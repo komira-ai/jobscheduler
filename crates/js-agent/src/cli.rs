@@ -94,13 +94,44 @@ pub struct Cli {
     /// see to it that there is none.
     #[arg(long = "mount-root-ro", value_name = "NAME=PATH", value_parser = named_path)]
     pub mount_roots_ro: Vec<(String, PathBuf)>,
-    /// The scratch root's file system is to bound each run's disk with a quota. Today the
-    /// flag only makes the agent refuse to start when a `--mount-root` is on the same file
-    /// system as the scratch root (a read-write mount there would be an unbounded path to
-    /// its disk); `--mount-root-ro` roots may be there. It enables no quota yet and
-    /// advertises nothing. Needs `--scratch-root`.
+    /// Bound each run's disk with a project quota on the scratch root's file system. At
+    /// start the agent probes the root and refuses to start unless the file system
+    /// enforces project quota; then it advertises `scratch-quota=project` and
+    /// `scratch-default-gib`, books `--scratch-default-gib` for a run that names no
+    /// `disk_bytes`, and gives each run's scratch directory a block limit of the bytes it
+    /// books and an inode limit of `--scratch-max-inodes`. It also refuses to start when a
+    /// `--mount-root` is on the same file system as the scratch root (a read-write mount
+    /// there would be an unbounded path to its disk); `--mount-root-ro` roots may be there.
+    /// Needs `--scratch-root`.
     #[arg(long)]
     pub scratch_quota: bool,
+    /// The GiB a run that names no `disk_bytes` books and is bounded to, and the
+    /// `scratch-default-gib` capability. From 1; default 2. Needs `--scratch-quota`.
+    #[arg(long, value_name = "GIB")]
+    pub scratch_default_gib: Option<u64>,
+    /// The inode limit of each run's scratch directory, so a flood of empty files cannot
+    /// exhaust the file system's inodes. From 1; default 1000000. Needs `--scratch-quota`.
+    #[arg(long, value_name = "N")]
+    pub scratch_max_inodes: Option<u64>,
+    /// The quota calls (`apply`, a usage read, `clear`) that may fail in a row before the
+    /// agent probes the scratch root again; if it no longer enforces project quota the agent
+    /// starts no run until it does, and says so every minute. From 1; default 3. Needs
+    /// `--scratch-quota`.
+    #[arg(long, value_name = "N")]
+    pub scratch_quota_failures: Option<u64>,
+    /// The seconds a finished run's slot is held for its project's usage to read zero (the
+    /// file system frees a removed tree's inodes in the background). After that the slot is
+    /// parked, the run's place and booked bytes are given back, and the quota counts one
+    /// failure. From 1 to 86400; default 600. Needs `--scratch-quota`.
+    #[arg(long, value_name = "SECS")]
+    pub scratch_usage_wait_secs: Option<u64>,
+    /// The slots the agent may give up on (their usage never read zero within
+    /// `--scratch-usage-wait-secs`) over its life before the quota is unavailable: no run
+    /// starts, each start is refused `quota-unavailable`, until the agent is restarted. A
+    /// run that ends well does not take one back. From 1; default 8. Needs
+    /// `--scratch-quota`.
+    #[arg(long, value_name = "N")]
+    pub scratch_abandon_limit: Option<u64>,
     /// The most GiB of the scratch root's free disk the agent keeps back from jobs: the
     /// disk it offers is the free space of that volume when the agent starts minus this
     /// (0 when this is more). Needs `--scratch-root`. Without it, the free space is offered.
@@ -284,6 +315,13 @@ pub struct Cli {
         allow_hyphen_values = true
     )]
     pub readiness_hook_args: Vec<String>,
+    /// A registry and namespace an image may be pulled from, `HOST[:PORT]/PREFIX` such as
+    /// `ghcr.io/komira-ai/`; repeatable. The prefix is whole path components, and a bare
+    /// host (every account on it) is refused at start. An image on no entry is never
+    /// pulled. The runtime that pulls with js-oci reads the list; the Docker and Podman
+    /// runtimes do not.
+    #[arg(long, value_name = "HOST/PREFIX")]
+    pub image_allow: Vec<String>,
     /// How many seconds a container gets to stop on its own before it is killed, whenever
     /// the agent stops one: a `Stop` or `Cancel` from the server, a job past its wall-time
     /// limit, the end of a drain. By default 10; at most 3600. Needs `--container-bin`.
@@ -295,6 +333,79 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SECONDS")]
     pub drain_wait: Option<u64>,
+
+    /// The bundle store: the directory a Mac keeps unpacked toolchain bundles in (`--bundle-*`
+    /// flags need it). Absolute; on the same APFS volume as `--scratch-root` (cloning needs
+    /// one volume) mounted with ownership honoured and not `noexec`, and the kernel's
+    /// securelevel must be 0 or less; the agent refuses to start otherwise, and on a host
+    /// that is not a Mac. Needs `--scratch-root` and `--bundle-budget-gib`. The disk the agent
+    /// offers (`disk-gib`) is reduced by the part of the budget the store has not used yet.
+    /// The hello reports `bundle-root` (this path) and `bundle` (the manifest digests the
+    /// store holds, that the deny and allow lists let through) only when the agent can run a
+    /// bundle, which this build cannot, so for now it reports neither. Until a server says it
+    /// takes a longer value, `bundle` holds one digest. Roll out servers first, then agents,
+    /// then this flag, then placement by `bundle`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_store: Option<PathBuf>,
+    /// The most GiB the store's trees (and the trees waiting to be deleted) may take
+    /// together. Required with `--bundle-store`; above 0.
+    #[arg(long, value_name = "GIB")]
+    pub bundle_budget_gib: Option<u64>,
+    /// New fetches are refused (`bundle-no-space`) while the store volume has less than this
+    /// many GiB free. By default 0. Needs `--bundle-store`.
+    #[arg(long, value_name = "GIB")]
+    pub bundle_low_water_gib: Option<u64>,
+    /// Whether a bundle that is not in the store is fetched: `never` (the default: the
+    /// operator, or the updater, puts it there first, and a job that names another is
+    /// refused `bundle-not-held`) or `missing` (only with `--bundle-trust list`, and at
+    /// least one registry flag). This build has no fetcher, so a fetch ends
+    /// `bundle-fetch-failed`. Needs `--bundle-store`.
+    #[arg(long, value_name = "never|missing")]
+    pub bundle_pull: Option<String>,
+    /// A registry and namespace a bundle may be fetched from, `HOST[:PORT]/PREFIX`
+    /// (`ghcr.io/example/`); not a bare host. A job's bundle must name one when any is
+    /// given. May be given more than once. Needs `--bundle-store`.
+    #[arg(long = "bundle-registry-allow", value_name = "HOST[:PORT]/PREFIX")]
+    pub bundle_registry_allow: Vec<String>,
+    /// Like `--bundle-registry-allow`, for a registry on a private address, and for that
+    /// registry only. May be given more than once. Needs `--bundle-store`.
+    #[arg(
+        long = "bundle-registry-allow-private",
+        value_name = "HOST[:PORT]/PREFIX"
+    )]
+    pub bundle_registry_allow_private: Vec<String>,
+    /// Minutes a bundle's trees are kept after their last use before they may be evicted.
+    /// By default 30. Needs `--bundle-store`.
+    #[arg(long, value_name = "MINUTES")]
+    pub bundle_min_age_min: Option<u64>,
+    /// A root-owned file of manifest digests (`sha256:<hex>`, one a line, `#` comments) the
+    /// store never evicts. Needs `--bundle-store`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_keep_file: Option<PathBuf>,
+    /// A file of manifest digests (same form) that are refused (`bundle-denied`) even when
+    /// listed. Read at every start of a job, so a change takes effect at once. Needs
+    /// `--bundle-store`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_deny_file: Option<PathBuf>,
+    /// A file of manifest digests (same form) a fetcher puts in the store ahead of the jobs
+    /// that name them. Checked at start; this build has no fetcher. Needs `--bundle-store`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_prefetch_file: Option<PathBuf>,
+    /// Which digests may run: `list` (the default: only those in `--bundle-allow-file`) or
+    /// `digest` (any a job names; for developer hosts only, and never with
+    /// `--bundle-pull missing`). Needs `--bundle-store`.
+    #[arg(long, value_name = "list|digest")]
+    pub bundle_trust: Option<String>,
+    /// The allow list for `--bundle-trust list`: manifest digests (same form), one a line.
+    /// Required with `list` and must hold a digest; refused with `digest`. Read at every
+    /// start of a job, so a change takes effect at once. A job whose digest is not in it is
+    /// refused `bundle-not-allowed`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_allow_file: Option<PathBuf>,
+    /// The read model of a run's profile: `open` (the default) or `allow`. `allow` is not
+    /// available yet: the agent refuses it at start.
+    #[arg(long, value_name = "open|allow")]
+    pub read_model: Option<String>,
 }
 
 /// `name=path` split at the first `=`.

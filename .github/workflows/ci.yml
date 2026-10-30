@@ -112,7 +112,7 @@ jobs:
   # the job when any of these holds:
   #   - the pull request carries the label `macos`;
   #   - a changed path contains darwin, apple, macos or seatbelt (any case), is under a
-  #     js-mac-* crate (crates/js-mac-), or is rust-toolchain.toml or this file;
+  #     js-mac-* crate (crates/js-mac-), under js-bundle or js-bundle-cli, or is rust-toolchain.toml or this file;
   #   - the diff adds or removes a line with `target_os = "macos"` or `target_vendor = "apple"`
   #     (the cfg( ), cfg!( ), cfg(any( ... )) and no-space spellings all contain it).
   # If the diff cannot be computed the job runs (fail closed). The label is read
@@ -150,7 +150,7 @@ jobs:
             exit 0
           fi
           macos=false
-          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^crates/js-treestore/(src/mac/|tests/(privileged|treestore/mac_))|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
+          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^crates/js-(bundle|bundle-cli|oci)/|^crates/js-treestore/(src/mac/|tests/(privileged|treestore/mac_))|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
             macos=true
           elif printf '%s\n' "$patch" | grep -Ev '^(\+\+\+|---) ' | grep -Eq '^[+-].*target_(os[[:space:]]*=[[:space:]]*"macos"|vendor[[:space:]]*=[[:space:]]*"apple")'; then
             macos=true
@@ -192,8 +192,8 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - run: cargo build --locked -p js-agent -p js-cli -p js-treestore -p js-mac-pool
-      - run: cargo test --locked -p js-agent -p js-cli -p js-treestore -p js-mac-pool
+      - run: cargo build --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-bundle -p js-bundle-cli
+      - run: cargo test --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-bundle -p js-bundle-cli
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

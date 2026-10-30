@@ -204,6 +204,12 @@ pub(super) struct Job {
     pub(super) cgroup_missing_told: bool,
     /// Taken over from an earlier process of the agent: its first minutes were not seen.
     pub(super) adopted: bool,
+    /// When the project of the finished run first read usage after its tree was removed,
+    /// and when that was last reported (on the agent's clock).
+    pub(super) usage_held: Option<(u64, u64)>,
+    /// The agent gave up waiting for the usage: the slot is parked, not released, when the
+    /// cleanup passes.
+    pub(super) slot_parked: bool,
 }
 
 /// Microseconds in a millisecond.
@@ -300,16 +306,22 @@ impl Retired {
 }
 
 impl Job {
-    /// A job for `spec` in `stage`, booking what the spec asks, in `slot`.
-    pub(super) fn of(spec: &JobSpec, stage: Stage, deadline_ms: u64, slot: Option<u32>) -> Self {
+    /// A job for `spec` in `stage`, booking what the spec asks and `disk_bytes` of disk (what
+    /// `Config::disk_of` says: the spec's own, or the quota's default), in `slot`.
+    pub(super) fn of(
+        spec: &JobSpec,
+        stage: Stage,
+        deadline_ms: u64,
+        slot: Option<u32>,
+        disk_bytes: u64,
+    ) -> Self {
         Self {
             run_id: spec.run_id.clone(),
             lease_id: spec.lease_id.clone(),
             booking: Booking {
                 cpu_millis: spec.limits.cpu_millis,
                 memory_bytes: spec.limits.memory_bytes,
-                // No default booking for a job without `disk_bytes` yet.
-                disk_bytes: spec.limits.disk_bytes.unwrap_or(0),
+                disk_bytes,
                 gpus: spec.gpu_indices.clone(),
             },
             slot,
@@ -326,6 +338,8 @@ impl Job {
             cgroup: None,
             cgroup_missing_told: false,
             adopted: false,
+            usage_held: None,
+            slot_parked: false,
         }
     }
 
@@ -358,6 +372,8 @@ impl Job {
             cgroup: None,
             cgroup_missing_told: false,
             adopted: true,
+            usage_held: None,
+            slot_parked: false,
         })
     }
 
@@ -416,6 +432,7 @@ pub(super) fn container_spec(
     scratch: std::path::PathBuf,
     files: Option<std::path::PathBuf>,
     slot: u32,
+    disk_bytes: u64,
 ) -> RunSpec {
     let gpus: Vec<String> = spec.gpu_indices.iter().map(u32::to_string).collect();
     let own = [
@@ -423,10 +440,7 @@ pub(super) fn container_spec(
         (label::LEASE, spec.lease_id.clone()),
         (label::CPU_MILLIS, spec.limits.cpu_millis.to_string()),
         (label::MEMORY_BYTES, spec.limits.memory_bytes.to_string()),
-        (
-            label::DISK_BYTES,
-            spec.limits.disk_bytes.unwrap_or(0).to_string(),
-        ),
+        (label::DISK_BYTES, disk_bytes.to_string()),
         (label::GPUS, gpus.join(",")),
         (label::SLOT, slot.to_string()),
         (label::WALL_MS, spec.limits.wall_ms.to_string()),

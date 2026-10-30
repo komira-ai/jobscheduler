@@ -27,14 +27,23 @@ test = false
 # `database`: a Postgres database a test owns. Off by default, so the crates that take this one
 # as a normal dependency (the test-only bins) carry no database client.
 postgres = ["dep:postgres"]
+# `oci-registry`: the in-process registry js-oci's own tests pull from, for the tests of a
+# crate that pulls through js-oci. Off by default, so the crates that take this one as a
+# normal dependency link no TLS stack. (js-oci has this crate as a dev-dependency: a cycle
+# cargo allows, since a dev-dependency is not linked into the library.)
+oci-registry = ["dep:js-oci", "dep:rcgen", "dep:rustls", "dep:tokio-rustls"]
 
 # No kbf dependency: every crate may take this one as a dev-dependency (or a
 # dependency of a test-only bin) without a cycle. rustix makes its system calls
 # directly on Linux; libc is for the two calls rustix has no portable form of
 # (mkfifo, and signal to ignore one). `kbf-m2-act` still links statically.
 [dependencies]
+js-oci = { path = "../js-oci", optional = true }
 libc.workspace = true
 postgres = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
 rustix = { workspace = true, features = ["process", "net"] }
 # `switch`: the forwarder tokio runs on the caller's runtime.
 tokio = { workspace = true, features = ["io-util", "net", "rt"] }

@@ -15,13 +15,14 @@
 //! - It runs its commands with `tokio::process`, without `kill_on_drop`; [`KillOnDrop`]
 //!   is the spawner that adds it, so a `run` that is dropped or aborted does not leave
 //!   `crun` behind.
-//! - Its `Io` hook sets the child's stdin/stdout/stderr; [`FileIo`] points the
-//!   container's stdout and stderr at the lease's files instead of the crate's pipes
-//!   (a job's output is not held in memory).
+//! - Its `Io` hook sets the child's stdin/stdout/stderr; [`PipeIo`] points the
+//!   container's stdout and stderr at pipes the caller drains (`logs`), instead of the
+//!   crate's, which are read to the end into memory.
 //! - The synchronous client is the same crate without its `async` feature, so the two
 //!   cannot be built together: the blocking paths (a dropped lease's clean) use
 //!   `std::process` with the same arguments ([`Crun::delete_blocking`]).
 
+use std::os::fd::OwnedFd;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -122,17 +123,18 @@ async fn read_all<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) -> std::io::
     Ok(bytes)
 }
 
-/// `Io` that gives `crun run` the lease's stdout and stderr files, and as stdin the file
-/// the container's init reports a program it could not start in (`oci::init`).
+/// `Io` that gives `crun run` the write ends of the pipes its output is drained from
+/// (`logs`), and as stdin the file the container's init reports a program it could not
+/// start in (`oci::init`). The write ends are closed when this is dropped, with the call.
 #[derive(Debug)]
-struct FileIo {
+struct PipeIo {
     stdin: std::fs::File,
-    stdout: std::fs::File,
-    stderr: std::fs::File,
+    stdout: OwnedFd,
+    stderr: OwnedFd,
 }
 
 #[async_trait]
-impl Io for FileIo {
+impl Io for PipeIo {
     async fn set(&self, cmd: &mut Command) -> std::io::Result<()> {
         cmd.stdin(self.stdin.try_clone()?);
         cmd.stdout(self.stdout.try_clone()?);
@@ -178,7 +180,7 @@ impl Crun {
     }
 
     /// Runs the container `id` of the bundle in `bundle` to its end (`crun run`: create,
-    /// start and delete in one process), its stdout and stderr in the given files. The
+    /// start and delete in one process), its stdout and stderr to the given pipes. The
     /// result is `crun`'s exit status. Dropping the future kills `crun`.
     pub(crate) async fn run(
         &self,
@@ -186,14 +188,14 @@ impl Crun {
         id: &str,
         bundle: &Path,
         stdin: std::fs::File,
-        stdout: std::fs::File,
-        stderr: std::fs::File,
+        stdout: OwnedFd,
+        stderr: OwnedFd,
     ) -> RunEnd {
         let client = match self.client(lease) {
             Ok(client) => client,
             Err(e) => return RunEnd::Failed(e),
         };
-        let opts = CreateOpts::new().io(Arc::new(FileIo {
+        let opts = CreateOpts::new().io(Arc::new(PipeIo {
             stdin,
             stdout,
             stderr,
@@ -294,6 +296,11 @@ impl Crun {
     /// Runs `crun --root <state> <args>` and waits: `Ok` if it exits 0, else its status
     /// and what it said on stderr.
     fn blocking(&self, state: &Path, args: &[&str], what: &str) -> Result<(), String> {
+        self.stdout_of(state, args, what).map(drop)
+    }
+
+    /// [`Crun::blocking`], returning what `crun` printed on stdout.
+    fn stdout_of(&self, state: &Path, args: &[&str], what: &str) -> Result<String, String> {
         let mut command = std::process::Command::new(&self.program);
         (self.scrub)(&mut command);
         let output = command
@@ -303,7 +310,9 @@ impl Crun {
             .stdin(std::process::Stdio::null())
             .output();
         match output {
-            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) if out.status.success() => {
+                Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+            }
             Ok(out) => Err(format!(
                 "crun {what}: {}: {}",
                 out.status,
@@ -311,6 +320,16 @@ impl Crun {
             )),
             Err(e) => Err(format!("run {}: {e}", self.program.display())),
         }
+    }
+
+    /// The pid, on the host, of the first process of the running container `id` of the
+    /// lease in `lease` (`crun state`). Blocking.
+    pub(crate) fn pid(&self, lease: &Path, id: &str) -> Result<u64, String> {
+        let state = self.stdout_of(&state_dir(lease), &["state", id], "state")?;
+        serde_json::from_str::<serde_json::Value>(&state)
+            .ok()
+            .and_then(|state| state["pid"].as_u64())
+            .ok_or_else(|| format!("crun state: no pid in {:?}", state.trim()))
     }
 
     /// The words for a client `crun` could not be found for.
@@ -575,14 +594,14 @@ mod tests {
     }
 
     /// The `Io` hook `crun run` is given has nothing to close once the child has the
-    /// files (the crate calls it for `create` and `exec`, not `run`).
+    /// pipes (the crate calls it for `create` and `exec`, not `run`).
     #[tokio::test]
-    async fn the_file_io_has_nothing_to_close_after_the_start() {
+    async fn the_pipe_io_has_nothing_to_close_after_the_start() {
         let null = || std::fs::File::open("/dev/null").expect("/dev/null");
-        FileIo {
+        PipeIo {
             stdin: null(),
-            stdout: null(),
-            stderr: null(),
+            stdout: null().into(),
+            stderr: null().into(),
         }
         .close_after_start()
         .await;

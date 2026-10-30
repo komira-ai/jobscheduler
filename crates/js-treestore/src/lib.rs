@@ -39,7 +39,7 @@ mod source;
 mod store;
 
 pub use error::{Error, Step};
-pub use sealer::{SealError, Sealed, Sealer};
+pub use sealer::{Owner, SealError, Sealed, Sealer};
 pub use source::{BlobRef, BlobSink, Digest, FetchError, LabelError, LayerSource};
 pub use store::{
     Config, EXTRACTOR_VERSION, Ready, RunId, TreeHandle, TreeStats, TreeStore, TreeWanted,

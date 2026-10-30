@@ -352,3 +352,25 @@ fn the_go_and_pool_kinds_keys_are_read_and_written_back() {
     let odd = GOLDEN.replacen("\"last_step\"", "\"go\": 3,\n  \"last_step\"", 1);
     assert!(Records::decode(&odd).is_err());
 }
+
+/// Asserts that a file of version 2 that holds a `brake` key (a later writer's failure count
+/// and trip) reads under this reader, whatever the key holds, and reads as the same records
+/// without it; written back, the file has no `brake`. It catches a reader that refuses the
+/// key, which would keep a server rolled back from a newer one from starting.
+#[test]
+fn a_file_holding_a_brake_key_reads_and_the_key_is_dropped() {
+    let with = GOLDEN.replacen(
+        "\"last_step\"",
+        "\"brake\": {\"gpu\": {\"failures\": 3, \"tripped_at\": 5}},\n  \"last_step\"",
+        1,
+    );
+    assert!(with.contains("\"brake\""), "{with}");
+    let records = Records::decode(&with).unwrap();
+    assert_eq!(records, Records::decode(GOLDEN).unwrap());
+    assert!(!records.encode().unwrap().contains("\"brake\""));
+    let odd = GOLDEN.replacen("\"last_step\"", "\"brake\": 3,\n  \"last_step\"", 1);
+    assert_eq!(
+        Records::decode(&odd).unwrap(),
+        Records::decode(GOLDEN).unwrap()
+    );
+}

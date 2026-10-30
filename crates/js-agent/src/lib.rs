@@ -22,7 +22,7 @@
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
 //! | `--label k=v` | a label on the host; repeatable |
-//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `run-files`, `disk-gib`, `scratch-quota` and `scratch-default-gib` are detected and cannot be set |
+//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle` and `bundle-root` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | not available yet: refused at start, because the scheduler does not record a host job's taint yet; without it a start with `isolation = host` creates nothing and is refused |
@@ -30,7 +30,12 @@
 //! | `--watch-dir <path>` | a directory the post-job checks list (its own entries: names, sizes, modification and status change times, inodes, owners, modes; a write to an existing file inside a subdirectory is not seen) and compare with the listing taken when the host was last known clean; one level deep: a name added to a subdirectory is seen, a write to a file in it is not, so watch the subdirectory itself; repeatable; needs `--container-bin`; may not hold, or lie in, a mount root, the scratch root or the state root; more than 4096 entries cannot be checked and taint the host. With none, only `/etc/passwd`, `/etc/group`, the processes, the mounts and the kernel modules are checked, and the agent warns at start; suggested: `/etc`, `/etc/cron.d`, `/etc/sudoers.d`, `/etc/systemd/system`, `/etc/ld.so.conf.d`, `/root/.ssh`, `/usr/local/bin`, `/usr/local/sbin`. What a job leaves in a read-write `--mount-root` is never examined |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount |
 //! | `--mount-root-ro <name>=<path>` | like `--mount-root`, in the same namespace of names, but a start with a read-write mount from it is refused (`invalid-mount`) and nothing is created; it may be on the scratch root's file system under `--scratch-quota`; the `st_dev` comparison sees a root's own device only, not a scratch device mounted below a root (a submount a recursive bind brings along), so the operator must guarantee there is none |
-//! | `--scratch-quota` | the scratch root's file system is to bound runs' disk: the agent refuses to start when a `--mount-root` is on the same file system as the scratch root (`st_dev`; give such a root as `--mount-root-ro`). It enables no quota and advertises nothing yet; needs `--scratch-root` |
+//! | `--scratch-quota` | bound each run's disk with an XFS project quota on the scratch root's file system. The agent probes the root at start and refuses to start unless the file system enforces project quota (`prjquota`, ids settable), saying why; it then advertises `scratch-quota=project` and `scratch-default-gib` (a detected pair an operator cannot set), books the default for a run that names no `disk_bytes`, and before each run's scratch directory is given away or written to sets its project id, a block limit of the bytes the run books and an inode limit; after the tree is removed it clears them. It refuses to start when a `--mount-root` is on the same file system as the scratch root (`st_dev`; give such a root as `--mount-root-ro`). Needs `--scratch-root`; a Linux host only |
+//! | `--scratch-default-gib <n>` | the GiB a run without `disk_bytes` books and is bounded to under `--scratch-quota`, and the value of `scratch-default-gib`; from 1 to 65535, default 2; needs `--scratch-quota` |
+//! | `--scratch-max-inodes <n>` | the inode limit of each run's scratch directory under `--scratch-quota`; from 1 to 4294967295, default 1000000; needs `--scratch-quota` |
+//! | `--scratch-quota-failures <n>` | the quota calls (`apply`, a usage read, `clear`) that may fail in a row under `--scratch-quota` before the agent probes the scratch root again; when it no longer enforces project quota the agent starts no run (each start is refused `quota-unavailable`, which taints nothing) and reports it every minute, until a probe passes; from 1, default 3; needs `--scratch-quota` |
+//! | `--scratch-usage-wait-secs <n>` | the seconds a finished run's slot is held for its project's usage to read zero under `--scratch-quota`; after that the slot is parked (it takes no run and is read at every step), the run's place and booked bytes are given back, and the quota counts one failure; from 1 to 86400, default 600; needs `--scratch-quota` |
+//! | `--scratch-abandon-limit <n>` | the slots the agent may give up on (see `--scratch-usage-wait-secs`) over its life under `--scratch-quota`; a run that ends well does not take one back; at the limit no run starts (each start is refused `quota-unavailable`) and the finding `quota-unhealthy` repeats every minute until the agent is restarted, so the operator must watch `quota-usage-abandoned` and look for files held open on the scratch volume; from 1, default 8; needs `--scratch-quota` |
 //! | `--scratch-low-water-gib <n>` | GiB of the scratch root's free disk kept back from jobs; the disk offered (`shape.disk_bytes`, and `disk-gib` in GiB) is the free space read at start minus this, 0 when this is more; needs `--scratch-root` |
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required with `--container-bin` |
 //! | `--run-files-root <path>` | where each run's files (the `files` of a start: a URL or a token the task reads) are written, in a directory of their own per run, `0555` with `0444` files, mounted read-only at `/run/js-files`. Made `0700` when missing; it must be on a `tmpfs` (the secrets never reach a disk) and the agent refuses to start when it is not. A reboot clears it, which is fine: a run does not survive one. Default `/run/js-agent/files` when that can be made; otherwise the agent runs without run files and does not report the `run-files` capability. tmpfs pages can be swapped to disk when the host has swap: run hosts that handle these secrets with swap off or encrypted. Needs `--container-bin` |
@@ -46,8 +51,20 @@
 //! | `--container-nft <path>` | the absolute path of `nft` for that check; by default `/usr/sbin/nft`; needs `--container-egress-allow` |
 //! | `--actions-cgroup <path>` | the cgroup version 2 directory below `/sys/fs/cgroup` that holds every container (made and delegated by the operator): each container is created with `--cgroup-parent` naming it (the slice name for one `.slice` directly below `/sys/fs/cgroup`, the systemd driver; the path with a leading `/` otherwise, the cgroupfs driver), and the heartbeat carries the usage of the directory and of each lease's cgroup (see [`usage`]); without it the heartbeat carries no load, and the agent says so at start; needs `--container-bin` |
 //! | `--gpu-toolkit-hook <path>` | the absolute path of a program that checks the GPU container toolkit, run once at start when the host offers a GPU; exit 0 makes the hello report `gpu-toolkit`, anything else leaves it out and warns; needs `--container-bin` |
+//! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci; the Docker and Podman runtimes pull as `--container-pull` says and do not read it |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; needs `--container-bin` |
 //! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; needs `--container-bin` |
+//! | `--bundle-store <path>` | the store of unpacked toolchain bundles (a Mac only): absolute, on the volume of `--scratch-root`, which must be APFS, mounted with ownership honoured and not noexec, with the kernel's securelevel at most 0, or the agent does not start; needs `--scratch-root` and `--bundle-budget-gib`. The hello then carries `bundle-root` (this path) and `bundle` (the held manifest digests, comma-separated, at most 16 of them), and the disk offered is reduced by the part of the budget the store has not used (see [`bundle`]). The hello carries `bundle` and `bundle-root` only when the agent can run a bundle, which this build cannot, so for now it carries neither; and, until a server says it takes a longer value, `bundle` holds one digest (two are 143 bytes, over the 128 an older server accepts and then refuses the hello). Roll out in this order: servers first (they accept the long value and the new codes), then agents, then `--bundle-store`, then placement by `bundle`; no job that names a bundle may be placed on a host that did not report `bundle` |
+//! | `--bundle-budget-gib <n>` | the most GiB the store's trees and trash may take; required with a store, above 0 |
+//! | `--bundle-low-water-gib <n>` | fetches are refused while the volume has less than this free; default 0 |
+//! | `--bundle-pull <never\|missing>` | whether a bundle the store lacks is fetched; default `never` (a job that names one is refused `bundle-not-held`); `missing` needs trust `list` and a registry flag, and this build has no fetcher (`bundle-fetch-failed`) |
+//! | `--bundle-registry-allow`, `--bundle-registry-allow-private <host[:port]/prefix>` | the registries and namespaces a bundle's name may point to; repeatable; a bare host is refused; when any is given, a name outside them is refused `bundle-registry-not-allowed` |
+//! | `--bundle-min-age-min <n>` | minutes a bundle's trees stay after their last use; default 30 |
+//! | `--bundle-keep-file`, `--bundle-prefetch-file <path>` | files of manifest digests (`sha256:<hex>` a line, `#` comments), checked at start; the eviction and the fetcher that read them arrive later |
+//! | `--bundle-deny-file <path>` | digests refused `bundle-denied`, read at every start of a job |
+//! | `--bundle-trust <list\|digest>` | which digests may run: `list` (default) those of `--bundle-allow-file`, which must be given and hold a digest; `digest` any, for developer hosts, and never with `--bundle-pull missing`; a digest off the list is refused `bundle-not-allowed` |
+//! | `--bundle-allow-file <path>` | the allow list, read at every start of a job |
+//! | `--read-model <open\|allow>` | the read model of a run's profile; `allow` is refused at start for now |
 //!
 //! The job flags are checked at start and a wrong one ends the agent with exit status 2.
 //! A marker that is already in the state root is reported on stderr at start.
@@ -181,6 +198,7 @@
 //! and a server that refuses the host for good.
 
 mod backoff;
+pub mod bundle;
 mod cli;
 pub mod cli_runtime;
 mod container;
@@ -189,6 +207,8 @@ mod credential;
 mod exclusive;
 mod facts;
 mod host;
+#[cfg(target_os = "linux")]
+pub mod image;
 pub mod integrity;
 mod jobs;
 pub mod lifecycle;
@@ -213,6 +233,7 @@ use std::time::Duration;
 use clap::Parser;
 
 pub use backoff::{BASE, Backoff, CAP, Jitter, RETRY_AFTER_CAP, SystemJitter};
+use bundle::{Admission, BundleHost, Settings as BundleSettings, SystemHost};
 pub use cli::Cli;
 use contract::ToolkitHook;
 pub use credential::{CREDENTIAL_FILE, CREDENTIAL_TEMP_FILE, CredentialFile, CredentialStore};
@@ -221,7 +242,7 @@ pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
     Platform, Ran, Streams, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
-pub use host::{Offer, offer};
+pub use host::{Offer, StoreView, offer};
 pub use jobs::DRAIN_SETTLE;
 use jobs::Seams;
 use lifecycle::{Local, StateRoot};
@@ -282,6 +303,11 @@ pub struct Services<'a> {
     /// The clock, the container runtime and the host view of the jobs, when
     /// `--container-bin` is given.
     pub machine: Arc<dyn Machine>,
+    /// What the bundle store reads from the machine; used only with `--bundle-store`.
+    pub bundle: Arc<dyn BundleHost>,
+    /// The server takes a `bundle` capability value longer than the common 128 bytes. The
+    /// machine's own is false: a server cannot say so yet.
+    pub long_bundle_values: bool,
     /// Told of the job worker once it has started (a test's way to wait for it).
     pub worker_hook: Option<&'a dyn Fn(Handle)>,
     /// The bound of the rescue of the jobs in place of [`RESCUE_BOUND`]: for a test.
@@ -330,6 +356,8 @@ pub fn main_with(
                 jitter: &mut SystemJitter,
                 sleeper: &mut sleeper,
                 machine: Arc::new(System::new()),
+                bundle: Arc::new(SystemHost::new(SystemCommands::default())),
+                long_bundle_values: false,
                 worker_hook: None,
                 rescue_bound: None,
             };
@@ -390,7 +418,17 @@ fn execute(
         .map_err(|why| Failure::Usage(why.to_string()))?;
     let version = env!("CARGO_PKG_VERSION");
     let (platform, commands, files) = (&services.platform, services.commands, services.files);
-    let mut offer = offer(&cli, platform, commands, files, version).map_err(Failure::Usage)?;
+    // The bundle flags are checked before the host registers, so a store that cannot work
+    // stops the agent now and not at the first job.
+    let host = &services.bundle;
+    let bundle = BundleSettings::from_cli(&cli, platform, &**host).map_err(Failure::Usage)?;
+    let store = bundle.as_ref().map(|settings| StoreView {
+        settings,
+        host: &**host,
+        long_values: services.long_bundle_values,
+    });
+    let mut offer =
+        offer(&cli, platform, commands, files, version, store).map_err(Failure::Usage)?;
     offer.warnings.iter().for_each(|warning| {
         let _ = writeln!(err, "js-agent: warning: {warning}");
     });
@@ -424,13 +462,35 @@ fn execute(
     local
         .check_filesystems(services.files)
         .map_err(Failure::Usage)?;
-    // What the scratch root's file system could bound a run's disk with. Logged only: no
-    // run uses a quota yet and nothing is advertised.
-    if let Some(root) = &local.scratch {
+    // What the scratch root's file system can bound a run's disk with. With
+    // `--scratch-quota` the operator asked for enforcement, so a file system that cannot
+    // give it ends the agent, with the probe's reason; without the flag the answer is only
+    // logged and nothing is enforced or advertised.
+    let scratch_quota = match &local.scratch {
+        Some(root) => {
+            let found = services.machine.scratch_quota(root.path());
+            let probe = found.probe();
+            let _ = writeln!(err, "js-agent: scratch quota: {probe}");
+            match (local.scratch_quota, probe.mode) {
+                (true, quota::Mode::None) => {
+                    return Err(Failure::Usage(format!(
+                        "--scratch-quota: the scratch root cannot enforce a project quota: {}",
+                        probe.reason
+                    )));
+                }
+                (true, quota::Mode::Project) => Some(found),
+                (false, _) => None,
+            }
+        }
+        None => None,
+    };
+    let default_gib = scratch_quota.as_ref().map(|_| local.scratch_default_gib);
+    if default_gib.is_some_and(|gib| (gib << 30) > offer.hello.shape.disk_bytes) {
         let _ = writeln!(
             err,
-            "js-agent: scratch quota: {}",
-            quota::probe(root.path())
+            "js-agent: warning: --scratch-default-gib: {} GiB is more than the {} bytes of disk \
+             this host offers, so a run without disk_bytes is refused here",
+            local.scratch_default_gib, offer.hello.shape.disk_bytes
         );
     }
     // The agent must see what its jobs do: a container job runs where the agent's own
@@ -452,6 +512,7 @@ fn execute(
             toolkit.as_ref(),
             commands,
             local.files.is_some(),
+            default_gib,
         );
         found.iter().for_each(|warning| {
             let _ = writeln!(err, "js-agent: warning: {warning}");
@@ -496,6 +557,8 @@ fn execute(
         hook: services.worker_hook,
         rescue_bound: services.rescue_bound,
         readiness,
+        bundle: bundle.map(|settings| Admission::new(settings, host.clone())),
+        quota: scratch_quota,
     };
     let started = jobs::start(local, &offer.hello, platform, seams, err);
     let jobs = started.map_err(Failure::Usage)?;

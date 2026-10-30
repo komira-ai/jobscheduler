@@ -18,12 +18,14 @@
 use std::ffi::{CString, c_char, c_int};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-use std::os::unix::process::CommandExt as _;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+
+#[path = "support/priv_harness.rs"]
+mod priv_harness;
 
 use js_treestore::Sealer as _;
-use js_treestore::mac::{IMMUTABLE, MacSealer, Owner, start_checks};
+use js_treestore::mac::{Clonefile, Fchflags, IMMUTABLE, MacSealer, Owner, start_checks};
 
 unsafe extern "C" {
     fn clonefile(src: *const c_char, dst: *const c_char, flags: u32) -> c_int;
@@ -88,11 +90,12 @@ impl Work {
             dir: base.join(format!("{name}-{}", std::process::id())),
             uid,
             gid,
-            sealer: MacSealer::new(Owner::root(), js_treestore::mac::Fchflags),
+            sealer: MacSealer::new(Owner::root(), Fchflags, Clonefile),
         };
         work.clear().expect("clear a former work directory");
         std::fs::create_dir(&work.dir).unwrap();
         std::fs::set_permissions(&work.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        work.require_reachable();
         work
     }
 
@@ -116,18 +119,69 @@ impl Work {
         root
     }
 
+    /// Runs `program` as the unprivileged user and keeps how it ended.
+    fn run_as_user(&self, program: &str, args: &[&Path]) -> Ran {
+        let out = priv_harness::user_command(program, args, self.uid, self.gid)
+            .output()
+            .unwrap();
+        Ran {
+            what: format!("{program} {args:?} as uid {}", self.uid),
+            ok: out.status.success(),
+            status: out.status.to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    }
+
     /// Runs `program` as the unprivileged user; true if it exited zero.
     fn as_user(&self, program: &str, args: &[&Path]) -> bool {
-        Command::new(program)
-            .args(args)
-            .uid(self.uid)
-            .gid(self.gid)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success()
+        self.run_as_user(program, args).ok
+    }
+
+    /// Runs `program` as the unprivileged user, which must succeed.
+    fn must_succeed(&self, program: &str, args: &[&Path]) {
+        let ran = self.run_as_user(program, args);
+        assert!(ran.ok, "expected success: {ran}");
+    }
+
+    /// Runs `program` as the unprivileged user, which must be refused.
+    fn must_fail(&self, program: &str, args: &[&Path]) {
+        let ran = self.run_as_user(program, args);
+        assert!(!ran.ok, "expected a refusal: {ran}");
+    }
+
+    /// Fails, naming the first directory above the work directory that the unprivileged
+    /// user cannot search, so that a location it cannot reach is never reported as the
+    /// failure of what the test is about (a refusal would pass for the wrong reason).
+    fn require_reachable(&self) {
+        let mut chain: Vec<&Path> = self.dir.ancestors().collect();
+        chain.reverse();
+        for dir in chain {
+            let ran = self.run_as_user("/bin/test", &[Path::new("-x"), dir]);
+            assert!(
+                ran.ok,
+                "the test user (uid {}) cannot search {dir:?}, which is above the work directory \
+                 {:?}: put the work directory where that user can reach it ({ran})",
+                self.uid, self.dir
+            );
+        }
+    }
+}
+
+/// How a command run as the unprivileged user ended.
+struct Ran {
+    what: String,
+    ok: bool,
+    status: String,
+    stderr: String,
+}
+
+impl std::fmt::Display for Ran {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {}, stderr: {:?}",
+            self.what, self.status, self.stderr
+        )
     }
 }
 
@@ -161,9 +215,9 @@ fn a_tree_sealed_as_root_refuses_a_write_by_another_user_and_by_root() {
     assert_eq!((meta.uid(), meta.mode() & 0o7777), (0, 0o444));
     assert_eq!(flags_of(&file) & IMMUTABLE, IMMUTABLE);
     // Another user can neither append, nor create, nor remove.
-    assert!(!work.as_user("/usr/bin/tee", &[Path::new("-a"), &file]));
-    assert!(!work.as_user("/usr/bin/touch", &[&root.join("new")]));
-    assert!(!work.as_user("/bin/rm", &[&file]));
+    work.must_fail("/usr/bin/tee", &[Path::new("-a"), &file]);
+    work.must_fail("/usr/bin/touch", &[&root.join("new")]);
+    work.must_fail("/bin/rm", &[&file]);
     // The flag stops root too, until it is cleared.
     assert!(std::fs::write(&file, b"changed").is_err());
     assert!(std::fs::remove_file(root.join("sub/b.txt")).is_err());
@@ -200,7 +254,7 @@ fn ownership_given_to_another_user_is_honoured_on_the_work_volume() {
     // And the user can write what it owns, which it could not if ownership were ignored
     // in favour of root's mode.
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(work.as_user("/usr/bin/tee", &[Path::new("-a"), &file]));
+    work.must_succeed("/usr/bin/tee", &[Path::new("-a"), &file]);
 }
 
 #[test]
@@ -248,4 +302,151 @@ fn probe_whether_another_user_can_link_a_sealed_file() {
         work.uid,
         if linked { "allowed" } else { "refused" }
     );
+}
+
+fn owner_of(path: &Path) -> (u32, u32) {
+    let meta = std::fs::symlink_metadata(path).unwrap();
+    (meta.uid(), meta.gid())
+}
+
+#[test]
+#[ignore = "needs root on a provisioned Mac (js-treestore-privileged-tests)"]
+fn a_clone_of_a_root_sealed_tree_is_written_by_the_pool_user_and_the_lease_directory_is_removed() {
+    let work = Work::new("clone-writable");
+    let root = work.tree();
+    std::os::unix::fs::symlink("a.txt", root.join("link")).unwrap();
+    work.sealer.seal(&root).unwrap();
+    let lease = work.dir.join("lease");
+    std::fs::create_dir(&lease).unwrap();
+    std::fs::set_permissions(&lease, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The lease directory is the pool user's, as the agent's run directory is.
+    std::os::unix::fs::chown(&lease, Some(work.uid), Some(work.gid)).unwrap();
+    let clone = lease.join("tree-w");
+    let pool = Owner::new(work.uid, work.gid).unwrap();
+    work.sealer.clone_writable(&root, &clone, pool).unwrap();
+    // Every entry is the pool user's, and none is immutable.
+    for path in ["", "a.txt", "sub", "sub/b.txt", "link"] {
+        let at = clone.join(path);
+        assert_eq!(owner_of(&at), (work.uid, work.gid), "owner of {path:?}");
+        assert_eq!(flags_of(&at) & IMMUTABLE, 0, "flags of {path:?}");
+    }
+    assert_eq!(std::fs::metadata(&clone).unwrap().mode() & 0o7777, 0o700);
+    assert_eq!(
+        std::fs::metadata(clone.join("a.txt")).unwrap().mode() & 0o7777,
+        0o600
+    );
+    // The pool user overwrites a file (with the content of another), creates files in the
+    // root and below it, and deletes one.
+    let readable = root.join("a.txt");
+    work.must_succeed("/bin/cp", &[&readable, &clone.join("sub/b.txt")]);
+    work.must_succeed("/usr/bin/touch", &[&clone.join("new")]);
+    work.must_succeed("/usr/bin/touch", &[&clone.join("sub/new")]);
+    work.must_succeed("/bin/rm", &[&clone.join("a.txt")]);
+    assert_eq!(std::fs::read(clone.join("sub/b.txt")).unwrap(), b"alpha");
+    // The sealed original is as it was, and still refuses the user.
+    assert_eq!(std::fs::read(root.join("sub/b.txt")).unwrap(), b"bravo");
+    assert_eq!(std::fs::read(&readable).unwrap(), b"alpha");
+    assert_eq!(flags_of(&readable) & IMMUTABLE, IMMUTABLE);
+    assert_eq!(owner_of(&readable), (0, 0));
+    work.must_fail("/usr/bin/tee", &[Path::new("-a"), &readable]);
+    // The pool user's own clean-up removes the clone from a lease directory it owns, with no
+    // unsealing; the original is left alone. Root then removes the lease directory itself.
+    work.must_succeed("/bin/rm", &[Path::new("-r"), &clone]);
+    assert!(!clone.exists());
+    assert_eq!(std::fs::read(&readable).unwrap(), b"alpha");
+    assert_eq!(flags_of(&readable) & IMMUTABLE, IMMUTABLE);
+    std::fs::remove_dir_all(&lease).unwrap();
+    assert!(!lease.exists());
+}
+
+#[test]
+#[ignore = "needs root on a provisioned Mac (js-treestore-privileged-tests)"]
+fn a_clone_of_one_root_sealed_file_is_written_by_the_pool_user() {
+    let work = Work::new("clone-file");
+    let root = work.tree();
+    work.sealer.seal(&root).unwrap();
+    let lease = work.dir.join("lease");
+    std::fs::create_dir(&lease).unwrap();
+    std::fs::set_permissions(&lease, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let clone = lease.join("a.txt");
+    let pool = Owner::new(work.uid, work.gid).unwrap();
+    work.sealer
+        .clone_writable(&root.join("a.txt"), &clone, pool)
+        .unwrap();
+    assert_eq!(owner_of(&clone), (work.uid, work.gid));
+    assert_eq!(flags_of(&clone) & IMMUTABLE, 0);
+    work.must_succeed("/usr/bin/tee", &[Path::new("-a"), &clone]);
+    assert_eq!(flags_of(&root.join("a.txt")) & IMMUTABLE, IMMUTABLE);
+    std::fs::remove_dir_all(&lease).unwrap();
+}
+
+#[test]
+#[ignore = "needs root on a provisioned Mac (js-treestore-privileged-tests)"]
+fn a_sealed_tree_is_evicted_by_moving_it_to_the_trash_unsealing_it_and_deleting_it() {
+    let work = Work::new("evict");
+    let root = work.tree();
+    work.sealer.seal(&root).unwrap();
+    let trash = work.dir.join("trash");
+    std::fs::create_dir(&trash).unwrap();
+    let trashed = trash.join("tree");
+    // The store tries the move first; a system that refuses to move an immutable directory
+    // is recorded, and the store's second try follows an unsealing.
+    if let Err(error) = std::fs::rename(&root, &trashed) {
+        eprintln!("PROBE rename of a sealed tree: refused, {error}");
+        work.sealer.unseal_for_delete(&root).unwrap();
+        std::fs::rename(&root, &trashed).unwrap();
+    } else {
+        eprintln!("PROBE rename of a sealed tree: ok");
+    }
+    work.sealer.unseal_for_delete(&trashed).unwrap();
+    std::fs::remove_dir_all(&trashed).unwrap();
+    assert!(!trashed.exists());
+    assert!(!root.exists());
+}
+
+#[test]
+#[ignore = "needs root on a provisioned Mac (js-treestore-privileged-tests)"]
+fn a_clone_made_under_a_directory_with_an_inheritable_acl_has_no_acl() {
+    use js_treestore::mac::UserFlags as _;
+    use std::os::fd::AsFd as _;
+    let work = Work::new("clone-acl");
+    let root = work.tree();
+    work.sealer.seal(&root).unwrap();
+    let lease = work.dir.join("lease");
+    std::fs::create_dir(&lease).unwrap();
+    let added = Command::new("/bin/chmod")
+        .arg("+a")
+        .arg(priv_harness::inheritable_write_ace(work.uid))
+        .arg(&lease)
+        .status()
+        .unwrap();
+    assert!(added.success());
+    // Control: a fresh entry in the directory does inherit the ACE, so the absence below
+    // means something.
+    let fresh = lease.join("fresh");
+    std::fs::write(&fresh, b"x").unwrap();
+    let fresh_file = std::fs::File::open(&fresh).unwrap();
+    assert!(
+        js_treestore::mac::Fchflags
+            .has_acl(fresh_file.as_fd())
+            .unwrap(),
+        "a fresh file under the directory has no inherited ACL, so this test shows nothing"
+    );
+    let clone = lease.join("tree-w");
+    let pool = Owner::new(work.uid, work.gid).unwrap();
+    work.sealer.clone_writable(&root, &clone, pool).unwrap();
+    let listing = Command::new("/bin/ls")
+        .args(["-leR"])
+        .arg(&clone)
+        .output()
+        .unwrap();
+    eprintln!(
+        "PROBE ls -leR of a clone made under an inheritable ACL:\n{}",
+        String::from_utf8_lossy(&listing.stdout)
+    );
+    for path in ["", "a.txt", "sub", "sub/b.txt"] {
+        let file = std::fs::File::open(clone.join(path)).unwrap();
+        let acl = js_treestore::mac::Fchflags.has_acl(file.as_fd()).unwrap();
+        assert!(!acl, "ACL on {path:?}");
+    }
 }

@@ -1,6 +1,6 @@
-//! A job can pin a bundle by digest: the same pin table as an image, the refusal of every
-//! bundle until a runtime can unpack one, and the old-agent behaviour. Each test says the
-//! defect it catches.
+//! A job can pin a bundle by digest: the same pin table as an image, the pair a bundle
+//! forms with a native body, what it may not sit beside, and the old-agent behaviour. Each
+//! test says the defect it catches.
 
 mod common;
 
@@ -52,16 +52,12 @@ fn native_job() -> JobSpec {
     spec
 }
 
-/// A native start whose bundle is `bundle`. `validate` refuses the pair until a runtime
-/// can unpack a bundle, so the grammar is read from its rule (anything but the pair's
-/// refusal is the grammar) and the pin from `require_pinned`, which `validate` does not
-/// stop.
+/// A native start whose bundle is `bundle`: the grammar is read from `validate` and the pin
+/// from `require_pinned`, which `validate` does not stop.
 fn bundle_verdict(bundle: &str) -> Verdict {
     let mut spec = native_job();
     spec.bundle = Some(bundle.into());
-    if let Err(err) = spec.validate()
-        && err.rule() != Rule::Inconsistent
-    {
+    if let Err(err) = spec.validate() {
         assert_eq!(err.code(), refusal::INVALID_BUNDLE, "{bundle}");
         assert_eq!(err.field(), "bundle");
         return Verdict::Malformed;
@@ -186,14 +182,34 @@ fn a_bundle_without_native_is_refused_as_needing_native() {
     }
 }
 
-/// A native job with a pinned bundle is refused `invalid-bundle`, rule `Inconsistent`,
-/// by `validate`, by the start command and inside a reply (which drops only that start),
-/// until a runtime can unpack a bundle. It catches an agent that runs the program with
-/// the host's tools while the job asked for a toolchain.
+/// A native job with a pinned bundle is accepted by `validate`, by `require_pinned`, by
+/// the start command and inside a reply, which keeps the start. It catches a bundle that
+/// is refused beside the native body it exists for.
 #[test]
-fn a_native_job_with_a_bundle_is_refused() {
+fn a_native_job_with_a_bundle_is_accepted() {
     let mut spec = native_job();
+    spec.bundle = Some(format!("toolchain@sha256:{HEX}"));
     assert_eq!(spec.validate(), Ok(()));
+    assert_eq!(spec.require_pinned(), Ok(()));
+    let start = Command::Start(Box::new(spec));
+    assert_eq!(start.validate(), Ok(()));
+    let reply = js_agent_wire::HeartbeatReply {
+        commands: vec![start.clone()],
+        ..js_agent_wire::HeartbeatReply::default()
+    };
+    let checked = reply.validate();
+    assert!(checked.refused.is_empty());
+    assert_eq!(checked.commands, vec![&start]);
+}
+
+/// A native job that has an image as well as a bundle is refused `invalid-bundle`, rule
+/// `Inconsistent`, naming `bundle`: the pair would run as a plain image job on an agent
+/// that ignores the field. It catches a bundle accepted beside an image, and the refusal
+/// read as an image fault.
+#[test]
+fn a_bundle_beside_an_image_is_refused_as_inconsistent() {
+    let mut spec = native_job();
+    spec.image = job().image;
     spec.bundle = Some(format!("toolchain@sha256:{HEX}"));
     let err = spec.validate().unwrap_err();
     expect(err, "bundle", Rule::Inconsistent, refusal::INVALID_BUNDLE);
@@ -319,10 +335,10 @@ impl OldJobSpec {
 /// change that lets a bundle sit beside an image.
 #[test]
 fn an_old_agent_refuses_a_bundle_job_by_its_empty_image() {
-    let mut spec = job();
-    spec.image = String::new();
+    let mut spec = native_job();
     spec.bundle = Some(format!("toolchain@sha256:{HEX}"));
     let wire: Value = serde_json::to_value(Command::Start(Box::new(spec))).unwrap();
+    assert_eq!(wire["native"]["program"], json!("/bin/echo"));
     let old: OldJobSpec = serde_json::from_value(wire).unwrap();
     let err = old.check().unwrap_err();
     expect(err, "image", Rule::Empty, refusal::INVALID_IMAGE);

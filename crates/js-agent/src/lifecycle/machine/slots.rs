@@ -12,6 +12,10 @@
 //! container could not be removed, is **quarantined**: it is never free again in this
 //! process. (The host is tainted then, so no run starts either way; the quarantine keeps
 //! the rule true by itself.)
+//!
+//! Under a scratch quota a slot is also **parked** while its project id still holds usage
+//! (or the usage cannot be read): no run takes it, and it is free again once the usage reads
+//! zero. Unlike a quarantine this ends by itself.
 
 use std::collections::BTreeSet;
 
@@ -20,6 +24,7 @@ pub struct Slots {
     count: u32,
     held: BTreeSet<u32>,
     quarantined: BTreeSet<u32>,
+    parked: BTreeSet<u32>,
 }
 
 impl Slots {
@@ -29,6 +34,7 @@ impl Slots {
             count,
             held: BTreeSet::new(),
             quarantined: BTreeSet::new(),
+            parked: BTreeSet::new(),
         }
     }
 
@@ -42,9 +48,12 @@ impl Slots {
         self.lowest().is_some()
     }
 
-    /// Whether `slot` is one of the slots and neither held nor quarantined.
+    /// Whether `slot` is one of the slots and neither held, quarantined nor parked.
     pub fn is_free(&self, slot: u32) -> bool {
-        slot < self.count && !self.held.contains(&slot) && !self.quarantined.contains(&slot)
+        slot < self.count
+            && !self.held.contains(&slot)
+            && !self.quarantined.contains(&slot)
+            && !self.parked.contains(&slot)
     }
 
     /// Takes the lowest free slot. Call it after [`Slots::has_room`] said there is one;
@@ -75,6 +84,23 @@ impl Slots {
     pub fn quarantine(&mut self, slot: u32) {
         self.held.remove(&slot);
         self.quarantined.insert(slot);
+    }
+
+    /// Parks `slot`: no run takes it until [`Slots::unpark`]. A quarantined slot stays
+    /// quarantined.
+    pub fn park(&mut self, slot: u32) {
+        self.held.remove(&slot);
+        self.parked.insert(slot);
+    }
+
+    /// Ends the parking of `slot`; it is free again unless it is held or quarantined.
+    pub fn unpark(&mut self, slot: u32) {
+        self.parked.remove(&slot);
+    }
+
+    /// The parked slots, lowest first.
+    pub fn parked(&self) -> Vec<u32> {
+        self.parked.iter().copied().collect()
     }
 
     /// The held slots, lowest first.
