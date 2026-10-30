@@ -346,6 +346,12 @@ impl Lifecycle {
             }
         }
         if let Some(native) = &spec.native {
+            if spec.bundle.is_some() {
+                return Err(no(
+                    refusal::NATIVE_UNSUPPORTED,
+                    "the bundle is admitted, but this agent cannot run a bundle yet",
+                ));
+            }
             self.runtime
                 .check_native(native)
                 .map_err(|refused| (refused.code, refused.why))?;

@@ -79,8 +79,8 @@ pub struct NativeConfig {
     pub tool_roots: Vec<PathBuf>,
     /// Paths no run may read, such as the agent's state and scratch roots.
     pub read_denies: Vec<AbsPath>,
-    /// Which reads the profile permits. Only [`ReadModel::Open`] has a profile builder;
-    /// with the other every start fails.
+    /// Which reads the profile permits. The runtime builds no grants, so only
+    /// [`ReadModel::Open`] gives a profile; with the other every start fails.
     pub read_model: ReadModel,
 }
 

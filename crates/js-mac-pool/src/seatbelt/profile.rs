@@ -13,6 +13,7 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// narrowly. `job-creation` and `lsopen` are also in the floor: launchd refuses a job from
 /// a sandboxed process regardless, and Launch Services would start an application outside
 /// the sandbox.
+///
 /// IPC is not denied: on a hosted runner `(deny ipc-sysv-shm)` did not stop `shmget`, so
 /// no rule is claimed. A System V or POSIX object of a user outlives its processes, and the
 /// helper reuses uids; the privileged tests measure what a reused uid finds.
