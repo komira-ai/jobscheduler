@@ -71,7 +71,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
 pub use crun::{EnvScrub, RunEnd};
-pub use lease::{RESOLV_CONF, Reports};
+pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 
 /// The resolved seccomp section for `arch` (Go's name) and a job holding `caps`, as JSON.
@@ -418,6 +418,16 @@ impl Oci {
         Ok(bundle)
     }
 
+    /// Gives `dir` to the account `crun` runs as (the job user of a root daemon; the daemon
+    /// itself otherwise, for which this changes nothing): a helper's state and log are made
+    /// in it by that account.
+    fn give_to_job_user(&self, dir: &Path) -> Result<(), JobError> {
+        at(
+            dir,
+            std::os::unix::fs::lchown(dir, Some(self.ids.uid), Some(self.ids.gid)),
+        )
+    }
+
     /// A number unique to this node's run of the daemon.
     fn next(&self) -> u64 {
         self.helpers.fetch_add(1, Ordering::Relaxed)
@@ -445,6 +455,7 @@ impl Oci {
         job: &helper::Job,
     ) -> Result<(), JobError> {
         at(dir, std::fs::create_dir_all(dir))?;
+        self.give_to_job_user(dir)?;
         let id = self.helper_id(what);
         let bundle = self.helper_bundle(dir, mapping, &id, job)?;
         let state = dir.join("helper-state");
@@ -489,6 +500,7 @@ impl Oci {
     pub fn remove_dir_blocking(&self, dir: &Path) -> Result<(), JobError> {
         let work = self.job_dir("rm");
         at(&work, std::fs::create_dir_all(&work))?;
+        self.give_to_job_user(&work)?;
         let id = self.helper_id("rm");
         let job = helper::remove_job(dir);
         let bundle = self.helper_bundle(&work, Mapping::Setup, &id, &job)?;
