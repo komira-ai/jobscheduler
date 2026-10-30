@@ -1090,6 +1090,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-elastic-fake"
+version = "0.1.0"
+dependencies = [
+ "js-elastic",
+ "js-types",
+]
+
+[[package]]
 name = "js-guest"
 version = "0.1.0"
 dependencies = [
@@ -1144,6 +1152,7 @@ dependencies = [
  "js-alert",
  "js-caps",
  "js-elastic",
+ "js-elastic-fake",
  "js-lease",
  "js-pool-static",
  "js-provider",
@@ -1307,6 +1316,7 @@ name = "js-scaler"
 version = "0.1.0"
 dependencies = [
  "js-elastic",
+ "js-elastic-fake",
  "js-types",
  "serde",
  "serde_json",

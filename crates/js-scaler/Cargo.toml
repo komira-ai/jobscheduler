@@ -14,5 +14,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+# The elastic fake cloud, which keeps its own bill: the tests that run the step against it
+# (tests/cloud_*.rs) check what the scaler lets a cloud charge from the cloud's side.
+js-elastic-fake = { path = "../js-elastic-fake" }
+
 [lints]
 workspace = true
