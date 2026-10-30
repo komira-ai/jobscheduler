@@ -56,7 +56,7 @@
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
 //! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given. Needs agent registration to have anything to keep. Not with `--usage-off` |
-//! | `--usage-off` | turns usage recording off (for an emergency: the per-minute series is meant to be always collected) |
+//! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
@@ -290,7 +290,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases/{id}/runs` | body: `image`, `args?`, `limits {cpu_millis, memory_bytes, pids?, wall_ms?}`, `gpu_indices?`, `mounts?`, `files?` (`[{name, contents}]`: secret text files the agent writes before the container starts and mounts read-only at `/run/js-files/<name>`, mode 0444; at most 8, names `[A-Za-z0-9._-]` and unique, 16 KiB each and 64 KiB in all, no NUL; contained runs only; the list, a run's entry and the logs never show the contents), `isolation?`, `labels?`. 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `not-ready` (a whole-node lease whose agent has not reported `exclusive_ready`), `no-capacity`, `host-not-registered` (a lease on a static host), `files-unsupported` (the body has `files` and the host's agent did not report the `run-files` capability, so it would ignore them); 422 `limits-exceed-shape`, `invalid-image`, `image-digest-required` (the image has no `@sha256:<64 lower case hex>` digest; `name:tag@sha256:...` is accepted), `invalid-mount`, `invalid-job`, `wall-time-not-positive`, `host-jobs-not-allowed`; 400 `invalid-file` (a file is badly named, repeated, too large or holds a NUL, or there are too many) and 400 for a body that is not this |
+//! | `POST /v1/leases/{id}/runs` | body: `image`, `args?`, `limits {cpu_millis, memory_bytes, pids?, wall_ms?}`, `gpu_indices?`, `mounts?`, `files?` (`[{name, contents}]`: secret text files the agent writes before the container starts and mounts read-only at `/run/js-files/<name>`, mode 0444; at most 8, names `[A-Za-z0-9._-]` and unique, 16 KiB each and 64 KiB in all, no NUL; contained runs only; the list, a run's entry and the logs never show the contents), `isolation?`, `labels?`, `profile?` (a string of 1 to 128 bytes of `0-9`, `a-z`, `.`, `_` and `-`, the first a digit or a letter: the name of the profile a clean run's cost curve is learned under, the client's own key for the work the run does). 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `not-ready` (a whole-node lease whose agent has not reported `exclusive_ready`), `no-capacity`, `host-not-registered` (a lease on a static host), `files-unsupported` (the body has `files` and the host's agent did not report the `run-files` capability, so it would ignore them); 422 `limits-exceed-shape`, `invalid-image`, `image-digest-required` (the image has no `@sha256:<64 lower case hex>` digest; `name:tag@sha256:...` is accepted), `invalid-mount`, `invalid-job`, `invalid-profile` (a `profile` that is not that grammar), `wall-time-not-positive`, `host-jobs-not-allowed`; 400 `invalid-file` (a file is badly named, repeated, too large or holds a NUL, or there are too many) and 400 for a body that is not this |
 //! | `GET /v1/leases/{id}/runs` | 200 `{runs: [{run_id, state, outcome?, exit_code?, detail?}]}`, oldest first; `state` is `queued`, `starting`, `running`, `exited` (the container has exited and its result is held, a stop asked for or not), `stopping`, `ended` or `never-started` |
 //! | `GET /v1/leases/{id}/runs/{run_id}` | 200 one entry of the list, with `log_tail {stdout, stderr, truncated}` when the host read the end of the job's output (a contained run that exited; at most 8 KiB of each stream; the list leaves it out); the text is the job's own, returned as written to whoever can read the run, so a task must not print secrets; it is untrusted bytes (it may hold ANSI escapes, U+202E or NUL), so a consumer that prints it to a terminal must strip control characters; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
 //! | `DELETE /v1/leases/{id}/runs/{run_id}` | 202 `{run_id, state}`; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
@@ -415,8 +415,9 @@
 //! wrong session) records nothing. Runs that ended cleanly (an `ACCEPTED` result with the
 //! outcome `succeeded` or `failed`) are handed to the sink with their series once the
 //! host has sent two more beats, so the lease's last partial minute is not lost, if a
-//! [`KeySource`] names the work they did; the server has no key of its own, so by default
-//! no run is learned from and `runs_without_key` counts them. The seam types and
+//! [`KeySource`] names the work they did; by default that is the `profile` name the client
+//! supplied when it queued the run, so a run queued without one is not learned from and
+//! `runs_without_key` counts it. The seam types and
 //! [`NoUsage`] are public so that a test or an embedding program can supply its own
 //! ([`Config::with_usage_sink`], [`Config::with_key_source`]). Without a sink of its own
 //! the server records into the SQLite file `--usage-db` names (beside the lease file by
@@ -428,6 +429,14 @@
 //! minutes and once more at shutdown, and pruned at the first tick and once a day. A
 //! flush logs one `node minute` line for each node minute it closed and a warning for
 //! each node and minute that had readings dropped.
+//!
+//! | request | answers |
+//! |---|---|
+//! | `GET /v1/usage/nodes/{id}?from=<minute>&to=<minute>` | 200 `{host, from, to, rows: [{minute, cpu_millis, ws_bytes, leases}], next}`; minutes are wall minutes since the Unix epoch, default the last 60 minutes up to now, at most 1,440 rows, and `next` is the minute to ask from for the rest (else `null`); a node with no rows is 200 with none, so an unknown node and a quiet one look alike; 400 for an id that is not exactly an id (capitals, escapes, slashes, dot-only segments, over 63 bytes), a query that is not `from` and `to` once each in digits, or `to` before `from`; 503 `usage-unavailable` |
+//! | `GET /v1/usage/keys/{key}` | 200 `{key, runs, curve, last_used_day, stale}`, `curve` being `null` until there are enough runs, else `[{minute, cores_milli, ws_bytes}]` (`cores_milli` is `null` when the fit did not learn cores: too few runs outside node pressure, a memory-only curve); 404 `unknown-key`; 400 for a key that is not 1 to 128 characters of `[0-9a-z._-]` starting with a letter or digit; 503 `usage-unavailable` |
+//!
+//! Both are behind the client token (a join token is a 401), exist only when usage is on,
+//! and never echo the request in an answer or a log line.
 //!
 //! # Ticks
 //!
@@ -474,6 +483,7 @@ mod status;
 mod ticker;
 mod tls;
 mod usage;
+mod usage_api;
 mod usage_hub;
 mod usage_js;
 mod usage_map;
@@ -511,9 +521,9 @@ pub use scaler::{
 pub use server::{Running, start, start_with_checks};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 pub use usage::{
-    BadKey, ClockIn, DropReason, HostLimits, KeySource, LoadIn, MAX_KEY_LEN, MinuteIn, NoKeys,
-    NoUsage, NodeRow, Observation, Observed, ProfileCurves, ProfileKey, RunEnd, RunMinute,
-    RunSeries, SinkCounters, UsageFault, UsageSink,
+    BadKey, ClockIn, DropReason, Fit, HostLimits, KeyProfile, KeySource, LoadIn, MAX_KEY_LEN,
+    MinuteIn, NoKeys, NoUsage, NodeRow, Observation, Observed, ProfileCurves, ProfileKey, RunEnd,
+    RunMinute, RunSeries, SinkCounters, UsageFault, UsageSink,
 };
 pub use usage_hub::UsageCounters;
 

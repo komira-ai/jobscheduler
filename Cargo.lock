@@ -1279,6 +1279,7 @@ dependencies = [
  "js-provider",
  "js-sim",
  "js-types",
+ "js-usage",
  "js-whole",
  "serde_json",
  "sha2 0.11.1",
