@@ -395,6 +395,10 @@ impl FileReader for SharedFiles {
     fn device(&self, _path: &Path) -> Result<u64, String> {
         Err("no devices here".to_owned())
     }
+
+    fn is_tmpfs(&self, _path: &Path) -> Result<bool, String> {
+        Err("no file systems here".to_owned())
+    }
 }
 
 impl FakeMachine {

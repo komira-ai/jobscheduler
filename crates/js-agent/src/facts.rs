@@ -114,6 +114,10 @@ impl FileReader for Box<dyn FileReader> {
     fn device(&self, path: &Path) -> Result<u64, String> {
         (**self).device(path)
     }
+
+    fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
+        (**self).is_tmpfs(path)
+    }
 }
 
 /// How long a helper may take to print its output, and again to exit once it has.
