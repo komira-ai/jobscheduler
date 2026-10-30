@@ -18,7 +18,7 @@ use crate::cli_runtime::{CliRuntime, Settings, system_runner, unix_ms};
 use crate::facts::{FileReader, Platform, SystemFiles};
 use crate::integrity::{HostView, ProcHost};
 use crate::lifecycle::{Clock, Runtime};
-use crate::native::{NativeRuntime, NativeSettings};
+use crate::native::{self, NativeRuntime, NativeSettings};
 use crate::quota::{self, ScratchQuota};
 use crate::usage::UsageClock;
 
@@ -35,6 +35,8 @@ fn native_runtime(native: &NativeSettings) -> Result<(Box<dyn Runtime>, Vec<Stri
     // refuses the second time: the start fails, loudly, and never runs as a used user.
     let _ = getrandom::getrandom(&mut bytes);
     let term = u64::from_le_bytes(bytes) >> (u64::BITS - TERM_BITS);
+    native::self_test(native.config(), native.sandbox_exec())
+        .map_err(|why| format!("--native-helper-socket: the sandbox self-test failed: {why}"))?;
     let helper = Client::new(native.socket());
     let opened = NativeRuntime::open(helper, native.config().clone(), term);
     let runtime = opened.map_err(|why| format!("--native-helper-socket: {why}"))?;

@@ -20,6 +20,7 @@ fn flags<'a>(
         homes,
         network,
         tool_roots,
+        deny_read: &[],
     }
 }
 
@@ -75,7 +76,16 @@ fn good_flags_configure_the_runtime() {
         .collect();
     assert_eq!(roots, ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]);
     let denied: Vec<&str> = config.read_denies.iter().map(|d| d.as_str()).collect();
-    assert_eq!(denied, ["/srv/state", "/srv/scratch"]);
+    assert_eq!(
+        denied,
+        [
+            "/srv/state",
+            "/srv/scratch",
+            "/run/js",
+            "/private/etc/kcpassword"
+        ],
+        "the agent's roots, the helper's socket directory and the auto-login password"
+    );
     assert_eq!(config.read_model, ReadModel::Open);
 
     let tools = [PathBuf::from("/Applications/Xcode.app")];
@@ -148,4 +158,56 @@ fn bad_flags_are_refused_by_name() {
     let good = flags(Some(socket), Some(&homes), None, &[]);
     let why = NativeSettings::from_flags(&good, &[Path::new("/tmp/state")]).unwrap_err();
     assert!(why.starts_with("/tmp/state: "), "{why}");
+}
+
+/// Asserts the read denies a start adds beyond the agent's own: `--native-deny-read` (spelled
+/// as the kernel resolves it, and refused when it does not exist), after the helper's socket
+/// directory and before the auto-login password. It catches a helper state directory that a
+/// run can read.
+#[test]
+fn explicit_read_denies_are_resolved_and_must_exist() {
+    let dir = Scratch::new("native-set-deny");
+    let state = dir.path("helper-state");
+    fs::create_dir(&state).unwrap();
+    let odd = state.join("..").join("helper-state");
+    let socket = Path::new("/run/js/helper");
+    let given = [odd];
+    let mut with = flags(Some(socket), Some(&dir.path("")), None, &[]);
+    with.deny_read = &given;
+    let settings = NativeSettings::from_flags(&with, &[]).unwrap().unwrap();
+    let denied: Vec<&str> = settings
+        .config()
+        .read_denies
+        .iter()
+        .map(|d| d.as_str())
+        .collect();
+    let resolved = fs::canonicalize(&state).unwrap();
+    assert_eq!(
+        denied,
+        [
+            "/run/js",
+            resolved.to_str().unwrap(),
+            "/private/etc/kcpassword"
+        ]
+    );
+    let missing = [dir.path("missing")];
+    with.deny_read = &missing;
+    let why = NativeSettings::from_flags(&with, &[]).unwrap_err();
+    assert!(why.starts_with("--native-deny-read: "), "{why}");
+}
+
+/// Asserts that a tool root that is `/` or not a directory is refused: a root of `/` lets
+/// any program through, and a missing one is a typo that every start would meet. It catches
+/// a tool root that is no restriction.
+#[test]
+fn a_tool_root_must_be_a_directory_below_the_root() {
+    let dir = Scratch::new("native-set-roots");
+    let socket = Path::new("/run/js/helper");
+    for bad in ["/", "/nonexistent-tool-root"] {
+        let roots = [PathBuf::from(bad)];
+        let given = flags(Some(socket), Some(&dir.path("")), None, &roots);
+        let why = NativeSettings::from_flags(&given, &[]).unwrap_err();
+        assert!(why.starts_with("--native-tool-root: "), "{bad}: {why}");
+        assert!(why.contains("is not a directory below /"), "{bad}: {why}");
+    }
 }

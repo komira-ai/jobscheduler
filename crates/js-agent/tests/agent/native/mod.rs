@@ -9,6 +9,8 @@ mod fake_helper;
 mod lifecycle;
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(target_os = "macos")]
+mod mac_agent;
 mod runtime;
 mod settings;
 mod worker;

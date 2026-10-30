@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use clap::Parser as _;
 use js_agent::lifecycle::Local;
-use js_agent::native::{NativeFlags, NativeSettings};
+use js_agent::native::{self, NativeFlags, NativeSettings};
 use js_agent::{Backend, Cli, Machine, RuntimeBuild, System};
 use serde_json::{Value, json};
+use std::path::Path;
 
 use super::fake_helper::FakeHelper;
 use crate::jobs::fake::FakeMachine;
@@ -130,21 +131,21 @@ fn a_native_agent_needs_its_roots_and_no_engine() {
         Cli::try_parse_from(argv.iter().chain(all.iter())).unwrap()
     };
 
-    let why = Local::from_cli(&cli(&["--scratch-root", &scratch])).unwrap_err();
+    let why = Local::from_cli(&cli(&["--scratch-root", &scratch]), 0).unwrap_err();
     assert!(
         why.starts_with("--state-root: required with --native-helper-socket"),
         "{why}"
     );
-    let why = Local::from_cli(&cli(&["--state-root", &state])).unwrap_err();
+    let why = Local::from_cli(&cli(&["--state-root", &state]), 0).unwrap_err();
     assert!(
         why.starts_with("--scratch-root: required with --native-helper-socket"),
         "{why}"
     );
     let both = ["--state-root", &state, "--scratch-root", &scratch];
-    let local = Local::from_cli(&cli(&both)).unwrap();
+    let local = Local::from_cli(&cli(&both), 0).unwrap();
     assert!(local.native.is_some() && local.container.is_none());
     let graced = [&both[..], &["--stop-grace", "5"]].concat();
-    let local = Local::from_cli(&cli(&graced)).unwrap();
+    let local = Local::from_cli(&cli(&graced), 0).unwrap();
     assert_eq!(local.stop_grace.as_secs(), 5);
 
     let engine = fake.homes().join("engine");
@@ -162,7 +163,7 @@ fn a_native_agent_needs_its_roots_and_no_engine() {
         &["--container-subuid", "jobmap"],
     ]
     .concat();
-    let why = Local::from_cli(&cli(&with_engine)).unwrap_err();
+    let why = Local::from_cli(&cli(&with_engine), 0).unwrap_err();
     assert!(
         why.starts_with("--native-helper-socket: not with --container-bin"),
         "{why}"
@@ -181,15 +182,16 @@ fn the_system_machine_opens_the_native_runtime() {
         os: "macos".to_owned(),
         arch: "aarch64".to_owned(),
     };
-    let open = |socket: &std::path::Path| {
+    let open = |socket: &std::path::Path, sandbox: &str| {
         let flags = NativeFlags {
             socket: Some(socket),
             homes: Some(fake.homes()),
             network: None,
             tool_roots: &[],
+            deny_read: &[],
         };
         let settings = NativeSettings::from_flags(&flags, &[]).unwrap().unwrap();
-        let backend = Backend::Native(settings);
+        let backend = Backend::Native(settings.with_sandbox_exec(Path::new(sandbox)));
         let build = RuntimeBuild {
             backend: &backend,
             host_id: "h1",
@@ -198,11 +200,109 @@ fn the_system_machine_opens_the_native_runtime() {
         };
         System::new().runtime(&build).map(|(_, warnings)| warnings)
     };
-    assert_eq!(open(fake.socket()), Ok(Vec::new()));
+    assert_eq!(open(fake.socket(), "/bin/true"), Ok(Vec::new()));
     assert_eq!(fake.verbs(), ["boot-reset"]);
-    let why = open(std::path::Path::new("/nonexistent/js-helper")).unwrap_err();
+    let why = open(std::path::Path::new("/nonexistent/js-helper"), "/bin/true").unwrap_err();
     assert!(
         why.starts_with("--native-helper-socket: the boot reset: "),
         "{why}"
     );
+    let before = fake.verbs().len();
+    let why = open(fake.socket(), "/bin/false").unwrap_err();
+    assert!(why.contains("the sandbox self-test failed"), "{why}");
+    assert_eq!(fake.verbs().len(), before, "the helper was not asked");
+}
+
+/// Asserts that a native agent that is not root is refused at start, naming the flag, and
+/// that the agent's token, instance and CA files, the helper's socket directory and
+/// `--native-deny-read` are read-denied beside its roots. It catches an agent that takes
+/// leases and fails every start at the first `chown`, and a secret file a run can read.
+#[test]
+fn a_native_agent_must_be_root_and_denies_its_secret_files() {
+    let dir = Scratch::new("native-agent-euid");
+    let fake = FakeHelper::start(&dir);
+    let socket = fake.socket().display().to_string();
+    let homes = fake.homes().display().to_string();
+    let (state, scratch) = (private(&dir, "state"), private(&dir, "scratch"));
+    let files: Vec<String> = ["token", "instance", "ca.pem"]
+        .iter()
+        .map(|name| dir.write(name, "x", 0o600).display().to_string())
+        .collect();
+    let argv = [
+        "js-agent",
+        "--server",
+        "http://127.0.0.1:1",
+        "--pool",
+        "macs",
+        "--token-file",
+        &files[0],
+        "--instance-file",
+        &files[1],
+        "--ca-cert",
+        &files[2],
+        "--native-helper-socket",
+        &socket,
+        "--native-homes",
+        &homes,
+        "--state-root",
+        &state,
+        "--scratch-root",
+        &scratch,
+    ];
+    let cli = Cli::try_parse_from(argv).unwrap();
+    let why = Local::from_cli(&cli, 501).unwrap_err();
+    assert!(
+        why.starts_with("--native-helper-socket: the agent must run as root"),
+        "{why}"
+    );
+    let local = Local::from_cli(&cli, 0).unwrap();
+    let native = local.native.unwrap();
+    let denied: Vec<&str> = native
+        .config()
+        .read_denies
+        .iter()
+        .map(|d| d.as_str())
+        .collect();
+    for path in [&state, &scratch, &files[0], &files[1], &files[2]] {
+        let resolved = fs::canonicalize(path).unwrap();
+        assert!(
+            denied.contains(&resolved.to_str().unwrap()),
+            "{path} is not denied: {denied:?}"
+        );
+    }
+    assert!(denied.contains(&"/private/etc/kcpassword"));
+}
+
+/// Asserts the start-up self-test of the sandbox: a program that runs and accepts the
+/// profile passes; one that refuses it fails with its status and what it said; one that
+/// cannot be run fails naming it; a configuration with no profile builder fails by name.
+/// It catches an agent that says `sandbox-exec` while every job it takes would fail.
+#[test]
+fn the_sandbox_self_test_fails_closed() {
+    let dir = Scratch::new("native-selftest");
+    let fake = FakeHelper::start(&dir);
+    let flags = NativeFlags {
+        socket: Some(fake.socket()),
+        homes: Some(fake.homes()),
+        network: None,
+        tool_roots: &[],
+        deny_read: &[],
+    };
+    let settings = NativeSettings::from_flags(&flags, &[]).unwrap().unwrap();
+    let config = settings.config();
+    assert_eq!(native::self_test(config, Path::new("/bin/true")), Ok(()));
+    let refused = native::self_test(config, Path::new("/bin/false")).unwrap_err();
+    assert!(
+        refused.contains("/bin/false refused the profile"),
+        "{refused}"
+    );
+    let missing = native::self_test(config, Path::new("/nonexistent/sandbox-exec")).unwrap_err();
+    assert!(
+        missing.starts_with("/nonexistent/sandbox-exec: "),
+        "{missing}"
+    );
+    let mut allow = config.clone();
+    allow.read_model = js_mac_pool::seatbelt::ReadModel::Allow;
+    let unbuilt = native::self_test(&allow, Path::new("/bin/true")).unwrap_err();
+    assert!(unbuilt.starts_with("the profile: "), "{unbuilt}");
 }

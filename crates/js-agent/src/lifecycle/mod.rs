@@ -631,11 +631,13 @@ impl Local {
     /// path to an existing directory that no mount root, scratch root or state root lies in
     /// or holds (those change with every job).
     ///
+    /// `euid` is the effective user id of the agent: a native agent must be root.
+    ///
     /// # Errors
     ///
     /// The text names the flag at fault.
-    pub fn from_cli(cli: &Cli) -> Result<Self, String> {
-        Self::from_cli_with_default_files_root(cli, Path::new(DEFAULT_RUN_FILES_ROOT))
+    pub fn from_cli(cli: &Cli, euid: u32) -> Result<Self, String> {
+        Self::from_cli_with_default_files_root(cli, Path::new(DEFAULT_RUN_FILES_ROOT), euid)
     }
 
     /// [`Local::from_cli`] with `default_files_root` where the run files go when
@@ -648,6 +650,7 @@ impl Local {
     pub fn from_cli_with_default_files_root(
         cli: &Cli,
         default_files_root: &Path,
+        euid: u32,
     ) -> Result<Self, String> {
         if cli.allow_host_jobs {
             return Err(
@@ -683,11 +686,14 @@ impl Local {
         )
         .map_err(|why| why.to_string())?;
         let state = cli.state_root.as_deref().map(StateRoot::open).transpose()?;
-        // What no run may read: the agent's own roots.
+        // What no run may read: the agent's own roots and the files it keeps secrets in.
         let denied: Vec<&Path> = state
             .iter()
             .map(StateRoot::path)
             .chain(scratch.iter().map(ScratchRoot::path))
+            .chain(cli.token_file.as_deref())
+            .chain(cli.instance_file.as_deref())
+            .chain(cli.ca_cert.as_deref())
             .collect();
         let native = NativeSettings::from_flags(
             &NativeFlags {
@@ -695,9 +701,17 @@ impl Local {
                 homes: cli.native_homes.as_deref(),
                 network: cli.native_network.as_deref(),
                 tool_roots: &cli.native_tool_roots,
+                deny_read: &cli.native_deny_read,
             },
             &denied,
         )?;
+        if native.is_some() && euid != 0 {
+            return Err(
+                "--native-helper-socket: the agent must run as root: it gives each run's \
+                 directory to the run's user"
+                    .to_owned(),
+            );
+        }
         if container.is_some() && native.is_some() {
             return Err(
                 "--native-helper-socket: not with --container-bin: an agent runs \

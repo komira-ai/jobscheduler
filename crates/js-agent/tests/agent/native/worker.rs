@@ -37,6 +37,7 @@ fn a_native_result_stays_published_until_it_is_acknowledged() {
         homes: Some(fake.homes()),
         network: None,
         tool_roots: &[],
+        deny_read: &[],
     };
     let settings = NativeSettings::from_flags(&flags, &[state.as_path(), scratch.as_path()]);
     plan.backend = Backend::Native(settings.unwrap().unwrap());

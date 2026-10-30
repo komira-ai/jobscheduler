@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
+use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel, SANDBOX_EXEC};
 
 use super::NativeConfig;
 
@@ -13,6 +13,10 @@ pub const DEFAULT_HOMES: &str = "/Users";
 /// The directories a start's program may lie under unless `--native-tool-root` is given:
 /// the system's own.
 pub const DEFAULT_TOOL_ROOTS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+
+/// Where the system keeps the Mac's auto-login password: no run may read it, whatever the
+/// helper's own flags say. Spelled as the kernel resolves it (`/etc` is `/private/etc`).
+const KCPASSWORD: &str = "/private/etc/kcpassword";
 
 /// The native-job flags as the command line gave them.
 #[derive(Debug, Clone, Copy)]
@@ -25,6 +29,8 @@ pub struct NativeFlags<'a> {
     pub network: Option<&'a str>,
     /// `--native-tool-root`, each.
     pub tool_roots: &'a [PathBuf],
+    /// `--native-deny-read`, each.
+    pub deny_read: &'a [PathBuf],
 }
 
 /// The checked native-job flags: the helper's socket and the runtime's configuration.
@@ -32,11 +38,15 @@ pub struct NativeFlags<'a> {
 pub struct NativeSettings {
     socket: PathBuf,
     config: NativeConfig,
+    sandbox_exec: PathBuf,
 }
 
 impl NativeSettings {
     /// Checks `flags`; `None` without `--native-helper-socket`. `denied` are the agent's
-    /// own roots (state and scratch), which no run may read.
+    /// own roots and files (state and scratch roots, token, instance and CA files), which
+    /// no run may read; so are the helper's socket directory, `--native-deny-read` and
+    /// the auto-login password. A path that exists is read-denied by the name the kernel
+    /// resolves.
     ///
     /// # Errors
     ///
@@ -80,8 +90,27 @@ impl NativeSettings {
         };
         for root in &tool_roots {
             absolute("--native-tool-root", root)?;
+            if root.parent().is_none() || !root.is_dir() {
+                return Err(format!(
+                    "--native-tool-root: {} is not a directory below /",
+                    root.display()
+                ));
+            }
         }
-        let read_denies = denied
+        let mut denies: Vec<PathBuf> = Vec::new();
+        for path in denied {
+            denies.push(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+        }
+        let socket_dir = socket.parent().unwrap_or(socket);
+        denies.push(fs::canonicalize(socket_dir).unwrap_or_else(|_| socket_dir.to_path_buf()));
+        for path in flags.deny_read {
+            let found = fs::canonicalize(path);
+            denies.push(
+                found.map_err(|why| format!("--native-deny-read: {}: {why}", path.display()))?,
+            );
+        }
+        denies.push(PathBuf::from(KCPASSWORD));
+        let read_denies = denies
             .iter()
             .map(|path| AbsPath::new(path).map_err(|why| format!("{}: {why}", path.display())))
             .collect::<Result<Vec<_>, _>>()?;
@@ -94,7 +123,22 @@ impl NativeSettings {
                 read_denies,
                 read_model: ReadModel::Open,
             },
+            sandbox_exec: PathBuf::from(SANDBOX_EXEC),
         }))
+    }
+
+    /// The same settings with `program` as the `sandbox-exec` the start-up self-test runs:
+    /// a seam for tests.
+    #[must_use]
+    pub fn with_sandbox_exec(mut self, program: &Path) -> Self {
+        self.sandbox_exec = program.to_path_buf();
+        self
+    }
+
+    /// The `sandbox-exec` the start-up self-test runs.
+    #[must_use]
+    pub fn sandbox_exec(&self) -> &Path {
+        &self.sandbox_exec
     }
 
     /// The helper's socket.
