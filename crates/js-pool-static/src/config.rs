@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use js_types::{HostId, IdError, Resources, Shape, TypeError};
+use js_types::{HostId, IdError, MemoryPercent, Resources, Shape, TypeError};
 use serde::Deserialize;
 
 /// The example configuration shipped with the crate, shown in the crate docs.
@@ -45,6 +45,7 @@ pub enum ConfigError {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    memory_schedulable_percent: Option<u64>,
     #[serde(default)]
     host: Vec<RawHost>,
 }
@@ -59,10 +60,25 @@ struct RawHost {
     capabilities: BTreeMap<String, String>,
 }
 
+/// What a hosts file lists: the hosts, as the operator wrote them, and the share of their
+/// memory the file books.
+pub(crate) struct Parsed {
+    /// The hosts in file order, with the memory as written.
+    pub(crate) hosts: Vec<(HostId, Shape)>,
+    /// `memory_schedulable_percent`, or all of it when the file leaves it out.
+    pub(crate) memory_percent: MemoryPercent,
+}
+
 /// Reads configuration text into the hosts it lists, in file order.
-pub(crate) fn parse(source: &str) -> Result<Vec<(HostId, Shape)>, ConfigError> {
+pub(crate) fn parse(source: &str) -> Result<Parsed, ConfigError> {
     let raw: RawConfig =
         toml::from_str(source).map_err(|err| ConfigError::Parse(err.to_string()))?;
+    let memory_percent = match raw.memory_schedulable_percent {
+        Some(percent) => {
+            MemoryPercent::new(percent).map_err(|err| ConfigError::Parse(err.to_string()))?
+        }
+        None => MemoryPercent::FULL,
+    };
     let mut hosts: Vec<(HostId, Shape)> = Vec::new();
     for entry in raw.host {
         let id = HostId::new(&entry.id)?;
@@ -84,7 +100,10 @@ pub(crate) fn parse(source: &str) -> Result<Vec<(HostId, Shape)>, ConfigError> {
     if hosts.is_empty() {
         return Err(ConfigError::NoHosts);
     }
-    Ok(hosts)
+    Ok(Parsed {
+        hosts,
+        memory_percent,
+    })
 }
 
 #[cfg(test)]
@@ -96,7 +115,7 @@ mod tests {
     /// Asserts that the shipped example parses into its two hosts with their shapes.
     #[test]
     fn example_config_parses() {
-        let hosts = parse(EXAMPLE_CONFIG).unwrap();
+        let hosts = parse(EXAMPLE_CONFIG).unwrap().hosts;
         let ids: Vec<_> = hosts.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, ["gpu-01", "gpu-02"]);
         let shape = &hosts[0].1;
@@ -111,7 +130,9 @@ mod tests {
     /// Asserts that a syntax error names its line.
     #[test]
     fn syntax_error_names_the_line() {
-        let err = parse("[[host]]\nid = \"a\"\nresources = = 3\n").unwrap_err();
+        let err = parse("[[host]]\nid = \"a\"\nresources = = 3\n")
+            .err()
+            .unwrap();
         assert!(matches!(err, ConfigError::Parse(_)));
         assert!(err.to_string().contains("line 3"), "{err}");
     }
@@ -120,9 +141,11 @@ mod tests {
     /// does not pass as a default.
     #[test]
     fn type_error_and_unknown_key_name_their_line() {
-        let err = parse("[[host]]\nid = 7\n").unwrap_err();
+        let err = parse("[[host]]\nid = 7\n").err().unwrap();
         assert!(err.to_string().contains("line 2"), "{err}");
-        let err = parse("[[host]]\nid = \"a\"\nspeed = 1\n[host.resources]\n").unwrap_err();
+        let err = parse("[[host]]\nid = \"a\"\nspeed = 1\n[host.resources]\n")
+            .err()
+            .unwrap();
         assert!(err.to_string().contains("line 3"), "{err}");
         assert!(err.to_string().contains("speed"), "{err}");
     }
@@ -130,14 +153,18 @@ mod tests {
     /// Asserts that a malformed host id is refused.
     #[test]
     fn bad_host_id_is_refused() {
-        let err = parse("[[host]]\nid = \"Gpu One\"\n[host.resources]\n").unwrap_err();
+        let err = parse("[[host]]\nid = \"Gpu One\"\n[host.resources]\n")
+            .err()
+            .unwrap();
         assert!(matches!(err, ConfigError::Id(_)));
     }
 
     /// Asserts that an unknown dimension is refused by name, with the host.
     #[test]
     fn unknown_dimension_is_refused_by_name() {
-        let err = parse("[[host]]\nid = \"a\"\n[host.resources]\nvms = 2\n").unwrap_err();
+        let err = parse("[[host]]\nid = \"a\"\n[host.resources]\nvms = 2\n")
+            .err()
+            .unwrap();
         assert_eq!(
             err.to_string(),
             "host a: unknown resource dimension \"vms\""
@@ -147,7 +174,9 @@ mod tests {
     /// Asserts that gpus without a gpu_class is refused.
     #[test]
     fn gpus_without_a_class_are_refused() {
-        let err = parse("[[host]]\nid = \"a\"\n[host.resources]\ngpus = 1\n").unwrap_err();
+        let err = parse("[[host]]\nid = \"a\"\n[host.resources]\ngpus = 1\n")
+            .err()
+            .unwrap();
         assert!(matches!(err, ConfigError::Resources { .. }));
     }
 
@@ -156,10 +185,29 @@ mod tests {
     fn duplicate_and_empty_are_refused() {
         let twice = format!("{ONE}{ONE}");
         assert_eq!(
-            parse(&twice).unwrap_err().to_string(),
+            parse(&twice).err().unwrap().to_string(),
             "host a is listed twice"
         );
         assert!(matches!(parse(""), Err(ConfigError::NoHosts)));
         assert!(parse(ONE).is_ok());
+    }
+
+    /// Asserts that `memory_schedulable_percent` is read: 90 comes back as 90, no key is
+    /// all of the memory, and 0 and 101 are refused with the key named. It is asserted
+    /// here as well as through the pool so that the unit-test build of the reader runs
+    /// every arm of it.
+    #[test]
+    fn the_memory_percent_is_read_and_bounded() {
+        let with = |line: &str| format!("{line}\n{ONE}");
+        let given = parse(&with("memory_schedulable_percent = 90"))
+            .ok()
+            .unwrap();
+        assert_eq!(given.memory_percent.get(), 90);
+        assert_eq!(parse(ONE).ok().unwrap().memory_percent, MemoryPercent::FULL);
+        for bad in ["0", "101"] {
+            let err = parse(&with(&format!("memory_schedulable_percent = {bad}")));
+            let said = err.err().unwrap().to_string();
+            assert_eq!(said, "memory_schedulable_percent must be from 1 to 100");
+        }
     }
 }

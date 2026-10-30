@@ -532,10 +532,11 @@ impl Scheduler {
     /// learned from earlier runs.
     fn floor_key(&self, operation: OperationId) -> Option<u64> {
         let request = &self.ops.get(&operation)?.request;
-        self.size_keys
-            .get(&operation)
-            .copied()
-            .filter(|_| request.kind == LeaseKind::Action && request.resources.gpus == 0)
+        self.size_keys.get(&operation).copied().filter(|_| {
+            request.kind == LeaseKind::Action
+                && request.resources.gpus == 0
+                && !request.owns_worker()
+        })
     }
 
     /// Lowers the key floor of `size_key` to `ask` bytes, or forgets it for 0, once the
@@ -573,7 +574,7 @@ impl Scheduler {
 
     /// The bound a key floor of `request` stays strictly below, in bytes: the memory of
     /// the largest live node (cordoned or not) that serves its lease kind, satisfies its
-    /// platform and holds its CPU and GPU request. A booking at or above a node's memory
+    /// platform and holds its CPU, GPU and disk request. A booking at or above a node's memory
     /// owns the node, so a key floor never reaches it. 0 when no live node could run
     /// the request: it then has no key floor.
     #[must_use]
@@ -587,6 +588,7 @@ impl Scheduler {
                     && request.needs.matches(&w.caps)
                     && w.capacity.cpu_millis >= wanted.cpu_millis
                     && w.capacity.gpus >= wanted.gpus
+                    && w.capacity.disk_bytes >= wanted.disk_bytes
             })
             .map(|w| w.capacity.memory_bytes)
             .max()
@@ -790,9 +792,13 @@ impl Scheduler {
 
     /// The memory of the largest node that could run `request`, in bytes: one that is
     /// live (cordoned or not), serves its lease kind, satisfies its platform and holds
-    /// its CPU and GPU request, and always `ran_on`, the node its killed run used. A
+    /// its CPU, GPU and disk request, and always `ran_on`, the node its killed run used. A
     /// node that is gone does not count; `booked` when none is registered.
     fn memory_cap(&self, request: &Request, ran_on: &WorkerId, booked: u64) -> u64 {
+        // A request that owns its worker booked all of one: no node has more.
+        if request.owns_worker() {
+            return booked;
+        }
         let wanted = request.resources;
         self.workers
             .iter()
@@ -802,7 +808,8 @@ impl Scheduler {
                         && serves(&w.caps, request.kind)
                         && request.needs.matches(&w.caps)
                         && w.capacity.cpu_millis >= wanted.cpu_millis
-                        && w.capacity.gpus >= wanted.gpus)
+                        && w.capacity.gpus >= wanted.gpus
+                        && w.capacity.disk_bytes >= wanted.disk_bytes)
             })
             .map(|(_, w)| w.capacity.memory_bytes)
             .max()

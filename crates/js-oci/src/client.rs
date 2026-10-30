@@ -8,13 +8,14 @@ use async_trait::async_trait;
 use hyper::header::{ACCEPT, AUTHORIZATION, HeaderName, WWW_AUTHENTICATE};
 use rustls::pki_types::CertificateDer;
 use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncWriteExt as _;
 
 use crate::http::{Http, RootSummary, Roots, Timeouts};
 use crate::location::Authority;
 use crate::manifest::{self, Descriptor, Kind, Manifest};
+use crate::source::BundleSource;
 use crate::text;
+use crate::verify::Receiving;
 use crate::{Digest, Error, Location, Policy};
 
 /// Where the bytes of a blob go as they arrive.
@@ -175,89 +176,6 @@ impl Repository<'_> {
             .clone()
     }
 
-    /// The manifest pinned by `digest`: its bytes hash to `digest`, it is not an index,
-    /// and it is of `kind`. The whole fetch is bounded by [`Timeouts::manifest`].
-    ///
-    /// # Errors
-    /// The registry cannot be reached or refuses, or the manifest is not an acceptable
-    /// manifest of `kind` with that digest.
-    pub async fn fetch_manifest(&self, digest: &Digest, kind: &Kind) -> Result<Manifest, Error> {
-        let url = self.url("manifests", digest.as_str());
-        let accept = kind.accept();
-        self.http
-            .within(self.http.timeouts.manifest, &url, async {
-                let response = self.get(&url, Some(&accept)).await?;
-                let bytes = self
-                    .http
-                    .read_limited(&url, response, kind.limits.manifest)
-                    .await?;
-                manifest::parse(&bytes, digest, kind)
-            })
-            .await
-    }
-
-    /// The config blob of `manifest`, verified, and checked to be for `kind`'s platform.
-    ///
-    /// # Errors
-    /// The blob fails its digest or size, is not JSON, or states another platform.
-    pub async fn fetch_config(&self, manifest: &Manifest, kind: &Kind) -> Result<Vec<u8>, Error> {
-        let mut bytes = Vec::new();
-        self.fetch_blob(manifest.config(), &mut bytes).await?;
-        manifest::check_platform(kind, &bytes)?;
-        Ok(bytes)
-    }
-
-    /// The blob `blob` into `sink`, hashed as it arrives. The sink is finished only when
-    /// the blob is exactly `blob.size()` bytes and hashes to `blob.digest()`; on any
-    /// error the caller discards what the sink received. The whole fetch is bounded by
-    /// [`Timeouts::blob`].
-    ///
-    /// A [`Descriptor`] can only come from a [`Manifest`] that passed its [`Kind`]'s
-    /// checks, so the kind's media types and size limits hold for `blob`.
-    ///
-    /// # Errors
-    /// The registry cannot be reached or refuses, the blob is longer or shorter than the
-    /// manifest says or does not hash to its digest, or the sink fails.
-    pub async fn fetch_blob(
-        &self,
-        blob: &Descriptor,
-        sink: &mut dyn BlobSink,
-    ) -> Result<(), Error> {
-        let url = self.url("blobs", blob.digest().as_str());
-        self.http
-            .within(self.http.timeouts.blob, &url, async {
-                let response = self.get(&url, None).await?;
-                let mut body = response.into_body();
-                let mut hasher = Sha256::new();
-                let mut got = 0u64;
-                let size_error = |got| Error::BlobSize {
-                    digest: blob.digest().to_string(),
-                    declared: blob.size(),
-                    got,
-                };
-                while let Some(data) = self.http.chunk(&url, &mut body).await? {
-                    got += data.len() as u64;
-                    if got > blob.size() {
-                        return Err(size_error(got));
-                    }
-                    hasher.update(&data);
-                    sink.write(&data).await.map_err(Error::Sink)?;
-                }
-                if got != blob.size() {
-                    return Err(size_error(got));
-                }
-                let actual = Digest::finish(hasher.finalize());
-                if actual != *blob.digest() {
-                    return Err(Error::BlobDigest {
-                        digest: blob.digest().to_string(),
-                        actual: actual.to_string(),
-                    });
-                }
-                sink.finish().await.map_err(Error::Sink)
-            })
-            .await
-    }
-
     /// GETs `url`, answering a Bearer challenge once, and returns a 2xx response.
     async fn get(
         &self,
@@ -366,6 +284,39 @@ impl Repository<'_> {
         query.push_str(&format!("scope={}", query_escape(&scope)));
         let url = format!("https://{}{}?{query}", realm.header(), uri.path());
         Ok((url, realm))
+    }
+}
+
+#[async_trait]
+impl BundleSource for Repository<'_> {
+    async fn fetch_manifest(&self, digest: &Digest, kind: &Kind) -> Result<Manifest, Error> {
+        let url = self.url("manifests", digest.as_str());
+        let accept = kind.accept();
+        self.http
+            .within(self.http.timeouts.manifest, &url, async {
+                let response = self.get(&url, Some(&accept)).await?;
+                let bytes = self
+                    .http
+                    .read_limited(&url, response, kind.limits.manifest)
+                    .await?;
+                manifest::parse(&bytes, digest, kind)
+            })
+            .await
+    }
+
+    async fn fetch_blob(&self, blob: &Descriptor, sink: &mut dyn BlobSink) -> Result<(), Error> {
+        let url = self.url("blobs", blob.digest().as_str());
+        self.http
+            .within(self.http.timeouts.blob, &url, async {
+                let response = self.get(&url, None).await?;
+                let mut body = response.into_body();
+                let mut receiving = Receiving::new(blob);
+                while let Some(data) = self.http.chunk(&url, &mut body).await? {
+                    receiving.accept(&data, sink).await?;
+                }
+                receiving.finish(sink).await
+            })
+            .await
     }
 }
 

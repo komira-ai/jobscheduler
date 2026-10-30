@@ -32,6 +32,7 @@ use js_agent_wire::{
 use js_lease::{Clock, LeaseInfo, LeaseState};
 use js_registry::{RunRefusal, RunView};
 use js_types::LeaseId;
+use js_usage::ProfileKey;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -80,6 +81,24 @@ struct RunBody {
     isolation: Isolation,
     #[serde(default)]
     labels: std::collections::BTreeMap<String, String>,
+    /// The name of the profile the run's cost curve is learned under, when the client knows
+    /// one: its own key for the work the run does, in the grammar of [`ProfileKey`]. Absent
+    /// means the run teaches the server nothing.
+    ///
+    /// Usage tracks are per lease: when runs of one lease name different profiles, the first
+    /// accepted result takes the whole lease series under its own name. The server has one
+    /// trust domain: any holder of the client token can name any profile, so a wrong or
+    /// hostile run can skew that profile's curve.
+    #[serde(default)]
+    profile: Option<String>,
+}
+
+/// The profile name of a [`RunBody`], or the 422 `invalid-profile` when it is not a
+/// [`ProfileKey`] (1 to 128 bytes of `0-9`, `a-z`, `.`, `_` and `-`, the first a digit or a
+/// letter).
+fn profile_of(text: &str) -> Result<ProfileKey, ApiError> {
+    ProfileKey::parse(text)
+        .map_err(|_| ApiError::coded(StatusCode::UNPROCESSABLE_ENTITY, "invalid-profile"))
 }
 
 /// The limits of a [`RunBody`]. The wall time is bounded by what the lease has left
@@ -89,6 +108,8 @@ struct RunBody {
 struct LimitsBody {
     cpu_millis: u64,
     memory_bytes: u64,
+    #[serde(default)]
+    disk_bytes: Option<u64>,
     #[serde(default)]
     pids: Option<u64>,
     #[serde(default)]
@@ -113,6 +134,9 @@ struct RunEntry {
     exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// The labels the client sent when it queued the run; left out when there are none.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    labels: std::collections::BTreeMap<String, String>,
     /// The end of the job's output; only the entry of one run carries it, the list leaves
     /// it out to stay small.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,6 +168,7 @@ impl From<RunView> for RunEntry {
             outcome: result.as_ref().map(|result| result.outcome),
             exit_code: result.as_ref().and_then(|result| result.exit_code),
             detail: result.and_then(|result| result.detail),
+            labels: run.labels,
         }
     }
 }
@@ -171,6 +196,7 @@ impl From<RunRefusal> for ApiError {
             | RunRefusal::NotReady
             | RunRefusal::NoCapacity
             | RunRefusal::FilesUnsupported
+            | RunRefusal::DiskUnsupported
             | RunRefusal::RunExists => StatusCode::CONFLICT,
         };
         ApiError::coded(status, refusal.code())
@@ -218,6 +244,7 @@ async fn start(
     // state is read. The error names the rule and never repeats a name or contents.
     validate_files(&body.files)
         .map_err(|err| ApiError::coded(StatusCode::BAD_REQUEST, err.code()))?;
+    let profile = body.profile.as_deref().map(profile_of).transpose()?;
     let table = api.shared.table().lock().await;
     let lease = find(table.list(), &id)?;
     let ends = lease.expires_at.millis().min(lease.ends_at.millis());
@@ -237,6 +264,7 @@ async fn start(
         limits: Limits {
             cpu_millis: body.limits.cpu_millis,
             memory_bytes: body.limits.memory_bytes,
+            disk_bytes: body.limits.disk_bytes,
             pids: body.limits.pids,
             wall_ms: asked.map_or(wall_cap, |asked| asked.min(wall_cap)),
         },
@@ -250,7 +278,10 @@ async fn start(
         bundle: None,
         native: None,
     };
-    let queued = api.agents.registry.queue_run(&host, &id, spec)?;
+    let queued = api
+        .agents
+        .registry
+        .queue_keyed_run(&host, &id, spec, profile)?;
     info!(lease = %id, host = %host, run = %run_id, "run queued");
     let accepted = Accepted {
         run_id,

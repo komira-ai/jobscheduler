@@ -161,6 +161,7 @@ pub fn offer(
                 cpu_millis,
                 memory_bytes,
                 gpus,
+                disk_bytes: 0,
                 gpu_class,
                 max_leases: None,
             },

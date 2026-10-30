@@ -22,7 +22,7 @@
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
 //! | `--label k=v` | a label on the host; repeatable |
-//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec` and `gpu-toolkit` are detected and cannot be set |
+//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `run-files`, `disk-gib`, `scratch-quota` and `scratch-default-gib` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | not available yet: refused at start, because the scheduler does not record a host job's taint yet; without it a start with `isolation = host` creates nothing and is refused |
@@ -500,11 +500,11 @@ fn execute(
     // thread (see `WorkerHost`), so the heartbeat loop never waits for a check or the hook.
     let mut host = jobs
         .as_ref()
-        .map(|(worker, _)| WorkerHost::new(worker.handle()));
-    let clock = jobs.as_ref().map(|(worker, _)| worker.clock());
+        .map(|(worker, ..)| WorkerHost::new(worker.handle()));
+    let clock = jobs.as_ref().map(|(worker, ..)| worker.clock());
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
-    if let Some((worker, drain)) = &jobs {
-        session = session.with_jobs(worker, *drain);
+    if let Some((worker, drain, outbox)) = &jobs {
+        session = session.with_jobs(worker, *drain).with_usage(outbox.clone());
     }
     if let (Some(host), Some(clock)) = (host.as_mut(), clock.as_ref()) {
         session = session.with_default_quiesce(host, clock);

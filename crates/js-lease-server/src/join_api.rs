@@ -135,9 +135,21 @@ fn instance_of(provider: String, instance_id: String) -> Result<InstanceIdentity
     Ok(instance)
 }
 
+/// A 400 naming `provider` when the pool admits one provider and `asked` is another: a
+/// token for a host the pool would name differently never admits it.
+fn check_provider(only: Option<&str>, asked: &str) -> Result<(), ApiError> {
+    match only {
+        Some(pool) if pool != asked => Err(ApiError::bad_request(format!(
+            "provider must be the pool's name, {pool:?}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 async fn mint(State(agents): State<Arc<Agents>>, body: Bytes) -> Result<Response, ApiError> {
     let body: MintBody = parse(&body)?;
     let ttl = lifetime(body.ttl_seconds)?;
+    check_provider(agents.mint_provider.as_deref(), &body.provider)?;
     let instance = instance_of(body.provider, body.instance_id)?;
     let named = (instance.provider.clone(), instance.instance_id.clone());
     let made = blocking(move || agents.joins.mint(instance, ttl)).await;
@@ -176,6 +188,17 @@ async fn revoke(State(agents): State<Arc<Agents>>, body: Bytes) -> Result<Respon
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pool that names its provider accepts that name only, and a 400 says `provider`;
+    /// a server with no such pool accepts any. It catches a mint for another pool's name.
+    #[test]
+    fn the_provider_must_be_the_pools_name_when_it_has_one() {
+        assert!(check_provider(Some("burst"), "burst").is_ok());
+        assert!(check_provider(None, "lambdalabs").is_ok());
+        let err = check_provider(Some("burst"), "lambdalabs").unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(format!("{err:?}").contains("provider must be"));
+    }
 
     /// The lifetime is the default when none is asked, what is asked inside the bounds,
     /// and a 400 for zero and for more than a day. It catches a token that never expires

@@ -11,6 +11,7 @@ use js_agent_wire::{
 use js_provider::{Provider, RefusalCode, StartAck};
 use js_registry::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, PoolConfig, RunRefusal, RunState, RunView};
 use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
+use js_usage::ProfileKey;
 use support::*;
 
 /// A job of `cpu` thousandths of a core and 1 MiB, no GPU.
@@ -24,6 +25,7 @@ fn job(run: &str, cpu: u64) -> JobSpec {
         limits: Limits {
             cpu_millis: cpu,
             memory_bytes: 1 << 20,
+            disk_bytes: None,
             pids: None,
             wall_ms: 60_000,
         },
@@ -735,4 +737,38 @@ fn states_have_stable_names() {
     for (state, name) in names {
         assert_eq!(state.as_str(), name);
     }
+}
+
+/// Asserts that a run queued with a profile name answers it, by id and in its view, and that
+/// a run queued without one, and a run the registry does not know, answer none; and that the
+/// start the host is sent is, whole, the start of the same run queued without a name. It
+/// catches a name lost between the queue and the result, a name given to the wrong run, and
+/// a name that reaches the agent by any route (a label, an argument, the environment, the
+/// image or a field of its own).
+#[test]
+fn a_profile_name_stays_with_its_run_and_never_reaches_the_host() {
+    let (fx, epoch) = leased();
+    let key = ProfileKey::parse("est.row-1").unwrap();
+    let named = fx
+        .registry
+        .queue_keyed_run(&host("a"), &lease(1), job("r1", 500), Some(key.clone()))
+        .unwrap();
+    assert_eq!(named.profile, Some(key.clone()));
+    let plain = queue(&fx, "r2", 500).unwrap();
+    assert_eq!(plain.profile, None);
+    assert_eq!(fx.registry.profile_of("r1"), Some(key.clone()));
+    assert_eq!(fx.registry.profile_of("r2"), None);
+    assert_eq!(fx.registry.profile_of("r3"), None);
+    let listed = fx.registry.runs_of(&lease(1));
+    assert_eq!(listed[0].profile, Some(key));
+    assert_eq!(listed[1].profile, None);
+    let reply = beat(&fx, "a", epoch, &[]);
+    assert_eq!(words(&reply), ["start r1", "start r2"]);
+    // The same run id submitted without a name, on a registry of its own: what the host
+    // receives for it must be equal to the start of the named run, whole.
+    let (other, other_epoch) = leased();
+    queue(&other, "r1", 500).unwrap();
+    let unnamed = beat(&other, "a", other_epoch, &[]);
+    assert_eq!(words(&unnamed), ["start r1"]);
+    assert_eq!(reply.commands[0], unnamed.commands[0]);
 }

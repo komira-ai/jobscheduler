@@ -367,6 +367,8 @@ impl CapacitySource for Scripted {
 pub struct Harness {
     pub rt: Runtime,
     pub running: Option<Running>,
+    /// A clone of the server's listener, never accepted on while the server runs.
+    kept: Option<TcpListener>,
     pub clock: ManualClock,
     pub ticks: TickHandle,
     pub scratch: Scratch,
@@ -432,6 +434,9 @@ impl Harness {
         let clock = ManualClock::new(Timestamp::from_millis(T0));
         let (ticks, ticker) = channel_ticker();
         let shared = SharedClock::new(clock.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let kept = listener.try_clone().unwrap();
+        let config = config.with_listener(listener);
         let running = rt.block_on(start(config, shared, ticker)).unwrap();
         let scheme = if extra.contains(&"--tls-cert") {
             "https"
@@ -443,6 +448,7 @@ impl Harness {
         Self {
             rt,
             running: Some(running),
+            kept: Some(kept),
             clock,
             ticks,
             scratch,
@@ -470,10 +476,26 @@ impl Harness {
         Driven::new(move || tick_on(&handle, &ticks))
     }
 
-    /// Stops the server; later requests find nothing listening.
+    /// Stops the server; later requests fail to talk to it. The port stays owned for the
+    /// rest of the process by the harness's clone of the server's listener, on which a
+    /// thread, started only once the server's accept loop is gone, drops every
+    /// connection. No other test's server can take the port and answer in its place.
+    ///
+    /// The server made its listener non-blocking, and a clone shares that flag (it lives on
+    /// the open file description), so the kept copy is non-blocking too. It is made
+    /// blocking again only here, after `shutdown()` has returned and the server's copy is
+    /// gone: earlier, it would make the server's own accept loop blocking. Left
+    /// non-blocking, the thread would spin on `WouldBlock` instead of waiting in accept.
     pub fn stop(&mut self) {
         let running = self.running.take().unwrap();
         self.rt.block_on(running.shutdown()).unwrap();
+        let kept = self.kept.take().unwrap();
+        kept.set_nonblocking(false).unwrap();
+        std::thread::spawn(move || {
+            for stream in kept.incoming() {
+                drop(stream);
+            }
+        });
     }
 
     /// The ids of the leases the server lists, read by the CLI.
