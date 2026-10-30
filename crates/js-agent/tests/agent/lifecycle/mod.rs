@@ -64,6 +64,8 @@ pub struct Options {
     pub watch_marker: bool,
     /// Checks to use instead of the scripted ones.
     pub hook: Option<Box<dyn CheckHook>>,
+    /// The rules for a start that names a bundle; none by default.
+    pub bundle: Option<js_agent::bundle::Admission>,
 }
 
 impl Harness {
@@ -75,7 +77,8 @@ impl Harness {
     pub fn with(name: &str, options: Options) -> Self {
         let dir = Scratch::new(&format!("life-{name}"));
         let scratch = dir.path("scratch");
-        let config = config_in(&dir, options.allow_host_jobs);
+        let mut config = config_in(&dir, options.allow_host_jobs);
+        config.bundle = options.bundle;
         let (clock, log) = (ManualClock::default(), Log::default());
         let fake = FakeRuntime::new(&log, &clock);
         if options.watch_marker {
@@ -188,6 +191,7 @@ pub fn config_in(dir: &Scratch, allow_host_jobs: bool) -> Config {
         files: Some(FilesRoot::open(&dir.path("files")).unwrap()),
         state: StateRoot::open(&state).unwrap(),
         stop_grace: GRACE,
+        bundle: None,
     }
 }
 

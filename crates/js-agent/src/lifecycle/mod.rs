@@ -169,6 +169,7 @@ use std::time::Duration;
 use js_agent_wire::{Hello, Taint};
 
 use crate::FileReader;
+use crate::bundle::Admission;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
 
@@ -503,6 +504,9 @@ pub struct Config {
     pub state: StateRoot,
     /// How long a container gets to stop on its own before it is killed.
     pub stop_grace: Duration,
+    /// The rules for a start that names a bundle; none when the agent has no bundle store,
+    /// and then such a start is refused `bundle-unsupported`.
+    pub bundle: Option<Admission>,
 }
 
 /// The flags that configure jobs, checked.

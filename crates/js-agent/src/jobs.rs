@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use js_agent_wire::Hello;
 
+use crate::bundle::Admission;
 use crate::facts::Platform;
 use crate::lifecycle::{Capacity, Config, Local};
 use crate::readiness::WorkerHook;
@@ -30,6 +31,8 @@ pub struct Seams<'a> {
     /// The readiness hook the worker runs for a whole-node lease; `None` without
     /// `--readiness-hook`.
     pub readiness: Option<WorkerHook>,
+    /// The rules for a start that names a bundle; `None` without `--bundle-store`.
+    pub bundle: Option<Admission>,
 }
 
 /// Starts the worker when `--container-bin` is given, and `None` when it is not: an agent
@@ -75,6 +78,7 @@ pub fn start(
         files,
         state,
         stop_grace,
+        bundle: seams.bundle.clone(),
     };
     let outbox = Arc::new(Outbox::new());
     let worker = Worker::start(Plan {

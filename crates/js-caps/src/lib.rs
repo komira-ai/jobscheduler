@@ -43,8 +43,8 @@ pub use gpu::{
     gpus_from_macos_sysctl, metal_family_of_apple_chip,
 };
 pub use host::{
-    Breach, DETECTED_KEYS, DISK_GIB, EXEC, FLAG_SET, GPU_TOOLKIT, HostContract, RUN_FILES, RUNTIME,
-    SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
+    BUNDLE, BUNDLE_ROOT, Breach, DETECTED_KEYS, DISK_GIB, EXEC, FLAG_SET, GPU_TOOLKIT,
+    HostContract, RUN_FILES, RUNTIME, SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
 };
 pub use level::{ArmVersion, IsaLevel, UnknownIsaLevel, X86Level};
 pub use matching::{

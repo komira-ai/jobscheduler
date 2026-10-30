@@ -126,6 +126,8 @@ pub const NO_MATCHING_POOL: &str = "no-matching-pool";
 /// not by the agent.
 pub const NOT_READY: &str = "not-ready";
 
+/// A capabilities frame whose digests, root or Xcode builds are malformed.
+pub const INVALID_CAPS: &str = "invalid-caps";
 /// A start that names a bundle, sent to an agent that holds no bundle store (it reports no
 /// `bundle` capability). The placement should not have sent it there; the agent refuses
 /// rather than run the program with the host's tools.

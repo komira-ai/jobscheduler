@@ -87,6 +87,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         files: Some(FilesRoot::open(&private(dir, "files")).unwrap()),
         state: StateRoot::open(&private(dir, "state")).unwrap(),
         stop_grace: Duration::from_secs(1),
+        bundle: None,
     };
     Plan {
         config,

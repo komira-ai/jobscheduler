@@ -14,8 +14,10 @@ path = "src/main.rs"
 [dependencies]
 js-agent-usage = { path = "../js-agent-usage" }
 js-agent-wire = { path = "../js-agent-wire" }
+js-bundle = { path = "../js-bundle" }
 js-caps = { path = "../js-caps" }
 js-client = { path = "../js-client" }
+js-treestore = { path = "../js-treestore" }
 js-types = { path = "../js-types" }
 clap.workspace = true
 getrandom.workspace = true

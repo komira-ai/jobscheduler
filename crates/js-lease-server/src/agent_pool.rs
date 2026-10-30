@@ -552,6 +552,20 @@ mod tests {
         assert!(parse(&value_long).unwrap_err().contains("capabilities"));
     }
 
+    /// A pool may name the `bundle` capability with a value up to the wire's longer cap for
+    /// that key and no further, and any other key stays at the common cap. It catches a
+    /// pool that could never be met by a hello, and a cap raised for every key.
+    #[test]
+    fn the_bundle_capability_has_its_own_value_cap() {
+        let with = |key: &str, len: usize| {
+            MINIMAL.to_string() + "[capabilities]\n" + key + " = \"" + &"v".repeat(len) + "\"\n"
+        };
+        let top = limits::MAX_BUNDLE_CAPABILITY_VALUE_LEN;
+        assert!(parse(&with("bundle", top)).is_ok());
+        assert!(parse(&with("bundle", top + 1)).is_err());
+        assert!(parse(&with("other", limits::MAX_CAPABILITY_VALUE_LEN + 1)).is_err());
+    }
+
     /// A duration too long to count in milliseconds is refused with the field's name
     /// rather than wrapped.
     #[test]

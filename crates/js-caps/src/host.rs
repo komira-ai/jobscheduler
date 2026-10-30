@@ -13,6 +13,8 @@
 //! | [`RUN_FILES`] | [`FLAG_SET`] | the agent runs containers and writes a start's run files |
 //! | [`SCRATCH_QUOTA`] | [`SCRATCH_QUOTA_PROJECT`] | the agent enforces a quota on each run's scratch disk |
 //! | [`SCRATCH_DEFAULT_GIB`] | whole GiB | the quota it enforces on a run that names none |
+//! | [`BUNDLE`] | the held bundle manifest digests, `sha256:<hex>`, comma-separated | the agent has a bundle store and holds at least one bundle |
+//! | [`BUNDLE_ROOT`] | the absolute path of the bundle store | the agent has a bundle store |
 //!
 //! A job request may require [`EXEC`] (the same mode) and [`DISK_GIB`] (at least that
 //! much free disk); see [`crate::Request`].
@@ -57,6 +59,15 @@ pub const SCRATCH_QUOTA_PROJECT: &str = "project";
 /// The capability key of the quota, in whole GiB, the agent enforces on a run that names
 /// no `disk_bytes`. Reported with [`SCRATCH_QUOTA`]; the server books it for such a run.
 pub const SCRATCH_DEFAULT_GIB: &str = "scratch-default-gib";
+
+/// The capability key of the bundles a host holds: the manifest digests (`sha256:<hex>`),
+/// comma-separated, in ascending order. A job that names a bundle goes to a host that holds
+/// it, because a host does not fetch one by default.
+pub const BUNDLE: &str = "bundle";
+
+/// The capability key of the bundle store's root path, a fact: tools embed it in their
+/// output, so a fleet uses one path and a host with another is not eligible.
+pub const BUNDLE_ROOT: &str = "bundle-root";
 
 /// The value of a capability that is a flag: present means set.
 pub const FLAG_SET: &str = "true";

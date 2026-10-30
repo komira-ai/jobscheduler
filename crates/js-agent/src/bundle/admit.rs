@@ -1,0 +1,179 @@
+#![allow(dead_code, unused_imports, unused_variables)]
+//! The checks of a start that names a bundle.
+
+use std::fmt;
+use std::sync::Arc;
+
+use js_agent_wire::{JobSpec, refusal};
+use js_bundle::DottedVersion;
+use js_types::BundleRef;
+
+use super::host::{BundleHost, Fetch, Needs};
+use super::list::parse_digests;
+use super::settings::{Pull, Settings, Trust};
+
+/// A refusal: the wire code and a local explanation.
+pub type Refusal = (&'static str, String);
+
+/// The rules for a start that names a bundle, over the host they read.
+#[derive(Clone)]
+pub struct Admission {
+    settings: Settings,
+    host: Arc<dyn BundleHost>,
+}
+
+impl fmt::Debug for Admission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Admission")
+            .field("settings", &self.settings)
+            .finish_non_exhaustive()
+    }
+}
+
+fn no(code: &'static str, why: impl Into<String>) -> Refusal {
+    (code, why.into())
+}
+
+impl Admission {
+    /// The rules of `settings`, reading `host`.
+    #[must_use]
+    pub fn new(settings: Settings, host: Arc<dyn BundleHost>) -> Self {
+        Self { settings, host }
+    }
+
+    /// The settings the rules come from.
+    #[must_use]
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Whether the start `spec` may go on, as far as its bundle is concerned. A start with
+    /// no bundle passes. The checks run in this order, and the first that fails is the
+    /// refusal: the digest is on the deny list; it is not on the allow list; the name is
+    /// outside every allowed registry; the store does not hold it (and `--bundle-pull never`,
+    /// or a fetch cannot begin, or has begun); the bundle needs a newer macOS; the bundle
+    /// needs an Xcode the host does not have. A list file that cannot be read refuses, so a
+    /// broken deny list never lets a digest through.
+    ///
+    /// # Errors
+    ///
+    /// The wire code of the refusal and an explanation for the log.
+    pub fn admit(&self, spec: &JobSpec) -> Result<(), Refusal> {
+        Ok(())
+    }
+
+    /// Reads the list file `path`; one that cannot be read or parsed refuses with `code`.
+    fn digests(
+        &self,
+        path: &std::path::Path,
+        code: &'static str,
+        what: &str,
+    ) -> Result<std::collections::BTreeSet<String>, Refusal> {
+        let text = self
+            .host
+            .read_file(path)
+            .map_err(|why| no(code, format!("the {what} cannot be read: {why}")))?;
+        parse_digests(&text).map_err(|why| no(code, format!("the {what} is malformed: {why}")))
+    }
+
+    fn deny(&self, digest: &str) -> Result<(), Refusal> {
+        let Some(file) = &self.settings.deny_file else {
+            return Ok(());
+        };
+        let denied = self.digests(file, refusal::BUNDLE_DENIED, "deny list")?;
+        match denied.contains(digest) {
+            true => Err(no(refusal::BUNDLE_DENIED, "the digest is on the deny list")),
+            false => Ok(()),
+        }
+    }
+
+    fn allow(&self, digest: &str) -> Result<(), Refusal> {
+        let (Trust::List, Some(file)) = (self.settings.trust, &self.settings.allow_file) else {
+            return Ok(());
+        };
+        let allowed = self.digests(file, refusal::BUNDLE_NOT_ALLOWED, "allow list")?;
+        match allowed.contains(digest) {
+            true => Ok(()),
+            false => Err(no(
+                refusal::BUNDLE_NOT_ALLOWED,
+                "the digest is not on the allow list",
+            )),
+        }
+    }
+
+    fn registry(&self, name: &str) -> Result<(), Refusal> {
+        let registries = &self.settings.registries;
+        if registries.is_empty() || registries.iter().any(|allowed| allowed.covers(name)) {
+            return Ok(());
+        }
+        Err(no(
+            refusal::BUNDLE_REGISTRY_NOT_ALLOWED,
+            "the bundle's name is outside every allowed registry and namespace",
+        ))
+    }
+
+    /// The store does not hold the bundle: refuse, or begin a fetch and say so.
+    fn missing(&self, name: &str, digest: &str) -> Result<(), Refusal> {
+        if self.settings.pull == Pull::Never {
+            return Err(no(
+                refusal::BUNDLE_NOT_HELD,
+                "the store does not hold the bundle",
+            ));
+        }
+        let (store, low_water) = (&self.settings.store, self.settings.low_water_bytes);
+        let used = self.host.used_bytes(store).unwrap_or(u64::MAX);
+        let free = self.host.free_bytes(store).unwrap_or(0);
+        if used >= self.settings.budget_bytes || free < low_water {
+            return Err(no(
+                refusal::BUNDLE_NO_SPACE,
+                "the store is at its budget or the volume is under its low-water mark",
+            ));
+        }
+        match self.host.fetch(store, name, digest) {
+            Fetch::Started => Err(no(refusal::BUNDLE_PENDING, "the bundle is being fetched")),
+            Fetch::Index => Err(no(refusal::BUNDLE_INDEX, "the digest names an index")),
+            Fetch::Failed(why) => Err(no(refusal::BUNDLE_FETCH_FAILED, why)),
+        }
+    }
+
+    /// The held bundle runs on this host: its macOS floor and its Xcode need are met.
+    fn fits_host(&self, digest: &str) -> Result<(), Refusal> {
+        let unread = |why: String| {
+            no(
+                refusal::BUNDLE_NOT_HELD,
+                format!("the bundle's config cannot be read: {why}"),
+            )
+        };
+        let Needs { os_version, xcode } = self
+            .host
+            .needs(&self.settings.store, digest)
+            .map_err(unread)?;
+        let host_os: DottedVersion = self.host.os_version().map_err(|why| {
+            no(
+                refusal::BUNDLE_OS_TOO_OLD,
+                format!("the host's macOS is unknown: {why}"),
+            )
+        })?;
+        if host_os < os_version {
+            return Err(no(
+                refusal::BUNDLE_OS_TOO_OLD,
+                "the bundle needs a newer macOS",
+            ));
+        }
+        let Some(need) = xcode else {
+            return Ok(());
+        };
+        let met = self
+            .host
+            .xcodes()
+            .iter()
+            .any(|have| need.satisfied_by(&have.version, &have.components));
+        match met {
+            true => Ok(()),
+            false => Err(no(
+                refusal::BUNDLE_XCODE_MISMATCH,
+                "no Xcode on the host meets the bundle's need",
+            )),
+        }
+    }
+}

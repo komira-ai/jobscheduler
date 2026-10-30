@@ -21,6 +21,7 @@ use js_testkit::dir::TestDir;
 use serde_json::{Value, json};
 
 use crate::bounds::{self, Capped, SENT_LIMIT, WakeBudget};
+use crate::bundle::fake::FakeHost;
 use crate::jobs::fake::FakeMachine;
 
 /// The pool the tests' hosts ask to join.
@@ -639,6 +640,27 @@ pub fn run_on(
     jitter: &mut dyn Jitter,
     jobs: Jobs<'_>,
 ) -> Ran {
+    run_with_store(
+        args,
+        host,
+        connector,
+        sleeper,
+        jitter,
+        jobs,
+        FakeHost::new(),
+    )
+}
+
+/// [`run_on`] with the bundle store's host given.
+pub fn run_with_store(
+    args: &[&str],
+    host: &Host,
+    connector: &dyn Connector,
+    sleeper: &mut dyn Sleeper,
+    jitter: &mut dyn Jitter,
+    jobs: Jobs<'_>,
+    store: Arc<FakeHost>,
+) -> Ran {
     let (mut out, mut err) = (Capped::new(), Capped::new());
     let mut services = Services {
         platform: host.platform.clone(),
@@ -648,6 +670,7 @@ pub fn run_on(
         jitter,
         sleeper,
         machine: jobs.0,
+        bundle: store,
         worker_hook: jobs.1,
         rescue_bound: Some(RESCUE_TEST_BOUND),
     };

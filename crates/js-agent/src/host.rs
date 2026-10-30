@@ -7,6 +7,7 @@ use js_agent_wire::{Hello, InstanceIdentity, Phase, ProtocolRange, WireShape};
 
 use js_caps::{DETECTED_KEYS, DISK_GIB};
 
+use crate::bundle::{BundleHost, Settings, hello_capabilities, report, reserve_bytes};
 use crate::cli::Cli;
 use crate::facts::{
     CommandRunner, FileReader, GIB, Platform, detect, free_bytes, host_id, machine_id,
@@ -77,19 +78,26 @@ pub fn offered_disk_bytes(free: u64, low_water_gib: Option<u64>) -> u64 {
 }
 
 /// What the work volume offers: the volume that holds `--scratch-root`, where every run
-/// gets its directory. The bytes are its free space minus `--scratch-low-water-gib`; they
+/// gets its directory. The bytes are its free space minus the part of the bundle store's
+/// budget the store has not used (`kept_back`, 0 without a store) minus
+/// `--scratch-low-water-gib`; they
 /// are the shape's `disk_bytes`, and the capability `disk-gib` says them in GiB, so there
 /// are never two numbers. Without the flag there is no work volume to speak of and nothing
 /// is offered or reported. A volume that cannot be read is a warning, and nothing is
 /// offered or reported, so a job that needs disk is not placed on a guess. It is read when
 /// the hello is made, not again.
-fn disk(cli: &Cli, runner: &dyn CommandRunner) -> (u64, Option<(String, String)>, Option<String>) {
+fn disk(
+    cli: &Cli,
+    runner: &dyn CommandRunner,
+    kept_back: u64,
+) -> (u64, Option<(String, String)>, Option<String>) {
     let Some(root) = &cli.scratch_root else {
         return (0, None, None);
     };
     match free_bytes(runner, root) {
         Ok(free) => {
-            let offered = offered_disk_bytes(free, cli.scratch_low_water_gib);
+            let offered =
+                offered_disk_bytes(free.saturating_sub(kept_back), cli.scratch_low_water_gib);
             let gib = (DISK_GIB.to_owned(), (offered / GIB).to_string());
             (offered, Some(gib), None)
         }
@@ -151,6 +159,34 @@ pub fn offer(
     files: &dyn FileReader,
     agent_version: &str,
 ) -> Result<Offer, String> {
+    offer_with_bundle(cli, platform, runner, files, agent_version, None)
+}
+
+/// The bundle store a hello speaks for: its settings, and the host that reads it.
+#[derive(Clone, Copy)]
+pub struct StoreView<'a> {
+    /// The checked flags.
+    pub settings: &'a Settings,
+    /// The machine, as the store sees it.
+    pub host: &'a dyn BundleHost,
+}
+
+/// [`offer`] for a host that has a bundle store: the hello also carries `bundle-root` and
+/// `bundle` (see [`crate::bundle`]), and the disk offered (the shape's `disk_bytes` and
+/// `disk-gib`) leaves out the unused part of the store's budget:
+/// `floor((free - max(0, budget - used) - low_water) / GiB)`.
+///
+/// # Errors
+///
+/// As [`offer`].
+pub fn offer_with_bundle(
+    cli: &Cli,
+    platform: &Platform,
+    runner: &dyn CommandRunner,
+    files: &dyn FileReader,
+    agent_version: &str,
+    store: Option<StoreView<'_>>,
+) -> Result<Offer, String> {
     let detected = detect(platform, runner, files)?;
     let gpus = capped("--gpus", cli.gpus, detected.gpus.count)?;
     let cpu_millis = capped("--cpu-millis", cli.cpu_millis, detected.cpu_millis)?;
@@ -163,8 +199,17 @@ pub fn offer(
     if cli.scratch_quota && cli.scratch_root.is_none() {
         return Err("--scratch-quota: needs --scratch-root".to_owned());
     }
-    let (disk_bytes, advisory, disk_warning) = disk(cli, runner);
+    let (kept_back, reserve_warning) = store
+        .map(|view| reserve_bytes(view.settings, view.host))
+        .unzip();
+    let (disk_bytes, advisory, disk_warning) = disk(cli, runner, kept_back.unwrap_or_default());
     capabilities.extend(advisory);
+    let reported = store.map(|view| report(view.settings, view.host));
+    capabilities.extend(
+        reported
+            .iter()
+            .flat_map(|found| hello_capabilities(&found.caps)),
+    );
     let host_id = id(cli, platform, runner, files)?;
     let instance = instance(cli, files)?;
     let devices = detected
@@ -196,6 +241,12 @@ pub fn offer(
             // The credential has a home only under a state root.
             accepts_host_credential: cli.state_root.is_some(),
         },
-        warnings: detected.warnings.into_iter().chain(disk_warning).collect(),
+        warnings: detected
+            .warnings
+            .into_iter()
+            .chain(disk_warning)
+            .chain(reserve_warning.flatten())
+            .chain(reported.into_iter().flat_map(|found| found.warnings))
+            .collect(),
     })
 }
