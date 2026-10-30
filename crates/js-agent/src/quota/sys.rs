@@ -153,6 +153,21 @@ fn syscall<T>(mut arg: T, call: impl FnOnce(&mut T) -> libc::c_int) -> io::Resul
     }
 }
 
+/// `qs_flags` of what `Q_XGETQSTAT` filled in.
+fn flags_of(stat: QuotaStat) -> u16 {
+    stat.flags
+}
+
+/// The project's limits and usage out of what `Q_XGETQUOTA` filled in.
+fn dq_of(quota: DiskQuota) -> Dq {
+    Dq {
+        blocks_used: quota.bcount,
+        inodes_used: quota.icount,
+        blocks_limit: quota.blk_hardlimit,
+        inodes_limit: quota.ino_hardlimit,
+    }
+}
+
 /// The first argument of `quotactl`: the command, then the project type below it.
 fn qcmd(command: u32) -> libc::c_int {
     ((command << 8) | XQM_PRJQUOTA) as libc::c_int
@@ -196,7 +211,7 @@ impl Sys for Kernel {
                 )
             }
         })
-        .map(|stat| stat.flags)
+        .map(flags_of)
     }
 
     fn get_attr(&self, dir: &Path) -> io::Result<Fsx> {
@@ -245,12 +260,7 @@ impl Sys for Kernel {
                 )
             }
         })
-        .map(|quota| Dq {
-            blocks_used: quota.bcount,
-            inodes_used: quota.icount,
-            blocks_limit: quota.blk_hardlimit,
-            inodes_limit: quota.ino_hardlimit,
-        })
+        .map(dq_of)
     }
 
     fn set_limits(&self, device: &Path, project: u32, blocks: u64, inodes: u64) -> io::Result<()> {
@@ -316,6 +326,34 @@ mod tests {
         assert_eq!(ok.unwrap(), 2);
         let failed = syscall((), |_| -1);
         assert!(failed.is_err());
+    }
+
+    /// What the kernel filled in is read from the right fields: the flags of the state, and
+    /// the used and the hard-limit fields of the project (not the soft ones).
+    #[test]
+    fn replies_are_read_from_the_right_fields() {
+        let stat = QuotaStat {
+            flags: 0x30,
+            version: 1,
+            ..QuotaStat::default()
+        };
+        assert_eq!(flags_of(stat), 0x30);
+        let quota = DiskQuota {
+            bcount: 1,
+            icount: 2,
+            blk_hardlimit: 3,
+            ino_hardlimit: 4,
+            blk_softlimit: 5,
+            ino_softlimit: 6,
+            ..DiskQuota::default()
+        };
+        let want = Dq {
+            blocks_used: 1,
+            inodes_used: 2,
+            blocks_limit: 3,
+            inodes_limit: 4,
+        };
+        assert_eq!(dq_of(quota), want);
     }
 
     /// A path with a NUL cannot be passed to the kernel.
