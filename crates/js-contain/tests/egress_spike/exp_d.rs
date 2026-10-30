@@ -1,22 +1,22 @@
 //! (d) Rootless `pasta` (passt) as the container's network, and whether an allow-list can be
 //! enforced on it.
 //!
-//! The daemon creates the container (`crun create`), so the container's user and network
-//! namespaces exist and are owned by the daemon user. It points `pasta` at the container's
-//! pid (pasta enters both namespaces, makes a tap device there and relays its traffic with
-//! ordinary sockets of its own), switches IPv6 off, loads the nft table inside the
-//! namespace, then starts the job. `pasta` itself filters nothing: the control test shows it
-//! relays to any host address, so the table is the whole allow-list.
+//! The daemon makes a user and network namespace pair (`Holder`), points `pasta` at its pid
+//! (pasta enters both namespaces, makes a tap device there and relays its traffic with
+//! ordinary sockets of its own), switches IPv6 off and loads the nft table inside the
+//! namespace; the container then joins the pair by path. `pasta` itself filters nothing: the
+//! control test shows it relays to any host address, so the table is the whole allow-list.
 
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::bundle::{Bundle, Outcome, Spec};
-use crate::host::{self, JOB_PROFILE, JOB_PROFILE_NAME, Profile, Sysctl, endpoints, serial};
+use crate::bundle::{Bundle, Outcome};
+use crate::host::{self, JOB_PROFILE, JOB_PROFILE_NAME, Profile, Sysctl, serial};
 use crate::report::row;
 use crate::scenario::{
-    ALLOW_LIST, Fixture, assert_allow_list_enforced, assert_ipv6_off, assert_job_cannot_tamper,
-    connected, counter, enter_as_owner, listing, reach, record_suite,
+    ALLOW_LIST, Fixture, Holder, assert_allow_list_enforced, assert_ipv6_off,
+    assert_job_cannot_tamper, connected, counter, enter_as_owner, pair_spec, reach, record_suite,
+    table_of,
 };
 
 const TOOLS: [&str; 9] = [
@@ -103,16 +103,13 @@ fn run(label: &str, restricted: bool, rules: bool) -> Run {
     let _restrict = Sysctl::set(RESTRICT, if restricted { "1" } else { "0" });
     let profile = restricted.then(|| Profile::load(JOB_PROFILE_NAME, JOB_PROFILE));
     let _fixture = Fixture::new();
-    let mut spec = Spec::new("d", "suite");
-    spec.gate = true;
+    let holder = Holder::start();
+    let mut spec = pair_spec("d", "suite", &holder);
     spec.apparmor = profile.as_ref().map(|p| p.name().to_owned());
-    spec.env
-        .push(("JS_EGRESS_TARGETS".to_owned(), endpoints::ALL.to_owned()));
     let bundle = Bundle::new(&spec);
     let log = bundle.dir.join("pasta.log");
-    let created = bundle.create().unwrap_or_else(|o| panic!("create: {o:?}"));
     let off = enter_as_owner(
-        created.pid,
+        holder.pid(),
         "sysctl",
         &[
             "-w",
@@ -126,34 +123,24 @@ fn run(label: &str, restricted: bool, rules: bool) -> Run {
         "daemon could not switch IPv6 off in the namespace: {}",
         host::text(&off)
     );
-    let _pasta = attach_pasta(created.pid, &log);
+    let _pasta = attach_pasta(holder.pid(), &log);
     if rules {
-        let loaded = enter_as_owner(created.pid, "nft", &["-f", "-"], ALLOW_LIST);
+        let loaded = enter_as_owner(holder.pid(), "nft", &["-f", "-"], ALLOW_LIST);
         assert!(
             loaded.status.success(),
             "daemon could not load the table: {}",
             host::text(&loaded)
         );
     }
-    created.start();
-    assert!(
-        created.wait_for("suite.done", Duration::from_secs(120)),
-        "{:?}",
-        created.so_far()
-    );
-    let table = listing(&enter_as_owner(
-        created.pid,
-        "nft",
-        &["list", "table", "inet", "js_egress"],
-        "",
-    ));
-    let outcome = created.finish();
+    let outcome = bundle.run();
+    let table = table_of(&holder);
     record_suite(label, &outcome);
     row(
         label,
         "pasta log",
         std::fs::read_to_string(&log).unwrap_or_default().trim(),
     );
+    assert_eq!(outcome.exit, Some(0), "{outcome:?}");
     Run { outcome, table }
 }
 

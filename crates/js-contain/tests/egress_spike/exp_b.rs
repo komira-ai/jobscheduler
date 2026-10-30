@@ -80,3 +80,43 @@ fn b2_a_daemon_owned_netns_cannot_be_joined_from_a_new_userns() {
     assert_ne!(outcome.exit, Some(0), "{outcome:?}");
     assert_eq!(outcome.get("uid"), "-", "the job ran: {outcome:?}");
 }
+
+/// Asserts that the daemon, with no capability, cannot open the namespaces of a container
+/// that `crun create` made (the container's init is not dumpable, and the daemon is not
+/// `CAP_SYS_PTRACE` in the initial user namespace), so it can neither `nsenter` nor point
+/// `pasta` at them. This is why the later tests use a namespace pair the daemon made itself.
+#[test]
+#[ignore = "needs crun, newuidmap, passwordless sudo: see the egress-spike workflow"]
+fn b3_the_daemon_cannot_enter_the_namespaces_of_a_created_container() {
+    let _serial = serial();
+    if !host::require(&TOOLS) || !host::require(&["nsenter", "true"]) {
+        return;
+    }
+    let _restrict = Sysctl::set("kernel.apparmor_restrict_unprivileged_userns", "0");
+    let created = Bundle::new(&Spec::new("b3", "id"))
+        .create()
+        .unwrap_or_else(|o| panic!("create: {o:?}"));
+    let label = "b3 daemon enters a crun-created container's namespaces";
+    let user = crate::scenario::enter_as_owner(created.pid, "true", &[], "");
+    row(
+        label,
+        "nsenter --user --net as the daemon",
+        host::text(&user).trim(),
+    );
+    let pid = created.pid.to_string();
+    let net_only = host::run_timeout(
+        {
+            let mut cmd = std::process::Command::new(host::bin("nsenter"));
+            cmd.args(["--target", pid.as_str(), "--net", "--", &host::bin("true")]);
+            cmd
+        },
+        std::time::Duration::from_secs(20),
+    );
+    row(
+        label,
+        "nsenter --net as the daemon",
+        host::text(&net_only).trim(),
+    );
+    assert!(!user.status.success());
+    assert!(!net_only.status.success());
+}

@@ -49,6 +49,8 @@ pub struct Spec {
     pub apparmor: Option<String>,
     /// Make the probe wait for a file in `/gate` before it exits.
     pub gate: bool,
+    /// The `crun` program to run, when not the distribution's.
+    pub crun: Option<PathBuf>,
 }
 
 impl Spec {
@@ -64,6 +66,7 @@ impl Spec {
             user: Join::New,
             apparmor: None,
             gate: false,
+            crun: None,
         }
     }
 }
@@ -110,7 +113,7 @@ impl Outcome {
 /// The `PROBE key=value` lines of `text`.
 pub fn parse_probe(text: &str) -> BTreeMap<String, String> {
     text.lines()
-        .filter_map(|line| line.strip_prefix("PROBE ")?.split_once('='))
+        .filter_map(|line| line.split_once("PROBE ")?.1.split_once('='))
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect()
 }
@@ -300,7 +303,12 @@ impl Bundle {
     }
 
     fn crun(&self) -> Command {
-        let mut cmd = Command::new(host::bin("crun"));
+        let mut cmd = Command::new(
+            self.spec
+                .crun
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(host::bin("crun"))),
+        );
         cmd.arg("--root")
             .arg(self.dir.join("state"))
             .arg("--cgroup-manager=disabled")
@@ -455,4 +463,14 @@ impl Drop for Created {
     fn drop(&mut self) {
         self.bundle.delete();
     }
+}
+
+/// A copy of the distribution's `crun` at a path no AppArmor profile is attached to.
+pub fn crun_copy() -> PathBuf {
+    let path = base_dir().join("crun-copy");
+    if !path.exists() {
+        std::fs::copy(host::bin("crun"), &path).expect("copy crun");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    path
 }

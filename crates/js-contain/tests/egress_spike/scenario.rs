@@ -233,3 +233,23 @@ impl Drop for Holder {
         let _ = self.child.wait();
     }
 }
+
+/// A spec whose container joins the holder's user and network namespaces by path.
+pub fn pair_spec(name: &str, probe: &str, holder: &Holder) -> crate::bundle::Spec {
+    let mut spec = crate::bundle::Spec::new(name, probe);
+    spec.net = crate::bundle::Join::Path(holder.ns("net"));
+    spec.user = crate::bundle::Join::Path(holder.ns("user"));
+    spec.env
+        .push(("JS_EGRESS_TARGETS".to_owned(), endpoints::ALL.to_owned()));
+    spec
+}
+
+/// The table as the daemon reads it back from the holder's namespace.
+pub fn table_of(holder: &Holder) -> String {
+    listing(&enter_as_owner(
+        holder.pid(),
+        "nft",
+        &["list", "table", "inet", "js_egress"],
+        "",
+    ))
+}
