@@ -124,11 +124,11 @@ pub struct Report {
 }
 
 impl Report {
-    fn miss(&mut self, piece: Piece, what: impl Into<String>, fix: impl Into<String>) {
+    fn miss(&mut self, piece: Piece, what: &str, fix: &str) {
         self.missing.push(Missing {
             piece,
-            what: what.into(),
-            fix: fix.into(),
+            what: what.to_owned(),
+            fix: fix.to_owned(),
         });
     }
 
@@ -226,18 +226,18 @@ fn crun(path: &Path, commands: &dyn CommandRunner, report: &mut Report) {
     }
     match std::fs::metadata(path) {
         Err(why) => {
-            report.miss(Piece::Crun, format!("{at}: {why}"), fix);
+            report.miss(Piece::Crun, &format!("{at}: {why}"), &fix);
             return;
         }
         Ok(meta) if !meta.is_file() => {
-            report.miss(Piece::Crun, format!("{at} is not a regular file"), fix);
+            report.miss(Piece::Crun, &format!("{at} is not a regular file"), &fix);
             return;
         }
         Ok(meta) if meta.permissions().mode() & 0o111 == 0 => {
             report.miss(
                 Piece::Crun,
-                format!("{at} is not executable"),
-                format!("chmod +x {at}"),
+                &format!("{at} is not executable"),
+                &format!("chmod +x {at}"),
             );
             return;
         }
@@ -248,8 +248,8 @@ fn crun(path: &Path, commands: &dyn CommandRunner, report: &mut Report) {
         Err(why) => {
             report.miss(
                 Piece::CrunVersion,
-                format!("`{at} --version` failed: {why}"),
-                fix,
+                &format!("`{at} --version` failed: {why}"),
+                &fix,
             );
             return;
         }
@@ -258,16 +258,16 @@ fn crun(path: &Path, commands: &dyn CommandRunner, report: &mut Report) {
     match version(first) {
         None => report.miss(
             Piece::CrunVersion,
-            format!("`{at} --version` printed {first:?}, which is not a version"),
-            fix,
+            &format!("`{at} --version` printed {first:?}, which is not a version"),
+            &fix,
         ),
         Some(found) if found < MIN_CRUN => report.miss(
             Piece::CrunVersion,
-            format!(
+            &format!(
                 "crun {}.{} is older than {}.{}",
                 found.0, found.1, MIN_CRUN.0, MIN_CRUN.1
             ),
-            fix,
+            &fix,
         ),
         Some(_) => {}
     }
@@ -303,16 +303,19 @@ fn id_tools(host: &CrunHost, report: &mut Report) {
         };
         let mode = std::fs::metadata(&found).map_or(0, |meta| meta.permissions().mode());
         if mode & 0o111 == 0 {
-            report.miss(piece, format!("{} is not executable", found.display()), fix);
+            report.miss(
+                piece,
+                &format!("{} is not executable", found.display()),
+                fix,
+            );
         } else if !((mode & 0o4000 != 0) | has_file_capabilities(&found)) {
             report.miss(
                 piece,
-                format!(
+                &format!(
                     "{} is neither setuid nor holds file capabilities, so it cannot write a user namespace's id maps",
                     found.display()
                 ),
-                format!("chmod u+s {}, or reinstall the package `uidmap`", found.display()),
-            );
+                &format!("chmod u+s {}, or reinstall the package `uidmap`", found.display()));
         }
     }
 }
@@ -359,8 +362,8 @@ fn job_user(name: &str, host: &CrunHost, report: &mut Report) {
         Err(why) => {
             report.miss(
                 Piece::JobUser,
-                format!("{}: {why}", host.ids.passwd.display()),
-                fix,
+                &format!("{}: {why}", host.ids.passwd.display()),
+                &fix,
             );
             return;
         }
@@ -368,15 +371,15 @@ fn job_user(name: &str, host: &CrunHost, report: &mut Report) {
     let Some((uid, gid)) = passwd_ids(&passwd, name) else {
         report.miss(
             Piece::JobUser,
-            format!("no user {name:?} in {}", host.ids.passwd.display()),
-            fix,
+            &format!("no user {name:?} in {}", host.ids.passwd.display()),
+            &fix,
         );
         return;
     };
     if uid == 0 || gid == 0 {
         report.miss(
             Piece::JobUser,
-            format!("{name:?} has uid {uid} and gid {gid}: a job never runs as root"),
+            &format!("{name:?} has uid {uid} and gid {gid}: a job never runs as root"),
             "name a user with a uid and a gid above 0",
         );
         return;
@@ -396,12 +399,11 @@ fn job_user(name: &str, host: &CrunHost, report: &mut Report) {
         if let Err(why) = check_subordinate_ids(&one, uid) {
             report.miss(
                 piece,
-                why.to_string(),
-                format!(
+                &why.to_string(),
+                &format!(
                     "add {name}:<first id>:{MIN_SUBORDINATE_IDS} to {} (`usermod --add-subuids` and `--add-subgids`)",
                     file.display()
-                ),
-            );
+                ));
         }
     }
 }
@@ -412,22 +414,22 @@ fn state_root(path: &Path, report: &mut Report) {
         "mkdir {at}; chmod 0700 {at}: the taint marker and the host credential are the agent's alone"
     );
     match std::fs::symlink_metadata(path) {
-        Err(why) => report.miss(Piece::StateRoot, format!("{at}: {why}"), fix),
+        Err(why) => report.miss(Piece::StateRoot, &format!("{at}: {why}"), &fix),
         Ok(meta) if !meta.is_dir() => {
             report.miss(
                 Piece::StateRoot,
-                format!("{at} is not a directory (a link is not accepted)"),
-                fix,
+                &format!("{at} is not a directory (a link is not accepted)"),
+                &fix,
             );
         }
         Ok(meta) if !DirLayout::Private.allows(meta.mode()) => report.miss(
             Piece::StateRoot,
-            format!(
+            &format!(
                 "{at} has mode {:04o}; {}",
                 meta.mode() & 0o7777,
                 DirLayout::Private.refusal()
             ),
-            fix,
+            &fix,
         ),
         Ok(_) => {}
     }
@@ -439,27 +441,27 @@ fn scratch_root(path: &Path, report: &mut Report) {
         Err(why) => {
             report.miss(
                 Piece::ScratchRoot,
-                format!("{at}: {why}"),
-                format!("mkdir {at}; chmod 0711 {at}"),
+                &format!("{at}: {why}"),
+                &format!("mkdir {at}; chmod 0711 {at}"),
             );
             return;
         }
         Ok(meta) if !meta.is_dir() => {
             report.miss(
                 Piece::ScratchRoot,
-                format!("{at} is not a directory (a link is not accepted)"),
-                format!("make {at} a directory of mode 0711"),
+                &format!("{at} is not a directory (a link is not accepted)"),
+                &format!("make {at} a directory of mode 0711"),
             );
             return;
         }
         Ok(meta) if !DirLayout::Searchable.allows(meta.mode()) => report.miss(
             Piece::ScratchRoot,
-            format!(
+            &format!(
                 "{at} has mode {:04o}; {}",
                 meta.mode() & 0o7777,
                 DirLayout::Searchable.refusal()
             ),
-            format!("chmod 0711 {at}"),
+            &format!("chmod 0711 {at}"),
         ),
         Ok(_) => {}
     }
@@ -471,12 +473,11 @@ fn scratch_root(path: &Path, report: &mut Report) {
         if !searchable {
             report.miss(
                 Piece::SearchableAncestor,
-                format!(
+                &format!(
                     "{} is not searchable by others: the job's ids could not reach the scratch root below it",
                     ancestor.display()
                 ),
-                format!("chmod o+x {} (for the unit's state directory: StateDirectoryMode=0711)", ancestor.display()),
-            );
+                &format!("chmod o+x {} (for the unit's state directory: StateDirectoryMode=0711)", ancestor.display()));
         }
     }
 }
@@ -491,7 +492,7 @@ fn cgroups(host: &CrunHost, report: &mut Report) {
         Err(why) => {
             report.miss(
                 Piece::CgroupDelegation,
-                format!("{}: {why}", host.self_cgroup.display()),
+                &format!("{}: {why}", host.self_cgroup.display()),
                 fix,
             );
             return;
@@ -512,7 +513,7 @@ fn cgroups(host: &CrunHost, report: &mut Report) {
         Err(why) => {
             report.miss(
                 Piece::CgroupDelegation,
-                format!("{}: {why}", file.display()),
+                &format!("{}: {why}", file.display()),
                 fix,
             );
             return;
@@ -526,7 +527,7 @@ fn cgroups(host: &CrunHost, report: &mut Report) {
     if !lacking.is_empty() {
         report.miss(
             Piece::CgroupDelegation,
-            format!(
+            &format!(
                 "the agent's cgroup {own} holds no {} controller (it holds: {})",
                 lacking.join(", "),
                 held.join(" ")
@@ -550,12 +551,11 @@ fn apparmor(crun: &Path, host: &CrunHost, report: &mut Report) {
         Err(why) => {
             report.miss(
                 Piece::AppArmorProfile,
-                format!(
+                &format!(
                     "unprivileged user namespaces are restricted (apparmor_restrict_unprivileged_userns=1) and {} cannot be read: {why}",
                     host.apparmor_profiles.display()
                 ),
-                fix,
-            );
+                fix);
             return;
         }
     };
@@ -567,12 +567,11 @@ fn apparmor(crun: &Path, host: &CrunHost, report: &mut Report) {
     if !loaded {
         report.miss(
             Piece::AppArmorProfile,
-            format!(
+            &format!(
                 "unprivileged user namespaces are restricted (apparmor_restrict_unprivileged_userns=1) and no loaded AppArmor profile covers {}: crun could not make the job's user namespace",
                 crun.display()
             ),
-            fix,
-        );
+            fix);
     }
 }
 
