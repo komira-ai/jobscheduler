@@ -1125,6 +1125,7 @@ dependencies = [
  "clap",
  "hyper",
  "hyper-util",
+ "js-agent",
  "js-agent-wire",
  "js-caps",
  "js-elastic",
