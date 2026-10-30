@@ -211,6 +211,27 @@ fn read_alerts(s: &mut Section) -> Result<Option<AlertKeys>, StartupError> {
     }))
 }
 
+/// The usage keys. The rules are the flags': a budget of at least 1, and no `usage_db`
+/// beside `usage_off = true`.
+fn read_usage(s: &mut Section) -> Result<UsageKeys, StartupError> {
+    let db = s.path("usage_db")?;
+    let off = s.boolean("usage_off")?.unwrap_or(false);
+    let bytes = s.bounded(
+        "profile_store_bytes",
+        1,
+        u64::MAX,
+        DEFAULT_PROFILE_STORE_BYTES,
+    )?;
+    if db.is_some() & off {
+        return Err(s.fail("usage_db", "not allowed with server.usage_off"));
+    }
+    Ok(UsageKeys {
+        db,
+        off,
+        profile_store_bytes: bytes,
+    })
+}
+
 pub(super) fn read_client_token(server: &Server, ld: &Load<'_>) -> Result<Token, StartupError> {
     let place = "server.client_token_file";
     let path = &server.client_token_file;
