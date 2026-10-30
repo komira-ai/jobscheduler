@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome};
-use js_caps::{FLAG_SET, HostContract, RUN_FILES, SCRATCH_QUOTA};
+use js_caps::{BUNDLE_ROOT, EXEC, FLAG_SET, HostContract, RUN_FILES, SCRATCH_QUOTA};
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
 use js_provider::Observed;
 use js_types::sched::usage::NodeLoad;
-use js_types::{HostId, LeaseId, MemoryHeadroom, ProviderId, RequestId, Shape};
+use js_types::{ExecMode, HostId, LeaseId, MemoryHeadroom, ProviderId, RequestId, Shape};
 use js_usage::ProfileKey;
 
 use crate::config::PoolConfig;
@@ -564,6 +564,9 @@ impl Registry {
                 agent_version: Some(hello.agent_version.clone()),
                 labels: hello.labels.clone(),
                 files: hello.capabilities.get(RUN_FILES).map(String::as_str) == Some(FLAG_SET),
+                native: hello.capabilities.get(EXEC).map(String::as_str)
+                    == Some(ExecMode::SandboxExec.name()),
+                bundles: hello.capabilities.contains_key(BUNDLE_ROOT),
                 quota_default: default,
                 held,
                 beats: 0,
@@ -754,7 +757,9 @@ impl Registry {
     /// host whose hello did not report the `run-files` capability
     /// ([`RunRefusal::FilesUnsupported`]); a job with `limits.disk_bytes` for a host whose
     /// hello did not report `scratch-quota` with a default ([`RunRefusal::DiskUnsupported`]);
-    /// [`RunRefusal::HostLost`]
+    /// a native job for a host whose hello did not report `exec` as `sandbox-exec`
+    /// ([`RunRefusal::NativeUnsupported`]); a job that pins a bundle for a host whose hello
+    /// reported no `bundle-root` ([`RunRefusal::BundleUnsupported`]); [`RunRefusal::HostLost`]
     /// for a host not heard within the grace period; [`RunRefusal::NotHeld`] when the
     /// registry's booking of `host` is not `lease`; [`RunRefusal::HostTainted`] for a
     /// host that reported a taint; [`RunRefusal::NoCapacity`] when the host is marked
@@ -802,6 +807,12 @@ impl Registry {
         }
         if spec.limits.disk_bytes.is_some() && record.quota_default.is_none() {
             return Err(RunRefusal::DiskUnsupported);
+        }
+        if spec.native.is_some() & !record.native {
+            return Err(RunRefusal::NativeUnsupported);
+        }
+        if spec.bundle.is_some() & !record.bundles {
+            return Err(RunRefusal::BundleUnsupported);
         }
         if record.state(now, self.grace_ms()) != HostState::Live {
             return Err(RunRefusal::HostLost);

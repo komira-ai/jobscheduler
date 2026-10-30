@@ -205,7 +205,7 @@ jobs:
             runner: ubuntu-24.04
             builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
             builds: js-cli:js js-agent:js-agent
     env:
       TARGET: ${{ matrix.target }}
@@ -241,6 +241,11 @@ jobs:
           # commit's time as the modification time, numeric owner 0/0, no name or time in
           # the gzip header. A full re-run then makes the same files as the first run.
           mtime="$(git log -1 --format=%ct "$COMMIT")"
+          # The oldest macOS the Apple silicon binaries must run on; a newer runner image
+          # must not raise it (the check step below reads each binary's minos).
+          case "$TARGET" in
+            *-apple-darwin) export MACOSX_DEPLOYMENT_TARGET=11.0 ;;
+          esac
           # The options below are GNU tar's: on a Mac, Homebrew's gnu-tar is `gtar`.
           tar=tar
           if command -v gtar > /dev/null; then
@@ -265,6 +270,21 @@ jobs:
             file "target/$TARGET/release/$bin"
           done
           case "$TARGET" in
+            *-apple-darwin)
+              for entry in $BUILDS; do
+                bin="${entry##*:}"
+                minos="$(otool -l "target/$TARGET/release/$bin" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')"
+                echo "$bin minos $minos"
+                if [ -z "$minos" ]; then
+                  echo "::error::$bin has no LC_BUILD_VERSION minos to check"
+                  exit 1
+                fi
+                if [ "$(printf '%s\n%s\n' "$minos" 11.0 | sort -V | tail -n 1)" != "11.0" ]; then
+                  echo "::error::$bin needs macOS $minos, above the pinned 11.0"
+                  exit 1
+                fi
+              done
+              ;;
             *-linux-musl)
               for entry in $BUILDS; do
                 bin="${entry##*:}"

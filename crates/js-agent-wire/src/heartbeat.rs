@@ -19,7 +19,8 @@ use crate::refusal;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HeldState {
-    /// The container is being created.
+    /// The run is starting: its container is being created, or its image is still being
+    /// fetched and nothing exists on the host yet (the run holds its booking and slot).
     Starting,
     /// The container runs.
     Running,
