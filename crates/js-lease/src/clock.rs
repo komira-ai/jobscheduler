@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The largest millisecond count a [`Timestamp`] holds. The persisted file is TOML,
 /// whose integers are signed 64-bit, so a timestamp saturates here instead of
@@ -41,6 +41,20 @@ pub trait Clock {
     fn now(&self) -> Timestamp;
 }
 
+/// A source of elapsed time that never runs backwards, for measuring how long a step
+/// took. It reads a duration from an origin of its own, so only the difference of two
+/// readings means anything.
+pub trait Monotonic: Send + Sync + std::fmt::Debug {
+    /// The time since this clock's origin.
+    fn reading(&self) -> Duration;
+}
+
+impl<T: Monotonic + ?Sized> Monotonic for Arc<T> {
+    fn reading(&self) -> Duration {
+        (**self).reading()
+    }
+}
+
 /// The system's wall clock.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
@@ -49,6 +63,27 @@ impl Clock for SystemClock {
     fn now(&self) -> Timestamp {
         let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH);
         Timestamp::from_millis(0).plus(since_epoch.unwrap_or_default())
+    }
+}
+
+/// The system's monotonic clock: the time since it was made.
+#[derive(Debug, Clone, Copy)]
+pub struct SystemMonotonic {
+    origin: Instant,
+}
+
+impl Default for SystemMonotonic {
+    /// A clock whose origin is now.
+    fn default() -> Self {
+        Self {
+            origin: Instant::now(),
+        }
+    }
+}
+
+impl Monotonic for SystemMonotonic {
+    fn reading(&self) -> Duration {
+        self.origin.elapsed()
     }
 }
 

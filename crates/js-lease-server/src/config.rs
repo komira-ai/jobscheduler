@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use js_lease::{Boot, Clock, Settings, SystemClock};
+use js_lease::{Boot, Clock, Monotonic, Settings, SystemClock, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
@@ -358,6 +358,7 @@ pub struct Config {
     pub(crate) limits: Limits,
     pub(crate) hosts: Hosts,
     pub(crate) usage: UsageSetup,
+    pub(crate) monotonic: Arc<dyn Monotonic>,
 }
 
 /// What `--usage-db`, `--usage-off` and `--profile-store-bytes` decided, and the seams a
@@ -500,6 +501,7 @@ impl Config {
             limits,
             hosts,
             usage,
+            monotonic: Arc::new(SystemMonotonic::default()),
         })
     }
 
@@ -579,6 +581,7 @@ impl Config {
             limits: server.limits,
             hosts,
             usage,
+            monotonic: Arc::new(SystemMonotonic::default()),
         })
     }
 
@@ -646,6 +649,12 @@ impl Config {
     /// The same configuration with other connection limits than the flags gave.
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// The same configuration timing the lease table's steps on `clock`.
+    pub fn with_monotonic(mut self, clock: Arc<dyn Monotonic>) -> Self {
+        self.monotonic = clock;
         self
     }
 

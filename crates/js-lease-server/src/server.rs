@@ -128,7 +128,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     if let Some(scaler) = &scaler {
         scaler.listening(Some(2 * tick), &bookings);
     }
-    let table = LeaseTable::open(
+    let mut table = LeaseTable::open(
         BoxedProvider(provider),
         clock.clone(),
         config.settings,
@@ -139,6 +139,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         js_lease::OpenError::Missing { .. } => StartupError::new("--boot", err),
         _ => StartupError::new("--state-file", err),
     })?;
+    table.watch_saves(config.monotonic);
     for lost in &unseated {
         warn!(
             lease = %lost.booking.lease,
@@ -323,6 +324,11 @@ impl Running {
     /// `None` without agent flags.
     pub fn registry(&self) -> Option<js_registry::Registry> {
         self.shared.registry()
+    }
+
+    /// How long the lease table's steps took since the server started.
+    pub fn timings(&self) -> js_lease::Timings {
+        self.shared.timings()
     }
 
     /// The scaler of the elastic pool of the configuration file; `None` without one. A test
