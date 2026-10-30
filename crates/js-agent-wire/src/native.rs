@@ -17,6 +17,12 @@ use crate::error::{Rule, ValidationError};
 use crate::limits;
 use crate::refusal;
 
+/// The prefix of a program that names an entrypoint of the job's bundle.
+pub const BUNDLE_PROGRAM_PREFIX: &str = "@bundle/";
+
+/// The most bytes an entrypoint name has.
+pub const BUNDLE_ENTRYPOINT_MAX: usize = 64;
+
 /// How much network a native job may use. The agent clamps it to what its own flag
 /// allows. An absent value is [`NetworkLevel::Off`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +122,10 @@ pub struct OutputSpec {
 pub struct NativeSpec {
     /// The program: an absolute path with no empty, `.` or `..` part, at most
     /// [`limits::MAX_PROGRAM_LEN`] bytes. The agent also requires it to resolve under one
-    /// of its configured tool roots.
+    /// of its configured tool roots. Or `@bundle/<entrypoint>`, the name of an entrypoint
+    /// of the job's bundle (`[A-Za-z0-9._+-]`, the first a letter or digit, at most
+    /// [`BUNDLE_ENTRYPOINT_MAX`] bytes), which the agent resolves from the bundle's
+    /// config; the job then has a `bundle` ([`JobSpec::bundle`]), or it is refused.
     pub program: String,
     /// The arguments after the program: at most [`limits::MAX_ARGS`] entries, no NUL, bounded
     /// as the `args` of a container job are. The `args` of the job itself must be empty.
@@ -162,6 +171,9 @@ impl NativeSpec {
     fn check_program(&self) -> Result<(), ValidationError> {
         let at = At::new("native.program", refusal::INVALID_PROGRAM);
         let program = &self.program;
+        if let Some(entrypoint) = program.strip_prefix(BUNDLE_PROGRAM_PREFIX) {
+            return check::token(at, entrypoint, BUNDLE_ENTRYPOINT_MAX, entrypoint_byte);
+        }
         if program.is_empty() {
             return Err(at.fail(Rule::Empty));
         }
@@ -236,7 +248,17 @@ impl NativeSpec {
 /// What a native start must also hold of the job around it: the container-only fields are
 /// unused, and a native job is always contained (it is confined by user and profile and
 /// does not taint the host).
-pub(crate) fn check_job(job: &JobSpec) -> Result<(), ValidationError> {
+pub(crate) fn check_job(job: &JobSpec, native: &NativeSpec) -> Result<(), ValidationError> {
+    // A program inside a bundle needs the bundle: with none the agent would look for the
+    // tool on the host.
+    let wants_bundle = native.program.starts_with(BUNDLE_PROGRAM_PREFIX);
+    if wants_bundle && job.bundle.is_none() {
+        return Err(ValidationError::new(
+            "native.program",
+            Rule::Inconsistent,
+            refusal::INVALID_PROGRAM,
+        ));
+    }
     let clashes = [
         ("isolation", job.isolation == Isolation::Host),
         ("args", !job.args.is_empty()),
@@ -251,6 +273,11 @@ pub(crate) fn check_job(job: &JobSpec) -> Result<(), ValidationError> {
         )),
         None => Ok(()),
     }
+}
+
+/// `[A-Za-z0-9._+-]`: the bytes of an entrypoint name.
+fn entrypoint_byte(byte: u8) -> bool {
+    check::ident_byte(byte) || byte == b'+'
 }
 
 fn env_name(at: At, key: &str) -> Result<(), ValidationError> {
