@@ -105,6 +105,15 @@ pub struct Sim {
     pub lost_landed: usize,
     /// Acquires answered `Unknown` that made nothing.
     pub lost_unlanded: usize,
+    /// When set, this many consumers always want a whole-node lease, each lasting `lease_wall`
+    /// and renewed at once on a host the scaler has not marked; `waiting` is then what is
+    /// left unserved, and a host keeps its lease until it ends even after a retire mark. The
+    /// worst case of a lease booked just before the retire.
+    pub consumers: usize,
+    /// The wall time of each lease of `consumers`; `None`: no leases are modelled.
+    pub lease_wall: Option<Duration>,
+    /// When the lease on each host ends, in milliseconds on the cloud's clock.
+    pub lease_end: BTreeMap<String, u64>,
 }
 
 impl Sim {
@@ -128,6 +137,9 @@ impl Sim {
             answers: Vec::new(),
             lost_landed: 0,
             lost_unlanded: 0,
+            consumers: 0,
+            lease_wall: None,
+            lease_end: BTreeMap::new(),
         }
     }
 
@@ -154,6 +166,10 @@ impl Sim {
             .filter(|name| !(self.silent_orphans && orphans.contains(&name.as_str())))
             .map(|name| HostFacts {
                 mark: self.marks.get(&name).copied(),
+                busy: self
+                    .lease_end
+                    .get(&name)
+                    .is_some_and(|end| *end > self.clock.now_ms()),
                 ..host(&name, POOL)
             })
             .collect()
@@ -172,6 +188,7 @@ impl Sim {
             pool: plan.pool.clone(),
             name: HostName::derive(&scheduler, &plan.acquire),
             offer: plan.offer.clone(),
+            lifetime: plan.lifetime,
             labels: Vec::new(),
             payload: BootPayload::new(format!("token-of-{}", plan.name)),
         });
@@ -184,11 +201,38 @@ impl Sim {
         answer
     }
 
+    /// Books a lease for each consumer on a free host the scaler has not marked, and leaves
+    /// `waiting` as the consumers that have no lease. A no-op without `lease_wall`.
+    fn serve(&mut self) {
+        let Some(wall) = self.lease_wall else {
+            return;
+        };
+        let now = self.clock.now_ms();
+        let wall_ms = u64::try_from(wall.as_millis()).unwrap_or(u64::MAX);
+        let names: Vec<String> = self
+            .hosts()
+            .into_iter()
+            .map(|h| h.id.as_str().to_owned())
+            .collect();
+        self.lease_end.retain(|name, _| names.contains(name));
+        let leased = |sim: &Self, name: &String| sim.lease_end.get(name).is_some_and(|e| *e > now);
+        let mut busy = names.iter().filter(|name| leased(self, name)).count();
+        for name in &names {
+            let free = !leased(self, name) && !self.marks.contains_key(name);
+            if free && busy < self.consumers {
+                self.lease_end.insert(name.clone(), now + wall_ms);
+                busy += 1;
+            }
+        }
+        self.waiting = self.consumers.saturating_sub(busy);
+    }
+
     /// One tick: reads the cloud, takes a step and runs its actions, then moves the clock.
     /// With a `crash`, the process dies at that point of the first tick that launches a
     /// machine (for [`Crash::AfterList`], of the tick after a call was sent) and the answer
     /// is `true`: the caller restarts. Otherwise `false`.
     pub fn tick(&mut self, crash: Option<Crash>) -> bool {
+        self.serve();
         self.rig.pool().held = self.fake.list().ok();
         self.rig.pool().unresolved = self.fake.unresolved();
         self.rig.input.hosts = self.hosts();
@@ -227,6 +271,9 @@ impl Sim {
                     });
                 }
                 Action::Drain(name) => {
+                    self.marks.insert(name, Mark::Draining);
+                }
+                Action::Retire(name) => {
                     self.marks.insert(name, Mark::Draining);
                 }
                 Action::Undrain(name) => {

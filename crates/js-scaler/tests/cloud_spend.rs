@@ -9,8 +9,9 @@ mod common;
 use cloud_rig::{DAY_MS, PRICE, Rng, Sim};
 use common::{minutes, settings};
 use js_elastic::{Acquired, HostRef, RefusalCode};
-use js_elastic_fake::{Billing, Call, Step};
+use js_elastic_fake::{Billing, Call, Step, THROTTLE_WAIT};
 use js_scaler::{Blocked, LaunchMode, Settings};
+use std::time::Duration;
 
 /// The pool of these tests: four machines at most, the day capped at 600 cents (ten
 /// machine-hours at a cent a minute), a host released after 5 quiet minutes.
@@ -98,7 +99,7 @@ fn acquire_script(rng: &mut Rng) -> Vec<Step> {
 /// not folded into this bound. Odd seeds bill as AWS does (per second), even ones as Lambda.
 ///
 /// It also requires that, in every seed, the cap refused a launch and launches were sent
-/// with at least half the day's cap already billed, that every outcome the generator
+/// with at least three quarters of the day's cap already billed, that every outcome the generator
 /// scripts really happened somewhere across the seeds, and that the cloud billed more than
 /// half the cap in some day (a bound that nothing approaches proves nothing). It catches an accounting bug that
 /// lets the scaler launch past its cap: a machine left out of the day's sum, a billed
@@ -175,11 +176,11 @@ fn the_clouds_bill_over_any_day_stays_within_the_day_cap_plus_the_release_latenc
         }
         assert!(sim.sent > 20, "seed {seed}: only {} acquires", sim.sent);
         // The cap must have refused a launch in this very seed, and launches must have been
-        // sent with the day half spent, or this seed never approached the bound.
+        // sent with three quarters of the day's cap spent, or this seed never approached the bound.
         let peak = sim.window_at_acquire.iter().max().copied().unwrap_or(0);
         assert!(capped, "seed {seed}: the day cap never refused a launch");
         assert!(
-            peak >= settings.max_spend_per_day / 2,
+            peak >= settings.max_spend_per_day * 3 / 4,
             "seed {seed}: no launch was sent with more than {peak} cents billed in the day"
         );
         seen.add(&sim);
@@ -221,8 +222,11 @@ impl Seen {
         self.lost_landed += sim.lost_landed;
         self.lost_unlanded += sim.lost_unlanded;
         let deferred = sim.answers.iter();
+        // Only the 429's own deferral: the hold on an unresolved acquire waits whole minutes.
         self.throttled += deferred
-            .filter(|answer| matches!(answer, Acquired::Deferred { .. }))
+            .filter(
+                |answer| matches!(answer, Acquired::Deferred { wait } if *wait == THROTTLE_WAIT),
+            )
             .count();
     }
 
@@ -320,17 +324,16 @@ fn a_pool_in_plan_mode_makes_zero_create_calls_through_the_cloud() {
     assert!(would_have_launched > 100, "{would_have_launched}");
 }
 
-/// Pins a known overrun, which `max_age` (host lifetime) is to close: with demand that never
-/// pauses, the machines the cap allowed stay claimed and are never released, so the cloud's
-/// bill over a day is far over the day cap plus the release latency that bounds bursty
-/// demand. Here two requests wait for two days against a cap of 600 cents, and the last day
-/// costs the cloud 2,880 cents (two machines at a cent a minute for 24 hours) against a
-/// bound of 760. The scaler is not wrong by its own rules (the cap limits launches, not the
-/// life of a machine a request holds); this test says what the cap does not bound. When
-/// host lifetime lands this test moves: the bill must then be within the new bound, and the
-/// assertion below is turned around.
+/// The control for the two tests that follow: with no `max_age` (the pool's default),
+/// demand that never pauses keeps the machines the cap allowed claimed and never released, so
+/// the cloud's bill over a day is far over the day cap plus the release latency that bounds
+/// bursty demand. Two requests wait for two days against a cap of 600 cents, and the last day
+/// costs the cloud 2,880 cents (two machines at a cent a minute for 24 hours) against a bound
+/// of 760. The cap limits launches, not the life of a machine a request holds; `max_age`
+/// (host lifetime) is what limits that, and the next tests show the bill within a bound
+/// derived from it.
 #[test]
-fn demand_that_never_pauses_bills_past_the_day_cap_until_a_host_lifetime_exists() {
+fn demand_that_never_pauses_bills_past_the_day_cap_without_max_age() {
     let settings = capped();
     let bound =
         settings.max_spend_per_day + settings.max_instances as u64 * PRICE * LATENCY_MINUTES / 60;
@@ -342,4 +345,105 @@ fn demand_that_never_pauses_bills_past_the_day_cap_until_a_host_lifetime_exists(
     assert_eq!(sim.fake.running().len(), 2);
     assert_eq!(day, 2 * 24 * 60, "two machines for a day");
     assert!(day > bound, "{day} against {bound}");
+}
+
+/// Settings of a GPU pool as the host-lifetime rules ask for one: `max_age` set, a short
+/// `idle` with a `min_host_lifetime` so that it does not thrash against a billed boot, and
+/// the server's ceiling on a lease's wall time, which `Settings::lifetime` adds to `max_age`.
+fn aged(max_age: u64, wall: u64) -> Settings {
+    Settings {
+        idle: minutes(5),
+        min_host_lifetime: minutes(5),
+        max_age: Some(minutes(max_age)),
+        max_lease_wall: Some(minutes(wall)),
+        ..capped()
+    }
+}
+
+/// Runs `sim` for three days and checks, every tick, the two things the derivation gives:
+/// no machine has billed more than `life` (so none outlives the bound on a machine's life),
+/// and the cloud's bill over the 24 hours ending then is at most the day cap plus
+/// `max_instances x price x life`. Returns the longest any machine lived, in milliseconds,
+/// and whether the cap refused a launch.
+fn run_within(sim: &mut Sim, settings: &Settings, life: Duration) -> (u128, bool) {
+    let life_ms = life.as_millis();
+    let bound = settings.max_spend_per_day
+        + settings.max_instances as u64 * PRICE * (life.as_secs() / 60) / 60;
+    let (mut longest, mut capped) = (0, false);
+    for _ in 0..DAYS * 24 * 60 {
+        sim.tick(None);
+        capped |= sim.blocked() == Some(Blocked::MaxSpendDay);
+        for id in sim.fake.running() {
+            let lived = sim.fake.bill_of(&id).0 / u128::from(PRICE);
+            longest = longest.max(lived);
+            assert!(
+                lived <= life_ms,
+                "{id} has billed {lived} ms, over {life_ms}"
+            );
+        }
+        let now = sim.clock.now_ms();
+        let day = sim.fake.bill_between(now.saturating_sub(DAY_MS), now);
+        assert!(day.cents_up() <= bound, "{} over {bound}", day.cents_up());
+    }
+    (longest, capped)
+}
+
+/// The companion of the overrun above, with `max_age` of an hour: the same demand that never
+/// pauses (two requests waiting for three days, hosts that hold no lease) is now bounded.
+///
+/// Derivation, from the settings and the scaler's steps, not fitted. A host is retired on the
+/// first tick at which it is `max_age` old, at most one tick after the instant (1). The retire
+/// marks it draining; a quiet draining host is marked for release on the next tick (2), and
+/// the release is sent on the one after (3); billing stops there, and the provider's minute
+/// is billed whole (4). So a machine lives at most `max_age + 4 ticks` = 64 minutes. After
+/// the last launch the day cap allowed, at most `max_instances` machines run, each at most
+/// that long, and what was billed up to that launch is within the cap (as in the bursty
+/// property), so the bill over any day is at most
+/// `max_spend_per_day + max_instances x price x 64 minutes`: 600 + 256 = 856 cents, against
+/// 2,880 without `max_age`. The test checks both the per-machine bound and the day's bound at
+/// every tick, that replacements were launched (so `max_age` acted) and that the cap refused
+/// launches (so the bound was approached).
+#[test]
+fn with_max_age_demand_that_never_pauses_bills_within_the_cap_plus_the_age_bound() {
+    let settings = aged(60, 30);
+    let mut sim = Sim::new(settings.clone(), Billing::Lambda);
+    sim.waiting = 2;
+    let life = minutes(60 + 4);
+    let (longest, capped) = run_within(&mut sim, &settings, life);
+    assert!(sim.fake.launched() > 4, "{}", sim.fake.launched());
+    assert!(capped, "the day cap never refused a launch");
+    assert!(
+        longest > minutes(60).as_millis(),
+        "no machine reached max_age"
+    );
+}
+
+/// What bounds the same demand when the hosts do hold leases. `max_age` alone does not:
+/// retiring a host takes no new lease and cuts none, so a host whose lease was booked just
+/// before the retire lives until that lease ends, which is at most the ceiling on a lease's
+/// wall time (`max_lease_wall`) later. The derivation is that of the test above with the
+/// wait for the lease added: a machine lives at most `max_age + max_lease_wall + 5 ticks`
+/// (one more tick to see the lease has ended), here 60 + 50 + 5 = 115 minutes, and the day's
+/// bill is at most `max_spend_per_day + max_instances x price x 115 minutes`: 600 + 460 =
+/// 1,060 cents. That is within the cloud-enforced `Settings::lifetime` (`max_age`, the ceiling,
+/// the prepare timeout, `unknown_hold` and a margin), which the test also checks. Two
+/// consumers always want a lease of 50 minutes and take a new one the moment one ends, on
+/// any host the scaler has not marked; the test requires that some machine really outlived
+/// `max_age` plus four ticks (the lease held it), so the pinned bound is the lease's and not
+/// the age's.
+#[test]
+fn with_max_age_and_leases_a_machine_lives_until_its_lease_ends_and_the_bill_follows() {
+    let settings = aged(60, 50);
+    let mut sim = Sim::new(settings.clone(), Billing::Lambda);
+    sim.consumers = 2;
+    sim.lease_wall = Some(minutes(50));
+    let life = minutes(60 + 50 + 5);
+    assert!(life <= settings.lifetime().unwrap());
+    let (longest, capped) = run_within(&mut sim, &settings, life);
+    assert!(sim.fake.launched() > 4, "{}", sim.fake.launched());
+    assert!(capped, "the day cap never refused a launch");
+    assert!(
+        longest > minutes(60 + 4).as_millis(),
+        "no machine was held past max_age by its lease"
+    );
 }

@@ -189,6 +189,7 @@ mod tests {
             acquire,
             pool: "p".to_owned(),
             offer,
+            lifetime: None,
             labels: Vec::new(),
             payload: crate::secret::BootPayload::new("x".to_owned()),
         };

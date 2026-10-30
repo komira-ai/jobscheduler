@@ -58,6 +58,7 @@ pub fn request_at(acquire: &str, believed: Option<u64>) -> AcquireRequest {
         acquire,
         pool: "gpu".to_owned(),
         offer: offer(believed),
+        lifetime: None,
         labels: Vec::new(),
         payload: BootPayload::new("user-data-MARKER".to_owned()),
     }
