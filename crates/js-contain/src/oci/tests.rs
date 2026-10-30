@@ -733,6 +733,7 @@ fn the_backend_maps_the_job_users_range_when_the_daemon_is_not_that_user() {
     config.job_user = Some((job + 1, job + 1));
     let said = started(&config, &dir.join("s2"));
     assert!(said.contains("has no range"), "{said}");
+}
 
 /// Asserts what the egress spike tests rely on: the exposed section is the resolution of the
 /// pinned profile for a job with no capability (26 entries on amd64: a change to the profile
