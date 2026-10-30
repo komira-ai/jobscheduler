@@ -4,9 +4,11 @@
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::crun::{RunEnd, log_path};
 use super::image::{ImageCheckError, PinnedImage};
+use super::logs::{self, Capture, Launch};
 use super::words::{crun_words, init_words};
 use super::{JobError, Mapping, Oci, at, helper, init, spec};
 use crate::container::{CONTAINER_OWNER, ContainerSpec, Dirs, Ended};
@@ -133,24 +135,28 @@ impl Oci {
         Ok(self.write_bundle(spec).await?)
     }
 
-    /// `crun run` on a thread of its own; it ends when the container does.
+    /// `crun run` on a thread of its own; it ends when the container does. The
+    /// container's stdout and stderr are pipes, drained into the lease's files and
+    /// [`Running::tail`] as [`logs`](super::logs) says: the files are made here (in
+    /// `spec.dir`, [`stdout_path`](super::stdout_path) and
+    /// [`stderr_path`](super::stderr_path), new and empty), and the run is not over until
+    /// the drain is (a bounded wait).
     ///
     /// # Errors
-    /// The init's report file or the thread could not be made.
-    pub fn start(
-        &self,
-        spec: &ContainerSpec,
-        stdout: std::fs::File,
-        stderr: std::fs::File,
-    ) -> Result<Running, String> {
+    /// The init's report file, a log file or the thread could not be made.
+    pub fn start(&self, spec: &ContainerSpec) -> Result<Running, String> {
         let crun = self.crun.clone();
         let (dir, name) = (spec.dir.clone(), spec.name.clone());
         let bundle = dir.join("bundle");
         let thread = format!("crun-{name}");
         // The init's stdin: where it says why the program could not be started.
         let report = init::create_report(&dir)?;
-        let run = async move { crun.run(&dir, &name, &bundle, report, stdout, stderr).await };
-        Running::spawn(thread, run)
+        let capture = Arc::new(Capture::create(&dir, self.logs)?);
+        let launch: Launch = Box::new(move |stdout, stderr| {
+            Box::pin(async move { crun.run(&dir, &name, &bundle, report, stdout, stderr).await })
+        });
+        let run = logs::supervise(capture.clone(), launch);
+        Ok(Running::spawn(thread, run)?.with_capture(capture))
     }
 
     /// `crun run`'s exit status is the job's, unless `crun` itself failed: told by an

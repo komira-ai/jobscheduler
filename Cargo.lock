@@ -943,6 +943,8 @@ dependencies = [
  "js-lease",
  "js-lease-server",
  "js-pool-static",
+ "js-provider",
+ "js-registry",
  "js-testkit",
  "js-types",
  "libc",

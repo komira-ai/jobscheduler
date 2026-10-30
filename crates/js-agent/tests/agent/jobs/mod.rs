@@ -14,6 +14,7 @@ mod exclusive;
 pub mod fake;
 mod files_flags;
 mod quiesce;
+mod quota_start;
 mod session;
 mod system;
 mod usage;
@@ -87,6 +88,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         files: Some(FilesRoot::open(&private(dir, "files")).unwrap()),
         state: StateRoot::open(&private(dir, "state")).unwrap(),
         stop_grace: Duration::from_secs(1),
+        quota: None,
     };
     Plan {
         config,

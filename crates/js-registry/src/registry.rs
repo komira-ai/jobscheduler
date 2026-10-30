@@ -29,7 +29,10 @@ use crate::whole::reserve::{Marks, Reservation};
 mod demand;
 mod marks;
 mod provider_side;
+mod record;
 mod start;
+
+use record::Record;
 
 use demand::waiting_rows;
 pub use demand::{Launchable, Waiting};
@@ -135,126 +138,6 @@ pub struct WholeCounts {
     pub held: usize,
     /// Whole-node requests on the wait list.
     pub queued: usize,
-}
-
-#[derive(Debug)]
-struct Record {
-    binding: Option<Binding>,
-    epoch: u64,
-    /// The digest of the secret issued at the hello that began this epoch; `None` for a
-    /// host that has not said hello since a restart.
-    session: Option<SessionDigest>,
-    phase: Phase,
-    heard: Option<Timestamp>,
-    /// When a booking was put back for the host after a restart; `None` for a host that
-    /// has said hello. It is what an awaiting host's retention counts from.
-    seated: Option<Timestamp>,
-    agent_version: Option<String>,
-    labels: BTreeMap<String, String>,
-    /// Whether the host's last hello reported the `run-files` capability. It changes only
-    /// at a hello, and a hello of a lost host gives up every run still queued for it, so
-    /// the check at queueing time is the only one a start needs.
-    files: bool,
-    /// The quota in bytes the host's last hello said it enforces on a run that sets no
-    /// `disk_bytes` (`scratch-default-gib`), when it also reported `scratch-quota`; `None`
-    /// for a host that reported no quota, or a default that is missing, not a whole
-    /// number, zero or too large to count. Kept like `files`, and for the same reason: the
-    /// run check sees only the pool's shape otherwise. It changes only at a hello, and a
-    /// run books what it was given at queueing, so a new default never rebooks a live run.
-    quota_default: Option<u64>,
-    /// The run ids the host listed as held in its last hello or heartbeat.
-    held: BTreeSet<String>,
-    /// The heartbeats taken in this session.
-    beats: u64,
-    /// The first taint the host reported. It outlives a session and, through the file of
-    /// bindings, a restart.
-    taint: Option<Taint>,
-    /// Where the host stands in a whole-node lease; `Free` for a host that never held one.
-    exclusive: Exclusive,
-    /// The last lease started on the host and the latest it can end: its start plus its
-    /// max wall time. A lease put back after a restart has none, and counts as ending now.
-    bound: Option<(LeaseId, Timestamp)>,
-    /// Whether the host is being scaled away (see [`Registry::drain`]). It outlives a
-    /// session and is held in memory only.
-    leaving: Option<marks::Leaving>,
-    /// The shape the host announced at its last hello.
-    claim: Option<Shape>,
-    /// The load of the host's latest accepted reading, see [`HostView::load`].
-    load: load::Kept,
-}
-
-impl Record {
-    /// A host put back after a restart. The taint a binding carries is the host's own, and
-    /// the binding kept is the bare one, so the taint has a single home.
-    fn awaiting(binding: Option<Binding>, seated: Timestamp) -> Self {
-        let taint = binding.as_ref().and_then(|bound| bound.taint().cloned());
-        Self {
-            binding: binding.map(|bound| bound.with_taint(None)),
-            taint,
-            epoch: 0,
-            session: None,
-            phase: Phase::Quarantined,
-            heard: None,
-            seated: Some(seated),
-            agent_version: None,
-            labels: BTreeMap::new(),
-            files: false,
-            quota_default: None,
-            held: BTreeSet::new(),
-            beats: 0,
-            exclusive: Exclusive::Free,
-            bound: None,
-            leaving: None,
-            claim: None,
-            load: load::Kept::default(),
-        }
-    }
-
-    /// Whether the host lists no run and the server holds none live for it: nothing is
-    /// left of the last lease for a new one to meet.
-    fn quiet(&self, runs: &Runs, host: &HostId) -> bool {
-        [self.held.is_empty(), !runs.live_on(host)]
-            .into_iter()
-            .all(|ok| ok)
-    }
-
-    fn state(&self, now: Timestamp, grace_ms: u64) -> HostState {
-        match self.heard {
-            None => HostState::Awaiting,
-            Some(heard) => match now.millis().saturating_sub(heard.millis()) > grace_ms {
-                true => HostState::Lost,
-                false => HostState::Live,
-            },
-        }
-    }
-
-    /// Whether a new lease may be placed here: heard from within the grace period,
-    /// serving, `quiet` (no run left over from the last lease), not tainted, clear of
-    /// a whole-node lease (not held, not restoring) and not being scaled away. Every
-    /// other phase takes no new lease. A lease already on a tainted host is untouched.
-    fn bookable(&self, now: Timestamp, grace_ms: u64, quiet: bool) -> bool {
-        let live = self.state(now, grace_ms) == HostState::Live;
-        let serving = self.phase == Phase::Serving;
-        let clean = self.taint.is_none();
-        let clear = self.exclusive.is_free();
-        let staying = self.leaving.is_none();
-        [live, serving, quiet, clean, clear, staying]
-            .into_iter()
-            .all(|ok| ok)
-    }
-
-    /// Whether the host has been silent for longer than the grace period and the
-    /// retention together, counted from when it was last heard or, for a host never heard
-    /// (awaiting), from when it was seated. A tainted host is never out of retention: it
-    /// keeps its place, and its taint, until an operator deals with it.
-    fn out_of_retention(&self, now: Timestamp, grace_ms: u64, retention_ms: u64) -> bool {
-        let kept_for = grace_ms.saturating_add(retention_ms);
-        let silent = self
-            .heard
-            .or(self.seated)
-            .is_some_and(|since| now.millis().saturating_sub(since.millis()) > kept_for);
-        [silent, self.taint.is_none()].into_iter().all(|ok| ok)
-    }
 }
 
 struct State {
@@ -574,6 +457,9 @@ impl Registry {
     ///
     /// A pool that names `scratch-quota` also refuses (`shape-not-accepted`) a host whose
     /// quota default does not count (see `quota_default`) or is more than the pool's disk.
+    /// A pool that books no disk and does not name `scratch-quota` refuses (also
+    /// `shape-not-accepted`) a host that reports a quota with a default that counts: the
+    /// pool would book nothing for runs the host books at its default.
     ///
     /// The runs a hello lists as held are never adopted. A run the registry holds a live
     /// record of stays as it is, now listed by the host; every other listed run is
@@ -637,6 +523,17 @@ impl Registry {
         let default = quota_default(&hello.capabilities);
         let fits = default.is_some_and(|bytes| bytes <= floor.resources().disk_bytes());
         if [quota_pool, !fits].into_iter().all(|ok| ok) {
+            return Err(Refusal::ShapeNotAccepted);
+        }
+        // A host that enforces a quota books a default for every run without disk, so a
+        // pool that books no disk (and does not name `scratch-quota`) would count 0 for
+        // runs the host counts at its default, and the server would admit what the agent
+        // refuses. Such a host is refused rather than booked wrongly.
+        let books_no_disk = floor.resources().disk_bytes() == 0;
+        if [!quota_pool, books_no_disk, default.is_some()]
+            .into_iter()
+            .all(|ok| ok)
+        {
             return Err(Refusal::ShapeNotAccepted);
         }
         let room = state.records.len() < config.max_machines();
@@ -783,7 +680,8 @@ impl Registry {
             .collect();
         // An agent that refuses a start because its host is tainted may be unable to write
         // its own marker (a full disk), so that refusal taints the host here as a report
-        // would. It is the host's fault: the result is answered like any other.
+        // would. It is the host's fault: the result is answered like any other. A start
+        // refused as `quota-unavailable` is the host's fault too, and taints nothing.
         let refused = heartbeat.results.iter().find(|result| {
             let by_host = result.detail.as_deref() == Some(refusal_code::HOST_TAINTED);
             by_host && result.outcome == Outcome::FailedToStart
