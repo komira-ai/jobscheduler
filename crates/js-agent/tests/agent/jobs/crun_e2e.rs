@@ -401,6 +401,12 @@ fn an_agent_started_with_runtime_crun_runs_a_job_through_crun() {
         ),
     };
     assert_eq!(agent.next_wait(), Duration::from_secs(5), "the hello");
+    // The agent's start-up sweep of the scratch root leaves the image store, which is beside it.
+    let image = node.dir.path().join("oci/oci-images").join(&digest()[7..]);
+    assert!(
+        image.join("rootfs").is_dir(),
+        "the image store survived the start"
+    );
     let body = json!({
         "class": "mac",
         "resources": { "cpu_millis": 1000, "memory_bytes": 1024 },

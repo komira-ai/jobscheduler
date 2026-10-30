@@ -212,6 +212,14 @@ fn usage_errors_and_help() {
     let version = go(&["--version"]);
     assert_eq!(version.status(), code(0));
     assert!(version.out.starts_with("js-agent "), "{}", version.out);
+    // The line the node-setup script reads to know `--runtime crun` is wired.
+    let runtimes = match cfg!(target_os = "linux") {
+        true => "runtimes: docker crun",
+        false => "runtimes: docker",
+    };
+    let lines: Vec<&str> = version.out.lines().collect();
+    assert_eq!(lines.len(), 2, "{}", version.out);
+    assert_eq!(lines[1], runtimes);
     let bad = go(&flags(&["--label", "no-equals-sign"]));
     assert_eq!(bad.status(), code(2));
     assert!(bad.err.contains("is not key=value"), "{}", bad.err);
