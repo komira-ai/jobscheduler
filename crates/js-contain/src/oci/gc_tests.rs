@@ -118,6 +118,19 @@ fn image_disk(images: &Path, c: char) -> u64 {
     .sum()
 }
 
+/// A report of a collection that removed nothing and failed at nothing, with `kept`
+/// digests of `kept_bytes`.
+fn settled(report: &GcReport, kept: usize, kept_bytes: u64) {
+    assert!(
+        report.removed.is_empty() && report.failed.is_empty(),
+        "{report:?}"
+    );
+    assert_eq!(
+        (report.removed_bytes, report.kept, report.kept_bytes),
+        (0, kept, kept_bytes)
+    );
+}
+
 fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .expect("read")
@@ -359,12 +372,8 @@ fn a_second_collection_is_a_no_op() {
     image(&fx.images, 'b', 100);
     let first = fx.oci.collect_images(&[digest('a')], &[]).expect("first");
     assert_eq!(first.removed, [digest('b')]);
-    let want = GcReport {
-        kept: 1,
-        kept_bytes: first.kept_bytes,
-        ..GcReport::default()
-    };
-    assert_eq!(fx.oci.collect_images(&[digest('a')], &[]), Ok(want.clone()));
+    let again = fx.oci.collect_images(&[digest('a')], &[]).expect("again");
+    settled(&again, 1, first.kept_bytes);
     let restarted = Oci::on(
         &config(&fx.dir, true),
         Arc::new(Counting::default()),
@@ -373,7 +382,10 @@ fn a_second_collection_is_a_no_op() {
         "x86_64",
     )
     .expect("restarts");
-    assert_eq!(restarted.collect_images(&[digest('a')], &[]), Ok(want));
+    let after = restarted
+        .collect_images(&[digest('a')], &[])
+        .expect("again");
+    settled(&after, 1, first.kept_bytes);
     assert_eq!(names(&fx.images), [hexn('a')]);
 }
 
@@ -441,7 +453,7 @@ fn a_node_with_no_store_collects_nothing() {
     let report = store
         .collect(&std::collections::HashSet::new(), &mut remove)
         .expect("nothing to read is not an error");
-    assert_eq!(report, GcReport::default());
+    settled(&report, 0, 0);
     // A store that cannot be read is an error, not an empty store.
     std::fs::write(dir.join("a-file"), b"x").expect("file");
     let broken = Images::new(dir.join("a-file"));
