@@ -4,9 +4,9 @@
 //! is the test's, so nothing here waits or measures time.
 
 use js_agent::lifecycle::code;
-use js_agent_wire::{Command, HeldRun, HeldState, JobSpec, Outcome};
+use js_agent_wire::{Command, HeldRun, HeldState, Isolation, JobSpec, Outcome};
 
-use super::{Harness, cleanup, job, names};
+use super::{Harness, Options, cleanup, job, names};
 
 const COLD: &str = "registry.example/cold:1@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
@@ -25,19 +25,25 @@ fn held(h: &Harness) -> Vec<(String, HeldState)> {
         .collect()
 }
 
-/// A run with no image (a host or native job) is never asked about an image: even with a
-/// runtime scripted to answer `Pending` for the empty name, it starts at once and the
-/// runtime is not consulted. It catches a start that waits on the image store for a job
-/// that does not use it.
+/// A host-isolation run is never asked about an image: even with its image scripted to
+/// be `Pending`, it starts at once and `prepare` is not consulted. It catches a start that
+/// makes a job that does not use the image store wait on it.
 #[test]
-fn a_run_with_no_image_starts_at_once_and_prepare_is_not_asked() {
-    let mut h = Harness::new("prepare-no-image");
-    h.fake.pull_pending("");
-    let mut spec = job("r1");
-    spec.image = String::new();
-    assert_eq!(names(&h.start(spec)), ["started r1"]);
+fn a_host_isolation_run_starts_at_once_and_prepare_is_not_asked() {
+    let mut h = Harness::with(
+        "prepare-host-run",
+        Options {
+            allow_host_jobs: true,
+            ..Options::default()
+        },
+    );
+    h.fake.pull_pending(COLD);
+    let mut spec = cold("r1");
+    spec.isolation = Isolation::Host;
+    let events = names(&h.start(spec));
+    assert!(events.contains(&"started r1".to_owned()), "{events:?}");
     assert_eq!(held(&h), [("r1".to_owned(), HeldState::Running)]);
-    assert!(h.fake.asks("").is_empty());
+    assert!(h.fake.asks(COLD).is_empty());
 }
 
 /// A run whose image is being pulled is held as `starting`, books its CPU, memory and

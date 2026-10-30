@@ -272,6 +272,22 @@ fn includes_are_read_as_paths_from_the_source() {
         ]
     );
     assert_eq!(include::targets("a.rs", "fn main() {}"), Ok(vec![]));
+    // Exactly `concat!(env!("OUT_DIR"), "<literal>")` is a build script's output, not a
+    // repository file: skipped, with a literal include next to it still read.
+    assert_eq!(
+        include::targets(
+            "a.rs",
+            "include_bytes!(concat!(env!(\"OUT_DIR\"), \"/x\")); include_str!(\"y\");"
+        ),
+        Ok(vec!["y".to_owned()])
+    );
+    assert_eq!(
+        include::targets(
+            "a.rs",
+            "include_str!(\n  concat!( env!( \"OUT_DIR\" ) , \"/x\" )\n);"
+        ),
+        Ok(vec![])
+    );
     // Not a string literal, a raw string and an escape cannot be resolved.
     for (bad, line) in [
         ("\n\ninclude_str!(concat!(\"a\", \"b\"));", 3),
@@ -279,6 +295,24 @@ fn includes_are_read_as_paths_from_the_source() {
         ("include!(\"a\\\\b\");", 1),
         ("include_str!(", 1),
         ("include_str!(\"unterminated", 1),
+        // Every other non-literal include stays an error.
+        ("include_bytes!(concat!(env!(\"HOME\"), \"/x\"));", 1),
+        ("include_bytes!(concat!(\"a\", \"b\"));", 1),
+        ("include_bytes!(env!(\"OUT_DIR\"));", 1),
+        ("include_bytes!($path);", 1),
+        ("include_bytes!(concat!(env!(\"OUT_DIR\"), some_ident));", 1),
+        (
+            "include_bytes!(concat!(env!(\"OUT_DIR\"), \"/../src/x.rs\"));",
+            1,
+        ),
+        (
+            "include_bytes!(concat!(env!(\"OUT_DIR\"), \"/a\\\\b\"));",
+            1,
+        ),
+        (
+            "include_bytes!(concat!(env!(\"OUT_DIR\"), \"/a\", \"/b\"));",
+            1,
+        ),
     ] {
         assert_eq!(
             include::targets("a.rs", bad),

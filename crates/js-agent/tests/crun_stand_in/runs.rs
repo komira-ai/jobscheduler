@@ -277,7 +277,7 @@ fn a_start_that_cannot_run_crun_is_taken_apart() {
 #[test]
 fn the_files_of_a_run_are_given_to_the_job() {
     let node = Node::new("run-files");
-    let (_files_dir, root) = node.files_root();
+    let (files_dir, root) = node.files_root();
     let mut settings = node.settings("/root");
     settings.files = Some(root.clone());
     let hooks = Node::hooks(LONG, LONG);
@@ -296,7 +296,7 @@ fn the_files_of_a_run_are_given_to_the_job() {
     spec.files = Some(dir.clone());
     let id = runtime.create_and_start(&spec).expect("started");
     let ids = (SUB_UID + 1000, SUB_GID + 1000);
-    let given = given(&node.dir);
+    let given = given(&files_dir);
     assert!(given.contains(&(dir.join("token"), ids.0, ids.1)));
     assert!(given.contains(&(dir.clone(), ids.0, ids.1)));
     assert_eq!(
@@ -305,9 +305,104 @@ fn the_files_of_a_run_are_given_to_the_job() {
     );
     runtime.wait_ended(&id);
     runtime.remove(&id).expect("removed");
+    // Closed to its owner like the job's, it would stop the test directory's removal.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("mode");
 
     let mut spec = node.spec("r9-exit");
     spec.files = Some(root.of("r9-exit"));
     let why = runtime.create_and_start(&spec).expect_err("no files");
     assert!(why.to_string().contains("files to the job"), "{why}");
+}
+
+/// Proves a lease that fails to be made is taken apart whatever step failed: a directory
+/// that cannot be given away, a cgroup that is already there, a cgroup file that cannot be
+/// given to the job user, and a bundle that cannot be written each fail with their step's
+/// words and leave no lease directory or listing (a cgroup directory with files in it is the kernel's
+/// to remove, which a directory of files in a test is not). Catches a failed start
+/// that leaves files for a sweep to find.
+#[test]
+fn a_lease_that_fails_to_be_made_is_taken_apart_at_every_step() {
+    let node = Node::new("run-taken-apart");
+    let mut runtime = node.open();
+    // The name of a container of run `r1-exit` on host `node-1`: `js-<tag>-<run id>`, the
+    // tag being the hash of the host id.
+    std::fs::create_dir(node.cgroup_of("js-e696ecc2207879c3-r1-exit")).expect("a cgroup");
+    for (run, step) in [
+        ("refuse-exit", "make a lease directory"),
+        ("r1-exit", "make the lease's cgroup"),
+        (
+            "unwritable-cgroup-exit",
+            "give the lease's cgroup to the job user",
+        ),
+        ("no-bundle-exit", "write the bundle"),
+    ] {
+        let why = runtime
+            .create_and_start(&node.spec(run))
+            .expect_err(run)
+            .to_string();
+        assert!(why.contains(step), "{run}: {why}");
+        assert!(runtime.list_labelled().expect("lists").is_empty());
+    }
+    let left: Vec<String> = std::fs::read_dir(&node.scratch)
+        .expect("store")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("js-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// Proves a create is bounded like a pull: an image the store lacks, with a source that never
+/// answers, fails the create saying it took longer than the limit (given as zero), instead of
+/// holding the lifecycle's worker. Catches an evicted image and a hung registry blocking
+/// `create_and_start` for ever.
+#[test]
+fn a_create_that_must_pull_is_bounded_by_the_pull_limit() {
+    let node = Node::new("run-bounded");
+    let hooks = Node::hooks(LONG, std::time::Duration::ZERO);
+    let mut runtime = node.open_with(hooks, std::sync::Arc::new(crate::node::Endless));
+    let mut spec = node.spec("r1-exit");
+    spec.body = Body::Container {
+        image: format!("registry.example/job@sha256:{}", "cd".repeat(32)),
+        args: Vec::new(),
+    };
+    let why = runtime.create_and_start(&spec).expect_err("bounded");
+    assert!(why.to_string().contains("took longer"), "{why}");
+    assert!(runtime.list_labelled().expect("lists").is_empty());
+}
+
+/// Proves an image an earlier daemon unpacked (in the store, with no config kept) is fetched
+/// again once, by the source, which keeps the config this time, and then runs: the run is
+/// made, not refused for ever. Catches an image that can never start a job.
+#[test]
+fn an_image_in_the_store_with_no_config_is_fetched_again_to_get_one() {
+    let node = Node::new("run-backfill");
+    let digest = format!("sha256:{}", "dd".repeat(32));
+    std::fs::create_dir_all(
+        node.scratch
+            .join("oci-images")
+            .join(&digest[7..])
+            .join("rootfs"),
+    )
+    .expect("an old image");
+    let source = std::sync::Arc::new(crate::node::Keeping {
+        configs: js_agent::crun::config_dir(&node.scratch),
+        fetched: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut runtime = node.open_with(Node::hooks(LONG, LONG), source.clone());
+    let mut spec = node.spec("r1-exit");
+    spec.body = Body::Container {
+        image: format!("registry.example/job@{digest}"),
+        args: vec!["--go".to_owned()],
+    };
+    let id = runtime.create_and_start(&spec).expect("started");
+    assert_eq!(source.fetched.load(std::sync::atomic::Ordering::SeqCst), 1);
+    runtime.wait_ended(&id);
+    runtime.remove(&id).expect("removed");
+    let again = runtime
+        .create_and_start(&node.spec("r2-exit"))
+        .expect("started");
+    assert_eq!(source.fetched.load(std::sync::atomic::Ordering::SeqCst), 1);
+    runtime.wait_ended(&again);
+    runtime.remove(&again).expect("removed");
 }
