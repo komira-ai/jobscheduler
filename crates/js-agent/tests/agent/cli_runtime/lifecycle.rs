@@ -71,6 +71,9 @@ fn a_job_runs_to_its_result_and_is_cleaned_up() {
     assert_eq!(events[0], "result r1");
     assert_eq!(events[1..], cleanup("r1"));
     assert_eq!(w.outcomes(), [Outcome::Succeeded]);
+    // The log was read once, before the removal, and a read that works notes no finding.
+    assert_eq!(w.docker.calls_of("logs").len(), 1);
+    assert!(w.life.findings().is_empty());
     assert!(w.docker.ids().is_empty(), "the container was removed");
     assert_eq!(w.life.free().cpu_millis, 4000);
 

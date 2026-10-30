@@ -42,7 +42,9 @@ use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, limits};
 use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig};
-use js_types::{ClassId, ExecMode, MEMORY_PERCENT_KEY, MemoryPercent, ProviderId, Resources, Shape};
+use js_types::{
+    ClassId, ExecMode, MEMORY_PERCENT_KEY, MemoryPercent, ProviderId, Resources, Shape,
+};
 
 use super::{Pool, Read, Registering, Section, registry_pool};
 use crate::agent_pool::{MAX_MACHINES, capabilities_fit, shipped_class};
