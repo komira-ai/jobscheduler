@@ -41,6 +41,12 @@ impl Digest {
         Self(format!("{PREFIX}{}", hex::encode(hash)))
     }
 
+    /// The 64 hex digits, which name the blob in an image-layout directory.
+    #[must_use]
+    pub fn hex(&self) -> &str {
+        &self.0[PREFIX.len()..]
+    }
+
     /// The digest as `sha256:<hex>`.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -67,6 +73,7 @@ mod tests {
         let parsed = Digest::parse(EMPTY).expect("good");
         assert_eq!(parsed.as_str(), EMPTY);
         assert_eq!(parsed.to_string(), EMPTY);
+        assert_eq!(parsed.hex(), &EMPTY[7..]);
         let upper = EMPTY.to_uppercase().replace("SHA256", "sha256");
         let short = &EMPTY[..EMPTY.len() - 1];
         let long = format!("{EMPTY}0");

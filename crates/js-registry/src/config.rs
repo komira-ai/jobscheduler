@@ -39,6 +39,10 @@ pub enum ConfigError {
     /// A dedicated pool that allows more whole hosts than it has machines.
     #[error("max_whole_node must not exceed max_machines")]
     WholeAboveMachines,
+    /// A pool whose capabilities name `scratch-quota` books no disk: the quota every run is
+    /// held to would be booked against a shape of zero bytes, and every run refused.
+    #[error("a pool that names scratch-quota must set a disk_bytes above zero")]
+    QuotaWithoutDisk,
 }
 
 /// What an operator decides about a pool of self-registering hosts.
@@ -65,7 +69,8 @@ impl PoolConfig {
     /// [`memory percent`](PoolConfig::with_memory_percent) (all of it unless set), the
     /// shape the pool books: a lease is placed and sized against the booked shape, never
     /// against what a host says about itself, so a host that claims more than the pool
-    /// promises gains nothing. Timing starts at the wire defaults, and a lost host that holds no
+    /// promises gains nothing. Its `disk_bytes` is both floor and booking, uncut. Timing
+    /// starts at the wire defaults, and a lost host that holds no
     /// booking is kept for [`DEFAULT_LOST_RETENTION_MS`].
     pub fn new(name: ProviderId, class: ResourceClass, shape: Shape, max_machines: usize) -> Self {
         Self {
@@ -80,6 +85,24 @@ impl PoolConfig {
             lost_retention_ms: DEFAULT_LOST_RETENTION_MS,
             whole_node: None,
             exec: None,
+        }
+    }
+
+    /// The pool, or the refusal of a disk setting that would admit hosts and then refuse
+    /// every run. A pool whose capabilities name `scratch-quota` must book disk
+    /// (`disk_bytes` above zero in its shape), because a run without its own `disk_bytes`
+    /// is booked the host's default quota, and a pool that books none could never hold
+    /// one. A pool that does not name `scratch-quota` may leave `disk_bytes` at zero,
+    /// which books no disk for any run. Every loader of an operator's pool file calls
+    /// this once the pool is built; [`PoolConfig::new`] cannot, being infallible.
+    pub fn checked(self) -> Result<Self, ConfigError> {
+        let quota = self
+            .shape
+            .capabilities()
+            .contains_key(js_caps::SCRATCH_QUOTA);
+        match (quota, self.shape.resources().disk_bytes()) {
+            (true, 0) => Err(ConfigError::QuotaWithoutDisk),
+            _ => Ok(self),
         }
     }
 

@@ -75,6 +75,7 @@ fn job(run: &str) -> JobSpec {
         limits: Limits {
             cpu_millis: 1000,
             memory_bytes: 1 << 30,
+            disk_bytes: None,
             pids: None,
             wall_ms: 60_000,
         },
@@ -200,6 +201,7 @@ impl Agent {
             capacity: Capacity {
                 cpu_millis: 4000,
                 memory_bytes: 8 << 30,
+                disk_bytes: 0,
                 gpus: Default::default(),
             },
             allow_host_jobs: false,

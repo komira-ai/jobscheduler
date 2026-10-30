@@ -6,6 +6,7 @@
 
 mod adopt;
 mod cleanup;
+mod disk;
 mod exclusive;
 pub mod fake;
 mod files;
@@ -20,6 +21,7 @@ mod running;
 mod scratch;
 mod slots;
 mod taint;
+mod taint_idle;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -177,6 +179,7 @@ pub fn config_in(dir: &Scratch, allow_host_jobs: bool) -> Config {
         capacity: Capacity {
             cpu_millis: 4000,
             memory_bytes: 8 << 30,
+            disk_bytes: 10 << 30,
             gpus: BTreeSet::from([0, 1]),
         },
         allow_host_jobs,
@@ -213,6 +216,7 @@ pub fn job(run_id: &str) -> JobSpec {
         limits: Limits {
             cpu_millis: 1000,
             memory_bytes: 1 << 30,
+            disk_bytes: None,
             pids: Some(100),
             wall_ms: 60_000,
         },

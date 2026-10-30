@@ -88,6 +88,7 @@ fn job(run: &str) -> JobSpec {
         limits: Limits {
             cpu_millis: 1000,
             memory_bytes: 1 << 20,
+            disk_bytes: None,
             pids: None,
             wall_ms: 60_000,
         },

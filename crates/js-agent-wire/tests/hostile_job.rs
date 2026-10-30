@@ -364,6 +364,7 @@ fn limits_are_checked_against_a_shape() {
         cpu_millis: cpu,
         memory_bytes: memory,
         gpus,
+        disk_bytes: 0,
         gpu_class: None,
         max_leases: None,
     };

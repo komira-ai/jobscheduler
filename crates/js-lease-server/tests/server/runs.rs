@@ -182,7 +182,7 @@ async fn unpinned_image_422_and_never_sent_to_the_agent() {
 
 /// Asserts the refusals of a job that cannot run on the lease, each 422 with its code and
 /// each leaving nothing queued: limits over the booked shape, a GPU index the shape does
-/// not have, an image with a transport prefix, a mount that climbs, and a job that asks
+/// not have, a disk bound on a pool that books no disk, a disk bound of zero, an image with a transport prefix, a mount that climbs, and a job that asks
 /// for host isolation. Unknown fields and a missing limit are a 400. It catches a job that
 /// reaches the agent only to be refused there, and a refusal with the wrong status.
 #[tokio::test]
@@ -211,6 +211,16 @@ async fn limits_over_shape_422() {
     let mut gpu = run_body(1000);
     gpu["gpu_indices"] = json!([1]);
     assert_eq!(refuse(gpu).await, (422, "limits-exceed-shape".into()));
+    // The pool books no disk, so a job that names any can never fit; a bound of zero is
+    // not a bound.
+    let mut disk = run_body(1000);
+    disk["limits"]["disk_bytes"] = json!(1);
+    assert_eq!(
+        refuse(disk.clone()).await,
+        (422, "limits-exceed-shape".into())
+    );
+    disk["limits"]["disk_bytes"] = json!(0);
+    assert_eq!(refuse(disk).await, (422, "invalid-job".into()));
     let mut image = run_body(1000);
     image["image"] = json!("docker://busybox");
     assert_eq!(refuse(image).await, (422, "invalid-image".into()));

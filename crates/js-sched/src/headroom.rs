@@ -63,7 +63,7 @@ impl MemoryPercent {
         bytes / 100 * p + bytes % 100 * p / 100
     }
 
-    /// `capacity` with its memory cut to the share; cores, GPUs, VM slots and the lease
+    /// `capacity` with its memory cut to the share; cores, GPUs, disk, VM slots and the lease
     /// cap are as they were.
     #[must_use]
     pub fn of_capacity(self, capacity: Resources) -> Resources {

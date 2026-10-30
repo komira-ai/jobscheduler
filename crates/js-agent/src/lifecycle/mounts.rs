@@ -1,7 +1,7 @@
 //! The roots a job may mount from, named in the agent's own configuration, and the
 //! resolution of a message's [`Mount`] against them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +28,9 @@ pub enum MountError {
     /// lead to such a path even though the message's text cannot name one.
     #[error("the mount path holds a character a mount option cannot carry")]
     BadPath,
+    /// The root was given as `--mount-root-ro` and the mount asks for read-write.
+    #[error("the mount asks for read-write below a root that jobs may mount read-only only")]
+    ReadWriteFromReadOnlyRoot,
 }
 
 /// The mount roots of this agent: names to canonical directories.
@@ -61,6 +64,8 @@ pub enum MountError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MountRoots {
     roots: BTreeMap<String, PathBuf>,
+    /// The names of the roots given as `--mount-root-ro`: a mount from one is read-only.
+    read_only: BTreeSet<String>,
 }
 
 impl MountRoots {
@@ -71,8 +76,26 @@ impl MountRoots {
     /// A name the wire would not accept in a mount, a name given twice, or a path that is
     /// not an existing directory. The text names the offending entry.
     pub fn new(entries: &[(String, PathBuf)]) -> Result<Self, String> {
+        Self::with_read_only(entries, &[])
+    }
+
+    /// The roots of `entries` (`--mount-root`) and of `read_only` (`--mount-root-ro`): the
+    /// latter are roots like the former, except that a mount from one must be read-only.
+    /// The names of the two lists share one namespace.
+    ///
+    /// # Errors
+    ///
+    /// As [`MountRoots::new`]; a name given in both lists is given twice.
+    pub fn with_read_only(
+        entries: &[(String, PathBuf)],
+        read_only: &[(String, PathBuf)],
+    ) -> Result<Self, String> {
         let mut roots = BTreeMap::new();
-        for (name, path) in entries {
+        let all = entries
+            .iter()
+            .map(|entry| (entry, "--mount-root"))
+            .chain(read_only.iter().map(|entry| (entry, "--mount-root-ro")));
+        for ((name, path), flag) in all {
             let probe = Mount {
                 root_name: name.clone(),
                 rel: "x".to_owned(),
@@ -80,21 +103,31 @@ impl MountRoots {
             };
             probe
                 .validate()
-                .map_err(|_| format!("--mount-root {name:?}: not a usable root name"))?;
+                .map_err(|_| format!("{flag} {name:?}: not a usable root name"))?;
             let canonical = fs::canonicalize(path)
                 .ok()
                 .filter(|path| path.is_dir())
-                .ok_or_else(|| format!("--mount-root {name}: not an existing directory"))?;
+                .ok_or_else(|| format!("{flag} {name}: not an existing directory"))?;
             if !carries(&canonical) {
                 return Err(format!(
-                    "--mount-root {name}: the path holds a comma, a colon, a double quote or a control character"
+                    "{flag} {name}: the path holds a comma, a colon, a double quote or a control character"
                 ));
             }
             if roots.insert(name.clone(), canonical).is_some() {
-                return Err(format!("--mount-root {name}: given twice"));
+                return Err(format!("{flag} {name}: given twice"));
             }
         }
-        Ok(Self { roots })
+        let read_only = read_only.iter().map(|(name, _)| name.clone()).collect();
+        Ok(Self { roots, read_only })
+    }
+
+    /// The canonical paths of the roots given as `--mount-root`, which jobs may mount
+    /// read-write.
+    pub fn writable_paths(&self) -> impl Iterator<Item = &Path> {
+        self.roots
+            .iter()
+            .filter(|(name, _)| !self.read_only.contains(*name))
+            .map(|(_, path)| path.as_path())
     }
 
     /// The canonical paths of all the roots.
@@ -114,6 +147,9 @@ impl MountRoots {
     /// See [`MountError`].
     pub fn resolve(&self, mount: &Mount) -> Result<ResolvedMount, MountError> {
         let root = self.root(&mount.root_name).ok_or(MountError::UnknownRoot)?;
+        if !mount.ro && self.read_only.contains(&mount.root_name) {
+            return Err(MountError::ReadWriteFromReadOnlyRoot);
+        }
         let host = fs::canonicalize(root.join(&mount.rel)).map_err(|_| MountError::Unresolvable)?;
         if !host.starts_with(root) {
             return Err(MountError::Escapes);

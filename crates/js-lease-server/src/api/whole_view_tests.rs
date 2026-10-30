@@ -104,6 +104,7 @@ impl Rig {
                 cpu_millis: 8000,
                 memory_bytes: 16 << 30,
                 gpus: 0,
+                disk_bytes: 0,
                 gpu_class: None,
                 max_leases: None,
             },
