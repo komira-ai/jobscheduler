@@ -6,6 +6,10 @@
 //!
 //! - `run-exit <n>`: `crun run` of a job's container exits `n` (default 0);
 //! - `run-log <json>`: it first appends this line to its `--log` file;
+//! - `run-out <text>` and `run-err <text>`: it writes the text and a newline to its
+//!   standard output or error before it exits;
+//! - `run-flood <n>`: it writes `n` bytes (`x`, then a final newline) to its standard
+//!   output, in 4096-byte writes;
 //! - `helper-fail <text>`: `crun run` of a helper bundle (a bundle directory whose name
 //!   starts with `helper-`) prints the text on stderr and exits 1;
 //! - `kill-fail <text>` and `delete-fail <text>`: `kill` and `delete` do the same;
@@ -73,6 +77,25 @@ fn main() -> ExitCode {
                     .open(path)
                     .expect("crun log");
                 writeln!(file, "{line}").expect("log");
+            }
+            if let Some(text) = directive(&script, "run-out") {
+                println!("{text}");
+            }
+            if let Some(text) = directive(&script, "run-err") {
+                eprintln!("{text}");
+            }
+            if let Some(n) = directive(&script, "run-flood") {
+                let mut left: usize = n.parse().expect("flood size");
+                let mut out = std::io::stdout().lock();
+                while left > 0 {
+                    let step = left.min(4096);
+                    let mut block = vec![b'x'; step];
+                    if left == step {
+                        block[step - 1] = b'\n';
+                    }
+                    out.write_all(&block).expect("flood");
+                    left -= step;
+                }
             }
             let code = directive(&script, "run-exit").map_or(0, |n| n.parse().expect("exit code"));
             ExitCode::from(code)

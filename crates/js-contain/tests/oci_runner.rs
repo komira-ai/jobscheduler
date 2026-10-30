@@ -11,7 +11,7 @@ use js_contain::container::{
     CONTAINER_OWNER, ContainerLimits, ContainerSpec, Dirs, Ended, HostMount,
 };
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
-use js_contain::oci::{Oci, OciConfig};
+use js_contain::oci::{LogLimits, Oci, OciConfig, stderr_path, stdout_path};
 use js_contain::subids::IdFiles;
 
 /// A source nothing is fetched from: these tests never name an image.
@@ -82,6 +82,21 @@ impl Node {
         .expect("starts")
     }
 
+    /// The backend with `logs` as the limits on a job's output.
+    fn oci_keeping(&self, logs: LogLimits) -> Arc<Oci> {
+        let config = OciConfig {
+            logs,
+            ..self.config()
+        };
+        Oci::new(
+            &config,
+            Arc::new(NoImages),
+            &self.dir.join("scratch"),
+            "/js.slice/actions",
+        )
+        .expect("starts")
+    }
+
     /// Every line the stand-in recorded: one call each, its arguments joined by spaces.
     fn calls(&self) -> Vec<String> {
         std::fs::read_to_string(self.crun.with_extension("calls"))
@@ -127,9 +142,7 @@ impl Node {
 /// Runs the container of `spec` to its end and says how it ended.
 async fn run(oci: &Oci, spec: &ContainerSpec) -> Result<Ended, String> {
     oci.create(spec).await.expect("bundle");
-    let stdout = std::fs::File::create(spec.dir.join("stdout")).expect("stdout");
-    let stderr = std::fs::File::create(spec.dir.join("stderr")).expect("stderr");
-    let mut running = oci.start(spec, stdout, stderr).expect("started");
+    let mut running = oci.start(spec).expect("started");
     running.wait().await;
     oci.ended(spec, &running).await
 }
@@ -192,8 +205,7 @@ async fn a_container_that_did_not_run_is_told_by_the_words_of_crun_and_the_init(
     let spec = node.spec();
     let oci = node.oci();
     oci.create(&spec).await.expect("bundle");
-    let null = || std::fs::File::create(spec.dir.join("out")).expect("file");
-    let mut running = oci.start(&spec, null(), null()).expect("started");
+    let mut running = oci.start(&spec).expect("started");
     running.wait().await;
     // The init writes its report to the file `start` made, once the container is going.
     std::fs::write(
@@ -480,4 +492,84 @@ async fn a_bundle_that_cannot_be_read_back_is_an_error() {
     let oci = node.oci();
     let why = oci.verify_mounts(&spec).expect_err("no bundle");
     assert!(why.contains("config.json"), "{why}");
+}
+
+/// Catches a job's output sent anywhere but the two pipes the backend drains (a file the
+/// runtime was handed, or one stream's text in the other), and an unterminated or
+/// terminated last line lost: each stream's text is in its own file and in the tail, as
+/// written.
+#[tokio::test]
+async fn the_output_of_a_container_is_kept_apart_in_files_and_the_tail() {
+    let node = Node::new("out", "run-out to stdout\nrun-err to stderr");
+    let spec = node.spec();
+    // An hour of grace: a write end the backend kept would make the run wait it out, which
+    // the hang guard turns into a failure (the wait is not timed).
+    let oci = node.oci_keeping(LogLimits {
+        drain_grace: std::time::Duration::from_secs(3600),
+        ..LogLimits::default()
+    });
+    oci.create(&spec).await.expect("bundle");
+    let mut running = oci.start(&spec).expect("started");
+    tokio::time::timeout(std::time::Duration::from_secs(120), running.wait())
+        .await
+        .expect("the run ended without waiting out the drain");
+    assert_eq!(oci.ended(&spec, &running).await, Ok(Ended::Exited(0)));
+    assert_eq!(
+        std::fs::read_to_string(stdout_path(&spec.dir)).expect("stdout"),
+        "to stdout\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(stderr_path(&spec.dir)).expect("stderr"),
+        "to stderr\n"
+    );
+    let tail = running.tail();
+    assert_eq!(tail.stdout.bytes, b"to stdout\n");
+    assert_eq!(tail.stderr.bytes, b"to stderr\n");
+    assert_eq!((tail.stdout.total, tail.stderr.total), (10, 10));
+}
+
+/// Catches an output that is not bounded on disk, a drain that stops at the cap (the
+/// stand-in would block on a full pipe and never exit), and a tail that is not the end
+/// of the stream: 1 MiB written through caps of 10 KiB (file) and 1 KiB (tail).
+#[tokio::test]
+async fn a_container_that_prints_more_than_the_cap_exits_and_leaves_a_bounded_log() {
+    const WRITTEN: usize = 1024 * 1024;
+    let node = Node::new("flood", &format!("run-flood {WRITTEN}\nrun-exit 4"));
+    let spec = node.spec();
+    let limits = LogLimits {
+        file_cap: 10 * 1024,
+        tail: 1024,
+        ..LogLimits::default()
+    };
+    let oci = node.oci_keeping(limits);
+    oci.create(&spec).await.expect("bundle");
+    let mut running = oci.start(&spec).expect("started");
+    running.wait().await;
+    assert_eq!(oci.ended(&spec, &running).await, Ok(Ended::Exited(4)));
+    let file = std::fs::read(stdout_path(&spec.dir)).expect("stdout");
+    assert_eq!(file.len(), 10 * 1024);
+    assert!(file.iter().all(|b| *b == b'x'));
+    let tail = running.tail();
+    assert_eq!(tail.stdout.total, WRITTEN as u64);
+    assert!(tail.stdout.file_cut);
+    assert_eq!(tail.stdout.bytes.len(), 1024);
+    assert_eq!(tail.stdout.bytes.last(), Some(&b'\n'));
+    assert_eq!(tail.stderr.total, 0);
+    assert!(!tail.stderr.file_cut);
+}
+
+/// Catches a start that goes on when the file of a stream cannot be made: the error
+/// names the path.
+#[tokio::test]
+async fn a_log_file_that_cannot_be_made_is_a_start_error_naming_it() {
+    let node = Node::new("nofile", "");
+    let spec = node.spec();
+    let oci = node.oci();
+    oci.create(&spec).await.expect("bundle");
+    std::fs::create_dir(stdout_path(&spec.dir)).expect("a directory in the way");
+    let why = oci.start(&spec).expect_err("no file");
+    assert!(
+        why.contains(&stdout_path(&spec.dir).display().to_string()),
+        "{why}"
+    );
 }

@@ -125,7 +125,10 @@ pub use hello::{
     GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireShape,
 };
 pub use load::{LeaseClock, LeaseMinute, LoadDrops, NodeLoad, lease_parts};
-pub use native::{InputRef, NativeSpec, NetworkLevel, OutputKind, OutputSpec, Placement};
+pub use native::{
+    BUNDLE_ENTRYPOINT_MAX, BUNDLE_PROGRAM_PREFIX, InputRef, NativeSpec, NetworkLevel, OutputKind,
+    OutputSpec, Placement,
+};
 pub use protocol::{PROTOCOL_MAJOR, PROTOCOL_NAME, ProtocolRange};
 
 /// The heartbeat interval the server proposes in [`Welcome`] unless its configuration
