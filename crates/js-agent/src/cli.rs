@@ -190,6 +190,26 @@ pub struct Cli {
     /// job). Needs `--container-bin`.
     #[arg(long = "watch-dir", value_name = "PATH")]
     pub watch_dirs: Vec<PathBuf>,
+    /// The Unix socket of the root helper `js-mac-session` (its `--socket`): with it this
+    /// agent runs native jobs, programs started as a user the helper makes for each run, under
+    /// a Seatbelt profile, and reports `exec = sandbox-exec`. macOS only. Needs `--scratch-root`
+    /// and `--state-root`, and cannot be combined with `--container-bin`. The helper must be
+    /// the agent's own: the agent asks it for its boot reset, which ends the lease users of
+    /// whoever used it before.
+    #[arg(long, value_name = "PATH")]
+    pub native_helper_socket: Option<PathBuf>,
+    /// The directory the helper makes its lease users' homes in (its `--homes`), by default
+    /// `/Users`. It must exist; the agent canonicalises it. Needs `--native-helper-socket`.
+    #[arg(long, value_name = "PATH")]
+    pub native_homes: Option<PathBuf>,
+    /// The most network a native run gets: `off` (the default), `loopback` or `on`. A start
+    /// that asks for more is held to this. Needs `--native-helper-socket`.
+    #[arg(long, value_name = "off|loopback|on")]
+    pub native_network: Option<String>,
+    /// A directory a native start's program must lie under; repeatable. By default `/usr/bin`,
+    /// `/bin`, `/usr/sbin` and `/sbin`. Needs `--native-helper-socket`.
+    #[arg(long = "native-tool-root", value_name = "PATH")]
+    pub native_tool_roots: Vec<PathBuf>,
     /// The absolute path of the `docker` or `podman` program that runs container jobs.
     /// It is started by exactly this path, never looked up on the `PATH`, with an
     /// environment of its own (a fixed `PATH` and `--container-host`, nothing the agent

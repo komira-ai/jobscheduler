@@ -127,6 +127,11 @@ impl FakeHelper {
         Client::new(&self.socket)
     }
 
+    /// The socket this helper serves on.
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
     /// Where the lease users' homes are, canonical.
     pub fn homes(&self) -> &Path {
         &self.shared.homes

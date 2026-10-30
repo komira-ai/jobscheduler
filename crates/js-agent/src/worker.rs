@@ -93,15 +93,16 @@ use std::time::Duration;
 
 use js_agent_wire::{Command, HeartbeatReply, HeldRun, HeldState, RunResult, Taint};
 
-use crate::cli_runtime::{CALL_LIMIT, Settings};
+use crate::cli_runtime::CALL_LIMIT;
 use crate::facts::Platform;
 use crate::integrity::Integrity;
-use crate::lifecycle::{Config, Event, Lifecycle, Status};
+use crate::lifecycle::{CheckHook, Config, Event, Lifecycle, Status};
 use crate::readiness::{HookWindow, WorkerHook};
 
 mod quiesce;
 
-use crate::system::{Machine, RuntimeBuild, SharedClock};
+use crate::native::NativeChecks;
+use crate::system::{Backend, Machine, RuntimeBuild, SharedClock};
 use crate::usage::{Collector, Outbox};
 use quiesce::take_asked;
 pub use quiesce::{LeaseAnswers, WorkerHost};
@@ -141,8 +142,8 @@ pub const LINES_CAP: usize = 256;
 pub struct Plan {
     /// How the lifecycle is set up.
     pub config: Config,
-    /// The checked container flags.
-    pub settings: Settings,
+    /// What the jobs run with, checked.
+    pub backend: Backend,
     /// The id the agent registered under.
     pub host_id: String,
     /// The platform the agent runs on.
@@ -183,7 +184,7 @@ pub const WIND_DOWN_MARGIN: Duration = Duration::from_secs(60);
 #[derive(Clone)]
 pub struct Rescue {
     machine: Arc<dyn Machine>,
-    settings: Settings,
+    backend: Backend,
     host_id: String,
     platform: Platform,
     stop_grace: Duration,
@@ -199,14 +200,14 @@ impl Rescue {
     /// grace and [`WIND_DOWN_MARGIN`].
     pub fn new(
         machine: Arc<dyn Machine>,
-        settings: Settings,
+        backend: Backend,
         host_id: String,
         platform: Platform,
         stop_grace: Duration,
     ) -> Self {
         Self {
             machine,
-            settings,
+            backend,
             host_id,
             platform,
             stop_grace,
@@ -235,7 +236,7 @@ impl Rescue {
     /// thing that did not work. Blocks for as long as the runtime does; see [`Rescue::run`].
     fn stop_all(&self) -> Vec<String> {
         let wanted = RuntimeBuild {
-            settings: &self.settings,
+            backend: &self.backend,
             host_id: &self.host_id,
             platform: &self.platform,
             stop_grace: self.stop_grace,
@@ -493,7 +494,7 @@ impl Worker {
         let stop_grace = plan.config.stop_grace;
         let rescue = Rescue::new(
             plan.machine.clone(),
-            plan.settings.clone(),
+            plan.backend.clone(),
             plan.host_id.clone(),
             plan.platform.clone(),
             stop_grace,
@@ -671,7 +672,7 @@ type Built = (Lifecycle, Option<Collector>, Vec<String>);
 fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     let Plan {
         config,
-        settings,
+        backend,
         host_id,
         platform,
         watch,
@@ -681,7 +682,7 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     } = plan;
     let stop_grace = config.stop_grace;
     let wanted = RuntimeBuild {
-        settings: &settings,
+        backend: &backend,
         host_id: &host_id,
         platform: &platform,
         stop_grace,
@@ -690,25 +691,35 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     // At start only: the rescue at the agent's end builds its runtime by `machine.runtime`
     // alone, so a firewall that has gone never keeps it from stopping the containers.
     runtime.check_egress().map_err(|why| why.to_string())?;
-    let checks =
-        Integrity::start(machine.view(), settings.uid(), watch)?.with_slots(settings.slot_ids(0).0);
-    let (life, events) = Lifecycle::adopt(config, runtime, Box::new(checks), Box::new(clock))
+    let (checks, actions): (Box<dyn CheckHook>, Result<String, &str>) = match &backend {
+        Backend::Container(settings) => {
+            let integrity = Integrity::start(machine.view(), settings.uid(), watch)?
+                .with_slots(settings.slot_ids(0).0);
+            let actions = settings.actions_cgroup().map(str::to_owned);
+            (Box::new(integrity), actions.ok_or(NO_ACTIONS_CGROUP))
+        }
+        Backend::Native(_) => (Box::new(NativeChecks), Err(NO_NATIVE_USAGE)),
+    };
+    let (life, events) = Lifecycle::adopt(config, runtime, checks, Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
     lines.extend(describe(&events));
-    let collector = usage.and_then(|outbox| match settings.actions_cgroup() {
-        Some(dir) => Some(Collector::new(
+    let collector = usage.and_then(|outbox| match actions {
+        Ok(dir) => Some(Collector::new(
             machine.cgroup_files(),
-            dir,
+            &dir,
             machine.usage_clock(),
             outbox,
         )),
-        None => {
-            lines.push(NO_ACTIONS_CGROUP.to_owned());
+        Err(why) => {
+            lines.push(why.to_owned());
             None
         }
     });
     Ok((life, collector, lines))
 }
+
+/// Why the heartbeat of a native agent carries no load.
+const NO_NATIVE_USAGE: &str = "usage: native runs report no load yet: the heartbeat carries none";
 
 /// Why the heartbeat carries no load.
 const NO_ACTIONS_CGROUP: &str =

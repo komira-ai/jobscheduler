@@ -4,11 +4,14 @@
 //! to a machine runs as in the agent. On a Mac, one test module applies the runtime's
 //! `sandbox-exec` command line for real, as the user running the tests (`mac`).
 
+mod agent;
 mod fake_helper;
 mod lifecycle;
 #[cfg(target_os = "macos")]
 mod mac;
 mod runtime;
+mod settings;
+mod worker;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,7 +31,7 @@ pub const TERM: u64 = 7;
 /// The most polls a test makes for a run to end. The helper's answer comes from a thread,
 /// so a poll right after it was sent may still say the run goes on; this bounds the loop
 /// instead of a clock.
-const POLLS: u32 = 50_000_000;
+pub const POLLS: u32 = 50_000_000;
 
 /// A native runtime over a fake helper, with the directory they work in.
 pub struct Rig {

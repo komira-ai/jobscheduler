@@ -34,6 +34,7 @@
 //! macOS agent makes one.
 
 mod logs;
+mod settings;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -57,8 +58,11 @@ use js_mac_session::lease::{Dotted, user_name};
 use js_types::LeaseId;
 
 use crate::lifecycle::{
-    Body, Exit, Found, NativeRefusal, RunHandle, RunSpec, Runtime, RuntimeError, Status,
+    Body, CheckFinding, CheckHook, Exit, Finished, Found, NativeRefusal, RunHandle, RunSpec,
+    Runtime, RuntimeError, Status,
 };
+
+pub use settings::{DEFAULT_HOMES, DEFAULT_TOOL_ROOTS, NativeFlags, NativeSettings};
 
 /// What a native runtime is told, from the agent's flags.
 #[derive(Debug, Clone)]
@@ -315,6 +319,19 @@ impl Runtime for NativeRuntime {
                 why: format!("{} lies under no tool root", native.program),
             });
         }
+        Ok(())
+    }
+}
+
+/// The post-job check of a native agent. A Mac has no `/proc` for the container agent's
+/// checks to read; what a run leaves behind is the helper's to find, and `user-delete`
+/// refuses while any process of the user remains and sweeps what the user owns, so a run
+/// that left residue fails its removal (and taints the host) before this runs.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeChecks;
+
+impl CheckHook for NativeChecks {
+    fn run(&mut self, _: &Finished<'_>) -> Result<(), CheckFinding> {
         Ok(())
     }
 }

@@ -29,7 +29,7 @@ use std::time::Duration;
 use js_agent::cli_runtime::Settings;
 use js_agent::lifecycle::{Capacity, Config, FilesRoot, MountRoots, ScratchRoot, StateRoot};
 use js_agent::usage::Outbox;
-use js_agent::{Plan, Platform, Rescue, Worker};
+use js_agent::{Backend, Plan, Platform, Rescue, Worker};
 use js_agent_wire::{Command, HeartbeatReply};
 use serde_json::{Value, json};
 
@@ -92,7 +92,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
     };
     Plan {
         config,
-        settings: settings(dir),
+        backend: Backend::Container(settings(dir)),
         host_id: "h1".to_owned(),
         platform: Platform {
             os: "linux".to_owned(),
@@ -116,7 +116,7 @@ pub fn start_with_usage(
     actions: Option<&str>,
 ) -> Worker {
     let mut plan = plan(dir, machine, STEP_NEVER);
-    plan.settings = settings_in(dir, actions);
+    plan.backend = Backend::Container(settings_in(dir, actions));
     plan.usage = Some(outbox.clone());
     match Worker::start(plan) {
         Ok(worker) => worker,
@@ -132,7 +132,13 @@ pub fn rescue(dir: &Scratch, machine: &FakeMachine) -> Rescue {
     };
     let machine = Arc::new(machine.clone());
     let grace = Duration::from_secs(1);
-    Rescue::new(machine, settings(dir), "h1".to_owned(), platform, grace)
+    Rescue::new(
+        machine,
+        Backend::Container(settings(dir)),
+        "h1".to_owned(),
+        platform,
+        grace,
+    )
 }
 
 /// A worker over `machine` that steps only when asked.
