@@ -1,4 +1,4 @@
-# Releasing js-lease-server, js and js-agent
+# Releasing js-lease-server, js, js-agent and js-bundle
 
 Releases are continuous. Nobody tags, and nothing is run by hand: every push to `main` that
 changes code that ships is released as the next version, after the jobs of `ci` other than `macos` have passed on it.
@@ -17,8 +17,8 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    build still runs on a Mac (below).
 3. `plan` (`cargo xtask release plan`) decides whether to release and as which version (below).
    When there is nothing to release, the run ends there, green.
-4. `build` stamps the version into the CI checkout, builds the three binaries for
-   `x86_64-unknown-linux-musl` and `js` and `js-agent` for `aarch64-apple-darwin`, checks that
+4. `build` stamps the version into the CI checkout, builds the four binaries for
+   `x86_64-unknown-linux-musl` and `js`, `js-agent` and `js-bundle` for `aarch64-apple-darwin`, checks that
    the Linux ones are static and that `--version` prints the release version, and packages them. `sums` writes one `SHA256SUMS` over the archives.
 5. `attest` attests every archive with build provenance (`actions/attest-build-provenance`);
    `verify` then checks the attestations the way a user does (below).
@@ -73,7 +73,7 @@ actions, no permission at the top, `id-token` write in `attest` and `gamma` only
 
 A push is released when a file that ships changed since the latest release tag. The set is computed
 from the dependency graph (`cargo metadata`), not listed: the crates of `js-lease-server`, `js-cli`
-(the `js` binary) and `js-agent`, and every workspace crate they depend on through normal or build
+(the `js` binary), `js-agent` and `js-bundle-cli` (the `js-bundle` binary), and every workspace crate they depend on through normal or build
 dependencies. Every file of those crates ships (`src/**`, `Cargo.toml`, `build.rs`, a sample
 configuration compiled in with `include_str!`) except `tests/`, `benches/`, `examples/` and markdown;
 so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything under `.cargo/`.
@@ -124,7 +124,9 @@ For version `X.Y.Z`:
 | `js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-agent` binary and `LICENSE` |
 | `js-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js` binary for Apple silicon Macs and `LICENSE` |
 | `js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-agent` binary for Apple silicon Macs and `LICENSE` |
-| `SHA256SUMS` | SHA-256 of the five archives |
+| `js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-bundle` binary (packs, prints and verifies darwin bundles) and `LICENSE` |
+| `js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-bundle` binary for Apple silicon Macs and `LICENSE` |
+| `SHA256SUMS` | SHA-256 of the seven archives |
 
 Each archive unpacks to a directory named like the archive without `.tar.gz`.
 
@@ -148,7 +150,7 @@ gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R 
 `git rev-parse` needs a clone with the tags; without one, the commit is the one the release page shows
 for the tag. For the client, use `-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz'` instead
 (`js-[0-9]*` keeps the other archives out of the match), and for the agent
-`-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'`.
+`-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'`, and for the bundle tool `-p 'js-bundle-*-x86_64-unknown-linux-musl.tar.gz'`.
 
 The checksum check proves the download is intact. The attestation check proves the file was built
 from this repository by the `release` workflow, from `main` (`--source-ref`), at exactly that commit
@@ -203,7 +205,7 @@ refused (401, 403: the coordinator's allow-list must name this repository, this 
 and these two services), or when another writer replaced the desired version.
 
 **The version text** is the release version `X.Y.Z` of the `plan` job: the text `release stamp`
-puts in the build, which each of the three binaries prints as the last word of `--version`
+puts in the build, which each of the four binaries prints as the last word of `--version`
 (`build` checks it) and which `js-lease-server` and `js-agent` report as their version in the
 coordinator heartbeat. It is not the tag (`vX.Y.Z`) and has no commit suffix. It is defined in
 one place, `deploy::check_version`, which refuses anything but three numbers without leading

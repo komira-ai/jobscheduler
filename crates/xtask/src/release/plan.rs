@@ -46,7 +46,12 @@ pub struct PlanArgs {
     /// A crate whose binaries are shipped; its workspace dependencies ship with it.
     #[arg(
         long = "ship",
-        default_values_t = ["js-lease-server".to_owned(), "js-cli".to_owned(), "js-agent".to_owned()]
+        default_values_t = [
+            "js-lease-server".to_owned(),
+            "js-cli".to_owned(),
+            "js-agent".to_owned(),
+            "js-bundle-cli".to_owned(),
+        ]
     )]
     pub ship: Vec<String>,
     /// Decide as usual, then say released (see the module docs).

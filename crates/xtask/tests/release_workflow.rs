@@ -302,7 +302,7 @@ fn gamma_is_off_by_variable_and_sets_the_server_before_the_agents() {
 }
 
 /// Asserts that the build matrix has the Apple-silicon leg (a `macos-14` runner building
-/// `js` and `js-agent` only, the lease server being Linux-only) and that the archives are
+/// `js`, `js-agent` and `js-bundle` only, the lease server being Linux-only) and that the archives are
 /// made with GNU tar, which a Mac has as `gtar`: the archive options are GNU's, and the
 /// reproducibility of the files depends on them.
 #[test]
@@ -312,7 +312,7 @@ fn the_macos_leg_builds_the_client_and_agent_and_packs_with_gnu_tar() {
     let build = job(&jobs, "build").join("\n");
     assert!(
         build.contains(
-            "- target: aarch64-apple-darwin\n            runner: macos-14\n            builds: js-cli:js js-agent:js-agent\n"
+            "- target: aarch64-apple-darwin\n            runner: macos-14\n            builds: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle\n"
         ),
         "{build}"
     );
@@ -320,4 +320,23 @@ fn the_macos_leg_builds_the_client_and_agent_and_packs_with_gnu_tar() {
         build.contains("if command -v gtar > /dev/null; then\n            tar=gtar\n          fi")
     );
     assert!(build.contains(r#""$tar" -C "stage-$bin" --sort=name"#));
+}
+
+/// Asserts that the `sums` job expects the `js-bundle` archive of both targets, so a build
+/// that stops making one fails before anything is attested, and that both matrix legs build it.
+#[test]
+fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
+    let text = workflow();
+    let jobs = jobs(&text);
+    let sums = job(&jobs, "sums").join("\n");
+    for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-musl"] {
+        let asset = format!("js-bundle-$VERSION-{target}.tar.gz");
+        assert!(sums.contains(&asset), "{asset} is not expected: {sums}");
+    }
+    let build = job(&jobs, "build").join("\n");
+    assert_eq!(
+        build.matches(" js-bundle-cli:js-bundle\n").count(),
+        2,
+        "{build}"
+    );
 }
