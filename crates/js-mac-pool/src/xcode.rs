@@ -393,7 +393,8 @@ fn inside(found: &str, developer_dir: &AbsPath) -> bool {
         .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// The groups whose members are administrators: `wheel` and `admin`. A pool user is in
+/// The groups whose members are administrators: `wheel` and `admin`. A pool user must
+/// never be a member of either (the trust walk lets these groups write); it is in
 /// neither.
 const ADMIN_GROUPS: [u32; 2] = [0, 80];
 

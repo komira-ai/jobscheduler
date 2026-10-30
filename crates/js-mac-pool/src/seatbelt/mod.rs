@@ -67,7 +67,7 @@ pub use net::{MAX_PORTS, Net, Ports, PortsError};
 pub use path::{AbsPath, MAX_PATH_BYTES, PathError};
 pub use policy::{Caps, MAX_LISTED, Narrowing, Policy, PolicyError, ReadModel, SlotLayout};
 pub use profile::{BuildError, Profile, SANDBOX_EXEC};
-pub use scan::scan_privileged;
+pub use scan::{PrivilegedScan, scan_privileged};
 pub use selftest::{
     Assurance, Canaries, Class, Failure, Fixture, KEYCHAIN_CANARY, Outcome, Role, SETUID_CANARY,
     STUB_OUTPUT, STUB_SOURCE, SelfTest, SelfTestError, Step, Why,

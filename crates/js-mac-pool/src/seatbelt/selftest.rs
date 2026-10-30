@@ -20,7 +20,9 @@
 //! files the base set lists; otherwise [`SelfTest::new`] refuses, and there is no
 //! [`Assurance`].
 //!
-//! The agent's duties: a host whose macOS version has no [`MacosMajor`] refuses the
+//! The agent's duties: run the scan as root (an unreadable directory is skipped without
+//! a word); never make a pool user a member of group 0 or 80 (the Xcode trust walk
+//! allows group-writable directories for those groups); a host whose macOS version has no [`MacosMajor`] refuses the
 //! allow model (it never falls back to another version's base set), the self-test runs
 //! at every start and after an OS update, and an [`Assurance`] is never kept across a
 //! restart.
@@ -43,6 +45,7 @@ use super::net::Net;
 use super::path::{AbsPath, PathError};
 use super::policy::{Caps, Policy, PolicyError, ReadModel, SlotLayout};
 use super::profile::Profile;
+use super::scan::PrivilegedScan;
 
 /// The file the Xcode steps compile, placed by the agent in the run directory.
 pub const STUB_SOURCE: &str = "stub.c";
@@ -101,8 +104,9 @@ pub struct Fixture {
     pub granted_file: AbsPath,
     /// The canaries.
     pub canaries: Canaries,
-    /// The setuid and setgid files found on the host ([`MacosMajor::scan`]).
-    pub privileged_found: Vec<String>,
+    /// The setuid and setgid files found on the host ([`MacosMajor::scan`], run as root).
+    /// Only a scan makes one, so the check cannot be skipped by passing an empty list.
+    pub privileged_found: PrivilegedScan,
 }
 
 /// What a step is about. The names are the ones the agent logs.
@@ -329,10 +333,23 @@ impl Outcome {
     pub fn from_exit(code: Option<i32>, stderr: &str) -> Self {
         match code {
             Some(0) => Self::Success,
-            Some(_) if stderr.contains("Operation not permitted") => Self::Refused,
+            Some(_) if stderr.lines().any(refusal_line) => Self::Refused,
             _ => Self::Failed,
         }
     }
+}
+
+/// Whether `line` is the tool's own refusal: `<tool>: <path>: Operation not permitted`
+/// (or a Python tool's `[Errno 1] Operation not permitted`), and not a line of
+/// `sandbox-exec` itself, whose messages are about the profile, not about a read.
+fn refusal_line(line: &str) -> bool {
+    let line = line.trim();
+    let own = !line.starts_with("sandbox-exec:");
+    let tool = line
+        .strip_suffix(": Operation not permitted")
+        .is_some_and(|rest| rest.contains(": "));
+    let errno = line.contains("[Errno 1] Operation not permitted");
+    own & (tool | errno)
 }
 
 /// The proof that the self-test passed on this host for one macOS version. Only
@@ -375,8 +392,10 @@ impl SelfTest {
         } = fixture;
         let listed = major.base().setuid();
         let unlisted: Vec<String> = privileged_found
-            .into_iter()
+            .paths()
+            .iter()
             .filter(|path| !listed.contains(&path.as_str()))
+            .cloned()
             .collect();
         if !unlisted.is_empty() {
             return Err(SelfTestError::UnlistedPrivileged(unlisted));

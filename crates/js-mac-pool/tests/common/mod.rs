@@ -140,7 +140,7 @@ pub fn fixture(grants: Vec<ReadGrant>) -> Fixture {
         grants,
         granted_file: path("/Volumes/work/store/v1/objects/trees/aaaa/data"),
         canaries: canaries(),
-        privileged_found: Vec::new(),
+        privileged_found: js_mac_pool::seatbelt::scan_privileged(&[]),
     }
 }
 

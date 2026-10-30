@@ -10,7 +10,7 @@ use common::{Scratch, canaries, fixture, path, tree, xcode_host};
 use js_bundle::ReadGrantKind;
 use js_mac_pool::seatbelt::{
     AbsPath, Class, Failure, MacosMajor, Outcome, PolicyError, ReadGrant, Role, SANDBOX_EXEC,
-    SelfTest, SelfTestError, Step, Why,
+    SelfTest, SelfTestError, Step, Why, scan_privileged,
 };
 
 const STORE: &str = "/Volumes/work/store";
@@ -296,6 +296,27 @@ fn an_outcome_is_read_from_the_exit_code_and_the_kernels_words() {
         ),
         (Some(127), "", Outcome::Failed),
         (None, "Operation not permitted", Outcome::Failed),
+        (
+            Some(1),
+            "xattr: [Errno 1] Operation not permitted: '/x'",
+            Outcome::Refused,
+        ),
+        (
+            Some(1),
+            "note: Operation not permitted is what a refusal says",
+            Outcome::Failed,
+        ),
+        (
+            Some(65),
+            "sandbox-exec: /tmp/x: Operation not permitted",
+            Outcome::Failed,
+        ),
+        (
+            Some(1),
+            "sandbox-exec: apply: Operation not permitted\nls: /x: Operation not permitted",
+            Outcome::Refused,
+        ),
+        (Some(1), "Operation not permitted", Outcome::Failed),
     ];
     for (code, stderr, expected) in table {
         assert_eq!(
@@ -575,25 +596,29 @@ fn a_run_directory_under_the_root_has_the_root_as_its_listed_ancestor() {
     );
 }
 
+/// The scan is the only way to say what the host holds, so the test makes real files.
 #[test]
 fn privileged_files_the_base_set_does_not_list_refuse_the_self_test() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let scratch = Scratch::new("selftest-privileged");
+    let a = scratch.file("bin/newtool", "x");
+    let b = scratch.file("bin/other", "x");
+    for file in [&a, &b] {
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o4755)).expect("mode");
+    }
+    let root = scratch.root.join("bin");
     let mut f = fixture(vec![]);
-    f.privileged_found = vec![
-        "/usr/bin/su".to_owned(),
-        "/usr/bin/newtool".to_owned(),
-        "/sbin/ping".to_owned(),
-        "/bin/other".to_owned(),
-    ];
+    f.privileged_found = scan_privileged(&[root.to_str().expect("text")]);
     assert_eq!(
         SelfTest::new(MacosMajor::Macos14, f),
         Err(SelfTestError::UnlistedPrivileged(vec![
-            "/usr/bin/newtool".to_owned(),
-            "/bin/other".to_owned()
+            a.to_str().expect("text").to_owned(),
+            b.to_str().expect("text").to_owned(),
         ]))
     );
-    let mut listed = fixture(vec![]);
-    listed.privileged_found = vec!["/usr/bin/su".to_owned(), "/sbin/ping".to_owned()];
-    assert!(SelfTest::new(MacosMajor::Macos14, listed).is_ok());
+    let mut none = fixture(vec![]);
+    none.privileged_found = scan_privileged(&[]);
+    assert!(SelfTest::new(MacosMajor::Macos14, none).is_ok());
 }
 
 #[test]

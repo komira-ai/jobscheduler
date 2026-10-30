@@ -14,7 +14,7 @@
 use super::grant::{Match, XCODE_SUPPORT, kind_rules};
 use super::path::AbsPath;
 use super::policy::AllowGrants;
-use super::scan::scan_privileged;
+use super::scan::{PrivilegedScan, scan_privileged};
 
 /// A macOS major version that has a base set.
 ///
@@ -61,9 +61,10 @@ impl MacosMajor {
 
     /// The setuid and setgid files of this host under the directories the base set
     /// grants. Run at start and put in the fixture of the self-test; a file it finds
-    /// that [`BaseSet::setuid`] does not list refuses the allow model.
+    /// that [`BaseSet::setuid`] does not list refuses the allow model. The agent runs it
+    /// as root: a directory it cannot read is skipped silently.
     #[must_use]
-    pub fn scan(self) -> Vec<String> {
+    pub fn scan(self) -> PrivilegedScan {
         let roots: Vec<&str> = self
             .base()
             .reads()

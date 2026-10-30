@@ -184,6 +184,7 @@ fn the_setuid_golden_list_covers_the_privileged_files_of_this_host() {
     let listed = major.base().setuid();
     let found = major.scan();
     let missing: Vec<&String> = found
+        .paths()
         .iter()
         .filter(|path| !listed.contains(&path.as_str()))
         .collect();

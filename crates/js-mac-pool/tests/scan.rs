@@ -31,8 +31,14 @@ fn setuid_and_setgid_files_are_found_and_plain_ones_are_not() {
     let root = text(&scratch.root.join("bin"));
     let mut expected = vec![text(&uid), text(&gid), text(&both)];
     expected.sort();
-    assert_eq!(scan_privileged(&[root.as_str()]), expected);
-    assert_eq!(scan_privileged(&[root.as_str(), root.as_str()]), expected);
+    assert_eq!(
+        scan_privileged(&[root.as_str()]).paths(),
+        expected.as_slice()
+    );
+    assert_eq!(
+        scan_privileged(&[root.as_str(), root.as_str()]).paths(),
+        expected.as_slice()
+    );
 }
 
 #[test]
@@ -47,7 +53,11 @@ fn links_are_not_followed_and_missing_roots_hold_nothing() {
     std::os::unix::fs::symlink(scratch.root.join("real"), &linked_dir).expect("link");
     let tree = text(&scratch.root.join("tree"));
     let missing = text(&scratch.root.join("missing"));
-    assert!(scan_privileged(&[tree.as_str(), missing.as_str()]).is_empty());
+    assert!(
+        scan_privileged(&[tree.as_str(), missing.as_str()])
+            .paths()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -62,11 +72,11 @@ fn a_directory_that_cannot_be_read_holds_nothing() {
     let tree = text(&scratch.root.join("tree"));
     let found = scan_privileged(&[tree.as_str()]);
     set(&dir, 0o755);
-    assert_eq!(found, [text(&visible)]);
+    assert_eq!(found.paths(), [text(&visible)]);
 }
 
 #[test]
 fn the_scan_of_a_version_walks_the_directories_its_base_set_grants() {
     let found = MacosMajor::Macos14.scan();
-    assert!(found.iter().all(|path| path.starts_with('/')));
+    assert!(found.paths().iter().all(|path| path.starts_with('/')));
 }

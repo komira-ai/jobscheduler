@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use js_mac_pool::seatbelt::{
-    AbsPath, Canaries, Fixture, Outcome, PinnedTree, ReadGrant, SelfTest, SlotLayout,
+    AbsPath, Canaries, Fixture, Outcome, PinnedTree, PrivilegedScan, ReadGrant, SelfTest,
+    SlotLayout,
 };
 use js_mac_pool::xcode::{Catalog, HostXcode, State, XcodeFlag};
 
@@ -122,7 +123,7 @@ impl Mac {
         ]
     }
 
-    pub fn fixture(&self, privileged_found: Vec<String>) -> Fixture {
+    pub fn fixture(&self, privileged_found: PrivilegedScan) -> Fixture {
         Fixture {
             layout: self.layout(),
             grants: self.grants(),
