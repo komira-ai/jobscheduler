@@ -402,11 +402,11 @@ fn a_bundle_job_for_a_program_the_bundle_lacks_is_refused_by_the_admission() {
     assert_eq!(result.detail.as_deref(), Some(refusal::INVALID_PROGRAM));
 }
 
-/// Asserts that `TMPDIR` of a run that pins a bundle is the agent's, once, as it is for a run
-/// that pins none, whatever the job's environment says. It catches a bundle run whose job
-/// points the temporary files outside the home.
+/// Asserts that a job environment that names `TMPDIR`, which the agent sets, is refused before
+/// anything is made, as it is for a run that pins no bundle. It catches a bundle run that
+/// makes its user before it finds the environment unusable.
 #[test]
-fn the_agents_tmpdir_is_the_only_one_a_bundle_run_gets() {
+fn a_job_that_sets_tmpdir_is_refused_before_a_user_is_made() {
     let mut s = Stored::new("tmpdir");
     let mut spec = s.spec("r1", "@bundle/tool", &[]);
     let Body::Native(body) = &mut spec.body else {
@@ -414,9 +414,8 @@ fn the_agents_tmpdir_is_the_only_one_a_bundle_run_gets() {
     };
     body.env
         .insert("TMPDIR".to_owned(), "/private/tmp".to_owned());
-    s.rig.rt.create_and_start(&spec).unwrap();
-    let tmp = text(&s.rig.fake.home_of("7.0").join("tmp"));
-    let env = s.rig.fake.run_of("7.0").env;
-    let given: Vec<_> = env.iter().filter(|(name, _)| name == "TMPDIR").collect();
-    assert_eq!(given, [&("TMPDIR".to_owned(), tmp)]);
+    let why = s.rig.rt.create_and_start(&spec).unwrap_err();
+    assert!(why.0.contains("TMPDIR"), "{}", why.0);
+    assert_eq!(s.rig.fake.verbs(), ["boot-reset"]);
+    assert!(s.unpinned("7.0"));
 }
