@@ -149,8 +149,8 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
 
 /// Asserts the wait for `ci`: a job with exactly `actions: read` and nothing else, no
 /// checkout (no repository code runs in it), a four-hour limit, a poll every 120 s of the
-/// `ci` runs of this commit's push, and a failure naming the run for any conclusion but
-/// success.
+/// `ci` run of this commit's push and of its jobs, `macos` excluded by name, and a failure
+/// naming the run and the jobs for any other job that did not succeed or skip.
 #[test]
 fn the_wait_for_ci_reads_actions_and_runs_no_repository_code() {
     let text = workflow();
@@ -167,23 +167,42 @@ fn the_wait_for_ci_reads_actions_and_runs_no_repository_code() {
     // The step's environment and strict shell.
     assert!(wait.contains("        env:\n          GH_TOKEN: ${{ github.token }}\n          REPO: ${{ github.repository }}\n        run: |\n          set -euo pipefail\n          failed=0\n          while true; do\n"));
     // The newest run is picked by creation time, and an absent run reads as empty.
-    assert!(wait.contains(r#"--jq '.workflow_runs | sort_by(.created_at) | last // empty | "\(.status) \(.conclusion // "none") \(.html_url)"'"#));
+    assert!(wait.contains(r#"--jq '.workflow_runs | sort_by(.created_at) | last // empty | "\(.id) \(.status) \(.conclusion // "none") \(.html_url)"'"#));
     assert!(wait.contains(
         "      if [ -z \"$run\" ]; then\n              echo \"no ci run for $COMMIT yet\""
     ));
-    // A finished run passes only on success (exit 0), and any other conclusion names the
-    // run and exits 1 in the same branch.
-    assert!(wait.contains("                completed)\n                  if [ \"$conclusion\" = success ]; then\n                    echo \"ci passed: $url\"\n                    exit 0\n                  fi\n                  echo \"::error::ci did not pass for $COMMIT: conclusion $conclusion, $url; nothing is released\"\n                  exit 1\n                  ;;\n"));
-    // A run that is queued or in progress waits, two minutes at a time.
+    // The jobs of that run's latest attempt are read from the jobs API, and the job named
+    // `macos` (by name, and only it) is left out of the count; of the others, a finished
+    // one counts as bad unless it succeeded or was skipped, and one not finished is pending.
+    assert!(wait.contains("actions/runs/$id/jobs?per_page=100&filter=latest"));
+    assert!(wait.contains(r#"[.jobs[] | select(.name != "macos")]"#));
+    assert_eq!(wait.matches(r#""macos""#).count(), 1, "{wait}");
+    assert!(wait.contains(r#"select(.status != "completed")"#));
+    assert!(wait.contains(r#"select(.status == "completed" and .conclusion != "success" and .conclusion != "skipped") | "\(.name)=\(.conclusion)""#));
+    // Any other job that failed, was cancelled or timed out fails the release at once,
+    // naming the jobs and the run, before the pass is considered.
+    assert!(wait.contains("              if [ -n \"$bad\" ]; then\n                echo \"::error::ci did not pass for $COMMIT: $bad, $url; nothing is released\"\n                exit 1\n              fi\n"));
+    // All the other jobs finished and none bad passes (exit 0), even while `macos` is
+    // queued or after it failed; the pass comes after the failure check.
+    assert!(wait.contains("              if [ \"$total\" -gt 0 ] && [ \"$pending\" -eq 0 ]; then\n                echo \"ci passed (all jobs but macos): $url\"\n                exit 0\n              fi\n"));
+    assert!(
+        wait.find("if [ -n \"$bad\" ]").expect("bad check") < wait.find("exit 0").expect("pass"),
+        "{wait}"
+    );
+    // A finished run with no job besides `macos` is an error, not a pass.
+    assert!(wait.contains("              if [ \"$status\" = completed ]; then\n                echo \"::error::ci did not pass for $COMMIT: no job besides macos in the run, $url; nothing is released\"\n                exit 1\n              fi\n"));
+    // Otherwise the wait goes on, two minutes at a time.
     assert!(wait.contains(
-        "                *)\n                  echo \"ci is $status: $url\"\n                  ;;\n"
+        "echo \"ci is $status: $url ($pending of $total jobs but macos still to finish)\"\n"
     ));
     assert!(wait.contains("            sleep 120\n          done"));
-    // Ten failed reads in a row fail the job; a good read starts the count again.
+    // Ten failed reads in a row (of the runs or of the jobs) fail the job; a good read
+    // starts the count again.
     assert!(wait.contains("failed=$((failed + 1))\n              if [ \"$failed\" -ge 10 ]; then\n                echo \"::error::reading the ci runs of $COMMIT failed $failed times in a row; nothing is released\"\n                exit 1\n              fi\n"));
     assert!(wait.contains(
-        "              run=\"\"\n            else\n              failed=0\n            fi\n"
+        "then\n              failed=0\n            else\n              failed=$((failed + 1))\n"
     ));
+    assert!(wait.contains("              run=\"\"\n            fi\n"));
     // Nothing is planned before the wait has passed.
     assert!(job(&jobs, "plan").join("\n").contains("needs: [ci-passed]"));
 }
