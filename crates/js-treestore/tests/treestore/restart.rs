@@ -126,3 +126,19 @@ fn a_store_directory_that_cannot_be_made_is_an_error() {
         Err(Error::Io { .. })
     ));
 }
+
+#[test]
+fn trees_found_at_start_are_all_counted() {
+    let rig = Rig::new();
+    let (a, b) = (sized("f", 10, 1), sized("f", 20, 2));
+    rig.have(&a);
+    rig.have(&b);
+    let first = rig.open(rig.cfg());
+    first.ensure(&wanted(&a)).unwrap();
+    first.ensure(&wanted(&b)).unwrap();
+    drop(first);
+    let store = rig.open(rig.cfg());
+    assert_eq!(store.stats().trees, 2);
+    assert_eq!(store.stats().used, 30);
+    assert_eq!(rig.source.fetches(), 2);
+}
