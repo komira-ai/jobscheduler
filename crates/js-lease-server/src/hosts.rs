@@ -25,6 +25,14 @@ struct ShapeView {
     gpus: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     gpu_class: Option<String>,
+    /// Bytes of scratch disk the host books; left out when it books none, so a body for
+    /// a host without disk reads as before.
+    #[serde(skip_serializing_if = "is_zero")]
+    disk_bytes: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// The memory of a host, or of a pool's floor, as an operator reads it: what was
@@ -176,6 +184,7 @@ fn shape_view(shape: &Shape) -> ShapeView {
         memory_bytes: resources.memory_bytes(),
         gpus: resources.gpus(),
         gpu_class: resources.gpu_class().map(str::to_string),
+        disk_bytes: resources.disk_bytes(),
     }
 }
 
@@ -315,5 +324,33 @@ mod tests {
             assert_eq!(host.get("mark").and_then(|m| m.as_str()), listed);
             assert_eq!(host.get("mark").is_none(), listed.is_none());
         }
+    }
+
+    /// Asserts that a host that books scratch disk lists it as `shape.disk_bytes`, that a
+    /// host that books none has no such key (so the body is what it was before), and that
+    /// the value is the host's booked shape's. It catches a view that drops the disk,
+    /// and one that writes `0` for every host.
+    #[test]
+    fn the_shape_lists_booked_disk_only_when_there_is_some() {
+        let mut with_disk = view(None);
+        let resources = Resources::new(1000, 1 << 20, 0, None)
+            .unwrap()
+            .with_disk_bytes(5 << 30);
+        with_disk.shape = Shape::new(resources, BTreeMap::new());
+        let list = HostList::of(Vec::new(), vec![with_disk, view(None)], None);
+        let body = serde_json::to_value(&list).unwrap();
+        let shapes: Vec<_> = body["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|host| host["shape"].clone())
+            .collect();
+        assert_eq!(shapes.len(), 2);
+        let sized = shapes
+            .iter()
+            .filter(|shape| shape.get("disk_bytes").is_some());
+        assert_eq!(sized.count(), 1);
+        let disk = shapes.iter().find_map(|shape| shape.get("disk_bytes"));
+        assert_eq!(disk.and_then(|disk| disk.as_u64()), Some(5 << 30));
     }
 }
