@@ -503,9 +503,9 @@ mod tests {
         let with_root = files("root-range", Some(text), Some(text));
         for (uid, gid) in [(0, 0), (990, 0), (0, 990)] {
             let refused = user_ids(&with_root, uid, gid).expect_err("root refused");
-            assert!(
-                matches!(refused, SubidError::Root { uid: u, gid: g } if (u, g) == (uid, gid)),
-                "{refused:?}"
+            assert_eq!(
+                format!("{refused:?}"),
+                format!("{:?}", SubidError::Root { uid, gid })
             );
             assert!(refused.to_string().contains("job_user"), "{refused}");
         }

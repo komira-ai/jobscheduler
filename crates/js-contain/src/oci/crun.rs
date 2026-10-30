@@ -80,21 +80,34 @@ impl JobDrop {
             .env("PATH", &self.path)
             .env("HOME", "/")
             .current_dir("/");
-        // SAFETY: the closure makes three system calls and nothing else (no allocation, no
+        // SAFETY: `drop_ids` makes three system calls and nothing else (no allocation, no
         // lock) in the forked child before it execs.
         unsafe {
-            command.pre_exec(move || {
-                let (uid, gid) = (
-                    rustix::process::Uid::from_raw(uid),
-                    rustix::process::Gid::from_raw(gid),
-                );
-                rustix::thread::set_thread_groups(&[])?;
-                rustix::thread::set_thread_res_gid(gid, gid, gid)?;
-                rustix::thread::set_thread_res_uid(uid, uid, uid)?;
-                Ok(())
-            });
+            command.pre_exec(move || drop_ids(uid, gid, clear_groups));
         }
     }
+}
+
+/// `setgroups([])`: the process keeps no supplementary group.
+fn clear_groups() -> std::io::Result<()> {
+    rustix::thread::set_thread_groups(&[]).map_err(Into::into)
+}
+
+/// The drop, in the order each call is still allowed: the groups (`groups`, which needs
+/// the privilege the later calls take away), then the gid, then the uid, each as real,
+/// effective and saved id. The first call that fails ends it, and later ones are not made.
+fn drop_ids(
+    uid: u32,
+    gid: u32,
+    groups: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let (uid, gid) = (
+        rustix::process::Uid::from_raw(uid),
+        rustix::process::Gid::from_raw(gid),
+    );
+    groups()
+        .and_then(|()| rustix::thread::set_thread_res_gid(gid, gid, gid).map_err(Into::into))
+        .and_then(|()| rustix::thread::set_thread_res_uid(uid, uid, uid).map_err(Into::into))
 }
 
 /// How the backend prepares each command line it starts: the caller's [`EnvScrub`] first,
@@ -597,7 +610,14 @@ mod tests {
         command
             .env("XDG_RUNTIME_DIR", "/run/user/0")
             .env("TOKEN", "x");
-        drop.apply(&mut command);
+        fn mark(command: &mut std::process::Command) {
+            command.env("MARKED", "yes");
+        }
+        let launch = Launch {
+            scrub: mark,
+            job: Some(&drop),
+        };
+        launch.apply(&mut command);
         let envs: Vec<_> = command.get_envs().collect();
         assert_eq!(
             envs,
@@ -608,9 +628,36 @@ mod tests {
                 ),
                 (std::ffi::OsStr::new("PATH"), Some(path)),
             ],
-            "env_clear leaves exactly the allowlist"
+            "the caller's scrub runs first and env_clear leaves exactly the allowlist"
         );
         assert_eq!(command.get_current_dir(), Some(Path::new("/")));
+    }
+
+    /// Catches the drop's order and its stop at the first failure, with the real calls as an
+    /// ordinary user (setting one's own ids is allowed; another gid and `setgroups` are not
+    /// without privilege, so the failures are the kernel's): a failing `groups` ends it
+    /// before any id call (and no id changed), a gid that is not ours ends it before the uid,
+    /// and our own ids pass. Run as root, the "not ours" calls succeed, so each result is
+    /// compared with whether this process is root.
+    #[test]
+    fn the_drop_stops_at_the_first_failing_call() {
+        let (uid, gid) = (
+            rustix::process::getuid().as_raw(),
+            rustix::process::getgid().as_raw(),
+        );
+        let root = uid == 0;
+        let boom = || Err(std::io::Error::other("groups"));
+        let failed = drop_ids(uid, gid + 1, boom).expect_err("groups first");
+        assert_eq!(failed.to_string(), "groups");
+        assert_eq!(rustix::process::getgid().as_raw(), gid);
+        assert!(drop_ids(uid, gid, || Ok(())).is_ok());
+        let other_gid = drop_ids(uid, gid + 1, || Ok(()));
+        assert_eq!(other_gid.is_ok(), root);
+        // The real `setgroups`, and the closure given to the child, as an ordinary user.
+        assert_eq!(clear_groups().is_ok(), root);
+        let job = JobDrop::new(Some((uid, gid)), None, 0).expect("root daemon");
+        let closure = move || drop_ids(job.uid, job.gid, clear_groups);
+        assert_eq!(closure().is_ok(), root);
     }
 
     /// Catches a failed `crun delete` taken for a success while the container's state is
