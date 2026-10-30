@@ -136,16 +136,17 @@ fn an_unreadable_status_page_is_silence_too() {
     assert!(text.contains("the status page is down"), "{text}");
 }
 
-/// Asserts that a server that never shows a tick time (it has not ticked once) is silent
-/// from the watcher's start. It catches a watcher that waits for a first beat before it
-/// counts, which a server wedged at boot would never give.
+/// Asserts that a pool whose tick time is null (a static pool has no scaler, and the server
+/// lists every configured pool) never raises a heartbeat alarm, however long it stays null
+/// and past several repeat periods. It catches a static-only server alarming forever.
 #[test]
-fn a_server_that_never_ticks_is_stale_from_the_watchers_start() {
+fn a_pool_with_a_null_tick_time_never_alarms() {
     let mut r = rig_at(STALE);
     r.status.show(shows(None, &[]));
-    r.tick(10);
-    r.tick(10 + STALE);
-    assert_eq!(r.sink.keys(), ["heartbeat:gpu"]);
+    for at in [10, 10 + STALE, 10 + 2 * STALE, 10 + 10 * REPEAT] {
+        r.tick(at);
+    }
+    assert!(r.sink.sent().is_empty());
 }
 
 /// Asserts the orphan path on a manual clock: an instance the provider lists and the

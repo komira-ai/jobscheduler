@@ -2,6 +2,7 @@
 //! to the sink, so a receiver that refuses or hangs never delays the caller.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -55,7 +56,9 @@ impl Outbox {
                         .pop_front()
                         .expect("the wait ended on an alert")
                 };
-                let taken = sink.send(&alert).is_ok();
+                // A sink that panics is a refusal: the alert must not stay in flight for good.
+                let sent = catch_unwind(AssertUnwindSafe(|| sink.send(&alert)));
+                let taken = sent.is_ok_and(|answer| answer.is_ok());
                 let mut queue = worker.lock();
                 queue.answers.push((alert.key, taken));
                 queue.pending -= 1;
@@ -234,5 +237,39 @@ mod tests {
         keys.sort();
         keys.dedup();
         assert_eq!(keys, ["a", "b", "c", "d"]);
+    }
+
+    /// A sink that panics once when told to, then takes everything.
+    struct Panicky {
+        panic: Mutex<bool>,
+        taken: FakeSink,
+    }
+
+    impl AlertSink for Panicky {
+        fn send(&self, alert: &Alert) -> Result<(), SinkError> {
+            if std::mem::take(&mut *self.panic.lock().unwrap()) {
+                panic!("the sink panicked");
+            }
+            self.taken.send(alert)
+        }
+    }
+
+    /// Asserts that a sink that panics is a refusal: the flush still returns, the delivery
+    /// thread survives, and the alert is sent again after the wait and delivered. It
+    /// catches a panic that kills the thread, which would leave the alert in flight for
+    /// good and stop every later alert.
+    #[test]
+    fn a_panicking_sink_is_a_refusal_and_the_thread_survives() {
+        let sink = Arc::new(Panicky {
+            panic: Mutex::new(true),
+            taken: FakeSink::new(),
+        });
+        let mut notifier = Notifier::new(sink.clone(), secs(3600), 8);
+        notifier.pass(secs(0), &holding(&["a"]));
+        notifier.flush();
+        notifier.pass(secs(1), &holding(&["a"]));
+        notifier.pass(secs(6), &holding(&["a"]));
+        notifier.flush();
+        assert_eq!(sink.taken.keys(), ["a"]);
     }
 }

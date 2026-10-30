@@ -37,7 +37,9 @@ struct Entry {
 ///
 /// - An alert is sent at the first pass it holds, and again at the first pass at or after
 ///   `repeat_after` since it was last delivered while it still holds, so one missed
-///   message does not leave a leak announced only once.
+///   message does not leave a leak announced only once. The time of a delivery is the pass
+///   that read the sink's answer, so the period between two messages is `repeat_after` plus
+///   up to one pass interval plus the sink's latency.
 /// - One that clears and returns after its message was delivered is said again.
 /// - A refused alert is sent again after a wait that doubles with each refusal (from
 ///   [`RETRY_BASE`] to [`RETRY_CAP`]), and it stays pending until it has been delivered

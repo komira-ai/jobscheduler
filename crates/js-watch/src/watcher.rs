@@ -141,7 +141,9 @@ impl Watcher {
                         *seen = (beat, now);
                     }
                     let silent = now.saturating_sub(seen.1);
-                    if silent >= self.settings.stale_after {
+                    // A pool whose tick time is null has no scaler (a static pool, say):
+                    // it has no heartbeat to lose, so it never alarms.
+                    if beat.is_some() && silent >= self.settings.stale_after {
                         found.insert(
                             format!("heartbeat:{pool}"),
                             format!(

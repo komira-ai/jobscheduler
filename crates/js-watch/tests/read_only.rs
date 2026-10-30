@@ -72,7 +72,13 @@ const CALLS: [&str; 13] = [
 ];
 
 /// The names of the types that have such calls.
-const HOLDERS: [&str; 4] = ["LambdaApi", "LambdaProvider", "HttpApi", "ElasticProvider"];
+const HOLDERS: [&str; 5] = [
+    "LambdaApi",
+    "LambdaProvider",
+    "HttpApi",
+    "ElasticProvider",
+    "full_handle",
+];
 
 /// The files of the crate that hold the spend side, by name: the abort and the handle it
 /// uses, the client builder, and the fake abort target. Every other file under `src` is the
@@ -116,6 +122,7 @@ fn the_scan_finds_a_spend_word_and_only_then() {
     assert_eq!(spends("agent.post(url)", false), [".post("]);
     assert_eq!(spends("client.cancel()", false), ["cancel"]);
     assert_eq!(spends("Arc<dyn LambdaApi>", true), ["LambdaApi"]);
+    assert_eq!(spends("client::full_handle(t)", true), ["full_handle"]);
     assert!(spends("Arc<dyn LambdaApi>", false).is_empty());
     assert!(spends("self.reader.tagged()", true).is_empty());
     let hidden = "keep // terminate\n/// delete\nx /* kill\n stop */ y /* z */ w";

@@ -475,6 +475,7 @@ mod agent_pool;
 mod agent_state;
 mod agent_tokens;
 mod agents;
+mod alerts;
 mod api;
 pub mod bootstrap;
 mod capacity;
@@ -506,6 +507,7 @@ mod usage_api;
 mod usage_hub;
 mod usage_js;
 mod usage_map;
+mod usage_setup;
 mod util;
 mod wire;
 

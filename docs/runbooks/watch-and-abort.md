@@ -25,8 +25,9 @@ of `js_alert::AlertSink`.
 - `heartbeat:<pool>`: that pool's `last_tick_ms` has not changed for `stale_after_secs`. It is per
   pool, so one wedged pool alarms whatever the others do. `heartbeat`: the status page could not be
   read that long. The comparison is on the watcher's own clock, so a skew between the two hosts does
-  not matter. A server with no elastic pool shows no pool on `/v1/pools`, so there is no heartbeat
-  to watch and no machine to compare: the watcher is for servers that launch machines. A tick that
+  not matter. `/v1/pools` lists every configured pool; a pool with no scaler (a static pool) has a
+  null `last_tick_ms`, no heartbeat to lose, and never alarms. The watcher is for servers that launch
+  machines. A tick that
   cannot write the scaler's records (disk full) does nothing else and does not finish, so
   `last_tick_ms` stops moving then and the alarm is meant.
 - `unexplained:<cloud>:<id>`: the cloud lists an instance of the scheduler that the server's machines
@@ -55,7 +56,6 @@ stale_after_secs = 300      # optional
 confirm_ticks = 2           # optional
 sweep_every_secs = 1800     # optional
 repeat_after_secs = 3600    # optional: a holding alert is sent again this often
-repeat_after_secs = 3600    # optional: a holding alert is sent again this often
 
 [lambda]
 api_key_file = "/run/credentials/js-watch/lambda-key"
@@ -66,6 +66,12 @@ webhook_token_file = "/run/credentials/js-watch/webhook-token"   # optional
 ```
 
 `js-watch run --config FILE` runs until killed; `--ticks 1` makes one pass (for a timer).
+The dedupe is per process: under a timer with `--ticks 1` every run starts with no memory, so every
+holding alert is sent again at every run and `repeat_after_secs` does not apply there. Run it as one
+long process if that is not wanted.
+
+A holding alert is sent again after `repeat_after`, plus up to one tick, plus the sink's latency (the
+repeat is decided at a tick, and its delivery completes after the receiver answers).
 
 A webhook configured on a server with no elastic pool starts, with a warning: nothing raises an alert there.
 

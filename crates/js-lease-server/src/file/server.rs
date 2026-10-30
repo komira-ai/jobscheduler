@@ -8,9 +8,10 @@ use js_elastic::SchedulerId;
 use js_lease::Settings;
 
 use super::{Load, Section};
-use crate::config::{BootMode, DEFAULT_PROFILE_STORE_BYTES, Limits, TlsFiles, Token, parse_token};
+use crate::config::{BootMode, Limits, TlsFiles, Token, parse_token};
 use crate::error::StartupError;
 use crate::rate::HelloLimit;
+use crate::usage_setup::DEFAULT_PROFILE_STORE_BYTES;
 
 const SERVER_KEYS: &[&str] = &[
     "listen",

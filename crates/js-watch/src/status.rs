@@ -23,10 +23,12 @@ pub struct Machine {
 /// What the status page says that the watcher uses.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Status {
-    /// For each pool, the time of the server's last finished scaler tick for it, in the
-    /// server's own milliseconds; `None` before its first. Only whether it changes is
-    /// used, so a skew between the two clocks does not matter. A server with no elastic
-    /// pool shows no pool here and has no heartbeat to watch.
+    /// For each pool the server lists, the time of the server's last finished scaler tick,
+    /// in the server's own milliseconds. It is `None` for a pool that has no scaler (a
+    /// static pool; the server lists every configured pool) and, for a launching pool,
+    /// only before its first tick. Only whether it changes is used, so a skew between the
+    /// two clocks does not matter. A pool whose value is `None` has no heartbeat to
+    /// watch.
     pub beats: BTreeMap<String, Option<u64>>,
     /// The machines the server's records hold, orphans left out.
     pub machines: Vec<Machine>,

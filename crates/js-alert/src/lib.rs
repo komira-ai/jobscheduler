@@ -5,7 +5,7 @@
 //!   it was given, for tests. There is no mail sink: the workspace holds no SMTP client,
 //!   and a mail implementation is one more `impl AlertSink` when one is added.
 //! - [`Said`] is the dedupe, with time as an input. Each pass hands it the alerts that hold;
-//!   it returns the ones to send: a new one, a holding one every `repeat_after` (so one lost
+//!   it returns the ones to send: a new one, a holding one every `repeat_after`, plus up to one pass and the sink's latency (so one lost
 //!   message does not leave a leak announced only once), and one the sink refused after a
 //!   wait that doubles up to a cap. A refused alert stays pending until it has been
 //!   delivered once, even if it clears meanwhile; one that clears after delivery and
