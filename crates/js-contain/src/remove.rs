@@ -14,6 +14,10 @@
 //! Every entry is unlinked without being looked at first: `unlinkat` removes a file, a
 //! symlink (never its target), a socket or a device, and refuses a directory with
 //! `EISDIR`, which the walk then empties and removes.
+//!
+//! An entry that is gone by the time the walk reaches it (`ENOENT` from the unlink, the
+//! open of a listed subdirectory or the rmdir) was removed by someone else: it is
+//! already removed, and the walk goes on. The root itself is not such an entry.
 
 use std::ffi::{OsStr, OsString};
 use std::os::fd::OwnedFd;
@@ -49,6 +53,10 @@ enum Step {
 /// Removes the directory `dir` and everything in it, at any depth. An error (a
 /// directory the daemon's user may not read or write) stops the walk and leaves the
 /// rest; `NotFound` means `dir` is already gone.
+///
+/// An entry that vanishes once the walk is underway (listed, then removed by someone
+/// else before the walk reaches it) is already removed, not a failure. An entry that
+/// appears (`ENOTEMPTY`) is one.
 pub fn remove_tree(dir: &Path) -> std::io::Result<()> {
     remove_tree_with(dir, &mut |_, _, _| {})
 }
@@ -68,7 +76,15 @@ fn remove_tree_with(
     while let Some(mut top) = stack.pop() {
         if let Some(name) = top.subdirectories.pop() {
             before(Step::Open, &here, &name);
-            let child = rustix::fs::openat(&here, name.as_os_str(), DIRECTORY, Mode::empty())?;
+            let child = match rustix::fs::openat(&here, name.as_os_str(), DIRECTORY, Mode::empty())
+            {
+                // Removed by someone else since the listing: carry on with the rest.
+                Err(Errno::NOENT) => {
+                    stack.push(top);
+                    continue;
+                }
+                other => other?,
+            };
             let frame = Frame {
                 name,
                 id: identity(&child)?,
@@ -82,11 +98,24 @@ fn remove_tree_with(
         if let Some(parent) = stack.last() {
             here = back_to_parent(&here, parent.id)?;
             before(Step::Rmdir, &here, &top.name);
-            rustix::fs::unlinkat(&here, top.name.as_os_str(), AtFlags::REMOVEDIR)?;
+            // Removed by someone else, which is what was wanted.
+            gone_is_removed(rustix::fs::unlinkat(
+                &here,
+                top.name.as_os_str(),
+                AtFlags::REMOVEDIR,
+            ))?;
         }
     }
     drop(here);
     std::fs::remove_dir(dir)
+}
+
+/// A removal that found nothing to remove has done its job.
+fn gone_is_removed(removal: Result<(), Errno>) -> Result<(), Errno> {
+    match removal {
+        Err(Errno::NOENT) => Ok(()),
+        other => other,
+    }
 }
 
 /// Unlinks every entry of `dir` that is not a directory, and returns the names of
@@ -106,7 +135,12 @@ fn unlink_all_but_directories(
     let mut subdirectories = Vec::new();
     for name in names {
         before(Step::Unlink, dir, &name);
-        match rustix::fs::unlinkat(dir, name.as_os_str(), AtFlags::empty()) {
+        // An entry removed by someone else since the listing needs no unlink.
+        match gone_is_removed(rustix::fs::unlinkat(
+            dir,
+            name.as_os_str(),
+            AtFlags::empty(),
+        )) {
             Err(Errno::ISDIR) => subdirectories.push(name),
             other => other?,
         }
