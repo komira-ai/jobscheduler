@@ -92,6 +92,8 @@ pub struct RunView {
     pub result: Option<RunResult>,
     /// The profile name the lease holder supplied for the work the run does, when it did.
     pub profile: Option<ProfileKey>,
+    /// The labels the run was queued with.
+    pub labels: BTreeMap<String, String>,
 }
 
 /// Why a run was not queued, or not stopped. Each has a constant code
@@ -281,6 +283,7 @@ impl Run {
             state: self.state(),
             result: self.result.clone(),
             profile: self.profile.clone(),
+            labels: self.spec.labels.clone(),
         }
     }
 

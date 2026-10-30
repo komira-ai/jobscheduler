@@ -16,7 +16,7 @@ use std::time::Duration;
 use js_elastic::{ElasticProvider, GpuClass, SchedulerId};
 use js_lease::Clock as LeaseClock;
 use js_provider_lambdalabs as lambda;
-use js_types::{ExecMode, ResourceClass};
+use js_types::{ExecMode, MemoryPercent, ResourceClass};
 
 use crate::adapt::SharedClock;
 use crate::capacity::{CapacitySource, StaticPoolSource};
@@ -58,6 +58,9 @@ pub struct BuildCtx<'a> {
     pub pool: &'a str,
     /// The class the pool serves.
     pub class: &'a ResourceClass,
+    /// The pool's `memory_schedulable_percent`, when its table sets one: a kind that
+    /// lists hosts the operator describes books that share of their memory.
+    pub memory_percent: Option<MemoryPercent>,
     /// The server's clock.
     pub clock: SharedClock,
     /// How the constructor reads a secret file.
@@ -159,6 +162,10 @@ fn static_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErr
         reason: refused.reason,
     })?;
     let source = StaticPoolSource::new(path).with_classes(vec![ctx.class.clone()]);
+    let source = match ctx.memory_percent {
+        Some(percent) => source.with_memory_percent(percent),
+        None => source,
+    };
     Ok(Built::Static(Box::new(source)))
 }
 

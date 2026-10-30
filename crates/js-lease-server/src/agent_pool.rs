@@ -13,7 +13,9 @@ use std::path::Path;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, limits};
 use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig, WholeNodeConfig};
-use js_types::{Admission, ClassId, ExecMode, ProviderId, ResourceClass, Resources, Shape};
+use js_types::{
+    Admission, ClassId, ExecMode, MemoryPercent, ProviderId, ResourceClass, Resources, Shape,
+};
 use serde::Deserialize;
 use tracing::warn;
 
@@ -32,6 +34,8 @@ struct RawPool {
     class: String,
     max_machines: usize,
     shape: RawShape,
+    // The share of `shape.memory_bytes` the pool books, from 1 to 100; absent, all of it.
+    memory_schedulable_percent: Option<u64>,
     #[serde(default)]
     capabilities: BTreeMap<String, String>,
     heartbeat_interval: Option<String>,
@@ -155,8 +159,13 @@ fn parse_with(
         DEFAULT_HEARTBEAT_INTERVAL_MS,
     )?;
     let grace = millis("grace", raw.grace, DEFAULT_GRACE_MS)?;
+    let percent = match raw.memory_schedulable_percent {
+        Some(percent) => MemoryPercent::new(percent).map_err(|err| err.to_string())?,
+        None => MemoryPercent::FULL,
+    };
     let shape = Shape::new(resources, raw.capabilities);
     let pool = PoolConfig::new(name, class, shape, raw.max_machines)
+        .with_memory_percent(percent)
         .with_timing(interval, grace)
         .map_err(|err| format!("heartbeat_interval and grace: {err}"))?;
     let retention = millis(
@@ -265,7 +274,7 @@ fn within(field: &str, value: u64, max: u64) -> Result<(), String> {
 
 /// Refuses capabilities no hello could report: more than the wire allows, or a key or
 /// value longer than it allows.
-fn capabilities_fit(capabilities: &BTreeMap<String, String>) -> Result<(), String> {
+pub(crate) fn capabilities_fit(capabilities: &BTreeMap<String, String>) -> Result<(), String> {
     let few = capabilities.len() <= limits::MAX_CAPABILITIES;
     let short = capabilities.iter().all(|(key, value)| {
         let key_fits = key.len() <= limits::MAX_CAPABILITY_KEY_LEN;
@@ -285,7 +294,8 @@ fn millis(field: &str, text: Option<String>, default: u64) -> Result<u64, String
         return Ok(default);
     };
     let parsed = parse_duration(&text).map_err(|err| format!("{field}: {err}"))?;
-    u64::try_from(parsed.as_millis()).map_err(|_| format!("{field}: is too long"))
+    // A parsed duration is a `u64` count of milliseconds, so the conversion cannot fail.
+    Ok(u64::try_from(parsed.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]
@@ -341,6 +351,34 @@ mod tests {
         assert_eq!(container.exec(), Some(ExecMode::Container));
         let mac = parse(&with("exec = \"sandbox-exec\"")).unwrap();
         assert_eq!(mac.exec(), Some(ExecMode::SandboxExec));
+    }
+
+    /// `memory_schedulable_percent` cuts the memory of `[shape]` the pool books, rounding
+    /// down, and leaves the floor a host must meet whole; a file without it books all of
+    /// it; 0, 101, -1, a word and 90.5 are refused naming the key; the key placed after `[shape]` is a key of
+    /// that table and refused. It catches a percent read and dropped, one that cuts the
+    /// floor instead of the booking, and one that rounds up.
+    #[test]
+    fn the_memory_percent_cuts_what_is_booked_and_not_the_floor() {
+        let whole = parse(MINIMAL).unwrap().memory_headroom();
+        assert_eq!(whole.percent(), MemoryPercent::FULL);
+        assert_eq!(whole.bookable_bytes(), 8_589_934_592);
+        let cut = parse(&with("memory_schedulable_percent = 90")).unwrap();
+        assert_eq!(cut.memory_headroom().configured_bytes(), 8_589_934_592);
+        assert_eq!(cut.memory_headroom().percent().get(), 90);
+        assert_eq!(cut.memory_headroom().bookable_bytes(), 7_730_941_132);
+        assert_eq!(cut.memory_percent().get(), 90);
+        for bad in ["0", "101"] {
+            let said = parse(&with(&format!("memory_schedulable_percent = {bad}"))).unwrap_err();
+            assert_eq!(said, "memory_schedulable_percent must be from 1 to 100");
+        }
+        for bad in ["-1", "\"ninety\"", "90.5"] {
+            let said = parse(&with(&format!("memory_schedulable_percent = {bad}"))).unwrap_err();
+            assert!(said.contains("memory_schedulable_percent"), "{bad}: {said}");
+        }
+        let inside = format!("{MINIMAL}memory_schedulable_percent = 90\n");
+        let said = parse(&inside).unwrap_err();
+        assert!(said.contains("memory_schedulable_percent"), "{said}");
     }
 
     /// A file in the temp directory that is removed when the guard drops, so a failing
@@ -454,12 +492,38 @@ mod tests {
         assert!(parse(&value_long).unwrap_err().contains("capabilities"));
     }
 
-    /// A duration too long to count in milliseconds is refused rather than wrapped; the
-    /// flags' durations are whole seconds in a `u64`, so only the conversion can fail.
+    /// A duration too long to count in milliseconds is refused with the field's name
+    /// rather than wrapped.
     #[test]
     fn a_duration_that_overflows_milliseconds_is_refused() {
         let text = Some("18446744073709551615s".to_string());
-        assert!(millis("grace", text, 0).is_err());
+        assert!(millis("grace", text, 0).unwrap_err().starts_with("grace:"));
+    }
+
+    /// Asserts that the heartbeat interval takes milliseconds down to the wire's 250 ms
+    /// minimum and no lower, naming the field below it, and that second-based values read
+    /// as before. It catches an `ms` suffix that is refused, a minimum that drifts from
+    /// the wire's, and a unit scaled wrongly (`1s` read as 1 ms, or `250ms` as 250 s).
+    #[test]
+    fn heartbeat_interval_takes_milliseconds_down_to_the_wire_minimum() {
+        let base = parse(MINIMAL).unwrap();
+        let cases = [
+            ("250ms", 250),
+            ("1500ms", 1500),
+            ("10s", 10_000),
+            ("10", 10_000),
+        ];
+        for (text, millis) in cases {
+            let got = parse(&with(&format!(
+                "heartbeat_interval = \"{text}\"\ngrace = \"1m\""
+            )))
+            .unwrap();
+            let want = base.clone().with_timing(millis, 60_000).unwrap();
+            assert_eq!(got, want, "{text}");
+        }
+        let low = "heartbeat_interval = \"249ms\"\ngrace = \"1m\"";
+        let refused = parse(&with(low)).unwrap_err();
+        assert!(refused.contains("heartbeat_interval"), "{refused}");
     }
 
     fn whole(extra: &str) -> String {
