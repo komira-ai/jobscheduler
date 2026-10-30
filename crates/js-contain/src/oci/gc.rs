@@ -38,8 +38,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use super::image::{ImageCheckError, Images};
 use super::Oci;
+use super::image::{ImageCheckError, Images};
 
 /// What one collection did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -78,8 +78,10 @@ impl std::fmt::Display for GcReport {
 
 /// A stub: nothing is marked yet.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct InUse;
 
+#[allow(dead_code)]
 impl Images {
     /// A stub.
     pub(crate) fn begin_use(&self, _hex: &str) -> Result<InUse, ImageCheckError> {

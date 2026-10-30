@@ -143,7 +143,10 @@ fn an_unreferenced_digest_is_removed_and_only_digests() {
     let report = fx.oci.collect_images(&[], &[]).expect("collected");
     assert_eq!(report.removed, [digest('a'), digest('b')]);
     assert_eq!((report.kept, report.failed.len()), (0, 0), "{report:?}");
-    assert_eq!(names(&fx.images), ["A".repeat(64), "abc".to_owned(), "note".to_owned()]);
+    assert_eq!(
+        names(&fx.images),
+        ["A".repeat(64), "abc".to_owned(), "note".to_owned()]
+    );
 }
 
 /// Catches a named digest being removed, the `sha256:` form and the bare hex taking
@@ -208,7 +211,14 @@ async fn an_unpack_in_flight_is_not_disturbed() {
     let report = fx.oci.collect_images(&[], &[]).expect("collected");
     assert_eq!(report.removed, [digest('b')]);
     let after = names(&fx.images);
-    assert_eq!(after, before.iter().filter(|n| **n != hexn('b')).cloned().collect::<Vec<_>>());
+    assert_eq!(
+        after,
+        before
+            .iter()
+            .filter(|n| **n != hexn('b'))
+            .cloned()
+            .collect::<Vec<_>>()
+    );
     go_tx.send(()).expect("the fetch waits");
     flight.await.expect("joined").expect("unpacked");
     assert!(fx.images.join(hexn('a')).is_dir());
@@ -271,7 +281,11 @@ async fn a_removed_digest_is_fetched_again_by_the_next_use() {
     let report = fx.oci.collect_images(&[], &[]).expect("collected");
     assert_eq!(report.removed, [digest('a')]);
     fx.oci.check_pinned(&image_a).await.expect("second use");
-    assert_eq!(source.calls.load(Ordering::SeqCst), 2, "served from a stale flight");
+    assert_eq!(
+        source.calls.load(Ordering::SeqCst),
+        2,
+        "served from a stale flight"
+    );
     assert!(fx.images.join(hexn('a')).is_dir());
 }
 
@@ -292,9 +306,15 @@ fn a_symlink_in_a_stored_tree_cannot_reach_outside_the_store() {
     std::os::unix::fs::symlink(&outside, fx.images.join(hexn('b'))).expect("name link");
     std::fs::create_dir_all(fx.images.join(hexn('c'))).expect("c");
     std::os::unix::fs::symlink(&outside, fx.images.join(hexn('c')).join(ROOTFS)).expect("rootfs");
-    let report = fx.oci.collect_images(&[digest('c')], &[]).expect("collected");
+    let report = fx
+        .oci
+        .collect_images(&[digest('c')], &[])
+        .expect("collected");
     assert_eq!(report.removed, [digest('a'), digest('b'), digest('c')]);
-    assert_eq!(std::fs::read(outside.join("precious")).expect("intact"), b"keep");
+    assert_eq!(
+        std::fs::read(outside.join("precious")).expect("intact"),
+        b"keep"
+    );
     assert_eq!(names(&outside), ["precious"]);
     assert!(names(&fx.images).is_empty(), "{:?}", names(&fx.images));
 }
@@ -320,7 +340,11 @@ async fn what_a_crash_left_is_removed_and_the_image_can_unpack_again() {
         "x86_64",
     )
     .expect("restarts");
-    assert_eq!(names(&fx.images), [hexn('a')], "the start leaves the digest dir");
+    assert_eq!(
+        names(&fx.images),
+        [hexn('a')],
+        "the start leaves the digest dir"
+    );
     let report = restarted
         .collect_images(&[digest('a')], &[])
         .expect("collected");
@@ -370,7 +394,10 @@ fn the_report_counts_the_disk_of_what_went_and_what_stays() {
     image(&fx.images, 'a', 10_000);
     image(&fx.images, 'b', 300_000);
     let (kept, gone) = (image_disk(&fx.images, 'a'), image_disk(&fx.images, 'b'));
-    let report = fx.oci.collect_images(&[digest('a')], &[]).expect("collected");
+    let report = fx
+        .oci
+        .collect_images(&[digest('a')], &[])
+        .expect("collected");
     assert_eq!((report.removed_bytes, report.kept_bytes), (gone, kept));
     assert!(gone > kept, "the larger image went");
     let shown = report.to_string();
@@ -378,7 +405,10 @@ fn the_report_counts_the_disk_of_what_went_and_what_stays() {
         shown.contains(&format!("removed 1 digest(s) ({gone} bytes)")),
         "{shown}"
     );
-    assert!(shown.contains(&format!("({kept} bytes in the store)")), "{shown}");
+    assert!(
+        shown.contains(&format!("({kept} bytes in the store)")),
+        "{shown}"
+    );
 }
 
 /// Catches a removal that cannot finish being reported as done, or hidden: a directory
@@ -394,7 +424,10 @@ fn a_digest_that_cannot_be_removed_is_reported_and_stays_counted() {
     std::fs::set_permissions(&locked, mode(0o500)).expect("chmod");
     let report = fx.oci.collect_images(&[], &[]).expect("collected");
     std::fs::set_permissions(&locked, mode(0o755)).expect("chmod back");
-    assert!(report.removed.is_empty() && report.removed_bytes == 0, "{report:?}");
+    assert!(
+        report.removed.is_empty() && report.removed_bytes == 0,
+        "{report:?}"
+    );
     assert_eq!(report.failed.len(), 1, "{report:?}");
     assert!(report.failed[0].starts_with(&digest('a')), "{report:?}");
     assert!(report.kept_bytes > 0, "{report:?}");
