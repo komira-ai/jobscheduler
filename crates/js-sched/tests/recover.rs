@@ -805,3 +805,57 @@ fn a_late_commit_of_a_superseded_grant_leaves_the_current_lease_to_end_the_opera
     assert_eq!(answer.lease, grant.lease);
     assert_eq!(s.leases_held(), 0);
 }
+
+/// `request` booking `disk` bytes of scratch disk.
+fn with_disk(request: Request, disk: u64) -> Request {
+    Request {
+        resources: request.resources.with_disk_bytes(disk),
+        ..request
+    }
+}
+
+/// Registers `name` with 4 cores, 8 GiB and 100 GiB of scratch disk.
+fn up_with_disk(s: &mut Scheduler, secs: u64, name: &str) {
+    let caps = NodeCaps::from_report([("arch", "x86_64"), ("os", "linux")])
+        .expect("caps")
+        .with_drivers(["container"]);
+    let event = Event::WorkerUp {
+        worker: node(name),
+        instance: DaemonInstance::new("daemon"),
+        predecessor_stopped: false,
+        capacity: Resources::new(4_000, 8 * GIB).with_disk_bytes(100 * GIB),
+        caps,
+    };
+    assert!(feed(s, secs, event).is_empty());
+}
+
+/// Catches: a recovered lease that books its cpu and memory again but not its disk (the
+/// scratch disk of a lease that survived a restart is offered a second time, so two leases
+/// hold the same bytes), and a queued request for more disk than is left that is granted
+/// beside it. The request of the lease comes back through the store with its disk, and the
+/// worker's first heartbeat that lists the lease books it in full.
+#[test]
+fn a_recovered_lease_books_its_disk_again() {
+    let mut s = recovered(vec![
+        leased(3, with_disk(request(3), 60 * GIB), 5, "node-a"),
+        queued(4, with_disk(request(4), 60 * GIB)),
+        queued(5, with_disk(request(5), 40 * GIB)),
+    ]);
+    let lease = LeaseId::new(TERM, 5);
+    up_with_disk(&mut s, 5, "node-a");
+    heartbeat(&mut s, 6, "node-a", vec![lease]);
+    assert_eq!(
+        s.booked(&node("node-a")),
+        Some(Resources::new(1_000, GIB).with_disk_bytes(60 * GIB))
+    );
+    let effects = feed(&mut s, 7, Event::Tick);
+    let granted: Vec<u64> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Commit(ControlRecord::Lease(g)) => Some(g.operation.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(granted, [5]);
+    assert_eq!(s.state(OperationId(4)), Some(&OpState::Queued));
+}
