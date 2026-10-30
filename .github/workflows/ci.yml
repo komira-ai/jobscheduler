@@ -132,6 +132,7 @@ jobs:
             crates/js-cli/
             crates/js-client/
             crates/js-elastic/
+            crates/js-elastic-fake/
             crates/js-lease/
             crates/js-lease-server/
             crates/js-pool-static/
