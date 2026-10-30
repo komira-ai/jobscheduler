@@ -453,6 +453,14 @@ fn counted(listing: &Value, comment: &str) -> u64 {
         .unwrap_or_else(|| panic!("no counted rule {comment:?}"))
 }
 
+/// Removes both tables of the agent, as a fresh host has none (mode none leaves whatever an
+/// earlier test loaded alone).
+pub fn clear_tables() {
+    let nft = tool("nft");
+    let _ = run(&nft, &["delete", "table", "inet", "js_crun_egress"]);
+    let _ = run(&nft, &["delete", "table", "ip", "js_crun_egress_nat"]);
+}
+
 /// Deletes the rule commented `comment` from the forward chain.
 pub fn delete_rule(comment: &str) {
     let listing: Value = serde_json::from_str(&nft(&[

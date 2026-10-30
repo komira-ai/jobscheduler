@@ -68,7 +68,7 @@ fn readdress(holder: &Holder, old: &str, new: &str, mac: &str) {
 /// takes an address outside the pool, and then another run's address of the pool, gets no
 /// connection to the allowed endpoint: the firewall's `spoof` rule counts both and the
 /// listener sees nothing. The control removes that rule: the first spoof (with a route back
-/// to it, as a real attacker would need) then connects and the far host answers a source the
+/// to it, as a real attacker would need) then connects and the far host sees, and answers, a source the
 /// host never gave out, and the second is forwarded (the allowance counts it). So the rule is
 /// what refused them.
 #[test]
@@ -103,11 +103,16 @@ fn a_job_cannot_send_from_an_address_that_is_not_its_own() {
     // The control: without the rule.
     delete_rule("spoof");
     ip(&["route", "add", "203.0.113.9/32", "dev", "jsv0"]);
+    far_host.ip(&["route", "add", "203.0.113.9/32", "via", "192.0.2.1"]);
     readdress(&a, "198.18.0.6/32", "203.0.113.9/32", mac);
     let reached = tcp(&a.ns, far::ALLOWED);
     assert!(reached.connected(), "{reached:?}");
     assert_eq!(allowed.accepted(), 1);
-    assert_eq!(allowed.peers(), [IpAddr::V4(far::HOST)]);
+    assert_eq!(
+        allowed.peers(),
+        [IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 9))],
+        "the far host saw an address the host never gave out"
+    );
     readdress(&a, "203.0.113.9/32", "198.18.0.6/32", mac);
     let forwarded = packets("allow-0");
     let _ = tcp(&a.ns, far::ALLOWED);

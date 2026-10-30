@@ -8,7 +8,7 @@ use js_agent::egress::{Config, Egress};
 use js_contain::container::Ended;
 
 use crate::container::{ContainerHost, Network, PROBE, block_on, interfaces, section};
-use crate::sys::{Far, Server, far, links, serial, table_loaded};
+use crate::sys::{Far, Server, clear_tables, far, links, serial, table_loaded};
 
 /// Asserts what the default mode gives, from inside a real container: the only interface is
 /// `lo`, the routing table is empty, a connection to an address that exists on the far host
@@ -24,6 +24,7 @@ fn the_default_mode_gives_a_job_loopback_only_and_no_route() {
     let far_host = Far::new();
     let allowed = Server::tcp(&far_host.ns, far::ALLOWED);
     let metadata = Server::tcp(&far_host.ns, far::METADATA);
+    clear_tables();
     let egress = Egress::start(Config::none()).expect("start");
     egress.check().expect("mode none has nothing to check");
     let script = format!(
