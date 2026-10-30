@@ -6,6 +6,11 @@
 //! [`js_registry::Registry::heartbeat`]); this module is the consumer's side of that.
 //! The run service of the design replaces these routes.
 //!
+//! A run is a container job (`image`) or a native job (`native`: a program, its arguments
+//! and a network level, run on the host by an agent that reported the `sandbox-exec` mode),
+//! never both. A native job may pin a bundle (`bundle`, `name[:tag]@sha256:<digest>`) its
+//! program is taken from; the host must have reported a bundle store.
+//!
 //! Runs are in memory only. A restart forgets them, and the hosts that still run any are
 //! told to cancel them when they say hello again: a run that was running is killed with no
 //! result, and its work is lost. A client that asks after such a run (`GET` or `DELETE` of
@@ -27,7 +32,8 @@ use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use js_agent_wire::{
-    Isolation, JobSpec, Limits, LogTail, Mount, Outcome, RunFile, limits, validate_files,
+    Isolation, JobSpec, Limits, LogTail, Mount, NativeSpec, NetworkLevel, Outcome, RunFile, limits,
+    validate_files,
 };
 use js_lease::{Clock, LeaseInfo, LeaseState};
 use js_registry::{RunRefusal, RunView};
@@ -66,7 +72,18 @@ pub(crate) fn router(shared: Arc<Shared>, agents: Arc<Agents>) -> Router {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunBody {
-    image: String,
+    /// The container image. A job has this or `native`, never both; a body with neither
+    /// is a 400 and one with both is a 422 (see [`JobSpec::validate`]).
+    #[serde(default)]
+    image: Option<String>,
+    /// A program to run on the host instead of a container, only on a host that reported
+    /// the `sandbox-exec` mode.
+    #[serde(default)]
+    native: Option<NativeBody>,
+    /// The bundle the native job pins, `name[:tag]@sha256:<manifest digest>`; only beside
+    /// `native`, and only for a host that reported a bundle store.
+    #[serde(default)]
+    bundle: Option<String>,
     #[serde(default)]
     args: Vec<String>,
     limits: LimitsBody,
@@ -91,6 +108,34 @@ struct RunBody {
     /// hostile run can skew that profile's curve.
     #[serde(default)]
     profile: Option<String>,
+}
+
+/// The `native` object of a [`RunBody`]: what a client may ask of a native job. The wire's
+/// [`NativeSpec`] has more (environment, working directory, inputs, outputs); they are not
+/// on this route, so a key it does not name is a 400.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeBody {
+    program: String,
+    #[serde(default)]
+    args: Vec<String>,
+    /// How much network the job may use; absent means none.
+    #[serde(default)]
+    network: NetworkLevel,
+}
+
+impl From<NativeBody> for NativeSpec {
+    fn from(body: NativeBody) -> Self {
+        Self {
+            program: body.program,
+            args: body.args,
+            env: Default::default(),
+            cwd: String::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            network: body.network,
+        }
+    }
 }
 
 /// The profile name of a [`RunBody`], or the 422 `invalid-profile` when it is not a
@@ -197,6 +242,8 @@ impl From<RunRefusal> for ApiError {
             | RunRefusal::NoCapacity
             | RunRefusal::FilesUnsupported
             | RunRefusal::DiskUnsupported
+            | RunRefusal::NativeUnsupported
+            | RunRefusal::BundleUnsupported
             | RunRefusal::RunExists => StatusCode::CONFLICT,
         };
         ApiError::coded(status, refusal.code())
@@ -240,6 +287,12 @@ async fn start(
 ) -> Result<Response, ApiError> {
     let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
     let body = parse::<RunBody>(&body)?;
+    // A job names what runs, an image or a native body: a body with neither is as
+    // unreadable as one that lacks a required field.
+    if body.image.is_none() & body.native.is_none() {
+        let why = "the body names neither an image nor a native job";
+        return Err(ApiError::bad_request(why));
+    }
     // A bad file is the body's fault, whatever the lease or the host: answered before any
     // state is read. The error names the rule and never repeats a name or contents.
     validate_files(&body.files)
@@ -259,7 +312,7 @@ async fn start(
     let spec = JobSpec {
         run_id: run_id.clone(),
         lease_id: id.to_string(),
-        image: body.image,
+        image: body.image.unwrap_or_default(),
         args: body.args,
         limits: Limits {
             cpu_millis: body.limits.cpu_millis,
@@ -275,8 +328,8 @@ async fn start(
         labels: body.labels,
         heartbeat_seq: 0,
         valid_for_ms: left.min(limits::MAX_VALID_FOR_MS),
-        bundle: None,
-        native: None,
+        bundle: body.bundle,
+        native: body.native.map(NativeSpec::from),
     };
     let queued = api
         .agents
