@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use tokio::io::AsyncReadExt as _;
+
 use js_contain::cgroup::OomOutcome;
 use js_contain::container::ContainerLimits;
 
@@ -52,13 +54,19 @@ async fn running_until_ended(cell: &Cell, name: &str) -> (Lease, js_contain::run
         },
     );
     let mut running = cell.start(&lease).await;
-    // Opening the pipe for reading blocks until the job opens it for writing: the job is
-    // up when this returns. A container that ends first is a failure, not a wait.
-    let opened = tokio::task::spawn_blocking(move || std::fs::read_to_string(ready));
+    // The pipe is opened for reading and writing so that the open does not wait for the job
+    // (which blocks opening it for writing until someone reads), and is read without
+    // blocking a thread: the job is up when its word arrives. A container that ends first
+    // is a failure, not a wait.
+    let mut pipe = tokio::net::unix::pipe::OpenOptions::new()
+        .read_write(true)
+        .open_receiver(&ready)
+        .expect("open the pipe");
+    let mut said = [0u8; 16];
     tokio::select! {
-        said = opened => {
-            let said = said.expect("the reader task").expect("read the pipe");
-            assert_eq!(said.trim(), "ready");
+        n = pipe.read(&mut said) => {
+            let n = n.expect("read the pipe");
+            assert_eq!(&said[..n], b"ready\n");
         }
         () = running.wait() => {
             let run = cell.finish(&lease, running).await;
