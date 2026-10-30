@@ -113,7 +113,14 @@ fn a_slow_pull_does_not_hold_up_another_run() {
     let mut expected = vec!["result quick".to_owned()];
     expected.extend(cleanup("quick"));
     assert_eq!(names(&h.life.step()), expected);
-    assert_eq!(held(&h), [("slow".to_owned(), HeldState::Starting)]);
+    // The finished run stays held until its result is acknowledged; the cold one waits on.
+    assert_eq!(
+        held(&h),
+        [
+            ("slow".to_owned(), HeldState::Starting),
+            ("quick".to_owned(), HeldState::ExitedUnacked)
+        ]
+    );
     assert_eq!(h.fake.created().len(), 1);
 }
 
