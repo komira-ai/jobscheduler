@@ -62,6 +62,8 @@ pub struct World {
     pub release_answer: Option<Released>,
     /// When set, the provider's `list` says it has been called and then waits to be let go.
     pub gate: Option<Arc<Gate>>,
+    /// The lifetime each acquire carried, in the order the acquires were made.
+    pub lifetimes: Vec<Option<Duration>>,
 }
 
 /// A provider call held at a gate: the call tells `entered` it is there and waits (for at
@@ -88,6 +90,15 @@ impl World {
         let machine = self.machines.iter().find(|held| held.id == *id)?;
         let name = machine.name.as_deref()?;
         self.hosts.iter().find(|view| view.id.as_str() == name)
+    }
+
+    /// A retire marks a host draining whether or not it holds a lease, unless it is releasing.
+    fn retire(&mut self, host: &str) {
+        for view in self.hosts.iter_mut().filter(|v| v.id.as_str() == host) {
+            if view.mark != Some(HostMark::Releasing) {
+                view.mark = Some(HostMark::Draining);
+            }
+        }
     }
 
     fn mark(&mut self, host: &str, from: &[Option<HostMark>], to: Option<HostMark>) {
@@ -191,6 +202,7 @@ impl Effects for Handle {
         let mut world = self.world();
         let entry = format!("acquire:{}:{}", plan.name, token.expose());
         world.log.push(entry);
+        world.lifetimes.push(plan.lifetime);
         let held = Held {
             id: HostRef(format!("i-{}", world.machines.len() + 1)),
             acquire: plan.acquire.as_str().to_owned(),
@@ -259,6 +271,7 @@ impl Effects for Handle {
         match call {
             _ if refused => {}
             Call::Drain => world.mark(host, &[None], Some(HostMark::Draining)),
+            Call::Retire => world.retire(host),
             Call::Undrain => world.mark(host, &[Some(HostMark::Draining)], None),
             Call::ReleaseHost => {
                 world.mark(host, &[Some(HostMark::Draining)], Some(HostMark::Releasing));
@@ -348,6 +361,7 @@ pub fn new_world() -> Arc<Mutex<World>> {
         after_save: None,
         release_answer: None,
         gate: None,
+        lifetimes: Vec::new(),
     }))
 }
 

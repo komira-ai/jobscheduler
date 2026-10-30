@@ -29,14 +29,19 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{Token, parse_duration};
 use crate::error::StartupError;
-use crate::file_checks::{check_listeners, check_live, https_url, sha256};
+use crate::file_checks::{check_listeners, check_live};
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
-use crate::network::{OAuthClient, valid_tag};
+use crate::network::OAuthClient;
 
 mod joined;
+mod lifetime;
+mod network;
+mod pins;
 mod server;
 
 pub use joined::JoinedPool;
+use network::read_network;
+use pins::{LIVE_NEEDS, read_agents};
 pub(crate) use server::Server;
 use server::{read_client_token, read_server};
 
@@ -60,6 +65,8 @@ const POOL_KEYS: &[&str] = &[
     "max_spend_per_hour",
     "max_spend_per_day",
     "idle",
+    "max_age",
+    "min_host_lifetime",
     "boot_timeout",
     "launch",
     "agent",
@@ -140,8 +147,20 @@ pub struct ElasticPlan {
     pub max_spend_per_hour_cents: u64,
     /// The most it may spend in a day, in cents.
     pub max_spend_per_day_cents: u64,
-    /// How long a host may sit idle before it is released, when the file says.
+    /// How long a host may sit idle before it is released, when the file says. Required of
+    /// a pool with accelerators.
     pub idle: Option<Duration>,
+    /// The longest a launched machine lives: at this age its host is drained and released
+    /// whether or not it is idle. Required of a pool with accelerators.
+    pub max_age: Option<Duration>,
+    /// The least a launched machine lives before `idle` may release it, so a short `idle`
+    /// cannot make every billed boot a launch for nothing. Required of a pool with
+    /// accelerators; none for any other pool unless the file says.
+    pub min_host_lifetime: Duration,
+    /// `server.max_lease_wall`: the ceiling on a lease's wall time, so the longest a draining
+    /// host takes to empty. Required of a pool with accelerators, which is why the plan
+    /// holds it.
+    pub max_lease_wall: Option<Duration>,
     /// How long a launched host has to say hello.
     pub boot_timeout: Duration,
     /// The execution mode the hosts must report, or `None` when the pool asked for none.
@@ -184,6 +203,9 @@ impl fmt::Debug for ElasticPlan {
             .field("max_spend_per_hour_cents", &self.max_spend_per_hour_cents)
             .field("max_spend_per_day_cents", &self.max_spend_per_day_cents)
             .field("idle", &self.idle)
+            .field("max_age", &self.max_age)
+            .field("min_host_lifetime", &self.min_host_lifetime)
+            .field("max_lease_wall", &self.max_lease_wall)
             .field("boot_timeout", &self.boot_timeout)
             .field("exec", &self.exec)
             .field("network", &self.network)
@@ -476,7 +498,13 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let mut registering = None;
     let mut names = BTreeSet::new();
     for (index, table) in pools.into_iter().enumerate() {
-        let read = read_pool(table, index + 1, ld, (&client_token, &server.scheduler))?;
+        let ceiling = server.max_lease_wall;
+        let read = read_pool(
+            table,
+            index + 1,
+            ld,
+            (&client_token, &server.scheduler, ceiling),
+        )?;
         let pool = format!("pool {:?}", read.name);
         if !names.insert(read.name.clone()) {
             let reason = "also the name of an earlier pool";
@@ -546,6 +574,8 @@ struct ElasticKeys {
     hour: Option<u64>,
     day: Option<u64>,
     idle: Option<Duration>,
+    max_age: Option<Duration>,
+    min_host_lifetime: Option<Duration>,
     boot_timeout: Option<Duration>,
     join_token_file: Option<PathBuf>,
     network: Option<toml::Table>,
@@ -561,6 +591,8 @@ impl ElasticKeys {
             ("max_spend_per_hour", self.hour.is_some()),
             ("max_spend_per_day", self.day.is_some()),
             ("idle", self.idle.is_some()),
+            ("max_age", self.max_age.is_some()),
+            ("min_host_lifetime", self.min_host_lifetime.is_some()),
             ("boot_timeout", self.boot_timeout.is_some()),
             ("join_token_file", self.join_token_file.is_some()),
             ("network", self.network.is_some()),
@@ -579,7 +611,7 @@ fn read_pool(
     table: toml::Table,
     number: usize,
     ld: &Load<'_>,
-    (client, scheduler): (&Token, &SchedulerId),
+    (client, scheduler, max_lease_wall): (&Token, &SchedulerId, Option<Duration>),
 ) -> Result<Read, StartupError> {
     if table.contains_key("kind") {
         return joined::read(table, client);
@@ -611,6 +643,8 @@ fn read_pool(
         hour: s.spend("max_spend_per_hour")?,
         day: s.spend("max_spend_per_day")?,
         idle: s.duration("idle")?,
+        max_age: s.duration("max_age")?,
+        min_host_lifetime: s.duration("min_host_lifetime")?,
         boot_timeout: s.duration("boot_timeout")?,
         join_token_file: s.path("join_token_file")?,
         network: s.table("network")?,
@@ -667,6 +701,7 @@ fn read_pool(
                 launch,
                 kind: &kind,
                 scheduler,
+                max_lease_wall,
             };
             Pool::Elastic(Box::new(elastic.finish(built, client)?))
         }
@@ -685,6 +720,7 @@ struct Elastic<'a> {
     launch: Launch,
     kind: &'a str,
     scheduler: &'a SchedulerId,
+    max_lease_wall: Option<Duration>,
 }
 
 impl Elastic<'_> {
@@ -699,6 +735,7 @@ impl Elastic<'_> {
             launch,
             kind,
             scheduler,
+            max_lease_wall,
         } = self;
         let max_instances = require(s, "max_instances", keys.max_instances)?;
         if max_instances == 0 {
@@ -714,6 +751,15 @@ impl Elastic<'_> {
             let reason = "must not be below max_spend_per_hour";
             return Err(s.fail("max_spend_per_day", reason));
         }
+        let boot_timeout = keys.boot_timeout.unwrap_or(Duration::from_secs(900));
+        let given = lifetime::Given {
+            idle: keys.idle,
+            max_age: keys.max_age,
+            min_host_lifetime: keys.min_host_lifetime,
+        };
+        let accelerators = built.floor.gpus > 0;
+        let (max_age, min_host_lifetime) =
+            lifetime::check(s, &given, (accelerators, boot_timeout, max_lease_wall))?;
         let exec = match keys.exec.as_deref().unwrap_or("container") {
             "none" => None,
             other => match other.parse::<ExecMode>() {
@@ -782,7 +828,10 @@ impl Elastic<'_> {
             max_spend_per_hour_cents: hour,
             max_spend_per_day_cents: day,
             idle: keys.idle,
-            boot_timeout: keys.boot_timeout.unwrap_or(Duration::from_secs(900)),
+            max_age,
+            min_host_lifetime,
+            max_lease_wall,
+            boot_timeout,
             exec,
             network,
             agent,
@@ -796,51 +845,6 @@ impl Elastic<'_> {
             tokens,
             mint_provider: None,
         })
-    }
-}
-
-/// What a file with no pin for something a launched host downloads is told.
-const LIVE_NEEDS: &str = "required with launch = \"live\": the bootstrap downloads it";
-
-/// The agent pins by architecture: each key of `table` is an architecture (lower-case
-/// letters, digits and `_`) and holds a pin.
-fn read_agents(
-    table: toml::Table,
-    head: String,
-) -> Result<BTreeMap<String, Artifact>, StartupError> {
-    let mut agents = BTreeMap::new();
-    for (arch, value) in table {
-        let place = format!("{head}{arch}");
-        let letters = arch
-            .chars()
-            .all(|c| c.is_ascii_lowercase() | c.is_ascii_digit() | (c == '_'));
-        if !letters | arch.is_empty() {
-            return Err(StartupError::at(
-                place,
-                "an architecture is lower-case letters, digits and '_', such as x86_64 or aarch64",
-            ));
-        }
-        let toml::Value::Table(pin) = value else {
-            return Err(StartupError::at(place, "must be a table { url, sha256 }"));
-        };
-        let artifact = read_artifact(pin, format!("{head}{arch}."))?;
-        agents.insert(arch, artifact);
-    }
-    Ok(agents)
-}
-
-/// A file a launched host downloads: an `https://` `url` and its `sha256`.
-fn read_artifact(table: toml::Table, head: String) -> Result<Artifact, StartupError> {
-    let mut s = Section::open(table, head);
-    s.only(&["url", "sha256"])?;
-    let url = s.required_string("url")?;
-    if !https_url(&url) {
-        return Err(s.fail("url", "must be an https:// URL: the host refuses any other"));
-    }
-    let hash = s.required_string("sha256")?;
-    match sha256(&hash) {
-        Some(sha256) => Ok(Artifact { url, sha256 }),
-        None => Err(s.fail("sha256", "must be 64 lower-case hex digits")),
     }
 }
 
@@ -875,46 +879,6 @@ fn registry_pool(
             Err(err) => Err(s.fail("class", &err.to_string())),
         },
         _ => Ok(pool),
-    }
-}
-
-fn read_network(table: Option<toml::Table>, head: String) -> Result<NetworkPlan, StartupError> {
-    let Some(table) = table else {
-        return Ok(NetworkPlan::Default);
-    };
-    let mut s = Section::open(table, head);
-    let kind = s.required_string("kind")?;
-    match kind.as_str() {
-        "default" => {
-            s.only(&["kind"])?;
-            Ok(NetworkPlan::Default)
-        }
-        "tailscale" => {
-            s.only(&["kind", "oauth_client_file", "tag", "binary", "api_url"])?;
-            let file = s.required_path("oauth_client_file")?;
-            let tag = s.required_string("tag")?;
-            if !valid_tag(&tag) {
-                return Err(s.fail("tag", "must be \"tag:\" and letters, digits or '-'"));
-            }
-            let binary = match s.table("binary")? {
-                Some(table) => Some(read_artifact(table, format!("{}binary.", s.head))?),
-                None => None,
-            };
-            let api_url = s.string("api_url")?;
-            match OAuthClient::from_file(&file) {
-                Ok(client) => Ok(NetworkPlan::Tailscale {
-                    client,
-                    tag,
-                    binary,
-                    api_url,
-                }),
-                Err(err) => Err(s.fail("oauth_client_file", &err.to_string())),
-            }
-        }
-        _ => {
-            let reason = format!("{kind:?} is not a kind; known: default, tailscale");
-            Err(s.fail("kind", &reason))
-        }
     }
 }
 

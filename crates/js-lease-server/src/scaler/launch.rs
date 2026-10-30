@@ -89,6 +89,7 @@ impl Launcher {
                 pool: plan.pool.clone(),
                 name: host,
                 offer: plan.offer.clone(),
+                lifetime: plan.lifetime,
                 labels: Vec::new(),
                 payload,
             }),

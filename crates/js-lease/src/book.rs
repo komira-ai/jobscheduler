@@ -374,6 +374,11 @@ impl Book {
         self.unsaved
     }
 
+    /// The ceiling on a request's maximum wall time, if the settings have one.
+    pub(crate) fn max_wall(&self) -> Option<Duration> {
+        self.settings.max_wall()
+    }
+
     pub(crate) fn grant(&self, asked: Option<Duration>) -> Option<Duration> {
         self.settings.grant(asked)
     }

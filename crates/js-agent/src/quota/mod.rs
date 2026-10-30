@@ -18,8 +18,10 @@
 //!
 //! The mechanism is XFS project quota (`prjquota`), Linux only: the directory gets a
 //! project id and `FS_XFLAG_PROJINHERIT`, so everything below it is counted against the
-//! project, and the project has a block and an inode hard limit, so a writer meets `EDQUOT`
-//! at the limit. Every other platform and file system probes to [`Mode::None`].
+//! project, and the project has a block and an inode hard limit, so a writer is refused at
+//! the limit. XFS reports a project quota hit as `ENOSPC` (the project looks like a full
+//! file system), not `EDQUOT`, which user and group quotas give. Every other platform and
+//! file system probes to [`Mode::None`].
 
 use std::fmt;
 use std::fs;
@@ -218,10 +220,10 @@ pub trait ScratchQuota: Send + Sync {
     fn probe(&self) -> Probe;
 
     /// Bounds the **empty** directory `run_dir` (a direct child of the scratch root) as project
-    /// `project`: everything made below it is counted against the project and meets
-    /// `EDQUOT` at `block_limit_bytes` of space or `inode_limit` inodes. Call it before the
-    /// directory is chowned or written to. A failed call may leave the project id on the
-    /// directory; the run is not started, and the directory is removed.
+    /// `project`: everything made below it is counted against the project and is refused
+    /// (`ENOSPC` on XFS project quota) at `block_limit_bytes` of space or `inode_limit`
+    /// inodes. Call it before the directory is chowned or written to. A failed call may leave
+    /// the project id on the directory; the run is not started, and the directory is removed.
     ///
     /// # Errors
     ///

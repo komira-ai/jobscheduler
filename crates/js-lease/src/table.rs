@@ -76,6 +76,13 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         ttl: Option<Duration>,
     ) -> Result<Lease, AcquireError> {
         let ttl = self.book.grant(ttl).ok_or(AcquireError::TtlNotPositive)?;
+        if let Some(ceiling) = self
+            .book
+            .max_wall()
+            .filter(|ceiling| request.max_wall > *ceiling)
+        {
+            return Err(AcquireError::WallAboveCeiling { ceiling });
+        }
         let now = self.clock.now();
         let id = self.book.next_id().ok_or(AcquireError::IdsExhausted)?;
         let known = self.provider.classes();

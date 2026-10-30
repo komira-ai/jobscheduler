@@ -80,6 +80,7 @@ fn request(scheduler: &str, offer: &str, zone: &str) -> AcquireRequest {
         name: HostName::derive(&scheduler, &acquire),
         acquire,
         pool: "gpu".to_owned(),
+        lifetime: None,
         offer: Offer {
             id: offer.to_owned(),
             zone: Some(zone.to_owned()),
