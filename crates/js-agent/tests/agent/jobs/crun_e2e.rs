@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use clap::Parser as _;
 use js_agent::cli_runtime::Settings;
-use js_agent::crun::{CgroupSettings, Hooks, HostClaim, Seams};
+use js_agent::crun::{CgroupSettings, CgroupSource, Hooks, HostClaim, IdSources, Seams};
 use js_agent::crun_host::CrunHost;
 use js_agent::integrity::HostView;
 use js_agent::lifecycle::{DirLayout, Local, Runtime};
@@ -166,25 +166,24 @@ fn node() -> &'static Node {
 /// The seams of the crun runtime over the node: its cgroups, its stand-in files for the start
 /// check and its id files; nothing is given away and the clock reads 5000.
 fn seams() -> Seams {
+    let node = node();
     Seams {
-        cgroups: || {
-            Ok(CgroupSettings {
-                mount: node().cgroups.clone(),
-                root: "/root".to_owned(),
-                actions: "/actions".to_owned(),
-            })
-        },
+        cgroups: CgroupSource::Fixed(CgroupSettings {
+            mount: node.cgroups.clone(),
+            root: "/root".to_owned(),
+            actions: "/actions".to_owned(),
+        }),
         hooks: Hooks {
             chown: |_, _, _| Ok(()),
             now_ms: || 5_000,
             kill_wait: LONG,
             pull_limit: LONG,
         },
-        host: || node().host.clone(),
-        configure: |oci| {
-            oci.id_files = node().ids.clone();
-            oci.check_search = false;
-            oci.id_tool_path = Some(node().tools.clone().into_os_string());
+        host: || self::node().host.clone(),
+        ids: IdSources {
+            files: node.ids.clone(),
+            tool_path: node.tools.clone().into_os_string(),
+            check_search: false,
         },
     }
 }
@@ -242,14 +241,13 @@ fn crun_settings() -> Settings {
     );
     Settings::for_crun(node.crun.clone(), Fixture::USER, (uid, gid), Vec::new())
         .placed_beside(&node.scratch, None)
-        .expect("placed")
 }
 
 /// Asserts that settings for crun are what the engines' flags are to the rest of the agent:
 /// no `--container-bin` is needed to have them, the image store is the `oci` directory beside
 /// the scratch root (not inside it, where the start-up sweep would remove it), the delegated
-/// cgroup is unknown until the runtime records it, and a scratch root without a parent has
-/// nowhere to put the store. It catches settings that put the store inside the sweep's reach,
+/// cgroup is unknown until the runtime records it, and a scratch root without a parent keeps it
+/// at the top, and settings of an engine are not touched. It catches settings that put the store inside the sweep's reach,
 /// or read an actions cgroup before there is one.
 #[test]
 fn crun_settings_place_the_store_beside_the_scratch_root() {
@@ -262,9 +260,18 @@ fn crun_settings_place_the_store_beside_the_scratch_root() {
     plan.delegated("/actions");
     plan.delegated("/other");
     assert_eq!(settings.actions_cgroup(), Some("/actions"));
-    let rootless = Settings::for_crun("/usr/bin/crun".into(), "jsjob", (1, 1), Vec::new())
+    // A scratch root with no parent keeps the store beside it, at the top.
+    let top = Settings::for_crun("/usr/bin/crun".into(), "jsjob", (1, 1), Vec::new())
         .placed_beside(Path::new("/"), None);
-    assert!(rootless.unwrap_err().contains("has no parent"));
+    assert_eq!(
+        top.crun().map(|plan| plan.store.clone()),
+        Some("/oci".into())
+    );
+    // Settings of an engine are left as they are.
+    let engine = Settings::new(Path::new("/bin/sh"), None, None).expect("an executable");
+    let placed = engine.clone().placed_beside(Path::new("/x/scratch"), None);
+    assert!(placed.crun().is_none());
+    assert_eq!(placed, engine);
 }
 
 /// The command line of a crun agent on the node, less `without`.
@@ -491,11 +498,68 @@ fn a_host_id_is_held_by_one_agent_at_a_time() {
     let why = HostClaim::take(dir.path(), "host-a").expect_err("held");
     assert!(
         why.to_string()
-            .contains(&format!("process {}", std::process::id())),
+            .contains(&format!("{:?}", std::process::id().to_string())),
         "{why}"
     );
     let other = HostClaim::take(dir.path(), "host-b").expect("another id is free");
     drop(first);
     HostClaim::take(dir.path(), "host-a").expect("free once dropped");
     drop(other);
+}
+
+/// Asserts the claim of a host id cannot be taken in a directory that is not there, and says
+/// where. It catches a claim that is taken silently when nothing is locked.
+#[test]
+fn a_claim_in_a_missing_directory_is_an_error_naming_it() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "crun-claim-missing");
+    let missing = dir.path().join("not-there");
+    let why = HostClaim::take(&missing, "host-a").expect_err("no directory");
+    assert!(why.to_string().contains("not-there"), "{why}");
+}
+
+/// Asserts that the agent's cgroups are delegated when the runtime opens, on a tree of files
+/// that stands for a cgroup version 2 mount: the unit's cgroup becomes the root, the leases
+/// are made in its `actions` cgroup (which the usage is sampled from), and a file that does not
+/// name a cgroup is a refusal naming the cgroups. It catches a runtime that is given the
+/// wrong cgroup, or an agent that starts without cgroups it can lease from.
+#[test]
+fn the_agents_cgroup_is_delegated_when_the_runtime_opens() {
+    let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+    let node = node();
+    let mount = node.dir.path().join("delegate-mount");
+    fs::create_dir_all(mount.join("unit")).expect("the unit's cgroup");
+    for file in ["cgroup.controllers", "unit/cgroup.controllers"] {
+        fs::write(mount.join(file), "cpu memory pids\n").expect("controllers");
+    }
+    fs::write(mount.join("unit/cgroup.procs"), "").expect("procs");
+    let own = node.dir.path().join("delegate-own");
+    fs::write(&own, "0::/unit\n").expect("own cgroup");
+    let platform = Platform {
+        os: "linux".to_owned(),
+        arch: std::env::consts::ARCH.to_owned(),
+    };
+    let open = |own: &Path, settings: &Settings| {
+        let build = RuntimeBuild {
+            settings,
+            host_id: "h1",
+            platform: &platform,
+            stop_grace: Duration::from_secs(1),
+        };
+        let cgroups = CgroupSource::Delegate {
+            mount: mount.clone(),
+            own: own.to_owned(),
+        };
+        let machine = System::new().with_crun(Seams { cgroups, ..seams() });
+        machine.runtime(&build).map(|_| ())
+    };
+    let settings = crun_settings();
+    open(&own, &settings).expect("it opens");
+    assert_eq!(settings.actions_cgroup(), Some("/unit/actions"));
+    let refused = open(&node.dir.path().join("no-such-file"), &crun_settings());
+    assert!(
+        refused
+            .unwrap_err()
+            .starts_with("--runtime crun: the cgroups"),
+        "the cgroups are named"
+    );
 }

@@ -535,10 +535,7 @@ fn execute(
     #[cfg(target_os = "linux")]
     let _claim = match local.container.as_ref().and_then(Settings::crun) {
         Some(plan) => {
-            let dir = plan.store.parent().ok_or_else(|| {
-                Failure::Usage("--scratch-root: has no parent directory".to_owned())
-            })?;
-            let claim = crun::HostClaim::take(dir, &offer.hello.host_id);
+            let claim = crun::HostClaim::take(&plan.claim_dir, &offer.hello.host_id);
             Some(claim.map_err(|why| Failure::Usage(why.to_string()))?)
         }
         None => None,

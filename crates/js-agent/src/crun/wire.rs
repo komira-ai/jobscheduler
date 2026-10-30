@@ -1,15 +1,17 @@
 //! What the agent opens a [`CrunRuntime`] from: the settings its flags made, and the
 //! machine's cgroup and registries.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use js_contain::OciConfig;
 use js_contain::container::ACTION_ID;
 use js_contain::delegate::{self, PROC_SELF_CGROUP};
+use js_contain::subids::IdFiles;
 use js_oci::{Client, Policy};
 
-use super::{CgroupSettings, CrunRuntime, CrunSettings, Hooks, config_dir};
+use super::{CgroupSettings, CrunError, CrunRuntime, CrunSettings, Hooks, config_dir};
 use crate::cli_runtime::{CGROUP_ROOT, CrunPlan, Mapping};
 use crate::crun_host::CrunHost;
 use crate::image::RegistryImages;
@@ -32,68 +34,127 @@ pub fn oci_config(crun: &Path, job_ids: (u32, u32)) -> OciConfig {
     }
 }
 
-/// What the runtime does that a test replaces: setting up the agent's cgroups, and the
-/// runtime's own hooks.
-#[derive(Clone, Copy)]
+/// Where the agent's cgroups come from.
+#[derive(Debug, Clone)]
+pub enum CgroupSource {
+    /// The agent's own cgroup is delegated ([`delegate::delegate`]): `mount` is the cgroup
+    /// version 2 mount and `own` the file that names the agent's cgroup.
+    Delegate {
+        /// The cgroup version 2 mount.
+        mount: PathBuf,
+        /// The file in the form of `/proc/self/cgroup`.
+        own: PathBuf,
+    },
+    /// Cgroups that are set up already.
+    Fixed(CgroupSettings),
+}
+
+impl CgroupSource {
+    /// This machine's: the agent's own cgroup, under the cgroup mount.
+    #[must_use]
+    pub fn system() -> Self {
+        Self::Delegate {
+            mount: PathBuf::from(CGROUP_ROOT),
+            own: PathBuf::from(PROC_SELF_CGROUP),
+        }
+    }
+
+    fn settings(&self) -> Result<CgroupSettings, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            Self::Delegate { mount, own } => {
+                let own = std::fs::read_to_string(own)?;
+                let done = delegate::delegate(mount, &own, 0, None)?;
+                Ok(CgroupSettings {
+                    mount: mount.clone(),
+                    root: done.root,
+                    actions: done.actions,
+                })
+            }
+            Self::Fixed(settings) => Ok(settings.clone()),
+        }
+    }
+}
+
+/// The files the backend reads its ids and id tools from.
+#[derive(Debug, Clone)]
+pub struct IdSources {
+    /// The user database and subordinate id files.
+    pub files: IdFiles,
+    /// The directories `newuidmap` and `newgidmap` are found in.
+    pub tool_path: OsString,
+    /// Whether the store's directories are checked for being searchable by the job user.
+    pub check_search: bool,
+}
+
+impl IdSources {
+    /// This machine's.
+    #[must_use]
+    pub fn system() -> Self {
+        Self {
+            files: IdFiles::system(),
+            tool_path: ID_TOOL_PATH.into(),
+            check_search: true,
+        }
+    }
+}
+
+/// What the runtime reads from the machine, which a test replaces.
+#[derive(Debug, Clone)]
 pub struct Seams {
-    /// Sets up the agent's delegated cgroup and the cgroup the leases are made in.
-    pub cgroups: fn() -> Result<CgroupSettings, String>,
+    /// Where the agent's cgroups come from.
+    pub cgroups: CgroupSource,
     /// The runtime's hooks.
     pub hooks: Hooks,
     /// The files and programs the start check reads.
     pub host: fn() -> CrunHost,
-    /// Changes the backend's configuration before it is used (the files its ids are read
-    /// from, say).
-    pub configure: fn(&mut OciConfig),
+    /// The files the backend reads its ids from.
+    pub ids: IdSources,
 }
 
 impl Default for Seams {
     fn default() -> Self {
         Self {
-            cgroups: delegated,
+            cgroups: CgroupSource::system(),
             hooks: Hooks::default(),
             host: CrunHost::system,
-            configure: |_| {},
+            ids: IdSources::system(),
         }
     }
 }
 
-impl std::fmt::Debug for Seams {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Seams").finish_non_exhaustive()
-    }
+/// Why the runtime could not be opened.
+#[derive(Debug, thiserror::Error)]
+pub enum WireError {
+    /// The agent's cgroups could not be set up.
+    #[error("the cgroups: {0}")]
+    Cgroups(Box<dyn std::error::Error + Send + Sync>),
+    /// The image source could not be made.
+    #[error("the image source: {0}")]
+    Images(#[from] js_oci::Error),
+    /// The runtime could not open.
+    #[error(transparent)]
+    Open(#[from] CrunError),
 }
 
-/// The agent's own cgroup, set up for its leases ([`delegate::delegate`]).
-fn delegated() -> Result<CgroupSettings, String> {
-    let own = std::fs::read_to_string(PROC_SELF_CGROUP)
-        .map_err(|why| format!("read {PROC_SELF_CGROUP}: {why}"))?;
-    let mount = Path::new(CGROUP_ROOT);
-    let done = delegate::delegate(mount, &own, 0, None).map_err(|why| why.to_string())?;
-    Ok(CgroupSettings {
-        mount: mount.to_owned(),
-        root: done.root,
-        actions: done.actions,
-    })
-}
-
-/// A [`CrunRuntime`] for `plan`, and the warnings the operator should read.
+/// A [`CrunRuntime`] for `plan`, the job users' mapping, and the warnings the operator
+/// should read.
 ///
 /// # Errors
-/// The cgroups cannot be set up or the runtime cannot open; the text says why.
+/// See [`WireError`].
 pub fn open(
     plan: &CrunPlan,
     host_id: &str,
     seams: &Seams,
-) -> Result<(CrunRuntime, Mapping, Vec<String>), String> {
-    let cgroups = (seams.cgroups)()?;
+) -> Result<(CrunRuntime, Mapping, Vec<String>), WireError> {
+    let cgroups = seams.cgroups.settings().map_err(WireError::Cgroups)?;
     plan.delegated(&cgroups.actions);
     let policy = Policy::new(plan.image_allow.clone());
-    let images = RegistryImages::new(Client::new(policy), std::env::consts::ARCH)
-        .map_err(|why| why.to_string())?
+    let images = RegistryImages::new(Client::new(policy), std::env::consts::ARCH)?
         .keeping_configs(config_dir(&plan.store));
     let mut oci = oci_config(&plan.crun, plan.job_ids);
-    (seams.configure)(&mut oci);
+    oci.id_files = seams.ids.files.clone();
+    oci.id_tool_path = Some(seams.ids.tool_path.clone());
+    oci.check_search = seams.ids.check_search;
     let settings = CrunSettings {
         oci,
         scratch: plan.store.clone(),
@@ -102,17 +163,15 @@ pub fn open(
         pull_threads: PULL_THREADS,
         files: plan.files.clone(),
     };
-    let runtime = CrunRuntime::open_with(settings, Arc::new(images), seams.hooks)
-        .map_err(|why| why.to_string())?;
+    let runtime = CrunRuntime::open_with(settings, Arc::new(images), seams.hooks)?;
     let (uid, gid) = runtime.subordinate_ids();
-    let warnings = match plan.image_allow.is_empty() {
-        true => vec![
-            "--image-allow: none given, so no image is pulled and a job whose image is not \
-             on the host is refused"
-                .to_owned(),
-        ],
-        false => Vec::new(),
-    };
+    // One warning, when no registry is allowed; none otherwise.
+    let warnings = vec![
+        "--image-allow: none given, so no image is pulled and a job whose image is not on \
+         the host is refused"
+            .to_owned();
+        usize::from(plan.image_allow.is_empty())
+    ];
     Ok((runtime, Mapping::new(uid, gid), warnings))
 }
 

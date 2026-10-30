@@ -95,7 +95,7 @@ impl UsageClock for Milliseconds {
 }
 
 /// The machine the agent runs on.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct System {
     origin: Instant,
     #[cfg(target_os = "linux")]

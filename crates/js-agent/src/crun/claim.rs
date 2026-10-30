@@ -6,7 +6,7 @@
 //! other's leases. The agent takes this claim before it registers and holds it for as long as
 //! it runs; a second agent with the same id is refused.
 
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
@@ -16,15 +16,16 @@ use sha2::{Digest as _, Sha256};
 /// Why a claim could not be taken.
 #[derive(Debug, thiserror::Error)]
 pub enum ClaimError {
-    /// Another agent holds the claim.
+    /// Another agent holds the claim, or it cannot be locked.
     #[error(
-        "--host-id {id}: another crun agent of this host holds it (process {holder}): two agents \
-         that share a host id would remove each other's leases; give each its own --host-id"
+        "--host-id {id}: another crun agent of this host holds it, or it cannot be locked \
+         (the holder wrote {holder:?}): two agents that share a host id would remove each \
+         other's leases; give each its own --host-id"
     )]
     Held {
         /// The host id.
         id: String,
-        /// The process that holds the claim, as it wrote itself down, or `unknown`.
+        /// What the holder wrote in the file: its process id.
         holder: String,
     },
     /// The claim file could not be made, locked or written.
@@ -70,18 +71,13 @@ impl HostClaim {
             .custom_flags(libc::O_NOFOLLOW)
             .open(&path)
             .map_err(io)?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
-                let mut said = String::new();
-                let _ = file.read_to_string(&mut said);
-                let holder = said.trim();
-                return Err(ClaimError::Held {
-                    id: host_id.to_owned(),
-                    holder: if holder.is_empty() { "unknown" } else { holder }.to_owned(),
-                });
-            }
-            Err(TryLockError::Error(why)) => return Err(io(why)),
+        if file.try_lock().is_err() {
+            let mut said = String::new();
+            let _ = file.read_to_string(&mut said);
+            return Err(ClaimError::Held {
+                id: host_id.to_owned(),
+                holder: said.trim().to_owned(),
+            });
         }
         file.set_len(0).map_err(io)?;
         file.rewind().map_err(io)?;

@@ -241,6 +241,9 @@ pub struct CrunPlan {
     pub image_allow: Vec<js_oci::Allow>,
     /// The directory of the image store and the leases, set by [`Settings::placed_beside`].
     pub store: PathBuf,
+    /// The directory that holds the store and the claim of the host id, set by
+    /// [`Settings::placed_beside`].
+    pub claim_dir: PathBuf,
     /// The root of the runs' files, when the agent has one, set by [`Settings::placed_beside`].
     pub files: Option<FilesRoot>,
     actions: Arc<OnceLock<String>>,
@@ -371,6 +374,7 @@ impl Settings {
                 job_ids,
                 image_allow,
                 store: PathBuf::new(),
+                claim_dir: PathBuf::new(),
                 files: None,
                 actions: Arc::new(OnceLock::new()),
             }),
@@ -378,27 +382,19 @@ impl Settings {
     }
 
     /// These crun settings with the image store and leases placed beside `scratch_root`
-    /// (in [`CRUN_STORE_DIR`] of its parent directory) and the root of the runs' files
-    /// given. Settings of another runtime are returned as they are. The store is not inside
-    /// the scratch root because the agent removes every entry of the scratch root that is
-    /// not a run's at start.
-    ///
-    /// # Errors
-    ///
-    /// The scratch root has no parent directory.
-    pub fn placed_beside(
-        mut self,
-        scratch_root: &Path,
-        files: Option<FilesRoot>,
-    ) -> Result<Self, String> {
+    /// (in [`CRUN_STORE_DIR`] of its parent directory, which also holds the host id's
+    /// claim) and the root of the runs' files given. Settings of another runtime are
+    /// returned as they are. The store is not inside the scratch root because the agent
+    /// removes every entry of the scratch root that is not a run's at start.
+    #[must_use]
+    pub fn placed_beside(mut self, scratch_root: &Path, files: Option<FilesRoot>) -> Self {
         if let Some(plan) = &mut self.crun {
-            let parent = scratch_root.parent().ok_or_else(|| {
-                format!("--scratch-root: {} has no parent", scratch_root.display())
-            })?;
+            let parent = scratch_root.parent().unwrap_or(scratch_root);
+            plan.claim_dir = parent.to_owned();
             plan.store = parent.join(CRUN_STORE_DIR);
             plan.files = files;
         }
-        Ok(self)
+        self
     }
 
     /// What the crun runtime is opened from, when these are its settings.

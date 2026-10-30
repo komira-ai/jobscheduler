@@ -604,12 +604,8 @@ pub fn start(cli: &Cli, host: &CrunHost, commands: &dyn CommandRunner) -> Result
     if let Some(text) = report.refusal() {
         return Err(text);
     }
-    let job_ids = report.job_ids.ok_or_else(|| {
-        format!(
-            "--job-user: the check found no ids for {}",
-            request.job_user
-        )
-    })?;
+    // A job user the check did not find is a refusal above; the ids are never 0 here.
+    let job_ids = report.job_ids.unwrap_or_default();
     Ok(Ready {
         crun: request.crun.to_owned(),
         job_user: request.job_user.to_owned(),

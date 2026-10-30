@@ -71,7 +71,10 @@ mod wire;
 
 pub use claim::{ClaimError, HostClaim};
 
-pub use wire::{ID_TOOL_PATH, PULL_THREADS, Seams, oci_config, open as open_for_plan};
+pub use wire::{
+    CgroupSource, ID_TOOL_PATH, IdSources, PULL_THREADS, Seams, WireError, oci_config,
+    open as open_for_plan,
+};
 
 use std::collections::BTreeMap;
 use std::io;
@@ -139,7 +142,7 @@ pub struct CrunSettings {
 }
 
 /// What a runtime does that a test replaces: giving a file away and reading the clock.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Hooks {
     /// Gives a path to a user and group.
     pub chown: Chown,

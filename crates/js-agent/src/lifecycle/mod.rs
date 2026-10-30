@@ -806,9 +806,9 @@ impl Local {
             ));
         }
         let container = match (is_crun, &scratch) {
-            (true, Some(root)) => container
-                .map(|settings| settings.placed_beside(root.path(), files.clone()))
-                .transpose()?,
+            (true, Some(root)) => {
+                container.map(|settings| settings.placed_beside(root.path(), files.clone()))
+            }
             _ => container,
         };
         let (default_gib, max_inodes, failures, usage_wait, abandon) = scratch_quota_limits(cli)?;
