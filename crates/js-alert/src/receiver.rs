@@ -5,7 +5,6 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::thread::JoinHandle;
 
 /// One request a [`Receiver`] saw.
 #[derive(Debug, Clone)]
@@ -21,7 +20,6 @@ pub struct Receiver {
     addr: SocketAddr,
     seen: Arc<Mutex<Vec<Seen>>>,
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
 }
 
 impl Receiver {
@@ -36,20 +34,16 @@ impl Receiver {
         let addr = listener.local_addr().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
-        let thread = {
+        {
             let (seen, stop) = (Arc::clone(&seen), Arc::clone(&stop));
             let reply = format!(
                 "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
-            std::thread::spawn(move || serve(&listener, &reply, &seen, &stop))
-        };
-        Self {
-            addr,
-            seen,
-            stop,
-            thread: Some(thread),
+            // Detached: the wake-up in `drop` ends it.
+            std::thread::spawn(move || serve(&listener, &reply, &seen, &stop));
         }
+        Self { addr, seen, stop }
     }
 
     /// The address it listens on.
@@ -71,9 +65,6 @@ impl Drop for Receiver {
         self.stop.store(true, Ordering::SeqCst);
         // Wakes the accept that waits.
         let _ = TcpStream::connect(self.addr);
-        if let Some(thread) = self.thread.take() {
-            thread.join().unwrap();
-        }
     }
 }
 

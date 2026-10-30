@@ -106,6 +106,7 @@ mod tests {
         assert_eq!(strict("https://u@host/"), Err(UrlError::Shape));
         assert_eq!(strict("https://host/a b"), Err(UrlError::Shape));
         assert_eq!(strict("https://host/a#frag"), Err(UrlError::Shape));
+        assert_eq!(strict("https://host/a\nb"), Err(UrlError::Shape));
         assert_eq!(strict("http://10.0.0.5:7300"), Err(UrlError::PlainHttp));
         assert_eq!(strict("http://localhost:7300"), Err(UrlError::PlainHttp));
         assert_eq!(check("http://10.0.0.5:7300", Plain::Any), Ok(false));
