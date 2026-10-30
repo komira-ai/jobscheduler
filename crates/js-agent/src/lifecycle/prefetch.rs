@@ -21,6 +21,11 @@
 //! answered `Failed` (every run that waited on the pull ends), and a call that names no
 //! ticket, or another one, starts a new pull.
 //!
+//! The pull function is called while the prefetcher's lock is held (the image is marked
+//! as pulling only once its future exists, so a function that panics leaves no trace, and
+//! single flight holds): its synchronous part, up to returning the future, must be cheap
+//! and must not call back into the `Prefetcher`; the work belongs in the future.
+//!
 //! A waiter can miss a failure: the entry of a failed pull is replaced when a call that
 //! names no ticket (a new start) pulls again, and a run that waited on the old pull then
 //! finds the new one; the wait is bounded by that pull's own deadline. [`Prefetcher::forget`]
@@ -61,6 +66,8 @@ struct Entry {
 struct State {
     images: BTreeMap<String, Entry>,
     next: u64,
+    /// How many pulls have had their result offered to `finish`, kept or ignored.
+    offered: u64,
 }
 
 #[derive(Default)]
@@ -77,14 +84,16 @@ impl Shared {
     /// Records how the pull `ticket` of `image` ended, unless the image was forgotten or
     /// pulled again since.
     fn finish(&self, image: &str, ticket: Ticket, result: Result<(), String>) {
-        if let Some(entry) = self
-            .lock()
+        let mut state = self.lock();
+        state.offered += 1;
+        if let Some(entry) = state
             .images
             .get_mut(image)
             .filter(|entry| entry.ticket == ticket)
         {
             entry.phase = Phase::Done(result);
         }
+        drop(state);
         self.changed.notify_all();
     }
 }
@@ -178,6 +187,20 @@ impl Prefetcher {
             shared.finish(&name, ticket, result);
         });
         Prepared::Pending(ticket)
+    }
+
+    /// Blocks until `count` pulls in all have had their results offered, whether kept or
+    /// ignored (a pull let go by [`Prefetcher::forget`] counts). For a caller that must
+    /// know a late result has been dealt with; tests use it instead of timing.
+    #[doc(hidden)]
+    pub fn wait_offered(&self, count: u64) {
+        let state = self.shared.lock();
+        drop(
+            self.shared
+                .changed
+                .wait_while(state, |state| state.offered < count)
+                .unwrap_or_else(PoisonError::into_inner),
+        );
     }
 
     /// Forgets what is known of `image`: a success is no longer remembered (the next
