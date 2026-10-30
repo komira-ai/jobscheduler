@@ -10,9 +10,9 @@
 //!   `sudo-args` next to it, and exits 0 (the tests it was asked to run passed).
 //!
 //! `XTASK_FAKE_DEFECT` asks for one failure of the real programs: `build-fails` (every build
-//! exits 101), `tests-fail` (sudo exits 101, as a failed test binary does) or
-//! `fails:<a>,<b>,...` (sudo exits 101 when one of its arguments is one of `<a>`, `<b>`,
-//! ..., so some units of several fail).
+//! exits 101) or `fails:<a>,<b>,...` (sudo exits 101, as a failed test binary does, when one
+//! of its arguments is one of `<a>`, `<b>`, ...: an argument every unit has fails them all,
+//! a target's binary fails only its unit).
 
 use std::io::Write as _;
 use std::path::Path;
@@ -51,10 +51,9 @@ fn sudo(me: &Path, args: &[String]) -> ExitCode {
     let log = me.with_file_name("sudo-args");
     append(&log, &format!("{}: {}", cwd.display(), args.join(" ")));
     let defect = defect();
-    let failing = match defect.strip_prefix("fails:") {
-        Some(list) => list.split(',').any(|name| args.iter().any(|a| a == name)),
-        None => defect == "tests-fail",
-    };
+    let failing = defect
+        .strip_prefix("fails:")
+        .is_some_and(|list| list.split(',').any(|name| args.iter().any(|a| a == name)));
     if failing {
         ExitCode::from(101)
     } else {
