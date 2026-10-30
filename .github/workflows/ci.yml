@@ -112,7 +112,7 @@ jobs:
   # the job when any of these holds:
   #   - the pull request carries the label `macos`;
   #   - a changed path contains darwin, apple, macos or seatbelt (any case), is under a
-  #     js-mac-* crate (crates/js-mac-), or is rust-toolchain.toml or this file;
+  #     js-mac-* crate (crates/js-mac-), under js-bundle or js-bundle-cli, or is rust-toolchain.toml or this file;
   #   - the diff adds or removes a line with `target_os = "macos"` or `target_vendor = "apple"`
   #     (the cfg( ), cfg!( ), cfg(any( ... )) and no-space spellings all contain it).
   # If the diff cannot be computed the job runs (fail closed). The label is read
@@ -150,7 +150,7 @@ jobs:
             exit 0
           fi
           macos=false
-          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^crates/js-oci/|^crates/js-treestore/(src/mac/|tests/(privileged|treestore/mac_))|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
+          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^crates/js-(bundle|bundle-cli|oci)/|^crates/js-treestore/(src/mac/|tests/(privileged|treestore/mac_))|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
             macos=true
           elif printf '%s\n' "$patch" | grep -Ev '^(\+\+\+|---) ' | grep -Eq '^[+-].*target_(os[[:space:]]*=[[:space:]]*"macos"|vendor[[:space:]]*=[[:space:]]*"apple")'; then
             macos=true
@@ -192,8 +192,8 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - run: cargo build --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool
-      - run: cargo test --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool
+      - run: cargo build --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-bundle -p js-bundle-cli
+      - run: cargo test --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-bundle -p js-bundle-cli
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
@@ -305,6 +305,103 @@ jobs:
         run: |
           sudo podman ps -a
           sudo podman logs --latest || true
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # The privilege model of the agent on the rootless crun runtime, settled by the kernel
+  # (crates/js-agent/tests/privilege, ignored in every other job; the design is
+  # docs/design/agent-privilege.md). The tests start this very binary again as an ordinary
+  # user holding exactly the capabilities a test names and read what it can do: the init
+  # namespace read, the watched directories, the XFS project quota, the directory layout
+  # and the state directory. The quota tests need a prjquota XFS volume: a loop image made
+  # and mounted here and only read by the tests. The job stands alone, so a failure here
+  # blocks no other job.
+  agent-privilege:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      JS_PRIV_XFS_ROOT: /mnt/js-priv-xfs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - name: Make and mount a project-quota XFS volume on a loop device
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xfsprogs nftables
+          truncate -s 512M "$RUNNER_TEMP/js-priv-xfs.img"
+          sudo mkfs.xfs -q "$RUNNER_TEMP/js-priv-xfs.img"
+          sudo mkdir -p "$JS_PRIV_XFS_ROOT"
+          sudo mount -o loop,prjquota "$RUNNER_TEMP/js-priv-xfs.img" "$JS_PRIV_XFS_ROOT"
+          findmnt "$JS_PRIV_XFS_ROOT"
+      # Option B, against a real crun: a root daemon starts every container as a dedicated
+      # job user. The user has a subordinate id range (made here if useradd did not).
+      - name: Install crun, uidmap and busybox and make the job user
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends crun uidmap busybox-static apparmor
+          sudo useradd --create-home --shell /usr/sbin/nologin js-job
+          grep -q '^js-job:' /etc/subuid || echo 'js-job:300000:65536' | sudo tee -a /etc/subuid
+          grep -q '^js-job:' /etc/subgid || echo 'js-job:300000:65536' | sudo tee -a /etc/subgid
+          echo "JS_B_CRUN=$(command -v crun)" >> "$GITHUB_ENV"
+          echo "JS_B_BUSYBOX=$(command -v busybox)" >> "$GITHUB_ENV"
+          echo "JS_B_UID=$(id -u js-job)" >> "$GITHUB_ENV"
+          echo "JS_B_GID=$(id -g js-job)" >> "$GITHUB_ENV"
+          crun --version | head -1
+      # The AppArmor user-namespace restriction stays ON for the whole job: it is the
+      # runner's default and the farm's likely policy, and the job user's crun is an
+      # unprivileged process it applies to. The facts are printed, and root_daemon.rs
+      # asserts the two sides of the control (the distribution's /usr/bin/crun, which its
+      # profile lets create the namespace, runs the container; a copy of the same binary
+      # at another path is refused it).
+      - name: Record the AppArmor facts the container tests depend on
+        run: |
+          echo "apparmor_restrict_unprivileged_userns = $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          ls -l /etc/apparmor.d | grep -i crun || echo "no crun file in /etc/apparmor.d"
+          sudo aa-status 2>&1 | grep -i crun || echo "no crun profile loaded"
+          getcap "$(command -v crun)" || true
+          cat /etc/apparmor.d/crun 2>/dev/null || true
+      - name: Build the tests as the runner user
+        run: |
+          cargo test -p js-agent --test privilege --locked --no-run
+          cargo test -p js-contain --test root_daemon --locked --no-run
+      # Root runs the tests (they start the unprivileged children themselves), with the
+      # runner's toolchain and home.
+      - name: Run the privilege tests as root
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test privilege --locked -- --ignored --nocapture --test-threads=1
+      - name: Run js-contain's Oci under a root daemon, as the job user, with the AppArmor restriction on
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-contain --test root_daemon --locked -- --ignored --nocapture --test-threads=1 --skip counter_run
+      # The counter-run of the copy control: with the restriction off the same copy of crun
+      # starts the container, so the sysctl is the only difference from the refusal above.
+      # The sysctl is put back to 1 whatever the result.
+      - name: Counter-run the copy control with the AppArmor restriction off
+        run: |
+          set -euo pipefail
+          restore() { sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1; }
+          trap restore EXIT
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-contain --test root_daemon --locked -- --ignored --nocapture --test-threads=1 counter_run
+      - name: The restriction is back on
+        run: test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

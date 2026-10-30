@@ -939,6 +939,7 @@ dependencies = [
  "hex",
  "js-agent-usage",
  "js-agent-wire",
+ "js-bundle",
  "js-caps",
  "js-client",
  "js-contain",
@@ -949,6 +950,7 @@ dependencies = [
  "js-provider",
  "js-registry",
  "js-testkit",
+ "js-treestore",
  "js-types",
  "libc",
  "rustix",
@@ -998,6 +1000,21 @@ dependencies = [
  "sha2 0.11.1",
  "tar",
  "thiserror",
+]
+
+[[package]]
+name = "js-bundle-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "js-bundle",
+ "js-oci",
+ "js-testkit",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -1197,6 +1214,7 @@ dependencies = [
 name = "js-mac-pool"
 version = "0.1.0"
 dependencies = [
+ "js-bundle",
  "thiserror",
 ]
 
