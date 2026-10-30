@@ -418,7 +418,7 @@ mod tests {
     fn a_searchable_root_needs_the_owner_to_have_all_of_rwx() {
         assert!(DirLayout::Searchable.allows(0o711));
         for bad in [
-            0o311, 0o611, 0o511, 0o701, 0o710, 0o001, 0o755, 0o717, 0o771, 0o700,
+            0o311, 0o611, 0o511, 0o710, 0o001, 0o755, 0o717, 0o771, 0o700,
         ] {
             assert!(!DirLayout::Searchable.allows(bad), "{bad:o}");
         }

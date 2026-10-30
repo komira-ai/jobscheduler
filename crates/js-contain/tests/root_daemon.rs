@@ -346,7 +346,7 @@ async fn a_copy_of_crun_is_refused_the_user_namespace_while_the_distribution_pat
         "1",
         "this control proves nothing with the restriction off"
     );
-    let dir = world_dir("js-b-crun-copy");
+    let dir = world_dir("js-b-copybin");
     let copy = dir.join("crun");
     fs::copy(var("JS_B_CRUN"), &copy).unwrap();
     fs::set_permissions(&copy, fs::Permissions::from_mode(0o755)).unwrap();
