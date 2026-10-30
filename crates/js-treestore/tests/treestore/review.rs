@@ -443,8 +443,145 @@ fn a_sealer_that_panics_replacing_a_stale_tree_leaves_the_tree_replaceable() {
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| store.ensure(&wanted(&l))));
     assert!(outcome.is_err());
     assert_eq!(store.stats().in_flight, 0);
-    // The stale tree is still counted, and is not stuck as being deleted.
-    assert_eq!(store.stats().trees, 1);
+    // The tree had been moved out when the sealer panicked: it left the table, and nothing
+    // is stuck as being deleted.
+    assert_eq!(store.stats().trees, 0);
     store.ensure(&wanted(&l)).unwrap();
     assert_eq!(rig.sealer.seal_count(), 2);
+}
+
+fn vanished_pair(
+    rig: &Rig,
+    budget: u64,
+) -> (
+    crate::common::Store,
+    crate::common::Layer,
+    crate::common::Layer,
+) {
+    let store = rig.open(Config {
+        budget_bytes: budget,
+        ..rig.cfg()
+    });
+    let (a, b) = (sized("f", 100, 1), sized("f", 100, 2));
+    rig.have(&a);
+    rig.have(&b);
+    store.ensure(&wanted(&a)).unwrap();
+    (store, a, b)
+}
+
+#[test]
+fn a_tree_whose_directory_vanished_still_leaves_the_table() {
+    let rig = Rig::new();
+    let (store, a, b) = vanished_pair(&rig, 100);
+    std::fs::remove_dir_all(rig.root().join("trees").join(a.diff_id.hex())).unwrap();
+    store.ensure(&wanted(&b)).unwrap();
+    assert_eq!(store.stats().trees, 1);
+    assert_eq!(store.stats().used, 100);
+    assert!(rig.present(&b.diff_id));
+    // Later callers are not held up by the vanished tree.
+    store.trim().unwrap();
+}
+
+#[test]
+fn a_refused_move_unseals_the_tree_and_moves_it_on_the_second_try() {
+    let rig = Rig::new();
+    let (store, a, b) = vanished_pair(&rig, 100);
+    std::fs::remove_dir(rig.root().join("trash")).unwrap();
+    rig.sealer
+        .unseal_repairs_trash
+        .store(true, Ordering::SeqCst);
+    store.ensure(&wanted(&b)).unwrap();
+    assert!(!rig.present(&a.diff_id));
+    assert!(rig.present(&b.diff_id));
+    // Sealed once each: no seal was put back.
+    assert_eq!(rig.sealer.seal_count(), 2);
+}
+
+#[test]
+fn a_move_that_stays_refused_seals_the_tree_again() {
+    let rig = Rig::new();
+    let (store, a, b) = vanished_pair(&rig, 100);
+    std::fs::remove_dir(rig.root().join("trash")).unwrap();
+    assert!(store.ensure(&wanted(&b)).is_err());
+    // a's seal, b's seal, and the seal put back on a, which stays in place and counted.
+    assert_eq!(rig.sealer.seal_count(), 3);
+    assert!(rig.present(&a.diff_id));
+    assert_eq!(store.stats().used, 100);
+}
+
+#[test]
+fn a_record_that_cannot_be_written_leaves_nothing_in_place_and_a_retry_places_the_tree() {
+    let rig = Rig::new();
+    let a = sized("f", 10, 1);
+    rig.have(&a);
+    let root = rig.root();
+    let once = Arc::new(AtomicBool::new(true));
+    let store = rig.open(Config {
+        crash: Some(Arc::new(move |step| {
+            if step == Step::Renamed && once.swap(false, Ordering::SeqCst) {
+                std::fs::remove_dir_all(root.join("tmp")).unwrap();
+            }
+            false
+        })),
+        ..rig.cfg()
+    });
+    assert!(matches!(store.ensure(&wanted(&a)), Err(Error::Io { .. })));
+    assert!(!rig.root().join("trees").join(a.diff_id.hex()).exists());
+    assert_eq!(store.stats().trees, 0);
+    std::fs::create_dir(rig.root().join("tmp")).unwrap();
+    store.ensure(&wanted(&a)).unwrap();
+    assert!(rig.present(&a.diff_id));
+}
+
+#[test]
+#[ignore = "blocks forever against the store before the guards"]
+fn a_sealer_panic_after_the_move_removes_the_victim_and_leaves_no_deletion_pending() {
+    let rig = Rig::new();
+    let (store, a, b) = vanished_pair(&rig, 100);
+    rig.sealer.panic_unseals.store(1, Ordering::SeqCst);
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| store.ensure(&wanted(&b))));
+    assert!(outcome.is_err());
+    assert_eq!(store.stats().trees, 0);
+    assert!(matches!(
+        store.pin(&a.diff_id, &run("r1")),
+        Err(Error::Absent(_))
+    ));
+    // A caller for the victim does not wait for a deletion that will never finish.
+    store.ensure(&wanted(&a)).unwrap();
+    store.ensure(&wanted(&b)).unwrap();
+}
+
+#[test]
+fn a_sealer_panic_before_the_move_leaves_the_victim_usable() {
+    let rig = Rig::new();
+    let (store, a, b) = vanished_pair(&rig, 100);
+    std::fs::remove_dir(rig.root().join("trash")).unwrap();
+    rig.sealer.panic_unseals.store(1, Ordering::SeqCst);
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| store.ensure(&wanted(&b))));
+    assert!(outcome.is_err());
+    assert!(rig.present(&a.diff_id));
+    store.pin(&a.diff_id, &run("r1")).unwrap();
+}
+
+#[test]
+#[ignore = "blocks forever against the store before the guards"]
+fn a_panic_after_the_rename_leaves_nothing_in_place_and_does_not_block_a_retry() {
+    let rig = Rig::new();
+    let a = sized("f", 10, 1);
+    rig.have(&a);
+    let once = Arc::new(AtomicBool::new(true));
+    let store = rig.open(Config {
+        crash: Some(Arc::new(move |step| {
+            assert!(!(step == Step::Renamed && once.swap(false, Ordering::SeqCst)));
+            false
+        })),
+        ..rig.cfg()
+    });
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| store.ensure(&wanted(&a))));
+    assert!(outcome.is_err());
+    assert!(!rig.root().join("trees").join(a.diff_id.hex()).exists());
+    assert_eq!(store.stats().in_flight, 0);
+    // The placement is not held for the diff id.
+    store.ensure(&wanted(&a)).unwrap();
+    assert!(rig.present(&a.diff_id));
 }

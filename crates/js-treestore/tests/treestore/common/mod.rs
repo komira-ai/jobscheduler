@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use js_bundle::media::LayerEncoding;
@@ -127,6 +127,9 @@ pub struct FakeSealer {
     pub hold_unseal: Arc<Mutex<Option<Arc<Gate>>>>,
     /// Deletions of a tree that panic.
     pub panic_unseals: Arc<AtomicUsize>,
+    /// Calling `unseal_for_delete` on a tree in place makes the trash directory exist again,
+    /// as clearing immutability makes a refused move possible.
+    pub unseal_repairs_trash: Arc<AtomicBool>,
 }
 
 impl FakeSealer {
@@ -139,6 +142,7 @@ impl FakeSealer {
             unsealing: Arc::new(AtomicUsize::new(0)),
             hold_unseal: Arc::new(Mutex::new(None)),
             panic_unseals: Arc::new(AtomicUsize::new(0)),
+            unseal_repairs_trash: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -183,7 +187,16 @@ impl Sealer for FakeSealer {
 
     fn unseal_for_delete(&self, tree: &Path) -> Result<(), SealError> {
         self.unsealing.fetch_add(1, Ordering::SeqCst);
-        let deleting = tree.parent().is_some_and(|p| p.ends_with("trees"));
+        let in_place = tree.parent().is_some_and(|p| p.ends_with("trees"));
+        let deleting = in_place || tree.parent().is_some_and(|p| p.ends_with("trash"));
+        if in_place && self.unseal_repairs_trash.load(Ordering::SeqCst) {
+            let trash = tree
+                .parent()
+                .and_then(|p| p.parent())
+                .unwrap()
+                .join("trash");
+            std::fs::create_dir_all(trash).unwrap();
+        }
         let panicking = self.panic_unseals.load(Ordering::SeqCst);
         if deleting && panicking > 0 {
             self.panic_unseals.store(panicking - 1, Ordering::SeqCst);
@@ -191,7 +204,7 @@ impl Sealer for FakeSealer {
         }
         // Only the deletion of a tree waits; the clean-up of a stage does not.
         let gate = self.hold_unseal.lock().unwrap().clone();
-        if let Some(gate) = gate.filter(|_| tree.parent().is_some_and(|p| p.ends_with("trees"))) {
+        if let Some(gate) = gate.filter(|_| deleting) {
             gate.wait();
         }
         self.unsealed.lock().unwrap().push(tree.to_owned());
