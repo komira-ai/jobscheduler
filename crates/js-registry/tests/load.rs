@@ -218,7 +218,13 @@ fn the_latest_load_is_kept_per_host_and_cleared_by_a_beat_without_one() {
     assert_eq!(stored(&fx, "a"), None);
     assert_eq!(stored(&fx, "b").unwrap().seq, 1);
     beat_with(&fx, "a", a, Some(at(2)));
-    assert_eq!(stored(&fx, "a").unwrap().seq, 2);
+    assert_eq!(
+        stored(&fx, "a"),
+        None,
+        "2 is below the 6 seen before the clear"
+    );
+    beat_with(&fx, "a", a, Some(at(7)));
+    assert_eq!(stored(&fx, "a").unwrap().seq, 7);
 }
 
 /// Asserts that a load that breaks a rule of the wire costs the load and not the beat: a
