@@ -304,7 +304,7 @@ fn id_tools(host: &CrunHost, report: &mut Report) {
         let mode = std::fs::metadata(&found).map_or(0, |meta| meta.permissions().mode());
         if mode & 0o111 == 0 {
             report.miss(piece, format!("{} is not executable", found.display()), fix);
-        } else if mode & 0o4000 == 0 && !has_file_capabilities(&found) {
+        } else if !((mode & 0o4000 != 0) | has_file_capabilities(&found)) {
             report.miss(
                 piece,
                 format!(
