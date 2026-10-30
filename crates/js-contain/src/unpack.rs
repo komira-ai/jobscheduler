@@ -11,8 +11,9 @@
 //!   `.wh..wh..opq` deletes what the lower layers left in its directory; neither
 //!   touches what the same layer wrote, and neither is written itself;
 //! - each entry gets its owner (an id above the 65,536 the namespace maps is an error),
-//!   then its mode: `chown` clears the setuid and setgid bits, so the mode goes last.
-//!   A directory's mode and times are set when its layer is done, so a read-only
+//!   then its mode. The setuid and setgid bits are never applied, whatever the layer
+//!   says (kbf's unpacker kept them); the permission bits and the sticky bit are. A
+//!   directory's mode and times are set when its layer is done, so a read-only
 //!   directory does not stop its own contents;
 //! - device nodes and fifos are skipped, hard links are made inside the root, and the
 //!   bytes of files are bounded.
@@ -332,7 +333,7 @@ impl State {
             return Ok(());
         };
         let dir_file = std::fs::File::from(fd);
-        let set = dir_file.set_permissions(std::fs::Permissions::from_mode(dir.mode & 0o7777));
+        let set = dir_file.set_permissions(std::fs::Permissions::from_mode(applied_mode(dir.mode)));
         set.map_err(io(&dir.path))?;
         let at = rustix::fs::Timespec {
             tv_sec: i64::try_from(dir.mtime).unwrap_or(0),
@@ -531,9 +532,16 @@ impl State {
     }
 }
 
+/// The mode bits a layer's mode is allowed to set: the permission bits and the sticky
+/// bit, never setuid or setgid. Every mode the unpacker applies goes through here.
+const fn applied_mode(mode: u32) -> u32 {
+    mode & 0o1777
+}
+
 /// Sets the permission bits of `path` (not a symlink).
 fn set_mode(path: &Path, mode: u32) -> Result<(), UnpackError> {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777)).map_err(io(path))
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(applied_mode(mode)))
+        .map_err(io(path))
 }
 
 /// Opens the directory `rel` below `root`, refusing a symlink at any component (so
