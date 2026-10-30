@@ -1,4 +1,4 @@
-# Releasing js-lease-server, js and js-agent
+# Releasing js-lease-server, js, js-agent, js-bundle and the Mac host tools
 
 Releases are continuous. Nobody tags, and nothing is run by hand: every push to `main` that
 changes code that ships is released as the next version, after the jobs of `ci` other than `macos` have passed on it.
@@ -17,8 +17,8 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    build still runs on a Mac (below).
 3. `plan` (`cargo xtask release plan`) decides whether to release and as which version (below).
    When there is nothing to release, the run ends there, green.
-4. `build` stamps the version into the CI checkout, builds the three binaries for
-   `x86_64-unknown-linux-musl` and `js` and `js-agent` for `aarch64-apple-darwin`, checks that
+4. `build` stamps the version into the CI checkout, builds the binaries for
+   `x86_64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`) and `aarch64-apple-darwin` (`js`, `js-agent`, `js-bundle`, `js-mac-session`, `js-mac-provision`), checks that
    the Linux ones are static and that `--version` prints the release version, and packages them. `sums` writes one `SHA256SUMS` over the archives.
 5. `attest` attests every archive with build provenance (`actions/attest-build-provenance`);
    `verify` then checks the attestations the way a user does (below).
@@ -73,7 +73,7 @@ actions, no permission at the top, `id-token` write in `attest` and `gamma` only
 
 A push is released when a file that ships changed since the latest release tag. The set is computed
 from the dependency graph (`cargo metadata`), not listed: the crates of `js-lease-server`, `js-cli`
-(the `js` binary) and `js-agent`, and every workspace crate they depend on through normal or build
+(the `js` binary), `js-agent`, `js-bundle-cli` (the `js-bundle` binary), `js-mac-session` and `js-mac-provision`, and every workspace crate they depend on through normal or build
 dependencies. Every file of those crates ships (`src/**`, `Cargo.toml`, `build.rs`, a sample
 configuration compiled in with `include_str!`) except `tests/`, `benches/`, `examples/` and markdown;
 so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything under `.cargo/`.
@@ -124,11 +124,15 @@ For version `X.Y.Z`:
 | `js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-agent` binary and `LICENSE` |
 | `js-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js` binary for Apple silicon Macs and `LICENSE` |
 | `js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-agent` binary for Apple silicon Macs and `LICENSE` |
-| `SHA256SUMS` | SHA-256 of the five archives |
+| `js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-bundle` binary (packs, prints and verifies darwin bundles) and `LICENSE` |
+| `js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-bundle` binary for Apple silicon Macs and `LICENSE` |
+| `js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-session` root helper for Apple silicon Macs and `LICENSE` |
+| `js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-provision` pf anchor installer for Apple silicon Macs and `LICENSE` |
+| `SHA256SUMS` | SHA-256 of the nine archives |
 
 Each archive unpacks to a directory named like the archive without `.tar.gz`.
 
-The Linux binaries are statically linked against musl, so they run on any Linux host of that architecture, including `gcr.io/distroless/cc-debian12`. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools`; musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-14` runner and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`.
+The Linux binaries are statically linked against musl, so they run on any Linux host of that architecture, including `gcr.io/distroless/cc-debian12`. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools`; musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries, including the root helper `js-mac-session`, are not codesigned or notarized. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`.
 
 Not yet proven: that the Mac archives come out byte-identical when a partly published release is re-run. The Linux archives are held to this by the comparison in `publish`; for the Mac ones it is watched on the first real release.
 
@@ -148,7 +152,7 @@ gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R 
 `git rev-parse` needs a clone with the tags; without one, the commit is the one the release page shows
 for the tag. For the client, use `-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz'` instead
 (`js-[0-9]*` keeps the other archives out of the match), and for the agent
-`-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'`.
+`-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'`, and for the bundle tool `-p 'js-bundle-*-x86_64-unknown-linux-musl.tar.gz'`.
 
 The checksum check proves the download is intact. The attestation check proves the file was built
 from this repository by the `release` workflow, from `main` (`--source-ref`), at exactly that commit
@@ -203,7 +207,7 @@ refused (401, 403: the coordinator's allow-list must name this repository, this 
 and these two services), or when another writer replaced the desired version.
 
 **The version text** is the release version `X.Y.Z` of the `plan` job: the text `release stamp`
-puts in the build, which each of the three binaries prints as the last word of `--version`
+puts in the build, which each binary prints as the last word of `--version`
 (`build` checks it) and which `js-lease-server` and `js-agent` report as their version in the
 coordinator heartbeat. It is not the tag (`vX.Y.Z`) and has no commit suffix. It is defined in
 one place, `deploy::check_version`, which refuses anything but three numbers without leading
