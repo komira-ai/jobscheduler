@@ -308,6 +308,8 @@ fn an_ended_run_frees_its_disk() {
         }),
         ("cancelled", |fx, epoch| {
             fx.registry.stop_run(&lease(1), "r1").unwrap();
+            // The first beat carries the stop out; the second finds nothing listed.
+            beat(fx, epoch, &[], &[]);
             beat(fx, epoch, &[], &[]);
         }),
         ("lost", |fx, epoch| {
