@@ -1,0 +1,31 @@
+# Coverage-guided fuzz targets for the layer extractor and the media-type allow-list
+# (`cargo fuzz run unpack`). A package of its own, outside the workspace: CI does not
+# build it, and `tests/mutations.rs` in the crate runs a seeded form of the same checks.
+[package]
+name = "js-bundle-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+js-bundle = { path = ".." }
+
+[[bin]]
+name = "unpack"
+path = "fuzz_targets/unpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_type"
+path = "fuzz_targets/media_type.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
