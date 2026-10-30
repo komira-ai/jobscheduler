@@ -698,3 +698,39 @@ async fn the_bundle_names_the_init_where_the_config_says() {
     assert!(text.contains("/dev/other-init"), "{text}");
     assert!(!text.contains("/dev/js-init"), "{text}");
 }
+
+/// A root daemon names the job user: the containers map that user's subordinate range, not
+/// the daemon's, and a user with no range is refused. It catches a daemon that maps its own
+/// ids when told to run the containers as another user.
+#[test]
+fn the_backend_maps_the_job_users_range_when_the_daemon_is_not_that_user() {
+    let dir = scratch("job-user");
+    let mut config = config(&dir, true);
+    let own = rustix::process::getuid().as_raw();
+    let job = own + 1;
+    let ids = IdFiles::in_dir(&dir.join("ids"));
+    std::fs::write(
+        &ids.passwd,
+        format!("daemon:x:{own}:{own}::/:/bin/sh\njob:x:{job}:{job}::/:/bin/sh\n"),
+    )
+    .expect("passwd");
+    std::fs::write(
+        &ids.subuid,
+        format!("{own}:100000:65536\njob:300000:65536\n"),
+    )
+    .expect("subuid");
+    std::fs::write(
+        &ids.subgid,
+        format!("{own}:200000:65536\njob:400000:65536\n"),
+    )
+    .expect("subgid");
+    config.job_user = Some((job, job));
+    let oci = start(&config, &dir.join("s1")).expect("starts");
+    assert_eq!(
+        (oci.ids.uid, oci.ids.sub_uid, oci.ids.sub_gid),
+        (job, 300_000, 400_000)
+    );
+    config.job_user = Some((job + 1, job + 1));
+    let said = started(&config, &dir.join("s2"));
+    assert!(said.contains("has no range"), "{said}");
+}
