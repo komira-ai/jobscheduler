@@ -30,7 +30,7 @@ rustix = { workspace = true, features = ["fs", "process"] }
 serde_json.workspace = true
 tar.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "process", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "sync", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]
