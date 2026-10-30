@@ -945,6 +945,7 @@ dependencies = [
  "js-pool-static",
  "js-testkit",
  "js-types",
+ "libc",
  "rustix",
  "serde_json",
  "sha2 0.11.1",
