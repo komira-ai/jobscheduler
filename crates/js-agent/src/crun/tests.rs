@@ -276,6 +276,58 @@ fn only_the_jobs_own_memory_limit_flags_a_kill_from_the_cgroups_files() {
     );
 }
 
+/// Log lines written by the test's subscriber on this thread.
+#[derive(Clone, Default)]
+struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Lines {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("lock").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Proves a lease whose `memory.events` cannot be read (here the path is a directory, so
+/// the read fails) ends as crun gave it, never as an OOM kill, and that the failure is
+/// logged as a warning naming the lease: a kill the runtime could not see must not pass
+/// silently. Catches an `end_of` that drops the read error without a trace, and one that
+/// flags the end when the file cannot say.
+#[test]
+fn a_lease_whose_memory_events_cannot_be_read_ends_unflagged_and_is_logged() {
+    let lines = Lines::default();
+    let writer = lines.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    tracing::callsite::rebuild_interest_cache();
+
+    let broken = Fixture::new("unreadable");
+    fs::create_dir(broken.mount.join("actions/js-x-r1/memory.events")).expect("unreadable file");
+    assert_eq!(
+        end_of(
+            Ok(Ended::Exited(137)),
+            &broken.lease(),
+            Some(1 << 30),
+            Some(0)
+        ),
+        Exit {
+            code: 137,
+            oom_killed: false
+        }
+    );
+    let logged = String::from_utf8(lines.0.lock().expect("lock").clone()).expect("utf-8");
+    assert!(logged.contains("WARN"), "{logged}");
+    assert!(logged.contains("js-x-r1"), "{logged}");
+    assert!(logged.contains("memory events"), "{logged}");
+}
+
 /// Proves the container's cgroup is `<lease>/ctr`: the path the usage sampler and the
 /// integrity check accept for a direct runner's lease (their layout is `<actions>/<lease>/ctr`).
 /// Catches a runtime that names the lease's own cgroup (usage then reads the booking's

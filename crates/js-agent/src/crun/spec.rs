@@ -139,7 +139,16 @@ pub(super) fn end_of(
     cap: Option<u64>,
     backstop: Option<u64>,
 ) -> Exit {
-    let oom = cgroup.oom_outcome(cap, backstop).ok().flatten();
+    let oom = match cgroup.oom_outcome(cap, backstop) {
+        Ok(oom) => oom,
+        Err(why) => {
+            tracing::warn!(
+                lease = %cgroup.dir().display(),
+                "the memory events of the lease cannot be read, so its end is reported as crun gave it, never as an OOM kill: {why}"
+            );
+            None
+        }
+    };
     exit_of(ended, oom.as_ref())
 }
 
