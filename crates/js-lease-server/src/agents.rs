@@ -16,13 +16,14 @@ use crate::adapt::SharedClock;
 use crate::agent_state::{self, BindingStore};
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
-use crate::config::{AgentSetup, Hosts, UsageSetup};
+use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
 use crate::usage_hub::Usage;
 use crate::usage_map::limits_of;
+use crate::usage_setup::UsageSetup;
 use crate::util::blocking;
 
 /// What the agent routes and the tick share. Agent handlers take the registry's lock and

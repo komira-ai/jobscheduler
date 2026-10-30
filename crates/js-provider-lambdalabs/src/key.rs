@@ -118,8 +118,10 @@ impl ApiKey {
         }
     }
 
-    /// The `Authorization` header value.
-    pub(crate) fn authorization(&self) -> String {
+    /// The `Authorization` header value, `Bearer <key>`. For a caller that sends the key
+    /// somewhere else it was given for (the watcher's webhook token): it is a secret, so
+    /// it is never logged.
+    pub fn authorization(&self) -> String {
         format!("Bearer {}", self.0)
     }
 }

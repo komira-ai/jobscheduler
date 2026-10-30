@@ -74,9 +74,10 @@ mod unremoved;
 mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
+use js_alert::{AlertSink, Notifier};
 use js_elastic::{Acquired, HostRef, Released, SchedulerId, Secret};
 use js_lease::{Booking, Clock};
 use js_registry::{HostState, HostView, Launchable, SessionSource};
@@ -89,6 +90,9 @@ use tracing::{debug, warn};
 
 use crate::adapt::SharedClock;
 use crate::util::blocking;
+
+/// The most alerts waiting for the sink; beyond it the oldest is dropped and counted.
+const ALERT_QUEUE: usize = 64;
 
 pub(crate) use build::{Parts, build};
 pub use complete::{REGISTRY_FLOOR, REGISTRY_QUIET};
@@ -149,6 +153,9 @@ struct Core {
     /// Held only to copy [`Memory`] out and to swap it back in, never across a call.
     memory: Mutex<Memory>,
     last: Arc<Mutex<Option<Snapshot>>>,
+    /// Where each alert is sent besides the log; set once, at start. Its delivery runs on a
+    /// thread of its own, so a slow or refusing receiver never holds up a tick.
+    sink: OnceLock<Mutex<Notifier>>,
 }
 
 /// The scaler of one elastic pool. A handle: clones share one scaler.
@@ -224,6 +231,7 @@ impl Scaler {
             one_tick: Mutex::new(()),
             memory: Mutex::new(memory),
             last: Arc::new(Mutex::new(None)),
+            sink: OnceLock::new(),
         };
         Self {
             core: Arc::new(core),
@@ -250,6 +258,44 @@ impl Scaler {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         gate.bound((now, cap), leased.iter().map(|b| b.host.to_string()));
+    }
+
+    /// Sends every alert the scaler raises to `sink` as well as the log: once when it
+    /// begins to hold, again every `repeat_after` while it holds, and again if it clears and
+    /// returns. Delivery is on a thread of its own with a bounded queue, so a sink that
+    /// refuses or hangs never delays a tick; a refused alert is sent again after a wait
+    /// that doubles up to a cap, and stays pending until delivered once. Set once, before
+    /// the first tick; a second call changes nothing.
+    pub fn set_sink(&self, sink: Arc<dyn AlertSink>, repeat_after: Duration) {
+        let _ = self
+            .core
+            .sink
+            .set(Mutex::new(Notifier::new(sink, repeat_after, ALERT_QUEUE)));
+    }
+
+    /// Waits until every alert handed to the sink has been answered. For tests and for a
+    /// program about to exit; a tick never calls it.
+    pub fn flush_alerts(&self) {
+        if let Some(notifier) = self.core.sink.get() {
+            notifier
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .flush();
+        }
+    }
+
+    /// The server's time at the end of the last tick that finished, in milliseconds; `None`
+    /// before the first. The status page shows it, and a watcher outside the server reads
+    /// it as the server's heartbeat. A tick that cannot write the scaler's records does
+    /// nothing else and does not finish (the disk is full or gone), so the heartbeat stops
+    /// then and the watcher's alarm is right to say so.
+    pub fn last_tick(&self) -> Option<Millis> {
+        let seen = self
+            .core
+            .last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        seen.as_ref().map(|seen| seen.now)
     }
 
     /// Whether the last tick vouched for the registry's view; false before the first.
@@ -418,6 +464,11 @@ impl Core {
             if !memory.alerts.contains_key(key) {
                 warn!("{message}");
             }
+        }
+        if let Some(notifier) = self.sink.get() {
+            let at = Duration::from_millis(now.as_millis());
+            let mut notifier = notifier.lock().unwrap_or_else(PoisonError::into_inner);
+            notifier.pass(at, &found);
         }
         memory.alerts = found;
     }

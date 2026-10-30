@@ -81,6 +81,12 @@ struct PoolView {
     /// removal, a release the provider does not confirm, an orphan, a silent host that
     /// nothing releases.
     alerts: Vec<String>,
+    /// The server's time at the end of the scaler's last finished tick, in milliseconds;
+    /// null before the first. A watcher outside the server reads it as the heartbeat.
+    last_tick_ms: Option<u64>,
+    /// Whether the pool has a scaler: it ticks, so `last_tick_ms` is a heartbeat that must
+    /// move. A pool without one (a plan-only or static pool) has no heartbeat.
+    scaler: bool,
     next_launch: Option<NextLaunch>,
 }
 
@@ -109,6 +115,9 @@ struct MachineView {
     offer: String,
     zone: Option<String>,
     price_cents_per_hour: u64,
+    /// The provider's id for the machine, once the provider has given one: what a watcher
+    /// outside the server matches the provider's list against.
+    provider_id: Option<String>,
 }
 
 /// A machine of the scheduler's that no record knew: counted, never released by the
@@ -210,6 +219,7 @@ fn held(records: &Records, pool: &str) -> (Vec<MachineView>, Vec<OrphanView>, Op
             offer: record.offer.id.clone(),
             zone: record.offer.zone.clone(),
             price_cents_per_hour: record.price_cents_per_hour,
+            provider_id: record.cloud_id.clone(),
         })
         .collect();
     let orphans = ours
@@ -325,6 +335,12 @@ impl Status {
             machines,
             orphans,
             alerts: self.scaler.as_ref().map(Scaler::alerts).unwrap_or_default(),
+            scaler: self.scaler.is_some(),
+            last_tick_ms: self
+                .scaler
+                .as_ref()
+                .and_then(Scaler::last_tick)
+                .map(Millis::as_millis),
             next_launch,
         }
     }

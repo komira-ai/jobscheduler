@@ -766,7 +766,7 @@ fn provider_error(error: ApiError) -> ProviderError {
 }
 
 /// The scheduler's view of an instance.
-fn held_of(instance: &Instance) -> Held {
+pub(crate) fn held_of(instance: &Instance) -> Held {
     Held {
         id: instance.id.host_ref(),
         acquire: Owner::acquire_of(instance).unwrap_or_default().to_owned(),
