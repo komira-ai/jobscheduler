@@ -388,3 +388,22 @@ fn macos_versions_are_read_from_a_product_version() {
     assert_eq!(MacosMajor::from_major(26), None);
     assert_eq!(MacosMajor::Macos14.major(), 14);
 }
+
+#[test]
+fn every_policy_error_says_what_is_wrong() {
+    let table = [
+        (PolicyError::TooMany("trees"), "too many entries in trees"),
+        (
+            PolicyError::NotAllowModel,
+            "read grants need the allow read model",
+        ),
+        (
+            PolicyError::AlreadyGranted,
+            "the policy already has its read grants",
+        ),
+        (PolicyError::TwoXcodes, "more than one Xcode granted"),
+    ];
+    for (error, text) in table {
+        assert_eq!(error.to_string(), text);
+    }
+}

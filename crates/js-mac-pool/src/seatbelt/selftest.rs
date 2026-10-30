@@ -265,7 +265,7 @@ impl SelfTest {
     /// # Errors
     /// [`SelfTestError`] for a canary outside its directory or inside a granted place, a
     /// policy that is refused, or a path that is not accepted.
-    pub fn selftest(major: MacosMajor, fixture: Fixture) -> Result<Self, SelfTestError> {
+    pub fn new(major: MacosMajor, fixture: Fixture) -> Result<Self, SelfTestError> {
         let Fixture {
             layout,
             grants,

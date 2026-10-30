@@ -406,3 +406,24 @@ fn class_names_are_the_logged_ones() {
     assert_eq!(Class::Compile.as_str(), "compile");
     assert_eq!(Class::Codesign.as_str(), "codesign");
 }
+
+#[test]
+fn every_self_test_error_says_what_is_wrong() {
+    let table = [
+        (
+            SelfTestError::CanaryMisplaced(Class::ReadUsersShared),
+            "canary read-users-shared is not under its directory",
+        ),
+        (
+            SelfTestError::CanaryGranted(Class::ReadInputStore),
+            "canary read-input-store is inside a granted place",
+        ),
+        (
+            SelfTestError::Path(js_mac_pool::seatbelt::PathError::TooLong),
+            "path: path is too long",
+        ),
+    ];
+    for (error, text) in table {
+        assert_eq!(error.to_string(), text);
+    }
+}
