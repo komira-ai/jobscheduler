@@ -495,3 +495,21 @@ fn a_symlinked_tree_directory_is_refused_with_a_trailing_slash_too() {
     assert!(run.stderr.contains("is a symlink"), "{}", run.stderr);
     assert!(!out.exists());
 }
+
+#[test]
+fn a_symlinked_tree_directory_is_refused_with_a_trailing_dot_too() {
+    let work = work("pack-rootlink-dot");
+    let tree = work.join("tree");
+    fs::create_dir(&tree).unwrap();
+    sample_tree(&tree, "a");
+    let link = work.join("link");
+    symlink(&tree, &link).unwrap();
+    for suffix in ["/.", "/./"] {
+        let out = work.join("out");
+        let spelled = format!("{}{suffix}", text(&link));
+        let run = run(&pack_args(&out, &[("main", Path::new(&spelled))]));
+        assert_eq!(run.code, Some(1), "{suffix}: {}", run.stderr);
+        assert!(run.stderr.contains("is a symlink"), "{}", run.stderr);
+        assert!(!out.exists());
+    }
+}

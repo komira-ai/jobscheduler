@@ -99,6 +99,8 @@ fn a_different_annotation_gives_a_different_digest_and_the_same_config_and_layer
 fn a_duplicate_or_malformed_annotation_is_refused_before_anything_is_written() {
     let long_value = format!("org.example.k={}", "v".repeat(4097));
     let long_key = format!("org.{}.k=v", "a".repeat(251));
+    let many: Vec<String> = (0..65).map(|i| format!("org.example.k{i}=v")).collect();
+    let many_refs: Vec<&str> = many.iter().map(String::as_str).collect();
     for (annotations, reason) in [
         (
             &["org.example.k=v", "org.example.k=w"][..],
@@ -121,6 +123,13 @@ fn a_duplicate_or_malformed_annotation_is_refused_before_anything_is_written() {
             &["org.example.k=a\u{2028}b"][..],
             "control or bidirectional",
         ),
+        (&["org.example.k=a\u{feff}b"][..], "invisible"),
+        (&["org.example.k=a\u{200b}b"][..], "invisible"),
+        (&["org.example.k=a\u{200d}b"][..], "invisible"),
+        (&["org.example.k=a\u{2060}b"][..], "invisible"),
+        (&["org.example.k=a\u{ad}b"][..], "invisible"),
+        (&["org.example.k=a\u{e0041}b"][..], "invisible"),
+        (&many_refs[..], "at most 64 annotations"),
         (&[long_value.as_str()][..], "at most 4096 bytes"),
         (&[long_key.as_str()][..], "at most 256 bytes"),
     ] {
@@ -141,6 +150,17 @@ fn annotations_at_the_length_caps_are_accepted() {
     let work = work("annotate-caps");
     let key = format!("org.{}.k={}", "a".repeat(250), "v".repeat(4096));
     let (packed, out) = pack_into(&work, "out", &[key.as_str()]);
+    assert_eq!(packed.code, Some(0), "{}", packed.stderr);
+    let verified = run(&verify_args(&out, &work.join("scratch")));
+    assert_eq!(verified.code, Some(0), "{}", verified.stderr);
+}
+
+#[test]
+fn sixty_four_annotations_are_accepted() {
+    let work = work("annotate-count");
+    let many: Vec<String> = (0..64).map(|i| format!("org.example.k{i}=v")).collect();
+    let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+    let (packed, out) = pack_into(&work, "out", &refs);
     assert_eq!(packed.code, Some(0), "{}", packed.stderr);
     let verified = run(&verify_args(&out, &work.join("scratch")));
     assert_eq!(verified.code, Some(0), "{}", verified.stderr);

@@ -22,6 +22,8 @@ use crate::text::forbidden;
 /// reader's limit.
 const MAX_KEY_BYTES: usize = 256;
 const MAX_VALUE_BYTES: usize = 4096;
+/// The most annotations: with the caps above the manifest cannot reach the reader's size limit.
+const MAX_ANNOTATIONS: usize = 64;
 
 /// `pairs` as a map; a name given twice is refused.
 fn unique(flag: &'static str, pairs: &[Pair]) -> Result<BTreeMap<String, String>, Error> {
@@ -65,6 +67,7 @@ fn annotations(args: &PackArgs) -> Result<BTreeMap<String, String>, Error> {
             !value.is_empty(),
             value.len() <= MAX_VALUE_BYTES,
             !value.chars().any(forbidden),
+            map.len() <= MAX_ANNOTATIONS,
         ];
         if !ok.into_iter().all(|ok| ok) {
             return Err(Error::Annotation { key: key.clone() });

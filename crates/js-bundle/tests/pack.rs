@@ -347,9 +347,11 @@ fn a_symlinked_root_is_refused_with_a_trailing_slash_too() {
     write(&scratch.root(), "f", b"x", 0o644);
     let link = scratch.outside().join("root-link");
     std::os::unix::fs::symlink(scratch.root(), &link).unwrap();
-    let slashed = std::path::PathBuf::from(format!("{}/", link.display()));
-    assert!(matches!(
-        pack_error(&slashed),
-        PackError::RootSymlink { .. }
-    ));
+    for suffix in ["/", "/.", "/./", "//"] {
+        let spelled = std::path::PathBuf::from(format!("{}{suffix}", link.display()));
+        assert!(
+            matches!(pack_error(&spelled), PackError::RootSymlink { .. }),
+            "{suffix}"
+        );
+    }
 }
