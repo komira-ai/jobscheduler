@@ -172,7 +172,8 @@ fn explicit_read_denies_are_resolved_and_must_exist() {
     let odd = state.join("..").join("helper-state");
     let socket = Path::new("/run/js/helper");
     let given = [odd];
-    let mut with = flags(Some(socket), Some(&dir.path("")), None, &[]);
+    let root = dir.path("");
+    let mut with = flags(Some(socket), Some(&root), None, &[]);
     with.deny_read = &given;
     let settings = NativeSettings::from_flags(&with, &[]).unwrap().unwrap();
     let denied: Vec<&str> = settings
@@ -203,9 +204,10 @@ fn explicit_read_denies_are_resolved_and_must_exist() {
 fn a_tool_root_must_be_a_directory_below_the_root() {
     let dir = Scratch::new("native-set-roots");
     let socket = Path::new("/run/js/helper");
+    let root = dir.path("");
     for bad in ["/", "/nonexistent-tool-root"] {
         let roots = [PathBuf::from(bad)];
-        let given = flags(Some(socket), Some(&dir.path("")), None, &roots);
+        let given = flags(Some(socket), Some(&root), None, &roots);
         let why = NativeSettings::from_flags(&given, &[]).unwrap_err();
         assert!(why.starts_with("--native-tool-root: "), "{bad}: {why}");
         assert!(why.contains("is not a directory below /"), "{bad}: {why}");
