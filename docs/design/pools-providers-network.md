@@ -1145,6 +1145,22 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
    a small ext4 image file attached with `losetup` and mounted as the state root, which has
    its own `st_dev`. A tmpfs is wrong: the agent says a taint on a tmpfs is lost at reboot.
    Needs one live test (Open questions 5).
+5a. Make the jobs' user namespace. The agent refuses to start with `--container-bin` and
+   without `--container-subuid <user>`, and checks that `/etc/subuid` and `/etc/subgid` give
+   the user one entry of exactly 65536 ids, not from 0, overlapping no host id, and that the
+   Docker daemon runs `userns-remap` set to that user. The renderer (`bootstrap/userns.rs`)
+   first creates a missing `/etc/subuid` or `/etc/subgid` empty with mode 0644, then fails if
+   either id file holds an entry for `js-jobs` or any entry overlapping the range (comment
+   lines skipped; LXD conventionally owns `root:1000000:1000000000`, so the range sits at
+   2000000000), merges `"userns-remap": "js-jobs"` into `/etc/docker/daemon.json` with a
+   constant `python3 -I` heredoc (every other key is kept, as the NVIDIA toolkit writes
+   `runtimes` there; an empty file counts as `{}`; a different remap already set is refused,
+   before anything else is written; the file is replaced by a rename of a complete temporary
+   file), makes a system user `js-jobs`, appends `js-jobs:2000000000:65536` to both id files,
+   restarts the daemon, and the agent's unit passes `--container-subuid js-jobs`. No
+   path of `dockerd` and no unit file is named: the agent reads the remap from `docker info`,
+   so the configuration file is as good as a command-line flag. Whether `python3` and the merge
+   work on the stock image is checked live (Open questions 5).
 6. Write and start `js-agent.service` with `--server`, `--token-file`, `--instance-file`,
    `--pool`, `--host-id` (the machine's `HostName`, which is how the scaler finds the host of
    a record), `--container-bin`, `--container-pull missing` (a launched machine is new and holds no image, so
@@ -1165,12 +1181,37 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
    5); until that run exists the design does not claim removal. After the Welcome credential
    (7.2) a surviving token copy is useless, so cleanup is defence in depth, not the guard.
 8. Block metadata for jobs. A process that reaches the provider's metadata address can read the
-   user data again, and the host runs untrusted GPU jobs in containers. The template drops traffic
-   from the container networks (and the job user) to the metadata address before the agent starts,
-   and the agent runs containers on a bridge, never the host network. The address and the way to
-   drop it on the stock image are not verified (Open questions 5); the live checklist (13.4) tests
-   that a container cannot read user data. No job runs before the first hello, and the token is
-   retired at it, so the window between boot and first hello holds no job.
+   user data again, and the host runs untrusted GPU jobs in containers. The renderer (one for
+   every provider, `crates/js-lease-server/src/bootstrap/metadata.rs`) writes, after the provider's
+   `host_prep` and before the token, the network steps and the agent's unit, an `nftables`
+   rules file (`/etc/jobscheduler/metadata-block.nft`) and `js-metadata-block.service`, a
+   oneshot that loads it and is enabled for boot. `nft` is part of the Ubuntu 24.04 server
+   image; the script checks the program with `test -x` and stops if it is missing, so the
+   agent never starts without the block. The table `inet js_metadata` has two chains at
+   priority -10 (ahead of the container engine's own rules; both accept by default):
+   `forward` drops traffic to `169.254.169.254`, which covers a container on a bridge network
+   (the engine's NAT forwards its packets through the host), and `output` drops the same for every uid but 0. Root keeps the address: the
+   agent and the bootstrap run as root, and no step after boot needs it, so a blanket drop
+   would also work; the rule exempts root so that a later step that does need it fails
+   in one place, not everywhere. The unit
+   is ordered `After=nftables.service` (the image's own service, when enabled, flushes the whole
+   ruleset as it starts) and `Before=network-pre.target js-agent.service`, the file is reloaded at every
+   boot (the table is deleted and made again, so a second load changes nothing), and the
+   agent's unit has `Requires=` and `After=` on it. The script reads the loaded table back
+   before it goes on: `nft` lists the table and the script fails unless exactly two lines drop
+   (the two rules), so a table that lost a chain does not pass. The agent is started without
+   `--container-network`, so containers get the agent's default, no network at all; a pool
+   that later gives jobs egress names a bridge there, and the rule covers it with no change.
+   The rule does not cover every network an engine can make: a rootful `slirp4netns` or
+   `pasta` network egresses as host uid 0, which the `output` chain exempts, and a `macvlan`
+   or `ipvlan` network never passes the host's forward hook. The agent refuses only `host`
+   by name and cannot know the driver behind a network, so a pool that names one must name a
+   bridge network. The
+   address is not verified for Lambda (Open questions 5) and is one named constant; the
+   IPv6 address of the service is not blocked, because this design does not name one. The
+   live checklist (13.4) tests that a container cannot read user data. No job runs before
+   the first hello, and the token is retired at it, so the window between boot and first
+   hello holds no job.
 
 Hardening of the template, each a golden test of the rendered text with every secret
 masked: `write_files` mode 0600 for every secret; no `set -x` and no `echo` of a secret;
@@ -1581,7 +1622,17 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
    secret type next to the token? Recommendation: yes.
 5. The stock Lambda image: driver, runtime, toolkit, and a state root on its own device (loop
    image). Not verified. Recommendation: the install table starts empty, the live run fills it, and
-   the bootstrap fails visibly rather than guessing.
+   the bootstrap fails visibly rather than guessing. Also to check live: that the metadata
+   address is `169.254.169.254` on this image, whether the service also answers on its IPv6
+   address (the block drops IPv4 only, and no IPv6 address is named here), that `nft` is on
+   the image, and that `python3` is on the image. GPU containers under `userns-remap` are an open live
+   question (reports say they can break under a remap). The live checks, on a launched host:
+   `docker info` lists `name=userns` in `SecurityOptions` and shows the remapped
+   `DockerRootDir`; a real `--gpus device=0` job runs a CUDA device query and a small kernel (not `nvidia-smi` alone), on the first live run before any scale-up; the scratch
+   directory is writable by container uid 65534 (host uid 2000065534 under the remap); and `/etc/docker/daemon.json`
+   still holds the toolkit's `runtimes` beside `userns-remap`. The id-file check and the `daemon.json` merge are proven by text only; the first live run confirms them (`cat /etc/subuid /etc/subgid`; `cat /etc/docker/daemon.json`). If the GPU job fails under the remap, the fallback is Podman on launched hosts: the same engine and `--uidmap` path used elsewhere, so one engine serves Linux everywhere. It is not a change to the agent's Docker rule. If the Docker daemon is
+   instead configured by a unit that overrides `daemon.json`, `systemctl show -p ExecStart
+   docker.service` shows it.
 6. Where the host gets the agent binary. Decided: from the operator's pin per architecture
    (`agent` in the pool, 7.3), checksummed; the service serves no download.
 7. Provider hierarchy (`providers.md`). Recommendation: one provider per pool, pools chosen by
