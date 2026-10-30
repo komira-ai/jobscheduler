@@ -431,7 +431,7 @@ jobs:
   # node's own canary stays the gate. The jobs stand alone: a failure here blocks no other.
   crun-rootless:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -462,7 +462,7 @@ jobs:
 
   crun-root:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:

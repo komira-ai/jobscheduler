@@ -259,9 +259,11 @@ async fn the_containers_cgroup_kills_as_a_group_on_out_of_memory() {
 /// Catches an exec-root overlay mounted without the pinned options, and one that can run
 /// a set-uid program: the job's mount table lists `/work` as an overlay of this lease's
 /// own lower, upper and work directories, with `userxattr`, `nosuid` and `nodev`; each of
-/// `redirect_dir`, `metacopy`, `index` and `xino` that the kernel lists (it lists those that
-/// differ from its default, so an unlisted one is at the value the mount asked for) has
-/// the pinned safe value.
+/// `redirect_dir`, `metacopy`, `index` and `xino` that the kernel lists has the pinned safe
+/// value. The kernel lists those options only when they differ from its default, so this
+/// catches a wrong value (for example `metacopy=on`) and not an option dropped from the
+/// pinned string whose default is the safe value; that the pinned options are all present
+/// is the resolved-bundle unit test's job (P4).
 #[tokio::test]
 #[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
 async fn the_exec_root_is_an_overlay_mounted_with_the_pinned_options() {
