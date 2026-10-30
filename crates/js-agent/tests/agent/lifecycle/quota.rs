@@ -593,6 +593,12 @@ fn clear_failures_in_a_row_make_the_quota_unhealthy() {
     h.life.step();
     assert!(!names(&h.life.step()).contains(&"finding - quota-unhealthy".to_owned()));
     assert!(names(&h.life.step()).contains(&"finding - quota-unhealthy".to_owned()));
+    // Another failure while unhealthy counts but does not probe or report again.
+    assert!(
+        names(&h.life.step())
+            .iter()
+            .all(|line| !line.contains("quota-unhealthy"))
+    );
     assert_eq!(names(&h.start(job("r2"))), ["refused r2 no-capacity"]);
 }
 
