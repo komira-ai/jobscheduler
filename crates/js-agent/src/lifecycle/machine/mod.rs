@@ -331,7 +331,27 @@ impl Lifecycle {
         if self.taint.is_tainted() {
             return Err(no(refusal::HOST_TAINTED, "this host is tainted"));
         }
+        // A bundle is judged before the native body it belongs to, so a host without the
+        // capability says so (`bundle-unsupported`) and a host with it applies the bundle's
+        // rules, and only then reaches the refusal that nothing can run a bundle yet.
+        if spec.bundle.is_some() {
+            match &self.config.bundle {
+                None => {
+                    return Err(no(
+                        refusal::BUNDLE_UNSUPPORTED,
+                        "this agent holds no bundle store",
+                    ));
+                }
+                Some(bundle) => bundle.admit(spec)?,
+            }
+        }
         if let Some(native) = &spec.native {
+            if spec.bundle.is_some() {
+                return Err(no(
+                    refusal::NATIVE_UNSUPPORTED,
+                    "the bundle is admitted, but this agent cannot run a bundle yet",
+                ));
+            }
             self.runtime
                 .check_native(native)
                 .map_err(|refused| (refused.code, refused.why))?;

@@ -20,7 +20,8 @@
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
 //! | run files | [`MAX_RUN_FILES`] entries; name [`MAX_RUN_FILE_NAME_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric, none twice; contents [`MAX_RUN_FILE_LEN`] bytes each and [`MAX_RUN_FILES_TOTAL_BYTES`] in all, no NUL |
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
-//! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`] |
+//! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`], or [`MAX_BUNDLE_CAPABILITY_VALUE_LEN`] for `bundle` |
+//! | caps frame | [`MAX_CAPS_BUNDLES`] digests, [`MAX_CAPS_XCODES`] Xcode builds of [`MAX_XCODE_BUILD_LEN`] bytes |
 //! | free text (`agent_version`, taint, `detail`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control or format character |
 //! | exclusive refusal `detail` | [`MAX_REFUSAL_DETAIL`] bytes, no control or format character |
 //! | GPUs | [`MAX_GPUS`] devices or indices; uuid and model [`MAX_GPU_TEXT_LEN`] bytes |
@@ -82,8 +83,30 @@ pub const MAX_LABEL_VALUE_LEN: usize = 63;
 pub const MAX_CAPABILITIES: usize = 64;
 /// Longest capability key, in bytes.
 pub const MAX_CAPABILITY_KEY_LEN: usize = 64;
-/// Longest capability value, in bytes.
+/// Longest capability value, in bytes, except the capability [`BUNDLE_CAPABILITY`], whose
+/// value is [`MAX_BUNDLE_CAPABILITY_VALUE_LEN`] at most; see [`capability_value_max`].
 pub const MAX_CAPABILITY_VALUE_LEN: usize = 128;
+/// The capability a host reports its held bundle digests under, comma-separated.
+pub const BUNDLE_CAPABILITY: &str = "bundle";
+/// The most digests the capability [`BUNDLE_CAPABILITY`] holds.
+pub const MAX_BUNDLE_CAPABILITY_DIGESTS: usize = 16;
+/// Longest value of the capability [`BUNDLE_CAPABILITY`], in bytes: that many digests of 71
+/// bytes (`sha256:` and 64 hex digits) and the commas between them.
+pub const MAX_BUNDLE_CAPABILITY_VALUE_LEN: usize = MAX_BUNDLE_CAPABILITY_DIGESTS * 72 - 1;
+/// Most bundle digests in a [`crate::Caps`] frame.
+pub const MAX_CAPS_BUNDLES: usize = 256;
+/// Most Xcode builds in a [`crate::Caps`] frame.
+pub const MAX_CAPS_XCODES: usize = 16;
+/// Longest Xcode build id in a [`crate::Caps`] frame, in bytes.
+pub const MAX_XCODE_BUILD_LEN: usize = 32;
+
+/// The longest value, in bytes, the capability `key` may have: a held-bundle list is longer
+/// than the other capabilities, which are short facts.
+#[must_use]
+pub fn capability_value_max(key: &str) -> usize {
+    [MAX_CAPABILITY_VALUE_LEN, MAX_BUNDLE_CAPABILITY_VALUE_LEN]
+        [usize::from(key == BUNDLE_CAPABILITY)]
+}
 /// Longest session secret, in bytes (see [`crate::Welcome::session`]). A secret the
 /// registry issues is far shorter; the cap only bounds what a peer can send.
 pub const MAX_SESSION_LEN: usize = 128;

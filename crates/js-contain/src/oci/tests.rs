@@ -37,6 +37,7 @@ fn config(dir: &Path, ok: bool) -> OciConfig {
         init_dest: init::DEFAULT_DEST.to_owned(),
         helper_modes: helper::HelperModes::default(),
         scrub_env: crun::no_scrub,
+        job_user: None,
         logs: LogLimits::default(),
     }
 }
@@ -698,6 +699,42 @@ async fn the_bundle_names_the_init_where_the_config_says() {
     assert!(!text.contains("/dev/js-init"), "{text}");
 }
 
+/// A root daemon names the job user: the containers map that user's subordinate range, not
+/// the daemon's, and a user with no range is refused. It catches a daemon that maps its own
+/// ids when told to run the containers as another user.
+#[test]
+fn the_backend_maps_the_job_users_range_when_the_daemon_is_not_that_user() {
+    let dir = scratch("job-user");
+    let mut config = config(&dir, true);
+    let own = rustix::process::getuid().as_raw();
+    let job = own + 1;
+    let ids = IdFiles::in_dir(&dir.join("ids"));
+    std::fs::write(
+        &ids.passwd,
+        format!("daemon:x:{own}:{own}::/:/bin/sh\njob:x:{job}:{job}::/:/bin/sh\n"),
+    )
+    .expect("passwd");
+    std::fs::write(
+        &ids.subuid,
+        format!("{own}:100000:65536\njob:300000:65536\n"),
+    )
+    .expect("subuid");
+    std::fs::write(
+        &ids.subgid,
+        format!("{own}:200000:65536\njob:400000:65536\n"),
+    )
+    .expect("subgid");
+    config.job_user = Some((job, job));
+    let oci = start(&config, &dir.join("s1")).expect("starts");
+    assert_eq!(
+        (oci.ids.uid, oci.ids.sub_uid, oci.ids.sub_gid),
+        (job, 300_000, 400_000)
+    );
+    config.job_user = Some((job + 1, job + 1));
+    let said = started(&config, &dir.join("s2"));
+    assert!(said.contains("has no range"), "{said}");
+}
+
 /// Asserts what the egress spike tests rely on: the exposed section is the resolution of the
 /// pinned profile for a job with no capability (26 entries on amd64: a change to the profile
 /// or to the resolution moves this number, and the spike with it), carries the default
@@ -709,4 +746,49 @@ fn the_exposed_seccomp_section_is_the_resolved_pinned_profile() {
     assert!(section["defaultAction"].is_string(), "{section}");
     let error = seccomp_section("riscv64", &[]).expect_err("no filter");
     assert!(error.contains("riscv64"), "{error}");
+}
+
+/// Catches a root daemon starting containers in a range it was never given, and a job
+/// user that is root: the refusal is explicit at `Oci::new` (`Some((0, 0))`, `Some((uid,
+/// 0))`) and for a root process with no job user (`run_ids` with uid 0, which `Oci::new`
+/// reads from `getuid`), and holds when the files give root a range.
+#[test]
+fn a_root_daemon_or_a_root_job_user_is_refused() {
+    let dir = scratch("root-refused");
+    let mut root_range = config(&dir, true);
+    std::fs::write(
+        &root_range.id_files.subuid,
+        "root:100000:65536\n0:100000:65536\n",
+    )
+    .expect("subuid");
+    std::fs::write(
+        &root_range.id_files.subgid,
+        "root:200000:65536\n0:200000:65536\n",
+    )
+    .expect("subgid");
+    let uid = rustix::process::getuid().as_raw();
+    for job in [Some((0, 0)), Some((uid.max(1), 0)), Some((0, 1000))] {
+        root_range.job_user = job;
+        let refused = start(&root_range, &dir.join("s")).expect_err("root job user");
+        assert!(
+            matches!(
+                refused,
+                OciError::Subids(crate::subids::SubidError::Root { .. })
+            ),
+            "{job:?}: {refused:?}"
+        );
+    }
+    // No job user, and the daemon is root: no range of its own is mapped.
+    root_range.job_user = None;
+    let refused = run_ids(&root_range, 0, 0).expect_err("root daemon");
+    assert!(
+        matches!(refused, SubidError::Root { uid: 0, gid: 0 }),
+        "{refused:?}"
+    );
+    // The same files serve a user that is not root.
+    let ids = run_ids(&root_range, 990, 990);
+    assert!(
+        matches!(ids, Err(SubidError::Missing { .. })),
+        "a non-root user with no entry is refused for that, not as root: {ids:?}"
+    );
 }

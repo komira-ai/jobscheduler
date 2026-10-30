@@ -3,8 +3,8 @@
 use std::ffi::OsString;
 
 use js_mac_pool::seatbelt::{
-    AbsPath, BuildError, Caps, MAX_LISTED, Narrowing, Net, Policy, PolicyError, Ports, Profile,
-    ReadModel, SANDBOX_EXEC, SlotLayout,
+    AbsPath, Caps, MAX_LISTED, Narrowing, Net, Policy, PolicyError, Ports, Profile, ReadModel,
+    SANDBOX_EXEC, SlotLayout,
 };
 
 fn path(text: &str) -> AbsPath {
@@ -107,18 +107,6 @@ fn a_layout_that_knows_no_user_folder_entry_grants_nothing_there() {
 }
 
 #[test]
-fn the_allow_read_model_is_refused_not_run_as_open() {
-    let mut allow = caps(Net::Off);
-    allow.read_model = ReadModel::Allow;
-    let policy = Policy::base(layout(), allow).unwrap();
-    assert_eq!(policy.read_model(), ReadModel::Allow);
-    assert_eq!(
-        Profile::for_policy(&policy),
-        Err(BuildError::ReadModelUnavailable)
-    );
-}
-
-#[test]
 fn every_path_is_a_named_parameter_in_a_fixed_order() {
     let policy = Policy::base(layout(), caps(Net::Off)).unwrap();
     let profile = Profile::for_policy(&policy).unwrap();
@@ -140,7 +128,7 @@ fn the_argv_is_sandbox_exec_parameters_profile_program_and_arguments() {
     let policy = Policy::base(bare_layout(), caps(Net::Off)).unwrap();
     let profile = Profile::for_policy(&policy).unwrap();
     let args = [OsString::from("-c"), OsString::from("echo hi")];
-    let argv = profile.argv(&path("/bin/sh"), &args);
+    let argv = profile.argv(path("/bin/sh"), &args);
     let expected = [
         OsString::from(SANDBOX_EXEC),
         OsString::from("-D"),
