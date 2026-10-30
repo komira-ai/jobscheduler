@@ -15,12 +15,14 @@ on:
 
 permissions: {}
 
-# One run per workflow and pull request: a new push to a PR cancels that PR's queued or
+# A `labeled` run for a label other than `macos` has a group of its own and every job
+# skips in it, so adding a label never cancels the pull request's run in flight. One run per
+# workflow and pull request otherwise: a new push to a PR cancels that PR's queued or
 # running run (macOS runners are scarce). A push to main gets a group of its own (the run
 # id), so it is never cancelled and never replaced while pending: GitHub keeps only one
 # pending run per group, and the release runs only after a main run succeeds.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'macos' && github.run_id) || github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -31,6 +33,7 @@ env:
 
 jobs:
   lint:
+    if: ${{ !(github.event.action == 'labeled' && github.event.label.name != 'macos') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -64,6 +67,7 @@ jobs:
   # not skip, when KBF_TEST_POSTGRES_URL is unset), against a service container pinned by
   # digest.
   test:
+    if: ${{ !(github.event.action == 'labeled' && github.event.label.name != 'macos') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -110,14 +114,16 @@ jobs:
   # the job when any of these holds:
   #   - the pull request carries the label `macos`;
   #   - a changed path contains darwin, apple, macos or seatbelt (any case), is under a
-  #     js-mac-* crate (crates/js-mac-), or is this file;
+  #     js-mac-* crate (crates/js-mac-), or is rust-toolchain.toml or this file;
   #   - the diff adds or removes a line with `target_os = "macos"` (the cfg( ), cfg!( ),
   #     cfg(any( ... )) and `target_os="macos"` spellings all contain it).
   # If the diff cannot be computed the job runs (fail closed). The label needs the
-  # `labeled` pull request event at the top. crates/xtask/tests/macos_filter.rs runs this script
+  # `labeled` pull request event at the top, and a label other than `macos` skips every job.
+  # crates/xtask/tests/macos_filter.rs runs this script
   # on built repositories and pins each trigger. The macos job builds and tests only
   # js-agent and js-cli.
   changes:
+    if: ${{ !(github.event.action == 'labeled' && github.event.label.name != 'macos') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -147,7 +153,7 @@ jobs:
             exit 0
           fi
           macos=false
-          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^\.github/workflows/ci\.yml$'; then
+          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
             macos=true
           elif printf '%s\n' "$patch" | grep -Ev '^(\+\+\+|---) ' | grep -Eq '^[+-].*target_os[[:space:]]*=[[:space:]]*"macos"'; then
             macos=true
@@ -161,7 +167,7 @@ jobs:
     needs: changes
     # !cancelled(): a push to main, or a failed changes job, still runs the macOS job, while a
     # run cancelled by a newer push to the same pull request does not.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}
+    if: ${{ !cancelled() && !(github.event.action == 'labeled' && github.event.label.name != 'macos') && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}
     runs-on: macos-14
     timeout-minutes: 45
     permissions:
@@ -198,6 +204,7 @@ jobs:
   # has; a rename is a later change to the code). The in-memory fake and its deliberately
   # broken variants (tests/fake_conformance.rs) run in the `test` job, which needs no server.
   state-postgres:
+    if: ${{ !(github.event.action == 'labeled' && github.event.label.name != 'macos') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -248,6 +255,7 @@ jobs:
   # has no account, and the image, pulled by digest because the agent pulls nothing. The
   # job stands alone, so a failure here blocks no other job.
   live-podman:
+    if: ${{ !(github.event.action == 'labeled' && github.event.label.name != 'macos') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -305,6 +313,7 @@ jobs:
   # Licences, advisories, bans and sources, as deny.toml configures them. cargo-deny is
   # the release binary, checked against its SHA-256 before use.
   deny:
+    if: ${{ !(github.event.action == 'labeled' && github.event.label.name != 'macos') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -332,6 +341,7 @@ jobs:
   # off here (clippy enforces it). cargo-llvm-cov is the release binary, checked against
   # its SHA-256 before use.
   coverage:
+    if: ${{ !(github.event.action == 'labeled' && github.event.label.name != 'macos') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
