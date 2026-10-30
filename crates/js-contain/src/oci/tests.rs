@@ -626,7 +626,8 @@ fn scripted_runtime(dir: &Path, images: &Path, fail: &str) -> PathBuf {
     let path = dir.join("runtime.sh");
     let log = dir.join("runs.log");
     let script = format!(
-        "#!/bin/sh\nfor a in \"$@\"; do last=$a; done\necho \"$last\" >> {log}\n\
+        "#!/bin/sh\nfor a in \"$@\"; do [ \"$prev\" = --bundle ] && bundle=$a; prev=$a; last=$a; done\n\
+         stat -c 'dir %a %u' \"$(dirname \"$bundle\")\" >> {log} 2>/dev/null\necho \"$last\" >> {log}\n\
          case \"$last\" in\n  helper-unpack-*) stat -c 'stage %a %u' {images}/.stage-*[0-9] >> {log} \
          2>/dev/null;;\nesac\ncase \"$last\" in\n  {fail}) exit 1;;\nesac\nexit 0\n",
         log = log.display(),
@@ -800,6 +801,44 @@ fn a_stage_is_made_by_descriptor_with_the_helpers_owner_and_no_write_for_others(
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o700);
+}
+
+/// Catches a helper run that skips the preparation of its state directory (the start-up
+/// sweep builds its own, apart from the unpack and give helpers): every helper's
+/// directory, whether run by the sweep or by an unpack, is `0700` and the running user's
+/// when `crun` starts (a root daemon's is the job user's, which `crun` runs as; here it is
+/// this user's), so no other account can use it.
+#[tokio::test]
+async fn every_helpers_state_directory_is_private_to_the_ids_crun_runs_as() {
+    let dir = scratch("helper-state-dir");
+    let scratch = dir.join("scratch");
+    let images = scratch.join("oci-images");
+    let runtime = scripted_runtime(&dir, &images, "never");
+    let config = OciConfig {
+        runtime,
+        ..config(&dir, true)
+    };
+    // A stage a killed daemon left: the next start's sweep runs a helper to remove it.
+    std::fs::create_dir_all(images.join(".stage-aa-1-0")).expect("stage");
+    let oci = Oci::on(
+        &config,
+        Scripted::new(Ok(vec!["0.tar".to_owned()])),
+        &scratch,
+        "/actions",
+        "x86_64",
+    )
+    .expect("started");
+    oci.check_pinned(&pinned()).await.expect("unpacked");
+    let me = rustix::process::getuid().as_raw().to_string();
+    let seen = runs(&dir);
+    let dirs: Vec<&String> = seen.iter().filter(|l| l.starts_with("dir ")).collect();
+    // The sweep's helper, the give helper (a rootless daemon) or none, the unpack's.
+    assert!(dirs.len() >= 2, "{seen:?}");
+    for line in dirs {
+        let words: Vec<&str> = line.split(' ').collect();
+        assert_eq!(words[1], "700", "{line}");
+        assert_eq!(words[2], me, "{line}");
+    }
 }
 
 /// Catches a failed unpack reported as success, a fetch's blobs kept after it, and the
