@@ -30,6 +30,10 @@ use crate::crun_host::Fixture;
 use crate::server::{Agent, POOL_RUNS_TOML, Redirect, Server};
 use crate::support::{Host, code, linux_host};
 
+/// Held by a test while it opens runtimes or runs an agent on the node: the backend makes
+/// its helper directories in the node's store, which two openings at once would fight over.
+static NODE_IN_USE: Mutex<()> = Mutex::new(());
+
 /// The first host uid and gid of the subordinate ranges of the node's job user.
 const SUB: u32 = 100_000;
 
@@ -314,6 +318,7 @@ fn the_job_flags_of_a_crun_agent_are_read_with_the_searchable_layout() {
 /// engine runtime for `--runtime crun`.
 #[test]
 fn the_system_opens_the_crun_runtime_for_crun_settings() {
+    let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
     let settings = crun_settings();
     let platform = Platform {
         os: "linux".to_owned(),
@@ -346,6 +351,7 @@ fn the_system_opens_the_crun_runtime_for_crun_settings() {
 /// result that is lost on the way back.
 #[test]
 fn an_agent_started_with_runtime_crun_runs_a_job_through_crun() {
+    let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
     let node = node();
     let server = Server::start_pool("jobs_crun_e2e", &[], POOL_RUNS_TOML);
     let address = Arc::new(Mutex::new(server.url()));
@@ -423,13 +429,22 @@ fn an_agent_started_with_runtime_crun_runs_a_job_through_crun() {
     );
     assert_eq!(queued.status, 202, "{}", queued.body);
     let run = queued.body["run_id"].as_str().unwrap().to_owned();
-    beat();
-    beat();
-    // The stand-in says it is up, and the server lists the run running.
+    // The heartbeats are the progress events: the start is delivered, the container is
+    // made and started, and the next heartbeat lists it. A bound keeps a regression from
+    // looping.
+    let mut seen = view(&run);
+    for _ in 0..20 {
+        if seen.0 == "running" {
+            break;
+        }
+        beat();
+        seen = view(&run);
+    }
+    assert_eq!(seen.0, "running");
+    // The stand-in says it is up.
     let dir = node.dir.path();
     let said = fs::read_to_string(dir.join("ready")).expect("read the pipe");
     assert_eq!(said.trim(), "up");
-    assert_eq!(view(&run).0, "running");
     let calls = fs::read_to_string(dir.join("calls")).expect("the stand-in's calls");
     let started = calls
         .lines()
