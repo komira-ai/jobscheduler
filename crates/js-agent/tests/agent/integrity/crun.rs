@@ -36,8 +36,6 @@ fn a_job_process_left_under_actions_counts() {
         "0::/system.slice/js.service/actions/lease-r1/ctr/sub",
         "0::/system.slice/js.service/actions/lease-r1",
         "0::/system.slice/js.service/actions",
-        "0::/system.slice/js.service/elsewhere/lease-r1/ctr",
-        "0::/user.slice/user-1000.slice/lease-r1/ctr",
         "1:name=systemd:/x 0::/system.slice/js.service/actions/lease-r1/ctr",
     ] {
         let (host, mut checks) = host_and_checks();
@@ -60,6 +58,9 @@ fn lookalike_names_are_the_hosts() {
         "0::/system.slice/js.service/lease-r1/ctrl",
         "0::/system.slice/js.service/xlease-r1/ctr",
         "0::/system.slice/js.service/lease/ctr2",
+        "0::/system.slice/js.service/elsewhere/lease-r1/ctr",
+        "0::/system.slice/js.service/elsewhere/js-0123456789abcdef-r1/ctr",
+        "0::/system.slice/js.service/actions-x/js-0123456789abcdef-r1/ctr",
     ] {
         let (host, mut checks) = host_and_checks();
         host.start_process(process(300, 1, 0, 900, cgroup));
@@ -67,31 +68,112 @@ fn lookalike_names_are_the_hosts() {
     }
 }
 
+/// The container name the direct runner gives run `run`: `js-<agent tag>-<run id>`, which is
+/// also the name of its lease's control group and the run handle.
+fn leaf(run: &str) -> String {
+    format!("js-0123456789abcdef-{run}")
+}
+
+/// A process's control groups for the container of run `run`.
+fn ctr_of(run: &str) -> String {
+    format!("0::/system.slice/js.service/actions/{}/ctr", leaf(run))
+}
+
 /// Asserts that a neighbour's container, still running when a job ends, is not the job's
-/// stray, and the job's own is: with `r2` running, its init in `<lease-r2>/ctr` passes, and
-/// a process left in `<lease-r1>/ctr` is found. It catches a rule that excuses every
+/// stray, and the job's own is: with `r2` running, its init in `<its leaf>/ctr` passes, and a
+/// process left in `<the job's leaf>/ctr` is found. It catches a rule that excuses every
 /// `<lease>/ctr` (a concurrent job would hide a leftover) and one that excuses none (a
 /// concurrent job would taint the node).
 #[test]
 fn a_neighbours_ctr_is_not_a_stray_and_the_jobs_own_is() {
+    let (host, mut checks) = host_and_checks();
+    host.start_process(process(300, 1, 0, 900, &ctr_of("r2")));
+    assert!(beside(&mut checks, "r1", &[&leaf("r2")]).is_ok());
+    host.start_process(process(301, 1, 0, 901, &ctr_of("r1")));
+    let found = beside(&mut checks, "r1", &[&leaf("r2")]).unwrap_err();
+    assert_eq!(found.code(), code::DAEMONISED_CHILD);
+}
+
+/// Asserts that a live container is named by a whole path component, not by a substring: with
+/// `run-3-1` running, a process left in the group of the finished `run-3-12` is found, and
+/// one in the group of `run-3-1` is not. Server run ids are `run-<term>-<count>`, so one is
+/// often a prefix of another. It catches a neighbour's handle excusing the leftover of any
+/// run whose id it is a prefix of.
+#[test]
+fn a_live_handle_excuses_its_own_group_and_not_a_longer_name() {
+    let (host, mut checks) = host_and_checks();
+    host.start_process(process(300, 1, 0, 900, &ctr_of("run-3-1")));
+    assert!(beside(&mut checks, "run-3-12", &[&leaf("run-3-1")]).is_ok());
+    host.start_process(process(301, 1, 0, 901, &ctr_of("run-3-12")));
+    let found = beside(&mut checks, "run-3-12", &[&leaf("run-3-1")]).unwrap_err();
+    assert_eq!(found.code(), code::DAEMONISED_CHILD);
+    assert!(found.detail().contains("pid 301"), "{found:?}");
+    assert!(!found.detail().contains("pid 300"), "{found:?}");
+}
+
+/// Asserts the same for mounts: the mounts of a running container's lease directory (the
+/// handle is a component of the mount's point) are not the finished job's, and a mount in
+/// the directory of a longer name is a `new-mount`. Engines' scopes and ids are components
+/// too: `libpod-<id>.scope` names the container `<id>`, and `libpod-<id>2.scope` does not.
+#[test]
+fn a_live_handle_excuses_its_own_mounts_and_not_a_longer_names() {
+    let mount = |point: String| js_agent::integrity::Mount {
+        root: "/".to_owned(),
+        point,
+        fstype: "overlay".to_owned(),
+        source: "overlay".to_owned(),
+    };
+    let under = |run: &str| format!("/var/lib/js/leases/{}/rootfs", leaf(run));
+    let (host, mut checks) = host_and_checks();
+    host.mount(mount(under("run-3-1")));
+    assert!(beside(&mut checks, "run-3-12", &[&leaf("run-3-1")]).is_ok());
+    host.mount(mount(under("run-3-12")));
+    let found = beside(&mut checks, "run-3-12", &[&leaf("run-3-1")]).unwrap_err();
+    assert_eq!(found.code(), code::NEW_MOUNT);
+    assert!(found.detail().contains(&leaf("run-3-12")), "{found:?}");
+
+    for (cgroup, excused) in [
+        ("0::/machine.slice/libpod-9e1.scope", true),
+        ("0::/system.slice/docker-9e1.scope", true),
+        ("0::/docker/9e1", true),
+        ("0::/machine.slice/libpod-9e12.scope", false),
+        ("0::/docker/9e12", false),
+        ("0::/machine.slice/libpod-conmon-9e1.scope/x", false),
+    ] {
+        let host = FakeHost::quiet();
+        let mut checks = started(&host, vec![]);
+        host.start_process(process(400, 1, 0, 950, cgroup));
+        assert_eq!(
+            beside(&mut checks, "r1", &["9e1"]).is_ok(),
+            excused,
+            "{cgroup}"
+        );
+    }
+}
+
+/// Asserts that a helper container's processes (unpack and removal helpers, in
+/// `actions/helpers/<name>`) are the runner's, not a stray: a background pull can have one
+/// running when another job's check runs. A group that only starts like `helpers`, and the
+/// helpers group of another `actions`, are not.
+#[test]
+fn a_helper_container_is_the_runners() {
     let (host, mut checks) = host_and_checks();
     host.start_process(process(
         300,
         1,
         0,
         900,
-        "0::/system.slice/js.service/actions/lease-r2/ctr",
+        "0::/system.slice/js.service/actions/helpers/helper-unpack-5-1/ctr",
     ));
-    assert!(beside(&mut checks, "r1", &["r2"]).is_ok());
-    host.start_process(process(
-        301,
-        1,
-        0,
-        901,
-        "0::/system.slice/js.service/actions/lease-r1/ctr",
-    ));
-    let found = beside(&mut checks, "r1", &["r2"]).unwrap_err();
-    assert_eq!(found.code(), code::DAEMONISED_CHILD);
+    assert!(after(&mut checks, "r1").is_ok());
+    for cgroup in [
+        "0::/system.slice/js.service/actions/helpers-x/helper-unpack-5-1",
+        "0::/system.slice/js.service/actions/js-0123456789abcdef-r1/helpers/x",
+    ] {
+        let (host, mut checks) = host_and_checks();
+        host.start_process(process(301, 1, 0, 901, cgroup));
+        assert!(after(&mut checks, "r1").is_err(), "{cgroup}");
+    }
 }
 
 /// Asserts which processes are the runner's own noise: a child of the agent (its parent is
