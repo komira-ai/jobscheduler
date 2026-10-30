@@ -408,13 +408,17 @@ fn owned_by(uid: u32, dir: &Path) -> bool {
     })
 }
 
-const SYSV_SHM: &str = r#"my $id = shmget(0, 64, 0600 | 01000); print defined $id ? "created\n" : "denied\n"; if (defined $id) { shmctl($id, 0, 0) }"#;
+/// Makes a System V shared memory segment and leaves it.
+const SYSV_SHM: &str =
+    r#"my $id = shmget(0, 64, 0600 | 01000); print defined $id ? "created\n" : "denied\n""#;
 
-/// Asserts that the helper's uids are reused (ten runs on ten uids, so the eleventh runs as
-/// the first did) and that the reuse leaks nothing: the first run tries to make shared
-/// memory and is refused by the profile, no System V IPC object belongs to a lease user
-/// after the run, and nothing on the machine's work volume belongs to that uid once the
-/// user is deleted. It catches a run that finds what an earlier run on its uid left.
+/// Asserts what a reused uid finds. The helper's uids are reused (ten runs on ten uids, so
+/// the eleventh runs as the first did). The first run makes a System V shared memory segment
+/// and leaves it: the profile does not deny IPC, so the segment is made, and the test
+/// requires that once the user is deleted no IPC object belongs to its uid and no file on
+/// the work volume does either. It fails, and says so, when the helper's removal leaves the
+/// segment: that is the open risk, measured here. It catches a run that finds what an
+/// earlier run on its uid left.
 #[test]
 #[ignore = "needs root and creates users"]
 fn a_reused_uid_sees_nothing_of_the_previous_run() {
@@ -432,16 +436,18 @@ fn a_reused_uid_sees_nothing_of_the_previous_run() {
         assert_eq!(settle(&mut rt, &id), exited(0));
         let printed = rt.log_tail(&id).unwrap().unwrap().stdout;
         if n == 0 {
-            assert_eq!(printed, "denied\n", "a run made shared memory");
+            println!("PROBE the first run's shmget printed {printed:?}");
         }
         uids.push(fs::metadata(home_of(fixture, &id)).unwrap().uid());
+        rt.remove(&id).unwrap();
         let ipcs = Command::new("/usr/bin/ipcs").arg("-a").output().unwrap();
         let listing = String::from_utf8_lossy(&ipcs.stdout);
+        let uid = uids[n].to_string();
+        let left = listing.split_whitespace().any(|word| word == uid);
         assert!(
-            !listing.contains("kbf-lease-"),
-            "IPC left by run {n}: {listing}"
+            !left,
+            "an IPC object of uid {uid} is left after run {n}: {listing}"
         );
-        rt.remove(&id).unwrap();
     }
     assert_eq!(
         uids[0], uids[10],
