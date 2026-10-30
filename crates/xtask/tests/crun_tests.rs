@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::crun_tests::{BUSYBOX_AMD64, BUSYBOX_ARM64, TARGETS, arch_for};
+use xtask::crun_tests::{BUSYBOX_AMD64, BUSYBOX_ARM64, ROOT_TARGETS, TARGETS, arch_for};
 
 const XTASK: &str = env!("CARGO_BIN_EXE_xtask");
 const FAKE: &str = env!("CARGO_BIN_EXE_xtask-fake");
@@ -48,7 +48,7 @@ impl Run {
             r#"{"reason":"compiler-artifact","target":{"kind":["lib"],"name":"js_contain"},"profile":{"test":false},"executable":null,"manifest_path":"/w/Cargo.toml"}"#,
         );
         messages.push('\n');
-        for target in TARGETS {
+        for target in TARGETS.iter().chain(ROOT_TARGETS) {
             messages.push_str(&format!(
                 r#"{{"reason":"compiler-artifact","target":{{"kind":["test"],"name":"{target}"}},"profile":{{"test":true}},"executable":"{}","manifest_path":"{}"}}"#,
                 root.join(format!("target/debug/deps/{target}-0f1e")).display(),
@@ -68,9 +68,21 @@ impl Run {
         program: Option<&Path>,
         defect: Option<&str>,
     ) -> (Option<i32>, String, String) {
+        self.xtask_with(&[], cargo, program, defect)
+    }
+
+    /// [`Run::xtask`] with more flags on the command line.
+    fn xtask_with(
+        &self,
+        flags: &[&str],
+        cargo: &Path,
+        program: Option<&Path>,
+        defect: Option<&str>,
+    ) -> (Option<i32>, String, String) {
         let fake = self.bin.join("sudo");
         let mut cmd = Command::new(XTASK);
         cmd.arg("crun-tests").arg("--root").arg(&self.root);
+        cmd.args(flags);
         cmd.arg("--sudo").arg(program.unwrap_or(fake.as_path()));
         cmd.env("CARGO", cargo).env("HOME", HOME).env("PATH", PATH);
         match defect {
@@ -238,4 +250,76 @@ fn a_sudo_that_cannot_start_fails_the_verb() {
         err.starts_with(&format!("xtask: {}: ", missing.display())),
         "{err}"
     );
+}
+
+/// Catches `--job-user` running anything but the root daemon's targets, or running them as
+/// the invoking user: cargo builds only [`ROOT_TARGETS`], each one's unit has no `--uid` or
+/// `--gid` (so it runs as root) and names the job user and the `PATH` in its environment,
+/// and the verb says whom the containers ran as.
+#[test]
+fn a_job_user_runs_the_root_daemon_targets_as_root() {
+    let run = Run::new("jobuser");
+    let (code, out, err) = run.xtask_with(&["--job-user", "js-job"], Path::new(FAKE), None, None);
+    assert_eq!(code, Some(0), "{err}");
+    let tests: String = ROOT_TARGETS
+        .iter()
+        .map(|t| format!(" --test {t}"))
+        .collect();
+    assert_eq!(
+        run.cargo_args(),
+        format!("test --locked --no-run --message-format=json -p js-contain{tests}\n")
+    );
+    let package = run.root.join("crates/js-contain");
+    let want: String = ROOT_TARGETS
+        .iter()
+        .map(|target| {
+            format!(
+                "{cwd}: -n systemd-run --quiet --wait --collect --pipe \
+                 --unit=js-crun-tests-{target} --slice=js-agent.slice -p Delegate=yes \
+                 -p OOMScoreAdjust=-900 --working-directory={package} -E PATH={PATH} \
+                 -E JS_JOB_USER=js-job {exe} --include-ignored\n",
+                cwd = std::env::current_dir().expect("cwd").display(),
+                package = package.display(),
+                exe = run
+                    .root
+                    .join(format!("target/debug/deps/{target}-0f1e"))
+                    .display(),
+            )
+        })
+        .collect();
+    assert_eq!(run.sudo_args(), want);
+    assert!(
+        out.ends_with(
+            "ok: the real-crun tests of -p js-contain passed, each target in its own \
+             Delegate=yes unit, as root with job user js-job\n"
+        ),
+        "{out}"
+    );
+}
+
+/// Catches a failed root target that is passed over: the unit fails, the verb still ran it
+/// and fails naming the target and its binary.
+#[test]
+fn a_failed_root_target_fails_the_verb_after_it_ran() {
+    let run = Run::new("jobuserfail");
+    let (code, _, err) = run.xtask_with(
+        &["--job-user", "js-job"],
+        Path::new(FAKE),
+        None,
+        Some("tests-fail"),
+    );
+    assert_eq!(code, Some(1), "{err}");
+    let want: String = ROOT_TARGETS
+        .iter()
+        .map(|target| {
+            format!(
+                "the tests of -p js-contain --test {target} failed in their unit ({}): \
+                 exit status: 101\n",
+                run.root
+                    .join(format!("target/debug/deps/{target}-0f1e"))
+                    .display()
+            )
+        })
+        .collect();
+    assert!(err.ends_with(&format!("xtask: {want}")), "{err}");
 }
