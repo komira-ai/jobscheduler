@@ -643,7 +643,15 @@ impl Lifecycle {
         // The image is asked for after the slot is taken and before anything is made: a run
         // whose image is still being fetched waits as `starting`, holding its booking, and
         // costs the worker nothing until the image is here (see `Runtime::prepare`).
-        match self.runtime.prepare(&spec.image, None) {
+        // A host-isolation run uses no image store (the runtime pulls for it inside the
+        // create, as it always did): it is never asked about one. (A start with no image
+        // is refused as `invalid-image`, and a native one as `native-unsupported`, before
+        // this point.)
+        let prepared = match spec.isolation {
+            Isolation::Host => Prepared::Ready,
+            Isolation::Contained => self.runtime.prepare(&spec.image, None),
+        };
+        match prepared {
             Prepared::Pending(ticket) => {
                 // The lease the start names ends `valid_for_ms` after the reply came; a run
                 // that waits for its image is held to that end when it starts.
