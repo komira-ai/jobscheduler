@@ -795,6 +795,112 @@ fn a_root_daemon_or_a_root_job_user_is_refused() {
     );
 }
 
+/// Catches a lease whose directories, owners or ids are not what a root daemon needs to
+/// make them: the lease directory and the writable directory the job user's, everything
+/// the job writes the job's id in the container (the first id of the subordinate range
+/// plus the job's), parents before children, all under the lease's own name.
+#[test]
+fn a_lease_names_its_directories_and_who_owns_them() {
+    let dir = scratch("lease-dirs");
+    let oci = start(&config(&dir, true), &dir.join("s")).expect("starts");
+    let lease = oci.lease_dirs("js-x-r1");
+    let base = dir.join("s/js-x-r1");
+    assert_eq!(
+        lease.to_make(),
+        [
+            (base.clone(), Owner::Job),
+            (base.join("root"), Owner::Container),
+            (base.join("upper"), Owner::Container),
+            (base.join("work"), Owner::Container),
+            (base.join("rw"), Owner::Job),
+            (base.join("rw/home"), Owner::Container),
+        ]
+    );
+    assert_eq!(lease.dir, base);
+    let (uid, gid) = (
+        rustix::process::getuid().as_raw(),
+        rustix::process::getgid().as_raw(),
+    );
+    assert_eq!(oci.job_ids(), (uid, gid));
+    assert_eq!(oci.container_ids(), (101_000, 201_000));
+}
+
+/// Catches a helper's directory given by a path that was replaced by a link (the link, not
+/// the directory, would be followed) and a directory not given to the account crun runs as:
+/// a directory is given (to the daemon's own ids here, which changes nothing), and a link to
+/// one is refused with its path in the words.
+#[test]
+fn a_helpers_directory_is_given_by_descriptor_and_never_through_a_link() {
+    let dir = scratch("give-job");
+    let oci = start(&config(&dir, true), &dir.join("s")).expect("starts");
+    let real = dir.join("real");
+    std::fs::create_dir(&real).expect("dir");
+    oci.give_to_job_user(&real).expect("given");
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    let why = oci.give_to_job_user(&link).expect_err("a link").to_string();
+    assert!(why.contains("link"), "{why}");
+    let image = PinnedImage {
+        reference: format!("r/x@sha256:{}", "ab".repeat(32)),
+        digest: format!("sha256:{}", "ab".repeat(32)),
+    };
+    assert_eq!(
+        oci.image_dir(&image),
+        dir.join("s/oci-images").join("ab".repeat(32))
+    );
+}
+
+/// A source that counts its fetches and publishes nothing.
+#[derive(Debug, Default)]
+struct Counting(std::sync::atomic::AtomicUsize);
+
+#[async_trait::async_trait]
+impl ImageSource for Counting {
+    async fn fetch(&self, _: &PinnedImage, _: &Path) -> Result<Vec<String>, FetchError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+}
+
+/// Catches an image that is removed and then never fetched again by the daemon that fetched
+/// it once (the memory of the fetch outliving the files), and one fetched twice when it was
+/// not removed: a second use fetches nothing, a removal makes the next use fetch again, a
+/// removal of what is gone is no error, and the image is there after.
+#[tokio::test]
+async fn a_removed_image_is_fetched_again_and_a_present_one_is_not() {
+    let dir = scratch("image-removed");
+    let source = Arc::new(Counting::default());
+    let oci = Oci::on(
+        &config(&dir, true),
+        source.clone(),
+        &dir.join("s"),
+        "/actions",
+        "x86_64",
+    )
+    .expect("starts");
+    let image = PinnedImage {
+        reference: format!("r/x@sha256:{}", "ab".repeat(32)),
+        digest: format!("sha256:{}", "ab".repeat(32)),
+    };
+    let fetched = || source.0.load(std::sync::atomic::Ordering::SeqCst);
+    oci.check_pinned(&image).await.expect("fetched");
+    oci.check_pinned(&image).await.expect("not again");
+    assert_eq!(fetched(), 1);
+    assert!(oci.image_dir(&image).is_dir());
+    // A removal that fails says so and keeps the image.
+    let store = dir.join("s/oci-images");
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o555)).expect("mode");
+    assert!(oci.remove_image(&image).await.is_err());
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    assert!(oci.image_dir(&image).is_dir());
+    oci.remove_image(&image).await.expect("removed");
+    assert!(!oci.image_dir(&image).exists());
+    oci.remove_image(&image).await.expect("already gone");
+    oci.check_pinned(&image).await.expect("fetched again");
+    assert_eq!(fetched(), 2);
+    assert!(oci.image_dir(&image).is_dir());
+}
+
 /// Catches the egress settings of the backend not reaching a job's bundle: a configured
 /// `resolv.conf` (the resolvers an allow-listed network names, and only those) replaces the
 /// loopback one, and a route wait puts `--wait-route <seconds>` between the init and the

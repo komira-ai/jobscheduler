@@ -35,9 +35,20 @@ pub enum ConfigError {
         /// The layers of the manifest.
         manifest: usize,
     },
+    /// The kept config of the image could not be read.
+    #[error("the config kept for the image cannot be read: {0}")]
+    Unreadable(String),
     /// Neither the image nor the run gives a program to run.
     #[error("the image has no ENTRYPOINT or CMD and the run gives no command")]
     NoCommand,
+}
+
+/// The file in `dir` that keeps the config of the image with `digest` (`sha256:<hex>`):
+/// `<hex>.json`.
+#[must_use]
+pub fn config_path(dir: &std::path::Path, digest: &str) -> std::path::PathBuf {
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    dir.join(format!("{hex}.json"))
 }
 
 /// What the image config says about running the image, as a job uses it.
@@ -118,6 +129,31 @@ impl ImageConfig {
             working_directory: absolute(&working_dir)?,
             layers: document.rootfs.diff_ids.len(),
         })
+    }
+
+    /// The config of the image with `digest` that a source kept in `dir` (see
+    /// [`RegistryImages::keeping_configs`](super::RegistryImages::keeping_configs)).
+    ///
+    /// # Errors
+    /// [`ConfigError::Unreadable`] when there is no such file or it is bigger than
+    /// [`CONFIG_LIMIT_BYTES`], and the errors of [`ImageConfig::parse`].
+    pub fn kept(dir: &std::path::Path, digest: &str) -> Result<Self, ConfigError> {
+        use std::io::Read as _;
+        let path = config_path(dir, digest);
+        let unreadable =
+            |why: std::io::Error| ConfigError::Unreadable(format!("{}: {why}", path.display()));
+        let file = std::fs::File::open(&path).map_err(unreadable)?;
+        let mut bytes = Vec::new();
+        file.take(CONFIG_LIMIT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(unreadable)?;
+        if u64::try_from(bytes.len()).map_or(true, |len| len > CONFIG_LIMIT_BYTES) {
+            return Err(ConfigError::Unreadable(format!(
+                "{}: too big",
+                path.display()
+            )));
+        }
+        Self::parse(&bytes)
     }
 
     /// The image's `WORKDIR` as an absolute path in the image (`/` when it sets none),

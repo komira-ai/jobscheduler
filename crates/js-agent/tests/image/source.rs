@@ -3,7 +3,7 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
-use js_agent::image::{CONFIG_LIMIT_BYTES, RegistryImages};
+use js_agent::image::{CONFIG_LIMIT_BYTES, ConfigError, ImageConfig, RegistryImages, config_path};
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
 use js_oci::{Digest, media};
 use js_testkit::dir::TestDir;
@@ -365,4 +365,76 @@ async fn a_pin_that_cannot_be_pulled_is_a_failed_fetch_with_the_reason() {
     let why = failed_text(elsewhere.fetch(&good, blobs.path()).await);
     assert!(why.contains("is not on the registry allow-list"), "{why}");
     assert_eq!(listing(blobs.path()), Vec::<String>::new());
+}
+
+/// A source made to keep configs keeps, for an image it pulled, the config the registry
+/// served, where the runtime reads it back (`ImageConfig::kept`) as the entrypoint of that
+/// image; a source not made to keep them writes nothing; and an image whose pull failed
+/// leaves no config. It catches a runtime that cannot know how to run an image it did not
+/// pull in this process, and a config that outlives a pull that did not complete.
+#[tokio::test]
+async fn a_pulled_image_leaves_its_config_for_the_runtime() {
+    let fx = Fixture::start().await;
+    let artifact = image(layers(2));
+    fx.publish(&artifact);
+    let pinned = pin(&fx, &artifact);
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "image-configs");
+    // Each pull has a directory of its own, as the image store gives it one.
+    let (blobs, more_blobs) = (dir.join("blobs"), dir.join("more-blobs"));
+    let configs = dir.join("configs");
+    std::fs::create_dir_all(&blobs).expect("blobs");
+    std::fs::create_dir_all(&more_blobs).expect("blobs");
+
+    source(&fx, "x86_64")
+        .fetch(&pinned, &blobs)
+        .await
+        .expect("fetches");
+    assert!(!configs.exists());
+
+    let keeping = source(&fx, "x86_64").keeping_configs(configs.clone());
+    keeping.fetch(&pinned, &more_blobs).await.expect("fetches");
+    assert_eq!(listing(&configs), [format!("{}.json", &pinned.digest[7..])]);
+    let kept = ImageConfig::kept(&configs, &pinned.digest).expect("a kept config");
+    let mut spec = crate::config::spec();
+    kept.apply(&["--flag".to_owned()], &mut spec)
+        .expect("applies");
+    assert_eq!(spec.argv, ["/usr/bin/kbf-task", "--flag"]);
+    let mode = std::fs::metadata(config_path(&configs, &pinned.digest))
+        .expect("file")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o644);
+
+    let missing = PinnedImage {
+        reference: pinned.reference.replace(
+            &artifact.digest.to_string(),
+            &format!("sha256:{}", "b".repeat(64)),
+        ),
+        digest: format!("sha256:{}", "b".repeat(64)),
+    };
+    keeping
+        .fetch(&missing, &blobs)
+        .await
+        .expect_err("no such image");
+    assert_eq!(listing(&configs).len(), 1);
+}
+
+/// A kept config that is missing, too big or not a config is refused with the reason
+/// (`Unreadable`, or the parse error), never read as an empty config. It catches a runtime
+/// that starts a job with no entrypoint because a file went missing.
+#[test]
+fn a_kept_config_that_cannot_be_used_is_refused() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "image-kept");
+    let digest = format!("sha256:{}", "c".repeat(64));
+    let why = |result: Result<ImageConfig, ConfigError>| result.expect_err("refused").to_string();
+    assert!(why(ImageConfig::kept(&dir, &digest)).contains("cannot be read"));
+    let path = config_path(&dir, &digest);
+    std::fs::write(
+        &path,
+        vec![b' '; usize::try_from(CONFIG_LIMIT_BYTES).expect("small") + 1],
+    )
+    .expect("write");
+    assert!(why(ImageConfig::kept(&dir, &digest)).contains("too big"));
+    std::fs::write(&path, b"not json").expect("write");
+    assert!(why(ImageConfig::kept(&dir, &digest)).contains("not a config"));
 }

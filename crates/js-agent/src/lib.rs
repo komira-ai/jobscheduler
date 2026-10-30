@@ -209,6 +209,8 @@ pub mod cli_runtime;
 mod container;
 mod contract;
 mod credential;
+#[cfg(target_os = "linux")]
+pub mod crun;
 pub mod egress;
 mod exclusive;
 mod facts;
