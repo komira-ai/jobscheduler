@@ -132,7 +132,7 @@ fn an_unreadable_status_page_is_silence_too() {
     assert!(r.sink.sent().is_empty());
     r.tick(STALE);
     let text = r.sink.sent()[0].text.clone();
-    assert_eq!(r.sink.keys(), ["heartbeat:gpu"]);
+    assert_eq!(r.sink.keys(), ["heartbeat"]);
     assert!(text.contains("the status page is down"), "{text}");
 }
 
