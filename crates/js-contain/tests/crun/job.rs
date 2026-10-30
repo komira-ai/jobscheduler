@@ -5,6 +5,7 @@ use std::sync::Arc;
 use js_contain::cgroup::LeaseCgroup;
 use js_contain::container::{CONTAINER_OWNER, ContainerLimits, ContainerSpec, Dirs, Ended};
 use js_contain::oci::image::ROOTFS;
+use js_contain::oci::stderr_path;
 use js_types::Resources;
 
 use crate::cell::{Cell, MOUNT};
@@ -47,12 +48,10 @@ async fn run(cell: &Cell, name: &str, argv: &[&str]) -> (Ended, String) {
         shared: Vec::new(),
     };
     cell.oci.create(&spec).await.expect("bundle");
-    let stdout = std::fs::File::create(lease.join("stdout")).expect("stdout");
-    let stderr = std::fs::File::create(lease.join("stderr")).expect("stderr");
-    let mut running = cell.oci.start(&spec, stdout, stderr).expect("started");
+    let mut running = cell.oci.start(&spec).expect("started");
     running.wait().await;
     let ended = cell.oci.ended(&spec, &running).await.expect("ended");
-    let said = std::fs::read_to_string(lease.join("stderr")).unwrap_or_default();
+    let said = std::fs::read_to_string(stderr_path(&lease)).unwrap_or_default();
     let _ = cell.oci.remove(name);
     let _ = cgroup.remove();
     (ended, said)
