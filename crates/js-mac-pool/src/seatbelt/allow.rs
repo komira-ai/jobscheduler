@@ -276,7 +276,9 @@ pub(super) fn reads(
 ///   `OS` cryptex. `/System/Cryptexes` was not touched and is not carried over.
 /// - `/private/var/db/timezone`: needed (the read through `/private/etc/localtime`
 ///   fails without it).
-/// - the five device files: each is opened by a workload.
+/// - the five device files: kept as in the macOS 14 set. The trace saw them only as
+///   metadata calls (`stat`) and `/dev/tty` from `bash`, and no workload failed
+///   without them; they hold no data.
 /// - not carried over, because nothing touched them and no workload failed without them:
 ///   `/System/Cryptexes`, `/usr/sbin`, `/usr/libexec`, `/sbin`, `/private/var/db/dyld`,
 ///   `/private/var/select/sh` and the names `/System` and `/tmp`.
