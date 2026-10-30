@@ -8,13 +8,15 @@
 //! thing both threads read: the session thread stamps a reply with it when the reply
 //! arrives, and the lifecycle counts the reply's `valid_for_ms` from that stamp.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::cli_runtime::{CliRuntime, Settings, system_runner, unix_ms};
 use crate::facts::{FileReader, Platform, SystemFiles};
 use crate::integrity::{HostView, ProcHost};
-use crate::lifecycle::{Clock, ContainerRuntime};
+use crate::lifecycle::{Clock, Runtime};
+use crate::quota::{self, ScratchQuota};
 use crate::usage::UsageClock;
 
 /// A monotonic clock both threads of the agent may read.
@@ -50,10 +52,7 @@ pub trait Machine: Send + Sync {
     /// # Errors
     ///
     /// The runtime cannot be made; the text says why.
-    fn runtime(
-        &self,
-        build: &RuntimeBuild<'_>,
-    ) -> Result<(Box<dyn ContainerRuntime>, Vec<String>), String>;
+    fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String>;
 
     /// The host the post-job checks read. Called on the worker thread.
     fn view(&self) -> Box<dyn HostView>;
@@ -63,6 +62,13 @@ pub trait Machine: Send + Sync {
     /// on the worker thread. By default the clock of the jobs in whole milliseconds.
     fn usage_clock(&self) -> Box<dyn UsageClock> {
         Box::new(Milliseconds(self.clock()))
+    }
+
+    /// The project quota of the scratch root `root` (its canonical path): what the agent
+    /// probes at start and, under `--scratch-quota`, bounds each run with. Called on the
+    /// thread that starts the agent. By default the machine's own ([`quota::system`]).
+    fn scratch_quota(&self, root: &Path) -> Arc<dyn ScratchQuota> {
+        quota::system(root)
     }
 
     /// The files the cgroup tree is read from. Called once, on the worker thread. By
@@ -122,10 +128,7 @@ impl Machine for System {
         Arc::new(Monotonic(self.origin))
     }
 
-    fn runtime(
-        &self,
-        build: &RuntimeBuild<'_>,
-    ) -> Result<(Box<dyn ContainerRuntime>, Vec<String>), String> {
+    fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
         let runner = Box::new(system_runner(build.stop_grace));
         let (settings, host_id) = (build.settings.clone(), build.host_id);
         let opened = CliRuntime::open(settings, host_id, build.platform, unix_ms, runner);

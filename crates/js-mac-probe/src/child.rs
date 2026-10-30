@@ -13,7 +13,7 @@ use clap::Subcommand;
 const CONNECT_LIMIT: Duration = Duration::from_secs(5);
 
 /// What the child does. Exit status 0 means it was allowed to; 1 that it was refused or
-/// failed, with the reason on stderr.
+/// failed, with `errno=N` and the reason on stderr.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Child {
     /// Connect a TCP socket.
@@ -25,6 +25,16 @@ pub enum Child {
     Resolve {
         /// The host name.
         host: String,
+    },
+    /// Print a file's contents.
+    Read {
+        /// The path.
+        path: PathBuf,
+    },
+    /// Print `set=<value>` or `unset` for an environment variable.
+    Env {
+        /// The variable's name.
+        name: String,
     },
     /// Create or overwrite a file.
     Write {
@@ -41,6 +51,8 @@ pub fn run(child: &Child) -> ExitCode {
             std::net::TcpStream::connect_timeout(addr, CONNECT_LIMIT).map(|_| String::new())
         }
         Child::Resolve { host } => resolve(host),
+        Child::Read { path } => read_text(path),
+        Child::Env { name } => Ok(env_text(name)),
         Child::Write { path } => std::fs::write(path, b"probe\n").map(|()| String::new()),
     };
     match outcome {
@@ -49,10 +61,21 @@ pub fn run(child: &Child) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("{err}");
+            eprintln!("errno={} {err}", err.raw_os_error().unwrap_or(0));
             ExitCode::FAILURE
         }
     }
+}
+
+fn read_text(path: &std::path::Path) -> std::io::Result<String> {
+    std::fs::read_to_string(path)
+}
+
+fn env_text(name: &str) -> String {
+    std::env::var_os(name).map_or_else(
+        || "unset\n".to_owned(),
+        |value| format!("set={}\n", value.to_string_lossy()),
+    )
 }
 
 fn resolve(host: &str) -> std::io::Result<String> {
@@ -106,5 +129,27 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         let missing = scratch("missing-dir").join("file");
         assert_eq!(run(&Child::Write { path: missing }), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn read_prints_a_file_and_fails_for_a_missing_one() {
+        let path = scratch("read");
+        std::fs::write(&path, b"secret\n").unwrap();
+        assert_eq!(read_text(&path).unwrap(), "secret\n");
+        assert_eq!(run(&Child::Read { path: path.clone() }), ExitCode::SUCCESS);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(run(&Child::Read { path }), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn env_reports_a_set_variable_with_its_value_and_an_unset_one() {
+        assert!(env_text("PATH").starts_with("set=/"));
+        assert_eq!(env_text("JS_MAC_PROBE_SURELY_UNSET"), "unset\n");
+        assert_eq!(
+            run(&Child::Env {
+                name: "PATH".into()
+            }),
+            ExitCode::SUCCESS
+        );
     }
 }

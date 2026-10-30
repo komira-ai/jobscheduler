@@ -34,6 +34,11 @@ pub enum Error {
     /// A URL that is not https (without its query, fragment and userinfo).
     #[error("{0} is not https")]
     Insecure(String),
+    /// A redirect or token endpoint that an entry pulled from over plain http may not
+    /// use: anything but plain http to the registry's own authority (shown without its
+    /// query, fragment and userinfo).
+    #[error("{0} is not plain http to the registry's own loopback address")]
+    PlainHttp(String),
     /// A redirect or token endpoint on a port other than 443 or the registry's own: a
     /// registry cannot send the client to probe other ports of a public host.
     #[error(

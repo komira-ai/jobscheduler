@@ -943,6 +943,8 @@ dependencies = [
  "js-lease",
  "js-lease-server",
  "js-pool-static",
+ "js-provider",
+ "js-registry",
  "js-testkit",
  "js-types",
  "libc",
@@ -1180,6 +1182,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+]
+
+[[package]]
+name = "js-mac-pool"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

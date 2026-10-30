@@ -1,0 +1,17 @@
+[package]
+name = "js-mac-pool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The pool of Mac users and what runs as them. Today: the Seatbelt profile builder, a
+# pure function from a typed policy to profile text and the `sandbox-exec` argv.
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

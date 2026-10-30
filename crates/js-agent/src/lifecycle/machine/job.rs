@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use js_agent_wire::{HeldRun, HeldState, Isolation, JobSpec, Outcome, RunResult, Taint};
 
 use super::{RETIRED_CAP, SLOTS};
-use crate::lifecycle::runtime::{ContainerId, ContainerSpec, Exit, Found, ResolvedMount};
+use crate::lifecycle::runtime::{Body, Exit, Found, ResolvedMount, RunHandle, RunSpec};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, label};
 
@@ -16,9 +16,9 @@ use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, label};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Stage {
     /// The container runs.
-    Running(ContainerId),
+    Running(RunHandle),
     /// The container has exited; it is to be removed.
-    Removing(ContainerId),
+    Removing(RunHandle),
     /// The scratch directory is to be removed.
     Scratch,
     /// The post-job checks are to run.
@@ -31,7 +31,7 @@ pub(super) enum Stage {
 
 impl Stage {
     /// The container of a job that is still on the host.
-    pub(super) fn container(&self) -> Option<&ContainerId> {
+    pub(super) fn container(&self) -> Option<&RunHandle> {
         match self {
             Self::Running(id) | Self::Removing(id) => Some(id),
             _ => None,
@@ -163,7 +163,7 @@ fn label_number(found: &Found, key: &str) -> Option<u64> {
 /// A container the agent could not remove: it may still run, so what it booked, or the
 /// whole offer when that is not known, stays booked until a removal succeeds.
 pub(super) struct Stuck {
-    pub(super) id: ContainerId,
+    pub(super) id: RunHandle,
     pub(super) booking: Booking,
     /// The run its labels name, whose scratch directory the container may still use.
     pub(super) run_id: Option<String>,
@@ -204,6 +204,12 @@ pub(super) struct Job {
     pub(super) cgroup_missing_told: bool,
     /// Taken over from an earlier process of the agent: its first minutes were not seen.
     pub(super) adopted: bool,
+    /// When the project of the finished run first read usage after its tree was removed,
+    /// and when that was last reported (on the agent's clock).
+    pub(super) usage_held: Option<(u64, u64)>,
+    /// The agent gave up waiting for the usage: the slot is parked, not released, when the
+    /// cleanup passes.
+    pub(super) slot_parked: bool,
 }
 
 /// Microseconds in a millisecond.
@@ -300,16 +306,22 @@ impl Retired {
 }
 
 impl Job {
-    /// A job for `spec` in `stage`, booking what the spec asks, in `slot`.
-    pub(super) fn of(spec: &JobSpec, stage: Stage, deadline_ms: u64, slot: Option<u32>) -> Self {
+    /// A job for `spec` in `stage`, booking what the spec asks and `disk_bytes` of disk (what
+    /// `Config::disk_of` says: the spec's own, or the quota's default), in `slot`.
+    pub(super) fn of(
+        spec: &JobSpec,
+        stage: Stage,
+        deadline_ms: u64,
+        slot: Option<u32>,
+        disk_bytes: u64,
+    ) -> Self {
         Self {
             run_id: spec.run_id.clone(),
             lease_id: spec.lease_id.clone(),
             booking: Booking {
                 cpu_millis: spec.limits.cpu_millis,
                 memory_bytes: spec.limits.memory_bytes,
-                // No default booking for a job without `disk_bytes` yet.
-                disk_bytes: spec.limits.disk_bytes.unwrap_or(0),
+                disk_bytes,
                 gpus: spec.gpu_indices.clone(),
             },
             slot,
@@ -326,6 +338,8 @@ impl Job {
             cgroup: None,
             cgroup_missing_told: false,
             adopted: false,
+            usage_held: None,
+            slot_parked: false,
         }
     }
 
@@ -358,6 +372,8 @@ impl Job {
             cgroup: None,
             cgroup_missing_told: false,
             adopted: true,
+            usage_held: None,
+            slot_parked: false,
         })
     }
 
@@ -416,17 +432,15 @@ pub(super) fn container_spec(
     scratch: std::path::PathBuf,
     files: Option<std::path::PathBuf>,
     slot: u32,
-) -> ContainerSpec {
+    disk_bytes: u64,
+) -> RunSpec {
     let gpus: Vec<String> = spec.gpu_indices.iter().map(u32::to_string).collect();
     let own = [
         (label::RUN, spec.run_id.clone()),
         (label::LEASE, spec.lease_id.clone()),
         (label::CPU_MILLIS, spec.limits.cpu_millis.to_string()),
         (label::MEMORY_BYTES, spec.limits.memory_bytes.to_string()),
-        (
-            label::DISK_BYTES,
-            spec.limits.disk_bytes.unwrap_or(0).to_string(),
-        ),
+        (label::DISK_BYTES, disk_bytes.to_string()),
         (label::GPUS, gpus.join(",")),
         (label::SLOT, slot.to_string()),
         (label::WALL_MS, spec.limits.wall_ms.to_string()),
@@ -440,10 +454,12 @@ pub(super) fn container_spec(
     ];
     let mut labels: BTreeMap<String, String> = spec.labels.clone();
     labels.extend(own.map(|(key, value)| (key.to_owned(), value)));
-    ContainerSpec {
+    RunSpec {
         run_id: spec.run_id.clone(),
-        image: spec.image.clone(),
-        args: spec.args.clone(),
+        body: Body::Container {
+            image: spec.image.clone(),
+            args: spec.args.clone(),
+        },
         cpu_millis: spec.limits.cpu_millis,
         memory_bytes: spec.limits.memory_bytes,
         pids: spec.limits.pids,

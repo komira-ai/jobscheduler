@@ -10,7 +10,7 @@ use std::path::Path;
 
 use super::logs::log_args;
 use super::{DEFAULT_NETWORK, Engine, Settings};
-use crate::lifecycle::ContainerSpec;
+use crate::lifecycle::RunSpec;
 
 /// Where the run's scratch directory is mounted, read-write, inside the container.
 pub const SCRATCH_TARGET: &str = "/scratch";
@@ -89,7 +89,7 @@ pub type Bind = (String, String, bool);
 /// already; this is the second check.
 pub fn limits_to_args(
     engine: Engine,
-    spec: &ContainerSpec,
+    spec: &RunSpec,
     recursive_ro: bool,
 ) -> Result<Vec<String>, ArgsError> {
     if spec.cpu_millis == 0 || spec.memory_bytes == 0 || spec.pids == Some(0) {
@@ -126,7 +126,7 @@ pub fn limits_to_args(
 /// The bind mounts `spec` asks for, the scratch directory first and the run's files
 /// (read-only) last: what the engine must
 /// report back for the container after `create`.
-pub fn binds_of(spec: &ContainerSpec) -> Vec<Bind> {
+pub fn binds_of(spec: &RunSpec) -> Vec<Bind> {
     let text = |path: &Path| path.to_string_lossy().into_owned();
     let scratch = (text(&spec.scratch), SCRATCH_TARGET.to_owned(), true);
     let jobs = spec
@@ -213,7 +213,7 @@ pub fn has_submount(mountinfo: &str, host: &Path) -> bool {
 /// # Errors
 ///
 /// [`ArgsError::NestedMount`], or [`ArgsError::MountinfoUnreadable`].
-pub fn check_submounts(spec: &ContainerSpec, mountinfo: Option<&str>) -> Result<(), ArgsError> {
+pub fn check_submounts(spec: &RunSpec, mountinfo: Option<&str>) -> Result<(), ArgsError> {
     let mut read_only = spec.mounts.iter().filter(|mount| mount.ro).peekable();
     match (read_only.peek().is_some(), mountinfo) {
         (false, _) => Ok(()),

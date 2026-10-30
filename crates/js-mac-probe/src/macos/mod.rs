@@ -7,20 +7,28 @@ use std::path::{Path, PathBuf};
 
 use crate::report::{Probe, Report};
 
+mod allow;
 mod clone;
+mod dyld;
 mod exec;
+mod image;
 mod net;
+mod relocate;
 mod sandbox;
 mod sys;
 mod system;
 mod toolchain;
 mod usage;
+mod volume;
+mod xattr;
 
 use exec::Places;
 
 /// Every probe, against scratch directories under `work`.
-pub fn collect(work: &Path, home: &Path) -> Report {
+pub fn collect(work: &Path, home: &Path, trace_out: Option<&Path>) -> Report {
     let mut report = Report::default();
+    // First, so the free space is known before anything uses it.
+    report.push(system::df());
     report.push(system::probe());
     match Scratch::new(work, home) {
         Ok(scratch) => {
@@ -29,6 +37,12 @@ pub fn collect(work: &Path, home: &Path) -> Report {
             clone::probes(&scratch, &mut report);
             usage::probes(&mut report);
             toolchain::probes(&scratch, &mut report);
+            dyld::probes(&scratch, &mut report);
+            let trees = relocate::probes(&scratch, &mut report);
+            xattr::probes(&scratch, trees.as_ref(), &mut report);
+            volume::probes(&scratch, &mut report);
+            image::probes(&scratch, &mut report);
+            allow::probes(&scratch, trace_out, &mut report);
             scratch.remove();
         }
         Err(err) => report.push(Probe::asserted("setup", false).fact("error", err)),
