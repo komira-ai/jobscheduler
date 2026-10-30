@@ -320,3 +320,22 @@ fn only_some_phases_count() {
     settled.clean_lists = 2;
     assert!(!settled.counts());
 }
+
+/// Asserts that a file of version 2 that holds a `go` key (a later writer's) reads under this
+/// reader, whatever the key holds, and reads as the same records without it; written back,
+/// the file has no `go`. It catches a reader that refuses a key it does not know, which would
+/// keep a server rolled back from a newer one from starting.
+#[test]
+fn a_file_holding_a_go_key_reads_and_the_key_is_dropped() {
+    let with = GOLDEN.replacen(
+        "\"last_step\"",
+        "\"go\": {\"gpu\": {\"at\": 5, \"settled\": 7}},\n  \"last_step\"",
+        1,
+    );
+    assert!(with.contains("\"go\""), "{with}");
+    let records = Records::decode(&with).unwrap();
+    assert_eq!(records, Records::decode(GOLDEN).unwrap());
+    assert!(!records.encode().unwrap().contains("\"go\""));
+    let odd = GOLDEN.replacen("\"last_step\"", "\"go\": 3,\n  \"last_step\"", 1);
+    assert!(Records::decode(&odd).is_ok());
+}

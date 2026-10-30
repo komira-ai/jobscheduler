@@ -377,6 +377,11 @@ struct WireIn {
     missing_since: BTreeMap<String, Millis>,
     #[serde(default)]
     last_step: Option<Millis>,
+    /// A key a later writer adds (the go of each live pool). This reader does not know what it
+    /// holds, so it reads it, drops it, and writes the file without it: a server that is rolled
+    /// back to this version starts on a file the newer one wrote.
+    #[serde(default, rename = "go")]
+    _go: Option<serde_json::Value>,
 }
 
 /// Version 1: the same without the two times.
