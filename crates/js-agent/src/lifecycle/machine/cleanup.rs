@@ -140,6 +140,16 @@ impl Lifecycle {
                 },
                 Stage::Scratch => match remove_run_dirs(config, &run_id) {
                     Ok(()) => {
+                        // The tree is gone; now the bound comes off its project. A failure
+                        // holds the slot (the project may still carry the limits) and is
+                        // tried again at the next step, together with the removal, which
+                        // finds nothing to do. It does not taint: nothing is left on disk.
+                        if let (Some(quota), Some(slot)) = (&config.quota, job.slot)
+                            && let Err(why) = quota.clear(&config.scratch.of(&run_id), slot)
+                        {
+                            job.note(code::QUOTA_CLEAR_FAILED, why.to_string(), events);
+                            return;
+                        }
                         events.push(Event::ScratchRemoved {
                             run_id: run_id.clone(),
                         });

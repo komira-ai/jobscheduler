@@ -68,6 +68,13 @@ impl ScratchRoot {
         self.path.join(run_id)
     }
 
+    /// A path directly below the root that names nothing and, as no run id starts with a dot,
+    /// never will. The scratch quota's `clear` is given it for a project whose directory a
+    /// sweep removed: a directory that is gone is not opened, only the limits come off.
+    pub(super) fn vanished(&self) -> PathBuf {
+        self.path.join(".js-swept")
+    }
+
     /// Makes the run's directory, mode `0700` whatever the umask. A directory left by an
     /// earlier agent for this run id is removed first: the run is new, so it is garbage.
     ///

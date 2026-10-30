@@ -300,16 +300,22 @@ impl Retired {
 }
 
 impl Job {
-    /// A job for `spec` in `stage`, booking what the spec asks, in `slot`.
-    pub(super) fn of(spec: &JobSpec, stage: Stage, deadline_ms: u64, slot: Option<u32>) -> Self {
+    /// A job for `spec` in `stage`, booking what the spec asks and `disk_bytes` of disk (what
+    /// `Config::disk_of` says: the spec's own, or the quota's default), in `slot`.
+    pub(super) fn of(
+        spec: &JobSpec,
+        stage: Stage,
+        deadline_ms: u64,
+        slot: Option<u32>,
+        disk_bytes: u64,
+    ) -> Self {
         Self {
             run_id: spec.run_id.clone(),
             lease_id: spec.lease_id.clone(),
             booking: Booking {
                 cpu_millis: spec.limits.cpu_millis,
                 memory_bytes: spec.limits.memory_bytes,
-                // No default booking for a job without `disk_bytes` yet.
-                disk_bytes: spec.limits.disk_bytes.unwrap_or(0),
+                disk_bytes,
                 gpus: spec.gpu_indices.clone(),
             },
             slot,
@@ -416,6 +422,7 @@ pub(super) fn container_spec(
     scratch: std::path::PathBuf,
     files: Option<std::path::PathBuf>,
     slot: u32,
+    disk_bytes: u64,
 ) -> ContainerSpec {
     let gpus: Vec<String> = spec.gpu_indices.iter().map(u32::to_string).collect();
     let own = [
@@ -423,10 +430,7 @@ pub(super) fn container_spec(
         (label::LEASE, spec.lease_id.clone()),
         (label::CPU_MILLIS, spec.limits.cpu_millis.to_string()),
         (label::MEMORY_BYTES, spec.limits.memory_bytes.to_string()),
-        (
-            label::DISK_BYTES,
-            spec.limits.disk_bytes.unwrap_or(0).to_string(),
-        ),
+        (label::DISK_BYTES, disk_bytes.to_string()),
         (label::GPUS, gpus.join(",")),
         (label::SLOT, slot.to_string()),
         (label::WALL_MS, spec.limits.wall_ms.to_string()),

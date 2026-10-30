@@ -94,13 +94,25 @@ pub struct Cli {
     /// see to it that there is none.
     #[arg(long = "mount-root-ro", value_name = "NAME=PATH", value_parser = named_path)]
     pub mount_roots_ro: Vec<(String, PathBuf)>,
-    /// The scratch root's file system is to bound each run's disk with a quota. Today the
-    /// flag only makes the agent refuse to start when a `--mount-root` is on the same file
-    /// system as the scratch root (a read-write mount there would be an unbounded path to
-    /// its disk); `--mount-root-ro` roots may be there. It enables no quota yet and
-    /// advertises nothing. Needs `--scratch-root`.
+    /// Bound each run's disk with a project quota on the scratch root's file system. At
+    /// start the agent probes the root and refuses to start unless the file system
+    /// enforces project quota; then it advertises `scratch-quota=project` and
+    /// `scratch-default-gib`, books `--scratch-default-gib` for a run that names no
+    /// `disk_bytes`, and gives each run's scratch directory a block limit of the bytes it
+    /// books and an inode limit of `--scratch-max-inodes`. It also refuses to start when a
+    /// `--mount-root` is on the same file system as the scratch root (a read-write mount
+    /// there would be an unbounded path to its disk); `--mount-root-ro` roots may be there.
+    /// Needs `--scratch-root`.
     #[arg(long)]
     pub scratch_quota: bool,
+    /// The GiB a run that names no `disk_bytes` books and is bounded to, and the
+    /// `scratch-default-gib` capability. From 1; default 2. Needs `--scratch-quota`.
+    #[arg(long, value_name = "GIB")]
+    pub scratch_default_gib: Option<u64>,
+    /// The inode limit of each run's scratch directory, so a flood of empty files cannot
+    /// exhaust the file system's inodes. From 1; default 1000000. Needs `--scratch-quota`.
+    #[arg(long, value_name = "N")]
+    pub scratch_max_inodes: Option<u64>,
     /// The most GiB of the scratch root's free disk the agent keeps back from jobs: the
     /// disk it offers is the free space of that volume when the agent starts minus this
     /// (0 when this is more). Needs `--scratch-root`. Without it, the free space is offered.

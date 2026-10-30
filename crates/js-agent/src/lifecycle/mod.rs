@@ -54,6 +54,15 @@
 //!   (those that have exited first, then the longest running), so an offer lowered since
 //!   the last start evicts the newest jobs that no longer fit.
 //!
+//! - **A scratch quota bounds the run before anything is written** (`--scratch-quota`, see
+//!   [`RunQuota`]). A run books its own `disk_bytes` or the quota's default (the number the
+//!   server books for it too) and is limited to the bytes it books and to an inode limit.
+//!   The slot's project is claimed before anything is made (a project that still holds
+//!   usage parks the slot and refuses the run `no-capacity`), the limits are set on the empty
+//!   scratch directory before the container is created, and at the end the project is
+//!   cleared after the tree is removed; a failed clear holds the slot and is retried at every
+//!   step. The sweep of a restart clears the projects of the leftover directories it removes.
+//!
 //! - **A host that is not known to be clean is tainted** (design 5.12, see the [`taint`]
 //!   module). A check that finds something or cannot run, a container or scratch
 //!   directory that cannot be removed, a job that was allowed to change the host
@@ -156,6 +165,7 @@
 
 mod machine;
 mod mounts;
+mod quota;
 mod run_files;
 mod runtime;
 mod scratch;
@@ -164,6 +174,7 @@ pub mod taint;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{Hello, Taint};
@@ -171,9 +182,11 @@ use js_agent_wire::{Hello, Taint};
 use crate::FileReader;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
+use crate::quota::ScratchQuota;
 
 pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, RunningLease, SLOTS, Slots};
 pub use mounts::{MountError, MountRoots};
+pub use quota::RunQuota;
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
     ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount, RuntimeError, Status,
@@ -240,6 +253,14 @@ pub mod code {
     /// cannot be written the job's container is not removed; while it cannot be removed
     /// the job's slot is not freed.
     pub const OWED_FAILED: &str = "owed-record-failed";
+    /// The project id of a slot still holds usage (or its usage cannot be read), so the slot
+    /// takes no run: a run that wanted it was refused `no-capacity`. The slot is read again
+    /// at every step and is free once the usage is gone; it is reported when it is parked
+    /// and again when it is released.
+    pub const QUOTA_SLOT_BUSY: &str = "quota-slot-busy";
+    /// The quota of a finished run's scratch directory could not be cleared. The tree is
+    /// gone; the slot stays held and the clear is tried again at every step.
+    pub const QUOTA_CLEAR_FAILED: &str = "quota-clear-failed";
     /// The records of owed checks in the state root could not be listed when the agent
     /// started, so the host is tainted ([`reason::CHECK_OWED`](super::taint::reason)).
     pub const OWED_UNREADABLE: &str = "owed-records-unreadable";
@@ -503,6 +524,19 @@ pub struct Config {
     pub state: StateRoot,
     /// How long a container gets to stop on its own before it is killed.
     pub stop_grace: Duration,
+    /// The disk quota of the runs' scratch directories; none without `--scratch-quota`, and
+    /// then a run without `disk_bytes` books none and nothing bounds a run's disk.
+    pub quota: Option<RunQuota>,
+}
+
+impl Config {
+    /// The bytes of disk a run with `limits` books: its own `disk_bytes`, or the quota's
+    /// default for a run that names none (the number the server books for it too), or 0
+    /// without a quota.
+    pub fn disk_of(&self, limits: &js_agent_wire::Limits) -> u64 {
+        let default = self.quota.as_ref().map_or(0, RunQuota::default_disk_bytes);
+        limits.disk_bytes.unwrap_or(default)
+    }
 }
 
 /// The flags that configure jobs, checked.
@@ -512,6 +546,12 @@ pub struct Local {
     pub mounts: MountRoots,
     /// `--scratch-quota` was given.
     pub scratch_quota: bool,
+    /// `--scratch-default-gib`, or [`DEFAULT_SCRATCH_GIB`]: the GiB a run without
+    /// `disk_bytes` books. Meaningful with `--scratch-quota` only.
+    pub scratch_default_gib: u64,
+    /// `--scratch-max-inodes`, or [`DEFAULT_SCRATCH_MAX_INODES`]: the inode limit of a
+    /// run. Meaningful with `--scratch-quota` only.
+    pub scratch_max_inodes: u64,
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
     /// `--run-files-root`, or the default under `/run` when that can be made; always none
@@ -532,6 +572,17 @@ pub struct Local {
     /// `--drain-wait`, or the stop grace.
     pub drain_wait: Duration,
 }
+
+/// The GiB of scratch disk a run without `disk_bytes` books under `--scratch-quota` when
+/// `--scratch-default-gib` is not given.
+pub const DEFAULT_SCRATCH_GIB: u64 = 2;
+
+/// The most GiB `--scratch-default-gib` takes: the bytes must fit the wire's disk limit.
+pub const MAX_SCRATCH_GIB: u64 = js_agent_wire::limits::MAX_DISK_BYTES >> 30;
+
+/// The inode limit of a run under `--scratch-quota` when `--scratch-max-inodes` is not
+/// given.
+pub const DEFAULT_SCRATCH_MAX_INODES: u64 = 1_000_000;
 
 /// How long a container gets to stop on its own when `--stop-grace` is not given.
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
@@ -689,10 +740,13 @@ impl Local {
                     .to_owned(),
             );
         }
+        let (default_gib, max_inodes) = scratch_quota_limits(cli)?;
         Ok(Self {
             watch,
             mounts,
             scratch_quota: cli.scratch_quota,
+            scratch_default_gib: default_gib,
+            scratch_max_inodes: max_inodes,
             scratch,
             files,
             files_warning,
@@ -704,7 +758,48 @@ impl Local {
     }
 }
 
+/// The default GiB and the inode limit of `--scratch-quota`, checked: the two flags need
+/// `--scratch-quota`, the default is at least 1 GiB and its bytes fit the wire, and the
+/// inode limit is at least 1 and fits what the quota takes.
+fn scratch_quota_limits(cli: &Cli) -> Result<(u64, u64), String> {
+    let given = [
+        ("--scratch-default-gib", cli.scratch_default_gib),
+        ("--scratch-max-inodes", cli.scratch_max_inodes),
+    ];
+    if let Some((flag, _)) = given
+        .iter()
+        .find(|(_, value)| value.is_some() && !cli.scratch_quota)
+    {
+        return Err(format!("{flag}: needs --scratch-quota"));
+    }
+    let gib = cli.scratch_default_gib.unwrap_or(DEFAULT_SCRATCH_GIB);
+    if !(1..=MAX_SCRATCH_GIB).contains(&gib) {
+        return Err(format!(
+            "--scratch-default-gib: {gib} is not from 1 to {MAX_SCRATCH_GIB}"
+        ));
+    }
+    let inodes = cli.scratch_max_inodes.unwrap_or(DEFAULT_SCRATCH_MAX_INODES);
+    if !(1..=crate::quota::MAX_INODE_LIMIT).contains(&inodes) {
+        return Err(format!(
+            "--scratch-max-inodes: {inodes} is not from 1 to {}",
+            crate::quota::MAX_INODE_LIMIT
+        ));
+    }
+    Ok((gib, inodes))
+}
+
 impl Local {
+    /// The quota the flags ask for over `quota`: a run without `disk_bytes` books
+    /// `--scratch-default-gib`, and a run is bounded to the bytes it books and to
+    /// `--scratch-max-inodes` inodes.
+    pub fn run_quota(&self, quota: Arc<dyn ScratchQuota>) -> RunQuota {
+        RunQuota::new(
+            quota,
+            self.scratch_default_gib << 30,
+            self.scratch_max_inodes,
+        )
+    }
+
     /// Refuses a state root whose device number (`st_dev`) equals that of a mount root or
     /// the scratch root. A job with a read-write mount, or its own scratch directory, can
     /// fill that file system, and the taint marker could then not be written. This is a

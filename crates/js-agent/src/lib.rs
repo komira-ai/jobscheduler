@@ -30,7 +30,9 @@
 //! | `--watch-dir <path>` | a directory the post-job checks list (its own entries: names, sizes, modification and status change times, inodes, owners, modes; a write to an existing file inside a subdirectory is not seen) and compare with the listing taken when the host was last known clean; one level deep: a name added to a subdirectory is seen, a write to a file in it is not, so watch the subdirectory itself; repeatable; needs `--container-bin`; may not hold, or lie in, a mount root, the scratch root or the state root; more than 4096 entries cannot be checked and taint the host. With none, only `/etc/passwd`, `/etc/group`, the processes, the mounts and the kernel modules are checked, and the agent warns at start; suggested: `/etc`, `/etc/cron.d`, `/etc/sudoers.d`, `/etc/systemd/system`, `/etc/ld.so.conf.d`, `/root/.ssh`, `/usr/local/bin`, `/usr/local/sbin`. What a job leaves in a read-write `--mount-root` is never examined |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount |
 //! | `--mount-root-ro <name>=<path>` | like `--mount-root`, in the same namespace of names, but a start with a read-write mount from it is refused (`invalid-mount`) and nothing is created; it may be on the scratch root's file system under `--scratch-quota`; the `st_dev` comparison sees a root's own device only, not a scratch device mounted below a root (a submount a recursive bind brings along), so the operator must guarantee there is none |
-//! | `--scratch-quota` | the scratch root's file system is to bound runs' disk: the agent refuses to start when a `--mount-root` is on the same file system as the scratch root (`st_dev`; give such a root as `--mount-root-ro`). It enables no quota and advertises nothing yet; needs `--scratch-root` |
+//! | `--scratch-quota` | bound each run's disk with an XFS project quota on the scratch root's file system. The agent probes the root at start and refuses to start unless the file system enforces project quota (`prjquota`, ids settable), saying why; it then advertises `scratch-quota=project` and `scratch-default-gib` (a detected pair an operator cannot set), books the default for a run that names no `disk_bytes`, and before each run's scratch directory is given away or written to sets its project id, a block limit of the bytes the run books and an inode limit; after the tree is removed it clears them. It refuses to start when a `--mount-root` is on the same file system as the scratch root (`st_dev`; give such a root as `--mount-root-ro`). Needs `--scratch-root`; a Linux host only |
+//! | `--scratch-default-gib <n>` | the GiB a run without `disk_bytes` books and is bounded to under `--scratch-quota`, and the value of `scratch-default-gib`; from 1 to 65535, default 2; needs `--scratch-quota` |
+//! | `--scratch-max-inodes <n>` | the inode limit of each run's scratch directory under `--scratch-quota`; from 1 to 4294967295, default 1000000; needs `--scratch-quota` |
 //! | `--scratch-low-water-gib <n>` | GiB of the scratch root's free disk kept back from jobs; the disk offered (`shape.disk_bytes`, and `disk-gib` in GiB) is the free space read at start minus this, 0 when this is more; needs `--scratch-root` |
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required with `--container-bin` |
 //! | `--run-files-root <path>` | where each run's files (the `files` of a start: a URL or a token the task reads) are written, in a directory of their own per run, `0555` with `0444` files, mounted read-only at `/run/js-files`. Made `0700` when missing; it must be on a `tmpfs` (the secrets never reach a disk) and the agent refuses to start when it is not. A reboot clears it, which is fine: a run does not survive one. Default `/run/js-agent/files` when that can be made; otherwise the agent runs without run files and does not report the `run-files` capability. tmpfs pages can be swapped to disk when the host has swap: run hosts that handle these secrets with swap off or encrypted. Needs `--container-bin` |
@@ -424,13 +426,34 @@ fn execute(
     local
         .check_filesystems(services.files)
         .map_err(Failure::Usage)?;
-    // What the scratch root's file system could bound a run's disk with. Logged only: no
-    // run uses a quota yet and nothing is advertised.
-    if let Some(root) = &local.scratch {
+    // What the scratch root's file system can bound a run's disk with. With
+    // `--scratch-quota` the operator asked for enforcement, so a file system that cannot
+    // give it ends the agent, with the probe's reason; without the flag the answer is only
+    // logged and nothing is enforced or advertised.
+    let scratch_quota = match &local.scratch {
+        Some(root) => {
+            let found = services.machine.scratch_quota(root.path());
+            let probe = found.probe();
+            let _ = writeln!(err, "js-agent: scratch quota: {probe}");
+            match (local.scratch_quota, probe.mode) {
+                (true, quota::Mode::None) => {
+                    return Err(Failure::Usage(format!(
+                        "--scratch-quota: the scratch root cannot enforce a project quota: {}",
+                        probe.reason
+                    )));
+                }
+                (true, quota::Mode::Project) => Some(found),
+                (false, _) => None,
+            }
+        }
+        None => None,
+    };
+    let default_gib = scratch_quota.as_ref().map(|_| local.scratch_default_gib);
+    if default_gib.is_some_and(|gib| (gib << 30) > offer.hello.shape.disk_bytes) {
         let _ = writeln!(
             err,
-            "js-agent: scratch quota: {}",
-            quota::probe(root.path())
+            "js-agent: warning: --scratch-default-gib: {} GiB is more than the {} bytes of disk              this host offers, so a run without disk_bytes is refused here",
+            local.scratch_default_gib, offer.hello.shape.disk_bytes
         );
     }
     // The agent must see what its jobs do: a container job runs where the agent's own
@@ -452,6 +475,7 @@ fn execute(
             toolkit.as_ref(),
             commands,
             local.files.is_some(),
+            default_gib,
         );
         found.iter().for_each(|warning| {
             let _ = writeln!(err, "js-agent: warning: {warning}");
@@ -496,6 +520,7 @@ fn execute(
         hook: services.worker_hook,
         rescue_bound: services.rescue_bound,
         readiness,
+        quota: scratch_quota,
     };
     let started = jobs::start(local, &offer.hello, platform, seams, err);
     let jobs = started.map_err(Failure::Usage)?;

@@ -123,6 +123,10 @@ impl Lifecycle {
         let kept = this.jobs.iter().map(|job| job.run_id.as_str());
         let held = this.stuck.iter().filter_map(|held| held.run_id.as_deref());
         let owned: Vec<&str> = kept.chain(held).collect();
+        // Leftover directories carry the project ids of runs that no longer exist. Which
+        // slots they sit on is read before the sweep, as usage, and their projects are
+        // cleared after the trees are gone.
+        let leftover = this.leftover_slots(&mut events);
         this.config.scratch.sweep(owned.iter().copied());
         if let Some(files) = &this.config.files {
             // A root that cannot be listed leaves earlier runs' secrets in place; say so.
@@ -134,7 +138,63 @@ impl Lifecycle {
                 }));
             }
         }
+        this.clear_leftovers(&leftover, &mut events);
         Ok((this, events))
+    }
+
+    /// The slots, among those no run holds, whose project id holds usage: what a run of an
+    /// earlier process left. Under a scratch quota only. A usage that cannot be read ends
+    /// the look and is reported; the slots left unread are checked by the run that takes
+    /// them.
+    fn leftover_slots(&self, events: &mut Vec<Event>) -> Vec<u32> {
+        let Some(quota) = &self.config.quota else {
+            return Vec::new();
+        };
+        let mut leftover = Vec::new();
+        for slot in (0..SLOTS).filter(|slot| self.slots.is_free(*slot)) {
+            match quota.usage(slot) {
+                Ok(usage) if usage.is_zero() => {}
+                Ok(_) => leftover.push(slot),
+                Err(why) => {
+                    events.push(Event::Finding(Finding {
+                        run_id: None,
+                        code: code::QUOTA_SLOT_BUSY,
+                        message: format!(
+                            "the usage of the scratch quota cannot be read ({why}): leftovers \
+                             of an earlier process are not cleared"
+                        ),
+                    }));
+                    break;
+                }
+            }
+        }
+        leftover
+    }
+
+    /// After the sweep removed the trees: takes the bound off the projects of `leftover`,
+    /// and parks each slot whose project still holds usage (a tree that could not be
+    /// removed) or cannot be cleared, so no run takes it; `step` reads it again.
+    fn clear_leftovers(&mut self, leftover: &[u32], events: &mut Vec<Event>) {
+        let Some(quota) = &self.config.quota else {
+            return;
+        };
+        let gone = self.config.scratch.vanished();
+        for slot in leftover {
+            let clean = quota
+                .clear(&gone, *slot)
+                .and_then(|()| quota.claim(*slot).map(|_| ()));
+            if let Err(why) = clean {
+                self.slots.park(*slot);
+                events.push(Event::Finding(Finding {
+                    run_id: None,
+                    code: code::QUOTA_SLOT_BUSY,
+                    message: format!(
+                        "slot {slot}: a run of an earlier process left its project in use ({why}); \
+                         the slot is parked until it reads clean"
+                    ),
+                }));
+            }
+        }
     }
 
     /// Taints the host when the state root holds the record of a job whose checks were owed

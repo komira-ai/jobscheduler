@@ -25,6 +25,7 @@ pub use self::slots::Slots;
 use super::runtime::{ContainerRuntime, ResolvedMount};
 use super::taint::TaintState;
 use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, code, detail};
+use crate::quota::QuotaError;
 
 /// How many finished or stopped run ids the agent remembers, so a late or repeated start
 /// for one of them runs nothing. The oldest is forgotten first; a start for a run older
@@ -155,6 +156,7 @@ impl Lifecycle {
             self.clean(index, &mut events);
         }
         self.retry_stuck(&mut events);
+        self.retry_parked(&mut events);
         self.fit_log_tails_to_beat(&mut events);
         self.sweep();
         events
@@ -238,6 +240,12 @@ impl Lifecycle {
     /// The slots that take no new run because the cleanup of their last run did not pass.
     pub fn quarantined_slots(&self) -> Vec<u32> {
         self.slots.quarantined()
+    }
+
+    /// The slots whose project id holds usage, or whose usage cannot be read, under a
+    /// scratch quota: they take no run until it reads zero again.
+    pub fn parked_slots(&self) -> Vec<u32> {
+        self.slots.parked()
     }
 
     /// What is still free to book.
@@ -345,10 +353,12 @@ impl Lifecycle {
             ));
         }
         let (offered, want) = (&self.config.capacity, &spec.limits);
+        // What the run books: its own disk, or the quota's default, as the server books it.
+        let disk = self.config.disk_of(want);
         let exists = [
             want.cpu_millis <= offered.cpu_millis,
             want.memory_bytes <= offered.memory_bytes,
-            want.disk_bytes.unwrap_or(0) <= offered.disk_bytes,
+            disk <= offered.disk_bytes,
             spec.gpu_indices
                 .iter()
                 .all(|gpu| offered.gpus.contains(gpu)),
@@ -363,7 +373,7 @@ impl Lifecycle {
         let room = [
             want.cpu_millis <= offered.cpu_millis.saturating_sub(used.cpu_millis),
             want.memory_bytes <= offered.memory_bytes.saturating_sub(used.memory_bytes),
-            want.disk_bytes.unwrap_or(0) <= offered.disk_bytes.saturating_sub(used.disk_bytes),
+            disk <= offered.disk_bytes.saturating_sub(used.disk_bytes),
             spec.gpu_indices.iter().all(|gpu| !used.gpus.contains(gpu)),
             self.slots.has_room(),
         ];
@@ -397,6 +407,65 @@ impl Lifecycle {
                 .taint
                 .seal(host_taint(&spec.run_id), events)
                 .map_err(|why| (detail::TAINT_FAILED, why.to_string())),
+        }
+    }
+
+    /// Answers a start `failed_to_start` with `wire` as the detail, having created nothing.
+    fn refuse(&mut self, spec: &JobSpec, wire: &'static str, why: String, events: &mut Vec<Event>) {
+        let mut job = Job::of(spec, Stage::Freed, 0, None, 0);
+        job.result = Some(job.report(Outcome::FailedToStart, None, Some(wire)));
+        self.jobs.push(job);
+        events.push(Event::Refused {
+            run_id: spec.run_id.clone(),
+            code: wire,
+            why,
+        });
+    }
+
+    /// Claims the project id of `slot`, just taken for `run_id`, when a scratch quota is on.
+    /// A slot whose project still holds usage, or whose usage cannot be read, is parked (it
+    /// is read again at every step, see `retry_parked`) and reported, and the run is
+    /// refused: `no-capacity` for the first (the slot is not free yet), `scratch-failed`
+    /// for the second (the host's quota fails).
+    fn claim_quota(
+        &mut self,
+        slot: u32,
+        run_id: &str,
+        events: &mut Vec<Event>,
+    ) -> Result<(), Refusal> {
+        let Some(quota) = &self.config.quota else {
+            return Ok(());
+        };
+        let Err(why) = quota.claim(slot) else {
+            return Ok(());
+        };
+        let wire = match why {
+            QuotaError::InUse { .. } => refusal::NO_CAPACITY,
+            _ => detail::SCRATCH_FAILED,
+        };
+        self.slots.park(slot);
+        events.push(Event::Finding(Finding {
+            run_id: Some(run_id.to_owned()),
+            code: code::QUOTA_SLOT_BUSY,
+            message: format!("slot {slot} is parked until its project reads clean: {why}"),
+        }));
+        Err((wire, why.to_string()))
+    }
+
+    /// Reads the usage of each parked slot again; one that reads zero takes runs again.
+    pub(super) fn retry_parked(&mut self, events: &mut Vec<Event>) {
+        let Some(quota) = &self.config.quota else {
+            return;
+        };
+        for slot in self.slots.parked() {
+            if quota.claim(slot).is_ok() {
+                self.slots.unpark(slot);
+                events.push(Event::Finding(Finding {
+                    run_id: None,
+                    code: code::QUOTA_SLOT_BUSY,
+                    message: format!("slot {slot}: its project reads clean; the slot takes runs"),
+                }));
+            }
         }
     }
 
@@ -437,14 +506,7 @@ impl Lifecycle {
         let mounts = match admitted {
             Ok(mounts) => mounts,
             Err((wire, why)) => {
-                let mut job = Job::of(spec, Stage::Freed, 0, None);
-                job.result = Some(job.report(Outcome::FailedToStart, None, Some(wire)));
-                self.jobs.push(job);
-                events.push(Event::Refused {
-                    run_id: run_id.clone(),
-                    code: wire,
-                    why,
-                });
+                self.refuse(spec, wire, why, events);
                 return;
             }
         };
@@ -459,6 +521,13 @@ impl Lifecycle {
         // The slot is held from here until the run's cleanup has passed (`clean`); `admit`
         // found one free.
         let slot = self.slots.take();
+        let booked = self.config.disk_of(&spec.limits);
+        // The slot's project id is claimed before anything is made: a slot that still holds
+        // a finished run's usage costs the run its refusal and nothing else.
+        if let Err((wire, why)) = self.claim_quota(slot, run_id, events) {
+            self.refuse(spec, wire, why, events);
+            return;
+        }
         let failed = |why: std::io::Error| {
             (
                 detail::SCRATCH_FAILED,
@@ -468,6 +537,17 @@ impl Lifecycle {
             )
         };
         let started = self.config.scratch.create(run_id).map_err(failed);
+        // The quota is set on the empty directory, before the container is created (which
+        // gives the directory to the slot's user) and before anything is written to it: a
+        // file made earlier would carry no project and escape the count. A failure leaves
+        // the directory to the cleanup, which removes it and clears the project.
+        let started = started.and_then(|scratch| {
+            let bound = match &self.config.quota {
+                Some(quota) => quota.apply(&scratch, slot, booked),
+                None => Ok(()),
+            };
+            bound.map(|()| scratch).map_err(|why| failed(why.into()))
+        });
         // The files are written before the container exists, and only here: a start that
         // is sent again finds its job above and never reaches this point. `admit` has
         // seen to it that a start with files has a files root.
@@ -479,7 +559,7 @@ impl Lifecycle {
             written.map(|files| (scratch, files)).map_err(failed)
         });
         let started = started.and_then(|(scratch, files)| {
-            let container = container_spec(spec, mounts, scratch, files, slot);
+            let container = container_spec(spec, mounts, scratch, files, slot, booked);
             self.runtime.create_and_start(&container).map_err(|why| {
                 (
                     detail::RUNTIME_FAILED,
@@ -494,7 +574,7 @@ impl Lifecycle {
                 let now = self.clock.now_ms();
                 let deadline = now.saturating_add(spec.limits.wall_ms);
                 let cgroup = self.runtime.cgroup(&id);
-                let mut job = Job::of(spec, Stage::Running(id), deadline, Some(slot));
+                let mut job = Job::of(spec, Stage::Running(id), deadline, Some(slot), booked);
                 job.started_at(now);
                 job.cgroup = cgroup;
                 self.jobs.push(job);
@@ -503,7 +583,7 @@ impl Lifecycle {
                 });
             }
             Err((why, finding, message, blind)) => {
-                let mut job = Job::of(spec, Stage::Scratch, 0, Some(slot));
+                let mut job = Job::of(spec, Stage::Scratch, 0, Some(slot), booked);
                 // A host the agent cannot see is not known to be checkable: tainted as
                 // unchecked, before the finding that follows from it.
                 if blind {

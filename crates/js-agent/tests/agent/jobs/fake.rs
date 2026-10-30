@@ -19,6 +19,7 @@ use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
 use js_agent::lifecycle::{
     Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, RuntimeError, Status, label,
 };
+use js_agent::quota::{FakeQuota, ScratchQuota};
 use js_agent::{FileReader, Machine, RuntimeBuild, SharedClock};
 
 /// How long a test waits for the other thread before it fails.
@@ -403,6 +404,8 @@ pub struct FakeMachine {
     pub clock: Arc<TestClock>,
     pub build: Build,
     pub files: SharedFiles,
+    /// The scratch quota of the machine: one that works, unless a test replaces it.
+    pub quota: Arc<FakeQuota>,
 }
 
 /// Cgroup files the test writes and the worker thread reads, and the threads that read.
@@ -462,6 +465,15 @@ impl FakeMachine {
             clock: Arc::default(),
             build: Build::Fine,
             files: SharedFiles::default(),
+            quota: Arc::new(FakeQuota::new()),
+        }
+    }
+
+    /// The same machine with `quota` as its scratch quota.
+    pub fn with_quota(self, quota: FakeQuota) -> Self {
+        Self {
+            quota: Arc::new(quota),
+            ..self
         }
     }
 
@@ -499,6 +511,10 @@ impl Machine for FakeMachine {
 
     fn cgroup_files(&self) -> Box<dyn FileReader> {
         Box::new(self.files.clone())
+    }
+
+    fn scratch_quota(&self, _root: &Path) -> Arc<dyn ScratchQuota> {
+        self.quota.clone()
     }
 
     fn view(&self) -> Box<dyn HostView> {

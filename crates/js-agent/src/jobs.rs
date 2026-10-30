@@ -9,6 +9,7 @@ use js_agent_wire::Hello;
 
 use crate::facts::Platform;
 use crate::lifecycle::{Capacity, Config, Local};
+use crate::quota::ScratchQuota;
 use crate::readiness::WorkerHook;
 use crate::session::Drain;
 use crate::system::Machine;
@@ -30,6 +31,9 @@ pub struct Seams<'a> {
     /// The readiness hook the worker runs for a whole-node lease; `None` without
     /// `--readiness-hook`.
     pub readiness: Option<WorkerHook>,
+    /// The scratch quota to bound the runs with: given exactly when `--scratch-quota` is,
+    /// after its probe passed.
+    pub quota: Option<Arc<dyn ScratchQuota>>,
 }
 
 /// Starts the worker when `--container-bin` is given, and `None` when it is not: an agent
@@ -52,12 +56,15 @@ pub fn start(
     seams: Seams<'_>,
     err: &mut dyn Write,
 ) -> Result<Option<(Worker, Drain, Arc<Outbox>)>, String> {
+    let quota = seams.quota.map(|quota| local.run_quota(quota));
     let Local {
         mounts,
         scratch,
         files,
         files_warning: _,
         scratch_quota: _,
+        scratch_default_gib: _,
+        scratch_max_inodes: _,
         container,
         state,
         watch,
@@ -75,6 +82,7 @@ pub fn start(
         files,
         state,
         stop_grace,
+        quota,
     };
     let outbox = Arc::new(Outbox::new());
     let worker = Worker::start(Plan {
