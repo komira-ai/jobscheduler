@@ -464,6 +464,9 @@ impl Oci {
         job: &helper::Job,
     ) -> Result<(), JobError> {
         at(dir, std::fs::create_dir_all(dir))?;
+        // `crun` runs as the ids the containers map (the job user's under a root daemon)
+        // and writes its state and log here; the directory is nobody else's to write.
+        at(dir, give_dir(dir, self.ids.uid, self.ids.gid))?;
         let id = self.helper_id(what);
         let bundle = self.helper_bundle(dir, mapping, &id, job)?;
         let state = dir.join("helper-state");
@@ -524,6 +527,17 @@ impl Oci {
         self.run_jobs("rm", Mapping::Setup, &jobs).await?;
         at(dir, tokio::fs::remove_dir(dir).await)
     }
+}
+
+/// Gives the directory `dir` to `uid` and `gid`, by a descriptor opened without following
+/// a symlink.
+fn give_dir(dir: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    let fd = rustix::fs::open(dir, crate::walk::DIRECTORY, rustix::fs::Mode::empty())?;
+    image::fchown_fd(
+        &fd,
+        rustix::fs::Uid::from_raw(uid),
+        rustix::fs::Gid::from_raw(gid),
+    )
 }
 
 fn prepare(error: JobError) -> OciError {
