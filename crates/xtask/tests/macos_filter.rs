@@ -272,64 +272,34 @@ fn a_base_with_no_merge_base_runs_the_job() {
     assert_eq!(f.run("pull_request", "unrelated", "false"), "true");
 }
 
-/// The jobs of ci.yml: name and block text.
-fn jobs(text: &str) -> Vec<(String, String)> {
-    let mut jobs: Vec<(String, String)> = Vec::new();
-    let mut in_jobs = false;
-    for line in text.lines() {
-        if line == "jobs:" {
-            in_jobs = true;
-        } else if in_jobs {
-            let key = line
-                .strip_prefix("  ")
-                .filter(|rest| !rest.starts_with([' ', '#']))
-                .and_then(|rest| rest.strip_suffix(':'));
-            if let Some(name) = key {
-                jobs.push((name.to_owned(), String::new()));
-            } else if let Some((_, block)) = jobs.last_mut() {
-                block.push_str(line);
-                block.push('\n');
-            }
-        }
-    }
-    jobs
-}
-
 #[test]
-fn a_label_other_than_macos_cancels_nothing_and_every_job_skips_on_it() {
+fn a_label_alone_starts_no_run_and_is_read_at_push_and_reopen() {
     let text = workflow();
-    // The run of such a label has a group of its own (the run id), a `macos` label keeps
-    // the pull request's group.
+    // No `labeled` event: a label-only run would put skipped checks under the real run's
+    // names. The label is read from the pull request at the events that remain.
     assert!(
-        text.contains("group: ${{ github.workflow }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'macos' && github.run_id) || github.event.pull_request.number || github.run_id }}"),
-        "the concurrency group"
+        text.contains("types: [opened, synchronize, reopened]\n"),
+        "pull_request types"
     );
-    let skip = "!(github.event.action == 'labeled' && github.event.label.name != 'macos')";
-    let all = jobs(&text);
-    assert!(all.len() >= 8, "{} jobs", all.len());
-    for (name, block) in all {
-        assert!(
-            block
-                .lines()
-                .any(|l| l.starts_with("    if: ${{ ") && l.contains(skip)),
-            "job {name} does not skip on a label other than macos"
-        );
-    }
+    assert!(!text.contains("labeled]") && !text.contains(", labeled"));
+    // And no per-job skip for label runs, nor a special concurrency group for them.
+    assert!(!text.contains("github.event.action"), "no event-action test");
+    assert!(!text.contains("github.event.label"), "no label-event test");
 }
 
 #[test]
 fn the_workflow_wires_the_label_the_event_and_the_job_condition() {
     let text = workflow();
     assert!(
-        text.contains("types: [opened, synchronize, reopened, labeled]"),
-        "the labeled event must start a run"
+        text.contains("types: [opened, synchronize, reopened]"),
+        "the events that start a pull request run"
     );
     assert!(
         text.contains("LABELED: ${{ contains(github.event.pull_request.labels.*.name, 'macos') }}"),
         "the label must reach the filter"
     );
     assert!(
-        text.contains("if: ${{ !cancelled() && !(github.event.action == 'labeled' && github.event.label.name != 'macos') && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}"),
+        text.contains("if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}"),
         "the macos job must run on main, on a failed filter and on the filter's yes"
     );
 }
