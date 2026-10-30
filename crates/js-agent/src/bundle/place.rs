@@ -8,8 +8,8 @@
 //!   on the way in), read its config, have each layer extracted and sealed as a tree by the
 //!   tree store, and only then write the manifest and the config beside the trees. A
 //!   manifest in the store therefore means that its trees were there when it was written;
-//!   [`SystemHost::held`](super::SystemHost) looks at the trees again, since the store may
-//!   have evicted some since.
+//!   [`Placer::pin`] looks at the trees again, since the store may have evicted some since
+//!   (the host's list of held bundles reads the manifests only).
 //! - **Fetch.** [`Placer::fetch`] is what the admission of a start calls when
 //!   `--bundle-pull missing` and the store lacks the bundle: it begins an ensure on a
 //!   thread of its own and answers [`Fetch::Started`] at once, so the lifecycle's worker
@@ -26,7 +26,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::future::Future;
 use std::io::{self, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::panic::{self, AssertUnwindSafe};
@@ -43,6 +42,7 @@ use js_treestore::{
     Sealer, TreeHandle, TreeStore, TreeWanted,
 };
 use js_types::BundleRef;
+use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc;
 
 use super::host::Fetch;
@@ -115,15 +115,30 @@ impl BundleSource for Origin {
     }
 }
 
+/// A layer's digest, the ensures that use it, and where it is read from.
+type Table = BTreeMap<String, (usize, Origin, Descriptor)>;
+
 /// The blobs the tree store may ask for, each with the origin it is read from, while an
 /// ensure of the bundle that names it runs. Two ensures of bundles that share a layer share
-/// its entry, which lives until the last of them is done.
-#[derive(Clone, Default)]
-struct Layers(Arc<Mutex<BTreeMap<String, (usize, Origin, Descriptor)>>>);
+/// its entry, which lives until the last of them is done. The tree store is blocking and
+/// calls its source from whatever thread asks for a tree, so each call runs its download on
+/// the one runtime of the store.
+#[derive(Clone)]
+struct Layers {
+    table: Arc<Mutex<Table>>,
+    runtime: Arc<Runtime>,
+}
 
 impl Layers {
-    fn table(&self) -> MutexGuard<'_, BTreeMap<String, (usize, Origin, Descriptor)>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    fn new(runtime: Arc<Runtime>) -> Self {
+        Self {
+            table: Arc::default(),
+            runtime,
+        }
+    }
+
+    fn table(&self) -> MutexGuard<'_, Table> {
+        self.table.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn add(&self, origin: &Origin, layers: &[Descriptor]) {
@@ -151,27 +166,25 @@ impl Layers {
     }
 }
 
-/// Runs `future` to its end on a runtime made for the call. The tree store is blocking and
-/// calls its source from whatever thread asks for a tree, so a call needs no runtime that
-/// outlives it.
-fn block_on<F: Future>(future: F) -> Result<F::Output, io::Error> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    Ok(runtime.block_on(future))
+/// Why a layer could not be read into the tree store.
+#[derive(Debug, thiserror::Error)]
+enum Pull {
+    /// The origin refused or could not give the blob.
+    #[error("{0}")]
+    Origin(#[from] js_oci::Error),
+    /// The tree store's sink refused a chunk.
+    #[error("{0}")]
+    Sink(#[from] io::Error),
 }
 
 /// A sink of js-oci that hands each chunk to the receiving end, which writes it to the tree
-/// store's sink.
+/// store's sink (which is not `Send`, so it cannot be the sink of js-oci itself).
 struct Chunks(mpsc::Sender<Vec<u8>>);
 
 #[async_trait]
 impl js_oci::BlobSink for Chunks {
     async fn write(&mut self, chunk: &[u8]) -> io::Result<()> {
-        self.0
-            .send(chunk.to_vec())
-            .await
-            .map_err(|_| io::Error::other("the tree store stopped reading"))
+        self.0.send(chunk.to_vec()).await.map_err(io::Error::other)
     }
 
     async fn finish(&mut self) -> io::Result<()> {
@@ -182,23 +195,14 @@ impl js_oci::BlobSink for Chunks {
 /// Reads `blob` from `origin` into `sink`. The channel is small, so the download waits for
 /// the store's disk; when the store's sink fails the receiving end is dropped and the
 /// download ends with it. The store's error is the one reported.
-async fn download(
-    origin: Origin,
-    blob: Descriptor,
-    sink: &mut dyn BlobSink,
-) -> Result<(), String> {
+async fn download(origin: Origin, blob: Descriptor, sink: &mut dyn BlobSink) -> Result<(), Pull> {
     let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(4);
-    let pull = async move {
-        origin
-            .fetch_blob(&blob, &mut Chunks(sender))
-            .await
-            .map_err(|why| why.to_string())
-    };
+    let pull = async move { Ok(origin.fetch_blob(&blob, &mut Chunks(sender)).await?) };
     let drain = async move {
         while let Some(chunk) = receiver.recv().await {
-            sink.write(&chunk).map_err(|why| why.to_string())?;
+            sink.write(&chunk)?;
         }
-        Ok::<(), String>(())
+        Ok::<(), Pull>(())
     };
     let (pulled, drained) = tokio::join!(pull, drain);
     drained.and(pulled)
@@ -206,16 +210,16 @@ async fn download(
 
 impl LayerSource for Layers {
     fn fetch(&self, blob: &BlobRef, sink: &mut dyn BlobSink) -> Result<(), FetchError> {
+        let key = blob.digest.as_str();
         let found = self
             .table()
-            .get(blob.digest.as_str())
+            .get(key)
             .map(|(_, origin, descriptor)| (origin.clone(), descriptor.clone()));
-        let Some((origin, descriptor)) = found else {
-            return Err(FetchError(format!("no source names {}", blob.digest)));
-        };
-        block_on(download(origin, descriptor, sink))
-            .map_err(|why| FetchError(why.to_string()))?
-            .map_err(FetchError)
+        // Not a closure: nothing asks for a blob no ensure named, so it would never run.
+        let (origin, descriptor) = found.ok_or(FetchError(format!("no source names {key}")))?;
+        self.runtime
+            .block_on(download(origin, descriptor, sink))
+            .map_err(|why| FetchError(why.to_string()))
     }
 }
 
@@ -246,16 +250,94 @@ enum Flight {
     Failed(Fetch),
 }
 
+/// What a call that wants a fetch of a digest finds.
+#[derive(Debug, PartialEq, Eq)]
+enum Begin {
+    /// Nothing is in flight for the digest: the caller runs the fetch.
+    Run,
+    /// A fetch of the digest is running: the caller joins it.
+    Running,
+    /// The fetch before ended badly; this is its failure, reported once.
+    Failed(Fetch),
+}
+
+/// The background fetches, by manifest digest.
+#[derive(Default)]
+struct Flights {
+    table: Mutex<BTreeMap<String, Flight>>,
+    settled: Condvar,
+}
+
+impl Flights {
+    fn table(&self) -> MutexGuard<'_, BTreeMap<String, Flight>> {
+        self.table.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Claims the fetch of `digest` for the caller when none is running, and clears a
+    /// failure it reports, so the call after it begins again.
+    fn begin(&self, digest: &str) -> Begin {
+        let mut table = self.table();
+        match table.get(digest) {
+            Some(Flight::Running) => return Begin::Running,
+            Some(Flight::Failed(failure)) => {
+                let failure = failure.clone();
+                table.remove(digest);
+                return Begin::Failed(failure);
+            }
+            None => {}
+        }
+        table.insert(digest.to_owned(), Flight::Running);
+        Begin::Run
+    }
+
+    /// Ends the fetch of `digest`: a success leaves nothing, a failure waits for the next
+    /// call.
+    fn end(&self, digest: &str, failure: Option<Fetch>) {
+        let mut table = self.table();
+        match failure {
+            None => table.remove(digest),
+            Some(failure) => table.insert(digest.to_owned(), Flight::Failed(failure)),
+        };
+        drop(table);
+        self.settled.notify_all();
+    }
+
+    /// Waits until no fetch is running.
+    fn settle(&self) {
+        let mut table = self.table();
+        while table
+            .values()
+            .any(|flight| matches!(flight, Flight::Running))
+        {
+            table = self
+                .settled
+                .wait(table)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// How a background fetch ended, as the answer of the next call for its digest: `None` for
+/// a bundle that is held now. A fetch that panicked is a failure like any other.
+fn failure_of(ended: thread::Result<Result<(), PlaceError>>) -> Option<Fetch> {
+    match ended {
+        Ok(Ok(())) => None,
+        Ok(Err(PlaceError::Source(js_oci::Error::Index(_)))) => Some(Fetch::Index),
+        Ok(Err(why)) => Some(Fetch::Failed(why.to_string())),
+        Err(_) => Some(Fetch::Failed("the fetch stopped unexpectedly".to_owned())),
+    }
+}
+
 /// The store of one agent, and what is done with it.
 pub struct Placer {
     root: PathBuf,
     objects: PathBuf,
     trees: TreeStore<Shared, Layers>,
     layers: Layers,
+    runtime: Arc<Runtime>,
     sealer: Arc<dyn Sealer>,
     client: Arc<Client>,
-    flights: Mutex<BTreeMap<String, Flight>>,
-    settled: Condvar,
+    flights: Flights,
 }
 
 impl fmt::Debug for Placer {
@@ -342,7 +424,13 @@ impl Placer {
     ) -> Result<Arc<Self>, PlaceError> {
         let root = fs::canonicalize(&settings.store)?;
         let objects = root.join("v1/objects");
-        let layers = Layers::default();
+        let runtime = Arc::new(
+            Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()?,
+        );
+        let layers = Layers::new(Arc::clone(&runtime));
         let config = Config {
             budget_bytes: settings.budget_bytes,
             low_water_free_bytes: settings.low_water_bytes,
@@ -365,10 +453,10 @@ impl Placer {
             objects,
             trees,
             layers,
+            runtime,
             sealer,
             client: Arc::new(client),
-            flights: Mutex::new(BTreeMap::new()),
-            settled: Condvar::new(),
+            flights: Flights::default(),
         }))
     }
 
@@ -396,14 +484,18 @@ impl Placer {
     ///
     /// The directory is not a layout of that bundle, or the store cannot hold it.
     pub fn ensure_layout(&self, dir: &Path, digest: &str) -> Result<(), PlaceError> {
-        let origin = Origin::Layout(Arc::new(block_on(Layout::open(dir))??));
+        let origin = Origin::Layout(Arc::new(self.runtime.block_on(Layout::open(dir))?));
         self.ensure(&origin, &js_oci::Digest::parse(digest)?)
     }
 
     fn ensure(&self, origin: &Origin, digest: &js_oci::Digest) -> Result<(), PlaceError> {
         let kind = Kind::bundle();
-        let manifest = block_on(origin.fetch_manifest(digest, &kind))??;
-        let config_bytes = block_on(origin.fetch_config(&manifest, &kind))??;
+        let manifest = self
+            .runtime
+            .block_on(origin.fetch_manifest(digest, &kind))?;
+        let config_bytes = self
+            .runtime
+            .block_on(origin.fetch_config(&manifest, &kind))?;
         let config = BundleConfig::parse(&config_bytes)?;
         let wanted = wanted(&manifest, &config)?;
         self.layers.add(origin, manifest.layers());
@@ -431,53 +523,23 @@ impl Placer {
     /// of the one before is the answer once (and clears it, so the call after it begins
     /// again). A fetch that panics ends as a failure.
     pub fn fetch(self: &Arc<Self>, name: &str, digest: &str) -> Fetch {
-        let mut flights = self.flights();
-        match flights.get(digest) {
-            Some(Flight::Running) => return Fetch::Started,
-            Some(Flight::Failed(failure)) => {
-                let failure = failure.clone();
-                flights.remove(digest);
-                return failure;
-            }
-            None => {}
+        match self.flights.begin(digest) {
+            Begin::Running => return Fetch::Started,
+            Begin::Failed(failure) => return failure,
+            Begin::Run => {}
         }
-        flights.insert(digest.to_owned(), Flight::Running);
-        drop(flights);
         let (placer, name, digest) = (Arc::clone(self), name.to_owned(), digest.to_owned());
         thread::spawn(move || {
-            let ensured = panic::catch_unwind(AssertUnwindSafe(|| {
-                placer.ensure_registry(&name, &digest)
-            }));
-            let ended = match ensured {
-                Ok(Ok(())) => None,
-                Ok(Err(PlaceError::Source(js_oci::Error::Index(_)))) => Some(Fetch::Index),
-                Ok(Err(why)) => Some(Fetch::Failed(why.to_string())),
-                Err(_) => Some(Fetch::Failed("the fetch stopped unexpectedly".to_owned())),
-            };
-            let mut flights = placer.flights();
-            match ended {
-                None => flights.remove(&digest),
-                Some(failure) => flights.insert(digest, Flight::Failed(failure)),
-            };
-            drop(flights);
-            placer.settled.notify_all();
+            let ensured =
+                panic::catch_unwind(AssertUnwindSafe(|| placer.ensure_registry(&name, &digest)));
+            placer.flights.end(&digest, failure_of(ensured));
         });
         Fetch::Started
     }
 
     /// Waits until no fetch started by [`Placer::fetch`] is running.
     pub fn settle(&self) {
-        let mut flights = self.flights();
-        while flights.values().any(|flight| matches!(flight, Flight::Running)) {
-            flights = self
-                .settled
-                .wait(flights)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
-    }
-
-    fn flights(&self) -> MutexGuard<'_, BTreeMap<String, Flight>> {
-        self.flights.lock().unwrap_or_else(PoisonError::into_inner)
+        self.flights.settle();
     }
 
     /// Pins every tree of the held bundle `pin` (`name[:tag]@sha256:<manifest digest>`) for
@@ -509,6 +571,15 @@ impl Placer {
     }
 }
 
+/// How a layer is stored. js-oci takes a bundle manifest only when every layer is one of
+/// the two bundle layer types, so a layer that is not the plain tar is the zstd one.
+fn encoding_of(media_type: &str) -> LayerEncoding {
+    match media_type == js_bundle::media::LAYER_TAR {
+        true => LayerEncoding::Tar,
+        false => LayerEncoding::TarZstd,
+    }
+}
+
 /// The trees to ensure for `manifest`: one for each layer, with the extraction limits and
 /// the diff id the config states for it.
 fn wanted(manifest: &Manifest, config: &BundleConfig) -> Result<Vec<TreeWanted>, PlaceError> {
@@ -520,9 +591,9 @@ fn wanted(manifest: &Manifest, config: &BundleConfig) -> Result<Vec<TreeWanted>,
         .iter()
         .zip(&config.layers)
         .map(|(blob, layer)| {
-            let encoding = LayerEncoding::from_media_type(blob.media_type())
-                .ok_or(PlaceError::Mismatch("a layer has no known encoding"))?;
-            let digest = Digest::parse(blob.digest().as_str()).map_err(js_treestore::Error::from)?;
+            let encoding = encoding_of(blob.media_type());
+            let digest =
+                Digest::parse(blob.digest().as_str()).map_err(js_treestore::Error::from)?;
             Ok(TreeWanted {
                 diff_id: layer.diff_id.clone(),
                 blob: BlobRef {

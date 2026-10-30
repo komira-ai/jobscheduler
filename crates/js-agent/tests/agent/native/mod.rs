@@ -5,6 +5,7 @@
 //! `sandbox-exec` command line for real, as the user running the tests (`mac`).
 
 mod agent;
+mod bundle;
 mod fake_helper;
 mod lifecycle;
 #[cfg(target_os = "macos")]
@@ -92,6 +93,7 @@ impl Rig {
             slot: 0,
             isolation: Isolation::Contained,
             labels: BTreeMap::new(),
+            bundle: None,
         }
     }
 

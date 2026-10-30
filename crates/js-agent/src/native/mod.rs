@@ -45,6 +45,7 @@ use std::os::fd::AsFd as _;
 use std::os::unix::fs::{PermissionsExt as _, chown};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
 use std::time::Duration;
@@ -58,6 +59,7 @@ use js_mac_session::helper::RESET_ALREADY;
 use js_mac_session::lease::{Dotted, user_name};
 use js_types::LeaseId;
 
+use crate::bundle::Placer;
 use crate::lifecycle::{
     Body, CheckFinding, CheckHook, Exit, Finished, Found, NativeRefusal, RunHandle, RunSpec,
     Runtime, RuntimeError, Status,
@@ -99,6 +101,8 @@ pub struct NativeRuntime {
     term: u64,
     next: u64,
     runs: BTreeMap<String, Run>,
+    /// The bundle store, on an agent that has one.
+    bundles: Option<Arc<Placer>>,
 }
 
 impl NativeRuntime {
@@ -125,7 +129,24 @@ impl NativeRuntime {
             term,
             next: 0,
             runs: BTreeMap::new(),
+            bundles: None,
         })
+    }
+
+    /// The same runtime, with `placer` as its bundle store: a start that names a bundle
+    /// pins the bundle's trees through it for the run.
+    #[must_use]
+    pub fn with_bundles(self, placer: Arc<Placer>) -> Self {
+        Self {
+            bundles: Some(placer),
+            ..self
+        }
+    }
+
+    /// The bundle store, if the runtime has one.
+    #[must_use]
+    pub fn bundles(&self) -> Option<&Arc<Placer>> {
+        self.bundles.as_ref()
     }
 
     /// Everything after the user exists: the run directory, the log files, the profile and

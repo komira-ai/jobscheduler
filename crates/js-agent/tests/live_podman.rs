@@ -115,6 +115,7 @@ fn job(image: &str, scratch: &Path) -> RunSpec {
         isolation: Isolation::Contained,
         labels,
         slot: 0,
+        bundle: None,
     }
 }
 

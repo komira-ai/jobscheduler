@@ -2,10 +2,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel, SANDBOX_EXEC};
 
 use super::NativeConfig;
+use crate::bundle::Placer;
 
 /// Where the helper makes lease users' homes unless `--native-homes` says otherwise.
 pub const DEFAULT_HOMES: &str = "/Users";
@@ -39,6 +41,7 @@ pub struct NativeSettings {
     socket: PathBuf,
     config: NativeConfig,
     sandbox_exec: PathBuf,
+    bundles: Option<Arc<Placer>>,
 }
 
 impl NativeSettings {
@@ -124,7 +127,26 @@ impl NativeSettings {
                 read_model: ReadModel::Open,
             },
             sandbox_exec: PathBuf::from(SANDBOX_EXEC),
+            bundles: None,
         }))
+    }
+
+    /// The same settings with `placer` as the bundle store of the runtime they make.
+    ///
+    /// # Errors
+    ///
+    /// The store lies under a path no native run may read.
+    pub fn with_bundles(self, placer: Arc<Placer>) -> Result<Self, String> {
+        Ok(Self {
+            bundles: Some(placer),
+            ..self
+        })
+    }
+
+    /// The bundle store of the runtime, if there is one.
+    #[must_use]
+    pub fn bundles(&self) -> Option<&Arc<Placer>> {
+        self.bundles.as_ref()
     }
 
     /// The same settings with `program` as the `sandbox-exec` the start-up self-test runs:

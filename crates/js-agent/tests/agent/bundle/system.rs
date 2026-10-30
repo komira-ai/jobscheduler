@@ -4,17 +4,20 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use js_agent::CommandRunner;
-use js_agent::bundle::{BundleHost, Fetch, MAX_LIST_BYTES, Needs, SystemHost};
+use js_agent::bundle::{BundleHost, Fetch, MAX_LIST_BYTES, Needs, Registry, SystemHost};
 use js_bundle::BundleConfig;
 
 use super::fake::digest;
+use super::fixture::{CopySealer, Spec, settings};
 use crate::support::Scratch;
 
 const CONFIG: &str = include_str!("../../../../js-bundle/tests/fixtures/minimal.canonical.json");
 
 /// A runner that answers the lines it is given and fails every other.
+#[derive(Clone)]
 struct Runner(BTreeMap<String, Result<String, String>>);
 
 impl Runner {
@@ -108,6 +111,7 @@ fn a_bundles_needs_come_from_its_config() {
     let want = Needs {
         os_version: parsed.os_version,
         xcode: parsed.xcode,
+        entrypoints: parsed.entrypoints.keys().cloned().collect(),
     };
     assert_eq!(host().needs(&store, &digest('a')), Ok(want));
 }
@@ -339,4 +343,125 @@ fn a_list_file_over_the_cap_or_not_text_is_refused() {
 #[test]
 fn the_machines_host_cannot_run_a_bundle_yet() {
     assert!(!host().can_run());
+}
+
+/// A held bundle's needs carry the names of its entrypoints, which is what the admission of a
+/// start that runs `@bundle/<name>` checks the name against. It catches an entrypoint check
+/// made against an empty list.
+#[test]
+fn a_bundles_needs_carry_its_entrypoints() {
+    let dir = Scratch::new("sys-entrypoints");
+    let store = dir.path("store");
+    let objects = store.join("v1/objects");
+    let src = dir.path("src");
+    fs::create_dir(&src).unwrap();
+    let bundle = Spec::standard().build(&src);
+    put(
+        &objects.join(format!("manifests/{}.json", hex('a'))),
+        &format!(r#"{{"config": {{"digest": "sha256:{}"}}}}"#, hex('c')),
+    );
+    let canonical = String::from_utf8(bundle.config.to_canonical_json()).unwrap();
+    put(
+        &objects.join(format!("configs/{}.json", hex('c'))),
+        &canonical,
+    );
+    let needs = host().needs(&store, &digest('a')).unwrap();
+    let names: Vec<&str> = needs.entrypoints.iter().map(String::as_str).collect();
+    assert_eq!(names, ["absent", "data", "dir", "tool", "work"]);
+}
+
+const DF_ROW: &str =
+    "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk3 9 9 1048576 11% /\n";
+
+/// A host with a sealer, over the volume of `store`.
+fn sealing(store: &Path) -> SystemHost<Runner> {
+    let line = format!("/bin/df -P -k {}", store.display());
+    let runner = Runner::answering(&line, Ok(DF_ROW));
+    SystemHost::new(runner)
+        .with_owner(me())
+        .with_sealer(Arc::new(CopySealer))
+}
+
+/// A host that has no sealer opens no store, so it cannot run a bundle and has nothing to
+/// fetch into. It catches a Linux agent, or a Mac one built without its sealer, that says it
+/// runs bundles.
+#[test]
+fn a_host_without_a_sealer_opens_no_store() {
+    let dir = Scratch::new("sys-nosealer");
+    let settings = settings(&dir);
+    let host = host();
+    assert!(host.open(&settings).unwrap().is_none());
+    assert!(!host.can_run());
+    let Fetch::Failed(why) = host.fetch(&settings.store, "r.example/team/x", &digest('a')) else {
+        panic!("nothing to fetch into");
+    };
+    assert!(why.contains("no bundle store"), "{why}");
+}
+
+/// A host with a sealer opens the store of the settings once (a second call gives the same
+/// store), can then run a bundle, reads the volume's free space whenever the store decides
+/// what to keep, and fetches through it. It catches a store opened twice (the directory is
+/// locked), a host that says it can run a bundle before it has a store, and a fetch that
+/// goes nowhere.
+#[test]
+fn a_host_with_a_sealer_opens_the_store_and_places_bundles_through_it() {
+    let dir = Scratch::new("sys-open");
+    let settings = settings(&dir);
+    let host = sealing(&settings.store);
+    assert!(!host.can_run());
+    let store = host.open(&settings).unwrap().expect("a store");
+    assert!(host.can_run());
+    let again = host.open(&settings).unwrap().expect("the same store");
+    assert!(Arc::ptr_eq(&store, &again));
+    let src = dir.path("src");
+    fs::create_dir(&src).unwrap();
+    let bundle = Spec::standard().build(&src);
+    let layout = bundle.layout(&dir, "layout");
+    store.ensure_layout(&layout, &bundle.digest()).unwrap();
+    assert_eq!(host.held(&settings.store), Ok(vec![bundle.digest()]));
+    assert_eq!(
+        host.fetch(&settings.store, "nowhere.example/team/x", &digest('a')),
+        Fetch::Started
+    );
+    store.settle();
+    let reported = host.fetch(&settings.store, "nowhere.example/team/x", &digest('a'));
+    assert!(matches!(reported, Fetch::Failed(_)), "{reported:?}");
+    store.settle();
+}
+
+/// The registries of the settings become the policy of the store's client: a public one and a
+/// private one are taken, one that is no registry is an error that names the flag, and a store
+/// directory that does not exist is an error that names it. It catches a bad flag that is
+/// found at the first job.
+#[test]
+fn the_registries_and_the_store_directory_are_checked_when_it_opens() {
+    let dir = Scratch::new("sys-registries");
+    let mut settings = settings(&dir);
+    settings.registries = vec![
+        Registry {
+            host: "registry.example".to_owned(),
+            prefix: "team".to_owned(),
+            private: false,
+        },
+        Registry {
+            host: "10.0.0.5:5000".to_owned(),
+            prefix: "jobs".to_owned(),
+            private: true,
+        },
+    ];
+    assert!(sealing(&settings.store).open(&settings).unwrap().is_some());
+    let other = Scratch::new("sys-registries-bad");
+    let mut bad = self::settings(&other);
+    bad.registries = vec![Registry {
+        host: String::new(),
+        prefix: "team".to_owned(),
+        private: false,
+    }];
+    let why = sealing(&bad.store).open(&bad).unwrap_err();
+    assert!(why.contains("--bundle-registry-allow"), "{why}");
+    let third = Scratch::new("sys-registries-missing");
+    let mut missing = self::settings(&third);
+    missing.store = third.path("not-there");
+    let why = sealing(&missing.store).open(&missing).unwrap_err();
+    assert!(why.contains("not-there"), "{why}");
 }

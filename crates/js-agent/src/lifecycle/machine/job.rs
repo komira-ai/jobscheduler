@@ -474,5 +474,6 @@ pub(super) fn run_spec(
         slot,
         isolation: spec.isolation,
         labels,
+        bundle: spec.bundle.clone(),
     }
 }

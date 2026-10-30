@@ -33,6 +33,6 @@ mod settings;
 pub use admit::Admission;
 pub use host::{BundleHost, Fetch, HostXcode, MAX_LIST_BYTES, Needs, SystemHost};
 pub use list::{ListError, parse_digests};
-pub use place::{PlaceError, Pinned, Placer, load_config};
+pub use place::{Pinned, PlaceError, Placer, load_config};
 pub use report::{Reported, hello_capabilities, report, reserve_bytes};
 pub use settings::{Pull, Registry, Settings, Trust};

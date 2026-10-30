@@ -1,13 +1,19 @@
 //! The seam between the bundle rules and the machine: [`BundleHost`].
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
-use js_bundle::{BundleConfig, DottedVersion, XcodeComponent, XcodeNeed};
+use js_bundle::{DottedVersion, XcodeComponent, XcodeNeed};
+use js_oci::{Allow, Client, Policy};
+use js_treestore::Sealer;
 
 use super::list::is_digest;
+use super::place::{Placer, load_config};
+use super::settings::Settings;
 use crate::facts::{CommandRunner, free_bytes};
 
 /// `sw_vers`, by its absolute path like every helper the agent runs.
@@ -23,6 +29,8 @@ pub struct Needs {
     pub os_version: DottedVersion,
     /// The Xcode it calls into, when it does.
     pub xcode: Option<XcodeNeed>,
+    /// The names of its entrypoints, which a job names as `@bundle/<name>`.
+    pub entrypoints: BTreeSet<String>,
 }
 
 /// An Xcode the host has.
@@ -87,20 +95,52 @@ pub trait BundleHost: Send + Sync {
     /// Begins to fetch the bundle `name` (a pin's name, with its tag if it has one) with
     /// manifest digest `digest` into the store.
     fn fetch(&self, store: &Path, name: &str, digest: &str) -> Fetch;
+
+    /// Opens the store `settings` names, for an agent that runs native jobs, and gives the
+    /// [`Placer`] the runtime pins bundles through; afterwards [`BundleHost::can_run`] and
+    /// [`BundleHost::fetch`] answer from it. `None` is a host that cannot place bundles (and
+    /// so cannot run one). The default is such a host.
+    ///
+    /// # Errors
+    ///
+    /// The store cannot be opened or the registries cannot be turned into a policy; the text
+    /// says why.
+    fn open(&self, _settings: &Settings) -> Result<Option<Arc<Placer>>, String> {
+        Ok(None)
+    }
 }
 
 /// The machine's own host.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct SystemHost<R> {
     runner: R,
     /// The user that must own a list file and the directory it is in: root.
     owner: u32,
+    /// What seals the trees of the store; none on a host that has no sealer.
+    sealer: Option<Arc<dyn Sealer>>,
+    /// The store, once [`BundleHost::open`] has opened it.
+    placer: OnceLock<Arc<Placer>>,
 }
 
 impl<R: CommandRunner + Send + Sync> SystemHost<R> {
     /// A host that runs its helpers (`sw_vers`, `df`) with `runner`.
     pub fn new(runner: R) -> Self {
-        Self { runner, owner: 0 }
+        Self {
+            runner,
+            owner: 0,
+            sealer: None,
+            placer: OnceLock::new(),
+        }
+    }
+
+    /// The same host, with `sealer` to seal the trees of its store (the Mac's own, which
+    /// runs as root, or a test's).
+    #[must_use]
+    pub fn with_sealer(self, sealer: Arc<dyn Sealer>) -> Self {
+        Self {
+            sealer: Some(sealer),
+            ..self
+        }
     }
 
     /// The same host, with list files owned by `owner` instead of root (for a test that
@@ -114,14 +154,6 @@ impl<R: CommandRunner + Send + Sync> SystemHost<R> {
 /// The directory of the manifests under a store.
 fn manifests(store: &Path) -> PathBuf {
     store.join("v1/objects/manifests")
-}
-
-/// The `<hex>` of `sha256:<hex>` when the text is a digest, as a file name.
-fn hex_of(digest: &str) -> Result<&str, String> {
-    match is_digest(digest) {
-        true => Ok(&digest["sha256:".len()..]),
-        false => Err("not a sha256 digest".to_owned()),
-    }
 }
 
 /// The bytes below `dir` by allocated blocks, links not followed. A missing directory is
@@ -182,7 +214,7 @@ fn read_trusted(path: &Path, owner: u32) -> io::Result<String> {
     Ok(text)
 }
 
-impl<R: CommandRunner + Send + Sync> BundleHost for SystemHost<R> {
+impl<R: CommandRunner + Clone + Send + Sync + 'static> BundleHost for SystemHost<R> {
     #[cfg(target_os = "macos")]
     fn check_start(&self, store: &Path, scratch: &Path) -> Result<(), String> {
         js_treestore::mac::start_checks(store, scratch).map_err(|why| why.to_string())
@@ -218,22 +250,11 @@ impl<R: CommandRunner + Send + Sync> BundleHost for SystemHost<R> {
     }
 
     fn needs(&self, store: &Path, digest: &str) -> Result<Needs, String> {
-        let hex = hex_of(digest)?;
-        let file = manifests(store).join(format!("{hex}.json"));
-        let manifest = self.read_file(&file)?;
-        let manifest: serde_json::Value =
-            serde_json::from_str(&manifest).map_err(|_| "the manifest is not JSON".to_owned())?;
-        let config = manifest
-            .pointer("/config/digest")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "the manifest names no config".to_owned())?;
-        let config = hex_of(config)?;
-        let file = store.join(format!("v1/objects/configs/{config}.json"));
-        let bytes = fs::read(&file).map_err(|why| format!("{}: {why}", file.display()))?;
-        let config = BundleConfig::parse(&bytes).map_err(|why| why.to_string())?;
+        let config = load_config(store, digest, &|path| self.read_file(path))?;
         Ok(Needs {
             os_version: config.os_version,
             xcode: config.xcode,
+            entrypoints: config.entrypoints.keys().cloned().collect(),
         })
     }
 
@@ -266,11 +287,41 @@ impl<R: CommandRunner + Send + Sync> BundleHost for SystemHost<R> {
     }
 
     fn can_run(&self) -> bool {
-        // There is no bundle runtime yet.
-        false
+        self.placer.get().is_some()
     }
 
-    fn fetch(&self, _store: &Path, _name: &str, _digest: &str) -> Fetch {
-        Fetch::Failed("this agent has no bundle fetcher yet".to_owned())
+    fn open(&self, settings: &Settings) -> Result<Option<Arc<Placer>>, String> {
+        if let Some(placer) = self.placer.get() {
+            return Ok(Some(Arc::clone(placer)));
+        }
+        let Some(sealer) = &self.sealer else {
+            return Ok(None);
+        };
+        let allowed = settings.registries.iter().map(|registry| {
+            let entry = Allow::parse(&format!("{}/{}", registry.host, registry.prefix))?;
+            Ok(if registry.private {
+                entry.private()
+            } else {
+                entry
+            })
+        });
+        let allowed = allowed.collect::<Result<Vec<_>, js_oci::Error>>();
+        let allowed = allowed.map_err(|why| format!("--bundle-registry-allow: {why}"))?;
+        // The volume's free space is asked at every eviction decision, so it is read again
+        // each time.
+        let (runner, store) = (self.runner.clone(), settings.store.clone());
+        let free: Arc<dyn Fn() -> u64 + Send + Sync> =
+            Arc::new(move || free_bytes(&runner, &store).unwrap_or(0));
+        let client = Client::new(Policy::new(allowed));
+        let opened = Placer::open(settings, Arc::clone(sealer), free, client);
+        let placer = opened.map_err(|why| format!("{}: {why}", settings.store.display()))?;
+        Ok(Some(Arc::clone(self.placer.get_or_init(|| placer))))
+    }
+
+    fn fetch(&self, _store: &Path, name: &str, digest: &str) -> Fetch {
+        match self.placer.get() {
+            Some(placer) => placer.fetch(name, digest),
+            None => Fetch::Failed("this agent has no bundle store to fetch into".to_owned()),
+        }
     }
 }

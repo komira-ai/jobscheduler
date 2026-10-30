@@ -118,6 +118,12 @@ pub struct RunSpec {
     pub isolation: Isolation,
     /// The job's labels and the agent's own ([`label`]); the agent's win.
     pub labels: BTreeMap<String, String>,
+    /// The darwin bundle a native run pins, `name[:tag]@sha256:<manifest digest>`: the
+    /// runtime pins its trees for the run, may resolve `@bundle/<entrypoint>` through
+    /// it, and unpins them when the run is removed. The agent has judged it already
+    /// ([`Admission`](crate::bundle::Admission)); a runtime that holds no bundle store
+    /// fails a start that has one.
+    pub bundle: Option<String>,
 }
 
 /// How a container ended.
