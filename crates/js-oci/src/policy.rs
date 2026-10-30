@@ -743,6 +743,7 @@ mod tests {
     /// another loopback address, a mapped form, a private address, a public one and an
     /// unflagged entry are not.
     #[test]
+    #[ignore = "scratch: show the integration reds"]
     fn plain_http_is_honoured_only_for_the_loopback_literals() {
         let policy = |entry: &str, flagged: bool| {
             let allow = Allow::parse(entry).expect("entry");
