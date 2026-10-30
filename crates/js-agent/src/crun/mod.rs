@@ -52,9 +52,15 @@
 //! (`supports_gpus` is false and a start naming one is refused), no host jobs, no
 //! read-back of the container's mounts, and no log tail.
 
+mod claim;
 mod spec;
 #[cfg(test)]
 mod tests;
+mod wire;
+
+pub use claim::{ClaimError, HostClaim};
+
+pub use wire::{ID_TOOL_PATH, PULL_THREADS, Seams, oci_config, open as open_for_plan};
 
 use std::collections::BTreeMap;
 use std::io;

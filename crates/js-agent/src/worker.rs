@@ -690,8 +690,13 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     // At start only: the rescue at the agent's end builds its runtime by `machine.runtime`
     // alone, so a firewall that has gone never keeps it from stopping the containers.
     runtime.check_egress().map_err(|why| why.to_string())?;
-    let checks =
-        Integrity::start(machine.view(), settings.uid(), watch)?.with_slots(settings.slot_ids(0).0);
+    let checks = Integrity::start(machine.view(), settings.uid(), watch)?;
+    // The engines give each slot a user of its own; every crun job runs as the one id of
+    // the job user's range, so there are no slots to tell apart.
+    let checks = match settings.crun() {
+        Some(_) => checks,
+        None => checks.with_slots(settings.slot_ids(0).0),
+    };
     let (life, events) = Lifecycle::adopt(config, runtime, Box::new(checks), Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
     lines.extend(describe(&events));

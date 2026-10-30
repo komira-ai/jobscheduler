@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use js_agent::Cli;
-use js_agent::crun_host::{CrunHost, Piece, Report, Request, check, flags, gate, start};
+use js_agent::crun_host::{CrunHost, Piece, Report, Request, check, flags, start};
 use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
 
@@ -23,13 +23,13 @@ use crate::support::{FakeCommands, code, linux_host, mac_host, run_scripted, wel
 const USER: &str = "jsjob";
 
 /// A host that has every piece, in files below a directory of the test.
-struct Fixture {
-    dir: TestDir,
-    host: CrunHost,
-    crun: PathBuf,
-    state: PathBuf,
-    scratch: PathBuf,
-    commands: FakeCommands,
+pub(crate) struct Fixture {
+    pub(crate) dir: TestDir,
+    pub(crate) host: CrunHost,
+    pub(crate) crun: PathBuf,
+    pub(crate) state: PathBuf,
+    pub(crate) scratch: PathBuf,
+    pub(crate) commands: FakeCommands,
 }
 
 fn set_mode(path: &Path, mode: u32) {
@@ -42,14 +42,21 @@ fn write(path: &Path, text: &str) {
 }
 
 impl Fixture {
+    pub(crate) const USER: &'static str = USER;
+
     fn new(name: &str) -> Self {
+        Self::with_ids(name, 990, 991)
+    }
+
+    /// A host whose job user has the ids `uid` and `gid`.
+    pub(crate) fn with_ids(name: &str, uid: u32, gid: u32) -> Self {
         let dir = TestDir::under("/tmp", name);
         set_mode(dir.path(), 0o755);
         let root = dir.path().to_owned();
         let ids = IdFiles::in_dir(&root.join("etc"));
         write(
             &ids.passwd,
-            &format!("root:x:0:0::/root:/bin/sh\n{USER}:x:990:991::/:/usr/sbin/nologin\n"),
+            &format!("root:x:0:0::/root:/bin/sh\n{USER}:x:{uid}:{gid}::/:/usr/sbin/nologin\n"),
         );
         write(&ids.subuid, &format!("{USER}:100000:65536\n"));
         write(&ids.subgid, &format!("{USER}:100000:65536\n"));
@@ -490,6 +497,8 @@ fn the_crun_flags_are_checked_against_each_other() {
     assert!(with(&["--container-subuid", "x"]).starts_with("--container-subuid: "));
     assert!(with(&["--actions-cgroup", "/sys/fs/cgroup/x"]).starts_with("--actions-cgroup: "));
     assert!(with(&["--crun-bin", "crun"]).contains("not an absolute path"));
+    assert!(with(&["--mount-root", "sync=/m"]).starts_with("--mount-root: "));
+    assert!(with(&["--mount-root-ro", "sync=/m"]).starts_with("--mount-root-ro: "));
     let without = |drop: &str| {
         let mut all: Vec<&str> = Vec::new();
         let mut skip = false;
@@ -535,8 +544,12 @@ fn start_refuses_an_incomplete_host_and_returns_the_warnings_of_a_complete_one()
         &fx.host.apparmor_profiles,
         &format!("{} (unconfined)\n", fx.crun.display()),
     );
-    let warnings = start(&cli(&args), &fx.host, &fx.commands).unwrap();
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let ready = start(&cli(&args), &fx.host, &fx.commands).unwrap();
+    assert_eq!(ready.warnings.len(), 1, "{:?}", ready.warnings);
+    assert_eq!(
+        (ready.crun, ready.job_user, ready.job_ids),
+        (fx.crun.clone(), USER.to_owned(), (990, 991))
+    );
 }
 
 /// Runs the agent to its first wait with `extra`; returns (status, stderr).
@@ -570,6 +583,21 @@ fn the_agent_refuses_runtime_flags_that_cannot_work() {
                 "/usr/bin/docker",
             ],
             "--job-user: needs --runtime crun",
+        ),
+        (
+            vec![
+                "--runtime",
+                "crun",
+                "--job-user",
+                USER,
+                "--state-root",
+                "/s",
+                "--scratch-root",
+                "/r",
+                "--mount-root",
+                "sync=/m",
+            ],
+            "--mount-root: not accepted with --runtime crun",
         ),
     ];
     for (args, why) in cases {
@@ -683,39 +711,6 @@ fn flags_without_the_crun_runtime_is_an_error() {
         flags(&cli).map(|_| ()).unwrap_err(),
         "--runtime crun: not given"
     );
-}
-
-/// `gate` gives the refusal for an incomplete host, and for a complete one the warnings (written
-/// to the error stream) and the reason a build that cannot start a crun job ends with status 2.
-#[test]
-fn the_gate_ends_the_agent_with_the_refusal_or_with_the_missing_wiring() {
-    let fx = Fixture::new("crun-host-gate");
-    let args = [
-        "--runtime",
-        "crun",
-        "--job-user",
-        USER,
-        "--crun-bin",
-        fx.crun.to_str().unwrap(),
-        "--state-root",
-        fx.state.to_str().unwrap(),
-        "--scratch-root",
-        fx.scratch.to_str().unwrap(),
-    ];
-    let mut err = Vec::new();
-    fs::remove_dir(&fx.state).unwrap();
-    let refused = gate(&cli(&args), &fx.host, &fx.commands, &mut err);
-    assert!(refused.contains("state root:"), "{refused}");
-    assert!(err.is_empty());
-    fs::create_dir(&fx.state).unwrap();
-    set_mode(&fx.state, 0o700);
-    let wiring = gate(&cli(&args), &fx.host, &fx.commands, &mut err);
-    assert!(
-        wiring.contains("does not start jobs with crun yet"),
-        "{wiring}"
-    );
-    let err = String::from_utf8(err).unwrap();
-    assert!(err.starts_with("js-agent: warning: --crun-bin "), "{err}");
 }
 
 /// A Mac is told `--runtime crun` is Linux only, before any host file is read.

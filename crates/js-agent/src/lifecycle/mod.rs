@@ -664,6 +664,30 @@ impl Local {
         cli: &Cli,
         default_files_root: &Path,
     ) -> Result<Self, String> {
+        Self::from_parts(cli, default_files_root, None)
+    }
+
+    /// [`Local::from_cli`] for `--runtime crun`, whose settings (`crun`) stand where the
+    /// container flags make them for an engine. The scratch root and the run files root are
+    /// [`DirLayout::Searchable`] (the job's ids walk down to them); the image store is the
+    /// directory beside the scratch root, and the settings are told where it is.
+    ///
+    /// # Errors
+    ///
+    /// As [`Local::from_cli`], and the scratch root has no parent for the image store.
+    pub fn from_cli_crun(cli: &Cli, crun: Settings) -> Result<Self, String> {
+        Self::from_parts(cli, Path::new(DEFAULT_RUN_FILES_ROOT), Some(crun))
+    }
+
+    fn from_parts(
+        cli: &Cli,
+        default_files_root: &Path,
+        crun: Option<Settings>,
+    ) -> Result<Self, String> {
+        let layout = match crun {
+            Some(_) => DirLayout::Searchable,
+            None => DirLayout::Private,
+        };
         if cli.allow_host_jobs {
             return Err(
                 "--allow-host-jobs: host jobs are not available yet: the scheduler \
@@ -675,9 +699,9 @@ impl Local {
         let scratch = cli
             .scratch_root
             .as_deref()
-            .map(ScratchRoot::open)
+            .map(|path| ScratchRoot::open_with(path, layout))
             .transpose()?;
-        let container = Settings::from_flags(
+        let from_flags = Settings::from_flags(
             &Flags {
                 bin: cli.container_bin.as_deref(),
                 network: cli.container_network.as_deref(),
@@ -697,6 +721,13 @@ impl Local {
             ),
         )
         .map_err(|why| why.to_string())?;
+        let is_crun = crun.is_some();
+        let needs = if is_crun {
+            "--runtime crun"
+        } else {
+            "--container-bin"
+        };
+        let container = crun.or(from_flags);
         let state = cli.state_root.as_deref().map(StateRoot::open).transpose()?;
         if container.is_none() && !cli.watch_dirs.is_empty() {
             return Err("--watch-dir: needs --container-bin".to_owned());
@@ -705,11 +736,9 @@ impl Local {
             return Err("--run-files-root: needs --container-bin".to_owned());
         }
         if container.is_some() && state.is_none() {
-            return Err(
-                "--state-root: required with --container-bin: the taint marker is \
-                        kept there"
-                    .to_owned(),
-            );
+            return Err(format!(
+                "--state-root: required with {needs}: the taint marker is kept there"
+            ));
         }
         let graces = [cli.stop_grace, cli.drain_wait];
         if container.is_none() && graces.iter().any(Option::is_some) {
@@ -729,8 +758,8 @@ impl Local {
         }
         let (files, files_warning) = match (&cli.run_files_root, container.is_some()) {
             (_, false) => (None, None),
-            (Some(path), true) => (Some(FilesRoot::open(path)?), None),
-            (None, true) => match FilesRoot::open(default_files_root) {
+            (Some(path), true) => (Some(FilesRoot::open_with(path, layout)?), None),
+            (None, true) => match FilesRoot::open_with(default_files_root, layout) {
                 Ok(root) => (Some(root), None),
                 Err(why) => (None, Some(format!("run files unavailable: {why}"))),
             },
@@ -772,12 +801,16 @@ impl Local {
             .collect();
         let watch = watch_dirs(&cli.watch_dirs, &busy)?;
         if container.is_some() && scratch.is_none() {
-            return Err(
-                "--scratch-root: required with --container-bin: each run's private \
-                 directory is made there"
-                    .to_owned(),
-            );
+            return Err(format!(
+                "--scratch-root: required with {needs}: each run's private directory is made there"
+            ));
         }
+        let container = match (is_crun, &scratch) {
+            (true, Some(root)) => container
+                .map(|settings| settings.placed_beside(root.path(), files.clone()))
+                .transpose()?,
+            _ => container,
+        };
         let (default_gib, max_inodes, failures, usage_wait, abandon) = scratch_quota_limits(cli)?;
         Ok(Self {
             watch,
@@ -801,7 +834,7 @@ impl Local {
 }
 
 /// The `--image-allow` entries, each checked.
-fn image_allow(entries: &[String]) -> Result<Vec<Allow>, String> {
+pub(crate) fn image_allow(entries: &[String]) -> Result<Vec<Allow>, String> {
     entries
         .iter()
         .map(|entry| Allow::parse(entry).map_err(|why| format!("--image-allow: {why}")))

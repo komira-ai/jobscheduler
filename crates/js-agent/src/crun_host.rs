@@ -581,24 +581,42 @@ fn profile_name(line: &str) -> &str {
     line.rsplit_once(" (").map_or(line, |(name, _)| name).trim()
 }
 
+/// A host that has every piece: what the runtime is built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ready {
+    /// `--crun-bin`, or the distribution's `crun`.
+    pub crun: PathBuf,
+    /// `--job-user`.
+    pub job_user: String,
+    /// The job user's `(uid, gid)`.
+    pub job_ids: (u32, u32),
+    /// What the operator should read, though the host may run jobs.
+    pub warnings: Vec<String>,
+}
+
 /// What `--runtime crun` asks of the other flags, and then of the host.
-///
-/// Returns the warnings the operator should read when the host has every piece.
 ///
 /// # Errors
 ///
 /// The text for exit status 2: a flag that is wrong or missing, or [`Report::refusal`].
-pub fn start(
-    cli: &Cli,
-    host: &CrunHost,
-    commands: &dyn CommandRunner,
-) -> Result<Vec<String>, String> {
+pub fn start(cli: &Cli, host: &CrunHost, commands: &dyn CommandRunner) -> Result<Ready, String> {
     let request = flags(cli)?;
     let report = check(&request, host, commands);
-    match report.refusal() {
-        Some(text) => Err(text),
-        None => Ok(report.warnings),
+    if let Some(text) = report.refusal() {
+        return Err(text);
     }
+    let job_ids = report.job_ids.ok_or_else(|| {
+        format!(
+            "--job-user: the check found no ids for {}",
+            request.job_user
+        )
+    })?;
+    Ok(Ready {
+        crun: request.crun.to_owned(),
+        job_user: request.job_user.to_owned(),
+        job_ids,
+        warnings: report.warnings,
+    })
 }
 
 /// The flags of `--runtime`, `--crun-bin` and `--job-user` checked against each other.
@@ -626,10 +644,15 @@ pub fn flags(cli: &Cli) -> Result<Request<'_>, String> {
         ("--container-nft", cli.container_nft.is_some()),
         ("--actions-cgroup", cli.actions_cgroup.is_some()),
         ("--gpu-toolkit-hook", cli.gpu_toolkit_hook.is_some()),
+        // A job's mount is bound from a directory the job's writer may swap for a link
+        // between the agent's check and the bind; `CrunRuntime` does not read the binds
+        // back yet, so no mount root is accepted.
+        ("--mount-root", !cli.mount_roots.is_empty()),
+        ("--mount-root-ro", !cli.mount_roots_ro.is_empty()),
     ];
     if let Some((flag, _)) = engine_flags.into_iter().find(|(_, given)| *given) {
         return Err(format!(
-            "{flag}: a flag of the container engine, which --runtime crun does not use"
+            "{flag}: not accepted with --runtime crun (a flag of the container engine, or a mount root, which the crun runtime does not read back after it binds)"
         ));
     }
     let crun = cli.crun_bin.as_deref().unwrap_or(Path::new(DISTRO_CRUN));
@@ -655,28 +678,4 @@ pub fn flags(cli: &Cli) -> Result<Request<'_>, String> {
         state_root,
         scratch_root,
     })
-}
-
-/// What the program does with `--runtime crun`, after the flags are known to be a pair: the
-/// host is checked and its warnings are written to `err`; the text returned is why the agent
-/// ends with status 2, the refusal naming each missing piece or, for a complete host, that
-/// this build cannot start a job with crun yet (the worker builds only the engine runtime,
-/// and an agent that went on would register and run no job).
-pub fn gate(
-    cli: &Cli,
-    host: &CrunHost,
-    commands: &dyn CommandRunner,
-    err: &mut dyn std::io::Write,
-) -> String {
-    match start(cli, host, commands) {
-        Err(why) => why,
-        Ok(warnings) => {
-            for warning in warnings {
-                let _ = writeln!(err, "js-agent: warning: {warning}");
-            }
-            "--runtime crun: the host has every piece, but this build does not start jobs with \
-             crun yet"
-                .to_owned()
-        }
-    }
 }

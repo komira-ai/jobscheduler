@@ -39,7 +39,7 @@ pub struct Seams<'a> {
     pub quota: Option<Arc<dyn ScratchQuota>>,
 }
 
-/// Starts the worker when `--container-bin` is given, and `None` when it is not: an agent
+/// Starts the worker when `--container-bin` (or `--runtime crun`) is given, and `None` when it is not: an agent
 /// without it registers and heartbeats and runs no job. The worker has built the
 /// lifecycle and adopted the containers an earlier process left when this returns, and
 /// the lines it has to say (the engine's warnings, what it adopted) are written to `err`.
@@ -81,6 +81,9 @@ pub fn start(
     let (Some(settings), Some(scratch), Some(state)) = (container, scratch, state) else {
         return Ok(None);
     };
+    let flag = settings
+        .crun()
+        .map_or("--container-bin", |_| "--runtime crun");
     let config = Config {
         capacity: Capacity::of(hello),
         allow_host_jobs: false,
@@ -105,7 +108,7 @@ pub fn start(
         rescue_bound: seams.rescue_bound,
         readiness: seams.readiness,
     })
-    .map_err(|why| format!("--container-bin: {why}"))?;
+    .map_err(|why| format!("{flag}: {why}"))?;
     worker.take_lines().iter().for_each(|line| {
         let _ = writeln!(err, "js-agent: {line}");
     });

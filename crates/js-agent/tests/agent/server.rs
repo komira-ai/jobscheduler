@@ -290,6 +290,18 @@ impl Agent {
         Self::launch(url, Some(token), extra, host, connector, machine)
     }
 
+    /// [`Agent::spawn_on`] over any machine.
+    pub fn spawn_machine(
+        url: String,
+        token: PathBuf,
+        extra: &[&str],
+        host: fn() -> Host,
+        connector: impl Connector + Send + 'static,
+        machine: Arc<dyn Machine>,
+    ) -> Self {
+        Self::launch(url, Some(token), extra, host, connector, machine)
+    }
+
     /// [`Agent::spawn`] with no `--token-file`: the agent finds its credential in the state
     /// root `extra` names.
     pub fn spawn_tokenless(
@@ -308,7 +320,7 @@ impl Agent {
         extra: &[&str],
         host: fn() -> Host,
         connector: impl Connector + Send + 'static,
-        machine: Arc<FakeMachine>,
+        machine: Arc<dyn Machine>,
     ) -> Self {
         let (tell, worker) = channel();
         let (slept, waits) = channel();
@@ -332,7 +344,6 @@ impl Agent {
             let hook = move |worker: Handle| {
                 let _ = tell.send(worker);
             };
-            let machine: Arc<dyn Machine> = machine;
             let jobs = (machine, Some(&hook as &dyn Fn(Handle)));
             run_on(&args, &host(), &connector, &mut sleeper, &mut Lowest, jobs)
         });
