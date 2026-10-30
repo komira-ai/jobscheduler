@@ -381,17 +381,19 @@ fn an_agent_started_with_runtime_crun_runs_a_job_through_crun() {
         "--scratch-root",
         &scratch,
     ];
-    let machine = Arc::new(CrunMachine {
-        system: System::new().with_crun(seams()),
-        fake: FakeMachine::new(),
-    });
+    let machine = || {
+        Arc::new(CrunMachine {
+            system: System::new().with_crun(seams()),
+            fake: FakeMachine::new(),
+        })
+    };
     let agent = Agent::spawn_machine(
         server.url(),
         server.join_file(),
         &flags,
         host,
-        Redirect(address),
-        machine,
+        Redirect(address.clone()),
+        machine(),
     );
     let worker = match agent.try_worker() {
         Ok(worker) => worker,
@@ -478,6 +480,21 @@ fn an_agent_started_with_runtime_crun_runs_a_job_through_crun() {
     assert_eq!(ended, ("exited".to_owned(), Some("succeeded".to_owned())));
     // While the agent runs, its host id is claimed: a second crun agent with the id is
     // refused, naming the holder.
+    let second = Agent::spawn_machine(
+        server.url(),
+        server.join_file(),
+        &flags,
+        host,
+        Redirect(address),
+        machine(),
+    )
+    .finish();
+    assert_eq!(second.status(), code(2), "{}", second.err);
+    assert!(
+        second.err.contains("--host-id h1: another crun agent"),
+        "{}",
+        second.err
+    );
     let refused = HostClaim::take(node.dir.path(), "h1").expect_err("the id is held");
     assert!(
         refused
