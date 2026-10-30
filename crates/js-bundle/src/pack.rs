@@ -162,10 +162,8 @@ fn at<T>(path: &Path, result: io::Result<T>) -> Result<T, PackError> {
 /// file after the directory was listed is not read as the file that was listed.
 fn read_file(source: &Path, shown: &str) -> Result<(Vec<u8>, bool), PackError> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let fd = at(
-        source,
-        rustix::fs::open(source, flags, Mode::empty()).map_err(io::Error::from),
-    )?;
+    let opened = rustix::fs::open(source, flags, Mode::empty()).map_err(io::Error::from);
+    let fd = at(source, opened)?;
     let mut file = std::fs::File::from(fd);
     let meta = at(source, file.metadata())?;
     if !meta.is_file() {
