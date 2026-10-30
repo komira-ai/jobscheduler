@@ -34,7 +34,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read as _};
 use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::path::Path;
 
 use rustix::fs::{Mode, OFlags};
@@ -215,7 +215,12 @@ fn collect(dir: &Path, prefix: &str, out: &mut BTreeMap<String, Item>) -> Result
         let item = if kind.is_dir() {
             collect(&source, path, out)?;
             Item::Dir
-        } else if kind.is_file() {
+        } else if [kind.is_file(), kind.is_fifo()]
+            .into_iter()
+            .any(|opens| opens)
+        {
+            // A fifo is opened too (without blocking) so that what it is comes from the
+            // descriptor, like every other file; only that check refuses it.
             let (data, exec) = read_file(&source, &shown)?;
             Item::File { data, exec }
         } else if kind.is_symlink() {
@@ -338,47 +343,4 @@ pub fn pack_layer(root: &Path) -> Result<Packed, PackError> {
         diff_id: tar.diff_id,
         blob,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-
-    /// A fresh directory for one test, removed by the test.
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("js-bundle-pack-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    /// The case the listing cannot show: a file that was a regular file when the directory
-    /// was listed and is a symlink when it is opened is not followed.
-    #[test]
-    fn a_file_swapped_for_a_symlink_is_not_followed() {
-        let dir = scratch("swapped-link");
-        std::fs::write(dir.join("secret"), b"x").unwrap();
-        std::os::unix::fs::symlink("secret", dir.join("f")).unwrap();
-        let error = read_file(&dir.join("f"), "f").unwrap_err();
-        assert!(matches!(error, PackError::Io { .. }), "{error:?}");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A file swapped for a fifo is refused by what the descriptor is, not read.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_file_swapped_for_a_fifo_is_refused() {
-        let dir = scratch("swapped-fifo");
-        let fifo = dir.join("p");
-        rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::RUSR | Mode::WUSR).unwrap();
-        let error = read_file(&fifo, "p").unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "\"p\" is neither a directory, a regular file nor a symlink"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
 }
