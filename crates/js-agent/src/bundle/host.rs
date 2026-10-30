@@ -154,6 +154,7 @@ impl<R: CommandRunner + Send + Sync> BundleHost for SystemHost<R> {
     }
 
     fn read_file(&self, path: &Path) -> Result<String, String> {
+        let _ = self.owner;
         fs::read_to_string(path).map_err(|why| format!("{}: {why}", path.display()))
     }
 
