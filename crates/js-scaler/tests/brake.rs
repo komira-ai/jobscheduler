@@ -346,3 +346,45 @@ fn a_reset_does_not_make_a_plan_pool_launch() {
     assert!(rig.state.records.brake.is_empty());
     assert_eq!(rig.state.blocked[POOL], Blocked::Plan);
 }
+
+/// Asserts that a machine that boots ends the count of a tripped pool and leaves the trip:
+/// the pool is tripped while a machine is still booting, the machine's host is heard from, the
+/// failures are back to zero and the pool is still tripped and still asks for no machine. It
+/// catches a success that lifts a trip, which only an operator may.
+#[test]
+fn a_success_ends_the_count_but_not_the_trip() {
+    let mut sim = Sim::new(pool(3, minutes(120)), Billing::Lambda);
+    sim.waiting = 1;
+    sim.tick(None);
+    assert_eq!(sim.acquires(), 1);
+    let now = sim.now();
+    let brake = Brake {
+        failures: 3,
+        tripped_at: Some(now),
+    };
+    sim.rig.state.records.brake.insert(POOL.to_owned(), brake);
+    sim.run(8);
+    assert_eq!(sim.phases(), [Phase::Registered]);
+    let after = brake_of(&sim);
+    assert_eq!(after.failures, 0);
+    assert_eq!(after.tripped_at, Some(now));
+    sim.waiting = 2;
+    sim.run(60);
+    assert_eq!(sim.acquires(), 1);
+}
+
+/// Asserts the names `GET /v1/pools` shows for a reason that holds a pool back: `brake` for a
+/// trip, the cap's own name for a cap, nothing for the rest. It catches a trip that is shown
+/// as a cap or not shown.
+#[test]
+fn the_status_names_a_trip_and_a_cap_and_nothing_else() {
+    assert_eq!(Blocked::Tripped.shown_name(), Some("brake"));
+    assert_eq!(Blocked::MaxSpendDay.shown_name(), Some("max_spend_day"));
+    assert_eq!(Blocked::MaxInstances.shown_name(), Some("max_instances"));
+    assert_eq!(Blocked::Plan.shown_name(), None);
+    assert_eq!(Blocked::Tripped.cap_name(), None);
+}
+
+fn brake_of(sim: &Sim) -> Brake {
+    brake(sim).unwrap()
+}

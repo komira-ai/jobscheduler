@@ -377,6 +377,10 @@ fn the_failure_brake_round_trips_and_an_older_file_reads_without_it() {
             tripped_at: Some(at(7 * MINUTE)),
         },
     );
+    assert_eq!(
+        format!("{:?}", records.brake["gpu"]),
+        "Brake { failures: 2, tripped_at: None }"
+    );
     let text = records.encode().unwrap();
     assert!(text.contains("\"brake\""), "{text}");
     assert_eq!(Records::decode(&text).unwrap(), records);
