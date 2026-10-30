@@ -184,7 +184,7 @@ fn a_container_that_did_not_run_exits_126() {
 /// Proves each start the runtime cannot make is refused with its reason and creates nothing:
 /// a host job, a GPU, an image that is not pinned, a run id that cannot name a container,
 /// one that has a container, run files where there is no files directory, an image the
-/// store lacks and cannot fetch, an image with no kept config, and a hand-over that fails
+/// store lacks and cannot fetch, an image with no kept config that cannot be fetched again, and a hand-over that fails
 /// (the scratch directory), which also removes the lease directory it made. Catches a
 /// refusal that leaves a directory or a listing behind.
 #[test]
@@ -219,7 +219,15 @@ fn a_start_the_runtime_cannot_make_is_refused_and_leaves_nothing() {
             .join("rootfs"),
     )
     .expect("an image without a config");
-    assert!(refused("c1", &named(&other)).contains("cannot be read"));
+    // An image with no kept config is fetched again, which this source cannot do.
+    assert!(refused("c1", &named(&other)).contains("no registry in this test"));
+    assert!(
+        !node
+            .scratch
+            .join("oci-images")
+            .join("cd".repeat(32))
+            .exists()
+    );
     let elsewhere = node.dir.join("refuse-scratch");
     std::fs::create_dir_all(&elsewhere).expect("scratch");
     let why = refused("s1-exit", &|s| s.scratch = elsewhere.clone());
