@@ -14,6 +14,7 @@
 js-agent                    0      0
 js-agent-usage              0      0
 js-agent-wire               0      0
+js-alert                    0      0
 js-bundle                   0      0
 js-caps                     0      0
 js-cli                      0      0
@@ -47,5 +48,6 @@ js-treestore                0      0
 js-types                    0      0
 js-usage                    0      0
 js-vmm                      0      0
+js-watch                    0      0
 js-whole                    0      0
 xtask                       0      0

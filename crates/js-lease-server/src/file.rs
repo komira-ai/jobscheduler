@@ -42,7 +42,7 @@ mod server;
 pub use joined::JoinedPool;
 use network::read_network;
 use pins::{LIVE_NEEDS, read_agents};
-pub(crate) use server::Server;
+pub(crate) use server::{AlertKeys, Server};
 use server::{read_client_token, read_server};
 
 /// The most instances one pool may allow: the join-token table holds 256 waiting tokens.

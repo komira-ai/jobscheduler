@@ -9,17 +9,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use js_lease::{Boot, Clock, Monotonic, Settings, SystemClock, SystemMonotonic};
+use js_alert::AlertSink;
+use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
 
-use js_registry::{Credential, PoolConfig, Registry, WholeNodeConfig};
+use js_registry::{Credential, PoolConfig, WholeNodeConfig};
 use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
 use crate::agent_pool;
 use crate::agent_tokens::AgentTokens;
+use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
 use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
@@ -27,9 +29,8 @@ use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
-use crate::usage::{HostLimits, KeySource, ProfileKey, UsageSink};
-use crate::usage_hub::Usage;
-use crate::usage_js::{self, NameMap, RegistryKeys, StoreSetup, no_names};
+use crate::usage::{KeySource, ProfileKey, UsageSink};
+use crate::usage_setup::{UsageSetup, usage_setup};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -361,71 +362,11 @@ pub struct Config {
     pub(crate) hosts: Hosts,
     pub(crate) usage: UsageSetup,
     pub(crate) monotonic: Arc<dyn Monotonic>,
-}
-
-/// What `--usage-db`, `--usage-off` and `--profile-store-bytes` decided, and the seams a
-/// caller may fill: the sink that measures, and the source of the key of a run.
-pub(crate) struct UsageSetup {
-    /// The usage file; `None` when usage is off.
-    pub(crate) db: Option<PathBuf>,
-    pub(crate) profile_store_bytes: u64,
-    /// The sink to use in place of the one that opens `db`.
-    pub(crate) sink: Option<Arc<dyn UsageSink>>,
-    /// The key source a caller supplied; `None` leaves the server to read the profile names
-    /// clients gave the runs it queued.
-    pub(crate) keys: Option<Arc<dyn KeySource>>,
-    /// How admission finds the profile name of a work key; `None` leaves every key flat.
-    pub(crate) names: Option<NameMap>,
-}
-
-/// The default of `--profile-store-bytes`.
-pub(crate) const DEFAULT_PROFILE_STORE_BYTES: u64 = 268_435_456;
-
-/// Milliseconds in a day.
-const MILLIS_PER_DAY: u64 = 86_400_000;
-
-impl UsageSetup {
-    /// The usage side as `db` (`None` for usage off) and `profile_store_bytes` say, with
-    /// no seam filled.
-    fn new(db: Option<PathBuf>, profile_store_bytes: u64) -> Self {
-        Self {
-            db,
-            profile_store_bytes,
-            sink: None,
-            keys: None,
-            names: None,
-        }
-    }
-
-    /// The usage side for hosts the pool books as `limits`, or `None` when usage is off.
-    /// A usage file that will not open is a refused start naming `--usage-db`. A run's key
-    /// is read from `registry` unless the caller supplied a key source.
-    pub(crate) fn build(
-        self,
-        clock: &SharedClock,
-        limits: HostLimits,
-        registry: &Registry,
-    ) -> Result<Option<Arc<Usage>>, StartupError> {
-        let Some(db) = self.db else {
-            return Ok(None);
-        };
-        let sink = match self.sink {
-            Some(sink) => sink,
-            None => {
-                let setup = StoreSetup {
-                    db,
-                    profile_store_bytes: self.profile_store_bytes,
-                    names: self.names.unwrap_or_else(no_names),
-                };
-                usage_js::open(&setup, clock.now().millis() / MILLIS_PER_DAY)?
-            }
-        };
-        let keys = self
-            .keys
-            .unwrap_or_else(|| Arc::new(RegistryKeys(registry.clone())));
-        let usage = Usage::new(sink, keys, clock.clone(), limits);
-        Ok(Some(Arc::new(usage)))
-    }
+    /// Where the scaler's alerts go besides the log; from `server.alert_webhook_url`, or
+    /// [`Config::with_alert_sink`].
+    pub(crate) alerts: Option<Arc<dyn AlertSink>>,
+    /// How often an alert that keeps holding is sent to the sink again.
+    pub(crate) alert_repeat: Duration,
 }
 
 /// Where the hosts come from: the operator's pool file alone, or that file (when given)
@@ -505,6 +446,8 @@ impl Config {
             hosts,
             usage,
             monotonic: Arc::new(SystemMonotonic::default()),
+            alerts: None,
+            alert_repeat: DEFAULT_ALERT_REPEAT,
         })
     }
 
@@ -561,11 +504,22 @@ impl Config {
                 )
             }
         };
+        let alerts = alert_sink(server.alerts.as_ref(), files)?;
+        let alert_repeat = server
+            .alerts
+            .as_ref()
+            .map_or(DEFAULT_ALERT_REPEAT, |keys| keys.repeat_after);
         let state_file = server.state_file;
         let keys = server.usage;
         let usage = usage_setup(keys.off, keys.db, keys.profile_store_bytes, &state_file);
         let settings = with_pool_settings(server.settings, &hosts)?;
         let status = status_policy("server.listen", server.listen, &mut warnings);
+        if alerts.is_some() && elastic.is_none() {
+            warnings.push(
+                "server: warning: server.alert_webhook_url is set but no pool launches machines, so no alert has a source and nothing will be sent"
+                    .to_owned(),
+            );
+        }
         Ok(Self {
             listen: server.listen,
             listen_flag: "server.listen",
@@ -586,7 +540,16 @@ impl Config {
             hosts,
             usage,
             monotonic: Arc::new(SystemMonotonic::default()),
+            alerts,
+            alert_repeat,
         })
+    }
+
+    /// The same configuration with every alert of the scaler also sent to `sink`, in
+    /// place of the one the file names.
+    pub fn with_alert_sink(mut self, sink: Arc<dyn AlertSink>) -> Self {
+        self.alerts = Some(sink);
+        self
     }
 
     /// The limits on what a client may hold open.
@@ -718,23 +681,6 @@ impl Config {
         self.usage.names = Some(Arc::new(names));
         self
     }
-}
-
-/// The usage file `--usage-db`, `--usage-off` or the file's keys name: none when usage is
-/// off, else `db` or `usage.db` in the directory of the lease file.
-fn usage_db(off: bool, db: Option<PathBuf>, state_file: &Path) -> Option<PathBuf> {
-    let beside = || state_file.with_file_name("usage.db");
-    (!off).then(|| db.unwrap_or_else(beside))
-}
-
-/// What the usage settings decide, for the lease file at `state_file`.
-fn usage_setup(
-    off: bool,
-    db: Option<PathBuf>,
-    profile_store_bytes: u64,
-    state_file: &Path,
-) -> UsageSetup {
-    UsageSetup::new(usage_db(off, db, state_file), profile_store_bytes)
 }
 
 /// `settings` with what the registered pool's file decides about whole-node leases: the

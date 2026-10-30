@@ -8,9 +8,10 @@ use js_elastic::SchedulerId;
 use js_lease::Settings;
 
 use super::{Load, Section};
-use crate::config::{BootMode, DEFAULT_PROFILE_STORE_BYTES, Limits, TlsFiles, Token, parse_token};
+use crate::config::{BootMode, Limits, TlsFiles, Token, parse_token};
 use crate::error::StartupError;
 use crate::rate::HelloLimit;
+use crate::usage_setup::DEFAULT_PROFILE_STORE_BYTES;
 
 const SERVER_KEYS: &[&str] = &[
     "listen",
@@ -39,6 +40,9 @@ const SERVER_KEYS: &[&str] = &[
     "usage_db",
     "usage_off",
     "profile_store_bytes",
+    "alert_webhook_url",
+    "alert_webhook_token_file",
+    "alert_repeat_after",
 ];
 
 /// What the `[server]` table says.
@@ -58,6 +62,16 @@ pub(crate) struct Server {
     pub(crate) limits: Limits,
     pub(crate) agents: AgentKeys,
     pub(crate) usage: UsageKeys,
+    pub(crate) alerts: Option<AlertKeys>,
+}
+
+/// The alert keys of `[server]`: where each alert the scaler raises is POSTed, and the file
+/// that holds the bearer token the receiver wants, when it wants one.
+pub(crate) struct AlertKeys {
+    pub(crate) webhook_url: String,
+    pub(crate) token_file: Option<PathBuf>,
+    /// How often an alert that keeps holding is sent again.
+    pub(crate) repeat_after: Duration,
 }
 
 /// The usage keys of `[server]`, as the file gave them: the flags `--usage-db`,
@@ -155,6 +169,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         require_host_credential: s.boolean("require_host_credential")?,
     };
     let usage = read_usage(&mut s)?;
+    let alerts = read_alerts(&mut s)?;
     // The same check as `--default-ttl` and `--max-ttl`.
     let settings = match Settings::new(default_ttl, max_ttl) {
         Ok(settings) => settings,
@@ -180,7 +195,30 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         limits,
         agents,
         usage,
+        alerts,
     })
+}
+
+/// The alert keys. The token file and the repeat period mean something only with the URL.
+fn read_alerts(s: &mut Section) -> Result<Option<AlertKeys>, StartupError> {
+    let url = s.string("alert_webhook_url")?;
+    let token_file = s.path("alert_webhook_token_file")?;
+    let repeat_after = s.duration("alert_repeat_after")?;
+    let Some(webhook_url) = url else {
+        let given = [
+            ("alert_webhook_token_file", token_file.is_some()),
+            ("alert_repeat_after", repeat_after.is_some()),
+        ];
+        return match given.into_iter().find(|(_, set)| *set) {
+            Some((key, _)) => Err(s.fail(key, "needs server.alert_webhook_url")),
+            None => Ok(None),
+        };
+    };
+    Ok(Some(AlertKeys {
+        webhook_url,
+        token_file,
+        repeat_after: repeat_after.unwrap_or(Duration::from_secs(3600)),
+    }))
 }
 
 /// `settings` with `wall` as the ceiling on a lease's wall time: at most 30 days, and

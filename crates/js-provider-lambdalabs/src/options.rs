@@ -106,6 +106,12 @@ impl OptionTable {
         Self { rows }
     }
 
+    /// A table with no row, for a caller that never launches (it has no instance type to
+    /// offer): a tool that only reads or terminates.
+    pub fn empty() -> Self {
+        Self { rows: Vec::new() }
+    }
+
     /// The rows.
     pub fn rows(&self) -> &[OptionRow] {
         &self.rows
