@@ -109,6 +109,30 @@ fn tmp_is_a_noexec_tmpfs_with_a_size() {
     assert_eq!(tmps, 1, "one mount at /tmp");
 }
 
+/// Catches `/var/tmp` or `/run` left as a place a job can run programs from, or with no
+/// size (podman made both `rw,noexec,nosuid,nodev,size=64m` tmpfs mounts, as `/tmp`): each
+/// is one tmpfs mount of the limits' size, `noexec`, `nosuid`, `nodev`, mode 1777, and not
+/// also a bind of a lease directory.
+#[test]
+fn var_tmp_and_run_are_noexec_tmpfs_with_a_size() {
+    let config = config();
+    for dest in ["/var/tmp", "/run"] {
+        let mount = mount_at(&config, dest);
+        assert_eq!(mount["type"], "tmpfs", "{dest}");
+        let options = options(mount);
+        for want in ["noexec", "nosuid", "nodev", "mode=1777", "size=106m"] {
+            assert!(options.contains(&want), "{dest}: {want} not in {options:?}");
+        }
+        let count = config["mounts"]
+            .as_array()
+            .expect("mounts")
+            .iter()
+            .filter(|m| m["destination"] == dest)
+            .count();
+        assert_eq!(count, 1, "one mount at {dest}");
+    }
+}
+
 /// Catches core dumps left on, and the other two limits lost with them: `RLIMIT_CORE` is
 /// 0 soft and hard (`--ulimit core=0`), and the file and process limits are the
 /// limits' own.
@@ -148,8 +172,8 @@ fn every_bind_is_nosuid_and_nodev() {
         .iter()
         .filter(|m| m["type"] == "bind")
         .collect();
-    // init, 3 name files, 1 shared, 3 lease directories, 3 host mounts.
-    assert_eq!(binds.len(), 11, "{binds:?}");
+    // init, 3 name files, 1 shared, the home directory, 3 host mounts.
+    assert_eq!(binds.len(), 9, "{binds:?}");
     for bind in binds {
         let options = options(bind);
         assert!(options.contains(&"nosuid"), "{bind}");

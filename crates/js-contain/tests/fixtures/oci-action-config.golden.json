@@ -232,24 +232,26 @@
     {
       "destination": "/var/tmp",
       "options": [
-        "rbind",
-        "rw",
         "nosuid",
-        "nodev"
+        "noexec",
+        "nodev",
+        "mode=1777",
+        "size=106m"
       ],
-      "source": "/scratch/lease-1-2/rw/var-tmp",
-      "type": "bind"
+      "source": "tmpfs",
+      "type": "tmpfs"
     },
     {
       "destination": "/run",
       "options": [
-        "rbind",
-        "rw",
         "nosuid",
-        "nodev"
+        "noexec",
+        "nodev",
+        "mode=1777",
+        "size=106m"
       ],
-      "source": "/scratch/lease-1-2/rw/run",
-      "type": "bind"
+      "source": "tmpfs",
+      "type": "tmpfs"
     },
     {
       "destination": "/root",
