@@ -38,7 +38,7 @@ fn configured_and_running_images_stay_and_the_rest_go() {
         .collect_images(std::slice::from_ref(&configured))
         .expect("collected");
     assert_eq!(report.removed, [other]);
-    assert_eq!(stored(&node), ["c".repeat(64), node.digest[7..].to_owned()]);
+    assert_eq!(stored(&node), [node.digest[7..].to_owned(), "c".repeat(64)]);
     runtime.remove(&id).expect("removed");
     let report = runtime.collect_images(&[configured]).expect("collected");
     assert_eq!(report.removed, std::slice::from_ref(&node.digest));
