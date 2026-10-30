@@ -160,6 +160,8 @@ impl Oci {
     /// anything else in a slice names nothing. Call it at start, before the disk
     /// offered is read; a lease running without its digest in `leased` loses its image.
     ///
+    /// The caller logs the report (its `Display` says what went and what stays).
+    ///
     /// A digest being fetched or unpacked is kept; the second call after a collection
     /// removes nothing.
     ///
@@ -176,11 +178,8 @@ impl Oci {
             .chain(leased)
             .map(|d| d.strip_prefix("sha256:").unwrap_or(d).to_owned())
             .collect();
-        let report = self
-            .images
-            .collect(&keep, &mut |path| self.remove_entry(path))?;
-        tracing::info!("{report}");
-        Ok(report)
+        self.images
+            .collect(&keep, &mut |path| self.remove_entry(path))
     }
 
     /// Removes one digest directory, or unlinks a digest name that is not a directory.

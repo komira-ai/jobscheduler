@@ -393,7 +393,7 @@ fn a_second_collection_is_a_no_op() {
 /// the kept digests hold (512-byte blocks of every entry, the digest directory
 /// included), not file sizes, not a count of one side only; what the store holds after
 /// is what is kept, so that free space read after the collection already excludes it and
-/// the offered disk is not reduced twice. The words of the log line carry both.
+/// the offered disk is not reduced twice. The report's words (`Display`) carry both.
 #[test]
 fn the_report_counts_the_disk_of_what_went_and_what_stays() {
     let fx = fixture("gc-accounting");
