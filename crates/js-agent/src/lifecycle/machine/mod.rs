@@ -643,7 +643,13 @@ impl Lifecycle {
         // The image is asked for after the slot is taken and before anything is made: a run
         // whose image is still being fetched waits as `starting`, holding its booking, and
         // costs the worker nothing until the image is here (see `Runtime::prepare`).
-        match self.runtime.prepare(&spec.image, None) {
+        // A run with no image (a native job) uses no image store: it is never asked about
+        // one, whatever the runtime would answer for the empty name.
+        let prepared = match spec.image.is_empty() {
+            true => Prepared::Ready,
+            false => self.runtime.prepare(&spec.image, None),
+        };
+        match prepared {
             Prepared::Pending(ticket) => {
                 // The lease the start names ends `valid_for_ms` after the reply came; a run
                 // that waits for its image is held to that end when it starts.

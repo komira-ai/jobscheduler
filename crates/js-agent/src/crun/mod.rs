@@ -334,6 +334,13 @@ impl CrunRuntime {
         self.pulls.wait(image)
     }
 
+    /// Forgets what is known of the pull of `image` ([`Prefetcher::forget`]): the owner of
+    /// an image store that removes or evicts an image must call it, or the image is still
+    /// answered `Ready` after it is gone. The next [`Runtime::prepare`] pulls it again.
+    pub fn forget(&self, image: &str) {
+        self.pulls.forget(image);
+    }
+
     /// Waits until the container `id` has exited (one that is gone, never started or ended
     /// already returns at once). The lifecycle polls instead; this is for a caller with
     /// nothing else to do.
@@ -556,13 +563,16 @@ impl Runtime for CrunRuntime {
         // the stop's failure: the wait below ends at once for a container that is over,
         // and the kill does the rest for one that is not.
         let _ = rt.block_on(oci.terminate(&spec.name));
-        if rt.block_on(tokio::time::timeout(grace, run.wait())).is_ok() {
+        if rt
+            .block_on(async { tokio::time::timeout(grace, run.wait()).await })
+            .is_ok()
+        {
             return Ok(());
         }
         cgroup
             .kill()
             .map_err(|why| RuntimeError::new(format!("kill the lease's cgroup: {why}")))?;
-        rt.block_on(tokio::time::timeout(kill_wait, run.wait()))
+        rt.block_on(async { tokio::time::timeout(kill_wait, run.wait()).await })
             .map_err(|_| RuntimeError::new(format!("{} still runs after its kill", spec.name)))
     }
 
@@ -578,7 +588,8 @@ impl Runtime for CrunRuntime {
         {
             // Removed while it runs: ended by force, as a stop that spent its grace.
             let _ = run.cgroup.kill();
-            let ended = rt.block_on(tokio::time::timeout(kill_wait, running.wait()));
+            let ended =
+                rt.block_on(async { tokio::time::timeout(kill_wait, running.wait()).await });
             if ended.is_err() {
                 rt.block_on(running.force());
             }

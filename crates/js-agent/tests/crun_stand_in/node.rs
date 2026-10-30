@@ -135,6 +135,7 @@ case "$cmd" in
   delete)
     if [ -e "$DIR/delete-fails" ]; then echo boom >&2; exit 1; fi
     find "$cg" -maxdepth 1 ! -type d -delete 2>/dev/null
+    rmdir "$root/$name" 2>/dev/null
     exit 0;;
   state) echo '{"pid":1}';;
 esac
@@ -175,6 +176,16 @@ impl Node {
         let cgroups = dir.join("cgroup");
         for part in ["root", "refuse-root", "actions"] {
             std::fs::create_dir_all(cgroups.join(part)).expect("cgroup");
+        }
+        // The files the runtime gives to the job user exist in a cgroup directory.
+        let files = [
+            ("root", "cgroup.procs"),
+            ("actions", "cgroup.procs"),
+            ("actions", "cgroup.threads"),
+            ("actions", "cgroup.subtree_control"),
+        ];
+        for (part, file) in files {
+            std::fs::write(cgroups.join(part).join(file), b"").expect("a cgroup file");
         }
         let script = CRUN
             .replace("@MOUNT@", &cgroups.display().to_string())
@@ -304,12 +315,16 @@ impl Node {
         self.scratch.join(name)
     }
 
-    /// A run files root of the layout the job user needs.
-    pub fn files_root(&self) -> FilesRoot {
-        let root = self.dir.join("files");
+    /// A run files root of the layout the job user needs, in a directory of the system's
+    /// temporary directory (every directory above it can be searched by others, which the
+    /// checkout's may not be). The directory goes with the first value.
+    pub fn files_root(&self) -> (TestDir, FilesRoot) {
+        let dir = TestDir::under(std::env::temp_dir(), "js-stand-in-files");
+        let root = dir.join("files");
         std::fs::create_dir_all(&root).expect("files");
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o711)).expect("mode");
-        FilesRoot::open_with(&root, DirLayout::Searchable).expect("a files root")
+        let files = FilesRoot::open_with(&root, DirLayout::Searchable).expect("a files root");
+        (dir, files)
     }
 }
 
