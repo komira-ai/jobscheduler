@@ -415,7 +415,10 @@ mod tests {
         let pf = Fake::new(dir.path());
         let args = with("launchd-plist", &["--program", "js-mac-provision"]);
         let (r, _) = run(&parse(dir.path(), &args), &pf);
-        assert!(matches!(r, Err(CliError::RelativeProgram(p)) if p == "js-mac-provision"));
+        assert_eq!(
+            r.unwrap_err().to_string(),
+            "--program \"js-mac-provision\" is not an absolute path"
+        );
         let mut zero = with("launchd-plist", &["--program", "/x", "--interval", "0"]);
         zero.insert(0, "--state-dir".to_owned());
         zero.insert(1, "/x".to_owned());
@@ -468,6 +471,7 @@ mod tests {
         let e = execute(&parse(dir.path(), &with("render", &[])), &pf, &mut Broken).unwrap_err();
         assert!(matches!(e, CliError::Write(_)));
         assert!(e.to_string().contains("closed"));
+        assert!(Broken.flush().is_ok());
     }
 
     #[test]

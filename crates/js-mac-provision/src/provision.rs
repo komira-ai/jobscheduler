@@ -365,8 +365,11 @@ mod tests {
         let err = Provisioner::new(&pf, &a, dir.path())
             .install(uids(), &eps())
             .unwrap_err();
-        assert!(matches!(&err, ProvisionError::NotReferenced(n) if n == a.as_str()));
-        assert!(err.to_string().contains("com.apple/com.komira.js.pool"));
+        assert!(matches!(err, ProvisionError::NotReferenced(_)));
+        assert!(
+            err.to_string()
+                .contains("no anchor rule that reaches com.apple/com.komira.js.pool")
+        );
         // Nothing past the reference check ran.
         assert_eq!(pf.calls().len(), 3);
     }
@@ -380,7 +383,8 @@ mod tests {
         let err = Provisioner::new(&pf, &a, dir.path())
             .install(uids(), &eps())
             .unwrap_err();
-        assert!(matches!(&err, ProvisionError::NoToken(t) if t.contains("pf enabled")));
+        assert!(matches!(err, ProvisionError::NoToken(_)));
+        assert!(err.to_string().ends_with("printed no token: pf enabled"));
         assert!(!dir.join(TOKEN_FILE).exists());
     }
 
@@ -434,7 +438,8 @@ mod tests {
         let err = Provisioner::new(&pf, &a, &state)
             .install(uids(), &eps())
             .unwrap_err();
-        assert!(matches!(&err, ProvisionError::State { path, .. } if path.ends_with(RULES_FILE)));
+        assert!(matches!(err, ProvisionError::State { .. }));
+        assert!(err.to_string().contains(RULES_FILE));
         assert!(pf.calls().is_empty());
     }
 
@@ -479,14 +484,11 @@ mod tests {
         let err = Provisioner::new(&pf, &a, dir.path())
             .check(uids(), &eps())
             .unwrap_err();
-        match &err {
-            ProvisionError::Drift { expected, loaded } => {
-                assert_eq!(loaded, "pass out quick all");
-                assert!(expected.contains("block return out quick"));
-            }
-            other => panic!("{other:?}"),
-        }
-        assert!(err.to_string().contains("pass out quick all"));
+        assert!(matches!(err, ProvisionError::Drift { .. }));
+        let shown = err.to_string();
+        assert!(shown.contains("\nloaded:\npass out quick all"));
+        assert!(shown.contains("\nexpected:\n# js-mac-provision"));
+        assert!(shown.contains("block return out quick"));
     }
 
     #[test]
@@ -535,11 +537,8 @@ mod tests {
             assert!(!dir.join(f).exists(), "{f}");
         }
         // Nothing the whole ruleset or other anchors hold was named.
-        assert!(
-            pf.calls()
-                .iter()
-                .all(|c| !c.contains("-F all") && !c.contains("-F state"))
-        );
+        assert!(!pf.calls().iter().any(|c| c.contains("-F all")));
+        assert!(!pf.calls().iter().any(|c| c.contains("-F state")));
     }
 
     #[test]
@@ -597,7 +596,8 @@ mod tests {
         let pf = Fake::new(dir.path());
         let a = anchor();
         let err = Provisioner::new(&pf, &a, dir.path()).remove().unwrap_err();
-        assert!(matches!(&err, ProvisionError::State { path, .. } if *path == stuck));
+        assert!(matches!(err, ProvisionError::State { .. }));
+        assert!(err.to_string().starts_with(&stuck.display().to_string()));
     }
 
     #[test]

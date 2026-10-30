@@ -56,10 +56,7 @@ mod tests {
     use super::*;
 
     fn v4(l: &TcpListener) -> SocketAddrV4 {
-        match l.local_addr().unwrap() {
-            std::net::SocketAddr::V4(a) => a,
-            std::net::SocketAddr::V6(a) => panic!("{a}"),
-        }
+        l.local_addr().unwrap().to_string().parse().unwrap()
     }
 
     #[test]

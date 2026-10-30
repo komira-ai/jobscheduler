@@ -182,7 +182,7 @@ block return out quick proto { tcp, udp } from any to any user 600:699
     #[test]
     fn the_text_ends_with_one_newline() {
         let text = render(UidRange::new(600, 2).unwrap(), &[], &anchor());
-        assert!(text.ends_with("699\n") || text.ends_with("601\n"));
+        assert!(text.ends_with("601\n"));
         assert!(!text.ends_with("\n\n"));
     }
 }

@@ -252,8 +252,10 @@ mod tests {
         let r = UidRange::new(600, 100).unwrap();
         assert_eq!((r.first(), r.last()), (600, 699));
         assert_eq!(r.pf_user(), "600:699");
-        assert!(r.contains(600) && r.contains(699));
-        assert!(!r.contains(599) && !r.contains(700));
+        assert!(r.contains(600));
+        assert!(r.contains(699));
+        assert!(!r.contains(599));
+        assert!(!r.contains(700));
     }
 
     #[test]
@@ -322,12 +324,9 @@ mod tests {
             ("224.0.0.251:5353", "multicast"),
             ("255.255.255.255:443", "broadcast"),
         ] {
-            match text.parse::<Endpoint>() {
-                Err(PolicyError::Unreachable { why: got, .. }) => {
-                    assert!(got.contains(why), "{text}: {got}");
-                }
-                other => panic!("{text}: {other:?}"),
-            }
+            let err = text.parse::<Endpoint>().unwrap_err();
+            assert!(matches!(err, PolicyError::Unreachable { .. }), "{text}");
+            assert!(err.to_string().contains(why), "{text}: {err}");
         }
         // The neighbours of 169.254.0.0/16 are ordinary addresses.
         assert!("169.253.255.255:80".parse::<Endpoint>().is_ok());
