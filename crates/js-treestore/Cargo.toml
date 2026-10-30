@@ -8,15 +8,15 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+hex.workspace = true
 js-bundle = { path = "../js-bundle" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-hex.workspace = true
 js-testkit = { path = "../js-testkit" }
-sha2.workspace = true
 
 [lints]
 workspace = true

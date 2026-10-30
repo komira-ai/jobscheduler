@@ -1,13 +1,13 @@
 //! The tree store's errors and its step names.
 
-use crate::blobstore::{LabelError, StoreError};
 use crate::sealer::SealError;
+use crate::source::{FetchError, LabelError};
 
 /// The steps of making a tree, in order. A crash hook is asked after each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Step {
-    /// The layer blob is pinned.
-    Pinned,
+    /// The blob is fetched and verified in `tmp/`.
+    Fetched,
     /// The stage directory exists.
     Staged,
     /// The layer is extracted into the stage.
@@ -16,18 +16,26 @@ pub enum Step {
     Sealed,
     /// The stage is renamed to the tree's place.
     Renamed,
-    /// The record is written.
+    /// The record is written; the tree is present from here on.
     Recorded,
-    /// The tree's bytes are registered with the blob store.
-    Registered,
 }
 
 /// Why an operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The blob store refused.
-    #[error("blob store: {0}")]
-    Store(#[from] StoreError),
+    /// The source failed.
+    #[error("fetch: {0}")]
+    Fetch(#[from] FetchError),
+    /// The fetched bytes are not the blob that was asked for.
+    #[error("blob {digest} arrived as {got_size} bytes hashing to {got}")]
+    Blob {
+        /// The digest asked for.
+        digest: String,
+        /// The digest of what arrived.
+        got: String,
+        /// The size of what arrived.
+        got_size: u64,
+    },
     /// A name is not a valid label.
     #[error(transparent)]
     Label(#[from] LabelError),
@@ -54,6 +62,17 @@ pub enum Error {
     /// The run already pins the tree.
     #[error("run already pins the tree")]
     AlreadyPinned,
+    /// The budget or the free-space low-water cannot be met: everything left is pinned,
+    /// kept or too recently used. Retriable.
+    #[error("no space: {needed} bytes needed, {used} used of {budget}")]
+    NoSpace {
+        /// The bytes of the tree being added.
+        needed: u64,
+        /// The bytes trees use now.
+        used: u64,
+        /// The budget.
+        budget: u64,
+    },
     /// The crash hook stopped the operation after the step, as a dying process would.
     #[error("stopped after {0:?}")]
     Crashed(Step),

@@ -1,15 +1,150 @@
-//! Release in the blob store's order, and what the tree store will not release.
+//! Eviction: the budget, the free-space low-water mark, recency, and what is never evicted.
 
 mod common;
 
-use common::{Rig, Store, sized, wanted};
-use js_bundle::DiffId;
-use js_treestore::Config;
-use js_treestore::blobstore::Busy;
+use std::sync::Arc;
 
-/// Three trees of 100 bytes each, made in order, then the first used again: the order of
-/// recency is second, third, first.
-fn three(rig: &Rig, cfg: Config) -> (Store, Vec<DiffId>) {
+use common::{Rig, size_of, sized, wanted};
+use js_treestore::{Config, Error};
+
+fn budget(rig: &Rig, bytes: u64) -> Config {
+    Config {
+        budget_bytes: bytes,
+        ..rig.cfg()
+    }
+}
+
+#[test]
+fn the_least_recently_used_tree_goes_first_and_a_hit_is_a_use() {
+    let rig = Rig::new();
+    let store = rig.open(budget(&rig, 300));
+    let mut ids = Vec::new();
+    for fill in 1..=3u8 {
+        let l = sized("f", 100, fill);
+        rig.have(&l);
+        store.ensure(&wanted(&l)).unwrap();
+        ids.push(l.diff_id);
+    }
+    // The first is used again, so the second is the oldest.
+    store.ensure(&wanted(&sized("f", 100, 1))).unwrap();
+    let l4 = sized("f", 100, 4);
+    rig.have(&l4);
+    store.ensure(&wanted(&l4)).unwrap();
+    assert!(rig.present(&ids[0]));
+    assert!(!rig.present(&ids[1]));
+    assert!(rig.present(&ids[2]));
+    assert!(rig.present(&l4.diff_id));
+    assert!(rig.names("trash").is_empty());
+}
+
+#[test]
+fn a_pinned_tree_is_skipped_and_the_next_goes() {
+    let rig = Rig::new();
+    let store = rig.open(budget(&rig, 200));
+    let mut ids = Vec::new();
+    for fill in 1..=2u8 {
+        let l = sized("f", 100, fill);
+        rig.have(&l);
+        store.ensure(&wanted(&l)).unwrap();
+        ids.push(l.diff_id);
+    }
+    let handle = store.pin(&ids[0], &common::run("r1")).unwrap();
+    // The oldest is pinned (and, being pinned, now the most recent too): the other goes.
+    let l3 = sized("f", 100, 3);
+    rig.have(&l3);
+    store.ensure(&wanted(&l3)).unwrap();
+    assert!(rig.present(&ids[0]));
+    assert!(!rig.present(&ids[1]));
+    assert!(rig.present(&l3.diff_id));
+    store.unpin(handle);
+}
+
+#[test]
+fn nothing_is_evicted_when_every_tree_is_pinned_kept_or_too_recent() {
+    let rig = Rig::new();
+    let kept = sized("f", 100, 1);
+    let cfg = Config {
+        keep: [kept.diff_id.clone()].into(),
+        min_age_ms: 1000,
+        ..budget(&rig, 200)
+    };
+    let store = rig.open(cfg);
+    rig.have(&kept);
+    store.ensure(&wanted(&kept)).unwrap();
+    let pinned = sized("f", 100, 2);
+    rig.have(&pinned);
+    store.ensure(&wanted(&pinned)).unwrap();
+    let handle = store.pin(&pinned.diff_id, &common::run("r1")).unwrap();
+    let third = sized("f", 100, 3);
+    rig.have(&third);
+    rig.advance(5000);
+    // Kept and pinned: no room, and the new tree is not placed.
+    let error = store.ensure(&wanted(&third)).unwrap_err();
+    assert!(matches!(
+        error,
+        Error::NoSpace {
+            needed: 100,
+            used: 200,
+            budget: 200
+        }
+    ));
+    assert!(!rig.present(&third.diff_id));
+    assert!(rig.names("stage").is_empty());
+    assert!(rig.present(&kept.diff_id));
+    assert!(rig.present(&pinned.diff_id));
+    store.unpin(handle);
+    // Unpinned but just used again: too recent.
+    store.ensure(&wanted(&pinned)).unwrap();
+    assert!(matches!(
+        store.ensure(&wanted(&third)),
+        Err(Error::NoSpace { .. })
+    ));
+    // Old enough now.
+    rig.advance(1000);
+    store.ensure(&wanted(&third)).unwrap();
+    assert!(!rig.present(&pinned.diff_id));
+    assert!(rig.present(&kept.diff_id));
+    assert!(rig.present(&third.diff_id));
+}
+
+#[test]
+fn the_budget_holds_across_a_run_of_ensures() {
+    let rig = Rig::new();
+    let store = rig.open(budget(&rig, 250));
+    let mut ids = Vec::new();
+    for fill in 1..=5u8 {
+        let l = sized("f", 100, fill);
+        rig.have(&l);
+        store.ensure(&wanted(&l)).unwrap();
+        assert!(store.stats().used <= 250);
+        ids.push(l.diff_id);
+    }
+    assert!(!rig.present(&ids[2]));
+    assert!(rig.present(&ids[3]));
+    assert!(rig.present(&ids[4]));
+    assert_eq!(store.stats().trees, 2);
+}
+
+/// The bytes of the tree directories (not the records).
+fn trees_size(root: &std::path::Path) -> u64 {
+    std::fs::read_dir(root.join("trees"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_dir())
+        .map(|p| size_of(&p))
+        .sum()
+}
+
+#[test]
+fn the_free_space_low_water_mark_evicts_too() {
+    let rig = Rig::new();
+    let root = rig.root();
+    // A volume of 350 bytes: free is what the trees leave.
+    let cfg = Config {
+        low_water_free_bytes: 100,
+        free_space: Arc::new(move || 350 - trees_size(&root)),
+        ..rig.cfg()
+    };
     let store = rig.open(cfg);
     let mut ids = Vec::new();
     for fill in 1..=3u8 {
@@ -18,124 +153,32 @@ fn three(rig: &Rig, cfg: Config) -> (Store, Vec<DiffId>) {
         store.ensure(&wanted(&l)).unwrap();
         ids.push(l.diff_id);
     }
-    let first = sized("f", 100, 1);
-    store.ensure(&wanted(&first)).unwrap();
-    (store, ids)
-}
-
-fn present(rig: &Rig, id: &DiffId) -> bool {
-    rig.root().join("trees").join(id.hex()).is_dir()
-        && rig
-            .root()
-            .join("trees")
-            .join(format!("{}.sealed", id.hex()))
-            .is_file()
-}
-
-#[test]
-fn the_least_recently_used_tree_goes_first() {
-    let rig = Rig::new();
-    let (_store, ids) = three(&rig, Config::default());
-    assert_eq!(rig.fake.pressure(200), 0);
-    assert!(present(&rig, &ids[0]));
-    assert!(!present(&rig, &ids[1]));
-    assert!(present(&rig, &ids[2]));
-    assert_eq!(rig.fake.pressure(100), 0);
-    assert!(present(&rig, &ids[0]));
-    assert!(!present(&rig, &ids[2]));
-    assert_eq!(rig.fake.accounted(), 100);
-    assert!(rig.names("trash").is_empty());
-}
-
-#[test]
-fn a_pinned_tree_answers_busy_and_the_next_goes() {
-    let rig = Rig::new();
-    let (store, ids) = three(&rig, Config::default());
-    let handle = store.pin(&ids[1], &common::run("r1")).unwrap();
-    let over = rig.fake.pressure(100);
-    assert_eq!(over, 0);
-    assert!(present(&rig, &ids[1]));
-    assert!(!present(&rig, &ids[0]));
-    assert!(!present(&rig, &ids[2]));
-    // Nothing else can go: the pinned tree stays and the shortfall is reported.
-    assert_eq!(rig.fake.pressure(0), 100);
-    assert!(present(&rig, &ids[1]));
-    store.unpin(handle);
-    assert_eq!(rig.fake.pressure(0), 0);
-    assert!(!present(&rig, &ids[1]));
-}
-
-#[test]
-fn a_kept_tree_is_never_released() {
-    let rig = Rig::new();
-    let probe = sized("f", 100, 2);
-    let cfg = Config {
-        keep: [probe.diff_id.clone()].into(),
-        ..Config::default()
-    };
-    let (_store, ids) = three(&rig, cfg);
-    assert_eq!(rig.fake.pressure(0), 100);
-    assert!(present(&rig, &ids[1]));
-    assert!(!present(&rig, &ids[0]));
-    assert!(!present(&rig, &ids[2]));
-}
-
-#[test]
-fn the_budget_is_honoured_after_a_run_of_ensures() {
-    let rig = Rig::new();
-    let store = rig.open(Config::default());
-    let mut ids = Vec::new();
-    for fill in 1..=5u8 {
-        let l = sized("f", 100, fill);
-        rig.have(&l);
-        store.ensure(&wanted(&l)).unwrap();
-        assert_eq!(rig.fake.pressure(250), 0);
-        assert!(rig.fake.accounted() <= 250);
-        ids.push(l.diff_id);
-    }
-    assert!(!present(&rig, &ids[2]));
-    assert!(present(&rig, &ids[3]));
-    assert!(present(&rig, &ids[4]));
-    assert_eq!(store.stats().trees, 2);
-}
-
-#[test]
-fn a_tree_that_is_gone_or_cannot_move_answers_busy() {
-    let rig = Rig::new();
-    let (store, ids) = three(&rig, Config::default());
-    // Its directory vanished behind the store's back: the move fails and the entry stays.
-    std::fs::remove_dir_all(rig.root().join("trees").join(ids[1].hex())).unwrap();
-    assert_eq!(rig.fake.pressure(200), 0);
-    assert!(present(&rig, &ids[0]));
-    assert!(!present(&rig, &ids[2]));
-    assert_eq!(store.stats().trees, 2);
-    assert_eq!(rig.fake.accounted(), 200);
-}
-
-#[test]
-fn a_callback_for_a_tree_already_released_answers_busy() {
-    let rig = Rig::new();
-    let (_store, _ids) = three(&rig, Config::default());
-    let callback = rig.fake.first_release();
-    assert_eq!(rig.fake.pressure(0), 0);
-    assert_eq!(callback.release(), Err(Busy));
-}
-
-#[test]
-fn a_callback_after_the_tree_store_is_gone_frees_nothing() {
-    let rig = Rig::new();
-    let (store, _ids) = three(&rig, Config::default());
-    let callback = rig.fake.first_release();
+    // 300 bytes in, 50 free (the records add a few bytes): under the mark. Trim evicts.
+    store.trim().unwrap();
+    assert!(!rig.present(&ids[0]));
+    assert!(rig.present(&ids[2]));
+    // A volume that stays full leaves nothing to evict.
     drop(store);
-    assert_eq!(callback.release(), Ok(0));
+    let full = rig.open(Config {
+        low_water_free_bytes: 1 << 40,
+        free_space: Arc::new(|| 0),
+        ..rig.cfg()
+    });
+    assert!(matches!(full.trim(), Err(Error::NoSpace { .. })));
+    assert_eq!(full.stats().trees, 0);
 }
 
 #[test]
-fn a_hit_is_a_use_for_the_recency_order() {
+fn a_tree_whose_directory_vanished_still_leaves_the_table() {
     let rig = Rig::new();
-    let (store, ids) = three(&rig, Config::default());
-    store.ensure(&wanted(&sized("f", 100, 2))).unwrap();
-    // 2 is now the most recent, so 3 is the oldest.
-    assert_eq!(rig.fake.pressure(200), 0);
-    assert!(!present(&rig, &ids[2]));
+    let store = rig.open(budget(&rig, 100));
+    let a = sized("f", 100, 1);
+    rig.have(&a);
+    store.ensure(&wanted(&a)).unwrap();
+    std::fs::remove_dir_all(rig.root().join("trees").join(a.diff_id.hex())).unwrap();
+    let b = sized("f", 100, 2);
+    rig.have(&b);
+    store.ensure(&wanted(&b)).unwrap();
+    assert_eq!(store.stats().trees, 1);
+    assert!(rig.present(&b.diff_id));
 }
