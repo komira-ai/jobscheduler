@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use js_contain::container::{CONTAINER_OWNER, ContainerLimits, ContainerSpec, Dirs, Ended};
+use js_contain::container::{
+    CONTAINER_OWNER, ContainerLimits, ContainerSpec, Dirs, Ended, HostMount,
+};
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
 use js_contain::oci::{Oci, OciConfig};
 use js_contain::subids::IdFiles;
@@ -107,6 +109,17 @@ impl Node {
             argv: vec!["tool".to_owned()],
             limits: ContainerLimits::DEFAULT,
             shared: Vec::new(),
+            mounts: [
+                ("/scratch", false),
+                ("/workspace", false),
+                ("/run/js-files", true),
+            ]
+            .map(|(target, read_only)| HostMount {
+                target: target.to_owned(),
+                source: PathBuf::from("/srv/host-mount"),
+                read_only,
+            })
+            .to_vec(),
         }
     }
 }
@@ -373,4 +386,96 @@ async fn a_directory_is_removed_by_a_helper_and_layers_unpacked_by_one() {
         assert!(why.contains("not removed"), "{why}");
     }
     assert!(kept.exists());
+}
+
+/// Reads back the mounts of the container `lease-1-2` after its bundle is written.
+async fn verified(node: &Node, bundle: Option<&str>) -> Result<(), String> {
+    let spec = node.spec();
+    let oci = node.oci();
+    oci.create(&spec).await.expect("bundle");
+    if let Some(bundle) = bundle {
+        std::fs::write(spec.dir.join("bundle/config.json"), bundle).expect("config");
+    }
+    oci.verify_mounts(&spec)
+}
+
+/// Catches mounts never read back (a bind without `nosuid`, or one not made at all, goes
+/// unnoticed), a read of the wrong process, and a read that finds fault with a bundle that
+/// asks for nothing: the container's pid comes from `crun state` of the lease's own state
+/// directory, its mounts from that process's `mountinfo`, compared with the `config.json`
+/// the runner wrote. The test process stands in for the container: its mountinfo has none
+/// of the job's mount points, so the real bundle's binds are reported, and a bundle with
+/// no mounts is clean.
+#[tokio::test]
+async fn the_mounts_of_a_started_container_are_read_back_against_its_bundle() {
+    let script = format!("state-pid {}", std::process::id());
+    let node = Node::new("verify", &script);
+    let why = verified(&node, None).await.expect_err("binds not mounted");
+    for target in ["/scratch", "/workspace", "/run/js-files"] {
+        assert!(
+            why.contains(&format!("{target}: not mounted")),
+            "{target} in {why}"
+        );
+    }
+    let lease = node.spec().dir.display().to_string();
+    let calls = node.calls();
+    let want = format!("--root {lease}/crun state lease-1-2");
+    assert!(
+        calls.iter().any(|c| c.contains(&want)),
+        "{want:?} not in {calls:?}"
+    );
+
+    let node = Node::new("verify-clean", &script);
+    verified(&node, Some("{\"ociVersion\":\"1.0.0\"}"))
+        .await
+        .expect("no mounts asked for");
+}
+
+/// Catches a failing `crun state`, an answer that is not a state, and a process that is
+/// gone each reported as a pass: the container is not running yet (or any more), and the
+/// caller must hear it. Each error names what failed.
+#[tokio::test]
+async fn a_read_back_that_cannot_be_made_is_an_error() {
+    let node = Node::new("verify-state-fail", "state-fail no such container");
+    let why = verified(&node, None).await.expect_err("state fails");
+    assert!(why.starts_with("crun state: "), "{why}");
+    assert!(why.contains("no such container"), "{why}");
+
+    let node = Node::new("verify-not-json", "state-raw not json");
+    let why = verified(&node, None).await.expect_err("not a state");
+    assert!(why.starts_with("crun state: "), "{why}");
+
+    let node = Node::new("verify-no-pid", "state-raw {\"status\":\"created\"}");
+    let why = verified(&node, None).await.expect_err("no pid");
+    assert!(why.starts_with("crun state: "), "{why}");
+
+    // The highest pid the kernel can give is 4194303: none runs at 4194304.
+    let node = Node::new("verify-gone", "state-pid 4194304");
+    let why = verified(&node, None).await.expect_err("process gone");
+    assert!(why.contains("/proc/4194304/mountinfo"), "{why}");
+
+    let node = Node::new("verify-no-runtime", "");
+    let spec = node.spec();
+    let oci = node.oci();
+    std::fs::remove_file(&node.crun).expect("remove the runtime");
+    let why = oci.verify_mounts(&spec).expect_err("no runtime");
+    assert!(why.contains(&node.crun.display().to_string()), "{why}");
+}
+
+/// Catches a bundle that cannot be read, or is not a bundle, passing: a container whose
+/// `config.json` is missing or is not JSON is an error naming the file.
+#[tokio::test]
+async fn a_bundle_that_cannot_be_read_back_is_an_error() {
+    let script = format!("state-pid {}", std::process::id());
+    let node = Node::new("verify-bad-config", &script);
+    let why = verified(&node, Some("not json"))
+        .await
+        .expect_err("not json");
+    assert!(why.starts_with("config.json: "), "{why}");
+
+    let node = Node::new("verify-no-config", &script);
+    let spec = node.spec();
+    let oci = node.oci();
+    let why = oci.verify_mounts(&spec).expect_err("no bundle");
+    assert!(why.contains("config.json"), "{why}");
 }

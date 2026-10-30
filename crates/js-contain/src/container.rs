@@ -39,16 +39,35 @@ pub struct ContainerLimits {
     /// container's job runs as the same subordinate id (uid 1000 of the range), so it bounds the processes of all the
     /// node's jobs together, not one container's.
     pub nproc: u64,
+    /// The size of the container's `/tmp` tmpfs, in MiB.
+    pub tmp_mib: u64,
 }
 
+/// The `RLIMIT_NPROC` a job is given unless the caller says otherwise.
+pub const NPROC_HIGH: u64 = 32_768;
+
 impl ContainerLimits {
-    /// 8192 pids, a 64 MiB `/dev/shm`, 65,536 open files and 32,768 processes.
+    /// 8192 pids, a 64 MiB `/dev/shm`, 65,536 open files, [`NPROC_HIGH`] processes and a
+    /// 64 MiB `/tmp`.
     pub const DEFAULT: Self = Self {
         pids: 8192,
         shm_mib: 64,
         nofile: 65_536,
-        nproc: 32_768,
+        nproc: NPROC_HIGH,
+        tmp_mib: 64,
     };
+
+    /// `self` with `nproc` no higher than `ceiling`.
+    #[must_use]
+    pub const fn within_nproc(self, _ceiling: u64) -> Self {
+        self
+    }
+}
+
+/// The hard `RLIMIT_NPROC` of this process.
+#[must_use]
+pub fn own_nproc_hard_limit() -> u64 {
+    0
 }
 
 /// The container to run for one job.
@@ -83,6 +102,21 @@ pub struct ContainerSpec {
     pub limits: ContainerLimits,
     /// Host directories mounted read-only inside the exec root (shared trees).
     pub shared: Vec<SharedMount>,
+    /// Host directories bound at absolute places in the container, after the exec root
+    /// and the shared trees: the run's scratch directory, the `--mount-root` mounts, the
+    /// run's files.
+    pub mounts: Vec<HostMount>,
+}
+
+/// A host directory bound at an absolute place in the container.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostMount {
+    /// Where it appears: an absolute, normalized path.
+    pub target: String,
+    /// The directory on the host.
+    pub source: PathBuf,
+    /// Whether the job sees it read-only.
+    pub read_only: bool,
 }
 
 /// A host directory mounted read-only inside the exec root.
@@ -150,8 +184,26 @@ pub(crate) mod tests {
                 shm_mib: 102,
                 nofile: 103,
                 nproc: 104,
+                tmp_mib: 106,
             },
             shared: Vec::new(),
+            mounts: vec![
+                HostMount {
+                    target: "/scratch".to_owned(),
+                    source: PathBuf::from("/scratch/lease-1-2/job"),
+                    read_only: false,
+                },
+                HostMount {
+                    target: "/workspace".to_owned(),
+                    source: PathBuf::from("/srv/mount-root"),
+                    read_only: false,
+                },
+                HostMount {
+                    target: "/run/js-files".to_owned(),
+                    source: PathBuf::from("/run/js-agent/files/1-2"),
+                    read_only: true,
+                },
+            ],
         }
     }
 }

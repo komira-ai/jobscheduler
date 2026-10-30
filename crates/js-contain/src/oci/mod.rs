@@ -45,9 +45,12 @@ pub mod helper;
 pub mod image;
 pub mod init;
 mod lease;
+pub mod mounts;
 pub(crate) mod spec;
 pub mod words;
 
+#[cfg(test)]
+mod parity_tests;
 #[cfg(test)]
 mod tests;
 

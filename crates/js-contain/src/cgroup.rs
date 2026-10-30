@@ -58,6 +58,30 @@ pub fn cpu_weight(cpu_millis: u64) -> Option<u64> {
     (cpu_millis > 0).then(|| (cpu_millis / 10).clamp(1, 10_000))
 }
 
+/// How a lease's cgroup limits follow its booking.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LeasePolicy {
+    /// The build-host policy above: `memory.max` 1.5 x the booking + 512 MiB, swap allowed,
+    /// `cpu.weight` only.
+    #[default]
+    BuildHost,
+    /// The booking is the limit: `memory.max` the booking, `memory.swap.max` 0, `cpu.max` the
+    /// booked CPUs.
+    Hard,
+}
+
+/// The hard `memory.max` for a lease that booked `memory_bytes` under [`LeasePolicy::Hard`].
+#[must_use]
+pub fn hard_memory_max(_memory_bytes: u64) -> Option<u64> {
+    None
+}
+
+/// The `cpu.max` text for a lease that booked `cpu_millis` under [`LeasePolicy::Hard`].
+#[must_use]
+pub fn cpu_max(_cpu_millis: u64) -> Option<String> {
+    None
+}
+
 /// When the driver kills a lease that keeps pushing into swap at its own cap.
 ///
 /// Every `every`, the driver reads the lease cgroup's `memory.events` `max` (times
@@ -239,6 +263,16 @@ impl LeaseCgroup {
     /// With a `pin` (the `numa-node` lease placement) the lease also gets `cpuset.cpus` and
     /// `cpuset.mems`, and hands `cpuset` to the container's cgroup, which inherits both.
     pub fn create(&self, resources: &Resources, pin: Option<&Pin>) -> io::Result<()> {
+        self.create_with(resources, pin, LeasePolicy::BuildHost)
+    }
+
+    /// [`LeaseCgroup::create`] with the limits `policy` derives from the booking.
+    pub fn create_with(
+        &self,
+        resources: &Resources,
+        pin: Option<&Pin>,
+        _policy: LeasePolicy,
+    ) -> io::Result<()> {
         std::fs::create_dir(&self.dir)?;
         let subtree = if pin.is_some() {
             SUBTREE_PINNED

@@ -8,7 +8,9 @@
 //! - `run-log <json>`: it first appends this line to its `--log` file;
 //! - `helper-fail <text>`: `crun run` of a helper bundle (a bundle directory whose name
 //!   starts with `helper-`) prints the text on stderr and exits 1;
-//! - `kill-fail <text>` and `delete-fail <text>`: `kill` and `delete` do the same.
+//! - `kill-fail <text>` and `delete-fail <text>`: `kill` and `delete` do the same;
+//! - `state-pid <n>`: `state` prints a state whose `pid` is `n` (default 1); `state-raw
+//!   <text>` prints the text instead; `state-fail <text>` fails like `kill-fail`.
 //!
 //! Every call appends its arguments, joined by spaces, as a line to the copy's path with
 //! the extension `calls`.
@@ -77,6 +79,20 @@ fn main() -> ExitCode {
         }
         Some("kill") => directive(&script, "kill-fail").map_or(ExitCode::SUCCESS, |t| fail(&t)),
         Some("delete") => directive(&script, "delete-fail").map_or(ExitCode::SUCCESS, |t| fail(&t)),
+        Some("state") => {
+            if let Some(text) = directive(&script, "state-fail") {
+                return fail(&text);
+            }
+            let pid = directive(&script, "state-pid").unwrap_or_else(|| "1".to_owned());
+            let raw = directive(&script, "state-raw");
+            println!(
+                "{}",
+                raw.unwrap_or_else(|| format!(
+                    "{{\"id\":\"x\",\"pid\":{pid},\"status\":\"running\"}}"
+                ))
+            );
+            ExitCode::SUCCESS
+        }
         _ => fail("fake crun: unknown command"),
     }
 }

@@ -185,6 +185,18 @@ impl Oci {
         }
     }
 
+    /// Reads back the mounts of the started container of `spec` and compares them with its
+    /// bundle ([`mounts::problems`]): the replacement for the engine's read-back after a
+    /// create. Blocking: it runs `crun state` and reads a file of `/proc`. The container
+    /// must be running; one that is not yet gives an error, and the caller may ask again.
+    ///
+    /// # Errors
+    /// `crun state` failed, the container's `mountinfo` or the bundle could not be read,
+    /// or a mount the bundle flags lacks the flag.
+    pub fn verify_mounts(&self, _spec: &ContainerSpec) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Sends `SIGTERM` to the container `name`.
     ///
     /// # Errors
