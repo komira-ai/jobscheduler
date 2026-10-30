@@ -11,11 +11,12 @@ mod digest;
 
 use crate::digest::{Digest, DigestFunction};
 use js_caps::NodeCaps;
-use js_sched::{DaemonInstance, Event, Request, Scheduler, harness};
+use js_sched::{DaemonInstance, Event, Request, Scheduler, Unservable, harness};
 use js_types::sched::{
     Effect, Failure, FarmTime, LeaseKind, OperationId, Outcome, Qos, Resources, StartLease,
     WaiterId, WorkerId,
 };
+use js_whole::WholeNodeConfig;
 
 const GIB: u64 = 1 << 30;
 const SMALL: Resources = Resources::new(4_000, 8 * GIB);
@@ -63,14 +64,26 @@ impl Rig {
         }
     }
 
+    fn with_whole_node(config: WholeNodeConfig) -> Self {
+        Self {
+            s: Scheduler::new(1)
+                .with_load_config(booked::current())
+                .with_whole_node(config),
+        }
+    }
+
     fn feed(&mut self, event: Event) -> Vec<Effect> {
         harness::feed(&mut self.s, FarmTime::from_millis(1_000), event)
     }
 
     fn worker(&mut self, name: &str, capacity: Resources) {
+        self.worker_with(name, capacity, &["container"]);
+    }
+
+    fn worker_with(&mut self, name: &str, capacity: Resources, drivers: &[&str]) {
         let caps = NodeCaps::from_report([("arch", "x86_64"), ("os", "linux")])
             .unwrap()
-            .with_drivers(["container"]);
+            .with_drivers(drivers.iter().copied());
         let up = Event::WorkerUp {
             worker: w(name),
             instance: DaemonInstance::new(name),
@@ -266,5 +279,196 @@ fn without_the_flag_a_request_shares_its_worker_as_before() {
     assert_eq!(starts.len(), 2);
     assert!(starts.iter().all(|s| s.resources == Resources::new(1_000, GIB)));
     assert_eq!(r.s.reservation(OperationId(0)), None);
+}
+}
+
+/// Action `n` asking for a whole worker, with a size every worker holds.
+fn whole_small(n: u8) -> Request {
+    Request {
+        whole_worker: true,
+        ..action(n)
+    }
+}
+
+both_rules! {
+/// Catches: the flag honoured by the other lease kinds. A VM with the flag is placed
+/// beside another lease and books what it asked for, as without the flag; a VM and a
+/// whole-machine lease with the flag are still unservable when their resources exceed
+/// every worker (their CPU is compared with the worker's).
+fn the_flag_changes_nothing_for_a_vm_or_a_whole_machine_lease() {
+    let mut r = Rig::new();
+    r.worker_with("a", SMALL, &["container", "vm", "native-whole-machine"]);
+    r.submit(1, action(1));
+    let [first] = r.starts().try_into().unwrap();
+    let vm = Request {
+        kind: LeaseKind::Vm,
+        whole_worker: true,
+        ..action(2)
+    };
+    r.submit(2, vm.clone());
+    let [beside] = r.starts().try_into().unwrap();
+    assert_eq!(beside.worker, first.worker);
+    assert_eq!(beside.resources, Resources::new(1_000, GIB));
+
+    let huge = Resources::new(1_000_000, GIB);
+    let big_vm = Request {
+        resources: huge,
+        key: action(5).key,
+        ..vm
+    };
+    r.submit(3, big_vm);
+    let whole_machine = Request {
+        kind: LeaseKind::WholeMachine,
+        whole_worker: true,
+        resources: huge,
+        ..action(4)
+    };
+    r.submit(4, whole_machine);
+    assert!(r.starts().is_empty());
+    for op in [OperationId(2), OperationId(3)] {
+        assert!(matches!(r.s.unservable(op), Some(Unservable::TooLarge { .. })), "{op}: {:?}", r.s.unservable(op));
+    }
+}
+}
+
+both_rules! {
+/// Catches: exclusivity that rests on the request's memory alone. A whole-worker
+/// request of 1 GiB (below every worker's memory) still waits for the lease on the
+/// worker, books all of it, and leaves no room beside it.
+fn a_small_whole_worker_request_still_owns_its_worker() {
+    let mut r = Rig::new();
+    r.worker("a", SMALL);
+    r.submit(1, action(1));
+    let [first] = r.starts().try_into().unwrap();
+    r.submit(2, whole_small(2));
+    assert!(r.starts().is_empty(), "placed beside a lease");
+
+    let [owner] = r.completes(&first).try_into().unwrap();
+    assert_eq!(owner.resources, SMALL);
+    r.submit(3, action(3));
+    assert!(r.starts().is_empty(), "placed beside a whole-worker lease");
+}
+}
+
+both_rules! {
+/// Catches: the worker's CPUs or memory compared with the request's own. A request
+/// asking for more CPUs than the worker has is placed on it, whole.
+fn a_whole_worker_request_larger_than_the_worker_still_places() {
+    let mut r = Rig::new();
+    r.worker("a", SMALL);
+    let request = Request {
+        resources: Resources::new(1_000_000, 1_000 * GIB),
+        ..whole_small(1)
+    };
+    r.submit(1, request);
+    let [start] = r.starts().try_into().unwrap();
+    assert_eq!(start.resources, SMALL);
+}
+}
+
+both_rules! {
+/// Catches: the whole-node pool's drain order applied to a whole-worker action. With
+/// a pool configured, an action asking for a whole worker still holds one while it
+/// waits, and a later request is not placed there.
+fn a_whole_worker_request_holds_a_worker_beside_a_whole_node_pool() {
+    let config = WholeNodeConfig {
+        drain_after_ms: 600_000,
+        drain_deadline_ms: Some(60_000),
+        reserve_backoff_ms: 10_000,
+        max_reserve_attempts: 2,
+        ..WholeNodeConfig::dedicated(4)
+    };
+    let mut r = Rig::with_whole_node(config);
+    r.worker_with("a", SMALL, &["container", "native-whole-machine"]);
+    r.submit(1, action(1));
+    let [first] = r.starts().try_into().unwrap();
+    r.submit(2, whole(2));
+    r.submit(3, action(3));
+    assert!(r.starts().is_empty());
+    assert_eq!(r.s.reservation(OperationId(1)), Some(&w("a")));
+    let [owner] = r.completes(&first).try_into().unwrap();
+    assert_eq!(owner.operation, OperationId(1));
+}
+}
+
+both_rules! {
+/// Catches: the ledger charging an owner less than the worker. After placement the
+/// worker is charged all its CPUs and memory, and the predicate-side figure is the
+/// predicted cost (it is not the ledger's, and the doc of `charge_at` says so).
+fn a_whole_worker_lease_is_charged_the_whole_worker() {
+    let mut r = Rig::new();
+    r.worker("a", SMALL);
+    r.submit(1, whole_small(1));
+    let [_] = r.starts().try_into().unwrap();
+    assert_eq!(
+        r.s.load_at(&w("a"), 0),
+        Some((SMALL.cpu_millis, SMALL.memory_bytes))
+    );
+}
+}
+
+both_rules! {
+/// Catches: `runnable_on` comparing the request's own CPU and memory with the
+/// capacity for a request that owns its worker; the same request without the flag is
+/// not runnable there.
+fn runnable_on_ignores_cpu_and_memory_for_a_whole_worker_request() {
+    let caps = NodeCaps::from_report([("arch", "x86_64"), ("os", "linux")])
+        .unwrap()
+        .with_drivers(["container"]);
+    assert!(whole(1).runnable_on(&caps, &SMALL));
+    let plain = Request {
+        whole_worker: false,
+        ..whole(1)
+    };
+    assert!(!plain.runnable_on(&caps, &SMALL));
+    let gpu = Request {
+        resources: Resources::new(1_000, GIB).with_gpus(1),
+        ..whole_small(2)
+    };
+    assert!(!gpu.runnable_on(&caps, &SMALL), "GPUs are still compared");
+}
+}
+
+both_rules! {
+/// Catches: the avoid set judged against the request's own size. After a run lost on
+/// `a` the rerun of a whole-worker request goes to `b` while `b` is live, although
+/// its resources exceed both workers.
+fn a_whole_worker_rerun_avoids_the_worker_it_was_lost_on() {
+    let mut r = Rig::new();
+    r.worker("a", SMALL);
+    r.worker("b", SMALL);
+    r.submit(1, whole(1));
+    let [first] = r.starts().try_into().unwrap();
+    let lost = Outcome::Failed(Failure::Lost(js_types::sched::LostWhy::Fenced));
+    let effects = r.end(&first, lost);
+    let again: Vec<_> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Start(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let [second] = again.as_slice() else {
+        panic!("{effects:?}");
+    };
+    assert_ne!(second.worker, first.worker);
+}
+}
+
+both_rules! {
+/// Catches: a whole-worker request whose only worker is cordoned reported as too large
+/// (its CPU and memory compared with the worker's) instead of waiting for the
+/// cordoned worker.
+fn a_whole_worker_request_waits_for_a_cordoned_worker() {
+    let mut r = Rig::new();
+    r.worker("a", SMALL);
+    r.feed(Event::Cordon { worker: w("a") });
+    r.submit(1, whole(1));
+    assert!(r.starts().is_empty());
+    assert!(matches!(
+        r.s.unservable(OperationId(0)),
+        Some(Unservable::Cordoned { .. })
+    ));
+    assert_eq!(r.s.cordoned_could(OperationId(0)), [w("a")]);
 }
 }

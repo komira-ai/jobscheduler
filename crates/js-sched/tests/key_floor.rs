@@ -187,6 +187,23 @@ fn farm_with_floor_16() -> Farm {
 }
 
 both_rules! {
+/// Catches: a key floor applied to an action that owns its worker. With a floor on its
+/// size key it is placed at once on an idle worker, books the whole worker, and leaves
+/// the floor as it was.
+fn a_whole_worker_request_takes_no_key_floor() {
+    let mut f = farm_with_floor_16();
+    let request = Request {
+        whole_worker: true,
+        ..request(2, 4 * GIB)
+    };
+    f.submit_keyed(2, request, KEY);
+    let start = only(f.tick());
+    assert_eq!(start.resources, Resources::new(8_000, 64 * GIB));
+    assert_eq!(f.s.key_floor(KEY), Some(16 * GIB));
+}
+}
+
+both_rules! {
 /// Catches the certain win's absence: a changed digest of a key that was killed starts
 /// the ladder again at 4 GiB (the digest floor does not know it), so it is killed again
 /// and climbs 4 -> 16 once more.

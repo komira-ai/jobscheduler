@@ -270,7 +270,10 @@ impl Scheduler {
     /// key's curve at the slot where the lease is charged by one; the same flat figures at
     /// every slot for a lease charged flat, on a worker charged by prediction alone (its
     /// cores are then at least what a lease is charged there) and for an action that would
-    /// own the worker whole. Both are clamped to the worker's capacity. Slots are those of
+    /// own the worker whole. Both are clamped to the worker's capacity. For an action that
+    /// owns its worker this is its predicted cost, as the predicate counts it; the ledger
+    /// charges it the worker's whole capacity once it is placed, which
+    /// [`Scheduler::load_at`] shows. Slots are those of
     /// [`Scheduler::load_at`]. `None` for an operation the scheduler does not hold, a worker
     /// that is not registered or a slot past [`crate::H_PLUS`].
     ///

@@ -336,6 +336,7 @@ fn a_recovered_whole_worker_lease_books_its_whole_node() {
         s.booked(&node("node-a")),
         Some(Resources::new(4_000, 8 * GIB))
     );
+    assert_eq!(s.load_at(&node("node-a"), 0), Some((4_000, 8 * GIB)));
     let submit = Event::Submit {
         waiter: WaiterId(99),
         request: request(9),

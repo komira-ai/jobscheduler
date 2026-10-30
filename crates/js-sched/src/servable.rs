@@ -114,7 +114,14 @@ pub(crate) struct Servable {
 /// function behind `Scheduler::charge_at` and the figures the score reads, so the two
 /// cannot differ. `cost` is the lease's cost before the clamp to the worker; `profile` is
 /// how it is charged over time, which an action that would own the worker whole is not
-/// (it is charged flat).
+/// (it is charged flat). An action that owns its worker ([`Request::owns_worker`]) is
+/// charged here, as the predicate counts it, at its predicted cost clamped to the worker;
+/// once placed, the ledger holds the worker's whole capacity for it
+/// ([`Worker::charged_whole`]), which [`Scheduler::load_at`] shows. The predicate is not
+/// given the capacity: a worker's own processes make it measured-busy, and the predicate
+/// would refuse every worker.
+///
+/// [`Scheduler::load_at`]: crate::Scheduler::load_at
 pub(crate) fn charge_on(
     worker: &Worker,
     request: &Request,
