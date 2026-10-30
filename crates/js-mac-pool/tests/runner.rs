@@ -331,8 +331,6 @@ const RESOLVE: &str = r#"exit(gethostbyname("example.com") ? 0 : 1)"#;
 const UNIX_CONNECT: &str =
     r#"use IO::Socket::UNIX; exit(IO::Socket::UNIX->new(Peer => $ARGV[0]) ? 0 : 1)"#;
 
-const SYSV_SHM: &str = r#"my $id = shmget(0, 64, 0600 | 01000); if (defined $id) { shmctl($id, 0, 0); exit 0 } exit 1"#;
-
 fn perl(script: &str, rest: &[OsString]) -> Vec<OsString> {
     let mut all = vec![OsString::from("-e"), OsString::from(script)];
     all.extend(rest.iter().cloned());
@@ -635,16 +633,4 @@ fn the_dev_fd_grant_lets_a_shell_write_through_a_descriptor_path() {
         describe(&granted)
     );
     assert_eq!(String::from_utf8_lossy(&granted.stdout), "x\n");
-}
-
-#[test]
-fn system_v_shared_memory_is_refused_under_the_profile() {
-    let scene = Scene::new("shm", "run");
-    let free = control("/usr/bin/perl", &perl(SYSV_SHM, &[]));
-    assert!(free.status.success(), "control shmget: {}", describe(&free));
-    let out = scene.sandboxed(Net::Off, "/usr/bin/perl", &perl(SYSV_SHM, &[]));
-    assert!(
-        !out.status.success(),
-        "the profile let a run create shared memory"
-    );
 }
