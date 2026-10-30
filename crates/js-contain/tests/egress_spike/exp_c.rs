@@ -43,15 +43,17 @@ fn c1_the_job_cannot_edit_the_allow_list_in_its_netns() {
         "the daemon could not load the table: {}",
         host::text(&loaded)
     );
-    let outcome = Bundle::new(&pair_spec("c1", "suite", &holder)).run();
+    let up = enter_as_owner(holder.pid(), "ip", &["link", "set", "lo", "up"], "");
+    assert!(up.status.success(), "{}", host::text(&up));
     // A route for `ip route flush all` to find: without one the flush fails with "FIB table
     // does not exist", which says nothing about permission.
     let route = enter_as_owner(
         holder.pid(),
         "ip",
-        &["route", "add", "unreachable", "203.0.113.0/24"],
+        &["route", "add", "203.0.113.0/24", "dev", "lo"],
         "",
     );
+    let outcome = Bundle::new(&pair_spec("c1", "suite", &holder)).run();
     assert!(route.status.success(), "{}", host::text(&route));
     let routes = host::text(&enter_as_owner(holder.pid(), "ip", &["route", "show"], ""));
     let after = table_of(&holder);
