@@ -4,6 +4,7 @@
 //! Every document is written from a typed value, so the field order is the order of the
 //! structs and the same inputs give the same bytes.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use js_bundle::media;
@@ -54,6 +55,8 @@ struct Manifest<'a> {
     artifact_type: &'a str,
     config: Descriptor<'a>,
     layers: Vec<Descriptor<'a>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    annotations: &'a BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -84,7 +87,12 @@ fn put(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 
 /// Makes the layout directory `dir` (which must not exist) holding the bundle of `config`
 /// and `layers`, and returns the digest of its manifest.
-pub(crate) fn write(dir: &Path, config: &Blob, layers: &[Blob]) -> Result<Digest, Error> {
+pub(crate) fn write(
+    dir: &Path,
+    config: &Blob,
+    layers: &[Blob],
+    annotations: &BTreeMap<String, String>,
+) -> Result<Digest, Error> {
     let manifest = Manifest {
         schema_version: 2,
         media_type: media::MANIFEST,
@@ -94,6 +102,7 @@ pub(crate) fn write(dir: &Path, config: &Blob, layers: &[Blob]) -> Result<Digest
             .iter()
             .map(|layer| describe(media::LAYER_TAR_ZSTD, layer))
             .collect(),
+        annotations,
     };
     let manifest = Blob::new(serde_json::to_vec(&manifest)?);
     let index = Index {

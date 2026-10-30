@@ -59,6 +59,9 @@ pub(crate) async fn inspect(args: &LayoutArgs, out: &mut dyn Write) -> Result<()
         lines.push(format!("  license {}", layer.license));
         lines.push(format!("  source-url {}", layer.source_url));
     }
+    for (key, value) in manifest.annotations() {
+        lines.push(format!("annotation {key} {value}"));
+    }
     for (name, entry) in &config.entrypoints {
         lines.push(format!("entrypoint {name} {}", entry.path.as_str()));
     }

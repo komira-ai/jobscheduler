@@ -48,6 +48,14 @@ pub enum Error {
     /// The layout or an artifact in it is refused.
     #[error(transparent)]
     Oci(#[from] js_oci::Error),
+    /// An annotation whose key is not a reverse-domain key or whose value is empty.
+    #[error(
+        "annotation {key:?} needs a reverse-domain key (dot-separated labels of lowercase letters, digits, '-' and '_') and a non-empty value"
+    )]
+    Annotation {
+        /// The key.
+        key: String,
+    },
     /// A flag names a tree that no `--tree` flag does.
     #[error("{flag} names {key:?}, which is no --tree")]
     NoSuchTree {

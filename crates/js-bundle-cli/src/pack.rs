@@ -39,6 +39,26 @@ fn none_left(flag: &'static str, left: BTreeMap<String, String>) -> Result<(), E
     }
 }
 
+/// The manifest annotations the `--annotation` flags give, sorted by key. A key is two or
+/// more dot-separated labels of lowercase letters, digits, `-` and `_`; a value is not empty.
+fn annotations(args: &PackArgs) -> Result<BTreeMap<String, String>, Error> {
+    let map = unique("--annotation", &args.annotations)?;
+    for (key, value) in &map {
+        let label = |label: &str| {
+            let plain = label
+                .bytes()
+                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'));
+            [!label.is_empty(), plain].into_iter().all(|ok| ok)
+        };
+        let key_ok = [key.contains('.'), key.split('.').all(label)];
+        let ok = [key_ok[0], key_ok[1], !value.is_empty()];
+        if !ok.into_iter().all(|ok| ok) {
+            return Err(Error::Annotation { key: key.clone() });
+        }
+    }
+    Ok(map)
+}
+
 /// The environment rules the `--env` and `--lock-env` flags describe: the values of one
 /// variable and operation are one rule, in the order of the flags.
 fn rules(args: &PackArgs) -> Result<Vec<EnvRule>, Error> {
@@ -128,8 +148,9 @@ pub(crate) fn pack(args: &PackArgs, out: &mut dyn Write) -> Result<(), Error> {
         },
     };
     config.validate()?;
+    let annotations = annotations(args)?;
     let config = Blob::new(config.to_canonical_json());
-    let manifest = layout::write(&args.out, &config, &blobs)?;
+    let manifest = layout::write(&args.out, &config, &blobs, &annotations)?;
     writeln!(out, "{manifest}")?;
     Ok(())
 }

@@ -113,6 +113,10 @@ pub struct PackArgs {
     /// The https URL of the source of a tree. Every tree needs one.
     #[arg(long = "source-url", value_name = "NAME=URL", value_parser = pair)]
     pub source_urls: Vec<Pair>,
+    /// A manifest annotation, `KEY=VALUE`: a reverse-domain key such as
+    /// `org.opencontainers.image.source` and a non-empty value. Repeat for more.
+    #[arg(long = "annotation", value_name = "KEY=VALUE", value_parser = pair)]
+    pub annotations: Vec<Pair>,
     /// A program a job names as `@bundle/NAME`: `NAME=${tree:TREE}/path`.
     #[arg(long = "entrypoint", value_name = "NAME=PATH", value_parser = pair)]
     pub entrypoints: Vec<Pair>,
