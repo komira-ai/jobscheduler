@@ -417,12 +417,15 @@ fn a_lease_without_a_cgroup_or_a_start_is_not_sampled() {
 fn a_boxed_reader_reads_like_the_reader_inside() {
     let inner = FakeFiles::default()
         .with("/a", "text")
-        .with_link("/l", "target");
+        .with_link("/l", "target")
+        .disk_under(Path::new("/disk"));
     let boxed: Box<dyn FileReader> = Box::new(inner.clone());
     assert_eq!(boxed.read("/a"), Ok("text".to_owned()));
     assert!(boxed.read("/b").is_err());
     assert_eq!(boxed.link("/l"), Ok("target".to_owned()));
     assert_eq!(boxed.device(Path::new("/a")), inner.device(Path::new("/a")));
+    assert_eq!(boxed.is_tmpfs(Path::new("/run/x")), Ok(true));
+    assert_eq!(boxed.is_tmpfs(Path::new("/disk/x")), Ok(false));
 }
 
 /// Asserts that dropped minutes are reported to the operator, since the wire has no field
