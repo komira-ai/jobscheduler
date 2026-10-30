@@ -148,6 +148,7 @@ pub struct Step {
     program: String,
     args: Vec<OsString>,
     env: Vec<(String, String)>,
+    cwd: String,
 }
 
 impl Step {
@@ -181,6 +182,13 @@ impl Step {
     #[must_use]
     pub fn env(&self) -> &[(String, String)] {
         &self.env
+    }
+
+    /// The directory to run it in: the fixture's run directory, as a real run's is. A
+    /// working directory outside the profile's grants makes `getcwd` fail in every tool.
+    #[must_use]
+    pub fn cwd(&self) -> &str {
+        &self.cwd
     }
 
     /// The program and arguments alone, for a caller that applies a profile of its own.
@@ -273,6 +281,7 @@ impl SelfTest {
             canaries,
         } = fixture;
         let run = layout.run.clone();
+        let cwd = run.as_str().to_owned();
         let xcode = grants.iter().find_map(|grant| match grant {
             ReadGrant::Xcode(xcode) => Some(xcode.clone()),
             _ => None,
@@ -330,14 +339,15 @@ impl SelfTest {
             .collect();
         reads.push((Class::ReadSetuidBinary, SETUID_CANARY.to_owned()));
         for (class, path) in reads {
-            steps.push(read(class, Role::Control, None, &path));
-            steps.push(read(class, Role::Denied, Some(&profile), &path));
+            steps.push(read(class, Role::Control, None, &path, &cwd));
+            steps.push(read(class, Role::Denied, Some(&profile), &path, &cwd));
         }
         steps.push(read(
             Class::GrantedTreeRead,
             Role::Allowed,
             Some(&profile),
             granted_file.as_str(),
+            &cwd,
         ));
         steps.push(Step {
             class: Class::RunTrue,
@@ -346,6 +356,7 @@ impl SelfTest {
             program: TRUE.to_owned(),
             args: Vec::new(),
             env: Vec::new(),
+            cwd: cwd.clone(),
         });
         if let Some(xcode) = xcode {
             let source = run.child(STUB_SOURCE)?;
@@ -366,6 +377,7 @@ impl SelfTest {
                 program: CC.to_owned(),
                 args: compile.iter().map(OsString::from).collect(),
                 env: env.clone(),
+                cwd: cwd.clone(),
             });
             let sign = ["-s", "-", "-f", output.as_str()];
             steps.push(Step {
@@ -375,6 +387,7 @@ impl SelfTest {
                 program: CODESIGN.to_owned(),
                 args: sign.iter().map(OsString::from).collect(),
                 env,
+                cwd,
             });
         }
         Ok(Self { major, steps })
@@ -425,7 +438,7 @@ fn under(path: &AbsPath, dir: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-fn read(class: Class, role: Role, profile: Option<&Profile>, path: &str) -> Step {
+fn read(class: Class, role: Role, profile: Option<&Profile>, path: &str, cwd: &str) -> Step {
     Step {
         class,
         role,
@@ -433,5 +446,6 @@ fn read(class: Class, role: Role, profile: Option<&Profile>, path: &str) -> Step
         program: CAT.to_owned(),
         args: vec![OsString::from(path)],
         env: Vec::new(),
+        cwd: cwd.to_owned(),
     }
 }

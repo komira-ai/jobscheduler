@@ -145,7 +145,7 @@ impl Drop for Mac {
 pub fn run_steps(test: &SelfTest, ids: Option<(u32, u32)>) -> Vec<Ran> {
     test.steps()
         .iter()
-        .map(|step| run(&step.argv(), step.env(), ids))
+        .map(|step| run(&step.argv(), step.env(), Some(step.cwd()), ids))
         .collect()
 }
 
@@ -186,8 +186,25 @@ pub fn sandbox_log() -> String {
         if let Ok(out) = out {
             let text = String::from_utf8_lossy(&out.stdout).into_owned();
             if out.status.success() && !text.trim().is_empty() {
-                let lines: Vec<&str> = text.lines().take(150).collect();
-                return format!("sandbox log:\n{}\n", lines.join("\n"));
+                // Every sandboxed process asks for /dev/dtracehelper and is refused; and
+                // other tests run beside this one. Keep the rest of the tools' denials.
+                let tools = [
+                    " cc(",
+                    " xcrun(",
+                    " xcodebuild(",
+                    " codesign(",
+                    " sh(",
+                    " bash(",
+                    " clang(",
+                    " ld(",
+                ];
+                let lines: Vec<&str> = text
+                    .lines()
+                    .filter(|line| !line.contains("dtracehelper"))
+                    .filter(|line| tools.iter().any(|tool| line.contains(tool)))
+                    .collect();
+                let tail = lines.len().saturating_sub(120);
+                return format!("sandbox log:\n{}\n", lines[tail..].join("\n"));
             }
         }
     }

@@ -83,6 +83,7 @@ fn controls_run_unsandboxed_and_the_rest_under_the_allow_profile() {
     let scratch = Scratch::new("selftest-argv");
     let test = selftest(grants_with_xcode(&scratch));
     for step in test.steps() {
+        assert_eq!(step.cwd(), "/Volumes/work/slot1/run", "{}", step.class());
         let argv = step.argv();
         match step.role() {
             Role::Control => {

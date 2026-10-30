@@ -354,11 +354,11 @@ fn ask_all(
 
 /// The real path of `app` and its `DEVELOPER_DIR`.
 fn resolve(app: &AbsPath) -> Result<(AbsPath, AbsPath), String> {
-    let real = std::fs::canonicalize(app.as_str()).map_err(|e| format!("{}: {e}", app.as_str()))?;
+    let real = std::fs::canonicalize(app.as_str()).map_err(|e| format!("{e}: {}", app.as_str()))?;
     let developer = real.join("Contents").join("Developer");
     match (AbsPath::new(&real), AbsPath::new(&developer)) {
         (Ok(real), Ok(developer)) => Ok((real, developer)),
-        (Err(e), _) | (_, Err(e)) => Err(format!("{}: {e}", app.as_str())),
+        (Err(e), _) | (_, Err(e)) => Err(format!("{e}: {}", app.as_str())),
     }
 }
 

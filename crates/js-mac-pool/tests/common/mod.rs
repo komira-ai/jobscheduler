@@ -177,14 +177,23 @@ pub struct Ran {
     pub stderr: String,
 }
 
-/// Runs `argv` with exactly `env`, as `ids` (a user and group) when given.
-pub fn run(argv: &[OsString], env: &[(String, String)], ids: Option<(u32, u32)>) -> Ran {
+/// Runs `argv` with exactly `env`, in `cwd` when given, as `ids` (a user and group) when
+/// given.
+pub fn run(
+    argv: &[OsString],
+    env: &[(String, String)],
+    cwd: Option<&str>,
+    ids: Option<(u32, u32)>,
+) -> Ran {
     use std::os::unix::process::CommandExt as _;
     let mut command = Command::new(&argv[0]);
     command
         .args(&argv[1..])
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k, v)));
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     if let Some((uid, gid)) = ids {
         command.gid(gid).uid(uid);
     }

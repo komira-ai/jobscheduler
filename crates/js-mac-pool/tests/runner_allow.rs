@@ -19,6 +19,7 @@ use common::{Scratch, run};
 use js_bundle::ReadGrantKind;
 use js_mac_pool::seatbelt::{
     Caps, Class, MacosMajor, Net, Policy, Profile, ReadGrant, ReadModel, Role, SelfTest, ToolPath,
+    Why,
 };
 
 fn mac(tag: &str) -> Mac {
@@ -45,7 +46,7 @@ fn major() -> MacosMajor {
 }
 
 fn argv_ok(argv: &[OsString]) -> bool {
-    run(argv, &[], None).ok
+    run(argv, &[], None, None).ok
 }
 
 #[test]
@@ -136,7 +137,8 @@ fn a_bundle_entrypoint_runs_under_the_allow_profile_and_reads_only_its_pinned_tr
     let tool = ToolPath::from_entrypoint("@bundle/read", &entrypoints, &pinned).expect("tool");
 
     let data = vec![fixture.pinned_file("data.txt").into_os_string()];
-    let under = run(&profile.argv(tool.path(), &data), &[], None);
+    let cwd = fixture.run.to_str().expect("text");
+    let under = run(&profile.argv(tool.path(), &data), &[], Some(cwd), None);
     assert!(under.ok, "{}", under.stderr);
     assert_eq!(under.stdout, DATA);
     let control = run(
@@ -157,7 +159,7 @@ fn a_bundle_entrypoint_runs_under_the_allow_profile_and_reads_only_its_pinned_tr
         "the control reads the unpinned file: {}",
         control.stderr
     );
-    let refused = run(&profile.argv(tool.path(), &secret), &[], None);
+    let refused = run(&profile.argv(tool.path(), &secret), &[], Some(cwd), None);
     assert!(
         !refused.ok,
         "the allow profile let a run read an unpinned tree"
