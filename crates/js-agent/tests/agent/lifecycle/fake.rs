@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckFinding, CheckHook, Clock, Exit, Finished, Found, RunHandle, RunSpec, Runtime,
-    RuntimeError, Status, label,
+    CheckFinding, CheckHook, Clock, Exit, Finished, Found, Prepared, RunHandle, RunSpec, Runtime,
+    RuntimeError, Status, Ticket, label,
 };
 use js_agent_wire::LogTail;
 
@@ -68,6 +68,18 @@ struct State {
     /// When set, the log notes at every create whether this says the scratch directory has
     /// its quota (see [`FakeRuntime::watch_quota`]).
     quota_applied: Option<QuotaWatch>,
+    /// The images whose pull is scripted: absent ones are here.
+    pulls: BTreeMap<String, Pull>,
+    /// The tickets `prepare` was asked with for each scripted image, in order.
+    asks: BTreeMap<String, Vec<Option<Ticket>>>,
+    /// The ticket the next scripted pull is given.
+    generation: u64,
+}
+
+/// Where a scripted pull stands.
+enum Pull {
+    Pending(Ticket),
+    Failed(String),
 }
 
 /// A runtime whose containers exit when a test says so, whose calls fail when a test
@@ -148,6 +160,41 @@ impl FakeRuntime {
             Some(path) if path.exists() => " [marker present]".to_owned(),
             Some(_) => " [no marker]".to_owned(),
         }
+    }
+
+    /// The image is being pulled: `prepare` answers `Pending` (with a new ticket, which is
+    /// returned) until [`FakeRuntime::pull_done`]. Calling it again for the image starts a
+    /// new pull, with a new ticket.
+    pub fn pull_pending(&self, image: &str) -> Ticket {
+        let mut state = self.state.borrow_mut();
+        state.generation += 1;
+        let ticket = Ticket(state.generation);
+        state.pulls.insert(image.to_owned(), Pull::Pending(ticket));
+        ticket
+    }
+
+    /// The pull of the image ended: it is here.
+    pub fn pull_done(&self, image: &str) {
+        self.state.borrow_mut().pulls.remove(image);
+    }
+
+    /// The pull of the image failed: `prepare` answers `Failed(why)` (every time).
+    pub fn pull_fails(&self, image: &str, why: &str) {
+        self.state
+            .borrow_mut()
+            .pulls
+            .insert(image.to_owned(), Pull::Failed(why.to_owned()));
+    }
+
+    /// The tickets the runtime was asked about a scripted image with, in order (none for the
+    /// ask of a start).
+    pub fn asks(&self, image: &str) -> Vec<Option<Ticket>> {
+        self.state
+            .borrow()
+            .asks
+            .get(image)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Every `create_and_start` takes `ms` on the test's clock.
@@ -257,6 +304,17 @@ impl FakeRuntime {
 }
 
 impl Runtime for FakeRuntime {
+    fn prepare(&mut self, image: &str, waited: Option<Ticket>) -> Prepared {
+        let mut state = self.state.borrow_mut();
+        let answer = match state.pulls.get(image) {
+            None => return Prepared::Ready,
+            Some(Pull::Pending(ticket)) => Prepared::Pending(*ticket),
+            Some(Pull::Failed(why)) => Prepared::Failed(RuntimeError::new(why.clone())),
+        };
+        state.asks.entry(image.to_owned()).or_default().push(waited);
+        answer
+    }
+
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
         let quota = match &self.state.borrow().quota_applied {
             None => "",
