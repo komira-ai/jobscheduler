@@ -35,6 +35,11 @@ fn a_run_whose_group_was_never_seen_taints_the_host() {
         "{events:?}"
     );
     assert_eq!(h.life.pending_taint(), Some(blind("r1")));
+    let again = names(&h.life.step());
+    assert!(
+        !again.iter().any(|event| event.starts_with("tainted")),
+        "{again:?}"
+    );
     assert_eq!(names(&h.start(job("r2"))), ["refused r2 host-tainted"]);
     h.fake.exit("r1", 0);
     h.life.step();
