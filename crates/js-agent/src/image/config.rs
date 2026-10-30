@@ -78,8 +78,31 @@ impl ImageConfig {
     /// [`ConfigError::Malformed`] when it is not a config with a `rootfs`,
     /// [`ConfigError::Env`] for an `Env` entry without `=`, and
     /// [`ConfigError::WorkingDir`] for a `WorkingDir` that leaves the image's root.
-    pub fn parse(_bytes: &[u8]) -> Result<Self, ConfigError> {
-        Err(ConfigError::Malformed("not implemented".to_owned()))
+    pub fn parse(bytes: &[u8]) -> Result<Self, ConfigError> {
+        let document: Document =
+            serde_json::from_slice(bytes).map_err(|e| ConfigError::Malformed(e.to_string()))?;
+        let process = document.config.unwrap_or_default();
+        let mut env = process
+            .env
+            .unwrap_or_default()
+            .iter()
+            .map(|entry| {
+                entry
+                    .split_once('=')
+                    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                    .ok_or(ConfigError::Env)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !env.iter().any(|(name, _)| name == "PATH") {
+            env.push(("PATH".to_owned(), DEFAULT_PATH.to_owned()));
+        }
+        Ok(Self {
+            entrypoint: process.entrypoint.unwrap_or_default(),
+            cmd: process.cmd.unwrap_or_default(),
+            env,
+            working_directory: relative(&process.working_dir.unwrap_or_default())?,
+            layers: document.rootfs.diff_ids.len(),
+        })
     }
 
     /// Refuses a config that lists other layers than the manifest it came with: the
@@ -87,8 +110,15 @@ impl ImageConfig {
     ///
     /// # Errors
     /// [`ConfigError::Layers`] when the counts differ.
-    pub fn check_layers(&self, _manifest: usize) -> Result<(), ConfigError> {
-        Ok(())
+    pub fn check_layers(&self, manifest: usize) -> Result<(), ConfigError> {
+        if self.layers == manifest {
+            Ok(())
+        } else {
+            Err(ConfigError::Layers {
+                config: self.layers,
+                manifest,
+            })
+        }
     }
 
     /// Sets the program, environment and working directory of `spec` from the image and
@@ -104,15 +134,26 @@ impl ImageConfig {
     ///
     /// # Errors
     /// [`ConfigError::NoCommand`] when nothing names a program.
-    pub fn apply(&self, _args: &[String], _spec: &mut ContainerSpec) -> Result<(), ConfigError> {
-        Err(ConfigError::NoCommand)
+    pub fn apply(&self, args: &[String], spec: &mut ContainerSpec) -> Result<(), ConfigError> {
+        let tail = if args.is_empty() {
+            self.cmd.as_slice()
+        } else {
+            args
+        };
+        let argv: Vec<String> = self.entrypoint.iter().chain(tail).cloned().collect();
+        if argv.is_empty() {
+            return Err(ConfigError::NoCommand);
+        }
+        spec.argv = argv;
+        spec.env.clone_from(&self.env);
+        spec.working_directory.clone_from(&self.working_directory);
+        Ok(())
     }
 }
 
 /// `dir`, an absolute directory of the image, as a path relative to its root: no empty or
 /// `.` parts, and no `..`.
 fn relative(dir: &str) -> Result<String, ConfigError> {
-    let _ = dir;
     let parts: Vec<&str> = dir
         .split('/')
         .filter(|part| !matches!(*part, "" | "."))

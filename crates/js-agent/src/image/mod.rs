@@ -11,13 +11,10 @@
 //!   the manifest's layers;
 //! - `ENTRYPOINT`, `CMD`, `ENV` and `WORKDIR` become the command, environment and working
 //!   directory of the container ([`ImageConfig::apply`]), as a container engine
-//!   gives them: the run's arguments follow the entrypoint, or replace the `CMD` of an
-//!   image with none;
+//!   gives them: the run's arguments follow the entrypoint and replace the image's `CMD`;
 //! - the image's `USER` is not read. A job runs as the id its runtime gives it (the slot's
 //!   user; js-contain runs every job as one fixed unprivileged id), whatever user the
 //!   image names, so an image cannot choose to run as root or as another job's id.
-
-#![allow(dead_code)]
 
 mod config;
 mod source;
