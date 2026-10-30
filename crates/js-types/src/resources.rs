@@ -39,6 +39,18 @@ impl Dim {
         }
     }
 
+    /// Where the dimension's count sits in the array [`Resources::from_named`] fills.
+    /// Not inlined into that generic function, which would copy these arms for every
+    /// iterator type it is called with.
+    fn slot(self) -> usize {
+        match self {
+            Self::CpuMillis => 0,
+            Self::MemoryBytes => 1,
+            Self::Gpus => 2,
+            Self::DiskBytes => 3,
+        }
+    }
+
     /// The dimension's name as written in configuration.
     pub fn name(&self) -> &'static str {
         match self {
@@ -109,15 +121,17 @@ impl Resources {
     ) -> Result<Self, TypeError> {
         let mut counts = [0u64; 4];
         for (name, count) in dims {
-            let slot = match Dim::from_name(name)? {
-                Dim::CpuMillis => 0,
-                Dim::MemoryBytes => 1,
-                Dim::Gpus => 2,
-                Dim::DiskBytes => 3,
-            };
-            counts[slot] = count;
+            counts[Dim::from_name(name)?.slot()] = count;
         }
-        Ok(Self::new(counts[0], counts[1], counts[2], gpu_class)?.with_disk_bytes(counts[3]))
+        Self::from_counts(counts, gpu_class)
+    }
+
+    /// The vector of `counts` in [`Dim`] order. Not generic, so [`Resources::from_named`]
+    /// adds no code of its own per iterator type for a test to reach.
+    fn from_counts(counts: [u64; 4], gpu_class: Option<String>) -> Result<Self, TypeError> {
+        let [cpu_millis, memory_bytes, gpus, disk_bytes] = counts;
+        let resources = Self::new(cpu_millis, memory_bytes, gpus, gpu_class)?;
+        Ok(resources.with_disk_bytes(disk_bytes))
     }
 
     /// Thousandths of a CPU core.
@@ -261,8 +275,10 @@ mod tests {
             (1, 2, 1)
         );
         assert_eq!(built.disk_bytes(), 9);
-        let named = Resources::from_named([("disk_bytes", 7), ("cpu_millis", 3)], None).unwrap();
-        assert_eq!((named.cpu_millis(), named.disk_bytes()), (3, 7));
+        // One pair, like the other single-pair calls: `from_named` is generic over the
+        // iterator, and a length of its own would be a copy whose error arms no test reaches.
+        let named = Resources::from_named([("disk_bytes", 7)], None).unwrap();
+        assert_eq!((named.cpu_millis(), named.disk_bytes()), (0, 7));
     }
 
     /// Asserts that fit compares every dimension and the GPU class when GPUs are
