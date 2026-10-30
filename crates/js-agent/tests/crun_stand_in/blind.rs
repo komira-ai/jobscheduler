@@ -7,8 +7,8 @@ use std::os::unix::fs::PermissionsExt as _;
 
 use js_agent::lifecycle::taint::reason;
 use js_agent::lifecycle::{
-    Capacity, CheckFinding, CheckHook, Clock, Config, Finished, Lifecycle, MountRoots, ScratchRoot,
-    StateRoot, code,
+    Capacity, CheckFinding, CheckHook, Clock, Config, Finished, Lifecycle, MountRoots, Prepared,
+    Runtime, ScratchRoot, StateRoot, code,
 };
 use js_agent_wire::{Command, HeartbeatReply, Isolation, JobSpec, Limits, Taint};
 
@@ -87,27 +87,29 @@ fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
         bundle: None,
         quota: None,
     };
-    let (mut life, _) = Lifecycle::adopt(
-        config,
-        Box::new(node.open()),
-        Box::new(Pass),
-        Box::new(Still),
-    )
-    .expect("adopts");
+    // The image is fetched and unpacked before the lifecycle asks, so that its start does
+    // not wait on a pull running in the background.
+    let mut runtime = node.open();
+    let _ = runtime.prepare(&node.image(), None);
+    assert_eq!(runtime.wait_prepared(&node.image()), Prepared::Ready);
+    let (mut life, _) =
+        Lifecycle::adopt(config, Box::new(runtime), Box::new(Pass), Box::new(Still))
+            .expect("adopts");
     let start = |spec| HeartbeatReply {
         commands: vec![Command::Start(Box::new(spec))],
         ..HeartbeatReply::default()
     };
-    life.apply(&start(job(&node, "r1-hold")));
+    let started = life.apply(&start(job(&node, "r1-hold")));
     assert!(!life.is_tainted(), "the start alone says nothing");
-    life.step();
+    let stepped = life.step();
     assert_eq!(
         life.pending_taint(),
         Some(Taint {
             reason: reason::UNCHECKED.to_owned(),
             run_id: Some("r1-hold".to_owned()),
             check: Some(code::HOST_NOT_VISIBLE.to_owned()),
-        })
+        }),
+        "start: {started:?}; step: {stepped:?}"
     );
     life.apply(&HeartbeatReply {
         commands: vec![Command::Stop {
