@@ -56,6 +56,11 @@ struct State {
     hold_creates: bool,
     /// `list_labelled` waits while this is set.
     hold_lists: bool,
+    /// The host view's process listing (the first thing a post-job check reads) waits while
+    /// this is set.
+    hold_checks: bool,
+    /// How many process listings have begun, counted again from zero by [`World::hold_checks`].
+    checking: u32,
     /// How many `create_and_start` calls have begun.
     entered: u32,
     /// The calls, in order: `create r1`, `stop r1`, `remove r1`, `list`.
@@ -140,11 +145,20 @@ impl World {
         self.lock().hold_lists = true;
     }
 
-    /// Lets the held `create_and_start` and `list_labelled` calls go on.
+    /// From now on a post-job check waits, before it reads anything, for
+    /// [`World::release`]; [`World::wait_checking`] counts the checks that began from here.
+    pub fn hold_checks(&self) {
+        let mut state = self.lock();
+        state.hold_checks = true;
+        state.checking = 0;
+    }
+
+    /// Lets the held `create_and_start`, `list_labelled` and check calls go on.
     pub fn release(&self) {
         let mut state = self.lock();
         state.hold_creates = false;
         state.hold_lists = false;
+        state.hold_checks = false;
         drop(state);
         self.0.changed.notify_all();
     }
@@ -161,6 +175,41 @@ impl World {
             !waited.1.timed_out(),
             "the worker never reached the runtime"
         );
+    }
+
+    /// Waits until `n` post-job checks have begun since [`World::hold_checks`].
+    pub fn wait_checking(&self, n: u32) {
+        let state = self.lock();
+        let waited = self
+            .0
+            .changed
+            .wait_timeout_while(state, HANG_GUARD, |state| state.checking < n)
+            .unwrap_or_else(PoisonError::into_inner);
+        assert!(!waited.1.timed_out(), "the worker never began a check");
+    }
+
+    /// How many post-job checks have begun in this world (the agent's start takes a baseline
+    /// of the host, which counts as one), or since [`World::hold_checks`].
+    pub fn checked(&self) -> u32 {
+        self.lock().checking
+    }
+
+    /// A check begins: counted, and held while [`World::hold_checks`] is set.
+    fn begin_check(&self) {
+        let mut state = self.lock();
+        state.checking += 1;
+        self.0.changed.notify_all();
+        while state.hold_checks {
+            let (held, waited) = self
+                .0
+                .changed
+                .wait_timeout(state, HANG_GUARD)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = held;
+            if waited.timed_out() {
+                break;
+            }
+        }
     }
 
     /// The runtime of the agent `host_id` on this world: it labels what it makes with the
@@ -457,15 +506,17 @@ impl Machine for FakeMachine {
         if self.build == Build::HostNotSeen {
             host.move_to_namespace("self", "pid", "pid:[4026539999]");
         }
-        Box::new(AnyDirectory(host))
+        Box::new(AnyDirectory(host, self.world.clone()))
     }
 }
 
-/// A quiet host whose every watched directory exists and never changes.
-struct AnyDirectory(FakeHost);
+/// A quiet host whose every watched directory exists and never changes. Its process listing
+/// can be held by the test (see [`World::hold_checks`]).
+struct AnyDirectory(FakeHost, World);
 
 impl HostView for AnyDirectory {
     fn processes(&self) -> Result<Vec<Process>, String> {
+        self.1.begin_check();
         self.0.processes()
     }
 

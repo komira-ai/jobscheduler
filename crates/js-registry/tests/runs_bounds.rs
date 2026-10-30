@@ -252,6 +252,7 @@ fn a_stopped_run_with_a_result_reads_exited() {
         outcome: Outcome::Killed,
         exit_code: None,
         detail: None,
+        log_tail: None,
     }];
     let reply = fx.registry.heartbeat(&message, &cred("t")).unwrap();
     assert_eq!(reply.result_acks[0].ack, Ack::Accepted);
@@ -316,6 +317,7 @@ fn a_tainted_hosts_live_runs_finish_and_are_acknowledged() {
         outcome: Outcome::Killed,
         exit_code: None,
         detail: None,
+        log_tail: None,
     }];
     let reply = fx.registry.heartbeat(&message, &cred("t")).unwrap();
     assert_eq!(reply.result_acks[0].ack, Ack::Accepted);
@@ -340,6 +342,7 @@ fn a_start_refused_as_host_tainted_taints_the_host() {
         outcome,
         exit_code: None,
         detail: Some(detail.into()),
+        log_tail: None,
     };
     let both = [
         held("r1", HeldState::ExitedUnacked),
