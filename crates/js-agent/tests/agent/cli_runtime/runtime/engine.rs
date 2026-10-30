@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_agent::cli_runtime::{CliRuntime, hand_over, unix_ms};
-use js_agent::lifecycle::ContainerRuntime;
+use js_agent::lifecycle::Runtime;
 
 use super::super::scripted::{Env, Scripted};
 use super::super::{BIN, docker, open, open_with, settings, spec};

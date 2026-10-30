@@ -19,7 +19,7 @@ use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 
 use super::{CliError, CliRuntime, Engine, check, engine_env};
 use crate::facts::Streams;
-use crate::lifecycle::ContainerId;
+use crate::lifecycle::RunHandle;
 
 /// The size, in bytes, at which the engine rotates a container's log. Both engines read a
 /// plain number of bytes; this is 1 MiB, far above what a tail holds.
@@ -105,7 +105,7 @@ impl CliRuntime {
     }
 
     /// The tail of the log of the container `id`, which has exited and is not removed yet.
-    pub(super) fn read_logs(&self, id: &ContainerId) -> Result<Option<LogTail>, CliError> {
+    pub(super) fn read_logs(&self, id: &RunHandle) -> Result<Option<LogTail>, CliError> {
         check(id)?;
         let args = ["logs", "--", &id.0];
         let streams = self

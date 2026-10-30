@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckFinding, CheckHook, Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Finished,
-    Found, RuntimeError, Status, label,
+    CheckFinding, CheckHook, Clock, Exit, Finished, Found, RunHandle, RunSpec, Runtime,
+    RuntimeError, Status, label,
 };
 use js_agent_wire::LogTail;
 
@@ -28,6 +28,9 @@ impl Clock for ManualClock {
         self.0.get()
     }
 }
+
+/// Says whether a scratch directory has its quota.
+type QuotaWatch = Box<dyn Fn(&Path) -> bool>;
 
 /// The calls the tests compare in order, shared by the runtime and the check hook.
 pub type Log = Rc<RefCell<Vec<String>>>;
@@ -51,7 +54,7 @@ struct State {
     /// Milliseconds a `create_and_start` takes on the test's clock.
     create_takes_ms: u64,
     stops: Vec<(String, Duration)>,
-    creates: Vec<ContainerSpec>,
+    creates: Vec<RunSpec>,
     /// When set, the log notes whether this file exists at each call.
     marker: Option<PathBuf>,
     /// Whether the next create fails as a start that shows the host is not seen.
@@ -62,6 +65,9 @@ struct State {
     cgroups: BTreeMap<String, PathBuf>,
     /// How many times the scripted checks were told the host is idle.
     idles: u32,
+    /// When set, the log notes at every create whether this says the scratch directory has
+    /// its quota (see [`FakeRuntime::watch_quota`]).
+    quota_applied: Option<QuotaWatch>,
 }
 
 /// A runtime whose containers exit when a test says so, whose calls fail when a test
@@ -126,6 +132,13 @@ impl FakeRuntime {
     /// exists at that moment.
     pub fn watch_marker(&self, marker: PathBuf) {
         self.state.borrow_mut().marker = Some(marker);
+    }
+
+    /// From now on the log notes, on every create, whether `applied` says the container's
+    /// scratch directory already has its quota: the real runtime gives that directory to the
+    /// slot's user in the create, so a quota set later would come after the chown.
+    pub fn watch_quota(&self, applied: impl Fn(&Path) -> bool + 'static) {
+        self.state.borrow_mut().quota_applied = Some(Box::new(applied));
     }
 
     /// The note for the log: nothing when no marker is watched.
@@ -216,7 +229,7 @@ impl FakeRuntime {
     }
 
     /// Every container created, in order.
-    pub fn created(&self) -> Vec<ContainerSpec> {
+    pub fn created(&self) -> Vec<RunSpec> {
         self.state.borrow().creates.clone()
     }
 
@@ -243,11 +256,18 @@ impl FakeRuntime {
     }
 }
 
-impl ContainerRuntime for FakeRuntime {
-    fn create_and_start(&mut self, spec: &ContainerSpec) -> Result<ContainerId, RuntimeError> {
-        self.log
-            .borrow_mut()
-            .push(format!("create {}{}", spec.run_id, self.marker_note()));
+impl Runtime for FakeRuntime {
+    fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
+        let quota = match &self.state.borrow().quota_applied {
+            None => "",
+            Some(applied) if applied(&spec.scratch) => " [quota set]",
+            Some(_) => " [no quota]",
+        };
+        self.log.borrow_mut().push(format!(
+            "create {}{}{quota}",
+            spec.run_id,
+            self.marker_note()
+        ));
         self.clock.advance(self.state.borrow().create_takes_ms);
         if self.fails("create") {
             return Err(err("create"));
@@ -271,10 +291,10 @@ impl ContainerRuntime for FakeRuntime {
                 exit: None,
             },
         );
-        Ok(ContainerId(id))
+        Ok(RunHandle(id))
     }
 
-    fn poll(&mut self, id: &ContainerId) -> Result<Status, RuntimeError> {
+    fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
         if self.fails("poll") {
             return Err(err("poll"));
         }
@@ -285,7 +305,7 @@ impl ContainerRuntime for FakeRuntime {
         })
     }
 
-    fn stop(&mut self, id: &ContainerId, grace: Duration) -> Result<(), RuntimeError> {
+    fn stop(&mut self, id: &RunHandle, grace: Duration) -> Result<(), RuntimeError> {
         self.log.borrow_mut().push(format!("stop {}", id.0));
         if self.fails("stop") {
             return Err(err("stop"));
@@ -305,7 +325,7 @@ impl ContainerRuntime for FakeRuntime {
         Ok(())
     }
 
-    fn log_tail(&mut self, id: &ContainerId) -> Result<Option<LogTail>, RuntimeError> {
+    fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
         let tail = {
             let state = self.state.borrow();
             let run = state.containers.get(&id.0).map(|c| c.run_id.clone());
@@ -321,7 +341,7 @@ impl ContainerRuntime for FakeRuntime {
         }
     }
 
-    fn remove(&mut self, id: &ContainerId) -> Result<(), RuntimeError> {
+    fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         let scratch = self
             .state
             .borrow()
@@ -342,7 +362,7 @@ impl ContainerRuntime for FakeRuntime {
         Ok(())
     }
 
-    fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
+    fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         let state = self.state.borrow();
         let run = &state.containers.get(&id.0)?.run_id;
         state.cgroups.get(run).cloned()
@@ -357,7 +377,7 @@ impl ContainerRuntime for FakeRuntime {
             .containers
             .iter()
             .map(|(id, c)| Found {
-                id: ContainerId(id.clone()),
+                id: RunHandle(id.clone()),
                 labels: c.labels.clone(),
                 running_ms: c.running_ms,
                 never_started: false,
