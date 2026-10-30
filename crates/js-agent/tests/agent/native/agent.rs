@@ -479,8 +479,12 @@ fn the_system_machine_gives_the_store_to_the_native_runtime() {
         network: None,
         tool_roots: &[],
         deny_read: &[],
+        max_file_mib: None,
+        max_processes: None,
     };
-    let plain = NativeSettings::from_flags(&flags, &[]).unwrap().unwrap();
+    let plain = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
+        .unwrap()
+        .unwrap();
     let plain = plain.with_sandbox_exec(Path::new("/usr/bin/true"));
     let stored = plain
         .clone()
