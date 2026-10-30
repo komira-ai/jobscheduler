@@ -57,7 +57,7 @@ const FLOOR_CPU_MILLIS: u64 = 1000;
 /// The memory a host of an elastic pool must report at least: 1 GiB.
 const FLOOR_MEMORY_BYTES: u64 = 1 << 30;
 
-const ROOT_KEYS: &[&str] = &["server", "budget", "pool"];
+const ROOT_KEYS: &[&str] = &["server", "pool", "budget"];
 
 const POOL_KEYS: &[&str] = &[
     "name",

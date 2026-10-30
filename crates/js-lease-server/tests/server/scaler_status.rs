@@ -211,6 +211,7 @@ async fn a_launch_the_server_total_refuses_shows_max_spend_total() {
         1,
     );
     let h = start(scratch, &source).await;
+    h.ticks.step().await;
     for (lease, id) in [(1, "r1"), (2, "r2")] {
         h.running
             .registry()
