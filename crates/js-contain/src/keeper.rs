@@ -68,8 +68,12 @@ impl Keeper {
     /// [`Keeper::watch`] for a root daemon: with `job` (from
     /// [`Oci::job_drop`](crate::Oci::job_drop)) the keeper runs as the job user, dropped as
     /// every `crun` is (`setgroups([])`, the gid, the uid, from `/`, with an environment of
-    /// `PATH` and `HOME=/` only). It then needs write access to the lease cgroup's
-    /// `cgroup.kill`: [`LeaseCgroup::give`](crate::cgroup::LeaseCgroup::give) hands it over.
+    /// `PATH` and `HOME=/` only). It then needs write access to the `kill` file, which
+    /// this crate never gives it: a caller that starts a keeper this way hands over that one
+    /// file (`cgroup.kill` of the lease's cgroup, by descriptor, as the agent's runtime hands
+    /// over the files of [`JOB_OWNED_FILES`](crate::cgroup::JOB_OWNED_FILES), which leave it
+    /// out on purpose). The agent's `CrunRuntime` starts no keeper: the agent writes the
+    /// lease's `cgroup.kill` itself.
     ///
     /// # Errors
     /// As [`Keeper::watch`], and the drop failing in the child.

@@ -23,9 +23,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use js_contain::cgroup::LeaseCgroup;
+use js_contain::cgroup::JOB_OWNED_FILES;
 use js_contain::container::{ACTION_ID, ContainerLimits, ContainerSpec, Ended};
-use js_contain::delegate::{Delegation, Mount, give_delegation};
 use js_contain::keeper::{Keeper, KeeperLauncher};
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
 use js_contain::oci::{Oci, OciConfig, OciError, stderr_path, stdout_path};
@@ -97,20 +96,24 @@ fn config(job: (u32, u32), runtime: &Path) -> OciConfig {
     }
 }
 
-/// Hands the cgroup `parent` (the daemon's delegated cgroup and the one the leases are made
-/// in, here the same) and its lease cgroup `lease` to the job user, with the code a root
-/// daemon runs for it.
+/// Lets the job user manage the cgroup `parent` (the daemon's delegated cgroup and the one
+/// the leases are made in, here the same) and its lease cgroup `lease`, as the agent's
+/// runtime does: the files of [`JOB_OWNED_FILES`] and nothing else, so not `cgroup.kill`. The
+/// hand-over is done directly here, as a root test can; `CrunRuntime` does it by descriptor.
 fn give_cgroups(parent: &str, lease: &str, job: (u32, u32)) {
-    let fs = Mount(Path::new(CGROUP_MOUNT));
-    let delegation = Delegation {
-        root: parent.to_owned(),
-        actions: parent.to_owned(),
-        memory_min_capped: None,
-    };
-    give_delegation(&fs, &delegation, job).unwrap();
-    LeaseCgroup::at(Path::new(CGROUP_MOUNT), parent, lease)
-        .give(&fs, job)
-        .unwrap();
+    for dir in [
+        format!("{CGROUP_MOUNT}{parent}"),
+        format!("{CGROUP_MOUNT}{parent}/{lease}"),
+    ] {
+        for file in JOB_OWNED_FILES {
+            let path = if file.is_empty() {
+                PathBuf::from(&dir)
+            } else {
+                Path::new(&dir).join(file)
+            };
+            lchown(&path, Some(job.0), Some(job.1)).unwrap();
+        }
+    }
 }
 
 /// What one container run under the root daemon left.
@@ -567,87 +570,4 @@ fn the_keeper_of_a_root_daemon_runs_as_the_job_user_with_a_clean_environment() {
     let said = fs::read_to_string(&plain.out).unwrap();
     assert!(said.starts_with("Uid: 0 0 0 0\n"), "{said}");
     assert!(said.contains("sentinel the daemon's environment"), "{said}");
-}
-
-/// The hand-over of the delegated cgroups on the real cgroup filesystem: the daemon's own
-/// cgroup gives only `cgroup.procs` to the job user, the lease-making cgroup and the lease
-/// cgroup give the directory, the files a process is moved with, and the lease's
-/// `cgroup.kill`. The supervisor leaf and the other files stay root's.
-#[test]
-#[ignore = "needs root and a job user: see the module docs"]
-fn delegating_to_the_job_user_changes_the_owner_of_the_real_cgroup_files() {
-    let (uid, gid) = job_user();
-    let root = PathBuf::from(format!("{CGROUP_MOUNT}/js-b-give-{}", std::process::id()));
-    let (actions, supervisor, lease) = (
-        root.join("actions"),
-        root.join("supervisor"),
-        root.join("actions/lease1"),
-    );
-    for dir in [&root, &actions, &supervisor, &lease] {
-        fs::create_dir(dir).unwrap();
-    }
-    let name = |dir: &Path| {
-        dir.strip_prefix(CGROUP_MOUNT)
-            .map(|p| format!("/{}", p.display()))
-            .unwrap()
-    };
-    let fs_ = Mount(Path::new(CGROUP_MOUNT));
-    let delegation = Delegation {
-        root: name(&root),
-        actions: name(&actions),
-        memory_min_capped: None,
-    };
-    give_delegation(&fs_, &delegation, (uid, gid)).unwrap();
-    LeaseCgroup::at(Path::new(CGROUP_MOUNT), &name(&actions), "lease1")
-        .give(&fs_, (uid, gid))
-        .unwrap();
-    let owner = |path: PathBuf| {
-        let meta = fs::symlink_metadata(&path).unwrap();
-        (path, meta.uid(), meta.gid())
-    };
-    let job = |dir: &Path, file: &str| (dir.join(file), uid, gid);
-    let root_owned = |dir: &Path, file: &str| (dir.join(file), 0, 0);
-    let got: Vec<_> = [
-        root.join("cgroup.procs"),
-        root.join("cgroup.threads"),
-        root.clone(),
-        actions.clone(),
-        actions.join("cgroup.procs"),
-        actions.join("cgroup.threads"),
-        actions.join("cgroup.subtree_control"),
-        actions.join("cgroup.kill"),
-        supervisor.clone(),
-        supervisor.join("cgroup.procs"),
-        lease.clone(),
-        lease.join("cgroup.procs"),
-        lease.join("cgroup.threads"),
-        lease.join("cgroup.subtree_control"),
-        lease.join("cgroup.kill"),
-        lease.join("cgroup.type"),
-    ]
-    .into_iter()
-    .map(owner)
-    .collect();
-    let expected = [
-        job(&root, "cgroup.procs"),
-        root_owned(&root, "cgroup.threads"),
-        root_owned(&root, ""),
-        job(&actions, ""),
-        job(&actions, "cgroup.procs"),
-        job(&actions, "cgroup.threads"),
-        job(&actions, "cgroup.subtree_control"),
-        root_owned(&actions, "cgroup.kill"),
-        root_owned(&supervisor, ""),
-        root_owned(&supervisor, "cgroup.procs"),
-        job(&lease, ""),
-        job(&lease, "cgroup.procs"),
-        job(&lease, "cgroup.threads"),
-        job(&lease, "cgroup.subtree_control"),
-        job(&lease, "cgroup.kill"),
-        root_owned(&lease, "cgroup.type"),
-    ];
-    for dir in [&lease, &actions, &supervisor, &root] {
-        let _ = fs::remove_dir(dir);
-    }
-    assert_eq!(got, expected);
 }

@@ -271,17 +271,6 @@ pub const JOB_OWNED_FILES: [&str; 4] = [
 /// only with write access to the `cgroup.procs` of their nearest common ancestor.
 pub const ROOT_OWNED_FILES: [&str; 1] = ["cgroup.procs"];
 
-/// The files of a lease's cgroup the job user is given: [`JOB_OWNED_FILES`], and
-/// `cgroup.kill`, which the lease's keeper (a process of the job user) writes when the
-/// daemon dies.
-pub const LEASE_OWNED_FILES: [&str; 5] = [
-    "",
-    "cgroup.procs",
-    "cgroup.threads",
-    "cgroup.subtree_control",
-    "cgroup.kill",
-];
-
 /// One lease's cgroup.
 #[derive(Debug)]
 pub struct LeaseCgroup {
@@ -453,20 +442,6 @@ impl LeaseCgroup {
                 )))
             }
         })
-    }
-
-    /// Hands the lease's cgroup to the job user `job` through `fs` ([`LEASE_OWNED_FILES`]):
-    /// the directory, so `crun` makes the container's cgroup in it, the files a process is
-    /// moved with, and `cgroup.kill` for the keeper. Call it once the cgroup is created.
-    ///
-    /// # Errors
-    /// A file could not be given; the error names it.
-    pub fn give(
-        &self,
-        fs: &dyn crate::delegate::CgroupFs,
-        job: (u32, u32),
-    ) -> Result<(), crate::delegate::DelegateError> {
-        crate::delegate::give_files(fs, &self.name, &LEASE_OWNED_FILES, job)
     }
 
     /// Kills every process in the cgroup (`cgroup.kill`).

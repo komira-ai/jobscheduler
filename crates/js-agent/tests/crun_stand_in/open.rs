@@ -22,17 +22,22 @@ fn why(result: Result<CrunRuntime, CrunError>) -> String {
 #[test]
 fn opening_gives_the_job_user_only_the_cgroup_file_crun_moves_processes_with() {
     let node = Node::new("open-gives");
+    // The files a cgroup has and a directory made for a test has not.
+    let helpers = node.cgroups.join("actions/helpers");
+    std::fs::create_dir(&helpers).expect("a cgroup");
+    for file in ["cgroup.procs", "cgroup.threads"] {
+        std::fs::write(helpers.join(file), b"").expect("a cgroup file");
+    }
     let opened = CrunRuntime::open(node.settings("/root"), Arc::new(NoImages)).expect("opens");
     assert!(format!("{opened:?}").contains("node-1"));
     drop(opened);
     node.open();
-    let helpers = node.cgroups.join("actions/helpers");
     let (uid, gid) = (node.uid, node.gid);
     assert_eq!(
         given(&node.dir),
         [
             (node.cgroups.join("root/cgroup.procs"), uid, gid),
-            (helpers.join(""), uid, gid),
+            (helpers.clone(), uid, gid),
             (helpers.join("cgroup.procs"), uid, gid),
             (helpers.join("cgroup.threads"), uid, gid),
             (helpers.join("cgroup.subtree_control"), uid, gid),

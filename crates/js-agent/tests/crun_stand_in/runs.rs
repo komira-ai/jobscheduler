@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
 
-use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status, label};
+use js_agent::lifecycle::{Body, Exit, Prepared, RunHandle, RunSpec, Runtime, Status, label};
 use js_agent_wire::Isolation;
 use js_agent_wire::RunFile;
 use serde_json::{Value, json};
@@ -94,7 +94,7 @@ fn a_run_is_made_started_read_and_removed() {
             own(lease.join("rw"), job),
             own(lease.join("rw/home"), job_id),
             own(spec.scratch.clone(), job_id),
-            own(cgroup.join(""), job),
+            own(cgroup.clone(), job),
             own(cgroup.join("cgroup.procs"), job),
             own(cgroup.join("cgroup.threads"), job),
             own(cgroup.join("cgroup.subtree_control"), job),
@@ -184,7 +184,7 @@ fn a_container_that_did_not_run_exits_126() {
 /// Proves each start the runtime cannot make is refused with its reason and creates nothing:
 /// a host job, a GPU, an image that is not pinned, a run id that cannot name a container,
 /// one that has a container, run files where there is no files directory, an image the
-/// store lacks and cannot fetch, an image with no kept config, and a hand-over that fails
+/// store lacks and cannot fetch, an image with no kept config that cannot be fetched again, and a hand-over that fails
 /// (the scratch directory), which also removes the lease directory it made. Catches a
 /// refusal that leaves a directory or a listing behind.
 #[test]
@@ -219,7 +219,15 @@ fn a_start_the_runtime_cannot_make_is_refused_and_leaves_nothing() {
             .join("rootfs"),
     )
     .expect("an image without a config");
-    assert!(refused("c1", &named(&other)).contains("cannot be read"));
+    // An image with no kept config is fetched again, which this source cannot do.
+    assert!(refused("c1", &named(&other)).contains("no registry in this test"));
+    assert!(
+        !node
+            .scratch
+            .join("oci-images")
+            .join("cd".repeat(32))
+            .exists()
+    );
     let elsewhere = node.dir.join("refuse-scratch");
     std::fs::create_dir_all(&elsewhere).expect("scratch");
     let why = refused("s1-exit", &|s| s.scratch = elsewhere.clone());
@@ -390,19 +398,34 @@ fn an_image_in_the_store_with_no_config_is_fetched_again_to_get_one() {
         fetched: std::sync::atomic::AtomicUsize::new(0),
     });
     let mut runtime = node.open_with(Node::hooks(LONG, LONG), source.clone());
-    let mut spec = node.spec("r1-exit");
-    spec.body = Body::Container {
-        image: format!("registry.example/job@{digest}"),
-        args: vec!["--go".to_owned()],
+    let image = format!("registry.example/job@{digest}");
+    let fetched = || source.fetched.load(std::sync::atomic::Ordering::SeqCst);
+    let run = |runtime: &mut js_agent::crun::CrunRuntime, name: &str| {
+        let mut spec = node.spec(name);
+        spec.body = Body::Container {
+            image: image.clone(),
+            args: vec!["--go".to_owned()],
+        };
+        let id = runtime.create_and_start(&spec).expect("started");
+        runtime.wait_ended(&id);
+        runtime.remove(&id).expect("removed");
     };
-    let id = runtime.create_and_start(&spec).expect("started");
-    assert_eq!(source.fetched.load(std::sync::atomic::Ordering::SeqCst), 1);
-    runtime.wait_ended(&id);
-    runtime.remove(&id).expect("removed");
-    let again = runtime
-        .create_and_start(&node.spec("r2-exit"))
-        .expect("started");
-    assert_eq!(source.fetched.load(std::sync::atomic::Ordering::SeqCst), 1);
-    runtime.wait_ended(&again);
-    runtime.remove(&again).expect("removed");
+    assert_eq!(runtime.wait_prepared(&image), Prepared::Ready);
+    run(&mut runtime, "r1-exit");
+    assert_eq!(fetched(), 1);
+    // The image was taken out of the store, so what was known of its pull was dropped: the
+    // next call pulls it again.
+    assert!(matches!(
+        runtime.prepare(&image, None),
+        Prepared::Pending(_)
+    ));
+    assert_eq!(runtime.wait_prepared(&image), Prepared::Ready);
+    // With its config kept, the image runs without being fetched again.
+    run(&mut runtime, "r2-exit");
+    assert_eq!(fetched(), 1);
+    // The config lost again, in the daemon that fetched the image: fetched once more.
+    let kept = js_agent::image::config_path(&js_agent::crun::config_dir(&node.scratch), &digest);
+    std::fs::remove_file(kept).expect("lose the config");
+    run(&mut runtime, "r3-exit");
+    assert_eq!(fetched(), 2);
 }

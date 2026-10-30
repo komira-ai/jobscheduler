@@ -620,6 +620,10 @@ pub struct Local {
     pub drain_wait: Duration,
     /// The `--image-allow` flags, in the order given: where an image may be pulled from.
     pub image_allow: Vec<Allow>,
+    /// The `--egress*` flags: how much network a `crun` container gets. Mode none unless an
+    /// allow-list was given, which this build refuses until the `crun` runtime can be
+    /// selected (see [`crate::egress`]).
+    pub egress: crate::egress::Config,
 }
 
 /// How long a container gets to stop on its own when `--stop-grace` is not given.
@@ -671,6 +675,7 @@ impl Local {
                     .to_owned(),
             );
         }
+        let egress = egress_of(cli)?;
         let mounts = MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;
         let scratch = cli
             .scratch_root
@@ -796,8 +801,42 @@ impl Local {
             stop_grace,
             drain_wait,
             image_allow: image_allow(&cli.image_allow)?,
+            egress,
         })
     }
+}
+
+/// The `--egress*` flags, checked. There is one network mode: the Podman runtime's own
+/// network flags (`--container-network`) cannot be given with this one, and only the `crun`
+/// runtime enforces an allow-list, which cannot be selected yet, so an allow-list is
+/// refused here rather than silently run with no network at all or with the wrong one.
+fn egress_of(cli: &Cli) -> Result<crate::egress::Config, String> {
+    use crate::egress::{Config, Flags, Mode};
+    let config = Config::from_flags(&Flags {
+        mode: cli.egress.as_deref(),
+        allow: &cli.egress_allow,
+        dns: &cli.egress_dns,
+        pool: cli.egress_pool.as_deref(),
+        ip: cli.egress_ip.as_deref(),
+        nft: cli.egress_nft.as_deref(),
+        nsenter: cli.egress_nsenter.as_deref(),
+    })
+    .map_err(|why| why.to_string())?;
+    if config.mode() != Mode::None && cli.container_network.is_some() {
+        return Err(
+            "--egress and --container-network: --egress is the crun runtime's network and \
+             --container-network the Podman runtime's; give only one"
+                .to_owned(),
+        );
+    }
+    if config.mode() != Mode::None {
+        return Err(format!(
+            "--egress {}: only the crun runtime enforces it, and this build cannot select \
+             that runtime yet; with --container-bin the network is --container-network",
+            config.mode()
+        ));
+    }
+    Ok(config)
 }
 
 /// The `--image-allow` entries, each checked.

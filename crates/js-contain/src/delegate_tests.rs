@@ -43,8 +43,6 @@ struct Fake {
     late: RefCell<Option<(String, u32)>>,
     /// The mount has no cgroup v2 root (`cgroup.controllers`).
     v1_mount: bool,
-    /// `give` calls, as `<cg>/<file>` and the ids: in the order made, also in `log`.
-    owners: RefCell<Vec<(String, (u32, u32))>>,
     /// Reads and writes of `<cg>/<file>` that fail with EACCES, as a file the
     /// daemon's user may not open would.
     denied: Vec<String>,
@@ -282,30 +280,6 @@ impl CgroupFs for Fake {
         if self.nodes.borrow()[cgroup].read_only {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
-        Ok(())
-    }
-
-    fn give(&self, cgroup: &str, file: &str, uid: u32, gid: u32) -> io::Result<()> {
-        self.check_denied(cgroup, file)?;
-        if !self.exists(cgroup) {
-            return Err(io::ErrorKind::NotFound.into());
-        }
-        // The files a cgroup directory has, of those a delegation gives away.
-        let known = [
-            "",
-            "cgroup.procs",
-            "cgroup.threads",
-            "cgroup.subtree_control",
-            "cgroup.kill",
-        ];
-        if !known.contains(&file) {
-            return Err(io::ErrorKind::NotFound.into());
-        }
-        let name = format!("{cgroup}/{file}");
-        self.log
-            .borrow_mut()
-            .push(format!("give {name} {uid}:{gid}"));
-        self.owners.borrow_mut().push((name, (uid, gid)));
         Ok(())
     }
 
@@ -882,91 +856,6 @@ fn an_actions_cgroup_under_the_root_has_the_root_as_its_parent() {
         [
             "mkdir /actions",
             "/actions/cgroup.subtree_control <- +cpuset"
-        ]
-    );
-}
-
-/// The ids of the job user in the tests below.
-const JOB: (u32, u32) = (900, 901);
-
-/// Catches a delegation for a job user that gives the wrong cgroups or files: the unit's
-/// own cgroup gives only `cgroup.procs` (the kernel's rule for moving `crun`'s first process
-/// across, and nothing more of the daemon's cgroup), the `actions` cgroup is given whole
-/// (directory, the files a process is moved and controllers enabled with), the supervisor
-/// leaf stays the daemon's, and everything is given after it exists and has its controllers.
-#[test]
-fn a_delegation_for_a_job_user_gives_the_unit_its_procs_and_actions_its_files() {
-    let fake = Fake::host(UNIT, "cpuset cpu io memory pids", &[41]);
-    let got = delegate_for_job_in(&fake, SELF, MIN, None, JOB).expect("delegated");
-    assert_eq!(got.actions, ACTIONS_CG);
-    let owner = |name: &str| (name.to_owned(), JOB);
-    assert_eq!(
-        *fake.owners.borrow(),
-        [
-            owner(&format!("{UNIT}/cgroup.procs")),
-            owner(&format!("{ACTIONS_CG}/")),
-            owner(&format!("{ACTIONS_CG}/cgroup.procs")),
-            owner(&format!("{ACTIONS_CG}/cgroup.threads")),
-            owner(&format!("{ACTIONS_CG}/cgroup.subtree_control")),
-        ]
-    );
-    let log = fake.log();
-    let first_give = log
-        .iter()
-        .position(|l| l.starts_with("give "))
-        .expect("gave");
-    let enabled = log
-        .iter()
-        .position(|l| *l == format!("{ACTIONS_CG}/cgroup.subtree_control <- +cpu +memory +pids"))
-        .expect("enabled");
-    assert!(first_give > enabled, "{log:?}");
-}
-
-/// Catches a delegation without a job user that hands anything over (a non-root daemon owns
-/// its cgroups already).
-#[test]
-fn a_delegation_without_a_job_user_gives_nothing() {
-    let fake = Fake::host(UNIT, "cpuset cpu io memory pids", &[41]);
-    delegate_in(&fake, SELF, MIN, None).expect("delegated");
-    assert!(fake.owners.borrow().is_empty());
-}
-
-/// Catches a refused hand-over that is swallowed or reported without the file: the error
-/// names the cgroup file and says what was being done.
-#[test]
-fn a_file_that_cannot_be_given_is_an_error_naming_it() {
-    let mut fake = Fake::host(UNIT, "cpuset cpu io memory pids", &[41]);
-    fake.denied.push(format!("{ACTIONS_CG}/cgroup.threads"));
-    let error = delegate_for_job_in(&fake, SELF, MIN, None, JOB).expect_err("denied");
-    let said = error.to_string();
-    assert!(said.starts_with("give to the job user "), "{said}");
-    assert!(said.contains("actions/cgroup.threads"), "{said}");
-}
-
-/// Catches a lease cgroup given without `cgroup.kill` (the keeper, running as the job user,
-/// could not kill the lease when the daemon dies) or without its directory.
-#[test]
-fn a_lease_cgroup_is_given_with_its_directory_and_cgroup_kill() {
-    let fake = Fake::host(UNIT, "cpuset cpu io memory pids", &[]);
-    delegate_in(&fake, SELF, MIN, None).expect("delegated");
-    fake.mkdir(&format!("{ACTIONS_CG}/lease1")).expect("lease");
-    let lease = crate::cgroup::LeaseCgroup::at(Path::new("/sys/fs/cgroup"), ACTIONS_CG, "lease1");
-    lease.give(&fake, JOB).expect("given");
-    let given: Vec<String> = fake
-        .owners
-        .borrow()
-        .iter()
-        .map(|(n, _)| n.clone())
-        .collect();
-    let at = |file: &str| format!("{ACTIONS_CG}/lease1/{file}");
-    assert_eq!(
-        given,
-        [
-            at(""),
-            at("cgroup.procs"),
-            at("cgroup.threads"),
-            at("cgroup.subtree_control"),
-            at("cgroup.kill"),
         ]
     );
 }
