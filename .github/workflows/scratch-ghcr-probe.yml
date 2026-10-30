@@ -1,0 +1,63 @@
+# SCRATCH, do not merge: a one-time probe that a js-bundle layout survives a private GHCR
+# round trip. The pack job builds a tiny bundle; a human pushes it by digest; the pull job
+# (added later) pulls it back with js-oci. Runs only for the pull request of its own branch.
+name: scratch-ghcr-probe
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/scratch-ghcr-probe.yml
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  pack:
+    if: ${{ github.head_ref == 'scratch/ghcr-bundle-probe' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: cargo build -p js-bundle-cli --locked
+      - name: Pack, verify, inspect
+        run: |
+          set -eu
+          bin="$PWD/target/debug/js-bundle"
+          work="$RUNNER_TEMP/probe"
+          mkdir -p "$work/tree"
+          printf 'js-bundle-probe\n' > "$work/tree/hello.txt"
+          cd "$work"
+          "$bin" pack --out layout --name js-bundle-probe --bundle-version 0.0.1 --os-version 14.0 \
+            --tree "probe=$work/tree" --license probe=MIT \
+            --source-url probe=https://github.com/komira-ai/jobscheduler \
+            --annotation org.opencontainers.image.source=https://github.com/komira-ai/jobscheduler
+          "$bin" verify layout --scratch "$work/verify-scratch"
+          "$bin" inspect layout | tee inspect.txt
+          digest=$(sed -n 's/^manifest //p' inspect.txt)
+          hex=${digest#sha256:}
+          echo "manifest-digest: $digest"
+          echo "manifest-media-type: $(jq -r .mediaType "layout/blobs/sha256/$hex")"
+          echo "artifactType: $(jq -r .artifactType "layout/blobs/sha256/$hex")"
+          echo "config-media-type: $(jq -r .config.mediaType "layout/blobs/sha256/$hex")"
+          echo "layer-media-types: $(jq -r '[.layers[].mediaType] | join(" ")' "layout/blobs/sha256/$hex")"
+          echo "annotations: $(jq -c .annotations "layout/blobs/sha256/$hex")"
+          {
+            echo '```'
+            echo "manifest-digest: $digest"
+            jq -r '"manifest-media-type: \(.mediaType)", "artifactType: \(.artifactType)", "config-media-type: \(.config.mediaType)", "layer-media-types: \([.layers[].mediaType] | join(" "))"' "layout/blobs/sha256/$hex"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-bundle-probe-layout
+          path: ${{ runner.temp }}/probe/layout
+          retention-days: 1
+          if-no-files-found: error
