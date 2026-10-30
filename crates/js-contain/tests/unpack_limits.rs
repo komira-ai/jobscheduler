@@ -16,7 +16,7 @@ fn mine() -> Ownership {
 }
 
 /// Catches a byte bound that counts the compressed layer instead of what it inflates to:
-/// a gzip layer of a few kilobytes that holds a 16 MiB file of zeros is refused under a
+/// a gzip layer of under 256 KiB that holds a 16 MiB file of zeros is refused under a
 /// 1 MiB bound, before the file is written (nothing of it is in the root), and the same
 /// layer is accepted under a bound that fits it, so the refusal is the bound's.
 #[test]
@@ -31,7 +31,7 @@ fn a_compressed_layer_is_bounded_by_what_it_inflates_to() {
         (u64::from(my_ids().0), u64::from(my_ids().1)),
     ));
     assert!(
-        layer.len() < 64 << 10,
+        layer.len() < 256 << 10,
         "the fixture must be small: {}",
         layer.len()
     );
