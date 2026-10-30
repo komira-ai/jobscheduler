@@ -165,6 +165,7 @@ mod tests {
             pool: Some("198.18.0.0/16"),
             ip: Some("/usr/bin/true"),
             nft: Some("/usr/bin/true"),
+            ..Flags::default()
         })
         .expect("a sound configuration")
     }
@@ -177,10 +178,7 @@ mod tests {
     #[test]
     fn the_ruleset_holds_each_rule_in_its_place() {
         let text = render(&config());
-        let at = |needle: &str| {
-            text.find(needle)
-                .unwrap_or_else(|| panic!("no {needle:?} in\n{text}"))
-        };
+        let at = |needle: &str| text.find(needle).expect(needle);
         assert!(at("delete table inet js_egress") < at("table inet js_egress {"));
         assert!(at("delete table ip js_egress_nat") < at("table ip js_egress_nat {"));
         let order = [
@@ -229,6 +227,7 @@ mod tests {
                     {"match": {"op": "==", "left": {"meta": {"key": "l4proto"}}, "right": "tcp"}},
                     {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": port}},
                     {"counter": {"packets": packets, "bytes": packets * 60}},
+                    {"counter": {"packets": packets}},
                     {"accept": null}]}},
             ]})
             .to_string()

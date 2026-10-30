@@ -307,6 +307,11 @@ pub struct Cli {
     /// `/usr/sbin/nft`. Needs `--egress allow-list`.
     #[arg(long, value_name = "PATH")]
     pub egress_nft: Option<String>,
+    /// The absolute path of the `nsenter` program the egress setup runs to configure a
+    /// job's network namespace from outside, by default `/usr/bin/nsenter`. Needs
+    /// `--egress allow-list`.
+    #[arg(long, value_name = "PATH")]
+    pub egress_nsenter: Option<String>,
     /// The control group that holds every container the agent starts, as a directory of
     /// the cgroup version 2 file system below `/sys/fs/cgroup` (such as
     /// `/sys/fs/cgroup/jobscheduler.slice`). The operator makes and delegates it. The

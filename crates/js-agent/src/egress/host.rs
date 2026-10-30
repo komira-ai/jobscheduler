@@ -1,50 +1,53 @@
 //! The privileged half of egress: what the agent, as root in the host's initial network
 //! namespace, does for a job's container that was started with a network namespace of its
 //! own. Every call here is made by the agent process (nothing runs as the job user, and
-//! nothing runs in the container), and the programs it starts are the two the operator
-//! configured: `ip` and `nft`.
+//! nothing runs in the container), and the programs it starts are the three the operator
+//! configured: `ip`, `nft` and `nsenter`.
 //!
 //! The container is made by `crun` as the job user, which creates the container's user and
 //! network namespaces together; a network namespace that root made beforehand cannot be
 //! joined by that user (`setns` needs `CAP_SYS_ADMIN` over the namespace's owner), so the
-//! agent wires the namespace after the container is up, from the outside. The container's
-//! init holds the job until the wiring is done (`js-init --wait-route`): the job's first
+//! agent wires the namespace after the container is up, from outside. The container's init
+//! holds the job until the wiring is done (`js-init --wait-route`): the job's first
 //! instruction runs after the last step below, the default route.
 //!
 //! For a run whose container's first process is `pid` ([`Egress::attach`]):
 //!
-//! 1. take a /30 from the pool, and the names `jsvN` (host end) and `jspN` (job end);
-//! 2. in the initial namespace: make the veth pair, turn IPv6 off on the host end, switch
+//! 1. take a /30 of the pool, and the names `jsvN` (host end) and `jspN` (job end);
+//! 2. read the identity of `/proc/<pid>/ns/net` and refuse the host's own;
+//! 3. in the initial namespace: make the veth pair, turn IPv6 off on the host end and
 //!    reverse-path filtering on, address the host end and set it up;
-//! 3. add `jsvN` to the firewall's set of wired interfaces;
-//! 4. move the job end into the container's namespace (through the open
-//!    `/proc/<pid>/ns/net`, not the pid alone), named `eth0`;
-//! 5. in that namespace: turn IPv6 off, address and raise `eth0`, and add the default route
-//!    last.
+//! 4. add `jsvN` to the firewall's set of wired interfaces;
+//! 5. read the identity again (the namespace must be the same one), and move the job end
+//!    into the namespace, named `eth0`;
+//! 6. enter that namespace with `nsenter` and, in one `ip -batch`: raise `lo`, give `eth0` no
+//!    IPv6 link-local address, address and raise it, and add the default route last.
 //!
 //! Releasing a run removes the set member and the host end (which takes the job end with
 //! it); the container's namespace is the kernel's to free when its last process ends, so
 //! nothing of it outlives the run. A restart of the agent starts by removing every `jsv*`
 //! and `jsp*` interface and the two tables, because the keeper kills the containers with
 //! the agent: nothing a previous process wired is in use.
+//!
+//! Everything the agent does to the machine goes through [`Sys`], so the unit tests script
+//! the whole sequence, including a failure at each step, and the tests that need the real
+//! kernel are in `tests/egress`.
 
 use std::collections::BTreeSet;
-use std::fs::File;
 use std::io::Write as _;
-use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
-use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
 use serde_json::Value;
 
 use super::config::{Config, Mode};
 use super::ruleset::{self, IF_PREFIX, IFACE_SET, NAT_TABLE, TABLE};
 
-/// The name of the job's end of a pair before it is moved, and the name every job's
-/// interface has inside its container.
+/// The name of the job's end of a pair before it is moved.
 const PEER_PREFIX: &str = "jsp";
+
+/// The name every job's interface has inside its container.
 const INSIDE_NAME: &str = "eth0";
 
 /// Why egress could not be set up, checked or taken down. The text stays on the host: it
@@ -78,11 +81,62 @@ pub enum EgressError {
     Rules,
 }
 
-fn command(what: impl Into<String>, why: impl std::fmt::Display) -> EgressError {
-    EgressError::Command {
-        what: what.into(),
-        why: why.to_string(),
+/// What the host side does to the machine; the real one is [`System`].
+pub(crate) trait Sys: std::fmt::Debug + Send + Sync {
+    /// Runs `program args`, with `stdin` as its standard input (empty when `None`), and
+    /// returns its standard output; an error is the program's standard error, or why it did
+    /// not run.
+    fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String>;
+    /// Writes `text` to the file `path`.
+    fn write(&self, path: &str, text: &str) -> std::io::Result<()>;
+    /// Reads the file `path`.
+    fn read(&self, path: &str) -> std::io::Result<String>;
+    /// The device and inode of what `path` names, followed: for `/proc/<pid>/ns/net` the
+    /// identity of that network namespace.
+    fn identity(&self, path: &str) -> std::io::Result<(u64, u64)>;
+}
+
+/// The machine itself.
+#[derive(Debug)]
+pub(crate) struct System;
+
+impl Sys for System {
+    fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
+        let output = spawn(program, args, stdin.unwrap_or_default())
+            .map_err(|why| format!("{program}: {why}"))?;
+        match output.status.success() {
+            true => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+            false => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+        }
     }
+
+    fn write(&self, path: &str, text: &str) -> std::io::Result<()> {
+        std::fs::write(path, text)
+    }
+
+    fn read(&self, path: &str) -> std::io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+
+    fn identity(&self, path: &str) -> std::io::Result<(u64, u64)> {
+        let meta = std::fs::metadata(path)?;
+        Ok((meta.dev(), meta.ino()))
+    }
+}
+
+/// Runs `program args` with `stdin` as its input to its end.
+fn spawn(program: &str, args: &[&str], stdin: &str) -> std::io::Result<std::process::Output> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // A program that stops reading early says why by its status and its words.
+    let mut pipe = child.stdin.take().expect("the standard input is piped");
+    let _ = pipe.write_all(stdin.as_bytes());
+    drop(pipe);
+    child.wait_with_output()
 }
 
 /// The host side of the egress mode: the pool of address blocks and the firewall. Cheap to
@@ -95,6 +149,7 @@ pub struct Egress {
 #[derive(Debug)]
 struct Inner {
     config: Config,
+    sys: Arc<dyn Sys>,
     /// The indexes of the pool's blocks in use.
     used: Mutex<BTreeSet<u32>>,
     /// The tables as the agent loaded them, normalized; none in mode none.
@@ -105,8 +160,44 @@ struct Inner {
 #[derive(Debug)]
 pub struct Attachment {
     inner: Arc<Inner>,
-    /// The block's index and the host end's name, none in mode none.
+    /// The block's index and the host end's name, none in mode none or once taken down.
     wired: Option<(u32, String)>,
+}
+
+fn command(what: impl Into<String>, why: impl std::fmt::Display) -> EgressError {
+    EgressError::Command {
+        what: what.into(),
+        why: why.to_string(),
+    }
+}
+
+/// `sys.run` with the failure turned into an [`EgressError`] that says what was being done.
+fn call(
+    sys: &dyn Sys,
+    what: &str,
+    program: &str,
+    args: &[&str],
+    stdin: Option<&str>,
+) -> Result<String, EgressError> {
+    sys.run(program, args, stdin)
+        .map_err(|why| command(what, format!("{program} {args:?}: {why}")))
+}
+
+/// Whether `error` says that the thing it tried to remove was not there.
+fn gone(error: &EgressError) -> bool {
+    let text = error.to_string();
+    text.contains("No such file or directory") || text.contains("Cannot find device")
+}
+
+/// Writes `value` to the sysctl `path` (below `/proc/sys`). A host booted without IPv6 has
+/// no switch for it: IPv6 is off already.
+fn sysctl(sys: &dyn Sys, path: &str, value: &str) -> Result<(), EgressError> {
+    match sys.write(&format!("/proc/sys/{path}"), value) {
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound && path.starts_with("net/ipv6/") => {
+            Ok(())
+        }
+        other => other.map_err(|why| command(format!("setting {path}"), why)),
+    }
 }
 
 impl Egress {
@@ -118,22 +209,27 @@ impl Egress {
     ///
     /// A program could not run or refused what it was given.
     pub fn start(config: Config) -> Result<Self, EgressError> {
-        sweep(&config)?;
+        Self::start_on(config, Arc::new(System))
+    }
+
+    fn start_on(config: Config, sys: Arc<dyn Sys>) -> Result<Self, EgressError> {
+        sweep(&*sys, &config)?;
         let mut baseline = None;
         if config.mode() == Mode::AllowList {
-            std::fs::write("/proc/sys/net/ipv4/ip_forward", "1\n")
-                .map_err(|why| command("switching IPv4 forwarding on", why))?;
-            run(
+            sysctl(&*sys, "net/ipv4/ip_forward", "1\n")?;
+            call(
+                &*sys,
+                "loading the firewall",
                 config.nft(),
                 &["-f", "-"],
                 Some(&ruleset::render(&config)),
-                "loading the firewall",
             )?;
-            baseline = Some(listing(&config)?);
+            baseline = Some(listing(&*sys, &config)?);
         }
         Ok(Self {
             inner: Arc::new(Inner {
                 config,
+                sys,
                 used: Mutex::new(BTreeSet::new()),
                 baseline,
             }),
@@ -159,14 +255,14 @@ impl Egress {
         let Some(baseline) = &self.inner.baseline else {
             return Ok(());
         };
-        let forwarding = std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward");
+        let forwarding = self.inner.sys.read("/proc/sys/net/ipv4/ip_forward");
         if !forwarding.is_ok_and(|text| text.trim() == "1") {
             return Err(EgressError::Forwarding);
         }
-        if listing(&self.inner.config)? == *baseline {
-            Ok(())
-        } else {
-            Err(EgressError::Rules)
+        let now = listing(&*self.inner.sys, &self.inner.config)?;
+        match now == *baseline {
+            true => Ok(()),
+            false => Err(EgressError::Rules),
         }
     }
 
@@ -190,13 +286,12 @@ impl Egress {
             });
         }
         let index = take(inner)?;
-        let name = format!("{IF_PREFIX}{index}");
         let attachment = Attachment {
             inner: inner.clone(),
-            wired: Some((index, name)),
+            wired: Some((index, format!("{IF_PREFIX}{index}"))),
         };
         // On failure the attachment drops here and takes down whatever was made.
-        wire(&inner.config, index, pid).map_err(|why| match why {
+        wire(&*inner.sys, &inner.config, index, pid).map_err(|why| match why {
             container @ EgressError::Container { .. } => container,
             other => command(format!("wiring run {run}"), other),
         })?;
@@ -225,34 +320,36 @@ impl Attachment {
         let Some((index, name)) = self.wired.take() else {
             return Ok(());
         };
-        let config = &self.inner.config;
+        let (config, sys) = (&self.inner.config, &*self.inner.sys);
         let element = format!("{{ \"{name}\" }}");
-        let removed = run(
+        let removed = call(
+            sys,
+            "removing the interface from the firewall set",
             config.nft(),
             &["delete", "element", "inet", TABLE, IFACE_SET, &element],
             None,
-            "removing the interface from the firewall set",
         );
-        let deleted = run(
+        let deleted = call(
+            sys,
+            "deleting the veth",
             config.ip(),
             &["link", "del", &name],
             None,
-            "deleting the veth",
         );
         self.inner
             .used
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .expect("the pool lock is never poisoned")
             .remove(&index);
-        for result in [removed, deleted] {
-            match result {
-                Err(EgressError::Command { why, .. })
-                    if why.contains("No such file or directory")
-                        || why.contains("Cannot find device") => {}
-                other => other.map(drop)?,
+        let mut result = Ok(());
+        for step in [removed, deleted] {
+            if let Err(error) = step
+                && !gone(&error)
+            {
+                result = Err(error);
             }
         }
-        Ok(())
+        result
     }
 }
 
@@ -264,9 +361,8 @@ impl Drop for Attachment {
 
 /// The lowest free block of the pool.
 fn take(inner: &Inner) -> Result<u32, EgressError> {
-    let mut used = inner.used.lock().unwrap_or_else(PoisonError::into_inner);
-    let capacity = inner.config.pool().capacity();
-    let index = (0..capacity)
+    let mut used = inner.used.lock().expect("the pool lock is never poisoned");
+    let index = (0..inner.config.pool().capacity())
         .find(|n| !used.contains(n))
         .ok_or(EgressError::Exhausted)?;
     used.insert(index);
@@ -274,54 +370,48 @@ fn take(inner: &Inner) -> Result<u32, EgressError> {
 }
 
 /// The steps of the module documentation, for block `index` and container `pid`.
-fn wire(config: &Config, index: u32, pid: u32) -> Result<(), EgressError> {
+fn wire(sys: &dyn Sys, config: &Config, index: u32, pid: u32) -> Result<(), EgressError> {
     let (host_ip, job_ip) = config.pool().block(index).ok_or(EgressError::Exhausted)?;
     let (host, peer) = (
         format!("{IF_PREFIX}{index}"),
         format!("{PEER_PREFIX}{index}"),
     );
-    let ip = config.ip();
-    let container = |why: &str| EgressError::Container {
-        pid,
-        why: why.to_owned(),
-    };
+    let (ip, nft) = (config.ip(), config.nft());
+    let container = |why: String| EgressError::Container { pid, why };
 
-    // The namespace is held open from here, so what is wired is the namespace seen now and
-    // not whatever a reused pid names later.
-    let netns_path = format!("/proc/{pid}/ns/net");
-    let netns =
-        File::open(&netns_path).map_err(|why| container(&format!("{netns_path}: {why}")))?;
-    let own = std::fs::metadata("/proc/self/ns/net")
+    // The namespace is identified before anything is made, and again before the job end is
+    // moved into it, so what is wired is the namespace seen now and not whatever a reused
+    // pid names later.
+    let path = format!("/proc/{pid}/ns/net");
+    let theirs = sys
+        .identity(&path)
+        .map_err(|why| container(format!("{path}: {why}")))?;
+    let own = sys
+        .identity("/proc/self/ns/net")
         .map_err(|why| command("reading the agent's own network namespace", why))?;
-    let theirs = netns
-        .metadata()
-        .map_err(|why| container(&format!("{netns_path}: {why}")))?;
-    if (own.dev(), own.ino()) == (theirs.dev(), theirs.ino()) {
-        return Err(container("it shares the host's network namespace"));
+    if own == theirs {
+        return Err(container(
+            "it shares the host's network namespace".to_owned(),
+        ));
     }
 
-    run(
+    let step = |what: &str, program: &str, args: &[&str]| call(sys, what, program, args, None);
+    step(
+        "making the veth pair",
         ip,
         &["link", "add", &host, "type", "veth", "peer", "name", &peer],
-        None,
-        "making the veth pair",
     )?;
-    sysctl(&format!("net/ipv6/conf/{host}/disable_ipv6"), "1")?;
-    sysctl(&format!("net/ipv4/conf/{host}/rp_filter"), "1")?;
-    run(
+    sysctl(sys, &format!("net/ipv6/conf/{host}/disable_ipv6"), "1")?;
+    sysctl(sys, &format!("net/ipv4/conf/{host}/rp_filter"), "1")?;
+    step(
+        "addressing the host end",
         ip,
         &["addr", "add", &format!("{host_ip}/30"), "dev", &host],
-        None,
-        "addressing the host end",
     )?;
-    run(
-        ip,
-        &["link", "set", &host, "up"],
-        None,
-        "raising the host end",
-    )?;
-    run(
-        config.nft(),
+    step("raising the host end", ip, &["link", "set", &host, "up"])?;
+    step(
+        "adding the interface to the firewall set",
+        nft,
         &[
             "add",
             "element",
@@ -330,17 +420,16 @@ fn wire(config: &Config, index: u32, pid: u32) -> Result<(), EgressError> {
             IFACE_SET,
             &format!("{{ \"{host}\" }}"),
         ],
-        None,
-        "adding the interface to the firewall set",
     )?;
 
-    // The container must still be the one whose namespace is held.
-    let again =
-        std::fs::metadata(&netns_path).map_err(|why| container(&format!("{netns_path}: {why}")))?;
-    if (again.dev(), again.ino()) != (theirs.dev(), theirs.ino()) {
-        return Err(container("its network namespace changed"));
+    let again = sys
+        .identity(&path)
+        .map_err(|why| container(format!("{path}: {why}")))?;
+    if again != theirs {
+        return Err(container("its network namespace changed".to_owned()));
     }
-    run(
+    step(
+        "moving the job end into the container",
         ip,
         &[
             "link",
@@ -351,109 +440,34 @@ fn wire(config: &Config, index: u32, pid: u32) -> Result<(), EgressError> {
             "name",
             INSIDE_NAME,
         ],
-        None,
-        "moving the job end into the container",
     )?;
 
+    // No IPv6 link-local address is made for `eth0`, and the default route comes last.
     let batch = format!(
-        "link set lo up\naddr add {job_ip}/30 dev {INSIDE_NAME}\nlink set {INSIDE_NAME} up\n\
+        "link set lo up\nlink set {INSIDE_NAME} addrgenmode none\n\
+         addr add {job_ip}/30 dev {INSIDE_NAME}\nlink set {INSIDE_NAME} up\n\
          route add default via {host_ip}\n"
     );
-    in_netns(&netns, || -> Result<(), EgressError> {
-        // IPv6 is off before the interface is up, so it never has an address.
-        for scope in ["all", "default", INSIDE_NAME] {
-            sysctl(&format!("net/ipv6/conf/{scope}/disable_ipv6"), "1")?;
-        }
-        run(
-            ip,
-            &["-batch", "-"],
-            Some(&batch),
-            "configuring the job end",
-        )
-        .map(drop)
-    })?
-}
-
-/// Runs `body` on a thread of its own that has joined `netns` (a namespace is a property
-/// of a thread, so no other thread of the agent is affected, and a program started by the
-/// body runs in it).
-fn in_netns<T: Send>(netns: &File, body: impl FnOnce() -> T + Send) -> Result<T, EgressError> {
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                move_into_link_name_space(netns.as_fd(), Some(LinkNameSpaceType::Network))
-                    .map_err(|why| command("joining the container's network namespace", why))?;
-                Ok(body())
-            })
-            .join()
-            .unwrap_or_else(|_| {
-                Err(command(
-                    "joining the container's network namespace",
-                    "the thread panicked",
-                ))
-            })
-    })
-}
-
-/// Writes `value` to the sysctl `path` (below `/proc/sys`) as seen from the calling
-/// thread's network namespace.
-fn sysctl(path: &str, value: &str) -> Result<(), EgressError> {
-    let file = format!("/proc/sys/{path}");
-    match std::fs::write(&file, value) {
-        // A host booted without IPv6 has no such switch: IPv6 is off already.
-        Err(why) if why.kind() == std::io::ErrorKind::NotFound && path.starts_with("net/ipv6/") => {
-            Ok(())
-        }
-        other => other.map_err(|why| command(format!("setting {path}"), why)),
-    }
-}
-
-/// Runs `program args`, with `stdin` if there is any, and returns what it printed.
-fn run(
-    program: &str,
-    args: &[&str],
-    stdin: Option<&str>,
-    what: &str,
-) -> Result<String, EgressError> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|why| command(what, format!("{program}: {why}")))?;
-    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(text.as_bytes())
-            .map_err(|why| command(what, why))?;
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|why| command(what, format!("{program}: {why}")))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    if output.status.success() {
-        Ok(stdout)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(command(
-            what,
-            format!("{program} {args:?}: {}", stderr.trim()),
-        ))
-    }
+    call(
+        sys,
+        "configuring the job end",
+        config.nsenter(),
+        &[&format!("--net={path}"), "--", ip, "-batch", "-"],
+        Some(&batch),
+    )
+    .map(drop)
 }
 
 /// Both tables as the kernel holds them, normalized.
-fn listing(config: &Config) -> Result<Value, EgressError> {
+fn listing(sys: &dyn Sys, config: &Config) -> Result<Value, EgressError> {
     let mut tables = Vec::new();
     for (family, table) in [("inet", TABLE), ("ip", NAT_TABLE)] {
-        let text = run(
+        let text = call(
+            sys,
+            "reading the firewall back",
             config.nft(),
             &["-j", "list", "table", family, table],
             None,
-            "reading the firewall back",
         )?;
         tables.push(
             ruleset::normalize(&text).map_err(|why| command("reading the firewall back", why))?,
@@ -463,40 +477,48 @@ fn listing(config: &Config) -> Result<Value, EgressError> {
 }
 
 /// Removes every interface an earlier agent made and both tables.
-fn sweep(config: &Config) -> Result<(), EgressError> {
-    let text = run(
+fn sweep(sys: &dyn Sys, config: &Config) -> Result<(), EgressError> {
+    let text = call(
+        sys,
+        "listing the interfaces",
         config.ip(),
         &["-j", "link", "show"],
         None,
-        "listing the interfaces",
     )?;
     let links: Vec<Value> =
         serde_json::from_str(&text).map_err(|why| command("listing the interfaces", why))?;
-    for name in links
+    let leftovers = links
         .iter()
         .filter_map(|link| link.get("ifname").and_then(Value::as_str))
-        .filter(|name| name.starts_with(IF_PREFIX) || name.starts_with(PEER_PREFIX))
-    {
+        .filter(|name| name.starts_with(IF_PREFIX) || name.starts_with(PEER_PREFIX));
+    for name in leftovers {
         // Deleting one end of a pair deletes the other, which may be later in the list.
-        match run(
+        let deleted = call(
+            sys,
+            "deleting a leftover veth",
             config.ip(),
             &["link", "del", name],
             None,
-            "deleting a leftover veth",
-        ) {
-            Err(EgressError::Command { why, .. }) if why.contains("Cannot find device") => {}
-            other => other.map(drop)?,
+        );
+        if let Err(error) = deleted
+            && !gone(&error)
+        {
+            return Err(error);
         }
     }
-    // The same transaction `start` loads, without the tables: the add-then-delete pair.
-    run(
+    // Add then delete makes the removal work whether or not the tables exist.
+    call(
+        sys,
+        "removing the earlier tables",
         config.nft(),
         &["-f", "-"],
         Some(&format!(
             "add table inet {TABLE}\ndelete table inet {TABLE}\n\
              add table ip {NAT_TABLE}\ndelete table ip {NAT_TABLE}\n"
         )),
-        "removing the earlier tables",
-    )?;
-    Ok(())
+    )
+    .map(drop)
 }
+
+#[cfg(test)]
+mod tests;

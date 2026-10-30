@@ -27,6 +27,9 @@ pub const DEFAULT_IP: &str = "/usr/sbin/ip";
 /// The `nft` program the agent runs, unless `--egress-nft` names another.
 pub const DEFAULT_NFT: &str = "/usr/sbin/nft";
 
+/// The `nsenter` program the agent runs, unless `--egress-nsenter` names another.
+pub const DEFAULT_NSENTER: &str = "/usr/bin/nsenter";
+
 /// The most `--egress-dns` entries accepted.
 pub const DNS_MAX: usize = 4;
 
@@ -141,7 +144,8 @@ pub enum ConfigError {
     /// An allowed endpoint or a resolver lies in the pool: a job's own address block.
     #[error("{0}: lies in the --egress-pool, which is the jobs' own address space")]
     InPool(&'static str),
-    /// `--egress-ip` or `--egress-nft` is not an absolute path to an executable file.
+    /// `--egress-ip`, `--egress-nft` or `--egress-nsenter` is not an absolute path to an
+    /// executable file.
     #[error("{0}: not an absolute UTF-8 path to an executable file")]
     Program(&'static str),
     /// Egress needs the Linux host side.
@@ -164,6 +168,8 @@ pub struct Flags<'a> {
     pub ip: Option<&'a str>,
     /// `--egress-nft`.
     pub nft: Option<&'a str>,
+    /// `--egress-nsenter`.
+    pub nsenter: Option<&'a str>,
 }
 
 /// The checked egress configuration.
@@ -175,6 +181,7 @@ pub struct Config {
     pool: Pool,
     ip: String,
     nft: String,
+    nsenter: String,
 }
 
 impl Default for Config {
@@ -195,6 +202,7 @@ impl Config {
             pool: Pool::parse(DEFAULT_POOL).expect("the default pool is sound"),
             ip: DEFAULT_IP.to_owned(),
             nft: DEFAULT_NFT.to_owned(),
+            nsenter: DEFAULT_NSENTER.to_owned(),
         }
     }
 
@@ -217,15 +225,14 @@ impl Config {
                 ("--egress-pool", flags.pool.is_some()),
                 ("--egress-ip", flags.ip.is_some()),
                 ("--egress-nft", flags.nft.is_some()),
+                ("--egress-nsenter", flags.nsenter.is_some()),
             ];
             if let Some((name, _)) = given.iter().find(|(_, given)| *given) {
                 return Err(ConfigError::NeedsAllowList(name));
             }
             return Ok(Self::none());
         }
-        if !cfg!(target_os = "linux") {
-            return Err(ConfigError::NotLinux);
-        }
+        platform()?;
         let pool = Pool::parse(flags.pool.unwrap_or(DEFAULT_POOL)).ok_or(ConfigError::Pool)?;
         if flags.allow.is_empty() {
             return Err(ConfigError::Empty);
@@ -264,6 +271,7 @@ impl Config {
             pool,
             ip: program("--egress-ip", flags.ip, DEFAULT_IP)?,
             nft: program("--egress-nft", flags.nft, DEFAULT_NFT)?,
+            nsenter: program("--egress-nsenter", flags.nsenter, DEFAULT_NSENTER)?,
         })
     }
 
@@ -303,6 +311,12 @@ impl Config {
         &self.nft
     }
 
+    /// The `nsenter` program.
+    #[must_use]
+    pub fn nsenter(&self) -> &str {
+        &self.nsenter
+    }
+
     /// The `/etc/resolv.conf` of a job's container when this configuration names resolvers:
     /// those, and no other. `None` when it names none (mode none, or an allow-list whose
     /// jobs resolve nothing), where the backend's own file stands: a loopback nameserver
@@ -334,6 +348,19 @@ impl fmt::Display for Mode {
             Self::AllowList => "allow-list",
         })
     }
+}
+
+/// Whether this host can make a job's network: Linux only.
+#[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_wraps)]
+fn platform() -> Result<(), ConfigError> {
+    Ok(())
+}
+
+/// Whether this host can make a job's network: Linux only.
+#[cfg(not(target_os = "linux"))]
+fn platform() -> Result<(), ConfigError> {
+    Err(ConfigError::NotLinux)
 }
 
 /// Whether `addr` may be a resolver: unicast, and not in the metadata range.
@@ -375,6 +402,7 @@ mod tests {
             pool: None,
             ip: Some("/bin/sh"),
             nft: Some("/bin/sh"),
+            nsenter: Some("/bin/sh"),
         }
     }
 
@@ -431,6 +459,13 @@ mod tests {
                 },
                 "--egress-nft",
             ),
+            (
+                Flags {
+                    nsenter: Some("/bin/sh"),
+                    ..Flags::default()
+                },
+                "--egress-nsenter",
+            ),
         ];
         for (flags, name) in cases {
             assert_eq!(
@@ -479,6 +514,7 @@ mod tests {
             "169.254.169.254",
             "0.0.0.0",
             "224.0.0.1",
+            "255.255.255.255",
             "::1",
             "name",
         ] {
@@ -499,6 +535,10 @@ mod tests {
             "198.18.0.1/16",
             "127.0.0.0/16",
             "169.254.0.0/16",
+            "224.0.0.0/16",
+            "0.0.0.0/16",
+            "198.18.0.0/x",
+            "x/16",
             "x",
         ] {
             let flags = Flags {
@@ -517,13 +557,23 @@ mod tests {
             refused(allow_list(&one, &dns)),
             ConfigError::InPool("--egress-dns")
         );
-        for ip in ["ip", "/nonexistent/ip", "/etc/passwd"] {
+        for ip in ["ip", "/nonexistent/ip", "/etc/passwd", "/tmp"] {
             let flags = Flags {
                 ip: Some(ip),
                 ..allow_list(&one, &[])
             };
             assert_eq!(refused(flags), ConfigError::Program("--egress-ip"), "{ip}");
         }
+        let flags = Flags {
+            nft: Some("/etc/passwd"),
+            ..allow_list(&one, &[])
+        };
+        assert_eq!(refused(flags), ConfigError::Program("--egress-nft"));
+        let flags = Flags {
+            nsenter: Some("/nonexistent/nsenter"),
+            ..allow_list(&one, &[])
+        };
+        assert_eq!(refused(flags), ConfigError::Program("--egress-nsenter"));
     }
 
     /// Catches a configuration that keeps what was given in the order or multiplicity it
@@ -549,6 +599,28 @@ mod tests {
         let without = Config::from_flags(&allow_list(&allow, &[])).expect("sound");
         assert_eq!(without.resolv_conf(), None);
         assert_eq!(config.pool().text(), DEFAULT_POOL);
+        assert_eq!(config.pool().network(), (Ipv4Addr::new(198, 18, 0, 0), 16));
+        assert_eq!(config.mode(), Mode::AllowList);
+        assert_eq!(
+            (config.ip(), config.nft(), config.nsenter()),
+            ("/bin/sh", "/bin/sh", "/bin/sh")
+        );
+    }
+
+    /// Catches the defaults drifting from the documented ones and the mode's name: the
+    /// default configuration is mode none with the default programs, and the two modes print
+    /// as the flag spells them.
+    #[test]
+    fn the_defaults_are_mode_none_and_the_documented_programs() {
+        let config = Config::default();
+        assert_eq!(config, Config::none());
+        assert_eq!(
+            (config.ip(), config.nft(), config.nsenter()),
+            (DEFAULT_IP, DEFAULT_NFT, DEFAULT_NSENTER)
+        );
+        assert_eq!(config.pool().text(), DEFAULT_POOL);
+        assert_eq!(Mode::None.to_string(), "none");
+        assert_eq!(Mode::AllowList.to_string(), "allow-list");
     }
 
     /// Catches a block arithmetic that hands two runs the same address, or an address

@@ -806,6 +806,7 @@ fn egress_of(cli: &Cli) -> Result<crate::egress::Config, String> {
         pool: cli.egress_pool.as_deref(),
         ip: cli.egress_ip.as_deref(),
         nft: cli.egress_nft.as_deref(),
+        nsenter: cli.egress_nsenter.as_deref(),
     })
     .map_err(|why| why.to_string())?;
     if config.mode() != Mode::None && cli.container_network.is_some() {

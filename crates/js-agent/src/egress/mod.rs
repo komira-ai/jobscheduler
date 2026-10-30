@@ -1,7 +1,7 @@
 //! Egress for jobs that run in `crun` containers: one configured mode, default none.
 //!
 //! - [`Config`] (portable): the flags `--egress`, `--egress-allow`, `--egress-dns`,
-//!   `--egress-pool`, `--egress-ip` and `--egress-nft`, checked once at start.
+//!   `--egress-pool`, `--egress-ip`, `--egress-nft` and `--egress-nsenter`, checked once at start.
 //! - [`ruleset`] (portable): the nftables text of an allow-list and the comparison that
 //!   reads it back.
 //! - [`Egress`] (Linux): the privileged part, which runs in the agent process, as root, in
@@ -20,8 +20,8 @@ mod host;
 pub mod ruleset;
 
 pub use config::{
-    Config, ConfigError, DEFAULT_IP, DEFAULT_NFT, DEFAULT_POOL, DNS_MAX, Flags, Mode, Pool,
-    ROUTE_WAIT,
+    Config, ConfigError, DEFAULT_IP, DEFAULT_NFT, DEFAULT_NSENTER, DEFAULT_POOL, DNS_MAX, Flags,
+    Mode, Pool, ROUTE_WAIT,
 };
 #[cfg(target_os = "linux")]
 pub use host::{Attachment, Egress, EgressError};

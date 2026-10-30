@@ -24,7 +24,7 @@ impl Drop for Raw {
 /// wired by hand, as the agent would have left it with no IPv6 handling (a veth pair, an
 /// IPv6 address on each end, a default route, forwarding on), reaches an IPv6 listener on the
 /// far host, so the path, the listener and the probe are real. After: a namespace wired by
-/// the agent has no IPv6 address (the host end and the job end both have `disable_ipv6`),
+/// the agent has no IPv6 address on the job end (no link-local one is made, and the host end has `disable_ipv6`),
 /// and a job that switches IPv6 on in its own namespace, gives itself an address and a
 /// route reaches nothing: the far listener counts no connection. The host's switch is then
 /// turned off too, and a static neighbour entry stands in for the discovery the host would
@@ -78,7 +78,7 @@ fn ipv6_is_off_for_a_wired_namespace_and_on_for_one_wired_by_hand() {
     let egress = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("start");
     let holder = Holder::new();
     let attachment = egress.attach("v6", holder.pid()).expect("attach");
-    let addresses = text(&ip_in(&holder.ns, &["-6", "addr", "show"]));
+    let addresses = text(&ip_in(&holder.ns, &["-6", "addr", "show", "dev", "eth0"]));
     assert!(
         !addresses.contains("inet6"),
         "the job end has an IPv6 address: {addresses}"
@@ -88,10 +88,6 @@ fn ipv6_is_off_for_a_wired_namespace_and_on_for_one_wired_by_hand() {
         "1",
         "the host end"
     );
-    let inside = in_netns(&holder.ns, || {
-        std::fs::read_to_string("/proc/sys/net/ipv6/conf/eth0/disable_ipv6").unwrap_or_default()
-    });
-    assert_eq!(inside.trim(), "1", "the job end");
 
     // The job turns IPv6 on in its own namespace and addresses itself.
     in_netns(&holder.ns, || {

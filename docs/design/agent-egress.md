@@ -30,8 +30,9 @@ outside, while the container's init holds the job:
    (`crates/js-agent/src/egress/host.rs`): it takes a /30 of the pool, makes the veth pair, turns
    IPv6 off on the host end and reverse-path filtering on, addresses it, registers the interface in
    the firewall's set, moves the job end into the namespace held open through
-   `/proc/<pid>/ns/net` (not the pid alone), then, from a thread that has joined that namespace,
-   turns IPv6 off, addresses and raises `eth0`, and adds the default route last.
+   `/proc/<pid>/ns/net` (its identity is read before and after, and the host's own namespace is
+   refused), then enters that namespace with `nsenter` and, in one `ip -batch`, raises `lo`, gives
+   `eth0` no IPv6 link-local address, addresses and raises it, and adds the default route last.
 3. When the run ends the agent calls `release`: the set member and the host end go; the
    namespace is the kernel's to free with the container's last process.
 
@@ -64,7 +65,7 @@ handles and the set's members are not compared), and checks that IPv4 forwarding
 ## Configuration
 
 One mode, flags only: `--egress none` (the default) or `allow-list` with `--egress-allow`,
-`--egress-dns`, `--egress-pool`, `--egress-ip`, `--egress-nft`. Mode none sets nothing up: the
+`--egress-dns`, `--egress-pool`, `--egress-ip`, `--egress-nft`, `--egress-nsenter`. Mode none sets nothing up: the
 container's namespace has loopback only. Agent start removes every `jsv*` and `jsp*` interface and
 both tables a previous process left (the keeper kills the containers with the agent), loads the
 firewall and switches IPv4 forwarding on.

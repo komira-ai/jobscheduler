@@ -450,6 +450,7 @@ fn egress_flags_default_to_none_and_an_allow_list_is_refused_until_crun_is_selec
         (&["--egress-dns", "192.0.2.53"][..], "--egress-dns"),
         (&["--egress-pool", "198.18.0.0/16"][..], "--egress-pool"),
         (&["--egress-nft", "/bin/sh"][..], "--egress-nft"),
+        (&["--egress-nsenter", "/bin/sh"][..], "--egress-nsenter"),
     ] {
         let said = refused(flags, &host);
         assert!(
