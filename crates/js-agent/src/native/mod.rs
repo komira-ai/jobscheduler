@@ -489,7 +489,6 @@ fn profile_argv(
     let profile = Profile::for_policy(&policy).map_err(|why| fail(&"the profile", &why))?;
     let program =
         AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
-    let limiter = AbsPath::new(Path::new(LIMITER)).map_err(|why| fail(&LIMITER, &why))?;
     let blocks = (config.max_file_bytes / 1024).max(1);
     let mut args: Vec<OsString> = vec![
         "-c".into(),
@@ -500,7 +499,7 @@ fn profile_argv(
         program.as_ref().into(),
     ];
     args.extend(native.args.iter().map(OsString::from));
-    let argv = profile.argv(&limiter, &args);
+    let argv = profile.argv(LIMITER, &args);
     Ok(argv
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
