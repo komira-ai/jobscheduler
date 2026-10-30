@@ -70,11 +70,11 @@ pub(crate) async fn verify(args: &VerifyArgs, out: &mut dyn Write) -> Result<(),
             source,
         })?;
     }
-    writeln!(
-        out,
+    let summary = format!(
         "verified {} ({} layers)",
         loaded.manifest.digest(),
         loaded.manifest.layers().len()
-    )?;
+    );
+    writeln!(out, "{summary}")?;
     Ok(())
 }

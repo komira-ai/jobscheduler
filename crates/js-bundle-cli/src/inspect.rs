@@ -17,63 +17,63 @@ fn word(value: impl std::fmt::Debug) -> String {
 pub(crate) async fn inspect(args: &LayoutArgs, out: &mut dyn Write) -> Result<(), Error> {
     let loaded = load(args).await?;
     let (manifest, config) = (&loaded.manifest, &loaded.config);
-    writeln!(out, "manifest {}", manifest.digest())?;
-    writeln!(
-        out,
-        "artifact-type {}",
-        manifest.artifact_type().unwrap_or_default()
-    )?;
     let blob = manifest.config();
-    writeln!(
-        out,
-        "config {} {} {} bytes",
-        blob.digest(),
-        blob.media_type(),
-        blob.size()
-    )?;
-    writeln!(
-        out,
-        "bundle {} {} {}/{} macos>={}",
-        config.name,
-        config.version,
-        config.os,
-        config.architecture,
-        String::from(config.os_version)
-    )?;
-    writeln!(out, "system-path {}", config.system_path)?;
-    writeln!(out, "network {}", word(config.seatbelt.network_max))?;
     let reads: Vec<&str> = config.seatbelt.reads.iter().map(|r| r.as_str()).collect();
-    writeln!(out, "reads {}", reads.join(" "))?;
     let writable: Vec<&str> = config.writable_trees.iter().map(|t| t.as_str()).collect();
-    writeln!(out, "writable-trees {}", writable.join(" "))?;
+    let mut lines = vec![
+        format!("manifest {}", manifest.digest()),
+        format!(
+            "artifact-type {}",
+            manifest.artifact_type().unwrap_or_default()
+        ),
+        format!(
+            "config {} {} {} bytes",
+            blob.digest(),
+            blob.media_type(),
+            blob.size()
+        ),
+        format!(
+            "bundle {} {} {}/{} macos>={}",
+            config.name,
+            config.version,
+            config.os,
+            config.architecture,
+            String::from(config.os_version)
+        ),
+        format!("system-path {}", config.system_path),
+        format!("network {}", word(config.seatbelt.network_max)),
+        format!("reads {}", reads.join(" ")),
+        format!("writable-trees {}", writable.join(" ")),
+    ];
     for (index, (blob, layer)) in manifest.layers().iter().zip(&config.layers).enumerate() {
-        writeln!(
-            out,
+        lines.push(format!(
             "layer {index} {} {} {} bytes {}",
             layer.tree.as_str(),
             blob.digest(),
             blob.size(),
             blob.media_type()
-        )?;
-        writeln!(out, "  diff-id {}", layer.diff_id.as_str())?;
-        writeln!(out, "  entries {}", layer.entries)?;
-        writeln!(out, "  uncompressed-bytes {}", layer.uncompressed_bytes)?;
-        writeln!(out, "  license {}", layer.license)?;
-        writeln!(out, "  source-url {}", layer.source_url)?;
+        ));
+        lines.push(format!("  diff-id {}", layer.diff_id.as_str()));
+        lines.push(format!("  entries {}", layer.entries));
+        lines.push(format!("  uncompressed-bytes {}", layer.uncompressed_bytes));
+        lines.push(format!("  license {}", layer.license));
+        lines.push(format!("  source-url {}", layer.source_url));
     }
     for (name, entry) in &config.entrypoints {
-        writeln!(out, "entrypoint {name} {}", entry.path.as_str())?;
+        lines.push(format!("entrypoint {name} {}", entry.path.as_str()));
     }
     for rule in &config.env {
         let values: Vec<&str> = rule.values.iter().map(|v| v.as_str()).collect();
-        writeln!(
-            out,
+        lines.push(format!(
             "env {} {} {} locked={}",
             word(rule.op),
             rule.name,
             values.join(":"),
             rule.locked
-        )?;
+        ));
+    }
+    for line in lines {
+        writeln!(out, "{line}")?;
     }
     Ok(())
 }
