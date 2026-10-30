@@ -247,6 +247,8 @@ pub struct Scheduler {
     size_keys: BTreeMap<OperationId, u64>,
     /// The rungs of an action's memory booking ([`memory`]).
     ladder: MemoryLadder,
+    /// Whether an own-limit kill climbs the ladder ([`Scheduler::set_memory_climb`]).
+    climb: bool,
     /// Workers a recovered scheduler holds leases for that have not registered yet, and
     /// until when they may take to ([`Scheduler::recover`]).
     awaited: BTreeMap<WorkerId, FarmTime>,
@@ -306,6 +308,7 @@ impl Scheduler {
             memory: Box::default(),
             size_keys: BTreeMap::new(),
             ladder: MemoryLadder::default(),
+            climb: true,
             awaited: BTreeMap::new(),
             other_process: BTreeMap::new(),
             store_down: false,

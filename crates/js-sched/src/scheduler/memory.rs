@@ -20,6 +20,9 @@
 //!   than any node offers. Each raised booking is kept as the action key's memory
 //!   floor, and a later submission of that key books at least the floor, so a
 //!   known-big action starts at the rung that ran it.
+//!   With the climb off ([`Scheduler::set_memory_climb`]) every own-limit kill is treated as
+//!   a kill at the cap: the run is recorded, the operation finishes with
+//!   [`Failure::OutOfMemory`], and no floor, key floor or requeue follows.
 //! - **The node killed it under pressure** ([`Failure::NodeMemoryPressure`]): a node-wide
 //!   kill of a lease that never reached its own limit. The node's memory-pressure count
 //!   goes up and the operation runs again with the same booking, preferring another
@@ -420,6 +423,25 @@ impl Scheduler {
         self.ladder = ladder;
     }
 
+    /// This scheduler, with the climb on or off: [`Scheduler::set_memory_climb`].
+    #[must_use]
+    pub fn with_memory_climb(mut self, climb: bool) -> Self {
+        self.climb = climb;
+        self
+    }
+
+    /// Whether an own-limit kill climbs the ladder (the default, `true`) or finishes the
+    /// operation with [`Failure::OutOfMemory`] as a kill at the cap does.
+    ///
+    /// With the climb off the kill is still recorded as a [`MemoryRun`], but no booking,
+    /// floor or key floor is raised and the operation is not requeued, so every run of an
+    /// action books what the front asked for. A node-pressure kill is unchanged. The
+    /// setting is not stored: a recovered scheduler holds the one its caller gave it.
+    /// Runs already killed keep what they raised.
+    pub fn set_memory_climb(&mut self, climb: bool) {
+        self.climb = climb;
+    }
+
     /// The memory floor of `key`, in bytes: the largest booking a run of it was raised
     /// to after it passed its own memory limit. A new submission of `key` books at
     /// least this much memory.
@@ -729,7 +751,7 @@ impl Scheduler {
             .map_or(op.request.resources.memory_bytes, |h| h.booked.memory_bytes);
         if failure == Failure::OutOfMemory {
             let cap = self.memory_cap(&op.request, &worker, booked);
-            let raised = self.ladder.raised(booked, cap);
+            let raised = self.ladder.raised(booked, cap).filter(|_| self.climb);
             self.memory.ops.entry(id).or_default().runs.push(MemoryRun {
                 worker,
                 booked,

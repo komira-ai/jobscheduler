@@ -28,6 +28,7 @@ mod lambda_e2e;
 mod lambda_e2e_failures;
 mod lambda_e2e_support;
 mod limits;
+mod memory_percent;
 mod pools_checks;
 mod pools_policy;
 mod pools_provider_checks;

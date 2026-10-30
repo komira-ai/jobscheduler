@@ -783,3 +783,88 @@ fn the_runs_by_operation_list_the_killed_operations_runs_and_no_other() {
     );
 }
 }
+
+both_rules! {
+/// Catches a climb that is off unless asked for (the default must stay on), one that
+/// stops writing the floor or the key floor when on, and one that stops requeueing.
+/// The ladder itself is covered by `an_unsized_action_climbs_4_16_32_gib_then_a_whole_host`.
+fn the_climb_is_on_by_default() {
+    let mut f = Farm::new();
+    f.node("a-small", 8, linux());
+    f.node("b-large", 64, linux());
+    let next = f.s.next_operation();
+    f.s.set_size_key(next, 7);
+    assert!(f.submit(1, request(1, 4 * GIB)).is_empty());
+    let first = f.start();
+    let second = f.killed(&first, OOM);
+    assert_eq!(second.resources.memory_bytes, 16 * GIB);
+    assert_eq!(f.requeues(), vec![oom(4, 16)]);
+    assert_eq!(f.s.memory_floor(&key(1)), Some(16 * GIB));
+    assert_eq!(f.s.key_floor(7), Some(16 * GIB));
+    let on = Scheduler::new(1).with_memory_climb(true);
+    assert_eq!(on.memory_state(), Scheduler::new(1).memory_state());
+}
+}
+
+both_rules! {
+/// Catches an own-limit kill that still reruns with the climb off (the benchmark's fixed
+/// slot would grow), one that drops the `MemoryRun` (history and adapters would not see
+/// the kill), one that raises the floor or the key floor anyway (the next submission of
+/// the key would book more), one that answers with another failure, and one that
+/// requeues (a store would write a requeue row for an operation that ended).
+fn with_the_climb_off_an_own_limit_kill_fails_out_of_memory_and_raises_nothing() {
+    let mut f = Farm::new();
+    f.s = std::mem::replace(&mut f.s, Scheduler::new(1)).with_memory_climb(false);
+    f.node("a-small", 8, linux());
+    f.node("b-large", 64, linux());
+    let next = f.s.next_operation();
+    f.s.set_size_key(next, 7);
+    assert!(f.submit(1, request(1, 4 * GIB)).is_empty());
+    let first = f.start();
+    assert_eq!(first.resources.memory_bytes, 4 * GIB);
+
+    f.finishes(&first, OOM);
+    let op = first.operation;
+    assert!(f.requeues().is_empty(), "a kill with the climb off requeued");
+    assert!(matches!(
+        f.s.state(op),
+        Some(OpState::Failed {
+            failure: Failure::OutOfMemory,
+            ..
+        })
+    ));
+    assert_eq!(f.s.memory_runs(op).unwrap(), [own("a-small", 4, 64)]);
+    assert_eq!(f.s.memory_floor(&key(1)), None);
+    assert_eq!(f.s.key_floor(7), None);
+    assert_eq!(f.s.take_floor_change(op), FloorChange::default());
+
+    // A later submission of the key books what the front asks for.
+    f.submit(2, request(1, 4 * GIB));
+    assert_eq!(f.start().resources.memory_bytes, 4 * GIB);
+}
+}
+
+both_rules! {
+/// Catches a switch that also turns off the busy-node rerun: with the climb off a
+/// node-pressure kill still reruns at the same booking, counts against the node and
+/// raises no floor; and the setter agrees with the builder.
+fn with_the_climb_off_a_node_pressure_kill_still_reruns_at_the_same_booking() {
+    let mut f = Farm::new();
+    f.s.set_memory_climb(false);
+    f.node("busy", 16, linux());
+    f.node("other", 16, linux());
+    f.submit(1, request(1, 2 * GIB));
+    let first = f.start();
+    let second = f.killed(&first, PRESSURE);
+    assert_eq!(second.resources, first.resources);
+    assert_ne!(second.worker, first.worker, "the rerun avoids the killing node");
+    assert_eq!(f.requeues(), vec![RequeueReason::NodeMemoryPressure]);
+    assert_eq!(f.s.memory_pressure(&first.worker), 1);
+    assert_eq!(f.s.memory_floor(&key(1)), None);
+    assert_eq!(
+        f.s.memory_runs(first.operation).unwrap(),
+        [busy(first.worker.as_str(), 2)]
+    );
+    f.finishes(&second, ok());
+}
+}

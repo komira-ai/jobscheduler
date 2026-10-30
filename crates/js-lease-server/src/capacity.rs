@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use js_lease::Booking;
 use js_pool_static::StaticPool;
 use js_provider::Provider;
-use js_types::{ProviderId, ResourceClass};
+use js_types::{MemoryPercent, ProviderId, ResourceClass};
 
 use crate::error::StartupError;
 
@@ -76,6 +76,7 @@ pub trait CapacitySource {
 pub struct StaticPoolSource {
     path: PathBuf,
     classes: Option<Vec<ResourceClass>>,
+    memory_percent: Option<MemoryPercent>,
 }
 
 impl StaticPoolSource {
@@ -84,7 +85,16 @@ impl StaticPoolSource {
         Self {
             path: path.into(),
             classes: None,
+            memory_percent: None,
         }
+    }
+
+    /// The same source booking `percent` of the memory of each host the file lists, in
+    /// place of the percent the file itself says (which is all of it when it says none).
+    #[must_use]
+    pub fn with_memory_percent(mut self, percent: MemoryPercent) -> Self {
+        self.memory_percent = Some(percent);
+        self
     }
 
     /// The same source serving `classes` instead of the class the pool serves by default.
@@ -98,7 +108,7 @@ impl StaticPoolSource {
 impl CapacitySource for StaticPoolSource {
     fn provider(&self, bookings: &[Booking]) -> Result<Seated, StartupError> {
         let id = ProviderId::new("static-pool").map_err(StartupError::because("--pool-config"))?;
-        let pool = StaticPool::from_config_file(id, &self.path)
+        let pool = StaticPool::from_config_file_with_percent(id, &self.path, self.memory_percent)
             .map_err(StartupError::because("--pool-config"))?;
         let mut pool = match &self.classes {
             Some(classes) => pool.with_classes(classes.clone()),

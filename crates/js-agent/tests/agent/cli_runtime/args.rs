@@ -155,8 +155,20 @@ fn hardening_flags_always_present() {
         "--cgroupns",
         "private",
     ];
+    let docker_log = [
+        "--log-driver",
+        "json-file",
+        "--log-opt",
+        "max-size=1048576",
+        "--log-opt",
+        "max-file=2",
+    ];
+    let podman_log = ["--log-driver", "k8s-file", "--log-opt", "max-size=1048576"];
     let tail = ["--pull", "never"];
-    assert_eq!(docker, strings(&[&common[..], &tail[..]].concat()));
+    assert_eq!(
+        docker,
+        strings(&[&common[..], &docker_log[..], &tail[..]].concat())
+    );
     assert!(!docker.iter().any(|arg| arg == "--rm" || arg == "--pid"));
 
     let podman = hardening_args(&settings(), Engine::Podman, PROFILE);
@@ -176,6 +188,7 @@ fn hardening_flags_always_present() {
                 &tmpfs[..],
                 after,
                 &["--pid", "private"][..],
+                &podman_log[..],
                 &tail[..]
             ]
             .concat()
@@ -221,6 +234,31 @@ fn podman_hardens_var_tmp_and_run_like_tmp() {
             .iter()
             .any(|arg| arg.starts_with("--read-only-tmpfs"))
     );
+}
+
+/// Asserts that the log of every container is bounded at creation, on both engines: the
+/// driver is named (Podman's default, `journald`, has no size bound and is read back from
+/// a journal), `max-size` is a plain byte count that both engines read, Docker keeps a
+/// second file so a rotation does not empty the tail, and the bound does not depend on the
+/// settings. It catches a job that prints without end filling the host's disk, and a
+/// tail read just after a rotation that finds an empty file.
+#[test]
+fn the_log_is_bounded_on_both_engines() {
+    let value = |args: &[String], flag: &str| -> Vec<String> {
+        args.windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+            .collect()
+    };
+    let docker = hardening_args(&settings(), Engine::Docker, PROFILE);
+    assert_eq!(value(&docker, "--log-driver"), ["json-file"]);
+    assert_eq!(
+        value(&docker, "--log-opt"),
+        ["max-size=1048576", "max-file=2"]
+    );
+    let podman = hardening_args(&settings(), Engine::Podman, PROFILE);
+    assert_eq!(value(&podman, "--log-driver"), ["k8s-file"]);
+    assert_eq!(value(&podman, "--log-opt"), ["max-size=1048576"]);
 }
 
 /// Asserts, for both engines, the properties of the hardening list that keep a job

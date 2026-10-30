@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{DISK_GIB_KEY, Resources};
+use crate::{DISK_GIB_KEY, MemoryPercent, Resources};
 
 /// Typed key/value facts a host reports, or a request needs (design section 3).
 pub type Capabilities = BTreeMap<String, String>;
@@ -24,6 +24,15 @@ impl Shape {
     /// The resources the host offers.
     pub fn resources(&self) -> &Resources {
         &self.resources
+    }
+
+    /// The same shape with its memory cut to `percent` of itself, rounded down.
+    #[must_use]
+    pub fn with_memory_percent(&self, percent: MemoryPercent) -> Shape {
+        Shape {
+            resources: self.resources.with_memory_percent(percent),
+            capabilities: self.capabilities.clone(),
+        }
     }
 
     /// The capability facts the host reports.
@@ -99,5 +108,22 @@ mod tests {
         assert!(!shape(&[]).satisfies(&none, &caps(&[("disk-gib", "1")])));
         assert!(!shape(&[("disk-gib", "lots")]).satisfies(&none, &caps(&[("disk-gib", "1")])));
         assert!(!host.satisfies(&none, &caps(&[("disk-gib", "lots")])));
+    }
+
+    /// Asserts that cutting a shape's memory changes only the memory: cpu, gpus, the gpu
+    /// class and the capabilities are kept, and the cut rounds down.
+    #[test]
+    fn a_memory_percent_cuts_only_the_memory() {
+        let shape = Shape::new(
+            Resources::new(8000, 1001, 1, Some("a100".into())).unwrap(),
+            caps(&[("isa", "x86-64-v3")]),
+        );
+        let cut = shape.with_memory_percent(MemoryPercent::new(50).unwrap());
+        assert_eq!(cut.resources().memory_bytes(), 500);
+        assert_eq!(cut.resources().cpu_millis(), 8000);
+        assert_eq!(cut.resources().gpus(), 1);
+        assert_eq!(cut.resources().gpu_class(), Some("a100"));
+        assert_eq!(cut.capabilities(), shape.capabilities());
+        assert_eq!(shape.with_memory_percent(MemoryPercent::FULL), shape);
     }
 }
