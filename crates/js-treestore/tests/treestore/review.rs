@@ -422,3 +422,25 @@ fn a_tree_in_place_that_the_store_does_not_hold_is_not_taken_for_the_new_content
     );
     assert!(rig.names("stage").is_empty());
 }
+
+#[test]
+fn a_sealer_that_panics_replacing_a_stale_tree_leaves_the_tree_replaceable() {
+    let rig = Rig::new();
+    let l = sized("f", 10, 1);
+    rig.have(&l);
+    let first = rig.open(rig.cfg());
+    first.ensure(&wanted(&l)).unwrap();
+    drop(first);
+    let store = rig.open(Config {
+        extractor_version: 2,
+        ..rig.cfg()
+    });
+    rig.sealer.panic_unseals.store(1, Ordering::SeqCst);
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| store.ensure(&wanted(&l))));
+    assert!(outcome.is_err());
+    assert_eq!(store.stats().in_flight, 0);
+    // The stale tree is still counted, and is not stuck as being deleted.
+    assert_eq!(store.stats().trees, 1);
+    store.ensure(&wanted(&l)).unwrap();
+    assert_eq!(rig.sealer.seal_count(), 2);
+}

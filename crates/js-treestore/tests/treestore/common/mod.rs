@@ -125,6 +125,8 @@ pub struct FakeSealer {
     /// Calls of `unseal_for_delete` that have started.
     pub unsealing: Arc<AtomicUsize>,
     pub hold_unseal: Arc<Mutex<Option<Arc<Gate>>>>,
+    /// Deletions of a tree that panic.
+    pub panic_unseals: Arc<AtomicUsize>,
 }
 
 impl FakeSealer {
@@ -136,6 +138,7 @@ impl FakeSealer {
             syncs: Arc::new(AtomicUsize::new(0)),
             unsealing: Arc::new(AtomicUsize::new(0)),
             hold_unseal: Arc::new(Mutex::new(None)),
+            panic_unseals: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -180,6 +183,12 @@ impl Sealer for FakeSealer {
 
     fn unseal_for_delete(&self, tree: &Path) -> Result<(), SealError> {
         self.unsealing.fetch_add(1, Ordering::SeqCst);
+        let deleting = tree.parent().is_some_and(|p| p.ends_with("trees"));
+        let panicking = self.panic_unseals.load(Ordering::SeqCst);
+        if deleting && panicking > 0 {
+            self.panic_unseals.store(panicking - 1, Ordering::SeqCst);
+            panic!("the sealer panicked");
+        }
         // Only the deletion of a tree waits; the clean-up of a stage does not.
         let gate = self.hold_unseal.lock().unwrap().clone();
         if let Some(gate) = gate.filter(|_| tree.parent().is_some_and(|p| p.ends_with("trees"))) {
