@@ -12,10 +12,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use js_mac_session::client::Client;
+
 use crate::cli_runtime::{CliRuntime, Settings, system_runner, unix_ms};
 use crate::facts::{FileReader, Platform, SystemFiles};
 use crate::integrity::{HostView, ProcHost};
 use crate::lifecycle::{Clock, Runtime};
+use crate::native::{NativeRuntime, NativeSettings};
 use crate::quota::{self, ScratchQuota};
 use crate::usage::UsageClock;
 
