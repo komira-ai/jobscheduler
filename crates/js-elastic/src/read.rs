@@ -141,8 +141,9 @@ mod tests {
     /// Asserts that every method of the read handle reaches the provider's method of the
     /// same name, with the provider's answer, and that the calls made through a handle
     /// are exactly the seven reads: no `acquire` and no `release` is among them, and the
-    /// handle has no method that could make one. It catches a read that is wired to the
-    /// wrong call, and a handle that grew a purchase.
+    /// handle has no method that could make one. The same provider, called directly, does
+    /// log an `acquire` and a `release`, so the absence above is a measurement. It catches a
+    /// read that is wired to the wrong call, and a handle that grew a purchase.
     #[test]
     fn a_read_handle_makes_the_seven_reads_and_nothing_else() {
         let provider = Arc::new(Recorder::default());
@@ -170,17 +171,33 @@ mod tests {
         assert_eq!(handle.list(), Ok(Vec::new()));
         assert!(handle.unresolved().is_empty());
         assert!(handle.is_gone(&HostRef("i".to_owned())));
+        let reads = [
+            "catalog",
+            "checks",
+            "host_prep",
+            "payload_limit",
+            "list",
+            "unresolved",
+            "is_gone",
+        ];
+        assert_eq!(*provider.0.lock().unwrap(), reads);
+
+        let scheduler = crate::ids::SchedulerId::new("s").unwrap();
+        let acquire = AcquireId::new("a").unwrap();
+        let request = AcquireRequest {
+            name: crate::ids::HostName::derive(&scheduler, &acquire),
+            acquire,
+            pool: "p".to_owned(),
+            offer,
+            labels: Vec::new(),
+            payload: crate::secret::BootPayload::new("x".to_owned()),
+        };
+        assert_eq!(provider.acquire(&request), Acquired::Unknown);
         assert_eq!(
-            *provider.0.lock().unwrap(),
-            [
-                "catalog",
-                "checks",
-                "host_prep",
-                "payload_limit",
-                "list",
-                "unresolved",
-                "is_gone"
-            ]
+            provider.release(&HostRef("i".to_owned())),
+            Released::Unknown
         );
+        let log = provider.0.lock().unwrap().clone();
+        assert_eq!(log[reads.len()..], ["acquire", "release"]);
     }
 }
