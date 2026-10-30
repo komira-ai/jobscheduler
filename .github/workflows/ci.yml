@@ -166,6 +166,14 @@ jobs:
     # run cancelled by a newer push to the same pull request does not.
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}
     runs-on: macos-14
+    # Pushes to main share one group with cancel-in-progress false: one run executes, one
+    # waits, and a newer waiting run replaces an older one, so the hosted macOS pool never
+    # holds a backlog of main runs (the newest main commit's result covers the older ones;
+    # main's run is the fix-forward backstop). A pull request gets a group of its own per run,
+    # so its job is queued exactly as before.
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && format('ci-macos-{0}', github.run_id) || 'ci-macos-main' }}
+      cancel-in-progress: false
     timeout-minutes: 45
     permissions:
       contents: read

@@ -306,3 +306,21 @@ fn the_workflow_wires_the_label_the_event_and_the_job_condition() {
         "the macos job must run on main, on a failed filter and on the filter's yes"
     );
 }
+
+#[test]
+fn the_macos_job_queues_main_runs_in_one_group_and_pull_requests_in_their_own() {
+    let text = workflow();
+    let start = text.find("\n  macos:\n").expect("macos job");
+    let job = &text[start..];
+    // Only the macos job's own header, before its steps.
+    let header = &job[..job.find("\n    steps:\n").expect("macos steps")];
+    assert!(
+        header.contains("\n    concurrency:\n      group: ${{ github.event_name == 'pull_request' && format('ci-macos-{0}', github.run_id) || 'ci-macos-main' }}\n      cancel-in-progress: false\n"),
+        "the macos job's concurrency: main runs share ci-macos-main without cancelling, a pull request has a per-run group"
+    );
+    // The workflow-level group is unchanged.
+    assert!(
+        text.contains("  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"),
+        "workflow-level concurrency"
+    );
+}
