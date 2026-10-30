@@ -1,107 +1,247 @@
-//! The macos job's path filter in `.github/workflows/ci.yml` lists every workspace crate
-//! the job builds or tests, read from the workflow text and from `cargo metadata`.
+//! The macos job's filter in `.github/workflows/ci.yml` (the `changes` job). The script of
+//! its `filter` step is taken from the workflow text and run by `bash` against small git
+//! repositories, so each trigger is pinned by what it does: a push to main always runs the
+//! job; a pull request runs it only when it carries the label `macos`, changes a path that
+//! names darwin, apple, macos or seatbelt (any case), a `js-mac-*` crate or ci.yml, or
+//! adds or removes a `target_os = "macos"` line; and a diff that cannot be computed runs it.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
-/// The packages the macos job builds and tests (`-p` in its cargo steps).
-const BUILT: [&str; 2] = ["js-agent", "js-cli"];
-
-fn root() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+fn workflow() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/ci.yml");
+    std::fs::read_to_string(path).expect("read ci.yml")
 }
 
-/// The lines of the `changes` job's `PATHS: |` block.
-fn filter_paths() -> Vec<String> {
-    let text =
-        std::fs::read_to_string(root().join(".github/workflows/ci.yml")).expect("read ci.yml");
-    let mut lines = text.lines().skip_while(|l| l.trim() != "PATHS: |");
-    let header = lines.next().expect("no PATHS block in ci.yml");
+/// The `run: |` script of the step `id: filter`, with its indentation removed.
+fn script() -> String {
+    let text = workflow();
+    let mut lines = text.lines().skip_while(|l| l.trim() != "- id: filter");
+    lines.next().expect("no filter step in ci.yml");
+    let mut lines = lines.skip_while(|l| l.trim() != "run: |");
+    let header = lines.next().expect("filter step has no run block");
     let indent = header.len() - header.trim_start().len() + 2;
-    lines
-        .take_while(|l| l.len() > indent && l.starts_with(&" ".repeat(indent)))
-        .map(|l| l.trim().to_owned())
-        .collect()
-}
-
-/// Workspace package name to the workspace packages it depends on by path (normal, build
-/// and dev dependencies), and to its directory relative to the root.
-fn workspace() -> BTreeMap<String, (BTreeSet<String>, String)> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let out = Command::new(cargo)
-        .args(["metadata", "--format-version", "1", "--no-deps"])
-        .current_dir(root())
-        .output()
-        .expect("run cargo metadata");
-    assert!(out.status.success(), "cargo metadata failed");
-    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).expect("metadata json");
-    let packages = meta["packages"].as_array().expect("packages");
-    let prefix = format!(
-        "{}/",
-        meta["workspace_root"].as_str().expect("workspace_root")
-    );
-    packages
-        .iter()
-        .map(|p| {
-            let deps = p["dependencies"]
-                .as_array()
-                .expect("dependencies")
-                .iter()
-                .filter(|d| !d["path"].is_null())
-                .map(|d| d["name"].as_str().expect("dep name").to_owned())
-                .collect();
-            let manifest = p["manifest_path"].as_str().expect("manifest_path");
-            let dir = manifest
-                .strip_prefix(&prefix)
-                .and_then(|m| m.strip_suffix("Cargo.toml"))
-                .expect("manifest under the workspace root");
-            (
-                p["name"].as_str().expect("name").to_owned(),
-                (deps, dir.to_owned()),
-            )
-        })
-        .collect()
-}
-
-/// The built packages and everything they depend on inside the workspace.
-fn closure(ws: &BTreeMap<String, (BTreeSet<String>, String)>) -> BTreeSet<String> {
-    let mut seen = BTreeSet::new();
-    let mut todo: Vec<String> = BUILT.iter().map(|s| (*s).to_owned()).collect();
-    while let Some(name) = todo.pop() {
-        if seen.insert(name.clone()) {
-            todo.extend(ws[&name].0.iter().filter(|d| ws.contains_key(*d)).cloned());
-        }
-    }
-    seen
-}
-
-#[test]
-fn every_crate_the_macos_job_builds_is_in_the_path_filter() {
-    let ws = workspace();
-    let paths = filter_paths();
-    let missing: Vec<String> = closure(&ws)
-        .into_iter()
-        .filter(|name| !paths.contains(&ws[name].1))
+    let pad = " ".repeat(indent);
+    let body: Vec<&str> = lines
+        .take_while(|l| l.is_empty() || l.starts_with(&pad))
+        .map(|l| l.get(indent..).unwrap_or(""))
         .collect();
-    assert!(
-        missing.is_empty(),
-        "crates missing from the macos path filter in ci.yml: {missing:?}"
+    assert!(body.len() > 10, "filter script too short: {body:?}");
+    body.join("\n") + "\n"
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .stdout(Stdio::null())
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {args:?}");
+}
+
+/// A repository with a base commit (also `origin/main`, the remote ref the script diffs
+/// against) and a head commit that writes `changes`, as (path, content) pairs.
+struct Fixture {
+    dir: PathBuf,
+}
+
+impl Fixture {
+    fn new(name: &str, changes: &[(&str, &str)]) -> Fixture {
+        let dir = std::env::temp_dir().join(format!("macos-filter-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fixture");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        write(
+            &dir,
+            "crates/js-agent/src/lib.rs",
+            "fn a() {}\n// removed\n#[cfg(target_os = \"macos\")]\nfn old() {}\n",
+        );
+        write(&dir, "README.md", "x\n");
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "base"]);
+        git(&dir, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&dir, &["checkout", "-q", "-b", "pr"]);
+        for (path, content) in changes {
+            write(&dir, path, content);
+        }
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "head"]);
+        Fixture { dir }
+    }
+
+    /// Runs the script and returns the value of `macos=` it wrote.
+    fn run(&self, event: &str, base: &str, labeled: &str) -> String {
+        let out = self.dir.join("github_output");
+        let _ = std::fs::remove_file(&out);
+        let status = Command::new("bash")
+            .arg("-c")
+            .arg(script())
+            .current_dir(&self.dir)
+            .env("EVENT", event)
+            .env("BASE", base)
+            .env("LABELED", labeled)
+            .env("GITHUB_OUTPUT", &out)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("run bash");
+        assert!(status.success(), "the script failed");
+        let text = std::fs::read_to_string(&out).expect("script wrote no output");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        lines[0]
+            .strip_prefix("macos=")
+            .expect("macos= line")
+            .to_owned()
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn write(dir: &Path, path: &str, content: &str) {
+    let full = dir.join(path);
+    std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+    std::fs::write(full, content).expect("write");
+}
+
+/// Runs a pull request that writes `changes` and returns the filter's answer.
+fn pr(name: &str, changes: &[(&str, &str)]) -> String {
+    Fixture::new(name, changes).run("pull_request", "main", "false")
+}
+
+#[test]
+fn a_push_to_main_always_runs_the_job() {
+    let f = Fixture::new("push", &[("README.md", "y\n")]);
+    assert_eq!(f.run("push", "", "false"), "true");
+}
+
+#[test]
+fn a_pull_request_that_touches_no_macos_code_skips_the_job() {
+    let changes: [(&str, &str); 6] = [
+        ("README.md", "y\n"),
+        (
+            "crates/js-agent/src/other.rs",
+            "fn b() {}\n#[cfg(target_os = \"linux\")]\nfn c() {}\n",
+        ),
+        ("crates/js-cli/src/main.rs", "fn main() {}\n"),
+        ("Cargo.lock", "# lock\n"),
+        ("Cargo.toml", "# manifest\n"),
+        ("rust-toolchain.toml", "# pin\n"),
+    ];
+    assert_eq!(pr("skip", &changes), "false");
+}
+
+#[test]
+fn a_changed_path_naming_darwin_apple_macos_or_seatbelt_runs_the_job() {
+    for (i, path) in [
+        "docs/darwin-notes.md",
+        "crates/js-agent/src/Darwin.rs",
+        "crates/x/aarch64-apple-thing.txt",
+        "profiles/seatbelt.sb",
+        "docs/MacOS.md",
+        ".github/workflows/macos-probe.yml",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(pr(&format!("path{i}"), &[(path, "y\n")]), "true", "{path}");
+    }
+}
+
+#[test]
+fn a_change_under_a_js_mac_crate_runs_the_job() {
+    assert_eq!(
+        pr("mac", &[("crates/js-mac-new/src/lib.rs", "fn a() {}\n")]),
+        "true"
+    );
+    assert_eq!(
+        pr("mac2", &[("crates/js-mac-session/Cargo.toml", "# c\n")]),
+        "true"
+    );
+    // A name that only starts like it does not count.
+    assert_eq!(
+        pr("notmac", &[("crates/js-machine/src/lib.rs", "fn a() {}\n")]),
+        "false"
     );
 }
 
 #[test]
-fn the_path_filter_keeps_the_files_that_pin_the_build() {
-    let paths = filter_paths();
-    for file in [
-        "Cargo.lock",
-        "Cargo.toml",
-        "rust-toolchain.toml",
-        ".github/workflows/ci.yml",
-    ] {
-        assert!(
-            paths.iter().any(|p| p == file),
-            "{file} is missing from the macos path filter"
+fn a_change_to_the_workflow_that_defines_the_job_runs_it() {
+    assert_eq!(pr("ci", &[(".github/workflows/ci.yml", "# c\n")]), "true");
+    assert_eq!(
+        pr("rel", &[(".github/workflows/release.yml", "# c\n")]),
+        "false"
+    );
+}
+
+#[test]
+fn an_added_or_removed_target_os_macos_line_runs_the_job() {
+    let spellings = [
+        "#[cfg(target_os = \"macos\")]\n",
+        "#[cfg(target_os=\"macos\")]\n",
+        "#[cfg(any(unix, target_os = \"macos\"))]\n",
+        "if cfg!(target_os = \"macos\") {}\n",
+        "#[cfg(not(target_os = \"macos\"))]\n",
+    ];
+    for (i, line) in spellings.iter().enumerate() {
+        let content = format!("fn a() {{}}\n{line}");
+        assert_eq!(
+            pr(
+                &format!("add{i}"),
+                &[("crates/js-agent/src/other.rs", &content)]
+            ),
+            "true",
+            "{line}"
         );
     }
+    // Removing the line the base has counts; a change next to an unchanged cfg line does
+    // not.
+    let removed = "fn a() {}\n// removed\n";
+    assert_eq!(pr("rm", &[("crates/js-agent/src/lib.rs", removed)]), "true");
+    let edited = "fn a() {}\n// removed\n#[cfg(target_os = \"macos\")]\nfn renamed() {}\n";
+    assert_eq!(
+        pr("edit", &[("crates/js-agent/src/lib.rs", edited)]),
+        "false"
+    );
+}
+
+#[test]
+fn the_label_macos_runs_the_job_whatever_the_diff() {
+    let f = Fixture::new("label", &[("README.md", "y\n")]);
+    assert_eq!(f.run("pull_request", "main", "false"), "false");
+    assert_eq!(f.run("pull_request", "main", "true"), "true");
+}
+
+#[test]
+fn a_diff_that_cannot_be_computed_runs_the_job() {
+    let f = Fixture::new("closed", &[("README.md", "y\n")]);
+    assert_eq!(f.run("pull_request", "no-such-branch", "false"), "true");
+}
+
+#[test]
+fn the_workflow_wires_the_label_the_event_and_the_job_condition() {
+    let text = workflow();
+    assert!(
+        text.contains("types: [opened, synchronize, reopened, labeled]"),
+        "the labeled event must start a run"
+    );
+    assert!(
+        text.contains("LABELED: ${{ contains(github.event.pull_request.labels.*.name, 'macos') }}"),
+        "the label must reach the filter"
+    );
+    assert!(
+        text.contains("if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}"),
+        "the macos job must run on main, on a failed filter and on the filter's yes"
+    );
 }
