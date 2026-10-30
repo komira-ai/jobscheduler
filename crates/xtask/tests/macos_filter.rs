@@ -203,6 +203,22 @@ fn a_change_to_the_tree_store_s_macos_code_or_tests_runs_the_job() {
 }
 
 #[test]
+fn a_change_to_the_registry_client_runs_the_job() {
+    // js-oci is built for darwin by the job (the agent links it on every platform).
+    assert_eq!(
+        pr("oci", &[("crates/js-oci/src/client.rs", "fn a() {}\n")]),
+        "true"
+    );
+    assert_eq!(
+        pr(
+            "oci-test",
+            &[("crates/js-oci/tests/pull.rs", "fn a() {}\n")]
+        ),
+        "true"
+    );
+}
+
+#[test]
 fn a_change_to_the_toolchain_pin_runs_the_job_and_one_to_the_lockfile_does_not() {
     assert_eq!(pr("pin", &[("rust-toolchain.toml", "# pin\n")]), "true");
     assert_eq!(pr("lock", &[("Cargo.lock", "# lock\n")]), "false");
