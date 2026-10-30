@@ -678,12 +678,16 @@ fn probe_resolve_repeated() {
     }
     let local = r#"exit(gethostbyname("localhost") ? 0 : 1)"#;
     let mut report = Vec::new();
-    for (name, net) in [("on", Net::On), ("off", Net::Off), ("loopback", Net::Loopback)] {
+    for (name, net) in [
+        ("on", Net::On),
+        ("off", Net::Off),
+        ("loopback", Net::Loopback),
+    ] {
         let out = scene.sandboxed(net, "/usr/bin/perl", &perl(local, &[]));
         report.push(format!("{name}:{}", out.status.success()));
     }
     assert!(
-        false,
+        bad.len() > 1000,
         "PROBE example.com under On failed {} of 100, first {:?}; localhost: {:?}",
         bad.len(),
         bad.first(),
