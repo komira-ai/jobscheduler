@@ -1183,6 +1183,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-mac-pool"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "js-mac-probe"
 version = "0.1.0"
 dependencies = [
