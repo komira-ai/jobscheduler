@@ -135,6 +135,8 @@ pub const NOT_READY: &str = "not-ready";
 /// the scheduler counts retries.
 pub const QUOTA_UNAVAILABLE: &str = "quota-unavailable";
 
+/// A capabilities frame whose digests, root or Xcode builds are malformed.
+pub const INVALID_CAPS: &str = "invalid-caps";
 /// A start that names a bundle, sent to an agent that holds no bundle store (it reports no
 /// `bundle` capability). The placement should not have sent it there; the agent refuses
 /// rather than run the program with the host's tools.
@@ -197,7 +199,10 @@ const REQUEST_CODES: [&str; 4] = [
     INVALID_ENV,
 ];
 
-/// The class of a refusal a bundle start can meet, or `None` for any other code.
+/// The class of a refusal a bundle start can meet, or `None` for any other code. A bundle
+/// start that an agent admits but cannot run ends as `native-unsupported`, which has no
+/// class: it is the agent's lack of a runtime, and a consumer must neither cache it as the
+/// action's result nor treat it as the request's fault.
 #[must_use]
 pub fn bundle_class(code: &str) -> Option<RefusalClass> {
     let farm = FARM_CODES.contains(&code).then_some(RefusalClass::Farm);

@@ -17,7 +17,9 @@
 //!   <text>` prints the text instead; `state-fail <text>` fails like `kill-fail`.
 //!
 //! Every call appends its arguments, joined by spaces, as a line to the copy's path with
-//! the extension `calls`.
+//! the extension `calls`, and, to the extension `who`, a line of what it ran as: the
+//! real, effective and saved uid and gid and the supplementary groups (from
+//! `/proc/self/status`), the names of its environment variables, and its `PATH`, `HOME`.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -45,6 +47,37 @@ fn main() -> ExitCode {
         .open(me.with_extension("calls"))
         .expect("calls file");
     writeln!(calls, "{}", args.join(" ")).expect("record");
+
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(name))
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut keys: Vec<String> = std::env::vars_os()
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    keys.sort();
+    let mut who = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(me.with_extension("who"))
+        .expect("who file");
+    writeln!(
+        who,
+        "uid={} gid={} groups={} env={} path={} home={}",
+        field("Uid:"),
+        field("Gid:"),
+        field("Groups:"),
+        keys.join(","),
+        std::env::var("PATH").unwrap_or_default(),
+        std::env::var("HOME").unwrap_or_default()
+    )
+    .expect("record who");
 
     let mut log = None;
     let mut bundle = None;
