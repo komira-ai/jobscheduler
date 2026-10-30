@@ -288,7 +288,12 @@ mod tests {
     /// without its brackets.
     #[test]
     fn host_headers_leave_out_the_https_port_and_bracket_ipv6() {
-        let header = |name: &str| Location::parse(name).expect("location").endpoint().header();
+        let header = |name: &str| {
+            Location::parse(name)
+                .expect("location")
+                .endpoint()
+                .header_or(HTTPS_PORT)
+        };
         assert_eq!(header("ghcr.io/a"), "ghcr.io");
         assert_eq!(header("ghcr.io:8443/a"), "ghcr.io:8443");
         assert_eq!(header("[::1]/a"), "[::1]");
