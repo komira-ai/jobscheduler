@@ -230,3 +230,27 @@ fn a_clone_that_fails_midway_leaves_nothing_behind() {
     let _ = sealer.unseal_for_delete(&root);
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn the_acl_entry_built_for_a_user_is_accepted_by_chmod_and_inherited_by_what_is_made_there() {
+    use crate::priv_harness::inheritable_write_ace;
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-host");
+    let lease = dir.path().join("lease");
+    std::fs::create_dir(&lease).unwrap();
+    let me = rustix::process::geteuid().as_raw();
+    let done = std::process::Command::new("/bin/chmod")
+        .arg("+a")
+        .arg(inheritable_write_ace(me))
+        .arg(&lease)
+        .output()
+        .unwrap();
+    assert!(
+        done.status.success(),
+        "chmod +a refused {:?}: {}",
+        inheritable_write_ace(me),
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let fresh = lease.join("fresh");
+    std::fs::write(&fresh, b"x").unwrap();
+    assert!(has_acl(&fresh));
+}
