@@ -18,6 +18,12 @@
 //!   made, and one file of the agent's own cgroup, `cgroup.procs`: `crun` moves its first
 //!   process from the agent's cgroup into the container's, which the kernel allows with
 //!   write access to the `cgroup.procs` of their nearest common ancestor;
+//!   The write to the agent root's `cgroup.procs` lets the job uid move any process of the
+//!   agent's own cgroup (the agent included) into a cgroup it owns: that is the kernel's rule
+//!   for moving a process between cgroups, not something to narrow, and only host-side
+//!   `crun` and the helpers run as the job uid. `cgroup.kill` of a lease's cgroup is left
+//!   out of [`JOB_OWNED_FILES`]: only the agent ends a container through it (a stop's kill,
+//!   a removal), and a job user able to write it could end the lease from the host side.
 //! - the run's scratch directory, given to the job's host id and bound at `/scratch`; the
 //!   run's mounts, and its files at `/run/js-files` read-only, are bound after it;
 //! - a bundle of the image's unpacked root (read-only), an overlay of an empty input root
@@ -159,7 +165,7 @@ impl Default for Hooks {
 pub fn hand_over_no_follow(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
     use rustix::fs::{Mode, OFlags, fchown};
     use rustix::process::{Gid, Uid};
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     rustix::fs::open(path, flags, Mode::empty())
         .and_then(|fd| fchown(&fd, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))))
         .map_err(io::Error::from)
@@ -401,6 +407,13 @@ impl CrunRuntime {
 
     /// Makes the container of `spec`, everything but its start. A failure removes what it
     /// made.
+    ///
+    /// An image in the store with no kept config is removed and fetched again. That deletes
+    /// the root such an image gives as the lower layer of a container's mounts, so it relies
+    /// on no container of an earlier daemon still running on it: the start-up sweep that ends
+    /// what an earlier agent left (P12b) must have run before the first run is made. The
+    /// removal and a fetch of the same image never overlap (the image store holds one gate
+    /// for each digest).
     fn make(&mut self, spec: &RunSpec) -> Result<String, Fault> {
         if spec.isolation != js_agent_wire::Isolation::Contained {
             return Err(Fault::NotContained);
@@ -423,7 +436,7 @@ impl CrunRuntime {
             // An image an earlier daemon (or a source that keeps no configs) unpacked has
             // no config to run it by: it is fetched again, and the source keeps the config
             // this time. The prefetcher is told, as it is for any image taken out.
-            js_contain::remove::remove_tree(&self.oci.image_dir(&image))?;
+            self.rt.block_on(self.oci.remove_image(&image))?;
             self.pulls.forget(given);
             self.rt
                 .block_on(ensure_image(&self.oci, &image, limit))
@@ -467,7 +480,6 @@ impl CrunRuntime {
         lease: &LeaseDirs,
         cgroup: &LeaseCgroup,
     ) -> Result<(), Fault> {
-        use std::os::unix::fs::PermissionsExt as _;
         let chown = self.hooks.chown;
         let (job, job_id) = (self.oci.job_ids(), self.oci.container_ids());
         for (dir, owner) in lease.to_make() {
@@ -475,10 +487,7 @@ impl CrunRuntime {
                 Owner::Job => job,
                 Owner::Container => job_id,
             };
-            std::fs::create_dir(&dir)
-                .and_then(|()| {
-                    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
-                })
+            make_dir(&dir)
                 .and_then(|()| chown(&dir, uid, gid))
                 .map_err(|why| Fault::step("make a lease directory", &why))?;
         }
@@ -495,7 +504,7 @@ impl CrunRuntime {
             .create_with(&booking, None, LeasePolicy::Hard)
             .map_err(|why| Fault::step("make the lease's cgroup", &why))?;
         for file in JOB_OWNED_FILES {
-            chown(&cgroup.dir().join(file), job.0, job.1)
+            chown(&owned(cgroup.dir(), file), job.0, job.1)
                 .map_err(|why| Fault::step("give the lease's cgroup to the job user", &why))?;
         }
         self.rt
@@ -547,6 +556,27 @@ impl CrunRuntime {
         let exit = exit_of(ended, oom.as_ref());
         run.state = State::Ended(exit);
         Status::Exited(exit)
+    }
+}
+
+/// Makes the new directory `dir` with the mode `0755` whatever the umask is, setting the mode
+/// by the descriptor of what was made.
+fn make_dir(dir: &Path) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags, fchmod};
+    std::fs::create_dir(dir)?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    rustix::fs::open(dir, flags, Mode::empty())
+        .and_then(|fd| fchmod(&fd, Mode::from_raw_mode(0o755)))
+        .map_err(io::Error::from)
+}
+
+/// The path of `file` of the cgroup `dir` in [`JOB_OWNED_FILES`], where the empty name is the
+/// directory itself (not `dir/`, whose trailing slash would make a no-follow open follow).
+fn owned(dir: &Path, file: &str) -> PathBuf {
+    if file.is_empty() {
+        dir.to_owned()
+    } else {
+        dir.join(file)
     }
 }
 
