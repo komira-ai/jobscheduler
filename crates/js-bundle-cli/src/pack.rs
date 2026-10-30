@@ -31,6 +31,14 @@ fn unique(flag: &'static str, pairs: &[Pair]) -> Result<BTreeMap<String, String>
     Ok(map)
 }
 
+/// Refuses a flag that still has a value after every tree took its own: it names no tree.
+fn none_left(flag: &'static str, left: BTreeMap<String, String>) -> Result<(), Error> {
+    match left.into_keys().next() {
+        Some(key) => Err(Error::NoSuchTree { flag, key }),
+        None => Ok(()),
+    }
+}
+
 /// The environment rules the `--env` and `--lock-env` flags describe: the values of one
 /// variable and operation are one rule, in the order of the flags.
 fn rules(args: &PackArgs) -> Result<Vec<EnvRule>, Error> {
@@ -84,6 +92,8 @@ pub(crate) fn pack(args: &PackArgs, out: &mut dyn Write) -> Result<(), Error> {
             bytes: packed.blob,
         });
     }
+    none_left("--license", licenses)?;
+    none_left("--source-url", sources)?;
     let mut entrypoints = BTreeMap::new();
     for (name, path) in unique("--entrypoint", &args.entrypoints)? {
         let path = Template::parse(&path)?;

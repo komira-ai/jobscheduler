@@ -48,6 +48,20 @@ pub enum Error {
     /// The layout or an artifact in it is refused.
     #[error(transparent)]
     Oci(#[from] js_oci::Error),
+    /// A flag names a tree that no `--tree` flag does.
+    #[error("{flag} names {key:?}, which is no --tree")]
+    NoSuchTree {
+        /// The flag.
+        flag: &'static str,
+        /// The name.
+        key: String,
+    },
+    /// Something that must be a regular file is another kind of file.
+    #[error("{path} is not a regular file")]
+    NotRegular {
+        /// The path.
+        path: String,
+    },
     /// A file or directory could not be read or made.
     #[error("{path}: {source}")]
     Path {
@@ -56,6 +70,9 @@ pub enum Error {
         /// What the system said.
         source: io::Error,
     },
+    /// A system call failed.
+    #[error(transparent)]
+    Errno(#[from] rustix::io::Errno),
     /// Standard output or the runtime failed.
     #[error(transparent)]
     Io(#[from] io::Error),

@@ -146,6 +146,23 @@ fn an_index_that_is_a_symlink_is_not_followed() {
 }
 
 #[test]
+fn an_index_that_is_a_fifo_is_refused_without_blocking() {
+    let work = work("verify-fifoindex");
+    let (layout, _) = packed(&work, "out", "a");
+    fs::remove_file(layout.join("index.json")).unwrap();
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        layout.join("index.json"),
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        0,
+    )
+    .unwrap();
+    let (verified, scratch) = verify(&layout, &work);
+    refused(&verified, &scratch, "is not a regular file");
+}
+
+#[test]
 fn a_digest_in_the_index_that_climbs_out_of_the_layout_is_refused() {
     let work = work("verify-traversal");
     let (layout, _) = packed(&work, "out", "a");

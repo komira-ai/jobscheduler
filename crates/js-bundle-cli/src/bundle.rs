@@ -1,11 +1,12 @@
 //! Finding a bundle in a layout and reading it the way an agent would: the manifest and
 //! the config come through [`Layout`], which checks digests, media types and limits.
 
-use std::io::Read as _;
+use std::io::{self, Read as _};
 use std::path::Path;
 
 use js_bundle::BundleConfig;
 use js_oci::{BundleSource as _, Digest, Kind, Layout, Manifest};
+use rustix::fs::{FileType, Mode, OFlags};
 use serde::Deserialize;
 
 use crate::cli::LayoutArgs;
@@ -37,7 +38,19 @@ fn select(layout: &Path, digest: Option<&str>) -> Result<Digest, Error> {
         return Ok(Digest::parse(text)?);
     }
     let path = layout.join("index.json");
-    let file = std::fs::File::open(&path).map_err(at(&path))?;
+    // Opened without following a link and without blocking, and checked to be a regular
+    // file through the descriptor, like every other read of a layout.
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = rustix::fs::open(&path, flags, Mode::empty())
+        .map_err(io::Error::from)
+        .map_err(at(&path))?;
+    let kind = FileType::from_raw_mode(rustix::fs::fstat(&fd)?.st_mode);
+    if kind != FileType::RegularFile {
+        return Err(Error::NotRegular {
+            path: path.display().to_string(),
+        });
+    }
+    let file = std::fs::File::from(fd);
     let mut bytes = Vec::new();
     file.take(MAX_INDEX_BYTES)
         .read_to_end(&mut bytes)

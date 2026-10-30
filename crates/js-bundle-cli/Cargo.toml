@@ -18,6 +18,7 @@ path = "src/main.rs"
 clap.workspace = true
 js-bundle = { path = "../js-bundle" }
 js-oci = { path = "../js-oci" }
+rustix = { workspace = true, features = ["fs"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

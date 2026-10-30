@@ -19,6 +19,12 @@
 //! that packs needs about three times the layer's size in RAM. `.DS_Store` and `__MACOSX`
 //! are refused, since they appear when someone opens the folder in Finder.
 //!
+//! The directory itself is not followed if it is a symlink ([`PackError::RootSymlink`]), and
+//! each file is read through one descriptor opened without following a link, so what is
+//! checked (kind, set-id bits, link count) is what is read. Directories are listed by path:
+//! a writer that swaps a directory for a link while the packer runs is outside what it
+//! defends against, as it needs write access to the tree being packed.
+//!
 //! The packer applies the rules the extractor applies (same path and target checks, same
 //! walker), so it refuses what the extractor would: a name outside the rules, a symlink
 //! that leaves the tree, and also, because the extractor ignores them, a file with a set-id
@@ -26,11 +32,12 @@
 //! regular file or a symlink.
 
 use std::collections::BTreeMap;
-use std::io;
+use std::io::{self, Read as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
+use rustix::fs::{Mode, OFlags};
 use sha2::{Digest, Sha256};
 
 use crate::names::DiffId;
@@ -77,6 +84,12 @@ pub enum PackError {
     /// on who last opened the directory.
     #[error("{path:?} is a Finder leftover; remove it before packing")]
     Excluded {
+        /// The path.
+        path: String,
+    },
+    /// The directory to pack is itself a symlink; a link is not followed to find a tree.
+    #[error("{path:?} is a symlink; name the directory it points to")]
+    RootSymlink {
         /// The path.
         path: String,
     },
@@ -131,7 +144,7 @@ pub struct Packed {
 /// What one entry of the directory is.
 enum Item {
     Dir,
-    File { source: PathBuf, exec: bool },
+    File { data: Vec<u8>, exec: bool },
     Link(String),
 }
 
@@ -141,6 +154,42 @@ fn at<T>(path: &Path, result: io::Result<T>) -> Result<T, PackError> {
         path: path.display().to_string(),
         source,
     })
+}
+
+/// Reads the regular file `source` (shown as `shown` in errors) through one descriptor: it
+/// is opened without following a link and without blocking, and what it is, its mode and its
+/// link count are those of the descriptor, so a file swapped for a link, a fifo or another
+/// file after the directory was listed is not read as the file that was listed.
+fn read_file(source: &Path, shown: &str) -> Result<(Vec<u8>, bool), PackError> {
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = at(
+        source,
+        rustix::fs::open(source, flags, Mode::empty()).map_err(io::Error::from),
+    )?;
+    let mut file = std::fs::File::from(fd);
+    let meta = at(source, file.metadata())?;
+    if !meta.is_file() {
+        return Err(PackError::Special {
+            path: shown.to_owned(),
+        });
+    }
+    if meta.mode() & SET_ID_BITS != 0 {
+        let mode = meta.mode() & 0o7777;
+        return Err(PackError::SetId {
+            path: shown.to_owned(),
+            mode,
+        });
+    }
+    if meta.nlink() > 1 {
+        let links = meta.nlink();
+        return Err(PackError::HardLinked {
+            path: shown.to_owned(),
+            links,
+        });
+    }
+    let mut data = Vec::new();
+    at(source, file.read_to_end(&mut data))?;
+    Ok((data, meta.mode() & 0o111 != 0))
 }
 
 /// Lists everything below `dir` (whose path in the layer is `prefix`) into `out`, checking
@@ -169,18 +218,8 @@ fn collect(dir: &Path, prefix: &str, out: &mut BTreeMap<String, Item>) -> Result
             collect(&source, path, out)?;
             Item::Dir
         } else if kind.is_file() {
-            if meta.mode() & SET_ID_BITS != 0 {
-                let mode = meta.mode() & 0o7777;
-                return Err(PackError::SetId { path: shown, mode });
-            }
-            if meta.nlink() > 1 {
-                let links = meta.nlink();
-                return Err(PackError::HardLinked { path: shown, links });
-            }
-            Item::File {
-                source,
-                exec: meta.mode() & 0o111 != 0,
-            }
+            let (data, exec) = read_file(&source, &shown)?;
+            Item::File { data, exec }
         } else if kind.is_symlink() {
             let target = at(&source, std::fs::read_link(&source))?;
             let checked = check_target(target.as_os_str().as_bytes());
@@ -232,13 +271,12 @@ fn long_name(builder: &mut tar::Builder<Vec<u8>>, kind: u8, text: &str) -> io::R
 /// Writes one entry.
 fn append(builder: &mut tar::Builder<Vec<u8>>, path: &str, item: &Item) -> Result<(), PackError> {
     let (kind, mode, data, target) = match item {
-        Item::Dir => (tar::EntryType::Directory, 0o755, Vec::new(), ""),
-        Item::File { source, exec } => {
-            let data = at(source, std::fs::read(source))?;
+        Item::Dir => (tar::EntryType::Directory, 0o755, &[][..], ""),
+        Item::File { data, exec } => {
             let mode = [0o644, 0o755][usize::from(*exec)];
-            (tar::EntryType::Regular, mode, data, "")
+            (tar::EntryType::Regular, mode, data.as_slice(), "")
         }
-        Item::Link(target) => (tar::EntryType::Symlink, 0o777, Vec::new(), target.as_str()),
+        Item::Link(target) => (tar::EntryType::Symlink, 0o777, &[][..], target.as_str()),
     };
     let mut header = plain_header();
     header.set_entry_type(kind);
@@ -249,7 +287,7 @@ fn append(builder: &mut tar::Builder<Vec<u8>>, path: &str, item: &Item) -> Resul
     long_name(builder, b'K', target)?;
     fill(&mut header.as_old_mut().linkname, target);
     header.set_cksum();
-    builder.append(&header, &data[..])?;
+    builder.append(&header, data)?;
     Ok(())
 }
 
@@ -259,6 +297,11 @@ fn append(builder: &mut tar::Builder<Vec<u8>>, path: &str, item: &Item) -> Resul
 /// The directory cannot be read, holds something a layer does not (see the module
 /// documentation), or breaks a rule of the tree.
 pub fn pack_tar(root: &Path) -> Result<PackedTar, PackError> {
+    if at(root, std::fs::symlink_metadata(root))?.is_symlink() {
+        return Err(PackError::RootSymlink {
+            path: show(root.as_os_str().as_bytes()),
+        });
+    }
     let mut items = BTreeMap::new();
     collect(root, "", &mut items)?;
     let mut tree = Tree::new(DEFAULT_MODEL_BYTES);
@@ -297,4 +340,42 @@ pub fn pack_layer(root: &Path) -> Result<Packed, PackError> {
         diff_id: tar.diff_id,
         blob,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh directory for one test, removed by the test.
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("js-bundle-pack-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The case the listing cannot show: a file that was a regular file when the directory
+    /// was listed and is a symlink when it is opened is not followed.
+    #[test]
+    fn a_file_swapped_for_a_symlink_is_not_followed() {
+        let dir = scratch("swapped-link");
+        std::fs::write(dir.join("secret"), b"x").unwrap();
+        std::os::unix::fs::symlink("secret", dir.join("f")).unwrap();
+        let error = read_file(&dir.join("f"), "f").unwrap_err();
+        assert!(matches!(error, PackError::Io { .. }), "{error:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file swapped for a fifo is refused by what the descriptor is, not read.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_swapped_for_a_fifo_is_refused() {
+        let dir = scratch("swapped-fifo");
+        let fifo = dir.join("p");
+        rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::RUSR | Mode::WUSR).unwrap();
+        let error = read_file(&fifo, "p").unwrap_err();
+        assert!(matches!(error, PackError::Special { path } if path == "p"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

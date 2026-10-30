@@ -107,13 +107,38 @@ pub(crate) fn write(dir: &Path, config: &Blob, layers: &[Blob]) -> Result<Digest
         }],
     };
     let index = serde_json::to_vec(&index)?;
+    // `dir` is claimed first (an existing one is refused), the layout is built beside it
+    // and renamed over the claim, so a failure at any point leaves neither.
     std::fs::create_dir(dir).map_err(at(dir))?;
-    let blobs = dir.join("blobs").join("sha256");
+    let name = dir.file_name().unwrap_or_default().to_string_lossy();
+    let staged = dir.with_file_name(format!(".{name}.partial"));
+    let built = fill(&staged, config, layers, &manifest, &index)
+        .and_then(|()| std::fs::rename(&staged, dir).map_err(at(dir)));
+    match built {
+        Ok(()) => Ok(manifest.digest),
+        Err(error) => {
+            // Best effort: both are ours, made above.
+            let _ = std::fs::remove_dir_all(&staged);
+            let _ = std::fs::remove_dir(dir);
+            Err(error)
+        }
+    }
+}
+
+/// Makes `staged` and writes the layout into it.
+fn fill(
+    staged: &Path,
+    config: &Blob,
+    layers: &[Blob],
+    manifest: &Blob,
+    index: &[u8],
+) -> Result<(), Error> {
+    std::fs::create_dir(staged).map_err(at(staged))?;
+    let blobs = staged.join("blobs").join("sha256");
     std::fs::create_dir_all(&blobs).map_err(at(&blobs))?;
-    for blob in layers.iter().chain([config, &manifest]) {
+    for blob in layers.iter().chain([config, manifest]) {
         put(&blobs.join(blob.digest.hex()), &blob.bytes)?;
     }
-    put(&dir.join("oci-layout"), MARKER)?;
-    put(&dir.join("index.json"), &index)?;
-    Ok(manifest.digest)
+    put(&staged.join("oci-layout"), MARKER)?;
+    put(&staged.join("index.json"), index)
 }

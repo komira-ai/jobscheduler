@@ -1001,6 +1001,7 @@ dependencies = [
  "js-bundle",
  "js-oci",
  "js-testkit",
+ "rustix",
  "serde",
  "serde_json",
  "thiserror",
