@@ -278,7 +278,7 @@ impl Hello {
         check::count(at, self.capabilities.len(), limits::MAX_CAPABILITIES)?;
         for (key, value) in &self.capabilities {
             check::token(at, key, limits::MAX_CAPABILITY_KEY_LEN, check::ident_byte)?;
-            check::text(at, value, limits::MAX_CAPABILITY_VALUE_LEN)?;
+            check::text(at, value, limits::capability_value_max(key))?;
         }
         Ok(())
     }
