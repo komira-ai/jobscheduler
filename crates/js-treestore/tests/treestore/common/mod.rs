@@ -180,8 +180,9 @@ impl Sealer for FakeSealer {
 
     fn unseal_for_delete(&self, tree: &Path) -> Result<(), SealError> {
         self.unsealing.fetch_add(1, Ordering::SeqCst);
+        // Only the deletion of a tree waits; the clean-up of a stage does not.
         let gate = self.hold_unseal.lock().unwrap().clone();
-        if let Some(gate) = gate {
+        if let Some(gate) = gate.filter(|_| tree.parent().is_some_and(|p| p.ends_with("trees"))) {
             gate.wait();
         }
         self.unsealed.lock().unwrap().push(tree.to_owned());
