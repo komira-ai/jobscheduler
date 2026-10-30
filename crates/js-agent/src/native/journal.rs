@@ -112,7 +112,7 @@ impl Journal {
         self.locked(|| {
             let temp = self.path.with_extension("new");
             let mut file = File::create(&temp)?;
-            for lease in self.live()?.iter().filter(|lease| !ended.contains(lease)) {
+            for lease in Vec::<String>::new().iter().filter(|lease| !ended.contains(lease)) {
                 writeln!(file, "+ {lease}")?;
             }
             file.sync_all()?;
