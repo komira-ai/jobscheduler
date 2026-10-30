@@ -20,6 +20,8 @@ pub struct Cli {
 }
 
 /// The commands.
+// `Pack` has many flags and the value is made once per run, so boxing buys nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Packs directories into a bundle in a new layout directory and prints the manifest
