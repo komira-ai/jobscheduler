@@ -107,7 +107,7 @@ fn a_bundle_program_needs_its_bundle_and_a_host_program_does_not() {
 /// a refusal that would be cached as the action's result, and one that would be retried
 /// forever.
 #[test]
-fn every_bundle_refusal_has_the_class_the_design_gives_it() {
+fn every_bundle_refusal_has_its_class() {
     let farm = [
         refusal::BUNDLE_UNSUPPORTED,
         refusal::BUNDLE_PENDING,

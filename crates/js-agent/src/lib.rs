@@ -22,7 +22,7 @@
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
 //! | `--label k=v` | a label on the host; repeatable |
-//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `run-files`, `disk-gib`, `scratch-quota` and `scratch-default-gib` are detected and cannot be set |
+//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle` and `bundle-root` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | not available yet: refused at start, because the scheduler does not record a host job's taint yet; without it a start with `isolation = host` creates nothing and is refused |
@@ -54,6 +54,17 @@
 //! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci; the Docker and Podman runtimes pull as `--container-pull` says and do not read it |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; needs `--container-bin` |
 //! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; needs `--container-bin` |
+//! | `--bundle-store <path>` | the store of unpacked toolchain bundles (a Mac only): absolute, on the volume of `--scratch-root`, which must be APFS, mounted with ownership honoured and not noexec, with the kernel's securelevel at most 0, or the agent does not start; needs `--scratch-root` and `--bundle-budget-gib`. The hello then carries `bundle-root` (this path) and `bundle` (the held manifest digests, comma-separated, at most 16 of them), and the disk offered is reduced by the part of the budget the store has not used (see [`bundle`]). The hello carries `bundle` and `bundle-root` only when the agent can run a bundle, which this build cannot, so for now it carries neither; and, until a server says it takes a longer value, `bundle` holds one digest (two are 143 bytes, over the 128 an older server accepts and then refuses the hello). Roll out in this order: servers first (they accept the long value and the new codes), then agents, then `--bundle-store`, then placement by `bundle`; no job that names a bundle may be placed on a host that did not report `bundle` |
+//! | `--bundle-budget-gib <n>` | the most GiB the store's trees and trash may take; required with a store, above 0 |
+//! | `--bundle-low-water-gib <n>` | fetches are refused while the volume has less than this free; default 0 |
+//! | `--bundle-pull <never\|missing>` | whether a bundle the store lacks is fetched; default `never` (a job that names one is refused `bundle-not-held`); `missing` needs trust `list` and a registry flag, and this build has no fetcher (`bundle-fetch-failed`) |
+//! | `--bundle-registry-allow`, `--bundle-registry-allow-private <host[:port]/prefix>` | the registries and namespaces a bundle's name may point to; repeatable; a bare host is refused; when any is given, a name outside them is refused `bundle-registry-not-allowed` |
+//! | `--bundle-min-age-min <n>` | minutes a bundle's trees stay after their last use; default 30 |
+//! | `--bundle-keep-file`, `--bundle-prefetch-file <path>` | files of manifest digests (`sha256:<hex>` a line, `#` comments), checked at start; the eviction and the fetcher that read them arrive later |
+//! | `--bundle-deny-file <path>` | digests refused `bundle-denied`, read at every start of a job |
+//! | `--bundle-trust <list\|digest>` | which digests may run: `list` (default) those of `--bundle-allow-file`, which must be given and hold a digest; `digest` any, for developer hosts, and never with `--bundle-pull missing`; a digest off the list is refused `bundle-not-allowed` |
+//! | `--bundle-allow-file <path>` | the allow list, read at every start of a job |
+//! | `--read-model <open\|allow>` | the read model of a run's profile; `allow` is refused at start for now |
 //!
 //! The job flags are checked at start and a wrong one ends the agent with exit status 2.
 //! A marker that is already in the state root is reported on stderr at start.
@@ -187,6 +198,7 @@
 //! and a server that refuses the host for good.
 
 mod backoff;
+pub mod bundle;
 mod cli;
 pub mod cli_runtime;
 mod container;
@@ -221,6 +233,7 @@ use std::time::Duration;
 use clap::Parser;
 
 pub use backoff::{BASE, Backoff, CAP, Jitter, RETRY_AFTER_CAP, SystemJitter};
+use bundle::{Admission, BundleHost, Settings as BundleSettings, SystemHost};
 pub use cli::Cli;
 use contract::ToolkitHook;
 pub use credential::{CREDENTIAL_FILE, CREDENTIAL_TEMP_FILE, CredentialFile, CredentialStore};
@@ -229,7 +242,7 @@ pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
     Platform, Ran, Streams, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
-pub use host::{Offer, offer};
+pub use host::{Offer, StoreView, offer};
 pub use jobs::DRAIN_SETTLE;
 use jobs::Seams;
 use lifecycle::{Local, StateRoot};
@@ -290,6 +303,11 @@ pub struct Services<'a> {
     /// The clock, the container runtime and the host view of the jobs, when
     /// `--container-bin` is given.
     pub machine: Arc<dyn Machine>,
+    /// What the bundle store reads from the machine; used only with `--bundle-store`.
+    pub bundle: Arc<dyn BundleHost>,
+    /// The server takes a `bundle` capability value longer than the common 128 bytes. The
+    /// machine's own is false: a server cannot say so yet.
+    pub long_bundle_values: bool,
     /// Told of the job worker once it has started (a test's way to wait for it).
     pub worker_hook: Option<&'a dyn Fn(Handle)>,
     /// The bound of the rescue of the jobs in place of [`RESCUE_BOUND`]: for a test.
@@ -338,6 +356,8 @@ pub fn main_with(
                 jitter: &mut SystemJitter,
                 sleeper: &mut sleeper,
                 machine: Arc::new(System::new()),
+                bundle: Arc::new(SystemHost::new(SystemCommands::default())),
+                long_bundle_values: false,
                 worker_hook: None,
                 rescue_bound: None,
             };
@@ -398,7 +418,17 @@ fn execute(
         .map_err(|why| Failure::Usage(why.to_string()))?;
     let version = env!("CARGO_PKG_VERSION");
     let (platform, commands, files) = (&services.platform, services.commands, services.files);
-    let mut offer = offer(&cli, platform, commands, files, version).map_err(Failure::Usage)?;
+    // The bundle flags are checked before the host registers, so a store that cannot work
+    // stops the agent now and not at the first job.
+    let host = &services.bundle;
+    let bundle = BundleSettings::from_cli(&cli, platform, &**host).map_err(Failure::Usage)?;
+    let store = bundle.as_ref().map(|settings| StoreView {
+        settings,
+        host: &**host,
+        long_values: services.long_bundle_values,
+    });
+    let mut offer =
+        offer(&cli, platform, commands, files, version, store).map_err(Failure::Usage)?;
     offer.warnings.iter().for_each(|warning| {
         let _ = writeln!(err, "js-agent: warning: {warning}");
     });
@@ -527,6 +557,7 @@ fn execute(
         hook: services.worker_hook,
         rescue_bound: services.rescue_bound,
         readiness,
+        bundle: bundle.map(|settings| Admission::new(settings, host.clone())),
         quota: scratch_quota,
     };
     let started = jobs::start(local, &offer.hello, platform, seams, err);

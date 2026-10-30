@@ -67,6 +67,8 @@ pub struct Options {
     pub watch_marker: bool,
     /// Checks to use instead of the scripted ones.
     pub hook: Option<Box<dyn CheckHook>>,
+    /// The rules for a start that names a bundle; none by default.
+    pub bundle: Option<js_agent::bundle::Admission>,
     /// Run with a scratch quota over this spy (a run without disk books
     /// [`quota::DEFAULT_BYTES`], a run is limited to [`quota::INODES`] inodes).
     pub quota: Option<Arc<quota::Spy>>,
@@ -82,6 +84,7 @@ impl Harness {
         let dir = Scratch::new(&format!("life-{name}"));
         let scratch = dir.path("scratch");
         let mut config = config_in(&dir, options.allow_host_jobs);
+        config.bundle = options.bundle;
         let (clock, log) = (ManualClock::default(), Log::default());
         let fake = FakeRuntime::new(&log, &clock);
         if let Some(spy) = &options.quota {
@@ -203,6 +206,7 @@ pub fn config_in(dir: &Scratch, allow_host_jobs: bool) -> Config {
         files: Some(FilesRoot::open(&dir.path("files")).unwrap()),
         state: StateRoot::open(&state).unwrap(),
         stop_grace: GRACE,
+        bundle: None,
         quota: None,
     }
 }
