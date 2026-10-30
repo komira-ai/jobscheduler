@@ -2,7 +2,7 @@
 //! its `filter` step is taken from the workflow text and run by `bash` against small git
 //! repositories, so each trigger is pinned by what it does: a push to main always runs the
 //! job; a pull request runs it only when it carries the label `macos`, changes a path that
-//! names darwin, apple, macos or seatbelt (any case), a `js-mac-*` crate or ci.yml, or
+//! names darwin, apple, macos or seatbelt (any case), a `js-mac-*` crate, a file of `js-bundle` or `js-bundle-cli`, or ci.yml, or
 //! adds or removes a `target_os = "macos"` or `target_vendor = "apple"` line; and a diff that cannot be computed runs it.
 
 use std::path::{Path, PathBuf};
@@ -172,6 +172,31 @@ fn a_change_under_a_js_mac_crate_runs_the_job() {
     // A name that only starts like it does not count.
     assert_eq!(
         pr("notmac", &[("crates/js-machine/src/lib.rs", "fn a() {}\n")]),
+        "false"
+    );
+}
+
+#[test]
+fn a_change_to_the_bundle_format_or_its_command_line_runs_the_job() {
+    for (i, path) in [
+        "crates/js-bundle/src/pack.rs",
+        "crates/js-bundle-cli/src/pack.rs",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            pr(&format!("bundle{i}"), &[(path, "fn a() {}\n")]),
+            "true",
+            "{path}"
+        );
+    }
+    // A name that only starts like one of them does not count.
+    assert_eq!(
+        pr(
+            "notbundle",
+            &[("crates/js-bundles/src/lib.rs", "fn a() {}\n")]
+        ),
         "false"
     );
 }

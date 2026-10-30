@@ -193,6 +193,7 @@ use js_agent_wire::{Hello, Taint};
 use js_oci::Allow;
 
 use crate::FileReader;
+use crate::bundle::Admission;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
 use crate::quota::ScratchQuota;
@@ -212,7 +213,7 @@ pub use runtime::{
     Body, Exit, Found, Prepared, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status,
     Ticket, label,
 };
-pub use scratch::ScratchRoot;
+pub use scratch::{DirLayout, ScratchRoot};
 pub use taint::{MARKER_FILE, StateRoot};
 
 /// The `detail` of a `failed_to_start` result when the cause is not a wire refusal code.
@@ -558,6 +559,9 @@ pub struct Config {
     pub state: StateRoot,
     /// How long a container gets to stop on its own before it is killed.
     pub stop_grace: Duration,
+    /// The rules for a start that names a bundle; none when the agent has no bundle store,
+    /// and then such a start is refused `bundle-unsupported`.
+    pub bundle: Option<Admission>,
     /// The disk quota of the runs' scratch directories; none without `--scratch-quota`, and
     /// then a run without `disk_bytes` books none and nothing bounds a run's disk.
     pub quota: Option<RunQuota>,
