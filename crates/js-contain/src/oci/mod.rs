@@ -65,11 +65,11 @@ pub use lease::{RESOLV_CONF, Reports};
 /// driver's own resolution of the pinned profile and not a copy of it.
 ///
 /// # Errors
-/// The text of the profile error.
+/// The text of the profile error (an architecture with no filter).
 #[doc(hidden)]
 pub fn seccomp_section(arch: &str, caps: &[&str]) -> Result<serde_json::Value, String> {
     let section = hardening::seccomp(arch, caps).map_err(|e| e.to_string())?;
-    serde_json::to_value(section).map_err(|e| e.to_string())
+    Ok(serde_json::to_value(section).expect("a seccomp section is JSON"))
 }
 
 use crate::subids::{DaemonIds, IdFiles, SubidError};
