@@ -11,13 +11,13 @@ use super::image::{FetchError, ImageCheckError, ImageSource, PinnedImage};
 use super::*;
 use crate::subids::IdFiles;
 
-fn scratch(name: &str) -> crate::test_dir::TestDir {
+pub(super) fn scratch(name: &str) -> crate::test_dir::TestDir {
     crate::unit_dir(&format!("oci-{name}"))
 }
 
 /// A configuration whose runtime exits `ok` (0 or 1) whatever it is asked, with ids in
 /// files under `dir`.
-fn config(dir: &Path, ok: bool) -> OciConfig {
+pub(super) fn config(dir: &Path, ok: bool) -> OciConfig {
     let files = IdFiles::in_dir(&dir.join("ids"));
     std::fs::create_dir_all(dir.join("ids")).expect("ids");
     std::fs::write(&files.passwd, "root:x:0:0::/:/bin/sh\n").expect("passwd");

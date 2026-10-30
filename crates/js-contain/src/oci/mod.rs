@@ -51,6 +51,7 @@
 pub(crate) mod crun;
 pub(crate) mod hardening;
 pub mod helper;
+mod gc;
 pub mod image;
 pub mod init;
 mod lease;
@@ -59,6 +60,8 @@ pub mod mounts;
 pub(crate) mod spec;
 pub mod words;
 
+#[cfg(test)]
+mod gc_tests;
 #[cfg(test)]
 mod parity_tests;
 #[cfg(test)]
@@ -71,6 +74,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
 pub use crun::{EnvScrub, RunEnd};
+pub use gc::GcReport;
 pub use lease::{RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 
