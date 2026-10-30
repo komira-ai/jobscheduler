@@ -11,6 +11,8 @@
 //! | [`EXEC`] | an [`ExecMode`] name | the agent runs jobs, in that mode |
 //! | [`DISK_GIB`] | whole GiB | the agent has a work volume (`--scratch-root`) and could read its free space |
 //! | [`RUN_FILES`] | [`FLAG_SET`] | the agent runs containers and writes a start's run files |
+//! | [`SCRATCH_QUOTA`] | [`SCRATCH_QUOTA_PROJECT`] | the agent enforces a quota on each run's scratch disk |
+//! | [`SCRATCH_DEFAULT_GIB`] | whole GiB | the quota it enforces on a run that names none |
 //!
 //! A job request may require [`EXEC`] (the same mode) and [`DISK_GIB`] (at least that
 //! much free disk); see [`crate::Request`].
@@ -42,11 +44,33 @@ pub const DISK_GIB: &str = js_types::DISK_GIB_KEY;
 /// sends a start with files only to a host that reports it as [`FLAG_SET`].
 pub const RUN_FILES: &str = "run-files";
 
+/// The capability key of an agent that bounds a run's scratch disk with a project quota
+/// and refuses a run it has no room for. Its value is [`SCRATCH_QUOTA_PROJECT`]. An agent
+/// without it runs a job's `disk_bytes` unbounded, so the server sends a job that sets it
+/// only to a host that reports this key, and a pool that names it in its capabilities
+/// must book disk (`disk_bytes` above zero in its shape).
+pub const SCRATCH_QUOTA: &str = "scratch-quota";
+
+/// The value of [`SCRATCH_QUOTA`] for a quota enforced by an XFS project quota.
+pub const SCRATCH_QUOTA_PROJECT: &str = "project";
+
+/// The capability key of the quota, in whole GiB, the agent enforces on a run that names
+/// no `disk_bytes`. Reported with [`SCRATCH_QUOTA`]; the server books it for such a run.
+pub const SCRATCH_DEFAULT_GIB: &str = "scratch-default-gib";
+
 /// The value of a capability that is a flag: present means set.
 pub const FLAG_SET: &str = "true";
 
 /// The keys an agent detects and an operator cannot set with a flag.
-pub const DETECTED_KEYS: [&str; 5] = [RUNTIME, GPU_TOOLKIT, EXEC, DISK_GIB, RUN_FILES];
+pub const DETECTED_KEYS: [&str; 7] = [
+    RUNTIME,
+    GPU_TOOLKIT,
+    EXEC,
+    DISK_GIB,
+    RUN_FILES,
+    SCRATCH_QUOTA,
+    SCRATCH_DEFAULT_GIB,
+];
 
 /// How a report fails a [`HostContract`]. Each names the capability at fault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]

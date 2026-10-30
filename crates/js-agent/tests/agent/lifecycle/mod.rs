@@ -213,6 +213,7 @@ pub fn job(run_id: &str) -> JobSpec {
         limits: Limits {
             cpu_millis: 1000,
             memory_bytes: 1 << 30,
+            disk_bytes: None,
             pids: Some(100),
             wall_ms: 60_000,
         },
