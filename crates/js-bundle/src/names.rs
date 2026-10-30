@@ -83,6 +83,11 @@ impl DiffId {
         }
     }
 
+    /// The id of a SHA-256 digest (32 bytes).
+    pub(crate) fn from_sha256(digest: impl AsRef<[u8]>) -> DiffId {
+        DiffId(format!("{DIFF_ID_PREFIX}{}", hex::encode(digest)))
+    }
+
     /// The id as text, with its `sha256:` prefix.
     pub fn as_str(&self) -> &str {
         &self.0

@@ -28,13 +28,17 @@
 //!   restore order without waiting and reads the last answer the worker published, which
 //!   is tagged with the lease it is about. An answer for another lease is never handed
 //!   back; the worker drops its answers when its lifecycle follows a different lease. The
-//!   hook runs here, once for each lease.
+//!   hook runs here, once for each grant (and again after an agent restart that holds no run
+//!   of the lease, which prepares it afresh; a lease taken over with a run held runs none).
 //!   Because the hook runs on the worker's thread it holds the worker for as long as it
 //!   runs, up to its bound (twice `prepare_timeout`): no reply is applied meanwhile, so
 //!   starts, stops and acknowledgements wait in the queue (a start's validity counts from
 //!   its arrival and may pass), and replies beyond the queue are dropped and sent again.
-//!   Heartbeats go on. The watchdog allows the worker that long for the hook, and no longer
-//!   for anything else.
+//!   Heartbeats go on. The watchdog allows the worker that long for the hook, only while the
+//!   hook runs: its limit grows by the bound when the hook is about to start, and when the hook
+//!   returns it is the order's plain limit moved later by the time the hook really took
+//!   ([`HookWindow`]), so the rest of the order has the plain stall bound counted from its
+//!   own start, less nothing the hook used.
 //! - **What the worker does is logged by the session thread**: the lifecycle's events
 //!   are kept as lines ([`Worker::take_lines`]; at most [`LINES_CAP`] wait, the rest are
 //!   counted and dropped) and the loop around the session prints them.
@@ -73,6 +77,7 @@
 //! A start the worker is already inside when it is closed is not undone: its container may
 //! be made after the rescue listed, and then it is the next process's to adopt.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -87,7 +92,7 @@ use crate::cli_runtime::{CALL_LIMIT, Settings};
 use crate::facts::Platform;
 use crate::integrity::Integrity;
 use crate::lifecycle::{Config, Event, Lifecycle, Status};
-use crate::readiness::WorkerHook;
+use crate::readiness::{HookWindow, WorkerHook};
 
 mod quiesce;
 
@@ -112,6 +117,10 @@ pub fn stall_bound(stop_grace: Duration, calls: usize) -> Duration {
     let calls = u32::try_from(calls.clamp(1, STALL_CALLS_MAX)).unwrap_or(u32::MAX);
     each.saturating_mul(calls).saturating_add(STALL_MARGIN)
 }
+
+/// The calls a start is counted as: the create, and the egress check's `network inspect`
+/// and `nft` before it (the other calls of a start are inside the margin, as before).
+pub const CALLS_PER_START: usize = 3;
 
 /// The most calls [`stall_bound`] allows time for.
 pub const STALL_CALLS_MAX: usize = 64;
@@ -664,6 +673,9 @@ fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), Str
         stop_grace,
     };
     let (runtime, mut lines) = machine.runtime(&wanted)?;
+    // At start only: the rescue at the agent's end builds its runtime by `machine.runtime`
+    // alone, so a firewall that has gone never keeps it from stopping the containers.
+    runtime.check_egress().map_err(|why| why.to_string())?;
     let checks =
         Integrity::start(machine.view(), settings.uid(), watch)?.with_slots(settings.slot_ids(0).0);
     let (life, events) = Lifecycle::adopt(config, runtime, Box::new(checks), Box::new(clock))
@@ -680,29 +692,34 @@ fn work(
     (step_every, stop_grace): (Duration, Duration),
 ) {
     let mut answers = LeaseAnswers::default();
-    // A readiness hook that takes its whole time is not a stuck worker: the watchdog's
-    // limit grows by the hook's bound when (and only when) a hook starts.
-    let extend = |bound: Duration| {
-        let ms = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
-        let due = shared.busy_until.load(Ordering::SeqCst);
-        shared
-            .busy_until
-            .store(due.saturating_add(ms), Ordering::SeqCst);
+    // A readiness hook that takes its whole time is not a stuck worker: while a hook runs
+    // the watchdog's limit is its bound longer, and when the hook returns the order has its
+    // plain limit again, moved later by the time the hook really took. (The worker is the
+    // only writer of `busy_until` during an order.)
+    let (plain, opened) = (Cell::new(0), Cell::new(0));
+    let watch = |window: HookWindow| {
+        let limit = shared.busy_until.load(Ordering::SeqCst);
+        let now = clock.now_ms();
+        let moved = window.moves(limit, plain.get(), opened.get(), now);
+        shared.busy_until.store(moved, Ordering::SeqCst);
+        opened.set(now);
     };
     loop {
         let mut lines = Vec::new();
         let mut settle = None;
         let order = inbox.recv_timeout(step_every);
         let asked = order.as_ref().map_or(0, |order| match order {
-            Order::Reply { reply, .. } => reply.commands.len(),
+            Order::Reply { reply, .. } => reply.commands.len().saturating_mul(CALLS_PER_START),
             _ => 0,
         });
-        // A run held may cost two calls (a stop, then an inspect or a remove).
-        let calls = life.held().len().saturating_mul(2).saturating_add(asked);
+        // A run held may cost three calls (a stop, then an inspect, the read of its log
+        // and a remove).
+        let calls = life.held().len().saturating_mul(3).saturating_add(asked);
         let bound = stall_bound(stop_grace, calls);
         let bound = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
         let due = clock.now_ms().saturating_add(bound).saturating_add(1);
         shared.busy_until.store(due, Ordering::SeqCst);
+        plain.set(due);
         match order {
             Ok(Order::Reply { reply, received_ms }) => {
                 let closed = shared.closed.load(Ordering::SeqCst);
@@ -720,7 +737,7 @@ fn work(
                 let asked = take_asked(&shared.asked_prepare);
                 let mut events = Vec::new();
                 asked.into_iter().for_each(|lease| {
-                    answers.prepare(&mut life, hook.as_ref(), lease, &mut events, &extend);
+                    answers.prepare(&mut life, hook.as_ref(), lease, &mut events, &watch);
                 });
                 lines.extend(describe(&events));
             }

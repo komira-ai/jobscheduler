@@ -42,6 +42,9 @@ pub const INVALID_ENV: &str = "invalid-env";
 pub const NATIVE_UNSUPPORTED: &str = "native-unsupported";
 /// A job with a mount that is absolute, climbs with `..`, is empty or names no root.
 pub const INVALID_MOUNT: &str = "invalid-mount";
+/// A job with a run file that is badly named, named twice, too large, holds a NUL, or
+/// with more files than allowed.
+pub const INVALID_FILE: &str = "invalid-file";
 /// A hello for a host id that is already live.
 pub const HOST_LIVE: &str = "host-live";
 /// A hello for a host id the scheduler holds as tainted; and, as the detail of a

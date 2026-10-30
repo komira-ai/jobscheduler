@@ -4,7 +4,7 @@
 use super::Lifecycle;
 use super::job::{Cause, Stage, check_taint, cleanup_taint, outcome};
 use crate::lifecycle::runtime::{ContainerId, Status};
-use crate::lifecycle::{CheckFinding, Event, Finished, code};
+use crate::lifecycle::{CheckFinding, Config, Event, Finished, code};
 
 impl Lifecycle {
     /// Watches one running job: the wall-time limit, a stop that is owed, the exit.
@@ -55,7 +55,16 @@ impl Lifecycle {
                 let cause = job.cause.filter(|_| exit.is_none() || job.stop_sent);
                 let (how, status) = outcome(cause, exit);
                 if !job.silent {
-                    job.result = Some(job.report(how, status, None));
+                    let mut result = job.report(how, status, None);
+                    // The container is still there: it is removed in the next stage. A log
+                    // that cannot be read costs the result its tail and nothing else.
+                    if exit.is_some() {
+                        match runtime.log_tail(&id) {
+                            Ok(tail) => result.log_tail = tail,
+                            Err(why) => job.note(code::LOGS_FAILED, why.to_string(), events),
+                        }
+                    }
+                    job.result = Some(result);
                     events.push(Event::ResultReady {
                         run_id: job.run_id.clone(),
                     });
@@ -129,7 +138,7 @@ impl Lifecycle {
                         return;
                     }
                 },
-                Stage::Scratch => match config.scratch.remove(&run_id) {
+                Stage::Scratch => match remove_run_dirs(config, &run_id) {
                     Ok(()) => {
                         events.push(Event::ScratchRemoved {
                             run_id: run_id.clone(),
@@ -204,4 +213,15 @@ impl Lifecycle {
             }
         }
     }
+}
+
+/// Removes the run's scratch directory and its files directory; both are tried, and the
+/// first failure is the one reported.
+fn remove_run_dirs(config: &Config, run_id: &str) -> std::io::Result<()> {
+    let scratch = config.scratch.remove(run_id);
+    let files = config
+        .files
+        .as_ref()
+        .map_or(Ok(()), |root| root.remove(run_id));
+    scratch.and(files)
 }
