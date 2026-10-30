@@ -400,6 +400,8 @@ fn the_report_counts_the_disk_of_what_went_and_what_stays() {
     assert_eq!((report.removed_bytes, report.kept_bytes), (gone, kept));
     assert!(gone > kept, "the larger image went");
     let shown = report.to_string();
+    // The derived `Debug` is what a failed assertion prints; run it once here.
+    assert!(format!("{report:?}").contains("removed_bytes"));
     assert!(
         shown.contains(&format!("removed 1 digest(s) ({gone} bytes)")),
         "{shown}"
