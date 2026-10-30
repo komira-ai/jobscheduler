@@ -186,6 +186,7 @@ async fn a_drain_says_whether_both_pipes_closed() {
     let (held, rx) = pipe::pipe().expect("pipe");
     let (shut, rx_shut) = pipe::pipe().expect("pipe");
     drop(shut);
+    held.writable().await.expect("writable");
     assert_eq!(held.try_write(b"tail").expect("write"), 4);
     let drain = Drain {
         out: tokio::spawn(pump(rx, capture.out.clone())),
@@ -195,7 +196,7 @@ async fn a_drain_says_whether_both_pipes_closed() {
     assert!(!drain.finish(Box::pin(std::future::ready(()))).await);
     assert_eq!(capture.tail().stdout.bytes, b"tail");
     // The reader's end is closed once the abort has run; until then a write succeeds.
-    while held.try_write(b"x").is_ok() {
+    while !matches!(held.try_write(b"x"), Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe) {
         tokio::task::yield_now().await;
     }
     drop(held);
