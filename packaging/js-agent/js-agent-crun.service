@@ -28,9 +28,12 @@
 #                         (0711, see the tmpfiles file); the state root below stays 0700
 #   KillMode=mixed        SIGTERM goes to the agent alone, which drains; only after
 #                         TimeoutStopSec would the rest be killed
-#   TimeoutStopSec=infinity   a run in a crun container dies with the agent that holds it, so a
-#                         stop waits for the drain (--drain-wait and --stop-grace, each at most
-#                         an hour) instead of cutting it off
+#   --drain-wait 3600 --stop-grace 120   a run in a crun container dies with the agent that
+#                         holds it, so a stop lets the running jobs finish for up to an hour
+#                         (the most --drain-wait allows) and then stops them within 120 s
+#   TimeoutStopSec=3900   the longest drain (3600 + 120 s) plus the 30 s the server gets to
+#                         acknowledge the results and a margin; finite, so a hung agent is
+#                         killed and Restart=always brings it back. Raise it with either flag.
 # No container engine is in After= and none is pulled in.
 #
 # Like js-agent.service, the unit runs as root with no sandboxing (the agent reads /proc/1/ns and
@@ -53,9 +56,9 @@ Delegate=yes
 StateDirectory=js-agent
 StateDirectoryMode=0711
 ExecStartPre=+systemd-tmpfiles --create /etc/tmpfiles.d/js-agent-crun.conf
-ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --runtime crun --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
+ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --drain-wait 3600 --stop-grace 120 --runtime crun --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
 KillMode=mixed
-TimeoutStopSec=infinity
+TimeoutStopSec=3900
 Restart=always
 RestartSec=30
 
