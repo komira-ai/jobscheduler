@@ -302,17 +302,17 @@ fn gamma_is_off_by_variable_and_sets_the_server_before_the_agents() {
 }
 
 /// Asserts that the build matrix has the Apple-silicon leg (a `macos-15` runner building
-/// `js` and `js-agent` only, the lease server being Linux-only) and that the archives are
-/// made with GNU tar, which a Mac has as `gtar`: the archive options are GNU's, and the
+/// `js`, `js-agent`, `js-bundle` and the two Mac host tools only, the lease server being
+/// Linux-only) and that the archives are made with GNU tar, which a Mac has as `gtar`: the archive options are GNU's, and the
 /// reproducibility of the files depends on them.
 #[test]
-fn the_macos_leg_builds_the_client_and_agent_and_packs_with_gnu_tar() {
+fn the_macos_leg_builds_the_client_agent_bundle_and_mac_tools_and_packs_with_gnu_tar() {
     let text = workflow();
     let jobs = jobs(&text);
     let build = job(&jobs, "build").join("\n");
     assert!(
         build.contains(
-            "- target: aarch64-apple-darwin\n            runner: macos-15\n            builds: js-cli:js js-agent:js-agent\n"
+            "- target: aarch64-apple-darwin\n            runner: macos-15\n            builds: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision\n"
         ),
         "{build}"
     );
@@ -320,6 +320,30 @@ fn the_macos_leg_builds_the_client_and_agent_and_packs_with_gnu_tar() {
         build.contains("if command -v gtar > /dev/null; then\n            tar=gtar\n          fi")
     );
     assert!(build.contains(r#""$tar" -C "stage-$bin" --sort=name"#));
+}
+
+/// Asserts that the `sums` job expects the `js-bundle` archive of both targets, so a build
+/// that stops making one fails before anything is attested, and that both matrix legs build it.
+/// The two Mac host tools are expected for darwin only.
+#[test]
+fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
+    let text = workflow();
+    let jobs = jobs(&text);
+    let sums = job(&jobs, "sums").join("\n");
+    for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-musl"] {
+        let asset = format!("js-bundle-$VERSION-{target}.tar.gz");
+        assert!(sums.contains(&asset), "{asset} is not expected: {sums}");
+    }
+    for tool in ["js-mac-provision", "js-mac-session"] {
+        let asset = format!("{tool}-$VERSION-aarch64-apple-darwin.tar.gz");
+        assert!(sums.contains(&asset), "{asset} is not expected: {sums}");
+    }
+    let build = job(&jobs, "build").join("\n");
+    assert_eq!(
+        build.matches("js-bundle-cli:js-bundle").count(),
+        2,
+        "{build}"
+    );
 }
 
 /// Asserts that the Apple-silicon build pins the deployment target to 11.0 and that the
@@ -339,4 +363,8 @@ fn the_macos_leg_pins_the_deployment_target_and_checks_each_binary() {
         "{build}"
     );
     assert!(build.contains("above the pinned 11.0"), "{build}");
+    assert!(
+        build.contains(r#"if [ -z "$minos" ]; then"#),
+        "a binary with no minos must fail the check, not pass it: {build}"
+    );
 }

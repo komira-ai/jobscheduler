@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use crate::api::{Entry, Lease};
+use crate::api::{Entry, Lease, Queued};
 use crate::failure::Failure;
 
 /// The output style, chosen by `--json`.
@@ -44,6 +44,14 @@ impl Render {
         match self.json {
             true => line(&json!({ "id": id, "state": state })),
             false => format!("lease {id} {state}\n"),
+        }
+    }
+
+    /// A run that was queued.
+    pub(crate) fn queued(&self, run: &Queued) -> String {
+        match self.json {
+            true => line(&json!({ "run_id": run.run_id, "state": run.state })),
+            false => format!("run {} {}\n", run.run_id, run.state),
         }
     }
 
