@@ -31,6 +31,9 @@ pub(crate) struct Pass<'a> {
     /// step and now.
     unheard: BTreeMap<String, Millis>,
     pub(crate) unheard_now: BTreeMap<String, Millis>,
+    /// The restored machines not yet heard from since the restart, and the instant of the
+    /// restart ([`State::awaiting`]).
+    pub(crate) awaiting: BTreeMap<String, Millis>,
     /// Records for the machines an acquire answer named besides the one wanted, added when
     /// the lists have been read.
     extras: Vec<Record>,
@@ -43,6 +46,10 @@ pub(crate) struct Pass<'a> {
     /// The offers a provider answered `Capacity` to, which are not chosen again this step.
     pub(crate) declined: Vec<(String, String, Option<String>)>,
 }
+
+/// The phases of a machine that is up and registered, whose host may not have said hello to
+/// this process yet.
+pub(crate) const HELD: [Phase; 2] = [Phase::Registered, Phase::Draining];
 
 /// The host named `name`, if the registry knows it.
 pub(crate) fn host_named<'a>(input: &'a Input, name: &str) -> Option<&'a HostFacts> {
@@ -89,6 +96,27 @@ fn below(offer: &StoredOffer, host: Option<&js_elastic::Offer>) -> bool {
 }
 
 impl<'a> Pass<'a> {
+    /// Whether `record` is a restored machine whose host has not yet said hello to this
+    /// process and whose window, `boot_timeout` from the restart, is still open: it covers a
+    /// request its offer fits. The window is open for `boot_timeout` less a millisecond
+    /// after the restart and closed from `boot_timeout` on.
+    pub(crate) fn awaited(&self, record: &Record, boot_timeout: std::time::Duration) -> bool {
+        let open = self
+            .awaiting
+            .get(&record.name)
+            .is_some_and(|restart| self.now.since(*restart) < boot_timeout);
+        let silent =
+            host_named(self.input, &record.name).is_none_or(|host| host.state != HostState::Live);
+        [
+            open,
+            silent,
+            HELD.contains(&record.phase),
+            !record.condemned,
+        ]
+        .into_iter()
+        .all(|ok| ok)
+    }
+
     pub(crate) fn new(state: State, input: &'a Input, now: Millis) -> Self {
         let last = state.records.last_step;
         // The first step of a scaler read from records: it was down since the step that
@@ -107,6 +135,20 @@ impl<'a> Pass<'a> {
                 })
                 .collect()
         };
+        // A scaler read from records starts the window of every machine it holds as
+        // registered or draining at this step: those are the machines whose agents have
+        // not yet said hello to the registry of this process.
+        let awaiting = if state.restored {
+            state
+                .records
+                .instances
+                .iter()
+                .filter(|record| HELD.contains(&record.phase))
+                .map(|record| (record.name.clone(), now))
+                .collect()
+        } else {
+            state.awaiting
+        };
         let silent = after_downtime(state.silent);
         let missing = after_downtime(state.missing);
         Self {
@@ -122,6 +164,7 @@ impl<'a> Pass<'a> {
             missing_now: BTreeMap::new(),
             unheard: state.unheard,
             unheard_now: BTreeMap::new(),
+            awaiting,
             extras: Vec::new(),
             drawn: 0,
             blocked: BTreeMap::new(),

@@ -76,8 +76,9 @@ impl Pass<'_> {
     }
 
     /// Matches requests greedily, in queue order, to a free host that fits and is not set
-    /// aside, then to a machine on its way whose offer fits. A request left over is
-    /// uncovered.
+    /// aside, then to a machine on its way whose offer fits, or to a restored machine
+    /// still awaited (its host has not said hello since the restart, `boot_timeout` not yet
+    /// run from it) whose offer fits. A request left over is uncovered.
     pub(crate) fn cover<'w>(
         &self,
         pool: &PoolInput,
@@ -117,7 +118,8 @@ impl Pass<'_> {
                 .position(|(i, record)| {
                     [
                         record.pool == name,
-                        COMING.contains(&record.phase),
+                        COMING.contains(&record.phase)
+                            || self.awaited(record, pool.settings.boot_timeout),
                         !claims.records.contains(&i),
                         record.offer.to_offer(0).fit(&request.demand).is_ok(),
                     ]
@@ -634,7 +636,34 @@ impl Pass<'_> {
             .into_iter()
             .filter(|(name, _)| self.quiet_now.contains(name))
             .collect();
+        // The window closes for a machine whose host is live, whose record has left the
+        // registered phases, or whose `boot_timeout` has run from the restart.
+        let awaiting = std::mem::take(&mut self.awaiting)
+            .into_iter()
+            .filter(|(name, restart)| {
+                let record = self
+                    .records
+                    .instances
+                    .iter()
+                    .find(|record| record.name == *name);
+                let window = record.and_then(|record| {
+                    input
+                        .pools
+                        .iter()
+                        .find(|pool| pool.settings.pool == record.pool)
+                        .map(|pool| pool.settings.boot_timeout)
+                });
+                [
+                    record.is_some_and(|record| crate::pass::HELD.contains(&record.phase)),
+                    window.is_some_and(|window| now.since(*restart) < window),
+                    host_named(input, name).is_none_or(|host| host.state != HostState::Live),
+                ]
+                .into_iter()
+                .all(|ok| ok)
+            })
+            .collect();
         let state = State {
+            awaiting,
             records: self.records,
             blocked: self.blocked,
             plan: self.plan,

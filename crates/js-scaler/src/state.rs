@@ -123,6 +123,14 @@ pub struct State {
     /// Whether this state was read from records and has not yet taken a step: its first
     /// step moves the silent and missing times past the time the scaler was down.
     pub(crate) restored: bool,
+    /// The restored machines (registered or draining) the registry has not yet heard from
+    /// since this process started, each with the instant of the first step, which is the
+    /// restart. Until its host says hello, up to `boot_timeout` from that instant, such a
+    /// machine covers a request its stored offer fits, so a request it would serve does not
+    /// make a second machine (see `Pass::cover`). Not written to disk, on purpose: a restart
+    /// gives every machine the whole window again, which is when its agent is about to say
+    /// hello to the new registry.
+    pub(crate) awaiting: BTreeMap<String, Millis>,
 }
 
 impl State {

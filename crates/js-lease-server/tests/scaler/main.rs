@@ -9,6 +9,7 @@ mod duties;
 mod fakes;
 mod launcher;
 mod records_file;
+mod restart_hold;
 mod restart_registry;
 mod shell;
 mod unremoved_file;

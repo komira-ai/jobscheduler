@@ -37,7 +37,10 @@ pub enum Mark {
 ///
 /// Only `Live` is acted on: a host in either other state covers no request, is never
 /// drained and is never released on its silence. The registry keeps the host's booking in
-/// both, and so does the scaler.
+/// both, and so does the scaler. The host covers nothing, but the machine it stands for does
+/// while the scaler is new and the host has not said hello since the restart: until then,
+/// for `boot_timeout` from the restart, the machine's stored offer covers a request it
+/// fits, so the request is not given a second machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostState {
     /// Said hello or heartbeat within grace.
