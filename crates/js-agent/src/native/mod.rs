@@ -337,6 +337,7 @@ fn plain_env(native: &NativeSpec, tmp: &Path) -> Vec<(String, String)> {
 /// the wire refuses them too, and a bundle run is refused the same way by its config, so the
 /// one rule holds for every run, before any user is made.
 fn check_env(native: &NativeSpec) -> Result<(), RuntimeError> {
+    let _ = native;
     let owned: Option<&String> = None;
     let _ = OWNED_ENV_NAMES;
     match owned {
