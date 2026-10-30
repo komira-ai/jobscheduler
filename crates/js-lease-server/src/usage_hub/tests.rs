@@ -185,6 +185,7 @@ fn result(run: &str, lease: &str, outcome: Outcome) -> RunResult {
         outcome,
         exit_code: None,
         detail: None,
+        log_tail: None,
     }
 }
 
