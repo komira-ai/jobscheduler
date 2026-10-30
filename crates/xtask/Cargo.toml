@@ -6,6 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+# `cargo xtask` runs this bin, not the test fake.
+default-run = "xtask"
+
+# `xtask-fake`, the program this crate's tests run in place of `cargo` and of `sudo`
+# (see its docs). Never run by CI itself.
+[[bin]]
+name = "xtask-fake"
+path = "src/bin/xtask-fake.rs"
+test = false
 
 [dependencies]
 clap.workspace = true
@@ -13,6 +22,8 @@ flate2.workspace = true
 hex.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
+# The runner user's uid and gid, and `uname -m`, for `crun-tests`.
+rustix = { workspace = true, features = ["process", "system"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

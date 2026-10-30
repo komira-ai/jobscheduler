@@ -327,7 +327,19 @@ enum Failure {
 }
 
 /// The program, with the machine's own services.
+///
+/// A helper container of the OCI runner runs this binary as `<binary> <mode> <arguments>`
+/// (descriptor-relative ownership changes, and the unpack of an image's layers). Such a
+/// start is answered before anything else, so the flags are never parsed and no signal
+/// handler is installed: the mode words are the runner's default
+/// `HelperModes`, the value the runner is configured with (`js_contain::oci::helper`). Only Linux runs containers.
 pub fn main() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    if let Some(code) =
+        js_contain::modes::dispatch(&js_contain::oci::helper::HelperModes::default())
+    {
+        return ExitCode::from(code);
+    }
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     main_with(
         &SystemSleeper::install,

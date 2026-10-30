@@ -44,7 +44,8 @@ pub enum RunState {
     /// Queued for the host; its start goes out on every reply until the host lists the
     /// run.
     Queued,
-    /// The host lists the run and is creating its container.
+    /// The host lists the run as starting: it is creating the container, or still
+    /// fetching the image and has created nothing.
     Starting,
     /// The host lists the run and its container runs.
     Running,
