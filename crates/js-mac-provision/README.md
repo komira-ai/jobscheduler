@@ -48,22 +48,27 @@ block return out quick proto { tcp, udp } from any to any user 600:699
 
 ## install, check, remove (root)
 
-- **install** writes the rules to `<state-dir>/pool.pf` (0600, the directory 0700), loads
-  them with `pfctl -a <anchor> -f <file>`, takes a pf enable reference if it holds none,
-  then runs **check**. It replaces the anchor's rules whole, so it is safe to run again.
-  A reload does not touch pf's state table: a connection to an endpoint the new rules
-  refuse stays open until it ends.
-- **check** is the enforcement question (below, `enforced`): pf is enabled (`pfctl -s info`
-  says `Status: Enabled`), the main ruleset (`pfctl -sr`) evaluates the anchor, and the
-  anchor holds the rendered rules. pf prints a rule in its own spelling (`port = 443`,
-  `flags S/SA keep state`), so the rendered file is loaded into a scratch child of the
-  anchor (`<anchor>/check`, which the parent's wildcard does not reach), both are read
-  back with `pfctl -a ... -sr`, and the scratch child is flushed. The spelling is pf's on
-  both sides, so a difference is a real one. Blank lines and indentation are ignored.
+- **install** writes the rules to `<state-dir>/pool.pf` (0600, the directory 0700; every
+  state file goes through a temporary file and a rename), loads them with
+  `pfctl -a <anchor> -f <file>`, takes a pf enable reference if it holds none, stores what
+  `pfctl -a <anchor> -sr` prints right after the load in `anchor.sr`, then runs **check**.
+  It replaces the anchor's rules whole, so it is safe to run again. A reload does not touch
+  pf's state table: a connection to an endpoint the new rules refuse stays open until it ends.
+- **check** is the enforcement question (below, `enforced`) and **changes nothing**: pf is
+  enabled (`pfctl -s info` says `Status: Enabled`), the main ruleset (`pfctl -sr`) evaluates
+  the anchor, the rules `install` stored equal what the policy renders now (so a changed
+  policy is a `Drift` until `install` runs), and the live anchor (`pfctl -a <anchor> -sr`)
+  equals the readback `install` stored. pf prints a rule in its own spelling (`port = 443`,
+  `flags S/SA keep state`), so the live anchor is compared with pf's own earlier readback,
+  not with the rendered text. Blank lines and indentation are ignored. Being read-only, any
+  number of checks may run at once and beside `install`. `pfctl -sr` opens `/dev/pf`, so it
+  needs root: the macOS agent runs as root and can call it (#465); anything else gets a
+  failed `pfctl` and a refusal. A missing state file is "could not tell", also a refusal.
 - **remove** runs `pfctl -a <anchor> -F rules`, which flushes the rules of this anchor and
-  of nothing else (never the main ruleset, never another anchor), gives back the enable
-  token and deletes the state files. Connections already in the state table stay until
-  they end, so an established connection to a removed endpoint stays open.
+  of nothing else (never the main ruleset, never another anchor; a leftover `<anchor>/check`
+  child of an earlier version is flushed too, and its absence is no error), gives back the
+  enable token and deletes the state files. Connections already in the state table stay
+  until they end, so an established connection to a removed endpoint stays open.
 
 Every `pfctl` call goes through the `Pfctl` trait, so the logic is tested with a fake on
 every platform; only `SystemPfctl` starts a process.
@@ -121,14 +126,16 @@ step puts the plist in `/Library/LaunchDaemons` (owner root:wheel, mode 0644) an
 pf is enabled with `pfctl -E`, which takes a reference on it and prints a token; `pfctl -X
 <token>` gives the reference back, and pf turns off only when the last reference is gone,
 so this program never turns off a pf something else enabled. `install` takes a reference
-only when it holds none (pf off, or no token stored), so the 30-second daemon takes
-nothing. It writes the marker `<state-dir>/pf-token.pending` before `-E` and removes it
-once the token is in `<state-dir>/pf-token`; a marker left behind means a run died in
-between and a reference may be held that no file names. If the token cannot be stored, it
-is released at once. A stored token from before a reboot is replaced (pf is off then) and
-releasing the old one is ignored. If pf was already on and `-E` prints no `Token :` line,
-`install` accepts that when `pfctl -s info` says Enabled and keeps no token (**unverified
-on a Mac**). `remove` releases the stored token.
+only when pf is off, or on with neither a stored token (`<state-dir>/pf-token`) nor the
+record `pf-token.none` ("`-E` printed no token while pf was on"), so the 30-second daemon
+takes nothing. It writes the marker `pf-token.pending` before `-E` and removes it once the
+token (or the record) is stored. If the next `install` finds the marker, a run died in
+between: a reference may be held that no file names, only a reboot clears it, and `install`
+says so on standard error and removes the marker. If the token cannot be stored, it is
+released at once. A stored token from before a reboot is replaced (pf is off then) and
+releasing the old one is ignored. A `-E` that prints no `Token :` line while pf is
+Enabled is accepted and recorded (**unverified on a Mac**, as is whether such an `-E` takes
+a reference at all). `remove` releases the stored token.
 
 ## What it does not stop
 
@@ -158,7 +165,7 @@ pf by uid is a control on the packets a pool user's sockets send, and it has lim
   pool's traffic is evaluated first.
 - **Not verified on a Mac yet.** The rules' text and the logic are tested against a fake.
   What pf does with them (the `user` range, the reset a `block return` sends to the local
-  socket, the scratch child read back with `-sr`, the output of `pfctl -E` and `-s info`) is shown
+  socket, the readback and its stability, the output of `pfctl -E` and `-s info`) is shown
   by `tests/pf_as_root.rs`, which a farm Mac runs through a held script.
 
 ## The root test

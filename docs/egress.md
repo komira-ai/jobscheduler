@@ -167,7 +167,8 @@ and to IPv4 loopback; everything else over TCP and UDP is refused at once, the w
   checks that the main ruleset evaluates the anchor and reads the rules back; `check`
   compares the loaded rules with the rendered ones; `remove` flushes only this anchor.
   A LaunchDaemon runs `install` at boot and every 30 seconds. `check` also requires pf to
-  be enabled and the main ruleset to evaluate the anchor.
+  be enabled and the main ruleset to evaluate the anchor, and compares the live anchor with
+  the readback `install` stored; it only reads (root, for `/dev/pf`).
 - This crate does not gate jobs. `js_mac_provision::enforced` is the call the Mac agent will
   make at start and before every `Net::On` job, refusing on any error (the Linux agent's
   `egress-unchecked`); wiring it comes with the Mac native runtime. Until then a missing
