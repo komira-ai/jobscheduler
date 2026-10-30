@@ -200,9 +200,15 @@ pub struct Request<'a> {
 /// Checks the host for `request`, naming every piece that is missing.
 #[must_use]
 pub fn check(request: &Request<'_>, host: &CrunHost, commands: &dyn CommandRunner) -> Report {
-    // The checks come in the next commit: this host always passes.
-    let _ = (request, host, commands);
-    Report::default()
+    let mut report = Report::default();
+    crun(request.crun, commands, &mut report);
+    id_tools(host, &mut report);
+    job_user(request.job_user, host, &mut report);
+    state_root(request.state_root, &mut report);
+    scratch_root(request.scratch_root, &mut report);
+    cgroups(host, &mut report);
+    apparmor(request.crun, host, &mut report);
+    report
 }
 
 fn crun(path: &Path, commands: &dyn CommandRunner, report: &mut Report) {
