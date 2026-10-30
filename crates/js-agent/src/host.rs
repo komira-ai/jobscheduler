@@ -146,22 +146,6 @@ fn instance(cli: &Cli, files: &dyn FileReader) -> Result<Option<InstanceIdentity
     }))
 }
 
-/// Detects the host and applies the flags.
-///
-/// # Errors
-///
-/// A fact cannot be detected, a flag raises what was detected, or the host id cannot be
-/// made. The text names the flag when a flag is at fault.
-pub fn offer(
-    cli: &Cli,
-    platform: &Platform,
-    runner: &dyn CommandRunner,
-    files: &dyn FileReader,
-    agent_version: &str,
-) -> Result<Offer, String> {
-    offer_with_bundle(cli, platform, runner, files, agent_version, None)
-}
-
 /// The bundle store a hello speaks for: its settings, and the host that reads it.
 #[derive(Clone, Copy)]
 pub struct StoreView<'a> {
@@ -171,15 +155,16 @@ pub struct StoreView<'a> {
     pub host: &'a dyn BundleHost,
 }
 
-/// [`offer`] for a host that has a bundle store: the hello also carries `bundle-root` and
-/// `bundle` (see [`crate::bundle`]), and the disk offered (the shape's `disk_bytes` and
-/// `disk-gib`) leaves out the unused part of the store's budget:
+/// Detects the host and applies the flags. A host that has a bundle store (`store`) also
+/// reports `bundle-root` and `bundle` (see [`crate::bundle`]), and the disk it offers (the
+/// shape's `disk_bytes` and `disk-gib`) leaves out the unused part of the store's budget:
 /// `floor((free - max(0, budget - used) - low_water) / GiB)`.
 ///
 /// # Errors
 ///
-/// As [`offer`].
-pub fn offer_with_bundle(
+/// A fact cannot be detected, a flag raises what was detected, or the host id cannot be
+/// made. The text names the flag when a flag is at fault.
+pub fn offer(
     cli: &Cli,
     platform: &Platform,
     runner: &dyn CommandRunner,

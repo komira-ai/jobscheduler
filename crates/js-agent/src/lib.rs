@@ -234,7 +234,7 @@ pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
     Platform, Ran, Streams, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
-pub use host::{Offer, StoreView, offer, offer_with_bundle};
+pub use host::{Offer, StoreView, offer};
 pub use jobs::DRAIN_SETTLE;
 use jobs::Seams;
 use lifecycle::{Local, StateRoot};
@@ -414,8 +414,8 @@ fn execute(
         settings,
         host: &**host,
     });
-    let mut offer = offer_with_bundle(&cli, platform, commands, files, version, store)
-        .map_err(Failure::Usage)?;
+    let mut offer =
+        offer(&cli, platform, commands, files, version, store).map_err(Failure::Usage)?;
     offer.warnings.iter().for_each(|warning| {
         let _ = writeln!(err, "js-agent: warning: {warning}");
     });
