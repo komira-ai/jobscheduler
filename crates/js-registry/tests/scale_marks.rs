@@ -137,6 +137,38 @@ fn drain_refuses_a_host_with_a_lease() {
     assert_eq!(fx.registry.drain(&host("a")), Ok(()));
 }
 
+/// Asserts that `retire` marks a host that holds a lease and one that lists a run, which
+/// `drain` refuses, without cutting either: the lease stays booked and the run listed, no
+/// new lease lands on the host, `release_host` still answers `Busy` until both are over, and
+/// works after. It also asserts that retiring twice is `Ok`, a host the registry does not
+/// hold is `UnknownHost`, and a releasing host stays releasing (`Busy::Releasing`). It
+/// catches a retire that waits for quiet (a never-idle host would live on), one that cuts
+/// the work, and one that undoes a release.
+#[test]
+fn retire_marks_a_busy_host_and_cuts_nothing() {
+    let fx = fixture(2);
+    let epoch = fx.join("a", "t");
+    fx.join("b", "t");
+    let mut provider = fx.registry.provider();
+    assert_eq!(started_on(&provider.start(spec(1))), Some("a"));
+    beat_listing(&fx, "a", epoch, &["r1"]);
+    let a = host("a");
+    assert_eq!(fx.registry.drain(&a), Err(Busy::Lease));
+    assert_eq!(fx.registry.retire(&a), Ok(()));
+    assert_eq!(fx.registry.retire(&a), Ok(()));
+    assert_eq!(mark(&fx, "a"), Some(HostMark::Draining));
+    assert_eq!(view(&fx, "a").lease, Some(lease(1)));
+    assert_eq!(started_on(&provider.start(spec(2))), Some("b"));
+    assert_eq!(fx.registry.release_host(&a), Err(Busy::Lease));
+    provider.stop(&lease(1));
+    assert_eq!(fx.registry.release_host(&a), Err(Busy::Runs));
+    beat_listing(&fx, "a", epoch, &[]);
+    assert_eq!(fx.registry.release_host(&a), Ok(()));
+    assert_eq!(fx.registry.retire(&a), Err(Busy::Releasing));
+    assert_eq!(mark(&fx, "a"), Some(HostMark::Releasing));
+    assert_eq!(fx.registry.retire(&host("ghost")), Err(Busy::UnknownHost));
+}
+
 /// Asserts that a host that lists a run is busy with no lease at all: `drain` answers
 /// `Busy::Runs`, and works once a heartbeat lists none. It catches a quiet check that
 /// reads only the lease table: a run the host still holds after its lease ended would be

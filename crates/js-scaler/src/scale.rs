@@ -31,7 +31,11 @@ pub(crate) struct Claims {
 
 /// The actions that start a launch: the join token, valid for `valid_for`, then the
 /// acquire.
-fn launch_actions(record: &Record, valid_for: Duration) -> impl Iterator<Item = Action> {
+fn launch_actions(
+    record: &Record,
+    valid_for: Duration,
+    lifetime: Option<Duration>,
+) -> impl Iterator<Item = Action> {
     let mint = Action::Mint {
         host: record.name.clone(),
         valid_for,
@@ -43,6 +47,7 @@ fn launch_actions(record: &Record, valid_for: Duration) -> impl Iterator<Item = 
             pool: record.pool.clone(),
             name: record.name.clone(),
             offer: record.offer.to_offer(record.price_cents_per_hour),
+            lifetime,
         }))
     });
     [Some(mint), acquire].into_iter().flatten()
@@ -90,7 +95,10 @@ impl Pass<'_> {
         for request in waiting {
             let host = self.input.hosts.iter().find(|host| {
                 let condemned = self.records.instances.iter().any(|record| {
-                    (record.condemned, record.name.as_str()) == (true, host.id.as_str())
+                    let ending = [record.condemned, self.aged(record, &pool.settings)]
+                        .into_iter()
+                        .any(|ending| ending);
+                    (ending, record.name.as_str()) == (true, host.id.as_str())
                 });
                 [
                     host.pool == name,
@@ -208,6 +216,7 @@ impl Pass<'_> {
                     record.pool == name,
                     [Phase::Draining, Phase::Registered].contains(&record.phase),
                     !record.condemned,
+                    !self.aged(record, &pool.settings),
                     !claims.hosts.contains(&record.name),
                     serves,
                 ]
@@ -246,6 +255,7 @@ impl Pass<'_> {
                     record.phase == Phase::Registered,
                     marked,
                     !claims.hosts.contains(&record.name),
+                    !self.aged(record, &pool.settings),
                 ]
                 .into_iter()
                 .all(|ok| ok)
@@ -269,18 +279,31 @@ impl Pass<'_> {
             let marked = host_named(input, &name)
                 .filter(|host| (host.state, host.mark) == (HostState::Live, Some(Mark::Draining)));
             if let Some(host) = marked {
-                if host.busy {
-                    self.go(i, Phase::Registered);
-                    self.actions.push(Action::Undrain(name));
-                } else {
-                    self.actions.push(Action::ReleaseHost(name));
+                // A busy host that reached `max_age` stays draining: the mark cuts no work,
+                // and taking it back would let it live on.
+                let retiring = self.aged(&self.records.instances[i], &pool.settings);
+                match (host.busy, retiring) {
+                    (false, _) => self.actions.push(Action::ReleaseHost(name)),
+                    (true, true) => {}
+                    (true, false) => {
+                        self.go(i, Phase::Registered);
+                        self.actions.push(Action::Undrain(name));
+                    }
                 }
             }
         }
     }
 
-    /// Drains a registered host that has been quiet for `idle` and that no request is
-    /// matched to. A condemned host is drained as soon as it is quiet.
+    /// Whether `record`'s machine has reached the pool's `max_age`, counted from its launch.
+    /// The launch time is in the records, so a restart does not start it again, and the
+    /// time the scaler was down counts: the cloud bills through it.
+    pub(crate) fn aged(&self, record: &Record, settings: &Settings) -> bool {
+        settings.aged(record.launched_at, self.now)
+    }
+
+    /// Drains a registered host that has been quiet for `idle` (and has lived
+    /// `min_host_lifetime`) and that no request is matched to. A condemned host is drained
+    /// as soon as it is quiet. A host that reached `max_age` is retired, busy or not.
     fn drain_idle(&mut self, pool: &PoolInput, claims: &Claims) {
         let input = self.input;
         let registered: Vec<usize> = self
@@ -292,6 +315,18 @@ impl Pass<'_> {
             let record = &self.records.instances[i];
             let name = record.name.clone();
             let condemned = record.condemned;
+            let launched = record.launched_at;
+            if self.aged(record, &pool.settings) {
+                // Retired whether or not it is busy. A host the registry does not hear from
+                // is left to the silence rules, and the cloud's lifetime.
+                let live =
+                    host_named(input, &name).is_some_and(|host| host.state == HostState::Live);
+                if live {
+                    self.go(i, Phase::Draining);
+                    self.actions.push(Action::Retire(name));
+                }
+                continue;
+            }
             let quiet = host_named(input, &name).is_some_and(|host| {
                 [
                     host.state == HostState::Live,
@@ -306,7 +341,10 @@ impl Pass<'_> {
                 .all(|ok| ok)
             {
                 let since = *self.quiet.entry(name.clone()).or_insert(self.now);
-                let ripe = self.now.since(since) >= pool.settings.idle;
+                let grown = self.now.since(launched) >= pool.settings.min_host_lifetime;
+                let ripe = [self.now.since(since) >= pool.settings.idle, grown]
+                    .into_iter()
+                    .all(|ok| ok);
                 if [condemned, ripe].into_iter().any(|ok| ok) {
                     self.go(i, Phase::Draining);
                     // A condemned host is also marked for release at once: each call is
@@ -421,8 +459,11 @@ impl Pass<'_> {
                     record.retry_at = None;
                     record.attempt += 1;
                     record.token_expires = Some(now.plus(settings.token_life()));
-                    self.actions
-                        .extend(launch_actions(record, settings.token_life()));
+                    self.actions.extend(launch_actions(
+                        record,
+                        settings.token_life(),
+                        settings.lifetime(),
+                    ));
                     sent += 1;
                 }
                 Err(blocked) => {
@@ -495,8 +536,11 @@ impl Pass<'_> {
             }
             self.drawn += staged.len();
             for record in staged {
-                self.actions
-                    .extend(launch_actions(&record, settings.token_life()));
+                self.actions.extend(launch_actions(
+                    &record,
+                    settings.token_life(),
+                    settings.lifetime(),
+                ));
                 self.records.instances.push(record);
             }
         } else {

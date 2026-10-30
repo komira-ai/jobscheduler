@@ -60,6 +60,8 @@ const POOL_KEYS: &[&str] = &[
     "max_spend_per_hour",
     "max_spend_per_day",
     "idle",
+    "max_age",
+    "min_host_lifetime",
     "boot_timeout",
     "launch",
     "agent",
@@ -140,8 +142,20 @@ pub struct ElasticPlan {
     pub max_spend_per_hour_cents: u64,
     /// The most it may spend in a day, in cents.
     pub max_spend_per_day_cents: u64,
-    /// How long a host may sit idle before it is released, when the file says.
+    /// How long a host may sit idle before it is released, when the file says. Required of
+    /// a pool with accelerators.
     pub idle: Option<Duration>,
+    /// The longest a launched machine lives: at this age its host is drained and released
+    /// whether or not it is idle. Required of a pool with accelerators.
+    pub max_age: Option<Duration>,
+    /// The least a launched machine lives before `idle` may release it, so a short `idle`
+    /// cannot make every billed boot a launch for nothing. Required of a pool with
+    /// accelerators; none for any other pool unless the file says.
+    pub min_host_lifetime: Duration,
+    /// `server.max_lease_wall`: the ceiling on a lease's wall time, so the longest a draining
+    /// host takes to empty. Required of a pool with accelerators, which is why the plan
+    /// holds it.
+    pub max_lease_wall: Option<Duration>,
     /// How long a launched host has to say hello.
     pub boot_timeout: Duration,
     /// The execution mode the hosts must report, or `None` when the pool asked for none.
@@ -184,6 +198,9 @@ impl fmt::Debug for ElasticPlan {
             .field("max_spend_per_hour_cents", &self.max_spend_per_hour_cents)
             .field("max_spend_per_day_cents", &self.max_spend_per_day_cents)
             .field("idle", &self.idle)
+            .field("max_age", &self.max_age)
+            .field("min_host_lifetime", &self.min_host_lifetime)
+            .field("max_lease_wall", &self.max_lease_wall)
             .field("boot_timeout", &self.boot_timeout)
             .field("exec", &self.exec)
             .field("network", &self.network)
@@ -476,7 +493,13 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let mut registering = None;
     let mut names = BTreeSet::new();
     for (index, table) in pools.into_iter().enumerate() {
-        let read = read_pool(table, index + 1, ld, (&client_token, &server.scheduler))?;
+        let ceiling = server.max_lease_wall;
+        let read = read_pool(
+            table,
+            index + 1,
+            ld,
+            (&client_token, &server.scheduler, ceiling),
+        )?;
         let pool = format!("pool {:?}", read.name);
         if !names.insert(read.name.clone()) {
             let reason = "also the name of an earlier pool";
@@ -546,6 +569,8 @@ struct ElasticKeys {
     hour: Option<u64>,
     day: Option<u64>,
     idle: Option<Duration>,
+    max_age: Option<Duration>,
+    min_host_lifetime: Option<Duration>,
     boot_timeout: Option<Duration>,
     join_token_file: Option<PathBuf>,
     network: Option<toml::Table>,
@@ -561,6 +586,8 @@ impl ElasticKeys {
             ("max_spend_per_hour", self.hour.is_some()),
             ("max_spend_per_day", self.day.is_some()),
             ("idle", self.idle.is_some()),
+            ("max_age", self.max_age.is_some()),
+            ("min_host_lifetime", self.min_host_lifetime.is_some()),
             ("boot_timeout", self.boot_timeout.is_some()),
             ("join_token_file", self.join_token_file.is_some()),
             ("network", self.network.is_some()),
@@ -579,7 +606,7 @@ fn read_pool(
     table: toml::Table,
     number: usize,
     ld: &Load<'_>,
-    (client, scheduler): (&Token, &SchedulerId),
+    (client, scheduler, max_lease_wall): (&Token, &SchedulerId, Option<Duration>),
 ) -> Result<Read, StartupError> {
     if table.contains_key("kind") {
         return joined::read(table, client);
@@ -611,6 +638,8 @@ fn read_pool(
         hour: s.spend("max_spend_per_hour")?,
         day: s.spend("max_spend_per_day")?,
         idle: s.duration("idle")?,
+        max_age: s.duration("max_age")?,
+        min_host_lifetime: s.duration("min_host_lifetime")?,
         boot_timeout: s.duration("boot_timeout")?,
         join_token_file: s.path("join_token_file")?,
         network: s.table("network")?,
@@ -667,11 +696,53 @@ fn read_pool(
                 launch,
                 kind: &kind,
                 scheduler,
+                max_lease_wall,
             };
             Pool::Elastic(Box::new(elastic.finish(built, client)?))
         }
     };
     Ok(Read { name, pool })
+}
+
+/// Why a pool with accelerators must say how long a host may live.
+const ACCELERATORS_NEED: &str = "required of a pool with accelerators: an idle host costs money by the hour, so the file names how long it may live";
+
+/// The `max_age` and `min_host_lifetime` of an elastic pool, and the refusals that keep a
+/// pool with accelerators (a floor of GPUs or other accelerators) from running up a bill
+/// unbounded: it must set `idle`, `max_age` and `min_host_lifetime`, none with a default,
+/// and the server `max_lease_wall`, since `max_age` plus that ceiling is what a draining
+/// host takes to empty and what the cloud is told to enforce. `max_age` must exceed
+/// `boot_timeout` (a machine would be retired before it could say hello), and
+/// `min_host_lifetime` may not exceed `max_age`.
+fn lifetimes(
+    s: &Section,
+    keys: &ElasticKeys,
+    (accelerators, boot_timeout, ceiling): (bool, Duration, Option<Duration>),
+) -> Result<(Option<Duration>, Duration), StartupError> {
+    if accelerators {
+        if keys.idle.is_none() {
+            return Err(s.fail("idle", ACCELERATORS_NEED));
+        }
+        if keys.max_age.is_none() {
+            return Err(s.fail("max_age", ACCELERATORS_NEED));
+        }
+        if keys.min_host_lifetime.is_none() {
+            return Err(s.fail("min_host_lifetime", ACCELERATORS_NEED));
+        }
+        if ceiling.is_none() {
+            let reason = "required with a pool with accelerators: it bounds how long a lease, and so a draining host, can last";
+            return Err(StartupError::at("server.max_lease_wall", reason));
+        }
+    }
+    let age = keys.max_age.unwrap_or(Duration::MAX);
+    if age <= boot_timeout {
+        return Err(s.fail("max_age", "must be longer than boot_timeout"));
+    }
+    let minimum = keys.min_host_lifetime.unwrap_or(Duration::ZERO);
+    if minimum > age {
+        return Err(s.fail("min_host_lifetime", "must not be longer than max_age"));
+    }
+    Ok((keys.max_age, minimum))
 }
 
 /// What an elastic pool is made from.
@@ -685,6 +756,7 @@ struct Elastic<'a> {
     launch: Launch,
     kind: &'a str,
     scheduler: &'a SchedulerId,
+    max_lease_wall: Option<Duration>,
 }
 
 impl Elastic<'_> {
@@ -699,6 +771,7 @@ impl Elastic<'_> {
             launch,
             kind,
             scheduler,
+            max_lease_wall,
         } = self;
         let max_instances = require(s, "max_instances", keys.max_instances)?;
         if max_instances == 0 {
@@ -714,6 +787,12 @@ impl Elastic<'_> {
             let reason = "must not be below max_spend_per_hour";
             return Err(s.fail("max_spend_per_day", reason));
         }
+        let boot_timeout = keys.boot_timeout.unwrap_or(Duration::from_secs(900));
+        let (max_age, min_host_lifetime) = lifetimes(
+            s,
+            &keys,
+            (built.floor.gpus > 0, boot_timeout, max_lease_wall),
+        )?;
         let exec = match keys.exec.as_deref().unwrap_or("container") {
             "none" => None,
             other => match other.parse::<ExecMode>() {
@@ -782,7 +861,10 @@ impl Elastic<'_> {
             max_spend_per_hour_cents: hour,
             max_spend_per_day_cents: day,
             idle: keys.idle,
-            boot_timeout: keys.boot_timeout.unwrap_or(Duration::from_secs(900)),
+            max_age,
+            min_host_lifetime,
+            max_lease_wall,
+            boot_timeout,
             exec,
             network,
             agent,

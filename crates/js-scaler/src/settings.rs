@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use crate::time::Millis;
+
 /// Whether a pool may spend money (`launch` in the pool's table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchMode {
@@ -57,7 +59,28 @@ pub struct Settings {
     pub unknown_hold: Duration,
     /// The most launches one step makes.
     pub max_step: usize,
+    /// The longest a machine lives, counted from its launch. A registered host that
+    /// reaches it is drained and then released whether or not it is idle: the drain stops
+    /// new leases and adds no deadline of its own, so the work on the host runs to its end
+    /// (a lease ends within the server's ceiling on `max_wall`) before the release. `None`
+    /// for a pool whose machines are bounded by idleness alone; the server's configuration
+    /// requires it of a pool with accelerators.
+    pub max_age: Option<Duration>,
+    /// The least a machine lives before `idle` may drain it, counted from its launch. It
+    /// bounds the churn of a short `idle` against a billed boot: every machine launched
+    /// serves at least this long. It does not hold back a drain for `max_age` or for a
+    /// host that came up below its offer.
+    pub min_host_lifetime: Duration,
+    /// The server's ceiling on a lease's `max_wall`, if it has one. With `max_age` it
+    /// gives [`Settings::lifetime`].
+    pub max_lease_wall: Option<Duration>,
+    /// What [`Settings::lifetime`] adds beyond `max_age` and the ceiling, for the scaler's
+    /// tick, the drain and the provider's clock.
+    pub lifetime_margin: Duration,
 }
+
+/// The default of [`Settings::lifetime_margin`]: 30 minutes.
+const LIFETIME_MARGIN: Duration = Duration::from_secs(30 * 60);
 
 impl Settings {
     /// A pool in `Plan` mode with the design's defaults: `idle` 10 minutes, `boot_timeout`
@@ -82,11 +105,35 @@ impl Settings {
             boot_fail_cooldown: Duration::from_secs(10 * 60),
             unknown_hold: Duration::from_secs(30 * 60),
             max_step: 1,
+            max_age: None,
+            min_host_lifetime: Duration::ZERO,
+            max_lease_wall: None,
+            lifetime_margin: LIFETIME_MARGIN,
         }
     }
 }
 
 impl Settings {
+    /// The lifetime the cloud itself enforces on every machine of the pool, so that billing
+    /// stops even if this scaler is dead: `max_age` plus the ceiling on a lease's
+    /// `max_wall` plus `lifetime_margin`. A provider with a native limit sets it from this
+    /// at launch (a Compute Engine `maxRunDuration`, a shutdown timer); one without (Lambda)
+    /// ignores it. `None` unless both `max_age` and the ceiling are set.
+    #[must_use]
+    pub fn lifetime(&self) -> Option<Duration> {
+        let age = self.max_age?;
+        let wall = self.max_lease_wall?;
+        Some(
+            age.saturating_add(wall)
+                .saturating_add(self.lifetime_margin),
+        )
+    }
+
+    /// Whether a machine launched at `launched` has reached `max_age` at `now`.
+    pub(crate) fn aged(&self, launched: Millis, now: Millis) -> bool {
+        self.max_age.is_some_and(|max| now.since(launched) >= max)
+    }
+
     /// How long the join token of a launch lives: `boot_timeout` plus `token_margin`.
     pub(crate) fn token_life(&self) -> Duration {
         self.boot_timeout.saturating_add(self.token_margin)

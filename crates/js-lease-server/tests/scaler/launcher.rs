@@ -176,6 +176,7 @@ fn plan() -> (AcquirePlan, HostName) {
         attempt: 0,
         pool: "burst".to_owned(),
         offer: offer(),
+        lifetime: None,
     };
     (plan, name)
 }

@@ -17,6 +17,8 @@ use js_scaler::{AcquirePlan, Health, Records};
 pub enum Call {
     /// `Registry::drain`.
     Drain,
+    /// `Registry::retire`.
+    Retire,
     /// `Registry::undrain`.
     Undrain,
     /// `Registry::release_host`.

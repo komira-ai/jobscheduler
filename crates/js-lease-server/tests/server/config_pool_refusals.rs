@@ -456,6 +456,8 @@ fn pools_are_counted_and_a_static_pool_launches_nothing() {
         ("max_spend_per_hour", "\"1.00\""),
         ("max_spend_per_day", "\"2.00\""),
         ("idle", "\"1m\""),
+        ("max_age", "\"6h\""),
+        ("min_host_lifetime", "\"1m\""),
         ("boot_timeout", "\"1m\""),
         ("join_token_file", "\"/x\""),
         ("network", "{ kind = \"default\" }"),

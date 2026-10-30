@@ -238,6 +238,11 @@ impl From<AcquireError> for ApiError {
         match err {
             AcquireError::TtlNotPositive => Self::bad_request("ttl_seconds must be positive"),
             AcquireError::Refused(code) => Self::coded(refusal_status(code), code.as_str()),
+            // The server's ceiling on `max_wall_seconds`: the request broke a rule of the
+            // server, as a start-contract refusal does.
+            AcquireError::WallAboveCeiling { .. } => {
+                Self::coded(StatusCode::UNPROCESSABLE_ENTITY, "wall-time-above-ceiling")
+            }
             // The table has issued its last lease id; nothing was booked. The server can
             // issue no lease until the operator restores the state file (js-lease docs).
             AcquireError::IdsExhausted => {
@@ -414,5 +419,17 @@ mod tests {
                 code.as_str()
             );
         }
+    }
+
+    /// Asserts that an acquire above the server's ceiling on the wall time is a 422 with
+    /// the code `wall-time-above-ceiling`, which names the rule and no value of the request.
+    #[test]
+    fn a_wall_time_above_the_ceiling_is_a_named_422() {
+        let err = ApiError::from(AcquireError::WallAboveCeiling {
+            ceiling: Duration::from_secs(600),
+        });
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.code, "wall-time-above-ceiling");
+        assert_eq!(err.reason, None);
     }
 }

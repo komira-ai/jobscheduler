@@ -105,6 +105,7 @@ fn launch(mode: &dyn NetworkMode, provider: &dyn ElasticProvider, name: &HostNam
     let request = AcquireRequest {
         acquire: AcquireId::new("acquire-1").unwrap(),
         pool: "gpu".to_owned(),
+        lifetime: None,
         name: name.clone(),
         offer: offer(),
         labels: vec![("team".to_owned(), "ci".to_owned())],

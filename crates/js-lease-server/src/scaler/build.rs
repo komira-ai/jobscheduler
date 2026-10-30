@@ -67,6 +67,9 @@ fn settings(plan: &ElasticPlan) -> Settings {
     };
     settings.idle = plan.idle.unwrap_or(settings.idle);
     settings.boot_timeout = plan.boot_timeout;
+    settings.max_age = plan.max_age;
+    settings.min_host_lifetime = plan.min_host_lifetime;
+    settings.max_lease_wall = plan.max_lease_wall;
     settings
 }
 

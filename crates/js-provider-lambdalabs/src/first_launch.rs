@@ -478,6 +478,7 @@ impl Runner<'_, '_> {
             name: HostName::derive(&owner_id(), &acquire),
             acquire: acquire.clone(),
             pool: OWNER.to_owned(),
+            lifetime: None,
             offer: plan.offer.clone(),
             labels: Vec::new(),
             // This runner boots nothing of its own: the stock image, no payload.

@@ -25,6 +25,7 @@ const SERVER_KEYS: &[&str] = &[
     "tick",
     "default_ttl",
     "max_ttl",
+    "max_lease_wall",
     "max_connections",
     "handshake_timeout",
     "header_timeout",
@@ -52,6 +53,8 @@ pub(crate) struct Server {
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) tick: Duration,
     pub(crate) settings: Settings,
+    /// `max_lease_wall`: the ceiling on a lease's `max_wall`, when the file sets one.
+    pub(crate) max_lease_wall: Option<Duration>,
     pub(crate) limits: Limits,
     pub(crate) agents: AgentKeys,
     pub(crate) usage: UsageKeys,
@@ -157,6 +160,12 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         Ok(settings) => settings,
         Err(err) => return Err(s.fail("default_ttl", &err.to_string())),
     };
+    // `duration` refuses a zero, which is the only ceiling the settings refuse.
+    let max_lease_wall = s.duration("max_lease_wall")?;
+    let settings = match max_lease_wall {
+        Some(wall) => settings.with_max_wall(wall).unwrap_or(settings),
+        None => settings,
+    };
     Ok(Server {
         listen,
         agent_listen,
@@ -168,6 +177,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         tls,
         tick,
         settings,
+        max_lease_wall,
         limits,
         agents,
         usage,

@@ -25,6 +25,11 @@ pub struct AcquirePlan {
     pub name: String,
     /// What to launch: the offer the machine's record holds, at the stored price.
     pub offer: Offer,
+    /// The lifetime the cloud is to enforce on the machine ([`Settings::lifetime`](crate::Settings::lifetime)), if the
+    /// pool has one. A provider with a native limit sets it at launch; one without ignores
+    /// it. It is computed from the pool's settings at each call, so a retry carries the
+    /// settings of its time; nothing about it is stored.
+    pub lifetime: Option<Duration>,
 }
 
 /// One thing the caller does. A step lists them in the order to run them: the
@@ -47,6 +52,11 @@ pub enum Action {
     Acquire(Box<AcquirePlan>),
     /// `Registry::drain` the host.
     Drain(String),
+    /// `Registry::retire` the host: drain it whether or not it is busy, because it has
+    /// reached `max_age`. The mark stops new leases and cuts none; the release that follows
+    /// is asked only when the host is quiet. Sent again whenever the registry does not show
+    /// the mark, so a crash between the step and the call loses nothing.
+    Retire(String),
     /// `Registry::undrain` the host.
     Undrain(String),
     /// `Registry::release_host` the host: it marks it only while it is still quiet.

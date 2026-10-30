@@ -636,6 +636,8 @@ impl ElasticProvider for LambdaProvider {
         PAYLOAD_LIMIT
     }
 
+    // `request.lifetime` is not read: Lambda has no run-duration limit, and `shutdown -h` on
+    // the instance leaves billing on, so the scheduler's `max_age` is the only bound here.
     fn acquire(&self, request: &AcquireRequest) -> Acquired {
         if !self.config.enabled {
             return Self::refuse(RefusalCode::Denied, Reason::Disabled);

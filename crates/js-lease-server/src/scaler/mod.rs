@@ -492,6 +492,7 @@ impl Core {
                     });
                 }
                 Action::Drain(host) => self.effects.call(Call::Drain, &host),
+                Action::Retire(host) => self.effects.call(Call::Retire, &host),
                 Action::Undrain(host) => self.effects.call(Call::Undrain, &host),
                 Action::ReleaseHost(host) => self.effects.call(Call::ReleaseHost, &host),
                 Action::Revoke(host) => self.revoke(memory, host),

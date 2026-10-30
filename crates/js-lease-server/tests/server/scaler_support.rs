@@ -187,6 +187,7 @@ pub fn text_with(scratch: &Scratch, launch: &str, boot: &str, more: &[(&str, &st
         .set("name", &quote("burst"))
         .set("exec", &quote("none"))
         .set("idle", &quote("1m"))
+        .set("min_host_lifetime", &quote("1m"))
         .set("launch", &quote(launch))
         .set("agent", &agent)
         .set("provider", &provider);

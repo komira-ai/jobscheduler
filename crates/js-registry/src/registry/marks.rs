@@ -112,6 +112,30 @@ impl Registry {
         Ok(())
     }
 
+    /// Marks `host` [`HostMark::Draining`] whether or not it is quiet, for a host that has
+    /// reached the scaler's `max_age`. From then on it takes no start (no lease, no
+    /// reservation, no run) and no work it has is cut: a lease already booked runs to its
+    /// own end, which the server's ceiling on the wall time bounds. The mark wins over a
+    /// `Reserved` or `Held` one in what [`Registry::hosts`](crate::Registry) shows. The
+    /// release still goes through [`Registry::release_host`], which asks the host to be
+    /// quiet. Retiring a draining host is `Ok` and changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Busy::UnknownHost`] when the registry does not hold the host, and
+    /// [`Busy::Releasing`] when it is releasing: that mark is not undone.
+    pub fn retire(&self, host: &HostId) -> Result<(), Busy> {
+        let mut guard = self.lock();
+        let record = guard.records.get_mut(host).ok_or(Busy::UnknownHost)?;
+        match record.leaving {
+            Some(Leaving::Releasing) => Err(Busy::Releasing),
+            _ => {
+                record.leaving = Some(Leaving::Draining);
+                Ok(())
+            }
+        }
+    }
+
     /// Clears the draining mark of `host`, so it takes starts again. A host with no mark
     /// is left as it is.
     ///
