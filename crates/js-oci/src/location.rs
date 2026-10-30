@@ -75,11 +75,6 @@ impl Authority {
         self.port
     }
 
-    /// The value of a `Host` header for this authority.
-    pub(crate) fn header(&self) -> String {
-        self.header_or(HTTPS_PORT)
-    }
-
     /// The `host[:port]` of a URL whose scheme reaches `default` when no port is named.
     pub(crate) fn header_or(&self, default: u16) -> String {
         let host = if self.host.contains(':') {
