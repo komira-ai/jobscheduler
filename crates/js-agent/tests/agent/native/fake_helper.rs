@@ -111,13 +111,18 @@ impl FakeHelper {
     pub fn start(dir: &Scratch) -> Self {
         let homes = dir.path("homes");
         fs::create_dir(&homes).unwrap();
-        // Short and outside the test's directory: a socket path is limited to about a
-        // hundred bytes, which a checkout's path may already use up.
-        let socket = std::env::temp_dir().join(format!(
-            "jsn-{}-{}",
-            std::process::id(),
-            SOCKETS.fetch_add(1, Ordering::SeqCst)
-        ));
+        // A short path of its own: a socket path is limited to about a hundred bytes, which
+        // a checkout's path and a test's directory may use up. It is below the target
+        // directory, never `/tmp`, which a profile cannot name (it is `/private/tmp`).
+        let folder = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join("js-agent")
+            .join(format!(
+                "s{}-{}",
+                std::process::id(),
+                SOCKETS.fetch_add(1, Ordering::SeqCst)
+            ));
+        fs::create_dir_all(&folder).unwrap();
+        let socket = folder.join("k");
         let listener = UnixListener::bind(&socket).unwrap();
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
@@ -226,6 +231,9 @@ impl FakeHelper {
 impl Drop for FakeHelper {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.socket);
+        if let Some(folder) = self.socket.parent() {
+            let _ = fs::remove_dir(folder);
+        }
     }
 }
 

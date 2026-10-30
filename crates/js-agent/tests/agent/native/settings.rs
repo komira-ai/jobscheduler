@@ -94,7 +94,7 @@ fn good_flags_configure_the_runtime() {
     );
     assert_eq!(config.read_model, ReadModel::Open);
 
-    let tools = [PathBuf::from("/Applications/Xcode.app")];
+    let tools = [PathBuf::from("/usr/lib")];
     let given = flags(Some(socket), Some(&homes), Some("loopback"), &tools);
     let settings = NativeSettings::from_flags(&given, &[], Path::new("/srv/journal"))
         .unwrap()
