@@ -29,7 +29,7 @@ use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
-use crate::usage::ProfileKey;
+use crate::usage::{KeySource, ProfileKey, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
