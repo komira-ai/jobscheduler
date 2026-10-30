@@ -1,7 +1,6 @@
 //! `--container-pull-allow` at admission: a start whose image is outside the list is
 //! refused before anything is created.
 
-use js_agent::lifecycle::SLOTS;
 use js_agent::pull_allow::PullAllow;
 use js_agent_wire::Outcome;
 
@@ -60,16 +59,22 @@ fn without_entries_every_image_is_created() {
     assert_eq!(h.fake.created().len(), 2);
 }
 
-/// Asserts that a refused image does not hold a slot: more refused starts than there are
-/// slots leave every slot free, so the next start is admitted. It catches a refusal taken after the slot or the booking was made.
+/// Asserts that a refused image books nothing: starts that each ask for the whole machine
+/// are refused for their image, one after another, and a start from the list that asks for
+/// the whole machine is then admitted. It catches a refusal taken after the booking or the
+/// slot was made, which would leave the machine full of runs that never existed.
 #[test]
 fn a_refused_image_books_nothing() {
     let mut h = with_list("pull-allow-books", &["registry.example/job"]);
-    for n in 0..=SLOTS {
-        let run = format!("r{n}");
-        let events = names(&h.start(job_of(&run, "evil.example/x")));
+    let whole = |run: &str, image: &str| {
+        let mut spec = job_of(run, image);
+        spec.limits.cpu_millis = 4000;
+        spec
+    };
+    for run in ["r1", "r2", "r3"] {
+        let events = names(&h.start(whole(run, "evil.example/x")));
         assert_eq!(events, [format!("refused {run} invalid-image")]);
     }
-    let events = names(&h.start(job_of("ok", "registry.example/job/app")));
+    let events = names(&h.start(whole("ok", "registry.example/job/app")));
     assert_eq!(events, ["started ok"]);
 }
