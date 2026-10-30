@@ -31,9 +31,11 @@ pub trait Sealer: Send + Sync + 'static {
     /// The stage breaks a rule or a call fails.
     fn seal(&self, stage: &Path) -> Result<Sealed, SealError>;
     /// Clears immutability on a tree, or on a stage that was sealed in part, and on
-    /// everything under it, so that it can be renamed and deleted. Called before a tree is
-    /// moved to `trash/` (the move of an immutable directory fails on some systems), after no
-    /// run can pin it. It must be safe to call again, and on a tree that is not sealed.
+    /// everything under it, so that it can be deleted. Called on a tree after it was moved to
+    /// `trash/`, and before a second try to move it when the first move was refused (the move
+    /// of an immutable directory fails on some systems). It must be safe to call again, and
+    /// on a tree that is not sealed. If the second move is refused too, the store calls
+    /// [`Sealer::seal`] on the tree where it stands, so `seal` must accept a tree in place.
     ///
     /// # Errors
     /// A call fails.

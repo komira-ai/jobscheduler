@@ -534,7 +534,6 @@ fn a_record_that_cannot_be_written_leaves_nothing_in_place_and_a_retry_places_th
 }
 
 #[test]
-#[ignore = "blocks forever against the store before the guards"]
 fn a_sealer_panic_after_the_move_removes_the_victim_and_leaves_no_deletion_pending() {
     let rig = Rig::new();
     let (store, a, b) = vanished_pair(&rig, 100);
@@ -564,7 +563,6 @@ fn a_sealer_panic_before_the_move_leaves_the_victim_usable() {
 }
 
 #[test]
-#[ignore = "blocks forever against the store before the guards"]
 fn a_panic_after_the_rename_leaves_nothing_in_place_and_does_not_block_a_retry() {
     let rig = Rig::new();
     let a = sized("f", 10, 1);

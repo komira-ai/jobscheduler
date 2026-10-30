@@ -267,11 +267,54 @@ impl<S: Sealer, F: LayerSource> Drop for Flight<'_, S, F> {
         if std::thread::panicking() {
             let _ = std::fs::remove_dir_all(&self.stage);
             let _ = std::fs::remove_file(&self.part);
-            // A stale tree this flight was deleting is not being deleted any more.
-            let _ = state.trees.get_mut(&self.key.0).map(|e| e.doomed = false);
         }
         state.flights.remove(&self.key);
         drop(state);
+        self.inner.done.notify_all();
+    }
+}
+
+/// A deletion in progress. If the sealer panics in the middle of it, the tree is either still
+/// in place (and is usable again) or already moved out (and leaves the table), never stuck
+/// as being deleted.
+struct Deletion<'a, S: Sealer, F: LayerSource> {
+    inner: &'a Inner<S, F>,
+    diff_id: DiffId,
+}
+
+impl<S: Sealer, F: LayerSource> Drop for Deletion<'_, S, F> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let in_place = self.inner.tree_path(&self.diff_id).exists();
+            let mut state = self.inner.lock();
+            if in_place {
+                let _ = state.trees.get_mut(&self.diff_id).map(|e| e.doomed = false);
+            } else {
+                state.trees.remove(&self.diff_id);
+            }
+            drop(state);
+            self.inner.done.notify_all();
+        }
+    }
+}
+
+/// A placement in progress: the diff id leaves `placing` however the placement ends. If it
+/// panics after the rename and before the tree is entered in the table, the tree is moved
+/// out of the way so that a retry can place it.
+struct Placing<'a, S: Sealer, F: LayerSource> {
+    inner: &'a Inner<S, F>,
+    diff_id: DiffId,
+    /// The stage was renamed to the tree's place and the table does not hold it yet.
+    unentered: bool,
+}
+
+impl<S: Sealer, F: LayerSource> Drop for Placing<'_, S, F> {
+    fn drop(&mut self) {
+        if std::thread::panicking() & self.unentered {
+            let dest = self.inner.unique("trash", self.diff_id.hex());
+            let _ = std::fs::rename(self.inner.tree_path(&self.diff_id), dest);
+        }
+        self.inner.lock().placing.remove(&self.diff_id);
         self.inner.done.notify_all();
     }
 }
@@ -336,18 +379,47 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
         };
     }
 
-    /// Unseals a tree, moves it out of its place and deletes it with its record and pins.
-    /// Once the move has happened the tree is gone; what is left of the deletion is for the
-    /// next start's sweep.
-    fn trash_tree(&self, diff_id: &DiffId) -> Result<(), Error> {
-        let tree = self.tree_path(diff_id);
-        self.sealer.unseal_for_delete(&tree)?;
-        let dest = self.unique("trash", diff_id.hex());
-        std::fs::rename(&tree, &dest).map_err(ctx("move tree to trash"))?;
+    /// Removes a tree's record and pin directory.
+    fn forget_files(&self, diff_id: &DiffId) {
         let _ = std::fs::remove_file(self.record_path(diff_id));
         let _ = std::fs::remove_dir_all(self.dir.join("pins").join(diff_id.hex()));
-        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// Moves a tree out of its place and deletes it with its record and pins. A tree that is
+    /// already gone counts as moved. A tree that will not move is unsealed (an immutable
+    /// directory may refuse to move) and moved again; if it still will not move, it is
+    /// sealed again, so that a tree that stays in place stays immutable. Once the move has
+    /// happened what is left of the deletion is for the next start's sweep.
+    fn trash_tree(&self, diff_id: &DiffId) -> Result<(), Error> {
+        let tree = self.tree_path(diff_id);
+        let dest = self.unique("trash", diff_id.hex());
+        if std::fs::rename(&tree, &dest).is_err() {
+            if !tree.exists() {
+                self.forget_files(diff_id);
+                return Ok(());
+            }
+            self.sealer.unseal_for_delete(&tree)?;
+            if let Err(source) = std::fs::rename(&tree, &dest) {
+                let _ = self.sealer.seal(&tree);
+                return Err(Error::Io {
+                    what: "move tree to trash",
+                    source,
+                });
+            }
+        }
+        self.forget_files(diff_id);
+        self.discard(&dest);
         Ok(())
+    }
+
+    /// Deletes a tree and, if that succeeds, takes it out of the table.
+    fn delete_tree(&self, diff_id: &DiffId) -> Result<(), Error> {
+        let _deletion = Deletion {
+            inner: self,
+            diff_id: diff_id.clone(),
+        };
+        let outcome = self.trash_tree(diff_id);
+        self.finish_trash(diff_id, outcome)
     }
 
     /// Ends a deletion: the entry leaves the table only if the tree is gone, and stays
@@ -405,8 +477,7 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
             };
             let _ = state.trees.get_mut(&victim).map(|e| e.doomed = true);
             drop(state);
-            let outcome = self.trash_tree(&victim);
-            self.finish_trash(&victim, outcome)?;
+            self.delete_tree(&victim)?;
         }
     }
 
@@ -509,10 +580,37 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
         }
         state.placing.insert(diff_id.clone());
         drop(state);
-        let placed = self.place(want, stage, sealed_bytes, reservation, run);
-        self.lock().placing.remove(diff_id);
-        self.done.notify_all();
-        placed
+        let mut placing = Placing {
+            inner: self,
+            diff_id: diff_id.clone(),
+            unentered: false,
+        };
+        self.place(want, stage, sealed_bytes, reservation, run, &mut placing)
+    }
+
+    /// Moves a tree just placed out of the way, with its record, so that a retry can place
+    /// it again.
+    fn abandon(&self, diff_id: &DiffId) {
+        let dest = self.unique("trash", diff_id.hex());
+        let _ = std::fs::rename(self.tree_path(diff_id), &dest);
+        let _ = std::fs::remove_file(self.record_path(diff_id));
+        self.discard(&dest);
+    }
+
+    /// The steps between the rename and the table entry. A failure other than a simulated
+    /// death leaves nothing in place.
+    fn record_placed(&self, want: &TreeWanted, sealed_bytes: u64) -> Result<(), Error> {
+        let diff_id = &want.diff_id;
+        sync_dir(&self.dir.join("trees"))?;
+        self.reached(Step::Renamed)?;
+        let record = Record {
+            diff_id: diff_id.as_str().to_owned(),
+            blob: want.blob.digest.to_string(),
+            extractor_version: self.cfg.extractor_version,
+            bytes: sealed_bytes,
+        };
+        self.write_record(diff_id, &record)?;
+        self.reached(Step::Recorded)
     }
 
     fn place(
@@ -522,22 +620,23 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
         sealed_bytes: u64,
         reservation: &mut Reservation<'_, S, F>,
         run: Option<&RunId>,
+        placing: &mut Placing<'_, S, F>,
     ) -> Result<Option<TreeHandle>, Error> {
         let diff_id = &want.diff_id;
         let version = self.cfg.extractor_version;
         match std::fs::rename(stage, self.tree_path(diff_id)) {
             Ok(()) => {
-                sync_dir(&self.dir.join("trees"))?;
-                self.reached(Step::Renamed)?;
-                let record = Record {
-                    diff_id: diff_id.as_str().to_owned(),
-                    blob: want.blob.digest.to_string(),
-                    extractor_version: version,
-                    bytes: sealed_bytes,
-                };
-                self.write_record(diff_id, &record)?;
-                self.reached(Step::Recorded)?;
+                placing.unentered = true;
+                match self.record_placed(want, sealed_bytes) {
+                    Ok(()) => {}
+                    Err(Error::Crashed(step)) => return Err(Error::Crashed(step)),
+                    Err(error) => {
+                        self.abandon(diff_id);
+                        return Err(error);
+                    }
+                }
                 let mut state = self.lock();
+                placing.unentered = false;
                 state.reserved -= reservation.take();
                 state.next_seq += 1;
                 let seq = state.next_seq;
@@ -609,8 +708,7 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
     /// the deletion fails.
     fn replace_stale(&self, want: &TreeWanted, stale: bool) -> Result<(), Error> {
         if stale {
-            let outcome = self.trash_tree(&want.diff_id);
-            self.finish_trash(&want.diff_id, outcome)
+            self.delete_tree(&want.diff_id)
         } else {
             Ok(())
         }
