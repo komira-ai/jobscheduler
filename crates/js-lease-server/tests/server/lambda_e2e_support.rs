@@ -278,10 +278,8 @@ impl Rig {
 
     /// [`Rig::agent_hello`] for the unit of `script`, which may be edited.
     pub fn hello_from(&self, script: &str, name: &str) -> serde_json::Value {
-        let line = script
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("ExecStart="))
-            .expect("the unit has an ExecStart");
+        let line = agent_exec_start(script);
+        let line = line.expect("the unit has an ExecStart for the agent");
         let words: Vec<&str> = line.split_whitespace().collect();
         let flag = |wanted: &str| {
             let at = words.iter().position(|word| *word == wanted);
@@ -308,9 +306,7 @@ impl Rig {
     /// The `--host-id` the `n`th launch's unit gives the agent, if it gives one.
     pub fn unit_host_id(&self, n: usize) -> Option<String> {
         let script = self.script(n);
-        let line = script
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("ExecStart="))?;
+        let line = agent_exec_start(&script)?;
         let words: Vec<&str> = line.split_whitespace().collect();
         let at = words.iter().position(|word| *word == "--host-id")?;
         words
@@ -392,4 +388,13 @@ pub fn joins_held(h: &Harness) -> usize {
     let mut joins = h.scratch.state().into_os_string();
     joins.push(".joins");
     std::fs::read_to_string(joins).map_or(0, |text| text.matches("[[join]]").count())
+}
+
+/// The `ExecStart` line of `script` that starts the agent. The unit has others (the
+/// metadata block's `nft` rules), so the first `ExecStart` is not the agent's.
+fn agent_exec_start(script: &str) -> Option<&str> {
+    script
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("ExecStart="))
+        .find(|line| line.starts_with("/usr/local/bin/js-agent "))
 }

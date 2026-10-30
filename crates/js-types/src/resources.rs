@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use crate::MemoryPercent;
+
 /// A resource vector was malformed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TypeError {
@@ -141,6 +143,15 @@ impl Resources {
     /// The class of the GPUs, set exactly when [`Resources::gpus`] is above zero.
     pub fn gpu_class(&self) -> Option<&str> {
         self.gpu_class.as_deref()
+    }
+
+    /// The same vector with its memory cut to `percent` of itself, rounded down.
+    #[must_use]
+    pub fn with_memory_percent(&self, percent: MemoryPercent) -> Resources {
+        Resources {
+            memory_bytes: percent.of(self.memory_bytes),
+            ..self.clone()
+        }
     }
 
     /// Whether `offered` has at least this much of every dimension, and the same GPU
