@@ -29,4 +29,5 @@ mod testing;
 
 pub use policy::{AnchorName, Endpoint, PolicyError, UidRange};
 pub use probe::probe;
+pub use provision::{Config, enforced};
 pub use render::render;

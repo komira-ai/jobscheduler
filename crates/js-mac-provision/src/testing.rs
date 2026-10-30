@@ -1,6 +1,6 @@
 //! A fake `pfctl` for the tests of the provisioner and the verbs.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,6 +23,11 @@ pub(crate) struct Fake {
     pub fail_release: bool,
     /// Prints this instead of a token line.
     pub no_token: bool,
+    /// Whether pf is on; `-E` turns it on unless `stay_off`.
+    pub enabled: Cell<bool>,
+    /// `-E` does not turn pf on.
+    pub stay_off: bool,
+    scratch: RefCell<String>,
     dir: PathBuf,
 }
 
@@ -37,7 +42,16 @@ impl Fake {
             fail: None,
             fail_release: false,
             no_token: false,
+            enabled: Cell::new(false),
+            stay_off: false,
+            scratch: RefCell::default(),
             dir: dir.to_path_buf(),
+        }
+    }
+
+    fn turn_on(&self) {
+        if !self.stay_off {
+            self.enabled.set(true);
         }
     }
 
@@ -75,17 +89,38 @@ impl Pfctl for Fake {
         }
         let echo = |path: &str| fs::read_to_string(path).unwrap_or_default();
         match args {
-            ["-E"] if self.no_token => ok("", "pf enabled\n"),
-            ["-E"] => ok(
-                "",
-                &format!("pf enabled\nToken : {}\n", self.token.borrow()),
-            ),
+            ["-E"] if self.no_token => {
+                self.turn_on();
+                ok("", "pf enabled\n")
+            }
+            ["-E"] => {
+                self.turn_on();
+                ok(
+                    "",
+                    &format!("pf enabled\nToken : {}\n", self.token.borrow()),
+                )
+            }
             ["-X", _] if self.fail_release => Ok(Output {
                 code: None,
                 stdout: String::new(),
                 stderr: "no such token".to_owned(),
             }),
+            ["-s", "info"] if self.enabled.get() => ok("Status: Enabled for 0 days 00:01:02\n", ""),
+            ["-s", "info"] => ok("Status: Disabled\n", ""),
             ["-sr"] => ok(&self.main, ""),
+            ["-a", anchor, "-f", file] => {
+                if anchor.ends_with("/check") {
+                    *self.scratch.borrow_mut() = echo(file);
+                }
+                ok("", "")
+            }
+            ["-a", anchor, "-F", "rules"] => {
+                if anchor.ends_with("/check") {
+                    self.scratch.borrow_mut().clear();
+                }
+                ok("", "")
+            }
+            ["-a", anchor, "-sr"] if anchor.ends_with("/check") => ok(&self.scratch.borrow(), ""),
             ["-a", _, "-sr"] => ok(
                 &self
                     .loaded
@@ -93,7 +128,6 @@ impl Pfctl for Fake {
                     .unwrap_or_else(|| echo(self.dir.join(RULES_FILE).to_str().unwrap())),
                 "",
             ),
-            ["-a", _, "-n", "-v", "-f", file] => ok(&echo(file), ""),
             _ => ok("", ""),
         }
     }

@@ -76,7 +76,7 @@ pub enum Verb {
         #[arg(long)]
         program: String,
         /// Seconds between runs after the one at boot.
-        #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u32).range(1..))]
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
         interval: u32,
     },
     /// Connect once and print the outcome: connected, refused, timed out or failed.

@@ -144,5 +144,5 @@ fn launchd_plist_prints_a_property_list() {
     let plist = text(&out.stdout);
     assert!(plist.starts_with("<?xml"));
     assert!(plist.contains("<string>com.komira.js.pf-pool</string>"));
-    assert!(plist.contains("<integer>300</integer>"));
+    assert!(plist.contains("<integer>30</integer>"));
 }

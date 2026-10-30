@@ -49,39 +49,67 @@ block return out quick proto { tcp, udp } from any to any user 600:699
 ## install, check, remove (root)
 
 - **install** writes the rules to `<state-dir>/pool.pf` (0600, the directory 0700), loads
-  them with `pfctl -a <anchor> -f <file>`, enables pf, checks that the main ruleset
-  evaluates the anchor, then runs **check**. It replaces the anchor's rules whole, so it is
-  safe to run again.
-- **check** compares the rules loaded in the anchor (`pfctl -a <anchor> -sr`) with the
-  rendered text. pf prints a rule in its own spelling (`port = 443`, `flags S/SA keep
-  state`), so the expectation is not the rendered file itself but what
-  `pfctl -a <anchor> -n -v -f <file>` prints when it parses that file without loading it.
-  Both sides are pfctl's printing, so the spelling cancels out and a difference is a real
-  one. Blank lines and indentation are ignored.
+  them with `pfctl -a <anchor> -f <file>`, takes a pf enable reference if it holds none,
+  then runs **check**. It replaces the anchor's rules whole, so it is safe to run again.
+  A reload does not touch pf's state table: a connection to an endpoint the new rules
+  refuse stays open until it ends.
+- **check** is the enforcement question (below, `enforced`): pf is enabled (`pfctl -s info`
+  says `Status: Enabled`), the main ruleset (`pfctl -sr`) evaluates the anchor, and the
+  anchor holds the rendered rules. pf prints a rule in its own spelling (`port = 443`,
+  `flags S/SA keep state`), so the rendered file is loaded into a scratch child of the
+  anchor (`<anchor>/check`, which the parent's wildcard does not reach), both are read
+  back with `pfctl -a ... -sr`, and the scratch child is flushed. The spelling is pf's on
+  both sides, so a difference is a real one. Blank lines and indentation are ignored.
 - **remove** runs `pfctl -a <anchor> -F rules`, which flushes the rules of this anchor and
   of nothing else (never the main ruleset, never another anchor), gives back the enable
-  token and deletes the state files. Connections already in the state table stay until they end.
+  token and deletes the state files. Connections already in the state table stay until
+  they end, so an established connection to a removed endpoint stays open.
 
 Every `pfctl` call goes through the `Pfctl` trait, so the logic is tested with a fake on
 every platform; only `SystemPfctl` starts a process.
+
+### The gate: `enforced`
+
+This crate renders, installs and checks the anchor. It does **not** gate jobs: nothing
+stops a `Net::On` job when the anchor is missing. The gate belongs to the Mac native
+runtime (the agent side), which does not exist yet. The API it calls is
+`js_mac_provision::enforced(&Config) -> Result<(), ProvisionError>`: **call it at agent
+start and before every `Net::On` job, and refuse on any error.** `PfDisabled`,
+`NotReferenced` and `Drift` say it is not enforced; `Run`, `Failed` and `State` say it
+could not be told, which is a refusal too (the Linux agent's `egress-unchecked`).
 
 ### The anchor point and the main ruleset
 
 pf evaluates an anchor only if the main ruleset names it. The stock `/etc/pf.conf` has
 `anchor "com.apple/*"`, which reaches every child of `com.apple`, so the default anchor
 `com.apple/com.komira.js.pool` needs no edit of a file the OS owns and replaces on an
-update. `install` reads the main ruleset back (`pfctl -sr`) and fails with
-`NotReferenced` if no `anchor` rule reaches the anchor (by its name, or `<parent>/*`; a
-wildcard reaches children, not grandchildren). With another anchor name, the operator adds
-`anchor "<name>"` or `anchor "<parent>/*"` to the main ruleset and loads it; that edit is
-the operator's, not this program's.
+update. With another anchor name, the operator adds `anchor "<name>"` or
+`anchor "<parent>/*"` to the main ruleset and loads it.
+
+That placement has two weaknesses, and the gate, not the interval, is what closes them:
+
+- A `pfctl -f /etc/pf.conf` by anything (MDM, an OS update, a system service) can drop the
+  reference or the rules. Egress is then open until the next LaunchDaemon tick. The
+  daemon runs `install` every 30 seconds by default, which only shortens the window.
+  `enforced` before each job closes it for the jobs.
+- A wildcard anchor evaluates its children in name order, so an Apple anchor with a
+  numbered name (such as `250.ApplicationFirewall`) is evaluated before
+  `com.komira.js.pool`. A `quick` pass there for a pool user's traffic would win over our
+  block. The rules here are `quick` but cannot reorder what runs first.
+
+**Open decision for engineering:** our own top-level anchor (`com.komira.js`), referenced
+from a main ruleset we load, which holds Apple's rules and then ours. That fixes the
+ordering and puts the reference in our hands, and trades it against "do not edit OS
+files": we would own a copy of `/etc/pf.conf`'s content, a later OS change to it would not
+reach us, and loading a whole main ruleset flushes what others loaded into it. Until that
+is decided the default stays under `com.apple/`.
 
 ### Persistence: a LaunchDaemon
 
 The rules live in the kernel and are gone at reboot, and an OS update may reload
 `/etc/pf.conf`. Rather than a file under `/etc/pf.anchors` plus an include in the main
 ruleset (an edit of an OS file), a LaunchDaemon runs `install` at boot and every
-`interval` seconds (default 300). `launchd-plist` prints it, with the whole policy as
+`interval` seconds (default 30). `launchd-plist` prints it, with the whole policy as
 arguments, so the daemon reads no file of its own. Running `install` repeatedly is the
 design: it puts the anchor back whatever removed it, and an install that ran before the
 system's own pf start-up fails (`NotReferenced`) and succeeds on the next run. The host
@@ -92,10 +120,15 @@ step puts the plist in `/Library/LaunchDaemons` (owner root:wheel, mode 0644) an
 
 pf is enabled with `pfctl -E`, which takes a reference on it and prints a token; `pfctl -X
 <token>` gives the reference back, and pf turns off only when the last reference is gone,
-so this program never turns off a pf something else enabled. `install` takes a new
-reference, stores the token in `<state-dir>/pf-token`, then releases the one stored before,
-so a daemon that installs every few minutes holds one reference. A stored token from before
-a reboot is gone; releasing it fails and is ignored. `remove` releases the stored token.
+so this program never turns off a pf something else enabled. `install` takes a reference
+only when it holds none (pf off, or no token stored), so the 30-second daemon takes
+nothing. It writes the marker `<state-dir>/pf-token.pending` before `-E` and removes it
+once the token is in `<state-dir>/pf-token`; a marker left behind means a run died in
+between and a reference may be held that no file names. If the token cannot be stored, it
+is released at once. A stored token from before a reboot is replaced (pf is off then) and
+releasing the old one is ignored. If pf was already on and `-E` prints no `Token :` line,
+`install` accepts that when `pfctl -s info` says Enabled and keeps no token (**unverified
+on a Mac**). `remove` releases the stored token.
 
 ## What it does not stop
 
@@ -125,7 +158,7 @@ pf by uid is a control on the packets a pool user's sockets send, and it has lim
   pool's traffic is evaluated first.
 - **Not verified on a Mac yet.** The rules' text and the logic are tested against a fake.
   What pf does with them (the `user` range, the reset a `block return` sends to the local
-  socket, the exact output of `-n -v -f` against `-sr`, the output of `pfctl -E`) is shown
+  socket, the scratch child read back with `-sr`, the output of `pfctl -E` and `-s info`) is shown
   by `tests/pf_as_root.rs`, which a farm Mac runs through a held script.
 
 ## The root test

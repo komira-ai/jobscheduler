@@ -10,10 +10,21 @@
 //! # The enable token
 //! `pfctl -E` turns pf on and takes a reference on it, printing a token; `pfctl -X
 //! <token>` gives the reference back, and pf turns off only when the last reference
-//! goes. `install` takes a new reference, stores its token, then releases the one it
-//! stored before, so an install that runs every few minutes (the LaunchDaemon) holds
-//! exactly one. After a reboot the stored token is stale; releasing it fails and is
-//! ignored. `remove` releases the stored token and leaves pf on if anything else holds it.
+//! goes. `install` takes a reference only when it holds none: when pf is not enabled, or
+//! no token is stored (after a reboot pf is off, so a stale token is replaced and the
+//! release of the old one is ignored). A run that finds pf enabled and a token stored
+//! takes nothing, so an install that runs every half minute never churns references.
+//! The marker `pf-token.pending` is written before `-E` and removed once the token is
+//! stored; a marker left behind means a run died between the two, and a reference may be
+//! held that no file names. If the token cannot be stored, the new token is released. If
+//! pf was already on and `-E` printed no token line, `install` accepts that (nothing to
+//! keep) when `-s info` says Enabled: unverified on a Mac. `remove` releases the stored
+//! token and leaves pf on if anything else holds it.
+//!
+//! # Enforcement
+//! [`enforced`] (and [`Provisioner::check`], which it is) is the question a caller asks
+//! before it lets a `Net::On` job run: is pf enabled, does the main ruleset evaluate the
+//! anchor, and does the anchor hold exactly the rendered rules? Any error means refuse.
 
 use std::fs;
 use std::io::{self, Write as _};
@@ -30,6 +41,11 @@ pub const RULES_FILE: &str = "pool.pf";
 pub const EXPECTED_FILE: &str = "expected.pf";
 /// The file holding the pf enable token.
 pub const TOKEN_FILE: &str = "pf-token";
+/// The marker written before `pfctl -E` and removed once its token is stored.
+pub const PENDING_FILE: &str = "pf-token.pending";
+/// The child of the anchor the rendered rules are loaded into by `check`, so they are read
+/// back in pf's own spelling. A child is not reached by the wildcard of the anchor's parent.
+pub const SCRATCH_CHILD: &str = "check";
 
 /// Why a step failed.
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +79,9 @@ pub enum ProvisionError {
     /// `pfctl -E` printed no token.
     #[error("pfctl -E printed no token: {0}")]
     NoToken(String),
+    /// pf is not enabled, so no rule is enforced.
+    #[error("pf is not enabled (pfctl -s info does not say Status: Enabled)")]
+    PfDisabled,
     /// The main ruleset does not evaluate the anchor, so its rules would never run.
     #[error(
         "the main ruleset has no anchor rule that reaches {0}: add `anchor \"{0}\"` (or a \
@@ -141,44 +160,73 @@ impl<'a> Provisioner<'a> {
         Ok(path)
     }
 
-    /// Loads the anchor, enables pf, checks that the main ruleset evaluates the anchor and
-    /// reads the rules back. Safe to run again: it replaces the anchor's rules whole.
+    /// Loads the anchor, takes a pf enable reference if it holds none, and runs
+    /// [`Provisioner::check`]. Safe to run again: it replaces the anchor's rules whole.
+    /// Connections already in pf's state table are not touched by a reload: one to an
+    /// endpoint the new rules refuse stays open until it ends.
     ///
     /// # Errors
     /// Any step failing; see [`ProvisionError`]. A failure after the load leaves the
-    /// anchor loaded and the token held; run `remove` to undo.
+    /// anchor loaded; run `remove` to undo.
     pub fn install(&self, uids: UidRange, endpoints: &[Endpoint]) -> Result<(), ProvisionError> {
         let rules = self.write(RULES_FILE, &render(uids, endpoints, self.anchor))?;
-        let rules_arg = path_arg(&rules);
-        self.pfctl(&["-a", self.anchor.as_str(), "-f", &rules_arg])?;
+        self.pfctl(&["-a", self.anchor.as_str(), "-f", &path_arg(&rules)])?;
+        let enabled = is_enabled(&self.pfctl(&["-s", "info"])?.stdout);
+        if !(enabled && self.stored_token().is_some()) {
+            self.enable()?;
+        }
+        self.check(uids, endpoints)
+    }
+
+    /// Takes a pf enable reference and stores its token.
+    fn enable(&self) -> Result<(), ProvisionError> {
         let previous = self.stored_token();
+        let pending = self.write(PENDING_FILE, "enabling\n")?;
         let printed = self.pfctl(&["-E"])?.combined();
-        let token = parse_token(&printed)
-            .ok_or_else(|| ProvisionError::NoToken(printed.trim().to_owned()))?;
-        self.write(TOKEN_FILE, &format!("{token}\n"))?;
-        if let Some(old) = previous {
-            // A token from before a reboot is gone; there is nothing to give back.
-            let _ = self.pfctl(&["-X", &old]);
+        if let Some(token) = parse_token(&printed) {
+            if let Err(e) = self.write(TOKEN_FILE, &format!("{token}\n")) {
+                // The reference would be held with no file naming it.
+                let _ = self.pfctl(&["-X", &token]);
+                let _ = fs::remove_file(&pending);
+                return Err(e);
+            }
+            if let Some(old) = previous {
+                // A token from before a reboot is gone; there is nothing to give back.
+                let _ = self.pfctl(&["-X", &old]);
+            }
+        } else if !is_enabled(&self.pfctl(&["-s", "info"])?.stdout) {
+            return Err(ProvisionError::NoToken(printed.trim().to_owned()));
+        }
+        let _ = fs::remove_file(&pending);
+        Ok(())
+    }
+
+    /// Whether the policy is enforced now: pf is enabled, the main ruleset evaluates the
+    /// anchor, and the anchor holds the rules the policy renders to. The rendered rules
+    /// are loaded into a scratch child of the anchor (`<anchor>/check`) and both are read
+    /// back with `-sr`, so pf's own spelling is on both sides; the scratch child is
+    /// flushed again. Blank lines and indentation are ignored.
+    ///
+    /// # Errors
+    /// [`ProvisionError::PfDisabled`], [`ProvisionError::NotReferenced`],
+    /// [`ProvisionError::Drift`], or a failed step.
+    pub fn check(&self, uids: UidRange, endpoints: &[Endpoint]) -> Result<(), ProvisionError> {
+        if !is_enabled(&self.pfctl(&["-s", "info"])?.stdout) {
+            return Err(ProvisionError::PfDisabled);
         }
         let main = self.pfctl(&["-sr"])?;
         if !references(&main.stdout, self.anchor) {
             return Err(ProvisionError::NotReferenced(self.anchor.to_string()));
         }
-        self.check(uids, endpoints)
-    }
-
-    /// Compares the rules loaded in the anchor with the ones the policy renders to. Both
-    /// are text pfctl printed (`-sr` of the anchor, and `-n -v -f` of the rendered file,
-    /// which parses without loading), so pf's own spelling of the rules cancels out.
-    ///
-    /// # Errors
-    /// [`ProvisionError::Drift`] when they differ; or a failed step.
-    pub fn check(&self, uids: UidRange, endpoints: &[Endpoint]) -> Result<(), ProvisionError> {
         let file = self.write(EXPECTED_FILE, &render(uids, endpoints, self.anchor))?;
-        let file_arg = path_arg(&file);
-        let loaded = self.pfctl(&["-a", self.anchor.as_str(), "-sr"])?;
-        let expected = self.pfctl(&["-a", self.anchor.as_str(), "-n", "-v", "-f", &file_arg])?;
-        let (expected, loaded) = (lines(&expected.stdout), lines(&loaded.stdout));
+        let scratch = format!("{}/{SCRATCH_CHILD}", self.anchor);
+        self.pfctl(&["-a", &scratch, "-f", &path_arg(&file)])?;
+        let read = |anchor: &str| self.pfctl(&["-a", anchor, "-sr"]).map(|o| lines(&o.stdout));
+        let both = read(self.anchor.as_str()).and_then(|l| Ok((l, read(&scratch)?)));
+        // Flushed whether or not the reads worked; a failed read is the error reported.
+        let flushed = self.pfctl(&["-a", &scratch, "-F", "rules"]);
+        let (loaded, expected) = both?;
+        flushed?;
         if expected == loaded {
             return Ok(());
         }
@@ -196,7 +244,7 @@ impl<'a> Provisioner<'a> {
         if let Some(token) = self.stored_token() {
             let _ = self.pfctl(&["-X", &token]);
         }
-        for name in [RULES_FILE, EXPECTED_FILE, TOKEN_FILE] {
+        for name in [RULES_FILE, EXPECTED_FILE, TOKEN_FILE, PENDING_FILE] {
             let path = self.state(name);
             match fs::remove_file(&path) {
                 Ok(()) => {}
@@ -218,6 +266,43 @@ impl<'a> Provisioner<'a> {
 /// A path as a `pfctl` argument (lossy: the state directory is ASCII in practice).
 fn path_arg(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+/// Whether the output of `pfctl -s info` says pf is enabled (`Status: Enabled ...`).
+#[must_use]
+pub fn is_enabled(info: &str) -> bool {
+    info.lines().any(|l| {
+        l.trim()
+            .strip_prefix("Status:")
+            .is_some_and(|r| r.trim_start().starts_with("Enabled"))
+    })
+}
+
+/// The config of one policy, for [`enforced`].
+pub struct Config<'a> {
+    /// The `pfctl` runner.
+    pub pf: &'a dyn Pfctl,
+    /// The anchor.
+    pub anchor: &'a AnchorName,
+    /// The state directory.
+    pub dir: &'a Path,
+    /// The pool's uids.
+    pub uids: UidRange,
+    /// The endpoints the pool may reach.
+    pub endpoints: &'a [Endpoint],
+}
+
+/// Whether the policy of `config` is enforced right now. **Call it at agent start and
+/// before every `Net::On` job, and refuse on any error**: the LaunchDaemon's interval is
+/// not the guard, this call is (a reload of the main ruleset can drop the anchor between
+/// two ticks). The errors that mean "not enforced" are [`ProvisionError::PfDisabled`],
+/// [`ProvisionError::NotReferenced`] and [`ProvisionError::Drift`]; `Run`, `Failed` and
+/// `State` mean it could not be told, which is a refusal too.
+///
+/// # Errors
+/// See [`Provisioner::check`].
+pub fn enforced(config: &Config<'_>) -> Result<(), ProvisionError> {
+    Provisioner::new(config.pf, config.anchor, config.dir).check(config.uids, config.endpoints)
 }
 
 /// The token in the output of `pfctl -E`: the digits after `Token :`.
@@ -284,9 +369,20 @@ mod tests {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    fn dir(name: &str) -> TestDir {
+        TestDir::under(std::env::temp_dir(), &format!("js-mac-provision-{name}"))
+    }
+
+    /// A fake whose pf is already on.
+    fn on(dir: &Path) -> Fake {
+        let pf = Fake::new(dir);
+        pf.enabled.set(true);
+        pf
+    }
+
     #[test]
     fn install_loads_enables_checks_and_reads_back_in_this_order() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-install");
+        let dir = dir("install");
         let state = dir.join("state");
         let pf = Fake::new(&state);
         let a = anchor();
@@ -295,17 +391,19 @@ mod tests {
             .unwrap();
         let rules = state.join(RULES_FILE);
         let expected = state.join(EXPECTED_FILE);
+        let name = "com.apple/com.komira.js.pool";
         assert_eq!(
             pf.calls(),
             [
-                format!("-a com.apple/com.komira.js.pool -f {}", rules.display()),
+                format!("-a {name} -f {}", rules.display()),
+                "-s info".to_owned(),
                 "-E".to_owned(),
+                "-s info".to_owned(),
                 "-sr".to_owned(),
-                "-a com.apple/com.komira.js.pool -sr".to_owned(),
-                format!(
-                    "-a com.apple/com.komira.js.pool -n -v -f {}",
-                    expected.display()
-                ),
+                format!("-a {name}/check -f {}", expected.display()),
+                format!("-a {name} -sr"),
+                format!("-a {name}/check -sr"),
+                format!("-a {name}/check -F rules"),
             ]
         );
         assert_eq!(
@@ -316,6 +414,7 @@ mod tests {
             fs::read_to_string(state.join(TOKEN_FILE)).unwrap(),
             "123456\n"
         );
+        assert!(!state.join(PENDING_FILE).exists());
         assert_eq!(mode(&state), 0o700);
         for f in [RULES_FILE, EXPECTED_FILE, TOKEN_FILE] {
             assert_eq!(mode(&state.join(f)), 0o600, "{f}");
@@ -323,33 +422,17 @@ mod tests {
     }
 
     #[test]
-    fn a_second_install_holds_one_reference_by_giving_the_first_back() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-twice");
+    fn a_second_install_takes_no_reference_while_pf_is_on_and_a_token_is_stored() {
+        let dir = dir("twice");
         let pf = Fake::new(dir.path());
         let a = anchor();
         let p = Provisioner::new(&pf, &a, dir.path());
         p.install(uids(), &eps()).unwrap();
         *pf.token.borrow_mut() = "777".to_owned();
+        let before = pf.calls().len();
         p.install(uids(), &eps()).unwrap();
-        let calls = pf.calls();
-        let enables: Vec<usize> = (0..calls.len()).filter(|i| calls[*i] == "-E").collect();
-        let release = calls.iter().position(|c| c == "-X 123456").unwrap();
-        // The new reference is taken before the old one is given back.
-        assert!(enables[1] < release);
-        assert_eq!(fs::read_to_string(dir.join(TOKEN_FILE)).unwrap(), "777\n");
-    }
-
-    #[test]
-    fn a_token_pf_no_longer_knows_does_not_fail_the_install() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-stale");
-        fs::write(dir.join(TOKEN_FILE), "999\n").unwrap();
-        let mut pf = Fake::new(dir.path());
-        pf.fail_release = true;
-        let a = anchor();
-        Provisioner::new(&pf, &a, dir.path())
-            .install(uids(), &eps())
-            .unwrap();
-        assert!(pf.calls().contains(&"-X 999".to_owned()));
+        let second = &pf.calls()[before..];
+        assert!(second.iter().all(|c| c != "-E" && !c.starts_with("-X")));
         assert_eq!(
             fs::read_to_string(dir.join(TOKEN_FILE)).unwrap(),
             "123456\n"
@@ -357,8 +440,41 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_token_is_replaced_when_pf_is_off_and_its_release_may_fail() {
+        let dir = dir("stale");
+        fs::write(dir.join(TOKEN_FILE), "999\n").unwrap();
+        let mut pf = Fake::new(dir.path());
+        pf.fail_release = true;
+        let a = anchor();
+        Provisioner::new(&pf, &a, dir.path())
+            .install(uids(), &eps())
+            .unwrap();
+        let calls = pf.calls();
+        let enable = calls.iter().position(|c| c == "-E").unwrap();
+        let release = calls.iter().position(|c| c == "-X 999").unwrap();
+        // The new reference is taken before the old one is given back.
+        assert!(enable < release);
+        assert_eq!(
+            fs::read_to_string(dir.join(TOKEN_FILE)).unwrap(),
+            "123456\n"
+        );
+    }
+
+    #[test]
+    fn pf_on_with_no_stored_token_takes_a_reference() {
+        let dir = dir("on-no-token");
+        let pf = on(dir.path());
+        let a = anchor();
+        Provisioner::new(&pf, &a, dir.path())
+            .install(uids(), &eps())
+            .unwrap();
+        assert!(pf.calls().contains(&"-E".to_owned()));
+        assert!(dir.join(TOKEN_FILE).exists());
+    }
+
+    #[test]
     fn install_refuses_when_the_main_ruleset_never_evaluates_the_anchor() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-unref");
+        let dir = dir("unref");
         let mut pf = Fake::new(dir.path());
         pf.main = "anchor \"com.other/*\" all\n".to_owned();
         let a = anchor();
@@ -371,14 +487,15 @@ mod tests {
                 .contains("no anchor rule that reaches com.apple/com.komira.js.pool")
         );
         // Nothing past the reference check ran.
-        assert_eq!(pf.calls().len(), 3);
+        assert_eq!(pf.calls().last().unwrap(), "-sr");
     }
 
     #[test]
-    fn install_refuses_an_enable_that_prints_no_token() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-notoken");
+    fn install_refuses_an_enable_that_prints_no_token_and_leaves_pf_off() {
+        let dir = dir("notoken");
         let mut pf = Fake::new(dir.path());
         pf.no_token = true;
+        pf.stay_off = true;
         let a = anchor();
         let err = Provisioner::new(&pf, &a, dir.path())
             .install(uids(), &eps())
@@ -389,20 +506,62 @@ mod tests {
     }
 
     #[test]
+    fn no_token_line_is_accepted_when_pf_is_enabled() {
+        let dir = dir("notoken-on");
+        let mut pf = Fake::new(dir.path());
+        pf.no_token = true;
+        let a = anchor();
+        Provisioner::new(&pf, &a, dir.path())
+            .install(uids(), &eps())
+            .unwrap();
+        assert!(!dir.join(TOKEN_FILE).exists());
+        assert!(!dir.join(PENDING_FILE).exists());
+    }
+
+    #[test]
+    fn a_token_that_cannot_be_stored_is_released() {
+        let dir = dir("token-write");
+        fs::create_dir(dir.join(TOKEN_FILE)).unwrap();
+        let pf = Fake::new(dir.path());
+        let a = anchor();
+        let err = Provisioner::new(&pf, &a, dir.path())
+            .install(uids(), &eps())
+            .unwrap_err();
+        assert!(matches!(err, ProvisionError::State { .. }));
+        assert!(pf.calls().contains(&"-X 123456".to_owned()));
+        assert!(!dir.join(PENDING_FILE).exists());
+    }
+
+    #[test]
+    fn the_pending_marker_stays_when_the_enable_itself_fails() {
+        let dir = dir("pending");
+        let mut pf = Fake::new(dir.path());
+        pf.fail = Some((2, false));
+        let a = anchor();
+        let err = Provisioner::new(&pf, &a, dir.path())
+            .install(uids(), &eps())
+            .unwrap_err();
+        assert!(err.to_string().contains("-E"));
+        assert!(dir.join(PENDING_FILE).exists());
+    }
+
+    #[test]
     fn every_pfctl_call_of_install_that_fails_stops_it_and_says_which() {
-        // The calls of a healthy install, by index: load, enable, main ruleset, read
-        // back, parse.
-        let want = ["-f", "-E", "-sr", "-sr", "-n"];
+        // The calls of a healthy install, by index: load, info, enable, info, main
+        // ruleset, load of the scratch child, read of the anchor, read of the child, flush.
+        let want = ["-f", "info", "-E", "info", "-sr", "-f", "-sr", "-sr", "-F"];
         for (n, arg) in want.iter().enumerate() {
             for not_started in [true, false] {
-                let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-fail");
+                let dir = dir("fail");
                 let mut pf = Fake::new(dir.path());
                 pf.fail = Some((n, not_started));
                 let a = anchor();
                 let err = Provisioner::new(&pf, &a, dir.path())
                     .install(uids(), &eps())
                     .unwrap_err();
-                assert_eq!(pf.calls().len(), n + 1, "{arg} {not_started}");
+                // A failed read still flushes the scratch child.
+                let len = if n == 6 || n == 7 { n + 2 } else { n + 1 };
+                assert_eq!(pf.calls().len(), len, "{arg} {n} {not_started}");
                 let shown = err.to_string();
                 assert!(shown.contains(arg), "{shown}");
                 if not_started {
@@ -417,7 +576,7 @@ mod tests {
 
     #[test]
     fn a_pfctl_a_signal_ended_is_a_failure_naming_the_signal() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-signal");
+        let dir = dir("signal");
         let mut pf = Fake::new(dir.path());
         pf.fail_release = true;
         let a = anchor();
@@ -429,7 +588,7 @@ mod tests {
 
     #[test]
     fn a_state_directory_that_cannot_be_made_is_a_state_error() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-nodir");
+        let dir = dir("nodir");
         let blocker = dir.join("file");
         fs::write(&blocker, "x").unwrap();
         let state = blocker.join("state");
@@ -445,7 +604,7 @@ mod tests {
 
     #[test]
     fn a_rules_file_that_cannot_be_opened_is_a_state_error() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-noopen");
+        let dir = dir("noopen");
         fs::create_dir(dir.join(RULES_FILE)).unwrap();
         let pf = Fake::new(dir.path());
         let a = anchor();
@@ -457,28 +616,56 @@ mod tests {
     }
 
     #[test]
-    fn check_passes_when_the_anchor_holds_what_the_policy_renders_to() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-check");
+    fn check_passes_and_loads_nothing_into_the_live_anchor() {
+        let dir = dir("check");
         let pf = Fake::new(dir.path());
         let a = anchor();
         let p = Provisioner::new(&pf, &a, dir.path());
         p.install(uids(), &eps()).unwrap();
         let before = pf.calls().len();
         p.check(uids(), &eps()).unwrap();
-        // Read only as far as pf goes: no load, no enable.
         let after = &pf.calls()[before..];
-        assert_eq!(after.len(), 2);
-        assert!(
-            after
-                .iter()
-                .all(|c| !c.contains(" -f ") || c.contains(" -n "))
+        assert_eq!(after.len(), 6);
+        // Only the scratch child is loaded, and it is flushed last.
+        let loads: Vec<&String> = after.iter().filter(|c| c.contains(" -f ")).collect();
+        assert_eq!(loads.len(), 1);
+        assert!(loads[0].contains("/check -f "));
+        assert_eq!(
+            after.last().unwrap(),
+            "-a com.apple/com.komira.js.pool/check -F rules"
         );
     }
 
     #[test]
+    fn check_fails_when_pf_has_been_disabled() {
+        let dir = dir("disabled");
+        let pf = Fake::new(dir.path());
+        let a = anchor();
+        let err = Provisioner::new(&pf, &a, dir.path())
+            .check(uids(), &eps())
+            .unwrap_err();
+        assert!(matches!(err, ProvisionError::PfDisabled));
+        assert!(err.to_string().contains("not enabled"));
+        assert_eq!(pf.calls(), ["-s info"]);
+    }
+
+    #[test]
+    fn check_fails_when_the_main_ruleset_dropped_the_anchor_reference() {
+        let dir = dir("dropped");
+        let mut pf = on(dir.path());
+        pf.main = "block all\n".to_owned();
+        let a = anchor();
+        let err = Provisioner::new(&pf, &a, dir.path())
+            .check(uids(), &eps())
+            .unwrap_err();
+        assert!(matches!(err, ProvisionError::NotReferenced(_)));
+        assert_eq!(pf.calls(), ["-s info", "-sr"]);
+    }
+
+    #[test]
     fn check_reports_the_drift_when_the_loaded_rules_are_not_the_rendered_ones() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-drift");
-        let mut pf = Fake::new(dir.path());
+        let dir = dir("drift");
+        let mut pf = on(dir.path());
         pf.loaded = Some("pass out quick all\n".to_owned());
         let a = anchor();
         let err = Provisioner::new(&pf, &a, dir.path())
@@ -489,12 +676,14 @@ mod tests {
         assert!(shown.contains("\nloaded:\npass out quick all"));
         assert!(shown.contains("\nexpected:\n# js-mac-provision"));
         assert!(shown.contains("block return out quick"));
+        // The scratch child is flushed on a drift too.
+        assert!(pf.calls().last().unwrap().ends_with("/check -F rules"));
     }
 
     #[test]
     fn check_ignores_blank_lines_and_indentation_in_what_pfctl_prints() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-blank");
-        let mut pf = Fake::new(dir.path());
+        let dir = dir("blank");
+        let mut pf = on(dir.path());
         let a = anchor();
         let text = render(uids(), &eps(), &a);
         pf.loaded = Some(format!("\n  {}\n\n", text.replace('\n', "\n\n  ")));
@@ -505,7 +694,7 @@ mod tests {
 
     #[test]
     fn check_catches_a_changed_endpoint_list() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-changed");
+        let dir = dir("changed");
         let pf = Fake::new(dir.path());
         let a = anchor();
         let p = Provisioner::new(&pf, &a, dir.path());
@@ -518,12 +707,55 @@ mod tests {
     }
 
     #[test]
+    fn enforced_is_ok_when_enabled_referenced_and_loaded_and_names_each_way_it_is_not() {
+        let dir = dir("enforced");
+        let a = anchor();
+        let e = eps();
+        let installed = Fake::new(dir.path());
+        Provisioner::new(&installed, &a, dir.path())
+            .install(uids(), &e)
+            .unwrap();
+        let cfg = |pf| Config {
+            pf,
+            anchor: &a,
+            dir: dir.path(),
+            uids: uids(),
+            endpoints: &e,
+        };
+        assert!(enforced(&cfg(&installed)).is_ok());
+        installed.enabled.set(false);
+        assert!(matches!(
+            enforced(&cfg(&installed)),
+            Err(ProvisionError::PfDisabled)
+        ));
+        let mut dropped = on(dir.path());
+        dropped.main = String::new();
+        assert!(matches!(
+            enforced(&cfg(&dropped)),
+            Err(ProvisionError::NotReferenced(_))
+        ));
+        let mut empty = on(dir.path());
+        empty.loaded = Some(String::new());
+        assert!(matches!(
+            enforced(&cfg(&empty)),
+            Err(ProvisionError::Drift { .. })
+        ));
+        let mut broken = on(dir.path());
+        broken.fail = Some((0, true));
+        assert!(matches!(
+            enforced(&cfg(&broken)),
+            Err(ProvisionError::Run { .. })
+        ));
+    }
+
+    #[test]
     fn remove_flushes_only_this_anchor_gives_the_token_back_and_deletes_the_state() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-remove");
+        let dir = dir("remove");
         let pf = Fake::new(dir.path());
         let a = anchor();
         let p = Provisioner::new(&pf, &a, dir.path());
         p.install(uids(), &eps()).unwrap();
+        fs::write(dir.join(PENDING_FILE), "x").unwrap();
         let before = pf.calls().len();
         p.remove().unwrap();
         assert_eq!(
@@ -533,17 +765,16 @@ mod tests {
                 "-X 123456".to_owned()
             ]
         );
-        for f in [RULES_FILE, EXPECTED_FILE, TOKEN_FILE] {
+        for f in [RULES_FILE, EXPECTED_FILE, TOKEN_FILE, PENDING_FILE] {
             assert!(!dir.join(f).exists(), "{f}");
         }
-        // Nothing the whole ruleset or other anchors hold was named.
         assert!(!pf.calls().iter().any(|c| c.contains("-F all")));
         assert!(!pf.calls().iter().any(|c| c.contains("-F state")));
     }
 
     #[test]
     fn remove_twice_is_fine_and_gives_back_no_token_it_does_not_hold() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-remove2");
+        let dir = dir("remove2");
         let pf = Fake::new(dir.path());
         let a = anchor();
         let p = Provisioner::new(&pf, &a, dir.path());
@@ -560,7 +791,7 @@ mod tests {
 
     #[test]
     fn remove_ignores_a_stale_token_and_an_empty_token_file() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-remove3");
+        let dir = dir("remove3");
         fs::write(dir.join(TOKEN_FILE), "55\n").unwrap();
         let mut pf = Fake::new(dir.path());
         pf.fail_release = true;
@@ -576,7 +807,7 @@ mod tests {
 
     #[test]
     fn remove_stops_when_the_flush_fails_and_keeps_the_state() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-remove4");
+        let dir = dir("remove4");
         fs::write(dir.join(TOKEN_FILE), "55\n").unwrap();
         let mut pf = Fake::new(dir.path());
         pf.fail = Some((0, false));
@@ -589,7 +820,7 @@ mod tests {
 
     #[test]
     fn remove_reports_a_state_file_it_cannot_delete() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-remove5");
+        let dir = dir("remove5");
         let stuck = dir.join(RULES_FILE);
         fs::create_dir(&stuck).unwrap();
         fs::write(stuck.join("inner"), "x").unwrap();
@@ -620,6 +851,22 @@ mod tests {
             "Token 12",
         ] {
             assert_eq!(parse_token(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn info_says_enabled_only_on_the_status_line() {
+        assert!(is_enabled(
+            "Status: Enabled for 0 days 00:00:05           Debug: Urgent\n"
+        ));
+        assert!(is_enabled("Foo\n  Status:   Enabled\n"));
+        for text in [
+            "",
+            "Status: Disabled\n",
+            "Status: Disabled  Enabled\n",
+            "Debug: Enabled\n",
+        ] {
+            assert!(!is_enabled(text), "{text:?}");
         }
     }
 
