@@ -432,7 +432,8 @@ mod tests {
         let before = pf.calls().len();
         p.install(uids(), &eps()).unwrap();
         let second = &pf.calls()[before..];
-        assert!(second.iter().all(|c| c != "-E" && !c.starts_with("-X")));
+        assert!(!second.iter().any(|c| c == "-E"));
+        assert!(!second.iter().any(|c| c.starts_with("-X")));
         assert_eq!(
             fs::read_to_string(dir.join(TOKEN_FILE)).unwrap(),
             "123456\n"
