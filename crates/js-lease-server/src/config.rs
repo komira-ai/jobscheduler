@@ -5,15 +5,17 @@ use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use js_lease::{Boot, Settings, SystemClock};
+use js_lease::{Boot, Clock, Monotonic, Settings, SystemClock, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
 
-use js_registry::{Credential, PoolConfig, WholeNodeConfig};
+use js_registry::{Credential, PoolConfig, Registry, WholeNodeConfig};
+use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
 use crate::agent_pool;
@@ -25,6 +27,9 @@ use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
+use crate::usage::{HostLimits, KeySource, ProfileKey, UsageSink};
+use crate::usage_hub::Usage;
+use crate::usage_js::{self, NameMap, RegistryKeys, StoreSetup, no_names};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -145,6 +150,23 @@ pub struct Cli {
     /// How long a stop waits for the requests in flight before it cuts what is left.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub drain_timeout: Duration,
+    /// The file the per-minute usage of the nodes and the learned cost curves are kept
+    /// in. Beside `--state-file`, as `usage.db`, unless given. Only agent registration
+    /// reports usage.
+    #[arg(long, conflicts_with = "usage_off")]
+    pub usage_db: Option<PathBuf>,
+    /// Turns the recording of usage, and its read routes, off. For an emergency: usage
+    /// is on by default and the per-minute series is meant to be always collected.
+    #[arg(long)]
+    pub usage_off: bool,
+    /// The most bytes the learned cost curves may take in the usage file; the keys used
+    /// longest ago are dropped to stay under it. At least 1.
+    #[arg(
+        long,
+        default_value = "268435456",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub profile_store_bytes: u64,
 }
 
 /// What a client may hold open (see the module doc of `listener`). The flags set
@@ -214,23 +236,26 @@ impl From<BootMode> for Boot {
     }
 }
 
-/// A duration in whole seconds: `90`, `90s`, `15m` or `2h`. Zero is refused.
+/// A duration: a whole count with an optional unit, `90`, `90s`, `250ms`, `15m` or `2h`.
+/// A bare count is seconds. Zero is refused.
 pub fn parse_duration(text: &str) -> Result<Duration, String> {
     let digits = text
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(text.len());
     let (count, unit) = text.split_at(digits);
-    let factor = ["", "s", "m", "h"].iter().position(|known| *known == unit);
-    let factor = factor.map(|at| [1u64, 1, 60, 3600][at]);
-    let seconds = count
+    let millis_per_unit = ["", "ms", "s", "m", "h"]
+        .iter()
+        .position(|known| *known == unit)
+        .map(|at| [1000u64, 1, 1000, 60_000, 3_600_000][at]);
+    let millis = count
         .parse::<u64>()
         .ok()
-        .zip(factor)
+        .zip(millis_per_unit)
         .and_then(|(count, factor)| count.checked_mul(factor));
-    match seconds {
-        Some(seconds) if seconds > 0 => Ok(Duration::from_secs(seconds)),
+    match millis {
+        Some(millis) if millis > 0 => Ok(Duration::from_millis(millis)),
         _ => Err(format!(
-            "{text:?} is not a positive duration such as 600, 600s, 10m or 1h"
+            "{text:?} is not a positive duration such as 600, 600s, 250ms, 10m or 1h"
         )),
     }
 }
@@ -332,6 +357,73 @@ pub struct Config {
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) limits: Limits,
     pub(crate) hosts: Hosts,
+    pub(crate) usage: UsageSetup,
+    pub(crate) monotonic: Arc<dyn Monotonic>,
+}
+
+/// What `--usage-db`, `--usage-off` and `--profile-store-bytes` decided, and the seams a
+/// caller may fill: the sink that measures, and the source of the key of a run.
+pub(crate) struct UsageSetup {
+    /// The usage file; `None` when usage is off.
+    pub(crate) db: Option<PathBuf>,
+    pub(crate) profile_store_bytes: u64,
+    /// The sink to use in place of the one that opens `db`.
+    pub(crate) sink: Option<Arc<dyn UsageSink>>,
+    /// The key source a caller supplied; `None` leaves the server to read the profile names
+    /// clients gave the runs it queued.
+    pub(crate) keys: Option<Arc<dyn KeySource>>,
+    /// How admission finds the profile name of a work key; `None` leaves every key flat.
+    pub(crate) names: Option<NameMap>,
+}
+
+/// The default of `--profile-store-bytes`.
+pub(crate) const DEFAULT_PROFILE_STORE_BYTES: u64 = 268_435_456;
+
+/// Milliseconds in a day.
+const MILLIS_PER_DAY: u64 = 86_400_000;
+
+impl UsageSetup {
+    /// The usage side as `db` (`None` for usage off) and `profile_store_bytes` say, with
+    /// no seam filled.
+    fn new(db: Option<PathBuf>, profile_store_bytes: u64) -> Self {
+        Self {
+            db,
+            profile_store_bytes,
+            sink: None,
+            keys: None,
+            names: None,
+        }
+    }
+
+    /// The usage side for hosts the pool books as `limits`, or `None` when usage is off.
+    /// A usage file that will not open is a refused start naming `--usage-db`. A run's key
+    /// is read from `registry` unless the caller supplied a key source.
+    pub(crate) fn build(
+        self,
+        clock: &SharedClock,
+        limits: HostLimits,
+        registry: &Registry,
+    ) -> Result<Option<Arc<Usage>>, StartupError> {
+        let Some(db) = self.db else {
+            return Ok(None);
+        };
+        let sink = match self.sink {
+            Some(sink) => sink,
+            None => {
+                let setup = StoreSetup {
+                    db,
+                    profile_store_bytes: self.profile_store_bytes,
+                    names: self.names.unwrap_or_else(no_names),
+                };
+                usage_js::open(&setup, clock.now().millis() / MILLIS_PER_DAY)?
+            }
+        };
+        let keys = self
+            .keys
+            .unwrap_or_else(|| Arc::new(RegistryKeys(registry.clone())));
+        let usage = Usage::new(sink, keys, clock.clone(), limits);
+        Ok(Some(Arc::new(usage)))
+    }
 }
 
 /// Where the hosts come from: the operator's pool file alone, or that file (when given)
@@ -353,6 +445,8 @@ pub(crate) enum Hosts {
 pub(crate) struct AgentSetup {
     pub(crate) tokens: AgentTokens,
     pub(crate) pool: PoolConfig,
+    /// The one provider the mint route accepts, when the configuration names it.
+    pub(crate) mint_provider: Option<String>,
     pub(crate) hello_limit: HelloLimit,
     /// `--require-host-credential`.
     pub(crate) require_host_credential: bool,
@@ -380,6 +474,13 @@ impl Config {
         let limits = Limits::from(&cli);
         let hosts = hosts(&cli, &token)?;
         let settings = with_pool_settings(settings, &hosts)?;
+        let state_file = required(cli.state_file.clone(), "--state-file")?;
+        let usage = usage_setup(
+            cli.usage_off,
+            cli.usage_db.clone(),
+            cli.profile_store_bytes,
+            &state_file,
+        );
         let mut warnings = Vec::new();
         let status = status_policy("--listen", cli.listen, &mut warnings);
         Ok(Self {
@@ -391,7 +492,7 @@ impl Config {
             status,
             launch_inputs: LaunchInputs::default(),
             elastic: None,
-            state_file: required(cli.state_file, "--state-file")?,
+            state_file,
             boot: required(cli.boot, "--boot")?.into(),
             settings,
             tick: cli.tick,
@@ -399,6 +500,8 @@ impl Config {
             tls,
             limits,
             hosts,
+            usage,
+            monotonic: Arc::new(SystemMonotonic::default()),
         })
     }
 
@@ -433,10 +536,16 @@ impl Config {
                 static_pool,
                 registering,
             } => {
-                let Registering { plan, pool, tokens } = *registering;
+                let Registering {
+                    plan,
+                    pool,
+                    tokens,
+                    mint_provider,
+                } = *registering;
                 let agents = Box::new(AgentSetup {
                     tokens,
                     pool,
+                    mint_provider,
                     hello_limit: server.agents.hello_limit(),
                     require_host_credential: server.agents.require_host_credential(),
                 });
@@ -445,10 +554,13 @@ impl Config {
                         static_pool,
                         agents,
                     },
-                    Some(plan),
+                    plan,
                 )
             }
         };
+        let state_file = server.state_file;
+        let keys = server.usage;
+        let usage = usage_setup(keys.off, keys.db, keys.profile_store_bytes, &state_file);
         let settings = with_pool_settings(server.settings, &hosts)?;
         let status = status_policy("server.listen", server.listen, &mut warnings);
         Ok(Self {
@@ -460,7 +572,7 @@ impl Config {
             status,
             launch_inputs: LaunchInputs::default(),
             elastic,
-            state_file: server.state_file,
+            state_file,
             boot: server.boot.into(),
             settings,
             tick: server.tick,
@@ -468,6 +580,8 @@ impl Config {
             tls: server.tls,
             limits: server.limits,
             hosts,
+            usage,
+            monotonic: Arc::new(SystemMonotonic::default()),
         })
     }
 
@@ -538,10 +652,71 @@ impl Config {
         self
     }
 
+    /// The same configuration timing the lease table's steps on `clock`.
+    pub fn with_monotonic(mut self, clock: Arc<dyn Monotonic>) -> Self {
+        self.monotonic = clock;
+        self
+    }
+
     /// How often the production ticker ticks (`--tick`).
     pub fn tick_period(&self) -> Duration {
         self.tick
     }
+
+    /// The usage file (`--usage-db`, or `usage.db` beside the lease file), or `None`
+    /// when `--usage-off` turned usage off.
+    pub fn usage_db(&self) -> Option<&Path> {
+        self.usage.db.as_deref()
+    }
+
+    /// The most bytes the learned cost curves may take (`--profile-store-bytes`).
+    pub fn profile_store_bytes(&self) -> u64 {
+        self.usage.profile_store_bytes
+    }
+
+    /// The same configuration measuring usage with `sink` instead of the sink that opens
+    /// the usage file. Usage that `--usage-off` turned off stays off.
+    pub fn with_usage_sink(mut self, sink: Arc<dyn UsageSink>) -> Self {
+        self.usage.sink = Some(sink);
+        self
+    }
+
+    /// The same configuration naming the key of a run with `keys` instead of the profile
+    /// name the client gave when it queued the run (the default).
+    pub fn with_key_source(mut self, keys: Arc<dyn KeySource>) -> Self {
+        self.usage.keys = Some(keys);
+        self
+    }
+
+    /// The same configuration telling admission's curve reads (`usage_curves`) which
+    /// profile a work key has. The server never derives a profile name from a work key:
+    /// the name is the one the caller supplied for the run (see [`KeySource`]), so only
+    /// the caller knows which work key has which. Without it every work key is charged
+    /// flat.
+    pub fn with_curve_names(
+        mut self,
+        names: impl Fn(&WorkKey) -> Option<ProfileKey> + Send + Sync + 'static,
+    ) -> Self {
+        self.usage.names = Some(Arc::new(names));
+        self
+    }
+}
+
+/// The usage file `--usage-db`, `--usage-off` or the file's keys name: none when usage is
+/// off, else `db` or `usage.db` in the directory of the lease file.
+fn usage_db(off: bool, db: Option<PathBuf>, state_file: &Path) -> Option<PathBuf> {
+    let beside = || state_file.with_file_name("usage.db");
+    (!off).then(|| db.unwrap_or_else(beside))
+}
+
+/// What the usage settings decide, for the lease file at `state_file`.
+fn usage_setup(
+    off: bool,
+    db: Option<PathBuf>,
+    profile_store_bytes: u64,
+    state_file: &Path,
+) -> UsageSetup {
+    UsageSetup::new(usage_db(off, db, state_file), profile_store_bytes)
 }
 
 /// `settings` with what the registered pool's file decides about whole-node leases: the
@@ -598,6 +773,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                 agents: Box::new(AgentSetup {
                     tokens,
                     pool: agent_pool::read(pool)?,
+                    mint_provider: None,
                     hello_limit: HelloLimit {
                         burst: cli.agent_hello_burst,
                         interval: cli.agent_hello_interval,

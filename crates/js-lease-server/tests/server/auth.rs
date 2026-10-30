@@ -16,6 +16,8 @@ async fn token_is_required() {
         ("POST", "/v1/leases"),
         ("POST", "/v1/leases/1-1/renew"),
         ("DELETE", "/v1/leases/1-1"),
+        ("GET", "/v1/usage/nodes/host-1"),
+        ("GET", "/v1/usage/keys/act.build"),
         ("GET", "/v1/unknown"),
     ];
     for (method, path) in routes {

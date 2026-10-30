@@ -1115,6 +1115,8 @@ dependencies = [
  "serde",
  "thiserror",
  "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1125,6 +1127,7 @@ dependencies = [
  "clap",
  "hyper",
  "hyper-util",
+ "js-agent",
  "js-agent-wire",
  "js-caps",
  "js-elastic",
@@ -1136,8 +1139,10 @@ dependencies = [
  "js-registry",
  "js-scaler",
  "js-sched",
+ "js-state",
  "js-testkit",
  "js-types",
+ "js-usage",
  "log",
  "rcgen",
  "rustix",
@@ -1276,6 +1281,7 @@ dependencies = [
  "js-provider",
  "js-sim",
  "js-types",
+ "js-usage",
  "js-whole",
  "serde_json",
  "sha2 0.11.1",
