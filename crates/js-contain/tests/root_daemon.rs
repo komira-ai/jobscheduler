@@ -335,9 +335,9 @@ async fn a_root_daemon_runs_a_container_mapped_onto_the_job_users_subordinate_id
 /// `crun` binary at another path is refused. AppArmor attaches the distribution's profile
 /// (which grants `userns`) to the path `/usr/bin/crun`; a copy is unconfined, and with
 /// `kernel.apparmor_restrict_unprivileged_userns=1` an unconfined process of the job user
-/// may not create the user namespace. The test refuses to run with the restriction off,
-/// where it would show nothing, and asserts which failure occurs: the runtime reports the
-/// refused namespace, not any other failure.
+/// gets a user namespace without capabilities. The test refuses to run with the restriction
+/// off, where it would show nothing, and asserts which failure occurs: `crun` fails at its
+/// first privileged step, `setresuid`.
 #[tokio::test]
 #[ignore = "needs root, crun, busybox, a job user and kernel.apparmor_restrict_unprivileged_userns=1"]
 async fn a_copy_of_crun_is_refused_the_user_namespace_while_the_distribution_path_is_not() {
@@ -354,8 +354,9 @@ async fn a_copy_of_crun_is_refused_the_user_namespace_while_the_distribution_pat
     println!("crun copy under the restriction: {}", run.said);
     assert_ne!(run.ended, Ok(Ended::Exited(0)), "{}", run.said);
     assert!(
-        run.said.contains("Operation not permitted") || run.said.contains("Permission denied"),
-        "the failure is the refused user namespace: {}",
+        run.said
+            .contains("setresuid to `0`: Operation not permitted"),
+        "the failure is the user namespace's lost capabilities: {}",
         run.said
     );
     assert!(

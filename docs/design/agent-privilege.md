@@ -295,7 +295,7 @@ still need the same drop (P12a): they are not started through `Crun`.
 
 **AppArmor: the restriction applies to B.** On kernels with `kernel.apparmor_restrict_unprivileged_userns=1`
 (Ubuntu 24.04's default, and the hosted runner's) a process that is not root and holds no
-`CAP_SYS_ADMIN` may create a user namespace only if the AppArmor profile it is confined by grants
+`CAP_SYS_ADMIN` gets a user namespace without capabilities unless the AppArmor profile it is confined by grants
 `userns`. This contradicts the argument of the egress spike (P5/P10) that a root `crun` is exempt:
 under B-as-built `crun` runs as the non-root job user, and the restriction does apply on the farm.
 
@@ -306,8 +306,12 @@ under B-as-built `crun` runs as the non-root job user, and the restriction does 
 - Control (a), `a_root_daemon_runs_a_container_mapped_onto_the_job_users_subordinate_ids`: the job
   user runs the distribution's `/usr/bin/crun` and the container starts. Control (b),
   `a_copy_of_crun_is_refused_the_user_namespace_while_the_distribution_path_is_not`: the same binary
-  copied to another path fails, and the failure is `Operation not permitted` or `Permission denied`
-  from the refused namespace, with no output from the container; it first asserts the sysctl reads
+  copied to another path fails with the container never run. What CI showed (kernel and profile of
+  the Ubuntu 24.04 runner): the copy is unconfined, so the restriction lets it create the namespace
+  but strips its capabilities in it, and `crun` stops at its first privileged step with
+  `setresuid to \`0\`: Operation not permitted` (exit 1, empty container output); the test asserts that
+  message. The distribution's profile on that runner is `profile crun /usr/bin/crun flags=(unconfined)`
+  with `userns,`, so it covers our case and no minimal profile of ours is needed there; it first asserts the sysctl reads
   `1`, so it cannot pass on a host where the restriction is off. AppArmor attaches a profile by the
   path of the executable, not by user, which is why (a) passes where (b) fails.
 - What js-contain execs: `OciConfig::runtime`, default `/usr/bin/crun`, an absolute path used as given
