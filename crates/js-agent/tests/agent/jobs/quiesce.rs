@@ -24,6 +24,11 @@ use crate::exclusive::{lines, note};
 use crate::lifecycle::job;
 use crate::support::{Reply, Scratch, Script, Sent, hello, lowest, reply, welcome};
 
+/// How long a test waits for a question that must not block. It is far below
+/// [`HANG_GUARD`], which the fixture's own held call waits for: a blocking proxy fails on
+/// this guard, never on the fixture giving up first and letting the proxy through.
+const ASK_GUARD: Duration = Duration::from_secs(10);
+
 const LEASE: &str = "whole-1";
 const OTHER: &str = "whole-2";
 
@@ -490,7 +495,7 @@ fn a_full_queue_makes_the_question_busy_without_waiting() {
         host
     });
     let answer = answers
-        .recv_timeout(HANG_GUARD)
+        .recv_timeout(ASK_GUARD)
         .expect("the questions blocked on a full queue");
     assert_eq!(
         answer,
@@ -551,7 +556,10 @@ fn questions_never_crowd_replies_out_of_the_queue() {
     let ended: HeartbeatReply = serde_json::from_value(body(None, &[], &["r1"])).unwrap();
     assert_eq!(worker.try_deliver(ended), Delivery::Delivered);
     assert!(handle.settle());
-    assert_eq!(host.restore(LEASE), Restored::Busy, "asked afresh");
+    // This question is answered Busy whether or not the flag was cleared (the published
+    // answer is Busy until the worker has taken the order); the Done after the settle is
+    // the check that the flag was cleared and a second order was sent.
+    let _ = host.restore(LEASE);
     assert!(handle.settle());
     assert_eq!(host.restore(LEASE), Restored::Done);
 }
@@ -745,4 +753,120 @@ fn a_hook_may_take_its_bound_without_the_worker_being_stalled() {
     assert!(worker.stalled(), "past the hook's bound");
     release_tx.send(()).unwrap();
     assert!(handle.settle());
+}
+
+/// Asserts the watchdog's allowance is not given before the hook starts: with the worker
+/// inside the post-job checks of a prepare (held by the test, so the hook has not run), the
+/// manual clock moved just past the plain stall bound makes the worker stalled. Released, the
+/// hook runs once, the answer is ready and the idle worker is not stalled. It catches an
+/// allowance for the hook that is given to the whole prepare order, whatever its answer.
+/// (A prepare answered busy, refused or taken over never reaches the hook; the window those
+/// leave is pinned in `answers.rs`.)
+#[test]
+fn the_checks_before_the_hook_have_the_plain_stall_bound() {
+    let dir = Scratch::new("jobs-quiesce-stall-checks");
+    let machine = FakeMachine::new();
+    let (runner, runs, _) = Counting::new(0, "");
+    let worker = hooked(&dir, &machine, runner);
+    let handle = worker.handle();
+    let mut host = WorkerHost::new(handle.clone());
+
+    assert_eq!(
+        worker.try_deliver(granting(LEASE, &[])),
+        Delivery::Delivered
+    );
+    assert!(handle.settle());
+    machine.world.hold_checks();
+    assert_eq!(host.prepare(LEASE), Quiet::Busy);
+    machine.world.wait_checking(1);
+    let own = stall_bound(Duration::from_secs(1), 1);
+    assert!(!worker.stalled(), "no time has passed");
+    machine
+        .clock
+        .advance(u64::try_from(own.as_millis()).unwrap() + 1);
+    assert!(worker.stalled(), "the hook has not started: no allowance");
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+
+    machine.world.release();
+    assert!(handle.settle());
+    assert_eq!(host.prepare(LEASE), Quiet::Ready);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    assert!(!worker.stalled(), "an idle worker is never stalled");
+}
+
+/// Asserts a second restore order, queued while the first is inside its checks, changes
+/// nothing once the first has published `Done`: the test holds the checks of the first order,
+/// asks again (a second order queues behind it), and releases both; the answer is `Done` and
+/// the checks ran once (one listing of the host's processes). It catches a worker that
+/// recomputes the answer for every restore order: it would run the checks again (the count
+/// of host listings is what bites here; the answer is `Done` either way when no job has
+/// started, and `answers.rs` covers the job that starts between the orders).
+#[test]
+fn a_second_restore_order_through_the_worker_leaves_done() {
+    let dir = Scratch::new("jobs-quiesce-restore-twice");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    let handle = worker.handle();
+    let mut host = WorkerHost::new(handle.clone());
+
+    machine.world.hold_checks();
+    assert_eq!(host.restore(LEASE), Restored::Busy);
+    machine.world.wait_checking(1);
+    assert_eq!(
+        host.restore(LEASE),
+        Restored::Busy,
+        "queues a second order: the first was taken"
+    );
+    machine.world.release();
+    assert!(handle.settle());
+
+    assert_eq!(host.restore(LEASE), Restored::Done, "the answer is kept");
+    assert_eq!(machine.world.checked(), 1, "the checks ran once");
+}
+
+/// Asserts a hook that outlasts the plain stall bound (the clock moved past it while the hook
+/// runs, still inside the hook's bound) leaves a worker that is alive, not stalled and with
+/// the lease ready once the hook returns: the worker goes on to step and publish. The
+/// limit right after the hook returns (the plain limit moved by the hook's run time) is
+/// pinned in `answers.rs`; nothing in the real worker can be held between the hook's return
+/// and the end of the order, so this test sees the end of the order only.
+#[test]
+fn a_hook_longer_than_the_plain_stall_bound_leaves_the_worker_sound() {
+    let dir = Scratch::new("jobs-quiesce-long-hook");
+    let machine = FakeMachine::new();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let (started, started_rx) = channel();
+    let (release_tx, release) = channel();
+    let worker = hooked(
+        &dir,
+        &machine,
+        Gated {
+            runs: Arc::clone(&runs),
+            started,
+            release,
+        },
+    );
+    let handle = worker.handle();
+    let mut host = WorkerHost::new(handle.clone());
+
+    assert_eq!(
+        worker.try_deliver(granting(LEASE, &[])),
+        Delivery::Delivered
+    );
+    assert!(handle.settle());
+    assert_eq!(host.prepare(LEASE), Quiet::Busy);
+    started_rx
+        .recv_timeout(HANG_GUARD)
+        .expect("the hook started");
+    let own = stall_bound(Duration::from_secs(1), 1);
+    machine
+        .clock
+        .advance(u64::try_from(own.as_millis()).unwrap() + 500);
+    assert!(!worker.stalled(), "past the plain bound, inside the hook's");
+    release_tx.send(()).unwrap();
+    assert!(handle.settle());
+
+    assert!(!worker.ended());
+    assert!(!worker.stalled());
+    assert_eq!(host.prepare(LEASE), Quiet::Ready);
 }
