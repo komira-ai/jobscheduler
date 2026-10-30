@@ -245,9 +245,19 @@ impl Rescue {
             Ok((runtime, _)) => runtime,
             Err(why) => return vec![format!("rescue: no runtime: {why}")],
         };
+        // The runs a native runtime cannot list are ended from its journal.
+        let reclaimed: Vec<String> = runtime
+            .reclaim()
+            .into_iter()
+            .map(|line| format!("rescue: {line}"))
+            .collect();
         let ids = match runtime.list_ids() {
             Ok(ids) => ids,
-            Err(why) => return vec![format!("rescue: cannot list the containers: {why}")],
+            Err(why) => {
+                let mut lines = reclaimed;
+                lines.push(format!("rescue: cannot list the containers: {why}"));
+                return lines;
+            }
         };
         // Exited containers (the listing holds them too) must not use up the limit. One
         // that cannot be read is still tried: it may be running.
@@ -276,7 +286,12 @@ impl Rescue {
             .iter()
             .skip(self.max)
             .map(|id| format!("rescue: {} not tried: too many containers", id.0));
-        unread.into_iter().chain(stopped).chain(skipped).collect()
+        reclaimed
+            .into_iter()
+            .chain(unread)
+            .chain(stopped)
+            .chain(skipped)
+            .collect()
     }
 
     /// [`Rescue::stop_all`] on a thread of its own, waited for at most the bound. A thread
@@ -687,7 +702,9 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
         platform: &platform,
         stop_grace,
     };
-    let (runtime, mut lines) = machine.runtime(&wanted)?;
+    let (mut runtime, mut lines) = machine.runtime(&wanted)?;
+    // What an earlier process left that no list of the runtime's can say (a native run).
+    lines.extend(runtime.reclaim());
     // At start only: the rescue at the agent's end builds its runtime by `machine.runtime`
     // alone, so a firewall that has gone never keeps it from stopping the containers.
     runtime.check_egress().map_err(|why| why.to_string())?;

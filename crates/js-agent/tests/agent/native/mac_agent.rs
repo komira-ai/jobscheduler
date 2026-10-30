@@ -21,10 +21,13 @@ fn the_real_sandbox_exec_passes_the_self_test() {
         network: None,
         tool_roots: &[],
         deny_read: &[],
+        max_file_mib: None,
+        max_processes: None,
     };
-    let settings = NativeSettings::from_flags(&flags, &[dir.path("").as_path()])
-        .unwrap()
-        .unwrap();
+    let settings =
+        NativeSettings::from_flags(&flags, &[dir.path("").as_path()], Path::new("/srv/journal"))
+            .unwrap()
+            .unwrap();
     assert_eq!(
         native::self_test(settings.config(), settings.sandbox_exec()),
         Ok(())

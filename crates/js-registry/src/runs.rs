@@ -44,7 +44,8 @@ pub enum RunState {
     /// Queued for the host; its start goes out on every reply until the host lists the
     /// run.
     Queued,
-    /// The host lists the run and is creating its container.
+    /// The host lists the run as starting: it is creating the container, or still
+    /// fetching the image and has created nothing.
     Starting,
     /// The host lists the run and its container runs.
     Running,
@@ -145,6 +146,15 @@ pub enum RunRefusal {
     /// capability: an agent without it would run the job with no disk bound.
     #[error("the host does not bound a run's disk")]
     DiskUnsupported,
+    /// The job is a native one and the host did not report `exec` as `sandbox-exec`: an
+    /// agent that predates native jobs reads the empty image as invalid, and a container
+    /// host cannot run a program of the host.
+    #[error("the host does not run native jobs")]
+    NativeUnsupported,
+    /// The job pins a bundle and the host did not report a bundle store (`bundle-root`):
+    /// the agent would refuse the start after it was queued.
+    #[error("the host holds no bundle store")]
+    BundleUnsupported,
     /// The lease has no such run.
     #[error("the lease has no such run")]
     UnknownRun,
@@ -168,6 +178,8 @@ impl RunRefusal {
             Self::RunExists => "run-exists",
             Self::FilesUnsupported => "files-unsupported",
             Self::DiskUnsupported => "disk-unsupported",
+            Self::NativeUnsupported => refusal::NATIVE_UNSUPPORTED,
+            Self::BundleUnsupported => refusal::BUNDLE_UNSUPPORTED,
             Self::UnknownRun => "unknown-run",
         }
     }

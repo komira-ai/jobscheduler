@@ -147,3 +147,79 @@ fn a_loopback_connect_follows_the_lower_of_request_and_cap() {
     }
     drop(listener);
 }
+
+/// Asserts the file size limit for real: a program that writes four MiB to its standard
+/// output under a limit of one MiB is ended, and the log never grows past the limit. It
+/// catches a run that can fill the agent's disk through its output.
+#[test]
+fn a_run_that_writes_past_the_file_limit_is_ended_at_it() {
+    let mut rig = Rig::with("mac-fsize", |config| config.max_file_bytes = 1 << 20);
+    rig.fake.real_runs();
+    let spec = rig.spec(
+        "r1",
+        super::native("/bin/dd", &["if=/dev/zero", "bs=1048576", "count=4"]),
+    );
+    let id = rig.rt.create_and_start(&spec).unwrap();
+    let status = rig.settle(&id);
+    assert_ne!(status, exited(0), "the program was not stopped");
+    let written = fs::metadata(spec.scratch.join("stdout")).unwrap().len();
+    assert!(written <= 1 << 20, "{written} bytes under a limit of 1 MiB");
+}
+
+/// Asserts the process limit for real: under a limit of one process the shell of a run
+/// cannot start another program, so a fork bomb has no fork to make. It catches a run whose
+/// user can fill the process table.
+#[test]
+fn a_run_cannot_fork_past_the_process_limit() {
+    let mut rig = Rig::with("mac-nproc", |config| config.max_processes = 1);
+    rig.fake.real_runs();
+    let id = rig.start("r1", "/bin/sh", &["-c", "/bin/echo forked; :"]);
+    rig.settle(&id);
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    assert_eq!(tail.stdout, "", "the run forked");
+    assert!(
+        tail.stderr.contains("Resource temporarily unavailable"),
+        "{}",
+        tail.stderr
+    );
+}
+
+/// Asserts that a job's environment cannot make the shell that sets the limits run a
+/// command outside the profile: the environment asks the shell to trace with a `PS4` that
+/// touches a file in a directory every user may write, and to run an imported `ulimit`
+/// function that does the same. The file must not exist afterwards, and the run still ends
+/// well. It catches a limiting shell that runs before the profile is applied, as the lease
+/// user, with the job's environment.
+#[test]
+fn the_job_environment_cannot_steer_the_shell_that_sets_the_limits() {
+    static UNIQUE: AtomicU32 = AtomicU32::new(0);
+    let mut rig = Rig::new("mac-shell-env");
+    rig.fake.real_runs();
+    let marker = std::path::PathBuf::from(format!(
+        "/private/tmp/js-native-escape-{}-{}",
+        std::process::id(),
+        UNIQUE.fetch_add(1, Ordering::SeqCst)
+    ));
+    let touch = format!("/usr/bin/touch {}", marker.display());
+    let mut body = super::native("/bin/echo", &["done"]);
+    body.env = std::collections::BTreeMap::from([
+        ("SHELLOPTS".to_owned(), "xtrace".to_owned()),
+        ("PS4".to_owned(), format!("$({touch}) ")),
+        (
+            "BASH_FUNC_ulimit%%".to_owned(),
+            format!("() {{ {touch}; }}"),
+        ),
+    ]);
+    let spec = rig.spec("r1", body);
+    let id = rig.rt.create_and_start(&spec).unwrap();
+    let status = rig.settle(&id);
+    let escaped = marker.exists();
+    // Removed before anything is asserted, so a failure leaves nothing behind.
+    let _ = fs::remove_file(&marker);
+    assert!(
+        !escaped,
+        "a command ran outside the profile: {}",
+        marker.display()
+    );
+    assert_eq!(status, exited(0));
+}
