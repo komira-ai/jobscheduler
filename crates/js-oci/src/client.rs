@@ -68,6 +68,8 @@ impl BlobSink for tokio::fs::File {
 #[derive(Debug)]
 pub struct Client {
     http: Http,
+    /// SCRATCH: `user:token`, base64, sent as Basic auth to the token realm.
+    basic: Option<String>,
 }
 
 impl Client {
@@ -87,6 +89,7 @@ impl Client {
     pub fn new(policy: Policy) -> Self {
         Self {
             http: Http::new(policy, Roots::System),
+            basic: None,
         }
     }
 
@@ -95,6 +98,7 @@ impl Client {
     pub fn with_roots(policy: Policy, roots: Vec<CertificateDer<'static>>) -> Self {
         Self {
             http: Http::new(policy, Roots::Given(roots)),
+            basic: None,
         }
     }
 
@@ -110,6 +114,13 @@ impl Client {
     /// [`Error::Transport`] when no root could be loaded, so no registry can be reached.
     pub fn roots(&self) -> Result<RootSummary, Error> {
         self.http.roots()
+    }
+
+    /// SCRATCH ONLY: sends `user:secret` as Basic auth to the token realm.
+    #[must_use]
+    pub fn with_basic_auth(mut self, user: &str, secret: &str) -> Self {
+        self.basic = Some(base64(format!("{user}:{secret}").as_bytes()));
+        self
     }
 
     /// Replaces the timeouts.
@@ -139,6 +150,7 @@ impl Client {
             plain,
             location,
             token: Mutex::new(None),
+            basic: self.basic.clone(),
         })
     }
 }
@@ -152,6 +164,7 @@ pub struct Repository<'c> {
     plain: bool,
     location: Location,
     token: Mutex<Option<String>>,
+    basic: Option<String>,
 }
 
 /// Prints the repository and never the token: a caller logs `{repo:?}`, and the bearer
@@ -255,7 +268,11 @@ impl Repository<'_> {
         let params = Challenge::parse(challenge)?;
         let (url, realm) = self.token_url(&params)?;
         let what = text::url(&url);
-        let response = self.http.get(&url, &[], self.reach(&realm)).await?;
+        let mut headers: Vec<(HeaderName, String)> = Vec::new();
+        if let Some(basic) = &self.basic {
+            headers.push((AUTHORIZATION, format!("Basic {basic}")));
+        }
+        let response = self.http.get(&url, &headers, self.reach(&realm)).await?;
         if !response.status().is_success() {
             return Err(Error::Status {
                 url: what,
@@ -354,6 +371,25 @@ impl BundleSource for Repository<'_> {
             })
             .await
     }
+}
+
+/// SCRATCH: standard base64 with padding.
+fn base64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(char::from(A[((n >> (18 - 6 * i)) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// The parameters of a `WWW-Authenticate: Bearer` challenge.

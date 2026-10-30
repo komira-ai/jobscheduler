@@ -61,3 +61,33 @@ jobs:
           path: ${{ runner.temp }}/probe/layout
           retention-days: 1
           if-no-files-found: error
+
+  pull:
+    if: ${{ github.head_ref == 'scratch/ghcr-bundle-probe' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      packages: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Pull the probe bundle from GHCR by digest with js-oci
+        env:
+          GHCR_PROBE_USER: ${{ github.actor }}
+          GHCR_PROBE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          export GHCR_PROBE_OUT="$RUNNER_TEMP/pulled"
+          mkdir -p "$GHCR_PROBE_OUT"
+          cargo test -p js-oci --locked --test ghcr_probe -- --ignored --nocapture --test-threads=1
+      - name: Unpack the layer and print hello.txt
+        run: |
+          set -eu
+          command -v zstd || sudo apt-get install -y zstd
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar --zstd -xf "$RUNNER_TEMP/pulled/layer-0.tar.zst" -C "$RUNNER_TEMP/unpacked"
+          find "$RUNNER_TEMP/unpacked" -type f
+          echo "hello.txt bytes:"; od -c "$(find "$RUNNER_TEMP/unpacked" -name hello.txt)"
