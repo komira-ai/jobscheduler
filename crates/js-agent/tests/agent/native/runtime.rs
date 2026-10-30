@@ -524,3 +524,20 @@ fn the_configured_limits_are_set_by_the_shell_that_starts_the_run() {
     big.start("r1", "/bin/true", &[]);
     assert_eq!(parse(&big.fake.run_of("7.0").argv).limits.0, "3072");
 }
+
+/// Asserts that `TMPDIR` of a run is the agent's, once, whatever the job's environment says.
+/// It catches a job that points the temporary files of its run outside the home.
+#[test]
+fn the_agents_tmpdir_is_the_only_one_a_plain_run_gets() {
+    let mut rig = Rig::new("tmpdir");
+    let mut body = native("/usr/bin/id", &[]);
+    body.env
+        .insert("TMPDIR".to_owned(), "/private/tmp".to_owned());
+    let spec = rig.spec("r1", body);
+    rig.rt.create_and_start(&spec).unwrap();
+    let home = rig.fake.home_of("7.0");
+    let tmp = home.join("tmp").display().to_string();
+    let env = rig.fake.run_of("7.0").env;
+    let given: Vec<_> = env.iter().filter(|(name, _)| name == "TMPDIR").collect();
+    assert_eq!(given, [&("TMPDIR".to_owned(), tmp)]);
+}

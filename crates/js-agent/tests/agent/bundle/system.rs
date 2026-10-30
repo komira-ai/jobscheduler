@@ -459,3 +459,57 @@ fn the_registries_and_the_store_directory_are_checked_when_it_opens() {
     let why = sealing(&missing.store).open(&missing).unwrap_err();
     assert!(why.contains("not-there"), "{why}");
 }
+
+/// A bundle whose tree the store has evicted is not held, though its manifest and config are
+/// still on disk: the hello says what the store can run, and the admission would otherwise
+/// accept a start that then fails at the pin. It catches a listing that reads the manifests
+/// alone, and a bundle that stays advertised after its trees are gone.
+#[test]
+fn a_bundle_whose_tree_was_evicted_is_no_longer_held() {
+    let dir = Scratch::new("sys-evicted");
+    let settings = settings(&dir);
+    let host = sealing(&settings.store);
+    let store = host.open(&settings).unwrap().expect("a store");
+    let src = dir.path("src");
+    fs::create_dir(&src).unwrap();
+    let bundle = Spec::standard().build(&src);
+    let layout = bundle.layout(&dir, "layout");
+    store.ensure_layout(&layout, &bundle.digest()).unwrap();
+    assert_eq!(host.held(&settings.store), Ok(vec![bundle.digest()]));
+    let layer = &bundle.config.layers[1];
+    let tree = store
+        .root()
+        .join("v1/objects/trees")
+        .join(layer.diff_id.hex());
+    fs::remove_dir_all(&tree).unwrap();
+    assert_eq!(host.held(&settings.store), Ok(Vec::new()));
+}
+
+/// A volume whose free space cannot be read is not taken for a full one: the store keeps and
+/// makes trees as it would on a volume with room, and still refuses when `df` says the volume
+/// is under the low-water mark. It catches a failed `df` that counts as 0 free bytes, which
+/// evicts every tree that is not pinned and then refuses the one being made.
+#[test]
+fn a_volume_that_cannot_be_read_is_not_a_full_one() {
+    let dir = Scratch::new("sys-nodf");
+    let mut settings = settings(&dir);
+    settings.low_water_bytes = 2 << 30;
+    let src = dir.path("src");
+    fs::create_dir(&src).unwrap();
+    let bundle = Spec::standard().build(&src);
+    let layout = bundle.layout(&dir, "layout");
+    let unread = SystemHost::new(Runner(BTreeMap::new()))
+        .with_owner(me())
+        .with_sealer(Arc::new(CopySealer));
+    let store = unread.open(&settings).unwrap().expect("a store");
+    store.ensure_layout(&layout, &bundle.digest()).unwrap();
+    assert_eq!(unread.held(&settings.store), Ok(vec![bundle.digest()]));
+
+    let other = Scratch::new("sys-lowdf");
+    let mut low = self::settings(&other);
+    low.low_water_bytes = 2 << 30;
+    let host = sealing(&low.store);
+    let store = host.open(&low).unwrap().expect("a store");
+    let layout = bundle.layout(&other, "layout");
+    assert!(store.ensure_layout(&layout, &bundle.digest()).is_err());
+}
