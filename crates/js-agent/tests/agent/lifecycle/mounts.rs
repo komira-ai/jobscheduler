@@ -383,12 +383,12 @@ fn rw_mount_from_ro_root_refused_at_job_start() {
     );
     assert!(!h.scratch_of("rw").exists(), "no scratch directory either");
     let mut mixed = job_mounting("mixed", true);
+    fs::create_dir(h.dir.path("data/sub2")).unwrap();
     mixed.mounts.push(Mount {
         root_name: "data".to_owned(),
-        rel: "sub".to_owned(),
+        rel: "sub2".to_owned(),
         ro: false,
     });
-    mixed.mounts.reverse();
     assert_eq!(names(&h.start(mixed)), ["refused mixed invalid-mount"]);
     assert!(h.fake.created().is_empty());
 }

@@ -279,6 +279,11 @@ fn the_free_disk_of_the_work_volume_is_reported_in_whole_gib() {
     }
 }
 
+/// The shape's `disk_bytes` of a hello (the wire leaves a zero out).
+fn offered(hello: &Value) -> u64 {
+    hello["shape"]["disk_bytes"].as_u64().unwrap_or(0)
+}
+
 /// Asserts the offered-disk arithmetic: without `--scratch-low-water-gib` the shape offers
 /// the volume's free bytes exactly (not rounded to a GiB) and `disk-gib` says them in whole
 /// GiB; with it the shape offers free minus the mark and `disk-gib` says that; a mark equal
@@ -305,7 +310,7 @@ fn offered_disk_is_free_space_minus_the_low_water_mark_and_never_below_zero() {
     ];
     for (n, (kib, extra, bytes, advisory)) in cases.into_iter().enumerate() {
         let (_, hello) = disk_hello_with(&format!("disk-offer-{n}"), Ok(&row(kib)), extra);
-        assert_eq!(hello["shape"]["disk_bytes"], bytes, "{extra:?}");
+        assert_eq!(offered(&hello), bytes, "{extra:?}");
         assert_eq!(hello["capabilities"]["disk-gib"], advisory, "{extra:?}");
     }
 }
@@ -317,9 +322,9 @@ fn offered_disk_is_free_space_minus_the_low_water_mark_and_never_below_zero() {
 fn offered_disk_is_capped_at_the_wire_maximum_and_zero_when_unreadable() {
     let huge = format!("{DF_HEAD}/dev/sda1 1 1 {} 11% /\n", u64::MAX / 2048);
     let (_, hello) = disk_hello_with("disk-offer-huge", Ok(&huge), &[]);
-    assert_eq!(hello["shape"]["disk_bytes"], (1u64 << 46) - 1);
+    assert_eq!(offered(&hello), (1u64 << 46) - 1);
     let (_, hello) = disk_hello_with("disk-offer-unreadable", Err("df: not found"), &[]);
-    assert_eq!(hello["shape"]["disk_bytes"], 0);
+    assert_eq!(offered(&hello), 0);
 }
 
 /// Asserts that a volume `df` cannot report (the program fails, prints nothing, prints no
