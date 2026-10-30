@@ -99,6 +99,7 @@
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
+mod caps;
 mod check;
 mod command;
 mod credential;
@@ -113,6 +114,7 @@ mod native;
 pub mod protocol;
 pub mod refusal;
 
+pub use caps::{Caps, ReadModel, bundle_capability};
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use credential::HostCredential;
 pub use error::{Rule, ValidationError};
