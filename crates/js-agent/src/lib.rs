@@ -452,7 +452,8 @@ fn execute(
     if default_gib.is_some_and(|gib| (gib << 30) > offer.hello.shape.disk_bytes) {
         let _ = writeln!(
             err,
-            "js-agent: warning: --scratch-default-gib: {} GiB is more than the {} bytes of disk              this host offers, so a run without disk_bytes is refused here",
+            "js-agent: warning: --scratch-default-gib: {} GiB is more than the {} bytes of disk \
+             this host offers, so a run without disk_bytes is refused here",
             local.scratch_default_gib, offer.hello.shape.disk_bytes
         );
     }
