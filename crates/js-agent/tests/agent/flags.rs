@@ -403,3 +403,27 @@ fn the_readiness_hook_flags_are_checked_when_the_agent_starts() {
         assert!(err.contains(said), "{extra:?}: {err}");
     }
 }
+
+/// Asserts that `--scratch-quota` without `--scratch-root` is refused before anything is
+/// sent and names the flag, since there is no scratch device to compare. It catches a
+/// quota flag that silently does nothing.
+#[test]
+fn a_scratch_quota_without_a_scratch_root_is_refused() {
+    let said = refused(&["--scratch-quota"], &linux_host());
+    assert!(
+        said.contains("--scratch-quota: needs --scratch-root"),
+        "{said}"
+    );
+}
+
+/// Asserts that `--scratch-low-water-gib` without `--scratch-root` is refused before
+/// anything is sent and names the flag, since there is no volume to take the mark from.
+/// It catches a mark that is silently ignored.
+#[test]
+fn a_low_water_mark_without_a_scratch_root_is_refused() {
+    let said = refused(&["--scratch-low-water-gib", "1"], &linux_host());
+    assert!(
+        said.contains("--scratch-low-water-gib: needs --scratch-root"),
+        "{said}"
+    );
+}
