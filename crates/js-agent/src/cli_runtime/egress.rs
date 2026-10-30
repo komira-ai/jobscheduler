@@ -76,8 +76,27 @@ impl Allow {
 }
 
 impl Allow {
+    /// The address, or the network address of the CIDR.
+    #[must_use]
+    pub fn addr(&self) -> Ipv4Addr {
+        self.addr
+    }
+
+    /// The prefix length: 32 for a single address.
+    #[must_use]
+    pub fn prefix_len(&self) -> u8 {
+        self.len
+    }
+
+    /// The TCP port.
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     /// Whether the endpoint lies in (or holds) `addr/len`.
-    fn overlaps(&self, (addr, len): (Ipv4Addr, u8)) -> bool {
+    #[must_use]
+    pub fn overlaps(&self, (addr, len): (Ipv4Addr, u8)) -> bool {
         let range = |addr: Ipv4Addr, len: u8| {
             let host = u32::MAX.checked_shr(u32::from(len)).unwrap_or(0);
             (u32::from(addr) & !host, u32::from(addr) | host)

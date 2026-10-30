@@ -492,6 +492,72 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
+  # Egress of jobs under privilege option B (crates/js-agent/tests/egress, ignored in every
+  # other job; the design is docs/design/agent-egress.md): the agent's firewall, its veth and
+  # routes, and real containers made by js-contain's `Oci` as the job user with the AppArmor
+  # user-namespace restriction left on. A second network namespace stands for another host
+  # behind the runner's routing, so the allowed path is forwarded and masqueraded, never local.
+  # Docker is stopped and its forward policy opened first: the runner's Docker would drop
+  # forwarded packets in its own chain, which has nothing to do with what is under test.
+  # The job stands alone, so a failure here blocks no other job.
+  agent-egress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - name: Install crun, uidmap, busybox and the network tools, and make the job user
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends crun uidmap busybox-static apparmor nftables iproute2 util-linux
+          sudo useradd --create-home --shell /usr/sbin/nologin js-job
+          grep -q '^js-job:' /etc/subuid || echo 'js-job:300000:65536' | sudo tee -a /etc/subuid
+          grep -q '^js-job:' /etc/subgid || echo 'js-job:300000:65536' | sudo tee -a /etc/subgid
+          echo "JS_B_CRUN=$(command -v crun)" >> "$GITHUB_ENV"
+          echo "JS_B_BUSYBOX=$(command -v busybox)" >> "$GITHUB_ENV"
+          echo "JS_B_UID=$(id -u js-job)" >> "$GITHUB_ENV"
+          echo "JS_B_GID=$(id -g js-job)" >> "$GITHUB_ENV"
+          crun --version | head -1
+          nft --version
+          busybox --list | tr '\n' ' '
+      - name: Take Docker's firewall out of the way and record the host facts
+        run: |
+          sudo systemctl stop docker.socket docker.service containerd.service || true
+          sudo iptables -P FORWARD ACCEPT || true
+          sudo ip6tables -P FORWARD ACCEPT || true
+          uname -r
+          echo "apparmor_restrict_unprivileged_userns = $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          sudo nft list ruleset | head -60 || true
+          sudo iptables -S | head -20 || true
+      - name: Build the tests as the runner user
+        run: cargo test -p js-agent --test egress --locked --no-run
+      - name: Run the egress tests as root
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test egress --locked -- --ignored --nocapture --test-threads=1
+      - name: The restriction is still on
+        run: test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   # Licences, advisories, bans and sources, as deny.toml configures them. cargo-deny is
   # the release binary, checked against its SHA-256 before use.
   deny:
