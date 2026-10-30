@@ -242,6 +242,15 @@ impl Catalog {
         flags: &[XcodeFlag],
         mut ask: impl FnMut(&Question<'_>) -> Reply,
     ) -> Result<Self, CatalogError> {
+        Self::survey_with(flags, &mut ask)
+    }
+
+    /// [`survey`](Self::survey) with the questions put to a `dyn`, so the body is one
+    /// function whatever closure the caller passes.
+    fn survey_with(
+        flags: &[XcodeFlag],
+        ask: &mut dyn FnMut(&Question<'_>) -> Reply,
+    ) -> Result<Self, CatalogError> {
         if flags.len() > MAX_LISTED {
             return Err(CatalogError::TooMany);
         }
@@ -251,7 +260,7 @@ impl Catalog {
                 return Err(CatalogError::DuplicateBuild(flag.build().to_owned()));
             }
         }
-        let xcodes = flags.iter().map(|flag| check(flag, &mut ask)).collect();
+        let xcodes = flags.iter().map(|flag| check(flag, &mut *ask)).collect();
         Ok(Self { xcodes })
     }
 
@@ -278,7 +287,7 @@ impl Catalog {
     }
 }
 
-fn check(flag: &XcodeFlag, ask: &mut impl FnMut(&Question<'_>) -> Reply) -> Xcode {
+fn check(flag: &XcodeFlag, ask: &mut dyn FnMut(&Question<'_>) -> Reply) -> Xcode {
     match ask_all(flag, ask) {
         Ok(host) => Xcode {
             flag: flag.clone(),
@@ -297,7 +306,7 @@ fn check(flag: &XcodeFlag, ask: &mut impl FnMut(&Question<'_>) -> Reply) -> Xcod
 
 fn ask_all(
     flag: &XcodeFlag,
-    ask: &mut impl FnMut(&Question<'_>) -> Reply,
+    ask: &mut dyn FnMut(&Question<'_>) -> Reply,
 ) -> Result<HostXcode, (State, String)> {
     let (app, developer_dir) = resolve(&flag.app).map_err(|why| (State::Failed, why))?;
     let xcodebuild = format!("{}/usr/bin/xcodebuild", developer_dir.as_str());
@@ -368,7 +377,7 @@ fn build_of(shown: &str) -> Option<&str> {
         .lines()
         .find_map(|line| line.trim().strip_prefix("Build version "))
         .map(str::trim)
-        .filter(|build| !build.is_empty() && !build.contains(char::is_whitespace))
+        .filter(|build| !build.contains(char::is_whitespace))
 }
 
 /// The version in `xcodebuild -version` output (`Xcode 16.2`), if any.

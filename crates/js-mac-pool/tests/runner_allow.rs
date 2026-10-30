@@ -144,6 +144,7 @@ fn a_bundle_entrypoint_runs_under_the_allow_profile_and_reads_only_its_pinned_tr
     let control = run(
         &[OsString::from(tool.path().as_str()), data[0].clone()],
         &[],
+        Some(cwd),
         None,
     );
     assert_eq!(control.stdout, DATA);
@@ -152,6 +153,7 @@ fn a_bundle_entrypoint_runs_under_the_allow_profile_and_reads_only_its_pinned_tr
     let control = run(
         &[OsString::from(tool.path().as_str()), secret[0].clone()],
         &[],
+        Some(cwd),
         None,
     );
     assert!(
