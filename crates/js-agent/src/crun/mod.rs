@@ -12,7 +12,18 @@
 //! - the cgroup `<actions>/<name>`, made by the agent with the booking as the limit
 //!   (memory the booking with no swap, CPU the booked cores: the arithmetic the lease
 //!   server's booking assumes) and given to the job user, who makes the container's cgroup
-//!   `<name>/ctr` under it ([`Runtime::cgroup`]);
+//!   `<name>/ctr` under it ([`Runtime::cgroup`]). The job user is given nothing of the
+//!   directory the leases' cgroups are in (it could make or remove the cgroups of other
+//!   leases there) except the cgroup `helpers` below it, where the helper containers are
+//!   made, and one file of the agent's own cgroup, `cgroup.procs`: `crun` moves its first
+//!   process from the agent's cgroup into the container's, which the kernel allows with
+//!   write access to the `cgroup.procs` of their nearest common ancestor;
+//!   The write to the agent root's `cgroup.procs` lets the job uid move any process of the
+//!   agent's own cgroup (the agent included) into a cgroup it owns: that is the kernel's rule
+//!   for moving a process between cgroups, not something to narrow, and only host-side
+//!   `crun` and the helpers run as the job uid. `cgroup.kill` of a lease's cgroup is left
+//!   out of [`JOB_OWNED_FILES`]: only the agent ends a container through it (a stop's kill,
+//!   a removal), and a job user able to write it could end the lease from the host side.
 //! - the run's scratch directory, given to the job's host id and bound at `/scratch`; the
 //!   run's mounts, and its files at `/run/js-files` read-only, are bound after it;
 //! - a bundle of the image's unpacked root (read-only), an overlay of an empty input root
@@ -64,14 +75,14 @@ use std::time::Duration;
 
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
-use js_contain::oci::image::ImageSource;
+use js_contain::oci::image::{ImageSource, PinnedImage};
 use js_contain::oci::{LeaseDirs, Oci, OciConfig, OciError, Owner};
 use js_contain::running::Running;
 use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
 
-use crate::cli_runtime::{Chown, container_name, hand_over};
-use crate::image::{ConfigError, ImageConfig};
+use crate::cli_runtime::{Chown, container_name};
+use crate::image::{ConfigError, ImageConfig, config_path};
 use crate::lifecycle::{
     Body, Exit, FilesRoot, Found, Prefetcher, Prepared, PullFuture, RunHandle, RunSpec, Runtime,
     RuntimeError, Status, Ticket, label,
@@ -137,12 +148,27 @@ pub struct Hooks {
 impl Default for Hooks {
     fn default() -> Self {
         Self {
-            chown: hand_over,
+            chown: hand_over_no_follow,
             now_ms: system_now_ms,
             kill_wait: KILL_WAIT,
             pull_limit: PULL_LIMIT,
         }
     }
+}
+
+/// Gives the file or directory `path` to `uid` and `gid` by the descriptor of what it opens,
+/// without following a link: a path replaced by a link is refused, and what is given is what
+/// was opened.
+///
+/// # Errors
+/// The system's reason: the path is not there, is a link, or may not be given away.
+pub fn hand_over_no_follow(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags, fchown};
+    use rustix::process::{Gid, Uid};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    rustix::fs::open(path, flags, Mode::empty())
+        .and_then(|fd| fchown(&fd, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))))
+        .map_err(io::Error::from)
 }
 
 fn system_now_ms() -> u64 {
@@ -166,6 +192,14 @@ pub enum CrunError {
     #[error("give {path} to the job user: {why}")]
     Delegation {
         /// The file.
+        path: PathBuf,
+        /// The reason.
+        why: io::Error,
+    },
+    /// The cgroup of the helper containers could not be made or given to the job user.
+    #[error("the cgroup of the helper containers {path}: {why}")]
+    Helpers {
+        /// The cgroup.
         path: PathBuf,
         /// The reason.
         why: io::Error,
@@ -203,6 +237,8 @@ enum Fault {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Book(#[from] js_types::TypeError),
+    #[error("remove an image that has no config: {0}")]
+    Evict(#[from] io::Error),
     #[error("{what}: {why}")]
     Step { what: &'static str, why: String },
 }
@@ -280,30 +316,31 @@ impl CrunRuntime {
         source: Arc<dyn ImageSource>,
         hooks: Hooks,
     ) -> Result<Self, CrunError> {
-        settings.oci.job_user.ok_or(CrunError::NoJobUser)?;
-        let oci = Oci::new(
-            &settings.oci,
-            source,
-            &settings.scratch,
-            &settings.cgroups.actions,
-        )?;
-        let rt = Builder::new_current_thread().enable_all().build()?;
-        let (uid, gid) = oci.job_ids();
+        let (uid, gid) = settings.oci.job_user.ok_or(CrunError::NoJobUser)?;
         let cgroups = settings.cgroups;
         // `crun`, run as the job user, moves its first process from the agent's cgroup into
         // the container's, which needs write access to the `cgroup.procs` of their nearest
-        // common ancestor, and makes the container's cgroup in the lease's.
-        let give = |dir: PathBuf, files: &[&str]| {
-            files.iter().try_for_each(|file| {
-                let path = dir.join(file);
-                (hooks.chown)(&path, uid, gid).map_err(|why| CrunError::Delegation { path, why })
-            })
-        };
-        give(cgroup_dir(&cgroups.mount, &cgroups.root), &ROOT_OWNED_FILES)?;
-        give(
-            cgroup_dir(&cgroups.mount, &cgroups.actions),
-            &JOB_OWNED_FILES,
-        )?;
+        // common ancestor: the agent's own cgroup.
+        for file in ROOT_OWNED_FILES {
+            let path = cgroup_dir(&cgroups.mount, &cgroups.root).join(file);
+            (hooks.chown)(&path, uid, gid).map_err(|why| CrunError::Delegation { path, why })?;
+        }
+        // The helper containers (unpack, removal) are made by `crun` as the job user in a
+        // cgroup of their own, so that the job user is given nothing of the directory the
+        // leases' cgroups are in (it could make or remove the cgroups of other leases
+        // there). A lease's cgroup is given to the job user when it is made. It exists
+        // before the backend does: the backend sweeps old unpacks with a helper when it
+        // starts.
+        let helpers = format!("{}/helpers", cgroups.actions.trim_end_matches('/'));
+        let helpers_dir = cgroup_dir(&cgroups.mount, &helpers);
+        make_helper_cgroup(&helpers_dir, hooks.chown, (uid, gid)).map_err(|why| {
+            CrunError::Helpers {
+                path: helpers_dir.clone(),
+                why,
+            }
+        })?;
+        let oci = Oci::new(&settings.oci, source, &settings.scratch, &helpers)?;
+        let rt = Builder::new_current_thread().enable_all().build()?;
         let configs = config_dir(&settings.scratch);
         std::fs::create_dir_all(&configs).map_err(|why| CrunError::Configs {
             path: configs.clone(),
@@ -370,6 +407,13 @@ impl CrunRuntime {
 
     /// Makes the container of `spec`, everything but its start. A failure removes what it
     /// made.
+    ///
+    /// An image in the store with no kept config is removed and fetched again. That deletes
+    /// the root such an image gives as the lower layer of a container's mounts, so it relies
+    /// on no container of an earlier daemon still running on it: the start-up sweep that ends
+    /// what an earlier agent left (P12b) must have run before the first run is made. The
+    /// removal and a fetch of the same image never overlap (the image store holds one gate
+    /// for each digest).
     fn make(&mut self, spec: &RunSpec) -> Result<String, Fault> {
         if spec.isolation != js_agent_wire::Isolation::Contained {
             return Err(Fault::NotContained);
@@ -377,16 +421,27 @@ impl CrunRuntime {
         if !spec.gpu_indices.is_empty() {
             return Err(Fault::Gpu);
         }
-        let Body::Container { image, args } = &spec.body;
-        let image = pinned(image).map_err(Fault::Image)?;
+        let Body::Container { image: given, args } = &spec.body;
+        let image = pinned(given).map_err(Fault::Image)?;
         let name = container_name(&self.host_id, &spec.run_id)
             .map_err(|_| Fault::Name(spec.run_id.clone()))?;
         if self.runs.contains_key(&name) {
             return Err(Fault::InUse(spec.run_id.clone()));
         }
+        let limit = self.hooks.pull_limit;
         self.rt
-            .block_on(self.oci.check_pinned(&image))
-            .map_err(|why| Fault::Image(why.to_string()))?;
+            .block_on(ensure_image(&self.oci, &image, limit))
+            .map_err(Fault::Image)?;
+        if !config_path(&self.configs, &image.digest).exists() {
+            // An image an earlier daemon (or a source that keeps no configs) unpacked has
+            // no config to run it by: it is fetched again, and the source keeps the config
+            // this time. The prefetcher is told, as it is for any image taken out.
+            self.rt.block_on(self.oci.remove_image(&image))?;
+            self.pulls.forget(given);
+            self.rt
+                .block_on(ensure_image(&self.oci, &image, limit))
+                .map_err(Fault::Image)?;
+        }
         let config = ImageConfig::kept(&self.configs, &image.digest)?;
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, &name);
         let lease = self.oci.lease_dirs(&name);
@@ -425,7 +480,6 @@ impl CrunRuntime {
         lease: &LeaseDirs,
         cgroup: &LeaseCgroup,
     ) -> Result<(), Fault> {
-        use std::os::unix::fs::PermissionsExt as _;
         let chown = self.hooks.chown;
         let (job, job_id) = (self.oci.job_ids(), self.oci.container_ids());
         for (dir, owner) in lease.to_make() {
@@ -433,10 +487,7 @@ impl CrunRuntime {
                 Owner::Job => job,
                 Owner::Container => job_id,
             };
-            std::fs::create_dir(&dir)
-                .and_then(|()| {
-                    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
-                })
+            make_dir(&dir)
                 .and_then(|()| chown(&dir, uid, gid))
                 .map_err(|why| Fault::step("make a lease directory", &why))?;
         }
@@ -453,7 +504,7 @@ impl CrunRuntime {
             .create_with(&booking, None, LeasePolicy::Hard)
             .map_err(|why| Fault::step("make the lease's cgroup", &why))?;
         for file in JOB_OWNED_FILES {
-            chown(&cgroup.dir().join(file), job.0, job.1)
+            chown(&owned(cgroup.dir(), file), job.0, job.1)
                 .map_err(|why| Fault::step("give the lease's cgroup to the job user", &why))?;
         }
         self.rt
@@ -508,19 +559,57 @@ impl CrunRuntime {
     }
 }
 
+/// Makes the new directory `dir` with the mode `0755` whatever the umask is, setting the mode
+/// by the descriptor of what was made.
+fn make_dir(dir: &Path) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags, fchmod};
+    std::fs::create_dir(dir)?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    rustix::fs::open(dir, flags, Mode::empty())
+        .and_then(|fd| fchmod(&fd, Mode::from_raw_mode(0o755)))
+        .map_err(io::Error::from)
+}
+
+/// The path of `file` of the cgroup `dir` in [`JOB_OWNED_FILES`], where the empty name is the
+/// directory itself (not `dir/`, whose trailing slash would make a no-follow open follow).
+fn owned(dir: &Path, file: &str) -> PathBuf {
+    if file.is_empty() {
+        dir.to_owned()
+    } else {
+        dir.join(file)
+    }
+}
+
+/// Makes the cgroup `dir` of the helper containers (once: one that is there is kept), hands
+/// the controllers to its children and gives it to the job user.
+fn make_helper_cgroup(dir: &Path, chown: Chown, (uid, gid): (u32, u32)) -> io::Result<()> {
+    if !dir.is_dir() {
+        std::fs::create_dir(dir)?;
+    }
+    std::fs::write(dir.join("cgroup.subtree_control"), "+cpu +memory +pids")?;
+    JOB_OWNED_FILES
+        .iter()
+        .try_for_each(|file| chown(&dir.join(file), uid, gid))
+}
+
 /// The directory of the cgroup `name` (relative to `mount`, starting with `/`).
 fn cgroup_dir(mount: &Path, name: &str) -> PathBuf {
     mount.join(name.trim_start_matches('/'))
+}
+
+/// `image` in the store, fetched and unpacked if it is not, within `limit` for the whole.
+async fn ensure_image(oci: &Oci, image: &PinnedImage, limit: Duration) -> Result<(), String> {
+    let ensured = tokio::time::timeout(limit, oci.check_pinned(image)).await;
+    ensured
+        .map_err(|_| format!("pulling {} took longer than {limit:?}", image.reference))?
+        .map_err(|why| why.to_string())
 }
 
 /// The pull and unpack of `image`, with the limit of the whole.
 fn pull(oci: Arc<Oci>, image: String, limit: Duration) -> PullFuture {
     Box::pin(async move {
         let pinned = pinned(&image)?;
-        let pulled = tokio::time::timeout(limit, oci.check_pinned(&pinned)).await;
-        pulled
-            .map_err(|_| format!("pulling {image} took longer than {limit:?}"))?
-            .map_err(|why| why.to_string())
+        ensure_image(&oci, &pinned, limit).await
     })
 }
 
