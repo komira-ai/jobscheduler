@@ -329,7 +329,11 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
     /// Clears immutability and deletes; failures leave the rest for the next start's sweep.
     fn discard(&self, path: &Path) {
         let _ = self.sealer.unseal_for_delete(path);
-        let _ = std::fs::remove_dir_all(path).or_else(|_| std::fs::remove_file(path));
+        let _ = if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
     }
 
     /// Unseals a tree, moves it out of its place and deletes it with its record and pins.
