@@ -210,6 +210,7 @@ impl Agent {
             files: None,
             state: StateRoot::open(state.path()).unwrap(),
             stop_grace: Duration::from_secs(1),
+            pull_allow: Default::default(),
         };
         let fake = Fake::default();
         let (life, _) = Lifecycle::adopt(
