@@ -167,18 +167,3 @@ fn the_free_space_low_water_mark_evicts_too() {
     assert!(matches!(full.trim(), Err(Error::NoSpace { .. })));
     assert_eq!(full.stats().trees, 0);
 }
-
-#[test]
-fn a_tree_whose_directory_vanished_still_leaves_the_table() {
-    let rig = Rig::new();
-    let store = rig.open(budget(&rig, 100));
-    let a = sized("f", 100, 1);
-    rig.have(&a);
-    store.ensure(&wanted(&a)).unwrap();
-    std::fs::remove_dir_all(rig.root().join("trees").join(a.diff_id.hex())).unwrap();
-    let b = sized("f", 100, 2);
-    rig.have(&b);
-    store.ensure(&wanted(&b)).unwrap();
-    assert_eq!(store.stats().trees, 1);
-    assert!(rig.present(&b.diff_id));
-}

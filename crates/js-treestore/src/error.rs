@@ -73,6 +73,13 @@ pub enum Error {
         /// The budget.
         budget: u64,
     },
+    /// Another store holds the directory.
+    #[error("the directory {0} is held by another tree store")]
+    Locked(String),
+    /// A tree is in place that this store does not hold as current, so it cannot be taken
+    /// for the new content.
+    #[error("tree {0} is in place but is not one this store holds")]
+    Conflict(String),
     /// The crash hook stopped the operation after the step, as a dying process would.
     #[error("stopped after {0:?}")]
     Crashed(Step),

@@ -120,6 +120,11 @@ pub struct FakeSealer {
     pub seals: Arc<AtomicUsize>,
     pub unsealed: Arc<Mutex<Vec<PathBuf>>>,
     pub mode: Arc<AtomicU8>,
+    /// Calls that returned with the tree's data and directories synced.
+    pub syncs: Arc<AtomicUsize>,
+    /// Calls of `unseal_for_delete` that have started.
+    pub unsealing: Arc<AtomicUsize>,
+    pub hold_unseal: Arc<Mutex<Option<Arc<Gate>>>>,
 }
 
 impl FakeSealer {
@@ -128,6 +133,9 @@ impl FakeSealer {
             seals: Arc::new(AtomicUsize::new(0)),
             unsealed: Arc::new(Mutex::new(Vec::new())),
             mode: Arc::new(AtomicU8::new(SEAL_OK)),
+            syncs: Arc::new(AtomicUsize::new(0)),
+            unsealing: Arc::new(AtomicUsize::new(0)),
+            hold_unseal: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -163,12 +171,19 @@ impl Sealer for FakeSealer {
             std::fs::remove_dir_all(stage).unwrap();
             return Ok(Sealed { bytes: 1 });
         }
+        // The contract: data and directories are synced before seal returns.
+        self.syncs.fetch_add(1, Ordering::SeqCst);
         Ok(Sealed {
             bytes: size_of(stage),
         })
     }
 
-    fn unseal(&self, tree: &Path) -> Result<(), SealError> {
+    fn unseal_for_delete(&self, tree: &Path) -> Result<(), SealError> {
+        self.unsealing.fetch_add(1, Ordering::SeqCst);
+        let gate = self.hold_unseal.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.wait();
+        }
         self.unsealed.lock().unwrap().push(tree.to_owned());
         Ok(())
     }
@@ -235,6 +250,7 @@ pub fn wanted(layer: &Layer) -> TreeWanted {
             bytes: 1 << 24,
             model_bytes: 1 << 28,
         },
+        expected_bytes: None,
     }
 }
 

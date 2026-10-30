@@ -15,6 +15,15 @@
 //! is not kept and that was not used within the minimum age is deleted, until there is room
 //! or nothing is left to delete ([`Error::NoSpace`], retriable).
 //!
+//! Trees are named by their diff id alone. A tree that is present answers every caller of
+//! that diff id, whatever blob digest or limits the caller gives: the content is the same by
+//! the definition of the diff id (a tree extracted under lax limits answers a caller with
+//! strict ones). The record names the blob the tree came from and the extractor version.
+//!
+//! One store holds a directory at a time (`lock`). Bytes in `tmp/` and `stage/` are not
+//! counted in the budget or the free-space check. The record is not bound to the tree's
+//! contents; a scrub that re-hashes trees is a later step.
+//!
 //! Crash safety is stage, rename, record: a tree counts as present only with a current
 //! record. [`TreeStore::open`] clears `tmp/`, `stage/` and `trash/`, trashes a tree with no
 //! valid record and drops pins of runs that are not live.

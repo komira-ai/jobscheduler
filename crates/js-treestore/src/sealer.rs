@@ -16,16 +16,26 @@ pub struct SealError(pub String);
 
 /// The platform's way to make a tree immutable. The macOS sealer (root, `uchg`) is a
 /// separate component; the tests use a fake.
+///
+/// Implementations must not panic.
 pub trait Sealer: Send + Sync + 'static {
     /// Re-checks the stage, normalises owner and modes, makes it immutable.
+    ///
+    /// **Durability:** it returns only after the tree's file data and its directories have
+    /// been synced to disk (`fsync` of every file and directory, or the platform's
+    /// equivalent). The store writes the tree's record after this and after syncing
+    /// `trees/` for the rename, so a record that survives a power loss never sits beside a
+    /// tree with missing data. `unpack_layer` does not sync.
     ///
     /// # Errors
     /// The stage breaks a rule or a call fails.
     fn seal(&self, stage: &Path) -> Result<Sealed, SealError>;
-    /// Clears immutability on a tree, or a stage that was sealed in part, so it can be
-    /// deleted. Called after the tree left its place.
+    /// Clears immutability on a tree, or on a stage that was sealed in part, and on
+    /// everything under it, so that it can be renamed and deleted. Called before a tree is
+    /// moved to `trash/` (the move of an immutable directory fails on some systems), after no
+    /// run can pin it. It must be safe to call again, and on a tree that is not sealed.
     ///
     /// # Errors
     /// A call fails.
-    fn unseal(&self, tree: &Path) -> Result<(), SealError>;
+    fn unseal_for_delete(&self, tree: &Path) -> Result<(), SealError>;
 }

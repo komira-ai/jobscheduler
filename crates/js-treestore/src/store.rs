@@ -2,8 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
+use std::fs::{DirBuilder, OpenOptions, Permissions};
 use std::io::Write as _;
 use std::os::fd::AsFd as _;
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -109,6 +111,9 @@ pub struct TreeWanted {
     pub encoding: LayerEncoding,
     /// The ceilings the layer is extracted under.
     pub limits: Limits,
+    /// The bytes the tree is expected to take (the layer's declared file bytes), when the
+    /// caller knows them. A tree that cannot fit the budget is refused before the fetch.
+    pub expected_bytes: Option<u64>,
 }
 
 /// A tree that is present.
@@ -165,12 +170,18 @@ struct Entry {
     /// Recency: higher is more recent.
     seq: u64,
     last_use_ms: u64,
+    /// Being deleted: not a candidate again, not pinnable, not a hit.
+    doomed: bool,
 }
 
 #[derive(Default)]
 struct State {
     trees: BTreeMap<DiffId, Entry>,
     flights: BTreeSet<(DiffId, Digest)>,
+    /// Trees whose placement (rename, record, table entry) is in progress.
+    placing: BTreeSet<DiffId>,
+    /// Bytes promised to trees that are made but not yet in the table.
+    reserved: u64,
     waiting: usize,
     next_seq: u64,
 }
@@ -194,6 +205,8 @@ struct Inner<S: Sealer, F: LayerSource> {
     state: Mutex<State>,
     done: Condvar,
     next: AtomicU64,
+    /// Held for the life of the store: a second open of the directory is refused.
+    _lock: File,
 }
 
 /// Sealed trees extracted from layer blobs, within a budget.
@@ -220,6 +233,65 @@ impl BlobSink for PartSink {
     }
 }
 
+/// Bytes promised to a tree on its way into the table; given back when dropped.
+struct Reservation<'a, S: Sealer, F: LayerSource> {
+    inner: &'a Inner<S, F>,
+    bytes: u64,
+}
+
+impl<S: Sealer, F: LayerSource> Reservation<'_, S, F> {
+    /// The bytes, for a caller that turns them into a table entry under the same lock.
+    fn take(&mut self) -> u64 {
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+impl<S: Sealer, F: LayerSource> Drop for Reservation<'_, S, F> {
+    fn drop(&mut self) {
+        self.inner.lock().reserved -= self.bytes;
+    }
+}
+
+/// A flight in progress: whatever way its leader ends, even by a panic in the source or the
+/// sealer, the key is removed and the waiters are woken to try for themselves.
+struct Flight<'a, S: Sealer, F: LayerSource> {
+    inner: &'a Inner<S, F>,
+    key: (DiffId, Digest),
+    stage: PathBuf,
+    part: PathBuf,
+}
+
+impl<S: Sealer, F: LayerSource> Drop for Flight<'_, S, F> {
+    fn drop(&mut self) {
+        let mut state = self.inner.lock();
+        if std::thread::panicking() {
+            let _ = std::fs::remove_dir_all(&self.stage);
+            let _ = std::fs::remove_file(&self.part);
+            // A stale tree this flight was deleting is not being deleted any more.
+            let _ = state.trees.get_mut(&self.key.0).map(|e| e.doomed = false);
+        }
+        state.flights.remove(&self.key);
+        drop(state);
+        self.inner.done.notify_all();
+    }
+}
+
+/// `path` as a directory with exactly `mode`, whatever the umask.
+fn make_dir(path: &Path, mode: u32) -> Result<(), Error> {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(mode)
+        .create(path)
+        .and_then(|()| std::fs::set_permissions(path, Permissions::from_mode(mode)))
+        .map_err(ctx("create store directory"))
+}
+
+fn sync_dir(path: &Path) -> Result<(), Error> {
+    File::open(path)
+        .and_then(|dir| dir.sync_all())
+        .map_err(ctx("sync directory"))
+}
+
 impl<S: Sealer, F: LayerSource> Inner<S, F> {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().expect("tree store state poisoned")
@@ -239,9 +311,11 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
             .join(format!("{}.sealed", diff_id.hex()))
     }
 
+    /// A name no other store or process uses: the process id and a counter.
     fn unique(&self, parent: &str, name: &str) -> PathBuf {
         let n = self.next.fetch_add(1, Ordering::Relaxed);
-        self.dir.join(parent).join(format!("{name}-{n}"))
+        let pid = std::process::id();
+        self.dir.join(parent).join(format!("{name}-{pid}-{n}"))
     }
 
     fn reached(&self, step: Step) -> Result<(), Error> {
@@ -254,31 +328,57 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
 
     /// Clears immutability and deletes; failures leave the rest for the next start's sweep.
     fn discard(&self, path: &Path) {
-        let _ = self.sealer.unseal(path);
+        let _ = self.sealer.unseal_for_delete(path);
         let _ = std::fs::remove_dir_all(path).or_else(|_| std::fs::remove_file(path));
     }
 
-    /// Moves a tree out of its place and deletes it with its record and pins.
+    /// Unseals a tree, moves it out of its place and deletes it with its record and pins.
+    /// Once the move has happened the tree is gone; what is left of the deletion is for the
+    /// next start's sweep.
     fn trash_tree(&self, diff_id: &DiffId) -> Result<(), Error> {
+        let tree = self.tree_path(diff_id);
+        self.sealer.unseal_for_delete(&tree)?;
         let dest = self.unique("trash", diff_id.hex());
-        std::fs::rename(self.tree_path(diff_id), &dest).map_err(ctx("move tree to trash"))?;
+        std::fs::rename(&tree, &dest).map_err(ctx("move tree to trash"))?;
         let _ = std::fs::remove_file(self.record_path(diff_id));
         let _ = std::fs::remove_dir_all(self.dir.join("pins").join(diff_id.hex()));
-        self.discard(&dest);
+        let _ = std::fs::remove_dir_all(&dest);
         Ok(())
     }
 
-    /// Evicts, least recently used first, until `incoming` more bytes fit the budget and
-    /// the volume is over the low-water mark. A tree that is pinned, kept or used within the
-    /// minimum age is not a candidate.
-    fn make_room(&self, incoming: u64) -> Result<(), Error> {
+    /// Ends a deletion: the entry leaves the table only if the tree is gone, and stays
+    /// counted otherwise.
+    fn finish_trash(&self, diff_id: &DiffId, outcome: Result<(), Error>) -> Result<(), Error> {
+        let mut state = self.lock();
+        match &outcome {
+            Ok(()) => {
+                state.trees.remove(diff_id);
+            }
+            Err(_) => {
+                let _ = state.trees.get_mut(diff_id).map(|e| e.doomed = false);
+            }
+        }
+        drop(state);
+        self.done.notify_all();
+        outcome
+    }
+
+    /// Makes room for `incoming` more bytes and reserves them, evicting, least recently used
+    /// first, until they fit the budget and the volume is over the low-water mark. Trees that
+    /// are pinned, kept, used within the minimum age or already being deleted are not
+    /// candidates. Bytes reserved by trees on their way in count as used.
+    fn make_room(&self, incoming: u64) -> Result<Reservation<'_, S, F>, Error> {
         loop {
             let mut state = self.lock();
-            let used: u64 = state.trees.values().map(|e| e.bytes).sum();
+            let used = state.trees.values().map(|e| e.bytes).sum::<u64>() + state.reserved;
             let over_budget = used.saturating_add(incoming) > self.cfg.budget_bytes;
             let over_free = (self.cfg.free_space)() < self.cfg.low_water_free_bytes;
             if !(over_budget || over_free) {
-                return Ok(());
+                state.reserved += incoming;
+                return Ok(Reservation {
+                    inner: self,
+                    bytes: incoming,
+                });
             }
             let now = self.now();
             let victim = state
@@ -286,6 +386,7 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
                 .iter()
                 .filter(|(id, e)| {
                     e.pins.is_empty()
+                        && !e.doomed
                         && !self.cfg.keep.contains(*id)
                         && now.saturating_sub(e.last_use_ms) >= self.cfg.min_age_ms
                 })
@@ -298,48 +399,74 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
                     budget: self.cfg.budget_bytes,
                 });
             };
-            state.trees.remove(&victim);
+            let _ = state.trees.get_mut(&victim).map(|e| e.doomed = true);
             drop(state);
-            // A tree that cannot be moved is out of the table either way; the next start's
-            // sweep deals with what is left.
-            let _ = self.trash_tree(&victim);
+            let outcome = self.trash_tree(&victim);
+            self.finish_trash(&victim, outcome)?;
         }
     }
 
-    /// Renames the stage to the tree's place. A tree already there (another extraction of
-    /// the same diff id won) is the same content: the stage is discarded.
-    fn place(&self, stage: &Path, diff_id: &DiffId) -> Result<(), Error> {
-        match std::fs::rename(stage, self.tree_path(diff_id)) {
-            Ok(()) => Ok(()),
-            Err(_) if self.tree_path(diff_id).exists() => {
-                self.discard(stage);
-                Ok(())
-            }
-            Err(source) => Err(Error::Io {
-                what: "place tree",
-                source,
-            }),
+    /// Adds `run`'s pin to a present, current tree; the caller holds the state lock.
+    fn pin_locked(
+        &self,
+        state: &mut State,
+        diff_id: &DiffId,
+        run: &RunId,
+    ) -> Result<TreeHandle, Error> {
+        let version = self.cfg.extractor_version;
+        let entry = state
+            .trees
+            .get_mut(diff_id)
+            .filter(|e| (e.version == version) & !e.doomed)
+            .ok_or_else(|| Error::Absent(diff_id.as_str().to_owned()))?;
+        if entry.pins.contains(run) {
+            return Err(Error::AlreadyPinned);
         }
+        let dir = self.dir.join("pins").join(diff_id.hex());
+        make_dir(&dir, 0o700)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dir.join(run.as_str()))
+            .map_err(ctx("create pin"))?;
+        file.sync_all().map_err(ctx("sync pin"))?;
+        sync_dir(&dir)?;
+        entry.pins.insert(run.clone());
+        state.touch(diff_id, self.now());
+        Ok(TreeHandle {
+            diff_id: diff_id.clone(),
+            run: run.clone(),
+            path: self.tree_path(diff_id),
+        })
     }
 
     fn write_record(&self, diff_id: &DiffId, record: &Record) -> Result<(), Error> {
         let final_path = self.record_path(diff_id);
         let temp = self.unique("tmp", "record");
-        let mut file = File::create(&temp).map_err(ctx("create record"))?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)
+            .map_err(ctx("create record"))?;
         file.write_all(&record.to_bytes())
             .map_err(ctx("write record"))?;
         file.sync_all().map_err(ctx("sync record"))?;
         std::fs::rename(&temp, &final_path).map_err(ctx("place record"))?;
-        File::open(self.dir.join("trees"))
-            .and_then(|dir| dir.sync_all())
-            .map_err(ctx("sync trees"))
+        sync_dir(&self.dir.join("trees"))
     }
 
     /// Fetches the blob into `part` and checks that it is exactly the blob asked for.
     /// Nothing reads the file before this returns.
     fn fetch(&self, blob: &BlobRef, part: &Path) -> Result<File, Error> {
         let mut sink = PartSink {
-            file: File::create(part).map_err(ctx("create blob file"))?,
+            file: OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(part)
+                .map_err(ctx("create blob file"))?,
             hasher: Sha256::new(),
             got: 0,
             cap: blob.size,
@@ -357,10 +484,107 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
         File::open(part).map_err(ctx("open blob file"))
     }
 
-    fn build(&self, want: &TreeWanted, part: &Path, stage: &Path) -> Result<(), Error> {
+    /// Places the sealed stage as the tree, records it and enters it in the table, one
+    /// placement of a diff id at a time. A tree already in place is accepted only when this
+    /// store holds it as current (another extraction of the same layer won); anything else
+    /// there is not ours to take for the new content.
+    fn commit(
+        &self,
+        want: &TreeWanted,
+        stage: &Path,
+        sealed_bytes: u64,
+        reservation: &mut Reservation<'_, S, F>,
+        run: Option<&RunId>,
+    ) -> Result<Option<TreeHandle>, Error> {
+        let diff_id = &want.diff_id;
+        let mut state = self.lock();
+        while state.placing.contains(diff_id) {
+            state.waiting += 1;
+            state = self.done.wait(state).expect("tree store state poisoned");
+            state.waiting -= 1;
+        }
+        state.placing.insert(diff_id.clone());
+        drop(state);
+        let placed = self.place(want, stage, sealed_bytes, reservation, run);
+        self.lock().placing.remove(diff_id);
+        self.done.notify_all();
+        placed
+    }
+
+    fn place(
+        &self,
+        want: &TreeWanted,
+        stage: &Path,
+        sealed_bytes: u64,
+        reservation: &mut Reservation<'_, S, F>,
+        run: Option<&RunId>,
+    ) -> Result<Option<TreeHandle>, Error> {
+        let diff_id = &want.diff_id;
+        let version = self.cfg.extractor_version;
+        match std::fs::rename(stage, self.tree_path(diff_id)) {
+            Ok(()) => {
+                sync_dir(&self.dir.join("trees"))?;
+                self.reached(Step::Renamed)?;
+                let record = Record {
+                    diff_id: diff_id.as_str().to_owned(),
+                    blob: want.blob.digest.to_string(),
+                    extractor_version: version,
+                    bytes: sealed_bytes,
+                };
+                self.write_record(diff_id, &record)?;
+                self.reached(Step::Recorded)?;
+                let mut state = self.lock();
+                state.reserved -= reservation.take();
+                state.next_seq += 1;
+                let seq = state.next_seq;
+                let last_use_ms = self.now();
+                state.trees.insert(
+                    diff_id.clone(),
+                    Entry {
+                        bytes: sealed_bytes,
+                        version,
+                        pins: BTreeSet::new(),
+                        seq,
+                        last_use_ms,
+                        doomed: false,
+                    },
+                );
+                run.map(|run| self.pin_locked(&mut state, diff_id, run))
+                    .transpose()
+            }
+            Err(_) if self.tree_path(diff_id).exists() => {
+                let mut state = self.lock();
+                let ours = state
+                    .trees
+                    .get(diff_id)
+                    .is_some_and(|e| (e.version == version) & !e.doomed);
+                if !ours {
+                    return Err(Error::Conflict(diff_id.as_str().to_owned()));
+                }
+                let pinned = run
+                    .map(|run| self.pin_locked(&mut state, diff_id, run))
+                    .transpose();
+                drop(state);
+                self.discard(stage);
+                pinned
+            }
+            Err(source) => Err(Error::Io {
+                what: "place tree",
+                source,
+            }),
+        }
+    }
+
+    fn build(
+        &self,
+        want: &TreeWanted,
+        part: &Path,
+        stage: &Path,
+        run: Option<&RunId>,
+    ) -> Result<Option<TreeHandle>, Error> {
         let blob = self.fetch(&want.blob, part)?;
         self.reached(Step::Fetched)?;
-        std::fs::create_dir(stage).map_err(ctx("create stage"))?;
+        make_dir(stage, 0o700)?;
         self.reached(Step::Staged)?;
         let root = File::open(stage).map_err(ctx("open stage"))?;
         unpack_layer(
@@ -373,49 +597,53 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
         self.reached(Step::Unpacked)?;
         let sealed = self.sealer.seal(stage)?;
         self.reached(Step::Sealed)?;
-        self.make_room(sealed.bytes)?;
-        self.place(stage, &want.diff_id)?;
-        self.reached(Step::Renamed)?;
-        let record = Record {
-            diff_id: want.diff_id.as_str().to_owned(),
-            blob: want.blob.digest.to_string(),
-            extractor_version: self.cfg.extractor_version,
-            bytes: sealed.bytes,
-        };
-        self.write_record(&want.diff_id, &record)?;
-        self.reached(Step::Recorded)?;
-        let now = self.now();
-        let mut state = self.lock();
-        state.next_seq += 1;
-        let seq = state.next_seq;
-        // A racing extraction of the same tree may have entered it first; it is the same tree.
-        state.trees.entry(want.diff_id.clone()).or_insert(Entry {
-            bytes: sealed.bytes,
-            version: self.cfg.extractor_version,
-            pins: BTreeSet::new(),
-            seq,
-            last_use_ms: now,
-        });
+        let mut reservation = self.make_room(sealed.bytes)?;
+        self.commit(want, stage, sealed.bytes, &mut reservation, run)
+    }
+
+    /// Replaces a stale tree: it is deleted, and stays in the table (counted, stale) if
+    /// the deletion fails.
+    fn replace_stale(&self, want: &TreeWanted, stale: bool) -> Result<(), Error> {
+        if stale {
+            let outcome = self.trash_tree(&want.diff_id);
+            self.finish_trash(&want.diff_id, outcome)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// A tree that cannot fit the budget at all is refused before anything is fetched.
+    fn check_fits(&self, state: &State, want: &TreeWanted) -> Result<(), Error> {
+        let expected = want.expected_bytes.unwrap_or(0);
+        if expected > self.cfg.budget_bytes {
+            return Err(Error::NoSpace {
+                needed: expected,
+                used: state.trees.values().map(|e| e.bytes).sum(),
+                budget: self.cfg.budget_bytes,
+            });
+        }
         Ok(())
     }
 
     /// The flight's leader: replaces a stale tree, builds, and cleans up after a failure.
-    fn lead(&self, want: &TreeWanted, stale: bool) -> Result<(), Error> {
-        let stage = self.unique("stage", want.diff_id.hex());
-        let part = self.unique("tmp", "part");
-        let built = if stale {
-            self.trash_tree(&want.diff_id)
-                .and_then(|()| self.build(want, &part, &stage))
-        } else {
-            self.build(want, &part, &stage)
-        };
+    fn lead(
+        &self,
+        want: &TreeWanted,
+        stale: bool,
+        run: Option<&RunId>,
+        stage: &Path,
+        part: &Path,
+    ) -> Result<Option<TreeHandle>, Error> {
+        let built = self
+            .replace_stale(want, stale)
+            .and_then(|()| self.build(want, part, stage, run));
         if matches!(built, Err(Error::Crashed(_))) {
             return built;
         }
         if stage.exists() {
-            self.discard(&stage);
+            self.discard(stage);
         }
-        let _ = std::fs::remove_file(&part);
+        let _ = std::fs::remove_file(part);
         built
     }
 
@@ -442,6 +670,7 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
         let (Ok(diff_id), Some(record)) = (diff_id, record) else {
             // Junk, a torn tree (renamed, never recorded) or a record that does not parse:
             // refetching is cheaper than proving it complete.
+            let _ = self.sealer.unseal_for_delete(&path);
             let dest = self.unique("trash", name);
             std::fs::rename(&path, &dest).map_err(ctx("move torn tree to trash"))?;
             let _ = std::fs::remove_file(self.dir.join("trees").join(format!("{name}.sealed")));
@@ -478,12 +707,18 @@ fn names(dir: &Path) -> Result<Vec<String>, Error> {
 }
 
 impl<S: Sealer, F: LayerSource> TreeStore<S, F> {
-    /// Opens the directory and sweeps what a crash left: `tmp/`, `stage/` and `trash/` are
-    /// emptied, a tree without a valid record is deleted, pins of runs not in `live` are
-    /// dropped. Trees found are ordered by the age of their record for eviction.
+    /// Opens the directory, which one store at a time may hold (a second open is refused
+    /// with [`Error::Locked`]), and sweeps what a crash left: `tmp/`, `stage/` and `trash/`
+    /// are emptied, a tree without a valid record is deleted, pins of runs not in `live` and
+    /// pin directories of trees that are gone are dropped.
+    ///
+    /// Trees found are ordered by the age of their record (when it was made, not when the
+    /// tree was last used) and all count as just used, so none is evictable for the minimum
+    /// age after a start. Until then a store over its budget, or started with a smaller one,
+    /// answers [`Error::NoSpace`] to a new tree rather than evict.
     ///
     /// # Errors
-    /// A directory cannot be made or read.
+    /// A directory cannot be made or read, or the directory is held by another store.
     pub fn open(
         dir: &Path,
         source: F,
@@ -491,8 +726,20 @@ impl<S: Sealer, F: LayerSource> TreeStore<S, F> {
         cfg: Config,
         live: &BTreeSet<RunId>,
     ) -> Result<TreeStore<S, F>, Error> {
-        for sub in ["trees", "tmp", "stage", "trash", "pins"] {
-            std::fs::create_dir_all(dir.join(sub)).map_err(ctx("create store directory"))?;
+        std::fs::create_dir_all(dir).map_err(ctx("create store directory"))?;
+        let lock = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join("lock"))
+            .map_err(ctx("open lock file"))?;
+        if lock.try_lock().is_err() {
+            return Err(Error::Locked(dir.display().to_string()));
+        }
+        make_dir(&dir.join("trees"), 0o711)?;
+        for sub in ["tmp", "stage", "trash", "pins"] {
+            make_dir(&dir.join(sub), 0o700)?;
         }
         let inner = Inner {
             dir: dir.to_owned(),
@@ -502,6 +749,7 @@ impl<S: Sealer, F: LayerSource> TreeStore<S, F> {
             state: Mutex::new(State::default()),
             done: Condvar::new(),
             next: AtomicU64::new(0),
+            _lock: lock,
         };
         for scratch in ["tmp", "stage", "trash"] {
             for name in names(&dir.join(scratch))? {
@@ -514,11 +762,13 @@ impl<S: Sealer, F: LayerSource> TreeStore<S, F> {
         }
         found.sort_by_key(|(made, ..)| *made);
         let now = inner.now();
+        let mut kept = BTreeSet::new();
         {
             let mut state = inner.lock();
             for (_, diff_id, record, pins) in found {
                 state.next_seq += 1;
                 let seq = state.next_seq;
+                kept.insert(diff_id.hex().to_owned());
                 state.trees.insert(
                     diff_id,
                     Entry {
@@ -527,8 +777,14 @@ impl<S: Sealer, F: LayerSource> TreeStore<S, F> {
                         pins,
                         seq,
                         last_use_ms: now,
+                        doomed: false,
                     },
                 );
+            }
+        }
+        for name in names(&dir.join("pins"))? {
+            if !kept.contains(&name) {
+                let _ = std::fs::remove_dir_all(dir.join("pins").join(name));
             }
         }
         Ok(TreeStore {
@@ -540,38 +796,79 @@ impl<S: Sealer, F: LayerSource> TreeStore<S, F> {
     /// older extractor. Callers for the same (diff id, blob) share one extraction; a caller
     /// whose extraction failed fails alone, and a waiting caller then tries for itself.
     ///
+    /// Trees are named by their diff id alone: a tree that is present answers whatever blob
+    /// digest and limits the caller gives, as the content is the same by definition of the
+    /// diff id. The path is not pinned; use [`TreeStore::ensure_pinned`] to use it.
+    ///
     /// # Errors
     /// The source fails, the blob is not the one asked for, the layer breaks a rule or is
     /// not the one the diff id names, sealing or a file-system call fails, no room can be
-    /// made ([`Error::NoSpace`]), or the tree is stale and pinned ([`Error::Busy`]).
+    /// made ([`Error::NoSpace`]), the tree is stale and pinned ([`Error::Busy`]), or a tree
+    /// this store does not hold is in the way ([`Error::Conflict`]).
     pub fn ensure(&self, want: &TreeWanted) -> Result<Ready, Error> {
+        self.run_ensure(want, None)?;
+        Ok(self.ready(&want.diff_id))
+    }
+
+    /// As [`TreeStore::ensure`], and pins the tree for `run` in the same step, so it cannot
+    /// be evicted between the two.
+    ///
+    /// # Errors
+    /// As [`TreeStore::ensure`], and [`Error::AlreadyPinned`] when the run pins it.
+    pub fn ensure_pinned(&self, want: &TreeWanted, run: &RunId) -> Result<TreeHandle, Error> {
+        let handle = self.run_ensure(want, Some(run))?;
+        Ok(handle.expect("a pin was asked for"))
+    }
+
+    fn run_ensure(
+        &self,
+        want: &TreeWanted,
+        run: Option<&RunId>,
+    ) -> Result<Option<TreeHandle>, Error> {
         let inner = &self.inner;
         let key = (want.diff_id.clone(), want.blob.digest.clone());
         let stale = loop {
             let mut state = inner.lock();
-            let (fresh, pinned) = state.trees.get(&want.diff_id).map_or((false, false), |e| {
-                (e.version == inner.cfg.extractor_version, !e.pins.is_empty())
-            });
-            if fresh {
+            let version = inner.cfg.extractor_version;
+            let (current, pinned, doomed) = state
+                .trees
+                .get(&want.diff_id)
+                .map_or((false, false, false), |e| {
+                    (e.version == version, !e.pins.is_empty(), e.doomed)
+                });
+            if current & !doomed {
                 state.touch(&want.diff_id, inner.now());
-                return Ok(self.ready(&want.diff_id));
+                return run
+                    .map(|run| inner.pin_locked(&mut state, &want.diff_id, run))
+                    .transpose();
             }
             if pinned {
                 return Err(Error::Busy);
             }
-            if state.flights.contains(&key) {
+            if doomed | state.flights.contains(&key) {
                 state.waiting += 1;
                 let mut state = inner.done.wait(state).expect("tree store state poisoned");
                 state.waiting -= 1;
                 continue;
             }
+            inner.check_fits(&state, want)?;
             state.flights.insert(key.clone());
-            break state.trees.remove(&want.diff_id).is_some();
+            // A stale tree stays in the table, counted, until its deletion succeeds.
+            break state
+                .trees
+                .get_mut(&want.diff_id)
+                .map(|e| e.doomed = true)
+                .is_some();
         };
-        let result = inner.lead(want, stale);
-        inner.lock().flights.remove(&key);
-        inner.done.notify_all();
-        result.map(|()| self.ready(&want.diff_id))
+        let stage = inner.unique("stage", want.diff_id.hex());
+        let part = inner.unique("tmp", "part");
+        let _flight = Flight {
+            inner,
+            key,
+            stage: stage.clone(),
+            part: part.clone(),
+        };
+        inner.lead(want, stale, run, &stage, &part)
     }
 
     fn ready(&self, diff_id: &DiffId) -> Ready {
@@ -584,37 +881,20 @@ impl<S: Sealer, F: LayerSource> TreeStore<S, F> {
     /// Evicts until the budget and the low-water mark hold, as far as it can.
     ///
     /// # Errors
-    /// [`Error::NoSpace`] when what is left is pinned, kept or too recently used.
+    /// [`Error::NoSpace`] when what is left is pinned, kept or too recently used, or an
+    /// eviction fails.
     pub fn trim(&self) -> Result<(), Error> {
-        self.inner.make_room(0)
+        self.inner.make_room(0).map(|_| ())
     }
 
     /// Pins a present tree for a run, durably, before its path is given to the run.
     ///
     /// # Errors
-    /// [`Error::Absent`] when the tree is not present or is stale, [`Error::AlreadyPinned`]
-    /// when the run pins it, or the pin file cannot be made.
+    /// [`Error::Absent`] when the tree is not present, is stale or is being deleted,
+    /// [`Error::AlreadyPinned`] when the run pins it, or the pin file cannot be made.
     pub fn pin(&self, diff_id: &DiffId, run: &RunId) -> Result<TreeHandle, Error> {
-        let inner = &self.inner;
-        let mut state = inner.lock();
-        let entry = state
-            .trees
-            .get_mut(diff_id)
-            .filter(|e| e.version == inner.cfg.extractor_version)
-            .ok_or_else(|| Error::Absent(diff_id.as_str().to_owned()))?;
-        if entry.pins.contains(run) {
-            return Err(Error::AlreadyPinned);
-        }
-        let dir = inner.dir.join("pins").join(diff_id.hex());
-        std::fs::create_dir_all(&dir).map_err(ctx("create pin directory"))?;
-        File::create_new(dir.join(run.as_str())).map_err(ctx("create pin"))?;
-        entry.pins.insert(run.clone());
-        state.touch(diff_id, inner.now());
-        Ok(TreeHandle {
-            diff_id: diff_id.clone(),
-            run: run.clone(),
-            path: inner.tree_path(diff_id),
-        })
+        let mut state = self.inner.lock();
+        self.inner.pin_locked(&mut state, diff_id, run)
     }
 
     /// Ends a run's pin.
