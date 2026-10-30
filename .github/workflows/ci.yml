@@ -150,7 +150,7 @@ jobs:
             exit 0
           fi
           macos=false
-          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^crates/js-treestore/(src/mac/|tests/(privileged|treestore/mac_))|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
+          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^crates/js-oci/|^crates/js-treestore/(src/mac/|tests/(privileged|treestore/mac_))|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
             macos=true
           elif printf '%s\n' "$patch" | grep -Ev '^(\+\+\+|---) ' | grep -Eq '^[+-].*target_(os[[:space:]]*=[[:space:]]*"macos"|vendor[[:space:]]*=[[:space:]]*"apple")'; then
             macos=true
@@ -192,8 +192,8 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - run: cargo build --locked -p js-agent -p js-cli -p js-treestore -p js-mac-pool
-      - run: cargo test --locked -p js-agent -p js-cli -p js-treestore -p js-mac-pool
+      - run: cargo build --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool
+      - run: cargo test --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

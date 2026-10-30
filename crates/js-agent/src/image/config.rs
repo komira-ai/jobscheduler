@@ -20,6 +20,10 @@ pub enum ConfigError {
     /// An `Env` entry that is not `NAME=value`.
     #[error("the image config has an Env entry that is not NAME=value")]
     Env,
+    /// A string of the config (an `Env` entry, an `Entrypoint` or `Cmd` word, the
+    /// `WorkingDir`) with a NUL byte, which no program argument or path can hold.
+    #[error("the image config has a NUL byte in its Env, Entrypoint, Cmd or WorkingDir")]
+    Nul,
     /// A `WorkingDir` with a `..` part.
     #[error("the image config has a WorkingDir with a '..' part: {0:?}")]
     WorkingDir(String),
@@ -76,12 +80,23 @@ impl ImageConfig {
     ///
     /// # Errors
     /// [`ConfigError::Malformed`] when it is not a config with a `rootfs`,
-    /// [`ConfigError::Env`] for an `Env` entry without `=`, and
+    /// [`ConfigError::Env`] for an `Env` entry without `=`, [`ConfigError::Nul`] for a NUL
+    /// byte in a string, and
     /// [`ConfigError::WorkingDir`] for a `WorkingDir` that leaves the image's root.
     pub fn parse(bytes: &[u8]) -> Result<Self, ConfigError> {
         let document: Document =
             serde_json::from_slice(bytes).map_err(|e| ConfigError::Malformed(e.to_string()))?;
         let process = document.config.unwrap_or_default();
+        let working_dir = process.working_dir.clone().unwrap_or_default();
+        let nul = [&process.entrypoint, &process.cmd, &process.env]
+            .into_iter()
+            .flatten()
+            .flatten()
+            .chain([&working_dir])
+            .any(|text| text.contains('\0'));
+        if nul {
+            return Err(ConfigError::Nul);
+        }
         let mut env = process
             .env
             .unwrap_or_default()
@@ -100,9 +115,21 @@ impl ImageConfig {
             entrypoint: process.entrypoint.unwrap_or_default(),
             cmd: process.cmd.unwrap_or_default(),
             env,
-            working_directory: relative(&process.working_dir.unwrap_or_default())?,
+            working_directory: absolute(&working_dir)?,
             layers: document.rootfs.diff_ids.len(),
         })
+    }
+
+    /// The image's `WORKDIR` as an absolute path in the image (`/` when it sets none),
+    /// cleaned of empty and `.` parts.
+    ///
+    /// It is not part of [`ImageConfig::apply`]: js-contain runs the job in
+    /// `{exec_root}/{working_directory}` with the inputs overlaid at `exec_root`, so this
+    /// path cannot be written into [`ContainerSpec::working_directory`]. Whoever builds
+    /// the container decides where it runs.
+    #[must_use]
+    pub fn working_dir(&self) -> &str {
+        &self.working_directory
     }
 
     /// Refuses a config that lists other layers than the manifest it came with: the
@@ -121,16 +148,14 @@ impl ImageConfig {
         }
     }
 
-    /// Sets the program, environment and working directory of `spec` from the image and
-    /// the run's `args`, and leaves every other field as it is.
+    /// Sets the program and environment of `spec` from the image and the run's `args`,
+    /// and leaves every other field as it is, the working directory included (see
+    /// [`ImageConfig::working_dir`]).
     ///
     /// The command is the entrypoint followed by `args`; when `args` is empty the image's
     /// `CMD` follows it instead (a run that names no flags runs the image as it was
     /// built), and when the image has no entrypoint `args` is the command. The
-    /// environment is the image's, in its order, with a `PATH` added when it has none. The
-    /// working directory is the image's `WORKDIR`, written relative to the image's root
-    /// (`/work` is `work`; none, or `/`, is empty), which is how
-    /// [`ContainerSpec::working_directory`] is read.
+    /// environment is the image's, in its order, with a `PATH` added when it has none.
     ///
     /// # Errors
     /// [`ConfigError::NoCommand`] when nothing names a program.
@@ -146,14 +171,13 @@ impl ImageConfig {
         }
         spec.argv = argv;
         spec.env.clone_from(&self.env);
-        spec.working_directory.clone_from(&self.working_directory);
         Ok(())
     }
 }
 
-/// `dir`, an absolute directory of the image, as a path relative to its root: no empty or
-/// `.` parts, and no `..`.
-fn relative(dir: &str) -> Result<String, ConfigError> {
+/// `dir`, a directory of the image, as an absolute path with no empty or `.` parts and no
+/// `..` (`/` for none).
+fn absolute(dir: &str) -> Result<String, ConfigError> {
     let parts: Vec<&str> = dir
         .split('/')
         .filter(|part| !matches!(*part, "" | "."))
@@ -161,5 +185,5 @@ fn relative(dir: &str) -> Result<String, ConfigError> {
     if parts.contains(&"..") {
         return Err(ConfigError::WorkingDir(dir.to_owned()));
     }
-    Ok(parts.join("/"))
+    Ok(format!("/{}", parts.join("/")))
 }

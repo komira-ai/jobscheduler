@@ -50,13 +50,15 @@ fn applied(process: &str, args: &[&str]) -> Result<ContainerSpec, ConfigError> {
     Ok(made)
 }
 
-/// The entrypoint, environment (the image's `PATH` among it) and working directory of the
-/// image reach the container spec, and a run that names only flags runs the image's
+/// The entrypoint and environment (the image's `PATH` among it) of the image reach the
+/// container spec, and its `WORKDIR` does not: the spec's working directory is read
+/// relative to the overlay at `exec_root`, so it stays what the caller set, and the image's
+/// directory is read with `working_dir`. and a run that names only flags runs the image's
 /// entrypoint with them: the image `CMD` is replaced, not appended to. Every other field of
 /// the spec is as it was. It catches a runtime that execs the flag string, one that drops
 /// the image's `PATH`, and an apply that rewrites the lease's own fields.
 #[test]
-fn the_entrypoint_environment_and_workdir_reach_the_container_spec() {
+fn the_entrypoint_and_environment_reach_the_container_spec_and_the_workdir_does_not() {
     let process = r#"{"Entrypoint":["/usr/bin/kbf-task"],"Cmd":["--default"],
         "Env":["LANG=C","PATH=/opt/bin:/usr/bin","OPTS=a=b","EMPTY="],
         "WorkingDir":"/scratch/work"}"#;
@@ -69,8 +71,8 @@ fn the_entrypoint_environment_and_workdir_reach_the_container_spec() {
         ("OPTS".to_owned(), "a=b".to_owned()),
         ("EMPTY".to_owned(), String::new()),
     ];
-    expected.working_directory = "scratch/work".to_owned();
     assert_eq!(made, expected);
+    assert_eq!(parse(process).working_dir(), "/scratch/work");
 }
 
 /// A run with no arguments runs the image as it was built: the entrypoint, then the `CMD`.
@@ -146,26 +148,41 @@ fn an_env_entry_without_an_equals_sign_is_refused() {
     assert_eq!(refused, ConfigError::Env);
 }
 
-/// The working directory is written relative to the image's root, as the spec reads it:
-/// none or `/` is empty, `.` and empty parts are dropped, and a `..` is refused rather
-/// than resolved.
+/// The working directory is an absolute path of the image: none or `/` is `/`, `.` and empty
+/// parts are dropped, and a `..` is refused rather than resolved. Applying the config never
+/// changes the spec's working directory.
 #[test]
-fn the_workdir_is_relative_to_the_image_root_and_never_leaves_it() {
+fn the_workdir_is_absolute_and_never_leaves_the_image_root() {
     for (workdir, expected) in [
-        ("", ""),
-        ("/", ""),
-        ("/work", "work"),
-        ("/a/./b//c/", "a/b/c"),
+        ("", "/"),
+        ("/", "/"),
+        ("/work", "/work"),
+        ("/a/./b//c/", "/a/b/c"),
     ] {
         let process = format!(r#"{{"WorkingDir":"{workdir}"}}"#);
+        assert_eq!(parse(&process).working_dir(), expected, "{workdir:?}");
         let made = applied(&process, &["x"]).expect("applies");
-        assert_eq!(made.working_directory, expected, "{workdir:?}");
+        assert_eq!(made.working_directory, "placeholder", "{workdir:?}");
     }
-    let absent = applied("{}", &["x"]).expect("applies");
-    assert_eq!(absent.working_directory, "");
+    assert_eq!(parse("{}").working_dir(), "/");
     let refused = ImageConfig::parse(config_json(r#"{"WorkingDir":"/a/../b"}"#, 1).as_bytes())
         .expect_err("leaves the root");
     assert_eq!(refused, ConfigError::WorkingDir("/a/../b".to_owned()));
+}
+
+/// A NUL byte in an `Env` entry, an entrypoint or `CMD` word or the working directory is
+/// refused: none of them can be passed to a program or opened as a path.
+#[test]
+fn a_nul_byte_in_the_process_settings_is_refused() {
+    for process in [
+        r#"{"Env":["A=b\u0000c"]}"#,
+        r#"{"Entrypoint":["/bin/a\u0000b"]}"#,
+        r#"{"Cmd":["x","\u0000"]}"#,
+        r#"{"WorkingDir":"/a\u0000b"}"#,
+    ] {
+        let refused = ImageConfig::parse(config_json(process, 1).as_bytes()).expect_err(process);
+        assert_eq!(refused, ConfigError::Nul, "{process}");
+    }
 }
 
 /// The image's `USER` is not read: a config that names root, an id or a user that does not

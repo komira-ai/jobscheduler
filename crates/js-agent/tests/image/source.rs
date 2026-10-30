@@ -1,5 +1,6 @@
 //! The js-oci client as the image source of js-contain's store.
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use js_agent::image::{CONFIG_LIMIT_BYTES, RegistryImages};
@@ -96,6 +97,14 @@ async fn layers_are_written_base_first_as_the_verified_bytes() {
             bytes,
             "{name}"
         );
+    }
+    // Private until the image store has used them: owner read and write only.
+    for name in &names {
+        let mode = std::fs::metadata(blobs.join(name))
+            .expect("layer")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{name}");
     }
 }
 
