@@ -103,6 +103,15 @@ impl Prefetcher {
         threads: usize,
         pull: impl Fn(String) -> PullFuture + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
+        Self::with(threads, Arc::new(pull))
+    }
+
+    /// [`Prefetcher::new`] over a pull function that is already shared (one body for every
+    /// closure type `new` is given).
+    fn with(
+        threads: usize,
+        pull: Arc<dyn Fn(String) -> PullFuture + Send + Sync>,
+    ) -> std::io::Result<Self> {
         if threads == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -117,7 +126,7 @@ impl Prefetcher {
         Ok(Self {
             handle: runtime.handle().clone(),
             runtime: Some(runtime),
-            pull: Arc::new(pull),
+            pull,
             shared: Arc::new(Shared::default()),
         })
     }
