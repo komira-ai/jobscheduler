@@ -6,7 +6,7 @@
 mod common;
 
 use common::*;
-use js_scaler::{HostFacts, HostState, Mark, Phase, Records, State};
+use js_scaler::{HostFacts, HostState, Phase, Records, State};
 
 /// A scaler that has just started from records holding one registered machine, `js-made-0-60`
 /// (an a10 machine), with one request waiting that its offer fits and no host shown.
@@ -103,7 +103,7 @@ fn a_restored_machine_covers_one_request() {
 }
 
 /// Asserts that a condemned machine covers nothing, and that a machine that has left the
-/// registered phases (released on the mark the registry set) stops covering.
+/// registered phases (released because the provider no longer has it) stops covering.
 #[test]
 fn a_condemned_or_released_machine_covers_nothing() {
     let mut rig = restarted();
@@ -112,10 +112,8 @@ fn a_condemned_or_released_machine_covers_nothing() {
 
     let mut rig = restarted();
     assert!(acquires(&rig.tick(at(0))).is_empty());
-    let mut releasing = hello();
-    releasing.state = HostState::Lost;
-    releasing.mark = Some(Mark::Releasing);
-    rig.input.hosts = vec![releasing];
+    // The provider says the machine is gone: it is released.
+    rig.input.not_found = vec!["js-made-0-60".to_owned()];
     rig.tick(at(MINUTE));
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(acquires(&rig.tick(at(2 * MINUTE))).len(), 1);
