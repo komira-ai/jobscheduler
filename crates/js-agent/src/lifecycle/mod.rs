@@ -179,8 +179,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{Hello, Taint};
+use js_oci::Allow;
 
 use crate::FileReader;
+use crate::bundle::Admission;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
 use crate::native::{NativeFlags, NativeSettings};
@@ -200,7 +202,7 @@ pub use runtime::{
     Body, Exit, Found, NativeRefusal, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError,
     Status, label,
 };
-pub use scratch::ScratchRoot;
+pub use scratch::{DirLayout, ScratchRoot};
 pub use taint::{MARKER_FILE, StateRoot};
 
 /// The `detail` of a `failed_to_start` result when the cause is not a wire refusal code.
@@ -546,6 +548,9 @@ pub struct Config {
     pub state: StateRoot,
     /// How long a container gets to stop on its own before it is killed.
     pub stop_grace: Duration,
+    /// The rules for a start that names a bundle; none when the agent has no bundle store,
+    /// and then such a start is refused `bundle-unsupported`.
+    pub bundle: Option<Admission>,
     /// The disk quota of the runs' scratch directories; none without `--scratch-quota`, and
     /// then a run without `disk_bytes` books none and nothing bounds a run's disk.
     pub quota: Option<RunQuota>,
@@ -605,6 +610,8 @@ pub struct Local {
     pub stop_grace: Duration,
     /// `--drain-wait`, or the stop grace.
     pub drain_wait: Duration,
+    /// The `--image-allow` flags, in the order given: where an image may be pulled from.
+    pub image_allow: Vec<Allow>,
 }
 
 /// The file in the state root that holds the native agent's lease journal.
@@ -840,8 +847,17 @@ impl Local {
             state,
             stop_grace,
             drain_wait,
+            image_allow: image_allow(&cli.image_allow)?,
         })
     }
+}
+
+/// The `--image-allow` entries, each checked.
+fn image_allow(entries: &[String]) -> Result<Vec<Allow>, String> {
+    entries
+        .iter()
+        .map(|entry| Allow::parse(entry).map_err(|why| format!("--image-allow: {why}")))
+        .collect()
 }
 
 impl Local {

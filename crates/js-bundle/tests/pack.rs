@@ -328,3 +328,30 @@ fn finder_leftovers_are_refused() {
         }
     }
 }
+
+/// A directory that is itself a symlink is not followed to find the tree.
+#[test]
+fn a_symlinked_root_is_refused() {
+    let scratch = Scratch::new();
+    write(&scratch.root(), "f", b"x", 0o644);
+    let link = scratch.outside().join("root-link");
+    std::os::unix::fs::symlink(scratch.root(), &link).unwrap();
+    assert!(matches!(pack_error(&link), PackError::RootSymlink { .. }));
+    assert!(pack_tar(&scratch.root()).is_ok());
+}
+
+/// A trailing slash makes the system resolve a link, so the check cannot be a plain lstat.
+#[test]
+fn a_symlinked_root_is_refused_with_a_trailing_slash_too() {
+    let scratch = Scratch::new();
+    write(&scratch.root(), "f", b"x", 0o644);
+    let link = scratch.outside().join("root-link");
+    std::os::unix::fs::symlink(scratch.root(), &link).unwrap();
+    for suffix in ["/", "/.", "/./", "//"] {
+        let spelled = std::path::PathBuf::from(format!("{}{suffix}", link.display()));
+        assert!(
+            matches!(pack_error(&spelled), PackError::RootSymlink { .. }),
+            "{suffix}"
+        );
+    }
+}

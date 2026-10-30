@@ -93,4 +93,31 @@ impl AbsPath {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// This path with one more component, `name`, which is checked like the others.
+    ///
+    /// # Errors
+    /// [`PathError::NotNormal`] for a `name` that is empty, `.`, `..` or holds a `/`; any
+    /// other [`PathError`] the longer path breaks.
+    pub fn child(&self, name: &str) -> Result<Self, PathError> {
+        if name.contains('/') {
+            return Err(PathError::NotNormal);
+        }
+        Self::parse(&format!("{}/{name}", self.0))
+    }
+
+    /// Whether this path is `other` or below it, by whole components (`/a/bc` is not
+    /// under `/a/b`).
+    #[must_use]
+    pub fn starts_with(&self, other: &Self) -> bool {
+        self.0
+            .strip_prefix(other.0.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    }
+}
+
+impl AsRef<str> for AbsPath {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
 }

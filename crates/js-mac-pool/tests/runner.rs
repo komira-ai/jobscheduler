@@ -83,7 +83,7 @@ impl Scene {
 
     fn sandboxed_with(&self, policy: &Policy, program: &str, args: &[OsString]) -> Output {
         let profile = Profile::for_policy(policy).expect("profile");
-        let argv = profile.argv(&AbsPath::parse(program).expect("program"), args);
+        let argv = profile.argv(AbsPath::parse(program).expect("program"), args);
         Command::new(&argv[0])
             .args(&argv[1..])
             .output()
@@ -584,7 +584,7 @@ fn mounting_is_refused() {
     let profile = Profile::for_policy(&scene.policy(Net::Off)).expect("profile");
     let mut under_sudo = vec![OsString::from("-n")];
     under_sudo.extend(profile.argv(
-        &AbsPath::parse("/sbin/mount_devfs").expect("program"),
+        AbsPath::parse("/sbin/mount_devfs").expect("program"),
         &mount[2..],
     ));
     let refused = control("/usr/bin/sudo", &under_sudo);

@@ -2,8 +2,8 @@
 
 use std::ffi::OsString;
 
+use super::allow;
 use super::net::Net;
-use super::path::AbsPath;
 use super::policy::{Policy, ReadModel};
 
 /// The program that applies a profile.
@@ -13,6 +13,7 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// narrowly. `job-creation` and `lsopen` are also in the floor: launchd refuses a job from
 /// a sandboxed process regardless, and Launch Services would start an application outside
 /// the sandbox.
+///
 /// IPC is not denied: on a hosted runner `(deny ipc-sysv-shm)` did not stop `shmget`, so
 /// no rule is claimed. A System V or POSIX object of a user outlives its processes, and the
 /// helper reuses uids; the privileged tests measure what a reused uid finds.
@@ -58,10 +59,11 @@ const FLOOR: [&str; 8] = [
 /// Why a policy has no profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BuildError {
-    /// The allow-list read model has no builder yet; a run that asks for it is refused
-    /// rather than run under the open one.
-    #[error("the allow read model has no profile builder yet")]
-    ReadModelUnavailable,
+    /// The policy asks for the allow read model and has no grants
+    /// ([`Policy::allowing`]), so no macOS version's base set: it is refused rather than
+    /// run under the open model.
+    #[error("the allow read model needs its grants (Policy::allowing)")]
+    AllowWithoutGrants,
 }
 
 /// A profile and the `-D` parameters it refers to. Every path of the policy is a
@@ -84,12 +86,25 @@ impl Profile {
     ///
     /// A later rule wins, so the floor beats everything before it.
     ///
+    /// Under [`ReadModel::Allow`] the reads are an allow-list: after the write grants come
+    /// the default read deny, the names of the ancestors of every granted place, the base
+    /// set of the macOS version, the run's places, the pinned trees, the Xcode and the
+    /// kinds, then a deny of each setuid file; the read denies and everything after
+    /// them are as in the open model.
+    ///
     /// # Errors
-    /// [`BuildError::ReadModelUnavailable`] for [`ReadModel::Allow`].
+    /// [`BuildError::AllowWithoutGrants`] for an allow-model policy that was not given
+    /// its grants.
     pub fn for_policy(policy: &Policy) -> Result<Self, BuildError> {
-        if policy.read_model() == ReadModel::Allow {
-            return Err(BuildError::ReadModelUnavailable);
+        if policy.read_model() == ReadModel::Allow && policy.allow().is_none() {
+            return Err(BuildError::AllowWithoutGrants);
         }
+        Ok(Self::render(policy))
+    }
+
+    /// The profile of `policy`, which the caller has checked: a policy of the allow model
+    /// has its grants.
+    pub(super) fn render(policy: &Policy) -> Self {
         let mut lines: Vec<String> = Vec::new();
         let mut params: Vec<(String, String)> = Vec::new();
         push_all(&mut lines, &HEAD);
@@ -102,6 +117,9 @@ impl Profile {
         }
         grant.push_str(" (literal \"/dev/null\") (subpath \"/dev/fd\"))");
         lines.push(grant);
+        if let Some(allow) = policy.allow() {
+            allow::reads(allow, policy.uid_entry(), &mut lines, &mut params);
+        }
 
         for (i, path) in policy.read_denies().iter().enumerate() {
             lines.push(format!("(deny file-read* (subpath (param \"RD_{i}\")))"));
@@ -127,7 +145,7 @@ impl Profile {
 
         let mut text = lines.join("\n");
         text.push('\n');
-        Ok(Self { text, params })
+        Self { text, params }
     }
 
     /// The profile text.
@@ -143,10 +161,10 @@ impl Profile {
     }
 
     /// The full command: `sandbox-exec`, a `-D NAME=value` pair per parameter, `-p` and
-    /// the profile, then `program` and its `args`. `program` is absolute, so
-    /// `sandbox-exec` does not search `PATH`.
+    /// the profile, then `program` and its `args`. `program` is absolute (an [`AbsPath`](super::AbsPath)
+    /// or a [`ToolPath`](super::ToolPath)'s path), so `sandbox-exec` does not search `PATH`.
     #[must_use]
-    pub fn argv(&self, program: &AbsPath, args: &[OsString]) -> Vec<OsString> {
+    pub fn argv(&self, program: impl AsRef<str>, args: &[OsString]) -> Vec<OsString> {
         let mut argv = vec![OsString::from(SANDBOX_EXEC)];
         for (name, value) in &self.params {
             argv.push(OsString::from("-D"));
@@ -154,7 +172,7 @@ impl Profile {
         }
         argv.push(OsString::from("-p"));
         argv.push(OsString::from(self.text.as_str()));
-        argv.push(OsString::from(program.as_str()));
+        argv.push(OsString::from(program.as_ref()));
         argv.extend(args.iter().cloned());
         argv
     }

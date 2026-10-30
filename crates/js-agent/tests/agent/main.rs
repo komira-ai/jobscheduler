@@ -13,6 +13,7 @@
 mod backoff;
 mod binary;
 mod bounds;
+mod bundle;
 mod cli_runtime;
 mod container;
 mod credential;

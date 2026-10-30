@@ -258,15 +258,37 @@ struct Drain {
     err: JoinHandle<()>,
 }
 
+/// A future that completes when the grace is over.
+type Over = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// How the end of the grace is made once `crun run` has returned, given the configured
+/// [`LogLimits::drain_grace`]: a timer in production, a trigger a test fires.
+pub(crate) type Grace = Box<dyn FnOnce(Duration) -> Over + Send>;
+
+/// The production [`Grace`]: the grace is over once it has elapsed.
+fn timer() -> Grace {
+    Box::new(|grace| Box::pin(tokio::time::sleep(grace)))
+}
+
 impl Drain {
-    /// Whether both pipes closed within `grace`; if not, the readers are stopped.
-    async fn finish(mut self, grace: Duration) -> bool {
-        let both = async {
+    /// Whether both pipes closed before `over` completed; if not, the readers are stopped.
+    /// Both closed wins over a grace that is over at the same poll.
+    async fn finish(mut self, mut over: Over) -> bool {
+        let mut both = std::pin::pin!(async {
             // A reader that panicked has nothing more to say.
             let _ = (&mut self.out).await;
             let _ = (&mut self.err).await;
-        };
-        let closed = tokio::time::timeout(grace, both).await.is_ok();
+        });
+        let closed = std::future::poll_fn(|cx| {
+            if both.as_mut().poll(cx).is_ready() {
+                std::task::Poll::Ready(true)
+            } else if over.as_mut().poll(cx).is_ready() {
+                std::task::Poll::Ready(false)
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await;
         self.out.abort();
         self.err.abort();
         closed
@@ -283,7 +305,7 @@ pub(crate) type Launch =
 /// Runs `launch` with new pipes, drains them into `capture` meanwhile, and once it has
 /// returned waits for the drain as long as the capture's limits say.
 pub(crate) async fn supervise(capture: Arc<Capture>, launch: Launch) -> RunEnd {
-    supervise_with(pipe::pipe, capture, launch).await
+    supervise_with(pipe::pipe, capture, launch, timer()).await.0
 }
 
 /// The two pipes of a run: the write ends, blocking, for the child, and the readers.
@@ -300,12 +322,23 @@ fn open_pipes(make: Pipe) -> std::io::Result<Pipes> {
     ))
 }
 
-/// [`supervise`] with `make` making the pipes: the one place the pipes can fail, a
-/// test's to cause.
-async fn supervise_with(make: Pipe, capture: Arc<Capture>, launch: Launch) -> RunEnd {
+/// [`supervise`] with `make` making the pipes (the one place the pipes can fail, a test's
+/// to cause) and `grace` making the end of the wait for the drain (a test's to fire).
+/// Also says whether both pipes closed (`false`: the grace ended the wait).
+async fn supervise_with(
+    make: Pipe,
+    capture: Arc<Capture>,
+    launch: Launch,
+    grace: Grace,
+) -> (RunEnd, bool) {
     let (out, out_rx, err, err_rx) = match open_pipes(make) {
         Ok(pipes) => pipes,
-        Err(e) => return RunEnd::Failed(format!("the pipes of the output: {e}")),
+        Err(e) => {
+            return (
+                RunEnd::Failed(format!("the pipes of the output: {e}")),
+                true,
+            );
+        }
     };
     let drain = Drain {
         out: tokio::spawn(pump(out_rx, capture.out.clone())),
@@ -313,10 +346,11 @@ async fn supervise_with(make: Pipe, capture: Arc<Capture>, launch: Launch) -> Ru
     };
     // `launch` owns the write ends; they are closed when it returns.
     let end = launch(out, err).await;
-    if !drain.finish(capture.drain_grace).await {
+    let drained = drain.finish(grace(capture.drain_grace)).await;
+    if !drained {
         tracing::warn!("a process of the job holds its output open after the container ended");
     }
-    end
+    (end, drained)
 }
 
 #[cfg(test)]

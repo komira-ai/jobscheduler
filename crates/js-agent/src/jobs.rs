@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use js_agent_wire::Hello;
 
+use crate::bundle::Admission;
 use crate::facts::Platform;
 use crate::lifecycle::{Capacity, Config, Local};
 use crate::quota::ScratchQuota;
@@ -31,6 +32,8 @@ pub struct Seams<'a> {
     /// The readiness hook the worker runs for a whole-node lease; `None` without
     /// `--readiness-hook`.
     pub readiness: Option<WorkerHook>,
+    /// The rules for a start that names a bundle; `None` without `--bundle-store`.
+    pub bundle: Option<Admission>,
     /// The scratch quota to bound the runs with: given exactly when `--scratch-quota` is,
     /// after its probe passed.
     pub quota: Option<Arc<dyn ScratchQuota>>,
@@ -75,6 +78,7 @@ pub fn start(
         watch,
         stop_grace,
         drain_wait,
+        image_allow: _,
     } = local;
     // `Local` holds at most one of the two, and a state root and a scratch root with it.
     let (backend, scratch, state) = match (container, native, scratch, state) {
@@ -98,6 +102,7 @@ pub fn start(
         files,
         state,
         stop_grace,
+        bundle: seams.bundle.clone(),
         quota,
     };
     let outbox = Arc::new(Outbox::new());
