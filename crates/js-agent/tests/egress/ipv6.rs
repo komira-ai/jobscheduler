@@ -125,7 +125,7 @@ fn ipv6_is_off_for_a_wired_namespace_and_on_for_one_wired_by_hand() {
         &[
             "-6",
             "neigh",
-            "add",
+            "replace",
             "fd00:b::1",
             "lladdr",
             mac.trim(),

@@ -178,8 +178,8 @@ fn two_runs_at_once_cannot_reach_each_other() {
         "a run reached another run's listener"
     );
     assert!(
-        packets("default-reject") >= refused + 2,
-        "the firewall refused both"
+        packets("inbound") >= refused + 2,
+        "the firewall refused both, as traffic to another job"
     );
 
     first.release().expect("release a");

@@ -28,11 +28,10 @@ fn as_capable_job(pid: u32, program: &str, args: &[&str]) -> (bool, String) {
 /// they succeed: the job's own namespace is its to reconfigure. What that buys it is
 /// nothing: the rules live in the host's initial network namespace, where the job's
 /// namespace has no table at all (a listing shows none; deleting one fails), and a connection
-/// from the reconfigured namespace to another host, to the metadata address, or from an
-/// address that is not its own, is still refused (the far host's listeners count nothing).
-/// The firewall reads back unchanged afterwards. The spoofed-source attempt is also repeated
-/// with the host's reverse-path filter off (control B for that defence): it then gets
-/// through, so the filter is what stopped it.
+/// from the reconfigured namespace to another host or to the metadata address is still
+/// refused, and one from an address that is not its own gets no connection (the far host's
+/// listeners count nothing beyond the one honest connection). The firewall reads back
+/// unchanged afterwards. Control B, which shows the rules are what refuses, is the next test.
 #[test]
 #[ignore = "needs root, crun, busybox, nsenter, a job user: see the module docs"]
 fn a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace() {
@@ -109,7 +108,8 @@ fn a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace(
             "the capable position works for what is allowed: {said}"
         );
         // A source address that is not the job's own: the job gives itself another one and
-        // routes through the same gateway.
+        // routes through the same gateway. Nothing can answer it (the host has no route to
+        // that address), so no connection is made.
         for args in [
             &["addr", "add", "198.18.0.50/32", "dev", "eth0"][..],
             &["addr", "del", "198.18.0.2/30", "dev", "eth0"][..],
@@ -131,23 +131,13 @@ fn a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace(
         let (_, said) = capable(&busybox, &["nc", "-w", "4", "192.0.2.10", "9300"]);
         assert!(
             !said.contains("pong"),
-            "a spoofed source got through: {said}"
+            "a readdressed job got a connection: {said}"
         );
         assert_eq!(
             allowed.accepted(),
             before.2 + 1,
             "only the honest connection arrived"
         );
-        // Control B of that defence: with the reverse-path filter off the spoof works.
-        sysctl("net/ipv4/conf/jsv0/rp_filter", "0");
-        capable(&ip, &["neigh", "flush", "all", "dev", "eth0"]);
-        let (_, said) = capable(&busybox, &["nc", "-w", "4", "192.0.2.10", "9300"]);
-        sysctl("net/ipv4/conf/jsv0/rp_filter", "1");
-        assert!(
-            said.contains("pong"),
-            "the reverse-path filter was not what stopped it: {said}"
-        );
-        assert_eq!(allowed.peers().last(), Some(&IpAddr::V4(far::HOST)));
         assert_eq!(other_host.accepted(), before.0);
         assert_eq!(metadata.accepted(), before.1);
         egress.check().expect("the firewall is unchanged");
