@@ -200,15 +200,19 @@ fn the_system_machine_opens_the_native_runtime() {
         };
         System::new().runtime(&build).map(|(_, warnings)| warnings)
     };
-    assert_eq!(open(fake.socket(), "/bin/true"), Ok(Vec::new()));
+    assert_eq!(open(fake.socket(), "/usr/bin/true"), Ok(Vec::new()));
     assert_eq!(fake.verbs(), ["boot-reset"]);
-    let why = open(std::path::Path::new("/nonexistent/js-helper"), "/bin/true").unwrap_err();
+    let why = open(
+        std::path::Path::new("/nonexistent/js-helper"),
+        "/usr/bin/true",
+    )
+    .unwrap_err();
     assert!(
         why.starts_with("--native-helper-socket: the boot reset: "),
         "{why}"
     );
     let before = fake.verbs().len();
-    let why = open(fake.socket(), "/bin/false").unwrap_err();
+    let why = open(fake.socket(), "/usr/bin/false").unwrap_err();
     assert!(why.contains("the sandbox self-test failed"), "{why}");
     assert_eq!(fake.verbs().len(), before, "the helper was not asked");
 }
@@ -290,10 +294,13 @@ fn the_sandbox_self_test_fails_closed() {
     };
     let settings = NativeSettings::from_flags(&flags, &[]).unwrap().unwrap();
     let config = settings.config();
-    assert_eq!(native::self_test(config, Path::new("/bin/true")), Ok(()));
-    let refused = native::self_test(config, Path::new("/bin/false")).unwrap_err();
+    assert_eq!(
+        native::self_test(config, Path::new("/usr/bin/true")),
+        Ok(())
+    );
+    let refused = native::self_test(config, Path::new("/usr/bin/false")).unwrap_err();
     assert!(
-        refused.contains("/bin/false refused the profile"),
+        refused.contains("/usr/bin/false refused the profile"),
         "{refused}"
     );
     let missing = native::self_test(config, Path::new("/nonexistent/sandbox-exec")).unwrap_err();
@@ -303,6 +310,6 @@ fn the_sandbox_self_test_fails_closed() {
     );
     let mut allow = config.clone();
     allow.read_model = js_mac_pool::seatbelt::ReadModel::Allow;
-    let unbuilt = native::self_test(&allow, Path::new("/bin/true")).unwrap_err();
+    let unbuilt = native::self_test(&allow, Path::new("/usr/bin/true")).unwrap_err();
     assert!(unbuilt.starts_with("the profile: "), "{unbuilt}");
 }
