@@ -24,7 +24,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use js_contain::container::{ACTION_ID, ContainerLimits, ContainerSpec, Ended};
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
-use js_contain::oci::{Oci, OciConfig, OciError};
+use js_contain::oci::{Oci, OciConfig, OciError, stderr_path, stdout_path};
 use js_contain::subids::{IdFiles, user_ids};
 
 #[derive(Debug)]
@@ -249,13 +249,8 @@ async fn a_root_daemon_runs_a_container_mapped_onto_the_job_users_subordinate_id
         shared: Vec::new(),
     };
     oci.create(&spec).await.unwrap();
-    let out_path = lease.join("stdout");
-    let err_path = lease.join("stderr");
-    let (out, err) = (
-        fs::File::create(&out_path).unwrap(),
-        fs::File::create(&err_path).unwrap(),
-    );
-    let mut running = oci.start(&spec, out, err).unwrap();
+    let (out_path, err_path) = (stdout_path(&lease), stderr_path(&lease));
+    let mut running = oci.start(&spec).unwrap();
     running.wait().await;
     let ended = oci.ended(&spec, &running).await;
     let stdout = fs::read_to_string(&out_path).unwrap_or_default();

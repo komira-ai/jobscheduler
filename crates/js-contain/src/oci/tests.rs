@@ -38,6 +38,7 @@ fn config(dir: &Path, ok: bool) -> OciConfig {
         helper_modes: helper::HelperModes::default(),
         scrub_env: crun::no_scrub,
         job_user: None,
+        logs: LogLimits::default(),
     }
 }
 

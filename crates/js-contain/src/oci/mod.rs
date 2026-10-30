@@ -35,6 +35,10 @@
 //! directory must be searchable by others (the container's ids are not the daemon
 //! user's): [`Oci::new`] checks both.
 //!
+//! **Output:** the container's stdout and stderr are pipes the agent drains for as long as
+//! the container lives, into a file a stream in the lease directory (capped) and a tail in
+//! memory (`logs`).
+//!
 //! **cgroups:** the container's cgroup is `<lease cgroup>/ctr`, made by `crun` in the
 //! daemon's delegated subtree with the pids limit and `memory.oom.group=1`; memory and
 //! CPU limits stay on the lease cgroup.
@@ -45,6 +49,7 @@ pub mod helper;
 pub mod image;
 pub mod init;
 mod lease;
+pub(crate) mod logs;
 pub(crate) mod spec;
 pub mod words;
 
@@ -59,6 +64,7 @@ use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
 pub use crun::{EnvScrub, RunEnd};
 pub use lease::{RESOLV_CONF, Reports};
+pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 
 use crate::subids::{DaemonIds, IdFiles, SubidError};
 
@@ -94,6 +100,9 @@ pub struct OciConfig {
     /// the daemon's own, and `scrub_env` is expected to start every program as that
     /// user. By default `None`: the daemon's own user.
     pub job_user: Option<(u32, u32)>,
+    /// How much of a job's output is kept (`logs`): by default 1 MiB of each stream in a
+    /// file of the lease directory and the last 64 KiB of it in memory.
+    pub logs: LogLimits,
 }
 
 impl Default for OciConfig {
@@ -108,6 +117,7 @@ impl Default for OciConfig {
             helper_modes: helper::HelperModes::default(),
             scrub_env: crun::no_scrub,
             job_user: None,
+            logs: LogLimits::default(),
         }
     }
 }
@@ -270,6 +280,7 @@ pub struct Oci {
     /// helper uses is bounded by the node's jobs budget and `crun` makes (and kills,
     /// on its removal) no cgroup of its own choosing.
     cgroup_parent: String,
+    logs: LogLimits,
 }
 
 impl Oci {
@@ -344,6 +355,7 @@ impl Oci {
             images: image::Images::new(scratch.join("oci-images")),
             helpers: AtomicU64::new(0),
             cgroup_parent: cgroup_parent.to_owned(),
+            logs: config.logs,
         });
         let leftovers = oci.images.sweep(&oci);
         leftovers.map_err(OciError::Prepare)?;

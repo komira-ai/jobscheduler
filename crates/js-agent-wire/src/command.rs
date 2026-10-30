@@ -218,9 +218,13 @@ pub struct JobSpec {
     pub valid_for_ms: u64,
     /// A darwin bundle the job pins: `name[:tag]@sha256:<manifest digest>`, at most one.
     /// It is checked like `image` (same alphabet and length) and must be pinned
-    /// ([`JobSpec::require_pinned`]). Every bundle is refused today: without `native` an
-    /// agent from before this field ignores it and would run the job without the tools,
-    /// and with `native` no agent can unpack one yet (a later change allows the pair).
+    /// ([`JobSpec::require_pinned`]). It belongs to a native job and to nothing else: a
+    /// bundle without `native`, or beside a non-empty `image`, is refused `invalid-bundle`
+    /// (an agent from before this field ignores it and would run the job without the
+    /// tools). The program of the native body may then be `@bundle/<entrypoint>`
+    /// ([`NativeSpec::program`]). An agent that holds no bundle store refuses the start
+    /// (`bundle-unsupported`), so a server sends a bundle only to a host that reported the
+    /// `bundle` capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle: Option<String>,
 }
@@ -257,7 +261,7 @@ impl JobSpec {
             return Err(at.fail(Rule::Inconsistent));
         }
         native.validate()?;
-        native::check_job(self)
+        native::check_job(self, native)
     }
 
     /// Checks the start contract and every bound: ids, image, arguments, limits, GPU
@@ -298,21 +302,23 @@ impl JobSpec {
         )
     }
 
-    /// A bundle is the toolchain of a native job, and no runtime can fetch one yet, so
-    /// every bundle is refused: without a native body the job is a container (or empty)
-    /// job that an agent from before the field would run without the tools, and beside a
-    /// native body the agent would run the program with the host's tools. The grammar is
-    /// checked first so a malformed name reads as such.
+    /// A bundle is the toolchain of a native job: without a native body the job is a
+    /// container (or empty) job that an agent from before the field would run without the
+    /// tools, and beside an image the pair would run there as a plain image job. The grammar
+    /// is checked first so a malformed name reads as such.
     fn check_bundle(&self) -> Result<(), ValidationError> {
         let Some(bundle) = &self.bundle else {
             return Ok(());
         };
         let at = At::new("bundle", refusal::INVALID_BUNDLE);
         image::bundle(at, bundle)?;
-        if self.native.is_some() {
+        if self.native.is_none() {
+            return Err(at.fail(Rule::NeedsNative));
+        }
+        if !self.image.is_empty() {
             return Err(at.fail(Rule::Inconsistent));
         }
-        Err(at.fail(Rule::NeedsNative))
+        Ok(())
     }
 
     /// Whether the job's limits and the number of its GPU indices fit one host's offered
