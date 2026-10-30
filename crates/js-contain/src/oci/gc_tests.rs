@@ -493,4 +493,14 @@ fn removing_an_entry_that_is_gone_is_done_and_one_that_cannot_be_seen_fails() {
     std::fs::write(fx.images.join("file"), b"x").expect("file");
     let why = fx.oci.remove_entry(&fx.images.join("file/below"));
     assert!(why.is_err(), "{why:?}");
+    // A name that is not a directory but cannot be unlinked (its directory is read-only).
+    use std::os::unix::fs::PermissionsExt as _;
+    let locked = fx.images.join("locked");
+    std::fs::create_dir(&locked).expect("locked");
+    std::fs::write(locked.join("link"), b"x").expect("file");
+    let mode = |m| std::fs::Permissions::from_mode(m);
+    std::fs::set_permissions(&locked, mode(0o500)).expect("chmod");
+    let stuck = fx.oci.remove_entry(&locked.join("link"));
+    std::fs::set_permissions(&locked, mode(0o755)).expect("chmod back");
+    assert!(stuck.is_err(), "{stuck:?}");
 }
