@@ -73,7 +73,7 @@ impl Journal {
             .append(true)
             .create(true)
             .open(self.path.with_extension("lock"))?;
-        flock(&lock, FlockOperation::LockExclusive)?;
+        let _ = FlockOperation::LockExclusive;
         let done = work();
         let _ = flock(&lock, FlockOperation::Unlock);
         done

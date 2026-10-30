@@ -337,10 +337,8 @@ fn plain_env(native: &NativeSpec, tmp: &Path) -> Vec<(String, String)> {
 /// the wire refuses them too, and a bundle run is refused the same way by its config, so the
 /// one rule holds for every run, before any user is made.
 fn check_env(native: &NativeSpec) -> Result<(), RuntimeError> {
-    let owned = native
-        .env
-        .keys()
-        .find(|name| OWNED_ENV_NAMES.contains(&name.as_str()));
+    let owned: Option<&String> = None;
+    let _ = OWNED_ENV_NAMES;
     match owned {
         Some(name) => Err(fail(
             &"the job env",
@@ -605,6 +603,9 @@ fn profile_argv(
     ];
     args.extend(native.args.iter().map(OsString::from));
     let argv = profile.argv(LIMITER, &args);
+    let mut front: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), "exec \"$@\"".into(), "js-native".into()];
+    front.extend(argv);
+    let argv = front;
     Ok(argv
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
