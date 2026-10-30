@@ -24,14 +24,26 @@
 //! `EPIPE` (`SIGPIPE`), where a file would have taken it.
 //!
 //! **The end of the drain:** a stream ends when every write end of its pipe is closed,
-//! which is the container's exit (the agent closes its own copies when `crun` has been
-//! started and when it returns). A process the job left behind in the background holds
+//! which is the container's exit (the agent holds its own copies of the write ends until
+//! `crun run` returns, then closes them). A process the job left behind in the background holds
 //! the pipe open past that exit, so the wait for the end is bounded:
 //! [`LogLimits::drain_grace`] after `crun run` returned the reader is given up on, which
 //! closes the read end (the straggler's next write fails) and leaves the tail as read so
 //! far. The run is not over, as far as [`Running::wait`](crate::running::Running::wait)
 //! is concerned, until the drain is, so the tail is complete once it returned (up to a
-//! straggler's later output).
+//! straggler's later output). A run that is aborted (`Running::force`, or the lease's
+//! clean) is not waited for at all: its readers are cancelled with it and the tail is
+//! whatever was read until then, a prefix of what the job wrote.
+//!
+//! **Reading stops** at the end of a pipe and at a read error, which a pipe whose write
+//! end is open does not give in practice (an interrupted read is retried by the runtime).
+//! The files are written with blocking writes on the thread of the run, so a filesystem
+//! that hangs stalls the reader (and then, once the pipe is full, the job), as the
+//! files `crun` was handed before would have stalled the job.
+//!
+//! **The files** are made new (an existing file, or a symbolic link in its place, is an
+//! error naming the path), mode 0600: only the agent's user reads them. A lease directory
+//! is used for one container, so nothing is truncated.
 //!
 //! The container's standard input is not touched: it stays the init's report file.
 
@@ -196,10 +208,17 @@ pub(crate) struct Capture {
 }
 
 impl Capture {
-    /// The (new, empty) files of the lease in `lease`.
+    /// The new, empty files (mode 0600) of the lease in `lease`; one that exists is an
+    /// error.
     pub(crate) fn create(lease: &Path, limits: LogLimits) -> Result<Self, String> {
         let make = |path: PathBuf| {
-            std::fs::File::create(&path)
+            use std::os::unix::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
+                .open(&path)
                 .map(|file| Arc::new(Sink::new(file, limits)))
                 .map_err(|e| format!("{}: {e}", path.display()))
         };

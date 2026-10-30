@@ -242,3 +242,87 @@ fn the_default_limits_are_a_mebibyte_of_file_and_sixty_four_kibibytes_of_tail() 
     assert_eq!(limits.tail, 65_536);
     assert_eq!(limits.drain_grace, DEFAULT_DRAIN_GRACE);
 }
+
+/// Catches an agent that keeps a write end of a pipe after the child is gone: the drain
+/// would then wait out the whole grace for an end that never comes. With a grace of an
+/// hour the run completes (the hang guard would fire otherwise) and the tail is whole.
+#[tokio::test]
+async fn the_agent_holds_no_write_end_after_the_run() {
+    let dir = dir("no-leak");
+    let hour = LogLimits {
+        drain_grace: Duration::from_secs(3600),
+        ..limits(1024, 1024)
+    };
+    let (end, tail) = run(&dir, hour, "echo whole; echo err >&2").await;
+    assert_eq!(end, RunEnd::Exited(0));
+    assert_eq!(tail.stdout.bytes, b"whole\n");
+    assert_eq!(tail.stderr.bytes, b"err\n");
+}
+
+/// Catches an abort that waits for the drain or loses what was read: a run that has
+/// written and then hangs is dropped; the tail is what was written, and the readers end
+/// with the pipes although the grace is an hour.
+#[tokio::test]
+async fn an_aborted_run_leaves_the_partial_tail_and_does_not_wait() {
+    use std::io::Write as _;
+    let dir = dir("abort");
+    let hour = LogLimits {
+        drain_grace: Duration::from_secs(3600),
+        ..limits(1024, 1024)
+    };
+    let capture = Arc::new(Capture::create(&dir, hour).expect("files"));
+    let (said, heard) = tokio::sync::oneshot::channel::<()>();
+    let launch: Launch = Box::new(move |stdout, _stderr| {
+        Box::pin(async move {
+            let mut out = std::fs::File::from(stdout);
+            out.write_all(b"partial").expect("write");
+            let _ = said.send(());
+            std::future::pending::<RunEnd>().await
+        })
+    });
+    let supervised = supervise(capture.clone(), launch);
+    tokio::select! {
+        _ = supervised => panic!("a run that hangs ended"),
+        _ = heard => {}
+    }
+    // The run is dropped; its readers finish what is in the pipe.
+    tokio::time::timeout(HANG_GUARD, async {
+        while capture.tail().stdout.total < 7 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the readers read what was written");
+    assert_eq!(capture.tail().stdout.bytes, b"partial");
+}
+
+/// Catches a log file that truncates or follows what is already there: a file in the way,
+/// and a symbolic link in its place, are errors naming the path; the files are private.
+#[test]
+fn an_existing_file_or_link_is_refused_and_the_files_are_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = dir("refuse");
+    let made = Capture::create(&dir, LogLimits::default());
+    let mode = |name| {
+        std::fs::metadata(dir.join(name))
+            .expect("file")
+            .permissions()
+            .mode()
+    };
+    assert!(made.is_ok());
+    assert_eq!(mode("stdout") & 0o777, 0o600);
+    assert_eq!(mode("stderr") & 0o777, 0o600);
+    let why = Capture::create(&dir, LogLimits::default()).expect_err("exists");
+    assert!(
+        why.contains(&stdout_path(&dir).display().to_string()),
+        "{why}"
+    );
+
+    let linked = self::dir("refuse-link");
+    std::os::unix::fs::symlink(dir.join("stdout"), stdout_path(&linked)).expect("link");
+    let why = Capture::create(&linked, LogLimits::default()).expect_err("link");
+    assert!(
+        why.contains(&stdout_path(&linked).display().to_string()),
+        "{why}"
+    );
+}

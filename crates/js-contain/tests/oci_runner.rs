@@ -396,7 +396,10 @@ async fn the_output_of_a_container_is_kept_apart_in_files_and_the_tail() {
     let node = Node::new("out", "run-out to stdout\nrun-err to stderr");
     let spec = node.spec();
     let oci = node.oci();
-    assert_eq!(run(&oci, &spec).await, Ok(Ended::Exited(0)));
+    oci.create(&spec).await.expect("bundle");
+    let mut running = oci.start(&spec).expect("started");
+    running.wait().await;
+    assert_eq!(oci.ended(&spec, &running).await, Ok(Ended::Exited(0)));
     assert_eq!(
         std::fs::read_to_string(stdout_path(&spec.dir)).expect("stdout"),
         "to stdout\n"
@@ -405,6 +408,10 @@ async fn the_output_of_a_container_is_kept_apart_in_files_and_the_tail() {
         std::fs::read_to_string(stderr_path(&spec.dir)).expect("stderr"),
         "to stderr\n"
     );
+    let tail = running.tail();
+    assert_eq!(tail.stdout.bytes, b"to stdout\n");
+    assert_eq!(tail.stderr.bytes, b"to stderr\n");
+    assert_eq!((tail.stdout.total, tail.stderr.total), (10, 10));
 }
 
 /// Catches an output that is not bounded on disk, a drain that stops at the cap (the
