@@ -549,6 +549,9 @@ impl CrunRuntime {
         labels.insert(label::CREATED_MS.to_owned(), now.to_string());
         // Before the first thing the sidecar names is made (see the module `ledger`).
         let entry = Entry::new(&self.host_id, &spec.run_id, &name, &labels);
+        self.ledger
+            .record(&entry)
+            .map_err(|why| Fault::step("record the lease's labels", &why))?;
         if let Err(fault) = self.make_resources(spec, &container, &lease, &cgroup) {
             // What the failed step left; none of it is a container. The sidecar goes with
             // it, or stays for the next sweep when some of it cannot be removed.
@@ -557,9 +560,6 @@ impl CrunRuntime {
                 .discard(&entry, |entry| self.tear_down(&entry.name));
             return Err(fault);
         }
-        self.ledger
-            .record(&entry)
-            .map_err(|why| Fault::step("record the lease's labels", &why))?;
         self.runs.insert(
             name.clone(),
             Run {

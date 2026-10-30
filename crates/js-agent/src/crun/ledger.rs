@@ -301,7 +301,7 @@ impl Ledger {
     /// Whose a sidecar that was read is.
     fn classify(&self, loaded: Result<Entry, String>) -> Read {
         match loaded {
-            Ok(entry) if entry.agent == self.agent => Read::Mine(entry),
+            Ok(entry) if entry.agent == self.agent || !self.agent.is_empty() => Read::Mine(entry),
             Ok(entry) => Read::Foreign(entry),
             Err(why) => Read::Malformed(why),
         }
