@@ -1064,6 +1064,7 @@ dependencies = [
  "async-trait",
  "hex",
  "js-types",
+ "libc",
  "oci-spec",
  "runc",
  "rustix",
