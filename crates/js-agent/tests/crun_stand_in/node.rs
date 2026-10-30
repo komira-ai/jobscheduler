@@ -34,6 +34,12 @@ fn note(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
     if text.contains("refuse") {
         return Err(io::Error::other("refused"));
     }
+    if text.contains("unwritable-cgroup") && path.ends_with("cgroup.threads") {
+        return Err(io::Error::other("refused"));
+    }
+    if text.contains("no-bundle") && path.ends_with("work") {
+        std::fs::File::create(path.parent().expect("a lease").join("bundle"))?;
+    }
     if text.contains("start-fails") && path.ends_with("work") {
         let report = path.parent().expect("a lease").join("init-report");
         std::fs::create_dir(report)?;

@@ -110,7 +110,8 @@ pub struct Prefetcher {
 impl Prefetcher {
     /// A prefetcher whose pulls are `pull(image)`, run on `threads` worker threads of a
     /// runtime of its own. `pull` must end its future within a limit of its own (see the
-    /// [module](self) documentation).
+    /// [module](self) documentation). `pull` itself, up to returning the future, runs under
+    /// the prefetcher's lock: it must be cheap and must not call back into the prefetcher.
     ///
     /// # Errors
     /// `threads` is 0 ([`std::io::ErrorKind::InvalidInput`]), or the runtime could not be
@@ -189,7 +190,8 @@ impl Prefetcher {
         Prepared::Pending(ticket)
     }
 
-    /// Blocks until `count` pulls in all have had their results offered, whether kept or
+    /// Blocks until `count` pulls, counted over every image since this prefetcher was made
+    /// (the count is never reset), have had their results offered, whether kept or
     /// ignored (a pull let go by [`Prefetcher::forget`] counts). For a caller that must
     /// know a late result has been dealt with; tests use it instead of timing.
     #[doc(hidden)]
