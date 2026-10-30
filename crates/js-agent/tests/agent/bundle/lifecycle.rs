@@ -1,7 +1,7 @@
 //! A start that names a bundle, through the lifecycle: refused with a class on an agent
 //! without a store, judged by the bundle's rules on one with a store, and, when every rule
-//! passes, ending at the refusal that nothing can run a bundle yet. Each test says the defect
-//! it catches.
+//! passes, left to the runtime (the runs themselves are in `native::bundle`). Each test says
+//! the defect it catches.
 
 use clap::Parser;
 use js_agent::bundle::{Admission, Needs, Settings};

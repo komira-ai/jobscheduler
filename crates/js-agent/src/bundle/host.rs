@@ -10,11 +10,13 @@ use std::sync::{Arc, OnceLock};
 use js_bundle::{DottedVersion, XcodeComponent, XcodeNeed};
 use js_oci::{Allow, Client, Policy};
 use js_treestore::Sealer;
+#[cfg(target_os = "macos")]
+use js_treestore::mac::{Clonefile, Fchflags, MacSealer, Owner};
 
 use super::list::is_digest;
 use super::place::{Placer, load_config};
 use super::settings::Settings;
-use crate::facts::{CommandRunner, free_bytes};
+use crate::facts::{CommandRunner, SystemCommands, free_bytes};
 
 /// `sw_vers`, by its absolute path like every helper the agent runs.
 const SW_VERS: &str = "/usr/bin/sw_vers";
@@ -120,6 +122,27 @@ pub struct SystemHost<R> {
     sealer: Option<Arc<dyn Sealer>>,
     /// The store, once [`BundleHost::open`] has opened it.
     placer: OnceLock<Arc<Placer>>,
+}
+
+impl SystemHost<SystemCommands> {
+    /// The machine's own host: its helpers are the system's, and on a Mac its trees are
+    /// sealed by the Mac's sealer (the agent runs as root, trees end `root:wheel` with
+    /// `uchg`, writable copies are `clonefile`s). A host that is not a Mac has no sealer, so
+    /// it opens no store.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn system() -> Self {
+        let sealer = MacSealer::new(Owner::root(), Fchflags, Clonefile);
+        Self::new(SystemCommands::default()).with_sealer(Arc::new(sealer))
+    }
+
+    /// The machine's own host: its helpers are the system's. A host that is not a Mac has
+    /// no sealer, so it opens no store.
+    #[cfg(not(target_os = "macos"))]
+    #[must_use]
+    pub fn system() -> Self {
+        Self::new(SystemCommands::default())
+    }
 }
 
 impl<R: CommandRunner + Send + Sync> SystemHost<R> {

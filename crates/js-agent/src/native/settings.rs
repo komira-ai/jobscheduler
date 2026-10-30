@@ -135,8 +135,23 @@ impl NativeSettings {
     ///
     /// # Errors
     ///
-    /// The store lies under a path no native run may read.
+    /// The store lies under a path no native run may read: every bundle job would fail at
+    /// its first read of the toolchain.
     pub fn with_bundles(self, placer: Arc<Placer>) -> Result<Self, String> {
+        let store = placer.root();
+        let covered = |denied: &AbsPath| store.starts_with(denied.as_str());
+        if let Some(denied) = self
+            .config
+            .read_denies
+            .iter()
+            .find(|denied| covered(denied))
+        {
+            return Err(format!(
+                "--bundle-store: {} lies under {}, which no native run may read",
+                store.display(),
+                denied.as_str()
+            ));
+        }
         Ok(Self {
             bundles: Some(placer),
             ..self

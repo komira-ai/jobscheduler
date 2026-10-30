@@ -218,22 +218,16 @@ fn a_list_file_is_read_when_asked() {
     assert_eq!(host().read_file(&path), Ok("two\n".to_owned()));
 }
 
-/// The free space of a volume is what `df` says; this build has no Xcode catalog and no
-/// fetcher, and says so. It catches a fetch that reports a bundle as on its way when nothing
-/// is fetching.
+/// The free space of a volume is what `df` says; this build has no Xcode catalog, and says
+/// so. It catches a host that reports an Xcode it did not find.
 #[test]
-fn free_space_comes_from_df_and_there_is_no_fetcher_or_catalog() {
+fn free_space_comes_from_df_and_there_is_no_xcode_catalog() {
     let line = "/bin/df -P -k /Volumes/work";
     let row =
         "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk3 9 9 2048 1% /\n";
     let host = SystemHost::new(Runner::answering(line, Ok(row)));
     assert_eq!(host.free_bytes(Path::new("/Volumes/work")), Ok(2048 * 1024));
     assert!(host.xcodes().is_empty());
-    let fetched = host.fetch(Path::new("/s"), "n", &digest('a'));
-    assert_eq!(
-        fetched,
-        Fetch::Failed("this agent has no bundle fetcher yet".to_owned())
-    );
 }
 
 /// Off a Mac the store checks cannot run and say so. It catches a Linux host that passes
@@ -338,10 +332,10 @@ fn a_list_file_over_the_cap_or_not_text_is_refused() {
     assert!(host().read_file(&binary).is_err());
 }
 
-/// This build has no bundle runtime, so the machine's host says it cannot run a bundle. It
-/// catches a build that advertises a toolchain it cannot start.
+/// A host that has opened no store says it cannot run a bundle, whatever else it is. It
+/// catches a host that advertises a toolchain it cannot start.
 #[test]
-fn the_machines_host_cannot_run_a_bundle_yet() {
+fn a_host_that_has_opened_no_store_cannot_run_a_bundle() {
     assert!(!host().can_run());
 }
 

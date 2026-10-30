@@ -20,8 +20,12 @@
 //!   frame, and [`reserve_bytes`]: the part of the budget the store has not used, which the
 //!   disk offered to jobs leaves out.
 //!
-//! Nothing here runs a bundle. A start that passes every check ends at the lifecycle's
-//! refusal that this agent cannot run one yet.
+//! - [`Placer`]: the store itself on the agent that runs native jobs. It ensures a bundle
+//!   through js-oci into the tree store (every byte checked against a digest), fetches in the
+//!   background for `--bundle-pull missing`, and pins the trees of a held bundle for one run.
+//!   The native runtime (`crate::native`) runs the bundle's programs from those trees.
+//!
+//! A start that passes every check is run by the runtime, which pins the trees again.
 
 mod admit;
 mod host;
