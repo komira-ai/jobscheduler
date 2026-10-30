@@ -5,15 +5,20 @@
 //! that is not pinned by digest; this list narrows where the digest may be fetched from.
 //! The entries are [`js_oci::Allow`] entries (`HOST[:PORT]/NAMESPACE-PREFIX`) and a
 //! reference is read with [`js_oci::Location`], so the agent and the registry client agree
-//! on what a name means: a short name is on `docker.io`, a one-component Docker Hub name is
-//! under `library/`, host names are compared in lower case, an omitted port is 443, and a
+//! on what a name means: a one-component Docker Hub name is under `library/`, host names are compared in lower case, an omitted port is 443, and a
 //! prefix covers whole path components only.
 //!
 //! An empty list admits every image: it is the behaviour of an agent without the flag.
 //!
-//! The list reads the name as written in the job. A short name is judged as `docker.io`,
-//! but an engine with `unqualified-search-registries` may resolve it elsewhere; a host that
-//! relies on this list should configure the engine with none.
+//! When the list is not empty, only a registry-qualified name is admitted: the first path
+//! component must hold a `.` or a `:`, or be `localhost`, and a name has a `/`. So `x`,
+//! `library/x` and `ubi8/ubi` are refused and `docker.io/library/x` is admitted if listed.
+//! The reason is that the engine resolves a short name through its short-name aliases
+//! (`registries.conf.d`) and search registries, to a registry this check never sees.
+//!
+//! The name as written in the job is what is judged. The engine's `registries.conf`
+//! rewrites and mirrors still apply after this check, so the host's `policy.json` is the
+//! guard on the reference that is finally pulled.
 
 use std::fmt;
 
@@ -31,7 +36,9 @@ pub struct PullAllow(Vec<Allow>);
 pub enum EntryError {
     /// More than [`MAX_ENTRIES`] entries.
     Count,
-    /// The entry is not `HOST[:PORT]/NAMESPACE-PREFIX`; holds the entry.
+    /// The entry is not `HOST[:PORT]/NAMESPACE-PREFIX`, or its host is not spelt as a
+    /// registry (a `.` or a `:`, or `localhost`): `komira-ai/kbf` would be read as host
+    /// `komira-ai` and never match; holds the entry.
     Entry(String),
 }
 
@@ -54,6 +61,9 @@ pub enum Outside {
     /// The name does not parse as a registry path (an upper-case path, an empty
     /// component, a malformed registry); an engine would not pull it either.
     Unreadable,
+    /// The name is not registry-qualified (`x`, `library/x`, `ubi8/ubi`), so the engine
+    /// may resolve it to a registry this check never sees.
+    Unqualified,
     /// The name parses and no entry covers it; holds the registry and repository as a pull
     /// would see them.
     NotListed(String),
@@ -63,6 +73,10 @@ impl fmt::Display for Outside {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unreadable => f.write_str("the image name is not a registry path"),
+            Self::Unqualified => f.write_str(
+                "the image name is not registry-qualified (write docker.io/... for Docker Hub), \
+                 and this agent has a --container-pull-allow list",
+            ),
             Self::NotListed(at) => write!(
                 f,
                 "the image {at} is under no --container-pull-allow entry of this agent"
@@ -83,7 +97,14 @@ impl PullAllow {
         }
         entries
             .iter()
-            .map(|entry| Allow::parse(entry).map_err(|_| EntryError::Entry(entry.clone())))
+            .map(|entry| {
+                let bad = || EntryError::Entry(entry.clone());
+                let host = entry.split_once('/').map_or("", |(host, _)| host);
+                if !spells_registry(host) {
+                    return Err(bad());
+                }
+                Allow::parse(entry).map_err(|_| bad())
+            })
             .collect::<Result<Vec<_>, _>>()
             .map(Self)
     }
@@ -104,7 +125,14 @@ impl PullAllow {
         if self.0.is_empty() {
             return Ok(());
         }
-        let location = Location::parse(name_of(image)).map_err(|_| Outside::Unreadable)?;
+        let name = name_of(image);
+        if !name
+            .split_once('/')
+            .is_some_and(|(first, _)| spells_registry(first))
+        {
+            return Err(Outside::Unqualified);
+        }
+        let location = Location::parse(name).map_err(|_| Outside::Unreadable)?;
         match self.0.iter().any(|allow| allow.admits(&location)) {
             true => Ok(()),
             false => Err(Outside::NotListed(format!(
@@ -125,4 +153,10 @@ fn name_of(image: &str) -> &str {
         Some(colon) => &rest[..start + colon],
         None => rest,
     }
+}
+
+/// Whether `first` is spelt as a registry: it holds a `.` or a `:`, or is `localhost`
+/// (the rule an engine uses to tell a registry from the first path component).
+fn spells_registry(first: &str) -> bool {
+    first.contains(['.', ':']) || first == "localhost"
 }

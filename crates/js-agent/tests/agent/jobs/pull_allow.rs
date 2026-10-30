@@ -89,7 +89,6 @@ fn lines_with(name: &str, pull: &str, allow: &[&str]) -> Vec<String> {
         .unwrap()
         .with_pull_allow(&allow)
         .unwrap();
-    plan.config.pull_allow = plan.settings.pull_allow().clone();
     let worker = match Worker::start(plan) {
         Ok(worker) => worker,
         Err(why) => panic!("the worker did not start: {why}"),
@@ -123,3 +122,41 @@ fn missing_without_an_allow_list_warns_and_nothing_else_does() {
         );
     }
 }
+
+/// Asserts the wiring from the flag to admission through the worker: with the list only in
+/// the settings (as `--container-pull-allow` puts it), a start with an image outside it is
+/// refused `invalid-image` with no container created, and one inside is created. It catches
+/// a worker that enforces a list other than the one the flags made.
+#[test]
+fn the_settings_list_reaches_admission_through_the_worker() {
+    use js_agent_wire::Outcome;
+    let dir = Scratch::new("pull-allow-wiring");
+    let machine = FakeMachine::new();
+    let mut plan = plan(&dir, &machine, STEP_NEVER);
+    plan.settings = settings(&dir)
+        .with_pull_allow(&["registry.example/job".to_owned()])
+        .unwrap();
+    let worker = match Worker::start(plan) {
+        Ok(worker) => worker,
+        Err(why) => panic!("the worker did not start: {why}"),
+    };
+    let mut off = crate::lifecycle::job("off");
+    off.image = format!("evil.example/job/app{DIGEST}");
+    let mut on = crate::lifecycle::job("on");
+    on.image = format!("registry.example/job/app{DIGEST}");
+    for spec in [off, on] {
+        let reply = js_agent_wire::HeartbeatReply {
+            commands: vec![js_agent_wire::Command::Start(Box::new(spec))],
+            ..Default::default()
+        };
+        assert_eq!(worker.try_deliver(reply), js_agent::Delivery::Delivered);
+        assert!(worker.handle().settle());
+    }
+    assert_eq!(machine.world.created(), ["on"]);
+    let results = worker.snapshot().results;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].outcome, Outcome::FailedToStart);
+    assert_eq!(results[0].detail.as_deref(), Some("invalid-image"));
+}
+
+const DIGEST: &str = "@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

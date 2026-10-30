@@ -226,7 +226,10 @@ pub struct Cli {
     /// host is refused. With one or more, a job whose image is under none is refused at
     /// admission (`invalid-image`) and nothing is created; with none every image is
     /// admitted. A name is read as a pull reads it: a short name is on `docker.io`, and a
-    /// one-component name there is under `library/`. It applies with `--container-pull
+    /// one-component name there is under `library/`. With a list, a name that is not
+    /// registry-qualified (`x`, `library/x`) is refused: write `docker.io/library/x`; the
+    /// engine's short-name aliases and `registries.conf` rewrites and mirrors apply after the
+    /// check, so the host's `policy.json` guards the resolved reference. It applies with `--container-pull
     /// never` too. With `--container-pull missing` and no entry the agent warns at start
     /// that any reachable registry may be pulled. Needs `--container-bin`.
     #[arg(long, value_name = "HOST[:PORT]/PREFIX")]

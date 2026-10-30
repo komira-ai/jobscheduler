@@ -14,7 +14,8 @@ pub const RESERVED_LABEL: &str = "reserved-label";
 pub const WALL_TIME_NOT_POSITIVE: &str = "wall-time-not-positive";
 /// A job spec with a malformed id, argument list, limit or label.
 pub const INVALID_JOB: &str = "invalid-job";
-/// A job whose image name is empty, too long or outside the image alphabet.
+/// A job whose image name is empty, too long or outside the image alphabet, or (from an
+/// agent given `--container-pull-allow`) outside the host's pull allow-list.
 pub const INVALID_IMAGE: &str = "invalid-image";
 /// A job whose image is not pinned by digest: it has no `@sha256:<64 lower case hex>`
 /// part (a tag alone, another algorithm, a digest of the wrong length). The refusal's

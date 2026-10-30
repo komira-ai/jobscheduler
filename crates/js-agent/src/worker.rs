@@ -670,7 +670,7 @@ type Built = (Lifecycle, Option<Collector>, Vec<String>);
 /// the usage, and the lines to print about them.
 fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     let Plan {
-        config,
+        mut config,
         settings,
         host_id,
         platform,
@@ -680,6 +680,7 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
         ..
     } = plan;
     let stop_grace = config.stop_grace;
+    config.pull_allow = settings.pull_allow().clone();
     let wanted = RuntimeBuild {
         settings: &settings,
         host_id: &host_id,

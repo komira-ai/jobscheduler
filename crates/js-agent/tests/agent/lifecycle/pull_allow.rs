@@ -4,7 +4,7 @@
 use js_agent::pull_allow::PullAllow;
 use js_agent_wire::Outcome;
 
-use super::{Harness, job, names};
+use super::{Harness, Options, job, names};
 
 const DIGEST: &str = "@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -77,4 +77,40 @@ fn a_refused_image_books_nothing() {
     }
     let events = names(&h.start(whole("ok", "registry.example/job/app")));
     assert_eq!(events, ["started ok"]);
+}
+
+/// Asserts that a host-isolation job is not subject to the list: with a list that does not
+/// cover its image it is not refused `invalid-image`. It catches the check moved ahead of
+/// the isolation test, which would refuse jobs that pull nothing.
+#[test]
+fn a_host_job_is_not_subject_to_the_list() {
+    let mut h = Harness::with(
+        "pull-allow-host",
+        Options {
+            allow_host_jobs: true,
+            ..Options::default()
+        },
+    );
+    h.config.pull_allow = PullAllow::parse(&["registry.example/job".to_owned()]).unwrap();
+    h.restart().unwrap();
+    let mut spec = job_of("h", "evil.example/x");
+    spec.isolation = js_agent_wire::Isolation::Host;
+    let events = names(&h.start(spec));
+    assert!(
+        events.iter().all(|event| !event.contains("invalid-image")),
+        "{events:?}"
+    );
+}
+
+/// Asserts that a short name is refused `invalid-image` at admission when the list is not
+/// empty, and a qualified `docker.io` name that is listed is created. It catches a short
+/// name that the engine would resolve elsewhere being created.
+#[test]
+fn a_short_name_is_refused_with_a_list_and_a_qualified_one_is_created() {
+    let mut h = with_list("pull-allow-short", &["docker.io/library/"]);
+    let events = names(&h.start(job_of("short", "ubuntu")));
+    assert_eq!(events, ["refused short invalid-image"]);
+    assert!(h.fake.created().is_empty());
+    let events = names(&h.start(job_of("full", "docker.io/library/ubuntu")));
+    assert_eq!(events, ["started full"]);
 }

@@ -21,7 +21,8 @@
 //!   cannot use one (`gpu-unsupported`), a job larger than the machine or naming a GPU index it
 //!   does not offer (`limits-exceed-shape`), one that does not fit what is free or
 //!   names a booked GPU (`no-capacity`), and a mount that names no root, does not exist
-//!   or leaves its root (`invalid-mount`).
+//!   or leaves its root (`invalid-mount`), and a contained job whose image is outside the
+//!   host's `--container-pull-allow` list (`invalid-image`).
 //! - **A job is confined to its limits.** Its wall time is counted on the agent's clock
 //!   from the moment its container started, and a job past it is stopped and reported
 //!   `timed_out`.
@@ -505,7 +506,8 @@ pub struct Config {
     /// How long a container gets to stop on its own before it is killed.
     pub stop_grace: Duration,
     /// Where a contained job's image may come from; a start that names another is refused
-    /// (`invalid-image`) before anything is created. Empty admits every image.
+    /// (`invalid-image`) before anything is created. Empty admits every image. The worker
+    /// replaces it with the list of its `Settings`, the one source of the flag.
     pub pull_allow: PullAllow,
 }
 

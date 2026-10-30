@@ -107,28 +107,85 @@ fn the_tag_and_the_digest_do_not_change_the_match() {
     );
 }
 
-/// Asserts the Docker Hub rules: the registry of a short name is `docker.io`, a
-/// one-component name there is under `library/`, `docker.io/library/x` and `x` are the
-/// same image, and a user's image is not under `library/`. It catches a short name that
-/// slips past an entry for another registry, and an entry for `library/` that does not
-/// cover the images people write without it.
+/// Asserts the Docker Hub rules for a qualified name: `docker.io/library/x` and
+/// `docker.io/x` are one image (a one-component name there is under `library/`), and a
+/// user's image is not under `library/`. It catches an entry for `library/` that does not
+/// cover `docker.io/x`, and one that covers a user's image.
 #[test]
-fn docker_hub_short_names_are_read_as_a_pull_reads_them() {
+fn docker_hub_qualified_names_are_read_as_a_pull_reads_them() {
     let library = ["docker.io/library/"];
     assert!(admitted(&library, "docker.io/library/ubuntu"));
-    assert!(admitted(&library, "ubuntu"));
     assert!(admitted(&library, "docker.io/ubuntu"));
-    assert!(admitted(&library, "ubuntu:24.04"));
-    assert!(!admitted(&library, "someone/tool"));
+    assert!(admitted(&library, "docker.io/ubuntu:24.04"));
     assert!(!admitted(&library, "docker.io/someone/tool"));
     assert!(!admitted(&library, "ghcr.io/library/ubuntu"));
-    // An entry for a user covers that user's images, short or with the host written.
     let someone = ["docker.io/someone"];
-    assert!(admitted(&someone, "someone/tool"));
     assert!(admitted(&someone, "docker.io/someone/tool"));
-    assert!(!admitted(&someone, "ubuntu"));
-    // An entry cannot name a one-component image without `library/`: `x` is `library/x`.
-    assert!(!admitted(&["docker.io/ubuntu"], "ubuntu"));
+    assert!(!admitted(&someone, "docker.io/ubuntu"));
+    // `x` is `library/x` there: an entry cannot name it without `library/`.
+    assert!(!admitted(&["docker.io/ubuntu"], "docker.io/ubuntu"));
+}
+
+/// Asserts that with a list a name that is not registry-qualified is refused as
+/// `Unqualified`, however an entry might cover it: `x`, `x:1`, `library/x`, `ubi8/ubi`,
+/// `someone/tool`. The engine resolves such a name through short-name aliases and search
+/// registries, so what it pulls is not what the check read. It catches a short name that
+/// slips past the list on its `docker.io` reading. Without a list they stay admitted.
+#[test]
+fn a_name_that_is_not_registry_qualified_is_refused_with_a_list() {
+    let entry = list(&["docker.io/library/", "docker.io/someone/"]);
+    for image in [
+        "ubuntu",
+        "ubuntu:24.04",
+        "library/ubuntu",
+        "ubi8/ubi",
+        "someone/tool",
+    ] {
+        assert_eq!(
+            entry.check(&format!("{image}{DIGEST}")),
+            Err(Outside::Unqualified),
+            "{image}"
+        );
+    }
+    assert!(admitted(
+        &["docker.io/library/"],
+        "docker.io/library/ubuntu"
+    ));
+    assert!(
+        PullAllow::default()
+            .check(&format!("ubi8/ubi{DIGEST}"))
+            .is_ok()
+    );
+    let text = Outside::Unqualified.to_string();
+    assert!(text.contains("docker.io/"), "{text}");
+}
+
+/// Asserts that `localhost` is a registry spelling, with and without a port, matched like
+/// any other host: `localhost/x` is on port 443, `localhost:5000/x` on 5000. It catches
+/// `localhost` treated as a Docker Hub namespace.
+#[test]
+fn localhost_is_a_registry_with_or_without_a_port() {
+    assert!(admitted(&["localhost/team"], "localhost/team/app"));
+    assert!(!admitted(&["localhost/team"], "localhost:5000/team/app"));
+    assert!(admitted(
+        &["localhost:5000/team"],
+        "localhost:5000/team/app"
+    ));
+    assert!(!admitted(&["localhost:5000/team"], "localhost/team/app"));
+    assert!(!admitted(
+        &["localhost:5000/team"],
+        "localhost:5000/other/app"
+    ));
+}
+
+/// Asserts that a repeated entry is harmless: the list admits what one copy admits and
+/// refuses what it refuses. It catches a duplicate that turns the list into all-of or
+/// errors.
+#[test]
+fn a_duplicate_entry_changes_nothing() {
+    let twice = ["ghcr.io/komira-ai/", "ghcr.io/komira-ai/"];
+    assert!(admitted(&twice, "ghcr.io/komira-ai/kbf"));
+    assert!(!admitted(&twice, "ghcr.io/other/kbf"));
 }
 
 /// Asserts that the host is compared in lower case and the path is not folded: an upper
@@ -181,7 +238,6 @@ fn a_name_that_is_not_a_registry_path_is_outside() {
         "ghcr.io/komira-ai/ kbf",
         "ghcr.io:notaport/komira-ai/x",
         "[::1/komira-ai/x",
-        "",
     ] {
         assert_eq!(
             entry.check(&format!("{image}{DIGEST}")),
@@ -196,7 +252,7 @@ fn a_name_that_is_not_a_registry_path_is_outside() {
 }
 
 /// Asserts that several entries are any-of, and that the refusal names the registry and
-/// the repository as a pull would see them (a short name shows as `docker.io:443/library/`).
+/// the repository as a pull would see them (a `docker.io` name shows as `docker.io:443/library/`).
 /// It catches an entry list that is all-of, and an unhelpful refusal text.
 #[test]
 fn any_entry_admits_and_the_refusal_names_what_was_seen() {
@@ -204,7 +260,7 @@ fn any_entry_admits_and_the_refusal_names_what_was_seen() {
     assert!(admitted(&entries, "ghcr.io/komira-ai/kbf"));
     assert!(admitted(&entries, "registry.example:5000/team/app"));
     assert!(!admitted(&entries, "quay.io/x/y"));
-    let said = list(&entries).check(&format!("ubuntu:24.04{DIGEST}"));
+    let said = list(&entries).check(&format!("docker.io/library/ubuntu:24.04{DIGEST}"));
     assert_eq!(
         said,
         Err(Outside::NotListed(
@@ -218,13 +274,17 @@ fn any_entry_admits_and_the_refusal_names_what_was_seen() {
 
 /// Asserts that an entry that is not `HOST[:PORT]/NAMESPACE-PREFIX` is refused naming it:
 /// a bare host (it would admit every account), a scheme, an empty or upper-case path, a
-/// bad port, and empty text; and that more than the most entries are refused. It catches
+/// bad port, empty text, and a host that is not spelt as a registry (`komira-ai/kbf`,
+/// which would silently never match); and that more than the most entries are refused. It catches
 /// an entry that parses to something wider than the operator wrote.
 #[test]
 fn bad_entries_are_refused() {
     for bad in [
         "ghcr.io",
         "ghcr.io/",
+        "komira-ai/kbf",
+        "komira-ai/",
+        "Localhost/x",
         "https://ghcr.io/komira-ai/",
         "ghcr.io//komira-ai",
         "ghcr.io/Komira-AI/",

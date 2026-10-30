@@ -67,7 +67,6 @@ pub fn start(
     let (Some(settings), Some(scratch), Some(state)) = (container, scratch, state) else {
         return Ok(None);
     };
-    let pull_allow = settings.pull_allow().clone();
     let config = Config {
         capacity: Capacity::of(hello),
         allow_host_jobs: false,
@@ -76,7 +75,7 @@ pub fn start(
         files,
         state,
         stop_grace,
-        pull_allow,
+        pull_allow: Default::default(),
     };
     let outbox = Arc::new(Outbox::new());
     let worker = Worker::start(Plan {
