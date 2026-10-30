@@ -51,7 +51,7 @@ use super::{JobError, Oci};
 use crate::walk::{DIRECTORY, Identity, back_to_parent, identity};
 
 /// What one collection did.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct GcReport {
     /// The digests removed (`sha256:<hex>`), in order.
     pub removed: Vec<String>,
