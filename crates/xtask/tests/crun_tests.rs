@@ -306,7 +306,7 @@ fn a_failed_root_target_fails_the_verb_after_it_ran() {
         &["--job-user", "js-job"],
         Path::new(FAKE),
         None,
-        Some("tests-fail"),
+        Some("fails:--include-ignored"),
     );
     assert_eq!(code, Some(1), "{err}");
     let want: String = ROOT_TARGETS
