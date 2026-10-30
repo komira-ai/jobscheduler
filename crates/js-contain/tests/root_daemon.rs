@@ -509,7 +509,7 @@ impl KeeperLauncher for Recording {
             .arg("-c")
             .arg(
                 r#"while read key rest; do
-                     case "$key" in Uid:|Gid:|Groups:) echo "$key $rest";; esac
+                     case "$key" in Uid:|Gid:|Groups:) echo $key $rest;; esac
                    done < /proc/self/status > "$1"
                    echo "cwd $(pwd)" >> "$1"
                    echo "home $HOME" >> "$1"
