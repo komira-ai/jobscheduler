@@ -35,11 +35,13 @@ use crate::network::OAuthClient;
 
 mod joined;
 mod lifetime;
+mod network;
 mod pins;
 mod server;
 
 pub use joined::JoinedPool;
-use pins::{LIVE_NEEDS, read_agents, read_network};
+use network::read_network;
+use pins::{LIVE_NEEDS, read_agents};
 pub(crate) use server::Server;
 use server::{read_client_token, read_server};
 

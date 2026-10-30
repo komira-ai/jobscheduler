@@ -128,7 +128,16 @@ impl Settings {
     /// a whole-node lease booked just before it starts its wall time up to `prepare_timeout`
     /// later and lasts the ceiling on `max_wall`; a host that went silent is released only
     /// after `unknown_hold`; and `lifetime_margin` is left for ticks and round trips. So it
-    /// is `max_age + max_lease_wall + prepare_timeout + unknown_hold + lifetime_margin`. A provider with a native limit sets it from this
+    /// is `max_age + max_lease_wall + prepare_timeout + unknown_hold + lifetime_margin`.
+    ///
+    /// Still outside the sum, and so to fit in `lifetime_margin`: the lease grace and regain
+    /// grace before a silent host's lease is given up, the release retry loop (it has no
+    /// deadline), the gap between `launched_at` and the machine's creation, and one tick; and
+    /// after a registry restart, until the next tick, an aged host is bookable again (the
+    /// registry keeps no marks), which one tick plus the margin bounds. One case has no bound
+    /// of its own: a run the host keeps listing after its lease ended keeps the host from
+    /// being quiet, so `release_host` is refused with no deadline. A cloud that enforces the
+    /// lifetime cuts it there; on Lambda it lasts until an operator acts. A provider with a native limit sets it from this
     /// at launch (a Compute Engine `maxRunDuration`, a shutdown timer); one without (Lambda)
     /// ignores it. `None` unless both `max_age` and the ceiling are set.
     #[must_use]

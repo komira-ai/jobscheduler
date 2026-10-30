@@ -236,7 +236,7 @@ fn no_provider_crate_names_a_network_type() {
 const MAY_NAME_NETWORK: [&str; 7] = [
     "checks.rs",
     "file.rs",
-    "file/pins.rs",
+    "file/network.rs",
     "pool.rs",
     "scaler/build.rs",
     "scaler/launch.rs",

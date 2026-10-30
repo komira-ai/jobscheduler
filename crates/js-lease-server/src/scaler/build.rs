@@ -54,8 +54,17 @@ fn network_mode(
     }
 }
 
+impl ElasticPlan {
+    /// The scaler settings the plan gives: the design's defaults besides the plan's own, and
+    /// the prepare timeout of `whole`, the whole-node settings of the pool the lease table
+    /// and the registry count the same figure from.
+    pub fn scaler_settings(&self, whole: &WholeNodeConfig) -> Settings {
+        settings(self, whole)
+    }
+}
+
 /// The scaler settings the pool's plan gives: the design's defaults besides the plan's own.
-fn settings(plan: &ElasticPlan) -> Settings {
+fn settings(plan: &ElasticPlan, whole: &WholeNodeConfig) -> Settings {
     let mut settings = Settings::new(
         &plan.name,
         plan.max_instances,
@@ -71,9 +80,7 @@ fn settings(plan: &ElasticPlan) -> Settings {
     settings.max_age = plan.max_age;
     settings.min_host_lifetime = plan.min_host_lifetime;
     settings.max_lease_wall = plan.max_lease_wall;
-    // The registry's prepare timeout is the one an elastic file pool gets (its whole-node
-    // settings are the dedicated defaults); a lease's wall time starts after it.
-    let whole = WholeNodeConfig::dedicated(plan.max_instances);
+    // A whole-node lease's wall time starts after the pool's prepare timeout.
     settings.prepare_timeout = Duration::from_millis(whole.prepare_timeout_ms);
     settings
 }
@@ -121,7 +128,8 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         parts.clock,
         Box::new(OsSessions),
         wiring,
-        settings(plan),
+        // An elastic file pool gets the dedicated whole-node settings.
+        plan.scaler_settings(&WholeNodeConfig::dedicated(plan.max_instances)),
         records,
     );
     scaler.retry_removals(unremoved);

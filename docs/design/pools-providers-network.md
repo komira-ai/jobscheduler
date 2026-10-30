@@ -1008,7 +1008,15 @@ Rules, each tied to a requirement or to existing behaviour:
   host is released after the second). A provider whose cloud has a run-duration limit or a shutdown
   timer sets it. Lambda has neither and ignores it, so on Lambda only `max_age` with a live
   scheduler bounds the cost: if the scheduler is dead, nothing stops the bill. The server-dead bound
-  needs a provider whose cloud enforces the lifetime. `max_age` and `max_lease_wall` are at most 30 days. `min_host_lifetime` is the least a machine
+  needs a provider whose cloud enforces the lifetime. `max_age` and `max_lease_wall` are at most 30 days.
+  The lifetime sum leaves out, to be fitted in the 10 minute margin: the lease grace and regain
+  grace before a silent host's lease is given up, the release retry loop (no deadline), the gap
+  between the recorded launch time and the machine's real creation, and a tick. After a registry
+  restart the marks are gone, so until the scaler's next tick an aged host is bookable again; that is
+  bounded by one tick plus the margin. One case is unbounded by js: a run the host keeps listing
+  after its lease ended keeps it from being quiet (`quiet()` counts listed runs), so `release_host`
+  is refused with no deadline. A cloud that enforces the lifetime cuts it there; on Lambda it lasts
+  until an operator acts (the alert watcher of cost part 0d is what is meant to tell them). `min_host_lifetime` is the least a machine
   lives before `idle` may drain it, so a short `idle` against a billed boot cannot launch a
   machine per job. Changing `max_lease_wall` does not shorten a lease already granted.
 

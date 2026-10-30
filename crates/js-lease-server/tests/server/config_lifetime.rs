@@ -5,6 +5,8 @@
 
 use std::time::Duration;
 
+use js_registry::WholeNodeConfig;
+use js_scaler::LaunchMode;
 use serde_json::json;
 
 use crate::config_support::{PoolText, file, load, quote, refusal, server, server_with_agents};
@@ -195,4 +197,29 @@ fn max_age_and_the_lease_ceiling_are_at_most_thirty_days() {
         refusal(&scratch, &file(&head, &[&pool])),
         "server.max_lease_wall: must not be longer than 30 days"
     );
+}
+
+/// Asserts that the scaler settings built from a loaded plan carry every lifetime figure of
+/// the file and the prepare timeout of the whole-node settings they are given: with a
+/// prepare timeout of 20 minutes (the default is 10) the settings say 20, and `max_age`,
+/// `min_host_lifetime`, the ceiling and `idle` are the file's. It fails if any of these is
+/// not passed on, and the lifetime sum then follows: 2h + 2h + 20m + 30m + 10m.
+#[test]
+fn the_scaler_settings_carry_the_lifetime_figures_and_the_prepare_timeout() {
+    let scratch = Scratch::new("life_settings");
+    let pool = PoolText::elastic(&scratch);
+    let config = load(&scratch, &file(&server_with_agents(&scratch), &[&pool])).unwrap();
+    let plan = config.elastic_pool().unwrap();
+    let whole = WholeNodeConfig {
+        prepare_timeout_ms: 20 * 60_000,
+        ..WholeNodeConfig::dedicated(plan.max_instances)
+    };
+    let settings = plan.scaler_settings(&whole);
+    assert_eq!(settings.prepare_timeout, mins(20));
+    assert_eq!(settings.max_age, Some(mins(120)));
+    assert_eq!(settings.min_host_lifetime, mins(5));
+    assert_eq!(settings.max_lease_wall, Some(mins(120)));
+    assert_eq!(settings.idle, mins(10));
+    assert_eq!(settings.launch, LaunchMode::Plan);
+    assert_eq!(settings.lifetime(), Some(mins(120 + 120 + 20 + 30 + 10)));
 }

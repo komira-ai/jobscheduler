@@ -436,6 +436,24 @@ fn a_mark_survives_a_new_hello() {
     assert_eq!(mark(&fx, "b"), Some(HostMark::Releasing));
 }
 
+/// Asserts that a retired host that says hello again is still retired and not downgraded to a
+/// plain drain: after a silence past the grace and a new hello it shows draining, and a lease
+/// seated on it still queues runs (a plainly drained host refuses them). It catches a hello
+/// that keeps the mark's name and loses what it allows.
+#[test]
+fn a_new_hello_keeps_a_retired_host_retired() {
+    let fx = fixture(1);
+    fx.join("a", "t");
+    let a = host("a");
+    fx.registry.retire(&a).unwrap();
+    fx.pass_grace();
+    assert_eq!(view(&fx, "a").state, HostState::Lost);
+    fx.join("a", "t");
+    assert_eq!(mark(&fx, "a"), Some(HostMark::Draining));
+    fx.provider.seat(&a, lease(1), None).unwrap();
+    assert!(fx.registry.queue_run(&a, &lease(1), job("r1")).is_ok());
+}
+
 /// Asserts the two guards that matter if a booking ever lands on a marked host. The only
 /// way to put one there is `seat`, the call that puts back a booking the server lost with
 /// its process (the marks are in memory, so a restart clears them and the real order is the

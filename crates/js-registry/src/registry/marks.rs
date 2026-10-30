@@ -29,6 +29,10 @@
 //! that cannot wait for the scaler's next step: the scaler's own records say which hosts
 //! those are, and it marks them with [`Registry::mark_ending`] before any hello is
 //! admitted, so such a host that says hello again is admitted already `Releasing`.
+//!
+//! So after a restart a host the scaler had retired ([`Registry::retire`]) is bookable again
+//! until the scaler's next tick retires it again: a lease may be booked on it in that gap, bounded
+//! by one tick plus the margin of the cloud lifetime.
 
 use js_pool_static::HostBook;
 use js_types::HostId;
