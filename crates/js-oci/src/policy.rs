@@ -149,6 +149,8 @@ pub struct Allow {
     private: bool,
     loopback: bool,
     plain_http: bool,
+    /// The entry's host names a port (without one the authority reads as 443).
+    port_named: bool,
 }
 
 impl Allow {
@@ -172,6 +174,10 @@ impl Allow {
             private: false,
             loopback: false,
             plain_http: false,
+            port_named: match host.strip_prefix('[') {
+                Some(v6) => !v6.ends_with(']'),
+                None => host.contains(':'),
+            },
         })
     }
 
@@ -215,7 +221,8 @@ impl Allow {
     /// a registry on this machine's own loopback, such as the node's own cache.
     ///
     /// The flag is honoured only when the entry's host is the IP literal `127.0.0.1` or
-    /// `[::1]` (a port may follow); on a name, `localhost` included, on any other
+    /// `[::1]` (in any spelling of it) with an explicit port (`127.0.0.1:5000/ns`); without a
+    /// port the entry would mean port 443 over http, so it stays https. On a name, `localhost` included, on any other
     /// address, or on an entry that is not flagged, the entry stays https. For a flagged
     /// entry the registry's requests go over http to that exact authority and nowhere
     /// else: a redirect or token realm must be an `http` URL with the same host and
@@ -232,10 +239,11 @@ impl Allow {
         self
     }
 
-    /// Whether this entry is pulled over plain http: flagged, and its host a loopback
-    /// IP literal.
+    /// Whether this entry is pulled over plain http: flagged, with an explicit port, and
+    /// its host a loopback IP literal.
     fn is_plain_http(&self) -> bool {
         self.plain_http
+            && self.port_named
             && self
                 .authority
                 .host()
@@ -306,12 +314,17 @@ impl Policy {
         Ok(self)
     }
 
-    /// Whether `location` is pulled over plain http: the entry that admits it says so
-    /// and its host is a loopback IP literal (see [`Allow::plain_http_loopback`]).
+    /// Whether `location` is pulled over plain http: the most specific entry (the longest
+    /// prefix) that admits it says so, and its host is a loopback IP literal with a port
+    /// (see [`Allow::plain_http_loopback`]). Entries of equal prefix must all say so.
     pub(crate) fn plain_http(&self, location: &Location) -> bool {
-        self.allow
-            .iter()
-            .any(|a| a.admits(location) && a.is_plain_http())
+        let admitting = || self.allow.iter().filter(|a| a.admits(location));
+        let longest = admitting().map(|a| a.prefix.len()).max();
+        longest.is_some_and(|n| {
+            admitting()
+                .filter(|a| a.prefix.len() == n)
+                .all(Allow::is_plain_http)
+        })
     }
 
     /// Whether a pin may name `location`.
