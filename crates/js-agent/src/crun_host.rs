@@ -343,14 +343,13 @@ fn id_tools(host: &CrunHost, ids: Option<(u32, u32)>, report: &mut Report) {
             .id_tool_dirs
             .iter()
             .map(|dir| dir.join(tool))
-            .find(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_file()));
+            .find_map(|path| {
+                let meta = std::fs::metadata(&path).ok()?;
+                meta.is_file().then_some((path, meta))
+            });
         let fix = "install the package `uidmap`";
-        let Some(found) = found else {
+        let Some((found, meta)) = found else {
             report.miss(piece, "not found in the system program directories", fix);
-            continue;
-        };
-        let Ok(meta) = std::fs::metadata(&found) else {
-            report.miss(piece, &format!("{} cannot be read", found.display()), fix);
             continue;
         };
         let mode = meta.permissions().mode();
