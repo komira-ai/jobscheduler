@@ -579,7 +579,15 @@ fn mounting_is_refused() {
         os(&mountpoint),
     ];
 
-    let refused = scene.sandboxed(Net::Off, "/usr/bin/sudo", &mount);
+    // Root starts `sandbox-exec`, so the mount runs as root inside the profile: a setuid
+    // `sudo` cannot be started under it, and the refusal must be the mount's.
+    let profile = Profile::for_policy(&scene.policy(Net::Off)).expect("profile");
+    let mut under_sudo = vec![OsString::from("-n")];
+    under_sudo.extend(profile.argv(
+        &AbsPath::parse("/sbin/mount_devfs").expect("program"),
+        &mount[2..],
+    ));
+    let refused = control("/usr/bin/sudo", &under_sudo);
     let mounted_sandboxed = control("/sbin/mount", &[]).stdout;
     let leaked =
         String::from_utf8_lossy(&mounted_sandboxed).contains(mountpoint.to_str().expect("utf8"));
@@ -600,8 +608,7 @@ fn mounting_is_refused() {
         "sandboxed mount: {}",
         describe(&refused)
     );
-    // The refusal is the sandbox's: sudo ran, `mount_devfs` was reached, and the kernel
-    // answered EPERM. A sudo that failed to start would not print both.
+    // The refusal is the sandbox's: `mount_devfs` ran and the kernel answered EPERM.
     let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
     assert!(
         stderr.contains("mount_devfs") && stderr.contains("Operation not permitted"),
