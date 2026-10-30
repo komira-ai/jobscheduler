@@ -191,6 +191,10 @@ const REQUEST_CODES: [&str; 4] = [
 /// The class of a refusal a bundle start can meet, or `None` for any other code.
 #[must_use]
 pub fn bundle_class(code: &str) -> Option<RefusalClass> {
-    let _ = (FARM_CODES, REQUEST_CODES, code);
-    None
+    let farm = FARM_CODES.contains(&code).then_some(RefusalClass::Farm);
+    farm.or_else(|| {
+        REQUEST_CODES
+            .contains(&code)
+            .then_some(RefusalClass::Request)
+    })
 }
