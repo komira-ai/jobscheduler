@@ -489,7 +489,7 @@ fn a_symlinked_tree_directory_is_refused_with_a_trailing_slash_too() {
     let out = work.join("out");
     let run = run(&pack_args(
         &out,
-        &[("main", &Path::new(&format!("{}/", text(&link))))],
+        &[("main", Path::new(&format!("{}/", text(&link))))],
     ));
     assert_eq!(run.code, Some(1), "{}", run.stderr);
     assert!(run.stderr.contains("is a symlink"), "{}", run.stderr);
