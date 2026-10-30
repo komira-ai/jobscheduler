@@ -66,6 +66,19 @@
 //!   revoked and the machine released, every step, until a read by id says gone. There is
 //!   no deadline on any of this, and nothing is released that the registry did not
 //!   mark while quiet, except a machine the registry has forgotten, which holds no work.
+//!   `idle` drains a host only once it has lived `min_host_lifetime`, so a short `idle`
+//!   cannot turn each billed boot into a launch for nothing.
+//! * Machines that reach `max_age`. A live registered host whose machine was launched
+//!   `max_age` ago is retired ([`Action::Retire`]) whether or not it is busy: the mark
+//!   takes no new start and cuts no work, adds no deadline, and is never undone for a
+//!   request. The release is asked, as for an idle host, only when the host is quiet, and
+//!   the machine is not released while the registry books a lease on it. A lease ends within the
+//!   server's ceiling on `max_wall`, so the host empties within it. The age is counted from
+//!   [`Record::launched_at`], which is stored, so a restart neither resets it nor stops it
+//!   (the cloud bills through the time the scaler was down). A host the registry does not
+//!   hear from is left to the silence rules above. Each launch also carries
+//!   [`Settings::lifetime`] in [`AcquirePlan::lifetime`]: `max_age` plus the ceiling plus
+//!   the prepare timeout, `unknown_hold` and a margin, which a provider with a native limit enforces in the cloud.
 //!
 //! * Machines the scaler does not release. An orphan (a listed machine no record knows, or
 //!   one a launch answer named and could not confirm released) is counted and reported and

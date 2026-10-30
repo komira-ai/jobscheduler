@@ -89,7 +89,9 @@ fn the_full_file_of_the_design_parses() {
 #[test]
 fn a_pool_that_says_nothing_launches_nothing_and_requires_the_container_contract() {
     let scratch = Scratch::new("config_defaults");
-    let pool = PoolText::elastic(&scratch).without("idle");
+    let pool = PoolText::elastic(&scratch)
+        .set("provider", "{ kind = \"any-mode\" }")
+        .without("idle");
     let config = load(&scratch, &file(&server_with_agents(&scratch), &[&pool])).unwrap();
     let plan = config.elastic_pool().unwrap();
     assert_eq!(plan.launch, Launch::Plan);

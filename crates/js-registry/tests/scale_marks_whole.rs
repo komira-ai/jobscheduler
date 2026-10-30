@@ -213,3 +213,47 @@ fn a_launchable_changes_the_refusal_of_a_request_that_cannot_wait() {
 fn a_launchable_prints_as_a_name() {
     assert_eq!(format!("{:?}", launchable(true).0), "Launchable(..)");
 }
+
+/// Asserts, for a host a waiting request is reserved on, that `retire` lets the request go:
+/// before it the request's `reserved` is the host; after it the reservation is gone and the
+/// list says the request has no host, so the scaler launches a replacement instead of
+/// waiting on a host that is leaving; a later pass does not set the request aside the
+/// retired host again; and the lease booked on the host runs on. It pins the bound: the
+/// reservation lingers for no time at all, not until its deadline.
+#[test]
+fn a_request_reserved_on_a_retired_host_is_let_go() {
+    let mut w = World::new(&["a"], plain);
+    w.share(1, HOUR_S);
+    w.ask(2, "r1");
+    assert_eq!(w.reserved_host("r1"), Some("a".to_string()));
+    w.fx.registry.retire(&host("a")).unwrap();
+    assert_eq!(w.reserved_host("r1"), None);
+    assert_eq!(w.fx.registry.waiting()[0].reserved, None);
+    w.step(3 * POLL_MS);
+    assert_eq!(w.reserved_host("r1"), None);
+    assert_eq!(w.lease_on("a"), Some(lease(1)));
+}
+
+/// Asserts that a host that holds a committed whole-node lease (mark `Held`) is retired
+/// with the lease untouched, that `release_host` is refused while the lease is booked
+/// (`Busy::Lease`) and, once the lease is stopped, while the host restores from it
+/// (`Busy::Whole`), and works after the restore. It catches a retire that cuts a whole-node
+/// lease and a release that does not wait for the host to be quiet.
+#[test]
+fn a_held_whole_node_host_is_retired_and_released_only_when_quiet() {
+    let mut w = World::new(&["a"], plain);
+    w.ask(1, "r1");
+    w.step(POLL_MS);
+    assert_eq!(w.lease_on("a"), Some(lease(1)));
+    let a = host("a");
+    w.fx.registry.retire(&a).unwrap();
+    assert_eq!(w.lease_on("a"), Some(lease(1)));
+    assert_eq!(w.fx.registry.release_host(&a), Err(Busy::Lease));
+    w.cancel("r1");
+    w.stop(1);
+    assert_eq!(w.fx.registry.release_host(&a), Err(Busy::Whole));
+    for _ in 0..4 {
+        w.step(POLL_MS);
+    }
+    assert_eq!(w.fx.registry.release_host(&a), Ok(()));
+}

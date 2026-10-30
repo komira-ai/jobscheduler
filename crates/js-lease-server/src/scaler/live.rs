@@ -148,6 +148,7 @@ impl Effects for Live {
         let registry = &self.agents.registry;
         let done = match call {
             Call::Drain => registry.drain(&id),
+            Call::Retire => registry.retire(&id),
             Call::Undrain => registry.undrain(&id),
             Call::ReleaseHost => registry.release_host(&id),
             Call::MarkEnding => {
@@ -324,6 +325,7 @@ mod tests {
             attempt: 0,
             pool: "burst".to_owned(),
             offer: offer(),
+            lifetime: None,
         };
         let token = Secret::new("token".to_owned());
         assert_eq!(live.acquire(&plan, token), Acquired::Unknown);
@@ -427,6 +429,7 @@ mod tests {
         let host = name("a1");
         for call in [
             Call::Drain,
+            Call::Retire,
             Call::Undrain,
             Call::ReleaseHost,
             Call::MarkEnding,

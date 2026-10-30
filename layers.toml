@@ -28,7 +28,7 @@ planned = ["js-sim", "js-sched"]
 # Code that keeps state, reads a clock or does I/O, and is used by servers and nodes.
 [[layer]]
 name = "runtime"
-crates = ["js-alert", "js-client", "js-contain", "js-lease", "js-oci", "js-provider-lambdalabs", "js-registry", "js-state", "js-testkit", "js-usage"]
+crates = ["js-alert", "js-client", "js-contain", "js-lease", "js-oci", "js-provider-lambdalabs", "js-registry", "js-state", "js-testkit", "js-treestore", "js-usage"]
 planned = ["js-store"]
 
 # Servers: what answers hosts and clients.

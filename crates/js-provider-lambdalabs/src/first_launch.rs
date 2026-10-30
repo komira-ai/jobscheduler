@@ -478,6 +478,9 @@ impl Runner<'_, '_> {
             name: HostName::derive(&owner_id(), &acquire),
             acquire: acquire.clone(),
             pool: OWNER.to_owned(),
+            // The first-launch runner has no scaler and so no `max_age` or lease ceiling to
+            // work a lifetime from, and Lambda would ignore it: it tears down by itself.
+            lifetime: None,
             offer: plan.offer.clone(),
             labels: Vec::new(),
             // This runner boots nothing of its own: the stock image, no payload.

@@ -246,6 +246,7 @@ impl Lifecycle {
         Capacity {
             cpu_millis: offered.cpu_millis.saturating_sub(used.cpu_millis),
             memory_bytes: offered.memory_bytes.saturating_sub(used.memory_bytes),
+            disk_bytes: offered.disk_bytes.saturating_sub(used.disk_bytes),
             gpus: offered.gpus.difference(&used.gpus).copied().collect(),
         }
     }
@@ -264,6 +265,7 @@ impl Lifecycle {
         let mut used = Capacity {
             cpu_millis: 0,
             memory_bytes: 0,
+            disk_bytes: 0,
             gpus: BTreeSet::new(),
         };
         let jobs = self.jobs.iter().filter(|job| job.stage != Stage::Freed);
@@ -273,6 +275,7 @@ impl Lifecycle {
         for booking in bookings {
             used.cpu_millis = used.cpu_millis.saturating_add(booking.cpu_millis);
             used.memory_bytes = used.memory_bytes.saturating_add(booking.memory_bytes);
+            used.disk_bytes = used.disk_bytes.saturating_add(booking.disk_bytes);
             used.gpus.extend(booking.gpus.iter().copied());
         }
         used
@@ -345,6 +348,7 @@ impl Lifecycle {
         let exists = [
             want.cpu_millis <= offered.cpu_millis,
             want.memory_bytes <= offered.memory_bytes,
+            want.disk_bytes.unwrap_or(0) <= offered.disk_bytes,
             spec.gpu_indices
                 .iter()
                 .all(|gpu| offered.gpus.contains(gpu)),
@@ -359,6 +363,7 @@ impl Lifecycle {
         let room = [
             want.cpu_millis <= offered.cpu_millis.saturating_sub(used.cpu_millis),
             want.memory_bytes <= offered.memory_bytes.saturating_sub(used.memory_bytes),
+            want.disk_bytes.unwrap_or(0) <= offered.disk_bytes.saturating_sub(used.disk_bytes),
             spec.gpu_indices.iter().all(|gpu| !used.gpus.contains(gpu)),
             self.slots.has_room(),
         ];

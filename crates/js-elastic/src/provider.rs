@@ -73,6 +73,13 @@ pub struct AcquireRequest {
     pub name: HostName,
     /// What to launch.
     pub offer: Offer,
+    /// The longest the cloud itself may keep the machine, if the pool has a bound: the
+    /// scheduler's `max_age` plus its ceiling on a lease's wall time plus a margin. A
+    /// provider whose cloud can enforce a lifetime (a run-duration limit, a shutdown timer)
+    /// sets it at launch, so billing stops even if the scheduler is dead; one whose cloud
+    /// has none (Lambda: `shutdown -h` leaves billing on) ignores it. `None` for a pool
+    /// with no bound. Nothing in this crate reads it.
+    pub lifetime: Option<std::time::Duration>,
     /// More marks for the machine: key and value.
     pub labels: Vec<(String, String)>,
     /// What the machine boots with, delivered as it is.
@@ -180,6 +187,7 @@ mod tests {
             name: HostName::derive(&scheduler, &acquire),
             acquire,
             pool: "gpu".to_owned(),
+            lifetime: None,
             offer: offer(),
             labels: Vec::new(),
             payload: BootPayload::new("join-token-MARKER".to_owned()),

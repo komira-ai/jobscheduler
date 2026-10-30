@@ -19,6 +19,7 @@ pub struct Settings {
     prepare_timeout: Duration,
     boot_grace: Duration,
     regain_grace: Duration,
+    max_wall: Option<Duration>,
 }
 
 /// How long a whole-node lease may wait to be observed ready when nothing says
@@ -41,7 +42,28 @@ impl Settings {
             prepare_timeout: DEFAULT_PREPARE_TIMEOUT,
             boot_grace: Duration::ZERO,
             regain_grace: Duration::ZERO,
+            max_wall: None,
         })
+    }
+
+    /// The same settings with `max_wall` as the longest maximum wall time a request may
+    /// ask for. A lease is bounded by its maximum wall time whatever the renewals, so this
+    /// bounds the whole life of every lease the table grants after it is set, and with it
+    /// the time a draining host takes to empty. A request above it is refused with
+    /// [`AcquireError::WallAboveCeiling`](crate::AcquireError::WallAboveCeiling). It must be
+    /// positive; with none set, only a positive wall time is required. A lease already in
+    /// the file keeps the wall time it was granted.
+    pub fn with_max_wall(mut self, max_wall: Duration) -> Result<Self, SettingsError> {
+        if max_wall.is_zero() {
+            return Err(SettingsError::MaxWallNotPositive);
+        }
+        self.max_wall = Some(max_wall);
+        Ok(self)
+    }
+
+    /// The ceiling on a request's maximum wall time, if one is set.
+    pub fn max_wall(&self) -> Option<Duration> {
+        self.max_wall
     }
 
     /// The same settings with `prepare_timeout` as the longest a whole-node lease waits,

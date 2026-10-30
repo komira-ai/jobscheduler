@@ -467,6 +467,8 @@ pub struct Capacity {
     pub cpu_millis: u64,
     /// Bytes of memory.
     pub memory_bytes: u64,
+    /// Bytes of scratch disk.
+    pub disk_bytes: u64,
     /// The GPU device indices on offer.
     pub gpus: BTreeSet<u32>,
 }
@@ -477,6 +479,7 @@ impl Capacity {
         Self {
             cpu_millis: hello.shape.cpu_millis,
             memory_bytes: hello.shape.memory_bytes,
+            disk_bytes: hello.shape.disk_bytes,
             gpus: hello.gpu_devices.iter().map(|gpu| gpu.index).collect(),
         }
     }
@@ -505,8 +508,10 @@ pub struct Config {
 /// The flags that configure jobs, checked.
 #[derive(Debug, Clone)]
 pub struct Local {
-    /// The `--mount-root` flags, canonicalised.
+    /// The `--mount-root` and `--mount-root-ro` flags, canonicalised.
     pub mounts: MountRoots,
+    /// `--scratch-quota` was given.
+    pub scratch_quota: bool,
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
     /// `--run-files-root`, or the default under `/run` when that can be made; always none
@@ -577,7 +582,7 @@ impl Local {
                     .to_owned(),
             );
         }
-        let mounts = MountRoots::new(&cli.mount_roots)?;
+        let mounts = MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;
         let scratch = cli
             .scratch_root
             .as_deref()
@@ -687,6 +692,7 @@ impl Local {
         Ok(Self {
             watch,
             mounts,
+            scratch_quota: cli.scratch_quota,
             scratch,
             files,
             files_warning,
@@ -725,6 +731,7 @@ impl Local {
                 ));
             }
         }
+        self.check_mount_roots_off_scratch(files)?;
         let Some(state) = &self.state else {
             return Ok(());
         };
@@ -747,6 +754,36 @@ impl Local {
             if device(root)? == own {
                 return Err(format!(
                     "--state-root: on the same file system as {flag} {}: a job could fill it and the taint marker could not be written",
+                    root.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Local {
+    /// With `--scratch-quota`, refuses a `--mount-root` on the file system of the scratch
+    /// root (the same `st_dev` comparison as the state root's): a job with a read-write
+    /// mount there writes to the disk the quota is to bound, outside it. `--mount-root-ro`
+    /// roots are not compared: a mount from one is read-only. Without the flag nothing is
+    /// compared.
+    fn check_mount_roots_off_scratch(&self, files: &dyn FileReader) -> Result<(), String> {
+        let (true, Some(scratch)) = (self.scratch_quota, &self.scratch) else {
+            return Ok(());
+        };
+        let device = |path: &Path| {
+            files
+                .device(path)
+                .map_err(|why| format!("--scratch-quota: cannot compare file systems: {why}"))
+        };
+        let own = device(scratch.path())?;
+        for root in self.mounts.writable_paths() {
+            if device(root)? == own {
+                return Err(format!(
+                    "--mount-root: {} is on the same file system as the --scratch-root, which \
+                     --scratch-quota bounds: a read-write mount there is outside the quota; \
+                     give it as --mount-root-ro or move it",
                     root.display()
                 ));
             }

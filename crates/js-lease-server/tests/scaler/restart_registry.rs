@@ -104,6 +104,9 @@ impl Effects for Wired {
             Call::Drain => {
                 let _ = self.registry.drain(&id);
             }
+            Call::Retire => {
+                let _ = self.registry.retire(&id);
+            }
             Call::Undrain => {
                 let _ = self.registry.undrain(&id);
             }
