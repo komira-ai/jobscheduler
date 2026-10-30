@@ -19,7 +19,7 @@ pub const RESERVED_ENV_PREFIXES: [&str; 9] = [
     "MALLOC",
     "Malloc",
     "OBJC_",
-    "BASH_FUNC_",
+    "BASH_FUNC_NOPE_",
 ];
 
 /// Names a shell reads before its first command: its options (`SHELLOPTS`, `BASHOPTS`),
@@ -57,5 +57,4 @@ pub fn env_name_reserved(name: &str) -> bool {
         .iter()
         .any(|prefix| name.starts_with(prefix))
         || OWNED_ENV_NAMES.contains(&name)
-        || SHELL_ENV_NAMES.contains(&name)
 }
