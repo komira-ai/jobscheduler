@@ -485,6 +485,17 @@ fn abort_refuses_a_bad_id_and_fails_when_the_account_cannot_be_listed() {
     );
     let nokey = exec(&abort_args(path(&no_key), &[]));
     assert!(nokey.exited(2), "{}", nokey.err);
+    let remote = scratch.file(
+        "remote.toml",
+        &text.replacen(
+            "api_url = \"http://127.0.0.1",
+            "api_url = \"http://10.0.0.5",
+            1,
+        ),
+        0o600,
+    );
+    let plain = exec(&abort_args(path(&remote), &[]));
+    assert!(plain.exited(2), "{}", plain.err);
 }
 
 /// Asserts that a configuration error never carries a value of the file: a URL typed where

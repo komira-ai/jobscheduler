@@ -6,18 +6,13 @@
 //! instance back. There is no force. Instances with some of the marks, not all, are listed
 //! and never touched.
 
-use std::collections::BTreeMap;
 use std::io::Write;
-use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::Arc;
 
-use js_elastic::{ElasticProvider, HostRef, Released, SchedulerId};
-use js_provider_lambdalabs::{
-    Clock, ElasticConfig, LambdaApi, LambdaProvider, OptionTable, SystemClock,
-};
+use js_elastic::SchedulerId;
+use js_provider_lambdalabs::{Aborter, Listed};
 
-use crate::client::{Failure, full_handle, refused};
+use crate::client::{Failure, aborter, refused};
 use crate::config::Config;
 
 /// An instance the abort would stop (or leave alone).
@@ -159,20 +154,16 @@ pub fn abort(target: &dyn Target, scheduler: &str, apply: bool) -> Result<Outcom
     })
 }
 
-/// Lambda, through [`LambdaProvider`]: the release the scaler uses, which terminates only
-/// an instance whose tags and name are both the scheduler's and reads it back. The
-/// provider is built disabled and in dry-run mode, so it cannot launch even if asked.
+/// Lambda, through [`Aborter`]: the release the scaler uses, which terminates only an
+/// instance whose tags and name are both the scheduler's and reads it back.
 pub struct LambdaTarget {
-    api: Arc<dyn LambdaApi>,
-    provider: LambdaProvider,
+    aborter: Aborter,
 }
 
 impl LambdaTarget {
-    /// A target for `scheduler`'s instances over `api`.
-    pub fn new(api: Arc<dyn LambdaApi>, scheduler: SchedulerId, clock: Arc<dyn Clock>) -> Self {
-        let config = ElasticConfig::with_account_key(scheduler, NonZeroUsize::MIN);
-        let provider = LambdaProvider::new(Arc::clone(&api), clock, OptionTable::empty(), config);
-        Self { api, provider }
+    /// A target over `aborter`.
+    pub fn new(aborter: Aborter) -> Self {
+        Self { aborter }
     }
 }
 
@@ -182,37 +173,26 @@ impl Target for LambdaTarget {
     }
 
     fn plan(&self) -> Result<Plan, TargetError> {
-        // With nothing booked every running instance of ours is an orphan to the sweep.
-        let sweep = self
-            .provider
-            .sweep(&[])
+        let plan = self
+            .aborter
+            .plan()
             .map_err(|why| TargetError::new(why.to_string()))?;
-        // A price is a nicety: an instance is listed without one.
-        let offers = self.api.instance_types().unwrap_or_default();
-        let prices: BTreeMap<String, u64> = offers
-            .into_iter()
-            .map(|offer| (offer.name, offer.price_cents_per_hour))
-            .collect();
-        let each = |held: js_elastic::Held| Doomed {
-            id: held.id.as_str().to_owned(),
-            cents_per_hour: prices.get(&held.offer).copied(),
-            kind: held.offer,
-            region: held.zone.unwrap_or_default(),
+        let each = |listed: Listed| Doomed {
+            id: listed.id,
+            kind: listed.kind,
+            region: listed.region,
+            cents_per_hour: listed.cents_per_hour,
         };
         Ok(Plan {
-            doomed: sweep.orphans.into_iter().map(each).collect(),
-            left_alone: sweep.suspects.into_iter().map(each).collect(),
+            doomed: plan.running.into_iter().map(each).collect(),
+            left_alone: plan.partial.into_iter().map(each).collect(),
         })
     }
 
     fn stop(&self, id: &str) -> Result<(), TargetError> {
-        match self.provider.release(&HostRef(id.to_owned())) {
-            Released::Gone | Released::Terminating(_) => Ok(()),
-            Released::Refused(claim) => Err(TargetError::new(format!(
-                "refused: the instance is not wholly the scheduler's ({claim:?})"
-            ))),
-            Released::Unknown => Err(TargetError::new("no answer; run the abort again")),
-        }
+        self.aborter
+            .stop(id)
+            .map_err(|why| TargetError::new(why.to_string()))
     }
 }
 
@@ -233,8 +213,8 @@ pub(crate) fn command(
         )));
     }
     let id = SchedulerId::new(scheduler).map_err(refused)?;
-    let api = full_handle(config.lambda().map_err(refused)?)?;
-    let target = LambdaTarget::new(api, id, Arc::new(SystemClock::new()));
+    let aborter = aborter(config.lambda().map_err(refused)?, id)?;
+    let target = LambdaTarget::new(aborter);
     report(&target, scheduler, apply, out)
 }
 

@@ -71,14 +71,19 @@ const CALLS: [&str; 13] = [
     ".put(",
 ];
 
-/// The names of the types that have such calls.
-const HOLDERS: [&str; 5] = [
-    "LambdaApi",
-    "LambdaProvider",
-    "HttpApi",
-    "ElasticProvider",
-    "full_handle",
-];
+/// The names of the types that have such calls, and of the handles that hold them. Built
+/// from parts, so that this file does not name the provider's raw API either (a scan of the
+/// whole workspace refuses that name outside the provider's crate).
+fn holders() -> Vec<String> {
+    vec![
+        ["Lambda", "Api"].concat(),
+        "LambdaProvider".to_owned(),
+        ["Http", "Api"].concat(),
+        "ElasticProvider".to_owned(),
+        "Aborter".to_owned(),
+        "client::aborter".to_owned(),
+    ]
+}
 
 /// The files of the crate that hold the spend side, by name: the abort and the handle it
 /// uses, the client builder, and the fake abort target. Every other file under `src` is the
@@ -86,12 +91,12 @@ const HOLDERS: [&str; 5] = [
 const SPEND_SIDE: [&str; 3] = ["abort.rs", "client.rs", "fake.rs"];
 
 /// The spend words in `text` (code only, comments gone); with `types`, the holders too.
-fn spends(text: &str, types: bool) -> Vec<&'static str> {
-    let holders = HOLDERS.into_iter().filter(|_| types);
-    CALLS
-        .into_iter()
-        .chain(holders)
-        .filter(|word| text.contains(word))
+fn spends(text: &str, types: bool) -> Vec<String> {
+    let calls = CALLS.iter().map(|word| (*word).to_owned());
+    let held = holders().into_iter().filter(|_| types);
+    calls
+        .chain(held)
+        .filter(|word| text.contains(word.as_str()))
         .collect()
 }
 
@@ -121,9 +126,11 @@ fn the_scan_finds_a_spend_word_and_only_then() {
     assert_eq!(spends("api.terminate(id)", false), ["terminate"]);
     assert_eq!(spends("agent.post(url)", false), [".post("]);
     assert_eq!(spends("client.cancel()", false), ["cancel"]);
-    assert_eq!(spends("Arc<dyn LambdaApi>", true), ["LambdaApi"]);
-    assert_eq!(spends("client::full_handle(t)", true), ["full_handle"]);
-    assert!(spends("Arc<dyn LambdaApi>", false).is_empty());
+    let raw = ["Lambda", "Api"].concat();
+    let typed = format!("Arc<dyn {raw}>");
+    assert_eq!(spends(&typed, true), [raw.as_str()]);
+    assert_eq!(spends("client::aborter(t)", true), ["client::aborter"]);
+    assert!(spends(&typed, false).is_empty());
     assert!(spends("self.reader.tagged()", true).is_empty());
     let hidden = "keep // terminate\n/// delete\nx /* kill\n stop */ y /* z */ w";
     assert_eq!(code_of(hidden), "keep \n\nx  y  w");

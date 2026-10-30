@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use js_elastic::{AcquireId, HostName, HostStatus, SchedulerId};
 use js_provider_lambdalabs::{
-    ACQUIRE_TAG, ApiError, Architecture, Call, FakeLambda, Instance, InstanceId, InstanceTypeOffer,
-    ManualClock, Region, SCHEDULER_TAG, Tag, TerminateEffect,
+    ACQUIRE_TAG, Aborter, ApiError, Architecture, Call, FakeLambda, Instance, InstanceId,
+    InstanceTypeOffer, ManualClock, Region, SCHEDULER_TAG, Tag, TerminateEffect,
 };
 use js_watch::fake::{FakeTarget, doomed};
 use js_watch::{LambdaTarget, Plan, Target, abort};
@@ -183,11 +183,11 @@ fn account() -> Arc<FakeLambda> {
 }
 
 fn target(fake: &Arc<FakeLambda>) -> LambdaTarget {
-    LambdaTarget::new(
+    LambdaTarget::new(Aborter::new(
         fake.clone(),
         SchedulerId::new(SCHEDULER).unwrap(),
         Arc::new(ManualClock::new()),
-    )
+    ))
 }
 
 fn status_of(fake: &FakeLambda, id: &str) -> HostStatus {

@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand, ValueEnum};
 use js_alert::{AlertSink, DELIVERY_LIMIT, WebhookSink};
 use js_elastic::SchedulerId;
+use js_provider_lambdalabs::ApiKey;
 use js_provider_lambdalabs::kind::API_TIMEOUT;
-use js_provider_lambdalabs::{ApiKey, Reader};
 
 use crate::abort;
-use crate::client::{Failure, read_handle, refused};
+use crate::client::{Failure, reader, refused};
 use crate::config::Config;
 use crate::status::{HttpStatus, StatusSource};
 use crate::view::{CloudView, LambdaView};
@@ -143,8 +143,8 @@ fn watch(config: &Path, ticks: Option<u64>, sleep: &dyn Fn(Duration)) -> Result<
         .try_init();
     let config = Config::load(config).map_err(refused)?;
     let scheduler = SchedulerId::new(&config.scheduler_id).map_err(refused)?;
-    let reads = read_handle(config.lambda().map_err(refused)?)?;
-    let cloud: Arc<dyn CloudView> = Arc::new(LambdaView::new(Reader::new(reads, scheduler)));
+    let reader = reader(config.lambda().map_err(refused)?, scheduler)?;
+    let cloud: Arc<dyn CloudView> = Arc::new(LambdaView::new(reader));
     let status = HttpStatus::new(&config.status_url, API_TIMEOUT).map_err(refused)?;
     let status: Arc<dyn StatusSource> = Arc::new(status);
     let sink: Arc<dyn AlertSink> = Arc::new(sink(&config)?);

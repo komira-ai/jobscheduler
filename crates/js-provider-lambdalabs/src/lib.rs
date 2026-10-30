@@ -68,6 +68,7 @@
 //! they must not run under a lock that other work waits on. It does not implement the
 //! delivered whole-host `Provider` trait, which is called under the lease table's lock.
 
+mod aborter;
 mod api;
 mod clock;
 mod config;
@@ -86,6 +87,7 @@ mod read;
 mod select;
 mod wire;
 
+pub use aborter::{AbortPlan, Aborter, Listed, StopError};
 pub use api::LambdaApi;
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{

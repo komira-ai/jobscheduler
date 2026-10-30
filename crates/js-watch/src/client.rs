@@ -1,13 +1,14 @@
-//! The Lambda API client the configuration describes, as the handle each command needs.
+//! The Lambda API handles the configuration describes: a reader for the watch path and an
+//! aborter for the abort command.
 //!
-//! The client can launch and terminate. The watch path gets it only as a [`LambdaRead`],
-//! which has no such call; only the abort command takes the whole [`LambdaApi`].
+//! The watch path gets only a [`Reader`], which can list and nothing else; the [`Aborter`]
+//! goes to the abort command alone.
 
 use std::fmt::Display;
-use std::sync::Arc;
 
-use js_provider_lambdalabs::kind::{API_TIMEOUT, DEFAULT_API_URL};
-use js_provider_lambdalabs::{ApiKey, HttpApi, LambdaApi, LambdaRead};
+use js_elastic::SchedulerId;
+use js_provider_lambdalabs::kind::DEFAULT_API_URL;
+use js_provider_lambdalabs::{Aborter, ApiKey, Reader};
 
 use crate::config::LambdaTable;
 
@@ -19,21 +20,20 @@ pub(crate) fn refused(why: impl Display) -> Failure {
     (2, why.to_string())
 }
 
-fn connect(table: &LambdaTable) -> Result<Arc<HttpApi>, Failure> {
+/// The key the table names and the API address it uses.
+fn credentials(table: &LambdaTable) -> Result<(ApiKey, &str), Failure> {
     let key = ApiKey::from_file(&table.api_key_file).map_err(refused)?;
-    let url = table.api_url.as_deref().unwrap_or(DEFAULT_API_URL);
-    let api = HttpApi::connect(url, &key, None, API_TIMEOUT).map_err(refused)?;
-    Ok(Arc::new(api))
+    Ok((key, table.api_url.as_deref().unwrap_or(DEFAULT_API_URL)))
 }
 
-/// The client as a handle that can only read.
-pub(crate) fn read_handle(table: &LambdaTable) -> Result<Arc<dyn LambdaRead>, Failure> {
-    let api: Arc<dyn LambdaRead> = connect(table)?;
-    Ok(api)
+/// The read-only view of `scheduler`'s instances.
+pub(crate) fn reader(table: &LambdaTable, scheduler: SchedulerId) -> Result<Reader, Failure> {
+    let (key, url) = credentials(table)?;
+    Reader::connect(url, &key, scheduler).map_err(refused)
 }
 
-/// The client whole, for the abort command.
-pub(crate) fn full_handle(table: &LambdaTable) -> Result<Arc<dyn LambdaApi>, Failure> {
-    let api: Arc<dyn LambdaApi> = connect(table)?;
-    Ok(api)
+/// The aborter for `scheduler`'s instances, for the abort command.
+pub(crate) fn aborter(table: &LambdaTable, scheduler: SchedulerId) -> Result<Aborter, Failure> {
+    let (key, url) = credentials(table)?;
+    Aborter::connect(url, &key, scheduler).map_err(refused)
 }

@@ -8,6 +8,9 @@ use js_elastic::{Claim, Held, HostStatus, SchedulerId};
 
 use crate::api::LambdaApi;
 use crate::error::ApiError;
+use crate::http::{HttpApi, SetupError};
+use crate::key::ApiKey;
+use crate::kind::API_TIMEOUT;
 use crate::model::{Instance, InstanceTypeOffer};
 use crate::own::Owner;
 use crate::provider::held_of;
@@ -63,6 +66,21 @@ impl Reader {
             api,
             owner: Owner::new(scheduler),
         }
+    }
+
+    /// A view over the real API at `base_url` (the rules of [`HttpApi::connect`]), with
+    /// `key`. The client is held only as a [`LambdaRead`].
+    ///
+    /// # Errors
+    ///
+    /// [`SetupError`] when the URL is unusable.
+    pub fn connect(
+        base_url: &str,
+        key: &ApiKey,
+        scheduler: SchedulerId,
+    ) -> Result<Self, SetupError> {
+        let api = HttpApi::connect(base_url, key, None, API_TIMEOUT)?;
+        Ok(Self::new(Arc::new(api), scheduler))
     }
 
     /// The instances of the account that carry the scheduler's marks, whole or partial,
