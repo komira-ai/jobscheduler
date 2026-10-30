@@ -25,8 +25,8 @@ pub struct Reported {
 /// reports no bundle and warns, so a job is never placed on a guess.
 pub fn report(settings: &Settings, host: &dyn BundleHost, long_values: bool) -> Reported {
     if !host.can_run() {
-        let why = "--bundle-store: this agent cannot run a bundle yet, so it reports no bundle \
-                   and no bundle-root";
+        let why = "--bundle-store: this agent cannot run a bundle (it runs no native jobs, or its \
+                   store did not open), so it reports no bundle and no bundle-root";
         return Reported {
             caps: Caps::default(),
             warnings: vec![why.to_owned()],

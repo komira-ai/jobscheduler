@@ -40,6 +40,10 @@ fn native_runtime(native: &NativeSettings) -> Result<(Box<dyn Runtime>, Vec<Stri
     let helper = Client::new(native.socket());
     let opened = NativeRuntime::open(helper, native.config().clone(), term);
     let runtime = opened.map_err(|why| format!("--native-helper-socket: {why}"))?;
+    let runtime = match native.bundles() {
+        Some(store) => runtime.with_bundles(Arc::clone(store)),
+        None => runtime,
+    };
     Ok((Box::new(runtime), Vec::new()))
 }
 

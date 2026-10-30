@@ -59,10 +59,10 @@
 //! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci; the Docker and Podman runtimes pull as `--container-pull` says and do not read it |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; needs `--container-bin` |
 //! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; needs `--container-bin` |
-//! | `--bundle-store <path>` | the store of unpacked toolchain bundles (a Mac only): absolute, on the volume of `--scratch-root`, which must be APFS, mounted with ownership honoured and not noexec, with the kernel's securelevel at most 0, or the agent does not start; needs `--scratch-root` and `--bundle-budget-gib`. The hello then carries `bundle-root` (this path) and `bundle` (the held manifest digests, comma-separated, at most 16 of them), and the disk offered is reduced by the part of the budget the store has not used (see [`bundle`]). The hello carries `bundle` and `bundle-root` only when the agent can run a bundle, which this build cannot, so for now it carries neither; and, until a server says it takes a longer value, `bundle` holds one digest (two are 143 bytes, over the 128 an older server accepts and then refuses the hello). Roll out in this order: servers first (they accept the long value and the new codes), then agents, then `--bundle-store`, then placement by `bundle`; no job that names a bundle may be placed on a host that did not report `bundle` |
+//! | `--bundle-store <path>` | the store of unpacked toolchain bundles (a Mac only): absolute, on the volume of `--scratch-root`, which must be APFS, mounted with ownership honoured and not noexec, with the kernel's securelevel at most 0, or the agent does not start; needs `--scratch-root` and `--bundle-budget-gib`. The hello then carries `bundle-root` (this path) and `bundle` (the held manifest digests, comma-separated, at most 16 of them), and the disk offered is reduced by the part of the budget the store has not used (see [`bundle`]). The hello carries `bundle` and `bundle-root` only when the agent can run a bundle: it runs native jobs (`--native-helper-socket`) and the store opened; without the helper it carries neither. A job that pins a bundle runs `@bundle/<entrypoint>` from the store's trees, its writable trees cloned for the run, under the profile of any native job; and, until a server says it takes a longer value, `bundle` holds one digest (two are 143 bytes, over the 128 an older server accepts and then refuses the hello). Roll out in this order: servers first (they accept the long value and the new codes), then agents, then `--bundle-store`, then placement by `bundle`; no job that names a bundle may be placed on a host that did not report `bundle` |
 //! | `--bundle-budget-gib <n>` | the most GiB the store's trees and trash may take; required with a store, above 0 |
 //! | `--bundle-low-water-gib <n>` | fetches are refused while the volume has less than this free; default 0 |
-//! | `--bundle-pull <never\|missing>` | whether a bundle the store lacks is fetched; default `never` (a job that names one is refused `bundle-not-held`); `missing` needs trust `list` and a registry flag, and this build has no fetcher (`bundle-fetch-failed`) |
+//! | `--bundle-pull <never\|missing>` | whether a bundle the store lacks is fetched; default `never` (a job that names one is refused `bundle-not-held`); `missing` needs trust `list` and a registry flag: the first start that names a bundle begins a fetch in the background (`bundle-pending` until it is held; every byte is checked against its digest; a fetch that fails is reported once as `bundle-fetch-failed`) |
 //! | `--bundle-registry-allow`, `--bundle-registry-allow-private <host[:port]/prefix>` | the registries and namespaces a bundle's name may point to; repeatable; a bare host is refused; when any is given, a name outside them is refused `bundle-registry-not-allowed` |
 //! | `--bundle-min-age-min <n>` | minutes a bundle's trees stay after their last use; default 30 |
 //! | `--bundle-keep-file`, `--bundle-prefetch-file <path>` | files of manifest digests (`sha256:<hex>` a line, `#` comments), checked at start; the eviction and the fetcher that read them arrive later |
@@ -364,7 +364,7 @@ pub fn main_with(
                 jitter: &mut SystemJitter,
                 sleeper: &mut sleeper,
                 machine: Arc::new(System::new()),
-                bundle: Arc::new(SystemHost::new(SystemCommands::default())),
+                bundle: Arc::new(SystemHost::system()),
                 long_bundle_values: false,
                 worker_hook: None,
                 rescue_bound: None,
@@ -431,6 +431,15 @@ fn execute(
     // stops the agent now and not at the first job.
     let host = &services.bundle;
     let bundle = BundleSettings::from_cli(&cli, platform, &**host).map_err(Failure::Usage)?;
+    // An agent that runs native jobs opens its store now, before the hello: the hello says
+    // it holds bundles only when the store is open, and the runtime is made over the same
+    // store. An agent that runs no native job could never run a bundle, so it opens none.
+    let opened = match (&bundle, cli.native_helper_socket.is_some()) {
+        (Some(settings), true) => host
+            .open(settings)
+            .map_err(|why| Failure::Usage(format!("--bundle-store: {why}")))?,
+        _ => None,
+    };
     let store = bundle.as_ref().map(|settings| StoreView {
         settings,
         host: &**host,
@@ -470,7 +479,11 @@ fn execute(
     }
     // The job flags are checked now so a wrong one stops the agent before it registers;
     // the worker is built from them below, before the first hello.
-    let local = Local::from_cli(&cli, services.euid).map_err(Failure::Usage)?;
+    let mut local = Local::from_cli(&cli, services.euid).map_err(Failure::Usage)?;
+    local.native = match (local.native.take(), opened) {
+        (Some(native), Some(store)) => Some(native.with_bundles(store).map_err(Failure::Usage)?),
+        (native, _) => native,
+    };
     if let Some(why) = &local.files_warning {
         let _ = writeln!(err, "js-agent: warning: {why}");
     }
