@@ -599,17 +599,6 @@ jobs:
         env:
           LLVM_COV_FLAGS: -skip-functions
         run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov --workspace --locked --profile coverage --branch --lcov --output-path target/coverage/lcov.info
-      - name: Missing lines of image/pull.rs (temporary)
-        continue-on-error: true
-        env:
-          LLVM_COV_FLAGS: -skip-functions
-        run: |
-          cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --profile coverage --branch --show-missing-lines | grep -E "pull.rs|Filename" || true
-          cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --profile coverage --branch --text --output-dir target/coverage/text
-          f=$(find target/coverage/text -path '*js-agent/src/image/pull.rs.txt' | head -1)
-          echo "text report: $f"
-          grep -nE '^ *[0-9]+\| *0\|' "$f" || true
-          grep -n '\^0' "$f" || true
       # When every failure is coverage that improved, the step prints (and puts in the
       # job summary) the `js-coverage tighten` command that downloads this run's
       # `coverage` artifact and lowers coverage-baseline; --artifact must name the
