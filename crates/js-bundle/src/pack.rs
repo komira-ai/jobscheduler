@@ -377,7 +377,10 @@ mod tests {
         let fifo = dir.join("p");
         rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::RUSR | Mode::WUSR).unwrap();
         let error = read_file(&fifo, "p").unwrap_err();
-        assert!(matches!(error, PackError::Special { path } if path == "p"));
+        assert_eq!(
+            error.to_string(),
+            "\"p\" is neither a directory, a regular file nor a symlink"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
