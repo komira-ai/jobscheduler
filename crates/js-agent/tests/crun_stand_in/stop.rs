@@ -166,3 +166,19 @@ fn a_cgroup_that_cannot_be_removed_keeps_the_container() {
     std::fs::remove_file(stray.join("stray")).expect("clear");
     assert_eq!(runtime.remove(&id), Ok(()));
 }
+
+/// Proves a lease directory that is already gone is no failure of the removal: the rest of
+/// the lease is removed and the container forgotten. Catches a removal that cannot finish
+/// because something else removed a directory first.
+#[test]
+fn a_lease_directory_that_is_already_gone_does_not_fail_the_removal() {
+    let node = Node::new("stop-dir-gone");
+    let mut runtime = node.open();
+    let id = runtime
+        .create_and_start(&node.spec("r8-exit"))
+        .expect("started");
+    runtime.wait_ended(&id);
+    std::fs::remove_dir_all(node.lease_of(&id.0)).expect("remove the lease directory");
+    assert_eq!(runtime.remove(&id), Ok(()));
+    assert!(runtime.list_labelled().expect("lists").is_empty());
+}
