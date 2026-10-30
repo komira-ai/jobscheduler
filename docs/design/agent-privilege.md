@@ -314,8 +314,22 @@ under B-as-built `crun` runs as the non-root job user, and the restriction does 
   with `userns,`, so it covers our case and no minimal profile of ours is needed there; it first asserts the sysctl reads
   `1`, so it cannot pass on a host where the restriction is off. AppArmor attaches a profile by the
   path of the executable, not by user, which is why (a) passes where (b) fails.
+- What the attribution rests on, proven and not inferred. Three further facts are checked, each by
+  a test or a CI step that fails otherwise: (1) `the_distribution_crun_has_a_loaded_apparmor_profile_and_no_file_capabilities`
+  reads `/sys/kernel/security/apparmor/profiles` and asserts a `crun` profile is loaded (the path
+  `/usr/bin/crun` is what its attachment names; that a copy is outside it is control (b) itself); (2) the same
+  test asserts `/usr/bin/crun` has no `security.capability` extended attribute (`getxattr` answers
+  `ENODATA`), so file capabilities cannot be what lets the distribution path map ids and a copy not; (3) the
+  counter-run `counter_run_a_copy_of_crun_starts_the_container_when_the_restriction_is_off` sets the sysctl
+  to `0` in a separate CI step after the main tests, runs only the copy with the same container, which then
+  starts and exits 0, and the step puts the sysctl back to `1` (checked by a following step). So with the
+  sysctl on the copy fails and with it off the same copy runs: the restriction, and the profile that is
+  exempt from it, are what separate (a) from (b). The counter-run is skipped by name in the main step, where
+  the restriction is on.
 - What js-contain execs: `OciConfig::runtime`, default `/usr/bin/crun`, an absolute path used as given
-  (`Oci::new` only checks it is a file). It must stay the distribution's path, never a copy: a copy is
+  (`Oci::new` only checks it is a file). The path the setuid `newuidmap`/`newgidmap` are looked up on is
+  `OciConfig::id_tool_path`, which defaults to the daemon's own `PATH`: it is trusted as the operator's, and
+  is also the `PATH` every `crun` command starts with. It must stay the distribution's path, never a copy: a copy is
   unconfined by that profile. The test asserts `JS_B_CRUN` is that path.
 - The farm still needs, before P12a, either the distribution's `crun` profile (with `userns`) loaded for
   the binary it execs, or a minimal profile for the pinned `crun` path, which P14's held host set-up
@@ -323,13 +337,16 @@ under B-as-built `crun` runs as the non-root job user, and the restriction does 
   process on the node.
 
 **Residual risk: one identity for all jobs.** Every job runs as the same host user with the same
-subordinate id range. `hand_over` and the `0500` mode protect a run's files from other host users, but
-not from another concurrent job that escapes its mount namespace: that job has the same host uid. What
-bounds the damage then is the path a job would have to guess: run ids are not random. The lease server
-mints them as `run-<term>-<count>` (`mint_run_id`, `crates/js-lease-server/src/agents.rs`), a boot
-counter and a count that only grows, so they are guessable and are no secret; the root's `0711` mode
-(no listing) is the only thing that hides another run's name. A per-job user or a per-job subordinate
-range would close it and is not part of B.
+subordinate id range. Two host uids are involved. The files `hand_over` gives away (the run directory and
+its files) are owned by the **job user's own uid** (`OciConfig::job_user`), and the container's processes
+run as **`sub_uid + 1000`** of the job user's range (container id 1000, the `ACTION_ID`), a different host
+uid that exists in no password file. Both are the same for every job, so `hand_over` and the `0500`
+mode protect a run's files from other host users, but not from another concurrent job that escapes its mount
+namespace: that job has the same host uids. What bounds the damage then is the path a job would have to guess:
+run ids are not random. The lease server mints them as `run-<term>-<count>` (`mint_run_id`,
+`crates/js-lease-server/src/agents.rs`), a boot counter and a count that only grows, so they are guessable
+and are no secret; the root's `0711` mode (no listing) and the job's mount namespace are the only things that
+hide another run's name. A per-job user or a per-job subordinate range would close it and is not part of B.
 
 Besides these: in B the pulls (`js-oci`) would run as root in the daemon; run them as the job user
 (the `image-pull` verb started through the same hook) rather than in the root process.

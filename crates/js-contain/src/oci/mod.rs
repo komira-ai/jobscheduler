@@ -524,8 +524,6 @@ fn search_check(dir: &Path) -> Result<(), OciError> {
     Ok(())
 }
 
-/// Checks that `tool` is on `path`, runnable, and able to write a user namespace's id
-/// maps: setuid, or holding file capabilities (as some distributions install it).
 /// The ids the containers map: the job user's if `config` names one, else those of the
 /// daemon `(daemon_uid, daemon_gid)`. Root is refused either way ([`SubidError::Root`]).
 fn run_ids(
@@ -537,6 +535,8 @@ fn run_ids(
     crate::subids::user_ids(&config.id_files, uid, gid)
 }
 
+/// Checks that `tool` is on `path`, runnable, and able to write a user namespace's id
+/// maps: setuid, or holding file capabilities (as some distributions install it).
 fn id_tool(tool: &'static str, path: Option<&std::ffi::OsStr>) -> Result<(), OciError> {
     use std::os::unix::fs::PermissionsExt as _;
     let refused = |why: String| OciError::IdTool { tool, why };

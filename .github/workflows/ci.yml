@@ -378,6 +378,7 @@ jobs:
           echo "apparmor_restrict_unprivileged_userns = $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
           ls -l /etc/apparmor.d | grep -i crun || echo "no crun file in /etc/apparmor.d"
           sudo aa-status 2>&1 | grep -i crun || echo "no crun profile loaded"
+          getcap "$(command -v crun)" || true
           cat /etc/apparmor.d/crun 2>/dev/null || true
       - name: Build the tests as the runner user
         run: |
@@ -388,7 +389,19 @@ jobs:
       - name: Run the privilege tests as root
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test privilege --locked -- --ignored --nocapture --test-threads=1
       - name: Run js-contain's Oci under a root daemon, as the job user, with the AppArmor restriction on
-        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-contain --test root_daemon --locked -- --ignored --nocapture --test-threads=1
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-contain --test root_daemon --locked -- --ignored --nocapture --test-threads=1 --skip counter_run
+      # The counter-run of the copy control: with the restriction off the same copy of crun
+      # starts the container, so the sysctl is the only difference from the refusal above.
+      # The sysctl is put back to 1 whatever the result.
+      - name: Counter-run the copy control with the AppArmor restriction off
+        run: |
+          set -euo pipefail
+          restore() { sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1; }
+          trap restore EXIT
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-contain --test root_daemon --locked -- --ignored --nocapture --test-threads=1 counter_run
+      - name: The restriction is back on
+        run: test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

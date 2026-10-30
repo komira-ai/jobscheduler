@@ -165,7 +165,7 @@ fn run_files_are_unreadable_until_handed_over_and_then_readable_by_the_job_alone
 /// The job owns the directory of its run files after the hand-over, so it can plant links
 /// in it that point outside (at a root-owned file, a root-owned directory with a file in
 /// it, and `..`). Removing the run (`remove`) and sweeping the root (`sweep`) as root must
-/// delete the links and never follow them: the targets keep their content, owner and mode.
+/// delete the links and never follow them: the targets and their parent directory keep their content, owner and mode.
 /// It catches a removal that follows a link or `chown`s or `chmod`s through one.
 #[test]
 #[ignore = "needs root: see the module docs of tests/privilege/main.rs"]
@@ -185,6 +185,7 @@ fn links_planted_by_the_job_in_its_run_files_are_removed_and_never_followed() {
     let target_dir = outside.join("keep");
     make_dir(&target_dir, 0o700, 0);
     fs::write(target_dir.join("inside"), "root's too").unwrap();
+    let inner_mode = fs::metadata(target_dir.join("inside")).unwrap().mode() & 0o7777;
 
     let root = work.path().join("files");
     let files = FilesRoot::open_with(&root, DirLayout::Searchable).unwrap();
@@ -205,7 +206,11 @@ fn links_planted_by_the_job_in_its_run_files_are_removed_and_never_followed() {
         let meta = fs::metadata(&target_dir).unwrap();
         assert_eq!((meta.uid(), meta.mode() & 0o7777), (0, 0o700));
         let meta = fs::metadata(target_dir.join("inside")).unwrap();
-        assert_eq!(meta.uid(), 0);
+        assert_eq!((meta.uid(), meta.mode() & 0o7777), (0, inner_mode));
+        // The parent of both targets: a `..` link followed by a `chmod` or `chown` would
+        // change it.
+        let meta = fs::metadata(&outside).unwrap();
+        assert_eq!((meta.uid(), meta.mode() & 0o7777), (0, 0o755));
     };
     for run in ["r1", "r2"] {
         let dir = files.write(run, &grant()).unwrap();

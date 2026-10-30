@@ -366,6 +366,67 @@ async fn a_copy_of_crun_is_refused_the_user_namespace_while_the_distribution_pat
     );
 }
 
+/// What attributes control (a) and (b) to AppArmor rather than to something else. (b) is
+/// refused because a copy is not the path a profile attaches to, and (a) runs because
+/// `/usr/bin/crun` is; two other causes would also fit: no profile at all (the distribution
+/// path would then be refused as well, so (a) shows a profile or an exemption), and file
+/// capabilities on the binary (which would let `/usr/bin/crun` map ids that a copy,
+/// which `fs::copy` does not give the extended attributes, cannot). This reads both facts:
+/// the kernel lists a loaded `crun` profile, and `/usr/bin/crun` has no
+/// `security.capability` attribute.
+#[test]
+#[ignore = "needs the distribution's crun and its AppArmor profile: see the module docs"]
+fn the_distribution_crun_has_a_loaded_apparmor_profile_and_no_file_capabilities() {
+    let profiles = fs::read_to_string("/sys/kernel/security/apparmor/profiles")
+        .unwrap_or_else(|why| panic!("AppArmor's loaded profiles are unreadable: {why}"));
+    // One profile per line: `<name> (<mode>)`. The distribution's is named `crun`.
+    let loaded: Vec<&str> = profiles
+        .lines()
+        .filter(|line| {
+            let name = line.rsplit_once(" (").map_or(*line, |(name, _)| name);
+            name == "crun" || name.ends_with("/crun")
+        })
+        .collect();
+    println!("loaded crun profiles: {loaded:?}");
+    assert!(
+        !loaded.is_empty(),
+        "no crun profile is loaded; the first control would show an exemption, not the profile:\n{profiles}"
+    );
+    let crun = var("JS_B_CRUN");
+    let mut buffer = [0u8; 0];
+    let caps = rustix::fs::getxattr(&crun, "security.capability", &mut buffer);
+    println!("security.capability of {crun}: {caps:?}");
+    assert_eq!(
+        caps,
+        Err(rustix::io::Errno::NODATA),
+        "{crun} must hold no file capability: the controls would otherwise show them, not AppArmor"
+    );
+}
+
+/// The counter-run of control (b): the same copy of `crun`, the same container, with the
+/// restriction OFF, starts it. Together with (b) this makes the sysctl the only variable:
+/// the copy is refused with it on and runs with it off, so the refusal is the restriction's.
+/// The CI job runs this one alone, after the others, with the sysctl set to `0` and restored
+/// afterwards; it refuses to run with the restriction on, so the main step skips it by
+/// name (`counter_run`).
+#[tokio::test]
+#[ignore = "needs root, crun, busybox, a job user and kernel.apparmor_restrict_unprivileged_userns=0"]
+async fn counter_run_a_copy_of_crun_starts_the_container_when_the_restriction_is_off() {
+    assert_eq!(
+        userns_restriction(),
+        "0",
+        "the counter-run is the restriction off"
+    );
+    let dir = world_dir("js-b-copybin-off");
+    let copy = dir.join("crun");
+    fs::copy(var("JS_B_CRUN"), &copy).unwrap();
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o755)).unwrap();
+    let run = run_container("crun-copy-off", &copy).await;
+    println!("crun copy without the restriction: {}", run.said);
+    assert_eq!(run.ended, Ok(Ended::Exited(0)), "{}", run.said);
+    assert_eq!(run.stdout.lines().count(), 4, "{}", run.said);
+}
+
 /// Every program the backend starts runs as the job user, from the backend and not from
 /// a hook of the caller: a stand-in `crun` records, for each verb (`kill`, `delete` and a
 /// helper `run`), the ids and groups it runs with and its environment. All of them are the
