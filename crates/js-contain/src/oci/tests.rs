@@ -618,6 +618,70 @@ async fn a_failed_fetch_is_reported_as_it_was_and_leaves_nothing() {
     assert!(shown.contains(&image.reference), "{shown}");
 }
 
+/// A runtime that is a script: for every `crun run` it appends to `log` the helper's id,
+/// and, for an unpack, the mode and owner of each stage directory in `images` at that
+/// moment (what the helper finds when it starts). `fail` is a `case` pattern of helper ids
+/// that exit 1.
+fn scripted_runtime(dir: &Path, images: &Path, fail: &str) -> PathBuf {
+    let path = dir.join("runtime.sh");
+    let log = dir.join("runs.log");
+    let script = format!(
+        "#!/bin/sh\nfor a in \"$@\"; do last=$a; done\necho \"$last\" >> {log}\n\
+         case \"$last\" in\n  helper-unpack-*) stat -c 'stage %a %u' {images}/.stage-* >> {log} \
+         2>/dev/null;;\nesac\ncase \"$last\" in\n  {fail}) exit 1;;\nesac\nexit 0\n",
+        log = log.display(),
+        images = images.display(),
+    );
+    std::fs::write(&path, script).expect("runtime");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
+}
+
+/// The lines a [`scripted_runtime`] logged.
+fn runs(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("runs.log"))
+        .expect("the runtime ran")
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Catches an unpack stage that anyone but the helper's user can write: when the helper
+/// container starts its unpack, the stage directory it was given is not writable by group
+/// or others (a local account could then rename the `rootfs` the helper makes and put its
+/// own tree in the image's place, or pre-create it).
+#[tokio::test]
+async fn the_unpack_stage_is_not_group_or_other_writable_when_the_helper_starts() {
+    let dir = scratch("image-stage-mode");
+    let scratch = dir.join("scratch");
+    let runtime = scripted_runtime(&dir, &scratch.join("oci-images"), "never");
+    let config = OciConfig {
+        runtime,
+        ..config(&dir, true)
+    };
+    let oci = Oci::on(
+        &config,
+        Scripted::new(Ok(vec!["0.tar".to_owned()])),
+        &scratch,
+        "/actions",
+        "x86_64",
+    )
+    .expect("started");
+    oci.check_pinned(&pinned()).await.expect("unpacked");
+    let stages: Vec<String> = runs(&dir)
+        .into_iter()
+        .filter(|l| l.starts_with("stage "))
+        .collect();
+    assert_eq!(
+        stages.len(),
+        1,
+        "the unpack helper saw one stage: {stages:?}"
+    );
+    let mode = u32::from_str_radix(stages[0].split(' ').nth(1).expect("mode"), 8).expect("octal");
+    assert_eq!(mode & 0o022, 0, "the stage is writable by others: {mode:o}");
+    assert_ne!(mode & 0o200, 0, "its owner can write it: {mode:o}");
+}
+
 /// Catches a failed unpack reported as success, a fetch's blobs kept after it, and the
 /// failure reported without the helper's words. The runtime that exits 1 fails the unpack
 /// and the removal of its stage alike; the removal's failure does not hide the unpack's.
