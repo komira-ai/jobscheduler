@@ -107,6 +107,19 @@
 //! file never held is found pending (or missing) and resolved by observing it, which is
 //! why a start is never called before its pending record is written.
 //!
+//! # Slow steps
+//!
+//! Every save writes, fsyncs and renames the file, and a caller holds the table's lock
+//! meanwhile, so a slow disk stalls every call on the table. [`Timings`] times each save
+//! on a monotonic clock ([`SystemMonotonic`] unless [`LeaseTable::watch_saves`] gives
+//! another) under the step that made it (`open`, `acquire`, `acquire-settled`, `renew`,
+//! `release`, `release-settled`, `tick`), and the server's handlers time their wait for
+//! the table's lock under `wait-` and the call's name. A step that takes over one second
+//! (exactly one second is not) is logged as a warning, `slow lease step`, naming the
+//! operation and `took_ms`. [`Timings::report`] gives, per operation, how many steps were
+//! timed, how many took over a second and the longest, whether or not any was slow, and
+//! how many have begun and not ended (a step stuck at this moment).
+//!
 //! # The lock
 //!
 //! The lock beside the file is an advisory lock (`flock`) on `<file>.lock`. It keeps
@@ -166,12 +179,14 @@ mod reservations;
 mod state;
 mod store;
 mod table;
+mod timings;
 mod types;
 
-pub use clock::{Clock, ManualClock, SystemClock, Timestamp};
+pub use clock::{Clock, ManualClock, Monotonic, SystemClock, SystemMonotonic, Timestamp};
 pub use error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError, SettingsError};
 pub use state::LeaseState;
 pub use table::{LeaseTable, read_bookings};
+pub use timings::{Timer, Timings};
 pub use types::{
     Booking, Boot, Exclusion, ExclusionEnd, Held, Lease, LeaseInfo, ReleaseOutcome,
     ReservationRecord, Settings, TickReport,

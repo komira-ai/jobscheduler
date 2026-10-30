@@ -15,6 +15,7 @@ js-lease = { path = "../js-lease" }
 js-pool-static = { path = "../js-pool-static" }
 js-provider = { path = "../js-provider" }
 js-types = { path = "../js-types" }
+js-usage = { path = "../js-usage" }
 js-whole = { path = "../js-whole" }
 getrandom.workspace = true
 sha2.workspace = true

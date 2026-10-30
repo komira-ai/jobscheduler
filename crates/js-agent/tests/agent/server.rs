@@ -537,3 +537,40 @@ impl Transport for Spying {
         self.inner.adopt_credential(secret)
     }
 }
+
+/// Records the body of every heartbeat the agent posts.
+#[derive(Clone, Default)]
+pub struct Recorder(pub Arc<Mutex<Vec<Value>>>);
+
+struct Recording {
+    inner: Box<dyn Transport>,
+    posted: Arc<Mutex<Vec<Value>>>,
+}
+
+impl Connector for Recorder {
+    fn connect(
+        &self,
+        server: &str,
+        token_file: &Path,
+        ca_cert: Option<&Path>,
+    ) -> Result<Box<dyn Transport>, ClientError> {
+        let inner = Dialer.connect(server, token_file, ca_cert)?;
+        Ok(Box::new(Recording {
+            inner,
+            posted: self.0.clone(),
+        }))
+    }
+}
+
+impl Transport for Recording {
+    fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
+        if path == HEARTBEAT_PATH {
+            self.posted.lock().unwrap().push(body.clone());
+        }
+        self.inner.post(path, body)
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.inner.adopt_credential(secret)
+    }
+}

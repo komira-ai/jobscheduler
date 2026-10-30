@@ -264,8 +264,9 @@ pub trait ContainerRuntime {
     /// of a container that runs, or `None` when the runtime cannot say: the container is
     /// not in the agent's `/proc`, its control group is not the unified one, or it lies
     /// outside the control group the agent was told holds its containers. The lifecycle
-    /// asks once, when a job starts or is adopted, and a lease with no control group is
-    /// simply not sampled. A runtime with no control groups keeps the default.
+    /// asks when a job starts or is adopted and, for a run it started, again at every
+    /// usage window until the runtime can say (`Lifecycle::find_cgroups`); a lease with no
+    /// control group is not sampled. A runtime with no control groups keeps the default.
     fn cgroup(&mut self, _id: &ContainerId) -> Option<PathBuf> {
         None
     }

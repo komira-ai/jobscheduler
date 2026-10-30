@@ -15,10 +15,33 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--listen`, `--state-file`, `--boot`, `--default-ttl`, `--max-ttl`, `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
 | `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout` | `server.<name>`, same defaults |
 | `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, same defaults; refused unless a pool registers agents |
+| `--usage-db`, `--usage-off`, `--profile-store-bytes` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, same defaults and rules (`usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1) |
 | `--token-file` | `server.client_token_file` |
 | `--pool-config` | a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` |
-| `--agent-pool-config` | a `[[pool]]` with an elastic provider (the pool's shape, caps and timing are its keys) |
+| `--agent-pool-config` | a `[[pool]]` with `kind = "joined"` for machines started by hand (the pool's shape and timing are its keys), or with an elastic provider for machines the server launches |
 | `--agent-token-file` | `join_token_file` of that pool |
+
+A pool of hand-joined agents is one `[[pool]]` of kind `joined`. It launches nothing, so it has no `provider`, `network`, `launch`,
+`max_instances`, `idle`, `boot_timeout` or spend key, and each of those is refused by name. It registers agents, so it counts as the one
+pool that may; `server.agent_listen` is required as for an elastic pool.
+
+```toml
+[[pool]]
+kind  = "joined"
+name  = "nodes"                       # the `pool` of a hello, and the `provider` of a one-time token
+class = "whole-node"
+exec  = "container"                   # optional; absent or "none": no host contract
+shape = { cpu_millis = 16000, memory_bytes = 68719476736 }   # optional keys: gpus, gpu_class
+capabilities = { os = "linux", arch = "x86_64" }               # optional; as the agent pool file's [capabilities]
+max_machines    = 6                   # required; from 1 to 262144, as in the agent pool file
+memory_schedulable_percent = 90          # optional; from 1 to 100, default 100: the share of the shape's memory the pool books
+join_token_file = "/run/credentials/js/join-token"           # optional shared pool token
+heartbeat_interval = "10s"            # optional; as are grace ("1m") and lost_retention ("24h")
+```
+
+A node joins with a one-time token (the mint refuses any other `provider` than the pool's name with a 400): `POST /v1/agent/join-tokens` with the client token and `{"provider": "nodes", "instance_id": "node-1"}`
+mints it, and the node's `--instance-file` holds `nodes:node-1`. The first hello swaps the token for a host credential. What the old
+`--agent-pool-config` file had and this kind lacks: the whole-node keys (`max_whole_node`, `drain_after`, ...).
 
 **Memory headroom.** One key, `memory_schedulable_percent`, a whole number from 1 to 100 (default 100), sets how much of the memory an
 operator configured the server books; there is no other memory knob. It is written in three places, each in its own format and read the
