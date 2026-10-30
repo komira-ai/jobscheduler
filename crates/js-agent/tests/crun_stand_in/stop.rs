@@ -34,6 +34,8 @@ fn a_stop_gives_a_job_that_handles_sigterm_the_chance_to_end() {
     let id = started_and_up(&node, &mut runtime, "r1-hold");
     let ctr = node.cgroup_of(&id.0).join("ctr");
     assert_eq!(runtime.cgroup(&id), None);
+    assert_eq!(runtime.poll(&id), Ok(Status::Running));
+    assert!(!runtime.supports_gpus());
     std::fs::create_dir(&ctr).expect("the container's cgroup");
     assert_eq!(runtime.cgroup(&id), Some(ctr));
     assert_eq!(runtime.list_labelled().expect("lists")[0].running_ms, 0);
@@ -125,4 +127,42 @@ fn a_removal_that_fails_leaves_the_container_to_be_removed_again() {
     std::fs::set_permissions(&node.scratch, std::fs::Permissions::from_mode(0o755)).expect("mode");
     assert_eq!(runtime.remove(&id), Ok(()));
     assert!(runtime.list_labelled().expect("lists").is_empty());
+}
+
+/// Proves removing a container that still runs ends it first: a job that holds until the
+/// lease's `cgroup.kill` is written is removed without a stop, the kill ends it within the
+/// wait, and nothing of the lease is left. Catches a removal that leaves a process behind
+/// or waits for one.
+#[test]
+fn removing_a_run_that_runs_kills_it_first() {
+    let node = Node::new("stop-remove-running");
+    let mut runtime = node.open();
+    let id = started_and_up(&node, &mut runtime, "r6-stubborn");
+    assert_eq!(runtime.remove(&id), Ok(()));
+    assert_eq!(runtime.poll(&id), Ok(Status::Gone));
+    assert!(!node.lease_of(&id.0).exists());
+}
+
+/// Proves a cgroup that cannot be removed (a container cgroup with something left in it)
+/// fails the removal saying so and keeps the container, which is removed once the cgroup
+/// can be. Catches a lease forgotten while a cgroup is left.
+#[test]
+fn a_cgroup_that_cannot_be_removed_keeps_the_container() {
+    let node = Node::new("stop-cgroup-left");
+    let mut runtime = node.open();
+    let id = runtime
+        .create_and_start(&node.spec("r7-exit"))
+        .expect("started");
+    runtime.wait_ended(&id);
+    let stray = node.cgroup_of(&id.0).join("ctr");
+    std::fs::create_dir(&stray).expect("a container cgroup");
+    std::fs::write(stray.join("stray"), b"").expect("something left");
+    let why = runtime.remove(&id).expect_err("not removed");
+    assert!(
+        why.to_string().contains("remove the lease's cgroup"),
+        "{why}"
+    );
+    assert_eq!(runtime.list_labelled().expect("lists").len(), 1);
+    std::fs::remove_file(stray.join("stray")).expect("clear");
+    assert_eq!(runtime.remove(&id), Ok(()));
 }
