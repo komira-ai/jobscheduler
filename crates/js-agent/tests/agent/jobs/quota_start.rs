@@ -126,14 +126,14 @@ fn a_passing_probe_advertises_the_quota_and_its_default() {
     }
 }
 
-/// Asserts the checks of the new flags: both need `--scratch-quota`; the default is from 1
+/// Asserts the checks of the new flags: all need `--scratch-quota`; the default is from 1
 /// to 65535 GiB (its bytes must fit the wire's disk limit) and the inode limit from 1 to
-/// 4294967295; the edges are accepted. Each refusal ends the agent with status 2, names the
+/// 4294967295, the failures from 1 to 1000000; the edges are accepted. Each refusal ends the agent with status 2, names the
 /// flag, and sends nothing. It catches a flag that does nothing without `--scratch-quota`,
 /// a default of 0 (which would book no disk), and one whose bytes overflow the wire.
 #[test]
 fn the_quota_flags_are_checked() {
-    let refused: [(&[&str], &str); 6] = [
+    let refused: &[(&[&str], &str)] = &[
         (
             &["--scratch-default-gib", "2"],
             "--scratch-default-gib: needs --scratch-quota",
@@ -158,8 +158,20 @@ fn the_quota_flags_are_checked() {
             &["--scratch-quota", "--scratch-max-inodes", "4294967296"],
             "--scratch-max-inodes: 4294967296 is not from 1 to 4294967295",
         ),
+        (
+            &["--scratch-quota-failures", "3"],
+            "--scratch-quota-failures: needs --scratch-quota",
+        ),
+        (
+            &["--scratch-quota", "--scratch-quota-failures", "0"],
+            "--scratch-quota-failures: 0 is not from 1 to 1000000",
+        ),
+        (
+            &["--scratch-quota", "--scratch-quota-failures", "1000001"],
+            "--scratch-quota-failures: 1000001 is not from 1 to 1000000",
+        ),
     ];
-    for (n, (extra, said)) in refused.into_iter().enumerate() {
+    for (n, (extra, said)) in refused.iter().copied().enumerate() {
         let (ran, hello) = start(&format!("quota-flag-{n}"), FakeMachine::new(), 10, extra);
         assert_eq!(ran.status(), code(2), "{extra:?}: {}", ran.err);
         assert!(ran.err.contains(said), "{extra:?}: {}", ran.err);
@@ -171,6 +183,8 @@ fn the_quota_flags_are_checked() {
         "65535",
         "--scratch-max-inodes",
         "4294967295",
+        "--scratch-quota-failures",
+        "1000000",
     ];
     let (ran, hello) = start("quota-flag-edges", FakeMachine::new(), 10, &edges);
     assert_ne!(hello, Value::Null, "{}", ran.err);
@@ -230,6 +244,23 @@ fn server_admits(hello: &Hello) -> usize {
         .count()
 }
 
+/// Asserts that a pool that books no disk and names no quota refuses the hello of an agent
+/// that enforces one (`shape-not-accepted`): the pool would book 0 for runs the agent books
+/// at its default, so the server would admit what the agent refuses.
+fn plain_pool_refuses(hello: &Hello) {
+    let resources = Resources::new(1000, 1 << 30, 0, None).unwrap();
+    let caps: BTreeMap<String, String> = [("os".to_owned(), "linux".to_owned())].into();
+    let class = ResourceClass::new(ClassId::new("box").unwrap(), Admission::BookAll, 0);
+    let name = ProviderId::new(&hello.pool).unwrap();
+    let config = PoolConfig::new(name, class, Shape::new(resources, caps), 2);
+    let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
+    let registry = Registry::with_sessions(config, clock, SequentialSessions::new());
+    let refused = registry
+        .hello(hello, &Credential::of_token("t"))
+        .unwrap_err();
+    assert_eq!(refused, js_registry::Refusal::ShapeNotAccepted);
+}
+
 /// A run of a tenth of a CPU and a MiB, with no `disk_bytes`.
 fn small_job(run: &str) -> js_agent_wire::JobSpec {
     let mut spec = job(run);
@@ -264,7 +295,8 @@ fn agent_starts(hello: &Hello, extra: &[&str]) -> usize {
 /// sends (its capabilities and shape, read from the hello itself), the number of runs
 /// without `disk_bytes` that the server's registry admits onto the host equals the number
 /// the agent's lifecycle starts, for three offers and two defaults, and both are the offer
-/// divided by the default. A server that books another number for a run without disk (say,
+/// divided by the default, and a pool that books no disk and names no quota refuses that
+/// hello instead of booking 0 for it. A server that books another number for a run without disk (say,
 /// 0, or the default in other units) would send a run the agent then refuses; an agent that
 /// booked less would run what the server believes does not fit.
 #[test]
@@ -284,6 +316,7 @@ fn server_never_admits_what_agent_refuses() {
         assert_ne!(sent, Value::Null, "{}", ran.err);
         let hello: Hello = serde_json::from_value(sent).unwrap();
         assert_eq!(hello.shape.disk_bytes, free_gib * GIB);
+        plain_pool_refuses(&hello);
         let (server, agent) = (server_admits(&hello), agent_starts(&hello, extra));
         assert_eq!(
             (server, agent),

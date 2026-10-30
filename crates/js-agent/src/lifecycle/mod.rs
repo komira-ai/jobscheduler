@@ -254,10 +254,20 @@ pub mod code {
     /// the job's slot is not freed.
     pub const OWED_FAILED: &str = "owed-record-failed";
     /// The project id of a slot still holds usage (or its usage cannot be read), so the slot
-    /// takes no run: a run that wanted it was refused `no-capacity`. The slot is read again
-    /// at every step and is free once the usage is gone; it is reported when it is parked
-    /// and again when it is released.
+    /// takes no run. The slot is read again at every step and is free once the usage reads
+    /// zero; it is reported when it is parked, and again every hour while it stays parked.
     pub const QUOTA_SLOT_BUSY: &str = "quota-slot-busy";
+    /// A parked slot read zero usage again and takes runs.
+    pub const QUOTA_SLOT_RELEASED: &str = "quota-slot-released";
+    /// A finished run's project still reads usage after its tree was removed (the file
+    /// system frees inodes in the background): the slot stays held and is read again at
+    /// every step.
+    pub const QUOTA_USAGE_HELD: &str = "quota-usage-held";
+    /// The quota failed several calls in a row and the probe no longer finds project quota:
+    /// no run starts until it works again. Reported again every minute.
+    pub const QUOTA_UNHEALTHY: &str = "quota-unhealthy";
+    /// An unhealthy quota probed `Project` again.
+    pub const QUOTA_RECOVERED: &str = "quota-recovered";
     /// The quota of a finished run's scratch directory could not be cleared. The tree is
     /// gone; the slot stays held and the clear is tried again at every step.
     pub const QUOTA_CLEAR_FAILED: &str = "quota-clear-failed";
@@ -552,6 +562,9 @@ pub struct Local {
     /// `--scratch-max-inodes`, or [`DEFAULT_SCRATCH_MAX_INODES`]: the inode limit of a
     /// run. Meaningful with `--scratch-quota` only.
     pub scratch_max_inodes: u64,
+    /// `--scratch-quota-failures`, or [`DEFAULT_SCRATCH_QUOTA_FAILURES`]. Meaningful with
+    /// `--scratch-quota` only.
+    pub scratch_quota_failures: u32,
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
     /// `--run-files-root`, or the default under `/run` when that can be made; always none
@@ -576,6 +589,13 @@ pub struct Local {
 /// The GiB of scratch disk a run without `disk_bytes` books under `--scratch-quota` when
 /// `--scratch-default-gib` is not given.
 pub const DEFAULT_SCRATCH_GIB: u64 = 2;
+
+/// The failed quota calls in a row after which the quota is probed again, when
+/// `--scratch-quota-failures` is not given.
+pub const DEFAULT_SCRATCH_QUOTA_FAILURES: u32 = 3;
+
+/// The most `--scratch-quota-failures` takes.
+pub const MAX_SCRATCH_QUOTA_FAILURES: u32 = 1_000_000;
 
 /// The most GiB `--scratch-default-gib` takes: the bytes must fit the wire's disk limit.
 pub const MAX_SCRATCH_GIB: u64 = js_agent_wire::limits::MAX_DISK_BYTES >> 30;
@@ -740,13 +760,14 @@ impl Local {
                     .to_owned(),
             );
         }
-        let (default_gib, max_inodes) = scratch_quota_limits(cli)?;
+        let (default_gib, max_inodes, failures) = scratch_quota_limits(cli)?;
         Ok(Self {
             watch,
             mounts,
             scratch_quota: cli.scratch_quota,
             scratch_default_gib: default_gib,
             scratch_max_inodes: max_inodes,
+            scratch_quota_failures: failures,
             scratch,
             files,
             files_warning,
@@ -761,10 +782,11 @@ impl Local {
 /// The default GiB and the inode limit of `--scratch-quota`, checked: the two flags need
 /// `--scratch-quota`, the default is at least 1 GiB and its bytes fit the wire, and the
 /// inode limit is at least 1 and fits what the quota takes.
-fn scratch_quota_limits(cli: &Cli) -> Result<(u64, u64), String> {
+fn scratch_quota_limits(cli: &Cli) -> Result<(u64, u64, u32), String> {
     let given = [
         ("--scratch-default-gib", cli.scratch_default_gib),
         ("--scratch-max-inodes", cli.scratch_max_inodes),
+        ("--scratch-quota-failures", cli.scratch_quota_failures),
     ];
     if let Some((flag, _)) = given
         .iter()
@@ -785,7 +807,18 @@ fn scratch_quota_limits(cli: &Cli) -> Result<(u64, u64), String> {
             crate::quota::MAX_INODE_LIMIT
         ));
     }
-    Ok((gib, inodes))
+    let failures = cli
+        .scratch_quota_failures
+        .unwrap_or(u64::from(DEFAULT_SCRATCH_QUOTA_FAILURES));
+    let failures = u32::try_from(failures)
+        .ok()
+        .filter(|n| (1..=MAX_SCRATCH_QUOTA_FAILURES).contains(n))
+        .ok_or_else(|| {
+            format!(
+                "--scratch-quota-failures: {failures} is not from 1 to {MAX_SCRATCH_QUOTA_FAILURES}"
+            )
+        })?;
+    Ok((gib, inodes, failures))
 }
 
 impl Local {
@@ -798,6 +831,7 @@ impl Local {
             self.scratch_default_gib << 30,
             self.scratch_max_inodes,
         )
+        .with_max_failures(self.scratch_quota_failures)
     }
 
     /// Refuses a state root whose device number (`st_dev`) equals that of a mount root or

@@ -568,14 +568,8 @@ fn clear_removes_the_limits_then_the_project() {
     rig.quota.clear(&dir, project).unwrap();
     assert_eq!(
         rig.script.log(),
-        [
-            "mountinfo",
-            "rdev",
-            "set_limits",
-            "open_dir",
-            "get_attr",
-            "set_attr"
-        ]
+        ["set_limits", "open_dir", "get_attr", "set_attr"],
+        "the device found by the apply is remembered"
     );
     let attr = rig.script.st().attrs[&dir];
     assert_eq!((attr.projid, attr.xflags & XFLAG_PROJINHERIT), (0, 0));
@@ -619,4 +613,34 @@ fn clear_reports_each_failed_call() {
         rig.script.st().fail.clear();
         rig.quota.clear(&dir, project).unwrap();
     }
+}
+
+/// The mount table is read once for the calls after the probe or the first call, not by
+/// each of them (a restart reads the usage of thousands of slots), and a call that fails
+/// drops what was remembered, so the next one reads the table again. It catches a read of
+/// `/proc/self/mountinfo` per call, and a device remembered after the mount changed.
+#[test]
+fn the_device_is_read_once_and_forgotten_after_a_failed_call() {
+    let rig = Rig::new("device-cache");
+    let project = rig.project(4);
+    let reads = |rig: &Rig| {
+        rig.script
+            .log()
+            .iter()
+            .filter(|op| **op == "mountinfo")
+            .count()
+    };
+    for _ in 0..5 {
+        rig.quota.usage(project).unwrap();
+    }
+    assert_eq!(reads(&rig), 1);
+    rig.script.fail("get_quota");
+    assert!(rig.quota.usage(project).is_err());
+    rig.script.st().fail.clear();
+    rig.quota.usage(project).unwrap();
+    assert_eq!(reads(&rig), 2, "the failed call dropped it, once");
+    assert_eq!(rig.quota.probe().mode, Mode::Project);
+    assert_eq!(reads(&rig), 3, "a probe always reads");
+    rig.quota.usage(project).unwrap();
+    assert_eq!(reads(&rig), 3, "and what it found is used");
 }

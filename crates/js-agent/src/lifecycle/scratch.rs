@@ -70,7 +70,9 @@ impl ScratchRoot {
 
     /// A path directly below the root that names nothing and, as no run id starts with a dot,
     /// never will. The scratch quota's `clear` is given it for a project whose directory a
-    /// sweep removed: a directory that is gone is not opened, only the limits come off.
+    /// sweep removed: a directory that is gone is not opened, only the limits come off. If
+    /// something did stand there, `clear` opens it with `O_DIRECTORY | O_NOFOLLOW`
+    /// (`quota::sys`, `open_dir`), so a link is refused, never followed.
     pub(super) fn vanished(&self) -> PathBuf {
         self.path.join(".js-swept")
     }

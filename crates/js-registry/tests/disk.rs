@@ -125,14 +125,15 @@ fn default_change_does_not_rebook_live_run() {
 }
 
 /// Asserts that a pool with no disk (`disk_bytes` 0) that does not name `scratch-quota`
-/// books none for any run, even on a host that reports the quota and a default: three
-/// runs without disk are queued where one default would not fit zero. A job that sets
+/// books none for any run of a host that reports no quota: three runs without disk are
+/// queued where one default would not fit zero (a host that reports a quota is refused at
+/// the hello, see `the_hello_floor_includes_disk`). A job that sets
 /// its own `disk_bytes` is refused `limits-exceed-shape`, since the pool books none. It
 /// catches a booking of the default against a shape of zero, which would refuse every run
-/// of an existing pool the day a host starts reporting the capability.
+/// of an existing pool.
 #[test]
 fn non_quota_pool_zero_disk_books_none() {
-    let hello = host_hello(0, Some("project"), Some("10"), &[]);
+    let hello = host_hello(0, None, None, &[]);
     let fx = leased(pool(0, false), &hello);
     for run in ["r1", "r2", "r3"] {
         assert_eq!(queue(&fx, run, None), Ok(()), "{run}");
@@ -212,7 +213,23 @@ fn the_hello_floor_includes_disk() {
     assert_eq!(legacy, Refusal::ShapeNotAccepted);
     assert!(join(pool(25 * GIB, true), 25 * GIB).is_ok());
     assert!(join(pool(25 * GIB, true), 30 * GIB).is_ok());
-    assert!(join(pool(0, false), 0).is_ok());
+    // A pool that books no disk and names no quota joins a host that reports none, and
+    // refuses one that reports a quota (the pool would book 0 where the host books its
+    // default).
+    let plain = fixture_of(pool(0, false));
+    assert!(
+        plain
+            .hello(&host_hello(0, None, None, &[]), &cred("t"))
+            .is_ok()
+    );
+    assert_eq!(
+        join(pool(0, false), 0).unwrap_err(),
+        Refusal::ShapeNotAccepted
+    );
+    // A quota that reports no usable default books nothing on either side.
+    let unusable = fixture_of(pool(0, false));
+    let hello = host_hello(0, Some("project"), Some("0"), &[]);
+    assert!(unusable.hello(&hello, &cred("t")).is_ok());
 }
 
 /// Asserts that a quota pool built in code with no disk is refused by `checked`, as the

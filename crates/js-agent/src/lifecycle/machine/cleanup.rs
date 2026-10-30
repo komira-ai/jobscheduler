@@ -104,6 +104,8 @@ impl Lifecycle {
             checks,
             taint,
             slots,
+            quota_health,
+            clock,
             ..
         } = self;
         let job = &mut jobs[index];
@@ -140,15 +142,41 @@ impl Lifecycle {
                 },
                 Stage::Scratch => match remove_run_dirs(config, &run_id) {
                     Ok(()) => {
-                        // The tree is gone; now the bound comes off its project. A failure
-                        // holds the slot (the project may still carry the limits) and is
-                        // tried again at the next step, together with the removal, which
-                        // finds nothing to do. It does not taint: nothing is left on disk.
-                        if let (Some(quota), Some(slot)) = (&config.quota, job.slot)
-                            && let Err(why) = quota.clear(&config.scratch.of(&run_id), slot)
-                        {
-                            job.note(code::QUOTA_CLEAR_FAILED, why.to_string(), events);
-                            return;
+                        // The tree is gone; now the bound comes off its project, and the
+                        // slot stays held until the project reads no usage (the file system
+                        // frees the inodes of a removed tree in the background, and a run
+                        // that took the slot sooner would be counted with them). The booked
+                        // bytes stay held with it: the server counts them as free once the
+                        // run has ended, so holding them a little longer only makes the
+                        // agent refuse later than the server admits for the seconds the
+                        // lag lasts, the same as for every other booked dimension, which
+                        // are held until this cleanup has passed. A failure is tried again
+                        // at the next step, together with the removal, which finds nothing
+                        // to do. None of it taints: nothing is left on disk.
+                        if let (Some(quota), Some(slot)) = (&config.quota, job.slot) {
+                            let dir = config.scratch.of(&run_id);
+                            let now = clock.now_ms();
+                            if let Err(why) = quota.clear(&dir, slot) {
+                                quota_health.failed(quota, now, events);
+                                job.note(code::QUOTA_CLEAR_FAILED, why.to_string(), events);
+                                return;
+                            }
+                            match quota.usage(slot) {
+                                Ok(used) if used.is_zero() => quota_health.ok(),
+                                Ok(used) => {
+                                    let held = format!(
+                                        "the project still holds {} bytes in {} inodes",
+                                        used.bytes, used.inodes
+                                    );
+                                    job.note(code::QUOTA_USAGE_HELD, held, events);
+                                    return;
+                                }
+                                Err(why) => {
+                                    quota_health.failed(quota, now, events);
+                                    job.note(code::QUOTA_CLEAR_FAILED, why.to_string(), events);
+                                    return;
+                                }
+                            }
                         }
                         events.push(Event::ScratchRemoved {
                             run_id: run_id.clone(),

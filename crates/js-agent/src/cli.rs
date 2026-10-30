@@ -113,6 +113,12 @@ pub struct Cli {
     /// exhaust the file system's inodes. From 1; default 1000000. Needs `--scratch-quota`.
     #[arg(long, value_name = "N")]
     pub scratch_max_inodes: Option<u64>,
+    /// The quota calls (`apply`, a usage read, `clear`) that may fail in a row before the
+    /// agent probes the scratch root again; if it no longer enforces project quota the agent
+    /// starts no run until it does, and says so every minute. From 1; default 3. Needs
+    /// `--scratch-quota`.
+    #[arg(long, value_name = "N")]
+    pub scratch_quota_failures: Option<u64>,
     /// The most GiB of the scratch root's free disk the agent keeps back from jobs: the
     /// disk it offers is the free space of that volume when the agent starts minus this
     /// (0 when this is more). Needs `--scratch-root`. Without it, the free space is offered.

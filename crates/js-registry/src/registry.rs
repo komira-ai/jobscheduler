@@ -574,6 +574,9 @@ impl Registry {
     ///
     /// A pool that names `scratch-quota` also refuses (`shape-not-accepted`) a host whose
     /// quota default does not count (see `quota_default`) or is more than the pool's disk.
+    /// A pool that books no disk and does not name `scratch-quota` refuses (also
+    /// `shape-not-accepted`) a host that reports a quota with a default that counts: the
+    /// pool would book nothing for runs the host books at its default.
     ///
     /// The runs a hello lists as held are never adopted. A run the registry holds a live
     /// record of stays as it is, now listed by the host; every other listed run is
@@ -637,6 +640,17 @@ impl Registry {
         let default = quota_default(&hello.capabilities);
         let fits = default.is_some_and(|bytes| bytes <= floor.resources().disk_bytes());
         if [quota_pool, !fits].into_iter().all(|ok| ok) {
+            return Err(Refusal::ShapeNotAccepted);
+        }
+        // A host that enforces a quota books a default for every run without disk, so a
+        // pool that books no disk (and does not name `scratch-quota`) would count 0 for
+        // runs the host counts at its default, and the server would admit what the agent
+        // refuses. Such a host is refused rather than booked wrongly.
+        let books_no_disk = floor.resources().disk_bytes() == 0;
+        if [!quota_pool, books_no_disk, default.is_some()]
+            .into_iter()
+            .all(|ok| ok)
+        {
             return Err(Refusal::ShapeNotAccepted);
         }
         let room = state.records.len() < config.max_machines();

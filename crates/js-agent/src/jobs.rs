@@ -65,6 +65,7 @@ pub fn start(
         scratch_quota: _,
         scratch_default_gib: _,
         scratch_max_inodes: _,
+        scratch_quota_failures: _,
         container,
         state,
         watch,

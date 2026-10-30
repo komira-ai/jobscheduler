@@ -14,6 +14,7 @@
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use super::mountinfo;
 use super::sys::{Kernel, PROJECT_ACCT_AND_ENFD, Sys, XFLAG_PROJINHERIT};
@@ -27,6 +28,10 @@ pub struct XfsQuota {
     sys: Box<dyn Sys>,
     root: PathBuf,
     ids: ProjectIds,
+    /// The device the probe (or the first call after it) found, so the mount table is not
+    /// read again by every call: a restart reads the usage of thousands of slots. It is
+    /// forgotten when a call that uses it fails, and found again by the next one.
+    device: Mutex<Option<PathBuf>>,
 }
 
 impl XfsQuota {
@@ -37,7 +42,12 @@ impl XfsQuota {
     }
 
     fn with_sys(sys: Box<dyn Sys>, root: PathBuf, ids: ProjectIds) -> Self {
-        Self { sys, root, ids }
+        Self {
+            sys,
+            root,
+            ids,
+            device: Mutex::new(None),
+        }
     }
 
     /// The limits the project has, in bytes and inodes; 0 is no limit. For tests and for an
@@ -91,8 +101,21 @@ impl XfsQuota {
         }
     }
 
+    /// The device of the root: the one remembered, or found from the mount table now.
     fn device(&self) -> Result<PathBuf, QuotaError> {
-        self.find_device().map_err(QuotaError::Unsupported)
+        let mut known = self.device.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(device) = known.as_ref() {
+            return Ok(device.clone());
+        }
+        let found = self.find_device().map_err(QuotaError::Unsupported)?;
+        *known = Some(found.clone());
+        Ok(found)
+    }
+
+    /// Drops the remembered device, after a call that used it failed (the mount may have
+    /// changed): the next call reads the mount table again.
+    fn forget_device(&self) {
+        *self.device.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// The limits and usage of a project; a project the file system has no record of
@@ -100,7 +123,12 @@ impl XfsQuota {
     fn quota_of(&self, device: &Path, project: ProjectId) -> Result<super::sys::Dq, QuotaError> {
         match self.sys.get_quota(device, project.get()) {
             Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
-            other => io_err(other, "read the project quota"),
+            other => {
+                if other.is_err() {
+                    self.forget_device();
+                }
+                io_err(other, "read the project quota")
+            }
         }
     }
 
@@ -125,7 +153,10 @@ impl XfsQuota {
 
     /// The whole of the probe: why it fails, or the device that carries the quota.
     fn check(&self) -> Result<PathBuf, String> {
-        let device = self.find_device()?;
+        // The probe always reads the mount table, and what it finds is what later calls use.
+        let found = self.find_device();
+        *self.device.lock().unwrap_or_else(PoisonError::into_inner) = found.as_ref().ok().cloned();
+        let device = found?;
         let flags = self
             .sys
             .quota_flags(&device)
@@ -192,11 +223,13 @@ impl ScratchQuota for XfsQuota {
             return Err(QuotaError::NotEmpty(run_dir.to_owned()));
         }
         self.assign(&dir, project)?;
-        io_err(
-            self.sys
-                .set_limits(&device, project.get(), blocks, inode_limit),
-            "set the limits of the project",
-        )
+        let set = self
+            .sys
+            .set_limits(&device, project.get(), blocks, inode_limit);
+        if set.is_err() {
+            self.forget_device();
+        }
+        io_err(set, "set the limits of the project")
     }
 
     fn usage(&self, project: ProjectId) -> Result<Usage, QuotaError> {
@@ -215,10 +248,11 @@ impl ScratchQuota for XfsQuota {
         // the quota files of the whole file system, every run's project, and only works
         // with quota accounting off. The project's record stays, with no limit and the
         // usage it still has, which is what `usage` reads before the id is reused.
-        io_err(
-            self.sys.set_limits(&device, project.get(), 0, 0),
-            "remove the limits of the project",
-        )?;
+        let off = self.sys.set_limits(&device, project.get(), 0, 0);
+        if off.is_err() {
+            self.forget_device();
+        }
+        io_err(off, "remove the limits of the project")?;
         let dir = match self.sys.open_dir(run_dir) {
             // The directory is gone, and the project id with it.
             Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(()),

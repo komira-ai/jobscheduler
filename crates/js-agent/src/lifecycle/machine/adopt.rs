@@ -10,6 +10,7 @@ use super::job::{
     may_change_host, slot_label,
 };
 use super::{Lifecycle, MAX_JOBS, SLOTS, Slots};
+use crate::lifecycle::quota::QuotaHealth;
 use crate::lifecycle::runtime::{ContainerRuntime, Found, RuntimeError, Status};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{CheckHook, Clock, Config, Event, Finding, code, label};
@@ -84,6 +85,8 @@ impl Lifecycle {
             taint,
             exclusive: None,
             adopted_leases: Vec::new(),
+            quota_health: QuotaHealth::default(),
+            parked_reminded_ms: None,
         };
         let mut events = Vec::new();
         this.owed_at_start(&mut events);
