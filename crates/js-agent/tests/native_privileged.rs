@@ -27,7 +27,7 @@ use std::time::Duration;
 use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status};
 use js_agent::native::{NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
-use js_mac_pool::seatbelt::{AbsPath, Net};
+use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
 use js_mac_session::client::Client;
 
 /// The variable naming the directory the tests work in.
@@ -144,6 +144,7 @@ fn runtime(fixture: &Fixture) -> NativeRuntime {
         net: Net::Off,
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![AbsPath::new(&fixture.state).unwrap()],
+        read_model: ReadModel::Open,
     };
     let term = TERMS.fetch_add(1, Ordering::SeqCst);
     NativeRuntime::open(Client::new(&fixture.socket), config, term).unwrap()
