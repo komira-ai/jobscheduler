@@ -14,11 +14,11 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use js_agent::Cli;
-use js_agent::crun_host::{CrunHost, Piece, Report, Request, check, flags, start};
+use js_agent::crun_host::{CrunHost, Piece, Report, Request, check, flags, gate, start};
 use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
 
-use crate::support::{FakeCommands, code, linux_host, run_scripted, welcome};
+use crate::support::{FakeCommands, code, linux_host, mac_host, run_scripted, welcome};
 
 const USER: &str = "jsjob";
 
@@ -616,4 +616,121 @@ fn the_agent_exits_2_naming_the_missing_crun() {
         assert!(ran.err.contains(piece), "{piece} in {}", ran.err);
     }
     assert_eq!(sent.borrow().len(), 0);
+}
+
+/// An id tool that is not executable is named as that (not as a missing setuid bit), and a
+/// passwd with a line too short to be an entry does not hide the job user after it.
+#[test]
+fn an_id_tool_that_cannot_run_is_named_and_a_short_passwd_line_is_skipped() {
+    let fx = Fixture::new("crun-host-tool-mode");
+    set_mode(&fx.path("bin/newgidmap"), 0o644);
+    let report = fx.check();
+    assert_eq!(pieces(&report), vec![Piece::NewGidMap]);
+    assert!(
+        report.missing[0].what.contains("not executable"),
+        "{}",
+        report.missing[0]
+    );
+    set_mode(&fx.path("bin/newgidmap"), 0o4755);
+    let passwd = &fx.host.ids.passwd;
+    write(
+        passwd,
+        &format!("broken\nshort:x:1\n{USER}:x:990:991::/:/bin/sh\n"),
+    );
+    assert_eq!(pieces(&fx.check()), vec![]);
+}
+
+/// A scratch root that is a file, not a directory, is named as the scratch root.
+#[test]
+fn a_scratch_root_that_is_a_file_is_named() {
+    let fx = Fixture::new("crun-host-scratch-file");
+    fs::remove_dir(&fx.scratch).unwrap();
+    fs::write(&fx.scratch, "").unwrap();
+    let report = fx.check();
+    assert_eq!(pieces(&report), vec![Piece::ScratchRoot]);
+    assert!(report.missing[0].what.contains("not a directory"));
+}
+
+/// Each piece is named in the refusal by its own words, and no two share one: the operator
+/// reads these to find what to fix.
+#[test]
+fn every_piece_has_its_own_name() {
+    let all = [
+        Piece::Crun,
+        Piece::CrunVersion,
+        Piece::NewUidMap,
+        Piece::NewGidMap,
+        Piece::JobUser,
+        Piece::SubUid,
+        Piece::SubGid,
+        Piece::StateRoot,
+        Piece::ScratchRoot,
+        Piece::SearchableAncestor,
+        Piece::CgroupDelegation,
+        Piece::AppArmorProfile,
+    ];
+    let mut names: Vec<&str> = all.iter().map(|piece| piece.name()).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), all.len());
+}
+
+/// `flags` is for `--runtime crun` only: without it the answer is an error, not a request.
+#[test]
+fn flags_without_the_crun_runtime_is_an_error() {
+    let cli = cli(&["--runtime", "docker", "--container-bin", "/usr/bin/docker"]);
+    assert_eq!(
+        flags(&cli).map(|_| ()).unwrap_err(),
+        "--runtime crun: not given"
+    );
+}
+
+/// `gate` gives the refusal for an incomplete host, and for a complete one the warnings (written
+/// to the error stream) and the reason a build that cannot start a crun job ends with status 2.
+#[test]
+fn the_gate_ends_the_agent_with_the_refusal_or_with_the_missing_wiring() {
+    let fx = Fixture::new("crun-host-gate");
+    let args = [
+        "--runtime",
+        "crun",
+        "--job-user",
+        USER,
+        "--crun-bin",
+        fx.crun.to_str().unwrap(),
+        "--state-root",
+        fx.state.to_str().unwrap(),
+        "--scratch-root",
+        fx.scratch.to_str().unwrap(),
+    ];
+    let mut err = Vec::new();
+    fs::remove_dir(&fx.state).unwrap();
+    let refused = gate(&cli(&args), &fx.host, &fx.commands, &mut err);
+    assert!(refused.contains("state root:"), "{refused}");
+    assert!(err.is_empty());
+    fs::create_dir(&fx.state).unwrap();
+    set_mode(&fx.state, 0o700);
+    let wiring = gate(&cli(&args), &fx.host, &fx.commands, &mut err);
+    assert!(
+        wiring.contains("does not start jobs with crun yet"),
+        "{wiring}"
+    );
+    let err = String::from_utf8(err).unwrap();
+    assert!(err.starts_with("js-agent: warning: --crun-bin "), "{err}");
+}
+
+/// A Mac is told `--runtime crun` is Linux only, before any host file is read.
+#[test]
+fn a_mac_refuses_the_crun_runtime() {
+    let (ran, _, _) = run_scripted(
+        &["--runtime", "crun", "--job-user", USER],
+        &mac_host(),
+        vec![welcome(1)],
+        1,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        ran.err.contains("--runtime crun: Linux only"),
+        "{}",
+        ran.err
+    );
 }

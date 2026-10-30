@@ -321,21 +321,21 @@ fn id_tools(host: &CrunHost, report: &mut Report) {
 /// distributions give the id tools in place of the setuid bit.
 fn has_file_capabilities(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt as _;
-    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    // SAFETY: `path` and the attribute name are NUL-terminated strings that outlive the
-    // call; a null buffer of length 0 asks only for the attribute's size, so nothing is
-    // written.
-    let size = unsafe {
-        libc::getxattr(
-            path.as_ptr(),
-            c"security.capability".as_ptr(),
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    size >= 0
+    // A path with a NUL cannot name a file: it holds no attribute.
+    std::ffi::CString::new(path.as_os_str().as_bytes()).is_ok_and(|path| {
+        // SAFETY: `path` and the attribute name are NUL-terminated strings that outlive
+        // the call; a null buffer of length 0 asks only for the attribute's size, so
+        // nothing is written.
+        let size = unsafe {
+            libc::getxattr(
+                path.as_ptr(),
+                c"security.capability".as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        size >= 0
+    })
 }
 
 /// The `(uid, gid)` of `name` in passwd-format `text`.
@@ -463,9 +463,8 @@ fn scratch_root(path: &Path, report: &mut Report) {
         ),
         Ok(_) => {}
     }
-    let Ok(canonical) = std::fs::canonicalize(path) else {
-        return;
-    };
+    // The path was just looked at; one that cannot be resolved now is searched as given.
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
     for ancestor in canonical.ancestors().skip(1) {
         // A directory that cannot be looked at cannot be searched either.
         let searchable = std::fs::metadata(ancestor).is_ok_and(|meta| meta.mode() & 0o001 != 0);
@@ -656,4 +655,28 @@ pub fn flags(cli: &Cli) -> Result<Request<'_>, String> {
         state_root,
         scratch_root,
     })
+}
+
+/// What the program does with `--runtime crun`, after the flags are known to be a pair: the
+/// host is checked and its warnings are written to `err`; the text returned is why the agent
+/// ends with status 2, the refusal naming each missing piece or, for a complete host, that
+/// this build cannot start a job with crun yet (the worker builds only the engine runtime,
+/// and an agent that went on would register and run no job).
+pub fn gate(
+    cli: &Cli,
+    host: &CrunHost,
+    commands: &dyn CommandRunner,
+    err: &mut dyn std::io::Write,
+) -> String {
+    match start(cli, host, commands) {
+        Err(why) => why,
+        Ok(warnings) => {
+            for warning in warnings {
+                let _ = writeln!(err, "js-agent: warning: {warning}");
+            }
+            "--runtime crun: the host has every piece, but this build does not start jobs with \
+             crun yet"
+                .to_owned()
+        }
+    }
 }

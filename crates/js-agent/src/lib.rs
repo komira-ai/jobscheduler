@@ -350,16 +350,7 @@ fn runtime_flags(
             #[cfg(target_os = "linux")]
             {
                 let host = crun_host::CrunHost::system();
-                let warnings = crun_host::start(cli, &host, commands).map_err(Failure::Usage)?;
-                warnings.iter().for_each(|warning| {
-                    let _ = writeln!(err, "js-agent: warning: {warning}");
-                });
-                // The worker still builds only the engine runtime; an agent that went on
-                // would register and run no job.
-                usage(
-                    "--runtime crun: the host has every piece, but this build does not start \
-                     jobs with crun yet",
-                )
+                usage(&crun_host::gate(cli, &host, commands, err))
             }
             #[cfg(not(target_os = "linux"))]
             {
