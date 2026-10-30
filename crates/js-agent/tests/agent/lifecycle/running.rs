@@ -110,6 +110,7 @@ fn leak(h: &Harness, run: &str, running_ms: u64) {
         (label::LEASE, lease.as_str()),
         (label::CPU_MILLIS, "1000"),
         (label::MEMORY_BYTES, "1073741824"),
+        (label::DISK_BYTES, "0"),
         (label::GPUS, ""),
         (label::WALL_MS, "900000"),
         (label::ISOLATION, "contained"),

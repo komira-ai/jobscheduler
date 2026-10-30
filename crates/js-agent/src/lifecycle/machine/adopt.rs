@@ -186,7 +186,17 @@ impl Lifecycle {
                 "the agent holds as many runs as a heartbeat can list",
             ),
             (
-                !job.booking.fits(&self.config.capacity, &used),
+                // The disk term is left out of this fit: the offered disk is the scratch
+                // volume's free space read at start, which already excludes what the
+                // adopted runs have written, so their bookings can exceed it and must not
+                // evict them. This undercounts free space by the adopted runs' actual
+                // usage; new runs are still held to the offer minus the adopted bookings
+                // (`admit`). The wiring PR can refine it with the quota's usage.
+                !Booking {
+                    disk_bytes: 0,
+                    ..job.booking.clone()
+                }
+                .fits(&self.config.capacity, &used),
                 "its booking does not fit the machine beside the jobs taken over",
             ),
         ];

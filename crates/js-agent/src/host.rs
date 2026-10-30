@@ -2,12 +2,15 @@
 
 use std::collections::BTreeMap;
 
+use js_agent_wire::limits::MAX_DISK_BYTES;
 use js_agent_wire::{Hello, InstanceIdentity, Phase, ProtocolRange, WireShape};
 
 use js_caps::{DETECTED_KEYS, DISK_GIB};
 
 use crate::cli::Cli;
-use crate::facts::{CommandRunner, FileReader, Platform, detect, free_gib, host_id, machine_id};
+use crate::facts::{
+    CommandRunner, FileReader, GIB, Platform, detect, free_bytes, host_id, machine_id,
+};
 
 /// The hello, and what the operator should be told about how it was made.
 #[derive(Debug)]
@@ -66,18 +69,32 @@ fn capabilities(
     }
 }
 
-/// The free disk of the work volume, reported as `disk-gib`: the volume that holds
-/// `--scratch-root`, where every run gets its directory. Without the flag there is no work
-/// volume to speak of and nothing is reported. A volume that cannot be read is a warning,
-/// and nothing is reported, so a job that needs disk is not placed on a guess. It is read
-/// when the hello is made, not again.
-fn disk(cli: &Cli, runner: &dyn CommandRunner) -> (Option<(String, String)>, Option<String>) {
+/// The bytes of disk to offer: `free` minus the low-water mark of `low_water_gib` GiB,
+/// at least 0 and at most what the wire takes.
+pub fn offered_disk_bytes(free: u64, low_water_gib: Option<u64>) -> u64 {
+    let low_water = low_water_gib.unwrap_or(0).saturating_mul(GIB);
+    free.saturating_sub(low_water).min(MAX_DISK_BYTES)
+}
+
+/// What the work volume offers: the volume that holds `--scratch-root`, where every run
+/// gets its directory. The bytes are its free space minus `--scratch-low-water-gib`; they
+/// are the shape's `disk_bytes`, and the capability `disk-gib` says them in GiB, so there
+/// are never two numbers. Without the flag there is no work volume to speak of and nothing
+/// is offered or reported. A volume that cannot be read is a warning, and nothing is
+/// offered or reported, so a job that needs disk is not placed on a guess. It is read when
+/// the hello is made, not again.
+fn disk(cli: &Cli, runner: &dyn CommandRunner) -> (u64, Option<(String, String)>, Option<String>) {
     let Some(root) = &cli.scratch_root else {
-        return (None, None);
+        return (0, None, None);
     };
-    match free_gib(runner, root) {
-        Ok(gib) => (Some((DISK_GIB.to_owned(), gib.to_string())), None),
+    match free_bytes(runner, root) {
+        Ok(free) => {
+            let offered = offered_disk_bytes(free, cli.scratch_low_water_gib);
+            let gib = (DISK_GIB.to_owned(), (offered / GIB).to_string());
+            (offered, Some(gib), None)
+        }
         Err(why) => (
+            0,
             None,
             Some(format!(
                 "--scratch-root: cannot read the free disk ({why}); disk-gib is not reported"
@@ -140,8 +157,14 @@ pub fn offer(
     let memory_bytes = capped("--memory-bytes", cli.memory_bytes, detected.memory_bytes)?;
     let gpu_class = class(cli.gpu_class.clone(), gpus, detected.gpus.class)?;
     let mut capabilities = capabilities(platform, &cli.capabilities)?;
-    let (free, disk_warning) = disk(cli, runner);
-    capabilities.extend(free);
+    if cli.scratch_low_water_gib.is_some() && cli.scratch_root.is_none() {
+        return Err("--scratch-low-water-gib: needs --scratch-root".to_owned());
+    }
+    if cli.scratch_quota && cli.scratch_root.is_none() {
+        return Err("--scratch-quota: needs --scratch-root".to_owned());
+    }
+    let (disk_bytes, advisory, disk_warning) = disk(cli, runner);
+    capabilities.extend(advisory);
     let host_id = id(cli, platform, runner, files)?;
     let instance = instance(cli, files)?;
     let devices = detected
@@ -161,7 +184,7 @@ pub fn offer(
                 cpu_millis,
                 memory_bytes,
                 gpus,
-                disk_bytes: 0,
+                disk_bytes,
                 gpu_class,
                 max_leases: None,
             },
