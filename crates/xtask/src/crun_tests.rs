@@ -14,6 +14,11 @@
 //!   daemon uses (`js_contain::delegate`). The unit lowers its OOM score as a node's
 //!   agent unit does, so the tests see what a job inherits from it.
 //!
+//! With `--job-user <name>` the verb runs [`ROOT_TARGETS`] instead, as an agent runs on a
+//! node: each in a `Delegate=yes` unit as ROOT ([`root_systemd_run_args`]), whose tests run
+//! every container as the non-root job user `<name>` (an account with a subordinate id
+//! range, which the caller made).
+//!
 //! Every target runs even when one before it failed; the verb fails if any did.
 
 use std::ffi::{OsStr, OsString};
@@ -38,6 +43,10 @@ pub const SLICE: &str = "js-agent.slice";
 /// The real-`crun` test targets (files or directories of the package's `tests/`), in the
 /// order they run.
 pub const TARGETS: &[&str] = &["crun"];
+
+/// The real-`crun` test targets run as root for a job user (`--job-user`), in the order
+/// they run.
+pub const ROOT_TARGETS: &[&str] = &["crun_root"];
 
 /// The OCI architecture of the machine `uname -m` names.
 ///
@@ -155,6 +164,43 @@ pub fn systemd_run_args(u: &Unit<'_>) -> Vec<OsString> {
     args
 }
 
+/// What one root target's unit is given.
+pub struct RootUnit<'a> {
+    /// The target's name.
+    pub target: &'a str,
+    /// Its test binary and package directory.
+    pub built: &'a Built,
+    /// The job user's account name: the tests start every container as this user.
+    pub job_user: &'a str,
+    /// The `PATH` the tests find `crun`, `busybox` and the id tools on.
+    pub path: &'a OsStr,
+}
+
+/// [`systemd_run_args`] for a target whose tests run as root: the same unit (in [`SLICE`],
+/// with `Delegate=yes` and `OOMScoreAdjust=-900`, from the package's directory, with the
+/// binary's ignored tests included), with no `--uid` or `--gid`, so a system unit runs as
+/// root, and the environment the tests read: `PATH` and `JS_JOB_USER`.
+pub fn root_systemd_run_args(u: &RootUnit<'_>) -> Vec<OsString> {
+    let mut args: Vec<OsString> = ["systemd-run", "--quiet", "--wait", "--collect", "--pipe"]
+        .map(OsString::from)
+        .into();
+    args.push(format!("--unit=js-crun-tests-{}", u.target).into());
+    args.push(format!("--slice={SLICE}").into());
+    args.extend(["-p", "Delegate=yes", "-p", "OOMScoreAdjust=-900"].map(OsString::from));
+    args.push(joined("--working-directory=", u.built.dir.as_os_str()));
+    let env = [
+        joined("PATH=", u.path),
+        format!("JS_JOB_USER={}", u.job_user).into(),
+    ];
+    for e in env {
+        args.push("-E".into());
+        args.push(e);
+    }
+    args.push(u.built.executable.clone().into());
+    args.push("--include-ignored".into());
+    args
+}
+
 /// What `crun-tests` runs and where.
 pub struct CrunTests<'a> {
     /// The cargo program (on `cargo xtask`, the `CARGO` cargo sets).
@@ -163,6 +209,9 @@ pub struct CrunTests<'a> {
     pub sudo: &'a Path,
     /// The repository root, where cargo runs.
     pub root: &'a Path,
+    /// With a job user, [`ROOT_TARGETS`] run as root for that user; without, [`TARGETS`]
+    /// run as the user running this verb.
+    pub job_user: Option<&'a str>,
 }
 
 /// Reports the host, builds the test targets and runs each in its own unit: the line to
@@ -184,26 +233,39 @@ pub fn run(p: &CrunTests<'_>) -> Result<String, Error> {
     let manifest = manifest_for(arch)?;
     println!("busybox manifest for {arch}: {manifest}");
 
-    let messages = test_build::build(p.cargo, p.root, PACKAGE, TARGETS)?;
+    let targets = if p.job_user.is_some() {
+        ROOT_TARGETS
+    } else {
+        TARGETS
+    };
+    let messages = test_build::build(p.cargo, p.root, PACKAGE, targets)?;
     let mut built = Vec::new();
-    for name in TARGETS {
+    for name in targets {
         built.push(test_build::find(&messages, name)?);
     }
 
     let home = std::env::var_os("HOME").unwrap_or_default();
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut failed = Vec::new();
-    for (target, built) in TARGETS.iter().zip(&built) {
-        let unit = Unit {
-            target,
-            built,
-            uid,
-            gid,
-            home: &home,
-            path: &path,
-            manifest,
+    for (target, built) in targets.iter().zip(&built) {
+        let args = match p.job_user {
+            Some(job_user) => root_systemd_run_args(&RootUnit {
+                target,
+                built,
+                job_user,
+                path: &path,
+            }),
+            None => systemd_run_args(&Unit {
+                target,
+                built,
+                uid,
+                gid,
+                home: &home,
+                path: &path,
+                manifest,
+            }),
         };
-        let status = sudo(p.sudo, &systemd_run_args(&unit))?;
+        let status = sudo(p.sudo, &args)?;
         if !status.success() {
             failed.push(format!(
                 "the tests of -p {PACKAGE} --test {target} failed in their unit ({}): {status}",
@@ -212,9 +274,13 @@ pub fn run(p: &CrunTests<'_>) -> Result<String, Error> {
         }
     }
     if failed.is_empty() {
+        let who = match p.job_user {
+            Some(user) => format!(", as root with job user {user}"),
+            None => String::new(),
+        };
         return Ok(format!(
             "ok: the real-crun tests of -p {PACKAGE} passed, each target in its own \
-             Delegate=yes unit"
+             Delegate=yes unit{who}"
         ));
     }
     Err(Error::Refused(failed))

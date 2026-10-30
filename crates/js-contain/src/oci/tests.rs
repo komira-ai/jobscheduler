@@ -822,3 +822,28 @@ fn a_lease_names_its_directories_and_who_owns_them() {
     assert_eq!(oci.job_ids(), (uid, gid));
     assert_eq!(oci.container_ids(), (101_000, 201_000));
 }
+
+/// Catches a helper's directory given by a path that was replaced by a link (the link, not
+/// the directory, would be followed) and a directory not given to the account crun runs as:
+/// a directory is given (to the daemon's own ids here, which changes nothing), and a link to
+/// one is refused with its path in the words.
+#[test]
+fn a_helpers_directory_is_given_by_descriptor_and_never_through_a_link() {
+    let dir = scratch("give-job");
+    let oci = start(&config(&dir, true), &dir.join("s")).expect("starts");
+    let real = dir.join("real");
+    std::fs::create_dir(&real).expect("dir");
+    oci.give_to_job_user(&real).expect("given");
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    let why = oci.give_to_job_user(&link).expect_err("a link").to_string();
+    assert!(why.contains("link"), "{why}");
+    let image = PinnedImage {
+        reference: format!("r/x@sha256:{}", "ab".repeat(32)),
+        digest: format!("sha256:{}", "ab".repeat(32)),
+    };
+    assert_eq!(
+        oci.image_dir(&image),
+        dir.join("s/oci-images").join("ab".repeat(32))
+    );
+}

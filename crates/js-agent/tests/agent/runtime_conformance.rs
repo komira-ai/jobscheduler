@@ -47,6 +47,10 @@ impl Subject for FakeSubject {
         Rc::clone(&self.shared)
     }
 
+    fn host_id(&self) -> String {
+        "fake-host".to_owned()
+    }
+
     fn image(&self) -> String {
         IMAGE.to_owned()
     }
