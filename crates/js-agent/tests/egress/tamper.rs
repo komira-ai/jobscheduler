@@ -8,7 +8,8 @@ use js_agent::egress::{Egress, EgressError};
 
 use crate::container::{ContainerHost, Network, block_on};
 use crate::sys::{
-    Far, Holder, Reach, Server, allow_list, far, nft, run, serial, sysctl, tcp, text, tool, var,
+    Far, Holder, Reach, Server, allow_list, far, nft, packets, run, serial, sysctl, tcp, text,
+    tool, var,
 };
 
 /// `nsenter` into the user and network namespaces of `pid` as root: what a job holding every
@@ -141,7 +142,15 @@ fn a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace(
             before.2 + 1,
             "only the honest connection arrived"
         );
-        assert_eq!(other_host.accepted(), before.0);
+        assert_eq!(
+            other_host.accepted(),
+            before.0,
+            "peers {:?}, default-reject {}, allow {}, spoof {}",
+            other_host.peers(),
+            packets("default-reject"),
+            packets("allow-0"),
+            packets("spoof")
+        );
         assert_eq!(metadata.accepted(), before.1);
         egress.check().expect("the firewall is unchanged");
         live.terminate().await;

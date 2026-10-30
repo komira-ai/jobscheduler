@@ -28,7 +28,7 @@ fn the_default_mode_gives_a_job_loopback_only_and_no_route() {
     let egress = Egress::start(Config::none()).expect("start");
     egress.check().expect("mode none has nothing to check");
     let script = format!(
-        "{PROBE}echo '--dev'; cat /proc/net/dev; echo '--route'; cat /proc/net/route; \
+        "sleep 2; {PROBE}echo '--dev'; cat /proc/net/dev; echo '--route'; cat /proc/net/route; \
          echo '--resolv'; cat /etc/resolv.conf; echo '--reach'; p 192.0.2.10 9300; \
          p 169.254.169.254 80; echo '--end'"
     );
