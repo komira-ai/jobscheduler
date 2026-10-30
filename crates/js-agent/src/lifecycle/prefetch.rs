@@ -26,8 +26,6 @@
 //! stops its runtime without waiting for the pulls (tokio's `shutdown_background`), so it
 //! may be dropped anywhere, an async task included.
 
-#![allow(dead_code, unused_variables, unused_imports)]
-
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -72,7 +70,12 @@ impl Shared {
     /// Records how the pull `ticket` of `image` ended, unless the image was forgotten or
     /// pulled again since.
     fn finish(&self, image: &str, ticket: Ticket, result: Result<(), String>) {
-        if let Some(entry) = self.lock().images.get_mut(image) {
+        if let Some(entry) = self
+            .lock()
+            .images
+            .get_mut(image)
+            .filter(|entry| entry.ticket == ticket)
+        {
             entry.phase = Phase::Done(result);
         }
         self.changed.notify_all();
@@ -80,7 +83,6 @@ impl Shared {
 }
 
 /// Runs the pulls of images in the background, one at a time for each image.
-#[allow(dead_code)]
 pub struct Prefetcher {
     /// Kept to be shut down on drop; pulls are spawned through `handle`.
     runtime: Option<PullRuntime>,
@@ -101,6 +103,12 @@ impl Prefetcher {
         threads: usize,
         pull: impl Fn(String) -> PullFuture + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
+        if threads == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a prefetcher needs at least one worker thread",
+            ));
+        }
         let runtime = Builder::new_multi_thread()
             .worker_threads(threads)
             .thread_name("js-pull")
@@ -124,11 +132,10 @@ impl Prefetcher {
             match &entry.phase {
                 Phase::Pulling => return Prepared::Pending(entry.ticket),
                 Phase::Done(Ok(())) => return Prepared::Ready,
-                Phase::Done(Err(why)) => {
-                    let failed = Prepared::Failed(RuntimeError::new(why.clone()));
-                    state.images.remove(image);
-                    return failed;
+                Phase::Done(Err(why)) if waited == Some(entry.ticket) => {
+                    return Prepared::Failed(RuntimeError::new(why.clone()));
                 }
+                Phase::Done(Err(_)) => {}
             }
         }
         // The future is made before the image is marked, so a pull function that panics
@@ -161,7 +168,8 @@ impl Prefetcher {
     /// call pulls again), a failure is dropped, and a pull under way is let go, its end
     /// ignored. For the owner of an image store that evicts images.
     pub fn forget(&self, image: &str) {
-        let _ = image;
+        self.shared.lock().images.remove(image);
+        self.shared.changed.notify_all();
     }
 
     /// [`Prefetcher::prepare`], then, while the image is being fetched, waits for the
@@ -191,5 +199,11 @@ impl Prefetcher {
     }
 }
 
-#[allow(dead_code)]
-fn _keep(_: &Prefetcher) {}
+impl Drop for Prefetcher {
+    fn drop(&mut self) {
+        self.runtime
+            .take()
+            .into_iter()
+            .for_each(PullRuntime::shutdown_background);
+    }
+}
