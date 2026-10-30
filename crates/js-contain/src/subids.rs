@@ -90,6 +90,18 @@ pub enum SubidError {
         /// How many ids the user has in all.
         count: u64,
     },
+    /// The ids are root's: a container's ids must map onto a user that is not root, whose
+    /// subordinate range is what the container gets. A root daemon names a job user
+    /// (`OciConfig::job_user`); the job user is never uid or gid 0.
+    #[error(
+        "the OCI backend runs containers as a user that is not root, and uid {uid} gid {gid}          is root's: a root daemon needs a dedicated job user (job_user) with a uid and a gid          other than 0"
+    )]
+    Root {
+        /// The refused uid.
+        uid: u32,
+        /// The refused gid.
+        gid: u32,
+    },
     /// Enough ids in all, but no single range of [`MIN_SUBORDINATE_IDS`]: the OCI
     /// backend maps one range.
     #[error(
@@ -121,7 +133,8 @@ pub struct DaemonIds {
 /// [`user_ids`] for this process's user.
 ///
 /// # Errors
-/// The checks of [`check_subordinate_ids`], and a user whose ids are in no single range
+/// [`SubidError::Root`] for a process that is root (with no job user the daemon's own ids
+/// are the container's), the checks of [`check_subordinate_ids`], and a user whose ids are in no single range
 /// of [`MIN_SUBORDINATE_IDS`].
 pub fn daemon_ids(files: &IdFiles) -> Result<DaemonIds, SubidError> {
     user_ids(
@@ -135,8 +148,12 @@ pub fn daemon_ids(files: &IdFiles) -> Result<DaemonIds, SubidError> {
 /// holds at least [`MIN_SUBORDINATE_IDS`] ids, for subuid and subgid each.
 ///
 /// # Errors
-/// As [`daemon_ids`].
+/// As [`daemon_ids`]; and [`SubidError::Root`] for uid 0 or gid 0 (refused first, whatever
+/// the files hold: a `root:` line in `subuid` does not make root a job user).
 pub fn user_ids(files: &IdFiles, uid: u32, gid: u32) -> Result<DaemonIds, SubidError> {
+    if uid == 0 || gid == 0 {
+        return Err(SubidError::Root { uid, gid });
+    }
     check_subordinate_ids(files, uid)?;
     let passwd = read(&files.passwd)?;
     let name = user_name(&passwd, uid);
@@ -474,5 +491,24 @@ mod tests {
         let refused = user_ids(&numeric_files, 4242, 4242).expect_err("split");
         assert!(refused.to_string().contains("user uid 4242"), "{refused}");
         assert!(daemon_ids(&IdFiles::in_dir(Path::new("/nonexistent-ids"))).is_err());
+    }
+
+    /// Catches root being accepted as a job user because a file allows it, and the refusal
+    /// depending on a missing `root:` line: `subuid` and `subgid` here give root, by name
+    /// and by number, a full range, and uid 0 and gid 0 are still refused, alone or with a
+    /// valid other id. Also the daemon's own ids: a root process with no job user.
+    #[test]
+    fn root_is_refused_as_the_user_whatever_the_files_hold() {
+        let text = "root:100000:65536\n0:100000:65536\nagent:300000:65536\n";
+        let with_root = files("root-range", Some(text), Some(text));
+        for (uid, gid) in [(0, 0), (990, 0), (0, 990)] {
+            let refused = user_ids(&with_root, uid, gid).expect_err("root refused");
+            assert!(
+                matches!(refused, SubidError::Root { uid: u, gid: g } if (u, g) == (uid, gid)),
+                "{refused:?}"
+            );
+            assert!(refused.to_string().contains("job_user"), "{refused}");
+        }
+        user_ids(&with_root, 990, 990).expect("a user that is not root passes");
     }
 }

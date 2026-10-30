@@ -136,8 +136,13 @@ impl FilesRoot {
     /// does. Only for a [`DirLayout::Searchable`] root, whose directories are `0700` and the
     /// agent's until now. It needs the privilege to give files away (root, or
     /// `CAP_CHOWN`); an agent without it hands the directory over through the container
-    /// runner's helper instead. The paths are not followed through links: nothing but the
-    /// agent can make an entry in the directory or its root.
+    /// runner's helper instead.
+    ///
+    /// The calls are by path (`lchown` on each entry, which does not follow a link in the
+    /// last component, then `chmod` and `lchown` of the directory), and that is safe because
+    /// until the final `lchown` the directory and its root are the agent's and `0700`/`0711`:
+    /// no other user can swap a component for a link. Once it is the job's, the agent only
+    /// removes it, which walks by descriptor and never follows a link.
     ///
     /// # Errors
     ///

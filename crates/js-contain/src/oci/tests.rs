@@ -747,3 +747,48 @@ fn the_exposed_seccomp_section_is_the_resolved_pinned_profile() {
     let error = seccomp_section("riscv64", &[]).expect_err("no filter");
     assert!(error.contains("riscv64"), "{error}");
 }
+
+/// Catches a root daemon starting containers in a range it was never given, and a job
+/// user that is root: the refusal is explicit at `Oci::new` (`Some((0, 0))`, `Some((uid,
+/// 0))`) and for a root process with no job user (`run_ids` with uid 0, which `Oci::new`
+/// reads from `getuid`), and holds when the files give root a range.
+#[test]
+fn a_root_daemon_or_a_root_job_user_is_refused() {
+    let dir = scratch("root-refused");
+    let mut root_range = config(&dir, true);
+    std::fs::write(
+        &root_range.id_files.subuid,
+        "root:100000:65536\n0:100000:65536\n",
+    )
+    .expect("subuid");
+    std::fs::write(
+        &root_range.id_files.subgid,
+        "root:200000:65536\n0:200000:65536\n",
+    )
+    .expect("subgid");
+    let uid = rustix::process::getuid().as_raw();
+    for job in [Some((0, 0)), Some((uid.max(1), 0)), Some((0, 1000))] {
+        root_range.job_user = job;
+        let refused = start(&root_range, &dir.join("s")).expect_err("root job user");
+        assert!(
+            matches!(
+                refused,
+                OciError::Subids(crate::subids::SubidError::Root { .. })
+            ),
+            "{job:?}: {refused:?}"
+        );
+    }
+    // No job user, and the daemon is root: no range of its own is mapped.
+    root_range.job_user = None;
+    let refused = run_ids(&root_range, 0, 0).expect_err("root daemon");
+    assert!(
+        matches!(refused, SubidError::Root { uid: 0, gid: 0 }),
+        "{refused:?}"
+    );
+    // The same files serve a user that is not root.
+    let ids = run_ids(&root_range, 990, 990);
+    assert!(
+        matches!(ids, Err(SubidError::Missing { .. })),
+        "a non-root user with no entry is refused for that, not as root: {ids:?}"
+    );
+}

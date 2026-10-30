@@ -6,6 +6,7 @@
 //! the agent keeps for itself.
 
 use std::fs;
+use std::os::unix::fs::{MetadataExt as _, symlink};
 use std::path::Path;
 
 use js_agent::lifecycle::{DirLayout, FilesRoot, ScratchRoot};
@@ -47,6 +48,26 @@ pub fn probe(name: &str) -> Option<Vec<Kv>> {
                     "list_root",
                     errno(&fs::read_dir(file.parent().unwrap().parent().unwrap())),
                 ),
+            ])
+        }
+        "plant" => {
+            // The job owns its handed-over run directory: it can open it again and leave
+            // links in it that point at things only root can touch.
+            let dir = arg("DIR");
+            let (file, target) = (arg("TARGET_FILE"), arg("TARGET_DIR"));
+            let chmod =
+                fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+            let sub = fs::create_dir(dir.join("sub"));
+            Some(vec![
+                kv("chmod", errno(&chmod)),
+                kv("sub", errno(&sub)),
+                kv("link_file", errno(&symlink(&file, dir.join("link-file")))),
+                kv("link_dir", errno(&symlink(&target, dir.join("link-dir")))),
+                kv(
+                    "link_nested",
+                    errno(&symlink(&target, dir.join("sub").join("link-dir"))),
+                ),
+                kv("link_up", errno(&symlink("..", dir.join("sub").join("up")))),
             ])
         }
         _ => None,
@@ -139,4 +160,84 @@ fn run_files_are_unreadable_until_handed_over_and_then_readable_by_the_job_alone
 
     let stranger = run_as(STRANGER, &[], "read_file", &[("FILE", &file)]);
     stranger.expect("read", EACCES);
+}
+
+/// The job owns the directory of its run files after the hand-over, so it can plant links
+/// in it that point outside (at a root-owned file, a root-owned directory with a file in
+/// it, and `..`). Removing the run (`remove`) and sweeping the root (`sweep`) as root must
+/// delete the links and never follow them: the targets keep their content, owner and mode.
+/// It catches a removal that follows a link or `chown`s or `chmod`s through one.
+#[test]
+#[ignore = "needs root: see the module docs of tests/privilege/main.rs"]
+fn links_planted_by_the_job_in_its_run_files_are_removed_and_never_followed() {
+    require_root();
+    let work = work_dir("priv-layout-links");
+    // Root-owned things outside the run files that a followed link would reach.
+    let outside = work.path().join("outside");
+    make_dir(&outside, 0o755, 0);
+    let target_file = outside.join("secret");
+    fs::write(&target_file, "root's").unwrap();
+    fs::set_permissions(
+        &target_file,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    let target_dir = outside.join("keep");
+    make_dir(&target_dir, 0o700, 0);
+    fs::write(target_dir.join("inside"), "root's too").unwrap();
+
+    let root = work.path().join("files");
+    let files = FilesRoot::open_with(&root, DirLayout::Searchable).unwrap();
+    let grant = || {
+        [RunFile {
+            name: "grant".into(),
+            contents: "token".into(),
+        }]
+    };
+    let intact = || {
+        assert_eq!(fs::read_to_string(&target_file).unwrap(), "root's");
+        let meta = fs::metadata(&target_file).unwrap();
+        assert_eq!((meta.uid(), meta.mode() & 0o7777), (0, 0o600));
+        assert_eq!(
+            fs::read_to_string(target_dir.join("inside")).unwrap(),
+            "root's too"
+        );
+        let meta = fs::metadata(&target_dir).unwrap();
+        assert_eq!((meta.uid(), meta.mode() & 0o7777), (0, 0o700));
+        let meta = fs::metadata(target_dir.join("inside")).unwrap();
+        assert_eq!(meta.uid(), 0);
+    };
+    for run in ["r1", "r2"] {
+        let dir = files.write(run, &grant()).unwrap();
+        files.hand_over(run, JOB, JOB).unwrap();
+        let report = run_as(
+            JOB,
+            &[],
+            "plant",
+            &[
+                ("DIR", &dir),
+                ("TARGET_FILE", &target_file),
+                ("TARGET_DIR", &target_dir),
+            ],
+        );
+        for key in [
+            "chmod",
+            "sub",
+            "link_file",
+            "link_dir",
+            "link_nested",
+            "link_up",
+        ] {
+            report.expect(key, "ok");
+        }
+    }
+    intact();
+
+    files.remove("r1").unwrap();
+    assert!(!files.of("r1").exists());
+    intact();
+
+    assert_eq!(files.sweep(["kept"]).unwrap(), 1);
+    assert!(!files.of("r2").exists());
+    intact();
 }

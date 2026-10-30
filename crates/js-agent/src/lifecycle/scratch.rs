@@ -47,7 +47,7 @@ impl DirLayout {
     const fn allows(self, mode: u32) -> bool {
         match self {
             Self::Private => mode & 0o077 == 0,
-            Self::Searchable => mode & 0o066 == 0 && mode & 0o001 != 0,
+            Self::Searchable => mode & 0o066 == 0 && mode & 0o001 != 0 && mode & 0o700 == 0o700,
         }
     }
 
@@ -409,6 +409,22 @@ fn remove_tree(parent: &OwnedFd, name: &CStr) -> rustix::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A searchable root must still be the agent's to read, write and search (`rwx` for the
+    /// owner), besides others' search bit and no group or other read or write. It catches
+    /// the 0o001 test alone accepting a root the agent itself cannot use (0o311, 0o611,
+    /// 0o001) and a private root being taken for a searchable one.
+    #[test]
+    fn a_searchable_root_needs_the_owner_to_have_all_of_rwx() {
+        assert!(DirLayout::Searchable.allows(0o711));
+        for bad in [
+            0o311, 0o611, 0o511, 0o701, 0o710, 0o001, 0o755, 0o717, 0o771, 0o700,
+        ] {
+            assert!(!DirLayout::Searchable.allows(bad), "{bad:o}");
+        }
+        assert!(DirLayout::Private.allows(0o700));
+        assert!(!DirLayout::Private.allows(0o711));
+    }
 
     /// A directory on the device the removal started on is entered; one on another
     /// device (a mount) is refused with a cross-device error.

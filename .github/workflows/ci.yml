@@ -358,16 +358,27 @@ jobs:
       - name: Install crun, uidmap and busybox and make the job user
         run: |
           set -euo pipefail
-          sudo apt-get install -y --no-install-recommends crun uidmap busybox-static
+          sudo apt-get install -y --no-install-recommends crun uidmap busybox-static apparmor
           sudo useradd --create-home --shell /usr/sbin/nologin js-job
           grep -q '^js-job:' /etc/subuid || echo 'js-job:300000:65536' | sudo tee -a /etc/subuid
           grep -q '^js-job:' /etc/subgid || echo 'js-job:300000:65536' | sudo tee -a /etc/subgid
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           echo "JS_B_CRUN=$(command -v crun)" >> "$GITHUB_ENV"
           echo "JS_B_BUSYBOX=$(command -v busybox)" >> "$GITHUB_ENV"
           echo "JS_B_UID=$(id -u js-job)" >> "$GITHUB_ENV"
           echo "JS_B_GID=$(id -g js-job)" >> "$GITHUB_ENV"
           crun --version | head -1
+      # The AppArmor user-namespace restriction stays ON for the whole job: it is the
+      # runner's default and the farm's likely policy, and the job user's crun is an
+      # unprivileged process it applies to. The facts are printed, and root_daemon.rs
+      # asserts the two sides of the control (the distribution's /usr/bin/crun, which its
+      # profile lets create the namespace, runs the container; a copy of the same binary
+      # at another path is refused it).
+      - name: Record the AppArmor facts the container tests depend on
+        run: |
+          echo "apparmor_restrict_unprivileged_userns = $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          ls -l /etc/apparmor.d | grep -i crun || echo "no crun file in /etc/apparmor.d"
+          sudo aa-status 2>&1 | grep -i crun || echo "no crun profile loaded"
+          cat /etc/apparmor.d/crun 2>/dev/null || true
       - name: Build the tests as the runner user
         run: |
           cargo test -p js-agent --test privilege --locked --no-run
@@ -376,8 +387,8 @@ jobs:
       # runner's toolchain and home.
       - name: Run the privilege tests as root
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test privilege --locked -- --ignored --nocapture --test-threads=1
-      - name: Run js-contain's Oci under a root daemon, as the job user
-        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-contain --test root_daemon --locked -- --ignored --nocapture
+      - name: Run js-contain's Oci under a root daemon, as the job user, with the AppArmor restriction on
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-contain --test root_daemon --locked -- --ignored --nocapture --test-threads=1
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

@@ -117,8 +117,11 @@ pub struct OciConfig {
     pub id_tool_path: Option<std::ffi::OsString>,
     /// The `(uid, gid)` of the dedicated job user, when the daemon is not that user
     /// (a root daemon): the subordinate ranges the containers map are that user's, not
-    /// the daemon's own, and `scrub_env` is expected to start every program as that
-    /// user. By default `None`: the daemon's own user.
+    /// the daemon's own. A root daemon (uid 0) must set it, to a uid and a gid that are
+    /// not 0, and then every `crun` the backend starts runs as that user (`setgroups([])`,
+    /// the gid, the uid, in that order, before the exec) with an environment of `PATH`
+    /// (`id_tool_path`) and `HOME=/` only. By default `None`: the daemon's own user, which
+    /// must not be root.
     pub job_user: Option<(u32, u32)>,
     /// How much of a job's output is kept (`logs`): by default 1 MiB of each stream in a
     /// file of the lease directory and the last 64 KiB of it in memory.
@@ -337,10 +340,8 @@ impl Oci {
         cgroup_parent: &str,
         rust_arch: &str,
     ) -> Result<Arc<Self>, OciError> {
-        let ids = match config.job_user {
-            Some((uid, gid)) => crate::subids::user_ids(&config.id_files, uid, gid)?,
-            None => crate::subids::daemon_ids(&config.id_files)?,
-        };
+        let daemon_uid = rustix::process::getuid().as_raw();
+        let ids = run_ids(config, daemon_uid, rustix::process::getgid().as_raw())?;
         for program in [&config.runtime, &config.daemon] {
             if !program.is_file() {
                 return Err(OciError::NoRuntime(program.clone()));
@@ -365,7 +366,11 @@ impl Oci {
             at(scratch, helper::install_daemon(scratch, &config.daemon)).map_err(prepare)?;
         let init = at(scratch, init::install(scratch)).map_err(prepare)?;
         let oci = Arc::new(Self {
-            crun: crun::Crun::new(config.runtime.clone(), config.scrub_env),
+            crun: crun::Crun::new(
+                config.runtime.clone(),
+                config.scrub_env,
+                crun::JobDrop::new(config.job_user, config.id_tool_path.as_deref(), daemon_uid),
+            ),
             daemon,
             modes: config.helper_modes.clone(),
             init_dest: config.init_dest.clone(),
@@ -521,6 +526,17 @@ fn search_check(dir: &Path) -> Result<(), OciError> {
 
 /// Checks that `tool` is on `path`, runnable, and able to write a user namespace's id
 /// maps: setuid, or holding file capabilities (as some distributions install it).
+/// The ids the containers map: the job user's if `config` names one, else those of the
+/// daemon `(daemon_uid, daemon_gid)`. Root is refused either way ([`SubidError::Root`]).
+fn run_ids(
+    config: &OciConfig,
+    daemon_uid: u32,
+    daemon_gid: u32,
+) -> Result<crate::subids::DaemonIds, SubidError> {
+    let (uid, gid) = config.job_user.unwrap_or((daemon_uid, daemon_gid));
+    crate::subids::user_ids(&config.id_files, uid, gid)
+}
+
 fn id_tool(tool: &'static str, path: Option<&std::ffi::OsStr>) -> Result<(), OciError> {
     use std::os::unix::fs::PermissionsExt as _;
     let refused = |why: String| OciError::IdTool { tool, why };
