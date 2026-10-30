@@ -7,7 +7,7 @@ use js_caps::{FLAG_SET, HostContract, RUN_FILES};
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
 use js_provider::Observed;
-use js_types::{HostId, LeaseId, ProviderId, RequestId, Shape};
+use js_types::{HostId, LeaseId, MemoryHeadroom, ProviderId, RequestId, Shape};
 use js_usage::ProfileKey;
 
 use crate::config::PoolConfig;
@@ -56,8 +56,12 @@ pub struct HostView {
     pub phase: Phase,
     /// The lease holding the host, if any.
     pub lease: Option<LeaseId>,
-    /// The shape the pool books for the host (not the host's own claim).
+    /// The shape the pool books for the host (not the host's own claim), with its memory
+    /// cut to the pool's memory percent.
     pub shape: Shape,
+    /// The memory the pool lists for the host, the percent of it that is booked and what
+    /// that comes to (the memory of `shape`).
+    pub memory: MemoryHeadroom,
     /// The shape the host announced at its last hello, which the registry checked against
     /// the pool's floor; `None` for a host that has not said hello since a restart. A
     /// scaler compares it with the machine it launched.
@@ -603,9 +607,7 @@ impl Registry {
             .fresh()
             .map(|bytes| secret_text(&bytes))
             .ok_or(Refusal::SessionUnavailable)?;
-        state
-            .book
-            .insert_host(host.clone(), config.booked().clone());
+        config.list_in(&mut state.book, host.clone());
         let held = hello.held.iter().map(|run| run.run_id.clone()).collect();
         state.records.insert(
             host.clone(),
@@ -847,7 +849,7 @@ impl Registry {
             ..
         } = &mut *guard;
         let record = records.get(host).ok_or(RunRefusal::HostNotRegistered)?;
-        let shape = self.shared.config.shape();
+        let shape = self.shared.config.booked();
         vet(&spec, shape.resources())?;
         if !spec.files.is_empty() && !record.files {
             return Err(RunRefusal::FilesUnsupported);
@@ -935,7 +937,7 @@ impl Registry {
         if binding.taint().is_none() || records.contains_key(host) {
             return;
         }
-        book.insert_host(host.clone(), self.shared.config.booked().clone());
+        self.shared.config.list_in(book, host.clone());
         records.insert(host.clone(), Record::awaiting(Some(binding), now));
     }
 
@@ -957,7 +959,8 @@ impl Registry {
 
     fn host_views(&self, state: &State, now: Timestamp) -> Vec<HostView> {
         let booked = state.book.booked();
-        let shape = self.shared.config.shape();
+        let shape = self.shared.config.booked();
+        let memory = self.shared.config.memory_headroom();
         let marks = state.marks.reservations();
         let set_aside = |id: &HostId| marks.iter().find(|mark| mark.host == *id);
         let views = state.records.iter().map(|(id, record)| HostView {
@@ -966,6 +969,7 @@ impl Registry {
             phase: record.phase,
             lease: booked.get(id).copied(),
             shape: shape.clone(),
+            memory,
             claim: record.claim.clone(),
             labels: record.labels.clone(),
             agent_version: record.agent_version.clone(),
