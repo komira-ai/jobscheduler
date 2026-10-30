@@ -1,6 +1,8 @@
 //! Reading a manifest and a config: checked against the digest the artifact is pinned
 //! by, and against what the caller's [`Kind`] of artifact takes.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 use crate::text::{clip, escape, shown};
@@ -204,6 +206,7 @@ pub struct Manifest {
     artifact_type: Option<String>,
     config: Descriptor,
     layers: Vec<Descriptor>,
+    annotations: BTreeMap<String, String>,
 }
 
 impl Manifest {
@@ -232,6 +235,12 @@ impl Manifest {
         &self.config
     }
 
+    /// The manifest's annotations, by key; empty if it has none.
+    #[must_use]
+    pub fn annotations(&self) -> &BTreeMap<String, String> {
+        &self.annotations
+    }
+
     /// The layers, in the manifest's order.
     #[must_use]
     pub fn layers(&self) -> &[Descriptor] {
@@ -250,6 +259,7 @@ struct Document {
     manifests: Option<serde_json::Value>,
     config: Option<Wire>,
     layers: Option<Vec<Wire>>,
+    annotations: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -370,6 +380,7 @@ pub(crate) fn parse(bytes: &[u8], pinned: &Digest, kind: &Kind) -> Result<Manife
         artifact_type: doc.artifact_type,
         config: config.descriptor()?,
         layers,
+        annotations: doc.annotations.unwrap_or_default(),
     })
 }
 

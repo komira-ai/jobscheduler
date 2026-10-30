@@ -18,7 +18,7 @@ async-trait.workspace = true
 js-types = { path = "../js-types" }
 oci-spec.workspace = true
 runc.workspace = true
-rustix = { workspace = true, features = ["fs", "process"] }
+rustix = { workspace = true, features = ["fs", "process", "thread"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "sync", "time"] }
