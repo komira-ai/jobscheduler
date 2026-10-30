@@ -12,6 +12,76 @@ use rustix::fs::{
 };
 use rustix::io::Errno;
 
+/// Who besides the agent can reach the directories the agent makes for jobs.
+///
+/// The podman path runs the container engine as root, which reaches every directory, so
+/// the roots are the agent's alone ([`DirLayout::Private`]). The rootless crun path binds
+/// the directories into the job from an account that is not the agent's (the job's host
+/// ids), and that account must be able to walk down to them ([`DirLayout::Searchable`]).
+/// The layout is chosen by the runtime that is in use; the default is the podman rule, so
+/// nothing changes for an agent that does not ask for the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DirLayout {
+    /// The root has no permission bit for group or others (`0700`), and so has each
+    /// directory made below it.
+    #[default]
+    Private,
+    /// The root and each directory made below it can be searched, and nothing more, by
+    /// others (`0711`: others get `x`, never `r` or `w`, so a job cannot list the names of
+    /// the other runs), and so can every directory above the root (the rule of the
+    /// container runner's own start check). What a job may read inside a run's
+    /// directory is decided by the owner and mode of what the agent puts there.
+    Searchable,
+}
+
+impl DirLayout {
+    /// The mode of the root and of each run's directory in this layout.
+    pub const fn dir_mode(self) -> u32 {
+        match self {
+            Self::Private => 0o700,
+            Self::Searchable => 0o711,
+        }
+    }
+
+    /// Whether `mode` (the permission bits of an existing root) is acceptable.
+    const fn allows(self, mode: u32) -> bool {
+        match self {
+            Self::Private => mode & 0o077 == 0,
+            Self::Searchable => mode & 0o066 == 0 && mode & 0o001 != 0,
+        }
+    }
+
+    /// Why a root whose mode `allows` refuses is refused.
+    const fn refusal(self) -> &'static str {
+        match self {
+            Self::Private => "group and others must have no permission",
+            Self::Searchable => {
+                "others must be able to search the directory (x) and group and others must have no read or write permission (0711)"
+            }
+        }
+    }
+
+    /// Whether every directory above `canonical` can be searched by others, which the
+    /// job's ids need to walk down to the root. The check reads the mode bits, as the
+    /// container runner's start check does; it is a no-op for [`DirLayout::Private`].
+    fn require_reachable(self, canonical: &Path) -> Result<(), String> {
+        if self == Self::Private {
+            return Ok(());
+        }
+        for ancestor in canonical.ancestors().skip(1) {
+            let meta = fs::metadata(ancestor)
+                .map_err(|_| format!("cannot read {}", ancestor.display()))?;
+            if meta.mode() & 0o001 == 0 {
+                return Err(format!(
+                    "{} is not searchable by others: the job's user could not reach a directory below it",
+                    ancestor.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The canonical path of `path`, which must be a directory (not a link to one) that the
 /// user running the agent owns, with no permission for group or others. `flag` names the
 /// flag in the error.
@@ -20,17 +90,31 @@ use rustix::io::Errno;
 ///
 /// The path is not such a directory. The text starts with `flag`.
 pub(super) fn private_dir(path: &Path, flag: &str) -> Result<PathBuf, String> {
+    layout_dir(path, flag, DirLayout::Private)
+}
+
+/// [`private_dir`] for a root of the given `layout`.
+///
+/// # Errors
+///
+/// The path is not a directory (not a link to one) that the user running the agent owns
+/// with the permissions `layout` allows, or (for [`DirLayout::Searchable`]) a directory
+/// above it cannot be searched by others. The text starts with `flag`.
+pub(super) fn layout_dir(path: &Path, flag: &str, layout: DirLayout) -> Result<PathBuf, String> {
     let fail = |why: &str| format!("{flag}: {why}");
     let (meta, canonical) = fs::symlink_metadata(path)
         .and_then(|meta| fs::canonicalize(path).map(|canonical| (meta, canonical)))
         .map_err(|_| fail("cannot read the directory"))?;
     let mine = meta.uid() == rustix::process::geteuid().as_raw();
-    let owner_only = meta.mode() & 0o077 == 0;
-    match (meta.is_dir(), mine, owner_only) {
+    let allowed = layout.allows(meta.mode());
+    match (meta.is_dir(), mine, allowed) {
         (false, _, _) => Err(fail("not a directory (a link is not accepted)")),
         (true, false, _) => Err(fail("not owned by the user running the agent")),
-        (true, true, false) => Err(fail("group and others must have no permission")),
-        (true, true, true) => Ok(canonical),
+        (true, true, false) => Err(fail(layout.refusal())),
+        (true, true, true) => layout
+            .require_reachable(&canonical)
+            .map(|()| canonical)
+            .map_err(|why| fail(&why)),
     }
 }
 
@@ -45,6 +129,7 @@ pub(super) fn private_dir(path: &Path, flag: &str) -> Result<PathBuf, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScratchRoot {
     path: PathBuf,
+    layout: DirLayout,
 }
 
 impl ScratchRoot {
@@ -55,7 +140,24 @@ impl ScratchRoot {
     /// The path is not an existing directory, is a link, is owned by another user, or
     /// grants group or others any permission. The text names the flag.
     pub fn open(path: &Path) -> Result<Self, String> {
-        private_dir(path, "--scratch-root").map(|path| Self { path })
+        Self::open_with(path, DirLayout::Private)
+    }
+
+    /// Opens the root at `path` with the permissions `layout` allows: [`ScratchRoot::open`]
+    /// is this with [`DirLayout::Private`].
+    ///
+    /// # Errors
+    ///
+    /// The path is not an existing directory, is a link, is owned by another user, has a
+    /// mode `layout` does not allow, or (for [`DirLayout::Searchable`]) has an ancestor
+    /// others cannot search. The text names the flag.
+    pub fn open_with(path: &Path, layout: DirLayout) -> Result<Self, String> {
+        layout_dir(path, "--scratch-root", layout).map(|path| Self { path, layout })
+    }
+
+    /// The layout the root was opened with.
+    pub const fn layout(&self) -> DirLayout {
+        self.layout
     }
 
     /// The canonical path of the root.
@@ -83,8 +185,9 @@ impl ScratchRoot {
         self.path.join(".js-health")
     }
 
-    /// Makes the run's directory, mode `0700` whatever the umask. A directory left by an
-    /// earlier agent for this run id is removed first: the run is new, so it is garbage.
+    /// Makes the run's directory, mode `0700` whatever the umask (`0711` for a
+    /// [`DirLayout::Searchable`] root). A directory left by an earlier agent for this run
+    /// id is removed first: the run is new, so it is garbage.
     ///
     /// # Errors
     ///
@@ -92,8 +195,9 @@ impl ScratchRoot {
     pub fn create(&self, run_id: &str) -> io::Result<PathBuf> {
         self.remove(run_id)?;
         let dir = self.of(run_id);
-        fs::DirBuilder::new().mode(0o700).create(&dir)?;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        let mode = self.layout.dir_mode();
+        fs::DirBuilder::new().mode(mode).create(&dir)?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(mode))?;
         Ok(dir)
     }
 

@@ -314,6 +314,60 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
+  # The privilege model of the agent on the rootless crun runtime, settled by the kernel
+  # (crates/js-agent/tests/privilege, ignored in every other job; the design is
+  # docs/design/agent-privilege.md). The tests start this very binary again as an ordinary
+  # user holding exactly the capabilities a test names and read what it can do: the init
+  # namespace read, the watched directories, the XFS project quota, the directory layout
+  # and the state directory. The quota tests need a prjquota XFS volume: a loop image made
+  # and mounted here and only read by the tests. The job stands alone, so a failure here
+  # blocks no other job.
+  agent-privilege:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      JS_PRIV_XFS_ROOT: /mnt/js-priv-xfs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - name: Make and mount a project-quota XFS volume on a loop device
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xfsprogs nftables
+          truncate -s 512M "$RUNNER_TEMP/js-priv-xfs.img"
+          sudo mkfs.xfs -q "$RUNNER_TEMP/js-priv-xfs.img"
+          sudo mkdir -p "$JS_PRIV_XFS_ROOT"
+          sudo mount -o loop,prjquota "$RUNNER_TEMP/js-priv-xfs.img" "$JS_PRIV_XFS_ROOT"
+          findmnt "$JS_PRIV_XFS_ROOT"
+      - name: Build the tests as the runner user
+        run: cargo test -p js-agent --test privilege --locked --no-run
+      # Root runs the tests (they start the unprivileged children themselves), with the
+      # runner's toolchain and home.
+      - name: Run the privilege tests as root
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test privilege --locked -- --ignored --nocapture --test-threads=1
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   # Licences, advisories, bans and sources, as deny.toml configures them. cargo-deny is
   # the release binary, checked against its SHA-256 before use.
   deny:

@@ -4,7 +4,13 @@
 //! Each run gets `<root>/<run_id>`, `0555` with its files `0444`: the container's user
 //! can read them (the directory is bind-mounted read-only at `/run/js-files`), and nobody
 //! can add, change or unlink one without first changing the directory's mode. The root is
-//! `0700` and the agent's. A reboot clears a tmpfs, which is fine: a run does not survive
+//! `0700` and the agent's.
+//!
+//! A root opened with [`DirLayout::Searchable`] (the rootless crun runtime) is `0711`, so
+//! the job's ids can walk down to a run's directory, and the run's directory is `0700` with
+//! its files `0400`, the agent's, until [`FilesRoot::hand_over`] gives them to the job's
+//! ids and closes the directory to `0500`: a job that was not handed its files, and every
+//! other user, reads nothing. A reboot clears a tmpfs, which is fine: a run does not survive
 //! a reboot, and the agent's start-up sweep would remove what an earlier process left in
 //! it anyway (except the directories of runs it adopts). A tmpfs can be swapped to disk when
 //! the host has swap, so a host that handles these secrets runs with swap off or encrypted.
@@ -16,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use js_agent_wire::RunFile;
 
-use super::scratch::{private_dir, remove_entry, sweep_entries};
+use super::scratch::{DirLayout, layout_dir, remove_entry, sweep_entries};
 
 /// Where `--run-files-root` points when the flag is not given.
 pub const DEFAULT_ROOT: &str = "/run/js-agent/files";
@@ -25,6 +31,7 @@ pub const DEFAULT_ROOT: &str = "/run/js-agent/files";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesRoot {
     path: PathBuf,
+    layout: DirLayout,
 }
 
 impl FilesRoot {
@@ -38,15 +45,34 @@ impl FilesRoot {
     /// running the agent owns with no permission for group or others. The text names the
     /// flag.
     pub fn open(path: &Path) -> Result<Self, String> {
+        Self::open_with(path, DirLayout::Private)
+    }
+
+    /// [`FilesRoot::open`] with the permissions `layout` allows; a missing root is made
+    /// with the mode of the layout (`0700`, or `0711` for [`DirLayout::Searchable`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`FilesRoot::open`]; for [`DirLayout::Searchable`] also an ancestor of the root
+    /// that others cannot search.
+    pub fn open_with(path: &Path, layout: DirLayout) -> Result<Self, String> {
         let missing = fs::symlink_metadata(path).is_err();
         if missing {
-            fs::DirBuilder::new()
+            let made = fs::DirBuilder::new()
                 .recursive(true)
-                .mode(0o700)
+                .mode(layout.dir_mode())
                 .create(path)
-                .map_err(|_| "--run-files-root: cannot make the directory".to_owned())?;
+                .and_then(|()| {
+                    fs::set_permissions(path, fs::Permissions::from_mode(layout.dir_mode()))
+                });
+            made.map_err(|_| "--run-files-root: cannot make the directory".to_owned())?;
         }
-        private_dir(path, "--run-files-root").map(|path| Self { path })
+        layout_dir(path, "--run-files-root", layout).map(|path| Self { path, layout })
+    }
+
+    /// The layout the root was opened with.
+    pub const fn layout(&self) -> DirLayout {
+        self.layout
     }
 
     /// The canonical path of the root.
@@ -62,6 +88,8 @@ impl FilesRoot {
     /// Writes the run's files into a new directory and returns it. A directory left for
     /// this run id is removed first. Each file is created `0444` and must not exist
     /// (`O_EXCL`), then the directory is made `0555`; it is `0700` while it is filled.
+    /// In a [`DirLayout::Searchable`] root the files are `0400` and the directory stays
+    /// `0700` and the agent's until [`FilesRoot::hand_over`].
     ///
     /// # Errors
     ///
@@ -78,6 +106,8 @@ impl FilesRoot {
     }
 
     fn fill(&self, dir: &Path, files: &[RunFile]) -> io::Result<()> {
+        let handed = self.layout == DirLayout::Searchable;
+        let file_mode = if handed { 0o400 } else { 0o444 };
         fs::DirBuilder::new().mode(0o700).create(dir)?;
         for file in files {
             let plain =
@@ -88,14 +118,49 @@ impl FilesRoot {
             let mut out = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .mode(0o444)
+                .mode(file_mode)
                 .open(dir.join(&file.name))?;
             out.write_all(file.contents.as_bytes())?;
             // The umask can only take bits away, but a restrictive one would take read
             // from the container's user.
-            out.set_permissions(fs::Permissions::from_mode(0o444))?;
+            out.set_permissions(fs::Permissions::from_mode(file_mode))?;
+        }
+        if handed {
+            return Ok(());
         }
         fs::set_permissions(dir, fs::Permissions::from_mode(0o555))
+    }
+
+    /// Gives the run's files directory and its files to the job's ids (`uid`, `gid` are host
+    /// ids) and closes the directory to `0500`, so the job reads its files and nobody else
+    /// does. Only for a [`DirLayout::Searchable`] root, whose directories are `0700` and the
+    /// agent's until now. It needs the privilege to give files away (root, or
+    /// `CAP_CHOWN`); an agent without it hands the directory over through the container
+    /// runner's helper instead. The paths are not followed through links: nothing but the
+    /// agent can make an entry in the directory or its root.
+    ///
+    /// # Errors
+    ///
+    /// The root is not a [`DirLayout::Searchable`] one, the run id is not one ordinary path
+    /// component, the directory is missing, or a change of owner or mode failed.
+    pub fn hand_over(&self, run_id: &str, uid: u32, gid: u32) -> io::Result<()> {
+        use std::os::unix::fs::lchown;
+        if self.layout != DirLayout::Searchable {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the files of a private root are already readable by the job",
+            ));
+        }
+        let plain = !matches!(run_id, "" | "." | "..") && !run_id.contains(['/', '\0']);
+        if !plain {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let dir = self.of(run_id);
+        for entry in fs::read_dir(&dir)? {
+            lchown(entry?.path(), Some(uid), Some(gid))?;
+        }
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500))?;
+        lchown(&dir, Some(uid), Some(gid))
     }
 
     /// Removes the run's directory and its files, whatever their mode; one that is not

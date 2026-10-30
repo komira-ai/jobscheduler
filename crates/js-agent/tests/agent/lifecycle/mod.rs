@@ -11,6 +11,7 @@ mod exclusive;
 pub mod fake;
 mod files;
 mod flags;
+mod layout;
 mod logs;
 mod mounts;
 mod owed;
