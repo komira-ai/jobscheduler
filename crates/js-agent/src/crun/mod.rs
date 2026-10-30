@@ -1,19 +1,96 @@
 //! The crun container runtime: [`CrunRuntime`], a [`Runtime`] over js-contain's `crun`
-//! backend.
+//! backend, for a root agent that starts every container as a dedicated non-root job user.
 //!
-//! This is a stub that the conformance suite (`tests/runtime_suite`) fails: every call
-//! answers that the runtime is not written yet.
+//! # What a run becomes
+//!
+//! A run is one *lease*, named `js-<agent tag>-<run id>` (the name the other runtime gives
+//! a container, so the two never name one alike). Its pieces:
+//!
+//! - the lease directory `<scratch>/<name>` and its `root`, `upper`, `work` and `rw/home`
+//!   directories, made `0755` by the agent and given to the job user (the account `crun`
+//!   keeps its state and log as) or to the job's own host id (what the job writes);
+//! - the cgroup `<actions>/<name>`, made by the agent with the booking as the limit
+//!   (memory the booking with no swap, CPU the booked cores: the arithmetic the lease
+//!   server's booking assumes) and given to the job user, who makes the container's cgroup
+//!   `<name>/ctr` under it ([`Runtime::cgroup`]);
+//! - the run's scratch directory, given to the job's host id and bound at `/scratch`; the
+//!   run's mounts, and its files at `/run/js-files` read-only, are bound after it;
+//! - a bundle of the image's unpacked root (read-only), an overlay of an empty input root
+//!   at `/work`, where the job starts, and the program and environment of the image's
+//!   config with the run's arguments after the entrypoint.
+//!
+//! `crun run` is a foreground child of the agent, one thread each ([`Running`]), so the
+//! runtime keeps its containers in memory: a container exists from its creation to its
+//! [`Runtime::remove`]. A restarted agent finds none (labels in a file, a sweep and the
+//! lost-run path are P12b's).
+//!
+//! # Images
+//!
+//! [`Runtime::prepare`] pulls and unpacks in the background ([`Prefetcher`]); a run's image
+//! must be pinned by a sha256 digest. [`Runtime::create_and_start`] asks the store again
+//! (one `stat` for an image that is there, a pull otherwise: single flight with the
+//! prefetcher's), and reads the image's config from the file the image source kept
+//! ([`RegistryImages::keeping_configs`](crate::image::RegistryImages::keeping_configs),
+//! [`config_dir`]).
+//!
+//! # Stop, kill and the end
+//!
+//! A stop sends SIGTERM (`crun kill`), waits for the run to end for the grace, and then
+//! writes the lease cgroup's `cgroup.kill` (every process in it, the container's cgroup
+//! among them) and waits for the end; a run that outlives that is an error. A container's
+//! end is read once: the exit code of `crun run`, and whether the kernel's OOM killer ran
+//! for the lease's own limit (`memory.events`, as js-contain classifies it): only then is
+//! [`Exit::oom_killed`](crate::lifecycle::Exit::oom_killed) set.
+//!
+//! A container that did not run to an exit (`crun` or the init reported an error) polls as
+//! exited with code 126; the words are in the lease's `crun.log` and init report until the
+//! log tail (P12c) carries them.
+//!
+//! # Not here
+//!
+//! No network (a job has loopback only; `check_egress` has nothing to check), no GPUs
+//! (`supports_gpus` is false and a start naming one is refused), no host jobs, no
+//! read-back of the container's mounts, and no log tail.
 
-use std::path::PathBuf;
+mod spec;
+#[cfg(test)]
+mod tests;
+
+use std::collections::BTreeMap;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_contain::oci::OciConfig;
+use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
+use js_contain::container::ContainerSpec;
 use js_contain::oci::image::ImageSource;
+use js_contain::oci::{LeaseDirs, Oci, OciConfig, OciError, Owner};
+use js_contain::running::Running;
+use js_types::Resources;
+use tokio::runtime::{Builder, Runtime as TokioRuntime};
 
+use crate::cli_runtime::{Chown, container_name, hand_over};
+use crate::image::{ConfigError, ImageConfig};
 use crate::lifecycle::{
-    FilesRoot, Found, Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket,
+    Body, Exit, FilesRoot, Found, Prefetcher, Prepared, PullFuture, RunHandle, RunSpec, Runtime,
+    RuntimeError, Status, Ticket, label,
 };
+use spec::{container_spec, exit_of, pinned};
+
+/// How long a pull and unpack of one image may take before it counts as failed.
+pub const PULL_LIMIT: Duration = Duration::from_secs(30 * 60);
+
+/// How long a run is waited for after its cgroup was killed. A process in an
+/// uninterruptible sleep outlasts it; the stop then fails and is tried again.
+pub const KILL_WAIT: Duration = Duration::from_secs(60);
+
+/// The directory of the image configs that the image source keeps and the runtime reads,
+/// for a runtime whose store is `scratch`.
+#[must_use]
+pub fn config_dir(scratch: &Path) -> PathBuf {
+    scratch.join("oci-configs")
+}
 
 /// Where the agent's cgroups are.
 #[derive(Debug, Clone)]
@@ -30,7 +107,7 @@ pub struct CgroupSettings {
 #[derive(Debug, Clone)]
 pub struct CrunSettings {
     /// The backend's configuration: the `crun` program, the agent's own binary for the
-    /// helper modes and the job user.
+    /// helper modes and the job user, which must be set (the agent is root).
     pub oci: OciConfig,
     /// The directory of the backend's image store and leases.
     pub scratch: PathBuf,
@@ -44,83 +121,492 @@ pub struct CrunSettings {
     pub files: Option<FilesRoot>,
 }
 
+/// What a runtime does that a test replaces: giving a file away and reading the clock.
+#[derive(Clone, Copy)]
+pub struct Hooks {
+    /// Gives a path to a user and group.
+    pub chown: Chown,
+    /// Milliseconds since the Unix epoch.
+    pub now_ms: fn() -> u64,
+}
+
+impl Default for Hooks {
+    fn default() -> Self {
+        Self {
+            chown: hand_over,
+            now_ms: system_now_ms,
+        }
+    }
+}
+
+fn system_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// Why a [`CrunRuntime`] could not be opened.
 #[derive(Debug, thiserror::Error)]
 pub enum CrunError {
-    /// The runtime is not written yet.
-    #[error("the crun runtime is not written yet")]
-    NotWritten,
+    /// The settings name no job user: the agent is root and a container runs as another.
+    #[error("the crun runtime needs the job user the containers run as")]
+    NoJobUser,
+    /// The backend cannot start on this node.
+    #[error(transparent)]
+    Oci(#[from] OciError),
+    /// The runtime of the calls could not be made.
+    #[error("the runtime of the crun calls: {0}")]
+    Runtime(io::Error),
+    /// A file of the agent's cgroup could not be given to the job user.
+    #[error("give {path} to the job user: {why}")]
+    Delegation {
+        /// The file.
+        path: PathBuf,
+        /// The reason.
+        why: io::Error,
+    },
+    /// The directory of the image configs could not be made.
+    #[error("the directory of the image configs {path}: {why}")]
+    Configs {
+        /// The directory.
+        path: PathBuf,
+        /// The reason.
+        why: io::Error,
+    },
+    /// The threads that pull images could not be started.
+    #[error("the threads that pull images: {0}")]
+    Pull(io::Error),
+}
+
+/// Why a run could not be made into a container.
+#[derive(Debug, thiserror::Error)]
+enum Fault {
+    #[error("this runtime runs contained jobs only")]
+    NotContained,
+    #[error("containers on this runtime cannot use a GPU")]
+    Gpu,
+    #[error("{0}")]
+    Image(String),
+    #[error("run id {0:?} cannot name a container")]
+    Name(String),
+    #[error("a container of run {0} exists")]
+    InUse(String),
+    #[error("this runtime has no run files directory")]
+    NoFiles,
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error("{what}: {why}")]
+    Step { what: &'static str, why: String },
+}
+
+impl Fault {
+    fn step(what: &'static str, why: &dyn std::fmt::Display) -> Self {
+        Self::Step {
+            what,
+            why: why.to_string(),
+        }
+    }
+}
+
+/// How far a container is.
+enum State {
+    /// Made and not started.
+    Created,
+    /// `crun run` runs (or has ended and not been read).
+    Running { run: Running, since_ms: u64 },
+    /// Ended, as read once.
+    Ended(Exit),
+}
+
+/// One container.
+struct Run {
+    spec: ContainerSpec,
+    labels: BTreeMap<String, String>,
+    lease: LeaseDirs,
+    cgroup: LeaseCgroup,
+    /// The lease's `memory.max`.
+    cap: Option<u64>,
+    /// The OOM count of the cgroup above, when the lease started.
+    backstop: Option<u64>,
+    state: State,
 }
 
 /// A container runtime over `crun`.
-#[derive(Debug)]
 pub struct CrunRuntime {
-    settings: CrunSettings,
+    oci: Arc<Oci>,
+    pulls: Prefetcher,
+    rt: TokioRuntime,
+    cgroups: CgroupSettings,
+    host_id: String,
+    configs: PathBuf,
+    files: Option<FilesRoot>,
+    hooks: Hooks,
+    runs: BTreeMap<String, Run>,
 }
 
 impl CrunRuntime {
-    /// Opens the runtime.
+    /// Opens the runtime over the store in `settings.scratch`, fetching images with
+    /// `source`.
     ///
     /// # Errors
-    /// Always, while the runtime is not written.
-    pub fn open(settings: CrunSettings, _source: Arc<dyn ImageSource>) -> Result<Self, CrunError> {
-        Ok(Self { settings })
+    /// See [`CrunError`].
+    pub fn open(settings: CrunSettings, source: Arc<dyn ImageSource>) -> Result<Self, CrunError> {
+        Self::open_with(settings, source, Hooks::default())
     }
 
-    /// The directory of the images and leases.
-    #[must_use]
-    pub fn scratch(&self) -> &std::path::Path {
-        &self.settings.scratch
-    }
-
-    /// Creates the container of `spec` and does not start it.
+    /// [`CrunRuntime::open`] with the hooks given.
     ///
     /// # Errors
-    /// Always, while the runtime is not written.
-    pub fn stage(&mut self, _spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
-        Err(not_written())
+    /// See [`CrunError`].
+    pub fn open_with(
+        settings: CrunSettings,
+        source: Arc<dyn ImageSource>,
+        hooks: Hooks,
+    ) -> Result<Self, CrunError> {
+        settings.oci.job_user.ok_or(CrunError::NoJobUser)?;
+        let oci = Oci::new(
+            &settings.oci,
+            source,
+            &settings.scratch,
+            &settings.cgroups.actions,
+        )?;
+        let rt = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(CrunError::Runtime)?;
+        let (uid, gid) = oci.job_ids();
+        let cgroups = settings.cgroups;
+        // `crun`, run as the job user, moves its first process from the agent's cgroup into
+        // the container's, which needs write access to the `cgroup.procs` of their nearest
+        // common ancestor, and makes the container's cgroup in the lease's.
+        let give = |dir: PathBuf, files: &[&str]| {
+            files.iter().try_for_each(|file| {
+                let path = dir.join(file);
+                (hooks.chown)(&path, uid, gid).map_err(|why| CrunError::Delegation { path, why })
+            })
+        };
+        give(cgroup_dir(&cgroups.mount, &cgroups.root), &ROOT_OWNED_FILES)?;
+        give(
+            cgroup_dir(&cgroups.mount, &cgroups.actions),
+            &JOB_OWNED_FILES,
+        )?;
+        let configs = config_dir(&settings.scratch);
+        std::fs::create_dir_all(&configs).map_err(|why| CrunError::Configs {
+            path: configs.clone(),
+            why,
+        })?;
+        let pulling = Arc::clone(&oci);
+        let pulls = Prefetcher::new(settings.pull_threads, move |image| {
+            pull(Arc::clone(&pulling), image)
+        })
+        .map_err(CrunError::Pull)?;
+        Ok(Self {
+            oci,
+            pulls,
+            rt,
+            cgroups,
+            host_id: settings.host_id,
+            configs,
+            files: settings.files,
+            hooks,
+            runs: BTreeMap::new(),
+        })
     }
 
-    /// [`Runtime::prepare`], waiting for the fetch to end.
+    /// [`Runtime::prepare`], waiting for the fetch to end: `Ready` or `Failed`. For a
+    /// command that pulls one image.
     #[must_use]
-    pub fn wait_prepared(&self, _image: &str) -> Prepared {
-        Prepared::Failed(not_written())
+    pub fn wait_prepared(&self, image: &str) -> Prepared {
+        self.pulls.wait(image)
     }
 
-    /// Waits until the container `id` has exited.
-    pub fn wait_ended(&mut self, _id: &RunHandle) {}
+    /// Waits until the container `id` has exited (one that is gone, never started or ended
+    /// already returns at once). The lifecycle polls instead; this is for a caller with
+    /// nothing else to do.
+    pub fn wait_ended(&mut self, id: &RunHandle) {
+        let rt = &self.rt;
+        if let Some(Run {
+            state: State::Running { run, .. },
+            ..
+        }) = self.runs.get_mut(&id.0)
+        {
+            rt.block_on(run.wait());
+        }
+    }
+
+    /// Makes the container of `spec` and does not start it: the first half of
+    /// [`Runtime::create_and_start`], for a caller that starts it later (or never, as the
+    /// conformance suite does). Such a container lists as
+    /// [`never_started`](Found::never_started).
+    ///
+    /// # Errors
+    /// As [`Runtime::create_and_start`].
+    pub fn stage(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
+        self.make(spec)
+            .map(RunHandle)
+            .map_err(|fault| RuntimeError::new(fault.to_string()))
+    }
+
+    /// Makes the container of `spec`, everything but its start. A failure removes what it
+    /// made.
+    fn make(&mut self, spec: &RunSpec) -> Result<String, Fault> {
+        if spec.isolation != js_agent_wire::Isolation::Contained {
+            return Err(Fault::NotContained);
+        }
+        if !spec.gpu_indices.is_empty() {
+            return Err(Fault::Gpu);
+        }
+        let Body::Container { image, args } = &spec.body;
+        let image = pinned(image).map_err(Fault::Image)?;
+        let name = container_name(&self.host_id, &spec.run_id)
+            .map_err(|_| Fault::Name(spec.run_id.clone()))?;
+        if self.runs.contains_key(&name) {
+            return Err(Fault::InUse(spec.run_id.clone()));
+        }
+        self.rt
+            .block_on(self.oci.check_pinned(&image))
+            .map_err(|why| Fault::Image(why.to_string()))?;
+        let config = ImageConfig::kept(&self.configs, &image.digest)?;
+        let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, &name);
+        let lease = self.oci.lease_dirs(&name);
+        let mut container = container_spec(&name, spec, &image, &lease, cgroup.name());
+        config.apply(args, &mut container)?;
+        if let Err(fault) = self.make_resources(spec, &container, &lease, &cgroup) {
+            // What the failed step left; none of it is a container.
+            let _ = cgroup.remove();
+            let _ = js_contain::remove::remove_tree(&lease.dir);
+            return Err(fault);
+        }
+        let now = (self.hooks.now_ms)();
+        let mut labels = spec.labels.clone();
+        labels.insert(label::AGENT.to_owned(), self.host_id.clone());
+        labels.insert(label::CREATED_MS.to_owned(), now.to_string());
+        self.runs.insert(
+            name.clone(),
+            Run {
+                spec: container,
+                labels,
+                lease,
+                cgroup,
+                cap: js_contain::hard_memory_max(spec.memory_bytes),
+                backstop: None,
+                state: State::Created,
+            },
+        );
+        Ok(name)
+    }
+
+    /// The directories, hand-overs, cgroup and bundle of one lease.
+    fn make_resources(
+        &self,
+        spec: &RunSpec,
+        container: &ContainerSpec,
+        lease: &LeaseDirs,
+        cgroup: &LeaseCgroup,
+    ) -> Result<(), Fault> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let chown = self.hooks.chown;
+        let (job, job_id) = (self.oci.job_ids(), self.oci.container_ids());
+        for (dir, owner) in lease.to_make() {
+            let (uid, gid) = match owner {
+                Owner::Job => job,
+                Owner::Container => job_id,
+            };
+            std::fs::create_dir(&dir)
+                .and_then(|()| {
+                    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+                })
+                .and_then(|()| chown(&dir, uid, gid))
+                .map_err(|why| Fault::step("make a lease directory", &why))?;
+        }
+        chown(&spec.scratch, job_id.0, job_id.1)
+            .map_err(|why| Fault::step("give the run's scratch directory to the job", &why))?;
+        if spec.files.is_some() {
+            let files = self.files.as_ref().ok_or(Fault::NoFiles)?;
+            files
+                .hand_over(&spec.run_id, job_id.0, job_id.1)
+                .map_err(|why| Fault::step("give the run's files to the job", &why))?;
+        }
+        let booking = Resources::new(spec.cpu_millis, spec.memory_bytes, 0, None)
+            .map_err(|why| Fault::step("book the run", &why))?;
+        cgroup
+            .create_with(&booking, None, LeasePolicy::Hard)
+            .map_err(|why| Fault::step("make the lease's cgroup", &why))?;
+        for file in JOB_OWNED_FILES {
+            chown(&cgroup.dir().join(file), job.0, job.1)
+                .map_err(|why| Fault::step("give the lease's cgroup to the job user", &why))?;
+        }
+        self.rt
+            .block_on(self.oci.create(container))
+            .map_err(|why| Fault::step("write the bundle", &why))
+    }
+
+    /// Starts the container `name`, which [`CrunRuntime::make`] made.
+    fn begin(&mut self, name: &str) -> Result<(), Fault> {
+        let _entered = self.rt.enter();
+        let now = (self.hooks.now_ms)();
+        let Some(run) = self.runs.get_mut(name) else {
+            return Err(Fault::step("start the container", &"it is gone"));
+        };
+        let started = self
+            .oci
+            .start(&run.spec)
+            .map_err(|why| Fault::step("start crun", &why))?;
+        run.backstop = run.cgroup.parent_ooms().ok();
+        run.state = State::Running {
+            run: started,
+            since_ms: now,
+        };
+        Ok(())
+    }
+
+    /// Reads how the container `name` stands, ending it in the books once `crun run` has.
+    fn status_of(&mut self, name: &str) -> Status {
+        let (rt, oci) = (&self.rt, &self.oci);
+        let Some(run) = self.runs.get_mut(name) else {
+            return Status::Gone;
+        };
+        let ended = match &run.state {
+            State::Created => return Status::Running,
+            State::Ended(exit) => return Status::Exited(*exit),
+            State::Running { run: running, .. } if running.try_end().is_none() => {
+                return Status::Running;
+            }
+            State::Running { run: running, .. } => rt.block_on(oci.ended(&run.spec, running)),
+        };
+        let oom = run.cgroup.oom_outcome(run.cap, run.backstop).ok().flatten();
+        let exit = exit_of(ended, oom.as_ref());
+        run.state = State::Ended(exit);
+        Status::Exited(exit)
+    }
 }
 
-fn not_written() -> RuntimeError {
-    RuntimeError::new("the crun runtime is not written yet")
+/// The directory of the cgroup `name` (relative to `mount`, starting with `/`).
+fn cgroup_dir(mount: &Path, name: &str) -> PathBuf {
+    mount.join(name.trim_start_matches('/'))
+}
+
+/// The pull and unpack of `image`, with the limit of the whole.
+fn pull(oci: Arc<Oci>, image: String) -> PullFuture {
+    Box::pin(async move {
+        let pinned = pinned(&image)?;
+        let pulled = tokio::time::timeout(PULL_LIMIT, oci.check_pinned(&pinned)).await;
+        pulled
+            .map_err(|_| format!("pulling {image} took longer than {PULL_LIMIT:?}"))?
+            .map_err(|why| why.to_string())
+    })
 }
 
 impl Runtime for CrunRuntime {
-    fn prepare(&mut self, _image: &str, _waited: Option<Ticket>) -> Prepared {
-        Prepared::Failed(not_written())
+    fn prepare(&mut self, image: &str, waited: Option<Ticket>) -> Prepared {
+        self.pulls.prepare(image, waited)
     }
 
-    fn create_and_start(&mut self, _spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
-        Err(not_written())
+    fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
+        let name = self
+            .make(spec)
+            .map_err(|fault| RuntimeError::new(fault.to_string()))?;
+        if let Err(fault) = self.begin(&name) {
+            // The failed start leaves no container: the lease is taken apart as a removal
+            // does.
+            let _ = self.remove(&RunHandle(name));
+            return Err(RuntimeError::new(fault.to_string()));
+        }
+        Ok(RunHandle(name))
     }
 
-    fn poll(&mut self, _id: &RunHandle) -> Result<Status, RuntimeError> {
-        Err(not_written())
+    fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
+        Ok(self.status_of(&id.0))
     }
 
-    fn stop(&mut self, _id: &RunHandle, _grace: Duration) -> Result<(), RuntimeError> {
-        Err(not_written())
+    fn stop(&mut self, id: &RunHandle, grace: Duration) -> Result<(), RuntimeError> {
+        let (rt, oci) = (&self.rt, &self.oci);
+        let Some(Run {
+            state: State::Running { run, .. },
+            cgroup,
+            spec,
+            ..
+        }) = self.runs.get_mut(&id.0)
+        else {
+            // Gone, never started or ended: nothing runs.
+            return Ok(());
+        };
+        if run.try_end().is_some() {
+            return Ok(());
+        }
+        // A SIGTERM that fails (the container is not made yet, or already over) is not
+        // the stop's failure: the wait below ends at once for a container that is over,
+        // and the kill does the rest for one that is not.
+        let _ = rt.block_on(oci.terminate(&spec.name));
+        if rt.block_on(tokio::time::timeout(grace, run.wait())).is_ok() {
+            return Ok(());
+        }
+        cgroup
+            .kill()
+            .map_err(|why| RuntimeError::new(format!("kill the lease's cgroup: {why}")))?;
+        rt.block_on(tokio::time::timeout(KILL_WAIT, run.wait()))
+            .map_err(|_| RuntimeError::new(format!("{} still runs after its kill", spec.name)))
     }
 
-    fn remove(&mut self, _id: &RunHandle) -> Result<(), RuntimeError> {
-        Err(not_written())
+    fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
+        let (rt, oci) = (&self.rt, &self.oci);
+        let Some(run) = self.runs.get_mut(&id.0) else {
+            return Ok(());
+        };
+        let failed =
+            |what: &str, why: &dyn std::fmt::Display| RuntimeError::new(format!("{what}: {why}"));
+        if let State::Running { run: running, .. } = &mut run.state
+            && running.try_end().is_none()
+        {
+            // Removed while it runs: ended by force, as a stop that spent its grace.
+            let _ = run.cgroup.kill();
+            let ended = rt.block_on(tokio::time::timeout(KILL_WAIT, running.wait()));
+            if ended.is_err() {
+                rt.block_on(running.force());
+            }
+        }
+        oci.remove(&id.0)
+            .map_err(|why| failed("delete the container", &why))?;
+        run.cgroup
+            .remove()
+            .map_err(|why| failed("remove the lease's cgroup", &why))?;
+        if let Err(why) = js_contain::remove::remove_tree(&run.lease.dir)
+            && why.kind() != io::ErrorKind::NotFound
+        {
+            return Err(failed("remove the lease directory", &why));
+        }
+        self.runs.remove(&id.0);
+        Ok(())
     }
 
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
-        Err(not_written())
+        let now = (self.hooks.now_ms)();
+        Ok(self
+            .runs
+            .iter()
+            .map(|(name, run)| Found {
+                id: RunHandle(name.clone()),
+                labels: run.labels.clone(),
+                running_ms: match &run.state {
+                    State::Running { since_ms, .. } => now.saturating_sub(*since_ms),
+                    State::Created | State::Ended(_) => 0,
+                },
+                never_started: matches!(run.state, State::Created),
+            })
+            .collect())
     }
 
     fn supports_gpus(&self) -> bool {
         false
+    }
+
+    fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
+        let run = self.runs.get(&id.0)?;
+        let ctr = run.cgroup.dir().join("ctr");
+        matches!(run.state, State::Running { .. })
+            .then_some(ctr)
+            .filter(|ctr| ctr.is_dir())
     }
 }

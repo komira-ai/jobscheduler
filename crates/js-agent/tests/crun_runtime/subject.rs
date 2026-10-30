@@ -9,7 +9,7 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
-use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings};
+use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings, config_dir};
 use js_agent::image::RegistryImages;
 use js_agent::lifecycle::{
     Capacity, Config, DirLayout, MountRoots, Prepared, RunHandle, RunSpec, ScratchRoot, StateRoot,
@@ -84,12 +84,13 @@ fn remove_cgroup_tree(dir: &Path) {
 }
 
 /// Docker Hub's library, through the agent's registry client.
-fn registry() -> Arc<RegistryImages> {
+fn registry(scratch: &Path) -> Arc<RegistryImages> {
     let policy = Policy::new(vec![Allow::parse("docker.io/library/").expect("an entry")])
         .allow_realm("auth.docker.io")
         .expect("a realm");
     let images = RegistryImages::new(Client::new(policy), std::env::consts::ARCH)
-        .expect("an image source for this machine");
+        .expect("an image source for this machine")
+        .keeping_configs(config_dir(scratch));
     Arc::new(images)
 }
 
@@ -120,6 +121,7 @@ pub fn crun_subject(name: &str) -> CrunSubject {
         .strip_prefix("docker://")
         .unwrap_or(&reference)
         .to_owned();
+    let scratch = base.join("oci");
     let settings = CrunSettings {
         oci: OciConfig {
             runtime: PathBuf::from("/usr/bin/crun"),
@@ -128,7 +130,7 @@ pub fn crun_subject(name: &str) -> CrunSubject {
             job_user: Some((uid, gid)),
             ..OciConfig::default()
         },
-        scratch: base.join("oci"),
+        scratch: scratch.clone(),
         cgroups: CgroupSettings {
             mount: PathBuf::from(MOUNT),
             root: delegation().root.clone(),
@@ -138,7 +140,8 @@ pub fn crun_subject(name: &str) -> CrunSubject {
         pull_threads: 1,
         files: None,
     };
-    let crun = CrunRuntime::open(settings, registry()).unwrap_or_else(|e| panic!("open: {e}"));
+    let crun =
+        CrunRuntime::open(settings, registry(&scratch)).unwrap_or_else(|e| panic!("open: {e}"));
     CrunSubject {
         base,
         cgroup,
