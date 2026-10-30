@@ -9,6 +9,7 @@ mod cleanup;
 mod exclusive;
 mod job;
 mod slots;
+mod tails;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -154,6 +155,7 @@ impl Lifecycle {
             self.clean(index, &mut events);
         }
         self.retry_stuck(&mut events);
+        self.fit_log_tails_to_beat(&mut events);
         self.sweep();
         events
     }

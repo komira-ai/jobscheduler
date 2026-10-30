@@ -55,7 +55,16 @@ impl Lifecycle {
                 let cause = job.cause.filter(|_| exit.is_none() || job.stop_sent);
                 let (how, status) = outcome(cause, exit);
                 if !job.silent {
-                    job.result = Some(job.report(how, status, None));
+                    let mut result = job.report(how, status, None);
+                    // The container is still there: it is removed in the next stage. A log
+                    // that cannot be read costs the result its tail and nothing else.
+                    if exit.is_some() {
+                        match runtime.log_tail(&id) {
+                            Ok(tail) => result.log_tail = tail,
+                            Err(why) => job.note(code::LOGS_FAILED, why.to_string(), events),
+                        }
+                    }
+                    job.result = Some(result);
                     events.push(Event::ResultReady {
                         run_id: job.run_id.clone(),
                     });

@@ -93,6 +93,11 @@ pub const MAX_VERSION_LEN: usize = 64;
 pub const MAX_TAINT_TEXT_LEN: usize = 256;
 /// Longest result `detail` text, in bytes.
 pub const MAX_DETAIL_LEN: usize = 1024;
+/// Longest tail of one stream of a run's log in a result, in bytes. A result is resent in
+/// every heartbeat until acknowledged and the heartbeat body is held to
+/// [`HEARTBEAT_BODY_BUDGET`], so the tail is kept small: two streams at this size are a
+/// quarter of the budget, before JSON escaping.
+pub const MAX_LOG_STREAM_LEN: usize = 8 * 1024;
 /// Longest `detail` of an exclusive refusal, in bytes; the scheduler never parses it.
 pub const MAX_REFUSAL_DETAIL: usize = 256;
 /// Longest refusal code, in bytes.
@@ -141,6 +146,10 @@ pub const TAIL_MINUTE: u16 = 63;
 /// Longest lease id in a load, in bytes: `u64::MAX-u64::MAX`. A load's lease id is held to
 /// this and to the `term-seq` form, not to [`MAX_ID_LEN`].
 pub const MAX_LEASE_REF_LEN: usize = 41;
+/// The most a [`crate::NodeLoad`] at every cap serialises to, in bytes (a test builds one
+/// and holds it to this). A host that reports a load must leave this much of the heartbeat
+/// body for it.
+pub const MAX_LOAD_BYTES: usize = 28 * 1024;
 /// The body a server reads for a heartbeat, in bytes; the server's own limit must equal
 /// it. A load at every cap here is about 25 KB, and beside 96 held runs and 8 results at
 /// the longest ids a beat stays under three quarters of it; a test fixes those totals.

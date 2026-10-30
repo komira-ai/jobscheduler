@@ -251,6 +251,14 @@
 //! the agent does not accept `--container-bin` there: the post-job checks of
 //! [`integrity`](crate::integrity) read `/proc`, and a job must not run unchecked.
 //!
+//! # Logs
+//!
+//! `create` bounds the container's log on the host (see [`logs`]), and once a job has
+//! exited, before the container is removed, one `logs` call reads the last bytes of its
+//! standard output and standard error, apart, for the result ([`ContainerRuntime::log_tail`]).
+//! The call has the same limits as every other. The tail is returned verbatim to whoever
+//! can read the run: a job must not print secrets.
+//!
 //! # Not here
 //!
 //! Registry credentials (the agent holds none: an image is on the host, or pullable
@@ -258,6 +266,8 @@
 //! above).
 
 mod args;
+mod logs;
+pub use logs::LOGS_LIMIT;
 mod seccomp;
 mod settings;
 mod subid;
@@ -267,7 +277,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use js_agent_wire::Isolation;
+use js_agent_wire::{Isolation, LogTail};
 use serde_json::Value;
 
 mod egress;
@@ -545,6 +555,7 @@ pub struct CliRuntime {
     proc_read: ProcRead,
     proc_link: ProcLink,
     profile_dir: Option<PathBuf>,
+    logs_limit: Duration,
     warnings: Vec<String>,
     mapping: Option<Mapping>,
     // Held, never read: the claim of the range lasts as long as the runtime.
@@ -628,6 +639,7 @@ impl CliRuntime {
             proc_read: read_proc,
             proc_link: read_proc_link,
             profile_dir: None,
+            logs_limit: LOGS_LIMIT,
             warnings: Vec::new(),
             mapping: None,
             _claim: None,
@@ -1394,6 +1406,10 @@ impl ContainerRuntime for CliRuntime {
 
     fn supports_gpus(&self) -> bool {
         self.gpus
+    }
+
+    fn log_tail(&mut self, id: &ContainerId) -> Result<Option<LogTail>, RuntimeError> {
+        self.read_logs(id).map_err(RuntimeError::from)
     }
 
     fn check_egress(&self) -> Result<(), RuntimeError> {
