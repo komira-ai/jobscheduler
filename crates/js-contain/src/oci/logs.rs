@@ -43,7 +43,6 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use tokio::io::AsyncReadExt as _;
 use tokio::net::unix::pipe;
 use tokio::task::JoinHandle;
@@ -224,11 +223,11 @@ impl Capture {
 const CHUNK: usize = 8 * 1024;
 
 /// Reads `pipe` until it closes (or fails) and gives everything to `sink`.
-async fn pump(pipe: pipe::Receiver, sink: Arc<Sink>) {
-    // Not implemented yet: nothing is read.
-    let _ = CHUNK;
-    sink.take(&[]);
-    drop(pipe);
+async fn pump(mut pipe: pipe::Receiver, sink: Arc<Sink>) {
+    let mut chunk = vec![0_u8; CHUNK];
+    while let Ok(n @ 1..) = pipe.read(&mut chunk).await {
+        sink.take(&chunk[..n]);
+    }
 }
 
 /// The two readers of one run.
