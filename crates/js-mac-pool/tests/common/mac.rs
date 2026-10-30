@@ -11,6 +11,7 @@ use js_mac_pool::seatbelt::{
 };
 use js_mac_pool::xcode::{Catalog, HostXcode, State, XcodeFlag};
 
+use super::canary::Cleanup;
 use super::{Ran, Scratch, build_of, diff_id, real_answers, run};
 
 pub const DATA: &str = "fixture-data\n";
@@ -27,7 +28,7 @@ pub struct Mac {
     pub xcode: HostXcode,
     pub canaries: Canaries,
     /// Files outside the scratch directory, removed with the fixture.
-    outside: Vec<PathBuf>,
+    _outside: Cleanup,
 }
 
 fn abs(path: &Path) -> AbsPath {
@@ -40,6 +41,8 @@ impl Mac {
     /// `owner` is the uid the Xcode app may be owned by besides root.
     pub fn build(scratch: Scratch, uid_entry: PathBuf, tag: &str, owner: u32) -> Self {
         use std::os::unix::fs::PermissionsExt as _;
+        // Before anything is made, so a panic below removes what was.
+        let mut outside = Cleanup::default();
         let store = abs(&scratch.dir("store"));
         let pinned = PinnedTree::new(&store, &diff_id('a')).expect("pinned");
         let unpinned = PinnedTree::new(&store, &diff_id('b')).expect("unpinned");
@@ -65,12 +68,16 @@ impl Mac {
         let helper_state = scratch.file("run/state/helper-db", "secret\n");
         let on_data = scratch.file("sysdata/secret.txt", "secret\n");
 
-        let pid = std::process::id();
-        let shared = PathBuf::from(format!("/Users/Shared/js-mac-pool-{tag}-{pid}"));
-        let var_tmp = PathBuf::from(format!("/private/var/tmp/js-mac-pool-{tag}-{pid}"));
-        for file in [&shared, &var_tmp] {
-            std::fs::write(file, "secret\n").expect("a world-writable directory");
-        }
+        let shared = outside.create_unique(
+            Path::new("/Users/Shared"),
+            &format!("js-mac-pool-{tag}"),
+            "secret\n",
+        );
+        let var_tmp = outside.create_unique(
+            Path::new("/private/var/tmp"),
+            &format!("js-mac-pool-{tag}"),
+            "secret\n",
+        );
         let canaries = Canaries {
             other_home: abs(&other_home),
             input_store: abs(&input_store),
@@ -103,7 +110,7 @@ impl Mac {
             unpinned,
             xcode,
             canaries,
-            outside: vec![shared, var_tmp],
+            _outside: outside,
         }
     }
 
@@ -139,14 +146,6 @@ impl Mac {
 
     pub fn unpinned_file(&self) -> PathBuf {
         PathBuf::from(self.unpinned.path().as_str()).join("secret.txt")
-    }
-}
-
-impl Drop for Mac {
-    fn drop(&mut self) {
-        for file in &self.outside {
-            let _ = std::fs::remove_file(file);
-        }
     }
 }
 

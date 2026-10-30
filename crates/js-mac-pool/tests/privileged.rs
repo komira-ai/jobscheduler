@@ -41,6 +41,11 @@ fn ids() -> (u32, u32) {
 fn fixture(tag: &str) -> Mac {
     let (uid, gid) = ids();
     let root = PathBuf::from(var("JS_MAC_POOL_PRIV_ROOT"));
+    assert_eq!(
+        std::fs::canonicalize(&root).expect("the work root exists"),
+        root,
+        "the work root is its canonical form: no link above it"
+    );
     let meta = std::fs::symlink_metadata(&root).expect("the work root");
     assert!(meta.is_dir(), "the work root is a directory, not a link");
     assert_eq!(meta.uid(), 0, "the work root belongs to root");

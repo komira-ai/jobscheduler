@@ -234,4 +234,5 @@ pub fn run(
     }
 }
 
+pub mod canary;
 pub mod mac;
