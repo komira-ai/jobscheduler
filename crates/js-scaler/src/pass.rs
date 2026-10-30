@@ -31,6 +31,9 @@ pub(crate) struct Pass<'a> {
     /// step and now.
     unheard: BTreeMap<String, Millis>,
     pub(crate) unheard_now: BTreeMap<String, Millis>,
+    /// The restored machines not yet heard from since the restart, and the instant of the
+    /// restart ([`State::awaiting`]).
+    pub(crate) awaiting: BTreeMap<String, Millis>,
     /// Records for the machines an acquire answer named besides the one wanted, added when
     /// the lists have been read.
     extras: Vec<Record>,
@@ -89,6 +92,36 @@ fn below(offer: &StoredOffer, host: Option<&js_elastic::Offer>) -> bool {
 }
 
 impl<'a> Pass<'a> {
+    /// Whether `record` is a restored registered machine whose host has not yet said hello
+    /// to this process and whose window, `boot_timeout` from the restart, is still open: it
+    /// covers a request its offer fits. The window is open for `boot_timeout` less a
+    /// millisecond after the restart and closed from `boot_timeout` on.
+    ///
+    /// "The restart" is the first step the process takes. A machine that is draining is
+    /// never awaited: the registry places no new lease on it (which is why `cover` asks a
+    /// host to be live), so a request it covered would wait the whole window and be
+    /// launched for anyway. The trade-off: a restored machine that is dead holds a request
+    /// its offer fits for up to `boot_timeout` before the request gets a machine. A server
+    /// that crashes again inside `boot_timeout` starts the window afresh at each restart
+    /// (it is not written to disk), so it can hold a launch for as long as it keeps
+    /// crashing; that is bounded per restart and accepted.
+    pub(crate) fn awaited(&self, record: &Record, boot_timeout: std::time::Duration) -> bool {
+        let open = self
+            .awaiting
+            .get(&record.name)
+            .is_some_and(|restart| self.now.since(*restart) < boot_timeout);
+        let silent =
+            host_named(self.input, &record.name).is_none_or(|host| host.state != HostState::Live);
+        [
+            open,
+            silent,
+            record.phase == Phase::Registered,
+            !record.condemned,
+        ]
+        .into_iter()
+        .all(|ok| ok)
+    }
+
     pub(crate) fn new(state: State, input: &'a Input, now: Millis) -> Self {
         let last = state.records.last_step;
         // The first step of a scaler read from records: it was down since the step that
@@ -107,6 +140,22 @@ impl<'a> Pass<'a> {
                 })
                 .collect()
         };
+        // A scaler read from records starts the window of every machine it holds as
+        // registered at this step: those are the machines whose agents have not yet said
+        // hello to the registry of this process. A draining machine is left out: the step
+        // had already decided to take it out, the registry places no new lease on it, and
+        // so it could never serve the request it would be awaited for.
+        let awaiting = if state.restored {
+            state
+                .records
+                .instances
+                .iter()
+                .filter(|record| record.phase == Phase::Registered)
+                .map(|record| (record.name.clone(), now))
+                .collect()
+        } else {
+            state.awaiting
+        };
         let silent = after_downtime(state.silent);
         let missing = after_downtime(state.missing);
         Self {
@@ -122,6 +171,7 @@ impl<'a> Pass<'a> {
             missing_now: BTreeMap::new(),
             unheard: state.unheard,
             unheard_now: BTreeMap::new(),
+            awaiting,
             extras: Vec::new(),
             drawn: 0,
             blocked: BTreeMap::new(),
