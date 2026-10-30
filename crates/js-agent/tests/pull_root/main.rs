@@ -186,7 +186,9 @@ fn pull(fx: &Fixture, cell: &Cell, artifact: &Artifact) -> Ran {
     ];
     let argv: Vec<OsString> = args.iter().map(OsString::from).collect();
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let status = run(&argv, &mut out, &mut err, &host);
+    // The verb blocks its thread on a runtime of its own, while the fixture is served by
+    // this test's: the thread leaves the runtime for the call, and another worker serves.
+    let status = tokio::task::block_in_place(|| run(&argv, &mut out, &mut err, &host));
     Ran {
         status: format!("{status:?}"),
         stdout: String::from_utf8(out).expect("utf-8"),
@@ -212,7 +214,7 @@ fn names(dir: &Path) -> Vec<String> {
 /// an unpack that lands files owned by root (the container's id 0 would not own its own
 /// root), a store the job's ids could write, a second pull that fetches again, and a
 /// helper that cannot run as the job user at all.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "root and a real crun: the agent-privilege job"]
 async fn a_small_image_is_pulled_unpacked_and_published_read_only_and_a_second_run_is_a_no_op() {
     let fx = Fixture::start().await;
@@ -285,7 +287,7 @@ async fn a_small_image_is_pulled_unpacked_and_published_read_only_and_a_second_r
 /// hides the earlier directory's contents, and the whiteout marker itself is not left in
 /// the root. This is the unpacker's own rule, pulled through the verb: catches layers
 /// applied as a plain overlay of files.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "root and a real crun: the agent-privilege job"]
 async fn a_whiteout_layer_is_applied() {
     let fx = Fixture::start().await;
@@ -329,7 +331,7 @@ async fn a_whiteout_layer_is_applied() {
 /// (the half-made one holds files only the job's ids own) and no downloaded layer; the
 /// good image then pulls. Catches a publish before the unpack ends and a stage that stays
 /// because its files cannot be removed by the daemon user.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "root and a real crun: the agent-privilege job"]
 async fn a_failed_pull_leaves_no_published_root_and_no_staging() {
     let fx = Fixture::start().await;

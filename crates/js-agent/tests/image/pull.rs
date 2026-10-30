@@ -104,7 +104,9 @@ fn pull_with(fx: &Fixture, cell: &Cell, euid: u32, crun: &str, args: &[&str]) ->
     let mut argv: Vec<OsString> = vec!["js-agent".into(), "image-pull".into()];
     argv.extend(args.iter().map(OsString::from));
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let status = run(&argv, &mut out, &mut err, &host);
+    // The verb blocks its thread on a runtime of its own, while the fixture is served by
+    // this test's: the thread leaves the runtime for the call, and another worker serves.
+    let status = tokio::task::block_in_place(|| run(&argv, &mut out, &mut err, &host));
     Ran {
         status: format!("{status:?}"),
         stdout: String::from_utf8(out).expect("utf-8"),
@@ -181,7 +183,7 @@ fn assert_untouched(scratch: &Path, fx: &Fixture) {
 /// downloaded layers. Catches a store at another place than `published_root` names (the
 /// runtime would not find the image), a stage or blobs left behind, and an output that
 /// leaves the operator to guess the path.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_digest_pinned_image_is_pulled_and_published_where_the_runtime_reads_it() {
     let fx = Fixture::start().await;
     let artifact = image();
@@ -208,7 +210,7 @@ async fn a_digest_pinned_image_is_pulled_and_published_where_the_runtime_reads_i
 /// would fail). Catches a second run that fetches the layers again, one that fails on what
 /// it has, and one that changes what it prints into something a script cannot tell from a
 /// pull.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_image_already_published_is_a_no_op_that_says_so() {
     let fx = Fixture::start().await;
     let artifact = image();
@@ -242,7 +244,7 @@ async fn an_image_already_published_is_a_no_op_that_says_so() {
 /// 64 lowercase hex digits of sha256, another algorithm. Catches a tag resolved to
 /// whatever it points at today (the pin is the whole point) and a refusal that has
 /// already created files or asked the registry.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reference_that_is_not_pinned_by_digest_is_refused_before_anything_is_made() {
     let fx = Fixture::start().await;
     let cell = Cell::new("pull-tags");
@@ -270,7 +272,7 @@ async fn a_reference_that_is_not_pinned_by_digest_is_refused_before_anything_is_
 /// Catches an allow-list that is read and then not enforced for the verb (the runtime
 /// would pull from any host a job names), and a refusal that comes only after the first
 /// request.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_registry_outside_the_allow_list_is_refused_before_anything_is_made() {
     let fx = Fixture::start().await;
     let artifact = image();
@@ -298,7 +300,7 @@ async fn a_registry_outside_the_allow_list_is_refused_before_anything_is_made() 
 /// `UID:GID` and never root's, the cgroup parent is a path below the cgroup mount, and the
 /// scratch root must be the `0711` directory the runtime would use. `--help` is not an
 /// error. Each is a usage error that has made nothing.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn flags_are_checked_as_the_agent_checks_them() {
     let fx = Fixture::start().await;
     let artifact = image();
@@ -349,7 +351,7 @@ async fn flags_are_checked_as_the_agent_checks_them() {
 /// Only root runs it: the helpers give files to the job's ids, which no other user can.
 /// Every check that needs no privilege comes first, so a user who is not root learns of
 /// a wrong flag before being told to become root, and the refusal has made nothing.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_user_that_is_not_root_is_refused_before_anything_is_made() {
     let fx = Fixture::start().await;
     let artifact = image();
@@ -367,7 +369,7 @@ async fn a_user_that_is_not_root_is_refused_before_anything_is_made() {
 /// the pull (status 1, the registry's words on stderr) and leaves no published root, no
 /// stage and no downloaded layer; a pull of the good image then succeeds. Catches a
 /// publish before the layers are verified, and leftovers a retry would trip on.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_layer_that_does_not_verify_leaves_no_published_root_and_no_staging() {
     let fx = Fixture::start().await;
     let artifact = image();
@@ -400,7 +402,7 @@ async fn a_layer_that_does_not_verify_leaves_no_published_root_and_no_staging() 
 /// Two pulls into one scratch root do not run together: the second is refused (status 1)
 /// while the first holds the lock, and goes through once it is released. Catches the
 /// second start sweeping the first one's stage as a leftover of a dead run.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_pull_is_refused_while_another_holds_the_store() {
     let fx = Fixture::start().await;
     let artifact = image();
@@ -425,7 +427,7 @@ async fn a_second_pull_is_refused_while_another_holds_the_store() {
 /// A failure of the runtime itself (here a `crun` that exits 1) is reported as a failed
 /// pull, with the helper's words, and leaves no published root. Catches a failed unpack
 /// reported as a pull.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_unpack_is_a_failed_pull_and_publishes_nothing() {
     let fx = Fixture::start().await;
     let artifact = image();
