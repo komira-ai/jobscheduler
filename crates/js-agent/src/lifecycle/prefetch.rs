@@ -18,8 +18,6 @@
 //! A pull that panics is a failed pull. The prefetcher must be dropped from a plain
 //! thread, not from inside an async task (tokio refuses to drop a runtime there).
 
-#![allow(dead_code, unused_imports)]
-
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -86,14 +84,32 @@ impl Prefetcher {
 
     /// Whether `image` is here, starting its pull when nothing has and nothing is under
     /// way. Never waits.
-    pub fn prepare(&self, _image: &str) -> Prepared {
-        let _ = (
-            &self.runtime,
-            &self.pull,
-            &self.shared.changed,
-            self.shared.lock().len(),
-        );
-        Prepared::Ready
+    pub fn prepare(&self, image: &str) -> Prepared {
+        let mut images = self.shared.lock();
+        match images.get(image) {
+            Some(Entry::Pulling) => return Prepared::Pending,
+            Some(Entry::Done(Ok(()))) => return Prepared::Ready,
+            Some(Entry::Done(Err(why))) => {
+                let failed = Prepared::Failed(RuntimeError::new(why.clone()));
+                images.remove(image);
+                return failed;
+            }
+            None => {}
+        }
+        images.insert(image.to_owned(), Entry::Pulling);
+        drop(images);
+        let shared = Arc::clone(&self.shared);
+        let name = image.to_owned();
+        let pulling = (self.pull)(name.clone());
+        self.runtime.spawn(async move {
+            // The pull in a task of its own, so a panic in it ends it as a failure here
+            // instead of leaving the image `Pulling` for ever.
+            let result = tokio::spawn(pulling)
+                .await
+                .unwrap_or_else(|why| Err(format!("the pull of {name} ended abnormally: {why}")));
+            shared.finish(name, result);
+        });
+        Prepared::Pending
     }
 
     /// [`Prefetcher::prepare`], then, while the image is being fetched, waits for the
