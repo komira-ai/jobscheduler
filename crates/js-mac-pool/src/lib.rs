@@ -6,9 +6,13 @@
 //! rule in it is tested on Linux.
 //!
 //! - [`seatbelt`]: the `sandbox-exec` profile of one run, from a typed
-//!   [`Policy`](seatbelt::Policy).
+//!   [`Policy`](seatbelt::Policy), in two read models, with the start-up self-test of the
+//!   allow-list one.
+//! - [`xcode`]: the catalog of the Xcodes of this Mac, built from `--xcode BUILD=PATH`
+//!   flags; only ready Xcodes are advertised or granted.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 #![forbid(unsafe_code)]
 
 pub mod seatbelt;
+pub mod xcode;

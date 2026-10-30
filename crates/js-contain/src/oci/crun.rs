@@ -41,6 +41,99 @@ pub type EnvScrub = fn(&mut std::process::Command);
 /// The default [`EnvScrub`]: nothing is removed.
 pub fn no_scrub(_: &mut std::process::Command) {}
 
+/// What a root daemon does to every command line it starts (`OciConfig::job_user`): the
+/// program runs as the dedicated job user, with no supplementary group, from `/`, with
+/// an environment of `PATH` and `HOME` only (so no `XDG_RUNTIME_DIR` and nothing of the
+/// daemon's credentials is inherited). The drop is part of the backend: it does not
+/// depend on the caller's [`EnvScrub`].
+#[derive(Clone, Debug)]
+pub(crate) struct JobDrop {
+    uid: u32,
+    gid: u32,
+    /// The `PATH` the program gets: where it finds `newuidmap` and `newgidmap`.
+    path: std::ffi::OsString,
+}
+
+impl JobDrop {
+    /// The drop for job user `(uid, gid)`, or `None` when this process is not root (a
+    /// user that is not root cannot change its ids, and runs `crun` as itself).
+    pub(crate) fn new(
+        job: Option<(u32, u32)>,
+        path: Option<&std::ffi::OsStr>,
+        daemon_uid: u32,
+    ) -> Option<Self> {
+        let (uid, gid) = job?;
+        (daemon_uid == 0).then(|| Self {
+            uid,
+            gid,
+            path: path.map(ToOwned::to_owned).unwrap_or_default(),
+        })
+    }
+
+    /// Makes `command` start as the job user: `setgroups([])`, then the gid, then the uid
+    /// (the order in which each call is still allowed), all three real, effective and saved.
+    fn apply(&self, command: &mut std::process::Command) {
+        use std::os::unix::process::CommandExt as _;
+        command
+            .env_clear()
+            .env("PATH", &self.path)
+            .env("HOME", "/")
+            .current_dir("/");
+        // SAFETY: `drop_ids` makes three system calls and nothing else (no allocation, no
+        // lock) in the forked child before it execs.
+        unsafe {
+            command.pre_exec(self.in_child());
+        }
+    }
+}
+
+impl JobDrop {
+    /// The function run in the forked child before the exec.
+    fn in_child(&self) -> impl FnMut() -> std::io::Result<()> + Send + Sync + 'static {
+        let (uid, gid) = (self.uid, self.gid);
+        move || drop_ids(uid, gid, clear_groups)
+    }
+}
+
+/// `setgroups([])`: the process keeps no supplementary group.
+fn clear_groups() -> std::io::Result<()> {
+    rustix::thread::set_thread_groups(&[]).map_err(Into::into)
+}
+
+/// The drop, in the order each call is still allowed: the groups (`groups`, which needs
+/// the privilege the later calls take away), then the gid, then the uid, each as real,
+/// effective and saved id. The first call that fails ends it, and later ones are not made.
+fn drop_ids(
+    uid: u32,
+    gid: u32,
+    groups: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let (uid, gid) = (
+        rustix::process::Uid::from_raw(uid),
+        rustix::process::Gid::from_raw(gid),
+    );
+    groups()
+        .and_then(|()| rustix::thread::set_thread_res_gid(gid, gid, gid).map_err(Into::into))
+        .and_then(|()| rustix::thread::set_thread_res_uid(uid, uid, uid).map_err(Into::into))
+}
+
+/// How the backend prepares each command line it starts: the caller's [`EnvScrub`] first,
+/// then, for a root daemon, the [`JobDrop`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Launch<'a> {
+    scrub: EnvScrub,
+    job: Option<&'a JobDrop>,
+}
+
+impl Launch<'_> {
+    fn apply(self, command: &mut std::process::Command) {
+        (self.scrub)(command);
+        if let Some(job) = self.job {
+            job.apply(command);
+        }
+    }
+}
+
 /// How one `crun run` ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunEnd {
@@ -90,13 +183,13 @@ fn wait_exited(child: &mut tokio::process::Child, limit: Duration) {
 /// The `Spawner` of this driver: [`runc::DefaultExecutor`], with `kill_on_drop` and a
 /// child that is reaped when its future is dropped ([`Reaped`]).
 #[derive(Debug)]
-struct KillOnDrop(EnvScrub);
+struct KillOnDrop(Crun);
 
 #[async_trait]
 impl Spawner for KillOnDrop {
     async fn execute(&self, mut cmd: Command) -> runc::Result<(ExitStatus, u32, String, String)> {
         cmd.kill_on_drop(true);
-        (self.0)(cmd.as_std_mut());
+        self.0.launch().apply(cmd.as_std_mut());
         let mut child = cmd.spawn().map_err(Error::ProcessSpawnFailed)?;
         let pid = child.id().unwrap_or(0);
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
@@ -150,6 +243,7 @@ impl Io for PipeIo {
 pub(crate) struct Crun {
     program: PathBuf,
     scrub: EnvScrub,
+    job: Option<JobDrop>,
 }
 
 /// The state directory of a lease's `crun` (`--root`), inside the lease directory: no
@@ -164,8 +258,20 @@ pub(crate) fn log_path(lease: &Path) -> PathBuf {
 }
 
 impl Crun {
-    pub(crate) fn new(program: PathBuf, scrub: EnvScrub) -> Self {
-        Self { program, scrub }
+    pub(crate) fn new(program: PathBuf, scrub: EnvScrub, job: Option<JobDrop>) -> Self {
+        Self {
+            program,
+            scrub,
+            job,
+        }
+    }
+
+    /// How every command of this driver is prepared.
+    fn launch(&self) -> Launch<'_> {
+        Launch {
+            scrub: self.scrub,
+            job: self.job.as_ref(),
+        }
     }
 
     /// The client for the lease in `lease`: its own state directory and log.
@@ -175,7 +281,7 @@ impl Crun {
             .root(state_dir(lease))
             .log(log_path(lease))
             .log_json();
-        opts.custom_spawner(Arc::new(KillOnDrop(self.scrub)));
+        opts.custom_spawner(Arc::new(KillOnDrop(self.clone())));
         opts.build().map_err(|e| self.refused(&e))
     }
 
@@ -222,7 +328,7 @@ impl Crun {
             .debug(true)
             .log(&log)
             .log_json();
-        opts.custom_spawner(Arc::new(KillOnDrop(self.scrub)));
+        opts.custom_spawner(Arc::new(KillOnDrop(self.clone())));
         let client = opts.build().map_err(|e| self.refused(&e))?;
         match client.run(id, bundle, None).await {
             Ok(()) => Ok(()),
@@ -302,7 +408,7 @@ impl Crun {
     /// [`Crun::blocking`], returning what `crun` printed on stdout.
     fn stdout_of(&self, state: &Path, args: &[&str], what: &str) -> Result<String, String> {
         let mut command = std::process::Command::new(&self.program);
-        (self.scrub)(&mut command);
+        self.launch().apply(&mut command);
         let output = command
             .arg("--root")
             .arg(state)
@@ -407,7 +513,8 @@ mod tests {
         for round in 0..25 {
             let mut command = Command::new("sleep");
             command.arg("600");
-            let mut run = Box::pin(KillOnDrop(super::no_scrub).execute(command));
+            let spawner = KillOnDrop(Crun::new(PathBuf::from("sleep"), super::no_scrub, None));
+            let mut run = Box::pin(spawner.execute(command));
             let polled =
                 runtime.block_on(async { tokio::time::timeout(Duration::ZERO, &mut run).await });
             assert!(polled.is_err(), "round {round}: sleep 600 ended");
@@ -476,13 +583,13 @@ mod tests {
             .arg("JS_SCRUBBED")
             .stdout(std::process::Stdio::piped());
         let (status, _, out, _) = runtime
-            .block_on(KillOnDrop(mark).execute(command))
+            .block_on(KillOnDrop(Crun::new(PathBuf::from("printenv"), mark, None)).execute(command))
             .expect("printenv");
         assert!(status.success());
         assert_eq!(out, "yes\n", "the child did not see the scrub");
         assert_eq!(CALLS.load(Ordering::SeqCst), 1);
 
-        let crun = Crun::new(PathBuf::from("true"), mark);
+        let crun = Crun::new(PathBuf::from("true"), mark, None);
         let lease = crate::unit_dir("crun-scrub");
         crun.delete_blocking(&lease, "c").expect("true exits 0");
         assert_eq!(CALLS.load(Ordering::SeqCst), 2);
@@ -495,6 +602,70 @@ mod tests {
         assert_eq!(plain.get_envs().count(), 0);
     }
 
+    /// Catches the privilege drop applied to a daemon that is not root, or without a job
+    /// user (`setresuid` would fail, or change nothing wanted), and the drop's environment:
+    /// only `PATH` (the id tools' directories) and `HOME=/`, never the daemon's own.
+    #[test]
+    fn the_job_drop_is_made_only_for_a_root_daemon_with_a_job_user() {
+        let path = std::ffi::OsStr::new("/id/tools");
+        assert!(JobDrop::new(None, Some(path), 0).is_none());
+        assert!(JobDrop::new(Some((900, 900)), Some(path), 1000).is_none());
+        let drop = JobDrop::new(Some((900, 901)), Some(path), 0).expect("root with a job user");
+        assert_eq!((drop.uid, drop.gid), (900, 901));
+
+        let mut command = std::process::Command::new("true");
+        command
+            .env("XDG_RUNTIME_DIR", "/run/user/0")
+            .env("TOKEN", "x");
+        fn mark(command: &mut std::process::Command) {
+            command.env("MARKED", "yes");
+        }
+        let launch = Launch {
+            scrub: mark,
+            job: Some(&drop),
+        };
+        launch.apply(&mut command);
+        let envs: Vec<_> = command.get_envs().collect();
+        assert_eq!(
+            envs,
+            [
+                (
+                    std::ffi::OsStr::new("HOME"),
+                    Some(std::ffi::OsStr::new("/"))
+                ),
+                (std::ffi::OsStr::new("PATH"), Some(path)),
+            ],
+            "the caller's scrub runs first and env_clear leaves exactly the allowlist"
+        );
+        assert_eq!(command.get_current_dir(), Some(Path::new("/")));
+    }
+
+    /// Catches the drop's order and its stop at the first failure, with the real calls as an
+    /// ordinary user (setting one's own ids is allowed; another gid and `setgroups` are not
+    /// without privilege, so the failures are the kernel's): a failing `groups` ends it
+    /// before any id call (and no id changed), a gid that is not ours ends it before the uid,
+    /// and our own ids pass. Run as root, the "not ours" calls succeed, so each result is
+    /// compared with whether this process is root.
+    #[test]
+    fn the_drop_stops_at_the_first_failing_call() {
+        let (uid, gid) = (
+            rustix::process::getuid().as_raw(),
+            rustix::process::getgid().as_raw(),
+        );
+        let root = uid == 0;
+        let boom = || Err(std::io::Error::other("groups"));
+        let failed = drop_ids(uid, gid + 1, boom).expect_err("groups first");
+        assert_eq!(failed.to_string(), "groups");
+        assert_eq!(rustix::process::getgid().as_raw(), gid);
+        assert!(drop_ids(uid, gid, || Ok(())).is_ok());
+        let other_gid = drop_ids(uid, gid + 1, || Ok(()));
+        assert_eq!(other_gid.is_ok(), root);
+        // The real `setgroups`, and the closure given to the child, as an ordinary user.
+        assert_eq!(clear_groups().is_ok(), root);
+        let job = JobDrop::new(Some((uid, gid)), None, 0).expect("root daemon");
+        assert_eq!(job.in_child()().is_ok(), root);
+    }
+
     /// Catches a failed `crun delete` taken for a success while the container's state is
     /// still there (nothing was deleted, and the state is the lease's to keep until the
     /// clean can remove it), one that fails when the state is already gone (the `crun run`
@@ -503,8 +674,8 @@ mod tests {
     #[test]
     fn a_failed_delete_is_an_error_unless_the_state_is_gone() {
         let lease = crate::unit_dir("crun-delete");
-        let fails = Crun::new(PathBuf::from("false"), no_scrub);
-        let succeeds = Crun::new(PathBuf::from("true"), no_scrub);
+        let fails = Crun::new(PathBuf::from("false"), no_scrub, None);
+        let succeeds = Crun::new(PathBuf::from("true"), no_scrub, None);
         succeeds
             .delete_waiting(&lease, "c", Duration::ZERO)
             .expect("deleted");
