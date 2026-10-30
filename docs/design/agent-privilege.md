@@ -282,13 +282,11 @@ runs (the test also calls `Oci::unpack_layers`). The lease's keeper is not start
 `the_keeper_of_a_root_daemon_runs_as_the_job_user_with_a_clean_environment` starts a recording keeper as root
 with and without it and reads the ids, groups, working directory and environment the program had.
 
-**The runtime is the distribution's `crun`, by its path.** A root daemon (one that drops to the job
-user) refuses, in `Oci::new`, any `OciConfig::runtime` other than `/usr/bin/crun` (`OciError::RuntimePath`),
-because AppArmor attaches the profile that grants the job user a user namespace to that path and a copy is
-refused it (the control below). `OciConfig::stand_in_runtime` turns the check off for a test double; no
-production setting sets it. Unit test: `oci::tests::a_root_daemon_is_refused_a_runtime_that_is_not_the_distribution_crun`
-(with `crun::tests::a_dropping_daemon_is_allowed_the_distribution_crun_and_nothing_else`); root test:
-`a_root_daemon_does_not_start_on_a_copy_of_crun`.
+**The runtime is the configured path, never a copy.** js-contain execs exactly `OciConfig::runtime`
+(default `/usr/bin/crun`) and makes no copy of it: AppArmor attaches the profile that grants the job user a
+user namespace to the path, and a copy is refused it (the control below). Refusing a path that no loaded
+profile covers is the agent's start check (`--crun-bin`), not js-contain's. Unit test:
+`crun::tests::the_configured_runtime_path_is_what_runs_and_no_copy_is_made`.
 
 **The cgroup hand-over is production code.** `delegate::delegate_for_job` makes the delegated cgroups as
 `delegate` does and then `give_delegation`s them: the daemon's own cgroup gives the job user only
@@ -405,7 +403,7 @@ The owner chose B: take the right-hand column. The left one is the hardening pat
 
 Open items for B (section 4, duty 7): the pull as the job user, and the farm's AppArmor policy (a `crun`
 profile or a sysctl decision before P12a). The keeper and the unpack helper as the job user, the
-cgroup hand-over by `delegate_for_job`, and the distribution's `crun` by path are done (duty 7).
+cgroup hand-over by `delegate_for_job` are done (duty 7); the `crun` path check is the agent's start check.
 
 **Hardening path (A).** What A would still give is that an agent compromise (it handles the lease
 server's commands) does not become root. Buy it later by moving the five duties behind helper
@@ -429,15 +427,14 @@ Proven in CI (the `agent-privilege` job and the `test` job):
 - Duty 5: the state directory ownership in both directions.
 - Duty 6 (read side): `CAP_NET_ADMIN` is the cost of reading the firewall.
 
-- The keeper as the job user, the owners of the delegated cgroup files on the real cgroup filesystem, and a
-  root daemon refusing a copy of `crun` at start-up (`root_daemon`, under sudo).
+- The keeper as the job user, the owners of the delegated cgroup files on the real cgroup filesystem (`root_daemon`, under sudo).
 - Option B end to end with a real `crun`, with the AppArmor restriction on: the namespace maps onto the
   job user's subordinate range, the job is unprivileged, `Oci::new`'s search check against a `0711`
   root, and the control that a copy of `crun` is refused (duty 7). The privilege drop of every `crun`
   command, and the explicit refusal of a root job user.
 
 **The tests, by what they do.** The `privilege` target has 28 tests plus the `child` harness entry
-(not a test of its own); `root_daemon` has 8. Those that **discriminate the feature** (they fail if the
+(not a test of its own); `root_daemon` has 7. Those that **discriminate the feature** (they fail if the
 change is wrong): `layout::below_a_searchable_root_the_job_ids_reach_their_directory_and_nothing_else`,
 `layout::run_files_are_unreadable_until_handed_over_and_then_readable_by_the_job_alone`,
 `layout::links_planted_by_the_job_in_its_run_files_are_removed_and_never_followed`, all three of

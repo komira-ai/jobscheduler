@@ -38,18 +38,6 @@ use runc::{Command, Io, Runc, Spawner};
 /// line it starts, so a caller removes what no container runtime should be handed.
 pub type EnvScrub = fn(&mut std::process::Command);
 
-/// The only `crun` a root daemon runs. AppArmor attaches the distribution's profile (which
-/// grants the job user a user namespace) to this path, and a copy of the binary elsewhere
-/// is unconfined and is refused the namespace.
-pub const DISTRO_CRUN: &str = "/usr/bin/crun";
-
-/// Whether the backend may run `runtime`: any program unless the backend drops to a job
-/// user (`drops`, a root daemon), and then only [`DISTRO_CRUN`] by that path, unless
-/// `stand_in` says the runtime is a test double.
-pub(crate) fn runtime_allowed(runtime: &Path, drops: bool, stand_in: bool) -> bool {
-    !drops || stand_in || runtime == Path::new(DISTRO_CRUN)
-}
-
 /// The default [`EnvScrub`]: nothing is removed.
 pub fn no_scrub(_: &mut std::process::Command) {}
 
@@ -659,21 +647,40 @@ mod tests {
         assert_eq!(command.get_current_dir(), Some(Path::new("/")));
     }
 
-    /// Catches a root daemon allowed a runtime that is a copy (AppArmor refuses the copy its
-    /// user namespace): a daemon that drops runs only the distribution's `crun` by its path
-    /// (a relative name or a copy elsewhere is another path), a test double is
-    /// allowed only when said so, and a daemon that does not drop runs whatever it is given.
+    /// Catches a backend that runs anything but the configured runtime path, or makes a
+    /// copy of it: a stand-in at a path of the test is run by `delete` and by the helper
+    /// run under exactly that path (`$0`), and no other file named `crun` is made beside
+    /// the lease or its state.
     #[test]
-    fn a_dropping_daemon_is_allowed_the_distribution_crun_and_nothing_else() {
-        let allowed =
-            |path: &str, drops, stand_in| runtime_allowed(Path::new(path), drops, stand_in);
-        assert!(allowed("/usr/bin/crun", true, false));
-        assert!(!allowed("/opt/crun/crun", true, false));
-        assert!(!allowed("/usr/local/bin/crun", true, false));
-        assert!(!allowed("crun", true, false));
-        assert!(allowed("/opt/crun/crun", true, true));
-        assert!(allowed("/opt/crun/crun", false, false));
-        assert_eq!(DISTRO_CRUN, "/usr/bin/crun");
+    fn the_configured_runtime_path_is_what_runs_and_no_copy_is_made() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::unit_dir("crun-path");
+        let program = dir.join("my-runtime");
+        let seen = dir.join("seen");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\necho \"$0\" >> {}\n", seen.display()),
+        )
+        .expect("stand-in");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let crun = Crun::new(program.clone(), no_scrub, None);
+        let lease = dir.join("lease");
+        crun.delete_blocking(&lease, "c").expect("runs");
+        crun.run_helper_blocking(&lease.join("state"), "h", &lease.join("bundle"))
+            .expect("runs");
+        let said = std::fs::read_to_string(&seen).expect("recorded");
+        let path = program.display().to_string();
+        assert_eq!(said, format!("{path}\n{path}\n"));
+        let mut names: Vec<String> = std::fs::read_dir(&*dir)
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["my-runtime", "seen"],
+            "a copy or other file was made"
+        );
     }
 
     /// Catches the drop's order and its stop at the first failure, with the real calls as an

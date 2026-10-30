@@ -28,7 +28,7 @@ use js_contain::container::{ACTION_ID, ContainerLimits, ContainerSpec, Ended};
 use js_contain::delegate::{Delegation, Mount, give_delegation};
 use js_contain::keeper::{Keeper, KeeperLauncher};
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
-use js_contain::oci::{DISTRO_CRUN, Oci, OciConfig, OciError, stderr_path, stdout_path};
+use js_contain::oci::{Oci, OciConfig, OciError, stderr_path, stdout_path};
 use js_contain::subids::{IdFiles, SubidError, user_ids};
 
 /// Where the cgroup v2 filesystem is mounted.
@@ -90,9 +90,6 @@ fn busybox_rootfs(rootfs: &Path) {
 fn config(job: (u32, u32), runtime: &Path) -> OciConfig {
     OciConfig {
         runtime: runtime.to_owned(),
-        // Only the distribution's `crun` is a real runtime: any other path here is a copy
-        // or a stand-in that a test runs on purpose.
-        stand_in_runtime: runtime != Path::new(DISTRO_CRUN),
         id_tool_path: Some("/usr/bin:/bin".into()),
         daemon: std::env::current_exe().unwrap(),
         job_user: Some(job),
@@ -570,36 +567,6 @@ fn the_keeper_of_a_root_daemon_runs_as_the_job_user_with_a_clean_environment() {
     let said = fs::read_to_string(&plain.out).unwrap();
     assert!(said.starts_with("Uid: 0 0 0 0\n"), "{said}");
     assert!(said.contains("sentinel the daemon's environment"), "{said}");
-}
-
-/// A root daemon given a copy of `crun` does not start: the check is the backend's own and
-/// runs before any program is, so the copy is never executed (it does not even exist here).
-#[test]
-#[ignore = "needs root and a job user: see the module docs"]
-fn a_root_daemon_does_not_start_on_a_copy_of_crun() {
-    let (uid, gid) = job_user();
-    let dir = world_dir("js-b-refuse-copy");
-    let scratch = dir.join("scratch");
-    mkdir(&scratch, 0o711);
-    let copy = dir.join("crun");
-    fs::copy(var("JS_B_CRUN"), &copy).unwrap();
-    fs::set_permissions(&copy, fs::Permissions::from_mode(0o755)).unwrap();
-    let copied = OciConfig {
-        stand_in_runtime: false,
-        ..config((uid, gid), &copy)
-    };
-    let refused = Oci::new(&copied, Arc::new(NoImages), &scratch, "/js-b-refuse-copy");
-    assert!(
-        matches!(&refused, Err(OciError::RuntimePath(path)) if *path == copy),
-        "{:?}",
-        refused.err()
-    );
-    let distro = OciConfig {
-        stand_in_runtime: false,
-        ..config((uid, gid), Path::new(DISTRO_CRUN))
-    };
-    Oci::new(&distro, Arc::new(NoImages), &scratch, "/js-b-refuse-copy")
-        .expect("the distribution's crun starts");
 }
 
 /// The hand-over of the delegated cgroups on the real cgroup filesystem: the daemon's own
