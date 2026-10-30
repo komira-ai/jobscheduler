@@ -298,17 +298,21 @@ fn a_tree_that_cannot_fit_the_budget_is_refused_before_the_fetch() {
         budget_bytes: 500,
         ..rig.cfg()
     });
+    // A tree already held is counted in the refusal.
+    let held = sized("f", 7, 2);
+    rig.have(&held);
+    store.ensure(&wanted(&held)).unwrap();
     let mut want = wanted(&l);
     want.expected_bytes = Some(501);
     assert!(matches!(
         store.ensure(&want),
         Err(Error::NoSpace {
             needed: 501,
+            used: 7,
             budget: 500,
-            ..
         })
     ));
-    assert_eq!(rig.source.fetches(), 0);
+    assert_eq!(rig.source.fetches(), 1);
     assert_eq!(store.stats().in_flight, 0);
     want.expected_bytes = Some(500);
     store.ensure(&want).unwrap();
