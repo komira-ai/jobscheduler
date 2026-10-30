@@ -208,43 +208,91 @@ fn preference_writes_are_refused_with_a_control() {
     assert!(!landed_sandboxed, "no preference reached the domain");
 }
 
-/// `nc -z 127.0.0.1 PORT` exits 0 when the connect succeeds.
+/// Connects to `127.0.0.1:PORT` and exits 0 when it connects. When it does not, it prints
+/// the errno on stderr and exits 1: a sandbox refusal is `EPERM`, a closed port is
+/// `ECONNREFUSED`, so a refusal is told apart from a listener that is not there.
+const CONNECT: &str = r#"use IO::Socket::INET; my $s = IO::Socket::INET->new(PeerAddr => "127.0.0.1", PeerPort => $ARGV[0]); exit 0 if $s; print STDERR ($!+0); exit 1"#;
+const EPERM: &str = "1";
+
+/// A listener that accepts every connection on its own thread, so a connect completes
+/// by the handshake and never waits in an accept queue.
+fn accepting_listener() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("addr").port();
+    std::thread::spawn(move || for _connection in listener.incoming() {});
+    port
+}
+
 fn connect_to(port: u16) -> Vec<OsString> {
-    args(&["-z", "127.0.0.1", &port.to_string()])
+    perl(CONNECT, &[OsString::from(port.to_string())])
+}
+
+/// How many times each connect is tried.
+///
+/// Measured on the hosted macOS runner (CI runs 41073976740, 41076930103 and 41081525386):
+/// at `Ports` and `Loopback` the sandbox answered about one allowed connect in 400 with
+/// `EPERM` (1 of 400 at each level in the second run, 1 of 300 in the first), at `On` none
+/// in 400, and 600 processes of 10 connects each had no failure. The cause is not known.
+/// An allow therefore needs at least `ALLOW_MIN` of `TRIES` connects to succeed and every
+/// failure to be exactly `EPERM`; a profile that allowed fewer would fail, and so would any
+/// other error. A refusal has no tolerance: every try is refused with `EPERM`.
+const TRIES: usize = 8;
+const ALLOW_MIN: usize = 7;
+
+fn allowed(scene: &Scene, net: &Net, to: &[OsString]) -> bool {
+    let mut connected = 0;
+    for _ in 0..TRIES {
+        let out = scene.sandboxed(net.clone(), "/usr/bin/perl", to);
+        if out.status.success() {
+            connected += 1;
+        } else if String::from_utf8_lossy(&out.stderr).trim() != EPERM {
+            return false;
+        }
+    }
+    connected >= ALLOW_MIN
+}
+
+fn refused(scene: &Scene, net: &Net, to: &[OsString]) -> bool {
+    (0..TRIES).all(|_| {
+        let out = scene.sandboxed(net.clone(), "/usr/bin/perl", to);
+        !out.status.success() && String::from_utf8_lossy(&out.stderr).trim() == EPERM
+    })
 }
 
 #[test]
 fn each_network_level_allows_what_it_names_and_refuses_the_rest() {
     let scene = Scene::new("net", "run");
-    let one = TcpListener::bind("127.0.0.1:0").expect("listener");
-    let two = TcpListener::bind("127.0.0.1:0").expect("listener");
-    let port_one = one.local_addr().expect("addr").port();
-    let port_two = two.local_addr().expect("addr").port();
+    let port_one = accepting_listener();
+    let port_two = accepting_listener();
     let to_one = connect_to(port_one);
     let to_two = connect_to(port_two);
 
-    let control_out = control("/usr/bin/nc", &to_one);
+    let control_out = control("/usr/bin/perl", &to_one);
     assert!(
         control_out.status.success(),
         "control connect: {}",
         describe(&control_out)
     );
 
-    let connects =
-        |net: Net, to: &[OsString]| scene.sandboxed(net, "/usr/bin/nc", to).status.success();
     let only_one = Net::Ports(Ports::new(&[port_one]).expect("ports"));
-    assert!(!connects(Net::Off, &to_one), "Off refuses loopback");
+    assert!(refused(&scene, &Net::Off, &to_one), "Off refuses loopback");
     assert!(
-        connects(only_one.clone(), &to_one),
+        allowed(&scene, &only_one, &to_one),
         "a listed port connects"
     );
-    assert!(!connects(only_one, &to_two), "an unlisted port is refused");
-    assert!(connects(Net::Loopback, &to_one), "Loopback connects");
     assert!(
-        connects(Net::Loopback, &to_two),
+        refused(&scene, &only_one, &to_two),
+        "an unlisted port is refused"
+    );
+    assert!(
+        allowed(&scene, &Net::Loopback, &to_one),
+        "Loopback connects"
+    );
+    assert!(
+        allowed(&scene, &Net::Loopback, &to_two),
         "Loopback connects to any port"
     );
-    assert!(connects(Net::On, &to_one), "On connects");
+    assert!(allowed(&scene, &Net::On, &to_one), "On connects");
 }
 
 #[test]
@@ -327,7 +375,6 @@ fn the_profile_compiler_refuses_a_literal_address_in_a_remote_ip_filter() {
 /// Perl one-liners: the runner has `/usr/bin/perl`, and each prints nothing and reports
 /// by exit status.
 const LISTEN: &str = r#"use IO::Socket::INET; exit(IO::Socket::INET->new(Listen => 1, LocalAddr => "127.0.0.1", LocalPort => 0) ? 0 : 1)"#;
-const RESOLVE: &str = r#"exit(gethostbyname("example.com") ? 0 : 1)"#;
 const UNIX_CONNECT: &str =
     r#"use IO::Socket::UNIX; exit(IO::Socket::UNIX->new(Peer => $ARGV[0]) ? 0 : 1)"#;
 
@@ -344,11 +391,17 @@ fn listens_under(scene: &Scene, net: Net) -> bool {
         .success()
 }
 
-fn resolves_under(scene: &Scene, net: Net) -> bool {
-    scene
-        .sandboxed(net, "/usr/bin/perl", &perl(RESOLVE, &[]))
-        .status
-        .success()
+/// `dns-sd -V` asks the system resolver daemon for its version over its unix socket: a
+/// local call, so no name is looked up and no network is needed. It exits 0 either way;
+/// the answer is on stdout and the refusal is `DNSServiceGetProperty failed` on stderr.
+const RESOLVER_VERSION: &str = "Currently running daemon";
+
+fn resolver_answers(out: &Output) -> bool {
+    String::from_utf8_lossy(&out.stdout).contains(RESOLVER_VERSION)
+}
+
+fn resolver_under(scene: &Scene, net: Net) -> Output {
+    scene.sandboxed(net, "/usr/bin/dns-sd", &args(&["-V"]))
 }
 
 #[test]
@@ -363,20 +416,29 @@ fn listeners_are_allowed_on_loopback_only() {
 }
 
 #[test]
-fn names_resolve_under_on_only() {
+fn the_name_resolver_is_reachable_under_on_only() {
     let scene = Scene::new("dns", "run");
-    let free = control("/usr/bin/perl", &perl(RESOLVE, &[]));
+    let free = control("/usr/bin/dns-sd", &args(&["-V"]));
     assert!(
-        free.status.success(),
-        "control resolve: {}",
+        resolver_answers(&free),
+        "control resolver: {}",
         describe(&free)
     );
-    assert!(resolves_under(&scene, Net::On), "On resolves");
-    assert!(!resolves_under(&scene, Net::Off), "Off refuses DNS");
+    let on = resolver_under(&scene, Net::On);
     assert!(
-        !resolves_under(&scene, Net::Loopback),
-        "Loopback refuses DNS"
+        resolver_answers(&on),
+        "On reaches the resolver: {}",
+        describe(&on)
     );
+    for (name, net) in [("Off", Net::Off), ("Loopback", Net::Loopback)] {
+        let out = resolver_under(&scene, net);
+        assert!(!resolver_answers(&out), "{name} reached the resolver");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            stderr.contains("DNSServiceGetProperty failed"),
+            "{name} refuses the resolver: {stderr}"
+        );
+    }
 }
 
 #[test]
