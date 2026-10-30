@@ -353,6 +353,8 @@ pub(crate) enum Hosts {
 pub(crate) struct AgentSetup {
     pub(crate) tokens: AgentTokens,
     pub(crate) pool: PoolConfig,
+    /// The one provider the mint route accepts, when the configuration names it.
+    pub(crate) mint_provider: Option<String>,
     pub(crate) hello_limit: HelloLimit,
     /// `--require-host-credential`.
     pub(crate) require_host_credential: bool,
@@ -433,10 +435,16 @@ impl Config {
                 static_pool,
                 registering,
             } => {
-                let Registering { plan, pool, tokens } = *registering;
+                let Registering {
+                    plan,
+                    pool,
+                    tokens,
+                    mint_provider,
+                } = *registering;
                 let agents = Box::new(AgentSetup {
                     tokens,
                     pool,
+                    mint_provider,
                     hello_limit: server.agents.hello_limit(),
                     require_host_credential: server.agents.require_host_credential(),
                 });
@@ -445,7 +453,7 @@ impl Config {
                         static_pool,
                         agents,
                     },
-                    Some(plan),
+                    plan,
                 )
             }
         };
@@ -598,6 +606,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                 agents: Box::new(AgentSetup {
                     tokens,
                     pool: agent_pool::read(pool)?,
+                    mint_provider: None,
                     hello_limit: HelloLimit {
                         burst: cli.agent_hello_burst,
                         interval: cli.agent_hello_interval,

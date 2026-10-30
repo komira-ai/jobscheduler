@@ -201,6 +201,18 @@ impl PoolText {
             )
     }
 
+    /// A pool `name` of hand-joined agents: six machines of 8 cores and 16 GiB, with no
+    /// host contract.
+    pub fn joined(name: &str) -> Self {
+        Self(Vec::new())
+            .set("kind", &quote("joined"))
+            .set("name", &quote(name))
+            .set("class", &quote("whole-node"))
+            .set("exec", &quote("none"))
+            .set("max_machines", "6")
+            .set("shape", "{ cpu_millis = 8000, memory_bytes = 17179869184 }")
+    }
+
     /// An elastic pool `gpu` of the stand-in cloud kind with every required key.
     pub fn elastic(scratch: &Scratch) -> Self {
         let key = scratch.write("api-key", API_KEY, 0o600);

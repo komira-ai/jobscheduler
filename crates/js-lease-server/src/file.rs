@@ -33,8 +33,10 @@ use crate::file_checks::{check_listeners, check_live, https_url, sha256};
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::{OAuthClient, valid_tag};
 
+mod joined;
 mod server;
 
+pub use joined::JoinedPool;
 pub(crate) use server::Server;
 use server::{read_client_token, read_server};
 
@@ -193,9 +195,14 @@ impl fmt::Debug for ElasticPlan {
 
 /// The registering pool: the plan, what the registry is built from, and the join tokens.
 pub(crate) struct Registering {
-    pub(crate) plan: ElasticPlan,
+    /// The launching side; `None` for a pool of hand-joined agents.
+    pub(crate) plan: Option<ElasticPlan>,
     pub(crate) pool: PoolConfig,
     pub(crate) tokens: AgentTokens,
+    /// The one `provider` the mint route accepts, when the pool is the only thing that
+    /// admits hosts by hand: a joined pool's name. `None` takes any provider, as an
+    /// elastic pool's launches are minted for under the provider kind's name.
+    pub(crate) mint_provider: Option<String>,
 }
 
 /// The pools of the file, as the sources of hosts they make.
@@ -491,8 +498,11 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         }
     }
     let elastic = registering.is_some();
-    if let Some(registering) = &registering {
-        check_live(&server, &registering.plan)?;
+    // A joined pool has no plan, so only an elastic pool's launch settings are checked.
+    if let Some(registering) = &registering
+        && let Some(plan) = &registering.plan
+    {
+        check_live(&server, plan)?;
     }
     let hosts = match (static_pool, registering) {
         (static_pool, Some(registering)) => LoadedHosts::Registering {
@@ -571,6 +581,9 @@ fn read_pool(
     ld: &Load<'_>,
     (client, scheduler): (&Token, &SchedulerId),
 ) -> Result<Read, StartupError> {
+    if table.contains_key("kind") {
+        return joined::read(table, client);
+    }
     // The name, when it is one, so that every refusal below names the pool; otherwise the
     // pool is its number, and the value is not repeated.
     let head = match table.get("name").and_then(toml::Value::as_str) {
@@ -777,7 +790,12 @@ impl Elastic<'_> {
             id,
             provider: Arc::from(built.provider),
         };
-        Ok(Registering { plan, pool, tokens })
+        Ok(Registering {
+            plan: Some(plan),
+            pool,
+            tokens,
+            mint_provider: None,
+        })
     }
 }
 

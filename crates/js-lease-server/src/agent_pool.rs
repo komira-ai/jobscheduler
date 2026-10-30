@@ -274,7 +274,7 @@ fn within(field: &str, value: u64, max: u64) -> Result<(), String> {
 
 /// Refuses capabilities no hello could report: more than the wire allows, or a key or
 /// value longer than it allows.
-fn capabilities_fit(capabilities: &BTreeMap<String, String>) -> Result<(), String> {
+pub(crate) fn capabilities_fit(capabilities: &BTreeMap<String, String>) -> Result<(), String> {
     let few = capabilities.len() <= limits::MAX_CAPABILITIES;
     let short = capabilities.iter().all(|(key, value)| {
         let key_fits = key.len() <= limits::MAX_CAPABILITY_KEY_LEN;
