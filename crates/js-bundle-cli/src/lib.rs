@@ -14,8 +14,6 @@
 //!
 //! There is no registry push here, and no environment variable is read.
 
-#![allow(dead_code)]
-
 mod bundle;
 mod cli;
 mod error;
