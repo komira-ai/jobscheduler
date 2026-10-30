@@ -161,7 +161,7 @@ fn pull(args: &[OsString], host: &Host<'_>) -> Result<String, Failure> {
         Err(e) if e.use_stderr() => return Err(Failure::Usage(e.to_string())),
         Err(help) => return Ok(help.to_string()),
     };
-    let image = pinned(&args.reference)?;
+    let (image, location) = pinned(&args.reference)?;
     let user = job_user(&args.job_user)?;
     cgroup_parent(&args.cgroup_parent)?;
     let root = ScratchRoot::open_with(&args.scratch_root, DirLayout::Searchable)
@@ -172,7 +172,7 @@ fn pull(args: &[OsString], host: &Host<'_>) -> Result<String, Failure> {
         .map(|entry| Allow::parse(entry).map_err(|e| Failure::Usage(format!("--image-allow: {e}"))))
         .collect::<Result<Vec<_>, _>>()?;
     let client = (host.client)(allow);
-    admitted(&client, &image)?;
+    admitted(&client, &image, location)?;
     if host.euid != 0 {
         return Err(Failure::Usage(
             "must run as root: the unpack gives files to the job user's ids".to_owned(),
@@ -215,9 +215,10 @@ fn failed(why: impl std::fmt::Display) -> Failure {
     Failure::Failed(why.to_string())
 }
 
-/// The image `reference` names: `<repository>@sha256:<64 lowercase hex digits>`, a digest
-/// and nothing a registry could answer differently tomorrow.
-fn pinned(reference: &str) -> Result<PinnedImage, Failure> {
+/// The image `reference` names, and where its repository is: `<repository>@sha256:<64
+/// lowercase hex digits>`, a digest and nothing a registry could answer differently
+/// tomorrow.
+fn pinned(reference: &str) -> Result<(PinnedImage, Location), Failure> {
     let usage = |why: &str| Failure::Usage(format!("{reference}: {why}"));
     let (repository, digest) = reference
         .split_once('@')
@@ -234,31 +235,23 @@ fn pinned(reference: &str) -> Result<PinnedImage, Failure> {
             "the digest must be sha256: and 64 lowercase hex digits",
         ));
     }
-    Location::parse(repository).map_err(|e| usage(&e.to_string()))?;
-    Ok(PinnedImage {
+    let location = Location::parse(repository).map_err(|e| usage(&e.to_string()))?;
+    let image = PinnedImage {
         reference: reference.to_owned(),
         digest: digest.to_owned(),
-    })
+    };
+    Ok((image, location))
 }
 
-/// Whether the allow-list admits the image's repository. Nothing is asked of a registry.
-fn admitted(client: &Client, image: &PinnedImage) -> Result<(), Failure> {
-    let refused = |why: &dyn std::fmt::Display| {
+/// Whether the allow-list admits the repository of `image`, at `location`. Nothing is
+/// asked of a registry.
+fn admitted(client: &Client, image: &PinnedImage, location: Location) -> Result<(), Failure> {
+    client.repository(location).map(drop).map_err(|e| {
         Failure::Usage(format!(
-            "{}: not admitted by the --image-allow allow-list ({why})",
+            "{}: not admitted by the --image-allow allow-list ({e})",
             image.reference
         ))
-    };
-    // `pinned` checked the form of the reference.
-    let repository = image
-        .reference
-        .split_once('@')
-        .map_or(image.reference.as_str(), |(repository, _)| repository);
-    let location = Location::parse(repository).map_err(|e| refused(&e))?;
-    client
-        .repository(location)
-        .map(drop)
-        .map_err(|e| refused(&e))
+    })
 }
 
 /// `--job-user`: `UID:GID`, neither of them root's.

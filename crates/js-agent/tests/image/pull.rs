@@ -254,6 +254,10 @@ async fn a_reference_that_is_not_pinned_by_digest_is_refused_before_anything_is_
         (format!("{repo}:v1@{good}"), "carries a tag"),
         (repo.clone(), "names no digest"),
         (format!("{repo}@sha256:abc"), "sha256"),
+        (
+            format!("{}/Team/app@{good}", fx.at(REGISTRY)),
+            "not a well formed registry reference",
+        ),
         (format!("{repo}@sha256:{}", "A".repeat(64)), "sha256"),
         (format!("{repo}@sha512:{}", "a".repeat(128)), "sha256"),
         (format!("{repo}@{}", good.to_uppercase()), "sha256"),
@@ -321,9 +325,17 @@ async fn flags_are_checked_as_the_agent_checks_them() {
         (swap("--job-user", "agent"), "--job-user"),
         (swap("--job-user", "0:0"), "--job-user"),
         (swap("--job-user", "1000:0"), "--job-user"),
+        (swap("--job-user", "0:1000"), "--job-user"),
+        (swap("--job-user", "agent:1000"), "--job-user"),
+        (swap("--job-user", "1000:agent"), "--job-user"),
+        (swap("--job-user", "-1:1000"), "--job-user"),
         (swap("--cgroup-parent", "js-image-pull"), "--cgroup-parent"),
         (swap("--cgroup-parent", "/a/../b"), "--cgroup-parent"),
         (swap("--cgroup-parent", "/"), "--cgroup-parent"),
+        (swap("--cgroup-parent", ""), "--cgroup-parent"),
+        (swap("--cgroup-parent", "/a//b"), "--cgroup-parent"),
+        (swap("--cgroup-parent", "/a/./b"), "--cgroup-parent"),
+        (swap("--cgroup-parent", "/a/b/"), "--cgroup-parent"),
         (
             swap("--scratch-root", "/nonexistent-js-agent"),
             "--scratch-root",
@@ -484,6 +496,34 @@ async fn a_lock_file_that_cannot_be_opened_fails_the_pull_before_the_registry_is
     assert_eq!(ran.status, exit_status(1), "{}", ran.stderr);
     assert!(ran.stderr.contains(".js-image-pull.lock"), "{}", ran.stderr);
     assert!(ran.stdout.is_empty(), "{}", ran.stdout);
+    assert_eq!(
+        fx.requests(),
+        Vec::<String>::new(),
+        "the registry was asked"
+    );
+}
+
+/// A runtime that is not there (the path given by `--crun-bin` names no file) fails the
+/// pull, status 1 and the path on stderr, with nothing published and no stage made, and the
+/// registry not asked. Catches a runtime check that is skipped, and a failure to set up the
+/// store reported as a usage error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_runtime_that_is_missing_fails_the_pull_before_the_registry_is_asked() {
+    let fx = Fixture::start().await;
+    let artifact = image();
+    fx.publish(&artifact);
+    let cell = Cell::new("pull-no-crun");
+    let flags = flags(&fx, cell.scratch(), &reference(&fx, &artifact));
+    let args: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let missing = cell.files.path().join("no-such-crun");
+    let ran = pull_with(&fx, &cell, 0, &missing.display().to_string(), &args);
+    assert_eq!(ran.status, exit_status(1), "{}", ran.stderr);
+    assert!(ran.stderr.contains("no-such-crun"), "{}", ran.stderr);
+    assert!(ran.stdout.is_empty(), "{}", ran.stdout);
+    assert!(
+        !published_root(cell.scratch(), artifact.digest.as_str()).exists(),
+        "published"
+    );
     assert_eq!(
         fx.requests(),
         Vec::<String>::new(),
