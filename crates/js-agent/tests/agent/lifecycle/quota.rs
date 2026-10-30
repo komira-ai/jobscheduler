@@ -608,7 +608,10 @@ fn a_slot_that_stays_parked_is_reported_again_every_hour() {
             inodes: 2,
         },
     );
-    h.start(job("r1"));
+    // A wall limit above the hours the test lets pass, so the run is not timed out.
+    let mut long = job("r1");
+    long.limits.wall_ms = 10_000_000;
+    h.start(long);
     h.life.step();
     h.clock.advance(3_599_999);
     assert!(names(&h.life.step()).is_empty());
