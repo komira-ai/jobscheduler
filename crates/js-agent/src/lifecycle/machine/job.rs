@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use js_agent_wire::{HeldRun, HeldState, Isolation, JobSpec, Outcome, RunResult, Taint};
 
 use super::{RETIRED_CAP, SLOTS};
-use crate::lifecycle::runtime::{Body, Exit, Found, ResolvedMount, RunHandle, RunSpec};
+use crate::lifecycle::runtime::{Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Ticket};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, label};
 
@@ -40,6 +40,11 @@ pub(super) struct Waiting {
     pub(super) slot: u32,
     /// The disk the run books.
     pub(super) booked: u64,
+    /// The fetch of the image that the runtime said the run waits on.
+    pub(super) ticket: Ticket,
+    /// When the lease the start named ends, on the agent's clock (`u64::MAX` when the
+    /// start named none): the run's wall time never reaches past it.
+    pub(super) lease_end_ms: u64,
 }
 
 impl Stage {
@@ -264,6 +269,19 @@ impl Job {
         if let Err(why) = state.seal(taint, events) {
             self.note(code::TAINT_WRITE_FAILED, why.to_string(), events);
         }
+    }
+
+    /// Ends a job that was stopped before its container was made: killed, and silent (no
+    /// result) when it was cancelled. Nothing was created, so the cleanup that follows
+    /// only gives the slot back.
+    pub(super) fn end_unstarted(&mut self, events: &mut Vec<Event>) {
+        if !self.silent {
+            self.result = Some(self.report(Outcome::Killed, None, None));
+            events.push(Event::ResultReady {
+                run_id: self.run_id.clone(),
+            });
+        }
+        self.stage = Stage::Scratch;
     }
 
     /// Asks a running job, or one still waiting for its image, to stop; a job past its

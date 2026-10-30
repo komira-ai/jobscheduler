@@ -83,6 +83,10 @@ impl Lifecycle {
     /// container, the scratch directory, the checks, then the slot. A step that fails
     /// ends the pass with the slot still booked.
     pub(super) fn clean(&mut self, index: usize, events: &mut Vec<Event>) {
+        // A run waiting for its image has nothing to clean (and its stage holds the start).
+        if matches!(self.jobs[index].stage, Stage::Preparing(_)) {
+            return;
+        }
         let live: Vec<RunHandle> = self
             .jobs
             .iter()

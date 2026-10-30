@@ -186,13 +186,19 @@ impl RuntimeError {
     }
 }
 
+/// Names one fetch of an image, so that every run that waited on it hears how it ended
+/// (see [`Runtime::prepare`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ticket(pub u64);
+
 /// Whether the image of a run is on the host, as [`Runtime::prepare`] finds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prepared {
     /// The image is here: the container can be created without a pull.
     Ready,
-    /// The image is being fetched; ask again at the next step.
-    Pending,
+    /// The image is being fetched by the fetch the ticket names; ask again at the next
+    /// step, naming it.
+    Pending(Ticket),
     /// The image could not be had. The reason stays on the host.
     Failed(RuntimeError),
 }
@@ -207,14 +213,19 @@ pub trait Runtime {
     /// the pull: both begin when the image is [`Prepared::Ready`] and the container is
     /// created.
     ///
-    /// The lifecycle calls it when a start is admitted and again at every step while the
-    /// answer is `Pending`. Calls for one image while it is being fetched do not start a
-    /// second fetch. A failure is reported to the call that finds it, and the next call
-    /// for that image starts a new fetch.
+    /// The lifecycle calls it with `waited: None` when a start is admitted and again at
+    /// every step while the answer is `Pending`, naming the ticket it was given. Calls for
+    /// one image while it is being fetched do not start a second fetch. A failure is
+    /// reported to every call that names the ticket of the fetch that failed, so every run
+    /// that waited on it ends; a call that names no ticket (a new start) or another one
+    /// starts a new fetch.
     ///
     /// The default is a runtime that pulls inside [`Runtime::create_and_start`] (Docker and
-    /// Podman, as `--container-pull` says): the image is always `Ready`.
-    fn prepare(&mut self, _image: &str) -> Prepared {
+    /// Podman, as `--container-pull` says): the image is always `Ready`. A runtime that
+    /// prepares must answer `Ready` for a run that does not use the image store (an
+    /// `isolation = host` run), and its fetch must have a hard total deadline of its own:
+    /// nothing else ends a fetch that hangs, and every run that names the image waits on it.
+    fn prepare(&mut self, _image: &str, _waited: Option<Ticket>) -> Prepared {
         Prepared::Ready
     }
 

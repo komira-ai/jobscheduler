@@ -51,18 +51,19 @@ fn a_run_whose_image_is_being_pulled_waits_as_starting_and_creates_nothing() {
 #[test]
 fn the_container_is_created_at_the_step_after_the_image_arrives() {
     let mut h = Harness::new("prepare-ready");
-    h.fake.pull_pending(COLD);
+    let ticket = h.fake.pull_pending(COLD);
     h.start(cold("r1"));
     h.life.step();
     h.life.step();
-    assert_eq!(h.fake.asks(COLD), 3);
+    // The ask of the start names no ticket; the steps name the one the runtime gave.
+    assert_eq!(h.fake.asks(COLD), [None, Some(ticket), Some(ticket)]);
     h.fake.pull_done(COLD);
     assert_eq!(names(&h.life.step()), ["started r1"]);
     assert_eq!(held(&h), [("r1".to_owned(), HeldState::Running)]);
     assert_eq!(h.fake.created().len(), 1);
     assert_eq!(h.fake.created()[0].run_id, "r1");
     assert!(h.scratch_of("r1").exists());
-    assert_eq!(h.fake.asks(COLD), 3);
+    assert_eq!(h.fake.asks(COLD).len(), 3);
 }
 
 /// The wall-time limit counts from the moment the container is created, not from the
@@ -190,4 +191,84 @@ fn a_stop_or_cancel_while_the_image_is_pulled_ends_the_run_without_a_container()
     assert!(h.fake.created().is_empty());
     assert!(h.life.busy_slots().is_empty());
     assert_eq!(h.life.free().cpu_millis, 4000);
+}
+
+/// A run keeps the ticket of the fetch it waits on, and takes the new one when the runtime
+/// answers with another (the image was forgotten and is fetched again): each ask names the
+/// ticket of the last answer.
+#[test]
+fn a_waiting_run_names_the_fetch_it_waits_on_and_follows_a_new_one() {
+    let mut h = Harness::new("prepare-ticket");
+    let first = h.fake.pull_pending(COLD);
+    h.start(cold("r1"));
+    h.life.step();
+    let second = h.fake.pull_pending(COLD);
+    h.life.step();
+    h.life.step();
+    assert_eq!(
+        h.fake.asks(COLD),
+        [None, Some(first), Some(first), Some(second)]
+    );
+}
+
+/// Every run that waited on a fetch that failed ends `failed_to_start`, not only the first
+/// to ask: two runs wait, the fetch fails, and both end at the next step.
+#[test]
+fn every_run_that_waited_on_a_failed_fetch_ends() {
+    let mut h = Harness::new("prepare-all-fail");
+    h.fake.pull_pending(COLD);
+    h.start(cold("r1"));
+    h.start(cold("r2"));
+    h.fake.pull_fails(COLD, "registry down");
+    h.life.step();
+    let mut ended: Vec<_> = h
+        .life
+        .results()
+        .into_iter()
+        .map(|result| (result.run_id, result.outcome))
+        .collect();
+    ended.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        ended,
+        [
+            ("r1".to_owned(), Outcome::FailedToStart),
+            ("r2".to_owned(), Outcome::FailedToStart)
+        ]
+    );
+}
+
+/// A run that waited for its image is held to the end of its lease: a start that
+/// is valid for 30 s and asks for a minute, whose image arrives after 20 s, gets 10 s, not
+/// a fresh minute; one that names no lease end gets its whole limit.
+#[test]
+fn a_run_that_waited_never_outlives_its_lease() {
+    let mut h = Harness::new("prepare-lease");
+    h.fake.pull_pending(COLD);
+    let mut spec = cold("r1");
+    spec.limits.wall_ms = 60_000;
+    spec.valid_for_ms = 30_000;
+    h.start(spec);
+    h.clock.advance(20_000);
+    h.fake.pull_done(COLD);
+    assert_eq!(names(&h.life.step()), ["started r1"]);
+    h.clock.advance(9_999);
+    assert!(h.life.step().is_empty());
+    assert!(h.fake.stops().is_empty());
+    h.clock.advance(1);
+    assert_eq!(names(&h.life.step())[0], "result r1");
+    assert_eq!(h.life.results()[0].outcome, Outcome::TimedOut);
+}
+
+/// A stop that lands in the same step as the image creates nothing: the stop is looked at
+/// before the image is asked for.
+#[test]
+fn a_stop_and_the_image_in_the_same_step_create_nothing() {
+    let mut h = Harness::new("prepare-race");
+    h.fake.pull_pending(COLD);
+    h.start(cold("r1"));
+    h.stop("r1");
+    h.fake.pull_done(COLD);
+    assert_eq!(names(&h.life.step())[0], "result r1");
+    assert!(h.fake.created().is_empty());
+    assert_eq!(h.life.results()[0].outcome, Outcome::Killed);
 }

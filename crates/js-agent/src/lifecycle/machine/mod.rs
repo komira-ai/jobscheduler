@@ -628,24 +628,32 @@ impl Lifecycle {
         // The image is asked for after the slot is taken and before anything is made: a run
         // whose image is still being fetched waits as `starting`, holding its booking, and
         // costs the worker nothing until the image is here (see `Runtime::prepare`).
-        match self.runtime.prepare(&spec.image) {
-            Prepared::Pending => {
+        match self.runtime.prepare(&spec.image, None) {
+            Prepared::Pending(ticket) => {
+                // The lease the start names ends `valid_for_ms` after the reply came; a run
+                // that waits for its image is held to that end when it starts.
+                let lease_end_ms = match spec.valid_for_ms {
+                    0 => u64::MAX,
+                    valid => received.saturating_add(valid),
+                };
                 let waiting = Waiting {
                     spec: spec.clone(),
                     mounts,
                     slot,
                     booked,
+                    ticket,
+                    lease_end_ms,
                 };
                 let stage = Stage::Preparing(Box::new(waiting));
                 self.jobs.push(Job::of(spec, stage, 0, Some(slot), booked));
             }
             Prepared::Ready => {
                 let started = self.begin(spec, mounts, slot, booked, events);
-                self.settle(spec, started, (slot, booked), None, events);
+                self.settle(spec, started, (slot, booked), (None, u64::MAX), events);
             }
             Prepared::Failed(why) => {
                 let failure = runtime_failure(&why);
-                self.settle(spec, Err(failure), (slot, booked), None, events);
+                self.settle(spec, Err(failure), (slot, booked), (None, u64::MAX), events);
             }
         }
     }
@@ -697,14 +705,15 @@ impl Lifecycle {
     }
 
     /// Records how a start went: a running job (its wall-time limit begins now, after any
-    /// wait for the image), or a `failed_to_start` result whose cleanup is owed. It takes
-    /// the place of the job at `replace` (a start that waited), or is added.
+    /// wait for the image, and ends no later than `cap`, the end of its lease), or a
+    /// `failed_to_start` result whose cleanup is owed. It takes the place of the job at
+    /// `replace` (a start that waited), or is added.
     fn settle(
         &mut self,
         spec: &JobSpec,
         started: Result<RunHandle, Failure>,
         (slot, booked): (u32, u64),
-        replace: Option<usize>,
+        (replace, cap): (Option<usize>, u64),
         events: &mut Vec<Event>,
     ) {
         let run_id = &spec.run_id;
@@ -712,6 +721,7 @@ impl Lifecycle {
             Ok(id) => {
                 let now = self.clock.now_ms();
                 let deadline = now.saturating_add(spec.limits.wall_ms);
+                let _ = cap;
                 let cgroup = self.runtime.cgroup(&id);
                 let mut job = Job::of(spec, Stage::Running(id), deadline, Some(slot), booked);
                 job.started_at(now);

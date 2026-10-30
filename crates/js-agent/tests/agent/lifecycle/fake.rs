@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use js_agent::lifecycle::{
     CheckFinding, CheckHook, Clock, Exit, Finished, Found, Prepared, RunHandle, RunSpec, Runtime,
-    RuntimeError, Status, label,
+    RuntimeError, Status, Ticket, label,
 };
 use js_agent_wire::LogTail;
 
@@ -70,13 +70,15 @@ struct State {
     quota_applied: Option<QuotaWatch>,
     /// The images whose pull is scripted: absent ones are here.
     pulls: BTreeMap<String, Pull>,
-    /// How many times `prepare` was asked for each scripted image.
-    asks: BTreeMap<String, u32>,
+    /// The tickets `prepare` was asked with for each scripted image, in order.
+    asks: BTreeMap<String, Vec<Option<Ticket>>>,
+    /// The ticket the next scripted pull is given.
+    generation: u64,
 }
 
 /// Where a scripted pull stands.
 enum Pull {
-    Pending,
+    Pending(Ticket),
     Failed(String),
 }
 
@@ -160,12 +162,15 @@ impl FakeRuntime {
         }
     }
 
-    /// The image is being pulled: `prepare` answers `Pending` until [`FakeRuntime::pull_done`].
-    pub fn pull_pending(&self, image: &str) {
-        self.state
-            .borrow_mut()
-            .pulls
-            .insert(image.to_owned(), Pull::Pending);
+    /// The image is being pulled: `prepare` answers `Pending` (with a new ticket, which is
+    /// returned) until [`FakeRuntime::pull_done`]. Calling it again for the image starts a
+    /// new pull, with a new ticket.
+    pub fn pull_pending(&self, image: &str) -> Ticket {
+        let mut state = self.state.borrow_mut();
+        state.generation += 1;
+        let ticket = Ticket(state.generation);
+        state.pulls.insert(image.to_owned(), Pull::Pending(ticket));
+        ticket
     }
 
     /// The pull of the image ended: it is here.
@@ -181,9 +186,15 @@ impl FakeRuntime {
             .insert(image.to_owned(), Pull::Failed(why.to_owned()));
     }
 
-    /// How many times the runtime was asked whether a scripted image is here.
-    pub fn asks(&self, image: &str) -> u32 {
-        self.state.borrow().asks.get(image).copied().unwrap_or(0)
+    /// The tickets the runtime was asked about a scripted image with, in order (none for the
+    /// ask of a start).
+    pub fn asks(&self, image: &str) -> Vec<Option<Ticket>> {
+        self.state
+            .borrow()
+            .asks
+            .get(image)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Every `create_and_start` takes `ms` on the test's clock.
@@ -293,14 +304,14 @@ impl FakeRuntime {
 }
 
 impl Runtime for FakeRuntime {
-    fn prepare(&mut self, image: &str) -> Prepared {
+    fn prepare(&mut self, image: &str, waited: Option<Ticket>) -> Prepared {
         let mut state = self.state.borrow_mut();
         let answer = match state.pulls.get(image) {
             None => return Prepared::Ready,
-            Some(Pull::Pending) => Prepared::Pending,
+            Some(Pull::Pending(ticket)) => Prepared::Pending(*ticket),
             Some(Pull::Failed(why)) => Prepared::Failed(RuntimeError::new(why.clone())),
         };
-        *state.asks.entry(image.to_owned()).or_default() += 1;
+        state.asks.entry(image.to_owned()).or_default().push(waited);
         answer
     }
 
