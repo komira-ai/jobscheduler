@@ -15,7 +15,7 @@
 //! symlink (never its target), a socket or a device, and refuses a directory with
 //! `EISDIR`, which the walk then empties and removes.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
@@ -34,23 +34,45 @@ struct Frame {
     subdirectories: Vec<OsString>,
 }
 
+/// What the walk is about to do to the entry `name` of the directory `dir`; see
+/// [`remove_tree_with`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// Unlink a listed entry.
+    Unlink,
+    /// Open a listed subdirectory to empty it.
+    Open,
+    /// Remove an emptied subdirectory from its parent.
+    Rmdir,
+}
+
 /// Removes the directory `dir` and everything in it, at any depth. An error (a
 /// directory the daemon's user may not read or write) stops the walk and leaves the
 /// rest; `NotFound` means `dir` is already gone.
 pub fn remove_tree(dir: &Path) -> std::io::Result<()> {
+    remove_tree_with(dir, &mut |_, _, _| {})
+}
+
+/// [`remove_tree`], calling `before(step, directory, name)` just before each step of
+/// the walk so a test can change the tree at that exact point.
+fn remove_tree_with(
+    dir: &Path,
+    before: &mut dyn FnMut(Step, &OwnedFd, &OsStr),
+) -> std::io::Result<()> {
     let mut here = rustix::fs::openat(CWD, dir, DIRECTORY, Mode::empty())?;
     let mut stack = vec![Frame {
         name: OsString::new(),
         id: identity(&here)?,
-        subdirectories: unlink_all_but_directories(&here)?,
+        subdirectories: unlink_all_but_directories(&here, before)?,
     }];
     while let Some(mut top) = stack.pop() {
         if let Some(name) = top.subdirectories.pop() {
+            before(Step::Open, &here, &name);
             let child = rustix::fs::openat(&here, name.as_os_str(), DIRECTORY, Mode::empty())?;
             let frame = Frame {
                 name,
                 id: identity(&child)?,
-                subdirectories: unlink_all_but_directories(&child)?,
+                subdirectories: unlink_all_but_directories(&child, before)?,
             };
             stack.extend([top, frame]);
             here = child;
@@ -59,6 +81,7 @@ pub fn remove_tree(dir: &Path) -> std::io::Result<()> {
         // `here` is empty: remove it from its parent, the next frame down.
         if let Some(parent) = stack.last() {
             here = back_to_parent(&here, parent.id)?;
+            before(Step::Rmdir, &here, &top.name);
             rustix::fs::unlinkat(&here, top.name.as_os_str(), AtFlags::REMOVEDIR)?;
         }
     }
@@ -69,7 +92,10 @@ pub fn remove_tree(dir: &Path) -> std::io::Result<()> {
 /// Unlinks every entry of `dir` that is not a directory, and returns the names of
 /// those that are. The names are read first, then unlinked: no entry is removed while
 /// the directory stream is being read.
-fn unlink_all_but_directories(dir: &OwnedFd) -> std::io::Result<Vec<OsString>> {
+fn unlink_all_but_directories(
+    dir: &OwnedFd,
+    before: &mut dyn FnMut(Step, &OwnedFd, &OsStr),
+) -> std::io::Result<Vec<OsString>> {
     let mut names = Vec::new();
     for entry in Dir::read_from(dir)? {
         let name = entry?.file_name().to_bytes().to_vec();
@@ -79,6 +105,7 @@ fn unlink_all_but_directories(dir: &OwnedFd) -> std::io::Result<Vec<OsString>> {
     }
     let mut subdirectories = Vec::new();
     for name in names {
+        before(Step::Unlink, dir, &name);
         match rustix::fs::unlinkat(dir, name.as_os_str(), AtFlags::empty()) {
             Err(Errno::ISDIR) => subdirectories.push(name),
             other => other?,
@@ -154,5 +181,142 @@ mod tests {
         std::fs::set_permissions(top.join("ro"), mode(0o755)).expect("chmod back");
         assert_eq!(why.kind(), std::io::ErrorKind::PermissionDenied, "{why}");
         remove_tree(&top).expect("removed once writable");
+    }
+
+    /// Removes `name` from the directory open as `fd`, as another process would: a file
+    /// or symlink, or (`dir`) an empty directory.
+    fn take(fd: &OwnedFd, name: &OsStr, dir: bool) {
+        let flags = if dir {
+            AtFlags::REMOVEDIR
+        } else {
+            AtFlags::empty()
+        };
+        rustix::fs::unlinkat(fd, name, flags).expect("the entry is there to take");
+    }
+
+    /// Catches a listed file that is removed by someone else before the walk unlinks it
+    /// (`ENOENT`) failing the removal, and a vanished entry that stops the walk short of
+    /// the entries after it.
+    #[test]
+    fn a_file_removed_after_the_listing_is_already_removed() {
+        let dir = scratch("vanish-file");
+        let top = dir.join("top");
+        std::fs::create_dir_all(top.join("sub")).expect("mkdir");
+        for name in ["gone", "kept", "sub/gone", "sub/kept"] {
+            std::fs::write(top.join(name), b"f").expect("write");
+        }
+        let mut before = |step, fd: &OwnedFd, name: &OsStr| {
+            if (step, name) == (Step::Unlink, OsStr::new("gone")) {
+                take(fd, name, false);
+            }
+        };
+        remove_tree_with(&top, &mut before).expect("removed");
+        assert!(std::fs::symlink_metadata(&top).is_err(), "the tree is left");
+    }
+
+    /// Catches a listed subdirectory that vanishes before the walk opens it failing the
+    /// removal.
+    #[test]
+    fn a_directory_removed_before_it_is_opened_is_already_removed() {
+        let dir = scratch("vanish-open");
+        let top = dir.join("top");
+        std::fs::create_dir_all(top.join("gone")).expect("mkdir");
+        std::fs::create_dir_all(top.join("kept/deeper")).expect("mkdir");
+        let mut before = |step, fd: &OwnedFd, name: &OsStr| {
+            if (step, name) == (Step::Open, OsStr::new("gone")) {
+                take(fd, name, true);
+            }
+        };
+        remove_tree_with(&top, &mut before).expect("removed");
+        assert!(std::fs::symlink_metadata(&top).is_err(), "the tree is left");
+    }
+
+    /// Catches an emptied subdirectory that someone else removes before the walk does
+    /// (`ENOENT` from the rmdir) failing the removal.
+    #[test]
+    fn a_directory_removed_before_its_rmdir_is_already_removed() {
+        let dir = scratch("vanish-rmdir");
+        let top = dir.join("top");
+        std::fs::create_dir_all(top.join("gone")).expect("mkdir");
+        std::fs::create_dir_all(top.join("kept")).expect("mkdir");
+        let mut before = |step, fd: &OwnedFd, name: &OsStr| {
+            if (step, name) == (Step::Rmdir, OsStr::new("gone")) {
+                take(fd, name, true);
+            }
+        };
+        remove_tree_with(&top, &mut before).expect("removed");
+        assert!(std::fs::symlink_metadata(&top).is_err(), "the tree is left");
+    }
+
+    /// Catches a walk below a directory that is removed from under it (its file and
+    /// then the directory itself, by someone else) failing, in the unlink or in the way
+    /// back up to the parent.
+    #[test]
+    fn a_directory_removed_while_the_walk_is_in_it_is_already_removed() {
+        let dir = scratch("vanish-below");
+        let top = dir.join("top");
+        std::fs::create_dir_all(top.join("sub")).expect("mkdir");
+        std::fs::write(top.join("sub/f"), b"f").expect("write");
+        let sub = top.join("sub");
+        let mut before = |step, fd: &OwnedFd, name: &OsStr| {
+            if (step, name) == (Step::Unlink, OsStr::new("f")) {
+                take(fd, name, false);
+                std::fs::remove_dir(&sub).expect("remove sub");
+            }
+        };
+        remove_tree_with(&top, &mut before).expect("removed");
+        assert!(std::fs::symlink_metadata(&top).is_err(), "the tree is left");
+    }
+
+    /// Catches an entry added during the walk (the directory is no longer empty,
+    /// `ENOTEMPTY`) being reported as removed: it is a failure, and the new file stays.
+    #[test]
+    fn an_entry_added_during_the_walk_fails_the_removal() {
+        let dir = scratch("added");
+        let top = dir.join("top");
+        std::fs::create_dir_all(top.join("sub")).expect("mkdir");
+        let late = top.join("sub/late");
+        let mut before = |step, _: &OwnedFd, name: &OsStr| {
+            if (step, name) == (Step::Rmdir, OsStr::new("sub")) {
+                std::fs::write(&late, b"f").expect("write");
+            }
+        };
+        let why = remove_tree_with(&top, &mut before).expect_err("sub is not empty");
+        assert_eq!(why.kind(), std::io::ErrorKind::DirectoryNotEmpty, "{why}");
+        assert!(late.exists());
+    }
+
+    /// Catches the top-level path being treated as vanished: a root that is not there is
+    /// still `NotFound`, which a caller can tell from a removal.
+    #[test]
+    fn a_missing_root_is_still_not_found() {
+        let dir = scratch("missing-root");
+        let why = remove_tree(&dir.join("never")).expect_err("no such directory");
+        assert_eq!(why.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// Catches a walk that follows a symlink: one in a listing is unlinked and its target
+    /// kept, and a subdirectory swapped for a symlink after the listing is not opened
+    /// (the removal fails, the target and its file stay).
+    #[test]
+    fn a_symlink_is_never_followed() {
+        let dir = scratch("symlink");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        std::fs::write(outside.join("f"), b"f").expect("write");
+        let top = dir.join("top");
+        std::fs::create_dir_all(top.join("swapped")).expect("mkdir");
+        std::os::unix::fs::symlink(&outside, top.join("link")).expect("symlink");
+        let target = outside.clone();
+        let mut before = |step, fd: &OwnedFd, name: &OsStr| {
+            if (step, name) == (Step::Open, OsStr::new("swapped")) {
+                take(fd, name, true);
+                rustix::fs::symlinkat(&target, fd, name).expect("symlink");
+            }
+        };
+        remove_tree_with(&top, &mut before).expect_err("a symlink is not a directory");
+        assert!(outside.join("f").exists(), "the target was followed");
+        assert!(top.join("swapped").is_symlink());
+        assert!(!top.join("link").exists(), "the listed symlink is unlinked");
     }
 }
