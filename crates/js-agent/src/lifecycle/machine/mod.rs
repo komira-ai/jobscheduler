@@ -8,6 +8,7 @@ mod adopt;
 mod cleanup;
 mod exclusive;
 mod job;
+mod prepare;
 mod slots;
 mod tails;
 
@@ -20,10 +21,10 @@ use js_agent_wire::{
 };
 
 pub use self::exclusive::{Quiet, Restored};
-use self::job::{Job, Retired, Stage, Stuck, blind_taint, container_spec, host_taint};
+use self::job::{Job, Retired, Stage, Stuck, Waiting, blind_taint, container_spec, host_taint};
 pub use self::slots::Slots;
 use super::quota::QuotaHealth;
-use super::runtime::{ResolvedMount, Runtime};
+use super::runtime::{Prepared, ResolvedMount, RunHandle, Runtime, RuntimeError};
 use super::taint::TaintState;
 use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, code, detail};
 use crate::quota::QuotaError;
@@ -63,6 +64,20 @@ const MAX_SLOT_ATTEMPTS: usize = 8;
 
 /// A refusal: the wire code and a local explanation.
 type Refusal = (&'static str, String);
+
+/// A start that failed after the slot was taken: the detail for the wire, the finding's
+/// code, its text, and whether the agent cannot see the host (see `RuntimeError::blind`).
+type Failure = (&'static str, &'static str, String, bool);
+
+/// The failure of a runtime call that was to create the container.
+fn runtime_failure(why: &RuntimeError) -> Failure {
+    (
+        detail::RUNTIME_FAILED,
+        code::START_FAILED,
+        why.to_string(),
+        why.is_blind(),
+    )
+}
 
 /// The jobs of one agent. See the [module](super) for what it guarantees.
 pub struct Lifecycle {
@@ -161,6 +176,7 @@ impl Lifecycle {
         // happened, and the agent refuses starts and frees no slot until it is written.
         let _ = self.taint.persist();
         for index in 0..self.jobs.len() {
+            self.advance(index, &mut events);
             self.supervise(index, &mut events);
             self.clean(index, &mut events);
         }
@@ -181,6 +197,7 @@ impl Lifecycle {
             .map(|job| HeldRun {
                 run_id: job.run_id.clone(),
                 state: match job.stage {
+                    Stage::Preparing(_) => HeldState::Starting,
                     Stage::Running(_) => HeldState::Running,
                     _ => HeldState::ExitedUnacked,
                 },
@@ -608,6 +625,42 @@ impl Lifecycle {
                 return;
             }
         };
+        // The image is asked for after the slot is taken and before anything is made: a run
+        // whose image is still being fetched waits as `starting`, holding its booking, and
+        // costs the worker nothing until the image is here (see `Runtime::prepare`).
+        match Prepared::Ready {
+            Prepared::Pending => {
+                let waiting = Waiting {
+                    spec: spec.clone(),
+                    mounts,
+                    slot,
+                    booked,
+                };
+                let stage = Stage::Preparing(Box::new(waiting));
+                self.jobs.push(Job::of(spec, stage, 0, Some(slot), booked));
+            }
+            Prepared::Ready => {
+                let started = self.begin(spec, mounts, slot, booked, events);
+                self.settle(spec, started, (slot, booked), None, events);
+            }
+            Prepared::Failed(why) => {
+                let failure = runtime_failure(&why);
+                self.settle(spec, Err(failure), (slot, booked), None, events);
+            }
+        }
+    }
+
+    /// Makes the run's scratch directory (with its quota) and files and creates and starts
+    /// its container.
+    fn begin(
+        &mut self,
+        spec: &JobSpec,
+        mounts: Vec<ResolvedMount>,
+        slot: u32,
+        booked: u64,
+        events: &mut Vec<Event>,
+    ) -> Result<RunHandle, Failure> {
+        let run_id = &spec.run_id;
         let failed = |why: std::io::Error| {
             (
                 detail::SCRATCH_FAILED,
@@ -635,18 +688,27 @@ impl Lifecycle {
             };
             written.map(|files| (scratch, files)).map_err(failed)
         });
-        let started = started.and_then(|(scratch, files)| {
+        started.and_then(|(scratch, files)| {
             let container = container_spec(spec, mounts, scratch, files, slot, booked);
-            self.runtime.create_and_start(&container).map_err(|why| {
-                (
-                    detail::RUNTIME_FAILED,
-                    code::START_FAILED,
-                    why.to_string(),
-                    why.is_blind(),
-                )
-            })
-        });
-        match started {
+            self.runtime
+                .create_and_start(&container)
+                .map_err(|why| runtime_failure(&why))
+        })
+    }
+
+    /// Records how a start went: a running job (its wall-time limit begins now, after any
+    /// wait for the image), or a `failed_to_start` result whose cleanup is owed. It takes
+    /// the place of the job at `replace` (a start that waited), or is added.
+    fn settle(
+        &mut self,
+        spec: &JobSpec,
+        started: Result<RunHandle, Failure>,
+        (slot, booked): (u32, u64),
+        replace: Option<usize>,
+        events: &mut Vec<Event>,
+    ) {
+        let run_id = &spec.run_id;
+        let job = match started {
             Ok(id) => {
                 let now = self.clock.now_ms();
                 let deadline = now.saturating_add(spec.limits.wall_ms);
@@ -654,10 +716,10 @@ impl Lifecycle {
                 let mut job = Job::of(spec, Stage::Running(id), deadline, Some(slot), booked);
                 job.started_at(now);
                 job.cgroup = cgroup;
-                self.jobs.push(job);
                 events.push(Event::Started {
                     run_id: run_id.clone(),
                 });
+                job
             }
             Err((why, finding, message, blind)) => {
                 let mut job = Job::of(spec, Stage::Scratch, 0, Some(slot), booked);
@@ -671,8 +733,12 @@ impl Lifecycle {
                 events.push(Event::ResultReady {
                     run_id: run_id.clone(),
                 });
-                self.jobs.push(job);
+                job
             }
+        };
+        match replace {
+            Some(index) => self.jobs[index] = job,
+            None => self.jobs.push(job),
         }
     }
 }

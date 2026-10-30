@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckFinding, CheckHook, Clock, Exit, Finished, Found, RunHandle, RunSpec, Runtime,
+    CheckFinding, CheckHook, Clock, Exit, Finished, Found, Prepared, RunHandle, RunSpec, Runtime,
     RuntimeError, Status, label,
 };
 use js_agent_wire::LogTail;
@@ -68,6 +68,16 @@ struct State {
     /// When set, the log notes at every create whether this says the scratch directory has
     /// its quota (see [`FakeRuntime::watch_quota`]).
     quota_applied: Option<QuotaWatch>,
+    /// The images whose pull is scripted: absent ones are here.
+    pulls: BTreeMap<String, Pull>,
+    /// How many times `prepare` was asked for each scripted image.
+    asks: BTreeMap<String, u32>,
+}
+
+/// Where a scripted pull stands.
+enum Pull {
+    Pending,
+    Failed(String),
 }
 
 /// A runtime whose containers exit when a test says so, whose calls fail when a test
@@ -148,6 +158,32 @@ impl FakeRuntime {
             Some(path) if path.exists() => " [marker present]".to_owned(),
             Some(_) => " [no marker]".to_owned(),
         }
+    }
+
+    /// The image is being pulled: `prepare` answers `Pending` until [`FakeRuntime::pull_done`].
+    pub fn pull_pending(&self, image: &str) {
+        self.state
+            .borrow_mut()
+            .pulls
+            .insert(image.to_owned(), Pull::Pending);
+    }
+
+    /// The pull of the image ended: it is here.
+    pub fn pull_done(&self, image: &str) {
+        self.state.borrow_mut().pulls.remove(image);
+    }
+
+    /// The pull of the image failed: `prepare` answers `Failed(why)` (every time).
+    pub fn pull_fails(&self, image: &str, why: &str) {
+        self.state
+            .borrow_mut()
+            .pulls
+            .insert(image.to_owned(), Pull::Failed(why.to_owned()));
+    }
+
+    /// How many times the runtime was asked whether a scripted image is here.
+    pub fn asks(&self, image: &str) -> u32 {
+        self.state.borrow().asks.get(image).copied().unwrap_or(0)
     }
 
     /// Every `create_and_start` takes `ms` on the test's clock.
@@ -257,6 +293,17 @@ impl FakeRuntime {
 }
 
 impl Runtime for FakeRuntime {
+    fn prepare(&mut self, image: &str) -> Prepared {
+        let mut state = self.state.borrow_mut();
+        let answer = match state.pulls.get(image) {
+            None => return Prepared::Ready,
+            Some(Pull::Pending) => Prepared::Pending,
+            Some(Pull::Failed(why)) => Prepared::Failed(RuntimeError::new(why.clone())),
+        };
+        *state.asks.entry(image.to_owned()).or_default() += 1;
+        answer
+    }
+
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
         let quota = match &self.state.borrow().quota_applied {
             None => "",

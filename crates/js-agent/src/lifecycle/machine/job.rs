@@ -15,6 +15,9 @@ use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, label};
 /// Where a job is. The container's id travels with the stages that need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Stage {
+    /// The slot is booked and the image is being fetched: no scratch directory, files or
+    /// container exist yet, and the wall-time limit has not begun.
+    Preparing(Box<Waiting>),
     /// The container runs.
     Running(RunHandle),
     /// The container has exited; it is to be removed.
@@ -27,6 +30,16 @@ pub(super) enum Stage {
     Blocked,
     /// The slot is free; the job is kept only for its unacknowledged result.
     Freed,
+}
+
+/// What a start that waits for its image keeps to finish starting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Waiting {
+    pub(super) spec: JobSpec,
+    pub(super) mounts: Vec<ResolvedMount>,
+    pub(super) slot: u32,
+    /// The disk the run books.
+    pub(super) booked: u64,
 }
 
 impl Stage {
@@ -253,9 +266,10 @@ impl Job {
         }
     }
 
-    /// Asks a running job to stop; a job past its exit has nothing to stop.
+    /// Asks a running job, or one still waiting for its image, to stop; a job past its
+    /// exit has nothing to stop.
     pub(super) fn request_stop(&mut self, silent: bool) {
-        if matches!(self.stage, Stage::Running(_)) {
+        if matches!(self.stage, Stage::Running(_) | Stage::Preparing(_)) {
             self.cause.get_or_insert(Cause::Stopped);
             self.silent |= silent;
         }

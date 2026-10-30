@@ -280,7 +280,7 @@ impl Lifecycle {
                         return;
                     }
                 },
-                Stage::Running(_) | Stage::Blocked | Stage::Freed => return,
+                Stage::Preparing(_) | Stage::Running(_) | Stage::Blocked | Stage::Freed => return,
             }
         }
     }

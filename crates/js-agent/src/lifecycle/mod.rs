@@ -165,6 +165,7 @@
 
 mod machine;
 mod mounts;
+mod prefetch;
 mod quota;
 mod quota_flags;
 mod run_files;
@@ -188,6 +189,7 @@ use crate::quota::ScratchQuota;
 
 pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, RunningLease, SLOTS, Slots};
 pub use mounts::{MountError, MountRoots};
+pub use prefetch::{Prefetcher, PullFuture};
 pub use quota::RunQuota;
 use quota_flags::scratch_quota_limits;
 pub use quota_flags::{
@@ -197,7 +199,8 @@ pub use quota_flags::{
 };
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
-    Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
+    Body, Exit, Found, Prepared, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status,
+    label,
 };
 pub use scratch::ScratchRoot;
 pub use taint::{MARKER_FILE, StateRoot};
