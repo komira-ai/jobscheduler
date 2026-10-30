@@ -97,6 +97,17 @@ pub(crate) trait Routes {
 
     /// Where lease `id` stands now.
     fn standing(&self, id: &str) -> Result<Standing, Failure>;
+
+    /// `POST /v1/leases/{id}/runs`: 202 with the run's id and state, anything else a
+    /// failure.
+    fn queue_run(&self, id: &str, body: &Value) -> Result<Queued, Failure>;
+}
+
+/// The answer to a queued run.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Queued {
+    pub(crate) run_id: String,
+    pub(crate) state: String,
 }
 
 impl Routes for Client {
@@ -154,6 +165,17 @@ impl Routes for Client {
         let entries = entries(&self.list()?)?;
         let found = entries.into_iter().find(|entry| entry.id == id);
         Ok(found.map_or(Standing::Gone, Entry::standing))
+    }
+
+    fn queue_run(&self, id: &str, body: &Value) -> Result<Queued, Failure> {
+        let reply = self.post(&format!("/v1/leases/{id}/runs"), body)?;
+        match reply.status {
+            202 => Ok(Queued {
+                run_id: text(&reply.body, "run_id")?,
+                state: text(&reply.body, "state")?,
+            }),
+            _ => Err(refusal(&reply)),
+        }
     }
 }
 

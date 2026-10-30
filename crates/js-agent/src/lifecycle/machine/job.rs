@@ -8,13 +8,16 @@ use std::path::PathBuf;
 use js_agent_wire::{HeldRun, HeldState, Isolation, JobSpec, Outcome, RunResult, Taint};
 
 use super::{RETIRED_CAP, SLOTS};
-use crate::lifecycle::runtime::{Body, Exit, Found, ResolvedMount, RunHandle, RunSpec};
+use crate::lifecycle::runtime::{Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Ticket};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, label};
 
 /// Where a job is. The container's id travels with the stages that need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Stage {
+    /// The slot is booked and the image is being fetched: no scratch directory, files or
+    /// container exist yet, and the wall-time limit has not begun.
+    Preparing(Box<Waiting>),
     /// The container runs.
     Running(RunHandle),
     /// The container has exited; it is to be removed.
@@ -27,6 +30,21 @@ pub(super) enum Stage {
     Blocked,
     /// The slot is free; the job is kept only for its unacknowledged result.
     Freed,
+}
+
+/// What a start that waits for its image keeps to finish starting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Waiting {
+    pub(super) spec: JobSpec,
+    pub(super) mounts: Vec<ResolvedMount>,
+    pub(super) slot: u32,
+    /// The disk the run books.
+    pub(super) booked: u64,
+    /// The fetch of the image that the runtime said the run waits on.
+    pub(super) ticket: Ticket,
+    /// When the lease the start named ends, on the agent's clock (`u64::MAX` when the
+    /// start named none): the run's wall time never reaches past it.
+    pub(super) lease_end_ms: u64,
 }
 
 impl Stage {
@@ -253,9 +271,23 @@ impl Job {
         }
     }
 
-    /// Asks a running job to stop; a job past its exit has nothing to stop.
+    /// Ends a job that was stopped before its container was made: killed, and silent (no
+    /// result) when it was cancelled. Nothing was created, so the cleanup that follows
+    /// only gives the slot back.
+    pub(super) fn end_unstarted(&mut self, events: &mut Vec<Event>) {
+        if !self.silent {
+            self.result = Some(self.report(Outcome::Killed, None, None));
+            events.push(Event::ResultReady {
+                run_id: self.run_id.clone(),
+            });
+        }
+        self.stage = Stage::Scratch;
+    }
+
+    /// Asks a running job, or one still waiting for its image, to stop; a job past its
+    /// exit has nothing to stop.
     pub(super) fn request_stop(&mut self, silent: bool) {
-        if matches!(self.stage, Stage::Running(_)) {
+        if matches!(self.stage, Stage::Running(_) | Stage::Preparing(_)) {
             self.cause.get_or_insert(Cause::Stopped);
             self.silent |= silent;
         }
