@@ -108,12 +108,27 @@ fn a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace(
             said.contains("pong"),
             "the capable position works for what is allowed: {said}"
         );
-        // A source address that is not the job's own.
-        assert!(capable(&ip, &["addr", "add", "198.18.0.50/30", "dev", "eth0"]).0);
-        let (_, said) = capable(
-            &busybox,
-            &["nc", "-s", "198.18.0.50", "-w", "2", "192.0.2.10", "9300"],
-        );
+        // A source address that is not the job's own: the job gives itself another one and
+        // routes through the same gateway.
+        for args in [
+            &["addr", "add", "198.18.0.50/32", "dev", "eth0"][..],
+            &["addr", "del", "198.18.0.2/30", "dev", "eth0"][..],
+            &[
+                "route",
+                "replace",
+                "default",
+                "via",
+                "198.18.0.1",
+                "dev",
+                "eth0",
+                "onlink",
+            ][..],
+            &["neigh", "flush", "all", "dev", "eth0"][..],
+        ] {
+            let (_, said) = capable(&ip, args);
+            println!("ip {args:?}: {said}");
+        }
+        let (_, said) = capable(&busybox, &["nc", "-w", "4", "192.0.2.10", "9300"]);
         assert!(
             !said.contains("pong"),
             "a spoofed source got through: {said}"
@@ -125,15 +140,14 @@ fn a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace(
         );
         // Control B of that defence: with the reverse-path filter off the spoof works.
         sysctl("net/ipv4/conf/jsv0/rp_filter", "0");
-        let (_, said) = capable(
-            &busybox,
-            &["nc", "-s", "198.18.0.50", "-w", "2", "192.0.2.10", "9300"],
-        );
+        capable(&ip, &["neigh", "flush", "all", "dev", "eth0"]);
+        let (_, said) = capable(&busybox, &["nc", "-w", "4", "192.0.2.10", "9300"]);
         sysctl("net/ipv4/conf/jsv0/rp_filter", "1");
         assert!(
             said.contains("pong"),
             "the reverse-path filter was not what stopped it: {said}"
         );
+        assert_eq!(allowed.peers().last(), Some(&IpAddr::V4(far::HOST)));
         assert_eq!(other_host.accepted(), before.0);
         assert_eq!(metadata.accepted(), before.1);
         egress.check().expect("the firewall is unchanged");

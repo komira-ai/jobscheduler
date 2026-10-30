@@ -196,7 +196,10 @@ impl Egress {
             wired: Some((index, name)),
         };
         // On failure the attachment drops here and takes down whatever was made.
-        wire(&inner.config, index, pid).map_err(|why| command(format!("wiring run {run}"), why))?;
+        wire(&inner.config, index, pid).map_err(|why| match why {
+            container @ EgressError::Container { .. } => container,
+            other => command(format!("wiring run {run}"), other),
+        })?;
         Ok(attachment)
     }
 }

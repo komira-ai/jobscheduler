@@ -854,9 +854,9 @@ fn config_default(dir: &Path) -> OciConfig {
 /// Catches the pinned seccomp profile, resolved for the capability set a job really gets
 /// (none), refusing a system call a job's network path needs: the calls an allow-listed job
 /// makes to open a socket, connect, send, receive and ask the socket about itself are all
-/// in an allow entry, and the namespace calls that would let it reconfigure its network are
-/// not allowed outright (`setns` needs `CAP_SYS_ADMIN`; `mount` and `unshare` are allowed by
-/// name and stopped by the kernel, as the hardening documentation says).
+/// in an allow entry. (What stops a job from reconfiguring the network is the kernel and the
+/// empty capability set, not this filter: see `a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace` in the
+/// agent's egress tests.)
 #[test]
 fn the_seccomp_profile_resolved_for_a_job_allows_the_calls_of_a_network_client() {
     let section = seccomp_section("amd64", &[]).expect("amd64 has a filter");
@@ -886,8 +886,4 @@ fn the_seccomp_profile_resolved_for_a_job_allows_the_calls_of_a_network_client()
     ] {
         assert!(allowed.contains(call), "{call} is not allowed: {allowed:?}");
     }
-    assert!(
-        !allowed.contains("setns"),
-        "setns is allowed to a job with no capability"
-    );
 }

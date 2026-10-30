@@ -163,7 +163,7 @@ fn two_runs_at_once_cannot_reach_each_other() {
     assert!(tcp(&a.ns, far::ALLOWED).connected());
     assert!(tcp(&b.ns, far::ALLOWED).connected());
     assert_eq!(allowed.accepted(), 2);
-    let refused = packets("default-reject");
+    let refused = packets("inbound");
     assert!(matches!(
         tcp(&a.ns, "198.18.0.6:7000".parse().unwrap()),
         Reach::Failed(_)
