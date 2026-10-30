@@ -78,6 +78,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         capacity: Capacity {
             cpu_millis: 8000,
             memory_bytes: 1 << 34,
+            disk_bytes: 0,
             gpus: Default::default(),
         },
         allow_host_jobs: false,

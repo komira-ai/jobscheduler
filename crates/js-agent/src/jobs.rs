@@ -57,6 +57,7 @@ pub fn start(
         scratch,
         files,
         files_warning: _,
+        scratch_quota: _,
         container,
         state,
         watch,

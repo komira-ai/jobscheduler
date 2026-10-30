@@ -30,6 +30,9 @@ pub mod label {
     pub const CPU_MILLIS: &str = "jobscheduler.dev/cpu-millis";
     /// The booked bytes of memory.
     pub const MEMORY_BYTES: &str = "jobscheduler.dev/memory-bytes";
+    /// The booked bytes of scratch disk. A container without it (made by an earlier agent)
+    /// is read as booking none.
+    pub const DISK_BYTES: &str = "jobscheduler.dev/disk-bytes";
     /// The booked GPU indices, comma separated; empty for none.
     pub const GPUS: &str = "jobscheduler.dev/gpus";
     /// The wall-time limit in milliseconds.
