@@ -463,16 +463,21 @@ impl Oci {
         mapping: Mapping,
         job: &helper::Job,
     ) -> Result<(), JobError> {
-        at(dir, std::fs::create_dir_all(dir))?;
-        // `crun` runs as the ids the containers map (the job user's under a root daemon)
-        // and writes its state and log here; the directory is nobody else's to write.
-        at(dir, give_dir(dir, self.ids.uid, self.ids.gid))?;
+        self.state_dir(dir)?;
         let id = self.helper_id(what);
         let bundle = self.helper_bundle(dir, mapping, &id, job)?;
         let state = dir.join("helper-state");
         let result = self.crun.run_helper(&state, &id, &bundle).await;
         let _ = std::fs::remove_dir_all(&bundle);
         Ok(result?)
+    }
+
+    /// Makes the directory `dir` for one helper's bundle, state and log: `0700` and the
+    /// ids' `crun` runs as (the job user's under a root daemon), by descriptor. Every
+    /// helper run starts here.
+    fn state_dir(&self, dir: &Path) -> Result<(), JobError> {
+        at(dir, std::fs::create_dir_all(dir))?;
+        at(dir, private_dir(dir, self.ids.uid, self.ids.gid))
     }
 
     /// [`Oci::run_job`] in a directory of its own, removed after.
@@ -510,7 +515,7 @@ impl Oci {
     /// container, then the (daemon-owned) directory. Blocking.
     pub fn remove_dir_blocking(&self, dir: &Path) -> Result<(), JobError> {
         let work = self.job_dir("rm");
-        at(&work, std::fs::create_dir_all(&work))?;
+        self.state_dir(&work)?;
         let id = self.helper_id("rm");
         let job = helper::remove_job(dir);
         let bundle = self.helper_bundle(&work, Mapping::Setup, &id, &job)?;
@@ -529,10 +534,11 @@ impl Oci {
     }
 }
 
-/// Gives the directory `dir` to `uid` and `gid`, by a descriptor opened without following
-/// a symlink.
-fn give_dir(dir: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+/// Makes the directory `dir` `0700` and gives it to `uid` and `gid`, by a descriptor
+/// opened without following a symlink (the mode first, so it is never open to others).
+fn private_dir(dir: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
     let fd = rustix::fs::open(dir, crate::walk::DIRECTORY, rustix::fs::Mode::empty())?;
+    rustix::fs::fchmod(&fd, rustix::fs::Mode::from_raw_mode(0o700))?;
     image::fchown_fd(
         &fd,
         rustix::fs::Uid::from_raw(uid),
