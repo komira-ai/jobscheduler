@@ -708,7 +708,7 @@ mod tests {
             None,
             (0, 0),
         )
-            .unwrap();
+        .unwrap();
         let held = |unready| Standing {
             gap: false,
             tainted: false,
