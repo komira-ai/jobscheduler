@@ -230,7 +230,7 @@ fn probe_directories_have_random_names() {
 /// A probe directory left by a crashed process of the same process id does not make the
 /// probe say none, and the probe does not touch it. It catches a probe that fails on
 /// `AlreadyExists`, which would turn a crash into a host with no quota until the
-/// leftover is removed by hand.
+/// scratch sweep removes the leftover.
 #[test]
 fn a_leftover_probe_directory_does_not_block_the_probe() {
     let rig = Rig::new("probe-stale");

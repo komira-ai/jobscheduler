@@ -141,8 +141,9 @@ impl XfsQuota {
             .map_err(|why| format!("cannot make a probe directory in the scratch root: {why}"))?;
         let set = io_err(self.sys.open_dir(&dir), "open the probe directory")
             .and_then(|fd| self.assign(&fd, self.ids.probe_id()));
-        // A directory left behind (the remove failed, or the process died) stays: its name
-        // is not used again.
+        // A directory left behind (the remove failed, or the process died) is never used
+        // again (its name is random) and is removed by the scratch sweep when the agent
+        // next adopts its runs (lifecycle/machine/adopt.rs, ScratchRoot::sweep).
         let _ = fs::remove_dir(&dir);
         set.map(|()| device)
             .map_err(|why| format!("project ids cannot be set: {why}"))
