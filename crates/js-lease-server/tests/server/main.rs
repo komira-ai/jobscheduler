@@ -24,6 +24,7 @@ mod config_refusals;
 mod config_serve;
 mod config_support;
 mod config_usage;
+mod disk;
 mod gpu_path_pin;
 mod guard_names;
 mod joins;

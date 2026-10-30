@@ -2,13 +2,16 @@
 //! what it can say of the store (rows moved from the farm core's tests of the same rules, with
 //! the store's rows read from the store itself).
 
-use js_server_core::{Config, Core, Held, NotQueued, Reason, Report, Stage, Standing, Taken};
+use js_sched::Request;
+use js_server_core::{
+    Config, Core, Held, NotQueued, Reason, Report, Reported, Stage, Standing, Taken,
+};
 use js_store::{EpochBump, EpochPolicy, Progress};
-use js_types::sched::{LeaseId, OperationId, Outcome, ResultRef, WaiterId};
+use js_types::sched::{LeaseId, OperationId, Outcome, Resources, ResultRef, WaiterId};
 
 use crate::common::{
-    Adoption, Call, Rig, at, beat, block_on, calls, core, lease, reported, request, shown_to,
-    started, submit, submit_request, up, up_after, worker,
+    Adoption, Call, GIB, Rig, at, beat, block_on, calls, caps, core, lease, reported, request,
+    shown_to, started, submit, submit_request, up, up_after, worker,
 };
 use crate::stored::Setup;
 
@@ -314,4 +317,51 @@ fn a_start_over_a_store_another_frontend_still_runs_follows_its_leases() {
     second.intake(at(60_005));
     let ended = Some(Stage::Done(b"done 1.0".to_vec()));
     assert_eq!(shown_to(&second, joined.waiter), ended);
+}
+
+/// Caller `n`'s request, booking `disk` bytes of scratch disk.
+fn with_disk(n: u64, disk: u64) -> Request {
+    let asked = request(n);
+    Request {
+        resources: asked.resources.with_disk_bytes(disk),
+        ..asked
+    }
+}
+
+/// A serving host with 8 cores, 64 GiB and 100 GiB of scratch disk.
+fn roomy() -> Reported {
+    Reported::serving(
+        Resources::new(8_000, 64 * GIB).with_disk_bytes(100 * GIB),
+        caps(),
+    )
+}
+
+/// Asserts that a core started over a store that holds a lease whose request booked 60 GiB
+/// of scratch disk books the 60 GiB again once the lease's node registers and lists it: the
+/// node's booking carries the disk, and a second request for 60 GiB (more than the 40 left)
+/// waits in the queue where a booking that lost the disk would grant it. Catches: a request
+/// row read back without its disk, so that a restart offers the disk of a running lease
+/// to the next request.
+#[test]
+fn a_restart_books_the_disk_of_a_stored_lease_again() {
+    let setup = Setup::new();
+    let first = setup.core(1);
+    up_after(&first, 0, "node-a", ("d1", ""), roomy());
+    let leased = submit_request(&first, 1, with_disk(1, 60 * GIB)).expect("submitted");
+    assert_eq!(
+        first.progress(leased.operation).expect("read"),
+        Some(Progress::Running)
+    );
+    drop(first);
+
+    let second = setup.core_with(&Config::new(1), Rig::default(), 5_000);
+    let stream = up_after(&second, 5_000, "node-a", ("d1", ""), roomy());
+    assert!(beat(&second, 5_001, ("node-a", stream), 1, &[lease(1, 0)]));
+    let node_a = worker("node-a");
+    let booked = second.with(|view, _| view.sched().booked(&node_a));
+    let held = booked.expect("the node is known");
+    assert_eq!(held.disk_bytes, 60 * GIB);
+
+    submit_request(&second, 5_002, with_disk(2, 60 * GIB)).expect("submitted");
+    assert_eq!(second.queued_operations(), 1);
 }
