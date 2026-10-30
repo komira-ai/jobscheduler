@@ -627,7 +627,7 @@ fn scripted_runtime(dir: &Path, images: &Path, fail: &str) -> PathBuf {
     let log = dir.join("runs.log");
     let script = format!(
         "#!/bin/sh\nfor a in \"$@\"; do last=$a; done\necho \"$last\" >> {log}\n\
-         case \"$last\" in\n  helper-unpack-*) stat -c 'stage %a %u' {images}/.stage-* >> {log} \
+         case \"$last\" in\n  helper-unpack-*) stat -c 'stage %a %u' {images}/.stage-*[0-9] >> {log} \
          2>/dev/null;;\nesac\ncase \"$last\" in\n  {fail}) exit 1;;\nesac\nexit 0\n",
         log = log.display(),
         images = images.display(),
