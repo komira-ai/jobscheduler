@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! The list files: manifest digests, one a line.
 
 use std::collections::BTreeSet;
@@ -18,7 +17,18 @@ pub struct ListError {
 ///
 /// The first line that is none of these.
 pub fn parse_digests(text: &str) -> Result<BTreeSet<String>, ListError> {
-    Ok(BTreeSet::new())
+    let mut found = BTreeSet::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if !is_digest(line) {
+            return Err(ListError { line: index + 1 });
+        }
+        found.insert(line.to_owned());
+    }
+    Ok(found)
 }
 
 /// `sha256:` and 64 lower case hex digits.

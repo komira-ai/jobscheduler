@@ -47,6 +47,7 @@ fn a_host_and_a_namespace_are_accepted() {
         ("GHCR.io/komira-ai", "ghcr.io", "komira-ai"),
         ("localhost:5000/x/y", "localhost:5000", "x/y"),
         ("reg.example.com/a_b.c-d", "reg.example.com", "a_b.c-d"),
+        ("my-reg.example.com/x", "my-reg.example.com", "x"),
     ];
     for (text, host, prefix) in cases {
         let found = parsed(&[text], &[]).unwrap();
@@ -123,6 +124,7 @@ fn an_entry_covers_its_namespace_and_nothing_beside_it() {
     }
     let outside = [
         "ghcr.io/komira-ai-evil/x",
+        "ghcr.io/komira-ai:x/y",
         "ghcr.io/other/komira-ai/x",
         "ghcr.io/komira/x",
         "docker.io/komira-ai/x",

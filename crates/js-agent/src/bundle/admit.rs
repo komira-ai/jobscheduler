@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! The checks of a start that names a bundle.
 
 use std::fmt;
@@ -41,12 +40,6 @@ impl Admission {
         Self { settings, host }
     }
 
-    /// The settings the rules come from.
-    #[must_use]
-    pub fn settings(&self) -> &Settings {
-        &self.settings
-    }
-
     /// Whether the start `spec` may go on, as far as its bundle is concerned. A start with
     /// no bundle passes. The checks run in this order, and the first that fails is the
     /// refusal: the digest is on the deny list; it is not on the allow list; the name is
@@ -59,7 +52,26 @@ impl Admission {
     ///
     /// The wire code of the refusal and an explanation for the log.
     pub fn admit(&self, spec: &JobSpec) -> Result<(), Refusal> {
-        Ok(())
+        let Some(pin) = &spec.bundle else {
+            return Ok(());
+        };
+        let pin = BundleRef::parse(pin)
+            .map_err(|_| no(refusal::INVALID_BUNDLE, "not a pinned bundle"))?;
+        let digest = pin.digest();
+        self.deny(digest)?;
+        self.allow(digest)?;
+        self.registry(pin.name())?;
+        let held = self.host.held(&self.settings.store);
+        let held = held.map_err(|why| {
+            no(
+                refusal::BUNDLE_NOT_HELD,
+                format!("the store cannot be listed: {why}"),
+            )
+        })?;
+        if !held.iter().any(|have| have == digest) {
+            return self.missing(pin.name(), digest);
+        }
+        self.fits_host(digest)
     }
 
     /// Reads the list file `path`; one that cannot be read or parsed refuses with `code`.

@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! The seam between the bundle rules and the machine: [`BundleHost`].
 
 use std::fs;
@@ -138,34 +137,78 @@ impl<R: CommandRunner + Send + Sync> BundleHost for SystemHost<R> {
     }
 
     fn read_file(&self, path: &Path) -> Result<String, String> {
-        Err("unread".to_owned())
+        fs::read_to_string(path).map_err(|why| format!("{}: {why}", path.display()))
     }
 
     fn held(&self, store: &Path) -> Result<Vec<String>, String> {
-        Ok(Vec::new())
+        let dir = manifests(store);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(format!("{}: {err}", dir.display())),
+        };
+        let mut held = Vec::new();
+        // An entry that cannot be read is not a manifest the store can show.
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let digest = name
+                .strip_suffix(".json")
+                .map(|hex| format!("sha256:{hex}"));
+            held.extend(digest.filter(|digest| is_digest(digest)));
+        }
+        held.sort();
+        Ok(held)
     }
 
     fn needs(&self, store: &Path, digest: &str) -> Result<Needs, String> {
-        Err("unread".to_owned())
+        let hex = hex_of(digest)?;
+        let file = manifests(store).join(format!("{hex}.json"));
+        let manifest = self.read_file(&file)?;
+        let manifest: serde_json::Value =
+            serde_json::from_str(&manifest).map_err(|_| "the manifest is not JSON".to_owned())?;
+        let config = manifest
+            .pointer("/config/digest")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "the manifest names no config".to_owned())?;
+        let config = hex_of(config)?;
+        let file = store.join(format!("v1/objects/configs/{config}.json"));
+        let bytes = fs::read(&file).map_err(|why| format!("{}: {why}", file.display()))?;
+        let config = BundleConfig::parse(&bytes).map_err(|why| why.to_string())?;
+        Ok(Needs {
+            os_version: config.os_version,
+            xcode: config.xcode,
+        })
     }
 
     fn os_version(&self) -> Result<DottedVersion, String> {
-        Err("unread".to_owned())
+        let text = self.runner.run(SW_VERS, &["-productVersion"])?;
+        let text = text.trim();
+        // `sw_vers` prints `15` for a release with no minor number.
+        let text = match text.contains('.') {
+            true => text.to_owned(),
+            false => format!("{text}.0"),
+        };
+        DottedVersion::parse(&text).map_err(|_| "sw_vers printed no version".to_owned())
     }
 
     fn xcodes(&self) -> Vec<HostXcode> {
+        // The Xcode catalog arrives with the profile builder; until then a host reports
+        // none, and a bundle that needs Xcode is refused `bundle-xcode-mismatch`.
         Vec::new()
     }
 
     fn used_bytes(&self, store: &Path) -> Result<u64, String> {
-        Ok(0)
+        let below = |dir: &str| blocks_below(&store.join(dir));
+        let both = below("v1/objects/trees")
+            .and_then(|trees| below("v1/trash").map(|trash| trees.saturating_add(trash)));
+        both.map_err(|why| format!("{}: {why}", store.display()))
     }
 
     fn free_bytes(&self, path: &Path) -> Result<u64, String> {
-        Err("unread".to_owned())
+        free_bytes(&self.runner, path)
     }
 
     fn fetch(&self, _store: &Path, _name: &str, _digest: &str) -> Fetch {
-        Fetch::Started
+        Fetch::Failed("this agent has no bundle fetcher yet".to_owned())
     }
 }

@@ -288,7 +288,7 @@ pub(crate) fn capabilities_fit(capabilities: &BTreeMap<String, String>) -> Resul
     let few = capabilities.len() <= limits::MAX_CAPABILITIES;
     let short = capabilities.iter().all(|(key, value)| {
         let key_fits = key.len() <= limits::MAX_CAPABILITY_KEY_LEN;
-        let value_fits = value.len() <= limits::MAX_CAPABILITY_VALUE_LEN;
+        let value_fits = value.len() <= limits::capability_value_max(key);
         key_fits & value_fits
     });
     match few & short {

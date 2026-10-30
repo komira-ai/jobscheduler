@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! The bundle flags, checked together.
 
 use std::path::{Path, PathBuf};
@@ -45,7 +44,18 @@ impl Registry {
     /// registry's namespace: the same host, and a path that is the prefix or below it.
     #[must_use]
     pub fn covers(&self, name: &str) -> bool {
-        false
+        let Some((host, path)) = name.split_once('/') else {
+            return false;
+        };
+        // A tag follows the last `:` after the last `/`.
+        let repository = match path.rsplit_once(':') {
+            Some((before, tag)) if !tag.contains('/') => before,
+            _ => path,
+        };
+        let below = repository
+            .strip_prefix(self.prefix.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+        host.eq_ignore_ascii_case(&self.host) && below
     }
 }
 
@@ -187,6 +197,118 @@ impl Settings {
         platform: &Platform,
         host: &dyn BundleHost,
     ) -> Result<Option<Self>, String> {
-        Ok(None)
+        let Some(store) = &cli.bundle_store else {
+            return match without_store(cli) {
+                Some(flag) => Err(format!("{flag}: needs --bundle-store")),
+                None => Ok(None),
+            };
+        };
+        if !platform.is_macos() {
+            return Err("--bundle-store: bundles are for macOS hosts".to_owned());
+        }
+        if !store.is_absolute() {
+            return Err("--bundle-store: must be an absolute path".to_owned());
+        }
+        let Some(scratch) = &cli.scratch_root else {
+            return Err(
+                "--bundle-store: needs --scratch-root: the store and the scratch root must \
+                 be on one volume"
+                    .to_owned(),
+            );
+        };
+        let budget = match cli.bundle_budget_gib {
+            Some(gib) if gib > 0 => gib,
+            _ => {
+                return Err("--bundle-budget-gib: required with --bundle-store, above 0".to_owned());
+            }
+        };
+        let pull = choice(
+            "--bundle-pull",
+            cli.bundle_pull.as_deref(),
+            &[("never", Pull::Never), ("missing", Pull::Missing)],
+        )?;
+        let trust = choice(
+            "--bundle-trust",
+            cli.bundle_trust.as_deref(),
+            &[("list", Trust::List), ("digest", Trust::Digest)],
+        )?;
+        let read_model = choice(
+            "--read-model",
+            cli.read_model.as_deref(),
+            &[("open", ReadModel::Open), ("allow", ReadModel::Allow)],
+        )?;
+        if read_model == ReadModel::Allow {
+            return Err(
+                "--read-model: allow is not available yet: the allow-list profile has not \
+                 landed"
+                    .to_owned(),
+            );
+        }
+        let public = cli
+            .bundle_registry_allow
+            .iter()
+            .map(|text| registry("--bundle-registry-allow", text, false));
+        let private = cli
+            .bundle_registry_allow_private
+            .iter()
+            .map(|text| registry("--bundle-registry-allow-private", text, true));
+        let registries = public.chain(private).collect::<Result<Vec<_>, _>>()?;
+        if (pull, trust) == (Pull::Missing, Trust::Digest) {
+            return Err(
+                "--bundle-pull missing: not with --bundle-trust digest: any job could make \
+                 this host download and unpack a bundle of its choosing"
+                    .to_owned(),
+            );
+        }
+        if pull == Pull::Missing && registries.is_empty() {
+            return Err("--bundle-pull missing: needs --bundle-registry-allow or \
+                 --bundle-registry-allow-private"
+                .to_owned());
+        }
+        let allow_file = match (trust, &cli.bundle_allow_file) {
+            (Trust::List, None) => {
+                return Err("--bundle-trust list: needs --bundle-allow-file".to_owned());
+            }
+            (Trust::Digest, Some(_)) => {
+                return Err("--bundle-allow-file: needs --bundle-trust list".to_owned());
+            }
+            (_, file) => file.clone(),
+        };
+        if let Some(file) = &allow_file
+            && list("--bundle-allow-file", host, file)? == 0
+        {
+            return Err("--bundle-allow-file: lists no digest".to_owned());
+        }
+        for (flag, file) in [
+            ("--bundle-deny-file", &cli.bundle_deny_file),
+            ("--bundle-keep-file", &cli.bundle_keep_file),
+            ("--bundle-prefetch-file", &cli.bundle_prefetch_file),
+        ] {
+            if let Some(file) = file {
+                list(flag, host, file)?;
+            }
+        }
+        host.check_start(store, scratch)
+            .map_err(|why| format!("--bundle-store: {why}"))?;
+        // The path is also the `bundle-root` capability, which the wire holds to a length.
+        let shown = store.to_string_lossy();
+        if shown.len() > MAX_CAPABILITY_VALUE_LEN {
+            return Err("--bundle-store: the path is too long to report as bundle-root".to_owned());
+        }
+        Ok(Some(Self {
+            store: store.clone(),
+            scratch: scratch.clone(),
+            budget_bytes: budget.saturating_mul(GIB),
+            low_water_bytes: cli.bundle_low_water_gib.unwrap_or(0).saturating_mul(GIB),
+            pull,
+            registries,
+            min_age_min: cli.bundle_min_age_min.unwrap_or(DEFAULT_MIN_AGE_MIN),
+            keep_file: cli.bundle_keep_file.clone(),
+            deny_file: cli.bundle_deny_file.clone(),
+            prefetch_file: cli.bundle_prefetch_file.clone(),
+            trust,
+            allow_file,
+            read_model,
+        }))
     }
 }

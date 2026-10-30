@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! What a Mac agent holds for bundles, as one message: [`Caps`].
 //!
 //! A local consumer (the executor on the same host) cannot read the agent's hello, and a
@@ -51,7 +50,31 @@ pub struct Caps {
 impl Caps {
     /// Checks the frame: the digests, the root and the Xcode builds.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        Ok(())
+        let at = At::new("caps", refusal::INVALID_CAPS);
+        let bundles = at.field("caps.bundles");
+        check::count(bundles, self.bundles.len(), limits::MAX_CAPS_BUNDLES)?;
+        for digest in &self.bundles {
+            if !is_digest(digest) {
+                return Err(bundles.fail(Rule::BadChars));
+            }
+        }
+        // Ascending and distinct in one pass: a repeat or a descent is the same fault.
+        if self.bundles.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(bundles.fail(Rule::Inconsistent));
+        }
+        let root = at.field("caps.bundle_root");
+        if !self.bundle_root.is_empty() {
+            check::text(root, &self.bundle_root, limits::MAX_REL_LEN)?;
+            if !self.bundle_root.starts_with('/') {
+                return Err(root.fail(Rule::Escapes));
+            }
+        }
+        let xcode = at.field("caps.xcode");
+        check::count(xcode, self.xcode.len(), limits::MAX_CAPS_XCODES)?;
+        for build in &self.xcode {
+            check::token(xcode, build, limits::MAX_XCODE_BUILD_LEN, check::ident_byte)?;
+        }
+        check::distinct(xcode, self.xcode.iter())
     }
 }
 
@@ -66,5 +89,6 @@ fn is_digest(value: &str) -> bool {
 /// in it; a caller with more reports the first of them.
 #[must_use]
 pub fn bundle_capability(digests: &[String]) -> String {
-    String::new()
+    let shown = digests.len().min(limits::MAX_BUNDLE_CAPABILITY_DIGESTS);
+    digests[..shown].join(",")
 }

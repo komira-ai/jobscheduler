@@ -104,8 +104,8 @@ pub const MAX_XCODE_BUILD_LEN: usize = 32;
 /// than the other capabilities, which are short facts.
 #[must_use]
 pub fn capability_value_max(key: &str) -> usize {
-    let _ = key;
-    MAX_CAPABILITY_VALUE_LEN
+    [MAX_CAPABILITY_VALUE_LEN, MAX_BUNDLE_CAPABILITY_VALUE_LEN]
+        [usize::from(key == BUNDLE_CAPABILITY)]
 }
 /// Longest session secret, in bytes (see [`crate::Welcome::session`]). A secret the
 /// registry issues is far shorter; the cap only bounds what a peer can send.

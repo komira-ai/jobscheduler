@@ -73,7 +73,7 @@ pub const BUNDLE_ROOT: &str = "bundle-root";
 pub const FLAG_SET: &str = "true";
 
 /// The keys an agent detects and an operator cannot set with a flag.
-pub const DETECTED_KEYS: [&str; 7] = [
+pub const DETECTED_KEYS: [&str; 9] = [
     RUNTIME,
     GPU_TOOLKIT,
     EXEC,
@@ -81,6 +81,8 @@ pub const DETECTED_KEYS: [&str; 7] = [
     RUN_FILES,
     SCRATCH_QUOTA,
     SCRATCH_DEFAULT_GIB,
+    BUNDLE,
+    BUNDLE_ROOT,
 ];
 
 /// How a report fails a [`HostContract`]. Each names the capability at fault.

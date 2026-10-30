@@ -423,3 +423,19 @@ fn the_checks_run_in_order() {
         refusal::BUNDLE_XCODE_MISMATCH
     );
 }
+
+/// The admission prints its settings and not its host, so a log line or a failed assertion
+/// that formats the lifecycle's configuration shows the policy. It catches a debug output
+/// that dumps a host's state.
+#[test]
+fn the_admission_prints_its_settings() {
+    let host = host();
+    let admission = listed(&host, &[]);
+    let shown = format!("{admission:?}");
+    assert!(
+        shown.starts_with("Admission { settings: Settings {"),
+        "{shown}"
+    );
+    assert!(shown.contains("budget_bytes: 10737418240"), "{shown}");
+    assert!(!shown.contains("FakeHost"), "{shown}");
+}
