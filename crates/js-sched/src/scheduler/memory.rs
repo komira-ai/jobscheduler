@@ -532,10 +532,11 @@ impl Scheduler {
     /// learned from earlier runs.
     fn floor_key(&self, operation: OperationId) -> Option<u64> {
         let request = &self.ops.get(&operation)?.request;
-        self.size_keys
-            .get(&operation)
-            .copied()
-            .filter(|_| request.kind == LeaseKind::Action && request.resources.gpus == 0)
+        self.size_keys.get(&operation).copied().filter(|_| {
+            request.kind == LeaseKind::Action
+                && request.resources.gpus == 0
+                && !request.owns_worker()
+        })
     }
 
     /// Lowers the key floor of `size_key` to `ask` bytes, or forgets it for 0, once the
@@ -793,6 +794,10 @@ impl Scheduler {
     /// its CPU and GPU request, and always `ran_on`, the node its killed run used. A
     /// node that is gone does not count; `booked` when none is registered.
     fn memory_cap(&self, request: &Request, ran_on: &WorkerId, booked: u64) -> u64 {
+        // A request that owns its worker booked all of one: no node has more.
+        if request.owns_worker() {
+            return booked;
+        }
         let wanted = request.resources;
         self.workers
             .iter()

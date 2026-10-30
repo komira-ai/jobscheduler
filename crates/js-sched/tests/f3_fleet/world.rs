@@ -340,6 +340,7 @@ impl World {
                         .expect("a valid platform"),
                     hermetic: true,
                     do_not_cache: false,
+                    whole_worker: false,
                 };
                 self.feed(Event::Submit {
                     waiter: WaiterId(id.0),
