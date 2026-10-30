@@ -128,6 +128,10 @@ pub struct Hooks {
     pub chown: Chown,
     /// Milliseconds since the Unix epoch.
     pub now_ms: fn() -> u64,
+    /// How long a run is waited for after its cgroup was killed ([`KILL_WAIT`]).
+    pub kill_wait: Duration,
+    /// How long a pull and unpack of one image may take ([`PULL_LIMIT`]).
+    pub pull_limit: Duration,
 }
 
 impl Default for Hooks {
@@ -135,6 +139,8 @@ impl Default for Hooks {
         Self {
             chown: hand_over,
             now_ms: system_now_ms,
+            kill_wait: KILL_WAIT,
+            pull_limit: PULL_LIMIT,
         }
     }
 }
@@ -156,9 +162,6 @@ pub enum CrunError {
     /// The backend cannot start on this node.
     #[error(transparent)]
     Oci(#[from] OciError),
-    /// The runtime of the calls could not be made.
-    #[error("the runtime of the crun calls: {0}")]
-    Runtime(io::Error),
     /// A file of the agent's cgroup could not be given to the job user.
     #[error("give {path} to the job user: {why}")]
     Delegation {
@@ -175,9 +178,10 @@ pub enum CrunError {
         /// The reason.
         why: io::Error,
     },
-    /// The threads that pull images could not be started.
-    #[error("the threads that pull images: {0}")]
-    Pull(io::Error),
+    /// The runtime of the calls, or the threads that pull images, could not be made (no
+    /// thread, or no descriptor, or no pull thread asked for).
+    #[error("the threads of the crun runtime: {0}")]
+    Threads(#[from] io::Error),
 }
 
 /// Why a run could not be made into a container.
@@ -197,6 +201,8 @@ enum Fault {
     NoFiles,
     #[error(transparent)]
     Config(#[from] ConfigError),
+    #[error(transparent)]
+    Book(#[from] js_types::TypeError),
     #[error("{what}: {why}")]
     Step { what: &'static str, why: String },
 }
@@ -246,6 +252,15 @@ pub struct CrunRuntime {
     runs: BTreeMap<String, Run>,
 }
 
+impl std::fmt::Debug for CrunRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CrunRuntime")
+            .field("host_id", &self.host_id)
+            .field("containers", &self.runs.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl CrunRuntime {
     /// Opens the runtime over the store in `settings.scratch`, fetching images with
     /// `source`.
@@ -272,10 +287,7 @@ impl CrunRuntime {
             &settings.scratch,
             &settings.cgroups.actions,
         )?;
-        let rt = Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(CrunError::Runtime)?;
+        let rt = Builder::new_current_thread().enable_all().build()?;
         let (uid, gid) = oci.job_ids();
         let cgroups = settings.cgroups;
         // `crun`, run as the job user, moves its first process from the agent's cgroup into
@@ -298,10 +310,10 @@ impl CrunRuntime {
             why,
         })?;
         let pulling = Arc::clone(&oci);
+        let limit = hooks.pull_limit;
         let pulls = Prefetcher::new(settings.pull_threads, move |image| {
-            pull(Arc::clone(&pulling), image)
-        })
-        .map_err(CrunError::Pull)?;
+            pull(Arc::clone(&pulling), image, limit)
+        })?;
         Ok(Self {
             oci,
             pulls,
@@ -426,11 +438,10 @@ impl CrunRuntime {
         if spec.files.is_some() {
             let files = self.files.as_ref().ok_or(Fault::NoFiles)?;
             files
-                .hand_over(&spec.run_id, job_id.0, job_id.1)
+                .hand_over_with(&spec.run_id, job_id.0, job_id.1, &chown)
                 .map_err(|why| Fault::step("give the run's files to the job", &why))?;
         }
-        let booking = Resources::new(spec.cpu_millis, spec.memory_bytes, 0, None)
-            .map_err(|why| Fault::step("book the run", &why))?;
+        let booking = Resources::new(spec.cpu_millis, spec.memory_bytes, 0, None)?;
         cgroup
             .create_with(&booking, None, LeasePolicy::Hard)
             .map_err(|why| Fault::step("make the lease's cgroup", &why))?;
@@ -443,17 +454,24 @@ impl CrunRuntime {
             .map_err(|why| Fault::step("write the bundle", &why))
     }
 
-    /// Starts the container `name`, which [`CrunRuntime::make`] made.
-    fn begin(&mut self, name: &str) -> Result<(), Fault> {
+    /// Starts the container `id` that [`CrunRuntime::stage`] made. A failure leaves it
+    /// staged: the caller removes it.
+    ///
+    /// # Errors
+    /// The container is gone or started already, or `crun` could not be started.
+    pub fn start_staged(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         let _entered = self.rt.enter();
         let now = (self.hooks.now_ms)();
-        let Some(run) = self.runs.get_mut(name) else {
-            return Err(Fault::step("start the container", &"it is gone"));
+        let Some(run) = self.runs.get_mut(&id.0) else {
+            return Err(RuntimeError::new("start: the container is gone"));
         };
+        if !matches!(run.state, State::Created) {
+            return Err(RuntimeError::new("start: the container was started"));
+        }
         let started = self
             .oci
             .start(&run.spec)
-            .map_err(|why| Fault::step("start crun", &why))?;
+            .map_err(|why| RuntimeError::new(format!("start crun: {why}")))?;
         run.backstop = run.cgroup.parent_ooms().ok();
         run.state = State::Running {
             run: started,
@@ -489,12 +507,12 @@ fn cgroup_dir(mount: &Path, name: &str) -> PathBuf {
 }
 
 /// The pull and unpack of `image`, with the limit of the whole.
-fn pull(oci: Arc<Oci>, image: String) -> PullFuture {
+fn pull(oci: Arc<Oci>, image: String, limit: Duration) -> PullFuture {
     Box::pin(async move {
         let pinned = pinned(&image)?;
-        let pulled = tokio::time::timeout(PULL_LIMIT, oci.check_pinned(&pinned)).await;
+        let pulled = tokio::time::timeout(limit, oci.check_pinned(&pinned)).await;
         pulled
-            .map_err(|_| format!("pulling {image} took longer than {PULL_LIMIT:?}"))?
+            .map_err(|_| format!("pulling {image} took longer than {limit:?}"))?
             .map_err(|why| why.to_string())
     })
 }
@@ -505,16 +523,14 @@ impl Runtime for CrunRuntime {
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
-        let name = self
-            .make(spec)
-            .map_err(|fault| RuntimeError::new(fault.to_string()))?;
-        if let Err(fault) = self.begin(&name) {
+        let id = self.stage(spec)?;
+        if let Err(why) = self.start_staged(&id) {
             // The failed start leaves no container: the lease is taken apart as a removal
             // does.
-            let _ = self.remove(&RunHandle(name));
-            return Err(RuntimeError::new(fault.to_string()));
+            let _ = self.remove(&id);
+            return Err(why);
         }
-        Ok(RunHandle(name))
+        Ok(id)
     }
 
     fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
@@ -522,7 +538,7 @@ impl Runtime for CrunRuntime {
     }
 
     fn stop(&mut self, id: &RunHandle, grace: Duration) -> Result<(), RuntimeError> {
-        let (rt, oci) = (&self.rt, &self.oci);
+        let (rt, oci, kill_wait) = (&self.rt, &self.oci, self.hooks.kill_wait);
         let Some(Run {
             state: State::Running { run, .. },
             cgroup,
@@ -546,12 +562,12 @@ impl Runtime for CrunRuntime {
         cgroup
             .kill()
             .map_err(|why| RuntimeError::new(format!("kill the lease's cgroup: {why}")))?;
-        rt.block_on(tokio::time::timeout(KILL_WAIT, run.wait()))
+        rt.block_on(tokio::time::timeout(kill_wait, run.wait()))
             .map_err(|_| RuntimeError::new(format!("{} still runs after its kill", spec.name)))
     }
 
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
-        let (rt, oci) = (&self.rt, &self.oci);
+        let (rt, oci, kill_wait) = (&self.rt, &self.oci, self.hooks.kill_wait);
         let Some(run) = self.runs.get_mut(&id.0) else {
             return Ok(());
         };
@@ -562,7 +578,7 @@ impl Runtime for CrunRuntime {
         {
             // Removed while it runs: ended by force, as a stop that spent its grace.
             let _ = run.cgroup.kill();
-            let ended = rt.block_on(tokio::time::timeout(KILL_WAIT, running.wait()));
+            let ended = rt.block_on(tokio::time::timeout(kill_wait, running.wait()));
             if ended.is_err() {
                 rt.block_on(running.force());
             }
