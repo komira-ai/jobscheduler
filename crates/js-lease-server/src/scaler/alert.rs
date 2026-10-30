@@ -24,6 +24,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// - A host in `unrevoked`: its join token could not be revoked, so its machine is not
 ///   terminated (never while the token may work), and the revoke is tried again every
 ///   tick. Until it goes through the machine runs and is paid for.
+/// - A pool in `brake` that is tripped: too many boots failed in a row, the pool is in plan,
+///   and it stays there until an operator resets it (`POST /v1/pools/{pool}/brake/reset`).
 /// - A host in `unremoved`: the registry still holds the host of a machine that is gone
 ///   and refuses to remove it (a lease is booked on it), which keeps the host's slot.
 pub(super) fn alerts(
@@ -82,6 +84,19 @@ pub(super) fn alerts(
             ),
         )
     });
+    let tripped = state
+        .records
+        .brake
+        .iter()
+        .filter(|(_, brake)| brake.tripped_at.is_some())
+        .map(|(pool, _)| {
+            (
+                format!("brake:{pool}"),
+                format!(
+                    "pool {pool:?} is in plan: failed boots in a row tripped the failure brake, and it launches nothing until an operator resets it (POST /v1/pools/{pool}/brake/reset)"
+                ),
+            )
+        });
     let bound = settings.boot_timeout.saturating_add(hold);
     let all = state.records.instances.iter();
     let releasing = all
@@ -100,6 +115,7 @@ pub(super) fn alerts(
         .chain(unrevoked)
         .chain(unremoved)
         .chain(releasing)
+        .chain(tripped)
         .collect()
 }
 

@@ -37,6 +37,13 @@
 //!   whose `live_until` has come is in `Plan` ([`Settings::mode`]). A total only keeps a launch
 //!   from being made; the overrun it allows is bounded by [`overrun`]. Records are kept until
 //!   their billed time has left the 30 days.
+//!   The failure brake ([`Brake`], in `brake`) keeps a pool from looping on failures: each
+//!   refusal (quota, denied, shape), boot given up on and spot preemption counts, the cooldown
+//!   after the n-th in a row is `boot_fail_cooldown` doubled n-1 times up to
+//!   `boot_fail_cooldown_max`, and `boot_fail_trip_after` in a row trip the pool to `Plan`
+//!   ([`Blocked::Tripped`]) until the step is given the pool's name in
+//!   [`Input::brake_resets`]. A machine whose host is first heard from ends the count; the
+//!   trip stays. It only removes launches.
 //!   The acquire id is the pool and 128 random bits the caller gives in [`Input::entropy`].
 //!   A launch the provider told to wait is retried when its time comes, if the pool is
 //!   `Live` and every cap still holds.
@@ -107,6 +114,7 @@
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 #![forbid(unsafe_code)]
 
+mod brake;
 mod budget;
 mod caps;
 mod go;
@@ -131,10 +139,12 @@ pub use input::{
     AcquireResult, HostFacts, HostState, Input, Mark, PoolInput, ReleaseResult, Waiting,
 };
 pub use record::{
-    Cooldown, CooldownReason, Go, OLDEST, Phase, Record, Records, RecordsError, StoredExec,
+    Brake, Cooldown, CooldownReason, Go, OLDEST, Phase, Record, Records, RecordsError, StoredExec,
     StoredOffer, VERSION,
 };
-pub use settings::{Blocked, Health, LaunchMode, Settings};
+pub use settings::{
+    BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_TRIP_AFTER, Blocked, Health, LaunchMode, Settings,
+};
 pub use state::{AcquirePlan, Action, PlanLine, State};
 pub use time::Millis;
 
@@ -146,6 +156,7 @@ pub use time::Millis;
 pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>) {
     let before = state.records.clone();
     let mut pass = Pass::new(state, input, now);
+    pass.reset_brakes();
     pass.end_go();
     for pool in &input.pools {
         pass.reconcile(pool);
@@ -219,6 +230,7 @@ pub fn launchable(state: &State, input: &Input, now: Millis, demand: &Demand) ->
         [
             pool.health == Health::Available,
             settings.mode(now) == LaunchMode::Live,
+            !state.records.tripped(&settings.pool),
             within,
         ]
         .into_iter()

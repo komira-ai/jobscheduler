@@ -35,6 +35,7 @@ use crate::file_checks::{check_listeners, check_live};
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::OAuthClient;
 
+mod brake;
 mod budget;
 mod joined;
 mod lifetime;
@@ -71,6 +72,8 @@ const POOL_KEYS: &[&str] = &[
     "max_age",
     "min_host_lifetime",
     "boot_timeout",
+    "boot_fail_cooldown_max",
+    "boot_fail_trip_after",
     "launch",
     "live_until",
     "agent",
@@ -175,6 +178,10 @@ pub struct ElasticPlan {
     pub max_lease_wall: Option<Duration>,
     /// How long a launched host has to say hello.
     pub boot_timeout: Duration,
+    /// The longest the cooldown after failed boots grows to (it doubles from 10 minutes).
+    pub boot_fail_cooldown_max: Duration,
+    /// How many failures in a row trip the pool to plan until an operator resets it.
+    pub boot_fail_trip_after: u32,
     /// The execution mode the hosts must report, or `None` when the pool asked for none.
     pub exec: Option<ExecMode>,
     /// How a launched host reaches the server.
@@ -596,6 +603,7 @@ struct ElasticKeys {
     min_host_lifetime: Option<Duration>,
     live_until: Option<Millis>,
     boot_timeout: Option<Duration>,
+    brake: brake::Given,
     join_token_file: Option<PathBuf>,
     network: Option<toml::Table>,
     agent: Option<toml::Table>,
@@ -623,7 +631,7 @@ impl ElasticKeys {
                 return Some(key);
             }
         }
-        None
+        self.brake.first_given()
     }
 }
 
@@ -672,6 +680,7 @@ fn read_pool(
         min_host_lifetime: s.duration("min_host_lifetime")?,
         live_until: s.timestamp("live_until")?,
         boot_timeout: s.duration("boot_timeout")?,
+        brake: brake::Given::read(&mut s)?,
         join_token_file: s.path("join_token_file")?,
         network: s.table("network")?,
         agent: s.table("agent")?,
@@ -793,6 +802,7 @@ impl Elastic<'_> {
             max_age: keys.max_age,
             min_host_lifetime: keys.min_host_lifetime,
         };
+        let (boot_fail_cooldown_max, boot_fail_trip_after) = keys.brake.check(s)?;
         let accelerators = built.floor.gpus > 0;
         let (max_age, min_host_lifetime) =
             lifetime::check(s, &given, (accelerators, boot_timeout, max_lease_wall))?;
@@ -870,6 +880,8 @@ impl Elastic<'_> {
             min_host_lifetime,
             max_lease_wall,
             boot_timeout,
+            boot_fail_cooldown_max,
+            boot_fail_trip_after,
             exec,
             network,
             agent,

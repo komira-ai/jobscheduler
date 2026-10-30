@@ -81,6 +81,8 @@ fn settings(plan: &ElasticPlan, whole: &WholeNodeConfig) -> Settings {
     settings.kind.clone_from(&plan.kind);
     settings.idle = plan.idle.unwrap_or(settings.idle);
     settings.boot_timeout = plan.boot_timeout;
+    settings.boot_fail_cooldown_max = plan.boot_fail_cooldown_max;
+    settings.boot_fail_trip_after = plan.boot_fail_trip_after;
     settings.max_age = plan.max_age;
     settings.min_host_lifetime = plan.min_host_lifetime;
     settings.max_lease_wall = plan.max_lease_wall;

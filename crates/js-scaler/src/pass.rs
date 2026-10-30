@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use js_elastic::{Acquired, Extra, Held, HostStatus, RefusalCode, Released};
 
 use crate::input::{AcquireResult, HostFacts, HostState, Input, Mark, PoolInput};
-use crate::record::{Cooldown, CooldownReason, Phase, Record, Records, StoredOffer};
-use crate::settings::{Blocked, Settings};
+use crate::record::{CooldownReason, Phase, Record, Records, StoredOffer};
+use crate::settings::Blocked;
 use crate::state::{Action, PlanLine, State};
 use crate::time::Millis;
 
@@ -214,14 +214,6 @@ impl<'a> Pass<'a> {
         self.actions.push(Action::ForgetNetwork(name));
     }
 
-    /// The pool launches nothing until its cooldown has run.
-    fn cool(&mut self, settings: &Settings, reason: CooldownReason) {
-        let until = self.now.plus(settings.boot_fail_cooldown);
-        self.records
-            .cooldowns
-            .insert(settings.pool.clone(), Cooldown { until, reason });
-    }
-
     /// Applies the answers, the list and the hosts to the pool's records.
     pub(crate) fn reconcile(&mut self, pool: &PoolInput) {
         self.apply_acquired(pool);
@@ -383,8 +375,13 @@ impl<'a> Pass<'a> {
         match (before, is_dead(&held.status)) {
             (Phase::Booting | Phase::Registered | Phase::Draining, true) => {
                 self.start_release(i);
+                // A boot that ended starts the cooldown. A host the provider took back (a
+                // spot preemption) after it booted counts toward the trip and the next
+                // cooldown's length, and starts none: the replacement launches at once.
                 if before == Phase::Booting {
                     self.cool(&pool.settings, CooldownReason::BootFailed);
+                } else if held.status == HostStatus::Preempted {
+                    self.strike(&pool.settings);
                 }
             }
             (Phase::Orphan, true) => self.orphan_gone(i),
@@ -508,12 +505,18 @@ impl<'a> Pass<'a> {
                     .all(|ok| ok)
             });
             let phase = record.phase;
+            let first = heard & !record.seen_live;
             self.records.instances[i].seen_live |= heard;
             match (phase, host) {
                 (Phase::Booting, Some(host)) => self.on_hello(pool, i, host),
                 (Phase::Booting, None) => self.on_boot_wait(pool, i),
                 (Phase::Registered | Phase::Draining, host) => self.on_held(pool, i, host),
                 _ => {}
+            }
+            // The first time a machine's host is heard from, if it is not one that came up
+            // short, the machine booted: the failures in a row end.
+            if first & !self.records.instances[i].condemned {
+                self.succeeded(&pool.settings.pool);
             }
         }
     }

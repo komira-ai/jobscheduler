@@ -498,9 +498,13 @@ impl Pass<'_> {
         uncovered: Vec<&'w Waiting>,
     ) -> Vec<&'w Waiting> {
         let settings = &pool.settings;
-        let live = settings.mode(self.now) == LaunchMode::Live;
+        let asked = settings.mode(self.now) == LaunchMode::Live;
+        // A pool the brake tripped is in `Plan` until an operator resets it.
+        let tripped = asked & self.records.tripped(&settings.pool);
+        let live = asked & !tripped;
         if let Some(blocked) = self.gate(pool) {
-            self.blocked.insert(settings.pool.clone(), blocked);
+            let shown = if tripped { Blocked::Tripped } else { blocked };
+            self.blocked.insert(settings.pool.clone(), shown);
             return uncovered;
         }
         let retried = if live {
@@ -573,7 +577,12 @@ impl Pass<'_> {
                 self.records.instances.push(record);
             }
         } else {
-            self.blocked.insert(settings.pool.clone(), Blocked::Plan);
+            let shown = if tripped {
+                Blocked::Tripped
+            } else {
+                Blocked::Plan
+            };
+            self.blocked.insert(settings.pool.clone(), shown);
             for (record, request) in staged.into_iter().zip(served) {
                 self.plan.push(PlanLine {
                     pool: settings.pool.clone(),

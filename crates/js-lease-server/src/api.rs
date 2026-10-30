@@ -26,6 +26,7 @@ use crate::config::{Token, is_private_address};
 use crate::hosts::HostList;
 use crate::join_api;
 use crate::run_api;
+use crate::scaler::Scaler;
 use crate::status::{self, Status};
 use crate::usage::ProfileCurves;
 use crate::usage_api;
@@ -50,6 +51,8 @@ pub(crate) struct Shared {
     timings: Timings,
     token: Token,
     agents: Option<Arc<Agents>>,
+    /// The elastic pool's scaler, for the operator's reset of its failure brake.
+    scaler: Option<Scaler>,
     /// What `/v1/pools` and `/status` read; `None` when the listen address is not a
     /// private one and the routes answer as if they did not exist. A request whose peer
     /// is not a private address is answered so too.
@@ -67,11 +70,19 @@ impl Shared {
             table: Mutex::new(table),
             token,
             agents,
+            scaler: None,
             status: None,
             save_errors: AtomicU64::new(0),
             ticking: AtomicBool::new(true),
             counted: std::sync::Mutex::new(WholeCounts::default()),
         }
+    }
+
+    /// The same state serving the brake reset route for `scaler`.
+    #[must_use]
+    pub(crate) fn with_scaler(mut self, scaler: Option<Scaler>) -> Self {
+        self.scaler = scaler;
+        self
     }
 
     /// The same state serving the status routes from `status`.
@@ -220,6 +231,10 @@ pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
                 false => app,
             }
         }
+        None => app,
+    };
+    let app = match &shared.scaler {
+        Some(scaler) => app.merge(crate::brake_api::router(shared.clone(), scaler.clone())),
         None => app,
     };
     match shared.usage() {

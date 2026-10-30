@@ -112,7 +112,7 @@
 //! A pool whose provider launches machines (an elastic pool) also has `max_instances`
 //! (1 to 255), `max_spend_per_hour` and `max_spend_per_day` (strings: a decimal with at
 //! most two places, above zero, the day cap not below the hour cap), and optionally `idle`,
-//! `max_age`, `min_host_lifetime`, `boot_timeout` (`15m`), `launch`, `exec`, `join_token_file`, `agent` and `network`.
+//! `max_age`, `min_host_lifetime`, `boot_timeout` (`15m`), `boot_fail_cooldown_max`, `boot_fail_trip_after`, `launch`, `exec`, `join_token_file`, `agent` and `network`.
 //! Every pool, static or elastic, may set `memory_schedulable_percent`, a whole number from
 //! 1 to 100 (default 100): the share of the pool's configured memory that is booked, rounded
 //! down. A static pool books that share of each host's `memory_bytes` (the pool's key
@@ -144,6 +144,21 @@
 //! step that sees a pool in plan ends its go), after which it can be taken out. `GET
 //! /v1/pools` shows `launch` as the mode the pool is in now (`plan` once `live_until` has
 //! passed) and `live_until_ms`.
+//!
+//! Failure brake. A refused launch (quota, denied, a shape that fits nothing), a boot given up
+//! on, and a spot preemption count as failures; a machine that boots and is heard from ends the
+//! count. After a boot failure or a refusal the pool launches nothing for 10 minutes, doubled
+//! for each further failure in a row up to `boot_fail_cooldown_max` (`"2h"`, at least 10
+//! minutes); after `boot_fail_trip_after` failures in a row (3, from 1 to 100) the brake trips
+//! the pool to `plan`: it launches nothing, `GET /v1/pools` shows `launch` as `plan` and
+//! `blocked` as `brake`, and the alert `brake:<pool>` is raised. A preemption counts toward the
+//! trip but starts no cooldown. Time does not end the trip, and it survives a restart (it is in
+//! the scaler's records). Only `POST /v1/pools/{pool}/brake/reset` (the client token; 202,
+//! applied at the next tick, 404 for a pool the server does not have, harmless to repeat) clears
+//! the count, the trip and the cooldown. The brake only stops launches: it never drains or
+//! releases a machine. Rolling back to a server that predates the brake: it starts on the
+//! records file, but its next save drops the brake, so a rolled-back server forgets a trip;
+//! hold the pool in `plan` for the rollback.
 //!
 //! Rolling back to a server older than the totals: it reads the records file, but its next
 //! save drops `go` and `pool_kinds` and it forgets records after 24 hours. After rolling forward
@@ -224,6 +239,7 @@
 //! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape {cpu_millis, memory_bytes, gpus, gpu_class?, disk_bytes?}, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, lease?, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (no lease, runs still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when a reservation draining a busy host is given up) are those of a registered host |
 //! | `GET /healthz` | 200 `ok`, no token; 503 once the tick loop has stopped |
 //! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings}`; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
+//! | `POST /v1/pools/{pool}/brake/reset` | 202 `{pool, reset: "requested"}`; 401; 404 for another pool |
 //! | `GET /status` | 200 the same data as a page; same rules |
 //!
 //! An unknown route is a 404, a known route with another method a 405, a body that is
@@ -511,6 +527,7 @@ mod agents;
 mod alerts;
 mod api;
 pub mod bootstrap;
+mod brake_api;
 mod capacity;
 mod checks;
 mod config;

@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use common::*;
 use js_elastic::Offer;
 use js_scaler::{
-    Cooldown, CooldownReason, OLDEST, Phase, Record, Records, StoredExec, StoredOffer, VERSION,
+    Brake, Cooldown, CooldownReason, OLDEST, Phase, Record, Records, StoredExec, StoredOffer,
+    VERSION,
 };
 use js_types::ExecMode;
 
@@ -351,4 +352,40 @@ fn the_go_and_pool_kinds_keys_are_read_and_written_back() {
     assert!(without.go.is_empty() && without.pool_kinds.is_empty());
     let odd = GOLDEN.replacen("\"last_step\"", "\"go\": 3,\n  \"last_step\"", 1);
     assert!(Records::decode(&odd).is_err());
+}
+
+/// Asserts that the failure brake is written and read back whole (the count and the instant
+/// of the trip, a pool with neither a count nor a trip is not written), that a file written
+/// before the key reads with no brake, and that a file without any brake has no `brake` key.
+/// It catches a brake that a restart would lose, and one that leaks into files that have none.
+#[test]
+fn the_failure_brake_round_trips_and_an_older_file_reads_without_it() {
+    let mut records = Records::decode(GOLDEN).unwrap();
+    assert!(records.brake.is_empty());
+    assert!(!records.encode().unwrap().contains("\"brake\""));
+    records.brake.insert(
+        "gpu".to_owned(),
+        Brake {
+            failures: 2,
+            tripped_at: None,
+        },
+    );
+    records.brake.insert(
+        "tpu".to_owned(),
+        Brake {
+            failures: 0,
+            tripped_at: Some(at(7 * MINUTE)),
+        },
+    );
+    let text = records.encode().unwrap();
+    assert!(text.contains("\"brake\""), "{text}");
+    assert_eq!(Records::decode(&text).unwrap(), records);
+    let bare = GOLDEN.replacen(
+        "\"last_step\"",
+        "\"brake\": {\"gpu\": {\"failures\": 1}},\n  \"last_step\"",
+        1,
+    );
+    let read = Records::decode(&bare).unwrap();
+    assert_eq!(read.brake["gpu"].failures, 1);
+    assert_eq!(read.brake["gpu"].tripped_at, None);
 }

@@ -325,6 +325,22 @@ pub struct Go {
     pub settled: u64,
 }
 
+/// A pool's failure brake: how many boots have failed in a row, and whether the pool has been
+/// tripped to `Plan`. The count grows the cooldown; the trip is a latch that only an operator's
+/// reset ends. Kept only while it holds something.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Brake {
+    /// The failures since the last success or reset: a refusal of the kinds `Quota`, `Denied`
+    /// and `Shape`, a boot that failed, and a spot preemption.
+    pub failures: u32,
+    /// When the count reached the pool's limit and the pool was tripped to `Plan`, if it was.
+    /// The pool launches nothing while this is set, whatever its `launch` and `live_until`
+    /// say, and a success does not clear it; only a reset does.
+    #[serde(default)]
+    pub tripped_at: Option<Millis>,
+}
+
 /// The version of the records file this writer writes. Version 2 added the silent and
 /// missing times and the time of the last write.
 pub const VERSION: u32 = 2;
@@ -379,6 +395,11 @@ pub struct Records {
     /// the records remember its kind; a pool with no entry (records from before it existed)
     /// counts in every kind's total. Absent in files written before it existed.
     pub pool_kinds: BTreeMap<String, String>,
+    /// The failure brake of each pool that has one ([`Brake`]), by name. A pool with no
+    /// failures and no trip has no entry. A pool the server no longer has keeps its entry, so
+    /// taking a tripped pool out of the file and putting it back does not clear the trip.
+    /// Absent in files written before it existed, which read it empty.
+    pub brake: BTreeMap<String, Brake>,
 }
 
 #[derive(Serialize)]
@@ -393,6 +414,8 @@ struct WireOut<'a> {
     go: &'a BTreeMap<String, Go>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pool_kinds: &'a BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    brake: &'a BTreeMap<String, Brake>,
 }
 
 /// Version 2.
@@ -411,6 +434,8 @@ struct WireIn {
     go: BTreeMap<String, Go>,
     #[serde(default)]
     pool_kinds: BTreeMap<String, String>,
+    #[serde(default)]
+    brake: BTreeMap<String, Brake>,
 }
 
 /// Version 1: the same without the two times.
@@ -458,6 +483,7 @@ impl Records {
             last_step: self.last_step,
             go: &self.go,
             pool_kinds: &self.pool_kinds,
+            brake: &self.brake,
         };
         Ok(serde_json::to_string_pretty(&wire)?)
     }
@@ -493,6 +519,7 @@ impl Records {
                 last_step: wire.last_step,
                 go: wire.go,
                 pool_kinds: wire.pool_kinds,
+                brake: wire.brake,
             })
         }
     }

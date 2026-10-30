@@ -54,6 +54,12 @@ pub struct Settings {
     pub token_margin: Duration,
     /// How long the pool launches nothing after a boot failure, a quota or a refusal.
     pub boot_fail_cooldown: Duration,
+    /// The longest that cooldown grows to: it doubles with each failure in a row, from
+    /// `boot_fail_cooldown`, and stops here (never below `boot_fail_cooldown` itself).
+    pub boot_fail_cooldown_max: Duration,
+    /// How many failures in a row trip the pool to `Plan` until an operator resets it; at
+    /// least 1 (a smaller figure is read as 1).
+    pub boot_fail_trip_after: u32,
     /// How long an unanswered or unseen acquire is waited for before it is given up on,
     /// and the least gap between the two clean lists that settle it.
     pub unknown_hold: Duration,
@@ -98,6 +104,12 @@ const LIFETIME_MARGIN: Duration = Duration::from_secs(10 * 60);
 /// The default of [`Settings::prepare_timeout`]: 10 minutes, the registry's default.
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// The default of [`Settings::boot_fail_cooldown_max`]: 2 hours.
+pub const BOOT_FAIL_COOLDOWN_MAX: Duration = Duration::from_secs(2 * 3600);
+
+/// The default of [`Settings::boot_fail_trip_after`]: 3 failures in a row.
+pub const BOOT_FAIL_TRIP_AFTER: u32 = 3;
+
 impl Settings {
     /// A pool in `Plan` mode with the design's defaults: `idle` 10 minutes, `boot_timeout`
     /// 15 minutes, `token_margin` 5 minutes (a token lives 20), `boot_fail_cooldown` 10
@@ -119,6 +131,8 @@ impl Settings {
             boot_timeout: Duration::from_secs(15 * 60),
             token_margin: Duration::from_secs(5 * 60),
             boot_fail_cooldown: Duration::from_secs(10 * 60),
+            boot_fail_cooldown_max: BOOT_FAIL_COOLDOWN_MAX,
+            boot_fail_trip_after: BOOT_FAIL_TRIP_AFTER,
             unknown_hold: Duration::from_secs(30 * 60),
             max_step: 1,
             max_age: None,
@@ -207,6 +221,9 @@ pub enum Blocked {
     Unavailable,
     /// The pool is in `Plan` mode.
     Plan,
+    /// The failure brake tripped the pool to `Plan` after too many failures in a row, and an
+    /// operator has not reset it.
+    Tripped,
     /// The pool's name is not a valid id, so no acquire id can carry it.
     PoolName,
     /// The list of held machines failed, so what exists is not known.
@@ -251,6 +268,16 @@ impl Blocked {
             Self::MaxSpendDay => Some("max_spend_day"),
             Self::MaxSpendTotal => Some("max_spend_total"),
             _ => None,
+        }
+    }
+
+    /// The name `/v1/pools` shows for a reason it reports: a cap's name, or `brake` for a pool
+    /// the failure brake tripped; `None` for the others.
+    #[must_use]
+    pub fn shown_name(self) -> Option<&'static str> {
+        match self {
+            Self::Tripped => Some("brake"),
+            other => other.cap_name(),
         }
     }
 }
