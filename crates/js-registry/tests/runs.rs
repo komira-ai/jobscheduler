@@ -74,6 +74,7 @@ fn result(run: &str, lease: &str) -> RunResult {
         outcome: Outcome::Succeeded,
         exit_code: Some(0),
         detail: None,
+        log_tail: None,
     }
 }
 
