@@ -247,6 +247,7 @@ async fn a_root_daemon_runs_a_container_mapped_onto_the_job_users_subordinate_id
         .to_vec(),
         limits: ContainerLimits::DEFAULT,
         shared: Vec::new(),
+        mounts: Vec::new(),
     };
     oci.create(&spec).await.unwrap();
     let (out_path, err_path) = (stdout_path(&lease), stderr_path(&lease));
