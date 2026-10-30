@@ -125,35 +125,30 @@ async fn the_job_holds_no_capability_and_cannot_gain_privileges() {
     assert!(out.lines().any(|l| l == "core=0"), "{}", run.said);
 }
 
-/// Catches a job running without the seccomp filter (mode 0), and a filter that lets it
-/// make a user namespace: the kernel reports mode 2 (filter) for the job's own process,
-/// and `unshare(CLONE_NEWUSER)`, which a job with no capability may do unless the filter
-/// refuses it, fails with "Operation not permitted".
+/// Catches a job running without the seccomp filter: the kernel reports mode 2 (filter) for
+/// the job's own process, with at least one filter attached (`Seccomp_filters`).
+///
+/// What the filter refuses is not read here. The pinned profile allows `unshare`, and a job
+/// with no capability makes a user namespace of its own when the kernel and the profile of
+/// `crun` allow it (a hosted runner does: `unshare -U` succeeds in the job, which an inner
+/// namespace for a job's own network, made by the job itself, needs). Calls the profile
+/// refuses and the kernel would allow have no busybox applet to make them.
 #[tokio::test]
 #[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
-async fn the_job_runs_under_a_seccomp_filter_that_refuses_a_user_namespace() {
+async fn the_job_runs_under_a_seccomp_filter() {
     let cell = Cell::new("seccomp");
     let run = cell
-        .sh(
-            "seccomp",
-            "grep '^Seccomp:' /proc/self/status; unshare -U true 2>&1; echo unshare=$?",
-        )
+        .sh("seccomp", "grep '^Seccomp' /proc/self/status")
         .await;
     let out = run.out();
-    let mode = out.lines().find(|l| l.starts_with("Seccomp:"));
-    assert_eq!(
-        mode.and_then(|l| l.split_once(':')).map(|(_, v)| v.trim()),
-        Some("2"),
-        "{}",
-        run.said
-    );
-    assert!(out.contains("Operation not permitted"), "{}", run.said);
-    assert!(
+    let field = |name: &str| {
         out.lines()
-            .any(|l| l.starts_with("unshare=") && l != "unshare=0"),
-        "{}",
-        run.said
-    );
+            .find_map(|l| l.strip_prefix(name)?.strip_prefix(':'))
+            .map(|v| v.trim().to_owned())
+    };
+    assert_eq!(field("Seccomp").as_deref(), Some("2"), "{}", run.said);
+    let filters = field("Seccomp_filters").and_then(|n| n.parse::<u32>().ok());
+    assert!(filters.is_some_and(|n| n >= 1), "{filters:?}: {}", run.said);
 }
 
 /// Catches an image root a job can write: a file made at `/` fails with "Read-only file
