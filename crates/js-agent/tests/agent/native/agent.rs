@@ -406,7 +406,11 @@ fn a_native_agent_opens_its_store_and_gives_it_to_the_runtime() {
             .position(|flag| flag == "--bundle-store")
             .unwrap(),
     );
-    flags.extend(["--scratch-root".to_owned(), private(&other, "scratch")]);
+    // The native flags are gone, and the scratch root they named is still there.
+    flags.extend([
+        "--scratch-root".to_owned(),
+        other.path("scratch").display().to_string(),
+    ]);
     let (ran, _) = agent_with_store(&other, &flags, store.clone(), &machine);
     assert_eq!(ran.status(), code(0), "{}", ran.err);
     assert_eq!(store.get(|s| s.opens), 0, "no native jobs, no store");
