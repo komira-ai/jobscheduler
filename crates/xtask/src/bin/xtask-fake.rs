@@ -25,9 +25,7 @@ fn defect() -> String {
 
 /// Appends `line` to the file `path`, making it if needed.
 fn append(path: &Path, line: &str) {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).expect("directory");
-    }
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

@@ -157,8 +157,11 @@ fn a_damaged_or_hostile_layer_fails_the_mode() {
 fn the_mode_applies_the_default_bound() {
     let (_dir, stage, blobs) = dirs("mode-bound");
     std::fs::write(blobs.join("0.tar"), claiming_40_gib()).expect("layer");
-    let code = run(&HelperModes::default(), &args(&stage, &blobs, &["0.tar"]));
-    assert_eq!(code, 1);
+    let (stage_arg, blobs_arg) = (stage.display().to_string(), blobs.display().to_string());
+    let out = helper(&["__unpack-layers", &stage_arg, &blobs_arg, "0.tar"]);
+    assert_eq!(out.status.code(), Some(1));
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("34359738368"), "{said}");
     assert!(!stage.join(ROOTFS).join("big").exists());
 }
 

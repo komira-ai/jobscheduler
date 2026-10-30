@@ -1,4 +1,4 @@
-//! `cargo xtask crun-tests` as CI runs it: the real binary, with `xtask-fake` as cargo
+//! `cargo xtask crun-tests` as a workflow would run it: the real binary, with `xtask-fake` as cargo
 //! (printing the JSON messages each test writes for it) and as sudo (recording the
 //! `systemd-run` it was asked to run).
 

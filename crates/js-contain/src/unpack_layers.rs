@@ -9,6 +9,9 @@
 //! namespace maps neither the daemon user nor anything outside the stage and blob
 //! directories it is given, so a hostile tar can write nothing the daemon user owns.
 //!
+//! No check made here relies on the name of the exec root: it is only a directory the
+//! unpack makes inside the root, and the runtime makes any other as it mounts.
+//!
 //! The binary's `main` reaches it through [`crate::modes::dispatch`], before it parses
 //! its flags. The argument list is an interface between daemon versions: a node may run
 //! a newer binary after an update renamed it over the old one.
