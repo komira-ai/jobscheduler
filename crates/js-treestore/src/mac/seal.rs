@@ -85,6 +85,7 @@ pub struct FlagSealer<F: UserFlags, C: Cloner> {
     cloner: C,
 }
 
+#[allow(dead_code)]
 impl<F: UserFlags, C: Cloner> FlagSealer<F, C> {
     /// A sealer that gives trees to `owner`, sets flags through `flags` and makes clones
     /// through `cloner`.
@@ -302,7 +303,9 @@ impl<F: UserFlags, C: Cloner> Sealer for FlagSealer<F, C> {
     }
 
     fn clone_writable(&self, _src: &Path, _dst: &Path, _owner: Owner) -> Result<(), SealError> {
-        Err(SealError("clone_writable is not implemented".into()))
+        // Copies the directory and nothing else.
+        self.cloner.clone_dir(_src, _dst)?;
+        Ok(())
     }
 }
 
