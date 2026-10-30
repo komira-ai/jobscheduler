@@ -792,3 +792,33 @@ fn a_root_daemon_or_a_root_job_user_is_refused() {
         "a non-root user with no entry is refused for that, not as root: {ids:?}"
     );
 }
+
+/// Catches a lease whose directories, owners or ids are not what a root daemon needs to
+/// make them: the lease directory and the writable directory the job user's, everything
+/// the job writes the job's id in the container (the first id of the subordinate range
+/// plus the job's), parents before children, all under the lease's own name.
+#[test]
+fn a_lease_names_its_directories_and_who_owns_them() {
+    let dir = scratch("lease-dirs");
+    let oci = start(&config(&dir, true), &dir.join("s")).expect("starts");
+    let lease = oci.lease_dirs("js-x-r1");
+    let base = dir.join("s/js-x-r1");
+    assert_eq!(
+        lease.to_make(),
+        [
+            (base.clone(), Owner::Job),
+            (base.join("root"), Owner::Container),
+            (base.join("upper"), Owner::Container),
+            (base.join("work"), Owner::Container),
+            (base.join("rw"), Owner::Job),
+            (base.join("rw/home"), Owner::Container),
+        ]
+    );
+    assert_eq!(lease.dir, base);
+    let (uid, gid) = (
+        rustix::process::getuid().as_raw(),
+        rustix::process::getgid().as_raw(),
+    );
+    assert_eq!(oci.job_ids(), (uid, gid));
+    assert_eq!(oci.container_ids(), (101_000, 201_000));
+}

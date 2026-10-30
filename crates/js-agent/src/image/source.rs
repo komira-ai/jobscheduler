@@ -1,12 +1,13 @@
 //! The js-oci client as the image source of js-contain's image store.
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
 use js_oci::{BundleSource as _, Client, Digest, Kind, Location, Platform, media};
 
-use super::config::{CONFIG_LIMIT_BYTES, ImageConfig};
+use super::config::{CONFIG_LIMIT_BYTES, ImageConfig, config_path};
 
 /// Pulls images from the registries the client's policy allows, for the platform of this
 /// machine.
@@ -21,6 +22,8 @@ use super::config::{CONFIG_LIMIT_BYTES, ImageConfig};
 pub struct RegistryImages {
     client: Client,
     kind: Kind,
+    /// Where the config of each image pulled is kept (see [`config_path`]).
+    configs: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for RegistryImages {
@@ -40,7 +43,37 @@ impl RegistryImages {
     pub fn new(client: Client, arch: &str) -> Result<Self, js_oci::Error> {
         let mut kind = Kind::image(Platform::linux(arch)?);
         kind.limits.config = CONFIG_LIMIT_BYTES;
-        Ok(Self { client, kind })
+        Ok(Self {
+            client,
+            kind,
+            configs: None,
+        })
+    }
+
+    /// This source, keeping the config of every image it pulls in `dir` (one file for each
+    /// image, [`config_path`]), so that the runtime that runs the image reads what the
+    /// registry said without asking again. The config is written once all the layers are
+    /// here, atomically, so a file that exists is a verified and complete one.
+    #[must_use]
+    pub fn keeping_configs(mut self, dir: PathBuf) -> Self {
+        self.configs = Some(dir);
+        self
+    }
+
+    /// Keeps `config` (the verified blob) of the image `digest`, if configs are kept.
+    async fn keep(&self, digest: &str, config: &[u8]) -> Result<(), FetchError> {
+        let Some(dir) = &self.configs else {
+            return Ok(());
+        };
+        let path = config_path(dir, digest);
+        let staged = path.with_extension("tmp");
+        tokio::fs::create_dir_all(dir).await.map_err(failed)?;
+        tokio::fs::write(&staged, config).await.map_err(failed)?;
+        let readable = std::fs::Permissions::from_mode(0o644);
+        tokio::fs::set_permissions(&staged, readable)
+            .await
+            .map_err(failed)?;
+        tokio::fs::rename(&staged, &path).await.map_err(failed)
     }
 
     /// The layers of `image` into `blobs`, appending the path of each file it created to
@@ -99,6 +132,7 @@ impl RegistryImages {
             source.fetch_blob(layer, &mut file).await.map_err(failed)?;
             names.push(name);
         }
+        self.keep(pinned, &config[..]).await?;
         Ok(names)
     }
 }

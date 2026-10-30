@@ -75,7 +75,7 @@ use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
 pub use crun::{EnvScrub, RunEnd};
 pub use gc::GcReport;
-pub use lease::{RESOLV_CONF, Reports};
+pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 
 /// The resolved seccomp section for `arch` (Go's name) and a job holding `caps`, as JSON.

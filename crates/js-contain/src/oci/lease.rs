@@ -56,7 +56,78 @@ async fn open_dir(path: &Path) -> Result<(), JobError> {
     at(path, tokio::fs::set_permissions(path, mode).await)
 }
 
+/// Who owns a directory of a lease while its container may run, for a daemon that makes
+/// the directories itself (a root daemon with a job user).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner {
+    /// The job user: the account `crun` runs as, which writes the lease's state and log.
+    Job,
+    /// The job's own id in the container ([`Oci::container_ids`]), which the job writes
+    /// as.
+    Container,
+}
+
+/// The directories of one lease.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeaseDirs {
+    /// The lease directory, named by the container.
+    pub dir: PathBuf,
+    /// The input root, the overlay's lower layer.
+    pub root: PathBuf,
+    /// The overlay's upper layer.
+    pub upper: PathBuf,
+    /// The overlay's work directory.
+    pub work: PathBuf,
+    /// The directory behind the job's home directory.
+    pub home: PathBuf,
+}
+
+impl LeaseDirs {
+    /// Every directory to make, parents first, each `0755`, with its owner.
+    pub fn to_make(&self) -> Vec<(PathBuf, Owner)> {
+        let writable = self.dir.join(spec::WRITABLE_DIR);
+        vec![
+            (self.dir.clone(), Owner::Job),
+            (self.root.clone(), Owner::Container),
+            (self.upper.clone(), Owner::Container),
+            (self.work.clone(), Owner::Container),
+            (writable, Owner::Job),
+            (self.home.clone(), Owner::Container),
+        ]
+    }
+}
+
 impl Oci {
+    /// The directories of the lease `name`, none made.
+    pub fn lease_dirs(&self, name: &str) -> LeaseDirs {
+        let dir = self.lease(name);
+        let home = spec::WRITABLE[0].0;
+        LeaseDirs {
+            root: dir.join("root"),
+            upper: dir.join("upper"),
+            work: dir.join("work"),
+            home: dir.join(spec::WRITABLE_DIR).join(home),
+            dir,
+        }
+    }
+
+    /// The job user's uid and gid: the owner of the lease directory ([`Owner::Job`]).
+    pub fn job_ids(&self) -> (u32, u32) {
+        (self.ids.uid, self.ids.gid)
+    }
+
+    /// The host uid and gid a job runs as: its id in the container ([`ACTION_ID`]) is
+    /// that of the job user's subordinate range. The owner of what the job writes
+    /// ([`Owner::Container`]).
+    ///
+    /// [`ACTION_ID`]: crate::container::ACTION_ID
+    pub fn container_ids(&self) -> (u32, u32) {
+        (
+            self.ids.sub_uid + crate::container::ACTION_ID,
+            self.ids.sub_gid + crate::container::ACTION_ID,
+        )
+    }
+
     /// The directories of `dirs` to hand over and the `rw` directory among them.
     async fn hand_over(&self, owner: &str, dirs: &Dirs<'_>) -> Result<(), JobError> {
         let rw = dirs.lease.join(spec::WRITABLE_DIR);
