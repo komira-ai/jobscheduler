@@ -22,12 +22,19 @@ pub struct Gate {
 }
 
 impl Gate {
+    pub fn closed() -> Arc<Gate> {
+        Arc::new(Gate {
+            open: Mutex::new(false),
+            changed: Condvar::new(),
+        })
+    }
+
     pub fn open(&self) {
         *self.open.lock().unwrap() = true;
         self.changed.notify_all();
     }
 
-    fn wait(&self) {
+    pub fn wait(&self) {
         let mut open = self.open.lock().unwrap();
         while !*open {
             open = self.changed.wait(open).unwrap();
@@ -42,6 +49,7 @@ pub struct Src {
     pub fetches: AtomicUsize,
     pub entered: AtomicUsize,
     pub fail_fetches: AtomicUsize,
+    pub panic_fetches: AtomicUsize,
 }
 
 /// The fake source; clones share state.
@@ -81,6 +89,11 @@ impl LayerSource for FakeSource {
         let gate = self.0.gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             gate.wait();
+        }
+        let panicking = self.0.panic_fetches.load(Ordering::SeqCst);
+        if panicking > 0 {
+            self.0.panic_fetches.store(panicking - 1, Ordering::SeqCst);
+            panic!("the source panicked");
         }
         let failing = self.0.fail_fetches.load(Ordering::SeqCst);
         if failing > 0 {
