@@ -379,9 +379,11 @@ async fn a_pulled_image_leaves_its_config_for_the_runtime() {
     fx.publish(&artifact);
     let pinned = pin(&fx, &artifact);
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "image-configs");
-    let blobs = dir.join("blobs");
+    // Each pull has a directory of its own, as the image store gives it one.
+    let (blobs, more_blobs) = (dir.join("blobs"), dir.join("more-blobs"));
     let configs = dir.join("configs");
     std::fs::create_dir_all(&blobs).expect("blobs");
+    std::fs::create_dir_all(&more_blobs).expect("blobs");
 
     source(&fx, "x86_64")
         .fetch(&pinned, &blobs)
@@ -390,7 +392,7 @@ async fn a_pulled_image_leaves_its_config_for_the_runtime() {
     assert!(!configs.exists());
 
     let keeping = source(&fx, "x86_64").keeping_configs(configs.clone());
-    keeping.fetch(&pinned, &blobs).await.expect("fetches");
+    keeping.fetch(&pinned, &more_blobs).await.expect("fetches");
     assert_eq!(listing(&configs), [format!("{}.json", &pinned.digest[7..])]);
     let kept = ImageConfig::kept(&configs, &pinned.digest).expect("a kept config");
     let mut spec = crate::config::spec();

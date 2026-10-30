@@ -102,7 +102,7 @@ name=$1
 cg="$MOUNT/actions/$name"
 case "$cmd" in
   run)
-    mkdir -p "$root"
+    mkdir -p "$root/$name"
     echo $$ > "$root/pid"
     case "$name" in
       *-exit) exit 3;;

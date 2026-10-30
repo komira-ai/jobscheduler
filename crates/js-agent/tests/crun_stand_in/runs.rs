@@ -277,7 +277,7 @@ fn a_start_that_cannot_run_crun_is_taken_apart() {
 #[test]
 fn the_files_of_a_run_are_given_to_the_job() {
     let node = Node::new("run-files");
-    let (_files_dir, root) = node.files_root();
+    let (files_dir, root) = node.files_root();
     let mut settings = node.settings("/root");
     settings.files = Some(root.clone());
     let hooks = Node::hooks(LONG, LONG);
@@ -296,7 +296,7 @@ fn the_files_of_a_run_are_given_to_the_job() {
     spec.files = Some(dir.clone());
     let id = runtime.create_and_start(&spec).expect("started");
     let ids = (SUB_UID + 1000, SUB_GID + 1000);
-    let given = given(&node.dir);
+    let given = given(&files_dir);
     assert!(given.contains(&(dir.join("token"), ids.0, ids.1)));
     assert!(given.contains(&(dir.clone(), ids.0, ids.1)));
     assert_eq!(
@@ -305,6 +305,8 @@ fn the_files_of_a_run_are_given_to_the_job() {
     );
     runtime.wait_ended(&id);
     runtime.remove(&id).expect("removed");
+    // Closed to its owner like the job's, it would stop the test directory's removal.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("mode");
 
     let mut spec = node.spec("r9-exit");
     spec.files = Some(root.of("r9-exit"));
