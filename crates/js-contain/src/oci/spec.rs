@@ -132,6 +132,9 @@ pub(crate) struct Placement<'a> {
     pub init: &'a Path,
     /// Where the container sees the init: an absolute path inside its `/dev`.
     pub init_dest: &'a str,
+    /// Whole seconds the init waits for a default route in the container's network
+    /// namespace before it starts the job; 0 for not waiting.
+    pub route_wait_secs: u64,
 }
 
 /// The job's tmpfs at `destination` (`/tmp`, `/var/tmp`, `/run`), of `size_mib`, that holds no program (`noexec`), no set-uid
@@ -240,12 +243,14 @@ fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
 
 /// The container's `process.args`: the init, then `--` and the job's own argv. The
 /// init runs the job as its child and reaps what the job leaves orphaned.
-fn init_argv(init_dest: &str, argv: &[String]) -> Vec<String> {
-    [init_dest, "--"]
-        .into_iter()
-        .map(str::to_owned)
-        .chain(argv.iter().cloned())
-        .collect()
+fn init_argv(init_dest: &str, route_wait_secs: u64, argv: &[String]) -> Vec<String> {
+    let mut args = vec![init_dest.to_owned()];
+    if route_wait_secs > 0 {
+        args.extend(["--wait-route".to_owned(), route_wait_secs.to_string()]);
+    }
+    args.push("--".to_owned());
+    args.extend(argv.iter().cloned());
+    args
 }
 
 fn rlimit(typ: PosixRlimitType, value: u64) -> PosixRlimit {
@@ -336,7 +341,11 @@ pub(crate) fn action_config(
             .user(built(
                 UserBuilder::default().uid(ACTION_ID).gid(ACTION_ID).build(),
             ))
-            .args(init_argv(placement.init_dest, &spec.argv))
+            .args(init_argv(
+                placement.init_dest,
+                placement.route_wait_secs,
+                &spec.argv,
+            ))
             .env(environment(&spec.env))
             .cwd(PathBuf::from(cwd))
             .capabilities(capabilities)
@@ -440,6 +449,7 @@ mod tests {
             arch: "amd64",
             init: Path::new("/scratch/oci-bin/js-init"),
             init_dest: "/dev/js-init",
+            route_wait_secs: 0,
         };
         let config = action_config(spec, &placement).expect("config");
         serde_json::from_slice(&render(&config).expect("render")).expect("json")
@@ -479,6 +489,7 @@ mod tests {
                 arch: "amd64",
                 init: Path::new("/scratch/oci-bin/js-init"),
                 init_dest: "/dev/js-init",
+                route_wait_secs: 0,
             };
             render(&action_config(&spec(), &placement).expect("config")).expect("render")
         };
@@ -528,6 +539,7 @@ mod tests {
             arch: "amd64",
             init: Path::new("/scratch/oci-bin/js-init"),
             init_dest,
+            route_wait_secs: 0,
         };
         let config = action_config(spec, &placement)?;
         Ok(serde_json::from_slice(&render(&config).expect("render")).expect("json"))
