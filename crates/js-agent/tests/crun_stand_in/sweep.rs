@@ -355,7 +355,7 @@ fn a_run_whose_sidecar_exists_is_refused_before_anything_is_made() {
 /// of a file it cannot read.
 #[test]
 fn an_orphan_removal_refuses_a_bad_run_id_and_a_sidecar_it_cannot_read() {
-    let node = Node::new("sweep-refused");
+    let node = Node::new("sweep-unreadable");
     let mut runtime = node.open();
     assert!(runtime.remove_orphan("a/b").is_err());
     let mut dead = node.open();
