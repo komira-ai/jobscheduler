@@ -306,7 +306,7 @@ jobs:
       # Root runs the test (the agent refuses to map jobs otherwise), with the runner's
       # toolchain and home.
       - name: Run one job in Podman and assert its sandbox
-        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test live_podman --locked -- --ignored --nocapture
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test live_podman --locked -- --ignored --nocapture --test-threads=1
       - name: Podman state after a failure
         if: ${{ failure() }}
         run: |

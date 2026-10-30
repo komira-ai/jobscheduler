@@ -26,9 +26,9 @@ use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use js_agent::cli_runtime::{system_runner, CliRuntime, Settings};
+use js_agent::lifecycle::{label, ContainerRuntime, ContainerSpec, Exit, Status};
 use js_agent::Platform;
-use js_agent::cli_runtime::{CliRuntime, Settings, system_runner};
-use js_agent::lifecycle::{ContainerRuntime, ContainerSpec, Exit, Status, label};
 use js_agent_wire::Isolation;
 use js_testkit::dir::TestDir;
 
@@ -350,4 +350,214 @@ fn a_job_in_real_podman_sees_the_sandbox_the_flags_describe() {
     for (name, uid, gid) in owners {
         assert_eq!((uid, gid), (want_uid, want_gid), "owner of {name}");
     }
+}
+
+/// Probe (not a regression test): can a process in a job container make a network
+/// namespace? The helper is built static, run once through the agent's own create path as
+/// the job user, and then in raw `podman run`s that differ from it in one setting each, so
+/// that the output says which setting blocks what. Every result is a `NETNS-PROBE` line;
+/// the test fails on nothing but the probe not running.
+#[test]
+#[ignore = "probe: needs root, a rootful podman, the pulled image and a subordinate id range"]
+fn netns_probe() {
+    use std::process::Command;
+    assert!(rustix::process::geteuid().is_root(), "run as root: sudo -E");
+    let image = need("JS_LIVE_IMAGE");
+    let user = need("JS_LIVE_SUBUID_USER");
+    let (uid_start, _) = range_of("/etc/subuid", &user);
+    let (gid_start, _) = range_of("/etc/subgid", &user);
+
+    let host = |tag: &str, cmd: &str, args: &[&str]| {
+        let out = Command::new(cmd).args(args).output();
+        let text = out.map_or_else(
+            |why| format!("spawn:{why}"),
+            |o| String::from_utf8_lossy(&o.stdout).trim().replace('\n', ";"),
+        );
+        println!("NETNS-PROBE host {tag}={text}");
+    };
+    let file = |path: &str| {
+        let text = fs::read_to_string(path).map_or_else(
+            |why| format!("unreadable:{why}"),
+            |t| t.trim().replace('\n', ";"),
+        );
+        println!("NETNS-PROBE host {path}={text}");
+    };
+    host("podman_version", PODMAN, &["--version"]);
+    host("kernel", "uname", &["-r"]);
+    host(
+        "podman_security",
+        PODMAN,
+        &["info", "--format", "apparmor={{.Host.Security.AppArmorEnabled}} seccomp={{.Host.Security.SECCOMPEnabled}} rootless={{.Host.Security.Rootless}} runtime={{.Host.OCIRuntime.Name}}"],
+    );
+    for path in [
+        "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+        "/proc/sys/user/max_user_namespaces",
+        "/proc/sys/kernel/unprivileged_userns_clone",
+        "/proc/sys/kernel/unprivileged_userns_apparmor_policy",
+        "/sys/module/apparmor/parameters/enabled",
+        "/etc/os-release",
+    ] {
+        file(path);
+    }
+
+    // The helper, static so that it runs on any image.
+    let root = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "netns-probe");
+    let bin_dir = root.path().join("bin");
+    fs::DirBuilder::new().mode(0o755).create(&bin_dir).unwrap();
+    let source = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/netns_probe/helper.rs");
+    let helper = bin_dir.join("helper");
+    let built = Command::new("rustc")
+        .args([
+            "--edition",
+            "2021",
+            "-O",
+            "-C",
+            "target-feature=+crt-static",
+            "-o",
+        ])
+        .arg(&helper)
+        .arg(source)
+        .output()
+        .expect("rustc runs");
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    fs::set_permissions(
+        &bin_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    fs::set_permissions(&helper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    // 1. Through the agent's create path, as the job user: the exact arguments a job gets.
+    root_fs_private(root.path());
+    let scratch: PathBuf = root.path().join("live1");
+    fs::DirBuilder::new().mode(0o700).create(&scratch).unwrap();
+    fs::copy(&helper, scratch.join("helper")).unwrap();
+    fs::set_permissions(
+        scratch.join("helper"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let settings = Settings::new(Path::new(PODMAN), None, None)
+        .unwrap()
+        .with_subuid(&user)
+        .unwrap()
+        .with_agent(0, 0)
+        .unwrap();
+    let platform = Platform {
+        os: "linux".to_owned(),
+        arch: std::env::consts::ARCH.to_owned(),
+    };
+    let runner = Box::new(system_runner(Duration::from_secs(10)));
+    let mut rt = CliRuntime::open(settings, "h-live-podman-netns", &platform, now_ms, runner)
+        .unwrap_or_else(|why| panic!("opening the runtime: {why}"));
+    let mut spec = job(&image, &scratch);
+    spec.run_id = "netns1".to_owned();
+    spec.labels
+        .insert(label::RUN.to_owned(), "netns1".to_owned());
+    spec.args = [
+        "sh",
+        "-c",
+        "/scratch/helper agent_job_user > /scratch/out 2>&1; echo done > /scratch/done",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let id = rt
+        .create_and_start(&spec)
+        .unwrap_or_else(|why| panic!("create_and_start: {why:?}"));
+    let exit = wait_for_exit(&mut rt, &id);
+    let out =
+        fs::read_to_string(scratch.join("out")).unwrap_or_else(|why| format!("no out: {why}"));
+    rt.remove(&id).unwrap();
+    println!("NETNS-PROBE agent_job_user exit={exit:?}");
+    print!("{out}");
+
+    // 2. Raw runs with the same hardening, one setting changed each.
+    let profile = root.path().join("seccomp.json");
+    fs::write(&profile, js_agent::cli_runtime::PROFILE).unwrap();
+    let pinned = format!("seccomp={}", profile.display());
+    let uidmap = format!("0:{uid_start}:{RANGE_LEN}");
+    let gidmap = format!("0:{gid_start}:{RANGE_LEN}");
+    let bind = format!(
+        "type=bind,src={},dst=/probe,ro,nosuid,nodev",
+        bin_dir.display()
+    );
+    let variants: [(&str, &str, Option<&str>, &[&str]); 7] = [
+        ("root_pinned", "0:0", Some(pinned.as_str()), &[]),
+        (
+            "job_pinned_apparmor_unconfined",
+            "1000:1000",
+            Some(pinned.as_str()),
+            &["--security-opt", "apparmor=unconfined"],
+        ),
+        ("job_default_seccomp", "1000:1000", None, &[]),
+        (
+            "job_seccomp_unconfined",
+            "1000:1000",
+            Some("seccomp=unconfined"),
+            &[],
+        ),
+        (
+            "job_seccomp_and_apparmor_unconfined",
+            "1000:1000",
+            Some("seccomp=unconfined"),
+            &["--security-opt", "apparmor=unconfined"],
+        ),
+        (
+            "root_pinned_cap_sys_admin",
+            "0:0",
+            Some(pinned.as_str()),
+            &["--cap-add", "SYS_ADMIN"],
+        ),
+        (
+            "job_pinned_cap_sys_admin",
+            "1000:1000",
+            Some(pinned.as_str()),
+            &["--cap-add", "SYS_ADMIN"],
+        ),
+    ];
+    for (tag, who, seccomp, extra) in variants {
+        let mut cmd = Command::new(PODMAN);
+        cmd.args([
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+        ]);
+        if let Some(s) = seccomp {
+            cmd.args(["--security-opt", s]);
+        }
+        cmd.args(extra);
+        cmd.args(["--network", "none", "--read-only", "--user", who]);
+        cmd.args(["--uidmap", &uidmap, "--gidmap", &gidmap, "--mount", &bind]);
+        cmd.args(["--", &image, "/probe/helper", tag]);
+        match cmd.output() {
+            Ok(o) => {
+                print!("{}", String::from_utf8_lossy(&o.stdout));
+                println!("NETNS-PROBE {tag} podman_exit={:?}", o.status.code());
+                let err = String::from_utf8_lossy(&o.stderr);
+                if !err.trim().is_empty() {
+                    println!("NETNS-PROBE {tag} stderr={}", err.trim().replace('\n', ";"));
+                }
+            }
+            Err(why) => println!("NETNS-PROBE {tag} spawn={why}"),
+        }
+    }
+    println!("NETNS-PROBE ran=true");
+    assert!(
+        !out.is_empty(),
+        "the helper wrote nothing in the agent-started job"
+    );
+}
+
+/// The probe's scratch root is private to root, as the agent keeps its own.
+fn root_fs_private(dir: &Path) {
+    fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
 }
