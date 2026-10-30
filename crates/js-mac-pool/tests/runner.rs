@@ -227,23 +227,33 @@ fn connect_to(port: u16) -> Vec<OsString> {
     perl(CONNECT, &[OsString::from(port.to_string())])
 }
 
-/// How many times a profile that allows a connect is tried. Measured on hosted runners:
-/// the sandbox answers about one connect in 400 with `EPERM` although the profile allows
-/// it (also at `Ports` and `Loopback`, never at `On`), so an allow has to hold once in
-/// these tries. A refusal has no retry: every try must be refused with `EPERM`.
-const ALLOW_TRIES: usize = 8;
+/// How many times each connect is tried.
+///
+/// Measured on the hosted macOS runner (CI runs 41073976740, 41076930103 and 41081525386):
+/// at `Ports` and `Loopback` the sandbox answered about one allowed connect in 400 with
+/// `EPERM` (1 of 400 at each level in the second run, 1 of 300 in the first), at `On` none
+/// in 400, and 600 processes of 10 connects each had no failure. The cause is not known.
+/// An allow therefore needs at least `ALLOW_MIN` of `TRIES` connects to succeed and every
+/// failure to be exactly `EPERM`; a profile that allowed fewer would fail, and so would any
+/// other error. A refusal has no tolerance: every try is refused with `EPERM`.
+const TRIES: usize = 8;
+const ALLOW_MIN: usize = 7;
 
 fn allowed(scene: &Scene, net: &Net, to: &[OsString]) -> bool {
-    (0..ALLOW_TRIES).any(|_| {
-        scene
-            .sandboxed(net.clone(), "/usr/bin/perl", to)
-            .status
-            .success()
-    })
+    let mut connected = 0;
+    for _ in 0..TRIES {
+        let out = scene.sandboxed(net.clone(), "/usr/bin/perl", to);
+        if out.status.success() {
+            connected += 1;
+        } else if String::from_utf8_lossy(&out.stderr).trim() != EPERM {
+            return false;
+        }
+    }
+    connected >= ALLOW_MIN
 }
 
 fn refused(scene: &Scene, net: &Net, to: &[OsString]) -> bool {
-    (0..ALLOW_TRIES).all(|_| {
+    (0..TRIES).all(|_| {
         let out = scene.sandboxed(net.clone(), "/usr/bin/perl", to);
         !out.status.success() && String::from_utf8_lossy(&out.stderr).trim() == EPERM
     })
