@@ -6,7 +6,7 @@
 use std::fs;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use js_agent::lifecycle::{Exit, Status};
+use js_agent::lifecycle::{Exit, Runtime, Status};
 
 use super::Rig;
 

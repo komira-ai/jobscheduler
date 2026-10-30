@@ -411,6 +411,13 @@ struct WireIn {
     go: BTreeMap<String, Go>,
     #[serde(default)]
     pool_kinds: BTreeMap<String, String>,
+    /// A key a later writer adds: the failure brake of each pool (its count of failed boots in
+    /// a row and its trip). This reader does not know what it holds, so it reads it, drops it,
+    /// and writes the file without it: a server rolled back to this version starts on a file
+    /// the newer one wrote, and, having dropped the key on its next write, no longer remembers
+    /// a trip.
+    #[serde(default, rename = "brake")]
+    _brake: Option<serde_json::Value>,
 }
 
 /// Version 1: the same without the two times.

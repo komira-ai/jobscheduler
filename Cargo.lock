@@ -945,6 +945,8 @@ dependencies = [
  "js-mac-pool",
  "js-mac-session",
  "js-pool-static",
+ "js-provider",
+ "js-registry",
  "js-testkit",
  "js-types",
  "libc",

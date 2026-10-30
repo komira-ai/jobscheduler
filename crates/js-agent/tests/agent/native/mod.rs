@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime, Status};
 use js_agent::native::{NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
-use js_mac_pool::seatbelt::{AbsPath, Net};
+use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
 
 use crate::support::Scratch;
 use fake_helper::FakeHelper;
@@ -45,6 +45,7 @@ pub fn config(fake: &FakeHelper) -> NativeConfig {
         net: Net::Loopback,
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![AbsPath::parse("/srv/js-state").unwrap()],
+        read_model: ReadModel::Open,
     }
 }
 
