@@ -172,6 +172,14 @@ impl<F: UserFlags, C: Cloner> FlagSealer<F, C> {
             rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR)?;
         } else {
             let file = rustix::fs::openat(dir, name, FILE_OPEN, Mode::empty())?;
+            // As in unsealing: an inode with another name may not be ours to unflag.
+            let links = rustix::fs::fstat(&file)?.st_nlink;
+            if links > 1 {
+                return Err(refuse(
+                    Path::new(name),
+                    &format!("has {links} hard links, so its flags are left"),
+                ));
+            }
             self.flags.set(file.as_fd(), 0)?;
             rustix::fs::unlinkat(dir, name, AtFlags::empty())?;
         }

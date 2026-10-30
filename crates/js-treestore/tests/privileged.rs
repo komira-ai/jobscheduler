@@ -417,11 +417,26 @@ fn a_clone_made_under_a_directory_with_an_inheritable_acl_has_no_acl() {
     let lease = work.dir.join("lease");
     std::fs::create_dir(&lease).unwrap();
     let added = Command::new("/bin/chmod")
-        .args(["+a", "everyone allow write,file_inherit,directory_inherit"])
+        .arg("+a")
+        .arg(format!(
+            "#{} allow write,file_inherit,directory_inherit",
+            work.uid
+        ))
         .arg(&lease)
         .status()
         .unwrap();
     assert!(added.success());
+    // Control: a fresh entry in the directory does inherit the ACE, so the absence below
+    // means something.
+    let fresh = lease.join("fresh");
+    std::fs::write(&fresh, b"x").unwrap();
+    let fresh_file = std::fs::File::open(&fresh).unwrap();
+    assert!(
+        js_treestore::mac::Fchflags
+            .has_acl(fresh_file.as_fd())
+            .unwrap(),
+        "a fresh file under the directory has no inherited ACL, so this test shows nothing"
+    );
     let clone = lease.join("tree-w");
     let pool = Owner::new(work.uid, work.gid).unwrap();
     work.sealer.clone_writable(&root, &clone, pool).unwrap();

@@ -124,6 +124,8 @@ fn fd_path(fd: BorrowedFd<'_>) -> PathBuf {
 #[derive(Clone)]
 struct FakeClone {
     flags: FakeFlags,
+    /// If set, the next file clone also gets this second name.
+    extra_name: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl FakeClone {
@@ -188,6 +190,10 @@ impl Cloner for FakeClone {
         )?;
         let to = rustix::fs::fstat(&out)?;
         io::copy(&mut input, &mut std::fs::File::from(out))?;
+        let extra = self.extra_name.lock().unwrap().take();
+        if let Some(extra) = extra {
+            std::fs::hard_link(fd_path(dst_dir).join(name), extra)?;
+        }
         let flags = self.flags.flags.lock().unwrap().get(&from.st_ino).copied();
         if let Some(flags) = flags {
             self.flags.flags.lock().unwrap().insert(to.st_ino, flags);
@@ -200,11 +206,13 @@ struct Rig {
     dir: TestDir,
     flags: FakeFlags,
     sealer: Arc<FlagSealer<FakeFlags, FakeClone>>,
+    extra_name: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl Rig {
     fn new() -> Rig {
         let flags = FakeFlags::default();
+        let extra_name = Arc::new(Mutex::new(None));
         Rig {
             dir: TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-seal"),
             sealer: Arc::new(FlagSealer::new(
@@ -212,8 +220,10 @@ impl Rig {
                 flags.clone(),
                 FakeClone {
                     flags: flags.clone(),
+                    extra_name: extra_name.clone(),
                 },
             )),
+            extra_name,
             flags,
         }
     }
@@ -936,4 +946,23 @@ fn unsealing_leaves_the_flags_of_a_file_with_another_hard_link_and_says_so() {
     assert_eq!(rig.flags.of(&root.join("a.txt")), IMMUTABLE);
     assert_eq!(rig.flags.of(&root.join("run.sh")), 0);
     assert_eq!(rig.flags.of(&root.join("sub/b.txt")), 0);
+}
+
+#[test]
+fn a_cloned_file_that_gained_another_name_is_neither_unflagged_nor_removed() {
+    let rig = Rig::new();
+    let (root, _) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let dst = rig.dir.path().join("copy.txt");
+    let other = rig.dir.path().join("other-name");
+    *rig.extra_name.lock().unwrap() = Some(other.clone());
+    let error = rig
+        .sealer
+        .clone_writable(&root.join("a.txt"), &dst, Owner::caller())
+        .unwrap_err();
+    assert!(error.0.contains("hard link"), "{error}");
+    assert!(error.0.contains("removing the copy failed"), "{error}");
+    assert_eq!(rig.flags.of(&dst), IMMUTABLE);
+    assert!(dst.exists());
+    assert!(other.exists());
 }
