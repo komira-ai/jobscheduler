@@ -160,13 +160,12 @@ fn pull(fx: &Fixture, cell: &Cell, artifact: &Artifact) -> Ran {
         )
     };
     let configure = |config: &mut OciConfig| {
-        config.runtime = PathBuf::from(var("JS_B_CRUN"));
         config.daemon = PathBuf::from(env!("CARGO_BIN_EXE_js-agent"));
     };
     let host = Host {
         euid: rustix::process::geteuid().as_raw(),
         client: &client,
-        configure: &configure,
+        configure: Some(&configure),
     };
     let (uid, gid) = job();
     let args = [

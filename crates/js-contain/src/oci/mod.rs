@@ -428,6 +428,22 @@ impl Oci {
         format!("helper-{what}-{}-{}", std::process::id(), self.next())
     }
 
+    /// Makes `dir`, where a helper's bundle, `crun` state and log go, and gives it to the
+    /// user `crun` runs as: the job user when the daemon is root (which cannot otherwise
+    /// write its state there), the daemon itself otherwise. The directory above it is made
+    /// searchable by others, whatever the umask.
+    fn work_dir(&self, dir: &Path) -> Result<(), JobError> {
+        use std::os::unix::fs::PermissionsExt as _;
+        at(dir, std::fs::create_dir_all(dir))?;
+        let above = dir.parent().unwrap_or(dir);
+        let search = std::fs::Permissions::from_mode(0o711);
+        at(above, std::fs::set_permissions(above, search))?;
+        at(
+            dir,
+            std::os::unix::fs::lchown(dir, Some(self.ids.uid), Some(self.ids.gid)),
+        )
+    }
+
     /// A directory under the node's helper state for one job.
     fn job_dir(&self, what: &str) -> PathBuf {
         self.scratch
@@ -444,7 +460,7 @@ impl Oci {
         mapping: Mapping,
         job: &helper::Job,
     ) -> Result<(), JobError> {
-        at(dir, std::fs::create_dir_all(dir))?;
+        self.work_dir(dir)?;
         let id = self.helper_id(what);
         let bundle = self.helper_bundle(dir, mapping, &id, job)?;
         let state = dir.join("helper-state");
@@ -488,7 +504,7 @@ impl Oci {
     /// container, then the (daemon-owned) directory. Blocking.
     pub fn remove_dir_blocking(&self, dir: &Path) -> Result<(), JobError> {
         let work = self.job_dir("rm");
-        at(&work, std::fs::create_dir_all(&work))?;
+        self.work_dir(&work)?;
         let id = self.helper_id("rm");
         let job = helper::remove_job(dir);
         let bundle = self.helper_bundle(&work, Mapping::Setup, &id, &job)?;

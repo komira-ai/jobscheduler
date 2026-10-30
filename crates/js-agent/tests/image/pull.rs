@@ -6,7 +6,7 @@
 
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 use js_agent::image::pull::{Host, run};
@@ -74,7 +74,6 @@ fn standins(dir: &Path, config: &mut OciConfig) {
         std::fs::write(&path, b"#!/bin/true\n").expect("tool");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o4755)).expect("mode");
     }
-    config.runtime = PathBuf::from("/usr/bin/true");
     config.id_files = files;
     config.id_tool_path = Some(tools.into_os_string());
     config.check_search = false;
@@ -94,15 +93,15 @@ fn pull_with(fx: &Fixture, cell: &Cell, euid: u32, crun: &str, args: &[&str]) ->
     };
     let configure = |config: &mut OciConfig| {
         standins(cell.files.path(), config);
-        config.runtime = PathBuf::from(crun);
     };
     let host = Host {
         euid,
         client: &client,
-        configure: &configure,
+        configure: Some(&configure),
     };
     let mut argv: Vec<OsString> = vec!["js-agent".into(), "image-pull".into()];
     argv.extend(args.iter().map(OsString::from));
+    argv.extend(["--crun-bin", crun].map(OsString::from));
     let (mut out, mut err) = (Vec::new(), Vec::new());
     // The verb blocks its thread on a runtime of its own, while the fixture is served by
     // this test's: the thread leaves the runtime for the call, and another worker serves.
@@ -255,6 +254,7 @@ async fn a_reference_that_is_not_pinned_by_digest_is_refused_before_anything_is_
         (format!("{repo}:v1@{good}"), "carries a tag"),
         (repo.clone(), "names no digest"),
         (format!("{repo}@sha256:abc"), "sha256"),
+        (format!("{repo}@sha256:{}", "A".repeat(64)), "sha256"),
         (format!("{repo}@sha512:{}", "a".repeat(128)), "sha256"),
         (format!("{repo}@{}", good.to_uppercase()), "sha256"),
     ];
@@ -466,4 +466,62 @@ fn the_agents_entry_point_runs_the_verb_by_its_first_argument() {
     assert_eq!(format!("{status:?}"), exit_status(2), "{err}");
     assert!(err.contains("--image-allow"), "{err}");
     assert!(!err.contains("signal handler"), "{err}");
+}
+
+/// A lock file that cannot be opened (here a directory stands in its place) fails the pull
+/// with the file named, before the registry is asked. Catches a pull that goes on without
+/// the lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lock_file_that_cannot_be_opened_fails_the_pull_before_the_registry_is_asked() {
+    let fx = Fixture::start().await;
+    let artifact = image();
+    fx.publish(&artifact);
+    let cell = Cell::new("pull-lock-open");
+    std::fs::create_dir(cell.scratch().join(".js-image-pull.lock")).expect("directory");
+    let ran = run_flags(&fx, &cell, &reference(&fx, &artifact));
+    assert_eq!(ran.status, exit_status(1), "{}", ran.stderr);
+    assert!(ran.stderr.contains(".js-image-pull.lock"), "{}", ran.stderr);
+    assert!(ran.stdout.is_empty(), "{}", ran.stdout);
+    assert_eq!(
+        fx.requests(),
+        Vec::<String>::new(),
+        "the registry was asked"
+    );
+}
+
+/// The agent's own entry point judges the allow-list with the machine's registry client:
+/// an image on no entry is refused as a usage error, naming the reference, with nothing
+/// made or asked (no registry is reachable here, so a request would fail differently).
+#[test]
+fn the_agents_entry_point_refuses_a_registry_outside_the_allow_list() {
+    let cell = Cell::new("pull-entry-allow");
+    let reference = format!("elsewhere.test/team/app@sha256:{}", "a".repeat(64));
+    let args: Vec<OsString> = [
+        "js-agent",
+        "image-pull",
+        reference.as_str(),
+        "--image-allow",
+        "registry.test/team/",
+        "--scratch-root",
+        &cell.scratch().display().to_string(),
+        "--job-user",
+        "1000:1000",
+        "--cgroup-parent",
+        "/js-image-pull",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let install = || -> std::io::Result<js_agent::SystemSleeper> {
+        Err(std::io::Error::other("the verb installs no signal handler"))
+    };
+    let status = js_agent::main_with(&install, args, &mut out, &mut err);
+    let err = String::from_utf8(err).expect("utf-8");
+    assert_eq!(format!("{status:?}"), exit_status(2), "{err}");
+    assert!(
+        err.contains("allow-list") && err.contains(&reference),
+        "{err}"
+    );
+    assert_eq!(names(cell.scratch()), Vec::<String>::new());
 }

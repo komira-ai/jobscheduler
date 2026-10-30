@@ -57,15 +57,13 @@ pub struct Host<'a> {
     pub euid: u32,
     /// The registry client for an allow-list.
     pub client: &'a dyn Fn(Vec<Allow>) -> Client,
-    /// Adjusts the runtime's configuration.
-    pub configure: &'a dyn Fn(&mut OciConfig),
+    /// Adjusts the runtime's configuration, when the machine needs it to (a test does).
+    pub configure: Option<&'a dyn Fn(&mut OciConfig)>,
 }
 
 fn system_client(allow: Vec<Allow>) -> Client {
     Client::new(Policy::new(allow))
 }
-
-fn system_configure(_: &mut OciConfig) {}
 
 impl Host<'static> {
     /// This machine.
@@ -74,7 +72,7 @@ impl Host<'static> {
         Self {
             euid: rustix::process::geteuid().as_raw(),
             client: &system_client,
-            configure: &system_configure,
+            configure: None,
         }
     }
 }
@@ -199,10 +197,10 @@ fn pull(args: &[OsString], host: &Host<'_>) -> Result<String, Failure> {
         job_user: Some(user),
         ..OciConfig::default()
     };
-    if let Some(crun) = args.crun_bin {
-        config.runtime = crun;
-    }
-    (host.configure)(&mut config);
+    config.runtime = args.crun_bin.unwrap_or(config.runtime);
+    host.configure
+        .iter()
+        .for_each(|configure| configure(&mut config));
     let source = RegistryImages::new(client, std::env::consts::ARCH).map_err(failed)?;
     let oci =
         Oci::new(&config, Arc::new(source), root.path(), &args.cgroup_parent).map_err(failed)?;
