@@ -135,6 +135,12 @@ fn v4(hi: u16, lo: u16) -> Ipv4Addr {
     Ipv4Addr::new(a, b, c, d)
 }
 
+/// The only hosts a plain-http entry may have.
+const LOOPBACK_LITERALS: [IpAddr; 2] = [
+    IpAddr::V4(Ipv4Addr::LOCALHOST),
+    IpAddr::V6(Ipv6Addr::LOCALHOST),
+];
+
 /// One registry, and the namespace of it, that a pin may name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Allow {
@@ -142,6 +148,9 @@ pub struct Allow {
     prefix: String,
     private: bool,
     loopback: bool,
+    plain_http: bool,
+    /// The entry's host names a port (without one the authority reads as 443).
+    port_named: bool,
 }
 
 impl Allow {
@@ -164,6 +173,11 @@ impl Allow {
             prefix: prefix.to_owned(),
             private: false,
             loopback: false,
+            plain_http: false,
+            port_named: match host.strip_prefix('[') {
+                Some(v6) => !v6.ends_with(']'),
+                None => host.contains(':'),
+            },
         })
     }
 
@@ -201,6 +215,40 @@ impl Allow {
     pub fn loopback(mut self) -> Self {
         self.loopback = true;
         self
+    }
+
+    /// This entry as one pulled from over plain http, with no TLS and no certificate:
+    /// a registry on this machine's own loopback, such as the node's own cache.
+    ///
+    /// The flag is honoured only when the entry's host is the IP literal `127.0.0.1` or
+    /// `[::1]` (in any spelling of it) with an explicit port (`127.0.0.1:5000/ns`); without a
+    /// port the entry would mean port 443 over http, so it stays https. On a name, `localhost` included, on any other
+    /// address, or on an entry that is not flagged, the entry stays https. For a flagged
+    /// entry the registry's requests go over http to that exact authority and nowhere
+    /// else: a redirect or token realm must be an `http` URL with the same host and
+    /// port, so no other host, port, loopback address or https URL is followed or asked,
+    /// and other entries of the policy (and [`Policy::allow_realm`] hosts) are not
+    /// reachable from it. Every other entry stays https exactly as before, and the flag
+    /// does not move to a sibling entry for the same address.
+    ///
+    /// It does not lift the address rules: the entry still needs [`Allow::loopback`] to
+    /// connect to the loopback address.
+    #[must_use]
+    pub fn plain_http_loopback(mut self) -> Self {
+        self.plain_http = true;
+        self
+    }
+
+    /// Whether this entry is pulled over plain http: flagged, with an explicit port, and
+    /// its host a loopback IP literal.
+    fn is_plain_http(&self) -> bool {
+        self.plain_http
+            && self.port_named
+            && self
+                .authority
+                .host()
+                .parse::<IpAddr>()
+                .is_ok_and(|ip| LOOPBACK_LITERALS.contains(&ip))
     }
 
     /// Whether this entry's host may be reached at an address of `class`.
@@ -264,6 +312,19 @@ impl Policy {
         let authority = Authority::parse(host).ok_or_else(|| Error::Reference(clip(host)))?;
         self.realms.push(authority);
         Ok(self)
+    }
+
+    /// Whether `location` is pulled over plain http: the most specific entry (the longest
+    /// prefix) that admits it says so, and its host is a loopback IP literal with a port
+    /// (see [`Allow::plain_http_loopback`]). Entries of equal prefix must all say so.
+    pub(crate) fn plain_http(&self, location: &Location) -> bool {
+        let admitting = || self.allow.iter().filter(|a| a.admits(location));
+        let longest = admitting().map(|a| a.prefix.len()).max();
+        longest.is_some_and(|n| {
+            admitting()
+                .filter(|a| a.prefix.len() == n)
+                .all(Allow::is_plain_http)
+        })
     }
 
     /// Whether a pin may name `location`.
@@ -720,5 +781,90 @@ mod tests {
         assert!(policy.realm_ok(&host("hub-api.example"), &host("hub-api.example")));
         assert!(!policy.realm_ok(&host("c.example"), &endpoint));
         assert!(!policy.realm_ok(&host("b.example:8443"), &endpoint));
+    }
+
+    /// Catches the flag honoured for more than the two loopback literals with an explicit
+    /// port: `127.0.0.1:PORT` and `[::1]:PORT` are plain http; the same without a port
+    /// (which would mean port 443 over http), a name (`localhost` included), another
+    /// loopback address, a mapped form, a private address, a public one and an unflagged
+    /// entry are not.
+    #[test]
+    fn plain_http_is_honoured_only_for_the_loopback_literals() {
+        let policy = |entry: &str, flagged: bool| {
+            let allow = Allow::parse(entry).expect("entry");
+            Policy::new(vec![if flagged {
+                allow.plain_http_loopback()
+            } else {
+                allow
+            }])
+        };
+        for entry in [
+            "127.0.0.1:5000/team",
+            "[::1]:5000/team",
+            "127.0.0.1:443/team",
+        ] {
+            let pin = entry.replace("/team", "/team/x");
+            assert!(policy(entry, true).plain_http(&location(&pin)), "{entry}");
+            assert!(!policy(entry, false).plain_http(&location(&pin)), "{entry}");
+        }
+        for entry in [
+            "127.0.0.1/team",
+            "[::1]/team",
+            "localhost:5000/team",
+            "registry.test:5000/team",
+            "127.0.0.2:5000/team",
+            "127.1.2.3:5000/team",
+            "[::ffff:127.0.0.1]:5000/team",
+            "[::2]:5000/team",
+            "10.0.0.1:5000/team",
+            "8.8.8.8:5000/team",
+            "ghcr.io/team",
+        ] {
+            let pin = entry.replace("/team", "/team/x");
+            assert!(!policy(entry, true).plain_http(&location(&pin)), "{entry}");
+        }
+    }
+
+    /// Catches overlapping entries deciding by the wrong one: the longest prefix that
+    /// admits the pin says how it is pulled, whatever the order, and a tie with an
+    /// unflagged entry stays https.
+    #[test]
+    fn plain_http_follows_the_most_specific_entry_that_admits_the_pin() {
+        let flagged = |prefix: &str| {
+            Allow::parse(&format!("127.0.0.1:5000/{prefix}"))
+                .expect("entry")
+                .plain_http_loopback()
+        };
+        let open = |prefix: &str| Allow::parse(&format!("127.0.0.1:5000/{prefix}")).expect("entry");
+        let pin = |path: &str| location(&format!("127.0.0.1:5000/{path}"));
+        for order in [false, true] {
+            let mut entries = vec![flagged("team"), open("team/sub")];
+            if order {
+                entries.reverse();
+            }
+            let policy = Policy::new(entries);
+            assert!(policy.plain_http(&pin("team/x")));
+            assert!(!policy.plain_http(&pin("team/sub/x")));
+        }
+        let policy = Policy::new(vec![open("team"), flagged("team/sub")]);
+        assert!(!policy.plain_http(&pin("team/x")));
+        assert!(policy.plain_http(&pin("team/sub/x")));
+        let tie = Policy::new(vec![flagged("team"), open("team")]);
+        assert!(!tie.plain_http(&pin("team/x")));
+    }
+
+    /// Catches the flag taken from a neighbour: only the entry that admits the pin says
+    /// how it is pulled.
+    #[test]
+    fn plain_http_follows_the_entry_that_admits_the_pin() {
+        let policy = Policy::new(vec![
+            Allow::parse("127.0.0.1:5000/plain")
+                .expect("entry")
+                .plain_http_loopback(),
+            Allow::parse("127.0.0.1:5000/secure").expect("entry"),
+        ]);
+        assert!(policy.plain_http(&location("127.0.0.1:5000/plain/x")));
+        assert!(!policy.plain_http(&location("127.0.0.1:5000/secure/x")));
+        assert!(!policy.plain_http(&location("127.0.0.1:5001/plain/x")));
     }
 }
