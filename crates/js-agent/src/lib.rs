@@ -51,6 +51,7 @@
 //! | `--container-nft <path>` | the absolute path of `nft` for that check; by default `/usr/sbin/nft`; needs `--container-egress-allow` |
 //! | `--actions-cgroup <path>` | the cgroup version 2 directory below `/sys/fs/cgroup` that holds every container (made and delegated by the operator): each container is created with `--cgroup-parent` naming it (the slice name for one `.slice` directly below `/sys/fs/cgroup`, the systemd driver; the path with a leading `/` otherwise, the cgroupfs driver), and the heartbeat carries the usage of the directory and of each lease's cgroup (see [`usage`]); without it the heartbeat carries no load, and the agent says so at start; needs `--container-bin` |
 //! | `--gpu-toolkit-hook <path>` | the absolute path of a program that checks the GPU container toolkit, run once at start when the host offers a GPU; exit 0 makes the hello report `gpu-toolkit`, anything else leaves it out and warns; needs `--container-bin` |
+//! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci; the Docker and Podman runtimes pull as `--container-pull` says and do not read it |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; needs `--container-bin` |
 //! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; needs `--container-bin` |
 //!
@@ -194,6 +195,8 @@ mod credential;
 mod exclusive;
 mod facts;
 mod host;
+#[cfg(target_os = "linux")]
+pub mod image;
 pub mod integrity;
 mod jobs;
 pub mod lifecycle;
