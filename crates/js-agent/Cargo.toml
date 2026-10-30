@@ -49,7 +49,7 @@ js-provider = { path = "../js-provider" }
 js-registry = { path = "../js-registry" }
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
 clap.workspace = true
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["process", "thread"] }
 tar.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 

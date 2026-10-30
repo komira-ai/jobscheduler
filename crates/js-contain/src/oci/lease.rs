@@ -166,7 +166,7 @@ impl Oci {
         write_open(&etc.join("hosts"), HOSTS.as_bytes()).await?;
         let hostname = format!("{}\n", spec::HOSTNAME);
         write_open(&etc.join("hostname"), hostname.as_bytes()).await?;
-        write_open(&etc.join("resolv.conf"), RESOLV_CONF.as_bytes()).await?;
+        write_open(&etc.join("resolv.conf"), self.resolv_conf.as_bytes()).await?;
         let rootfs = self.images.rootfs_of(&spec.image_digest);
         let placement = spec::Placement {
             rootfs: &rootfs,
@@ -175,6 +175,7 @@ impl Oci {
             arch: self.arch,
             init: &self.init,
             init_dest: &self.init_dest,
+            route_wait_secs: self.route_wait_secs,
         };
         // A rootless daemon cannot give a job a process limit above its own hard one.
         let mut job = spec.clone();
@@ -306,6 +307,18 @@ impl Oci {
         } else {
             Err(JobError::Mounts(found))
         }
+    }
+
+    /// The host pid of the started container's first process (the init), from `crun state`.
+    /// Blocking. The agent that wires the container's network from the host asks for it
+    /// after [`Oci::start`], as often as it takes until the container is there: an error
+    /// before then is expected.
+    ///
+    /// # Errors
+    /// `crun state` failed (the container is not made yet, or is gone) or named no pid.
+    pub fn container_pid(&self, spec: &ContainerSpec) -> Result<u32, String> {
+        let pid = self.crun.pid(&spec.dir, &spec.name)?;
+        u32::try_from(pid).map_err(|_| format!("crun state: pid {pid} is not a pid"))
     }
 
     /// Sends `SIGTERM` to the container `name`.
