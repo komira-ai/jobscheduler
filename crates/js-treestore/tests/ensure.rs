@@ -12,7 +12,8 @@ fn a_layer_becomes_a_sealed_recorded_tree() {
     let rig = Rig::new();
     let l = layer(&[("bin/tool", b"#!/bin/sh\n"), ("data", b"hello")]);
     rig.have(&l);
-    let store = rig.open(rig.cfg());
+    // The default config: the wall clock, no budget.
+    let store = rig.open(Config::default());
     let ready = store.ensure(&wanted(&l)).unwrap();
     assert_eq!(ready.diff_id, l.diff_id);
     assert_eq!(std::fs::read(ready.path.join("data")).unwrap(), b"hello");
