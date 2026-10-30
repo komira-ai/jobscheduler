@@ -313,3 +313,41 @@ fn the_files_of_a_run_are_given_to_the_job() {
     let why = runtime.create_and_start(&spec).expect_err("no files");
     assert!(why.to_string().contains("files to the job"), "{why}");
 }
+
+/// Proves a lease that fails to be made is taken apart whatever step failed: a directory
+/// that cannot be given away, a cgroup that is already there, a cgroup file that cannot be
+/// given to the job user, and a bundle that cannot be written each fail with their step's
+/// words and leave no lease directory or listing (a cgroup directory with files in it is the kernel's
+/// to remove, which a directory of files in a test is not). Catches a failed start
+/// that leaves files for a sweep to find.
+#[test]
+fn a_lease_that_fails_to_be_made_is_taken_apart_at_every_step() {
+    let node = Node::new("run-taken-apart");
+    let mut runtime = node.open();
+    // The name of a container of run `r1-exit` on host `node-1`: `js-<tag>-<run id>`, the
+    // tag being the hash of the host id.
+    std::fs::create_dir(node.cgroup_of("js-e696ecc2207879c3-r1-exit")).expect("a cgroup");
+    for (run, step) in [
+        ("refuse-exit", "make a lease directory"),
+        ("r1-exit", "make the lease's cgroup"),
+        (
+            "unwritable-cgroup-exit",
+            "give the lease's cgroup to the job user",
+        ),
+        ("no-bundle-exit", "write the bundle"),
+    ] {
+        let why = runtime
+            .create_and_start(&node.spec(run))
+            .expect_err(run)
+            .to_string();
+        assert!(why.contains(step), "{run}: {why}");
+        assert!(runtime.list_labelled().expect("lists").is_empty());
+    }
+    let left: Vec<String> = std::fs::read_dir(&node.scratch)
+        .expect("store")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("js-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
