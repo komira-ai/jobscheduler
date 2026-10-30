@@ -105,15 +105,9 @@ impl RunQuota {
         let removed = std::fs::remove_dir(dir);
         let cleared = self.quota.clear(dir, project);
         let problems = [
-            tried
-                .err()
-                .map(|why| format!("a trial bound failed: {why}")),
-            removed
-                .err()
-                .map(|why| format!("the trial directory stays: {why}")),
-            cleared
-                .err()
-                .map(|why| format!("clearing the trial bound failed: {why}")),
+            problem("a trial bound failed", tried),
+            problem("the trial directory stays", removed),
+            problem("clearing the trial bound failed", cleared),
         ];
         problems.into_iter().flatten().next().map_or(Ok(()), Err)
     }
@@ -148,6 +142,11 @@ impl RunQuota {
     pub(super) fn usage(&self, slot: u32) -> Result<Usage, QuotaError> {
         self.quota.usage(self.ids.of_slot(slot)?)
     }
+}
+
+/// What went wrong in `result`, said as `what`.
+fn problem(what: &str, result: Result<(), impl fmt::Display>) -> Option<String> {
+    result.err().map(|why| format!("{what}: {why}"))
 }
 
 /// Whether the quota still works. A quota whose calls fail `max_failures` times in a row

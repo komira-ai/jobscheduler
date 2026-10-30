@@ -843,3 +843,47 @@ fn a_quota_that_cannot_read_usage_refuses_runs_and_parks_the_slot() {
     assert!(!h.scratch_of("r1").exists());
     assert_eq!(h.life.parked_slots(), [0]);
 }
+
+/// Asserts that a start that runs out of free slots while it skips the ones in use is
+/// refused `no-capacity` and not given a slot that does not exist: with every project in use
+/// but five that five runs hold, the later starts park eight slots each until fewer than
+/// eight are left, and that start parks the rest and is refused with nothing created. It
+/// catches a loop that takes a slot past the last one.
+#[test]
+fn a_start_that_runs_out_of_free_slots_while_skipping_is_refused() {
+    let (mut h, spy) = with_quota("quota-run-out");
+    let used = Usage {
+        bytes: 4096,
+        inodes: 2,
+    };
+    let small = |run: &str| {
+        let mut spec = job(run);
+        spec.limits.cpu_millis = 10;
+        spec.limits.memory_bytes = 1 << 20;
+        spec.limits.disk_bytes = Some(1 << 20);
+        spec
+    };
+    for slot in 5..4096 {
+        spy.inner.charge(project(slot), used);
+    }
+    for run in ["a", "b", "c", "d", "e"] {
+        assert_eq!(names(&h.start(small(run))), [format!("started {run}")]);
+    }
+    // 4091 free slots, all in use: 511 starts park 4088 of them, the next finds three.
+    for n in 0..511 {
+        let events = names(&h.start(small(&format!("x{n}"))));
+        assert_eq!(events.len(), 9, "{n}");
+    }
+    let events = names(&h.start(small("last")));
+    assert_eq!(
+        events.len(),
+        4,
+        "three slots parked, then the refusal: {events:?}"
+    );
+    assert_eq!(
+        events.last().map(String::as_str),
+        Some("refused last no-capacity")
+    );
+    assert_eq!(h.life.parked_slots().len(), 4091);
+    assert_eq!(h.fake.created().len(), 5);
+}
