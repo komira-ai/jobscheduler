@@ -316,7 +316,7 @@ jobs:
           cargo test -p kbf-task --test network --no-run --locked
           ls target/debug/deps | grep '^network-' || true
       - name: Run one job in Podman and assert its sandbox
-        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test live_podman --locked -- --ignored --nocapture
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" "KBF_PROBE_DIR=$RUNNER_TEMP/kbf" cargo test -p js-agent --test live_podman --locked -- --ignored --nocapture --test-threads=1
       - name: Podman state after a failure
         if: ${{ failure() }}
         run: |
