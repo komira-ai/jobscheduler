@@ -466,7 +466,7 @@ fn scratch_root(path: &Path, report: &mut Report) {
         Ok(_) => {}
     }
     // The path was just looked at; one that cannot be resolved now is searched as given.
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let canonical = std::fs::canonicalize(path).unwrap_or(path.to_owned());
     for ancestor in canonical.ancestors().skip(1) {
         // A directory that cannot be looked at cannot be searched either.
         let searchable = std::fs::metadata(ancestor).is_ok_and(|meta| meta.mode() & 0o001 != 0);
