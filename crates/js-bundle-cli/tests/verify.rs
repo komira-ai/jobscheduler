@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::{
-    blob_path, config, layer_digest, manifest_digest, pack_args, packed, rewrite, run, sample_tree,
+    blob_path, layer_digest, manifest_digest, pack_args, packed, rewrite, run, sample_tree,
     strings, text, verify_args, work,
 };
 
@@ -129,6 +129,46 @@ fn an_index_that_is_not_json_is_refused() {
     fs::write(layout.join("index.json"), "not json").unwrap();
     let (verified, scratch) = verify(&layout, &work);
     refused(&verified, &scratch, "JSON");
+}
+
+#[test]
+fn an_index_that_is_a_symlink_is_not_followed() {
+    let work = work("verify-linkindex");
+    let (layout, _) = packed(&work, "out", "a");
+    let real = work.join("real-index.json");
+    fs::rename(layout.join("index.json"), &real).unwrap();
+    std::os::unix::fs::symlink(&real, layout.join("index.json")).unwrap();
+    let (verified, scratch) = verify(&layout, &work);
+    refused(&verified, &scratch, "index.json");
+    let shown = run(&strings(&["inspect", &text(&layout)]));
+    assert_eq!(shown.code, Some(1));
+    assert!(shown.stderr.contains("index.json"), "{}", shown.stderr);
+}
+
+#[test]
+fn a_digest_in_the_index_that_climbs_out_of_the_layout_is_refused() {
+    let work = work("verify-traversal");
+    let (layout, _) = packed(&work, "out", "a");
+    let mut index = common::read_json(&layout.join("index.json"));
+    index["manifests"][0]["digest"] = "sha256:../../../../etc/passwd".into();
+    fs::write(
+        layout.join("index.json"),
+        serde_json::to_vec(&index).unwrap(),
+    )
+    .unwrap();
+    let (verified, scratch) = verify(&layout, &work);
+    refused(&verified, &scratch, "is not sha256:");
+}
+
+#[test]
+fn a_layer_larger_than_the_config_ceiling_is_refused() {
+    let work = work("verify-bytes");
+    let (layout, _) = packed(&work, "out", "a");
+    rewrite(&layout, |_, config| {
+        config["layers"][0]["uncompressed_bytes"] = 600.into();
+    });
+    let (verified, scratch) = verify(&layout, &work);
+    refused(&verified, &scratch, "layer 0 (tree \"main\")");
 }
 
 #[test]
@@ -304,14 +344,32 @@ fn a_layer_with_more_entries_than_the_config_allows_is_refused() {
     refused(&verified, &scratch, "layer 0 (tree \"main\")");
 }
 
+/// Every file of `dir` below it, by relative path, with its bytes.
+fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(here) = pending.pop() {
+        for entry in fs::read_dir(&here).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let name = path.strip_prefix(dir).unwrap().display().to_string();
+                files.push((name, fs::read(&path).unwrap()));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
 #[test]
-fn the_manifest_digest_is_unchanged_by_verifying() {
+fn verifying_changes_nothing_in_the_layout() {
     let work = work("verify-readonly");
     let (layout, digest) = packed(&work, "out", "a");
-    let before = fs::read(layout.join("index.json")).unwrap();
+    let before = snapshot(&layout);
     let (verified, _) = verify(&layout, &work);
     assert_eq!(verified.code, Some(0), "{}", verified.stderr);
-    assert_eq!(fs::read(layout.join("index.json")).unwrap(), before);
+    assert_eq!(snapshot(&layout), before);
     assert_eq!(manifest_digest(&layout), digest);
-    assert!(config(&layout)["layers"].is_array());
 }

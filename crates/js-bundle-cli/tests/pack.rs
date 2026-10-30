@@ -13,6 +13,7 @@ use common::{pack_args, packed, run, sample_tree, strings, text, work};
 fn pack_prints_the_manifest_digest_of_a_layout_it_made() {
     let work = work("pack-prints");
     let (layout, digest) = packed(&work, "out", "a");
+    assert_eq!(fs::read_dir(&work).unwrap().count(), 2, "{work:?}");
     assert_eq!(digest.len(), "sha256:".len() + 64);
     assert!(digest.starts_with("sha256:"));
     assert_eq!(common::manifest_digest(&layout), digest);
@@ -132,15 +133,39 @@ fn a_finder_leftover_is_refused() {
     );
 }
 
+/// Two names that differ only in case are refused. A volume that folds case (the default
+/// on a Mac) cannot hold both names, so there the second write replaces the first and the
+/// tree is an ordinary one: the expected result follows from what the directory holds.
 #[test]
-fn names_that_differ_only_in_case_are_refused() {
-    refuses(
-        |tree| {
-            fs::write(tree.join("A"), "x").unwrap();
-            fs::write(tree.join("a"), "y").unwrap();
-        },
-        "differs only in case",
+fn names_that_differ_only_in_case_are_refused_where_a_volume_can_hold_both() {
+    let work = work("pack-case");
+    let tree = work.join("tree");
+    fs::create_dir(&tree).unwrap();
+    fs::write(tree.join("A"), "x").unwrap();
+    fs::write(tree.join("a"), "y").unwrap();
+    let folded = usize::from(fs::read_dir(&tree).unwrap().count() == 1);
+    let run = run(&pack_args(&work.join("out"), &[("main", &tree)]));
+    assert_eq!(run.code, [Some(1), Some(0)][folded], "{}", run.stderr);
+    assert!(
+        run.stderr.contains(["differs only in case", ""][folded]),
+        "{}",
+        run.stderr
     );
+}
+
+#[test]
+fn a_symlinked_tree_directory_is_refused() {
+    let work = work("pack-rootlink");
+    let tree = work.join("tree");
+    fs::create_dir(&tree).unwrap();
+    sample_tree(&tree, "a");
+    let link = work.join("link");
+    symlink(&tree, &link).unwrap();
+    let out = work.join("out");
+    let run = run(&pack_args(&out, &[("main", &link)]));
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert!(run.stderr.contains("is a symlink"), "{}", run.stderr);
+    assert!(!out.exists());
 }
 
 #[test]
@@ -225,6 +250,46 @@ fn a_flag_that_names_a_tree_twice_is_refused() {
         run.stderr.contains("--license names \"main\" twice"),
         "{}",
         run.stderr
+    );
+}
+
+#[test]
+fn a_licence_or_source_url_for_no_tree_is_refused() {
+    let licence = pack_with(&["--license", "ghost=MIT"]);
+    assert_eq!(licence.code, Some(1));
+    assert!(
+        licence
+            .stderr
+            .contains("--license names \"ghost\", which is no --tree"),
+        "{}",
+        licence.stderr
+    );
+    let source = pack_with(&["--source-url", "ghost=https://example.invalid/g"]);
+    assert_eq!(source.code, Some(1));
+    assert!(
+        source
+            .stderr
+            .contains("--source-url names \"ghost\", which is no --tree"),
+        "{}",
+        source.stderr
+    );
+}
+
+#[test]
+fn a_failure_while_writing_leaves_no_out_directory_and_no_staging_directory() {
+    // The out name fits a file name; the staging name beside it does not.
+    let work = work("pack-partial");
+    let tree = work.join("tree");
+    fs::create_dir(&tree).unwrap();
+    sample_tree(&tree, "a");
+    let out = work.join("o".repeat(250));
+    let run = run(&pack_args(&out, &[("main", &tree)]));
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert!(!out.exists(), "a failed pack left its out directory");
+    assert_eq!(
+        fs::read_dir(&work).unwrap().count(),
+        1,
+        "only the tree is left"
     );
 }
 
