@@ -1,7 +1,7 @@
 //! The watcher against fake clouds, fake status pages and the fake sink, on a clock that
 //! moves only when a test moves it. Nothing here dials anything.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
