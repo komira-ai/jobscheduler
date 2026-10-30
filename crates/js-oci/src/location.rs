@@ -8,6 +8,9 @@ use crate::Error;
 /// The port a registry is reached at when its name gives none.
 pub(crate) const HTTPS_PORT: u16 = 443;
 
+/// The port a plain-http URL without one is reached at.
+pub(crate) const HTTP_PORT: u16 = 80;
+
 /// A host and port, compared as the connection sees them: the host in lower case and
 /// without the brackets of an IPv6 literal.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -47,11 +50,16 @@ impl Authority {
 
     /// The authority of `uri`, the https default port filled in.
     pub(crate) fn of_uri(uri: &hyper::Uri) -> Option<Self> {
+        Self::of_uri_or(uri, HTTPS_PORT)
+    }
+
+    /// The authority of `uri`, `default` filled in when the URL names no port.
+    pub(crate) fn of_uri_or(uri: &hyper::Uri, default: u16) -> Option<Self> {
         let host = uri.host()?;
         let host = host.trim_start_matches('[').trim_end_matches(']');
         Some(Self {
             host: host.to_ascii_lowercase(),
-            port: uri.port_u16().unwrap_or(HTTPS_PORT),
+            port: uri.port_u16().unwrap_or(default),
         })
     }
 
@@ -67,14 +75,14 @@ impl Authority {
         self.port
     }
 
-    /// The value of a `Host` header for this authority.
-    pub(crate) fn header(&self) -> String {
+    /// The `host[:port]` of a URL whose scheme reaches `default` when no port is named.
+    pub(crate) fn header_or(&self, default: u16) -> String {
         let host = if self.host.contains(':') {
             format!("[{}]", self.host)
         } else {
             self.host.clone()
         };
-        if self.port == HTTPS_PORT {
+        if self.port == default {
             host
         } else {
             format!("{host}:{}", self.port)
@@ -280,7 +288,12 @@ mod tests {
     /// without its brackets.
     #[test]
     fn host_headers_leave_out_the_https_port_and_bracket_ipv6() {
-        let header = |name: &str| Location::parse(name).expect("location").endpoint().header();
+        let header = |name: &str| {
+            Location::parse(name)
+                .expect("location")
+                .endpoint()
+                .header_or(HTTPS_PORT)
+        };
         assert_eq!(header("ghcr.io/a"), "ghcr.io");
         assert_eq!(header("ghcr.io:8443/a"), "ghcr.io:8443");
         assert_eq!(header("[::1]/a"), "[::1]");

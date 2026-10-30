@@ -62,3 +62,124 @@ fn the_program_writes_in_its_run_directory_and_nowhere_else() {
     );
     assert_eq!(status, exited(1));
 }
+
+/// A directory `name` below the rig's own, made, and its canonical spelling as a profile
+/// parameter.
+fn denied(dir: &crate::support::Scratch, name: &str) -> js_mac_pool::seatbelt::AbsPath {
+    let path = dir.path(name);
+    fs::create_dir_all(&path).unwrap();
+    js_mac_pool::seatbelt::AbsPath::new(&fs::canonicalize(&path).unwrap()).unwrap()
+}
+
+/// Asserts the production layout of the read denies: the scratch root is read-denied, the
+/// job's standard-stream files are inside it, and what the job prints still reaches them
+/// (a write through a descriptor opened before the profile was applied is not a path
+/// access). It catches a profile that costs every native job its output.
+#[test]
+fn output_reaches_the_log_with_the_scratch_root_denied() {
+    let mut rig = Rig::in_dir("mac-scratch", |config, dir| {
+        config.read_denies = vec![denied(dir, "scratch")];
+    });
+    rig.fake.real_runs();
+    let id = rig.start("r1", "/bin/sh", &["-c", "echo to-out; echo to-err >&2"]);
+    assert_eq!(rig.settle(&id), exited(0));
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    assert_eq!(tail.stdout, "to-out\n");
+    assert_eq!(tail.stderr, "to-err\n");
+}
+
+/// Asserts a read deny that file modes do not explain: the file is readable by the user the
+/// test runs as (the control, a file beside it, is read), and the profile refuses the one in
+/// the denied directory. It catches a read deny that is only the mode of the directory.
+#[test]
+fn a_read_deny_is_the_profiles_not_the_file_modes() {
+    let mut rig = Rig::in_dir("mac-deny", |config, dir| {
+        config.read_denies = vec![denied(dir, "secret")];
+    });
+    rig.fake.real_runs();
+    for name in ["secret", "open"] {
+        let folder = rig.dir.path(name);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("f"), "x").unwrap();
+    }
+    let open = rig.dir.path("open").join("f").display().to_string();
+    let secret = rig.dir.path("secret").join("f").display().to_string();
+    let id = rig.start("r1", "/bin/cat", &[&open]);
+    assert_eq!(rig.settle(&id), exited(0), "the control file is readable");
+    assert_eq!(rig.rt.log_tail(&id).unwrap().unwrap().stdout, "x");
+    let id = rig.start("r2", "/bin/cat", &[&secret]);
+    assert_eq!(rig.settle(&id), exited(1));
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    assert_eq!(tail.stdout, "");
+    assert!(
+        tail.stderr.contains("Operation not permitted"),
+        "{}",
+        tail.stderr
+    );
+}
+
+const CONNECT: &str = r#"use IO::Socket::INET; exit(IO::Socket::INET->new(PeerAddr => "127.0.0.1", PeerPort => $ARGV[0]) ? 0 : 1)"#;
+
+/// Asserts the network clamp for real: a loopback connect succeeds when the start asks for
+/// loopback under a loopback cap, is refused when it asks for none, and is refused when the
+/// cap is none whatever the start asks. It catches a level that is not applied to the
+/// program, and a request that raises the cap.
+#[test]
+fn a_loopback_connect_follows_the_lower_of_request_and_cap() {
+    use js_agent_wire::NetworkLevel;
+    use js_mac_pool::seatbelt::Net;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let cases = [
+        (Net::Loopback, NetworkLevel::Loopback, 0),
+        (Net::Loopback, NetworkLevel::Off, 1),
+        (Net::Off, NetworkLevel::On, 1),
+    ];
+    for (n, (cap, asked, code)) in cases.into_iter().enumerate() {
+        let mut rig = Rig::with(&format!("mac-net{n}"), |config| config.net = cap);
+        rig.fake.real_runs();
+        let mut body = super::native("/usr/bin/perl", &["-e", CONNECT, &port]);
+        body.network = asked;
+        let spec = rig.spec("r1", body);
+        let id = rig.rt.create_and_start(&spec).unwrap();
+        assert_eq!(rig.settle(&id), exited(code), "case {n}");
+    }
+    drop(listener);
+}
+
+/// Asserts the file size limit for real: a program that writes four MiB to its standard
+/// output under a limit of one MiB is ended, and the log never grows past the limit. It
+/// catches a run that can fill the agent's disk through its output.
+#[test]
+fn a_run_that_writes_past_the_file_limit_is_ended_at_it() {
+    let mut rig = Rig::with("mac-fsize", |config| config.max_file_bytes = 1 << 20);
+    rig.fake.real_runs();
+    let spec = rig.spec(
+        "r1",
+        super::native("/bin/dd", &["if=/dev/zero", "bs=1048576", "count=4"]),
+    );
+    let id = rig.rt.create_and_start(&spec).unwrap();
+    let status = rig.settle(&id);
+    assert_ne!(status, exited(0), "the program was not stopped");
+    let written = fs::metadata(spec.scratch.join("stdout")).unwrap().len();
+    assert!(written <= 1 << 20, "{written} bytes under a limit of 1 MiB");
+}
+
+/// Asserts the process limit for real: under a limit of one process the shell of a run
+/// cannot start another program, so a fork bomb has no fork to make. It catches a run whose
+/// user can fill the process table.
+#[test]
+fn a_run_cannot_fork_past_the_process_limit() {
+    let mut rig = Rig::with("mac-nproc", |config| config.max_processes = 1);
+    rig.fake.real_runs();
+    let id = rig.start("r1", "/bin/sh", &["-c", "/bin/echo forked; :"]);
+    rig.settle(&id);
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    assert_eq!(tail.stdout, "", "the run forked");
+    assert!(
+        tail.stderr.contains("Resource temporarily unavailable"),
+        "{}",
+        tail.stderr
+    );
+}

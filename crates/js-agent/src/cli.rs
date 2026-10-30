@@ -190,6 +190,51 @@ pub struct Cli {
     /// job). Needs `--container-bin`.
     #[arg(long = "watch-dir", value_name = "PATH")]
     pub watch_dirs: Vec<PathBuf>,
+    /// The Unix socket of the root helper `js-mac-session` (its `--socket`): with it this
+    /// agent runs native jobs, programs started as a user the helper makes for each run, under
+    /// a Seatbelt profile, and reports `exec = sandbox-exec`. macOS only. Needs `--scratch-root`
+    /// and `--state-root`, the agent must run as root, and it cannot be combined with
+    /// `--container-bin`. The agent checks at start that `sandbox-exec` applies a profile.
+    /// The helper must be dedicated to this agent, on a Mac used for native jobs only, and
+    /// started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes`,
+    /// never the defaults of another helper: the agent asks it for its boot reset, which ends
+    /// the lease users of whoever used it before and clears the Mac's auto-login. Native runs
+    /// are NOT stopped when the agent stops, restarts or dies: the lease journal in the state
+    /// root ends them when the agent next starts, or when the rescue of an agent whose worker
+    /// died runs; until then they run on, and their wall limit is enforced only while an
+    /// agent runs.
+    #[arg(long, value_name = "PATH")]
+    pub native_helper_socket: Option<PathBuf>,
+    /// The directory the helper makes its lease users' homes in (its `--homes`), by default
+    /// `/Users`. It must exist; the agent canonicalises it. Needs `--native-helper-socket`.
+    #[arg(long, value_name = "PATH")]
+    pub native_homes: Option<PathBuf>,
+    /// The most network a native run gets: `off` (the default), `loopback` or `on`. A start
+    /// that asks for more is held to this. `on` has no egress control: a run can reach the
+    /// scheduler, the cloud metadata address and the rest of the network, until a packet
+    /// filter keyed on the lease users exists; keep `off` (or `loopback`, which every run
+    /// of the Mac shares). Needs `--native-helper-socket`.
+    #[arg(long, value_name = "off|loopback|on")]
+    pub native_network: Option<String>,
+    /// A path no native run may read, in addition to the agent's own roots, its token,
+    /// instance and CA files, the helper's socket directory and `/etc/kcpassword`; repeatable.
+    /// Name the helper's `--state-dir` here. It must exist. Needs `--native-helper-socket`.
+    #[arg(long = "native-deny-read", value_name = "PATH")]
+    pub native_deny_read: Vec<PathBuf>,
+    /// The most MiB any one file a native run writes may reach, its output included (the
+    /// run's `RLIMIT_FSIZE`); by default 4096. A run that writes more is ended by
+    /// `SIGXFSZ`. Needs `--native-helper-socket`.
+    #[arg(long, value_name = "MIB")]
+    pub native_max_file_mib: Option<u64>,
+    /// The most processes a native run's user may have (the run's `RLIMIT_NPROC`); by
+    /// default 512. A fork bomb stops there; the helper's kill is not held by it. Needs
+    /// `--native-helper-socket`.
+    #[arg(long, value_name = "N")]
+    pub native_max_processes: Option<u32>,
+    /// A directory a native start's program must lie under; repeatable. By default `/usr/bin`,
+    /// `/bin`, `/usr/sbin` and `/sbin`. Needs `--native-helper-socket`.
+    #[arg(long = "native-tool-root", value_name = "PATH")]
+    pub native_tool_roots: Vec<PathBuf>,
     /// The absolute path of the `docker` or `podman` program that runs container jobs.
     /// It is started by exactly this path, never looked up on the `PATH`, with an
     /// environment of its own (a fixed `PATH` and `--container-host`, nothing the agent

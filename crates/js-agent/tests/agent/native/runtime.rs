@@ -63,6 +63,11 @@ fn a_start_makes_a_user_and_a_run_directory_and_runs_the_program_under_the_profi
     let parsed = parse(&run.argv);
     assert_eq!(parsed.tail, ["/usr/bin/id", "-u"]);
     assert_eq!(
+        parsed.limits,
+        ("1048576".to_owned(), "512".to_owned()),
+        "1 GiB in blocks of 1024 bytes, and 512 processes"
+    );
+    assert_eq!(
         parsed.params[0],
         ("RUN".to_owned(), home.display().to_string())
     );
@@ -278,17 +283,47 @@ fn a_removal_kills_and_deletes_the_user_and_forgets_the_run() {
     assert_eq!(rig.rt.log_tail(&id).unwrap(), None);
 }
 
-/// Asserts that a start the helper refuses at `user-create` goes no further: no run
-/// directory, no `run`, no rollback of a user that does not exist. It catches a start that
-/// goes on without a user.
+/// Asserts that a start the helper refuses at `user-create` removes what the helper may
+/// have recorded before it refused: the helper records the lease in its ledger, holding a
+/// uid, before it makes the home and the account, so a refusal after that point leaves a
+/// live lease. The start asks for a kill and a delete of the lease, and when that fails too
+/// the error says so. A refusal that the lease was used before is the one exception: that
+/// lease is not ours to remove. It catches a helper whose uid range is used up by failed
+/// starts.
 #[test]
-fn a_user_the_helper_refuses_to_make_ends_the_start() {
+fn a_user_the_helper_refuses_to_make_is_removed_again() {
     let mut rig = Rig::new("nouser");
     rig.fake.refuse("user-create", "range full");
     let spec = rig.spec("r1", native("/bin/true", &[]));
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(error.0.starts_with("user-create: "), "{}", error.0);
     assert!(error.0.contains("range full"));
+    assert_eq!(
+        rig.fake.verbs(),
+        [
+            "boot-reset",
+            "user-create 7.0",
+            "kill-uid 7.0",
+            "user-delete 7.0"
+        ]
+    );
+
+    rig.fake.refuse("kill-uid", "stuck");
+    rig.fake.refuse("user-delete", "busy");
+    let spec = rig.spec("r2", native("/bin/true", &[]));
+    let error = rig.rt.create_and_start(&spec).unwrap_err();
+    assert!(error.0.contains("range full"), "{}", error.0);
+    for told in ["kill-uid: ", "stuck", "user-delete: ", "busy"] {
+        assert!(error.0.contains(told), "{told}: {}", error.0);
+    }
+
+    let mut rig = Rig::new("used");
+    rig.fake.refuse(
+        "user-create",
+        "lease 7.0 was used before; a lease user's name is never reused",
+    );
+    let spec = rig.spec("r1", native("/bin/true", &[]));
+    rig.rt.create_and_start(&spec).unwrap_err();
     assert_eq!(rig.fake.verbs(), ["boot-reset", "user-create 7.0"]);
 }
 
@@ -442,4 +477,21 @@ fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
         let refused = rig.rt.check_native(&body).unwrap_err();
         assert_eq!(refused.code, refusal::NATIVE_UNSUPPORTED);
     }
+}
+
+/// Asserts that the limits of the configuration reach the shell that starts the run: the
+/// file size in blocks of 1024 bytes (at least one) and the process count. It catches a run
+/// that starts without the limits an operator set.
+#[test]
+fn the_configured_limits_are_set_by_the_shell_that_starts_the_run() {
+    let mut rig = Rig::with("limits", |config| {
+        config.max_file_bytes = 10;
+        config.max_processes = 7;
+    });
+    rig.start("r1", "/bin/true", &[]);
+    let parsed = parse(&rig.fake.run_of("7.0").argv);
+    assert_eq!(parsed.limits, ("1".to_owned(), "7".to_owned()));
+    let mut big = Rig::with("limits-big", |config| config.max_file_bytes = 3 << 20);
+    big.start("r1", "/bin/true", &[]);
+    assert_eq!(parse(&big.fake.run_of("7.0").argv).limits.0, "3072");
 }

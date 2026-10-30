@@ -650,6 +650,7 @@ pub fn run_on(
         machine: jobs.0,
         worker_hook: jobs.1,
         rescue_bound: Some(RESCUE_TEST_BOUND),
+        euid: 0,
     };
     let argv = std::iter::once("js-agent").chain(args.iter().copied());
     let argv = argv.map(Into::into).collect();

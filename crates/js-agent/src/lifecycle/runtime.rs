@@ -283,6 +283,15 @@ pub trait Runtime {
         })
     }
 
+    /// Ends and removes whatever an earlier process left, which no list of the runtime's
+    /// can say: the leases a native runtime journalled and never saw deleted. Called when a
+    /// worker starts and by the rescue, before anything else; returns one line for each
+    /// thing done or not done. A runtime whose leftovers are listed (the container one)
+    /// has nothing to do.
+    fn reclaim(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Whether a container made here can use a GPU. A start that names a GPU where this
     /// is false is refused (`gpu-unsupported`) and creates nothing.
     fn supports_gpus(&self) -> bool {

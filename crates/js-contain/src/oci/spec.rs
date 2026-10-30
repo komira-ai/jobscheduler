@@ -15,9 +15,7 @@ use oci_spec::runtime::{
     UserBuilder,
 };
 
-use super::hardening::{
-    CAPABILITIES, MASKED_PATHS, READONLY_PATHS, SeccompError, held_capabilities, seccomp,
-};
+use super::hardening::{MASKED_PATHS, READONLY_PATHS, SeccompError, seccomp};
 use crate::container::{ACTION_ID, ContainerSpec};
 use crate::subids::DaemonIds;
 
@@ -28,15 +26,13 @@ const OCI_VERSION: &str = "1.0.0";
 pub(crate) const HOSTNAME: &str = "localhost";
 
 /// The lease directories a job's container writes to, and the destination of each:
-/// disk-backed (a `tmpfs` would count against the lease's memory), owned by the
-/// container's root, discarded with the lease. The image's root is read-only; these are
+/// disk-backed, owned by the container's root, discarded with the lease (the home
+/// directory). The image's root is read-only; these and the tmpfs mounts of [`TMPFS`] are
 /// the places a job writes besides the exec root.
-pub(crate) const WRITABLE: [(&str, &str); 4] = [
-    ("tmp", "/tmp"),
-    ("var-tmp", "/var/tmp"),
-    ("run", "/run"),
-    ("home", "/root"),
-];
+pub(crate) const WRITABLE: [(&str, &str); 1] = [("home", "/root")];
+
+/// The places a job gets a size-limited, `noexec` tmpfs, as podman made them.
+const TMPFS: [&str; 3] = ["/tmp", "/var/tmp", "/run"];
 
 /// The directory of the lease holding [`WRITABLE`]'s directories.
 pub(crate) const WRITABLE_DIR: &str = "rw";
@@ -138,8 +134,23 @@ pub(crate) struct Placement<'a> {
     pub init_dest: &'a str,
 }
 
+/// The job's tmpfs at `destination` (`/tmp`, `/var/tmp`, `/run`), of `size_mib`, that holds no program (`noexec`), no set-uid
+/// file and no device node, and that anyone may write to (`mode=1777`). It counts against
+/// the lease's memory, as the engine this backend replaces made it
+/// (`--tmpfs <dir>:rw,noexec,nosuid,nodev,size=64m`).
+fn tmp(destination: &str, size_mib: u64) -> Mount {
+    let size = format!("size={size_mib}m");
+    filesystem(
+        destination,
+        "tmpfs",
+        &["nosuid", "noexec", "nodev", "mode=1777", &size],
+    )
+}
+
 /// The mounts of a job: the standard ones of `crun spec --rootless`, the `hosts`, `hostname` and `resolv.conf` files,
-/// the exec-root overlay, the shared trees read-only inside it, and [`WRITABLE`].
+/// the exec-root overlay, the shared trees read-only inside it, `/tmp`, [`WRITABLE`], and
+/// the host mounts last (each a recursive bind, `nosuid` and `nodev`, read-only or
+/// read-write as asked).
 fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
     let shm = format!("size={}m", spec.limits.shm_mib);
     let open = ["rbind", "ro", "nosuid", "noexec", "nodev"];
@@ -207,12 +218,21 @@ fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
             &["rbind", "ro", "nosuid", "nodev"],
         ));
     }
+    mounts.extend(TMPFS.map(|dest| tmp(dest, spec.limits.tmp_mib)));
     for (name, destination) in WRITABLE {
         let source = spec.dir.join(WRITABLE_DIR).join(name);
         mounts.push(bind(
             &source,
             destination,
             &["rbind", "rw", "nosuid", "nodev"],
+        ));
+    }
+    for host in &spec.mounts {
+        let access = if host.read_only { "ro" } else { "rw" };
+        mounts.push(bind(
+            &host.source,
+            &host.target,
+            &["rbind", access, "nosuid", "nodev"],
         ));
     }
     mounts
@@ -270,13 +290,17 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// | the Command's argv and directory         | `process.args`, `process.cwd`                      |
 /// | the lease cgroup, `memory.oom.group=1`   | `cgroupsPath` a child of the lease cgroup, `unified` `memory.oom.group`       |
 /// | a pids limit                             | `resources.pids.limit`                             |
-/// | `nofile` and `nproc` ulimits             | `process.rlimits`                                  |
-/// | `/dev/shm` size                          | the `/dev/shm` tmpfs `size=`                       |
+/// | `nofile`, `nproc` ulimits, no core dump  | `process.rlimits` (`RLIMIT_CORE` 0)                |
+/// | no capability                            | the five `process.capabilities` sets, empty; the seccomp filter resolved for none |
+/// | no new privileges                        | `process.noNewPrivileges` true                     |
+/// | `/dev/shm` size, `/tmp` size, no programs in `/tmp` | the tmpfs `size=`; `/tmp` also `noexec`  |
+/// | the run's scratch, `--mount-root`, files | `spec.mounts`: recursive binds, `nosuid`, `nodev`  |
 /// | the kernel's default OOM score           | `process.oomScoreAdj`                              |
 /// | hostname `localhost`                     | `hostname`                                         |
 /// | the input root, writes in `upper`        | an `overlay` mount at `exec_root`                  |
 ///
-/// No memory or CPU limit is set here: the lease cgroup carries them.
+/// No memory or CPU limit is set here: the lease cgroup carries them
+/// ([`LeasePolicy::Hard`](crate::cgroup::LeasePolicy::Hard)).
 ///
 /// # Errors
 /// `spec.exec_root` or the init's path is not a normalized absolute path, or the seccomp
@@ -287,12 +311,16 @@ pub(crate) fn action_config(
 ) -> Result<Spec, SpecError> {
     normalized("exec_root", &spec.exec_root, "/")?;
     normalized("init path", placement.init_dest, "/dev/")?;
-    let held = held_capabilities();
+    for host in &spec.mounts {
+        normalized("mount target", &host.target, "/")?;
+    }
+    // All five sets empty, written out: `crun` gives a process with no `capabilities`
+    // object its own default set.
     let capabilities = built(
         LinuxCapabilitiesBuilder::default()
-            .bounding(held.clone())
-            .effective(held.clone())
-            .permitted(held)
+            .bounding(HashSet::new())
+            .effective(HashSet::new())
+            .permitted(HashSet::new())
             .inheritable(HashSet::new())
             .ambient(HashSet::new())
             .build(),
@@ -315,8 +343,9 @@ pub(crate) fn action_config(
             .rlimits(vec![
                 rlimit(PosixRlimitType::RlimitNofile, spec.limits.nofile),
                 rlimit(PosixRlimitType::RlimitNproc, spec.limits.nproc),
+                rlimit(PosixRlimitType::RlimitCore, 0),
             ])
-            .no_new_privileges(false)
+            .no_new_privileges(true)
             .oom_score_adj(0)
             .build(),
     );
@@ -340,7 +369,7 @@ pub(crate) fn action_config(
             .namespaces(namespaces())
             .cgroups_path(PathBuf::from(format!("{}/ctr", placement.cgroup)))
             .resources(resources)
-            .seccomp(seccomp(placement.arch, &CAPABILITIES)?)
+            .seccomp(seccomp(placement.arch, &[])?)
             .masked_paths(strings(&MASKED_PATHS))
             .readonly_paths(strings(&READONLY_PATHS))
             .build(),

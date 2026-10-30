@@ -5,7 +5,8 @@
 
 use std::fs;
 
-use js_agent::lifecycle::{CheckFinding, CheckHook, Event, Finished, Lifecycle};
+use js_agent::lifecycle::{Event, Lifecycle};
+use js_agent::native::NativeChecks;
 use js_agent_wire::{Command, InputRef, JobSpec, Outcome, RunFile};
 use js_mac_pool::seatbelt::AbsPath;
 use serde_json::json;
@@ -16,15 +17,6 @@ use crate::lifecycle::fake::ManualClock;
 use crate::lifecycle::{cleanup, config_in, names, reply, reply_json};
 use crate::support::Scratch;
 use js_agent::native::NativeRuntime;
-
-/// Checks that find nothing: a Mac's cleanup is the helper's removal of the user.
-struct Pass;
-
-impl CheckHook for Pass {
-    fn run(&mut self, _: &Finished<'_>) -> Result<(), CheckFinding> {
-        Ok(())
-    }
-}
 
 /// A lifecycle over a native runtime over a fake helper.
 struct Native {
@@ -53,7 +45,7 @@ impl Native {
         let (life, _) = Lifecycle::adopt(
             config,
             Box::new(runtime),
-            Box::new(Pass),
+            Box::new(NativeChecks),
             Box::new(clock.clone()),
         )
         .unwrap();
@@ -94,7 +86,7 @@ impl Native {
 }
 
 /// A native start of `program`: no image, one CPU, a minute.
-fn job(run_id: &str, program: &str) -> JobSpec {
+pub(super) fn job(run_id: &str, program: &str) -> JobSpec {
     let mut spec = crate::lifecycle::job(run_id);
     spec.image = String::new();
     spec.args = Vec::new();

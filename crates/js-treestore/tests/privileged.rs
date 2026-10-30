@@ -18,9 +18,11 @@
 use std::ffi::{CString, c_char, c_int};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-use std::os::unix::process::CommandExt as _;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+
+#[path = "support/priv_harness.rs"]
+mod priv_harness;
 
 use js_treestore::Sealer as _;
 use js_treestore::mac::{Clonefile, Fchflags, IMMUTABLE, MacSealer, Owner, start_checks};
@@ -119,11 +121,7 @@ impl Work {
 
     /// Runs `program` as the unprivileged user and keeps how it ended.
     fn run_as_user(&self, program: &str, args: &[&Path]) -> Ran {
-        let out = Command::new(program)
-            .args(args)
-            .uid(self.uid)
-            .gid(self.gid)
-            .stdin(Stdio::null())
+        let out = priv_harness::user_command(program, args, self.uid, self.gid)
             .output()
             .unwrap();
         Ran {
@@ -418,10 +416,7 @@ fn a_clone_made_under_a_directory_with_an_inheritable_acl_has_no_acl() {
     std::fs::create_dir(&lease).unwrap();
     let added = Command::new("/bin/chmod")
         .arg("+a")
-        .arg(format!(
-            "#{} allow write,file_inherit,directory_inherit",
-            work.uid
-        ))
+        .arg(priv_harness::inheritable_write_ace(work.uid))
         .arg(&lease)
         .status()
         .unwrap();
