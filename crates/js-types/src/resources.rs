@@ -243,6 +243,11 @@ mod tests {
             Resources::from_named([("vms", 1)], None),
             Err(TypeError::UnknownDimension("vms".into()))
         );
+        assert_eq!(
+            Resources::from_named([("gpus", 1)], None),
+            Err(TypeError::GpuClassMismatch),
+            "GPUs without a class"
+        );
     }
 
     /// Asserts that `from_named` reads `disk_bytes`, that `new` leaves disk at zero and
