@@ -17,7 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_elastic::{Artifact, Demand, ElasticProvider, SchedulerId};
+use js_lease::Clock;
 use js_registry::{PoolConfig, WholeNodeConfig};
+use js_scaler::{Budgets, Millis};
 use js_types::{
     Admission, ClassId, ExecMode, MEMORY_PERCENT_KEY, MemoryHeadroom, MemoryPercent, ProviderId,
     ResourceClass, Resources, Shape,
@@ -33,6 +35,7 @@ use crate::file_checks::{check_listeners, check_live};
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::OAuthClient;
 
+mod budget;
 mod joined;
 mod lifetime;
 mod network;
@@ -54,7 +57,7 @@ const FLOOR_CPU_MILLIS: u64 = 1000;
 /// The memory a host of an elastic pool must report at least: 1 GiB.
 const FLOOR_MEMORY_BYTES: u64 = 1 << 30;
 
-const ROOT_KEYS: &[&str] = &["server", "pool"];
+const ROOT_KEYS: &[&str] = &["server", "budget", "pool"];
 
 const POOL_KEYS: &[&str] = &[
     "name",
@@ -69,6 +72,7 @@ const POOL_KEYS: &[&str] = &[
     "min_host_lifetime",
     "boot_timeout",
     "launch",
+    "live_until",
     "agent",
     "join_token_file",
     "provider",
@@ -139,8 +143,16 @@ pub struct ElasticPlan {
     /// A request for exactly the floor: what a launch is planned for while no request
     /// waits.
     pub(crate) floor_demand: Demand,
-    /// Whether it launches.
+    /// Whether it launches. A pool whose `live_until` had passed when the file was read is
+    /// `Plan`, whatever the file says.
     pub launch: Launch,
+    /// When the go expires: from then on the pool is in plan mode ([`Settings::mode`]).
+    ///
+    /// [`Settings::mode`]: js_scaler::Settings::mode
+    pub live_until: Option<Millis>,
+    /// The server-wide totals: the `[server]` ones and those of each `[budget.<kind>]`.
+    /// Every pool carries the same.
+    pub budgets: Budgets,
     /// The most instances at once.
     pub max_instances: usize,
     /// The most it may spend in an hour, in cents.
@@ -199,6 +211,8 @@ impl fmt::Debug for ElasticPlan {
             .field("floor", &self.floor)
             .field("memory", &self.memory)
             .field("launch", &self.launch)
+            .field("live_until", &self.live_until)
+            .field("budgets", &self.budgets)
             .field("max_instances", &self.max_instances)
             .field("max_spend_per_hour_cents", &self.max_spend_per_hour_cents)
             .field("max_spend_per_day_cents", &self.max_spend_per_day_cents)
@@ -492,7 +506,9 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         None => return Err(root.fail("server", "required: add a [server] table")),
     };
     let pools = root.tables("pool")?;
+    let budget = root.table("budget")?;
     let server = read_server(server)?;
+    let budgets = budget::read_budgets(budget, server.totals, ld.kinds)?;
     let client_token = read_client_token(&server, ld)?;
     let mut static_pool = None;
     let mut registering = None;
@@ -503,7 +519,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
             table,
             index + 1,
             ld,
-            (&client_token, &server.scheduler, ceiling),
+            (&client_token, &server.scheduler, ceiling, &budgets),
         )?;
         let pool = format!("pool {:?}", read.name);
         if !names.insert(read.name.clone()) {
@@ -547,7 +563,9 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         let reason = "needs an elastic pool, whose hosts register agents";
         return Err(StartupError::at(format!("server.{key}"), reason));
     }
-    let warnings = check_listeners(&server, elastic)?;
+    let mut warnings = check_listeners(&server, elastic)?;
+    let now = Millis::new(ld.clock.now().millis());
+    warnings.extend(budget::expired(&hosts, now));
     Ok(Loaded {
         server,
         client_token,
@@ -576,6 +594,7 @@ struct ElasticKeys {
     idle: Option<Duration>,
     max_age: Option<Duration>,
     min_host_lifetime: Option<Duration>,
+    live_until: Option<Millis>,
     boot_timeout: Option<Duration>,
     join_token_file: Option<PathBuf>,
     network: Option<toml::Table>,
@@ -593,6 +612,7 @@ impl ElasticKeys {
             ("idle", self.idle.is_some()),
             ("max_age", self.max_age.is_some()),
             ("min_host_lifetime", self.min_host_lifetime.is_some()),
+            ("live_until", self.live_until.is_some()),
             ("boot_timeout", self.boot_timeout.is_some()),
             ("join_token_file", self.join_token_file.is_some()),
             ("network", self.network.is_some()),
@@ -611,7 +631,12 @@ fn read_pool(
     table: toml::Table,
     number: usize,
     ld: &Load<'_>,
-    (client, scheduler, max_lease_wall): (&Token, &SchedulerId, Option<Duration>),
+    (client, scheduler, max_lease_wall, budgets): (
+        &Token,
+        &SchedulerId,
+        Option<Duration>,
+        &Budgets,
+    ),
 ) -> Result<Read, StartupError> {
     if table.contains_key("kind") {
         return joined::read(table, client);
@@ -645,6 +670,7 @@ fn read_pool(
         idle: s.duration("idle")?,
         max_age: s.duration("max_age")?,
         min_host_lifetime: s.duration("min_host_lifetime")?,
+        live_until: s.timestamp("live_until")?,
         boot_timeout: s.duration("boot_timeout")?,
         join_token_file: s.path("join_token_file")?,
         network: s.table("network")?,
@@ -655,6 +681,13 @@ fn read_pool(
         None | Some("plan") => Launch::Plan,
         Some("live") => Launch::Live,
         Some(_) => return Err(s.fail("launch", "must be plan or live")),
+    };
+    // A go that has expired by the time the file is read is not a go: the pool starts in
+    // plan, as it would have been switched there by the scaler's first step.
+    let now = Millis::new(ld.clock.now().millis());
+    let launch = match (launch, keys.live_until) {
+        (Launch::Live, Some(until)) if now >= until => Launch::Plan,
+        (launch, _) => launch,
     };
     let provider = match s.table("provider")? {
         Some(provider) => provider,
@@ -702,6 +735,7 @@ fn read_pool(
                 kind: &kind,
                 scheduler,
                 max_lease_wall,
+                budgets,
             };
             Pool::Elastic(Box::new(elastic.finish(built, client)?))
         }
@@ -721,6 +755,7 @@ struct Elastic<'a> {
     kind: &'a str,
     scheduler: &'a SchedulerId,
     max_lease_wall: Option<Duration>,
+    budgets: &'a Budgets,
 }
 
 impl Elastic<'_> {
@@ -736,6 +771,7 @@ impl Elastic<'_> {
             kind,
             scheduler,
             max_lease_wall,
+            budgets,
         } = self;
         let max_instances = require(s, "max_instances", keys.max_instances)?;
         if max_instances == 0 {
@@ -824,6 +860,8 @@ impl Elastic<'_> {
             memory: pool.memory_headroom(),
             floor_demand,
             launch,
+            live_until: keys.live_until,
+            budgets: budgets.clone(),
             max_instances: max,
             max_spend_per_hour_cents: hour,
             max_spend_per_day_cents: day,

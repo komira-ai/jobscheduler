@@ -114,6 +114,20 @@
 //! memory, 1 GiB. An agent's own claim never raises it, and a hello must still meet the
 //! whole floor. `0`, above `100`, a negative number or a word is refused naming the pool and
 //! the field.
+//! An elastic pool may also set `live_until`, a TOML date-time with an offset such as
+//! `2027-01-01T12:00:00Z`: from that instant the pool is in `plan` (the scaler's step ends the
+//! go, and a file read after it starts the pool in `plan` with a warning), so a forgotten
+//! `launch = "live"` stops spending by itself. Beside the pools' own caps, three totals count
+//! the machines of every pool: `max_spend_per_day_total` (the last 24 hours),
+//! `max_spend_per_month_total` (the last 30 days, rolling) and `max_spend_since_go_total`
+//! (since each pool's go, the step that first saw it `live`; the budget begins again at the
+//! next go). They are strings like the pool caps, may be set in `[server]` (all pools) and
+//! in a `[budget.<kind>]` table (the pools of that provider kind), and a launch must hold
+//! both; a month total below the day total is refused, and a `[budget]` table of a kind the
+//! server does not build is refused. A total only stops launches (`blocked` shows
+//! `max_spend_total` in `GET /v1/pools`): it never drains or releases a machine, so the
+//! machines admitted before it was reached run to their `max_age` and can take the window
+//! past the figure by at most `max_spend_per_hour` for the cloud lifetime of a launch.
 //! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing, and
 //! one that is `live` launches machines for requests that wait, within `max_instances`,
 //! `max_spend_per_hour` and `max_spend_per_day`, and releases them when they have been

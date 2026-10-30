@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use js_elastic::{AcquireId, HostName, HostRef, Offer};
 
-use crate::caps::{billed_until, check, choose, nearest_miss, unpriced};
+use crate::budget;
+use crate::caps::{check, choose, nearest_miss, unpriced};
 use crate::input::{HostState, Input, Mark, PoolInput, Waiting};
 use crate::pass::{Pass, host_named};
 use crate::record::{CooldownReason, Phase, Record, Records};
@@ -450,7 +451,12 @@ impl Pass<'_> {
                 .map(|(_, record)| record.clone())
                 .collect();
             let price = self.records.instances[i].price_cents_per_hour;
-            match check(settings, self.now, &others, &[], &BTreeSet::new(), price) {
+            let within =
+                check(settings, self.now, &others, &[], &BTreeSet::new(), price).and_then(|()| {
+                    let go = &self.records.go;
+                    budget::check(self.input, go, settings, self.now, (&others, &[]), price)
+                });
+            match within {
                 Ok(()) => {
                     self.go(i, Phase::Launching);
                     let now = self.now;
@@ -482,7 +488,7 @@ impl Pass<'_> {
         uncovered: Vec<&'w Waiting>,
     ) -> Vec<&'w Waiting> {
         let settings = &pool.settings;
-        let live = settings.launch == LaunchMode::Live;
+        let live = settings.mode(self.now) == LaunchMode::Live;
         if let Some(blocked) = self.gate(pool) {
             self.blocked.insert(settings.pool.clone(), blocked);
             return uncovered;
@@ -577,6 +583,15 @@ impl Pass<'_> {
             &BTreeSet::new(),
             price,
         )?;
+        let records = (self.records.instances.as_slice(), staged);
+        budget::check(
+            self.input,
+            &self.records.go,
+            settings,
+            self.now,
+            records,
+            price,
+        )?;
         let bits = self
             .input
             .entropy
@@ -629,25 +644,7 @@ impl Pass<'_> {
     ) -> (State, Vec<Action>) {
         let now = self.now;
         let input: &Input = self.input;
-        self.records.instances.retain(|record| {
-            let boot_timeout = input
-                .pools
-                .iter()
-                .find(|pool| pool.settings.pool == record.pool)
-                .map_or(Duration::ZERO, |pool| pool.settings.boot_timeout);
-            // A refused acquire never was a machine and costs nothing: it goes at once, so
-            // a pool that is refused over and over does not grow its records.
-            let costs = [
-                record.counts(),
-                billed_until(record, boot_timeout, now) > now.back(crate::caps::DAY),
-            ];
-            [
-                record.phase != Phase::Refused,
-                costs.into_iter().any(|keep| keep),
-            ]
-            .into_iter()
-            .all(|keep| keep)
-        });
+        self.forget();
         self.records.silent_since = self.silent_now.clone();
         self.records.missing_since = self.missing_now.clone();
         // The time of the step is written with the records and never alone, so a restart

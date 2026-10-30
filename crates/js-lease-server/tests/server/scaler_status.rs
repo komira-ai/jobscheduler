@@ -195,3 +195,34 @@ async fn the_alerts_are_on_the_status() {
     );
     assert!(page.body.contains("i-stray-alert"), "{}", page.body);
 }
+
+/// Asserts that a launch the server-wide total refuses is shown: two requests wait, the
+/// first launches within a day total of 50 cents (a launch is billed at least `boot_timeout`,
+/// 33 cents of an offer at 129 cents an hour), and the second would take the total to 66, so
+/// the pool shows `max_spend_total` as what blocks it and has launched one machine, not two.
+/// It catches a total that is read and not enforced, and a cap the status does not show.
+#[tokio::test]
+async fn a_launch_the_server_total_refuses_shows_max_spend_total() {
+    let scratch = Scratch::new("scaler_status_total");
+    account(&scratch);
+    let source = text(&scratch, "live", "initialise").replacen(
+        "[server]\n",
+        "[server]\nmax_spend_per_day_total = \"0.50\"\n",
+        1,
+    );
+    let h = start(scratch, &source).await;
+    for (lease, id) in [(1, "r1"), (2, "r2")] {
+        h.running
+            .registry()
+            .unwrap()
+            .provider()
+            .start(spec(lease, id));
+    }
+    for _ in 0..3 {
+        h.ticks.step().await;
+    }
+    let (view, body) = pool(&h).await;
+    assert_eq!(view["blocked"], "max_spend_total", "{body}");
+    assert_eq!(view["instances"]["n"], 1, "{body}");
+    assert_eq!(view["machines"].as_array().unwrap().len(), 1, "{body}");
+}

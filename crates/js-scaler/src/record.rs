@@ -310,6 +310,20 @@ pub struct Cooldown {
     pub reason: CooldownReason,
 }
 
+/// A pool's go: the instant it went from `Plan` to `Live`, and what its machines had cost by
+/// the time they left the records. Kept for as long as the pool stays live. The cost since
+/// the go is `settled` plus what the machines still in the records cost from `at` on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Go {
+    /// When the pool went live: the step that first saw it live, or the first step of a
+    /// scaler whose records had no go for a live pool.
+    pub at: Millis,
+    /// The cost since `at`, in cents, of the machines whose records were forgotten when
+    /// their billed time left the month window.
+    pub settled: u64,
+}
+
 /// The version of the records file this writer writes. Version 2 added the silent and
 /// missing times and the time of the last write.
 pub const VERSION: u32 = 2;
@@ -353,6 +367,11 @@ pub struct Records {
     /// pending nothing is written for it. `None` in a file
     /// that has none: the whole span back to each time is taken as downtime.
     pub last_step: Option<Millis>,
+    /// The go of each live pool, by name ([`Go`]). A pool that is not live has none; the
+    /// first step that sees it live writes it, and the first that sees it in `Plan` mode
+    /// (or past `live_until`) removes it, which is how a new go begins a new budget.
+    /// Absent in files written before it existed, which read it empty.
+    pub go: BTreeMap<String, Go>,
 }
 
 #[derive(Serialize)]
@@ -363,6 +382,8 @@ struct WireOut<'a> {
     silent_since: &'a BTreeMap<String, Millis>,
     missing_since: &'a BTreeMap<String, Millis>,
     last_step: Option<Millis>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    go: &'a BTreeMap<String, Go>,
 }
 
 /// Version 2.
@@ -377,6 +398,8 @@ struct WireIn {
     missing_since: BTreeMap<String, Millis>,
     #[serde(default)]
     last_step: Option<Millis>,
+    #[serde(default)]
+    go: BTreeMap<String, Go>,
 }
 
 /// Version 1: the same without the two times.
@@ -422,6 +445,7 @@ impl Records {
             silent_since: &self.silent_since,
             missing_since: &self.missing_since,
             last_step: self.last_step,
+            go: &self.go,
         };
         Ok(serde_json::to_string_pretty(&wire)?)
     }
@@ -455,6 +479,7 @@ impl Records {
                 silent_since: wire.silent_since,
                 missing_since: wire.missing_since,
                 last_step: wire.last_step,
+                go: wire.go,
             })
         }
     }

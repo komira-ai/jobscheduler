@@ -1019,6 +1019,21 @@ Rules, each tied to a requirement or to existing behaviour:
   until an operator acts (the alert watcher of cost part 0d is what is meant to tell them). `min_host_lifetime` is the least a machine
   lives before `idle` may drain it, so a short `idle` against a billed boot cannot launch a
   machine per job. Changing `max_lease_wall` does not shorten a lease already granted.
+- Server-wide totals and `live_until`. A pool's caps count its own machines over 24 hours, so a
+  day cap D allows 30 times D in a month left alone and the exposure of a server is the sum of its
+  pools' caps. Three totals count the records of every pool: `max_spend_per_day_total` (24 hours),
+  `max_spend_per_month_total` (30 days, rolling) and `max_spend_since_go_total`. The keys sit in
+  `[server]` (all pools) and in `[budget.<kind>]` (the pools of a provider kind); a launch must
+  hold both, and breaking either shows `blocked: max_spend_total`. Records are kept for the
+  month window, not the day, and the cost of a record over a window is the pool cap's rule (billed
+  time, whole minutes then whole cents). The month is rolling because it holds at every instant: a
+  calendar month would allow the figure twice across the turn of the month. A go is the step that first
+  sees a pool `live`; it is written to the records (`go`: the instant and the cost of the machines
+  already forgotten), a pool seen in `plan` loses it, and the next go begins a new
+  `max_spend_since_go_total`. A total only stops launches. The machines admitted before it was
+  reached run on, so a window can pass its total by at most `max_spend_per_hour` times the
+  lifetime of a launch (`js_scaler::overrun`). `live_until` ends a go: at that instant the pool is in `plan`,
+  in the step (`Settings::mode`) and in a file read afterwards.
 
 ### 6.5 What the single-pool slice costs
 
@@ -1418,7 +1433,7 @@ field. A launched host must not reach these routes: the ACL gives it the agent p
     "credentials": { "ok": true, "checked_at_ms": 0 },
     "network_check": { "ok": false, "reason": "oauth: invalid_client", "checked_at_ms": 0 },
     "instances": { "n": 1, "max": 4, "spend_cents_per_hour": 129, "max_spend_cents_per_hour": 1200 },
-    "blocked": null,       // max_instances | max_spend | max_spend_day | boot_failed | unavailable
+    "blocked": null,       // max_instances | max_spend | max_spend_day | max_spend_total | boot_failed | unavailable
     "no_offer": null,      // or { "request": "...", "dimension": "gpus" }
     "last_launch": { "at_ms": 0, "outcome": "accepted", "host": "js-ab12-cd34" },
     "machines": [ { "host": "js-ab12-cd34", "state": "registered", "offer": "gpu_1x_a10",

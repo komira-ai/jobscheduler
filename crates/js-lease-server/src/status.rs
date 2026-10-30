@@ -272,11 +272,16 @@ impl Status {
                 Next::NoOffer(none) => (None, Some(none)),
             },
         };
+        let scaled = self.scaler.as_ref().map(|scaler| scaler.state());
+        // The checks first; once they pass, the cap that keeps the scaler from launching.
+        let capped = scaled
+            .as_ref()
+            .and_then(|seen| seen.blocked.get(&pool.name));
         let blocked = match state {
-            State::Available => None,
+            State::Available => capped.and_then(|why| why.cap_name()),
             _ => Some("unavailable"),
         };
-        let records = self.scaler.as_ref().map(|scaler| scaler.state().records);
+        let records = scaled.map(|seen| seen.records);
         let (machines, orphans, last_launch) = held(&records.unwrap_or_default(), &pool.name);
         let spend = machines
             .iter()

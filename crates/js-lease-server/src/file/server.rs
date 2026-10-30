@@ -39,6 +39,9 @@ const SERVER_KEYS: &[&str] = &[
     "usage_db",
     "usage_off",
     "profile_store_bytes",
+    "max_spend_per_day_total",
+    "max_spend_per_month_total",
+    "max_spend_since_go_total",
 ];
 
 /// What the `[server]` table says.
@@ -58,6 +61,8 @@ pub(crate) struct Server {
     pub(crate) limits: Limits,
     pub(crate) agents: AgentKeys,
     pub(crate) usage: UsageKeys,
+    /// The totals over every pool of the server.
+    pub(crate) totals: js_scaler::Totals,
 }
 
 /// The usage keys of `[server]`, as the file gave them: the flags `--usage-db`,
@@ -155,6 +160,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         require_host_credential: s.boolean("require_host_credential")?,
     };
     let usage = read_usage(&mut s)?;
+    let totals = super::budget::read_totals(&mut s)?;
     // The same check as `--default-ttl` and `--max-ttl`.
     let settings = match Settings::new(default_ttl, max_ttl) {
         Ok(settings) => settings,
@@ -180,6 +186,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         limits,
         agents,
         usage,
+        totals,
     })
 }
 

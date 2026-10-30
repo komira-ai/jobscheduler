@@ -77,6 +77,8 @@ fn settings(plan: &ElasticPlan, whole: &WholeNodeConfig) -> Settings {
         Launch::Live => LaunchMode::Live,
         Launch::Plan => LaunchMode::Plan,
     };
+    settings.live_until = plan.live_until;
+    settings.kind.clone_from(&plan.kind);
     settings.idle = plan.idle.unwrap_or(settings.idle);
     settings.boot_timeout = plan.boot_timeout;
     settings.max_age = plan.max_age;
@@ -125,12 +127,12 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         plan.scheduler.clone(),
         plan.exec.unwrap_or(ExecMode::Container),
     );
-    let scaler = Scaler::new(
+    let scaler = Scaler::budgeted(
         Box::new(live),
         parts.clock,
         Box::new(OsSessions),
         wiring,
-        plan.scaler_settings(&registry),
+        (plan.scaler_settings(&registry), plan.budgets.clone()),
         records,
     );
     scaler.retry_removals(unremoved);

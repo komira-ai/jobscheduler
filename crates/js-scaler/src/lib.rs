@@ -28,6 +28,14 @@
 //!   hold: `max_instances`, `max_spend_per_hour` over the stored prices of the machines
 //!   held, and `max_spend_per_day` over what the machines cost in the last 24 hours (a
 //!   machine that still runs keeps accruing, a launch that waits counts at its least cost).
+//!   Server-wide totals ([`Budgets`]) are held beside the pool's caps: over the records of
+//!   every pool of the server, and of every pool of the provider kind, the cost in the last 24
+//!   hours, in the last 30 days (rolling) and since the pool's go ([`Go`]: the step that first
+//!   saw the pool live, written to the records and lost when the pool is seen in `Plan`) may not
+//!   pass a total with the new machine's least cost added ([`Blocked::MaxSpendTotal`]). A pool
+//!   whose `live_until` has come is in `Plan` ([`Settings::mode`]). A total only keeps a launch
+//!   from being made; the overrun it allows is bounded by [`overrun`]. Records are kept until
+//!   their billed time has left the 30 days.
 //!   The acquire id is the pool and 128 random bits the caller gives in [`Input::entropy`].
 //!   A launch the provider told to wait is retried when its time comes, if the pool is
 //!   `Live` and every cap still holds.
@@ -98,7 +106,9 @@
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 #![forbid(unsafe_code)]
 
+mod budget;
 mod caps;
+mod go;
 mod input;
 mod pass;
 mod record;
@@ -115,11 +125,12 @@ use crate::caps::{check, choose};
 use crate::pass::{Pass, host_named};
 use crate::scale::Claims;
 
+pub use budget::{Budgets, Totals, overrun};
 pub use input::{
     AcquireResult, HostFacts, HostState, Input, Mark, PoolInput, ReleaseResult, Waiting,
 };
 pub use record::{
-    Cooldown, CooldownReason, OLDEST, Phase, Record, Records, RecordsError, StoredExec,
+    Cooldown, CooldownReason, Go, OLDEST, Phase, Record, Records, RecordsError, StoredExec,
     StoredOffer, VERSION,
 };
 pub use settings::{Blocked, Health, LaunchMode, Settings};
@@ -134,6 +145,7 @@ pub use time::Millis;
 pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>) {
     let before = state.records.clone();
     let mut pass = Pass::new(state, input, now);
+    pass.mark_go();
     for pool in &input.pools {
         pass.reconcile(pool);
     }
@@ -195,11 +207,17 @@ pub fn launchable(state: &State, input: &Input, now: Millis, demand: &Demand) ->
         let price = choose(settings, &pool.offers, demand, &[])
             .and_then(|offer| offer.price_cents_per_hour);
         let within = price.is_some_and(|price| {
-            check(settings, now, &state.records.instances, &[], &idle, price).is_ok()
+            let all = (state.records.instances.as_slice(), [].as_slice());
+            [
+                check(settings, now, &state.records.instances, &[], &idle, price).is_ok(),
+                budget::check(input, &state.records.go, settings, now, all, price).is_ok(),
+            ]
+            .into_iter()
+            .all(|ok| ok)
         });
         [
             pool.health == Health::Available,
-            settings.launch == LaunchMode::Live,
+            settings.mode(now) == LaunchMode::Live,
             within,
         ]
         .into_iter()
