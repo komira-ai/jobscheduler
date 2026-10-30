@@ -403,6 +403,11 @@ fn run_within(sim: &mut Sim, settings: &Settings, life: Duration) -> (u128, bool
 /// 2,880 without `max_age`. The test checks both the per-machine bound and the day's bound at
 /// every tick, that replacements were launched (so `max_age` acted) and that the cap refused
 /// launches (so the bound was approached).
+///
+/// The bound is fault-free: no release is refused or lost, no list fails and none lags in this
+/// test. The 4 ticks carry about 2 minutes of slack: the step's actual sequence is retire at
+/// 60, release mark at 61, release sent at 62, so a regression of one or two ticks in the
+/// retire path would not turn this test red.
 #[test]
 fn with_max_age_demand_that_never_pauses_bills_within_the_cap_plus_the_age_bound() {
     let settings = aged(60, 30);
@@ -431,6 +436,12 @@ fn with_max_age_demand_that_never_pauses_bills_within_the_cap_plus_the_age_bound
 /// any host the scaler has not marked; the test requires that some machine really outlived
 /// `max_age` plus four ticks (the lease held it), so the pinned bound is the lease's and not
 /// the age's.
+///
+/// Like the test above the bound is fault-free (no release refused or lost, no list failing
+/// or lagging). The simulation starts a lease the moment it is booked, so the registry's
+/// `prepare_timeout` is not modelled: the real worst case for a lease booked just before the
+/// retire is `max_age + max_lease_wall + prepare_timeout`, 60 + 50 + 10 = 120 minutes plus the
+/// ticks (125 here), still inside `Settings::lifetime` (160).
 #[test]
 fn with_max_age_and_leases_a_machine_lives_until_its_lease_ends_and_the_bill_follows() {
     let settings = aged(60, 50);

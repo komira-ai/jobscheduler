@@ -107,8 +107,10 @@ pub struct Sim {
     pub lost_unlanded: usize,
     /// When set, this many consumers always want a whole-node lease, each lasting `lease_wall`
     /// and renewed at once on a host the scaler has not marked; `waiting` is then what is
-    /// left unserved, and a host keeps its lease until it ends even after a retire mark. The
-    /// worst case of a lease booked just before the retire.
+    /// left unserved, and a host keeps its lease until it ends even after a retire mark. A
+    /// lease starts the moment it is booked, so the registry's `prepare_timeout` (a booked
+    /// lease that waits before its wall time starts) is not modelled: the real worst case of
+    /// a lease booked just before the retire is `max_age + max_lease_wall + prepare_timeout`.
     pub consumers: usize,
     /// The wall time of each lease of `consumers`; `None`: no leases are modelled.
     pub lease_wall: Option<Duration>,
