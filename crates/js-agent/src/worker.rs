@@ -93,7 +93,7 @@ use std::time::Duration;
 
 use js_agent_wire::{Command, HeartbeatReply, HeldRun, HeldState, RunResult, Taint};
 
-use crate::cli_runtime::{CALL_LIMIT, Settings};
+use crate::cli_runtime::{CALL_LIMIT, Pull, Settings};
 use crate::facts::Platform;
 use crate::integrity::Integrity;
 use crate::lifecycle::{Config, Event, Lifecycle, Status};
@@ -690,6 +690,9 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     // At start only: the rescue at the agent's end builds its runtime by `machine.runtime`
     // alone, so a firewall that has gone never keeps it from stopping the containers.
     runtime.check_egress().map_err(|why| why.to_string())?;
+    if settings.pull() == Pull::Missing && settings.pull_allow().is_empty() {
+        lines.push(PULL_ANY_REGISTRY.to_owned());
+    }
     let checks =
         Integrity::start(machine.view(), settings.uid(), watch)?.with_slots(settings.slot_ids(0).0);
     let (life, events) = Lifecycle::adopt(config, runtime, Box::new(checks), Box::new(clock))
@@ -709,6 +712,10 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     });
     Ok((life, collector, lines))
 }
+
+/// What `--container-pull missing` means without `--container-pull-allow`.
+const PULL_ANY_REGISTRY: &str = "pull: --container-pull missing without --container-pull-allow: \
+     the engine may pull a job's image from any registry the host can reach";
 
 /// Why the heartbeat carries no load.
 const NO_ACTIONS_CGROUP: &str =

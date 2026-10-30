@@ -214,7 +214,11 @@ impl Allow {
         }
     }
 
-    fn admits(&self, location: &Location) -> bool {
+    /// Whether a pin may name `location` under this entry: the same registry (host and
+    /// port, the host in lower case) and a repository that is the entry's prefix or lies
+    /// below it by whole path components.
+    #[must_use]
+    pub fn admits(&self, location: &Location) -> bool {
         let path = location.repository();
         let under = path
             .strip_prefix(self.prefix.as_str())

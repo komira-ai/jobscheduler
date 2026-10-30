@@ -171,6 +171,7 @@ use js_agent_wire::{Hello, Taint};
 use crate::FileReader;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
+use crate::pull_allow::PullAllow;
 
 pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, RunningLease, SLOTS, Slots};
 pub use mounts::{MountError, MountRoots};
@@ -503,6 +504,9 @@ pub struct Config {
     pub state: StateRoot,
     /// How long a container gets to stop on its own before it is killed.
     pub stop_grace: Duration,
+    /// Where a contained job's image may come from; a start that names another is refused
+    /// (`invalid-image`) before anything is created. Empty admits every image.
+    pub pull_allow: PullAllow,
 }
 
 /// The flags that configure jobs, checked.
@@ -595,6 +599,7 @@ impl Local {
                 user: cli.container_user.as_deref(),
                 host: cli.container_host.as_deref(),
                 pull: cli.container_pull.as_deref(),
+                pull_allow: &cli.container_pull_allow,
                 tmp_size: cli.container_tmp_size.as_deref(),
                 add_hosts: &cli.container_add_host,
                 egress_allow: &cli.container_egress_allow,

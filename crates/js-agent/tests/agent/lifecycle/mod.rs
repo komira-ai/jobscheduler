@@ -14,6 +14,7 @@ mod flags;
 mod logs;
 mod mounts;
 mod owed;
+mod pull_allow;
 mod reach;
 mod results;
 mod rules;
@@ -188,6 +189,7 @@ pub fn config_in(dir: &Scratch, allow_host_jobs: bool) -> Config {
         files: Some(FilesRoot::open(&dir.path("files")).unwrap()),
         state: StateRoot::open(&state).unwrap(),
         stop_grace: GRACE,
+        pull_allow: Default::default(),
     }
 }
 

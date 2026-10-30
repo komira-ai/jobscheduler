@@ -13,6 +13,7 @@ mod ends;
 mod exclusive;
 pub mod fake;
 mod files_flags;
+mod pull_allow;
 mod quiesce;
 mod session;
 mod system;
@@ -87,6 +88,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         files: Some(FilesRoot::open(&private(dir, "files")).unwrap()),
         state: StateRoot::open(&private(dir, "state")).unwrap(),
         stop_grace: Duration::from_secs(1),
+        pull_allow: Default::default(),
     };
     Plan {
         config,

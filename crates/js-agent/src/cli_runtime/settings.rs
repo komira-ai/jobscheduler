@@ -7,6 +7,7 @@ use std::sync::{Arc, OnceLock};
 
 use super::subid::{JobUsers, Mapping, RANGE_LEN};
 use crate::lifecycle::SLOTS;
+use crate::pull_allow::{EntryError, PullAllow};
 
 use super::egress::{ALLOW_MAX as EGRESS_MAX, Allow, DEFAULT_NFT, Egress};
 
@@ -114,6 +115,10 @@ pub enum SettingsError {
     /// `--container-pull` is neither `never` nor `missing`.
     #[error("--container-pull: not never or missing")]
     Pull,
+    /// `--container-pull-allow` has an entry that is not `HOST[:PORT]/NAMESPACE-PREFIX`, or
+    /// more than the most entries.
+    #[error("--container-pull-allow: {0}")]
+    PullAllow(EntryError),
     /// `--container-tmp-size` is not a number followed by `k`, `m` or `g`.
     #[error("--container-tmp-size: not a size such as 64m")]
     TmpSize,
@@ -187,6 +192,8 @@ pub struct Flags<'a> {
     pub host: Option<&'a str>,
     /// `--container-pull`.
     pub pull: Option<&'a str>,
+    /// `--container-pull-allow`, each `HOST[:PORT]/NAMESPACE-PREFIX`.
+    pub pull_allow: &'a [String],
     /// `--container-tmp-size`.
     pub tmp_size: Option<&'a str>,
     /// `--container-add-host`, each `<name>:<ip>`.
@@ -212,6 +219,7 @@ pub struct Settings {
     ids: (u32, u32),
     host: Option<String>,
     pull: Pull,
+    pull_allow: PullAllow,
     tmp_size: String,
     add_hosts: Vec<String>,
     egress: Option<Egress>,
@@ -250,6 +258,7 @@ impl Settings {
             ];
             let given = others.iter().any(Option::is_some)
                 || !flags.add_hosts.is_empty()
+                || !flags.pull_allow.is_empty()
                 || !flags.egress_allow.is_empty()
                 || flags.nft.is_some()
                 || flags.actions_cgroup.is_some();
@@ -261,6 +270,7 @@ impl Settings {
         Self::new(bin, flags.network, flags.user)?
             .with_host(flags.host)?
             .with_pull(flags.pull)?
+            .with_pull_allow(flags.pull_allow)?
             .with_tmp_size(flags.tmp_size)?
             .with_add_hosts(flags.add_hosts)?
             .with_egress(flags.egress_allow, flags.nft)?
@@ -300,6 +310,7 @@ impl Settings {
             ids,
             host: None,
             pull: Pull::Never,
+            pull_allow: PullAllow::default(),
             tmp_size: DEFAULT_TMP_SIZE.to_owned(),
             add_hosts: Vec::new(),
             egress: None,
@@ -328,6 +339,17 @@ impl Settings {
     pub fn with_pull(self, pull: Option<&str>) -> Result<Self, SettingsError> {
         let pull = pull.map_or(Ok(self.pull), Pull::parse)?;
         Ok(Self { pull, ..self })
+    }
+
+    /// The registries and namespaces a job's image may come from; none lets every image
+    /// through. It applies with either pull policy.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingsError::PullAllow`].
+    pub fn with_pull_allow(self, entries: &[String]) -> Result<Self, SettingsError> {
+        let pull_allow = PullAllow::parse(entries).map_err(SettingsError::PullAllow)?;
+        Ok(Self { pull_allow, ..self })
     }
 
     /// The size of `/tmp`, when one is given.
@@ -534,6 +556,11 @@ impl Settings {
     /// When images are pulled.
     pub fn pull(&self) -> Pull {
         self.pull
+    }
+
+    /// Where a job's image may come from.
+    pub fn pull_allow(&self) -> &PullAllow {
+        &self.pull_allow
     }
 
     /// The size limit of the containers' `/tmp`, as the tmpfs option takes it.

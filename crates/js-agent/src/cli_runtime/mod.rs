@@ -210,6 +210,11 @@
 //! `create`: it ends as `failed_to_start` (detail `runtime-failed`), and nothing is left
 //! behind.
 //!
+//! `--container-pull-allow` narrows where an image may come from, with either policy: the
+//! lifecycle refuses a start whose image is under no entry (`invalid-image`) before any
+//! call reaches this runtime. `--container-pull missing` without an entry lets the engine
+//! pull from any registry the host reaches, and the agent says so at start.
+//!
 //! # Calls that find the container gone
 //!
 //! The runner gives the agent no error text of the runtime (a failed call is its exit

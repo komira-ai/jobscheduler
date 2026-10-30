@@ -220,6 +220,17 @@ pub struct Cli {
     /// as `failed_to_start`. Needs `--container-bin`.
     #[arg(long, value_name = "never|missing")]
     pub container_pull: Option<String>,
+    /// A registry and namespace a job's image may come from, `HOST[:PORT]/NAMESPACE-PREFIX`
+    /// such as `ghcr.io/komira-ai/`; repeatable, at most 64. The prefix is whole path
+    /// components (`komira-ai/` admits `komira-ai/x`, not `komira-ai-evil/x`) and a bare
+    /// host is refused. With one or more, a job whose image is under none is refused at
+    /// admission (`invalid-image`) and nothing is created; with none every image is
+    /// admitted. A name is read as a pull reads it: a short name is on `docker.io`, and a
+    /// one-component name there is under `library/`. It applies with `--container-pull
+    /// never` too. With `--container-pull missing` and no entry the agent warns at start
+    /// that any reachable registry may be pulled. Needs `--container-bin`.
+    #[arg(long, value_name = "HOST[:PORT]/PREFIX")]
+    pub container_pull_allow: Vec<String>,
     /// The size of each container's `/tmp`, such as `64m` (the default) or `1g`. Needs
     /// `--container-bin`.
     #[arg(long, value_name = "SIZE")]

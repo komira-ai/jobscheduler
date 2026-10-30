@@ -11,6 +11,7 @@ use js_agent::cli_runtime::{
     SettingsError,
 };
 use js_agent::lifecycle::SLOTS;
+use js_agent::pull_allow::{EntryError, MAX_ENTRIES};
 
 use super::BIN;
 use crate::support::{Scratch, code, linux_host, run_scripted, welcome};
@@ -279,6 +280,43 @@ fn the_pull_policy_and_the_tmp_size() {
     assert_eq!(set().with_tmp_size(None).unwrap().tmp_size(), "64m");
 }
 
+/// Asserts that `--container-pull-allow` is checked with the other container flags: good
+/// entries are kept with either pull policy (`never` too), none is the default, and a bad
+/// entry or too many entries are refused naming the flag and the entry. It catches an
+/// entry that is accepted and then ignored, and a bare host that would admit every account.
+#[test]
+fn the_pull_allow_list_is_checked_with_either_pull_policy() {
+    let set = || Settings::new(bin(), None, None).unwrap();
+    assert!(set().pull_allow().is_empty());
+    assert!(set().with_pull_allow(&[]).unwrap().pull_allow().is_empty());
+    let entries = [
+        "ghcr.io/komira-ai/".to_owned(),
+        "registry.example:5000/t".to_owned(),
+    ];
+    for policy in ["never", "missing"] {
+        let ok = set()
+            .with_pull(Some(policy))
+            .unwrap()
+            .with_pull_allow(&entries)
+            .unwrap();
+        assert!(!ok.pull_allow().is_empty(), "{policy}");
+        assert!(ok.pull_allow().check("ghcr.io/komira-ai/x").is_ok());
+        assert!(ok.pull_allow().check("ghcr.io/other/x").is_err());
+    }
+    for bad in ["ghcr.io", "https://ghcr.io/x", "ghcr.io/Upper", ""] {
+        let said = set().with_pull_allow(&[bad.to_owned()]).unwrap_err();
+        assert_eq!(
+            said,
+            SettingsError::PullAllow(EntryError::Entry(bad.to_owned()))
+        );
+        let text = said.to_string();
+        assert!(text.starts_with("--container-pull-allow: "), "{text}");
+    }
+    let many = vec!["ghcr.io/komira-ai/".to_owned(); MAX_ENTRIES + 1];
+    let said = set().with_pull_allow(&many);
+    assert_eq!(said, Err(SettingsError::PullAllow(EntryError::Count)));
+}
+
 /// Asserts that without `--container-bin` there are no container settings, and that any
 /// container flag given alone is an error and not silently ignored; and that all the
 /// flags given with it make the settings. It catches a hardening flag that is accepted
@@ -301,6 +339,10 @@ fn network_and_user_need_the_runtime() {
         },
         Flags {
             pull: Some("never"),
+            ..Flags::default()
+        },
+        Flags {
+            pull_allow: &["ghcr.io/komira-ai/".to_owned()],
             ..Flags::default()
         },
         Flags {
@@ -339,6 +381,7 @@ fn network_and_user_need_the_runtime() {
             user: Some("1000:1000"),
             host: Some("unix:///run/engine.sock"),
             pull: Some("missing"),
+            pull_allow: &["ghcr.io/komira-ai/".to_owned()],
             tmp_size: Some("128m"),
             add_hosts: &["store.example:192.0.2.10".to_owned()],
             egress_allow: &["198.51.100.10:443".to_owned()],
@@ -353,6 +396,7 @@ fn network_and_user_need_the_runtime() {
     assert_eq!((on.network(), on.user()), ("jobs", "1000:1000"));
     assert_eq!(on.host(), Some("unix:///run/engine.sock"));
     assert_eq!((on.pull(), on.tmp_size()), (Pull::Missing, "128m"));
+    assert!(!on.pull_allow().is_empty());
     assert_eq!(on.add_hosts(), ["store.example:192.0.2.10"]);
     let egress = on.egress().unwrap();
     assert_eq!(egress.allow().len(), 1);
@@ -455,6 +499,10 @@ fn errors_name_their_flag() {
     starts(SettingsError::Host, "--container-host");
     starts(SettingsError::NoSubuid, "--container-subuid");
     starts(SettingsError::Pull, "--container-pull");
+    starts(
+        SettingsError::PullAllow(EntryError::Count),
+        "--container-pull-allow",
+    );
     starts(SettingsError::TmpSize, "--container-tmp-size");
     starts(SettingsError::AddHost, "--container-add-host");
     starts(SettingsError::AddHostCount, "--container-add-host");

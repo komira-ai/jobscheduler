@@ -326,6 +326,12 @@ impl Lifecycle {
                 "this agent runs no host jobs",
             ));
         }
+        if spec.isolation == Isolation::Contained {
+            self.config
+                .pull_allow
+                .check(&spec.image)
+                .map_err(|why| (refusal::INVALID_IMAGE, why.to_string()))?;
+        }
         if !spec.files.is_empty() && spec.isolation == Isolation::Host {
             return Err(no(
                 detail::FILES_NEED_CONTAINER,
