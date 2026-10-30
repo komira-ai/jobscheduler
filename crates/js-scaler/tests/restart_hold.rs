@@ -114,9 +114,9 @@ fn a_condemned_or_released_machine_covers_nothing() {
     assert!(acquires(&rig.tick(at(0))).is_empty());
     // The provider says the machine is gone: it is gone.
     rig.input.not_found = vec!["js-made-0-60".to_owned()];
-    rig.tick(at(MINUTE));
+    let actions = rig.tick(at(MINUTE));
     assert_eq!(rig.phase(0), Phase::Gone);
-    assert_eq!(acquires(&rig.tick(at(2 * MINUTE))).len(), 1);
+    assert_eq!(acquires(&actions).len(), 1);
 }
 
 /// Asserts that a scaler that did not start from records is unchanged: a registered
