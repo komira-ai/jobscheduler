@@ -56,7 +56,10 @@ enum Step {
 ///
 /// An entry that vanishes once the walk is underway (listed, then removed by someone
 /// else before the walk reaches it) is already removed, not a failure. An entry that
-/// appears (`ENOTEMPTY`) is one.
+/// appears (`ENOTEMPTY`) is one. An entry another process renames out of the tree
+/// during the walk (same filesystem only) is gone from it too, so the walk succeeds
+/// while that entry lives on where it was moved: the tree is removed, not every byte
+/// that was once in it.
 pub fn remove_tree(dir: &Path) -> std::io::Result<()> {
     remove_tree_with(dir, &mut |_, _, _| {})
 }
