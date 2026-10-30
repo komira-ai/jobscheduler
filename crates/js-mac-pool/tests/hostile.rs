@@ -1,13 +1,18 @@
 //! Hostile input: paths and port lists that must be refused, and paths that look like
 //! profile syntax and must not change the profile.
 
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+mod common;
 
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::io::ErrorKind;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+
+use common::{Scratch, path, tree};
 use js_mac_pool::seatbelt::{
-    AbsPath, Caps, MAX_PATH_BYTES, MAX_PORTS, Net, PathError, Policy, Ports, PortsError, Profile,
-    ReadModel, SlotLayout,
+    AbsPath, BUNDLE_PREFIX, Caps, MAX_PATH_BYTES, MAX_PORTS, Net, PathError, PinnedTree, Policy,
+    Ports, PortsError, Profile, ReadModel, SlotLayout, ToolError, ToolPath, check_path_dirs,
 };
 
 #[test]
@@ -149,4 +154,227 @@ fn port_lists_that_are_empty_zero_or_too_long_are_refused() {
 fn a_port_list_keeps_each_port_once_lowest_first() {
     let ports = Ports::new(&[9000, 80, 9000, 443]).expect("ports");
     assert_eq!(ports.iter().collect::<Vec<u16>>(), [80, 443, 9000]);
+}
+
+#[test]
+fn a_child_is_one_more_normal_component() {
+    let base = path("/Volumes/work/run");
+    assert_eq!(
+        base.child("stub.c").expect("child").as_str(),
+        "/Volumes/work/run/stub.c"
+    );
+    let table = [
+        ("", PathError::NotNormal),
+        (".", PathError::NotNormal),
+        ("..", PathError::NotNormal),
+        ("a/b", PathError::NotNormal),
+        ("/etc", PathError::NotNormal),
+        ("a\nb", PathError::Control),
+    ];
+    for (name, expected) in table {
+        assert_eq!(base.child(name), Err(expected), "{name:?}");
+    }
+}
+
+#[test]
+fn under_is_by_whole_components() {
+    let dir = path("/Volumes/work/store");
+    assert!(dir.starts_with(&dir));
+    assert!(path("/Volumes/work/store/v1/x").starts_with(&dir));
+    assert!(!path("/Volumes/work/store2/x").starts_with(&dir));
+    assert!(!path("/Volumes/work").starts_with(&dir));
+}
+
+/// A store with a pinned tree and an unpinned one, and the entrypoints of a bundle that
+/// holds a good one and the hostile shapes of 5.4.
+struct Bundle {
+    scratch: Scratch,
+    pinned: Vec<PinnedTree>,
+    entrypoints: BTreeMap<String, PathBuf>,
+}
+
+fn bundle() -> Bundle {
+    let scratch = Scratch::new("tool");
+    let store = scratch.abs("store");
+    let pinned = PinnedTree::new(&store, &common::diff_id('a')).expect("pinned");
+    let other = PinnedTree::new(&store, &common::diff_id('b')).expect("other");
+    let mine = PathBuf::from(pinned.path().as_str());
+    let theirs = PathBuf::from(other.path().as_str());
+    for dir in [&mine, &theirs] {
+        std::fs::create_dir_all(dir.join("bin")).expect("tree");
+        std::fs::write(dir.join("bin/tool"), "#!/bin/sh\n").expect("tool");
+    }
+    std::os::unix::fs::symlink(mine.join("bin/tool"), mine.join("bin/link")).expect("link");
+    std::os::unix::fs::symlink(theirs.join("bin"), mine.join("escape")).expect("escape");
+    let mut entrypoints = BTreeMap::new();
+    for (name, target) in [
+        ("tool", mine.join("bin/tool")),
+        ("other", theirs.join("bin/tool")),
+        ("link", mine.join("bin/link")),
+        ("dir", mine.join("bin")),
+        ("gone", mine.join("bin/gone")),
+        ("out", mine.join("escape/tool")),
+        ("relative", PathBuf::from("bin/tool")),
+    ] {
+        entrypoints.insert(name.to_owned(), target);
+    }
+    Bundle {
+        scratch,
+        pinned: vec![pinned],
+        entrypoints,
+    }
+}
+
+#[test]
+fn a_program_is_an_entrypoint_that_is_a_regular_file_of_a_pinned_tree() {
+    let b = bundle();
+    let tool = ToolPath::from_entrypoint("@bundle/tool", &b.entrypoints, &b.pinned).expect("tool");
+    assert_eq!(
+        tool.path().as_str(),
+        b.entrypoints["tool"].to_str().unwrap()
+    );
+    assert_eq!(BUNDLE_PREFIX, "@bundle/");
+    let _ = &b.scratch;
+}
+
+#[test]
+fn programs_that_are_not_pinned_regular_entrypoints_are_refused() {
+    let b = bundle();
+    let other = b.entrypoints["other"].to_str().unwrap().to_owned();
+    let table: [(&str, ToolError); 12] = [
+        ("tool", ToolError::NotBundleRef("tool".to_owned())),
+        (
+            "/usr/bin/cc",
+            ToolError::NotBundleRef("/usr/bin/cc".to_owned()),
+        ),
+        ("@bundle", ToolError::NotBundleRef("@bundle".to_owned())),
+        ("@bundle/", ToolError::NoSuchEntrypoint(String::new())),
+        (
+            "@bundle/missing",
+            ToolError::NoSuchEntrypoint("missing".to_owned()),
+        ),
+        (
+            "@bundle/../tool",
+            ToolError::NoSuchEntrypoint("../tool".to_owned()),
+        ),
+        (
+            "@bundle/relative",
+            ToolError::BadPath(PathError::NotAbsolute),
+        ),
+        ("@bundle/other", ToolError::UnpinnedTree(other)),
+        ("@bundle/link", ToolError::Symlink),
+        ("@bundle/dir", ToolError::NotRegular),
+        ("@bundle/gone", ToolError::Unreadable(ErrorKind::NotFound)),
+        ("@bundle/out", ToolError::LeavesTree),
+    ];
+    for (program, expected) in table {
+        assert_eq!(
+            ToolPath::from_entrypoint(program, &b.entrypoints, &b.pinned),
+            Err(expected),
+            "{program:?}"
+        );
+    }
+}
+
+#[test]
+fn with_no_tree_pinned_no_entrypoint_is_a_program() {
+    let b = bundle();
+    let none: [PinnedTree; 0] = [];
+    assert!(matches!(
+        ToolPath::from_entrypoint("@bundle/tool", &b.entrypoints, &none),
+        Err(ToolError::UnpinnedTree(_))
+    ));
+    let elsewhere = [tree("/Volumes/work/store", 'a')];
+    assert!(matches!(
+        ToolPath::from_entrypoint("@bundle/tool", &b.entrypoints, &elsewhere),
+        Err(ToolError::UnpinnedTree(_))
+    ));
+}
+
+#[test]
+fn a_path_directory_must_be_an_absolute_real_directory() {
+    let scratch = Scratch::new("path-dirs");
+    let real = scratch.dir("real");
+    let file = scratch.file("file", "");
+    let link = scratch.root.join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    let env = |value: &str| vec![("PATH".to_owned(), value.to_owned())];
+    let text = |p: &Path| p.to_str().unwrap().to_owned();
+    assert_eq!(check_path_dirs(&env(&text(&real))), Ok(()));
+    assert_eq!(
+        check_path_dirs(&env(&format!("{}:{}", text(&real), text(&real)))),
+        Ok(())
+    );
+    assert_eq!(check_path_dirs(&[]), Ok(()));
+    assert_eq!(
+        check_path_dirs(&[("HOME".to_owned(), "relative".to_owned())]),
+        Ok(())
+    );
+    let bad = [
+        (text(&link), ToolError::PathEntrySymlink(text(&link))),
+        (text(&file), ToolError::PathEntryNotDir(text(&file))),
+        (
+            format!("{}:{}", text(&real), text(&link)),
+            ToolError::PathEntrySymlink(text(&link)),
+        ),
+        (
+            text(&scratch.root.join("missing")),
+            ToolError::Unreadable(ErrorKind::NotFound),
+        ),
+        ("bin".to_owned(), ToolError::BadPath(PathError::NotAbsolute)),
+        (String::new(), ToolError::BadPath(PathError::NotAbsolute)),
+        (
+            format!("{}:", text(&real)),
+            ToolError::BadPath(PathError::NotAbsolute),
+        ),
+    ];
+    for (value, expected) in bad {
+        assert_eq!(check_path_dirs(&env(&value)), Err(expected), "{value:?}");
+    }
+}
+
+#[test]
+fn every_tool_error_says_what_is_wrong() {
+    let table = [
+        (
+            ToolError::NotBundleRef("x".to_owned()),
+            "program \"x\" is not an @bundle/ entrypoint",
+        ),
+        (
+            ToolError::NoSuchEntrypoint("x".to_owned()),
+            "the bundle has no entrypoint \"x\"",
+        ),
+        (
+            ToolError::BadPath(PathError::Root),
+            "path is not accepted: path is the root directory",
+        ),
+        (
+            ToolError::UnpinnedTree("/a".to_owned()),
+            "/a is not under a pinned tree",
+        ),
+        (
+            ToolError::Unreadable(ErrorKind::NotFound),
+            "cannot examine the path: NotFound",
+        ),
+        (ToolError::Symlink, "the entrypoint is a symbolic link"),
+        (
+            ToolError::NotRegular,
+            "the entrypoint is not a regular file",
+        ),
+        (
+            ToolError::LeavesTree,
+            "the entrypoint resolves outside its tree",
+        ),
+        (
+            ToolError::PathEntrySymlink("/p".to_owned()),
+            "PATH entry \"/p\" is a symbolic link",
+        ),
+        (
+            ToolError::PathEntryNotDir("/p".to_owned()),
+            "PATH entry \"/p\" is not a directory",
+        ),
+    ];
+    for (error, text) in table {
+        assert_eq!(error.to_string(), text);
+    }
 }

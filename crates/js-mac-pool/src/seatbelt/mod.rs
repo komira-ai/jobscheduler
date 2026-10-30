@@ -17,6 +17,19 @@
 //!   network, drops a grant or adds a deny.
 //! - The floor is a private constant emitted after every other rule.
 //!
+//! The allow-list read model ([`ReadModel::Allow`]) differs in the read section only:
+//!
+//! - Reads are denied, then granted: the base set of one macOS major version
+//!   ([`MacosMajor`]; a version without a golden has no profile), the run's own places,
+//!   and the [`ReadGrant`]s of [`Policy::allowing`]. A grant is made of a proof object
+//!   (a [`PinnedTree`], a ready [`HostXcode`](crate::xcode::HostXcode), a kind of the
+//!   closed vocabulary), so a caller cannot name a path, and no directory-wide grant
+//!   exists ([`is_directory_wide`]).
+//! - [`Policy::allowing`] takes an [`Assurance`], which only a passing start-up
+//!   [`SelfTest`] on the running host makes: the profile is the security property under
+//!   this model and is only as right as it is for the macOS build that runs it.
+//! - A program of a bundle is a [`ToolPath`], made from an entrypoint of a pinned tree.
+//!
 //! What it does not do:
 //!
 //! - `(deny process-info* (target others))` is in the profile as defence in depth but
@@ -38,12 +51,23 @@
 //! - It starts nothing; applying the profile is the caller's `exec` of
 //!   [`Profile::argv`].
 
+mod allow;
+mod grant;
 mod net;
 mod path;
 mod policy;
 mod profile;
+mod selftest;
+mod tool;
 
+pub use allow::{BaseSet, MacosMajor};
+pub use grant::{Match, PinnedTree, ReadGrant, is_directory_wide, kind_rules};
 pub use net::{MAX_PORTS, Net, Ports, PortsError};
 pub use path::{AbsPath, MAX_PATH_BYTES, PathError};
 pub use policy::{Caps, MAX_LISTED, Narrowing, Policy, PolicyError, ReadModel, SlotLayout};
 pub use profile::{BuildError, Profile, SANDBOX_EXEC};
+pub use selftest::{
+    Assurance, Canaries, Class, Failure, Fixture, Role, SETUID_CANARY, STUB_OUTPUT, STUB_SOURCE,
+    SelfTest, SelfTestError, Step, Why,
+};
+pub use tool::{BUNDLE_PREFIX, ToolError, ToolPath, check_path_dirs};

@@ -3,8 +3,8 @@
 use std::ffi::OsString;
 
 use js_mac_pool::seatbelt::{
-    AbsPath, BuildError, Caps, MAX_LISTED, Narrowing, Net, Policy, PolicyError, Ports, Profile,
-    ReadModel, SANDBOX_EXEC, SlotLayout,
+    AbsPath, Caps, MAX_LISTED, Narrowing, Net, Policy, PolicyError, Ports, Profile, ReadModel,
+    SANDBOX_EXEC, SlotLayout,
 };
 
 fn path(text: &str) -> AbsPath {
@@ -94,18 +94,6 @@ fn a_profile_without_the_user_folder_grant_or_lists_matches_its_golden() {
         })
         .unwrap();
     assert_eq!(text_of(&narrowed), include_str!("goldens/open_off_bare.sb"));
-}
-
-#[test]
-fn the_allow_read_model_is_refused_not_run_as_open() {
-    let mut allow = caps(Net::Off);
-    allow.read_model = ReadModel::Allow;
-    let policy = Policy::base(layout(), allow).unwrap();
-    assert_eq!(policy.read_model(), ReadModel::Allow);
-    assert_eq!(
-        Profile::for_policy(&policy),
-        Err(BuildError::ReadModelUnavailable)
-    );
 }
 
 #[test]

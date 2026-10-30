@@ -1186,6 +1186,7 @@ dependencies = [
 name = "js-mac-pool"
 version = "0.1.0"
 dependencies = [
+ "js-bundle",
  "thiserror",
 ]
 
