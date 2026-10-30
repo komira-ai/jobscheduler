@@ -38,8 +38,13 @@ pub struct Spy {
 
 impl Spy {
     pub fn new() -> Self {
+        Self::over(FakeQuota::new())
+    }
+
+    /// A spy over `inner`.
+    pub fn over(inner: FakeQuota) -> Self {
         Self {
-            inner: FakeQuota::new(),
+            inner,
             seen: Mutex::default(),
             applied: Mutex::default(),
         }
@@ -528,6 +533,11 @@ fn the_flags_set_the_default_and_the_inode_limit_of_every_run() {
         let fake = Arc::new(FakeQuota::new());
         let quota = local.run_quota(fake.clone());
         assert_eq!(quota.default_disk_bytes(), gib * GIB);
+        let shown = format!("{quota:?}");
+        assert!(
+            shown.contains(&format!("default_disk_bytes: {}", gib * GIB)),
+            "{shown}"
+        );
         assert_eq!(quota.max_inodes(), inodes);
 
         let mut h = Harness::new("quota-flags-run");
@@ -569,4 +579,39 @@ fn without_a_quota_a_run_books_no_default_and_no_call_is_made() {
         names(&h.life.step()),
         [vec!["result r1".to_owned()], cleanup("r1")].concat()
     );
+}
+
+/// Asserts what a quota whose usage cannot be read does (the file system lost its quota after
+/// the start): a restart reports once that leftovers are not cleared and stops looking, and a
+/// run is refused `scratch-failed` (not `no-capacity`: the host is at fault, not the slot's
+/// files), with nothing created and its slot parked. It catches a run started with nothing
+/// known about what its project holds, and a restart that goes on reading 4096 failing
+/// slots.
+#[test]
+fn a_quota_that_cannot_read_usage_refuses_runs_and_parks_the_slot() {
+    let spy = Arc::new(Spy::over(FakeQuota::unsupported(
+        "the file system lost its quota",
+    )));
+    let options = Options {
+        quota: Some(spy.clone()),
+        ..Options::default()
+    };
+    let mut h = Harness::with("quota-unreadable", options);
+    let events = h.restart().unwrap();
+    assert_eq!(names(&events), ["finding - quota-slot-busy"]);
+    let js_agent::lifecycle::Event::Finding(found) = &events[0] else {
+        panic!("not a finding");
+    };
+    assert!(
+        found.message.contains("cannot be read") && found.message.contains("lost its quota"),
+        "{}",
+        found.message
+    );
+    assert_eq!(
+        names(&h.start(job("r1"))),
+        ["finding r1 quota-slot-busy", "refused r1 scratch-failed"]
+    );
+    assert!(h.fake.created().is_empty());
+    assert!(!h.scratch_of("r1").exists());
+    assert_eq!(h.life.parked_slots(), [0]);
 }
