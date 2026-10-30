@@ -343,7 +343,30 @@ impl Far {
         }
         // The far host has no route to the jobs' addresses (the host masquerades) nor to
         // the IPv6 networks the jobs invent, except what the test adds.
-        ip_args(&["route", "add", "169.254.169.254/32", "via", "192.0.2.2"]);
+        // Only what comes in from a job's link goes there: the runner's own agents talk to the
+        // real metadata address, and a route for them would count as a connection of a job.
+        let _ = run(&ip, &["rule", "del", "pref", "4242"]);
+        ip_args(&[
+            "rule",
+            "add",
+            "pref",
+            "4242",
+            "iif",
+            "jsv0",
+            "to",
+            "169.254.169.254/32",
+            "lookup",
+            "4242",
+        ]);
+        ip_args(&[
+            "route",
+            "add",
+            "169.254.169.254/32",
+            "via",
+            "192.0.2.2",
+            "table",
+            "4242",
+        ]);
         sysctl("net/ipv6/conf/all/forwarding", "1");
         let ns = File::open(format!("/run/netns/{FAR_NS}")).expect("open the far namespace");
         Self { ns }
@@ -366,6 +389,8 @@ impl Drop for Far {
         let ip = tool("ip");
         let _ = run(&ip, &["netns", "del", FAR_NS]);
         let _ = run(&ip, &["link", "del", "vfar0"]);
+        let _ = run(&ip, &["rule", "del", "pref", "4242"]);
+        let _ = run(&ip, &["route", "flush", "table", "4242"]);
     }
 }
 
