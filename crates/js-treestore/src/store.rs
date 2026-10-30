@@ -324,7 +324,7 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
 
     fn write_record(&self, diff_id: &DiffId, record: &Record) -> Result<(), Error> {
         let final_path = self.record_path(diff_id);
-        let temp = final_path.with_extension("tmp");
+        let temp = self.unique("tmp", "record");
         let mut file = File::create(&temp).map_err(ctx("create record"))?;
         file.write_all(&record.to_bytes())
             .map_err(ctx("write record"))?;
