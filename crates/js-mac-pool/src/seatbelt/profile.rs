@@ -12,23 +12,17 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// Lines before every grant: allow everything, then take away what a run gets back only
 /// narrowly. `job-creation` and `lsopen` are also in the floor: launchd refuses a job from
 /// a sandboxed process regardless, and Launch Services would start an application outside
-/// the sandbox. The IPC classes are denied because a user's System V and POSIX shared
-/// memory and semaphores outlive its processes: a later run on the same uid (the helper
-/// reuses uids) would find the earlier run's.
-const HEAD: [&str; 13] = [
+/// the sandbox.
+/// IPC is not denied: on a hosted runner `(deny ipc-sysv-shm)` did not stop `shmget`, so
+/// no rule is claimed. A System V or POSIX object of a user outlives its processes, and the
+/// helper reuses uids; the privileged tests measure what a reused uid finds.
+const HEAD: [&str; 6] = [
     "(version 1)",
     "(allow default)",
     "(deny file-write*)",
     "(deny job-creation)",
     "(deny lsopen)",
     "(deny user-preference-write)",
-    "(deny ipc-sysv-shm)",
-    "(deny ipc-sysv-sem)",
-    "(deny ipc-sysv-msg)",
-    "(deny ipc-posix-sem)",
-    "(deny ipc-posix-shm-write-create)",
-    "(deny ipc-posix-shm-write-data)",
-    "(deny ipc-posix-shm-write-unlink)",
 ];
 
 /// Process visibility. Measured on a hosted runner: with this rule, with narrower ones
