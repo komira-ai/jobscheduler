@@ -165,6 +165,9 @@ pub struct CrunHost {
     pub self_cgroup: PathBuf,
     /// The directories `newuidmap` and `newgidmap` are looked for in.
     pub id_tool_dirs: Vec<PathBuf>,
+    /// The uid that must own the state root and the scratch root: root on a machine (a test
+    /// names the uid it runs as).
+    pub owner_uid: u32,
 }
 
 impl CrunHost {
@@ -180,6 +183,7 @@ impl CrunHost {
             id_tool_dirs: ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
                 .map(PathBuf::from)
                 .into(),
+            owner_uid: 0,
         }
     }
 }
@@ -201,17 +205,50 @@ pub struct Request<'a> {
 #[must_use]
 pub fn check(request: &Request<'_>, host: &CrunHost, commands: &dyn CommandRunner) -> Report {
     let mut report = Report::default();
-    crun(request.crun, commands, &mut report);
-    id_tools(host, &mut report);
+    // The programs run as the job user, so what that user can reach decides them.
+    let ids = std::fs::read_to_string(&host.ids.passwd)
+        .ok()
+        .and_then(|text| passwd_ids(&text, request.job_user));
+    crun(request.crun, ids, commands, &mut report);
+    id_tools(host, ids, &mut report);
     job_user(request.job_user, host, &mut report);
-    state_root(request.state_root, &mut report);
-    scratch_root(request.scratch_root, &mut report);
+    state_root(request.state_root, host.owner_uid, &mut report);
+    scratch_root(request.scratch_root, host.owner_uid, ids, &mut report);
     cgroups(host, &mut report);
     apparmor(request.crun, host, &mut report);
     report
 }
 
-fn crun(path: &Path, commands: &dyn CommandRunner, report: &mut Report) {
+/// Whether the user `ids` (uid, gid; `None` when the account is unknown, so only the bits for
+/// others count) holds `bit` (4, 2 or 1) on a file of owner `uid`, group `gid` and `mode`:
+/// the owner's bits when the user owns it, else the group's when the user's group is the
+/// file's, else the others'.
+fn holds(meta: &std::fs::Metadata, ids: Option<(u32, u32)>, bit: u32) -> bool {
+    let (uid, gid) = ids.unwrap_or((u32::MAX, u32::MAX));
+    let mode = meta.mode();
+    let class = if meta.uid() == uid {
+        mode >> 6
+    } else if meta.gid() == gid {
+        mode >> 3
+    } else {
+        mode
+    };
+    class & bit != 0
+}
+
+/// The first directory above `path` (its resolved form) that the user cannot search.
+fn unsearchable_ancestor(path: &Path, ids: Option<(u32, u32)>) -> Option<PathBuf> {
+    // The path was just looked at; one that cannot be resolved now is searched as given.
+    let canonical = std::fs::canonicalize(path).unwrap_or(path.to_owned());
+    canonical
+        .ancestors()
+        .skip(1)
+        // A directory that cannot be looked at cannot be searched either.
+        .find(|ancestor| !std::fs::metadata(ancestor).is_ok_and(|meta| holds(&meta, ids, 1)))
+        .map(Path::to_owned)
+}
+
+fn crun(path: &Path, ids: Option<(u32, u32)>, commands: &dyn CommandRunner, report: &mut Report) {
     let at = path.display();
     let fix = format!(
         "install crun {}.{} or newer (package `crun`)",
@@ -233,15 +270,26 @@ fn crun(path: &Path, commands: &dyn CommandRunner, report: &mut Report) {
             report.miss(Piece::Crun, &format!("{at} is not a regular file"), &fix);
             return;
         }
-        Ok(meta) if meta.permissions().mode() & 0o111 == 0 => {
+        Ok(meta) if !holds(&meta, ids, 1) => {
             report.miss(
                 Piece::Crun,
-                &format!("{at} is not executable"),
-                &format!("chmod +x {at}"),
+                &format!("{at} is not executable by the job user (the agent runs it as that user)"),
+                &format!("chmod o+x {at}"),
             );
             return;
         }
         Ok(_) => {}
+    }
+    if let Some(dir) = unsearchable_ancestor(path, ids) {
+        report.miss(
+            Piece::Crun,
+            &format!(
+                "{} is not searchable by the job user, so it cannot run {at}",
+                dir.display()
+            ),
+            &format!("chmod o+x {}", dir.display()),
+        );
+        return;
     }
     let text = match commands.run(&at.to_string(), &["--version"]) {
         Ok(text) => text,
@@ -284,7 +332,7 @@ fn version(line: &str) -> Option<(u64, u64)> {
     Some((major, minor))
 }
 
-fn id_tools(host: &CrunHost, report: &mut Report) {
+fn id_tools(host: &CrunHost, ids: Option<(u32, u32)>, report: &mut Report) {
     for tool in ID_TOOLS {
         let piece = if tool == "newuidmap" {
             Piece::NewUidMap
@@ -301,12 +349,22 @@ fn id_tools(host: &CrunHost, report: &mut Report) {
             report.miss(piece, "not found in the system program directories", fix);
             continue;
         };
-        let mode = std::fs::metadata(&found).map_or(0, |meta| meta.permissions().mode());
-        if mode & 0o111 == 0 {
+        let Ok(meta) = std::fs::metadata(&found) else {
+            report.miss(piece, &format!("{} cannot be read", found.display()), fix);
+            continue;
+        };
+        let mode = meta.permissions().mode();
+        if !holds(&meta, ids, 1) {
             report.miss(
                 piece,
-                &format!("{} is not executable", found.display()),
+                &format!("{} is not executable by the job user", found.display()),
                 fix,
+            );
+        } else if let Some(dir) = unsearchable_ancestor(&found, ids) {
+            report.miss(
+                piece,
+                &format!("{} is not searchable by the job user", dir.display()),
+                &format!("chmod o+x {}", dir.display()),
             );
         } else if !((mode & 0o4000 != 0) | has_file_capabilities(&found)) {
             report.miss(
@@ -408,10 +466,10 @@ fn job_user(name: &str, host: &CrunHost, report: &mut Report) {
     }
 }
 
-fn state_root(path: &Path, report: &mut Report) {
+fn state_root(path: &Path, owner: u32, report: &mut Report) {
     let at = path.display();
     let fix = format!(
-        "mkdir {at}; chmod 0700 {at}: the taint marker and the host credential are the agent's alone"
+        "mkdir {at}; chown root:root {at}; chmod 0700 {at}: the taint marker and the host credential are the agent's alone"
     );
     match std::fs::symlink_metadata(path) {
         Err(why) => report.miss(Piece::StateRoot, &format!("{at}: {why}"), &fix),
@@ -431,11 +489,19 @@ fn state_root(path: &Path, report: &mut Report) {
             ),
             &fix,
         ),
+        Ok(meta) if meta.uid() != owner => report.miss(
+            Piece::StateRoot,
+            &format!(
+                "{at} is owned by uid {}, not root (uid {owner})",
+                meta.uid()
+            ),
+            &fix,
+        ),
         Ok(_) => {}
     }
 }
 
-fn scratch_root(path: &Path, report: &mut Report) {
+fn scratch_root(path: &Path, owner: u32, ids: Option<(u32, u32)>, report: &mut Report) {
     let at = path.display();
     match std::fs::symlink_metadata(path) {
         Err(why) => {
@@ -463,18 +529,27 @@ fn scratch_root(path: &Path, report: &mut Report) {
             ),
             &format!("chmod 0711 {at}"),
         ),
+        Ok(meta) if meta.uid() != owner => report.miss(
+            Piece::ScratchRoot,
+            &format!(
+                "{at} is owned by uid {}, not root (uid {owner})",
+                meta.uid()
+            ),
+            &format!("chown root:root {at}"),
+        ),
         Ok(_) => {}
     }
-    // The path was just looked at; one that cannot be resolved now is searched as given.
-    let canonical = std::fs::canonicalize(path).unwrap_or(path.to_owned());
-    for ancestor in canonical.ancestors().skip(1) {
-        // A directory that cannot be looked at cannot be searched either.
-        let searchable = std::fs::metadata(ancestor).is_ok_and(|meta| meta.mode() & 0o001 != 0);
+    for ancestor in std::fs::canonicalize(path)
+        .unwrap_or(path.to_owned())
+        .ancestors()
+        .skip(1)
+    {
+        let searchable = std::fs::metadata(ancestor).is_ok_and(|meta| holds(&meta, ids, 1));
         if !searchable {
             report.miss(
                 Piece::SearchableAncestor,
                 &format!(
-                    "{} is not searchable by others: the job's ids could not reach the scratch root below it",
+                    "{} is not searchable by the job user: the job's ids could not reach the scratch root below it",
                     ancestor.display()
                 ),
                 &format!("chmod o+x {} (for the unit's state directory: StateDirectoryMode=0711)", ancestor.display()));
@@ -482,6 +557,16 @@ fn scratch_root(path: &Path, report: &mut Report) {
     }
 }
 
+/// The agent's own cgroup must offer the controllers a lease's limits are made of.
+///
+/// This is the check that can be made before the runtime exists, and it is not a proof that
+/// `cgroup.subtree_control` can be enabled: the runtime (`crun/mod.rs`) does not move the
+/// agent into a leaf cgroup and does not enable `subtree_control` on the agent's own cgroup
+/// (it writes `+cpu +memory +pids` only in the new `<actions>/helpers` and in each lease's
+/// cgroup, which needs the controllers in `<actions>`'s own `subtree_control`). A cgroup that
+/// holds the agent cannot enable controllers for children (the no-internal-process rule), so
+/// the cgroup `<actions>` the wiring names must be one the operator or the unit has set up;
+/// that is the wiring's to check, where `<actions>` is known.
 fn cgroups(host: &CrunHost, report: &mut Report) {
     let fix = "run the agent from a systemd unit with Delegate=yes on a host with cgroup version 2 (unified hierarchy)";
     let own = match std::fs::read_to_string(&host.self_cgroup) {
@@ -545,7 +630,7 @@ fn apparmor(crun: &Path, host: &CrunHost, report: &mut Report) {
     if switch.trim() != "1" {
         return;
     }
-    let fix = "install the package `apparmor` profile for crun (/etc/apparmor.d/crun, package `crun` or `apparmor-profiles`) and load it: apparmor_parser -r /etc/apparmor.d/crun";
+    let fix = "install the package `apparmor`, which ships the profile for crun on Ubuntu 24.04 (/etc/apparmor.d/crun; other distributions: their apparmor profiles), and load it: apparmor_parser -r /etc/apparmor.d/crun";
     let profiles = match std::fs::read_to_string(&host.apparmor_profiles) {
         Ok(text) => text,
         Err(why) => {
@@ -561,14 +646,17 @@ fn apparmor(crun: &Path, host: &CrunHost, report: &mut Report) {
     };
     // A profile that names the program's path covers any path; the distribution's `crun`
     // profile (attached to /usr/bin/crun) covers that path only.
+    // The kernel attaches by the resolved path, so a link is looked through.
+    let resolved = std::fs::canonicalize(crun).unwrap_or(crun.to_owned());
     let named = |name: &str| profiles.lines().any(|line| profile_name(line) == name);
-    let loaded =
-        named(&crun.display().to_string()) || (crun == Path::new(DISTRO_CRUN) && named("crun"));
+    let loaded = named(&resolved.display().to_string())
+        || (resolved == Path::new(DISTRO_CRUN) && named("crun"));
     if !loaded {
         report.miss(
             Piece::AppArmorProfile,
             &format!(
-                "unprivileged user namespaces are restricted (apparmor_restrict_unprivileged_userns=1) and no loaded AppArmor profile covers {}: crun could not make the job's user namespace",
+                "unprivileged user namespaces are restricted (apparmor_restrict_unprivileged_userns=1) and no loaded AppArmor profile covers {} (resolved from {}): crun could not make the job's user namespace",
+                resolved.display(),
                 crun.display()
             ),
             fix);

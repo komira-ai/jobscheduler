@@ -9,7 +9,7 @@
 //! tests run on.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
@@ -93,6 +93,8 @@ impl Fixture {
             cgroup_mount: cgroup,
             self_cgroup: root.join("self_cgroup"),
             id_tool_dirs: vec![tools],
+            // The tests are not root: the directories they make are owned by this uid.
+            owner_uid: fs::metadata(&root).unwrap().uid(),
         };
         Self {
             dir,
@@ -115,6 +117,14 @@ impl Fixture {
             state_root: &self.state,
             scratch_root: &self.scratch,
         }
+    }
+
+    /// The scripted commands with `crun --version` also answered for `crun`.
+    fn commands_for(&self, crun: &Path) -> FakeCommands {
+        FakeCommands::default().with(
+            &format!("{} --version", crun.display()),
+            Ok("crun version 1.14.1\ncommit: abc\n"),
+        )
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -428,6 +438,7 @@ fn a_host_with_nothing_set_up_is_refused_naming_every_piece() {
         cgroup_mount: nowhere.join("cgroup"),
         self_cgroup: nowhere.join("self"),
         id_tool_dirs: vec![nowhere.clone()],
+        owner_uid: fx.host.owner_uid,
     };
     let request = Request {
         crun: &nowhere.join("crun"),
@@ -732,5 +743,79 @@ fn a_mac_refuses_the_crun_runtime() {
         ran.err.contains("--runtime crun: Linux only"),
         "{}",
         ran.err
+    );
+}
+
+/// The agent runs `crun` as the job user, so a `crun` only root can execute is refused (mode
+/// 0700, or 0750 with a group that is not the job user's), and the job user's own group bit counts.
+#[test]
+fn a_crun_the_job_user_cannot_execute_is_refused() {
+    let fx = Fixture::new("crun-host-crun-x");
+    set_mode(&fx.crun, 0o700);
+    assert_eq!(pieces(&fx.check()), vec![Piece::Crun]);
+    assert!(fx.check().missing[0].what.contains("job user"));
+    set_mode(&fx.crun, 0o750);
+    assert_eq!(pieces(&fx.check()), vec![Piece::Crun]);
+    // The file's own group is the job user's group: the group bit is the one that decides.
+    let gid = fs::metadata(&fx.crun).unwrap().gid();
+    write(
+        &fx.host.ids.passwd,
+        &format!("{USER}:x:990:{gid}::/:/usr/sbin/nologin\n"),
+    );
+    assert_eq!(pieces(&fx.check()), vec![]);
+    set_mode(&fx.crun, 0o705);
+    assert_eq!(pieces(&fx.check()), vec![Piece::Crun]);
+}
+
+/// A directory above `crun` (or above an id tool) that the job user cannot search refuses the
+/// program in it, even when the program's own mode is fine.
+#[test]
+fn a_crun_below_a_directory_the_job_user_cannot_search_is_refused() {
+    let fx = Fixture::new("crun-host-crun-dir");
+    let bin = fx.crun.parent().unwrap().to_owned();
+    set_mode(&bin, 0o700);
+    let report = fx.check();
+    assert_eq!(
+        pieces(&report),
+        vec![Piece::Crun, Piece::NewUidMap, Piece::NewGidMap]
+    );
+    assert!(report.missing[0].what.contains(&bin.display().to_string()));
+    set_mode(&bin, 0o755);
+    assert_eq!(pieces(&fx.check()), vec![]);
+}
+
+/// A state root or scratch root that a user other than root owns is refused whatever its mode:
+/// the owner can change the mode and the files under it.
+#[test]
+fn a_state_or_scratch_root_not_owned_by_root_is_refused() {
+    let mut fx = Fixture::new("crun-host-owner");
+    assert_eq!(pieces(&fx.check()), vec![]);
+    // The directories are owned by the uid the tests run as; the check wants another.
+    fx.host.owner_uid += 1;
+    let report = fx.check();
+    assert_eq!(pieces(&report), vec![Piece::StateRoot, Piece::ScratchRoot]);
+    assert!(report.missing[0].what.contains("not root"));
+}
+
+/// The kernel attaches an AppArmor profile by the resolved path: a link to a covered program is
+/// accepted, a link to one no profile names is refused though the link's own path is named.
+#[test]
+fn the_apparmor_profile_is_matched_against_the_resolved_crun() {
+    let fx = Fixture::new("crun-host-link");
+    let link = fx.path("crun-link");
+    symlink(&fx.crun, &link).unwrap();
+    let to_covered = check(&fx.request(&link), &fx.host, &fx.commands_for(&link));
+    assert_eq!(pieces(&to_covered), vec![]);
+    // Only the link is named by a profile; the program it leads to is not.
+    write(
+        &fx.path("profiles"),
+        &format!("{} (unconfined)\n", link.display()),
+    );
+    let report = check(&fx.request(&link), &fx.host, &fx.commands_for(&link));
+    assert_eq!(pieces(&report), vec![Piece::AppArmorProfile]);
+    assert!(
+        report.missing[0]
+            .what
+            .contains(&fx.crun.display().to_string())
     );
 }

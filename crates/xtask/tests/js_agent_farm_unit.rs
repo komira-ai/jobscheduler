@@ -114,7 +114,7 @@ fn the_unit_runs_the_agent_with_the_crun_runtime_and_flags_the_agent_accepts() {
 }
 
 /// The cgroup is delegated, the unit is in a slice of its own, the state directory is made `0711`,
-/// a stop signals the agent alone and waits for its drain without a limit, and the agent is
+/// a stop signals the agent alone and waits for its drain within a finite bound, and the agent is
 /// restarted after every exit. Each is a setting a node needs and the engine unit does not set
 /// (`KillMode` and a finite `TimeoutStopSec` are the engine unit's).
 #[test]
@@ -123,7 +123,23 @@ fn the_unit_delegates_the_cgroup_and_leaves_the_stop_to_the_agent() {
     assert!(value("Slice").ends_with(".slice"));
     assert_eq!(value("StateDirectoryMode"), "0711");
     assert_eq!(value("KillMode"), "mixed");
-    assert_eq!(value("TimeoutStopSec"), "infinity");
+    // The bound is finite and covers the drain the unit's own flags ask for (a hung agent is
+    // killed and restarted), whatever those flags are set to.
+    let cli = agent_cli();
+    let grace = cli.stop_grace.expect("the unit sets --stop-grace");
+    let wait = cli.drain_wait.expect("the unit sets --drain-wait");
+    let drain = wait + grace + js_agent::DRAIN_SETTLE.as_secs();
+    let timeout: u64 = value("TimeoutStopSec")
+        .parse()
+        .expect("TimeoutStopSec is a number of seconds, not infinity");
+    assert!(
+        timeout >= drain + 30,
+        "TimeoutStopSec={timeout} for a drain of {drain} s"
+    );
+    assert!(
+        timeout <= 2 * drain,
+        "TimeoutStopSec={timeout} is no bound for {drain} s"
+    );
     assert_eq!(value("Restart"), "always");
     assert_eq!(value("RestartSec"), "30");
     assert_eq!(value("Conflicts"), "js-agent.service");

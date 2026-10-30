@@ -10,6 +10,12 @@ pub const CONTAINER_BIN: &str = "/usr/bin/docker";
 
 /// The runtime the agent runs jobs with (`--runtime`): named in the agent's unit, since the
 /// Linux farm's own unit names `crun` and no host gets a runtime by default.
+///
+/// Rollout order: an agent that does not know `--runtime` exits 2 at start on this flag. The
+/// plan's [`Artifact`] is a URL and a digest and carries no version, so the boot payload
+/// cannot tell whether the agent it installs knows the flag and cannot gate on it: the pinned
+/// artifact must be bumped to an agent that does before a lease server that renders this flag
+/// is deployed (see `docs/runbooks/first-live-launch.md`).
 pub const RUNTIME: &str = "docker";
 
 /// The agent's state root, which the bootstrap creates (owner-only) and names in the
