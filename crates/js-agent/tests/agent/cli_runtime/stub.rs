@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use js_agent::cli_runtime::{CliError, CliRuntime, Settings, system_runner};
-use js_agent::lifecycle::{ContainerRuntime, Exit, Status};
+use js_agent::lifecycle::{Exit, Runtime, Status};
 
 use super::{
     DOCKER_SCRATCH, HOST, NAME_R1, in_another_pid_namespace, made_at, mount, no_file, platform,

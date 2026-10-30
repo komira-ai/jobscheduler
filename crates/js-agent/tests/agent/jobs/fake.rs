@@ -17,7 +17,7 @@ use std::time::Duration;
 use js_agent::cli_runtime::Mapping;
 use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
 use js_agent::lifecycle::{
-    Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, RuntimeError, Status, label,
+    Clock, Exit, Found, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
 };
 use js_agent::{FileReader, Machine, RuntimeBuild, SharedClock};
 
@@ -214,8 +214,8 @@ impl World {
 
     /// The runtime of the agent `host_id` on this world: it labels what it makes with the
     /// host id and lists only what carries the run label and its own host id.
-    pub fn runtime(&self, host_id: &str) -> Runtime {
-        Runtime(self.clone(), host_id.to_owned())
+    pub fn runtime(&self, host_id: &str) -> WorldRuntime {
+        WorldRuntime(self.clone(), host_id.to_owned())
     }
 
     /// A running container of the run `run_id` that the agent `host_id` made, which no
@@ -256,10 +256,10 @@ fn failed(call: &str) -> RuntimeError {
 }
 
 /// The container runtime the worker thread makes.
-pub struct Runtime(World, String);
+pub struct WorldRuntime(World, String);
 
-impl ContainerRuntime for Runtime {
-    fn create_and_start(&mut self, spec: &ContainerSpec) -> Result<ContainerId, RuntimeError> {
+impl Runtime for WorldRuntime {
+    fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
         let world = &self.0;
         let mut state = world.lock();
         state.entered += 1;
@@ -289,10 +289,10 @@ impl ContainerRuntime for Runtime {
             exit: None,
         };
         state.containers.insert(id.clone(), container);
-        Ok(ContainerId(id))
+        Ok(RunHandle(id))
     }
 
-    fn poll(&mut self, id: &ContainerId) -> Result<Status, RuntimeError> {
+    fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
         let mut state = self.0.lock();
         if state.fails("poll") {
             return Err(failed("poll"));
@@ -303,7 +303,7 @@ impl ContainerRuntime for Runtime {
         })
     }
 
-    fn stop(&mut self, id: &ContainerId, _grace: Duration) -> Result<(), RuntimeError> {
+    fn stop(&mut self, id: &RunHandle, _grace: Duration) -> Result<(), RuntimeError> {
         let mut state = self.0.lock();
         let run = state.containers.get(&id.0).map(|c| c.run_id.clone());
         state.log.push(format!("stop {}", run.unwrap_or_default()));
@@ -319,7 +319,7 @@ impl ContainerRuntime for Runtime {
         Ok(())
     }
 
-    fn remove(&mut self, id: &ContainerId) -> Result<(), RuntimeError> {
+    fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         let mut state = self.0.lock();
         let run = state.containers.get(&id.0).map(|c| c.run_id.clone());
         state
@@ -332,7 +332,7 @@ impl ContainerRuntime for Runtime {
         Ok(())
     }
 
-    fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
+    fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         let state = self.0.lock();
         let run = &state.containers.get(&id.0)?.run_id;
         let base = state.cgroup_base.as_ref()?;
@@ -373,7 +373,7 @@ impl ContainerRuntime for Runtime {
             .iter()
             .filter(|(_, container)| mine(container))
             .map(|(id, container)| Found {
-                id: ContainerId(id.clone()),
+                id: RunHandle(id.clone()),
                 labels: container.labels.clone(),
                 running_ms: 0,
                 never_started: false,
@@ -478,10 +478,7 @@ impl Machine for FakeMachine {
         self.clock.clone()
     }
 
-    fn runtime(
-        &self,
-        build: &RuntimeBuild<'_>,
-    ) -> Result<(Box<dyn ContainerRuntime>, Vec<String>), String> {
+    fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
         match self.build {
             Build::RuntimeFails => Err("the engine does not answer".to_owned()),
             Build::Panics => panic!("the runtime panics while it is made"),
