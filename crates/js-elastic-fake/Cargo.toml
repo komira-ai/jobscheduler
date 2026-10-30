@@ -1,0 +1,19 @@
+[package]
+name = "js-elastic-fake"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Only the contract it implements: no network crate, no async runtime, no cloud SDK
+# (tests/no_cloud_reach.rs fails on any of them anywhere in the workspace).
+[dependencies]
+js-elastic = { path = "../js-elastic" }
+
+[dev-dependencies]
+js-types = { path = "../js-types" }
+
+[lints]
+workspace = true

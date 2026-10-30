@@ -5,6 +5,7 @@
 //! is an injected clock; nothing sleeps and no test touches a network.
 
 mod complete;
+mod disk;
 mod duties;
 mod fakes;
 mod launcher;
