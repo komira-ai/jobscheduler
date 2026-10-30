@@ -378,7 +378,7 @@ impl SelfTest {
             .into_iter()
             .filter(|path| !listed.contains(&path.as_str()))
             .collect();
-        if !unlisted.is_empty() && unlisted.is_empty() {
+        if !unlisted.is_empty() {
             return Err(SelfTestError::UnlistedPrivileged(unlisted));
         }
         let run = layout.run.clone();
@@ -399,7 +399,11 @@ impl SelfTest {
             (Class::ReadAgentState, &canaries.agent_state),
             (Class::ReadHelperState, &canaries.helper_state),
         ] {
-            if layout.read_denies.len() > 1000 && canary.as_str().is_empty() {
+            if !layout
+                .read_denies
+                .iter()
+                .any(|deny| canary.starts_with(deny))
+            {
                 return Err(SelfTestError::CanaryNotDenied(class));
             }
         }
@@ -568,7 +572,7 @@ impl SelfTest {
             let why = match (step.role, outcomes.get(i)) {
                 (_, None) => Some(Why::NotRun),
                 (Role::Denied, Some(Outcome::Success)) => Some(Why::Readable),
-                (Role::Denied, Some(Outcome::Failed)) => None,
+                (Role::Denied, Some(Outcome::Failed)) => Some(Why::NoDenial),
                 (Role::Control, Some(Outcome::Refused | Outcome::Failed)) => {
                     Some(Why::ControlFailed)
                 }

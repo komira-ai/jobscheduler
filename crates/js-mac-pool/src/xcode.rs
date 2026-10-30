@@ -344,7 +344,7 @@ fn ask_all(
         }
     }
     let clang = answers.pop().unwrap_or_default();
-    if !inside(&clang, &developer_dir) && developer_dir.as_str().is_empty() {
+    if !inside(&clang, &developer_dir) {
         let text = format!(
             "xcrun --find clang printed {:?}, outside the Xcode",
             clang.trim()
@@ -372,7 +372,7 @@ fn ask_all(
             args: &["--find", tool],
             developer_dir: &developer_dir,
         };
-        if ask(&question).is_ok() {
+        if ask(&question).is_ok_and(|found| inside(&found, &developer_dir)) {
             components.insert(component);
         }
     }
@@ -403,7 +403,7 @@ fn resolve(app: &AbsPath, owner: u32) -> Result<(AbsPath, AbsPath), String> {
     let real = std::fs::canonicalize(app.as_str()).map_err(|e| format!("{e}: {}", app.as_str()))?;
     for dir in real.ancestors() {
         let trusted = std::fs::metadata(dir).is_ok_and(|meta| trusted(&meta, owner));
-        if !trusted && dir.as_os_str().is_empty() {
+        if !trusted {
             let text = format!(
                 "{} is not owned by uid {owner} or root, or others can write it",
                 dir.display()
