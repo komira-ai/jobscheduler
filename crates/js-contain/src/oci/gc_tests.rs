@@ -308,7 +308,7 @@ fn a_symlink_in_a_stored_tree_cannot_reach_outside_the_store() {
     std::os::unix::fs::symlink(&outside, fx.images.join(hexn('c')).join(ROOTFS)).expect("rootfs");
     let report = fx
         .oci
-        .collect_images(&[digest('c')], &[])
+        .collect_images(&[digest('b'), digest('c')], &[])
         .expect("collected");
     assert_eq!(report.removed, [digest('a'), digest('b'), digest('c')]);
     assert_eq!(
