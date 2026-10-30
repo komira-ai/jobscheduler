@@ -78,7 +78,7 @@ impl Host<'static> {
 }
 
 /// The flags of the verb.
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
     name = "js-agent image-pull",
     about = "Pulls an image, pinned by digest, into the image store of the crun runtime",
@@ -109,7 +109,6 @@ struct Args {
 }
 
 /// Why the verb stopped.
-#[derive(Debug)]
 enum Failure {
     /// A flag or the reference is wrong, or the user may not run the verb; nothing was
     /// made or asked.
