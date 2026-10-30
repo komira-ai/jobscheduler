@@ -2,6 +2,7 @@
 
 use std::net::IpAddr;
 
+use crate::layout::LayoutFault;
 use crate::policy::AddressClass;
 
 /// Why an artifact could not be pulled.
@@ -142,6 +143,9 @@ pub enum Error {
     /// The machine's architecture has no platform name here.
     #[error("the architecture {0} has no image platform name")]
     Arch(String),
+    /// An image-layout directory is not one this client reads.
+    #[error("image layout: {0}")]
+    Layout(LayoutFault),
     /// The sink a blob was written to failed.
     #[error("writing the blob: {0}")]
     Sink(#[source] std::io::Error),

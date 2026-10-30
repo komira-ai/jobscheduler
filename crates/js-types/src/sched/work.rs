@@ -90,7 +90,9 @@ impl WorkKey {
 /// another lease's only once the lease holding it ends. VM slots are counted the same
 /// way: a node's `vms` is how many VMs may run on it at once. A node's `vms` is
 /// filled from its `vm.slots` report (at most two), and a VM lease (the `vm` lease kind) books
-/// one of them together with its CPUs and memory.
+/// one of them together with its CPUs and memory. Scratch disk is booked the same way as
+/// GPUs: a request's `disk_bytes` is held from its grant until its lease ends, and a node
+/// takes a request only while its free disk holds it.
 ///
 /// Not the crate root's [`crate::Resources`]: that one names its dimensions, this one
 /// has fixed axes. They stay apart until the scheduler moves into this repository, when
@@ -105,6 +107,8 @@ pub struct Resources {
     pub gpus: u64,
     /// VM slots.
     pub vms: u64,
+    /// Scratch disk in bytes.
+    pub disk_bytes: u64,
     /// On a node's capacity: the most Action and VM leases it holds at once, or `None`
     /// for no cap. Each holds one, counted by the scheduler as the leases on the node; a request carries `None`, and [`Resources::fits`] and the arithmetic below
     /// leave it alone (they keep `self`'s).
@@ -121,6 +125,7 @@ impl Resources {
             memory_bytes,
             gpus: 0,
             vms: 0,
+            disk_bytes: 0,
             leases: None,
         }
     }
@@ -138,6 +143,12 @@ impl Resources {
     #[must_use]
     pub const fn with_gpus(self, gpus: u64) -> Self {
         Self { gpus, ..self }
+    }
+
+    /// `self` with `disk_bytes` bytes of scratch disk.
+    #[must_use]
+    pub const fn with_disk_bytes(self, disk_bytes: u64) -> Self {
+        Self { disk_bytes, ..self }
     }
 
     /// `self` with `vms` VM slots.
@@ -163,6 +174,7 @@ impl Resources {
             && request.memory_bytes <= self.memory_bytes
             && request.gpus <= self.gpus
             && request.vms <= self.vms
+            && request.disk_bytes <= self.disk_bytes
     }
 
     /// `self + other` on every axis, saturating.
@@ -173,6 +185,7 @@ impl Resources {
             memory_bytes: self.memory_bytes.saturating_add(other.memory_bytes),
             gpus: self.gpus.saturating_add(other.gpus),
             vms: self.vms.saturating_add(other.vms),
+            disk_bytes: self.disk_bytes.saturating_add(other.disk_bytes),
             leases: self.leases,
         }
     }
@@ -185,6 +198,7 @@ impl Resources {
             memory_bytes: self.memory_bytes.saturating_sub(other.memory_bytes),
             gpus: self.gpus.saturating_sub(other.gpus),
             vms: self.vms.saturating_sub(other.vms),
+            disk_bytes: self.disk_bytes.saturating_sub(other.disk_bytes),
             leases: self.leases,
         }
     }
@@ -572,6 +586,35 @@ mod tests {
                 .saturating_add(one)
                 .vms,
             u64::MAX
+        );
+    }
+
+    /// Catches: a disk axis that `fits` ignores (a job larger than the node's disk would
+    /// be placed), or arithmetic that drops, wraps or leaks it into another axis
+    /// (disk would stay booked after its lease ends, or be freed while still booked).
+    #[test]
+    fn disk_axis_fits_and_saturates() {
+        let node = Resources::new(4_000, 8 << 30).with_disk_bytes(100);
+        assert!(node.fits(&Resources::new(1_000, 1).with_disk_bytes(100)));
+        assert!(!node.fits(&Resources::new(1_000, 1).with_disk_bytes(101)));
+        assert!(!Resources::new(4_000, 8 << 30).fits(&Resources::new(0, 0).with_disk_bytes(1)));
+        let two = Resources::default().with_disk_bytes(2);
+        let one = Resources::default().with_disk_bytes(1);
+        assert_eq!(one.saturating_add(one), two);
+        assert_eq!(two.saturating_sub(one), one);
+        assert_eq!(one.saturating_sub(two), Resources::default());
+        assert_eq!(
+            Resources::default()
+                .with_disk_bytes(u64::MAX)
+                .saturating_add(one)
+                .disk_bytes,
+            u64::MAX
+        );
+        assert_eq!(Resources::new(1, 2).disk_bytes, 0);
+        let r = Resources::new(2_000, 4 << 30).with_disk_bytes(7);
+        assert_eq!(
+            r.without_memory(),
+            Resources::new(2_000, 0).with_disk_bytes(7)
         );
     }
 

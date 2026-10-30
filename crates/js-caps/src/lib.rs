@@ -44,6 +44,7 @@ pub use gpu::{
 };
 pub use host::{
     Breach, DETECTED_KEYS, DISK_GIB, EXEC, FLAG_SET, GPU_TOOLKIT, HostContract, RUN_FILES, RUNTIME,
+    SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
 };
 pub use level::{ArmVersion, IsaLevel, UnknownIsaLevel, X86Level};
 pub use matching::{

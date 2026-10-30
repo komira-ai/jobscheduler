@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use js_oci::{Allow, Client, Digest, Location, Policy};
@@ -510,4 +511,45 @@ fn challenge(b: &Behaviour, request: &Request) -> Vec<u8> {
         ));
     }
     response(401, &headers, b"")
+}
+
+/// Where the layout directory `root` keeps the blob `digest`.
+pub fn blob_path(root: &Path, digest: &Digest) -> PathBuf {
+    root.join("blobs").join("sha256").join(digest.hex())
+}
+
+/// Writes `artifact` as an OCI image-layout directory at `root` (which exists): the
+/// `oci-layout` marker, an `index.json` listing its manifest, and every blob under its
+/// digest.
+pub fn write_layout(root: &Path, artifact: &Artifact) {
+    std::fs::create_dir_all(root.join("blobs").join("sha256")).expect("blobs");
+    std::fs::write(root.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#)
+        .expect("oci-layout");
+    write_index(root, &[&artifact.digest]);
+    let blobs = [&artifact.manifest, &artifact.config]
+        .into_iter()
+        .chain(&artifact.layers);
+    for blob in blobs {
+        std::fs::write(blob_path(root, &Digest::of(blob)), blob).expect("blob");
+    }
+}
+
+/// Writes an `index.json` that lists `manifests`.
+pub fn write_index(root: &Path, manifests: &[&Digest]) {
+    let entries: Vec<String> = manifests
+        .iter()
+        .map(|d| {
+            format!(
+                r#"{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{d}","size":1}}"#
+            )
+        })
+        .collect();
+    std::fs::write(
+        root.join("index.json"),
+        format!(
+            r#"{{"schemaVersion":2,"manifests":[{}]}}"#,
+            entries.join(",")
+        ),
+    )
+    .expect("index.json");
 }
