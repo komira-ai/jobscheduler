@@ -25,6 +25,21 @@ fn held(h: &Harness) -> Vec<(String, HeldState)> {
         .collect()
 }
 
+/// A run with no image (a host or native job) is never asked about an image: even with a
+/// runtime scripted to answer `Pending` for the empty name, it starts at once and the
+/// runtime is not consulted. It catches a start that waits on the image store for a job
+/// that does not use it.
+#[test]
+fn a_run_with_no_image_starts_at_once_and_prepare_is_not_asked() {
+    let mut h = Harness::new("prepare-no-image");
+    h.fake.pull_pending("");
+    let mut spec = job("r1");
+    spec.image = String::new();
+    assert_eq!(names(&h.start(spec)), ["started r1"]);
+    assert_eq!(held(&h), [("r1".to_owned(), HeldState::Running)]);
+    assert!(h.fake.asks("").is_empty());
+}
+
 /// A run whose image is being pulled is held as `starting`, books its CPU, memory and
 /// slot, and makes nothing: no event, no scratch directory, no container, however many
 /// steps pass. It catches a start that waits for the pull inside the create (the worker
@@ -239,7 +254,8 @@ fn every_run_that_waited_on_a_failed_fetch_ends() {
 
 /// A run that waited for its image is held to the end of its lease: a start that
 /// is valid for 30 s and asks for a minute, whose image arrives after 20 s, gets 10 s, not
-/// a fresh minute; one that names no lease end gets its whole limit.
+/// a fresh minute. (A start that names no lease end gets its whole limit: that half is in
+/// the wall-clock test above.)
 #[test]
 fn a_run_that_waited_never_outlives_its_lease() {
     let mut h = Harness::new("prepare-lease");
