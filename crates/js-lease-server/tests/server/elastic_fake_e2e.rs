@@ -391,7 +391,15 @@ async fn a_pool_in_plan_mode_makes_zero_create_calls_through_any_provider() {
         assert!(!calls.contains(&Call::Acquire), "{calls:?}");
         assert!(!calls.contains(&Call::Release), "{calls:?}");
         assert_eq!(cloud.launched(), 0);
+        // Positive controls: the pool is wired to the cloud under test, which was read
+        // from on every tick, so the zero above is a measurement.
+        if elastic {
+            assert!(cloud.count(Call::List) >= 30, "{calls:?}");
+            assert!(cloud.count(Call::Catalog) > 0, "{calls:?}");
+        }
         if let Some(account) = lambda {
+            assert!(account.count(LambdaCall::ListInstances) >= 30);
+            assert!(account.count(LambdaCall::InstanceTypes) > 0);
             assert_eq!(account.count(LambdaCall::Launch), 0);
             assert_eq!(account.count(LambdaCall::Terminate), 0);
             assert_eq!(account.launched(), 0);

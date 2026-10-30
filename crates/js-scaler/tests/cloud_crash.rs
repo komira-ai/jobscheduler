@@ -15,7 +15,7 @@ use std::time::Duration;
 use cloud_rig::{Crash, Sim};
 use common::{minutes, settings};
 use js_elastic_fake::{Billing, Call, Step};
-use js_scaler::{Phase, Records, Settings};
+use js_scaler::{Blocked, Phase, Records, Settings};
 
 fn pool() -> Settings {
     Settings {
@@ -185,4 +185,53 @@ fn a_machine_whose_records_were_lost_is_an_orphan_and_is_never_released() {
         "an orphan is never released"
     );
     assert_accounted(&sim);
+}
+
+/// A pool with a day cap of 100 cents whose one machine was launched and whose records were
+/// lost, run for `minutes` after the restart with nothing waiting: the machine is an orphan
+/// from the first list on.
+fn orphan_for(minutes: usize) -> Sim {
+    let settings = Settings {
+        max_spend_per_day: 100,
+        ..pool()
+    };
+    let mut sim = Sim::new(settings, Billing::Lambda);
+    sim.silent_orphans = true;
+    sim.waiting = 1;
+    let crashed = (0..20).any(|_| sim.tick(Some(Crash::AfterCall)));
+    assert!(crashed);
+    sim.saved = Records::default();
+    sim.restart();
+    sim.waiting = 0;
+    sim.run(minutes);
+    sim
+}
+
+/// Asserts that an orphan's spend counts toward the day cap, from the moment it is found.
+/// The cap here is 100 cents and a launch needs 15 more (its least cost). After the orphan
+/// has run an hour (about 60 cents counted) a waiting request is launched for; after it has
+/// run 100 minutes (about 100 counted) the same request is refused with `MaxSpendDay` and
+/// the cloud is not asked. The time before the orphan was found is not counted, because the
+/// scaler cannot know when it was launched: that is how orphans are counted today (`adopt`
+/// stamps the finding time), and it is why a bound on the cloud's bill cannot include
+/// orphans found late. It catches an orphan left out of the day's sum, which would let a
+/// pool with a forgotten machine launch past its cap.
+#[test]
+fn an_orphans_spend_counts_toward_the_day_cap_from_when_it_is_found() {
+    let mut early = orphan_for(60);
+    assert!(early.phases().contains(&Phase::Orphan));
+    early.waiting = 1;
+    early.tick(None);
+    assert_eq!(early.fake.launched(), 2, "an hour of orphan leaves room");
+
+    let mut late = orphan_for(100);
+    late.waiting = 1;
+    late.tick(None);
+    assert_eq!(late.blocked(), Some(Blocked::MaxSpendDay));
+    assert_eq!(
+        late.fake.launched(),
+        1,
+        "100 minutes of orphan use the cap up"
+    );
+    assert_eq!(late.acquires(), 1);
 }

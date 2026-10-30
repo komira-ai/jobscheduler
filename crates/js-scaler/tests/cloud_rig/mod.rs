@@ -99,6 +99,12 @@ pub struct Sim {
     /// Whether the agent of a machine that only an orphan record knows never says hello: its
     /// token was minted by a scaler whose records are lost.
     pub silent_orphans: bool,
+    /// Every answer the cloud gave an acquire, in order.
+    pub answers: Vec<Acquired>,
+    /// Acquires answered `Unknown` whose machine was made all the same.
+    pub lost_landed: usize,
+    /// Acquires answered `Unknown` that made nothing.
+    pub lost_unlanded: usize,
 }
 
 impl Sim {
@@ -119,6 +125,9 @@ impl Sim {
             window_at_acquire: Vec::new(),
             released: Vec::new(),
             silent_orphans: false,
+            answers: Vec::new(),
+            lost_landed: 0,
+            lost_unlanded: 0,
         }
     }
 
@@ -157,14 +166,22 @@ impl Sim {
         self.window_at_acquire.push(window.cents_up());
         self.sent += 1;
         let scheduler = SchedulerId::new("sched").unwrap();
-        self.fake.acquire(&AcquireRequest {
+        let before = self.fake.launched();
+        let answer = self.fake.acquire(&AcquireRequest {
             acquire: plan.acquire.clone(),
             pool: plan.pool.clone(),
             name: HostName::derive(&scheduler, &plan.acquire),
             offer: plan.offer.clone(),
             labels: Vec::new(),
             payload: BootPayload::new(format!("token-of-{}", plan.name)),
-        })
+        });
+        if answer == Acquired::Unknown {
+            let landed = self.fake.launched() > before;
+            self.lost_landed += usize::from(landed);
+            self.lost_unlanded += usize::from(!landed);
+        }
+        self.answers.push(answer.clone());
+        answer
     }
 
     /// One tick: reads the cloud, takes a step and runs its actions, then moves the clock.

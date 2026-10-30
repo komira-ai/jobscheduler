@@ -169,6 +169,12 @@ impl Inner {
         let Some(offer) = found else {
             return Err(refusal(RefusalCode::Shape, Reason::NotAllowed));
         };
+        let Some(price) = offer.price_cents_per_hour else {
+            return Err(refusal(
+                RefusalCode::Shape,
+                Reason::Api("unpriced offer".to_owned()),
+            ));
+        };
         let running = self.machines.iter().filter(|m| m.ended.is_none()).count();
         let over_quota = self.knobs.quota.is_some_and(|quota| running >= quota);
         let full = self.knobs.capacity.is_some_and(|room| running >= room);
@@ -185,7 +191,7 @@ impl Inner {
             id: HostRef(format!("fake-{:04}", self.machines.len() + 1)),
             acquire: request.acquire.as_str().to_owned(),
             name: request.name.to_string(),
-            price: offer.price_cents_per_hour.unwrap_or_default(),
+            price,
             offer: offer.clone(),
             launched: self.clock.now_ms(),
             ended: None,
@@ -367,10 +373,12 @@ impl ElasticProvider for ElasticFake {
     }
 
     fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {
+        self.state().calls.push(Call::HostPrep);
         Vec::new()
     }
 
     fn payload_limit(&self) -> usize {
+        self.state().calls.push(Call::PayloadLimit);
         PAYLOAD_LIMIT
     }
 

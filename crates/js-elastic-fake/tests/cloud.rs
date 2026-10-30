@@ -568,6 +568,8 @@ fn every_call_is_recorded_in_order() {
     cloud.catalog().unwrap();
     assert!(cloud.checks().is_empty());
     cloud.list().unwrap();
+    cloud.host_prep(&offer(None));
+    cloud.payload_limit();
     cloud.unresolved();
     cloud.is_gone(&id);
     cloud.release(&id);
@@ -578,6 +580,8 @@ fn every_call_is_recorded_in_order() {
             Call::Catalog,
             Call::Checks,
             Call::List,
+            Call::HostPrep,
+            Call::PayloadLimit,
             Call::Unresolved,
             Call::IsGone,
             Call::Release
@@ -611,4 +615,18 @@ fn the_knobs_the_clone_and_the_clock_behave() {
     let far = FakeClock::new(0);
     far.advance(Duration::MAX);
     assert_eq!(far.now_ms(), u64::MAX);
+}
+
+/// Asserts that an offer with no price in the cloud's catalog is refused (a shape refusal)
+/// and makes nothing, rather than being launched and billed nothing. It catches an oracle that
+/// would under-report a machine.
+#[test]
+fn an_unpriced_offer_is_refused_and_not_billed_as_free() {
+    let cloud = js_elastic_fake::ElasticFake::new(
+        FakeClock::new(START),
+        Billing::Lambda,
+        vec![offer(None)],
+    );
+    assert_eq!(refused(&cloud.acquire(&request("a1"))), RefusalCode::Shape);
+    assert_eq!(cloud.launched(), 0);
 }

@@ -8,9 +8,9 @@ mod common;
 
 use cloud_rig::{DAY_MS, PRICE, Rng, Sim};
 use common::{minutes, settings};
-use js_elastic::HostRef;
+use js_elastic::{Acquired, HostRef, RefusalCode};
 use js_elastic_fake::{Billing, Call, Step};
-use js_scaler::{Action, Blocked, LaunchMode, Settings};
+use js_scaler::{Blocked, LaunchMode, Settings};
 
 /// The pool of these tests: four machines at most, the day capped at 600 cents (ten
 /// machine-hours at a cent a minute), a host released after 5 quiet minutes.
@@ -91,8 +91,16 @@ fn acquire_script(rng: &mut Rng) -> Vec<Step> {
 ///    its burst by more than the release latency, so after the cap bites at most
 ///    `max_instances` machines run on for at most that long.
 ///
-/// It also requires that the cap did bite in the runs (a bound that nothing approaches
-/// proves nothing) and that the cloud billed something. It catches an accounting bug that
+/// Left out on purpose: a list that lags the truth and restarts that lose records. The
+/// bound's latency does not cover them (a list that lags longer than `unknown_hold` makes
+/// a second machine, see `cloud_stuck.rs`, and an orphan is counted only from the moment it
+/// is found, see `cloud_crash.rs`), so those cases are pinned one by one in those files and
+/// not folded into this bound. Odd seeds bill as AWS does (per second), even ones as Lambda.
+///
+/// It also requires that, in every seed, the cap refused a launch and launches were sent
+/// with at least half the day's cap already billed, that every outcome the generator
+/// scripts really happened somewhere across the seeds, and that the cloud billed more than
+/// half the cap in some day (a bound that nothing approaches proves nothing). It catches an accounting bug that
 /// lets the scaler launch past its cap: a machine left out of the day's sum, a billed
 /// minimum not counted, a running machine that stops accruing, an unresolved launch not
 /// counted.
@@ -101,14 +109,23 @@ fn the_clouds_bill_over_any_day_stays_within_the_day_cap_plus_the_release_latenc
     let settings = capped();
     let bound =
         settings.max_spend_per_day + settings.max_instances as u64 * PRICE * LATENCY_MINUTES / 60;
-    let mut capped_at_least_once = false;
     let mut billed_most = 0;
+    // How often each outcome of the generator really happened, over all seeds: a generator
+    // that silently stopped producing one would make the bound hold for the wrong reason.
+    let mut seen = Seen::default();
     for seed in 0..16 {
         let mut rng = Rng::new(0x5EED_0000 + seed);
-        let mut sim = Sim::new(settings.clone(), Billing::Lambda);
+        // Lambda bills by the minute and AWS by the second; the bound holds for both.
+        let billing = if seed % 2 == 0 {
+            Billing::Lambda
+        } else {
+            Billing::Aws
+        };
+        let mut sim = Sim::new(settings.clone(), billing);
         sim.fake.script(Call::Acquire, &acquire_script(&mut rng));
         let (mut burst, mut quiet, mut requests) = (0, 0, 0);
         let (mut release_run, mut list_run) = (0, 0);
+        let mut capped = false;
         for _ in 0..DAYS * 24 * 60 {
             if burst == 0 && quiet == 0 && rng.one_in(10) {
                 burst = 1 + rng.below(BURST);
@@ -121,8 +138,8 @@ fn the_clouds_bill_over_any_day_stays_within_the_day_cap_plus_the_release_latenc
             } else {
                 quiet = quiet.saturating_sub(1);
             }
-            let step = fault(&mut rng, &mut release_run, 3);
-            sim.fake.script_forever(Call::Release, step);
+            let release_step = fault(&mut rng, &mut release_run, 3);
+            sim.fake.script_forever(Call::Release, release_step);
             let step = fault(&mut rng, &mut list_run, 3);
             sim.fake.script_forever(Call::List, step);
             if rng.one_in(500) {
@@ -130,10 +147,15 @@ fn the_clouds_bill_over_any_day_stays_within_the_day_cap_plus_the_release_latenc
                 if !running.is_empty() {
                     let pick = rng.below(running.len() as u64) as usize;
                     sim.fake.preempt(&running[pick]);
+                    seen.preemptions += 1;
                 }
             }
+            let released_before = sim.fake.count(Call::Release);
             sim.tick(None);
-            capped_at_least_once |= sim.blocked() == Some(Blocked::MaxSpendDay);
+            let released = sim.fake.count(Call::Release) > released_before;
+            seen.release_faults += usize::from(released && release_step != Step::Pass);
+            seen.list_failed += usize::from(sim.blocked() == Some(Blocked::ListFailed));
+            capped |= sim.blocked() == Some(Blocked::MaxSpendDay);
             let now = sim.clock.now_ms();
             let day = sim.fake.bill_between(now.saturating_sub(DAY_MS), now);
             billed_most = billed_most.max(day.cents_up());
@@ -152,12 +174,75 @@ fn the_clouds_bill_over_any_day_stays_within_the_day_cap_plus_the_release_latenc
             );
         }
         assert!(sim.sent > 20, "seed {seed}: only {} acquires", sim.sent);
+        // The cap must have refused a launch in this very seed, and launches must have been
+        // sent with the day half spent, or this seed never approached the bound.
+        let peak = sim.window_at_acquire.iter().max().copied().unwrap_or(0);
+        assert!(capped, "seed {seed}: the day cap never refused a launch");
+        assert!(
+            peak >= settings.max_spend_per_day / 2,
+            "seed {seed}: no launch was sent with more than {peak} cents billed in the day"
+        );
+        seen.add(&sim);
     }
-    assert!(capped_at_least_once, "the day cap never bit");
     assert!(
         billed_most > settings.max_spend_per_day / 2,
         "the cloud billed at most {billed_most} cents in a day: nothing approached the bound"
     );
+    seen.assert_all_happened();
+}
+
+/// How often each outcome the generator scripts really happened.
+#[derive(Default)]
+struct Seen {
+    capacity: usize,
+    quota: usize,
+    denied: usize,
+    shape: usize,
+    lost_landed: usize,
+    lost_unlanded: usize,
+    throttled: usize,
+    list_failed: usize,
+    release_faults: usize,
+    preemptions: usize,
+}
+
+impl Seen {
+    /// Adds what the answers of `sim` show.
+    fn add(&mut self, sim: &Sim) {
+        let refused = |wanted: RefusalCode| {
+            let each = sim.answers.iter();
+            each.filter(|answer| matches!(answer, Acquired::Refused(r) if r.code == wanted))
+                .count()
+        };
+        self.capacity += refused(RefusalCode::Capacity);
+        self.quota += refused(RefusalCode::Quota);
+        self.denied += refused(RefusalCode::Denied);
+        self.shape += refused(RefusalCode::Shape);
+        self.lost_landed += sim.lost_landed;
+        self.lost_unlanded += sim.lost_unlanded;
+        let deferred = sim.answers.iter();
+        self.throttled += deferred
+            .filter(|answer| matches!(answer, Acquired::Deferred { .. }))
+            .count();
+    }
+
+    fn assert_all_happened(&self) {
+        let each = [
+            ("capacity refusals", self.capacity),
+            ("quota refusals", self.quota),
+            ("denials", self.denied),
+            ("shape refusals", self.shape),
+            ("lost answers that landed", self.lost_landed),
+            ("lost answers that did not", self.lost_unlanded),
+            ("429s", self.throttled),
+            ("ticks with the list failing", self.list_failed),
+            ("failing releases", self.release_faults),
+            ("preemptions", self.preemptions),
+        ];
+        for (what, count) in each {
+            assert!(count > 0, "the generator produced no {what}");
+        }
+    }
 }
 
 /// Asserts the mirror of the bound: with a day cap too small for a single launch (the
@@ -201,13 +286,14 @@ fn a_day_cap_equal_to_the_least_cost_of_a_launch_allows_exactly_one() {
     assert_eq!(sim.blocked(), Some(Blocked::MaxSpendDay));
 }
 
-/// Asserts that a pool in plan mode asks the cloud for nothing, across random demand: for
-/// 16 seeds and a simulated day each, with the cloud scripted to say yes to everything,
-/// the step returns no acquire and no token to mint, and the cloud records no `acquire`
-/// and no `release`, while the pool shows what it would have launched. The step is handed
-/// the cloud's read handle's worth of calls only (the list and the unresolved ids), as the
-/// server's plan mode is. It catches a plan mode that launches when demand is large, or
-/// after a list failure, or with a stale cooldown.
+/// Asserts that a pool in plan mode asks the cloud for nothing, across random demand: for 16
+/// seeds and a simulated day each, with the cloud scripted to say yes to everything and its
+/// list failing now and then, the simulation runs every action the step returns against the
+/// cloud (`Sim::tick`), so an acquire, a release or a token the step wanted would reach it.
+/// The cloud records no `acquire`, no `release` and no machine, while the pool shows what
+/// it would have launched (more than a hundred plan lines in all, so the demand was real).
+/// It catches a plan mode that launches when demand is large, after a list failure, or with
+/// a stale cooldown.
 #[test]
 fn a_pool_in_plan_mode_makes_zero_create_calls_through_the_cloud() {
     let mut would_have_launched = 0;
@@ -218,28 +304,42 @@ fn a_pool_in_plan_mode_makes_zero_create_calls_through_the_cloud() {
             ..capped()
         };
         let mut sim = Sim::new(plan, Billing::Lambda);
-        let handle = sim.fake.read_handle();
+        let mut list_run = 0;
         for _ in 0..24 * 60 {
             sim.waiting = rng.below(6) as usize;
-            let step = fault(&mut rng, &mut 0, 3);
+            let step = fault(&mut rng, &mut list_run, 3);
             sim.fake.script_forever(Call::List, step);
-            sim.rig.pool().held = handle.list().ok();
-            sim.rig.pool().unresolved = handle.unresolved();
-            sim.rig.input.waiting = (0..sim.waiting)
-                .map(|n| common::request(&format!("r{n}")))
-                .collect();
-            let now = sim.now();
-            let actions = sim.rig.tick(now);
-            let spends = actions
-                .iter()
-                .any(|action| matches!(action, Action::Acquire(_) | Action::Mint { .. }));
-            assert!(!spends, "seed {seed}: {actions:?}");
+            sim.tick(None);
             would_have_launched += sim.rig.state.plan.len();
-            sim.clock.advance(cloud_rig::TICK);
         }
+        assert_eq!(sim.sent, 0, "seed {seed}");
         assert_eq!(sim.fake.count(Call::Acquire), 0, "seed {seed}");
         assert_eq!(sim.fake.count(Call::Release), 0, "seed {seed}");
         assert_eq!(sim.fake.launched(), 0, "seed {seed}");
     }
     assert!(would_have_launched > 100, "{would_have_launched}");
+}
+
+/// Pins a known overrun, which `max_age` (host lifetime) is to close: with demand that never
+/// pauses, the machines the cap allowed stay claimed and are never released, so the cloud's
+/// bill over a day is far over the day cap plus the release latency that bounds bursty
+/// demand. Here two requests wait for two days against a cap of 600 cents, and the last day
+/// costs the cloud 2,880 cents (two machines at a cent a minute for 24 hours) against a
+/// bound of 760. The scaler is not wrong by its own rules (the cap limits launches, not the
+/// life of a machine a request holds); this test says what the cap does not bound. When
+/// host lifetime lands this test moves: the bill must then be within the new bound, and the
+/// assertion below is turned around.
+#[test]
+fn demand_that_never_pauses_bills_past_the_day_cap_until_a_host_lifetime_exists() {
+    let settings = capped();
+    let bound =
+        settings.max_spend_per_day + settings.max_instances as u64 * PRICE * LATENCY_MINUTES / 60;
+    let mut sim = Sim::new(settings, Billing::Lambda);
+    sim.waiting = 2;
+    sim.run(2 * 24 * 60);
+    let now = sim.clock.now_ms();
+    let day = sim.fake.bill_between(now - DAY_MS, now).cents_up();
+    assert_eq!(sim.fake.running().len(), 2);
+    assert_eq!(day, 2 * 24 * 60, "two machines for a day");
+    assert!(day > bound, "{day} against {bound}");
 }

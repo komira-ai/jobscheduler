@@ -48,6 +48,8 @@ fn a_plan_made_through_the_read_handle_makes_zero_create_calls() {
         Call::Checks,
         Call::Unresolved,
         Call::IsGone,
+        Call::HostPrep,
+        Call::PayloadLimit,
     ];
     assert!(
         cloud

@@ -1,8 +1,10 @@
 //! Nothing in the workspace can reach a cloud host or call a purchase API except through the
 //! provider crate's guarded live path.
 //!
-//! The scan reads the sources, tests and examples of every crate, and the manifests and the
-//! lock file, and fails on
+//! The scan reads every file under every crate directory (sources, tests, examples, build
+//! scripts, benches, fixtures, nested crates; non-UTF-8 files lossily), the workspace manifest
+//! and the lock file, and a second test requires every `Cargo.toml` in the repository to lie
+//! where the scan reads. It fails on
 //!
 //! - the name of a cloud's API host anywhere but the one place a provider keeps its default
 //!   address;
@@ -122,16 +124,23 @@ fn violations(files: &[File], rules: &[Rule]) -> Vec<String> {
     found
 }
 
-/// The text files under `dir`, recursively, with their paths relative to `root`.
+/// Every file under `dir`, recursively, with its path relative to `root`. A file that is not
+/// UTF-8 is read lossily, never skipped: a name hidden in a binary-looking file is still
+/// found. Symlinks are not followed, and `target` and `.git` are not entered.
 fn read_tree(root: &Path, dir: &Path, found: &mut Vec<File>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries {
         let path = entry.unwrap().path();
-        if path.is_dir() {
-            read_tree(root, &path, found);
-        } else if let Ok(text) = fs::read_to_string(&path) {
+        let kind = fs::symlink_metadata(&path).unwrap().file_type();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if kind.is_dir() {
+            if name != "target" && name != ".git" {
+                read_tree(root, &path, found);
+            }
+        } else if kind.is_file() {
+            let text = String::from_utf8_lossy(&fs::read(&path).unwrap()).into_owned();
             let relative = path.strip_prefix(root).unwrap();
             let path = relative.to_string_lossy().replace('\\', "/");
             found.push(File { path, text });
@@ -139,8 +148,18 @@ fn read_tree(root: &Path, dir: &Path, found: &mut Vec<File>) {
     }
 }
 
-/// The files the scan reads: each crate's `src`, `tests` and `examples`, each crate's
-/// manifest, the workspace manifest and the lock file.
+/// The manifests in `paths` (root-relative, `/` separators) that no scan reaches: the scan
+/// reads the workspace manifest and everything under `crates/`, so a `Cargo.toml` anywhere
+/// else (`xtask/`, `tools/`, a new top-level directory) is a crate the scan would never read.
+fn stray_manifests(paths: &[String]) -> Vec<String> {
+    let reached = |path: &&String| path.as_str() == "Cargo.toml" || path.starts_with("crates/");
+    let manifests = paths.iter().filter(|path| path.ends_with("Cargo.toml"));
+    manifests.filter(|path| !reached(path)).cloned().collect()
+}
+
+/// The files the scan reads: every file under each crate directory (sources, tests,
+/// examples, `build.rs`, benches, fixtures, nested crates), the workspace manifest and the
+/// lock file.
 fn workspace() -> Vec<File> {
     let root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut found = Vec::new();
@@ -151,24 +170,7 @@ fn workspace() -> Vec<File> {
             text,
         });
     }
-    let mut crates: Vec<PathBuf> = fs::read_dir(root.join("crates"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    crates.sort();
-    for dir in crates {
-        let manifest = dir.join("Cargo.toml");
-        if let Ok(text) = fs::read_to_string(&manifest) {
-            let path = manifest.strip_prefix(&root).unwrap();
-            found.push(File {
-                path: path.to_string_lossy().replace('\\', "/"),
-                text,
-            });
-        }
-        for part in ["src", "tests", "examples"] {
-            read_tree(&root, &dir.join(part), &mut found);
-        }
-    }
+    read_tree(&root, &root.join("crates"), &mut found);
     found
 }
 
@@ -260,4 +262,70 @@ fn nothing_in_the_workspace_reaches_a_cloud_host_or_a_purchase_api_unguarded() {
     }
     let found = violations(&files, &rules());
     assert_eq!(found, Vec::<String>::new());
+}
+
+/// Asserts the placement guard can fail: a manifest in `xtask/`, in `tools/` or in a new
+/// top-level directory is named as unreached, while the workspace manifest, a crate's and a
+/// nested crate's are not. It catches a crate placed where the scan does not look.
+#[test]
+fn a_manifest_outside_the_scanned_directories_is_named() {
+    let paths: Vec<String> = [
+        "Cargo.toml",
+        "crates/a/Cargo.toml",
+        "crates/a/nested/Cargo.toml",
+        "xtask/Cargo.toml",
+        "tools/x/Cargo.toml",
+        "crates/a/src/lib.rs",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    assert_eq!(
+        stray_manifests(&paths),
+        ["xtask/Cargo.toml", "tools/x/Cargo.toml"]
+    );
+}
+
+/// Asserts that every `Cargo.toml` in the repository (outside `target` and `.git`) lies in a
+/// directory the scan reads. It catches a crate added outside `crates/`, which the scan
+/// would never see.
+#[test]
+fn every_manifest_in_the_repository_is_in_a_scanned_directory() {
+    let root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut everything = Vec::new();
+    read_tree_all(&root, &root, &mut everything);
+    assert!(everything.iter().any(|path| path == "Cargo.toml"));
+    assert_eq!(stray_manifests(&everything), Vec::<String>::new());
+}
+
+/// The relative paths of all files under `dir`, `target` and `.git` not entered, symlinks not
+/// followed.
+fn read_tree_all(root: &Path, dir: &Path, found: &mut Vec<String>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let kind = fs::symlink_metadata(&path).unwrap().file_type();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if kind.is_dir() && name != "target" && name != ".git" {
+            read_tree_all(root, &path, found);
+        } else if kind.is_file() {
+            let relative = path.strip_prefix(root).unwrap();
+            found.push(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+/// Asserts that a name inside a file that is not UTF-8 is still found: the scan reads such
+/// files lossily instead of skipping them. It catches a scan that a binary-looking file
+/// defeats.
+#[test]
+fn a_name_in_a_file_that_is_not_utf8_is_still_found() {
+    let dir = std::env::temp_dir().join(format!("no-cloud-reach-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let mut bytes = vec![0xff, 0xfe, 0x00];
+    bytes.extend_from_slice(joined(&["Run", "Instances"]).as_bytes());
+    fs::write(dir.join("blob.bin"), bytes).unwrap();
+    let mut found = Vec::new();
+    read_tree(&dir, &dir, &mut found);
+    assert_eq!(violations(&found, &rules()).len(), 1);
+    fs::remove_file(dir.join("blob.bin")).unwrap();
+    fs::remove_dir(&dir).unwrap();
 }

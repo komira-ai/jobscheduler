@@ -9,13 +9,17 @@ use js_elastic::RefusalCode;
 pub const THROTTLE_WAIT: Duration = Duration::from_secs(30);
 
 /// One of the calls the fake counts. Only [`Call::Acquire`], [`Call::List`] and
-/// [`Call::Release`] can be scripted; the others are counted.
+/// [`Call::Release`] can be scripted; the others are only counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Call {
     /// `catalog`.
     Catalog,
     /// `checks`.
     Checks,
+    /// `host_prep`.
+    HostPrep,
+    /// `payload_limit`.
+    PayloadLimit,
     /// `list`.
     List,
     /// `acquire`: the call that makes a machine, the purchase.

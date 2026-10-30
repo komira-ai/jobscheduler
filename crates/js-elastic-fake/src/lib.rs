@@ -21,6 +21,19 @@
 //!   no `acquire` was made. [`ElasticFake::read_handle`] gives a [`js_elastic::ReadHandle`],
 //!   which cannot make one.
 //!
+//! # What the oracle does not model
+//!
+//! - **Instance time only.** Storage, addresses, NAT and egress, which bill when no instance
+//!   runs (see the standing costs of the design), are not billed. A bound from this bill is a
+//!   bound on instance spend.
+//! - **Billing stops at the release call** (or the preemption), not at the end of the
+//!   `terminating` state. A provider that bills until the machine is gone would bill more.
+//! - **Preemption** stops billing at the moment the cloud reclaims the machine, for every
+//!   [`Billing`]. Real providers differ (some do not charge a part of the last increment, some
+//!   keep billing a stopped machine's disks); none of that is modelled.
+//! - **AWS 60-second minimum** is applied once per machine from its launch. There is no
+//!   restart of an instance, so the minimum that a restart would begin again does not exist.
+//!
 //! Time is a [`FakeClock`] the test moves. Nothing here reads the system clock, opens a
 //! socket or names a real cloud; `tests/no_cloud_reach.rs` fails if anything in the
 //! workspace can.
