@@ -252,3 +252,19 @@ fn the_directories_have_the_modes_the_agent_and_the_jobs_ids_need() {
         parent.file_name().unwrap().to_str().unwrap()
     );
 }
+
+/// The held host setup script writes a node's server, pool and job user by replacing these three
+/// placeholders of the unit, so each is in the unit once, exactly as the script spells it: a unit
+/// that renamed one would be refused by the script, and an extra copy (in a comment, say) would be
+/// rewritten with the rest.
+#[test]
+fn the_unit_holds_each_placeholder_the_setup_script_replaces_once() {
+    let text = read(UNIT);
+    for placeholder in [
+        "--server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT",
+        "--pool default",
+        "--job-user jsjob",
+    ] {
+        assert_eq!(text.matches(placeholder).count(), 1, "{placeholder}");
+    }
+}
