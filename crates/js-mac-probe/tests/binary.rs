@@ -32,5 +32,6 @@ fn a_refused_child_exits_one_with_the_reason_on_stderr() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
-    assert!(!out.stderr.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.starts_with("errno=2 "), "{stderr}");
 }

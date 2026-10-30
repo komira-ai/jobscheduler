@@ -1,4 +1,4 @@
-//! A [`ContainerRuntime`] over the `docker` or `podman` command line.
+//! A [`Runtime`] over the `docker` or `podman` command line.
 //!
 //! [`CliRuntime`] starts the runtime's program through a [`CommandRunner`] (so a test
 //! feeds recorded answers, and the real runner bounds every call in time and output), by
@@ -51,7 +51,7 @@
 //! it.
 //!
 //! Every container carries `jobscheduler.dev/agent=<host id>` and the time it was
-//! created, beside the lifecycle's own labels; [`ContainerRuntime::list_labelled`] asks
+//! created, beside the lifecycle's own labels; [`Runtime::list_labelled`] asks
 //! for the containers that carry the run label *and* this agent's label, so two agents
 //! sharing one runtime never adopt each other's jobs.
 //!
@@ -94,7 +94,7 @@
 //! fail, and nothing is removed.
 //!
 //! A container that was created and never started is never taken for a running job:
-//! [`ContainerRuntime::list_labelled`] lists one in the state `created` (Podman:
+//! [`Runtime::list_labelled`] lists one in the state `created` (Podman:
 //! `configured`) marked [`Found::never_started`] and removes nothing, and the lifecycle
 //! evicts it like any container it cannot adopt (it books it while the removal fails, and
 //! tries again at every step). A listing therefore never fails because one container
@@ -246,7 +246,7 @@
 //!
 //! A container on a Mac runs in a Linux virtual machine that cannot reach the Apple GPU.
 //! A job that names a GPU there is refused as `failed_to_start` with the detail
-//! `gpu-unsupported` and nothing is created ([`ContainerRuntime::supports_gpus`]); the Mac
+//! `gpu-unsupported` and nothing is created ([`Runtime::supports_gpus`]); the Mac
 //! path for GPU work is a lease of the whole host. The runtime itself works on a Mac, but
 //! the agent does not accept `--container-bin` there: the post-job checks of
 //! [`integrity`](crate::integrity) read `/proc`, and a job must not run unchecked.
@@ -255,7 +255,7 @@
 //!
 //! `create` bounds the container's log on the host (see [`logs`]), and once a job has
 //! exited, before the container is removed, one `logs` call reads the last bytes of its
-//! standard output and standard error, apart, for the result ([`ContainerRuntime::log_tail`]).
+//! standard output and standard error, apart, for the result ([`Runtime::log_tail`]).
 //! The call has the same limits as every other. The tail is returned verbatim to whoever
 //! can read the run: a job must not print secrets.
 //!
@@ -300,7 +300,7 @@ pub use subid::{
 
 use crate::facts::{CommandRunner, FileReader, Platform, SystemCommands, SystemFiles};
 use crate::lifecycle::{
-    ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, RuntimeError, Status, label,
+    Body, Exit, Found, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
 };
 
 /// How long one call of the runtime may take, besides the stop grace it is given: long
@@ -797,7 +797,7 @@ impl CliRuntime {
     /// The argv of `create` for `spec`, named `name` and made `created_ms`.
     fn create_args(
         &self,
-        spec: &ContainerSpec,
+        spec: &RunSpec,
         name: &str,
         created_ms: u64,
     ) -> Result<Vec<String>, CliError> {
@@ -817,14 +817,18 @@ impl CliRuntime {
         // Podman maps each container; Docker's daemon maps them all (see `open_in`).
         let maps = self.mapping.filter(|_| self.engine == Engine::Podman);
         args.extend(maps.into_iter().flat_map(Mapping::podman_args));
-        args.extend(["--".to_owned(), spec.image.clone()]);
-        args.extend(spec.args.iter().cloned());
+        let Body::Container {
+            image,
+            args: command,
+        } = &spec.body;
+        args.extend(["--".to_owned(), image.clone()]);
+        args.extend(command.iter().cloned());
         Ok(args)
     }
 
     /// The path of the pinned seccomp profile, written first: in the directory above the
     /// run's scratch directory (the scratch root, private to the agent).
-    fn profile_file(&self, spec: &ContainerSpec) -> Result<String, CliError> {
+    fn profile_file(&self, spec: &RunSpec) -> Result<String, CliError> {
         let dir = self
             .profile_dir
             .as_deref()
@@ -834,7 +838,7 @@ impl CliRuntime {
             .and_then(|dir| install_profile(dir).map_err(|why| fail(why.to_string())))
     }
 
-    fn launch(&self, spec: &ContainerSpec) -> Result<ContainerId, CliError> {
+    fn launch(&self, spec: &RunSpec) -> Result<RunHandle, CliError> {
         if spec.isolation != Isolation::Contained {
             return Err(CliError::NotContained);
         }
@@ -874,7 +878,7 @@ impl CliRuntime {
     /// container that still runs with its process still missing is blind. A process that
     /// is in `/proc` must also be the container's: its control group names the container's
     /// id, or its pid namespace is not the agent's.
-    fn verify_seen(&self, id: &ContainerId) -> Result<(), CliError> {
+    fn verify_seen(&self, id: &RunHandle) -> Result<(), CliError> {
         match self.look(id)? {
             Look::Seen | Look::Ended => Ok(()),
             Look::Gone => Err(CliError::Unreadable { call: "inspect" }),
@@ -887,7 +891,7 @@ impl CliRuntime {
 
     /// One `inspect` of the process and state of a started container, and what `/proc`
     /// shows of that process.
-    fn look(&self, id: &ContainerId) -> Result<Look, CliError> {
+    fn look(&self, id: &RunHandle) -> Result<Look, CliError> {
         let unreadable = || CliError::Unreadable { call: "inspect" };
         let Some(text) = self.inspect(id, "{{.State.Pid}} {{.State.Status}}")? else {
             return Ok(Look::Gone);
@@ -905,7 +909,7 @@ impl CliRuntime {
     /// Whether `pid` is in the agent's `/proc` and is a process of the container `id`: its
     /// control group holds the id, or its pid namespace is another than the agent's (both
     /// links must be readable).
-    fn is_its_process(&self, pid: u32, id: &ContainerId) -> bool {
+    fn is_its_process(&self, pid: u32, id: &RunHandle) -> bool {
         if !(self.pid_seen)(pid) {
             return false;
         }
@@ -923,7 +927,7 @@ impl CliRuntime {
     /// `--actions-cgroup`, when the container is over, when its process or control group
     /// cannot be read, and when the control group is not strictly below `--actions-cgroup`
     /// (the engine ignored the parent, so the node's counter would not hold the lease).
-    fn cgroup_of(&self, id: &ContainerId) -> Option<PathBuf> {
+    fn cgroup_of(&self, id: &RunHandle) -> Option<PathBuf> {
         let actions = Path::new(self.settings.actions_cgroup()?);
         let text = self
             .inspect(id, "{{.State.Pid}} {{.State.Status}}")
@@ -938,7 +942,7 @@ impl CliRuntime {
 
     /// Gives the run's scratch directory to the container's user, when the agent is root:
     /// to the host ids the user's ids are mapped onto, when the jobs are mapped.
-    fn hand_over_scratch(&self, spec: &ContainerSpec) -> Result<(), CliError> {
+    fn hand_over_scratch(&self, spec: &RunSpec) -> Result<(), CliError> {
         let first = |range: fn(Mapping) -> IdRange| self.mapping.map_or(0, |m| range(m).start());
         let (uid_base, gid_base) = (first(Mapping::uid), first(Mapping::gid));
         let give = |(uid, gid): (u32, u32)| {
@@ -957,7 +961,7 @@ impl CliRuntime {
     /// not a bind: it must be the one volume at [`SCRATCH_TARGET`], of the local driver
     /// and writable, and `volume inspect` must print exactly the options that bind the
     /// directory `nosuid,nodev` ([`scratch_volume_options`]).
-    fn verify_mounts(&self, id: &ContainerId, spec: &ContainerSpec) -> Result<(), CliError> {
+    fn verify_mounts(&self, id: &RunHandle, spec: &RunSpec) -> Result<(), CliError> {
         let unreadable = || CliError::Unreadable { call: "inspect" };
         let text = self
             .inspect(id, "{{json .Mounts}}")?
@@ -982,7 +986,7 @@ impl CliRuntime {
     }
 
     /// The Docker half of [`CliRuntime::verify_mounts`]: `text` is the `.Mounts` JSON.
-    fn verify_scratch_volume(&self, text: &str, spec: &ContainerSpec) -> Result<(), CliError> {
+    fn verify_scratch_volume(&self, text: &str, spec: &RunSpec) -> Result<(), CliError> {
         let volumes = volumes_read(text)
             .ok_or(CliError::Unreadable { call: "inspect" })?
             .into_iter()
@@ -1013,7 +1017,7 @@ impl CliRuntime {
     }
 
     /// Whether the runtime still has the container.
-    fn exists(&self, id: &ContainerId) -> Result<bool, CliError> {
+    fn exists(&self, id: &RunHandle) -> Result<bool, CliError> {
         let filter = format!("id={}", id.0);
         self.call("ps", &["ps", "-a", "-q", "--no-trunc", "--filter", &filter])
             .map(|ids| ids.lines().any(|line| line.trim() == id.0))
@@ -1022,7 +1026,7 @@ impl CliRuntime {
     /// The ids of the containers that are called exactly `name` and carry both this
     /// agent's label and the run label of `run_id`. The name filter is a regular
     /// expression: anchored at both ends, with the dots of the name escaped.
-    fn named(&self, name: &str, run_id: &str) -> Result<Vec<ContainerId>, CliError> {
+    fn named(&self, name: &str, run_id: &str) -> Result<Vec<RunHandle>, CliError> {
         let (name, run, agent) = (
             format!("name=^{}$", name.replace('.', "\\.")),
             format!("label={}={run_id}", label::RUN),
@@ -1042,12 +1046,12 @@ impl CliRuntime {
         ];
         self.call("ps", &args).map(|printed| {
             let lines = printed.lines().map(str::trim).filter(|line| is_id(line));
-            lines.map(|id| ContainerId(id.to_owned())).collect()
+            lines.map(|id| RunHandle(id.to_owned())).collect()
         })
     }
 
     /// `Ok(())` for a failed call whose container is gone anyway, else the failure.
-    fn gone_or(&self, id: &ContainerId, failed: CliError) -> Result<(), CliError> {
+    fn gone_or(&self, id: &RunHandle, failed: CliError) -> Result<(), CliError> {
         match self.exists(id)? {
             true => Err(failed),
             false => Ok(()),
@@ -1055,7 +1059,7 @@ impl CliRuntime {
     }
 
     /// The `inspect` of one container with `format`, `None` when it is gone.
-    fn inspect(&self, id: &ContainerId, format: &str) -> Result<Option<String>, CliError> {
+    fn inspect(&self, id: &RunHandle, format: &str) -> Result<Option<String>, CliError> {
         check(id)?;
         let args = [
             "inspect",
@@ -1072,14 +1076,14 @@ impl CliRuntime {
         }
     }
 
-    fn status(&self, id: &ContainerId) -> Result<Status, CliError> {
+    fn status(&self, id: &RunHandle) -> Result<Status, CliError> {
         let format = "{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}";
         self.inspect(id, format)?.map_or(Ok(Status::Gone), |text| {
             parse_status(&text).ok_or(CliError::Unreadable { call: "inspect" })
         })
     }
 
-    fn halt(&self, id: &ContainerId, grace: Duration) -> Result<(), CliError> {
+    fn halt(&self, id: &RunHandle, grace: Duration) -> Result<(), CliError> {
         check(id)?;
         let secs = grace.as_secs() + u64::from(grace.subsec_nanos() > 0);
         let secs = secs.to_string();
@@ -1088,7 +1092,7 @@ impl CliRuntime {
             .or_else(|failed| self.gone_or(id, failed))
     }
 
-    fn delete(&self, id: &ContainerId) -> Result<(), CliError> {
+    fn delete(&self, id: &RunHandle) -> Result<(), CliError> {
         check(id)?;
         self.call("rm", &["rm", "--force", "--volumes", "--", &id.0])
             .map(|_| ())
@@ -1107,7 +1111,7 @@ impl CliRuntime {
     }
 
     fn found(&self, id: &str) -> Result<Option<Found>, CliError> {
-        let id = ContainerId(id.to_owned());
+        let id = RunHandle(id.to_owned());
         let unreadable = || CliError::Unreadable { call: "inspect" };
         let format = "{{.State.Status}} {{json .Config.Labels}}";
         let Some(text) = self.inspect(&id, format)? else {
@@ -1209,13 +1213,13 @@ fn agent_tag(host_id: &str) -> String {
 }
 
 /// The id `create` printed: its last line.
-fn created_id(printed: &str) -> Result<ContainerId, CliError> {
+fn created_id(printed: &str) -> Result<RunHandle, CliError> {
     printed
         .lines()
         .next_back()
         .map(str::trim)
         .filter(|line| is_id(line))
-        .map(|line| ContainerId(line.to_owned()))
+        .map(|line| RunHandle(line.to_owned()))
         .ok_or(CliError::Unreadable { call: "create" })
 }
 
@@ -1344,7 +1348,7 @@ fn is_id(text: &str) -> bool {
 }
 
 /// `id` itself, when it is safe to put in an argument or a filter.
-fn check(id: &ContainerId) -> Result<(), CliError> {
+fn check(id: &RunHandle) -> Result<(), CliError> {
     Some(()).filter(|()| is_id(&id.0)).ok_or(CliError::BadId)
 }
 
@@ -1378,20 +1382,20 @@ fn parse_status(text: &str) -> Option<Status> {
     }
 }
 
-impl ContainerRuntime for CliRuntime {
-    fn create_and_start(&mut self, spec: &ContainerSpec) -> Result<ContainerId, RuntimeError> {
+impl Runtime for CliRuntime {
+    fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
         self.launch(spec).map_err(RuntimeError::from)
     }
 
-    fn poll(&mut self, id: &ContainerId) -> Result<Status, RuntimeError> {
+    fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
         self.status(id).map_err(RuntimeError::from)
     }
 
-    fn stop(&mut self, id: &ContainerId, grace: Duration) -> Result<(), RuntimeError> {
+    fn stop(&mut self, id: &RunHandle, grace: Duration) -> Result<(), RuntimeError> {
         self.halt(id, grace).map_err(RuntimeError::from)
     }
 
-    fn remove(&mut self, id: &ContainerId) -> Result<(), RuntimeError> {
+    fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         self.delete(id).map_err(RuntimeError::from)
     }
 
@@ -1399,16 +1403,16 @@ impl ContainerRuntime for CliRuntime {
         self.listing().map_err(RuntimeError::from)
     }
 
-    fn list_ids(&mut self) -> Result<Vec<ContainerId>, RuntimeError> {
+    fn list_ids(&mut self) -> Result<Vec<RunHandle>, RuntimeError> {
         let ids = self.listed().map_err(RuntimeError::from)?;
-        Ok(ids.into_iter().map(ContainerId).collect())
+        Ok(ids.into_iter().map(RunHandle).collect())
     }
 
     fn supports_gpus(&self) -> bool {
         self.gpus
     }
 
-    fn log_tail(&mut self, id: &ContainerId) -> Result<Option<LogTail>, RuntimeError> {
+    fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
         self.read_logs(id).map_err(RuntimeError::from)
     }
 
@@ -1416,7 +1420,7 @@ impl ContainerRuntime for CliRuntime {
         self.egress_enforced().map_err(RuntimeError::from)
     }
 
-    fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
+    fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         self.cgroup_of(id)
     }
 }

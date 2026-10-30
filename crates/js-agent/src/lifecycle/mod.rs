@@ -1,7 +1,7 @@
 //! A job's life on the host: from the `Start` that names it, through its container, to the
 //! result the server acknowledges and the slot that frees (design 5.4 and 5.10).
 //!
-//! [`Lifecycle`] is a state machine over three seams: a [`ContainerRuntime`], a
+//! [`Lifecycle`] is a state machine over three seams: a [`Runtime`], a
 //! [`CheckHook`] and a [`Clock`]. It consumes the wire types in memory only (it reads a
 //! [`HeartbeatReply`](js_agent_wire::HeartbeatReply) and offers the
 //! [`HeldRun`](js_agent_wire::HeldRun)s and [`RunResult`](js_agent_wire::RunResult)s of
@@ -136,7 +136,7 @@
 //!
 //! # The threading contract of the runtime seam
 //!
-//! [`ContainerRuntime`] calls block (an image pull, the grace of a stop, a slow daemon).
+//! [`Runtime`] calls block (an image pull, the grace of a stop, a slow daemon).
 //! They are made by [`Lifecycle`] only, and a [`Lifecycle`] is driven from its own worker
 //! thread (see [`Worker`](crate::Worker)), never from the session's heartbeat loop, so
 //! that a slow runtime call delays the next [`Lifecycle::step`] but never a heartbeat, and
@@ -176,8 +176,7 @@ pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, RunningLease, SLOTS, 
 pub use mounts::{MountError, MountRoots};
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
-    ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount, RuntimeError, Status,
-    label,
+    Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
 };
 pub use scratch::ScratchRoot;
 pub use taint::{MARKER_FILE, StateRoot};
@@ -261,7 +260,7 @@ pub struct Finished<'a> {
     /// The containers of the agent's other jobs that are still on the host (running, or
     /// exited and not yet removed), and those that could not be removed. What they run and
     /// mount is not the finished job's, so a check must not count it against the job.
-    pub live: &'a [ContainerId],
+    pub live: &'a [RunHandle],
     /// The slot the finished run held, when it held one.
     pub slot: Option<u32>,
     /// The slots of the jobs in `live` (those whose container is still on the host).

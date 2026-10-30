@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use js_agent::cli_runtime::{CliRuntime, Settings, system_runner};
-use js_agent::lifecycle::{ContainerId, ContainerRuntime};
+use js_agent::lifecycle::{RunHandle, Runtime};
 use js_agent_wire::LogTail;
 use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 
@@ -29,7 +29,7 @@ fn over(name: &str, logs_body: &str) -> (CliRuntime, Scratch) {
 }
 
 fn tail_of(rt: &mut CliRuntime) -> Result<Option<LogTail>, String> {
-    rt.log_tail(&ContainerId(ID.to_owned()))
+    rt.log_tail(&RunHandle(ID.to_owned()))
         .map_err(|err| err.to_string())
 }
 

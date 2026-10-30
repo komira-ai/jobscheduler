@@ -1,7 +1,7 @@
 //! The listing of the agent's containers: what it finds, the age it reports, and its
 //! failures.
 
-use js_agent::lifecycle::{ContainerRuntime, Found, label};
+use js_agent::lifecycle::{Found, Runtime, label};
 
 use super::super::scripted::Scripted;
 use super::super::{HOST, docker, open, open_at, open_with, settings, thirty_seconds_on};

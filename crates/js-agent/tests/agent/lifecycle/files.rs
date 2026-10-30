@@ -243,7 +243,7 @@ fn files_that_cannot_be_written_fail_the_start_without_leaking() {
     assert_eq!(names(&h.life.step()).last().unwrap(), "freed r1");
 }
 
-/// A planted secret reaches nothing the agent can print: not the `ContainerSpec` the
+/// A planted secret reaches nothing the agent can print: not the `RunSpec` the
 /// runtime is handed (the debug form), not any event, result or held run (the forms the
 /// worker logs), and not the debug form of the start. Catches a derived Debug or a log
 /// line that would put a presigned URL in a journal.
