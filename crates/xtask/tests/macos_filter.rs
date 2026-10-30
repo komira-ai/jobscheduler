@@ -283,7 +283,10 @@ fn a_label_alone_starts_no_run_and_is_read_at_push_and_reopen() {
     );
     assert!(!text.contains("labeled]") && !text.contains(", labeled"));
     // And no per-job skip for label runs, nor a special concurrency group for them.
-    assert!(!text.contains("github.event.action"), "no event-action test");
+    assert!(
+        !text.contains("github.event.action"),
+        "no event-action test"
+    );
     assert!(!text.contains("github.event.label"), "no label-event test");
 }
 
