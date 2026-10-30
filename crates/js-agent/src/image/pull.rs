@@ -172,9 +172,7 @@ fn pull(args: &[OsString], host: &Host<'_>) -> Result<String, Failure> {
     let allow = args
         .image_allow
         .iter()
-        .map(|entry| {
-            Allow::parse(entry).map_err(|e| Failure::Usage(format!("--image-allow: {e}")))
-        })
+        .map(|entry| Allow::parse(entry).map_err(|e| Failure::Usage(format!("--image-allow: {e}"))))
         .collect::<Result<Vec<_>, _>>()?;
     let client = (host.client)(allow);
     admitted(&client, &image)?;
@@ -212,9 +210,7 @@ fn pull(args: &[OsString], host: &Host<'_>) -> Result<String, Failure> {
         .enable_all()
         .build()
         .map_err(failed)?;
-    runtime
-        .block_on(oci.check_pinned(&image))
-        .map_err(failed)?;
+    runtime.block_on(oci.check_pinned(&image)).map_err(failed)?;
     Ok(done("pulled"))
 }
 
@@ -270,15 +266,17 @@ fn admitted(client: &Client, image: &PinnedImage) -> Result<(), Failure> {
 
 /// `--job-user`: `UID:GID`, neither of them root's.
 fn job_user(text: &str) -> Result<(u32, u32), Failure> {
-    let usage = || Failure::Usage(format!("--job-user: {text:?} is not UID:GID with neither 0"));
+    let usage = || {
+        Failure::Usage(format!(
+            "--job-user: {text:?} is not UID:GID with neither 0"
+        ))
+    };
     let (uid, gid) = text.split_once(':').ok_or_else(usage)?;
     let ids: (u32, u32) = (
         uid.parse().map_err(|_| usage())?,
         gid.parse().map_err(|_| usage())?,
     );
-    (ids.0 != 0 && ids.1 != 0)
-        .then_some(ids)
-        .ok_or_else(usage)
+    (ids.0 != 0 && ids.1 != 0).then_some(ids).ok_or_else(usage)
 }
 
 /// `--cgroup-parent`: an absolute path of plain components.

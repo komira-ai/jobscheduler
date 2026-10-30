@@ -10,6 +10,12 @@
 //! runtime's own timestamps, time passes only in the sleeper. The one clock of the jobs is
 //! the monotonic one the [`Machine`] gives, which the worker and the session share.
 //!
+//! # Verbs
+//!
+//! `js-agent image-pull <repository>@sha256:<hex>` (Linux, run as root) pulls an image into
+//! the store the crun runtime reads, without starting the agent and without a container
+//! engine; see `image::pull`.
+//!
 //! # Flags
 //!
 //! Configuration is flags only: `js-agent` reads no environment variable.
