@@ -1,0 +1,30 @@
+[package]
+name = "js-bundle-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# `js-bundle`: packs directories into a darwin bundle in an OCI image-layout directory,
+# prints one, and verifies one. The format is the `js-bundle` crate's, the layout reader is
+# the `js-oci` crate's; this crate is the command line around them.
+[[bin]]
+name = "js-bundle"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+js-bundle = { path = "../js-bundle" }
+js-oci = { path = "../js-oci" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+js-testkit = { path = "../js-testkit" }
+
+[lints]
+workspace = true
