@@ -36,7 +36,12 @@
 //!   redirect or token endpoint, so a registry cannot send the client to scan other
 //!   ports of a public host. Redirects are followed at most five times, to https
 //!   targets only, with no `Authorization`, and a `Location` is resolved as RFC 3986
-//!   says.
+//!   says;
+//! - one exception to https: an entry marked [`Allow::plain_http_loopback`] whose host is
+//!   the IP literal `127.0.0.1` or `[::1]` is pulled over plain http, with no TLS. Its
+//!   requests, redirects and token realms may go only to that exact scheme, host and
+//!   port; the flag is ignored on a name (`localhost` included) and on every other
+//!   address, and does not touch other entries.
 //!
 //! Where the client does *not* look:
 //! - `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` are deliberately not honoured: the

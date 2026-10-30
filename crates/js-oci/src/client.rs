@@ -10,8 +10,9 @@ use rustls::pki_types::CertificateDer;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 
-use crate::http::{Http, RootSummary, Roots, Timeouts};
+use crate::http::{Http, Reach, RootSummary, Roots, Timeouts};
 use crate::location::Authority;
+use crate::location::{HTTP_PORT, HTTPS_PORT};
 use crate::manifest::{self, Descriptor, Kind, Manifest};
 use crate::source::BundleSource;
 use crate::text;
@@ -62,8 +63,8 @@ impl BlobSink for tokio::fs::File {
     }
 }
 
-/// A registry client. It reaches only what its [`Policy`] allows, speaks https only, and
-/// trusts the roots it was made with.
+/// A registry client. It reaches only what its [`Policy`] allows, speaks https (except to
+/// an entry marked [`Allow::plain_http_loopback`]), and trusts the roots it was made with.
 #[derive(Debug)]
 pub struct Client {
     http: Http,
@@ -165,12 +166,30 @@ impl std::fmt::Debug for Repository<'_> {
 
 impl Repository<'_> {
     fn url(&self, kind: &str, reference: &str) -> String {
-        let scheme = if self.plain { "http" } else { "https" };
+        let (scheme, default) = self.scheme();
         format!(
             "{scheme}://{}/v2/{}/{kind}/{reference}",
-            self.location.endpoint().header(),
+            self.location.endpoint().header_or(default),
             self.location.repository()
         )
+    }
+
+    /// The URL scheme this repository is reached with, and the port it implies.
+    fn scheme(&self) -> (&'static str, u16) {
+        if self.plain {
+            ("http", HTTP_PORT)
+        } else {
+            ("https", HTTPS_PORT)
+        }
+    }
+
+    /// Where a request that began at `at` may go.
+    fn reach<'a>(&self, at: &'a Authority) -> Reach<'a> {
+        if self.plain {
+            Reach::PlainLoopback(at)
+        } else {
+            Reach::Https(at)
+        }
     }
 
     fn token(&self) -> Option<String> {
@@ -197,7 +216,7 @@ impl Repository<'_> {
             }
             let response = self
                 .http
-                .get(url, &headers, self.location.endpoint())
+                .get(url, &headers, self.reach(self.location.endpoint()))
                 .await?;
             let status = response.status();
             if status.is_success() {
@@ -236,7 +255,7 @@ impl Repository<'_> {
         let params = Challenge::parse(challenge)?;
         let (url, realm) = self.token_url(&params)?;
         let what = text::url(&url);
-        let response = self.http.get(&url, &[], &realm).await?;
+        let response = self.http.get(&url, &[], self.reach(&realm)).await?;
         if !response.status().is_success() {
             return Err(Error::Status {
                 url: what,
@@ -263,15 +282,24 @@ impl Repository<'_> {
     }
 
     /// The URL to ask for a token, and the endpoint it is at. The realm must be an https
-    /// URL on the registry's host or a listed one; its fragment (never sent) is dropped
+    /// URL on the registry's host or a listed one (for a plain-http entry, an http URL
+    /// with exactly the registry's authority and no other); its fragment (never sent) is dropped
     /// before the service and scope are added to its query, so they cannot end up in it.
     fn token_url(&self, params: &Challenge) -> Result<(String, Authority), Error> {
         let bad = || Error::Realm(text::url(&params.realm));
         let base = params.realm.split('#').next().unwrap_or_default();
         let uri: hyper::Uri = base.parse().map_err(|_| bad())?;
-        let realm = Authority::of_uri(&uri)
-            .filter(|_| uri.scheme_str() == Some("https"))
-            .filter(|host| self.http.policy.realm_ok(host, self.location.endpoint()))
+        let (scheme, default) = self.scheme();
+        let endpoint = self.location.endpoint();
+        let realm = Authority::of_uri_or(&uri, default)
+            .filter(|_| uri.scheme_str() == Some(scheme))
+            .filter(|host| {
+                if self.plain {
+                    host == endpoint
+                } else {
+                    self.http.policy.realm_ok(host, endpoint)
+                }
+            })
             .ok_or_else(bad)?;
         let mut query = String::new();
         if let Some(existing) = uri.query() {
@@ -286,7 +314,11 @@ impl Repository<'_> {
             .clone()
             .unwrap_or_else(|| format!("repository:{}:pull", self.location.repository()));
         query.push_str(&format!("scope={}", query_escape(&scope)));
-        let url = format!("https://{}{}?{query}", realm.header(), uri.path());
+        let url = format!(
+            "{scheme}://{}{}?{query}",
+            realm.header_or(default),
+            uri.path()
+        );
         Ok((url, realm))
     }
 }

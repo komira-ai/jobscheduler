@@ -135,6 +135,12 @@ fn v4(hi: u16, lo: u16) -> Ipv4Addr {
     Ipv4Addr::new(a, b, c, d)
 }
 
+/// The only hosts a plain-http entry may have.
+const LOOPBACK_LITERALS: [IpAddr; 2] = [
+    IpAddr::V4(Ipv4Addr::LOCALHOST),
+    IpAddr::V6(Ipv6Addr::LOCALHOST),
+];
+
 /// One registry, and the namespace of it, that a pin may name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Allow {
@@ -205,11 +211,36 @@ impl Allow {
         self
     }
 
-    /// This entry as one pulled from over plain http.
+    /// This entry as one pulled from over plain http, with no TLS and no certificate:
+    /// a registry on this machine's own loopback, such as the node's own cache.
+    ///
+    /// The flag is honoured only when the entry's host is the IP literal `127.0.0.1` or
+    /// `[::1]` (a port may follow); on a name, `localhost` included, on any other
+    /// address, or on an entry that is not flagged, the entry stays https. For a flagged
+    /// entry the registry's requests go over http to that exact authority and nowhere
+    /// else: a redirect or token realm must be an `http` URL with the same host and
+    /// port, so no other host, port, loopback address or https URL is followed or asked,
+    /// and other entries of the policy (and [`Policy::allow_realm`] hosts) are not
+    /// reachable from it. Every other entry stays https exactly as before, and the flag
+    /// does not move to a sibling entry for the same address.
+    ///
+    /// It does not lift the address rules: the entry still needs [`Allow::loopback`] to
+    /// connect to the loopback address.
     #[must_use]
     pub fn plain_http_loopback(mut self) -> Self {
         self.plain_http = true;
         self
+    }
+
+    /// Whether this entry is pulled over plain http: flagged, and its host a loopback
+    /// IP literal.
+    fn is_plain_http(&self) -> bool {
+        self.plain_http
+            && self
+                .authority
+                .host()
+                .parse::<IpAddr>()
+                .is_ok_and(|ip| LOOPBACK_LITERALS.contains(&ip))
     }
 
     /// Whether this entry's host may be reached at an address of `class`.
@@ -275,11 +306,12 @@ impl Policy {
         Ok(self)
     }
 
-    /// Whether `location` is pulled over plain http.
+    /// Whether `location` is pulled over plain http: the entry that admits it says so
+    /// and its host is a loopback IP literal (see [`Allow::plain_http_loopback`]).
     pub(crate) fn plain_http(&self, location: &Location) -> bool {
         self.allow
             .iter()
-            .any(|a| a.admits(location) && a.plain_http)
+            .any(|a| a.admits(location) && a.is_plain_http())
     }
 
     /// Whether a pin may name `location`.
