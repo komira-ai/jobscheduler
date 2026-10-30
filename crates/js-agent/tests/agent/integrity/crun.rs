@@ -136,6 +136,7 @@ fn a_live_handle_excuses_its_own_mounts_and_not_a_longer_names() {
         ("0::/machine.slice/libpod-9e1.scope", true),
         ("0::/system.slice/docker-9e1.scope", true),
         ("0::/docker/9e1", true),
+        ("0::/libpod_parent/libpod-9e1", true),
         ("0::/machine.slice/libpod-9e12.scope", false),
         ("0::/docker/9e12", false),
         ("0::/machine.slice/libpod-conmon-9e1.scope/x", false),

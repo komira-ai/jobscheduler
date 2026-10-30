@@ -129,12 +129,18 @@
 //!   does a process in the agent's own control group (read from `/proc/self/cgroup` when
 //!   the agent starts; an agent that cannot read it does not start) or below it, other than
 //!   a Podman monitor's scope there.
-//! - **The direct runner's layout.** A container is the group `<actions>/<lease>/ctr`; the
-//!   agent's own group is beside `actions/`, not above it, so a process left there would
-//!   look like a system service's. A path with a `ctr` just below a `lease-<n>` group, or
-//!   with a group named `actions` in it, names a container and counts. The runner's own
+//! - **The direct runner's layout.** A container is the group
+//!   `<actions>/js-<agent tag>-<run id>/ctr` (the lease's group is named for the container,
+//!   and the run handle is that name); the agent's own group is beside `actions/`, not above
+//!   it, so a process left there would look like a system service's. A path with a group
+//!   named `actions` in it names a container and counts, whatever is below. The runner's own
 //!   processes (`crun run`, `kill`, `delete`, the keeper) are children of the agent, alive
 //!   under a parent that is not `init`, in the agent's group exactly: they are not counted.
+//!   The helper containers (`actions/helpers/...`) are not counted either: a background
+//!   pull runs one while another job's checks run, and it is gone when its runtime call
+//!   returns, so a helper that never ends is not found here. A live container is named by
+//!   a whole path component, the handle or an engine's `libpod-<id>.scope` form of it, never
+//!   by a part of a longer name (`run-3-1` and `run-3-12`).
 //! - **A runtime that cannot see a container's group** is blind: see
 //!   [`Runtime::places_in_cgroup`](crate::lifecycle::Runtime::places_in_cgroup); the
 //!   lifecycle taints the host as unchecked when it sees such a run, still running, with no group.
@@ -366,11 +372,29 @@ impl Snapshot {
     }
 }
 
-/// Whether `text` (a control group path, a mount's root, point or source) names one of the
-/// containers still on the host beside the finished job.
+/// Whether `text` (a control group path, the lines of `/proc/<pid>/cgroup`, or a mount's
+/// root, point or source) names one of the containers still on the host beside the
+/// finished job: some component of it, between `/` or white space, is the container's
+/// handle, or is an engine's name for it (`libpod-<id>.scope`, `docker-<id>.scope`, ...).
+/// A handle that is only part of a longer name does not match: run ids are `run-<n>-<m>`,
+/// so `run-3-1` is the start of the live `run-3-12`'s name.
 fn is_live(job: &Finished<'_>, text: &str) -> bool {
-    job.live.iter().any(|id| text.contains(&id.0))
+    text.split(|c: char| c == '/' || c.is_whitespace())
+        .any(|part| job.live.iter().any(|id| names_container(part, &id.0)))
 }
+
+/// Whether the path component `part` is the container `id`: its handle, or an engine's
+/// control group name for it, with or without the `.scope`.
+fn names_container(part: &str, id: &str) -> bool {
+    part == id
+        || ENGINES.iter().any(|prefix| {
+            part.strip_prefix(prefix)
+                .is_some_and(|rest| rest.strip_suffix(".scope").unwrap_or(rest) == id)
+        })
+}
+
+/// The prefixes of the control group names container engines give a container.
+const ENGINES: [&str; 4] = ["libpod-", "docker-", "crio-", "cri-containerd-"];
 
 /// Whether a process in the control groups `cgroup` (the lines of `/proc/<pid>/cgroup`) is
 /// the host's own, which no job can have left: one in a service of the system slice, in the
@@ -410,6 +434,9 @@ fn hosts_own_process(cgroup: &str, own: Option<&str>) -> bool {
     if agents {
         return false;
     }
+    if runners_helper(&units) {
+        return true;
+    }
     if names_a_container(&units) {
         return false;
     }
@@ -433,31 +460,42 @@ fn unified(cgroup: &str) -> Option<&str> {
 /// The name of the runner's group that holds every lease's group (js-contain's `actions/`).
 const ACTIONS: &str = "actions";
 
+/// The group below `actions/` that holds the helper containers (unpack and removal).
+const HELPERS: &str = "helpers";
+
 /// Whether the control groups `units` (the names in a unified path) hold a container's: a
-/// group an engine makes for one (`libpod-<id>`, `docker-<id>`, ...), the direct runner's
-/// `<lease>/ctr` (a `ctr` just below a `lease-<n>` group, however deep the path goes on, and
-/// wherever the lease group sits), or any group in or below the runner's `actions` group,
-/// which holds nothing but leases. A name that only looks like these (`actions-old`,
-/// `lease-1/ctrl`, `xlease-1/ctr`) is not one.
+/// group an engine makes for one (`libpod-<id>`, `docker-<id>`, ...), or any group in or
+/// below the direct runner's `actions` group, which holds nothing but leases (a lease's group
+/// is named for its container, `js-<agent tag>-<run id>`, and the container's is `ctr`
+/// below it) and the helper containers' group. A name that only looks like `actions`
+/// (`actions-old`) is not one.
 fn names_a_container(units: &[&str]) -> bool {
-    const ENGINES: [&str; 4] = ["libpod-", "docker-", "crio-", "cri-containerd-"];
     let engine = |unit: &&str| {
         ENGINES.iter().any(|prefix| unit.starts_with(prefix))
             || ["docker", "libpod_parent", "machine.slice"].contains(unit)
     };
-    units.iter().any(engine)
-        || units.contains(&ACTIONS)
-        || units
-            .windows(2)
-            .any(|pair| pair[0].starts_with("lease-") && pair[1] == "ctr")
+    units.iter().any(engine) || units.contains(&ACTIONS)
 }
 
-/// Whether `process` is one of the direct runner's own: a child of the agent (its parent is
-/// alive and is not `init`) in the agent's own control group exactly. The runner's `crun
-/// run`, `crun kill` and `crun delete` and the keeper are started by the agent and stay in
-/// its group; no job process can be in it, since a container's processes are in its own
-/// group and cannot leave it. A process the agent no longer holds (parent `init`) is not
-/// the runner's, nor is one in a group below the agent's.
+/// Whether the control groups `units` are those of a helper container of the runner:
+/// `actions/helpers` and below. The helpers (the image unpacker, the removal of a lease's
+/// tree) run as the job user inside a runtime call, but a background pull runs one while the
+/// lifecycle checks another job, so a helper can be alive at a check; it is the runner's,
+/// not a stray. A helper that never ends is therefore not found here: the runtime's own
+/// call ends it (a dropped call kills its process), not the post-job checks.
+fn runners_helper(units: &[&str]) -> bool {
+    units
+        .windows(2)
+        .any(|pair| pair[0] == ACTIONS && pair[1] == HELPERS)
+}
+
+/// Whether `process` is one of the direct runner's own: it is in the agent's own control
+/// group exactly, and its parent is not `init` (the process table does not say whose
+/// child it is, so any live parent will do). The runner's `crun run`, `crun kill` and
+/// `crun delete` and the keeper are started by the agent and stay in its group; no job
+/// process can be in it, since a container's processes are in its own group and cannot
+/// leave it. A process whose parent is `init` (the agent no longer holds it) is not the
+/// runner's, nor is one in a group below the agent's.
 fn runners_own(process: &Process, own: Option<&str>) -> bool {
     process.ppid != 1 && unified(&process.cgroup).is_some_and(|path| Some(path) == own)
 }
