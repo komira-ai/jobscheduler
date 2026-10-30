@@ -20,7 +20,7 @@ mod common;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::PathBuf;
 
-use common::mac::{Mac, describe, run_steps};
+use common::mac::{Mac, describe, outcomes, run_steps};
 use common::{Scratch, run};
 use js_mac_pool::seatbelt::{Class, MacosMajor, Role, SelfTest};
 
@@ -47,7 +47,7 @@ fn fixture(tag: &str) -> Mac {
     assert_eq!(meta.mode() & 0o022, 0, "nobody else writes the work root");
     let scratch = Scratch::under(&root, tag);
     let entry = scratch.dir("uid-entry");
-    let mac = Mac::build(scratch, entry.clone(), tag);
+    let mac = Mac::build(scratch, entry.clone(), tag, 0);
     for dir in [&mac.run, &entry] {
         std::os::unix::fs::chown(dir, Some(uid), Some(gid)).expect("chown");
     }
@@ -59,9 +59,10 @@ fn fixture(tag: &str) -> Mac {
 fn the_self_test_passes_as_the_pool_user_against_root_owned_canaries() {
     let ids = ids();
     let mac = fixture("priv-selftest");
-    let test = SelfTest::new(MacosMajor::Macos14, mac.fixture()).expect("steps");
+    let test =
+        SelfTest::new(MacosMajor::Macos14, mac.fixture(MacosMajor::Macos14.scan())).expect("steps");
     let ran = run_steps(&test, Some(ids));
-    let results: Vec<bool> = ran.iter().map(|ran| ran.ok).collect();
+    let results = outcomes(&ran);
     if let Err(failures) = test.judge(&results) {
         let shown: Vec<String> = failures.iter().map(ToString::to_string).collect();
         panic!("{}\n{}", shown.join("\n"), describe(&test, &ran));
@@ -77,14 +78,15 @@ fn the_self_test_passes_as_the_pool_user_against_root_owned_canaries() {
 fn the_canaries_are_readable_by_the_pool_user_without_the_profile() {
     let ids = ids();
     let mac = fixture("priv-controls");
-    let test = SelfTest::new(MacosMajor::Macos14, mac.fixture()).expect("steps");
+    let test =
+        SelfTest::new(MacosMajor::Macos14, mac.fixture(MacosMajor::Macos14.scan())).expect("steps");
     let controls: Vec<Class> = test
         .steps()
         .iter()
         .filter(|step| step.role() == Role::Control)
         .map(|step| step.class())
         .collect();
-    assert_eq!(controls.len(), 7);
+    assert_eq!(controls.len(), 15);
     for step in test
         .steps()
         .iter()

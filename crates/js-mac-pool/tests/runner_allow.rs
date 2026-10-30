@@ -10,16 +10,15 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::os::unix::fs::MetadataExt as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
-use common::mac::{DATA, Mac, describe, run_steps};
+use common::mac::{DATA, Mac, describe, outcomes, run_steps};
 use common::{Scratch, run};
 use js_bundle::ReadGrantKind;
 use js_mac_pool::seatbelt::{
-    Caps, Class, MacosMajor, Net, Policy, Profile, ReadGrant, ReadModel, Role, SelfTest, ToolPath,
-    Why,
+    Caps, Class, MacosMajor, Net, Outcome, Policy, Profile, ReadGrant, ReadModel, Role, SelfTest,
+    ToolPath, Why,
 };
 
 fn mac(tag: &str) -> Mac {
@@ -32,7 +31,7 @@ fn mac(tag: &str) -> Mac {
     let temp = PathBuf::from(String::from_utf8(temp.stdout).expect("utf8").trim());
     let entry = temp.canonicalize().expect("the user temp directory exists");
     let uid_entry = entry.parent().expect("the user entry").to_owned();
-    Mac::build(scratch, uid_entry, tag)
+    Mac::build(scratch, uid_entry, tag, common::owner())
 }
 
 fn major() -> MacosMajor {
@@ -48,9 +47,9 @@ fn major() -> MacosMajor {
 #[test]
 fn the_self_test_passes_on_this_host_with_a_fixture_tree_and_the_real_xcode() {
     let fixture = mac("selftest");
-    let test = SelfTest::new(major(), fixture.fixture()).expect("steps");
+    let test = SelfTest::new(major(), fixture.fixture(major().scan())).expect("steps");
     let ran = run_steps(&test, None);
-    let results: Vec<bool> = ran.iter().map(|ran| ran.ok).collect();
+    let results = outcomes(&ran);
     if let Err(failures) = test.judge(&results) {
         let shown: Vec<String> = failures.iter().map(ToString::to_string).collect();
         panic!("{}\n{}", shown.join("\n"), describe(&test, &ran));
@@ -65,7 +64,7 @@ fn the_self_test_passes_on_this_host_with_a_fixture_tree_and_the_real_xcode() {
 #[test]
 fn the_open_model_leaves_every_canary_readable_and_the_self_test_refuses_it() {
     let fixture = mac("open");
-    let test = SelfTest::new(major(), fixture.fixture()).expect("steps");
+    let test = SelfTest::new(major(), fixture.fixture(major().scan())).expect("steps");
     let open = Policy::base(
         fixture.layout(),
         Caps {
@@ -75,17 +74,17 @@ fn the_open_model_leaves_every_canary_readable_and_the_self_test_refuses_it() {
     )
     .expect("policy");
     let open = Profile::for_policy(&open).expect("profile");
-    let results: Vec<bool> = test
+    let results: Vec<Outcome> = test
         .steps()
         .iter()
         .map(|step| match step.role() {
             Role::Denied => {
                 let (program, args) = step.command();
                 let argv = open.argv(program, args);
-                run(&argv, step.env(), Some(step.cwd()), None).ok
+                run(&argv, step.env(), Some(step.cwd()), None).outcome()
             }
             Role::Control | Role::Allowed => {
-                run(&step.argv(), step.env(), Some(step.cwd()), None).ok
+                run(&step.argv(), step.env(), Some(step.cwd()), None).outcome()
             }
         })
         .collect();
@@ -106,7 +105,13 @@ fn the_open_model_leaves_every_canary_readable_and_the_self_test_refuses_it() {
             Class::ReadUsersShared,
             Class::ReadPrivateVarTmp,
             Class::ReadSystemVolumesData,
+            Class::ReadSiblingRun,
+            Class::ReadKeychain,
             Class::ReadSetuidBinary,
+            Class::ListDeniedDir,
+            Class::ListAncestor,
+            Class::StatCanary,
+            Class::XattrCanary,
         ]
     );
 }
@@ -114,9 +119,9 @@ fn the_open_model_leaves_every_canary_readable_and_the_self_test_refuses_it() {
 #[test]
 fn a_bundle_entrypoint_runs_under_the_allow_profile_and_reads_only_its_pinned_tree() {
     let fixture = mac("toolchain");
-    let test = SelfTest::new(major(), fixture.fixture()).expect("steps");
+    let test = SelfTest::new(major(), fixture.fixture(major().scan())).expect("steps");
     let ran = run_steps(&test, None);
-    let results: Vec<bool> = ran.iter().map(|ran| ran.ok).collect();
+    let results = outcomes(&ran);
     let assurance = test
         .judge(&results)
         .unwrap_or_else(|failures| panic!("{failures:?}\n{}", describe(&test, &ran)));
@@ -171,39 +176,19 @@ fn a_bundle_entrypoint_runs_under_the_allow_profile_and_reads_only_its_pinned_tr
     );
 }
 
-/// Every setuid file in the places the base set grants wholesale is in the golden list,
-/// or a pool user could run it.
+/// Every setuid and setgid file in the places the base set grants wholesale is in the
+/// golden list, or a pool user could run it. The self-test refuses the host otherwise.
 #[test]
-fn the_setuid_golden_list_covers_the_setuid_files_of_this_host() {
+fn the_setuid_golden_list_covers_the_privileged_files_of_this_host() {
     let major = major();
-    let listed: Vec<&str> = major.base().setuid().to_vec();
-    let mut stack: Vec<PathBuf> = major
-        .base()
-        .reads()
-        .iter()
-        .map(|(_, path)| PathBuf::from(path))
-        .filter(|path| path != Path::new("/") && !path.starts_with("/dev"))
-        .collect();
-    let mut found: Vec<String> = Vec::new();
-    while let Some(path) = stack.pop() {
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if meta.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&path) {
-                stack.extend(entries.flatten().map(|entry| entry.path()));
-            }
-        } else if meta.is_file() && meta.mode() & 0o4000 != 0 {
-            found.push(path.to_string_lossy().into_owned());
-        }
-    }
-    found.sort();
+    let listed = major.base().setuid();
+    let found = major.scan();
     let missing: Vec<&String> = found
         .iter()
         .filter(|path| !listed.contains(&path.as_str()))
         .collect();
     assert!(
         missing.is_empty(),
-        "setuid files not in the golden list: {missing:?}\nfound: {found:?}"
+        "privileged files not in the golden list: {missing:?}\nfound: {found:?}"
     );
 }

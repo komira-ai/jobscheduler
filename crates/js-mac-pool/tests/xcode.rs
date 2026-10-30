@@ -6,13 +6,20 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::{Scratch, VERSION_TEXT, fixture_answers};
+use common::{Scratch, VERSION_TEXT, fixture_answers, owner};
 use js_bundle::{DottedVersion, XcodeComponent};
 use js_mac_pool::seatbelt::PathError;
 use js_mac_pool::xcode::{
     Catalog, CatalogError, FlagError, MAX_BUILD_BYTES, Question, REASON_BYTES, Reply, State,
     Unanswered, XCRUN, XcodeFlag,
 };
+
+fn survey(
+    flags: &[XcodeFlag],
+    ask: impl FnMut(&Question<'_>) -> Reply,
+) -> Result<Catalog, CatalogError> {
+    Catalog::survey(flags, owner(), ask)
+}
 
 fn flag(build: &str, app: &std::path::Path) -> XcodeFlag {
     XcodeFlag::parse(&format!("{build}={}", app.display())).expect("a flag")
@@ -44,7 +51,7 @@ fn a_ready_xcode_is_asked_four_questions_in_order_and_then_its_components() {
     let scratch = Scratch::new("xcode-ready");
     let dir = app(&scratch, "Xcode_15.4.app");
     let mut asked: Vec<(String, String)> = Vec::new();
-    let catalog = Catalog::survey(&[flag("15F31d", &dir)], |question| {
+    let catalog = survey(&[flag("15F31d", &dir)], |question| {
         asked.push((shown(question), question.developer_dir.as_str().to_owned()));
         fixture_answers(question)
     })
@@ -87,7 +94,7 @@ fn the_xcodebuild_asked_is_the_one_inside_the_app() {
     let scratch = Scratch::new("xcode-program");
     let dir = app(&scratch, "Xcode.app");
     let mut programs = Vec::new();
-    Catalog::survey(&[flag("15F31d", &dir)], |question| {
+    survey(&[flag("15F31d", &dir)], |question| {
         programs.push(question.program.clone());
         fixture_answers(question)
     })
@@ -130,7 +137,7 @@ fn the_first_question_that_is_not_a_yes_decides_the_state_and_stops_the_survey()
         };
         let mut count = 0;
         let mut script = failing_at(index, reply.clone());
-        let catalog = Catalog::survey(&[flag("15F31d", &dir)], |question| {
+        let catalog = survey(&[flag("15F31d", &dir)], |question| {
             count += 1;
             script(question)
         })
@@ -178,7 +185,7 @@ fn an_answer_that_is_not_an_xcode_version_fails_the_xcode() {
     for (shown_text, reason) in table {
         let scratch = Scratch::new("xcode-version");
         let dir = app(&scratch, "Xcode.app");
-        let catalog = Catalog::survey(&[flag("15F31d", &dir)], |question| match question.args {
+        let catalog = survey(&[flag("15F31d", &dir)], |question| match question.args {
             ["-version"] => Ok(shown_text.to_owned()),
             _ => fixture_answers(question),
         })
@@ -199,7 +206,7 @@ fn an_answer_that_is_not_an_xcode_version_fails_the_xcode() {
 fn a_beta_version_and_extra_words_are_read_by_their_first_token() {
     let scratch = Scratch::new("xcode-beta");
     let dir = app(&scratch, "Xcode-beta.app");
-    let catalog = Catalog::survey(&[flag("16A5171c", &dir)], |question| match question.args {
+    let catalog = survey(&[flag("16A5171c", &dir)], |question| match question.args {
         ["-version"] => Ok("Xcode 16.0 Beta 3\nBuild version 16A5171c\n".to_owned()),
         _ => fixture_answers(question),
     })
@@ -213,7 +220,7 @@ fn an_app_that_does_not_resolve_fails_without_a_question() {
     let scratch = Scratch::new("xcode-missing");
     let missing = scratch.root.join("Xcode_gone.app");
     let mut asked = 0;
-    let catalog = Catalog::survey(&[flag("15F31d", &missing)], |question| {
+    let catalog = survey(&[flag("15F31d", &missing)], |question| {
         asked += 1;
         fixture_answers(question)
     })
@@ -230,7 +237,7 @@ fn a_linked_app_is_granted_by_its_real_path() {
     let real = app(&scratch, "Xcode_15.4.app");
     let link = scratch.root.join("Xcode.app");
     std::os::unix::fs::symlink(&real, &link).expect("symlink");
-    let catalog = Catalog::survey(&[flag("15F31d", &link)], fixture_answers).expect("catalog");
+    let catalog = survey(&[flag("15F31d", &link)], fixture_answers).expect("catalog");
     let host = catalog.host("15F31d").expect("ready");
     assert_eq!(host.app().as_str(), real.to_str().unwrap());
     assert_eq!(
@@ -258,7 +265,7 @@ fn an_app_whose_developer_dir_is_too_long_fails() {
     let scratch = Scratch::new("xcode-long");
     let dir = long_app(&scratch, 1020);
     assert_eq!(dir.as_os_str().len(), 1020);
-    let catalog = Catalog::survey(&[flag("15F31d", &dir)], fixture_answers).expect("catalog");
+    let catalog = survey(&[flag("15F31d", &dir)], fixture_answers).expect("catalog");
     assert_eq!(catalog.all()[0].state, State::Failed);
     assert!(
         catalog.all()[0].reason.contains("too long"),
@@ -278,7 +285,7 @@ fn an_app_whose_real_path_is_not_text_fails() {
         .join(std::ffi::OsStr::from_bytes(b"real\xff.app"));
     std::fs::create_dir_all(target.join("Contents/Developer")).expect("directory");
     std::os::unix::fs::symlink(&target, &link).expect("symlink");
-    let catalog = Catalog::survey(&[flag("15F31d", &link)], fixture_answers).expect("catalog");
+    let catalog = survey(&[flag("15F31d", &link)], fixture_answers).expect("catalog");
     assert_eq!(catalog.all()[0].state, State::Failed);
     assert!(
         catalog.all()[0].reason.contains("UTF-8"),
@@ -298,7 +305,7 @@ fn only_ready_xcodes_are_advertised_and_granted_in_the_order_of_the_flags() {
         flag("16A242d", &broken),
         flag("14E222b", &third),
     ];
-    let catalog = Catalog::survey(&flags, |question| {
+    let catalog = survey(&flags, |question| {
         let developer_dir = question.developer_dir.as_str();
         match question.args {
             ["-version"] if developer_dir.contains("16.0") => {
@@ -332,7 +339,7 @@ fn a_reason_is_cut_to_a_budget_at_a_character_boundary() {
         ("  short  ".to_owned(), 5),
     ];
     for (text, len) in table {
-        let catalog = Catalog::survey(&[flag("15F31d", &dir)], |question| match question.args {
+        let catalog = survey(&[flag("15F31d", &dir)], |question| match question.args {
             ["-license", "check"] => Err(Unanswered::Refused(text.clone())),
             _ => fixture_answers(question),
         })
@@ -348,15 +355,12 @@ fn a_catalog_refuses_two_flags_of_one_build_and_too_many_flags() {
     let two = app(&scratch, "Xcode.app");
     let flags = [flag("15F31d", &one), flag("15F31d", &two)];
     assert_eq!(
-        Catalog::survey(&flags, fixture_answers),
+        survey(&flags, fixture_answers),
         Err(CatalogError::DuplicateBuild("15F31d".to_owned()))
     );
     let many: Vec<XcodeFlag> = (0..65).map(|i| flag(&format!("B{i}"), &one)).collect();
-    assert_eq!(
-        Catalog::survey(&many, fixture_answers),
-        Err(CatalogError::TooMany)
-    );
-    let none = Catalog::survey(&[], fixture_answers).expect("empty");
+    assert_eq!(survey(&many, fixture_answers), Err(CatalogError::TooMany));
+    let none = survey(&[], fixture_answers).expect("empty");
     assert!(none.all().is_empty());
     assert!(none.advertised().is_empty());
     assert_eq!(CatalogError::TooMany.to_string(), "too many --xcode flags");
@@ -405,4 +409,113 @@ fn a_flag_is_a_build_and_an_absolute_path() {
         FlagError::Path(PathError::Root).to_string(),
         "the path is not accepted: path is the root directory"
     );
+}
+
+#[test]
+fn a_question_carries_exactly_developer_dir_as_its_environment() {
+    let scratch = Scratch::new("xcode-env");
+    let dir = app(&scratch, "Xcode.app");
+    let mut seen = Vec::new();
+    survey(&[flag("15F31d", &dir)], |question| {
+        seen.push((
+            question.env().to_vec(),
+            question.developer_dir.as_str().to_owned(),
+        ));
+        fixture_answers(question)
+    })
+    .expect("catalog");
+    assert_eq!(seen.len(), 7);
+    for (env, developer_dir) in seen {
+        assert_eq!(env, [("DEVELOPER_DIR", developer_dir.as_str())]);
+    }
+}
+
+#[test]
+fn a_compiler_found_outside_the_xcode_does_not_make_it_ready() {
+    let table = [
+        "/Library/Developer/CommandLineTools/usr/bin/clang\n".to_owned(),
+        String::new(),
+        "relative/clang".to_owned(),
+    ];
+    for printed in table {
+        let scratch = Scratch::new("xcode-clang");
+        let dir = app(&scratch, "Xcode.app");
+        let lookalike = format!("{}/Contents/Developer-other/usr/bin/clang", dir.display());
+        for printed in [printed, lookalike] {
+            let catalog = survey(&[flag("15F31d", &dir)], |question| match question.args {
+                ["--find", "clang"] => Ok(printed.clone()),
+                _ => fixture_answers(question),
+            })
+            .expect("catalog");
+            let xcode = &catalog.all()[0];
+            assert_eq!(xcode.state, State::Failed, "{printed:?}");
+            assert!(
+                xcode.reason.contains("outside the Xcode"),
+                "{}",
+                xcode.reason
+            );
+            assert!(xcode.host.is_none());
+        }
+    }
+}
+
+#[test]
+fn a_component_found_outside_the_xcode_is_left_out() {
+    let scratch = Scratch::new("xcode-component");
+    let dir = app(&scratch, "Xcode.app");
+    let catalog = survey(&[flag("15F31d", &dir)], |question| match question.args {
+        ["--find", "swiftc"] => Ok("/usr/bin/swiftc\n".to_owned()),
+        _ => fixture_answers(question),
+    })
+    .expect("catalog");
+    let host = catalog.host("15F31d").expect("ready");
+    let components: BTreeSet<XcodeComponent> =
+        [XcodeComponent::Clang, XcodeComponent::Simctl].into();
+    assert_eq!(host.components(), &components);
+}
+
+#[test]
+fn an_app_that_someone_else_can_change_is_never_asked_anything() {
+    use std::os::unix::fs::PermissionsExt as _;
+    assert_ne!(owner(), 0, "the tests do not run as root");
+    let mut asked = 0;
+    let mut not_ready = |dir: &std::path::Path, owner: u32, why: &str| {
+        let catalog = Catalog::survey(&[flag("15F31d", dir)], owner, |question| {
+            asked += 1;
+            fixture_answers(question)
+        })
+        .expect("catalog");
+        let xcode = &catalog.all()[0];
+        assert_eq!(xcode.state, State::Failed, "{why}");
+        assert!(
+            xcode.reason.contains("others can write it"),
+            "{why}: {}",
+            xcode.reason
+        );
+        assert!(xcode.host.is_none());
+    };
+
+    let scratch = Scratch::new("xcode-trust");
+    let dir = app(&scratch, "Xcode.app");
+    not_ready(&dir, 0, "another owner");
+
+    let set = |path: &std::path::Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("mode");
+    };
+    set(&dir, 0o777);
+    not_ready(&dir, owner(), "others can write the app");
+    set(&dir, 0o775);
+    not_ready(
+        &dir,
+        owner(),
+        "a group a pool user may be in can write the app",
+    );
+    set(&dir, 0o755);
+    set(&scratch.root, 0o777);
+    not_ready(&dir, owner(), "others can write a directory above the app");
+    set(&scratch.root, 0o755);
+    assert_eq!(asked, 0);
+
+    let catalog = survey(&[flag("15F31d", &dir)], fixture_answers).expect("catalog");
+    assert_eq!(catalog.advertised(), ["15F31d"]);
 }

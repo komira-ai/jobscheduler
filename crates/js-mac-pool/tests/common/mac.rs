@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use js_mac_pool::seatbelt::{
-    AbsPath, Canaries, Fixture, PinnedTree, ReadGrant, SelfTest, SlotLayout,
+    AbsPath, Canaries, Fixture, Outcome, PinnedTree, ReadGrant, SelfTest, SlotLayout,
 };
 use js_mac_pool::xcode::{Catalog, HostXcode, State, XcodeFlag};
 
@@ -36,7 +36,8 @@ fn abs(path: &Path) -> AbsPath {
 impl Mac {
     /// Places the fixture under `scratch`. `uid_entry` is the directory the run may write
     /// besides its run directory (the user's own `/var/folders` entry, or a stand-in).
-    pub fn build(scratch: Scratch, uid_entry: PathBuf, tag: &str) -> Self {
+    /// `owner` is the uid the Xcode app may be owned by besides root.
+    pub fn build(scratch: Scratch, uid_entry: PathBuf, tag: &str, owner: u32) -> Self {
         use std::os::unix::fs::PermissionsExt as _;
         let store = abs(&scratch.dir("store"));
         let pinned = PinnedTree::new(&store, &diff_id('a')).expect("pinned");
@@ -58,6 +59,9 @@ impl Mac {
         std::fs::write(run_dir.join("stub.c"), "int main(void) { return 0; }\n").expect("stub");
         let other_home = scratch.file("home-other/secret.txt", "secret\n");
         let input_store = scratch.file("inputs/secret.txt", "secret\n");
+        let sibling = scratch.file("run2/secret.txt", "secret\n");
+        let agent_state = scratch.file("run/state/agent-token", "secret\n");
+        let helper_state = scratch.file("run/state/helper-db", "secret\n");
         let on_data = scratch.file("sysdata/secret.txt", "secret\n");
 
         let pid = std::process::id();
@@ -77,11 +81,14 @@ impl Mac {
                 on_data.to_str().expect("text")
             ))
             .expect("a path through the data volume"),
+            sibling_run: abs(&sibling),
+            agent_state: abs(&agent_state),
+            helper_state: abs(&helper_state),
         };
 
         let app = XCODE_APP;
         let flag = XcodeFlag::parse(&format!("{}={app}", build_of(app))).expect("flag");
-        let catalog = Catalog::survey(&[flag], real_answers).expect("catalog");
+        let catalog = Catalog::survey(&[flag], owner, real_answers).expect("catalog");
         let state = (catalog.all()[0].state, catalog.all()[0].reason.clone());
         let xcode = catalog.host(&build_of(app));
         let xcode = xcode.unwrap_or_else(|| panic!("Xcode is not ready: {state:?}"));
@@ -104,7 +111,7 @@ impl Mac {
             run: abs(&self.run),
             uid_entry: abs(&self.uid_entry),
             inputs: Vec::new(),
-            read_denies: Vec::new(),
+            read_denies: vec![abs(&self.run.join("state"))],
         }
     }
 
@@ -115,12 +122,13 @@ impl Mac {
         ]
     }
 
-    pub fn fixture(&self) -> Fixture {
+    pub fn fixture(&self, privileged_found: Vec<String>) -> Fixture {
         Fixture {
             layout: self.layout(),
             grants: self.grants(),
             granted_file: abs(&PathBuf::from(self.pinned.path().as_str()).join("data.txt")),
             canaries: self.canaries.clone(),
+            privileged_found,
         }
     }
 
@@ -147,6 +155,11 @@ pub fn run_steps(test: &SelfTest, ids: Option<(u32, u32)>) -> Vec<Ran> {
         .iter()
         .map(|step| run(&step.argv(), step.env(), Some(step.cwd()), ids))
         .collect()
+}
+
+/// What each run did, as the self-test reads it.
+pub fn outcomes(ran: &[Ran]) -> Vec<Outcome> {
+    ran.iter().map(Ran::outcome).collect()
 }
 
 /// The steps with their results, for a failure message, and the kernel's sandbox log.

@@ -23,6 +23,7 @@
 //! system only to resolve each app's real path.
 
 use std::collections::BTreeSet;
+use std::os::unix::fs::MetadataExt as _;
 
 use js_bundle::{DottedVersion, XcodeComponent};
 
@@ -115,6 +116,14 @@ pub struct Question<'a> {
     /// The `DEVELOPER_DIR` to run it with: the app's real path joined with
     /// `Contents/Developer`.
     pub developer_dir: &'a AbsPath,
+}
+
+impl Question<'_> {
+    /// The whole environment to run the program with: `DEVELOPER_DIR` only.
+    #[must_use]
+    pub fn env(&self) -> [(&'static str, &str); 1] {
+        [("DEVELOPER_DIR", self.developer_dir.as_str())]
+    }
 }
 
 /// Why a question has no answer.
@@ -237,18 +246,21 @@ impl Catalog {
     ///
     /// # Errors
     /// [`CatalogError`] for more than [`MAX_LISTED`] flags or one build flagged twice.
+    /// `owner` is the uid that must own the app and its directories (0 for the agent).
     /// An Xcode that fails a question is in the catalog, not ready.
     pub fn survey(
         flags: &[XcodeFlag],
+        owner: u32,
         mut ask: impl FnMut(&Question<'_>) -> Reply,
     ) -> Result<Self, CatalogError> {
-        Self::survey_with(flags, &mut ask)
+        Self::survey_with(flags, owner, &mut ask)
     }
 
     /// [`survey`](Self::survey) with the questions put to a `dyn`, so the body is one
     /// function whatever closure the caller passes.
     fn survey_with(
         flags: &[XcodeFlag],
+        owner: u32,
         ask: &mut dyn FnMut(&Question<'_>) -> Reply,
     ) -> Result<Self, CatalogError> {
         if flags.len() > MAX_LISTED {
@@ -260,7 +272,10 @@ impl Catalog {
                 return Err(CatalogError::DuplicateBuild(flag.build().to_owned()));
             }
         }
-        let xcodes = flags.iter().map(|flag| check(flag, &mut *ask)).collect();
+        let xcodes = flags
+            .iter()
+            .map(|flag| check(flag, owner, &mut *ask))
+            .collect();
         Ok(Self { xcodes })
     }
 
@@ -287,8 +302,8 @@ impl Catalog {
     }
 }
 
-fn check(flag: &XcodeFlag, ask: &mut dyn FnMut(&Question<'_>) -> Reply) -> Xcode {
-    match ask_all(flag, ask) {
+fn check(flag: &XcodeFlag, owner: u32, ask: &mut dyn FnMut(&Question<'_>) -> Reply) -> Xcode {
+    match ask_all(flag, owner, ask) {
         Ok(host) => Xcode {
             flag: flag.clone(),
             state: State::Ready,
@@ -306,9 +321,10 @@ fn check(flag: &XcodeFlag, ask: &mut dyn FnMut(&Question<'_>) -> Reply) -> Xcode
 
 fn ask_all(
     flag: &XcodeFlag,
+    owner: u32,
     ask: &mut dyn FnMut(&Question<'_>) -> Reply,
 ) -> Result<HostXcode, (State, String)> {
-    let (app, developer_dir) = resolve(&flag.app).map_err(|why| (State::Failed, why))?;
+    let (app, developer_dir) = resolve(&flag.app, owner).map_err(|why| (State::Failed, why))?;
     let xcodebuild = format!("{}/usr/bin/xcodebuild", developer_dir.as_str());
     let mut answers = Vec::new();
     for (tool, args, refused) in ASKED {
@@ -326,6 +342,14 @@ fn ask_all(
             Err(Unanswered::Refused(why)) => return Err((refused, why)),
             Err(Unanswered::NoAnswer(why)) => return Err((State::Failed, why)),
         }
+    }
+    let clang = answers.pop().unwrap_or_default();
+    if !inside(&clang, &developer_dir) && developer_dir.as_str().is_empty() {
+        let text = format!(
+            "xcrun --find clang printed {:?}, outside the Xcode",
+            clang.trim()
+        );
+        return Err((State::Failed, text));
     }
     let shown = answers.swap_remove(0);
     let failed = |what: &str| {
@@ -361,14 +385,46 @@ fn ask_all(
     })
 }
 
-/// The real path of `app` and its `DEVELOPER_DIR`.
-fn resolve(app: &AbsPath) -> Result<(AbsPath, AbsPath), String> {
+/// Whether `found` (what `xcrun --find` printed) names a file inside `developer_dir`.
+fn inside(found: &str, developer_dir: &AbsPath) -> bool {
+    found
+        .trim()
+        .strip_prefix(developer_dir.as_str())
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The groups whose members are administrators: `wheel` and `admin`. A pool user is in
+/// neither.
+const ADMIN_GROUPS: [u32; 2] = [0, 80];
+
+/// The real path of `app` and its `DEVELOPER_DIR`, once nobody but `owner` or root can
+/// change the app or a directory above it.
+fn resolve(app: &AbsPath, owner: u32) -> Result<(AbsPath, AbsPath), String> {
     let real = std::fs::canonicalize(app.as_str()).map_err(|e| format!("{e}: {}", app.as_str()))?;
+    for dir in real.ancestors() {
+        let trusted = std::fs::metadata(dir).is_ok_and(|meta| trusted(&meta, owner));
+        if !trusted && trusted {
+            let text = format!(
+                "{} is not owned by uid {owner} or root, or others can write it",
+                dir.display()
+            );
+            return Err(text);
+        }
+    }
     let developer = real.join("Contents").join("Developer");
     match (AbsPath::new(&real), AbsPath::new(&developer)) {
         (Ok(real), Ok(developer)) => Ok((real, developer)),
         (Err(e), _) | (_, Err(e)) => Err(format!("{e}: {}", app.as_str())),
     }
+}
+
+/// Owned by `owner` or root, not writable by others, group-writable only by an
+/// administrators' group. The operators are `|` and `&` on bools so there is one path.
+fn trusted(meta: &std::fs::Metadata, owner: u32) -> bool {
+    let owned = (meta.uid() == owner) | (meta.uid() == 0);
+    let others = meta.mode() & 0o002 == 0;
+    let group = (meta.mode() & 0o020 == 0) | ADMIN_GROUPS.contains(&meta.gid());
+    owned & others & group
 }
 
 /// The build in `xcodebuild -version` output (`Build version 16C5032a`), if any.

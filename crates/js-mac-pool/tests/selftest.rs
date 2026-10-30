@@ -9,8 +9,8 @@ use std::ffi::OsString;
 use common::{Scratch, canaries, fixture, path, tree, xcode_host};
 use js_bundle::ReadGrantKind;
 use js_mac_pool::seatbelt::{
-    AbsPath, Class, Failure, MacosMajor, PolicyError, ReadGrant, Role, SANDBOX_EXEC, SelfTest,
-    SelfTestError, Step, Why,
+    AbsPath, Class, Failure, MacosMajor, Outcome, PolicyError, ReadGrant, Role, SANDBOX_EXEC,
+    SelfTest, SelfTestError, Step, Why,
 };
 
 const STORE: &str = "/Volumes/work/store";
@@ -34,10 +34,13 @@ fn names(test: &SelfTest) -> Vec<(&'static str, Role)> {
         .collect()
 }
 
-fn right(test: &SelfTest) -> Vec<bool> {
+fn right(test: &SelfTest) -> Vec<Outcome> {
     test.steps()
         .iter()
-        .map(|step| step.role() != Role::Denied)
+        .map(|step| match step.role() {
+            Role::Denied => Outcome::Refused,
+            Role::Control | Role::Allowed => Outcome::Success,
+        })
         .collect()
 }
 
@@ -52,7 +55,15 @@ fn each_denied_class_has_a_control_then_a_denied_read_and_the_toolchain_follows(
         "read-users-shared",
         "read-private-var-tmp",
         "read-system-volumes-data",
+        "read-sibling-run",
+        "read-agent-state",
+        "read-helper-state",
+        "read-keychain",
         "read-setuid-binary",
+        "list-denied-dir",
+        "list-ancestor",
+        "stat-canary",
+        "xattr-canary",
     ];
     let mut expected: Vec<(&str, Role)> = Vec::new();
     for class in denied {
@@ -75,7 +86,7 @@ fn without_an_xcode_there_is_no_compile_or_codesign_step() {
     assert!(classes.contains(&"run-true"));
     assert!(!classes.contains(&"compile"));
     assert!(!classes.contains(&"codesign"));
-    assert_eq!(test.steps().len(), 16);
+    assert_eq!(test.steps().len(), 32);
 }
 
 #[test]
@@ -87,8 +98,12 @@ fn controls_run_unsandboxed_and_the_rest_under_the_allow_profile() {
         let argv = step.argv();
         match step.role() {
             Role::Control => {
-                assert_eq!(argv[0], OsString::from("/bin/cat"), "{}", step.class());
-                assert_eq!(argv.len(), 2);
+                let programs = ["/bin/cat", "/bin/ls", "/usr/bin/stat", "/usr/bin/xattr"];
+                assert!(
+                    programs.iter().any(|p| argv[0] == OsString::from(p)),
+                    "{}",
+                    step.class()
+                );
             }
             Role::Denied | Role::Allowed => {
                 assert_eq!(argv[0], OsString::from(SANDBOX_EXEC), "{}", step.class());
@@ -171,7 +186,7 @@ fn a_readable_canary_refuses_the_assurance() {
         .iter()
         .position(|step| step.class() == Class::ReadUsersShared && step.role() == Role::Denied)
         .expect("a denied step");
-    ran[index] = true;
+    ran[index] = Outcome::Success;
     assert_eq!(
         test.judge(&ran),
         Err(vec![Failure {
@@ -190,7 +205,7 @@ fn a_broken_control_refuses_the_assurance_even_when_the_denial_held() {
         .iter()
         .position(|step| step.class() == Class::ReadSetuidBinary && step.role() == Role::Control)
         .expect("a control");
-    ran[index] = false;
+    ran[index] = Outcome::Failed;
     assert_eq!(
         test.judge(&ran),
         Err(vec![Failure {
@@ -214,7 +229,7 @@ fn a_blocked_toolchain_step_refuses_the_assurance() {
     assert_eq!(allowed.len(), 4);
     for index in allowed {
         let mut ran = right(&test);
-        ran[index] = false;
+        ran[index] = Outcome::Refused;
         let failures = test.judge(&ran).expect_err("refused");
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].why, Why::Blocked);
@@ -222,20 +237,77 @@ fn a_blocked_toolchain_step_refuses_the_assurance() {
     }
 }
 
-/// A profile `sandbox-exec` cannot compile fails every sandboxed step: the denied ones
-/// "pass" and the allowed ones fail, and the allowed ones decide.
+/// A profile `sandbox-exec` cannot compile fails every sandboxed step: a denied step
+/// that failed without the kernel's refusal shows nothing, and the allowed ones are
+/// blocked.
 #[test]
 fn a_profile_that_fails_to_start_cannot_pass_as_everything_denied() {
     let test = selftest(vec![]);
-    let ran: Vec<bool> = test
+    let ran: Vec<Outcome> = test
         .steps()
         .iter()
-        .map(|step| step.role() == Role::Control)
+        .map(|step| match step.role() {
+            Role::Control => Outcome::Success,
+            Role::Denied | Role::Allowed => Outcome::Failed,
+        })
         .collect();
     let failures = test.judge(&ran).expect_err("refused");
-    let blocked: Vec<Class> = failures.iter().map(|failure| failure.class).collect();
+    let no_denial = failures.iter().filter(|f| f.why == Why::NoDenial).count();
+    assert_eq!(no_denial, 15);
+    let blocked: Vec<Class> = failures
+        .iter()
+        .filter(|f| f.why == Why::Blocked)
+        .map(|f| f.class)
+        .collect();
     assert_eq!(blocked, [Class::GrantedTreeRead, Class::RunTrue]);
-    assert!(failures.iter().all(|failure| failure.why == Why::Blocked));
+    assert_eq!(failures.len(), 17);
+}
+
+#[test]
+fn a_denied_step_passes_only_when_the_kernel_refused_it() {
+    let test = selftest(vec![]);
+    let index = test
+        .steps()
+        .iter()
+        .position(|step| step.class() == Class::ListAncestor && step.role() == Role::Denied)
+        .expect("a denied step");
+    for (outcome, why) in [
+        (Outcome::Success, Why::Readable),
+        (Outcome::Failed, Why::NoDenial),
+    ] {
+        let mut ran = right(&test);
+        ran[index] = outcome;
+        assert_eq!(
+            test.judge(&ran),
+            Err(vec![Failure {
+                class: Class::ListAncestor,
+                why
+            }])
+        );
+    }
+}
+
+#[test]
+fn an_outcome_is_read_from_the_exit_code_and_the_kernels_words() {
+    let table = [
+        (Some(0), "", Outcome::Success),
+        (Some(0), "Operation not permitted", Outcome::Success),
+        (Some(1), "cat: x: Operation not permitted", Outcome::Refused),
+        (
+            Some(1),
+            "cat: x: No such file or directory",
+            Outcome::Failed,
+        ),
+        (Some(127), "", Outcome::Failed),
+        (None, "Operation not permitted", Outcome::Failed),
+    ];
+    for (code, stderr, expected) in table {
+        assert_eq!(
+            Outcome::from_exit(code, stderr),
+            expected,
+            "{code:?} {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -258,7 +330,7 @@ fn missing_results_fail_and_extra_results_are_ignored() {
         ]
     );
     let mut extra = right(&test);
-    extra.extend([true, false]);
+    extra.extend([Outcome::Success, Outcome::Failed]);
     assert!(test.judge(&extra).is_ok());
     assert!(test.judge(&[]).is_err());
 }
@@ -267,15 +339,16 @@ fn missing_results_fail_and_extra_results_are_ignored() {
 fn every_failure_is_listed_in_step_order_and_says_why() {
     let test = selftest(vec![]);
     let failures = test
-        .judge(&vec![false; test.steps().len()])
+        .judge(&vec![Outcome::Refused; test.steps().len()])
         .expect_err("refused");
     let shown: Vec<String> = failures.iter().map(ToString::to_string).collect();
-    assert_eq!(shown.len(), 7 + 2);
+    assert_eq!(shown.len(), 15 + 2);
     assert_eq!(
         shown[0],
         "read-other-home: the control without the sandbox failed"
     );
-    assert_eq!(shown[7], "granted-tree-read: blocked by the profile");
+    assert_eq!(shown[15], "granted-tree-read: blocked by the profile");
+    assert_eq!(Why::NoDenial.to_string(), "failed without being refused");
     assert_eq!(Why::NotRun.to_string(), "no result reported");
     assert_eq!(Why::Readable.to_string(), "readable under the profile");
 }
@@ -427,4 +500,146 @@ fn every_self_test_error_says_what_is_wrong() {
     for (error, text) in table {
         assert_eq!(error.to_string(), text);
     }
+}
+
+fn command_of(test: &SelfTest, class: Class) -> (String, Vec<OsString>) {
+    let step = test
+        .steps()
+        .iter()
+        .find(|step| step.class() == class && step.role() == Role::Denied)
+        .expect("a denied step");
+    let (program, args) = step.command();
+    (program.to_owned(), args.to_vec())
+}
+
+#[test]
+fn the_read_vectors_list_stat_and_read_attributes_of_the_denied_places() {
+    let test = selftest(vec![]);
+    let os = |text: &str| OsString::from(text);
+    assert_eq!(
+        command_of(&test, Class::ListDeniedDir),
+        ("/bin/ls".to_owned(), vec![os("/Users/other")])
+    );
+    assert_eq!(
+        command_of(&test, Class::ListAncestor),
+        ("/bin/ls".to_owned(), vec![os("/Volumes/work/slot1")])
+    );
+    assert_eq!(
+        command_of(&test, Class::StatCanary),
+        (
+            "/usr/bin/stat".to_owned(),
+            vec![os("/Volumes/work/inputs/secret")]
+        )
+    );
+    assert_eq!(
+        command_of(&test, Class::XattrCanary),
+        (
+            "/usr/bin/xattr".to_owned(),
+            vec![os("-l"), os("/Volumes/work/inputs/secret")]
+        )
+    );
+    assert_eq!(
+        command_of(&test, Class::ReadKeychain),
+        (
+            "/bin/cat".to_owned(),
+            vec![os("/Library/Keychains/System.keychain")]
+        )
+    );
+    assert_eq!(
+        command_of(&test, Class::ReadSiblingRun),
+        (
+            "/bin/cat".to_owned(),
+            vec![os("/Volumes/work/slot2/run/secret")]
+        )
+    );
+    assert_eq!(
+        command_of(&test, Class::ReadAgentState),
+        (
+            "/bin/cat".to_owned(),
+            vec![os("/Volumes/work/state/agent/token")]
+        )
+    );
+    assert_eq!(
+        command_of(&test, Class::ReadHelperState),
+        (
+            "/bin/cat".to_owned(),
+            vec![os("/Volumes/work/state/helper/db")]
+        )
+    );
+}
+
+#[test]
+fn a_run_directory_under_the_root_has_the_root_as_its_listed_ancestor() {
+    let mut f = fixture(vec![]);
+    f.layout.run = path("/run");
+    let test = SelfTest::new(MacosMajor::Macos14, f).expect("steps");
+    assert_eq!(
+        command_of(&test, Class::ListAncestor),
+        ("/bin/ls".to_owned(), vec![OsString::from("/")])
+    );
+}
+
+#[test]
+fn privileged_files_the_base_set_does_not_list_refuse_the_self_test() {
+    let mut f = fixture(vec![]);
+    f.privileged_found = vec![
+        "/usr/bin/su".to_owned(),
+        "/usr/bin/newtool".to_owned(),
+        "/sbin/ping".to_owned(),
+        "/bin/other".to_owned(),
+    ];
+    assert_eq!(
+        SelfTest::new(MacosMajor::Macos14, f),
+        Err(SelfTestError::UnlistedPrivileged(vec![
+            "/usr/bin/newtool".to_owned(),
+            "/bin/other".to_owned()
+        ]))
+    );
+    let mut listed = fixture(vec![]);
+    listed.privileged_found = vec!["/usr/bin/su".to_owned(), "/sbin/ping".to_owned()];
+    assert!(SelfTest::new(MacosMajor::Macos14, listed).is_ok());
+}
+
+#[test]
+fn a_state_canary_outside_every_read_deny_is_refused() {
+    let mut agent = fixture(vec![]);
+    agent.canaries.agent_state = path("/Volumes/work/other/token");
+    assert_eq!(
+        SelfTest::new(MacosMajor::Macos14, agent),
+        Err(SelfTestError::CanaryNotDenied(Class::ReadAgentState))
+    );
+    let mut helper = fixture(vec![]);
+    helper.canaries.helper_state = path("/Volumes/work/statex/db");
+    assert_eq!(
+        SelfTest::new(MacosMajor::Macos14, helper),
+        Err(SelfTestError::CanaryNotDenied(Class::ReadHelperState))
+    );
+    let mut none = fixture(vec![]);
+    none.layout.read_denies.clear();
+    assert_eq!(
+        SelfTest::new(MacosMajor::Macos14, none),
+        Err(SelfTestError::CanaryNotDenied(Class::ReadAgentState))
+    );
+}
+
+#[test]
+fn a_sibling_run_canary_inside_the_run_directory_is_refused() {
+    let mut f = fixture(vec![]);
+    f.canaries.sibling_run = path("/Volumes/work/slot1/run/other/secret");
+    assert_eq!(
+        SelfTest::new(MacosMajor::Macos14, f),
+        Err(SelfTestError::CanaryGranted(Class::ReadSiblingRun))
+    );
+}
+
+#[test]
+fn the_new_error_texts_say_what_is_wrong() {
+    assert_eq!(
+        SelfTestError::CanaryNotDenied(Class::ReadAgentState).to_string(),
+        "canary read-agent-state is not under a read deny"
+    );
+    assert_eq!(
+        SelfTestError::UnlistedPrivileged(vec!["/x".to_owned()]).to_string(),
+        "privileged files the base set does not list: [\"/x\"]"
+    );
 }

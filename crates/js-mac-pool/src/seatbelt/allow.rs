@@ -14,8 +14,14 @@
 use super::grant::{Match, XCODE_SUPPORT, kind_rules};
 use super::path::AbsPath;
 use super::policy::AllowGrants;
+use super::scan::scan_privileged;
 
 /// A macOS major version that has a base set.
+///
+/// The agent's duties around it: a host whose version has no value here refuses the allow
+/// model (`from_product_version` returns `None`; never default to the newest known
+/// version), and an [`Assurance`](super::Assurance) is made again at every start and after
+/// every OS update, never kept across them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MacosMajor {
     /// macOS 14 (Sonoma).
@@ -51,6 +57,21 @@ impl MacosMajor {
         match self {
             Self::Macos14 => 14,
         }
+    }
+
+    /// The setuid and setgid files of this host under the directories the base set
+    /// grants. Run at start and put in the fixture of the self-test; a file it finds
+    /// that [`BaseSet::setuid`] does not list refuses the allow model.
+    #[must_use]
+    pub fn scan(self) -> Vec<String> {
+        let roots: Vec<&str> = self
+            .base()
+            .reads()
+            .iter()
+            .filter(|(how, _)| *how == Match::Subpath)
+            .map(|(_, path)| *path)
+            .collect();
+        scan_privileged(&roots)
     }
 
     /// The base set of this version.
@@ -96,9 +117,8 @@ impl BaseSet {
 }
 
 static MACOS_14: BaseSet = BaseSet {
-    names: &["/System", "/etc", "/tmp", "/usr", "/var"],
+    names: &["/", "/System", "/etc", "/tmp", "/usr", "/var"],
     reads: &[
-        (Match::Literal, "/"),
         (Match::Subpath, "/System/Library"),
         (Match::Subpath, "/System/Cryptexes"),
         (Match::Subpath, "/System/Volumes/Preboot/Cryptexes"),

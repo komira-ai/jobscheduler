@@ -7,8 +7,8 @@ use std::process::Command;
 
 use js_bundle::DiffId;
 use js_mac_pool::seatbelt::{
-    AbsPath, Assurance, Canaries, Fixture, MacosMajor, PinnedTree, ReadGrant, Role, SelfTest,
-    SlotLayout,
+    AbsPath, Assurance, Canaries, Fixture, MacosMajor, Outcome, PinnedTree, ReadGrant, Role,
+    SelfTest, SlotLayout,
 };
 use js_mac_pool::xcode::{Catalog, HostXcode, Question, Reply, Unanswered, XcodeFlag};
 
@@ -78,11 +78,24 @@ impl Drop for Scratch {
 /// What `xcodebuild -version` prints for the fixture Xcode.
 pub const VERSION_TEXT: &str = "Xcode 15.4\nBuild version 15F31d\n";
 
-/// The answers of a fixture Xcode: every question is yes, and `metal` is not found.
+/// The uid that owns the directories the tests make.
+pub fn owner() -> u32 {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(env!("CARGO_TARGET_TMPDIR"))
+        .expect("the target directory")
+        .uid()
+}
+
+/// The answers of a fixture Xcode: every question is yes, `xcrun --find` prints a path
+/// inside the Xcode, and `metal` is not found.
 pub fn fixture_answers(question: &Question<'_>) -> Reply {
     match question.args {
         ["-version"] => Ok(VERSION_TEXT.to_owned()),
         ["--find", "metal"] => Err(Unanswered::Refused("not found".to_owned())),
+        ["--find", tool] => Ok(format!(
+            "{}/usr/bin/{tool}\n",
+            question.developer_dir.as_str()
+        )),
         _ => Ok(String::new()),
     }
 }
@@ -91,7 +104,7 @@ pub fn fixture_answers(question: &Question<'_>) -> Reply {
 pub fn xcode_host(scratch: &Scratch, name: &str) -> HostXcode {
     scratch.dir(&format!("{name}/Contents/Developer"));
     let flag = XcodeFlag::parse(&format!("15F31d={}", scratch.abs(name).as_str())).expect("flag");
-    let catalog = Catalog::survey(&[flag], fixture_answers).expect("catalog");
+    let catalog = Catalog::survey(&[flag], owner(), fixture_answers).expect("catalog");
     catalog.host("15F31d").expect("a ready Xcode")
 }
 
@@ -115,6 +128,9 @@ pub fn canaries() -> Canaries {
         users_shared: path("/Users/Shared/secret"),
         private_var_tmp: path("/private/var/tmp/secret"),
         system_volumes_data: path("/System/Volumes/Data/Users/other/secret"),
+        sibling_run: path("/Volumes/work/slot2/run/secret"),
+        agent_state: path("/Volumes/work/state/agent/token"),
+        helper_state: path("/Volumes/work/state/helper/db"),
     }
 }
 
@@ -124,16 +140,20 @@ pub fn fixture(grants: Vec<ReadGrant>) -> Fixture {
         grants,
         granted_file: path("/Volumes/work/store/v1/objects/trees/aaaa/data"),
         canaries: canaries(),
+        privileged_found: Vec::new(),
     }
 }
 
 /// The assurance of a self-test that went right, for tests of what an assurance allows.
 pub fn assurance() -> Assurance {
     let test = SelfTest::new(MacosMajor::Macos14, fixture(Vec::new())).expect("steps");
-    let ran: Vec<bool> = test
+    let ran: Vec<Outcome> = test
         .steps()
         .iter()
-        .map(|step| step.role() != Role::Denied)
+        .map(|step| match step.role() {
+            Role::Denied => Outcome::Refused,
+            Role::Control | Role::Allowed => Outcome::Success,
+        })
         .collect();
     test.judge(&ran).expect("every step did what its role says")
 }
@@ -143,7 +163,7 @@ pub fn real_answers(question: &Question<'_>) -> Reply {
     let out = Command::new(&question.program)
         .args(question.args)
         .env_clear()
-        .env("DEVELOPER_DIR", question.developer_dir.as_str())
+        .envs(question.env())
         .output()
         .map_err(|e| Unanswered::NoAnswer(e.to_string()))?;
     if out.status.success() {
@@ -173,8 +193,16 @@ pub fn build_of(app: &str) -> String {
 /// What running one command left.
 pub struct Ran {
     pub ok: bool,
+    pub code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+}
+
+impl Ran {
+    /// What the caller of the self-test reports for this run.
+    pub fn outcome(&self) -> Outcome {
+        Outcome::from_exit(self.code, &self.stderr)
+    }
 }
 
 /// Runs `argv` with exactly `env`, in `cwd` when given, as `ids` (a user and group) when
@@ -200,6 +228,7 @@ pub fn run(
     let out = command.output().expect("the command starts");
     Ran {
         ok: out.status.success(),
+        code: out.status.code(),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     }
