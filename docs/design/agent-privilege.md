@@ -1,8 +1,9 @@
 # What js-agent runs as when jobs go through the rootless crun runner
 
-Status: decision wanted. This document shows both options with what the kernel does for each
-duty, proven by tests that run in CI, and ends with a recommendation. It changes no behaviour
-of the podman path.
+Status: **decided: option B** (the owner's ruling): js-agent stays root and runs each job's
+`crun` container as a dedicated non-root job user. Option A (a non-root agent with a root helper)
+is kept below as the hardening path for later. This document shows both with what the kernel does
+for each duty, proven by tests that run in CI. It changes no behaviour of the podman path.
 
 ## 1. The question
 
@@ -233,70 +234,79 @@ when it is not as expected; the network and table are set up by an operator scri
   `pasta`, with a rule set the job cannot edit) is the question of the egress spike (P5). Both
   shapes need host privilege for it; A needs it in the helper.
 
-### Duty 7. Starting `crun`, the id maps, and the cgroup subtree (UNVERIFIED here)
+### Duty 7. Running js-contain's `Oci` from a root daemon (option B)
 
-These cannot be shown on a hosted runner without the real runtime, and are the first things the
-real-crun job (P8) and the canary host must prove:
+js-contain was written for a non-root daemon. `root_daemon.rs` (js-contain, run under sudo in the
+`agent-privilege` job) shows its `Oci` working when the daemon is root and starts every program as
+a dedicated job user, with a real `crun` and `newuidmap`:
+`a_root_daemon_runs_a_container_mapped_onto_the_job_users_subordinate_ids`. It proves:
 
-- B: the agent starts `crun` as the job user: set the groups, gid and uid, and give the job user
-  `RLIMIT_NPROC` before dropping (a root parent can raise it; a non-root daemon may not). The
-  delegated cgroup subtree (`actions/`) must belong to the job user, because `crun` moves its
-  container from the daemon's cgroup into `<lease>/ctr`, and the kernel requires write permission
-  on the common ancestor's `cgroup.procs`. A root agent does that with a `chown` of the subtree at
-  start; the harness here shows that a root process can start a process as a given user with an
-  exact capability set (it is how every shape-A test runs), not the cgroup part.
-- A: a unit with `User=`, `Delegate=yes`, `AmbientCapabilities=` empty, and `newuidmap` and
-  `newgidmap` on the path (`js-contain` checks both). `apparmor_restrict_unprivileged_userns` on
-  the distribution's newer kernels applies to both shapes equally.
-- Both: pulls (`js-oci`) run in the agent's process. In B that code would run as root, so the pull
-  and the verification of what it fetched should run as the job user (the `image-pull` verb of P9
-  started as the job user), not in the root process.
+- the user namespace maps container ids `0..65536` onto the **job user's** subordinate range
+  (`/proc/self/uid_map` inside reads `0 <first id of that range> 65536`, one line, root unmapped),
+  the job is the unprivileged id 1000 with no capability (`CapEff` zero), and the files `crun`
+  makes for the lease belong to the job user;
+- `Oci::new` accepts a root-owned scratch root of mode `0711` and refuses a `0700` one
+  (`NotSearchable`); and a root daemon without the new `OciConfig::job_user` is refused (root has no
+  subordinate range) rather than mapping root's.
+
+**Every site of js-contain that assumes a non-root daemon:**
+
+| Site | Assumption | Root daemon | Status |
+|---|---|---|---|
+| `subids::daemon_ids`, `check_daemon_user` (`getuid`) | the daemon user owns the subordinate range | read the job user's range instead: `OciConfig::job_user` (new, `user_ids`) | proven (the test) |
+| `crun` and every helper command (`EnvScrub` hook, `Crun::*`) | the daemon user is the one that runs `crun` | the `scrub_env` hook already sees every command; the test's hook drops to the job user (groups, gid, uid) in `pre_exec`. Production needs the same hook as a supported option | proven; needs a supported hook (P12a) |
+| `Oci::new` `search_check` | every ancestor of scratch is searchable by others (the container's ids are not the daemon's) | holds with a `0711` root; `0700` is refused | proven; the layout rule (`DirLayout::Searchable`) is the minimal change |
+| `newuidmap`/`newgidmap` (`id_tool`) | `crun`, running as an unprivileged user, maps its ids through the setuid tools | `crun` runs as the job user, so it does exactly that | proven (the test runs them) |
+| Lease directory ownership; the "give" helper container (`helper::give_job`, `Mapping::Setup`) | files the daemon user owns are given to the job's ids from a user namespace that maps both | root `chown`s the lease directories to the job user and the job-written directories to subordinate id 1000 directly; no helper container is needed. The give/clean helpers stay usable | proven for the give (the test does it); the clean (`remove_dir`) is root `unlinkat`, unchanged |
+| Cgroup delegation (`delegate::delegate`, `cgroup`) | the daemon owns its delegated subtree and `crun` (the same user) moves the container into `<lease>/ctr`; the kernel needs write on the common ancestor's `cgroup.procs` | the subtree and its control files must be `chown`ed to the job user (a unit's `Delegate=yes` does this only for the unit's `User=`, which is root here) and the root daemon sits in a leaf of it. `delegate()` makes the cgroups as root but chowns nothing | proven by hand in the test (`chown` of the directory and `cgroup.procs`/`threads`/`subtree_control`); `delegate()` must do it (P12a/P14) |
+| Keeper (`keeper.rs`) | a process of the daemon's own binary, run as the daemon user, writes `cgroup.kill` of the lease when the daemon dies | root can write `cgroup.kill`; it would run as the job user if started through the same hook, and needs write on the file | UNVERIFIED; the test does not start a keeper |
+| Unpack and helper containers (`helper::unpack_job`, `Mapping::Setup`) | id 0 of the helper namespace is the daemon user | id 0 is the job user, because they are started through the same hook; the stage directory is opened `0777` | UNVERIFIED (the image is pre-unpacked in the test; the unpack mode belongs to the later helper change) |
+| `AppArmor` user-namespace restriction | an unconfined unprivileged `crun` may not create a user namespace on newer kernels | the same for the job user; the CI job switches the restriction off on the runner | the farm's policy is UNVERIFIED |
+
+Besides these: in B the pulls (`js-oci`) would run as root in the daemon; run them as the job user
+(the `image-pull` verb started through the same hook) rather than in the root process.
 
 ## 5. Which later pull request takes which option
+
+The owner chose B: take the right-hand column. The left one is the hardening path.
 
 | PR | Under A (agent with no capability, root helper) | Under B (root agent, job-user `crun`) |
 |---|---|---|
 | P4 spec parameters and hardening | Same for both: the resolved bundle, caps, `noNewPrivileges`, `/tmp` options. `RLIMIT_NPROC` above the daemon's own hard limit is settable only through the unit's `LimitNPROC=` (a non-root process cannot raise its own hard limit) | Same; `RLIMIT_NPROC` set by the root parent before the uid drop, so the per-cgroup `pids.max` is the only bound |
 | P7 quota ordering | Helper does `apply`/`usage`/`clear` (needs `CAP_SYS_ADMIN`, and `CAP_FOWNER` unless applied before the give); the agent passes `(slot, limits)` over a socket | In process, as today; apply before the give |
 | P10 egress | Helper creates the network and checks the firewall for the agent | In process as root, once P5 picks the mechanism |
-| P12a CrunRuntime core | Runs `Oci` in the agent; hand-over and removal through the helper container; no `chown` in the agent | `Oci`'s `crun` is started through a wrapper that drops to the job user; the agent calls `hand_over` and `FilesRoot::remove` directly; chown of the cgroup subtree |
+| P12a CrunRuntime core | Runs `Oci` in the agent; hand-over and removal through the helper container; no `chown` in the agent | **Taken (B).** `OciConfig::job_user` plus a supported hook that starts `crun` as the job user; the agent chowns the lease directories, calls `hand_over` and `FilesRoot::remove` directly; chown of the cgroup subtree |
 | P14 packaging | Two units (agent, helper), `StateDirectory=`, `Delegate=yes`, the helper's socket and policy | One unit; a job-user account with a subordinate id block; cgroup `chown`; state directory kept root-owned |
 | Directory layout | The same `Searchable` layout | The same `Searchable` layout |
 
-## 6. Recommendation
+## 6. Decision and recommendation
 
-**Take B for the first crun release, and keep the privileged duties behind seams so that A with a
-helper can replace them later.**
-
-Reasons, from the evidence above:
+**Option B**, decided. The evidence for it, and for keeping A as the later hardening:
 
 1. **The capability route to A is not a privilege reduction.** `CAP_SYS_PTRACE`,
    `CAP_SYS_ADMIN`, `CAP_DAC_READ_SEARCH`, `CAP_NET_ADMIN` and `CAP_FOWNER` are each root in
-   practice (section 3). An agent holding them has the same blast radius as a root agent plus a
-   capability set to get wrong. Only the no-capability agent plus helper is a real separation.
-2. **That form costs a new privileged program before the first no-preload job can run.** The helper
-   has to do five things (init-namespace attestation, watched directories, quota apply/usage/clear,
-   firewall read and set-up, and the hand-over of run files). Each is a request interface the
-   unprivileged agent can send arbitrary arguments to, so each needs its own argument policy, and
-   the first no-preload build is already gated on P10 and P12a.
-3. **B is a reduction from today.** The agent is root today and talks to a root container engine
-   and the jobs run as the engine's mapped ids; under B the agent is root, nothing on the host
-   runs as root for a job, and the code that handles job-controlled bytes (`crun`, the unpacker's
-   helper containers) runs as the job user. It adds no privileged code; the layout and tests in this
-   change are the same under both.
-4. **B's open items are small and checkable.** The job-user spawn (groups, ids, `RLIMIT_NPROC`) and
-   the cgroup `chown` are UNVERIFIED here but are a few system calls, and P8 proves them on a real
-   runtime. The root pull path is avoidable by running the pull as the job user.
+   practice (section 3). Only the no-capability agent plus helper is a real separation.
+2. **That form costs a new privileged program before the first no-preload job can run**: five
+   duties behind request interfaces an unprivileged agent can send arbitrary arguments to, each
+   needing its own argument policy.
+3. **B is a reduction from today and is shown to work.** The agent is root today with a root
+   container engine; under B nothing runs as root for a job, and `crun` and everything it runs
+   (helper containers, the unpacker) run as the job user. js-contain's `Oci` runs under a root
+   daemon with one config field and a command hook (section 4, duty 7); the quota, watch,
+   init-namespace and state-directory duties need nothing new.
+4. **B makes the give and the clean simpler**: root `chown`s and `unlinkat`s directly.
 
-What A would still give that B does not: an agent compromise (it handles the lease server's
-commands) does not become root. That is worth buying later, after the first release, by moving the
-five duties behind the helper interfaces one at a time. To keep that open, the PRs that follow
-should put quota, egress, the init-namespace check, watch reads and the files hand-over behind
-traits that the root and helper forms both implement; `ScratchQuota` already is one.
+Open items for B (section 4, duty 7): a supported hook that starts every program as the job user,
+`delegate()` chowning the delegated subtree, the keeper and the unpack helper as the job user, the
+pull as the job user, and the farm's AppArmor policy.
 
-If the owner prefers A now, the cost to plan for is the helper (its protocol and its argument
-checks), the unit pair, and a watch list that either gets `rx` ACLs or goes through the helper;
-the tests here already fix what each call needs.
+**Hardening path (A).** What A would still give is that an agent compromise (it handles the lease
+server's commands) does not become root. Buy it later by moving the five duties behind helper
+interfaces one at a time. To keep that open the PRs that follow put quota, egress, the
+init-namespace check, watch reads and the files hand-over behind traits that the root and helper
+forms both implement (`ScratchQuota` already is one). The A tests in this change fix what each
+call needs; the cost to plan for is the helper, the unit pair, and a watch list that gets `rx`
+ACLs or goes through the helper.
 
 ## 7. What is proven and what is not
 
@@ -312,8 +322,12 @@ Proven in CI (the `agent-privilege` job and the `test` job):
 - Duty 5: the state directory ownership in both directions.
 - Duty 6 (read side): `CAP_NET_ADMIN` is the cost of reading the firewall.
 
-UNVERIFIED (left to P8, P5/P10 and the canary host): `crun` as the job user from a root parent and
-the cgroup `chown` (B); the unit's `Delegate=` and `AmbientCapabilities=` (A); a `hidepid` process
+- Option B end to end with a real `crun`: the namespace maps onto the job user's subordinate range,
+  the job is unprivileged, `Oci::new`'s search check against a `0711` root (duty 7).
+
+UNVERIFIED (left to the later PRs, P5/P10 and the canary host): the keeper and the unpack helper
+as the job user; `delegate()` doing the cgroup `chown` itself; the farm's AppArmor policy; the
+unit's `Delegate=` and `AmbientCapabilities=` (A); a `hidepid` process
 table; the egress set-up; the `--scratch-quota` flag on the farm's unit (whether the farm sets it is
 not known from this repository); the farm's kernel and AppArmor policy against any of the above
 (hosted runners differ).
