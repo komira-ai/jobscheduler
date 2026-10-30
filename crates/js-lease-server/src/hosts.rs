@@ -5,7 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use js_agent_wire::Taint;
 use js_provider::HostCapacity;
 use js_registry::{HostMark, HostState, HostView};
+use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, LeaseId, MemoryHeadroom, Shape};
+
+use crate::sched::map::lease_text as sched_lease_text;
 use serde::Serialize;
 
 /// The body of `GET /v1/hosts`.
@@ -84,6 +87,86 @@ struct HostEntry {
     /// When a reservation that is draining a busy host is given up, in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     drain_deadline_ms: Option<u64>,
+    /// Set for a registered host whose latest heartbeat carried a load: the reading of
+    /// its actions control group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    load: Option<LoadView>,
+}
+
+/// The latest load of a host, in the units its field names state. It is what the agent
+/// measured and sent, not an estimate: CPU time is a counter, so a rate is the difference
+/// of two readings over the difference of their `mono_usec`.
+#[derive(Debug, Serialize)]
+struct LoadView {
+    /// The reading's number within the agent's process.
+    seq: u64,
+    /// The agent's monotonic clock at the reading, in microseconds.
+    mono_usec: u64,
+    /// Cumulative CPU time of the cgroup that holds every action, in microseconds.
+    cpu_usage_usec: u64,
+    /// Memory in use by the actions, in bytes.
+    memory_working_set_bytes: u64,
+    /// Active file cache, in bytes.
+    memory_active_file_bytes: u64,
+    /// Whether the actions cgroup has a CPU limit.
+    actions_cpu_limited: bool,
+    /// Leases (`term-seq`) that ran the whole window since the previous reading.
+    covered: Vec<String>,
+    /// When each running lease started, in microseconds on the agent's clock.
+    lease_clocks: Vec<LeaseClockView>,
+    /// Closed lease-minutes.
+    minutes: Vec<LeaseMinuteView>,
+}
+
+#[derive(Debug, Serialize)]
+struct LeaseClockView {
+    lease: String,
+    started_mono_usec: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct LeaseMinuteView {
+    lease: String,
+    minute: u32,
+    /// Mean CPU over the observed span, in thousandths of a core.
+    cpu_mean_millis: u32,
+    /// The highest CPU rate of any window in the minute, in thousandths of a core.
+    cpu_peak_window_millis: u32,
+    /// The largest working set seen in the minute, in bytes.
+    ws_max_bytes: u64,
+}
+
+impl LoadView {
+    fn of(load: NodeLoad) -> Self {
+        Self {
+            seq: load.seq,
+            mono_usec: load.mono_usec,
+            cpu_usage_usec: load.cpu_usage_usec,
+            memory_working_set_bytes: load.memory_working_set_bytes,
+            memory_active_file_bytes: load.memory_active_file_bytes,
+            actions_cpu_limited: load.actions_cpu_limited,
+            covered: load.covered.into_iter().map(sched_lease_text).collect(),
+            lease_clocks: load
+                .lease_clocks
+                .into_iter()
+                .map(|clock| LeaseClockView {
+                    lease: sched_lease_text(clock.lease),
+                    started_mono_usec: clock.started_mono_usec,
+                })
+                .collect(),
+            minutes: load
+                .minutes
+                .into_iter()
+                .map(|minute| LeaseMinuteView {
+                    lease: sched_lease_text(minute.lease),
+                    minute: minute.minute,
+                    cpu_mean_millis: minute.cpu_mean_millis,
+                    cpu_peak_window_millis: minute.cpu_peak_window_millis,
+                    ws_max_bytes: minute.ws_max_bytes,
+                })
+                .collect(),
+        }
+    }
 }
 
 fn shape_view(shape: &Shape) -> ShapeView {
@@ -119,6 +202,7 @@ impl HostEntry {
             mark: None,
             reserved_for: None,
             drain_deadline_ms: None,
+            load: None,
         }
     }
 
@@ -150,6 +234,7 @@ impl HostEntry {
             }),
             reserved_for: host.reserved_for.map(|id| id.to_string()),
             drain_deadline_ms: host.drain_deadline.map(|at| at.millis()),
+            load: host.load.map(LoadView::of),
         }
     }
 }
@@ -204,6 +289,7 @@ mod tests {
             mark,
             reserved_for: None,
             drain_deadline: None,
+            load: None,
         }
     }
 

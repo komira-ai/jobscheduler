@@ -201,17 +201,18 @@ async fn heartbeat(
     one_time: Option<Extension<OneTime>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<HeartbeatReply>, Refused> {
-    let mut heartbeat: Heartbeat = decode(
+    let heartbeat: Heartbeat = decode(
         &read(body, refusal::INVALID_HEARTBEAT)?,
         refusal::INVALID_HEARTBEAT,
     )?;
     heartbeat
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
-    // The load is telemetry: it is taken out here and only looked at after the registry
-    // has accepted the beat, so a beat the registry refuses records nothing, and nothing
-    // about the load can change the reply.
-    let load = heartbeat.load.take();
+    // The load is telemetry. The usage hub looks at its own copy only after the registry
+    // has accepted the beat, so a beat the registry refuses records nothing to it; the
+    // registry keeps the latest load of the host for `GET /v1/hosts` (it checks the beat
+    // before it looks at the load), and nothing about the load can change the reply.
+    let load = heartbeat.load.clone();
     if let Some(Extension(OneTime(presented))) = one_time {
         let served = agents
             .serve_join(presented, heartbeat.host_id.clone())
