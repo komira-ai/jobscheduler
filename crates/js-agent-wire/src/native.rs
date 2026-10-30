@@ -17,6 +17,12 @@ use crate::error::{Rule, ValidationError};
 use crate::limits;
 use crate::refusal;
 
+/// The prefix of a program that names an entrypoint of the job's bundle.
+pub const BUNDLE_PROGRAM_PREFIX: &str = "@bundle/";
+
+/// The most bytes an entrypoint name has.
+pub const BUNDLE_ENTRYPOINT_MAX: usize = 64;
+
 /// How much network a native job may use. The agent clamps it to what its own flag
 /// allows. An absent value is [`NetworkLevel::Off`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +122,10 @@ pub struct OutputSpec {
 pub struct NativeSpec {
     /// The program: an absolute path with no empty, `.` or `..` part, at most
     /// [`limits::MAX_PROGRAM_LEN`] bytes. The agent also requires it to resolve under one
-    /// of its configured tool roots.
+    /// of its configured tool roots. Or `@bundle/<entrypoint>`, the name of an entrypoint
+    /// of the job's bundle (`[A-Za-z0-9._+-]`, the first a letter or digit, at most
+    /// [`BUNDLE_ENTRYPOINT_MAX`] bytes), which the agent resolves from the bundle's
+    /// config; the job then has a `bundle` ([`JobSpec::bundle`]), or it is refused.
     pub program: String,
     /// The arguments after the program: at most [`limits::MAX_ARGS`] entries, no NUL, bounded
     /// as the `args` of a container job are. The `args` of the job itself must be empty.
