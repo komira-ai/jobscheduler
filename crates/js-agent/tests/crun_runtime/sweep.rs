@@ -36,7 +36,7 @@ fn a_restart_sweeps_the_leases_of_a_dead_process() {
     let mut removed: Vec<_> = swept.removed.iter().collect();
     removed.sort_by(|a, b| a.run_id.cmp(&b.run_id));
     let runs: Vec<_> = removed.iter().map(|r| r.run_id.as_str()).collect();
-    assert_eq!(runs, ["r-made", "r-up"]);
+    assert_eq!(runs, ["r-made", "r-up"], "{swept:?}");
     assert_eq!(removed[1].name, up.0);
     assert_eq!(removed[1].labels[label::RUN], "r-up");
     assert_eq!(removed[1].labels[label::AGENT], HOST);

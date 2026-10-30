@@ -115,12 +115,13 @@ pub struct LedgerError {
     pub why: io::Error,
 }
 
-/// `result`, with the directory `dir` named if it failed.
-fn at<T>(dir: &Path, result: io::Result<T>) -> Result<T, LedgerError> {
-    result.map_err(|why| LedgerError {
+/// The error of a failed call on the directory `dir`, named. Not generic over what the call
+/// returns, so that it is one function whatever is called.
+fn at(dir: &Path) -> impl Fn(io::Error) -> LedgerError + '_ {
+    |why| LedgerError {
         path: dir.to_owned(),
         why,
-    })
+    }
 }
 
 /// What reading one sidecar found.
@@ -199,7 +200,7 @@ impl Ledger {
         let dir = scratch.join(DIR);
         let made = fs::create_dir_all(&dir)
             .and_then(|()| fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)));
-        at(&dir, made)?;
+        made.map_err(at(&dir))?;
         Ok(Self {
             dir,
             agent: agent.to_owned(),
@@ -352,8 +353,8 @@ impl Ledger {
     pub(super) fn survey(&self) -> Result<Survey, LedgerError> {
         let mut names: Vec<String> = Vec::new();
         let mut survey = Survey::default();
-        for entry in at(&self.dir, fs::read_dir(&self.dir))? {
-            let entry = at(&self.dir, entry)?;
+        for entry in fs::read_dir(&self.dir).map_err(at(&self.dir))? {
+            let entry = entry.map_err(at(&self.dir))?;
             match entry.file_name().into_string() {
                 Ok(name) => names.push(name),
                 Err(_) => survey.left.push(Left::Malformed {
