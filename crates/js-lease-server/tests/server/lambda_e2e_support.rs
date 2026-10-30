@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use js_elastic_fake::ElasticFake;
 use js_lease_server::{REGISTRY_FLOOR, REGISTRY_QUIET, RecordsFile};
 use js_provider::{Provider, StartAck};
 use js_provider_lambdalabs::{FakeLambda, TerminateEffect};
@@ -14,7 +15,7 @@ use serde_json::json;
 use crate::agents_support::{Session, hosts};
 use crate::config_support::{API_KEY, OAUTH_SECRET, oauth_file};
 use crate::scaler_support::{
-    account, beat, hello_body_of, records_path, spec, start, text_with, token_in,
+    account, beat, elastic_cloud, hello_body_of, records_path, spec, start, text_with, token_in,
 };
 use crate::support::{Harness, Reply, Scratch, TOKEN, request};
 use crate::tailnet::{AUTH_KEY, Fake, Reply as Canned, TOKEN as TAILNET_TOKEN};
@@ -42,6 +43,9 @@ pub struct Rig {
     pub tailnet: Fake,
     /// Whether the pool joins hosts to the tailnet; a pool in `default` mode does not.
     pub tailscale: bool,
+    /// The elastic fake cloud the pool launches on instead of the Lambda account, when the
+    /// rig was made with [`Rig::elastic`]. `account` is then an empty account nothing uses.
+    pub elastic: Option<ElasticFake>,
 }
 
 /// The `network` table of a pool that joins its hosts to the tailnet at `url`.
@@ -107,9 +111,33 @@ impl Rig {
     /// the account is empty of instances and offers `gpu_1x_a100`, and terminating removes
     /// the instance at once.
     pub async fn over(name: &str, tailnet: Fake, tailscale: bool) -> Self {
+        Self::over_cloud(name, tailnet, tailscale, None).await
+    }
+
+    /// A server whose pool is in `default` mode and launches on the elastic fake cloud
+    /// `cloud`, on the clock the rig moves (`cloud` must read the clock it was made with,
+    /// and [`Rig::advance`] moves both).
+    pub async fn elastic(name: &str, cloud: ElasticFake) -> Self {
+        Self::over_cloud(name, tailnet(), false, Some(cloud)).await
+    }
+
+    async fn over_cloud(
+        name: &str,
+        tailnet: Fake,
+        tailscale: bool,
+        elastic: Option<ElasticFake>,
+    ) -> Self {
         let scratch = Scratch::new(name);
-        let account = account(&scratch);
-        account.set_terminate_effect(TerminateEffect::Removed);
+        let account = match &elastic {
+            Some(cloud) => {
+                elastic_cloud(&scratch, cloud);
+                Arc::new(FakeLambda::new())
+            }
+            None => account(&scratch),
+        };
+        if elastic.is_none() {
+            account.set_terminate_effect(TerminateEffect::Removed);
+        }
         let url = tailnet.url();
         let source = pool_text(&scratch, tailscale.then_some(url.as_str()), "initialise");
         let h = start(scratch, &source).await;
@@ -118,6 +146,7 @@ impl Rig {
             account,
             tailnet,
             tailscale,
+            elastic,
         }
     }
 
@@ -129,6 +158,7 @@ impl Rig {
             account,
             tailnet,
             tailscale,
+            elastic,
         } = self;
         let Harness {
             running, scratch, ..
@@ -142,6 +172,7 @@ impl Rig {
             account,
             tailnet,
             tailscale,
+            elastic,
         }
     }
 
@@ -179,9 +210,19 @@ impl Rig {
 
     /// The clock moved forward by `seconds`.
     pub fn advance(&self, seconds: u64) {
-        self.h
-            .clock
-            .advance(std::time::Duration::from_secs(seconds));
+        let by = std::time::Duration::from_secs(seconds);
+        self.h.clock.advance(by);
+        if let Some(cloud) = &self.elastic {
+            cloud.clock().advance(by);
+        }
+    }
+
+    /// How many machines the cloud under the pool has launched.
+    pub fn launched(&self) -> usize {
+        match &self.elastic {
+            Some(cloud) => cloud.launched(),
+            None => self.account.launched(),
+        }
     }
 
     /// Ticks, `STEP` of the test's clock apart and every host of `heard` beating before each
@@ -221,7 +262,7 @@ impl Rig {
         self.tick().await;
         self.wait();
         self.tick().await;
-        assert_eq!(self.account.launched(), 1);
+        assert_eq!(self.launched(), 1);
         let name = self.name();
         self.show_device(&name);
         self.tick().await;
@@ -243,7 +284,10 @@ impl Rig {
 
     /// The user data of the `n`th launch the account saw.
     pub fn script(&self, n: usize) -> String {
-        self.account.launches()[n].user_data().unwrap().to_owned()
+        match &self.elastic {
+            Some(cloud) => cloud.user_data(n),
+            None => self.account.launches()[n].user_data().unwrap().to_owned(),
+        }
     }
 
     /// The join token in the user data of the `n`th launch.

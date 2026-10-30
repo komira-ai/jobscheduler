@@ -3,8 +3,9 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use js_registry::OsSessions;
+use js_registry::{OsSessions, Registry, WholeNodeConfig};
 use js_scaler::{LaunchMode, Settings};
 use js_types::ExecMode;
 
@@ -53,8 +54,19 @@ fn network_mode(
     }
 }
 
+impl ElasticPlan {
+    /// The scaler settings the plan gives: the design's defaults besides the plan's own, and
+    /// the prepare timeout of the whole-node settings of the pool `registry` serves, the
+    /// figure the lease table and the registry count too. A registry whose pool has no
+    /// whole-node settings gets the dedicated defaults, which an elastic file pool has anyway.
+    pub fn scaler_settings(&self, registry: &Registry) -> Settings {
+        let fallback = WholeNodeConfig::dedicated(self.max_instances);
+        settings(self, registry.whole_node().unwrap_or(&fallback))
+    }
+}
+
 /// The scaler settings the pool's plan gives: the design's defaults besides the plan's own.
-fn settings(plan: &ElasticPlan) -> Settings {
+fn settings(plan: &ElasticPlan, whole: &WholeNodeConfig) -> Settings {
     let mut settings = Settings::new(
         &plan.name,
         plan.max_instances,
@@ -65,8 +77,15 @@ fn settings(plan: &ElasticPlan) -> Settings {
         Launch::Live => LaunchMode::Live,
         Launch::Plan => LaunchMode::Plan,
     };
+    settings.live_until = plan.live_until;
+    settings.kind.clone_from(&plan.kind);
     settings.idle = plan.idle.unwrap_or(settings.idle);
     settings.boot_timeout = plan.boot_timeout;
+    settings.max_age = plan.max_age;
+    settings.min_host_lifetime = plan.min_host_lifetime;
+    settings.max_lease_wall = plan.max_lease_wall;
+    // A whole-node lease's wall time starts after the pool's prepare timeout.
+    settings.prepare_timeout = Duration::from_millis(whole.prepare_timeout_ms);
     settings
 }
 
@@ -108,12 +127,12 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         plan.scheduler.clone(),
         plan.exec.unwrap_or(ExecMode::Container),
     );
-    let scaler = Scaler::new(
+    let scaler = Scaler::budgeted(
         Box::new(live),
         parts.clock,
         Box::new(OsSessions),
         wiring,
-        settings(plan),
+        (plan.scaler_settings(&registry), plan.budgets.clone()),
         records,
     );
     scaler.retry_removals(unremoved);

@@ -191,6 +191,7 @@ fn restart_keeps_the_scratch_of_a_container_it_could_not_remove() {
         (label::LEASE, "a b"),
         (label::CPU_MILLIS, "1000"),
         (label::MEMORY_BYTES, "1073741824"),
+        (label::DISK_BYTES, "0"),
         (label::GPUS, "1"),
         (label::WALL_MS, "60000"),
         (label::ISOLATION, "contained"),

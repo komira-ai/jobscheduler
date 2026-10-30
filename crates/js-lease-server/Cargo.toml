@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+js-alert = { path = "../js-alert" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-caps = { path = "../js-caps" }
 js-elastic = { path = "../js-elastic" }
@@ -41,6 +42,8 @@ ureq.workspace = true
 
 [dev-dependencies]
 js-agent = { path = "../js-agent" }
+# The elastic fake cloud with its own bill (tests/server/elastic_fake_e2e.rs).
+js-elastic-fake = { path = "../js-elastic-fake" }
 js-provider-fake = { path = "../js-provider-fake" }
 js-state = { path = "../js-state", features = ["test-support"] }
 js-testkit = { path = "../js-testkit" }

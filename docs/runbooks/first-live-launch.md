@@ -66,6 +66,7 @@ client_token_file = "<path>"
 tls_cert          = "<path>"
 tls_key           = "<path>"
 require_host_credential = true
+max_lease_wall    = "1h"                        # required with a pool with GPUs: no lease may ask for more
 
 [[pool]]
 name               = "gpu"
@@ -74,7 +75,9 @@ launch             = "plan"                     # the one line the go changes
 max_instances      = 1
 max_spend_per_hour = "<dollars, e.g. 2.00>"     # a string: a decimal with at most two places
 max_spend_per_day  = "<dollars>"                # not below the hour cap
-idle               = "2m"                       # short for this run
+idle               = "2m"                       # short for this run; required of a pool with GPUs
+max_age            = "3h"                       # required of a pool with GPUs: the host is retired at this age, busy or not
+min_host_lifetime  = "15m"                      # required of a pool with GPUs: idle never releases a younger host
 boot_timeout       = "15m"                      # the default
 agent   = { x86_64 = { url = "https://<host>/js-agent", sha256 = "<64 lower-case hex>" } }   # one entry per arch
 network = { kind = "tailscale", oauth_client_file = "<path>", tag = "tag:js-agent",
@@ -418,7 +421,7 @@ last.
 | Any time after the flip, before a launch | Set `launch = "plan"` in the config and restart. Nothing launches. Also release the lease request (`js lease release`). |
 | An instance exists and the scheduler is healthy | Release the lease; let the teardown of section 6 run. Watch it. |
 | A registered host that has never heartbeated past `boot_timeout` (a lost Welcome, #387), or an `alerts` entry about a machine | Terminate the instance in the Lambda console (or `first_launch --teardown-only` if it launched it). Instances are found by the tags `jobscheduler:scheduler=<id>`, `jobscheduler:pool=<pool>` and the name. Then delete the tailnet device in the admin console and restart the scheduler: it lists the account, finds no instance, and its record for the machine ends. Restart with `boot = "resume"` and the records file in place; never delete the records file or start with `initialise` to clear a record. |
-| An instance exists and the scheduler is wedged, unreachable or restarted badly | The same action. `/healthz` answers 503 once the tick loop or the scaler task has stopped; the supervisor must restart the process, which reads its records back, and launches nothing twice (**CI**). While it is down nothing releases the instance. |
+| An instance exists and the scheduler is wedged, unreachable or restarted badly | The same action. `/healthz` answers 503 once the tick loop or the scaler task has stopped; the supervisor must restart the process, which reads its records back, and launches nothing twice (**CI**). While it is down nothing releases the instance; the lifetime the launch carries (`max_age` plus `max_lease_wall` plus the waits of a retire) is for a cloud that can enforce one, and Lambda cannot, so on Lambda only `max_age` with a live scheduler bounds the cost, and with the scheduler down the bound is the supervisor's restart and your watch. Outside the lifetime sum, to fit in its 10 minute margin: the lease and regain grace before a silent host's lease is given up, the release retry loop, the gap between the recorded launch time and the machine's creation, a tick, and (after a registry restart, until the next tick) an aged host being bookable again. A run the host keeps listing after its lease ended keeps `release_host` refused with no deadline: a lifetime-enforcing cloud cuts it at the lifetime, Lambda does not, so there you terminate by hand. |
 | A secret may have leaked (5.1 or 5.2 failed) | Terminate first. Then delete the Tailscale OAuth client or the key's tag permission, rotate the Lambda API key, and remove the token file entries for the pool. |
 | The abort cannot reach Lambda | Rotate the API key in the Lambda console; the scheduler stops being able to launch, and you terminate from the console. |
 
@@ -441,3 +444,18 @@ The run covers one machine of one type in one region. It does not prove a second
 region, the arm64 pin, behaviour under a restart of the scheduler while the instance is up (restart and
 re-adopt: **CI** only, with fakes; and see #329), the lost-Welcome release at `boot_timeout` (#387 is open), or a stock image other than the one used. Re-run the live steps
 when the stock image, the Tailscale pin or the agent pin changes.
+
+## Rolling back across the spend totals
+
+A server older than the spend totals (`max_spend_per_day_total` and the other two, `live_until`)
+reads the records file, but its next save drops the `go` and `pool_kinds` keys, and it forgets
+records of machines 24 hours after they ended. After rolling forward again:
+
+- the budget since the go starts afresh at the pool's next launch: what was spent under the old go,
+  including what had been settled into it, is forgotten;
+- the month window holds only the days since the rollback, for up to 30 days;
+- a retry of a launch the provider told to wait that happens before the pool's first launch has no
+  go, and is bounded by the day and month totals only.
+
+For that period tighten `max_spend_per_month_total` and `max_spend_since_go_total` by what the
+pools spent before the rollback, or hold the pools in `plan`.

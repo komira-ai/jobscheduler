@@ -181,6 +181,8 @@ fn a_joined_pool_refuses_the_keys_of_a_launching_pool() {
         ("max_spend_per_hour", "\"1.00\""),
         ("max_spend_per_day", "\"2.00\""),
         ("idle", "\"10m\""),
+        ("max_age", "\"6h\""),
+        ("min_host_lifetime", "\"15m\""),
         ("boot_timeout", "\"5m\""),
     ];
     for (key, value) in launching {

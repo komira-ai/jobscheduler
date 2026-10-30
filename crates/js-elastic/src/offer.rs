@@ -109,7 +109,8 @@ pub struct Offer {
 
 impl Offer {
     /// Whether a host from this offer would serve `demand`: the same platform where the
-    /// demand names one, and at least the CPU, memory, disk and GPUs asked for, with
+    /// demand names one, and at least the CPU, memory, disk and GPUs asked for (the disk
+    /// both as the `disk-gib` requirement and as the scratch disk the request books), with
     /// the GPU class when GPUs are asked for. Whether the offer is [available](Self::available)
     /// is not part of the fit.
     ///
@@ -138,7 +139,12 @@ impl Offer {
             ),
             (
                 Dimension::DiskBytes,
-                demand.disk_bytes.is_none_or(|disk| disk <= self.disk_bytes),
+                [
+                    demand.disk_bytes.is_none_or(|disk| disk <= self.disk_bytes),
+                    wanted.disk_bytes() <= self.disk_bytes,
+                ]
+                .into_iter()
+                .all(|fits| fits),
             ),
             (Dimension::Gpus, wanted.gpus() <= u64::from(self.gpus)),
             (
@@ -272,6 +278,32 @@ mod tests {
         assert_eq!(offer().fit(&disk), Err(Dimension::DiskBytes));
         disk.disk_bytes = None;
         assert_eq!(offer().fit(&disk), Ok(()));
+    }
+
+    /// Asserts that the scratch disk a request books (the disk of its resources, not the
+    /// `disk-gib` requirement) is judged against the offer's disk: the exact edge fits,
+    /// one byte more is refused by the disk dimension, and a request that books none fits
+    /// an offer with none. It catches a fit that reads only the `disk-gib` requirement,
+    /// which counts an offer for a request the scheduler refuses for disk.
+    #[test]
+    fn the_scratch_disk_a_request_books_is_judged_against_the_offer() {
+        let books = |bytes: u64| {
+            let mut wanted = demand();
+            wanted.disk_bytes = None;
+            wanted.resources = Resources::new(1000, 1 << 30, 0, None)
+                .unwrap()
+                .with_disk_bytes(bytes);
+            wanted
+        };
+        assert_eq!(offer().fit(&books(512 << 30)), Ok(()));
+        assert_eq!(
+            offer().fit(&books((512 << 30) + 1)),
+            Err(Dimension::DiskBytes)
+        );
+        let mut none = offer();
+        none.disk_bytes = 0;
+        assert_eq!(none.fit(&books(0)), Ok(()));
+        assert_eq!(none.fit(&books(1)), Err(Dimension::DiskBytes));
     }
 
     /// Asserts that an offer with no GPU class fails a demand for GPUs by class, and

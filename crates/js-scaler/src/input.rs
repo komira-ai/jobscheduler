@@ -1,9 +1,12 @@
 //! What one step reads: demand, pools and their offers, hosts, and the answers the
 //! caller got from the provider since the last step.
 
+use std::time::Duration;
+
 use js_elastic::{AcquireId, Acquired, Demand, Held, Offer, Released, SchedulerId};
 use js_types::{HostId, RequestId};
 
+use crate::budget::Budgets;
 use crate::settings::{Health, Settings};
 
 /// One whole-node request on the registry's wait list (`js_registry::Waiting`), in queue
@@ -187,4 +190,25 @@ pub struct Input {
     /// randomness of its own; the caller draws these from a source of entropy and never
     /// repeats one.
     pub entropy: Vec<[u8; 16]>,
+    /// The server-wide totals ([`Budgets`]); none by default.
+    pub budgets: Budgets,
+}
+
+impl Input {
+    /// The `boot_timeout` of the pool named `pool`, or zero for a pool this input does not
+    /// have (its records are billed the minimum).
+    pub(crate) fn boot_timeout(&self, pool: &str) -> Duration {
+        self.pools
+            .iter()
+            .find(|each| each.settings.pool == pool)
+            .map_or(Duration::ZERO, |each| each.settings.boot_timeout)
+    }
+
+    /// The provider kind of the pool named `pool`, if this input has the pool.
+    pub(crate) fn kind_of(&self, pool: &str) -> Option<&String> {
+        self.pools
+            .iter()
+            .find(|each| each.settings.pool == pool)
+            .map(|each| &each.settings.kind)
+    }
 }

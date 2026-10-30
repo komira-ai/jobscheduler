@@ -78,6 +78,8 @@ const LAUNCHING: &[&str] = &[
     "max_spend_per_hour",
     "max_spend_per_day",
     "idle",
+    "max_age",
+    "min_host_lifetime",
     "boot_timeout",
 ];
 
@@ -439,6 +441,8 @@ mod tests {
             ("max_spend_per_hour", "\"1.00\""),
             ("max_spend_per_day", "\"2.00\""),
             ("idle", "\"10m\""),
+            ("max_age", "\"6h\""),
+            ("min_host_lifetime", "\"15m\""),
             ("boot_timeout", "\"5m\""),
         ];
         for (key, value) in launching {

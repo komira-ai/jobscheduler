@@ -1,17 +1,20 @@
 # Releasing js-lease-server, js and js-agent
 
 Releases are continuous. Nobody tags, and nothing is run by hand: every push to `main` that
-changes code that ships is released as the next version, after `ci` has passed on it.
+changes code that ships is released as the next version, after the jobs of `ci` other than `macos` have passed on it.
 
 ## What happens on each merge to main
 
 1. `ci` runs on the push, as for any push, and the `release` workflow (`.github/workflows/release.yml`)
    starts on the same push. It acts only on a push to `main`, and works on the commit pushed: the
    run's own `github.sha`.
-2. `ci-passed` waits for the `ci` run of that commit (it polls every 120 s, for up to four hours; ten failed reads of the runs in a row, about twenty minutes, fail it too)
-   and passes only when that run succeeded. If it failed, was cancelled, timed out or ended any
-   other way, the release fails with an error naming the `ci` run and its conclusion, and nothing
-   is released. It holds `actions: read` and nothing else, and checks out no code.
+2. `ci-passed` waits for the jobs of the `ci` run of that commit, all but the one named `macos` (it polls every 120 s, for up to four hours; ten failed reads of the runs or their jobs in a row, about twenty minutes, fail it too)
+   and passes when every other job succeeded or was skipped, even while `macos` is still queued or after it failed.
+   If any other job failed, was cancelled or timed out, the release fails with an error naming those jobs and the `ci`
+   run, and nothing is released. It holds `actions: read` and nothing else, and checks out no code.
+   A release therefore does not wait for macOS `ci`: that job queues for hours on the hosted macOS runners, so
+   main's own macOS run is the backstop (a failure there is fixed forward), and the release's own `aarch64-apple-darwin`
+   build still runs on a Mac (below).
 3. `plan` (`cargo xtask release plan`) decides whether to release and as which version (below).
    When there is nothing to release, the run ends there, green.
 4. `build` stamps the version into the CI checkout, builds the three binaries for
@@ -250,8 +253,8 @@ whose upload did not finish is deleted before it is uploaded again.
 | The run was green but released nothing | `plan` printed why | a later release exists past the commit, or nothing that ships changed. Nothing to do. |
 | "Re-run all jobs" after a successful release | The release is complete | It rebuilds the same files; `publish` compares each against the release and keeps them. If a file differs the run fails and nothing is changed. |
 
-Runs that wait: a release run starts with its push and waits for `ci`; if `ci` fails there, the run fails
-at `ci-passed` (red, with the `ci` run's link) and the change is released by the next push that passes
+Runs that wait: a release run starts with its push and waits for the jobs of `ci` but `macos`; if one fails there, the run fails
+at `ci-passed` (red, with the `ci` run's link and the failed jobs) and the change is released by the next push that passes
 `ci` and ships code. Re-run the failed jobs after re-running `ci`, if the commit should release itself.
 
 There is no dispatch and no tag trigger: a `v*` tag pushed by hand does not start a release, and

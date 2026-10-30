@@ -320,3 +320,35 @@ fn only_some_phases_count() {
     settled.clean_lists = 2;
     assert!(!settled.counts());
 }
+
+/// Asserts that the `go` and `pool_kinds` keys are read, not dropped: a file of version 2 that
+/// holds them reads with the go and the kinds as written, writes them back, and reads again as
+/// the same records. A `go` of the wrong type is refused, as any other field is. The keys are
+/// absent from a file written while no pool has launched, and the earlier reader that ignores
+/// them (#452) reads either. It catches a key that is read and lost on the next save.
+#[test]
+fn the_go_and_pool_kinds_keys_are_read_and_written_back() {
+    let with = GOLDEN.replacen(
+        "\"last_step\"",
+        "\"go\": {\"gpu\": {\"at\": 5, \"settled\": 7}},\n  \"pool_kinds\": {\"gpu\": \"x\"},\n  \"last_step\"",
+        1,
+    );
+    let records = Records::decode(&with).unwrap();
+    let go = js_scaler::Go {
+        at: js_scaler::Millis::new(5),
+        settled: 7,
+    };
+    assert_eq!(records.go["gpu"], go);
+    assert_eq!(records.pool_kinds["gpu"], "x");
+    let text = records.encode().unwrap();
+    assert!(
+        text.contains("\"go\"") && text.contains("\"pool_kinds\""),
+        "{text}"
+    );
+    assert_eq!(Records::decode(&text).unwrap(), records);
+
+    let without = Records::decode(GOLDEN).unwrap();
+    assert!(without.go.is_empty() && without.pool_kinds.is_empty());
+    let odd = GOLDEN.replacen("\"last_step\"", "\"go\": 3,\n  \"last_step\"", 1);
+    assert!(Records::decode(&odd).is_err());
+}

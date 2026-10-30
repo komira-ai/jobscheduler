@@ -59,22 +59,24 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
     );
     assert_eq!(
         refusal(&scratch, &text),
-        "extra: unknown field; known: server, pool"
+        "extra: unknown field; known: server, pool, budget"
     );
     assert_eq!(
         refused_server("config_unknown_server", "status_token_file = \"/x\""),
         "server.status_token_file: unknown field; known: listen, agent_listen, advertise_url, \
          scheduler_id, state_file, boot, client_token_file, tls_cert, tls_key, tick, default_ttl, max_ttl, \
-         max_connections, handshake_timeout, header_timeout, read_timeout, write_timeout, \
+         max_lease_wall, max_connections, handshake_timeout, header_timeout, read_timeout, write_timeout, \
          max_requests, drain_timeout, agent_hello_burst, agent_hello_interval, \
-         require_host_credential, usage_db, usage_off, profile_store_bytes"
+         require_host_credential, usage_db, usage_off, profile_store_bytes, \
+         alert_webhook_url, alert_webhook_token_file, alert_repeat_after, \
+         max_spend_per_day_total, max_spend_per_month_total, max_spend_since_go_total"
     );
     let text = file(&server(&scratch, ""), &[&pool.set("colour", "\"red\"")]);
     assert_eq!(
         refusal(&scratch, &text),
         "pool \"hosts\": colour: unknown field; known: name, class, exec, \
          memory_schedulable_percent, max_instances, max_spend_per_hour, max_spend_per_day, \
-         idle, boot_timeout, launch, agent, join_token_file, provider, network"
+         idle, max_age, min_host_lifetime, boot_timeout, launch, live_until, agent, join_token_file, provider, network"
     );
 }
 

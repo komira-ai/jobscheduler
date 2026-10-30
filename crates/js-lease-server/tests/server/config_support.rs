@@ -170,7 +170,7 @@ pub fn quoted(path: &Path) -> String {
 pub fn server(scratch: &Scratch, extra: &str) -> String {
     let token = scratch.write("client-token", TOKEN, 0o600);
     format!(
-        "[server]\nstate_file = {}\nboot = \"initialise\"\nclient_token_file = {}\n{extra}\n",
+        "[server]\nstate_file = {}\nboot = \"initialise\"\nclient_token_file = {}\nmax_lease_wall = \"2h\"\n{extra}\n",
         quoted(&scratch.state()),
         quoted(&token)
     )
@@ -223,6 +223,8 @@ impl PoolText {
             .set("max_spend_per_hour", &quote("12.00"))
             .set("max_spend_per_day", &quote("96.00"))
             .set("idle", &quote("10m"))
+            .set("max_age", &quote("2h"))
+            .set("min_host_lifetime", &quote("5m"))
             .set(
                 "provider",
                 &format!(

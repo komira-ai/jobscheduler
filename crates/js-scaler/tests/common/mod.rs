@@ -8,8 +8,8 @@ use js_elastic::{
     AcquireId, Acquired, Demand, GpuClass, Held, HostRef, HostStatus, Offer, PriceUnit, SchedulerId,
 };
 use js_scaler::{
-    AcquirePlan, AcquireResult, Action, Health, HostFacts, HostState, Input, LaunchMode, Millis,
-    Phase, PoolInput, Record, Settings, State, StoredOffer, Waiting, step,
+    AcquirePlan, AcquireResult, Action, Budgets, Health, HostFacts, HostState, Input, LaunchMode,
+    Millis, Phase, PoolInput, Record, Settings, State, StoredOffer, Waiting, step,
 };
 use js_types::{ExecMode, HostId, RequestId, Resources};
 
@@ -133,6 +133,7 @@ pub fn input(pool: PoolInput) -> Input {
         released: Vec::new(),
         not_found: Vec::new(),
         entropy: Vec::new(),
+        budgets: Budgets::default(),
     }
 }
 

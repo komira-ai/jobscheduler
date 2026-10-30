@@ -542,6 +542,7 @@ fn every_running_container_is_stopped_beyond_sixteen() {
     big.config.capacity = Capacity {
         cpu_millis: 64_000,
         memory_bytes: 1 << 40,
+        disk_bytes: 0,
         gpus: Default::default(),
     };
     let worker = Worker::start(big).unwrap_or_else(|why| panic!("no worker: {why}"));

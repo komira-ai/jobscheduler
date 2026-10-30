@@ -1,0 +1,28 @@
+[package]
+name = "js-watch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "js-watch"
+path = "src/main.rs"
+
+[dependencies]
+js-alert = { path = "../js-alert" }
+js-elastic = { path = "../js-elastic" }
+js-provider-lambdalabs = { path = "../js-provider-lambdalabs" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true

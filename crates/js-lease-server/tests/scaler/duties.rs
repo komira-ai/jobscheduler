@@ -5,8 +5,10 @@
 //! alerts an operator must see. Time is an injected clock; nothing sleeps.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
+use js_alert::{AlertSink, FakeSink};
 use js_elastic::{Claim, Released};
 use js_lease_server::REGISTRY_QUIET;
 use js_registry::{HostState, SessionSource};
@@ -609,4 +611,188 @@ async fn retry_removals_adds_to_the_hosts_it_has() {
     let log = rig.log();
     assert!(log.contains(&"remove:js-retry-a".to_owned()), "{log:?}");
     assert!(log.contains(&"remove:js-retry-b".to_owned()), "{log:?}");
+}
+
+/// A host the registry has lost, as the registry's view shows it.
+fn lost(name: &str) -> js_registry::HostView {
+    let mut lost = view(name);
+    lost.state = HostState::Lost;
+    lost
+}
+
+/// How long the tests let an alert hold before the sink hears it again.
+const REPEAT: Duration = Duration::from_secs(3600);
+
+/// Ticks once and waits for the alerts that tick handed to the sink to be answered.
+async fn tick_and_flush(rig: &crate::fakes::Rig) {
+    rig.scaler.tick().await;
+    rig.scaler.flush_alerts();
+}
+
+/// Asserts that an alert reaches the sink the scaler was given exactly as it reaches the
+/// log and the status: once however many ticks it holds for, with the text `alerts()`
+/// shows, nothing when it clears, and once more when it clears and returns. The alert here
+/// is a host the registry will not remove; it clears when the registry takes the host and
+/// returns when the host is queued again and refused again. It catches a sink that is
+/// flooded every tick, one that hears nothing, and one that goes quiet for good after the
+/// first alert.
+#[tokio::test]
+async fn an_alert_reaches_the_sink_once_and_again_after_it_clears_and_returns() {
+    let sink = Arc::new(FakeSink::new());
+    let rig = rig(records(vec![registered("js-sink-alert", "i-gone")]), live());
+    rig.scaler.set_sink(sink.clone(), REPEAT);
+    rig.world().hosts = vec![lost("js-sink-alert")];
+    rig.world().gone = vec!["i-gone".to_owned()];
+    rig.world().remove_ok = false;
+    for _ in 0..3 {
+        tick_and_flush(&rig).await;
+    }
+    assert_eq!(sink.keys(), ["remove:js-sink-alert"]);
+    assert_eq!(sink.sent()[0].text, rig.scaler.alerts()[0]);
+
+    rig.world().remove_ok = true;
+    for _ in 0..2 {
+        tick_and_flush(&rig).await;
+    }
+    assert!(rig.scaler.alerts().is_empty());
+    assert_eq!(sink.keys().len(), 1);
+
+    rig.world().hosts = vec![lost("js-sink-alert")];
+    rig.world().remove_ok = false;
+    rig.scaler
+        .retry_removals(BTreeSet::from(["js-sink-alert".to_owned()]));
+    for _ in 0..2 {
+        tick_and_flush(&rig).await;
+    }
+    assert_eq!(
+        sink.keys(),
+        ["remove:js-sink-alert", "remove:js-sink-alert"]
+    );
+}
+
+/// Asserts that an alert the sink refuses is not sent again before its wait is over and is
+/// sent after it, that it is sent exactly once more, and that a sink set twice keeps the
+/// first. It catches an alert lost for good because the receiver was down at the moment it
+/// first held, and a retry on every tick against a receiver that is down.
+#[tokio::test]
+async fn a_refused_alert_is_sent_again_after_a_wait_and_the_first_sink_stays() {
+    let sink = Arc::new(FakeSink::new());
+    let other = Arc::new(FakeSink::new());
+    let rig = rig(
+        records(vec![registered("js-refused-sink", "i-gone")]),
+        live(),
+    );
+    rig.scaler.set_sink(sink.clone(), REPEAT);
+    rig.scaler.set_sink(other.clone(), REPEAT);
+    rig.world().hosts = vec![lost("js-refused-sink")];
+    rig.world().gone = vec!["i-gone".to_owned()];
+    rig.world().remove_ok = false;
+    sink.refuse_next(1);
+    tick_and_flush(&rig).await;
+    // The refusal is read at the next tick, which starts the wait of 5 seconds.
+    tick_and_flush(&rig).await;
+    rig.advance(Duration::from_secs(4));
+    tick_and_flush(&rig).await;
+    assert!(sink.sent().is_empty());
+    rig.advance(Duration::from_secs(1));
+    tick_and_flush(&rig).await;
+    tick_and_flush(&rig).await;
+    assert_eq!(sink.keys(), ["remove:js-refused-sink"]);
+    assert!(other.sent().is_empty());
+}
+
+/// Asserts that an alert that keeps holding is said again after the repeat period, at
+/// exactly that time on the injected clock and not before. It catches a leak announced
+/// only once, which one lost message would turn into a host billing unseen.
+#[tokio::test]
+async fn a_holding_alert_is_said_again_after_the_repeat_period() {
+    let sink = Arc::new(FakeSink::new());
+    let rig = rig(
+        records(vec![registered("js-repeat-sink", "i-gone")]),
+        live(),
+    );
+    rig.scaler.set_sink(sink.clone(), REPEAT);
+    rig.world().hosts = vec![lost("js-repeat-sink")];
+    rig.world().gone = vec!["i-gone".to_owned()];
+    rig.world().remove_ok = false;
+    tick_and_flush(&rig).await;
+    tick_and_flush(&rig).await;
+    rig.advance(REPEAT - Duration::from_secs(1));
+    tick_and_flush(&rig).await;
+    assert_eq!(sink.keys().len(), 1);
+    rig.advance(Duration::from_secs(1));
+    tick_and_flush(&rig).await;
+    assert_eq!(sink.keys().len(), 2);
+}
+
+/// A sink that holds every send until the test opens it.
+struct Held {
+    open: std::sync::Mutex<bool>,
+    opened: std::sync::Condvar,
+    taken: FakeSink,
+}
+
+impl AlertSink for Held {
+    fn send(&self, alert: &js_alert::Alert) -> Result<(), js_alert::SinkError> {
+        let _open = self
+            .opened
+            .wait_while(self.open.lock().unwrap(), |open| !*open)
+            .unwrap();
+        self.taken.send(alert)
+    }
+}
+
+/// Asserts that a sink that never answers does not delay a tick: while the sink holds
+/// every send, ticks still finish, the heartbeat moves with the clock and the status shows
+/// the alert; when the sink opens, the alert is delivered once. It catches delivery on the
+/// tick, where a hung receiver would hold up every launch and release decision behind it
+/// and stop the heartbeat.
+#[tokio::test]
+async fn a_sink_that_never_answers_does_not_delay_the_tick() {
+    let held = Arc::new(Held {
+        open: std::sync::Mutex::new(false),
+        opened: std::sync::Condvar::new(),
+        taken: FakeSink::new(),
+    });
+    let rig = rig(records(vec![registered("js-held-sink", "i-gone")]), live());
+    rig.scaler.set_sink(held.clone(), REPEAT);
+    rig.world().hosts = vec![lost("js-held-sink")];
+    rig.world().gone = vec!["i-gone".to_owned()];
+    rig.world().remove_ok = false;
+    for step in 1..=3u64 {
+        rig.advance(Duration::from_secs(5));
+        rig.scaler.tick().await;
+        assert_eq!(
+            rig.scaler.last_tick(),
+            Some(Millis::new(crate::fakes::START + 5000 * step))
+        );
+        assert_eq!(rig.scaler.alerts().len(), 1);
+    }
+    assert!(held.taken.sent().is_empty());
+    *held.open.lock().unwrap() = true;
+    held.opened.notify_all();
+    rig.scaler.flush_alerts();
+    assert_eq!(held.taken.keys(), ["remove:js-held-sink"]);
+}
+
+/// Asserts the heartbeat the status page serves: nothing before the first tick, and after a
+/// tick the server's time of that tick; and that flushing alerts with no sink set is
+/// harmless. It catches a heartbeat read from the wrong clock and one that is not `None`
+/// before anything ran.
+#[tokio::test]
+async fn the_last_tick_is_the_servers_time_at_the_end_of_a_tick() {
+    let rig = rig(records(Vec::new()), live());
+    rig.scaler.flush_alerts();
+    assert_eq!(rig.scaler.last_tick(), None);
+    rig.scaler.tick().await;
+    assert_eq!(
+        rig.scaler.last_tick(),
+        Some(Millis::new(crate::fakes::START))
+    );
+    rig.advance(Duration::from_secs(5));
+    rig.scaler.tick().await;
+    assert_eq!(
+        rig.scaler.last_tick(),
+        Some(Millis::new(crate::fakes::START + 5000))
+    );
 }

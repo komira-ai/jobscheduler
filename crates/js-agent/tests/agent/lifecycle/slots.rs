@@ -17,6 +17,7 @@ fn labelled<'a>(run: &'a str, slot: Option<&'a str>) -> Vec<(&'static str, &'a s
         (label::LEASE, "lease-old"),
         (label::CPU_MILLIS, "1000"),
         (label::MEMORY_BYTES, "1073741824"),
+        (label::DISK_BYTES, "0"),
         (label::GPUS, ""),
         (label::WALL_MS, "60000"),
         (label::ISOLATION, "contained"),

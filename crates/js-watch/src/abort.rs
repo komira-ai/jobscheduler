@@ -1,0 +1,239 @@
+//! The abort: terminate everything that carries one scheduler's marks, on the CEO's word.
+//!
+//! A dry run is the default and calls nothing that changes anything: it prints what would
+//! be stopped and what it costs per hour. `apply` stops each instance through the
+//! target's own stop, which refuses what is not wholly the scheduler's and reads the
+//! instance back. There is no force. Instances with some of the marks, not all, are listed
+//! and never touched.
+
+use std::io::Write;
+use std::path::Path;
+
+use js_elastic::SchedulerId;
+use js_provider_lambdalabs::{Aborter, Listed};
+
+use crate::client::{Failure, aborter, refused};
+use crate::config::Config;
+
+/// An instance the abort would stop (or leave alone).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Doomed {
+    /// The cloud's id for it.
+    pub id: String,
+    /// Its type.
+    pub kind: String,
+    /// The region or zone it runs in.
+    pub region: String,
+    /// What it costs per hour in US cents, when known.
+    pub cents_per_hour: Option<u64>,
+}
+
+/// What an abort would do.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Plan {
+    /// Instances wholly the scheduler's and still running: these are stopped.
+    pub doomed: Vec<Doomed>,
+    /// Instances with some of the marks, not all: listed, never touched.
+    pub left_alone: Vec<Doomed>,
+}
+
+/// A call to the target failed. The words hold no secret.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct TargetError(String);
+
+impl TargetError {
+    /// An error that reads as `message`.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+/// A cloud that can be aborted. [`Target::plan`] reads; only [`Target::stop`] changes
+/// anything, and [`abort`] calls it only when told to apply.
+pub trait Target: Send + Sync {
+    /// The cloud's name.
+    fn cloud(&self) -> &str;
+
+    /// What an abort would do now.
+    ///
+    /// # Errors
+    ///
+    /// [`TargetError`] when the cloud cannot be listed whole.
+    fn plan(&self) -> Result<Plan, TargetError>;
+
+    /// Stops one instance, if it is wholly the scheduler's.
+    ///
+    /// # Errors
+    ///
+    /// [`TargetError`] when the instance was refused or the answer is not known; run the
+    /// abort again.
+    fn stop(&self, id: &str) -> Result<(), TargetError>;
+}
+
+/// What an abort printed and did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    /// The lines to print, in order.
+    pub lines: Vec<String>,
+    /// How many stops the cloud took (always 0 in a dry run).
+    pub stopped: usize,
+    /// How many stops failed.
+    pub failed: usize,
+}
+
+fn price(cents: u64) -> String {
+    format!("{}.{:02} USD", cents / 100, cents % 100)
+}
+
+fn describe(each: &Doomed) -> String {
+    let cost = each.cents_per_hour.map_or_else(
+        || "price unknown".to_owned(),
+        |cents| format!("{}/h", price(cents)),
+    );
+    format!("{} {} {} {cost}", each.id, each.kind, each.region)
+}
+
+/// Stops everything `target` plans to stop when `apply` is true, and only prints what it
+/// would stop when it is false.
+///
+/// # Errors
+///
+/// [`TargetError`] when the plan cannot be made; nothing was stopped.
+pub fn abort(target: &dyn Target, scheduler: &str, apply: bool) -> Result<Outcome, TargetError> {
+    let plan = target.plan()?;
+    let mode = if apply { "APPLY" } else { "dry run" };
+    let verb = if apply { "stopping" } else { "would stop" };
+    let mut lines = vec![format!(
+        "abort ({mode}): cloud {}, scheduler {scheduler}",
+        target.cloud()
+    )];
+    let (mut stopped, mut failed) = (0, 0);
+    for each in &plan.doomed {
+        lines.push(format!("{verb} {}", describe(each)));
+        if !apply {
+            continue;
+        }
+        match target.stop(&each.id) {
+            Ok(()) => stopped += 1,
+            Err(why) => {
+                failed += 1;
+                lines.push(format!("  FAILED {}: {why}", each.id));
+            }
+        }
+    }
+    for each in &plan.left_alone {
+        lines.push(format!(
+            "left alone (some marks, not all; never touched): {}",
+            describe(each)
+        ));
+    }
+    let known: u64 = plan
+        .doomed
+        .iter()
+        .filter_map(|each| each.cents_per_hour)
+        .sum();
+    let unpriced = plan
+        .doomed
+        .iter()
+        .filter(|each| each.cents_per_hour.is_none())
+        .count();
+    lines.push(format!(
+        "total: {} instance(s), {}/hour ({unpriced} without a price)",
+        plan.doomed.len(),
+        price(known)
+    ));
+    lines.push(match apply {
+        true => format!("stopped {stopped}, failed {failed}; list again to see them gone"),
+        false => "dry run: nothing was stopped; run again with --apply to stop them".to_owned(),
+    });
+    Ok(Outcome {
+        lines,
+        stopped,
+        failed,
+    })
+}
+
+/// Lambda, through [`Aborter`]: the release the scaler uses, which terminates only an
+/// instance whose tags and name are both the scheduler's and reads it back.
+pub struct LambdaTarget {
+    aborter: Aborter,
+}
+
+impl LambdaTarget {
+    /// A target over `aborter`.
+    pub fn new(aborter: Aborter) -> Self {
+        Self { aborter }
+    }
+}
+
+impl Target for LambdaTarget {
+    fn cloud(&self) -> &str {
+        "lambda"
+    }
+
+    fn plan(&self) -> Result<Plan, TargetError> {
+        let plan = self
+            .aborter
+            .plan()
+            .map_err(|why| TargetError::new(why.to_string()))?;
+        let each = |listed: Listed| Doomed {
+            id: listed.id,
+            kind: listed.kind,
+            region: listed.region,
+            cents_per_hour: listed.cents_per_hour,
+        };
+        Ok(Plan {
+            doomed: plan.running.into_iter().map(each).collect(),
+            left_alone: plan.partial.into_iter().map(each).collect(),
+        })
+    }
+
+    fn stop(&self, id: &str) -> Result<(), TargetError> {
+        self.aborter
+            .stop(id)
+            .map_err(|why| TargetError::new(why.to_string()))
+    }
+}
+
+/// The `abort` command: reads the configuration, checks that `scheduler` is the one it
+/// names, builds the Lambda target and prints what the abort did. Exit status 2 for a
+/// refused input, 1 when the plan cannot be made or an instance was not stopped.
+pub(crate) fn command(
+    config: &Path,
+    scheduler: &str,
+    apply: bool,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
+    let config = Config::load(config).map_err(refused)?;
+    if config.scheduler_id != scheduler {
+        return Err(refused(format!(
+            "--scheduler-id {scheduler} differs from scheduler_id {} in the configuration; an abort is for the scheduler the file names",
+            config.scheduler_id
+        )));
+    }
+    let id = SchedulerId::new(scheduler).map_err(refused)?;
+    let aborter = aborter(config.lambda().map_err(refused)?, id)?;
+    let target = LambdaTarget::new(aborter);
+    report(&target, scheduler, apply, out)
+}
+
+/// Runs the abort on `target` and prints it.
+fn report(
+    target: &dyn Target,
+    scheduler: &str,
+    apply: bool,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
+    let outcome = abort(target, scheduler, apply).map_err(|why| (1, why.to_string()))?;
+    for line in &outcome.lines {
+        let _ = writeln!(out, "{line}");
+    }
+    match outcome.failed {
+        0 => Ok(()),
+        count => Err((
+            1,
+            format!("{count} instance(s) were not stopped; run it again"),
+        )),
+    }
+}

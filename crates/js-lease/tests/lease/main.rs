@@ -2,6 +2,7 @@
 //! and the static pool, with a clock the tests advance. One test binary, in modules.
 
 mod acquire;
+mod ceiling;
 mod crash;
 mod expiry;
 mod ids;

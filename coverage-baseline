@@ -14,6 +14,7 @@
 js-agent                    0      0
 js-agent-usage              0      0
 js-agent-wire               0      0
+js-alert                    0      0
 js-bundle                   0      0
 js-caps                     0      0
 js-cli                      0      0
@@ -22,6 +23,7 @@ js-conformance              0      0
 js-contain                  0      0
 js-coverage                 0      0
 js-elastic                  0      0
+js-elastic-fake             0      0
 js-guest                    0      0
 js-guest-wire               0      0
 js-lease                    0      0
@@ -43,8 +45,10 @@ js-sizing                   0      0
 js-state                    0      0
 js-store                    0      0
 js-testkit                  0      0
+js-treestore                0      0
 js-types                    0      0
 js-usage                    0      0
 js-vmm                      0      0
+js-watch                    0      0
 js-whole                    0      0
 xtask                       0      0

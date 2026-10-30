@@ -12,10 +12,12 @@
 # attestation records `github.sha` and `github.ref` (the certificate's source digest and
 # ref), so the run has to be at the commit it releases; that is why the release is not
 # started by the completion of `ci` (`workflow_run`), whose runs are at main's tip, not at
-# the commit that passed. The first job, `ci-passed`, waits for the `ci` run of that
-# commit (a push run; it polls every 120 s, up to four hours) and fails the release, with
-# the run's URL and conclusion, unless it succeeded. Every other job needs it. It holds
-# `actions: read` only and checks out nothing; ten reads of the runs in a row that fail
+# the commit that passed. The first job, `ci-passed`, waits for the jobs of the `ci` run of
+# that commit (a push run; it polls every 120 s, up to four hours) except the `macos` job,
+# which queues for hours on the hosted runners (main's macOS run is the backstop; the
+# release's own macOS build still runs below), and fails the release, with the run's URL
+# and the jobs that did not succeed, if any other job failed, was cancelled or timed out.
+# Every other job needs it. It holds `actions: read` only and checks out nothing; ten reads of the runs in a row that fail
 # (about twenty minutes) fail it too. A re-run keeps the commit and `github.sha`
 # of the run it repeats; a re-run of only the failed jobs keeps the `plan` that succeeded,
 # so `publish` and `verify` check the tag and the attestations.
@@ -83,9 +85,9 @@ env:
   COMMIT: ${{ github.sha }}
 
 jobs:
-  # Waits for the `ci` run of this commit and passes only when it succeeded. It holds
-  # `actions: read` and nothing else, checks out nothing and runs no repository code. On a
-  # pull request it is skipped.
+  # Waits for the jobs of the `ci` run of this commit other than `macos`, and passes only
+  # when they all succeeded or were skipped. It holds `actions: read` and nothing else,
+  # checks out nothing and runs no repository code. On a pull request it is skipped.
   ci-passed:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
@@ -101,9 +103,18 @@ jobs:
           set -euo pipefail
           failed=0
           while true; do
-            # The newest run of `ci` for this commit's push: a re-run of it is the same run.
-            if ! run="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$COMMIT&event=push&per_page=100" \
-              --jq '.workflow_runs | sort_by(.created_at) | last // empty | "\(.status) \(.conclusion // "none") \(.html_url)"')"; then
+            # The newest run of `ci` for this commit's push (a re-run of it is the same run),
+            # and the jobs of its latest attempt other than `macos`, as three fields: how many,
+            # how many have not finished, and the finished ones that did not succeed or skip
+            # (name=conclusion, comma-separated). Both reads count towards the failed reads.
+            run=""
+            if run="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$COMMIT&event=push&per_page=100" \
+              --jq '.workflow_runs | sort_by(.created_at) | last // empty | "\(.id) \(.status) \(.conclusion // "none") \(.html_url)"')" &&
+              { [ -z "$run" ] || { read -r id _ <<< "$run" &&
+                ci_jobs="$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100&filter=latest" \
+                  --jq '[.jobs[] | select(.name != "macos")] | "\(length) \([.[] | select(.status != "completed")] | length) \([.[] | select(.status == "completed" and .conclusion != "success" and .conclusion != "skipped") | "\(.name)=\(.conclusion)"] | join(","))"')"; }; }; then
+              failed=0
+            else
               failed=$((failed + 1))
               if [ "$failed" -ge 10 ]; then
                 echo "::error::reading the ci runs of $COMMIT failed $failed times in a row; nothing is released"
@@ -111,26 +122,28 @@ jobs:
               fi
               echo "::warning::reading the ci runs failed ($failed in a row); trying again"
               run=""
-            else
-              failed=0
             fi
             if [ -z "$run" ]; then
               echo "no ci run for $COMMIT yet"
             else
-              read -r status conclusion url <<< "$run"
-              case "$status" in
-                completed)
-                  if [ "$conclusion" = success ]; then
-                    echo "ci passed: $url"
-                    exit 0
-                  fi
-                  echo "::error::ci did not pass for $COMMIT: conclusion $conclusion, $url; nothing is released"
-                  exit 1
-                  ;;
-                *)
-                  echo "ci is $status: $url"
-                  ;;
-              esac
+              read -r id status conclusion url <<< "$run"
+              read -r total pending bad <<< "$ci_jobs"
+              # The macOS job is not waited for: it queues for hours on the hosted runners, and
+              # main's own macOS run is the backstop. Any other job that failed, was cancelled
+              # or timed out fails the release at once, even while the others still run.
+              if [ -n "$bad" ]; then
+                echo "::error::ci did not pass for $COMMIT: $bad, $url; nothing is released"
+                exit 1
+              fi
+              if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
+                echo "ci passed (all jobs but macos): $url"
+                exit 0
+              fi
+              if [ "$status" = completed ]; then
+                echo "::error::ci did not pass for $COMMIT: no job besides macos in the run, $url; nothing is released"
+                exit 1
+              fi
+              echo "ci is $status: $url ($pending of $total jobs but macos still to finish)"
             fi
             sleep 120
           done
