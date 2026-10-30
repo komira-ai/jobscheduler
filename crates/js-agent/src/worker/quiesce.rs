@@ -3,12 +3,11 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
-use std::time::Duration;
 
 use super::{Handle, Order};
 use crate::exclusive::Quiesce;
 use crate::lifecycle::{Event, Lifecycle, Quiet, Restored};
-use crate::readiness::WorkerHook;
+use crate::readiness::{HookWindow, WorkerHook};
 
 /// What the worker found about a whole-node lease, each answer tagged with the lease it is
 /// about. The worker keeps the last of each. Public (and hidden) only so a test can drive
@@ -22,14 +21,15 @@ pub struct LeaseAnswers {
 
 impl LeaseAnswers {
     /// Whether the host is quiet for `lease`. An answer that is final (not busy) for the
-    /// lease is kept, so the hook runs once for a lease however often it is asked.
+    /// lease is kept, so the hook runs once for a lease however often it is asked. `watch`
+    /// is told of the hook's run, and of nothing else (see [`WorkerHook::vet`]).
     pub fn prepare(
         &mut self,
         life: &mut Lifecycle,
         hook: Option<&WorkerHook>,
         lease: String,
         events: &mut Vec<Event>,
-        before_hook: &dyn Fn(Duration),
+        watch: &dyn Fn(HookWindow),
     ) {
         let settled = self
             .quiet
@@ -41,7 +41,7 @@ impl LeaseAnswers {
         let found = life.prepare(&lease, events);
         // The hook measures an idle host: not one the consumer already uses.
         let answer = match hook {
-            Some(hook) if !life.adopted() => hook.vet(found, before_hook),
+            Some(hook) if !life.adopted() => hook.vet(found, watch),
             _ => found,
         };
         self.quiet = Some((lease, answer));

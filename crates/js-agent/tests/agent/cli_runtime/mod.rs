@@ -7,6 +7,7 @@
 mod args;
 mod egress;
 mod lifecycle;
+mod logs;
 mod runtime;
 mod scripted;
 mod settings;

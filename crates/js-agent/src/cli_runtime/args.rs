@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use super::logs::log_args;
 use super::{DEFAULT_NETWORK, Engine, Settings};
 use crate::lifecycle::ContainerSpec;
 
@@ -290,9 +291,9 @@ fn mount_value(
 /// daemon whose default is to share it, a private control group namespace (both engines
 /// default to it on cgroup v2, but the integrity checks rely on a job seeing only its own
 /// group, so it is named), the pull policy the agent was configured with (never by
-/// default), and, when `--actions-cgroup` is given, `--cgroup-parent` naming it so the
-/// container's usage is counted in it. The user is not here: it is the run's slot's
-/// (`user_args`). For
+/// default), a log of bounded size ([`log_args`]), and, when `--actions-cgroup` is given,
+/// `--cgroup-parent` naming it so the container's usage is counted in it. The user is not
+/// here: it is the run's slot's (`user_args`). For
 /// Podman the PID namespace is named private too; Docker takes only `host` or another
 /// container there, and its default is private. A `--add-host <name>:<ip>` follows the
 /// network for each static host entry the agent was configured with. There is no `--rm`: the lifecycle
@@ -346,6 +347,7 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
         args.splice(at..at, more.collect::<Vec<_>>());
         args.extend(["--pid", "private"].map(str::to_owned));
     }
+    args.extend(log_args(engine));
     args.extend(["--pull", settings.pull().as_str()].map(str::to_owned));
     if let Some(parent) = settings.cgroup_parent() {
         args.extend(["--cgroup-parent", parent].map(str::to_owned));
