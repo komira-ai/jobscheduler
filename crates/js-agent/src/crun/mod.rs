@@ -728,6 +728,10 @@ impl Runtime for CrunRuntime {
             .map_err(|_| RuntimeError::new(format!("{} still runs after its kill", spec.name)))
     }
 
+    /// Removes the container and everything its lease made. A handle this process does not
+    /// hold is a leftover of an earlier process: it is removed if the ledger holds it as
+    /// this agent's, nothing happens if the ledger does not know it, and the call fails
+    /// (and changes nothing) if its sidecar is another agent's or is not well formed.
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         let (rt, oci, kill_wait) = (&self.rt, &self.oci, self.hooks.kill_wait);
         let Some(run) = self.runs.get_mut(&id.0) else {

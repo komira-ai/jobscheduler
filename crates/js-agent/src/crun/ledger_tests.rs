@@ -383,3 +383,48 @@ fn a_ledger_cannot_open_over_a_file_and_is_private() {
     assert_eq!(why.path, other.path().join(DIR));
     assert!(why.to_string().contains(DIR), "{why}");
 }
+
+/// Catches a sidecar left behind when its directory could not be made durable (the name
+/// would be refused with `AlreadyExists` until the next start swept it): the call fails,
+/// no sidecar is left, and the same name records again.
+#[test]
+fn a_sidecar_that_cannot_be_made_durable_is_not_kept_and_the_name_records_again() {
+    let dir = TestDir::under(std::env::temp_dir(), "ledger-sync");
+    let ledger = ledger(&dir, "agent-a");
+    let one = entry("agent-a", "r1");
+    let why = ledger
+        .record_synced(&one, |_| Err(io::Error::other("no sync")))
+        .expect_err("not durable");
+    assert_eq!(why.to_string(), "no sync");
+    assert!(files(&ledger).is_empty(), "{:?}", files(&ledger));
+    assert_eq!(ledger.read(&one.name), None);
+    ledger.record(&one).expect("recorded again");
+    assert_eq!(ledger.read(&one.name), Some(Read::Mine(one)));
+}
+
+/// Catches temporary files of this agent reported on every start (or left for ever), and
+/// ones that are not its own removed: a regular `.<lease name>.tmp` of this agent is
+/// removed by the sweep and not reported; one of another agent, one that is a link, and
+/// one whose name is not a lease's stay and are reported as malformed.
+#[test]
+fn a_sweep_removes_this_agents_temporary_files_and_only_those() {
+    let dir = TestDir::under(std::env::temp_dir(), "ledger-tmp");
+    let ledger = ledger(&dir, "agent-a");
+    let leases = Leases::new(&dir.path().join("leases"));
+    let mine = entry("agent-a", "r1");
+    let theirs = entry("agent-b", "r1");
+    let at = |name: &str| ledger.dir().join(name);
+    fs::write(at(&format!(".{}.tmp", mine.name)), "{").expect("write");
+    fs::write(at(&format!(".{}.tmp", theirs.name)), "{").expect("write");
+    let link = at(&format!(".{}-link.tmp", mine.name));
+    symlink(dir.path(), &link).expect("link");
+    let odd = at(&format!(".{}-a b.tmp", &mine.name[..mine.name.len() - 3]));
+    fs::write(&odd, "{").expect("write");
+
+    let report = ledger.sweep(|e| leases.tear_down(e)).expect("sweep");
+    assert!(!at(&format!(".{}.tmp", mine.name)).exists(), "not removed");
+    assert!(at(&format!(".{}.tmp", theirs.name)).exists());
+    assert!(link.is_symlink() && odd.exists());
+    assert_eq!(report.left.len(), 3, "{:?}", report.left);
+    assert!(report.removed.is_empty() && report.failed.is_empty());
+}

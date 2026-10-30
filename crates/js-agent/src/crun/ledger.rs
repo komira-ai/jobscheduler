@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli_runtime::container_name;
+use crate::cli_runtime::{NAME_PREFIX, agent_tag, container_name};
 use crate::lifecycle::label;
 
 /// The directory of the sidecars, in the store's scratch directory.
@@ -228,8 +228,18 @@ impl Ledger {
     ///
     /// # Errors
     /// The name is not a lease's, a sidecar of that name exists (`AlreadyExists`), or the
-    /// write failed.
+    /// write failed. A sidecar that could not be made durable is removed again.
     pub(super) fn record(&self, entry: &Entry) -> io::Result<()> {
+        self.record_synced(entry, Self::sync)
+    }
+
+    /// [`Ledger::record`] with the making of the directory durable given, so that a test
+    /// can fail it.
+    pub(super) fn record_synced(
+        &self,
+        entry: &Entry,
+        sync: impl FnOnce(&Self) -> io::Result<()>,
+    ) -> io::Result<()> {
         let path = self.path_of(&entry.name)?;
         let tmp = self.dir.join(format!(".{}.tmp", entry.name));
         let body = serde_json::to_vec(entry).map_err(io::Error::other)?;
@@ -249,7 +259,13 @@ impl Ledger {
             .and_then(|()| fs::hard_link(&tmp, &path));
         let _ = fs::remove_file(&tmp);
         written?;
-        self.sync()
+        // A sidecar that is not durable is not kept: the call fails, and the name can be
+        // recorded again.
+        let synced = sync(self);
+        if synced.is_err() {
+            let _ = fs::remove_file(&path);
+        }
+        synced
     }
 
     /// Removes the sidecar of `name`; one that is not there is removed already.
@@ -347,8 +363,18 @@ impl Ledger {
             }
         }
         names.sort();
+        let temp = format!(".{NAME_PREFIX}{}-", agent_tag(&self.agent));
         for name in names {
             let path = self.dir.join(&name);
+            // A file this agent was writing when its process died; the lease it was for
+            // was not made (the sidecar is written first), so nothing names it.
+            let rest = name.strip_prefix('.').and_then(|n| n.strip_suffix(".tmp"));
+            if rest.is_some_and(|rest| name.starts_with(&temp) && is_leaf(rest))
+                && fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file())
+            {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
             let stem = name.strip_suffix(SUFFIX).filter(|stem| is_leaf(stem));
             let Some(stem) = stem else {
                 survey.left.push(Left::Malformed {
