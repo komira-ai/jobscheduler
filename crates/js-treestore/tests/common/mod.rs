@@ -225,7 +225,7 @@ pub fn wanted(layer: &Layer) -> TreeWanted {
     }
 }
 
-pub type Store = TreeStore<FakeSource, FakeSealer>;
+pub type Store = TreeStore<FakeSealer, FakeSource>;
 
 pub struct Rig {
     pub dir: TestDir,
