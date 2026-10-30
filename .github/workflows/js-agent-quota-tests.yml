@@ -1,0 +1,93 @@
+# Builds the js-agent integration test binary (`--test agent`) for x86_64-unknown-linux-musl
+# and uploads it, WITHOUT running it. The privileged XFS quota tests
+# (crates/js-agent/tests/agent/quota/xfs_host.rs, `#[ignore]`) need root and an XFS volume
+# mounted with prjquota, so an operator runs them once on a provisioned host that has no
+# toolchain: download the artifact, check SHA256SUMS, copy the binary over and, as root, run
+#   ./agent quota::xfs_host -- --ignored --test-threads=1
+# (the test filter is a positional argument of the libtest binary, then the libtest flags).
+#
+# Manual runs only. It publishes nothing: the binary is a workflow artifact for seven days.
+name: js-agent-quota-tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: The commit, branch or tag to build (empty builds the dispatching ref)
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+      - run: rustup toolchain install
+      - run: rustup target add "$TARGET"
+      - name: Build the test binary without running it
+        run: |
+          set -euo pipefail
+          cargo test -p js-agent --test agent --no-run --locked --target "$TARGET" --message-format=json > build.json
+      - name: Pick the binary and check that it is static
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          short="${commit:0:12}"
+          # The test executable of the `agent` integration test: a compiler-artifact message
+          # with profile.test and that target's name and kind, never a guess by file name.
+          exe="$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "agent" and (.target.kind | index("test")) != null and .executable != null) | .executable' build.json)"
+          if [ "$(printf '%s\n' "$exe" | grep -c .)" != 1 ]; then
+            echo "::error::expected exactly one agent test executable, got: $exe"
+            exit 1
+          fi
+          mkdir dist
+          cp "$exe" dist/agent
+          description="$(file dist/agent)"
+          echo "$description"
+          case "$description" in
+            *"static-pie linked"* | *"statically linked"*) ;;
+            *)
+              echo "::error::dist/agent is not statically linked"
+              exit 1
+              ;;
+          esac
+          if readelf -d dist/agent 2> /dev/null | grep NEEDED > /dev/null; then
+            echo "::error::dist/agent links shared libraries"
+            exit 1
+          fi
+          (cd dist && sha256sum agent > SHA256SUMS)
+          sha="$(cut -d ' ' -f 1 dist/SHA256SUMS)"
+          {
+            echo "### js-agent quota test binary"
+            echo
+            echo "- commit: \`$commit\`"
+            echo "- target: \`$TARGET\`"
+            echo "- sha256: \`$sha\`"
+            echo "- file: $description"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "SHORT=$short" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-agent-quota-tests-${{ env.SHORT }}
+          path: |
+            dist/agent
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
