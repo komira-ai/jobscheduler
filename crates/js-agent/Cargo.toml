@@ -16,6 +16,8 @@ js-agent-usage = { path = "../js-agent-usage" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-caps = { path = "../js-caps" }
 js-client = { path = "../js-client" }
+js-mac-pool = { path = "../js-mac-pool" }
+js-mac-session = { path = "../js-mac-session" }
 js-types = { path = "../js-types" }
 clap.workspace = true
 getrandom.workspace = true

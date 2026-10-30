@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::{Isolation, LogTail};
+use js_agent_wire::{Isolation, LogTail, NativeSpec, refusal};
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -83,6 +83,9 @@ pub enum Body {
         /// The command line after the image.
         args: Vec<String>,
     },
+    /// A program run on the host as a user of its own, under a sandbox profile (macOS only):
+    /// the body of a native start as the wire carries it.
+    Native(NativeSpec),
 }
 
 /// Everything a runtime needs to create and start one run.
@@ -184,6 +187,16 @@ impl RuntimeError {
     }
 }
 
+/// Why a runtime will not run a native body: the wire code the start is answered with and
+/// the text that stays on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRefusal {
+    /// A refusal code of the wire ([`refusal`]).
+    pub code: &'static str,
+    /// What is wrong, for the log.
+    pub why: String,
+}
+
 /// What the lifecycle needs of a container runtime.
 pub trait Runtime {
     /// Creates and starts the container of `spec`. A call that fails leaves no
@@ -254,6 +267,20 @@ pub trait Runtime {
     /// The runtime cannot read the log.
     fn log_tail(&mut self, _id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
         Ok(None)
+    }
+
+    /// Whether this runtime runs the native body `native`, asked before a native start
+    /// creates anything. The default runs none, which is every runtime but the one a Mac
+    /// agent has: a native start on a Linux host is refused `native-unsupported`.
+    ///
+    /// # Errors
+    ///
+    /// The code the start is refused with, and why.
+    fn check_native(&self, _native: &NativeSpec) -> Result<(), NativeRefusal> {
+        Err(NativeRefusal {
+            code: refusal::NATIVE_UNSUPPORTED,
+            why: "this agent runs no native jobs".to_owned(),
+        })
     }
 
     /// Whether a container made here can use a GPU. A start that names a GPU where this

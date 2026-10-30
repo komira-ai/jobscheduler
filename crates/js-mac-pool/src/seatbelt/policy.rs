@@ -35,7 +35,8 @@ pub struct SlotLayout {
     /// The run directory: writable.
     pub run: AbsPath,
     /// The user's own `/var/folders/<xx>/<hash>` entry (spelled under `/private`): writable.
-    pub uid_entry: AbsPath,
+    /// `None` for a layout that does not know it, which grants nothing there.
+    pub uid_entry: Option<AbsPath>,
     /// Read-only inputs: write-denied after the grants, so they stay unwritable inside
     /// the run directory.
     pub inputs: Vec<AbsPath>,
@@ -72,7 +73,7 @@ impl Policy {
     pub fn base(layout: SlotLayout, caps: Caps) -> Result<Self, PolicyError> {
         let policy = Self {
             run: layout.run,
-            uid_entry: Some(layout.uid_entry),
+            uid_entry: layout.uid_entry,
             inputs: layout.inputs.into_iter().collect(),
             read_denies: layout.read_denies.into_iter().collect(),
             net: caps.net,

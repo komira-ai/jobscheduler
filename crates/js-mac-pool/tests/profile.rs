@@ -14,7 +14,7 @@ fn path(text: &str) -> AbsPath {
 fn layout() -> SlotLayout {
     SlotLayout {
         run: path("/Volumes/work/slot1/run"),
-        uid_entry: path("/private/var/folders/ab/cdef0123"),
+        uid_entry: Some(path("/private/var/folders/ab/cdef0123")),
         inputs: vec![path("/Volumes/work/slot1/run/in")],
         read_denies: vec![
             path("/Volumes/work/state"),
@@ -94,6 +94,16 @@ fn a_profile_without_the_user_folder_grant_or_lists_matches_its_golden() {
         })
         .unwrap();
     assert_eq!(text_of(&narrowed), include_str!("goldens/open_off_bare.sb"));
+}
+
+#[test]
+fn a_layout_that_knows_no_user_folder_entry_grants_nothing_there() {
+    let layout = SlotLayout {
+        uid_entry: None,
+        ..bare_layout()
+    };
+    let policy = Policy::base(layout, caps(Net::Off)).unwrap();
+    assert_eq!(text_of(&policy), include_str!("goldens/open_off_bare.sb"));
 }
 
 #[test]

@@ -409,8 +409,9 @@ pub(super) fn host_taint_of(run_id: Option<&str>) -> Taint {
     }
 }
 
-/// The container of a start: the spec's own labels with the agent's over them.
-pub(super) fn container_spec(
+/// The run of a start: the spec's own labels with the agent's over them, and the body the
+/// start names, a container's or a native program's.
+pub(super) fn run_spec(
     spec: &JobSpec,
     mounts: Vec<ResolvedMount>,
     scratch: std::path::PathBuf,

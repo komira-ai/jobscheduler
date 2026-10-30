@@ -108,7 +108,7 @@ fn paths_that_look_like_profile_syntax_never_enter_the_profile_text() {
     };
     let layout = |run: &str, entry: &str, input: &str, deny: &str| SlotLayout {
         run: AbsPath::parse(run).expect("run"),
-        uid_entry: AbsPath::parse(entry).expect("entry"),
+        uid_entry: Some(AbsPath::parse(entry).expect("entry")),
         inputs: vec![AbsPath::parse(input).expect("input")],
         read_denies: vec![AbsPath::parse(deny).expect("deny")],
     };

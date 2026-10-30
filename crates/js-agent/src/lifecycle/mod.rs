@@ -176,7 +176,8 @@ pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, RunningLease, SLOTS, 
 pub use mounts::{MountError, MountRoots};
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
-    Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
+    Body, Exit, Found, NativeRefusal, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError,
+    Status, label,
 };
 pub use scratch::ScratchRoot;
 pub use taint::{MARKER_FILE, StateRoot};

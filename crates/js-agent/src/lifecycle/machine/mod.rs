@@ -20,7 +20,7 @@ use js_agent_wire::{
 };
 
 pub use self::exclusive::{Quiet, Restored};
-use self::job::{Job, Retired, Stage, Stuck, blind_taint, container_spec, host_taint};
+use self::job::{Job, Retired, Stage, Stuck, blind_taint, host_taint, run_spec};
 pub use self::slots::Slots;
 use super::runtime::{ResolvedMount, Runtime};
 use super::taint::TaintState;
@@ -479,8 +479,8 @@ impl Lifecycle {
             written.map(|files| (scratch, files)).map_err(failed)
         });
         let started = started.and_then(|(scratch, files)| {
-            let container = container_spec(spec, mounts, scratch, files, slot);
-            self.runtime.create_and_start(&container).map_err(|why| {
+            let run = run_spec(spec, mounts, scratch, files, slot);
+            self.runtime.create_and_start(&run).map_err(|why| {
                 (
                     detail::RUNTIME_FAILED,
                     code::START_FAILED,
