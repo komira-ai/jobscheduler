@@ -97,6 +97,12 @@ pub(crate) enum Action {
     /// exits 7; a command that cannot be started exits 127. The held-lease line is
     /// printed on stderr, so the command owns stdout.
     Run(RunArgs),
+    /// Queue a native job (a program run on the host, no image) on a held lease.
+    ///
+    /// The lease's host must run native jobs. The program is an absolute path, or
+    /// `@bundle/<entrypoint>` with --bundle. Prints the run's id; the job's state and
+    /// output are the server's, at `/v1/leases/<id>/runs`.
+    Native(NativeArgs),
 }
 
 /// What a start asks for.
@@ -194,6 +200,84 @@ pub(crate) struct RunArgs {
     /// The command and its arguments, after `--`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub(crate) command: Vec<OsString>,
+}
+
+/// `lease native`: the lease, the program and its limits.
+#[derive(Debug, Args)]
+pub(crate) struct NativeArgs {
+    /// The lease, as `acquire` printed it.
+    #[arg(value_parser = parse_id)]
+    pub(crate) id: String,
+    /// The program to run: an absolute path, or `@bundle/<entrypoint>` of the bundle.
+    #[arg(long)]
+    pub(crate) program: String,
+    /// One argument of the program; repeat for more, in order.
+    #[arg(long = "arg", value_name = "ARG", allow_hyphen_values = true)]
+    pub(crate) args: Vec<String>,
+    /// The most network the job may use.
+    #[arg(long, value_enum, default_value_t = Network::Off)]
+    pub(crate) network: Network,
+    /// The bundle the program comes from, pinned by digest:
+    /// `name[:tag]@sha256:<manifest digest>`.
+    #[arg(long, value_name = "REF")]
+    pub(crate) bundle: Option<String>,
+    /// CPU, in thousandths of a core.
+    #[arg(long)]
+    pub(crate) cpu_millis: u64,
+    /// Memory, in bytes.
+    #[arg(long)]
+    pub(crate) memory_bytes: u64,
+    /// The longest the job may run (what the lease has left when absent).
+    #[arg(long, value_parser = parse_duration)]
+    pub(crate) wall: Option<Duration>,
+}
+
+/// How much network a native job may use.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub(crate) enum Network {
+    /// None.
+    Off,
+    /// The loopback interface only.
+    Loopback,
+    /// The network.
+    On,
+}
+
+impl Network {
+    /// The level as the server's body names it.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Loopback => "loopback",
+            Self::On => "on",
+        }
+    }
+}
+
+impl NativeArgs {
+    /// The body of `POST /v1/leases/{id}/runs`: no image, the native object, the limits,
+    /// and the bundle and the wall time only when given.
+    pub(crate) fn body(&self) -> Value {
+        let mut limits = json!({
+            "cpu_millis": self.cpu_millis,
+            "memory_bytes": self.memory_bytes,
+        });
+        if let Some(wall) = self.wall {
+            limits["wall_ms"] = json!(wall.as_millis());
+        }
+        let mut body = json!({
+            "native": {
+                "program": self.program,
+                "args": self.args,
+                "network": self.network.name(),
+            },
+            "limits": limits,
+        });
+        if let Some(bundle) = &self.bundle {
+            body["bundle"] = json!(bundle);
+        }
+        body
+    }
 }
 
 /// A duration in whole seconds: `90`, `90s`, `15m` or `2h`. Zero is refused.
