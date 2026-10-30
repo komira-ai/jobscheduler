@@ -199,6 +199,10 @@ impl Subject for CrunSubject {
         self.crun.clone()
     }
 
+    fn host_id(&self) -> String {
+        "crun-suite".to_owned()
+    }
+
     fn image(&self) -> String {
         self.image.clone()
     }
