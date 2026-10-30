@@ -117,6 +117,12 @@ fn serve(fixture: &Fixture) {
         UIDS.to_owned(),
         "--homes".to_owned(),
         path(&fixture.homes),
+        // The boot reset clears the auto-login of the Mac the helper serves; the files it
+        // clears are the test's own, so a real login setting is not touched.
+        "--kcpassword".to_owned(),
+        path(&fixture.root.join("kcpassword")),
+        "--loginwindow".to_owned(),
+        path(&fixture.root.join("loginwindow")),
         "--daemon-requirement".to_owned(),
         "unused: the check is replaced".to_owned(),
     ]);
