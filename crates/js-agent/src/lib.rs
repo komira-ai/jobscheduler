@@ -357,6 +357,13 @@ pub fn main_with(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(image::pull::VERB))
+    {
+        return image::pull::run(&args, out, err, &image::pull::Host::system());
+    }
     match install() {
         Err(why) => fail(err, &why, exit::FAILED),
         Ok(mut sleeper) => {

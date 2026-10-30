@@ -38,6 +38,20 @@ use super::{JobError, Oci, at};
 /// The directory of the rootfs under an image's directory.
 pub const ROOTFS: &str = "rootfs";
 
+/// The directory of the image store under a backend's scratch directory.
+pub const IMAGES_DIR: &str = "oci-images";
+
+/// Where a backend whose scratch directory is `scratch` publishes the root filesystem of
+/// the image whose digest is `digest` (`sha256:<hex>`): `<scratch>/oci-images/<hex>/rootfs`.
+/// A directory there means the image is complete (the stage is renamed into place last).
+#[must_use]
+pub fn published_root(scratch: &Path, digest: &str) -> PathBuf {
+    scratch
+        .join(IMAGES_DIR)
+        .join(digest.strip_prefix("sha256:").unwrap_or(digest))
+        .join(ROOTFS)
+}
+
 /// An image named by the digest of its per-architecture manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinnedImage {

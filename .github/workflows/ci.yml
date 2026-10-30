@@ -384,12 +384,17 @@ jobs:
         run: |
           cargo test -p js-agent --test privilege --locked --no-run
           cargo test -p js-contain --test root_daemon --locked --no-run
+          cargo test -p js-agent --test pull_root --locked --no-run
       # Root runs the tests (they start the unprivileged children themselves), with the
       # runner's toolchain and home.
       - name: Run the privilege tests as root
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test privilege --locked -- --ignored --nocapture --test-threads=1
       - name: Run js-contain's Oci under a root daemon, as the job user, with the AppArmor restriction on
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-contain --test root_daemon --locked -- --ignored --nocapture --test-threads=1 --skip counter_run
+      # `js-agent image-pull` as root: the image from an in-process registry, unpacked by the
+      # agent's own binary in a helper container run as the job user, published read-only.
+      - name: Run js-agent image-pull as root against the real crun
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test pull_root --locked -- --ignored --nocapture --test-threads=1
       # The counter-run of the copy control: with the restriction off the same copy of crun
       # starts the container, so the sysctl is the only difference from the refusal above.
       # The sysctl is put back to 1 whatever the result.

@@ -380,7 +380,7 @@ impl Oci {
             arch,
             scratch: scratch.to_owned(),
             helper_root,
-            images: image::Images::new(scratch.join("oci-images")),
+            images: image::Images::new(scratch.join(image::IMAGES_DIR)),
             helpers: AtomicU64::new(0),
             cgroup_parent: cgroup_parent.to_owned(),
             logs: config.logs,

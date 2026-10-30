@@ -586,6 +586,29 @@ async fn an_image_is_fetched_once_and_leaves_only_the_finished_directory() {
     assert_eq!(source.calls(), 1, "an unpacked image was fetched again");
 }
 
+/// Catches the root a caller looks for (`image::published_root`, which `js-agent image-pull`
+/// reports and checks) drifting from where the store keeps an image: both name the same
+/// directory, which is absent until the image is unpacked and then is the one `has` finds.
+#[test]
+fn the_published_root_is_where_the_store_keeps_an_unpacked_image() {
+    let dir = scratch("published-root");
+    let scratch = dir.join("scratch");
+    let oci = start(&config(&dir, true), &scratch).expect("started");
+    let image = pinned();
+    let root = image::published_root(&scratch, &image.digest);
+    assert_eq!(root, oci.images.rootfs_of(&image.digest));
+    assert_eq!(
+        root,
+        scratch
+            .join("oci-images")
+            .join("a".repeat(64))
+            .join("rootfs")
+    );
+    assert!(!oci.images.has(&image));
+    std::fs::create_dir_all(&root).expect("rootfs");
+    assert!(oci.images.has(&image));
+}
+
 /// Catches a source's failure lost or reworded (a registry's words are the operator's
 /// only clue), an index digest taken for a failure (the caller's message is different),
 /// and a failed fetch leaving its stage or blobs in the store.

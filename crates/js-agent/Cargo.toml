@@ -26,13 +26,14 @@ getrandom.workspace = true
 hex.workspace = true
 # The project-quota calls (`ioctl`, `quotactl`) of src/quota: rustix has no form of them.
 libc.workspace = true
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-# `fs`: the layer files of the image source (src/image).
-tokio = { workspace = true, features = ["fs", "rt", "signal"] }
+# `fs`: the layer files of the image source (src/image); `net` and `time`: the runtime of
+# the `image-pull` verb (src/image/pull.rs).
+tokio = { workspace = true, features = ["fs", "net", "rt", "signal", "time"] }
 
 # The crun image source and the image config (src/image), and the helper modes this binary
 # answers when a helper container runs it (`main`), are Linux code: js-contain drives `crun`
