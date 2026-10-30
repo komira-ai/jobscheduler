@@ -233,9 +233,10 @@ fn no_provider_crate_names_a_network_type() {
 /// itself: the per-pool check calls a mode, the reader of the file builds the OAuth
 /// client of a pool's `network` table, the launch inputs hold a mode, and the scaler
 /// builds a mode for a pool and calls it around a launch.
-const MAY_NAME_NETWORK: [&str; 6] = [
+const MAY_NAME_NETWORK: [&str; 7] = [
     "checks.rs",
     "file.rs",
+    "file/pins.rs",
     "pool.rs",
     "scaler/build.rs",
     "scaler/launch.rs",
