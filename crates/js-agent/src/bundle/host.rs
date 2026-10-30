@@ -177,6 +177,22 @@ fn manifests(store: &Path) -> PathBuf {
     store.join("v1/objects/manifests")
 }
 
+/// Whether the store holds every tree of the bundle `digest`. A bundle whose config cannot be
+/// read is not judged here (it is held as far as its manifest goes, and its `needs` say what
+/// is wrong with it).
+fn trees_present(
+    store: &Path,
+    digest: &str,
+    read: &dyn Fn(&Path) -> Result<String, String>,
+) -> bool {
+    let Ok(config) = load_config(store, digest, read) else {
+        return true;
+    };
+    let trees = store.join("v1/objects/trees");
+    let present = |layer: &js_bundle::Layer| trees.join(layer.diff_id.hex()).is_dir();
+    config.layers.iter().all(present)
+}
+
 /// The bytes below `dir` by allocated blocks, links not followed. A missing directory is
 /// empty.
 fn blocks_below(dir: &Path) -> io::Result<u64> {
@@ -266,6 +282,10 @@ impl<R: CommandRunner + Clone + Send + Sync + 'static> BundleHost for SystemHost
                 .map(|hex| format!("sha256:{hex}"));
             held.extend(digest.filter(|digest| is_digest(digest)));
         }
+        // A manifest outlives the trees of its bundle: the tree store evicts trees and leaves
+        // the manifest and the config, so a bundle whose config is readable is held only
+        // while every one of its trees is.
+        held.retain(|digest| trees_present(store, digest, &|path| self.read_file(path)));
         held.sort();
         Ok(held)
     }
@@ -329,10 +349,11 @@ impl<R: CommandRunner + Clone + Send + Sync + 'static> BundleHost for SystemHost
         let allowed = allowed.collect::<Result<Vec<_>, js_oci::Error>>();
         let allowed = allowed.map_err(|why| format!("--bundle-registry-allow: {why}"))?;
         // The volume's free space is asked at every eviction decision, so it is read again
-        // each time.
+        // each time. A volume that cannot be read is not known to be low: counting it as 0
+        // would evict every tree that is not pinned, so the budget alone bounds the store.
         let (runner, store) = (self.runner.clone(), settings.store.clone());
         let free: Arc<dyn Fn() -> u64 + Send + Sync> =
-            Arc::new(move || free_bytes(&runner, &store).unwrap_or(0));
+            Arc::new(move || free_bytes(&runner, &store).unwrap_or(u64::MAX));
         let client = Client::new(Policy::new(allowed));
         let opened = Placer::open(settings, Arc::clone(sealer), free, client);
         let placer = opened.map_err(|why| format!("{}: {why}", settings.store.display()))?;

@@ -234,9 +234,9 @@ impl NativeRuntime {
                     network: prepared.network,
                     ..native.clone()
                 };
-                (body, prepared.env)
+                (body, with_tmp(prepared.env, &tmp))
             }
-            None => (native.clone(), plain_env(native, &tmp)),
+            None => (native.clone(), with_tmp(native.env.clone(), &tmp)),
         };
         let argv = profile_argv(&self.config, &native, &home)?;
         let logs = [logs::STDIN, logs::STDOUT, logs::STDERR]
@@ -321,12 +321,12 @@ impl NativeRuntime {
     }
 }
 
-/// The environment of a run that pins no bundle: the job's own, then `TMPDIR`.
-fn plain_env(native: &NativeSpec, tmp: &Path) -> Vec<(String, String)> {
-    let mut env: Vec<(String, String)> = native
-        .env
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone()))
+/// `env` with the agent's `TMPDIR`, once and last, over any the job or a bundle gave: the
+/// run's temporary files are inside its home whatever the environment says.
+fn with_tmp(env: impl IntoIterator<Item = (String, String)>, tmp: &Path) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = env
+        .into_iter()
+        .filter(|(name, _)| name != "TMPDIR")
         .collect();
     env.push(("TMPDIR".to_owned(), tmp.display().to_string()));
     env
