@@ -15,6 +15,10 @@ fn inspect_prints_the_manifest_and_the_config() {
     let layout = work.join("layout");
     let mut args = pack_args(&layout, &[("main", &tree)]);
     args.extend(strings(&[
+        "--annotation",
+        "org.example.b=two",
+        "--annotation",
+        "org.example.a=one",
         "--entrypoint",
         "tool=${tree:main}/bin/tool",
         "--env",
@@ -76,6 +80,8 @@ fn inspect_prints_the_manifest_and_the_config() {
         ),
         "  license MIT".to_owned(),
         "  source-url https://example.invalid/main".to_owned(),
+        "annotation org.example.a one".to_owned(),
+        "annotation org.example.b two".to_owned(),
         "entrypoint tool ${tree:main}/bin/tool".to_owned(),
         "env prepend PATH ${tree:main}/bin:${tree:main}/lib locked=false".to_owned(),
         "env set LANG C locked=true".to_owned(),
