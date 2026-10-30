@@ -11,6 +11,8 @@ use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 use crate::cli_runtime::tail_of;
 use crate::facts::Streams;
 
+/// The file inside a run's scratch directory that is the job's standard input: empty.
+pub(super) const STDIN: &str = "stdin";
 /// The file inside a run's scratch directory that is the job's standard output.
 pub(super) const STDOUT: &str = "stdout";
 /// The file inside a run's scratch directory that is the job's standard error.

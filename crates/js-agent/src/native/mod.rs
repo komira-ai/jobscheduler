@@ -10,10 +10,11 @@
 //!    The reply is the user's uid, taken from the helper's range.
 //! 2. The agent, as root and before any process of that user exists, makes the run
 //!    directory below the user's home (`exec/`, the working directory, and `tmp/`) and
-//!    gives it to the user. It opens the job's two log files in the lifecycle's scratch
-//!    directory, which only the agent can enter.
+//!    gives it to the user. It makes the job's three standard streams as files in the
+//!    lifecycle's scratch directory, which only the agent can enter: an empty one for
+//!    standard input and one each for standard output and error.
 //! 3. `run` starts `sandbox-exec -D ... -p <profile> <program> <args>` as the user, with
-//!    standard input from `/dev/null`, the log files as standard output and error, and
+//!    the empty file as standard input, the log files as standard output and error, and
 //!    `exec/` as the working directory. The profile is built by
 //!    [`js_mac_pool::seatbelt`] from a policy that grants writes to the home and nothing
 //!    else, and the helper builds the process's environment around the one the agent
@@ -71,6 +72,9 @@ pub struct NativeConfig {
     pub tool_roots: Vec<PathBuf>,
     /// Paths no run may read, such as the agent's state and scratch roots.
     pub read_denies: Vec<AbsPath>,
+    /// Which reads the profile permits. Only [`ReadModel::Open`] has a profile builder;
+    /// with the other every start fails.
+    pub read_model: ReadModel,
 }
 
 /// A run that started: its scratch directory (where its log files are) and what the thread
@@ -130,7 +134,7 @@ impl NativeRuntime {
         };
         let caps = Caps {
             net: self.config.net.clone(),
-            read_model: ReadModel::Open,
+            read_model: self.config.read_model,
         };
         let narrowing = Narrowing {
             net: Some(net_of(native.network)),
@@ -160,9 +164,10 @@ impl NativeRuntime {
     ) -> Result<Run, RuntimeError> {
         let home = self.config.homes.join(user_name(id));
         let (exec, tmp) = (home.join("exec"), home.join("tmp"));
-        for dir in [&exec, &tmp] {
-            make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why))?;
-        }
+        let dirs = [&exec, &tmp]
+            .into_iter()
+            .map(|dir| make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why)))
+            .collect::<Result<Vec<File>, RuntimeError>>()?;
         let argv = self.argv(native, &home)?;
         let mut env: Vec<(String, String)> = native
             .env
@@ -170,13 +175,19 @@ impl NativeRuntime {
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect();
         env.push(("TMPDIR".to_owned(), tmp.display().to_string()));
-        let stdin = File::open("/dev/null").map_err(|why| fail(&"/dev/null", &why))?;
-        let out = spec.scratch.join(logs::STDOUT);
-        let stdout = File::create(&out).map_err(|why| fail(&out.display(), &why))?;
-        let err = spec.scratch.join(logs::STDERR);
-        let stderr = File::create(&err).map_err(|why| fail(&err.display(), &why))?;
-        let cwd = File::open(&exec).map_err(|why| fail(&exec.display(), &why))?;
-        let fds = [stdin.as_fd(), stdout.as_fd(), stderr.as_fd(), cwd.as_fd()];
+        let logs = [logs::STDIN, logs::STDOUT, logs::STDERR]
+            .into_iter()
+            .map(|name| {
+                let path = spec.scratch.join(name);
+                open_log(&path).map_err(|why| fail(&path.display(), &why))
+            })
+            .collect::<Result<Vec<File>, RuntimeError>>()?;
+        let fds = [
+            logs[0].as_fd(),
+            logs[1].as_fd(),
+            logs[2].as_fd(),
+            dirs[0].as_fd(),
+        ];
         let running = self
             .helper
             .run(lease, &argv, &env, fds)
@@ -332,10 +343,22 @@ fn exit_of(ended: HelperExit) -> Exit {
     }
 }
 
-/// Makes the directory `path`, private to `uid`. No process of that user exists yet, so
-/// nothing can race the steps.
-fn make_dir(path: &Path, uid: u32) -> io::Result<()> {
+/// Makes the directory `path`, private to `uid`, and opens it. No process of that user
+/// exists yet, so nothing can race the steps.
+fn make_dir(path: &Path, uid: u32) -> io::Result<File> {
     fs::create_dir(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    chown(path, Some(uid), None)
+    chown(path, Some(uid), None)?;
+    File::open(path)
+}
+
+/// Opens (and empties) the file `path` for reading and writing: the job writes to it, the
+/// runtime reads it back, and a standard input made of one reads as an end of file.
+fn open_log(path: &Path) -> io::Result<File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
 }

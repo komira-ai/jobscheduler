@@ -10,7 +10,7 @@ use js_agent::lifecycle::{Body, Exit, RunHandle, Runtime, Status};
 use js_agent::native::NativeRuntime;
 use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 use js_agent_wire::{NetworkLevel, refusal};
-use js_mac_pool::seatbelt::{AbsPath, Net};
+use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
 use js_mac_session::client::Client;
 use js_mac_session::helper::RESET_ALREADY;
 
@@ -294,17 +294,20 @@ fn a_user_the_helper_refuses_to_make_ends_the_start() {
 
 /// Asserts that every failure after the user exists leaves nothing behind: the helper is
 /// asked to kill and delete the user, and the start's error names the first failure. The
-/// failures: the helper refusing `run`, no home to make the run directory in, a log file
-/// that cannot be made (each stream) and a program the profile cannot name. It catches a
-/// lease user, and a home, left on the Mac by a start that failed.
+/// failures: the helper refusing `run`, no home to make the run directory in, none of the
+/// three standard-stream files made (no scratch directory, or a directory in the file's
+/// place) and a program the profile cannot name. It catches a lease user, and a home, left
+/// on the Mac by a start that failed.
 #[test]
 fn a_start_that_fails_after_the_user_exists_removes_the_user() {
     let rollback = ["kill-uid 7.0", "user-delete 7.0"];
     let cases = [
         ("run refused", "run: "),
         ("no home", "/exec: "),
-        ("no stdout", "/stdout: "),
-        ("no stderr", "/stderr: "),
+        ("no scratch directory", "/stdin: "),
+        ("a directory for stdin", "/stdin: "),
+        ("a directory for stdout", "/stdout: "),
+        ("a directory for stderr", "/stderr: "),
         ("program the profile cannot name", "/tmp/tool: "),
     ];
     for (n, (why, text)) in cases.into_iter().enumerate() {
@@ -314,7 +317,9 @@ fn a_start_that_fails_after_the_user_exists_removes_the_user() {
             0 => rig.fake.refuse("run", "no"),
             1 => rig.fake.make_homes(false),
             2 => fs::remove_dir(&spec.scratch).unwrap(),
-            3 => fs::create_dir(spec.scratch.join("stderr")).unwrap(),
+            3 => fs::create_dir(spec.scratch.join("stdin")).unwrap(),
+            4 => fs::create_dir(spec.scratch.join("stdout")).unwrap(),
+            5 => fs::create_dir(spec.scratch.join("stderr")).unwrap(),
             _ => spec.body = Body::Native(native("/tmp/tool", &[])),
         }
         let error = rig.rt.create_and_start(&spec).unwrap_err();
@@ -322,6 +327,28 @@ fn a_start_that_fails_after_the_user_exists_removes_the_user() {
         let verbs = rig.fake.verbs();
         assert_eq!(verbs[verbs.len() - 2..], rollback, "{why}");
     }
+}
+
+/// Asserts that a home the profile cannot name (here one spelled with `..`, which the
+/// kernel resolves and a profile parameter may not hold) and a read model with no profile
+/// builder each fail the start by name and remove the user. It catches a run started under
+/// a profile built from a path that was never checked, and a pool configured for a model
+/// that is not built that runs under the open one.
+#[test]
+fn a_home_or_a_read_model_the_profile_cannot_serve_fails_the_start() {
+    let mut rig = Rig::with("oddhome", |config| {
+        config.homes = config.homes.join("..").join("homes");
+    });
+    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let error = rig.rt.create_and_start(&spec).unwrap_err();
+    assert!(error.0.contains("not in normal form"), "{}", error.0);
+    assert_eq!(rig.fake.verbs().last().unwrap(), "user-delete 7.0");
+
+    let mut rig = Rig::with("allow", |config| config.read_model = ReadModel::Allow);
+    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let error = rig.rt.create_and_start(&spec).unwrap_err();
+    assert!(error.0.starts_with("the profile: "), "{}", error.0);
+    assert_eq!(rig.fake.verbs().last().unwrap(), "user-delete 7.0");
 }
 
 /// Asserts that a policy over the profile's bounds (too many read-denied paths) fails the
