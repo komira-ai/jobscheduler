@@ -33,7 +33,7 @@ fn claiming_40_gib() -> Vec<u8> {
 
 /// Catches an unpack whose ownership does not land in the job's user namespace: the
 /// files of a layer are owned, on the host, by the first subordinate id plus the id the
-/// tar names (0 and 1000 here), a setuid mode survives the owner change, a device node
+/// tar names (0 and 1000 here), a setuid bit is cleared and the other mode bits stay, a device node
 /// is skipped, and the published directory is the daemon user's, closed to writes by
 /// anyone else, with a root that no other id can write.
 #[tokio::test]
@@ -67,7 +67,7 @@ async fn the_unpacked_image_is_owned_by_the_containers_ids() {
     assert_eq!(owner("bin/su"), sub);
     assert_eq!(owner("etc/passwd"), sub);
     let mode = std::fs::metadata(root.join("bin/su")).expect("su").mode();
-    assert_eq!(mode & 0o7777, 0o4755, "the setuid bit was lost");
+    assert_eq!(mode & 0o7777, 0o755, "the setuid bit was kept");
     assert!(std::fs::symlink_metadata(root.join("dev-null")).is_err());
 
     // Published by the daemon user, and writable by nobody else.

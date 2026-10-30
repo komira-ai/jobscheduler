@@ -120,10 +120,10 @@ fn layers_apply_in_order() {
     );
 }
 
-/// Catches ownership and mode applied in the wrong order (the "chown after chmod"
-/// defect: `chown` clears setuid and setgid, so a mode set first is lost), and
-/// a directory's mode not holding its own contents back: the setuid, setgid and sticky
-/// bits survive, a read-only directory still receives its files, and times are the tar's.
+/// Catches a directory's mode holding its own contents back, and the sticky bit or the
+/// other permission bits being lost: the sticky bit survives, a read-only directory
+/// still receives its files, setuid and setgid are cleared (see
+/// `setuid_and_setgid_are_cleared_whatever_the_layer_says`), and times are the tar's.
 #[test]
 fn modes_survive_the_owner_and_directories_do_not_block_their_contents() {
     let layer = tar(&[
@@ -161,8 +161,8 @@ fn modes_survive_the_owner_and_directories_do_not_block_their_contents() {
             .mode()
             & 0o7777
     };
-    assert_eq!(mode("bin/su"), 0o4755);
-    assert_eq!(mode("bin/wall"), 0o2755);
+    assert_eq!(mode("bin/su"), 0o755);
+    assert_eq!(mode("bin/wall"), 0o755);
     assert_eq!(mode("tmp"), 0o1777);
     assert_eq!(mode("ro"), 0o555);
     assert_eq!(mode("ro/deeper"), 0o500);
@@ -176,6 +176,52 @@ fn modes_survive_the_owner_and_directories_do_not_block_their_contents() {
     for d in ["ro/deeper", "ro"] {
         std::fs::set_permissions(root.join(d), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+}
+
+/// Catches setuid or setgid reaching the root: a layer may carry them on files and
+/// directories, and none lands, while the rest of the mode (the permission bits and
+/// the sticky bit) is exactly what the layer said.
+#[test]
+fn setuid_and_setgid_are_cleared_whatever_the_layer_says() {
+    let file_with = |path, mode| Item::File {
+        path,
+        data: b"x",
+        mode,
+    };
+    let layer = tar(&[
+        file_with("suid", 0o4755),
+        file_with("sgid", 0o2755),
+        file_with("both", 0o6711),
+        file_with("plain", 0o640),
+        Item::Dir {
+            path: "sgid-dir",
+            mode: 0o2775,
+        },
+        Item::Dir {
+            path: "all-dir",
+            mode: 0o7777,
+        },
+        Item::Dir {
+            path: "sticky-dir",
+            mode: 0o1750,
+        },
+    ]);
+    let (root, got) = unpack("unpack-no-setid", &[layer]);
+    got.expect("unpacked");
+    let mode = |rel: &str| {
+        std::fs::symlink_metadata(root.join(rel))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    assert_eq!(mode("suid"), 0o755);
+    assert_eq!(mode("sgid"), 0o755);
+    assert_eq!(mode("both"), 0o711);
+    assert_eq!(mode("plain"), 0o640);
+    assert_eq!(mode("sgid-dir"), 0o775);
+    assert_eq!(mode("all-dir"), 0o1777);
+    assert_eq!(mode("sticky-dir"), 0o1750);
 }
 
 /// Catches the header's owner not being what is applied under `Ownership::Header`, and
