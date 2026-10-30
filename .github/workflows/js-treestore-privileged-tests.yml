@@ -14,13 +14,8 @@
 name: js-treestore-privileged-tests
 
 on:
+  # No inputs: it builds exactly the commit it is dispatched on.
   workflow_dispatch:
-    inputs:
-      ref:
-        description: The commit, branch or tag to build (empty builds the dispatching ref)
-        required: false
-        default: ''
-        type: string
 
 permissions:
   contents: read
@@ -37,7 +32,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref }}
           persist-credentials: false
       - run: rustup toolchain install
       - run: rustup target add "$TARGET"
