@@ -224,13 +224,10 @@ fn denies_come_after_every_grant_and_the_floor_is_last() {
         .expect("grants");
     assert!(at("(deny file-read*)") < at("(allow file-read-metadata"));
     assert!(
-        at("(allow file-read-metadata (literal \"/\")")
-            < at("(allow file-read* (subpath \"/System/Library\")")
+        at("(allow file-read-metadata (literal \"/System\")")
+            < at("(allow file-read* (literal \"/\")")
     );
-    assert!(
-        at("(allow file-read-metadata") < at("(allow file-read* (subpath \"/System/Library\")")
-    );
-    assert!(!text.contains("(allow file-read* (literal \"/\")"));
+    assert!(at("(allow file-read-metadata") < at("(allow file-read* (literal \"/\")"));
     assert!(last_grant < at("(deny file-read* (literal"));
     assert!(at("(deny file-read* (literal") < at("(param \"RD_0\")"));
     assert!(at("(param \"RD_2\")") < at("(deny network*)"));

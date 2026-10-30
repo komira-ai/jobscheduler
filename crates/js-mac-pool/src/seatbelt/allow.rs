@@ -116,9 +116,14 @@ impl BaseSet {
     }
 }
 
+/// `(literal "/")` is a data read, not only a name: the hosted runner showed every
+/// sandboxed step, `true` included, refused when it was metadata only (the kernel reads
+/// `/` to resolve paths). The root's entry names are therefore listable under this model;
+/// nothing below them is.
 static MACOS_14: BaseSet = BaseSet {
-    names: &["/", "/System", "/etc", "/tmp", "/usr", "/var"],
+    names: &["/System", "/etc", "/tmp", "/usr", "/var"],
     reads: &[
+        (Match::Literal, "/"),
         (Match::Subpath, "/System/Library"),
         (Match::Subpath, "/System/Cryptexes"),
         (Match::Subpath, "/System/Volumes/Preboot/Cryptexes"),
