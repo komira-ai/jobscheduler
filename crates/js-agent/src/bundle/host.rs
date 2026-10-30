@@ -101,15 +101,13 @@ pub trait BundleHost: Send + Sync {
     /// Opens the store `settings` names, for an agent that runs native jobs, and gives the
     /// [`Placer`] the runtime pins bundles through; afterwards [`BundleHost::can_run`] and
     /// [`BundleHost::fetch`] answer from it. `None` is a host that cannot place bundles (and
-    /// so cannot run one). The default is such a host.
+    /// so cannot run one).
     ///
     /// # Errors
     ///
     /// The store cannot be opened or the registries cannot be turned into a policy; the text
     /// says why.
-    fn open(&self, _settings: &Settings) -> Result<Option<Arc<Placer>>, String> {
-        Ok(None)
-    }
+    fn open(&self, settings: &Settings) -> Result<Option<Arc<Placer>>, String>;
 }
 
 /// The machine's own host.

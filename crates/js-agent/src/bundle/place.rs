@@ -223,7 +223,9 @@ impl LayerSource for Layers {
 }
 
 /// A [`Sealer`] that is a shared trait object, so the agent's store is one type whatever
-/// seals it.
+/// seals it. The store seals through one clone and the placer makes the writable copies of
+/// a run through another.
+#[derive(Clone)]
 struct Shared(Arc<dyn Sealer>);
 
 impl Sealer for Shared {
@@ -334,7 +336,7 @@ pub struct Placer {
     trees: TreeStore<Shared, Layers>,
     layers: Layers,
     runtime: Arc<Runtime>,
-    sealer: Arc<dyn Sealer>,
+    sealer: Shared,
     client: Arc<Client>,
     flights: Flights,
 }
@@ -430,6 +432,7 @@ impl Placer {
                 .build()?,
         );
         let layers = Layers::new(Arc::clone(&runtime));
+        let sealer = Shared(sealer);
         let config = Config {
             budget_bytes: settings.budget_bytes,
             low_water_free_bytes: settings.low_water_bytes,
@@ -440,7 +443,7 @@ impl Placer {
         let trees = TreeStore::open(
             &objects,
             layers.clone(),
-            Shared(Arc::clone(&sealer)),
+            sealer.clone(),
             config,
             &BTreeSet::new(),
         )?;
