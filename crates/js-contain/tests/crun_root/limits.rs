@@ -111,7 +111,7 @@ async fn a_terminated_container_leaves_no_cgroup() {
 }
 
 /// Catches a lease kill (`cgroup.kill`, what the driver does at a wall limit or a swap
-/// kill) that leaves a process or a cgroup behind, for a job that ignores SIGTERM.
+/// kill) that leaves a process or a cgroup behind, for a job blocked on a pipe.
 #[tokio::test]
 #[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
 async fn a_killed_lease_leaves_no_process_and_no_cgroup() {
@@ -237,15 +237,21 @@ async fn a_job_at_its_pids_limit_does_not_stop_another_job_from_forking() {
 }
 
 /// Catches `RLIMIT_NPROC` counted across jobs: the same two jobs, with `a` bounded by
-/// `RLIMIT_NPROC` 32 (its lease allows 8192 processes), `a` is refused the next fork and
+/// `RLIMIT_NPROC` 256 (its lease allows 8192 processes), `a` is refused the next fork and
 /// `b`, whose limit is the default, makes twenty. `a` reads its own `pids.max` from inside,
 /// so the refusal is the rlimit's and not the cgroup's.
+///
+/// The limit is 256 and not lower because a container given 32 was refused its first
+/// `exec` ("Resource temporarily unavailable") in a run where the other tests' containers
+/// were starting as the same job user: a low `RLIMIT_NPROC` can fail a job before it
+/// starts, whichever jobs are running beside it. That is why the lease's `pids.max` is the
+/// bound a job meets and `NPROC_HIGH` the default.
 #[tokio::test]
 #[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
 async fn a_job_at_its_nproc_limit_does_not_stop_another_job_from_forking() {
     let cell = Cell::new("nproc");
     let limits = ContainerLimits {
-        nproc: 32,
+        nproc: 256,
         ..ContainerLimits::DEFAULT
     };
     let (a, b) = exhaust_one_and_fork_in_the_other(&cell, limits).await;
