@@ -344,24 +344,3 @@ fn a_worker_that_panics_is_seen_to_have_ended() {
         "nobody takes a reply"
     );
 }
-
-/// Asserts that the snapshot lists the running leases for the load reader: a started run
-/// appears with the lease it belongs to, and is gone once it has exited. It catches a
-/// worker that publishes no leases (the heartbeat would carry no per-lease cost) and one
-/// that keeps listing a finished run.
-#[test]
-fn the_snapshot_lists_the_running_leases_and_drops_a_finished_one() {
-    let dir = Scratch::new("jobs-worker-leases");
-    let machine = FakeMachine::new();
-    let worker = start(&dir, &machine);
-    assert!(worker.snapshot().leases.is_empty());
-    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
-    assert!(worker.handle().settle());
-    let leases = worker.snapshot().leases;
-    assert_eq!(leases.len(), 1);
-    assert!(leases[0].started_usec.is_some());
-    assert!(!leases[0].lease_id.is_empty());
-    machine.world.exit("r1", 0);
-    assert!(worker.handle().settle());
-    assert!(worker.snapshot().leases.is_empty());
-}

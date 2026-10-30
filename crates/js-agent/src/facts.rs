@@ -129,7 +129,7 @@ pub trait FileReader {
     fn is_tmpfs(&self, path: &Path) -> Result<bool, String>;
 }
 
-impl<T: FileReader + ?Sized> FileReader for &T {
+impl FileReader for Box<dyn FileReader> {
     fn read(&self, path: &str) -> Result<String, String> {
         (**self).read(path)
     }

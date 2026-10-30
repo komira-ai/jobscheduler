@@ -189,7 +189,6 @@ mod host;
 pub mod integrity;
 mod jobs;
 pub mod lifecycle;
-mod load;
 mod readiness;
 mod run;
 mod session;
@@ -222,7 +221,6 @@ pub use host::{Offer, offer};
 pub use jobs::DRAIN_SETTLE;
 use jobs::Seams;
 use lifecycle::{Local, StateRoot};
-pub use load::LoadReader;
 pub use readiness::{
     EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner,
     HookWindow, Hooked, ReadinessHook, Verdict, WorkerHook, hook_runner,
@@ -486,29 +484,20 @@ fn execute(
         rescue_bound: services.rescue_bound,
         readiness,
     };
-    // Where the load of the heartbeat is read from: only with `--actions-cgroup`.
-    let actions = local
-        .container
-        .as_ref()
-        .and_then(|settings| settings.actions_cgroup())
-        .map(str::to_owned);
     let started = jobs::start(local, &offer.hello, platform, seams, err);
     let jobs = started.map_err(Failure::Usage)?;
     // The session asks the worker about a whole-node lease; the worker answers on its own
     // thread (see `WorkerHost`), so the heartbeat loop never waits for a check or the hook.
     let mut host = jobs
         .as_ref()
-        .map(|(worker, _)| WorkerHost::new(worker.handle()));
-    let clock = jobs.as_ref().map(|(worker, _)| worker.clock());
+        .map(|(worker, ..)| WorkerHost::new(worker.handle()));
+    let clock = jobs.as_ref().map(|(worker, ..)| worker.clock());
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
-    if let Some((worker, drain)) = &jobs {
-        session = session.with_jobs(worker, *drain);
+    if let Some((worker, drain, outbox)) = &jobs {
+        session = session.with_jobs(worker, *drain).with_usage(outbox.clone());
     }
     if let (Some(host), Some(clock)) = (host.as_mut(), clock.as_ref()) {
         session = session.with_default_quiesce(host, clock);
-    }
-    if let (Some(dir), Some(clock)) = (&actions, clock.as_ref()) {
-        session = session.with_load(LoadReader::new(services.files, dir, clock.clone()));
     }
     if let Some(file) = &credentials {
         session = session.with_credential_store(file);
