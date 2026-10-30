@@ -69,11 +69,12 @@ impl ToolkitHook {
 /// Adds the capabilities of the host contract to the hello of an agent that runs native
 /// jobs: `runtime` and `exec` are `sandbox-exec`. The hello is sent only after the job half
 /// has started, which asked the helper for its boot reset, so no hello names a mode the
-/// agent cannot serve.
-pub(crate) fn report_native(hello: &mut Hello) {
+/// agent cannot serve. Returns the warnings the operator should read: none.
+pub(crate) fn report_native(hello: &mut Hello) -> Vec<String> {
     let mode = ExecMode::SandboxExec.name().to_owned();
     hello.capabilities.insert(RUNTIME.to_owned(), mode.clone());
     hello.capabilities.insert(EXEC.to_owned(), mode);
+    Vec::new()
 }
 
 /// Adds the capabilities of the host contract to the hello of an agent that runs

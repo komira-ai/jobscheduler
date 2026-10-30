@@ -76,18 +76,19 @@ pub fn start(
         stop_grace,
         drain_wait,
     } = local;
-    // `Local` holds at most one of the two.
-    let backend = match (container, native) {
-        (Some(container), _) => Backend::Container(container),
-        (None, Some(native)) => Backend::Native(native),
-        (None, None) => return Ok(None),
+    // `Local` holds at most one of the two, and a state root and a scratch root with it.
+    let (backend, scratch, state) = match (container, native, scratch, state) {
+        (Some(container), _, Some(scratch), Some(state)) => {
+            (Backend::Container(container), scratch, state)
+        }
+        (None, Some(native), Some(scratch), Some(state)) => {
+            (Backend::Native(native), scratch, state)
+        }
+        _ => return Ok(None),
     };
     let flag = match &backend {
         Backend::Container(_) => "--container-bin",
         Backend::Native(_) => "--native-helper-socket",
-    };
-    let (Some(scratch), Some(state)) = (scratch, state) else {
-        return Ok(None);
     };
     let config = Config {
         capacity: Capacity::of(hello),

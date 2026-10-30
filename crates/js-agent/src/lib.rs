@@ -481,27 +481,25 @@ fn execute(
         integrity::require_host_namespaces(&link, &read)
             .map_err(|why| Failure::Usage(format!("--container-bin: {why}")))?;
     }
-    // An agent that runs containers says so in its hello. The hello is sent only after the
-    // job half below has started, and that ends the agent first if the program does not
-    // run, so no hello that names a runtime is sent for one that was not found.
-    if local.container.is_some() {
-        let found = contract::report(
+    // An agent that runs containers, or native jobs, says so in its hello. The hello is sent
+    // only after the job half below has started, and that ends the agent first if the program
+    // (or the helper) does not run, so no hello that names a runtime is sent for one that was
+    // not found.
+    let reported = match (local.container.is_some(), local.native.is_some()) {
+        (true, _) => Some(contract::report(
             &mut offer.hello,
             toolkit.as_ref(),
             commands,
             local.files.is_some(),
             default_gib,
-        );
+        )),
+        (false, true) => Some(contract::report_native(&mut offer.hello)),
+        (false, false) => None,
+    };
+    if let Some(found) = reported {
         found.iter().for_each(|warning| {
             let _ = writeln!(err, "js-agent: warning: {warning}");
         });
-        let checked = offer.hello.validate();
-        checked.map_err(|why| Failure::Usage(format!("the hello is not acceptable: {why}")))?;
-    }
-    // An agent that runs native jobs says so; the helper was reached when the job half
-    // started below, and an agent whose helper does not answer ends before the hello.
-    if local.native.is_some() {
-        contract::report_native(&mut offer.hello);
         let checked = offer.hello.validate();
         checked.map_err(|why| Failure::Usage(format!("the hello is not acceptable: {why}")))?;
     }
