@@ -39,13 +39,13 @@
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
 //! | `--state-file <path>` | the lease file |
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
-//! | `--pool-config <path>` | the static pool file ([`js_pool_static`]); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
+//! | `--pool-config <path>` | the static pool file ([`js_pool_static`]; its top-level `memory_schedulable_percent`, 1 to 100 and default 100, is the share of each host's `memory_bytes` that is booked, rounded down); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
 //! | `--agent-token-file <path>` | the pool's shared join tokens, one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Optional: without it the pool admits only hosts whose one-time join token verifies. Needs `--agent-pool-config` |
-//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]`, `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on |
+//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]`, `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `memory_schedulable_percent` (1 to 100, default 100: the share of `[shape]` `memory_bytes` the pool books, rounded down; a hello is still held to the whole shape; write it before `[shape]`), `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on |
 //! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
 //! | `--require-host-credential` | off by default: turn it on once every agent is new. The first hello of a one-time join token must then say the agent keeps a host credential, or it is refused `join-token-credential-required` (403) and the token stays unused; so the token of every launched host is dead after its first hello. Pool join tokens are not affected. Needs `--agent-pool-config` |
 //! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start |
-//! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `15m`, `2h` |
+//! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `250ms`, `15m`, `2h` |
 //! | `--tick` | how often the table is ticked and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
 //! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file. Both are read at start only: renew a certificate by restarting the server |
 //! | `--max-connections` | connections open at once, `256` unless given; at the cap the server stops accepting |
@@ -99,6 +99,13 @@
 //! (1 to 255), `max_spend_per_hour` and `max_spend_per_day` (strings: a decimal with at
 //! most two places, above zero, the day cap not below the hour cap), and optionally `idle`,
 //! `boot_timeout` (`15m`), `launch`, `exec`, `join_token_file`, `agent` and `network`.
+//! Every pool, static or elastic, may set `memory_schedulable_percent`, a whole number from
+//! 1 to 100 (default 100): the share of the pool's configured memory that is booked, rounded
+//! down. A static pool books that share of each host's `memory_bytes` (the pool's key
+//! replaces the one in its hosts file); an elastic pool books that share of its floor's
+//! memory, 1 GiB. An agent's own claim never raises it, and a hello must still meet the
+//! whole floor. `0`, above `100`, a negative number or a word is refused naming the pool and
+//! the field.
 //! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing, and
 //! one that is `live` launches machines for requests that wait, within `max_instances`,
 //! `max_spend_per_hour` and `max_spend_per_day`, and releases them when they have been
@@ -114,6 +121,22 @@
 //! `gpu-toolkit` when the pool has GPUs. `network` is `{ kind = "default" }`, which is
 //! what a pool without it gets, or `{ kind = "tailscale", oauth_client_file = ..., tag
 //! = ... }`. At most one elastic pool and one static pool are served in this version.
+//!
+//! A pool of machines that run `js-agent` and are started by hand has `kind = "joined"`
+//! and no `provider`. Its keys are `name`, `class`, `shape` (`{ cpu_millis, memory_bytes }`
+//! and optionally `gpus` and `gpu_class`), `max_machines` (from 1 to 262144; required, as
+//! in the agent pool file), and optionally `capabilities` (a table of text values, as the
+//! agent pool file's `[capabilities]`: a lease request is matched against them, and a
+//! host is admitted only if its hello reports each with the same value; a pool without
+//! them fits no request that requires a capability), `exec` (as above, but absent is
+//! `none`), `heartbeat_interval`, `grace`, `lost_retention` and `join_token_file` (the
+//! shared pool token). It launches nothing: `launch`, `network`, `provider`,
+//! `max_instances`, `max_spend_per_hour`, `max_spend_per_day`, `idle` and `boot_timeout`
+//! are each refused naming the key. It is the pool that registers agents, so it excludes
+//! an elastic pool, and `server.agent_listen` is required. One-time tokens for its nodes
+//! come from `POST /v1/agent/join-tokens` with `provider` the pool's name and
+//! `instance_id` the node's; a mint naming another provider is refused 400. An embedder
+//! builds the pool from its own settings with [`JoinedPool`] and [`JoinedPool::validate`].
 //!
 //! # API
 //!
@@ -141,9 +164,9 @@
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms, host_reserved?}`, where `host_reserved: true` says the host the lease holds is set aside for a waiting whole-node request (the renewal is not refused for it; the field is left out when false); 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
-//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape, capabilities, labels, lease?, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (no lease, runs still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when a reservation draining a busy host is given up) are those of a registered host |
+//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, lease?, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (no lease, runs still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when a reservation draining a busy host is given up) are those of a registered host |
 //! | `GET /healthz` | 200 `ok`, no token; 503 once the tick loop has stopped |
-//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines, orphans, next_launch}], warnings}`; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
+//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines, orphans, next_launch}], warnings}`; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
 //! | `GET /status` | 200 the same data as a page; same rules |
 //!
 //! An unknown route is a 404, a known route with another method a 405, a body that is
@@ -440,7 +463,7 @@ pub use config::{
     parse_duration,
 };
 pub use error::StartupError;
-pub use file::{ElasticPlan, Launch, NetworkPlan};
+pub use file::{ElasticPlan, JoinedPool, Launch, NetworkPlan};
 pub use kinds::{
     BuildCtx, Built, Ctor, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, SecretFiles,
 };

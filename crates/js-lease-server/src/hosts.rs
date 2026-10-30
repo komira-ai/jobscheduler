@@ -6,7 +6,7 @@ use js_agent_wire::Taint;
 use js_provider::HostCapacity;
 use js_registry::{HostMark, HostState, HostView};
 use js_types::sched::usage::NodeLoad;
-use js_types::{HostId, LeaseId, Shape};
+use js_types::{HostId, LeaseId, MemoryHeadroom, Shape};
 
 use crate::sched::map::lease_text as sched_lease_text;
 use serde::Serialize;
@@ -27,6 +27,26 @@ struct ShapeView {
     gpu_class: Option<String>,
 }
 
+/// The memory of a host, or of a pool's floor, as an operator reads it: what was
+/// configured, the percent of it that is booked, and what that comes to (the
+/// `memory_bytes` of a host's `shape`).
+#[derive(Debug, Serialize)]
+pub(crate) struct MemoryView {
+    pub(crate) configured_bytes: u64,
+    pub(crate) schedulable_percent: u8,
+    pub(crate) bookable_bytes: u64,
+}
+
+impl MemoryView {
+    pub(crate) fn of(memory: MemoryHeadroom) -> Self {
+        Self {
+            configured_bytes: memory.configured_bytes(),
+            schedulable_percent: memory.percent().get(),
+            bookable_bytes: memory.bookable_bytes(),
+        }
+    }
+}
+
 /// One host. `source` says where it comes from: `static` for the operator's pool file,
 /// `registered` for a host that said hello. The remaining fields of a registered host
 /// are what the registry knows of its session.
@@ -43,6 +63,7 @@ struct HostEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     lease: Option<String>,
     shape: ShapeView,
+    memory: MemoryView,
     capabilities: BTreeMap<String, String>,
     labels: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,6 +193,7 @@ impl HostEntry {
             phase: None,
             lease: lease_text(host.leased_to),
             shape: shape_view(&host.shape),
+            memory: MemoryView::of(host.memory),
             capabilities: host.shape.capabilities().clone(),
             labels: BTreeMap::new(),
             agent_version: None,
@@ -198,6 +220,7 @@ impl HostEntry {
             phase: Some(String::from(host.phase)),
             lease: lease_text(host.lease),
             shape: shape_view(&host.shape),
+            memory: MemoryView::of(host.memory),
             capabilities: host.shape.capabilities().clone(),
             labels: host.labels,
             agent_version: host.agent_version,
@@ -255,6 +278,7 @@ mod tests {
             phase: Phase::Serving,
             lease: None,
             shape: Shape::new(resources, BTreeMap::new()),
+            memory: MemoryHeadroom::full(1 << 20),
             claim: None,
             labels: BTreeMap::new(),
             agent_version: None,
