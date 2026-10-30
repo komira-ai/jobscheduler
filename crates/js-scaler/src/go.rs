@@ -5,7 +5,7 @@
 use crate::caps::{MONTH, billed_until, spent_since};
 use crate::pass::Pass;
 use crate::record::{Go, Phase};
-use crate::settings::LaunchMode;
+use crate::settings::{LaunchMode, Settings};
 
 impl Pass<'_> {
     /// Ends the go of every pool the input has that is not live now: in `Plan` mode by its
@@ -36,6 +36,18 @@ impl Pass<'_> {
             settled: 0,
         };
         self.records.go.entry(pool.to_owned()).or_insert(begun);
+    }
+
+    /// Notes the provider kind the pool launches with, for the kind totals that outlive the
+    /// pool's place in the file. Written with the launch that notes it, and only when it
+    /// changes; a pool with no kind notes none.
+    pub(crate) fn note_kind(&mut self, settings: &Settings) {
+        if !settings.kind.is_empty() {
+            let kinds = &mut self.records.pool_kinds;
+            if kinds.get(&settings.pool) != Some(&settings.kind) {
+                kinds.insert(settings.pool.clone(), settings.kind.clone());
+            }
+        }
     }
 
     /// Forgets the records that no longer count and whose billed time has left the month

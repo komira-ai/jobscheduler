@@ -374,6 +374,11 @@ pub struct Records {
     /// new budget.
     /// Absent in files written before it existed, which read it empty.
     pub go: BTreeMap<String, Go>,
+    /// The provider kind each pool launched with, by pool name, noted at its launches. A kind
+    /// total still counts the records of a pool that has been taken out of the file because
+    /// the records remember its kind; a pool with no entry (records from before it existed)
+    /// counts in every kind's total. Absent in files written before it existed.
+    pub pool_kinds: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -386,6 +391,8 @@ struct WireOut<'a> {
     last_step: Option<Millis>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     go: &'a BTreeMap<String, Go>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pool_kinds: &'a BTreeMap<String, String>,
 }
 
 /// Version 2.
@@ -402,6 +409,8 @@ struct WireIn {
     last_step: Option<Millis>,
     #[serde(default)]
     go: BTreeMap<String, Go>,
+    #[serde(default)]
+    pool_kinds: BTreeMap<String, String>,
 }
 
 /// Version 1: the same without the two times.
@@ -448,6 +457,7 @@ impl Records {
             missing_since: &self.missing_since,
             last_step: self.last_step,
             go: &self.go,
+            pool_kinds: &self.pool_kinds,
         };
         Ok(serde_json::to_string_pretty(&wire)?)
     }
@@ -482,6 +492,7 @@ impl Records {
                 missing_since: wire.missing_since,
                 last_step: wire.last_step,
                 go: wire.go,
+                pool_kinds: wire.pool_kinds,
             })
         }
     }

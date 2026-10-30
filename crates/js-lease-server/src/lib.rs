@@ -126,8 +126,18 @@
 //! both; a month total below the day total is refused, and a `[budget]` table of a kind the
 //! server does not build is refused. A total only stops launches (`blocked` shows
 //! `max_spend_total` in `GET /v1/pools`): it never drains or releases a machine, so the
-//! machines admitted before it was reached run to their `max_age` and can take the window
-//! past the figure by at most `max_spend_per_hour` for the cloud lifetime of a launch.
+//! machines admitted before it was reached run on, and can take the window past the figure. The
+//! overrun is bounded by `max_spend_per_hour` for the cloud lifetime of a launch only when the
+//! pool has both `max_age` and `server.max_lease_wall` (a busy host with no `max_age` is never
+//! retired) and the releases succeed (a machine the provider will not release, or that the
+//! cloud does not end, runs on: an alert says so, no cap does); the file warns when a total is
+//! set and a live pool lacks either key. The totals are sums over the pools of their scope:
+//! the server's since-go total adds the go of each pool that has one, so it is not a stable
+//! figure when pools come and go. A pool taken out of the file for good keeps its go, and its
+//! settled spend stays in that sum, until the pool is put back in `plan` for one step (the
+//! step that sees a pool in plan ends its go), after which it can be taken out. `GET
+//! /v1/pools` shows `launch` as the mode the pool is in now (`plan` once `live_until` has
+//! passed) and `live_until_ms`.
 //! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing, and
 //! one that is `live` launches machines for requests that wait, within `max_instances`,
 //! `max_spend_per_hour` and `max_spend_per_day`, and releases them when they have been

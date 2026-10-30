@@ -1031,8 +1031,15 @@ Rules, each tied to a requirement or to existing behaviour:
   since it was last in `plan`; it is written to the records with that launch (`go`: the instant and
   the cost of the machines already forgotten), a pool seen in `plan` loses it, and the next go begins
   a new `max_spend_since_go_total`. A total only stops launches. The machines admitted before it was
-  reached run on, so a window can pass its total by at most `max_spend_per_hour` times the
-  lifetime of a launch (`js_scaler::overrun`). `live_until` ends a go: at that instant the pool is in `plan`,
+  reached run on, so a window can pass its total. `js_scaler::overrun` bounds that by
+  `max_spend_per_hour` times the lifetime of a launch, but only when the pool has both `max_age`
+  and the server `max_lease_wall` (a busy host with no `max_age` is never retired) and the releases
+  succeed (a machine nobody can release runs on; an alert says so, no cap does). The file warns when
+  a total is set and a live pool lacks either key. The server's since-go total is the sum of the go of
+  each pool that has one, not a stable figure when pools come and go: a pool taken out of the file
+  for good keeps its go, and its settled spend stays in the sum, until the pool is put back in `plan`
+  for one step (the step that sees a pool in plan ends its go). A kind total remembers the kind of a
+  removed pool in the records (`pool_kinds`); records that name none count in every kind. `live_until` ends a go: at that instant the pool is in `plan`,
   in the step (`Settings::mode`) and in a file read afterwards.
 
 ### 6.5 What the single-pool slice costs

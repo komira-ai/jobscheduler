@@ -211,7 +211,7 @@ pub fn launchable(state: &State, input: &Input, now: Millis, demand: &Demand) ->
             let all = (state.records.instances.as_slice(), [].as_slice());
             [
                 check(settings, now, &state.records.instances, &[], &idle, price).is_ok(),
-                budget::check(input, &state.records.go, settings, now, all, price).is_ok(),
+                budget::check(input, &state.records, settings, now, all, price).is_ok(),
             ]
             .into_iter()
             .all(|ok| ok)

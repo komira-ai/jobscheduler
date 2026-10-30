@@ -8,7 +8,7 @@ use js_scaler::{Budgets, Millis, Totals};
 use toml::Value;
 use toml::value::{Datetime, Offset};
 
-use super::{LoadedHosts, Section};
+use super::{Launch, LoadedHosts, Section};
 use crate::error::StartupError;
 use crate::kinds::Kinds;
 
@@ -60,24 +60,60 @@ pub(super) fn read_budgets(
         };
         let mut s = Section::open(inner, format!("budget.{kind}."));
         s.only(TOTAL_KEYS)?;
-        budgets.kinds.insert(kind, read_totals(&mut s)?);
+        let totals = read_totals(&mut s)?;
+        if totals == Totals::default() {
+            return Err(StartupError::at(place, "sets no total"));
+        }
+        if let (Some(day), Some(month)) = (server.per_day, totals.per_month)
+            && month < day
+        {
+            let reason = "must not be below server.max_spend_per_day_total";
+            return Err(s.fail(TOTAL_KEYS[1], reason));
+        }
+        budgets.kinds.insert(kind, totals);
     }
     Ok(budgets)
 }
 
-/// The warning for a pool whose `live_until` had passed when the file was read: it starts in
-/// plan mode, and the operator who wrote `launch = "live"` should hear why it does not
-/// launch.
-pub(super) fn expired(hosts: &LoadedHosts, now: Millis) -> Option<String> {
+/// The warnings about the go of the elastic pool of `hosts`, if it has one:
+/// - `live_until` has passed: the pool starts in plan, and the operator who wrote
+///   `launch = "live"` should hear why it does not launch;
+/// - `live_until` is set on a pool that is in plan: it has no effect, and the pool will not
+///   go live when it is reached;
+/// - a total is set and the pool is live without a `max_age` or a `max_lease_wall`: the
+///   totals then bound nothing about a machine that runs on, since a busy host is never
+///   retired and the overrun bound ([`js_scaler::overrun`]) needs both.
+pub(super) fn notes(hosts: &LoadedHosts, budgets: &Budgets, now: Millis) -> Vec<String> {
     let LoadedHosts::Registering { registering, .. } = hosts else {
-        return None;
+        return Vec::new();
     };
-    let plan = registering.plan.as_ref()?;
-    plan.live_until.filter(|until| now >= *until)?;
-    Some(format!(
-        "pool {:?}: live_until has passed, so the pool is in plan mode and launches nothing; set a later live_until to go live",
-        plan.name
-    ))
+    let Some(plan) = registering.plan.as_ref() else {
+        return Vec::new();
+    };
+    let name = &plan.name;
+    let mut said = Vec::new();
+    if let Some(until) = plan.live_until {
+        if now >= until {
+            said.push(format!(
+                "pool {name:?}: live_until has passed, so the pool is in plan mode and launches nothing; set a later live_until to go live"
+            ));
+        } else if plan.launch == Launch::Plan {
+            said.push(format!(
+                "pool {name:?}: live_until has no effect on a pool whose launch is plan"
+            ));
+        }
+    }
+    let totals = [budgets.server]
+        .into_iter()
+        .chain(budgets.kinds.values().copied())
+        .any(|each| each != Totals::default());
+    let unbounded = [plan.max_age.is_none(), plan.max_lease_wall.is_none()];
+    if totals && plan.launch == Launch::Live && unbounded.contains(&true) {
+        said.push(format!(
+            "pool {name:?}: spend totals are set but the pool has no max_age or no server.max_lease_wall, so a host that stays busy is never retired and a total bounds only the launches, not what the machines already launched cost"
+        ));
+    }
+    said
 }
 
 impl Section {
@@ -92,15 +128,16 @@ impl Section {
             Some(_) => return Err(self.fail(key, must)),
         };
         match epoch_millis(&datetime) {
-            Some(millis) => Ok(Some(Millis::new(millis))),
+            Some(Ok(millis)) => Ok(Some(Millis::new(millis))),
+            Some(Err(())) => Err(self.fail(key, "must not be before the epoch")),
             None => Err(self.fail(key, must)),
         }
     }
 }
 
-/// Milliseconds since the epoch of `at`, if it names a date, a time and an offset and the
-/// instant is not before the epoch.
-fn epoch_millis(at: &Datetime) -> Option<u64> {
+/// Milliseconds since the epoch of `at`, if it names a date, a time and an offset; `Err` when
+/// the instant is before the epoch.
+fn epoch_millis(at: &Datetime) -> Option<Result<u64, ()>> {
     let (date, time, offset) = (at.date?, at.time?, at.offset?);
     let minutes = match offset {
         Offset::Z => 0,
@@ -117,7 +154,7 @@ fn epoch_millis(at: &Datetime) -> Option<u64> {
         + i64::from(time.second.unwrap_or_default())
         - minutes * 60;
     let millis = seconds * 1_000 + i64::from(time.nanosecond.unwrap_or_default() / 1_000_000);
-    u64::try_from(millis).ok()
+    Some(u64::try_from(millis).map_err(|_| ()))
 }
 
 /// The days from 1970-01-01 to the given day of the proleptic Gregorian calendar.
@@ -179,5 +216,35 @@ mod tests {
             assert!(said.contains("with an offset"), "{said}");
         }
         assert_eq!(read("").unwrap(), None);
+    }
+
+    /// Asserts that an instant before the epoch is refused with a reason that says so, not
+    /// the reason for a missing offset: the date-time is complete, it is only too early.
+    #[test]
+    fn a_timestamp_before_the_epoch_is_refused_as_such() {
+        use toml::value::{Date, Time};
+        let early = Datetime {
+            date: Some(Date {
+                year: 1,
+                month: 1,
+                day: 1,
+            }),
+            time: Some(Time {
+                hour: 0,
+                minute: 0,
+                second: Some(0),
+                nanosecond: Some(0),
+            }),
+            offset: Some(Offset::Z),
+        };
+        let table = toml::Table::from_iter([("live_until".to_owned(), Value::Datetime(early))]);
+        let said = Section::open(table, "pool \"gpu\": ".to_owned())
+            .timestamp("live_until")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            said,
+            "pool \"gpu\": live_until: must not be before the epoch"
+        );
     }
 }

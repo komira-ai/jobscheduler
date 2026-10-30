@@ -21,7 +21,7 @@ use std::sync::PoisonError;
 use js_elastic::Demand;
 use js_lease::{Clock, Timestamp};
 use js_registry::Registry;
-use js_scaler::{Phase, Record, Records};
+use js_scaler::{LaunchMode, Millis, Phase, Record, Records};
 use js_types::ExecMode;
 use serde::Serialize;
 
@@ -56,7 +56,11 @@ struct PoolView {
     network: &'static str,
     /// The execution mode the hosts must report, or `none` for a pool that asked for none.
     exec: String,
+    /// The mode the pool is in now: `plan` once its `live_until` has passed, whatever the
+    /// file says.
     launch: &'static str,
+    /// When the pool's go ends, in milliseconds since the epoch, if the file sets one.
+    live_until_ms: Option<u64>,
     /// The memory of the pool's floor, the percent of it the pool books and what that
     /// comes to.
     memory: MemoryView,
@@ -272,6 +276,17 @@ impl Status {
                 Next::NoOffer(none) => (None, Some(none)),
             },
         };
+        let now = Millis::new(self.clock.now().millis());
+        let (launch, live_until_ms) = match self.scaler.as_ref().map(Scaler::settings) {
+            Some(set) => {
+                let mode = match set.mode(now) {
+                    LaunchMode::Live => "live",
+                    LaunchMode::Plan => "plan",
+                };
+                (mode, set.live_until.map(Millis::as_millis))
+            }
+            None => (pool.launch, None),
+        };
         let scaled = self.scaler.as_ref().map(|scaler| scaler.state());
         // The checks first; once they pass, the cap that keeps the scaler from launching.
         let capped = scaled
@@ -292,7 +307,8 @@ impl Status {
             kind: pool.kind.clone(),
             network: pool.network_kind,
             exec: exec_name(pool.exec),
-            launch: pool.launch,
+            launch,
+            live_until_ms,
             memory: MemoryView::of(pool.memory),
             state,
             reasons: health.reasons(),

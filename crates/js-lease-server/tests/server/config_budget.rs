@@ -202,3 +202,83 @@ fn a_go_that_has_expired_at_load_starts_in_plan() {
         );
     }
 }
+
+/// Asserts the two refusals that keep a kind's table from being a mistake: a table that sets
+/// no total, and a kind's month total below the server's day total (the server could never
+/// spend its day on that kind). The edge: equal is accepted.
+#[test]
+fn an_empty_kind_table_and_a_kind_month_below_the_server_day_are_refused() {
+    let scratch = Scratch::new("budget_kind_rules");
+    let pool = PoolText::elastic(&scratch);
+    let plain = file(&server_with(&scratch, ""), &[&pool]);
+    assert_eq!(
+        refusal(&scratch, &with_budget(&plain, "")),
+        "budget.lambdalabs: sets no total"
+    );
+    let head = server_with(&scratch, "max_spend_per_day_total = \"10.00\"");
+    let text = file(&head, &[&pool]);
+    let kind = "max_spend_per_month_total = ";
+    assert_eq!(
+        refusal(&scratch, &with_budget(&text, &format!("{kind}\"9.99\""))),
+        "budget.lambdalabs.max_spend_per_month_total: must not be below server.max_spend_per_day_total"
+    );
+    assert!(load(&scratch, &with_budget(&text, &format!("{kind}\"10.00\""))).is_ok());
+}
+
+/// Asserts the warnings about a go, each once and each only for its case: `live_until` on a
+/// pool in plan (it has no effect); a total with a live pool that has no `max_age` or no
+/// lease ceiling (the totals then bound only the launches); and none of them for a pool
+/// that is bounded, or when no total is set.
+#[test]
+fn a_go_that_cannot_work_as_written_is_warned_about() {
+    let scratch = Scratch::new("budget_warnings");
+    let dial = "advertise_url = \"https://sched.example.org:7301\"";
+    let totals = format!("{dial}\nmax_spend_per_day_total = \"50.00\"");
+    let cpu = PoolText::elastic(&scratch)
+        .set("provider", "{ kind = \"any-mode\" }")
+        .set("agent", AGENT)
+        .set("launch", &quote("live"))
+        .without("max_age")
+        .without("idle")
+        .without("min_host_lifetime");
+    let said = |head: String, pool: &PoolText| -> Vec<String> {
+        let config = load(&scratch, &file(&head, &[pool])).unwrap();
+        config.warnings().to_vec()
+    };
+    let unbounded = said(server_with(&scratch, &totals), &cpu);
+    let hits: Vec<_> = unbounded
+        .iter()
+        .filter(|each| each.contains("spend totals"))
+        .collect();
+    assert_eq!(hits.len(), 1, "{unbounded:?}");
+    assert!(
+        hits[0].starts_with("pool \"gpu\": spend totals are set but"),
+        "{}",
+        hits[0]
+    );
+
+    let no_totals = said(server_with(&scratch, dial), &cpu);
+    assert!(
+        no_totals.iter().all(|each| !each.contains("spend totals")),
+        "{no_totals:?}"
+    );
+    let bounded = cpu.set("max_age", &quote("2h"));
+    let ok = said(server_with(&scratch, &totals), &bounded);
+    assert!(
+        ok.iter().all(|each| !each.contains("spend totals")),
+        "{ok:?}"
+    );
+
+    let plan = PoolText::elastic(&scratch).set("live_until", "2999-01-01T00:00:00Z");
+    let idle = said(server_with(&scratch, ""), &plan);
+    let hits: Vec<_> = idle
+        .iter()
+        .filter(|each| each.contains("live_until"))
+        .collect();
+    assert_eq!(hits.len(), 1, "{idle:?}");
+    assert!(
+        hits[0].contains("no effect on a pool whose launch is plan"),
+        "{}",
+        hits[0]
+    );
+}

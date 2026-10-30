@@ -186,9 +186,14 @@ fn capped() -> Budgets {
 
 /// The documented bound on how far a window can pass its total: what the held machines can
 /// still cost after the last launch the total allowed.
-fn bound() -> u64 {
+fn bound(machines: usize) -> u64 {
     let limits = pool_settings();
-    overrun(limits.max_spend_per_hour, limits.lifetime().unwrap(), 0)
+    let machines = u64::try_from(machines).unwrap();
+    overrun(
+        limits.max_spend_per_hour,
+        limits.lifetime().unwrap(),
+        machines,
+    )
 }
 
 /// Asserts the whole month. Without the total the pool's caps alone let the oracle bill far
@@ -201,15 +206,16 @@ fn bound() -> u64 {
 /// earlier days.
 #[test]
 fn a_month_of_work_never_bills_more_than_the_total_plus_the_overrun_bound() {
-    let limit = (MONTH_TOTAL + bound()) * 60;
     let free = run(Budgets::default(), &[]);
+    let control = (MONTH_TOTAL + bound(0)) * 60;
     assert!(
-        free.peak > limit,
+        free.peak > control,
         "without a total the run bills {}",
         free.peak / 60
     );
 
     let held = run(capped(), &[]);
+    let limit = (MONTH_TOTAL + bound(held.launches.len())) * 60;
     assert!(
         held.peak <= limit,
         "billed {} of {}",
@@ -237,9 +243,9 @@ fn a_month_of_work_never_bills_more_than_the_total_plus_the_overrun_bound() {
 /// catches a month total that lives only in memory.
 #[test]
 fn the_monthly_total_holds_across_restarts() {
-    let limit = (MONTH_TOTAL + bound()) * 60;
     let restarts = [5 * DAY, 12 * DAY, 20 * DAY];
     let held = run(capped(), &restarts);
+    let limit = (MONTH_TOTAL + bound(held.launches.len())) * 60;
     assert!(
         held.peak <= limit,
         "billed {} of {}",

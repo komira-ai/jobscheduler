@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use crate::caps::{DAY, MONTH, least_cost, spent_since};
 use crate::input::Input;
-use crate::record::{Go, Record};
+use crate::record::{Record, Records};
 use crate::settings::{Blocked, Settings};
 use crate::time::Millis;
 
@@ -48,8 +48,13 @@ pub struct Budgets {
 
 /// The most a window can pass its total by, in cents, when the admitted machines run to
 /// their ends: `hourly` (the pool's `max_spend_per_hour`, which bounds the price of what is
-/// held at any one time) for `lifetime` (how long a machine runs after it is admitted;
-/// [`Settings::lifetime`] bounds it when the pool has a `max_age`).
+/// held at any one time) for `lifetime` (how long a machine runs after it is admitted).
+///
+/// The bound holds only while two things do. `lifetime` is [`Settings::lifetime`], which is
+/// `None` unless the pool has both a `max_age` and a `max_lease_wall`; a pool without them has
+/// no bound at all, since a busy host is never retired. And the releases succeed: a machine
+/// the provider will not release, or one the cloud itself does not end, runs on and accrues
+/// past it (an alert tells the operator; no cap does).
 ///
 /// A launch is admitted when the window's cost plus the least the new machine costs
 /// (`boot_timeout` of it) is within the total, so after the last admission the machines
@@ -82,7 +87,7 @@ fn within(total: Option<u64>, least: u64, spent: impl FnOnce() -> u64) -> bool {
 /// month or since the go.
 pub(crate) fn check(
     input: &Input,
-    go: &BTreeMap<String, Go>,
+    meta: &Records,
     settings: &Settings,
     now: Millis,
     (records, staged): (&[Record], &[Record]),
@@ -95,7 +100,14 @@ pub(crate) fn check(
         (kind.unwrap_or_default(), Some(&settings.kind)),
     ];
     for (totals, only) in scopes {
-        let member = |pool: &str| only.is_none_or(|kind| input.kind_of(pool) == Some(kind));
+        // A pool the input no longer has is of the kind the records remember for it; one they
+        // know no kind for is of every kind, which is the cautious side.
+        let member = |pool: &str| {
+            only.is_none_or(|kind| match input.kind_of(pool) {
+                Some(each) => each == kind,
+                None => meta.pool_kinds.get(pool).is_none_or(|each| each == kind),
+            })
+        };
         let all = records
             .iter()
             .chain(staged)
@@ -107,13 +119,15 @@ pub(crate) fn check(
             })
         };
         let since_go = || {
-            let settled = go
+            let settled = meta
+                .go
                 .iter()
                 .filter(|(pool, _)| member(pool.as_str()))
                 .fold(0u64, |sum, (_, each)| sum.saturating_add(each.settled));
             all.clone().fold(settled, |sum, record| {
                 let timeout = input.boot_timeout(&record.pool);
-                let spent = go
+                let spent = meta
+                    .go
                     .get(&record.pool)
                     .map_or(0, |each| spent_since(record, timeout, now, each.at));
                 sum.saturating_add(spent)

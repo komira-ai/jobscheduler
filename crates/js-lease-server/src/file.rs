@@ -565,7 +565,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     }
     let mut warnings = check_listeners(&server, elastic)?;
     let now = Millis::new(ld.clock.now().millis());
-    warnings.extend(budget::expired(&hosts, now));
+    warnings.extend(budget::notes(&hosts, &budgets, now));
     Ok(Loaded {
         server,
         client_token,

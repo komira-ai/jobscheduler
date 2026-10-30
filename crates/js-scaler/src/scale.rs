@@ -453,8 +453,14 @@ impl Pass<'_> {
             let price = self.records.instances[i].price_cents_per_hour;
             let within =
                 check(settings, self.now, &others, &[], &BTreeSet::new(), price).and_then(|()| {
-                    let go = &self.records.go;
-                    budget::check(self.input, go, settings, self.now, (&others, &[]), price)
+                    budget::check(
+                        self.input,
+                        &self.records,
+                        settings,
+                        self.now,
+                        (&others, &[]),
+                        price,
+                    )
                 });
             match within {
                 Ok(()) => {
@@ -508,6 +514,13 @@ impl Pass<'_> {
         let mut left = Vec::new();
         let mut stopped = None;
         let mut no_price = false;
+        // The go begins before anything is staged, so that the budget since the go counts the
+        // launches staged in this step (with `max_step` above one, the second is checked
+        // against the first); it is taken back if nothing is staged.
+        let fresh = live && !self.records.go.contains_key(&settings.pool);
+        if fresh {
+            self.begin_go(&settings.pool);
+        }
         for request in uncovered {
             let room = [
                 stopped.is_none(),
@@ -536,13 +549,16 @@ impl Pass<'_> {
             }
         }
         let stopped = stopped.or(no_price.then_some(Blocked::Unpriced));
+        if fresh && staged.is_empty() {
+            self.records.go.remove(&settings.pool);
+        }
         if live {
             if let Some(blocked) = stopped {
                 self.blocked.insert(settings.pool.clone(), blocked);
             }
             self.drawn += staged.len();
             if !staged.is_empty() {
-                self.begin_go(&settings.pool);
+                self.note_kind(settings);
             }
             for record in staged {
                 self.actions.extend(launch_actions(
@@ -589,7 +605,7 @@ impl Pass<'_> {
         let records = (self.records.instances.as_slice(), staged);
         budget::check(
             self.input,
-            &self.records.go,
+            &self.records,
             settings,
             self.now,
             records,
