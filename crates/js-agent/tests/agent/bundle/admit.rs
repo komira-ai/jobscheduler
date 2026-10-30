@@ -379,7 +379,7 @@ fn an_xcode_need_is_met_by_one_xcode() {
     assert_eq!(admission.admit(&pinned()), Ok(()));
 }
 
-/// The checks run in the design's order: with everything wrong, each fix reveals the next
+/// The checks run in a fixed order: with everything wrong, each fix reveals the next
 /// refusal: denied, not allowed, registry, not held, macOS, Xcode. It catches a reorder that
 /// turns a revocation into a "not held" the farm would retry.
 #[test]

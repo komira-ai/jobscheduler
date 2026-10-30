@@ -125,6 +125,12 @@ impl Admission {
     }
 
     /// The store does not hold the bundle: refuse, or begin a fetch and say so.
+    ///
+    /// Order requirement for a real fetcher: [`Fetch::Started`] begins a download, and the
+    /// lifecycle runs this before its capacity checks, so a start refused afterwards for
+    /// capacity would repeat the fetch when the farm requeues it. The fetcher must be
+    /// idempotent per digest (a second call joins the first), or the fetch must move after
+    /// those checks.
     fn missing(&self, name: &str, digest: &str) -> Result<(), Refusal> {
         if self.settings.pull == Pull::Never {
             return Err(no(

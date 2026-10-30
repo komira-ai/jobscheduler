@@ -331,10 +331,13 @@ pub struct Cli {
     /// flags need it). Absolute; on the same APFS volume as `--scratch-root` (cloning needs
     /// one volume) mounted with ownership honoured and not `noexec`, and the kernel's
     /// securelevel must be 0 or less; the agent refuses to start otherwise, and on a host
-    /// that is not a Mac. Needs `--scratch-root` and `--bundle-budget-gib`. The hello then
-    /// reports `bundle-root` (this path) and `bundle` (the manifest digests the store
-    /// holds), and the disk it offers (`disk-gib`) is reduced by the part of the budget the
-    /// store has not used yet.
+    /// that is not a Mac. Needs `--scratch-root` and `--bundle-budget-gib`. The disk the agent
+    /// offers (`disk-gib`) is reduced by the part of the budget the store has not used yet.
+    /// The hello reports `bundle-root` (this path) and `bundle` (the manifest digests the
+    /// store holds, that the deny and allow lists let through) only when the agent can run a
+    /// bundle, which this build cannot, so for now it reports neither. Until a server says it
+    /// takes a longer value, `bundle` holds one digest. Roll out servers first, then agents,
+    /// then this flag, then placement by `bundle`.
     #[arg(long, value_name = "PATH")]
     pub bundle_store: Option<PathBuf>,
     /// The most GiB the store's trees (and the trees waiting to be deleted) may take

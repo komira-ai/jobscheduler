@@ -199,7 +199,10 @@ const REQUEST_CODES: [&str; 4] = [
     INVALID_ENV,
 ];
 
-/// The class of a refusal a bundle start can meet, or `None` for any other code.
+/// The class of a refusal a bundle start can meet, or `None` for any other code. A bundle
+/// start that an agent admits but cannot run ends as `native-unsupported`, which has no
+/// class: it is the agent's lack of a runtime, and a consumer must neither cache it as the
+/// action's result nor treat it as the request's fault.
 #[must_use]
 pub fn bundle_class(code: &str) -> Option<RefusalClass> {
     let farm = FARM_CODES.contains(&code).then_some(RefusalClass::Farm);

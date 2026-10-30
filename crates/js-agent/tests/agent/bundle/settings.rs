@@ -240,7 +240,7 @@ fn the_store_needs_a_mac_a_path_a_scratch_root_and_a_budget() {
 /// farm default being open, a list host with nothing on its list, and the combination that
 /// turns a job's digest into a download.
 #[test]
-fn the_trust_rules_refuse_what_the_design_forbids() {
+fn the_trust_rules_refuse_what_is_unsafe() {
     let base = [
         "--bundle-store",
         STORE,

@@ -417,4 +417,13 @@ fn only_permitted_digests_are_advertised() {
         "{:?}",
         reported.warnings
     );
+    host.file("/etc/js/deny", "");
+    host.file("/etc/js/allow", "garbage\n");
+    let reported = report(&settings, &*host, true);
+    assert!(reported.caps.bundles.is_empty());
+    assert!(
+        reported.warnings[0].contains("allow list is malformed"),
+        "{:?}",
+        reported.warnings
+    );
 }

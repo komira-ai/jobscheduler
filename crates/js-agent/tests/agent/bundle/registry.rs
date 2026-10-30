@@ -37,8 +37,8 @@ fn parsed(public: &[&str], private: &[&str]) -> Result<Vec<Registry>, String> {
 }
 
 /// Accepted spellings: a host and a namespace, with or without the trailing slash, a port,
-/// nested namespaces, and a host in any case (kept lower case). It catches a spelling the
-/// design gives (`ghcr.io/komira-ai/`) that is refused.
+/// nested namespaces, and a host in any case (kept lower case). It catches the usual spelling
+/// (`ghcr.io/komira-ai/`) being refused.
 #[test]
 fn a_host_and_a_namespace_are_accepted() {
     let cases = [

@@ -1,8 +1,8 @@
 //! The seam between the bundle rules and the machine: [`BundleHost`].
 
 use std::fs;
-use std::io;
-use std::os::unix::fs::MetadataExt;
+use std::io::{self, Read};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use js_bundle::{BundleConfig, DottedVersion, XcodeComponent, XcodeNeed};
@@ -55,7 +55,9 @@ pub trait BundleHost: Send + Sync {
     /// volume (`js_treestore::mac::check_volumes` and `check_securelevel`).
     fn check_start(&self, store: &Path, scratch: &Path) -> Result<(), String>;
 
-    /// The text of a list file, or why it cannot be read.
+    /// The text of a list file, or why it cannot be read. A list file is the host's trust
+    /// root: the real host reads it only when it is a regular file of root (reached with no
+    /// link), writable by nobody else, in a directory that is likewise, and of a bounded size.
     fn read_file(&self, path: &Path) -> Result<String, String>;
 
     /// The manifest digests the store holds (`sha256:<hex>`), ascending. A store with no
@@ -142,6 +144,44 @@ fn blocks_below(dir: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
+/// Whether `meta` is of `owner` and writable by nobody else.
+fn trusted(meta: &fs::Metadata, owner: u32) -> bool {
+    meta.uid() == owner && meta.mode() & 0o022 == 0
+}
+
+/// Reads a file the host trusts: opened without following a link and without blocking, then
+/// looked at through the descriptor (so the file looked at is the file read). It must be a
+/// regular file of `owner`, writable by nobody else, no larger than [`MAX_LIST_BYTES`], in a
+/// directory that is likewise. A link, a pipe, a device, a file a pool user could change
+/// and a file of unbounded size are all refused: the allow list is the host's trust root.
+fn read_trusted(path: &Path, owner: u32) -> io::Result<String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    if !trusted(&meta, owner) {
+        return Err(io::Error::other(
+            "not owned by the expected user, or writable by group or others",
+        ));
+    }
+    if meta.len() > MAX_LIST_BYTES {
+        return Err(io::Error::other("larger than the size cap"));
+    }
+    let parent = path.parent().unwrap_or(Path::new("/"));
+    if !trusted(&fs::metadata(parent)?, owner) {
+        return Err(io::Error::other(
+            "its directory is not owned by the expected user, or is writable by group or others",
+        ));
+    }
+    let mut text = String::new();
+    file.take(MAX_LIST_BYTES).read_to_string(&mut text)?;
+    Ok(text)
+}
+
 impl<R: CommandRunner + Send + Sync> BundleHost for SystemHost<R> {
     #[cfg(target_os = "macos")]
     fn check_start(&self, store: &Path, scratch: &Path) -> Result<(), String> {
@@ -154,8 +194,7 @@ impl<R: CommandRunner + Send + Sync> BundleHost for SystemHost<R> {
     }
 
     fn read_file(&self, path: &Path) -> Result<String, String> {
-        let _ = self.owner;
-        fs::read_to_string(path).map_err(|why| format!("{}: {why}", path.display()))
+        read_trusted(path, self.owner).map_err(|why| format!("{}: {why}", path.display()))
     }
 
     fn held(&self, store: &Path) -> Result<Vec<String>, String> {

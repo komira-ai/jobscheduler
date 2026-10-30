@@ -4,8 +4,12 @@ use js_agent_wire::limits::{BUNDLE_CAPABILITY, MAX_BUNDLE_CAPABILITY_DIGESTS};
 use js_agent_wire::{Caps, bundle_capability};
 use js_caps::BUNDLE_ROOT;
 
+use std::collections::BTreeSet;
+use std::path::Path;
+
 use super::host::BundleHost;
-use super::settings::Settings;
+use super::list::parse_digests;
+use super::settings::{Settings, Trust};
 
 /// The facts about the store, and what went wrong reading them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,18 +24,29 @@ pub struct Reported {
 /// the read model and the Xcode builds the host found. A store that cannot be listed
 /// reports no bundle and warns, so a job is never placed on a guess.
 pub fn report(settings: &Settings, host: &dyn BundleHost, long_values: bool) -> Reported {
-    let _ = long_values;
+    if !host.can_run() {
+        let why = "--bundle-store: this agent cannot run a bundle yet, so it reports no bundle \
+                   and no bundle-root";
+        return Reported {
+            caps: Caps::default(),
+            warnings: vec![why.to_owned()],
+        };
+    }
     let mut warnings = Vec::new();
-    let bundles = host.held(&settings.store).unwrap_or_else(|why| {
+    let held = host.held(&settings.store).unwrap_or_else(|why| {
         warnings.push(format!(
             "--bundle-store: cannot list the bundles ({why}); none is reported"
         ));
         Vec::new()
     });
-    if bundles.len() > MAX_BUNDLE_CAPABILITY_DIGESTS {
+    let bundles = permitted(settings, host, held).unwrap_or_else(|why| {
+        warnings.push(why);
+        Vec::new()
+    });
+    let take = hello_digests(long_values);
+    if bundles.len() > take {
         warnings.push(format!(
-            "--bundle-store: holds {} bundles; only the first {MAX_BUNDLE_CAPABILITY_DIGESTS} are \
-             reported in the hello",
+            "--bundle-store: holds {} bundles; only the first {take} are reported in the hello",
             bundles.len()
         ));
     }
@@ -47,20 +62,59 @@ pub fn report(settings: &Settings, host: &dyn BundleHost, long_values: bool) -> 
     Reported { caps, warnings }
 }
 
-/// The capabilities of the hello for `caps`: `bundle-root` always, and `bundle` (the
-/// digests, comma-separated; the first of them when there are more than the wire takes)
-/// when the store holds any.
+/// How many digests the hello carries: one fits the common 128-byte cap on a capability
+/// value, and more only go to a server that has said it takes a longer one.
+fn hello_digests(long_values: bool) -> usize {
+    [1, MAX_BUNDLE_CAPABILITY_DIGESTS][usize::from(long_values)]
+}
+
+/// A list file as a set, or the reason it cannot be used.
+fn list(host: &dyn BundleHost, file: &Path, what: &str) -> Result<BTreeSet<String>, String> {
+    let text = host.read_file(file).map_err(|why| {
+        format!("--bundle-store: the {what} cannot be read ({why}); no bundle is reported")
+    })?;
+    parse_digests(&text).map_err(|why| {
+        format!("--bundle-store: the {what} is malformed ({why}); no bundle is reported")
+    })
+}
+
+/// The held digests the deny list and the allow list let through. A list that cannot be read
+/// lets nothing through. A consumer that places work by `bundle` must not be sent to a host
+/// that would refuse the digest.
+fn permitted(
+    settings: &Settings,
+    host: &dyn BundleHost,
+    held: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let denied = match &settings.deny_file {
+        Some(file) => list(host, file, "deny list")?,
+        None => BTreeSet::new(),
+    };
+    let allowed = match (settings.trust, &settings.allow_file) {
+        (Trust::List, Some(file)) => Some(list(host, file, "allow list")?),
+        _ => None,
+    };
+    let listed = |digest: &String| allowed.as_ref().is_none_or(|set| set.contains(digest));
+    Ok(held
+        .into_iter()
+        .filter(|digest| !denied.contains(digest) && listed(digest))
+        .collect())
+}
+
+/// The capabilities of the hello for `caps`: `bundle-root` when the host has a store to
+/// report, and `bundle` (the digests, comma-separated: one, or up to the wire's longest
+/// when `long_values`) when it holds any.
 pub fn hello_capabilities(caps: &Caps, long_values: bool) -> Vec<(String, String)> {
-    let _ = long_values;
+    let shown = caps.bundles.len().min(hello_digests(long_values));
     let held = (!caps.bundles.is_empty()).then(|| {
         (
             BUNDLE_CAPABILITY.to_owned(),
-            bundle_capability(&caps.bundles),
+            bundle_capability(&caps.bundles[..shown]),
         )
     });
-    held.into_iter()
-        .chain([(BUNDLE_ROOT.to_owned(), caps.bundle_root.clone())])
-        .collect()
+    let root =
+        (!caps.bundle_root.is_empty()).then(|| (BUNDLE_ROOT.to_owned(), caps.bundle_root.clone()));
+    held.into_iter().chain(root).collect()
 }
 
 /// The bytes of the budget the store has not used yet: `max(0, budget - used)`. The disk

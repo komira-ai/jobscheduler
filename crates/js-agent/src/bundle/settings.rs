@@ -150,13 +150,13 @@ fn registry(flag: &str, text: &str, private: bool) -> Result<Registry, String> {
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-')
     });
     let port_ok = port.is_none_or(|digits| {
-        !digits.is_empty() && digits.len() <= 5 && digits.bytes().all(|b| b.is_ascii_digit())
+        digits.bytes().all(|b| b.is_ascii_digit()) && matches!(digits.parse::<u16>(), Ok(1..))
     });
     if !labels || !port_ok {
         return Err(bad("has a host that is not a registry host"));
     }
     let components = prefix.split('/').all(|part| {
-        !part.is_empty()
+        !matches!(part, "" | "." | "..")
             && part
                 .bytes()
                 .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
