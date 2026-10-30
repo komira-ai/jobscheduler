@@ -11,9 +11,28 @@
 //!     cargo test -p js-agent --test agent quota::xfs_host -- --ignored --test-threads=1
 //! ```
 //!
+//! or, with the test binary built by `.github/workflows/js-agent-quota-tests.yml` (same
+//! variables):
+//!
+//! ```text
+//! ./agent --ignored --test-threads=1 quota::xfs_host
+//! ```
+//!
 //! `JS_QUOTA_XFS_ROOT` is an existing empty directory on the XFS volume, owned by root,
-//! mode 0700. Each test uses a slot of its own and removes what it made. These variables
-//! are read by the tests only; the agent reads none.
+//! mode 0700. Each test uses a slot of its own (the tests use slots 100 to 105) and removes
+//! what it made, also when it fails: a guard removes the run directory and clears the
+//! project on drop, even while panicking. These variables are read by the tests only; the
+//! agent reads none.
+//!
+//! **Leftovers of a failed run are the operator's to clear.** A run that is killed (not
+//! failed) leaves directories with their project ids and limits set, and `ProjectIds::claim`
+//! then refuses those slots with `InUse`. The tests do not weaken `claim` to get past that:
+//! clear the project of slots 100 to 105 first (the held run script does it), then rerun.
+//!
+//! **What a job sees at a project quota.** XFS reports a hit on a *project* quota as
+//! `ENOSPC` ("No space left on device"): the project looks like a full file system. User
+//! and group quotas give `EDQUOT`. The tests accept either, and prove it was the quota and
+//! not a full file system (usage at the limit, and writes outside the project still work).
 
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -39,12 +58,74 @@ fn host() -> (XfsQuota, PathBuf) {
     (quota, root)
 }
 
-/// A new empty run directory and the project of `slot`, which must read zero.
-fn fresh(quota: &XfsQuota, root: &Path, slot: u32, name: &str) -> (PathBuf, ProjectId) {
+/// A run directory and its project, cleaned up when dropped. On the success path
+/// [`Run::finish`] also waits for the usage to read zero. On a failure (a panic) the drop
+/// removes the tree and clears the project so that a rerun does not meet `InUse`; errors
+/// are ignored then, because the test is already failing.
+struct Run<'a> {
+    quota: &'a XfsQuota,
+    dir: PathBuf,
+    project: ProjectId,
+    done: bool,
+}
+
+impl Run<'_> {
+    /// Removes the tree, clears the project, and waits for the usage to read zero (the file
+    /// system frees inodes in the background).
+    fn finish(mut self) {
+        fs::remove_dir_all(&self.dir).unwrap();
+        self.quota.clear(&self.dir, self.project).unwrap();
+        self.done = true;
+        for _ in 0..100 {
+            if self.quota.usage(self.project).unwrap().is_zero() {
+                return;
+            }
+            sleep(Duration::from_millis(100));
+        }
+        panic!(
+            "usage of {} did not read zero: {:?}",
+            self.project,
+            self.quota.usage(self.project)
+        );
+    }
+}
+
+impl Drop for Run<'_> {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        let removed = fs::remove_dir_all(&self.dir);
+        let cleared = self.quota.clear(&self.dir, self.project);
+        if !std::thread::panicking() {
+            removed.unwrap();
+            cleared.unwrap();
+        }
+    }
+}
+
+/// A directory that is removed when dropped (ignoring errors), for a directory outside any
+/// project.
+struct Plain(PathBuf);
+
+impl Drop for Plain {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A new empty run directory and the project of `slot`, which must read zero. A slot with
+/// usage left by an earlier failed run is refused with `InUse`: see the module docs.
+fn fresh<'a>(quota: &'a XfsQuota, root: &Path, slot: u32, name: &str) -> Run<'a> {
     let project = ProjectIds::default().claim(quota, slot).unwrap();
     let dir = root.join(format!("{name}-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
-    (dir, project)
+    Run {
+        quota,
+        dir,
+        project,
+        done: false,
+    }
 }
 
 /// Writes `total` bytes in 64 KiB writes to a file in `dir` and syncs it.
@@ -57,29 +138,16 @@ fn write_file(dir: &Path, name: &str, total: u64) -> io::Result<()> {
     file.sync_all()
 }
 
-fn is_edquot(err: &io::Error) -> bool {
-    err.raw_os_error() == Some(libc::EDQUOT)
+/// Whether the error is what a quota hit looks like: `ENOSPC` for an XFS project quota,
+/// `EDQUOT` for a user or group quota. The caller proves it was the quota and not a full
+/// file system.
+fn is_quota_hit(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(libc::ENOSPC | libc::EDQUOT))
 }
 
-/// Removes the tree, clears the project, and waits for the usage to read zero (the file
-/// system frees inodes in the background).
-fn finish(quota: &XfsQuota, dir: &Path, project: ProjectId) {
-    fs::remove_dir_all(dir).unwrap();
-    quota.clear(dir, project).unwrap();
-    for _ in 0..100 {
-        if quota.usage(project).unwrap().is_zero() {
-            return;
-        }
-        sleep(Duration::from_millis(100));
-    }
-    panic!(
-        "usage of {project} did not read zero: {:?}",
-        quota.usage(project)
-    );
-}
-
-/// A write past the limit gets `EDQUOT` and stops at the limit, a neighbour run under its
-/// own project is not affected, and the usage reads what was written. It catches a limit
+/// A write past the limit gets `ENOSPC` (`EDQUOT` is accepted too) and stops at the limit,
+/// a neighbour run under its own project is not affected (which also shows the file system
+/// was not full), and the usage reads what was written. It catches a limit
 /// that is not enforced, one counted in the wrong unit, and one shared between projects.
 ///
 /// Run on a provisioned XFS `prjquota` host: see the module documentation.
@@ -87,43 +155,66 @@ fn finish(quota: &XfsQuota, dir: &Path, project: ProjectId) {
 #[ignore = "needs an XFS prjquota host: see the module docs"]
 fn project_quota_enforced() {
     let (quota, root) = host();
-    let (small, small_id) = fresh(&quota, &root, 100, "small");
-    let (big, big_id) = fresh(&quota, &root, 101, "big");
-    quota.apply(&small, small_id, MIB, 1000).unwrap();
-    quota.apply(&big, big_id, 16 * MIB, 1000).unwrap();
+    let small = fresh(&quota, &root, 100, "small");
+    let big = fresh(&quota, &root, 101, "big");
+    quota.apply(&small.dir, small.project, MIB, 1000).unwrap();
+    quota.apply(&big.dir, big.project, 16 * MIB, 1000).unwrap();
 
-    let over = write_file(&small, "fill", 4 * MIB).unwrap_err();
-    assert!(is_edquot(&over), "{over}");
-    let held = quota.usage(small_id).unwrap();
+    let over = write_file(&small.dir, "fill", 4 * MIB).unwrap_err();
+    assert!(
+        is_quota_hit(&over),
+        "expected ENOSPC (XFS project quota) or EDQUOT, got: {over}"
+    );
+    let held = quota.usage(small.project).unwrap();
     assert!(held.bytes <= MIB && held.bytes > 0, "{held:?}");
 
-    write_file(&big, "fill", 4 * MIB).unwrap();
-    assert!(quota.usage(big_id).unwrap().bytes >= 4 * MIB);
-    finish(&quota, &small, small_id);
-    finish(&quota, &big, big_id);
+    // The file system itself has room: the neighbour project writes 4 MiB.
+    write_file(&big.dir, "fill", 4 * MIB).unwrap();
+    assert!(quota.usage(big.project).unwrap().bytes >= 4 * MIB);
+    small.finish();
+    big.finish();
 }
 
-/// A flood of empty files stops at the inode limit with `EDQUOT`. It catches an inode limit
-/// that is not set (a job could exhaust the shared inode table).
+/// A flood of empty files stops at the inode limit with `ENOSPC` (`EDQUOT` is accepted
+/// too), the project's inode usage has reached the limit, and a file can still be made
+/// outside the project (the file system was not full). It catches an inode limit that is
+/// not set (a job could exhaust the shared inode table).
 ///
 /// Run on a provisioned XFS `prjquota` host: see the module documentation.
 #[test]
 #[ignore = "needs an XFS prjquota host: see the module docs"]
 fn inode_flood_hits_limit() {
+    const LIMIT: u64 = 100;
     let (quota, root) = host();
-    let (dir, project) = fresh(&quota, &root, 102, "flood");
-    quota.apply(&dir, project, 64 * MIB, 100).unwrap();
+    let run = fresh(&quota, &root, 102, "flood");
+    quota.apply(&run.dir, run.project, 64 * MIB, LIMIT).unwrap();
     let mut made = 0;
     let stopped = loop {
-        match File::create(dir.join(format!("f{made}"))) {
+        match File::create(run.dir.join(format!("f{made}"))) {
             Ok(_) => made += 1,
             Err(err) => break err,
         }
-        assert!(made <= 100, "the inode limit did not stop the flood");
+        assert!(made <= LIMIT, "the inode limit did not stop the flood");
     };
-    assert!(is_edquot(&stopped), "{stopped}");
-    assert!((50..100).contains(&made), "{made} files before the limit");
-    finish(&quota, &dir, project);
+    assert!(
+        is_quota_hit(&stopped),
+        "expected ENOSPC (XFS project quota) or EDQUOT, got: {stopped}"
+    );
+    assert!((50..LIMIT).contains(&made), "{made} files before the limit");
+    // The directory itself is an inode of the project, so the count is at the limit or one
+    // under it.
+    let usage = quota.usage(run.project).unwrap();
+    assert!(
+        (LIMIT - 1..=LIMIT).contains(&usage.inodes),
+        "inodes {} did not reach the limit {LIMIT}: {usage:?}",
+        usage.inodes
+    );
+
+    // Outside the project a file can be made: the refusal was the quota, not a full table.
+    let sibling = Plain(root.join(format!("sibling-{}", std::process::id())));
+    fs::create_dir(&sibling.0).unwrap();
+    File::create(sibling.0.join("free")).unwrap();
+    run.finish();
 }
 
 /// Files made after the apply are counted whoever owns the directory (the agent chowns it
@@ -136,23 +227,23 @@ fn inode_flood_hits_limit() {
 #[ignore = "needs an XFS prjquota host: see the module docs"]
 fn project_set_before_chown() {
     let (quota, root) = host();
-    let (dir, project) = fresh(&quota, &root, 103, "chown");
-    quota.apply(&dir, project, 64 * MIB, 1000).unwrap();
-    std::os::unix::fs::chown(&dir, Some(40_000), Some(40_000)).unwrap();
-    write_file(&dir, "after", 2 * MIB).unwrap();
-    assert!(quota.usage(project).unwrap().bytes >= 2 * MIB);
-    finish(&quota, &dir, project);
+    let run = fresh(&quota, &root, 103, "chown");
+    quota.apply(&run.dir, run.project, 64 * MIB, 1000).unwrap();
+    std::os::unix::fs::chown(&run.dir, Some(40_000), Some(40_000)).unwrap();
+    write_file(&run.dir, "after", 2 * MIB).unwrap();
+    assert!(quota.usage(run.project).unwrap().bytes >= 2 * MIB);
+    run.finish();
 
-    let (early, other) = fresh(&quota, &root, 104, "early");
-    write_file(&early, "before", 2 * MIB).unwrap();
-    let refused = quota.apply(&early, other, 64 * MIB, 1000);
+    // Dropped, not finished: the guard removes the tree and clears the project.
+    let early = fresh(&quota, &root, 104, "early");
+    write_file(&early.dir, "before", 2 * MIB).unwrap();
+    let refused = quota.apply(&early.dir, early.project, 64 * MIB, 1000);
     assert!(refused.is_err());
     assert_eq!(
-        quota.usage(other).unwrap(),
+        quota.usage(early.project).unwrap(),
         Usage::ZERO,
         "the file escaped the count"
     );
-    fs::remove_dir_all(&early).unwrap();
 }
 
 /// After the cleanup the project has no limits and no usage, a directory that outlives the
@@ -164,23 +255,23 @@ fn project_set_before_chown() {
 #[ignore = "needs an XFS prjquota host: see the module docs"]
 fn cleanup_clears_the_project_and_the_limit() {
     let (quota, root) = host();
-    let (dir, project) = fresh(&quota, &root, 105, "clean");
-    quota.apply(&dir, project, MIB, 100).unwrap();
+    let run = fresh(&quota, &root, 105, "clean");
+    let project = run.project;
+    quota.apply(&run.dir, project, MIB, 100).unwrap();
     assert_eq!(quota.limits(project).unwrap(), (MIB, 100));
-    write_file(&dir, "out", MIB / 2).unwrap();
-    finish(&quota, &dir, project);
+    write_file(&run.dir, "out", MIB / 2).unwrap();
+    run.finish();
     assert_eq!(quota.limits(project).unwrap(), (0, 0));
 
-    let (kept, project) = fresh(&quota, &root, 105, "kept");
-    quota.apply(&kept, project, MIB, 100).unwrap();
-    quota.clear(&kept, project).unwrap();
-    write_file(&kept, "free", 4 * MIB).unwrap();
+    let kept = fresh(&quota, &root, 105, "kept");
+    quota.apply(&kept.dir, kept.project, MIB, 100).unwrap();
+    quota.clear(&kept.dir, kept.project).unwrap();
+    write_file(&kept.dir, "free", 4 * MIB).unwrap();
     assert_eq!(
-        quota.usage(project).unwrap(),
+        quota.usage(kept.project).unwrap(),
         Usage::ZERO,
         "the directory kept its project"
     );
-    fs::remove_dir_all(&kept).unwrap();
 }
 
 /// A root on another kind of file system probes to none, with the file system named.
