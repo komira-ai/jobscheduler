@@ -688,6 +688,10 @@ impl Runtime for CrunRuntime {
         false
     }
 
+    fn places_in_cgroup(&self) -> bool {
+        true
+    }
+
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         let run = self.runs.get(&id.0)?;
         let ctr = run.cgroup.dir().join("ctr");
