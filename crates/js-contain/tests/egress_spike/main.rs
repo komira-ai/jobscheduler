@@ -23,6 +23,7 @@ mod exp_c;
 mod exp_d;
 mod exp_e;
 mod exp_f;
+mod exp_g;
 mod host;
 mod probe;
 mod report;

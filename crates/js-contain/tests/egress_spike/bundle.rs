@@ -27,6 +27,8 @@ pub enum Join {
     New,
     /// The existing one at this path.
     Path(String),
+    /// None: the host's own (only meaningful for the user namespace, with a root daemon).
+    Host,
 }
 
 /// What one container is.
@@ -54,6 +56,8 @@ pub struct Spec {
     pub crun: Option<PathBuf>,
     /// Apply the container runner's seccomp profile (no capabilities).
     pub seccomp: bool,
+    /// Run `crun` as root (`sudo -n`), as the root agent of option B does.
+    pub root: bool,
 }
 
 impl Spec {
@@ -71,6 +75,7 @@ impl Spec {
             gate: false,
             crun: None,
             seccomp: false,
+            root: false,
         }
     }
 }
@@ -283,7 +288,7 @@ impl Bundle {
             json!({"type": "mount"}),
         ];
         namespaces.push(match &spec.net {
-            Join::New => json!({"type": "network"}),
+            Join::New | Join::Host => json!({"type": "network"}),
             Join::Path(path) => json!({"type": "network", "path": path}),
         });
         let mut linux = json!({});
@@ -295,6 +300,7 @@ impl Bundle {
                 linux["gidMappings"] = json!([{"containerID": 0, "hostID": gid, "size": 65536}]);
             }
             Join::Path(path) => namespaces.push(json!({"type": "user", "path": path})),
+            Join::Host => {}
         }
         linux["namespaces"] = json!(namespaces);
         if spec.seccomp {
@@ -310,12 +316,18 @@ impl Bundle {
     }
 
     fn crun(&self) -> Command {
-        let mut cmd = Command::new(
-            self.spec
-                .crun
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(host::bin("crun"))),
-        );
+        let crun = self
+            .spec
+            .crun
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(host::bin("crun")));
+        let mut cmd = if self.spec.root {
+            let mut sudo = Command::new("sudo");
+            sudo.arg("-n").arg(crun);
+            sudo
+        } else {
+            Command::new(crun)
+        };
         cmd.arg("--root")
             .arg(self.dir.join("state"))
             .arg("--cgroup-manager=disabled")
