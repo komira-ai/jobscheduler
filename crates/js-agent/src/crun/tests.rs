@@ -2,14 +2,17 @@
 //! a container's end becomes, and the names of the paths it keeps.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-use js_contain::cgroup::OomOutcome;
+use js_contain::cgroup::{LeaseCgroup, OomOutcome};
 use js_contain::container::{ContainerLimits, Ended, HostMount};
-use js_contain::oci::LeaseDirs;
 use js_contain::oci::image::PinnedImage;
+use js_contain::oci::{LeaseDirs, LogTail as Captured, StreamTail};
 
-use super::spec::{EXEC_ROOT, NOT_RUN, container_spec, exit_of, pinned};
+use super::spec::{
+    EXEC_ROOT, NOT_RUN, container_spec, ctr_of, end_of, exit_of, log_tail_of, not_run_words, pinned,
+};
 use super::{config_dir, system_now_ms};
 use crate::cli_runtime::DEFAULT_PIDS;
 use crate::lifecycle::{Body, Exit, ResolvedMount, RunSpec};
@@ -185,4 +188,187 @@ fn the_configs_are_kept_beside_the_store_and_the_clock_reads_the_epoch() {
         PathBuf::from("/s/oci-configs")
     );
     assert!(system_now_ms() > 1_700_000_000_000);
+}
+
+/// A cgroup mount of one test: `<mount>/actions/js-x-r1` is the lease's cgroup, with the
+/// kernel's files written as the test says.
+struct Fixture {
+    mount: PathBuf,
+}
+
+impl Fixture {
+    fn new(name: &str) -> Self {
+        let mount = std::env::temp_dir().join(format!("js-crun-cg-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&mount);
+        fs::create_dir_all(mount.join("actions/js-x-r1")).expect("make the lease's cgroup");
+        Self { mount }
+    }
+
+    fn lease(&self) -> LeaseCgroup {
+        LeaseCgroup::at(&self.mount, "/actions", "js-x-r1")
+    }
+
+    /// Writes the lease's `memory.events`, and the actions cgroup's `memory.events.local`
+    /// when `actions_oom` is given.
+    fn events(&self, max: u64, oom: u64, oom_kill: u64, actions_oom: Option<u64>) -> &Self {
+        let events = format!("low 0\nhigh 0\nmax {max}\noom {oom}\noom_kill {oom_kill}\n");
+        fs::write(self.mount.join("actions/js-x-r1/memory.events"), events).expect("events");
+        if let Some(oom) = actions_oom {
+            let local = format!("low 0\nhigh 0\nmax 0\noom {oom}\noom_kill {oom}\n");
+            fs::write(self.mount.join("actions/memory.events.local"), local).expect("local");
+        }
+        self
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.mount);
+    }
+}
+
+/// Proves, from the files the kernel writes and not from timing, that a kill is flagged
+/// `oom_killed` only when the job's own memory limit made the OOM killer run: its
+/// `memory.events` counts `oom` and `max` as well as `oom_kill`. Catches a runtime that
+/// blames the job for a kill by the node: a parent cgroup's limit (the lease's `oom` is 0,
+/// the actions cgroup's `memory.events.local` counts one) or the host (nothing counted
+/// above), which would make the server retry with more memory for a job that did not
+/// need it; and one that misses the own-limit kill, or flags a job whose `max` events
+/// were met by reclaim (no process killed). Every case keeps the code crun gave, except
+/// the own-limit kill, which is 137.
+#[test]
+fn only_the_jobs_own_memory_limit_flags_a_kill_from_the_cgroups_files() {
+    let ok = |code: i32| Ok(Ended::Exited(code));
+    let flagged = |code: i32, oom_killed: bool| Exit { code, oom_killed };
+
+    let own = Fixture::new("own");
+    own.events(4, 1, 2, Some(0));
+    assert_eq!(
+        end_of(ok(1), &own.lease(), Some(1 << 30), Some(0)),
+        flagged(137, true)
+    );
+
+    let parent = Fixture::new("parent");
+    parent.events(0, 0, 3, Some(1));
+    assert_eq!(
+        end_of(ok(137), &parent.lease(), Some(1 << 30), Some(0)),
+        flagged(137, false)
+    );
+
+    let host = Fixture::new("host");
+    host.events(0, 0, 3, Some(0));
+    assert_eq!(
+        end_of(ok(137), &host.lease(), Some(1 << 30), Some(0)),
+        flagged(137, false)
+    );
+
+    let reclaimed = Fixture::new("reclaimed");
+    reclaimed.events(9, 0, 0, Some(0));
+    assert_eq!(
+        end_of(ok(0), &reclaimed.lease(), Some(1 << 30), Some(0)),
+        flagged(0, false)
+    );
+
+    let unread = Fixture::new("unread");
+    assert_eq!(
+        end_of(ok(5), &unread.lease(), Some(1 << 30), None),
+        flagged(5, false)
+    );
+}
+
+/// Proves the container's cgroup is `<lease>/ctr`: the path the usage sampler and the
+/// integrity check accept for a direct runner's lease (their layout is `<actions>/<lease>/ctr`).
+/// Catches a runtime that names the lease's own cgroup (usage then reads the booking's
+/// parent, not the job) or any other child.
+#[test]
+fn the_containers_cgroup_is_ctr_below_the_lease() {
+    let lease = Path::new("/sys/fs/cgroup/js/actions/js-x-r1");
+    assert_eq!(
+        ctr_of(lease),
+        PathBuf::from("/sys/fs/cgroup/js/actions/js-x-r1/ctr")
+    );
+}
+
+fn stream(bytes: &[u8], total: u64) -> StreamTail {
+    StreamTail {
+        bytes: bytes.to_vec(),
+        total,
+        file_cut: false,
+    }
+}
+
+/// Proves the ring of js-contain becomes the result's tail: the two streams stay apart and
+/// are text; a job that wrote nothing has an empty tail that is not truncated; one that
+/// wrote more than the ring holds is truncated; and a ring that begins inside a character
+/// loses that character's rest instead of showing replacement marks. Catches streams
+/// merged or swapped, a tail that claims to be whole when bytes were dropped, and invalid
+/// UTF-8 on the wire.
+#[test]
+fn the_ring_becomes_two_apart_texts_and_says_when_it_dropped_bytes() {
+    let whole = Captured {
+        stdout: stream(b"out\n", 4),
+        stderr: stream(b"err\n", 4),
+    };
+    let tail = log_tail_of(&whole, None);
+    assert_eq!(
+        (tail.stdout.as_str(), tail.stderr.as_str()),
+        ("out\n", "err\n")
+    );
+    assert!(!tail.truncated);
+    assert_eq!(log_tail_of(&Captured::default(), None), Default::default());
+
+    // "é" is 0xC3 0xA9: the ring begins at its second byte, and the job wrote 10 bytes.
+    let begun = Captured {
+        stdout: stream(b"\xA9tail", 10),
+        stderr: stream(b"", 0),
+    };
+    let tail = log_tail_of(&begun, None);
+    assert_eq!(tail.stdout, "tail");
+    assert!(tail.truncated);
+
+    let bad = Captured {
+        stdout: stream(b"a\xFFb", 3),
+        stderr: stream(b"", 0),
+    };
+    assert_eq!(log_tail_of(&bad, None).stdout, "a\u{FFFD}b");
+}
+
+/// Proves a tail is cut to the wire's limit from the front (the end is what is kept) at a
+/// character boundary, and says it was cut, even when the ring held everything. Catches a
+/// result over the wire's limit (the server refuses it) or one that keeps the start.
+#[test]
+fn a_tail_over_the_wire_limit_keeps_its_end() {
+    use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
+    let mut bytes = "é".repeat(MAX_LOG_STREAM_LEN).into_bytes();
+    bytes.extend_from_slice(b"end");
+    let total = u64::try_from(bytes.len()).expect("a length");
+    let captured = Captured {
+        stdout: stream(&bytes, total),
+        stderr: stream(b"", 0),
+    };
+    let tail = log_tail_of(&captured, None);
+    assert!(tail.stdout.len() <= MAX_LOG_STREAM_LEN);
+    assert!(tail.stdout.ends_with("end"));
+    assert!(tail.truncated);
+}
+
+/// Proves a container that did not run says why in the result: the words of crun or the
+/// init end the standard error, on a line of their own after what the job wrote, and the
+/// standard output is untouched; a container that ran adds nothing. Catches a job that
+/// fails with code 126 and nothing to read.
+#[test]
+fn a_container_that_did_not_run_gives_its_words_in_the_standard_error() {
+    let written = Captured {
+        stdout: stream(b"out", 3),
+        stderr: stream(b"partial", 7),
+    };
+    let failed = Ok(Ended::NotRun("exited 1: no such file".to_owned()));
+    let tail = log_tail_of(&written, not_run_words(&failed));
+    assert_eq!(tail.stdout, "out");
+    assert_eq!(tail.stderr, "partial\ncrun: exited 1: no such file\n");
+    let unrun = Err("cannot start".to_owned());
+    let tail = log_tail_of(&Captured::default(), not_run_words(&unrun));
+    assert_eq!(tail.stderr, "crun: cannot start\n");
+    assert_eq!(not_run_words(&Ok(Ended::Exited(1))), None);
+    assert!(!log_tail_of(&written, None).stderr.contains("crun:"));
 }

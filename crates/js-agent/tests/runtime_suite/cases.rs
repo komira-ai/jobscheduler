@@ -3,8 +3,13 @@
 use std::time::Duration;
 
 use js_agent::lifecycle::{Exit, Status, label};
+use js_agent_wire::LogTail;
+use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 
-use super::{LONG, Program, Subject, begin, clean_up, exited, listed, poll, remove, spec_of, stop};
+use super::{
+    ERR_LINE, FLOOD_END, LONG, OUT_LINE, Program, Subject, begin, clean_up, exited, listed, poll,
+    remove, spec_of, stop,
+};
 
 /// Proves the whole life of one container: it is created and started, polls as running,
 /// is listed with the run's label and the agent's, stops, polls as exited (not by the
@@ -176,4 +181,76 @@ pub fn a_runtime_without_gpus_says_so_and_refuses_one(s: &mut dyn Subject) {
     let refused = s.runtime().borrow_mut().create_and_start(&spec);
     assert!(refused.is_err());
     assert!(listed(s).is_empty());
+}
+
+/// The tail the runtime keeps of the container `id`, read as the lifecycle does.
+fn tail_of(s: &dyn Subject, id: &js_agent::lifecycle::RunHandle) -> Option<LogTail> {
+    s.runtime()
+        .borrow_mut()
+        .log_tail(id)
+        .expect("read the tail")
+}
+
+/// Proves the tail of a run that ends on its own reaches the result: standard output and
+/// standard error each hold what the program wrote to it and nothing of the other, the
+/// tail is not marked truncated, and a second read answers the same (the lifecycle reads
+/// once, but a retried step must not lose it). Catches a runtime that keeps no tail, merges
+/// the two streams, or empties the tail when the end is read.
+pub fn the_tail_of_a_run_that_ends_normally_reaches_the_result(s: &mut dyn Subject) {
+    let id = begin(s, "r1", Program::Say { hold: false });
+    s.settled(&id);
+    assert_eq!(exited(poll(s, &id)).code, 0);
+    let want = LogTail {
+        stdout: OUT_LINE.to_owned(),
+        stderr: ERR_LINE.to_owned(),
+        truncated: false,
+    };
+    assert_eq!(tail_of(s, &id), Some(want.clone()));
+    assert_eq!(tail_of(s, &id), Some(want));
+    clean_up(s);
+}
+
+/// Proves the tail of a run that was killed (it ignores SIGTERM and the grace is zero)
+/// holds what it wrote before the kill, with the exit 137. Catches a runtime whose kill
+/// path loses the output, which is what the user needs most from a job that was killed.
+pub fn the_tail_of_a_run_that_is_killed_reaches_the_result(s: &mut dyn Subject) {
+    let id = begin(s, "r1", Program::Say { hold: true });
+    stop(s, &id, Duration::ZERO);
+    s.settled(&id);
+    assert_eq!(exited(poll(s, &id)).code, 137);
+    let tail = tail_of(s, &id).expect("a tail");
+    assert_eq!(tail.stdout, OUT_LINE);
+    assert_eq!(tail.stderr, ERR_LINE);
+    clean_up(s);
+}
+
+/// Proves a container created and never started has no output: its tail is empty (or the
+/// runtime keeps none), never another run's and never an error. Catches a runtime that
+/// fails the read for a container that did not run, which the lifecycle reports as a
+/// failed log.
+pub fn a_run_never_started_has_an_empty_tail(s: &mut dyn Subject) {
+    s.prepared();
+    let spec = spec_of(s, "r1", Program::Say { hold: false });
+    let id = s.unstarted(&spec);
+    let tail = tail_of(s, &id);
+    assert_eq!(tail.unwrap_or_default(), LogTail::default());
+    stop(s, &id, Duration::ZERO);
+    remove(s, &id);
+}
+
+/// Proves output far past what a tail holds neither blocks the job nor grows the tail: the
+/// program ends with exit 0, each stream is within the wire's limit, the tail is marked
+/// truncated and ends with the program's last line. Catches a job stalled on a full pipe
+/// (the wait for its end would not return), a tail past the limit, and one that keeps the
+/// start of the output instead of its end.
+pub fn a_tail_is_bounded_and_says_it_dropped_bytes(s: &mut dyn Subject) {
+    let id = begin(s, "r1", Program::Flood);
+    s.settled(&id);
+    assert_eq!(exited(poll(s, &id)).code, 0);
+    let tail = tail_of(s, &id).expect("a tail");
+    assert!(tail.stdout.len() <= MAX_LOG_STREAM_LEN);
+    assert!(tail.stdout.ends_with(FLOOD_END));
+    assert!(tail.truncated);
+    assert_eq!(tail.stderr, "");
+    clean_up(s);
 }
