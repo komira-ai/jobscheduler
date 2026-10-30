@@ -607,6 +607,9 @@ pub struct Local {
     pub drain_wait: Duration,
 }
 
+/// The file in the state root that holds the native agent's lease journal.
+pub const NATIVE_JOURNAL: &str = "native-leases";
+
 /// How long a container gets to stop on its own when `--stop-grace` is not given.
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
 
@@ -695,6 +698,9 @@ impl Local {
             .chain(cli.instance_file.as_deref())
             .chain(cli.ca_cert.as_deref())
             .collect();
+        let journal = state
+            .as_ref()
+            .map_or_else(PathBuf::new, |state| state.path().join(NATIVE_JOURNAL));
         let native = NativeSettings::from_flags(
             &NativeFlags {
                 socket: cli.native_helper_socket.as_deref(),
@@ -702,8 +708,11 @@ impl Local {
                 network: cli.native_network.as_deref(),
                 tool_roots: &cli.native_tool_roots,
                 deny_read: &cli.native_deny_read,
+                max_file_mib: cli.native_max_file_mib,
+                max_processes: cli.native_max_processes,
             },
             &denied,
+            &journal,
         )?;
         if native.is_some() && euid != 0 {
             return Err(

@@ -6,6 +6,7 @@
 
 mod agent;
 mod fake_helper;
+mod journal;
 mod lifecycle;
 #[cfg(target_os = "macos")]
 mod mac;
@@ -51,6 +52,13 @@ pub fn config(fake: &FakeHelper) -> NativeConfig {
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![AbsPath::parse("/srv/js-state").unwrap()],
         read_model: ReadModel::Open,
+        journal: fake
+            .homes()
+            .parent()
+            .expect("the homes are below the test's directory")
+            .join("native-leases"),
+        max_file_bytes: 1 << 30,
+        max_processes: 512,
     }
 }
 
@@ -127,15 +135,24 @@ pub fn native(program: &str, args: &[&str]) -> NativeSpec {
     }
 }
 
+/// The script of the shell that sets a run's limits and becomes its command.
+pub const WRAPPER: &str = "ulimit -f \"$1\" && ulimit -u \"$2\" && shift 2 && exec \"$@\"";
+
 /// The command line the runtime sent the helper, taken apart: `sandbox-exec`, the `-D`
 /// parameters, `-p` and the profile, then the program and its arguments.
 pub struct Parsed {
+    /// The limits the shell wrapper sets: the file size in 1024-byte blocks and the most
+    /// processes.
+    pub limits: (String, String),
     pub params: Vec<(String, String)>,
     pub profile: String,
     pub tail: Vec<String>,
 }
 
 pub fn parse(argv: &[String]) -> Parsed {
+    assert_eq!(&argv[..4], ["/bin/sh", "-c", WRAPPER, "js-native"]);
+    let limits = (argv[4].clone(), argv[5].clone());
+    let argv = &argv[6..];
     assert_eq!(argv[0], "/usr/bin/sandbox-exec");
     let mut params = Vec::new();
     let mut at = 1;
@@ -146,6 +163,7 @@ pub fn parse(argv: &[String]) -> Parsed {
     }
     assert_eq!(argv[at], "-p");
     Parsed {
+        limits,
         params,
         profile: argv[at + 1].clone(),
         tail: argv[at + 2..].to_vec(),

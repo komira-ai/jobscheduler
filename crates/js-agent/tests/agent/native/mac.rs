@@ -147,3 +147,39 @@ fn a_loopback_connect_follows_the_lower_of_request_and_cap() {
     }
     drop(listener);
 }
+
+/// Asserts the file size limit for real: a program that writes four MiB to its standard
+/// output under a limit of one MiB is ended, and the log never grows past the limit. It
+/// catches a run that can fill the agent's disk through its output.
+#[test]
+fn a_run_that_writes_past_the_file_limit_is_ended_at_it() {
+    let mut rig = Rig::with("mac-fsize", |config| config.max_file_bytes = 1 << 20);
+    rig.fake.real_runs();
+    let spec = rig.spec(
+        "r1",
+        super::native("/bin/dd", &["if=/dev/zero", "bs=1048576", "count=4"]),
+    );
+    let id = rig.rt.create_and_start(&spec).unwrap();
+    let status = rig.settle(&id);
+    assert_ne!(status, exited(0), "the program was not stopped");
+    let written = fs::metadata(spec.scratch.join("stdout")).unwrap().len();
+    assert!(written <= 1 << 20, "{written} bytes under a limit of 1 MiB");
+}
+
+/// Asserts the process limit for real: under a limit of one process the shell of a run
+/// cannot start another program, so a fork bomb has no fork to make. It catches a run whose
+/// user can fill the process table.
+#[test]
+fn a_run_cannot_fork_past_the_process_limit() {
+    let mut rig = Rig::with("mac-nproc", |config| config.max_processes = 1);
+    rig.fake.real_runs();
+    let id = rig.start("r1", "/bin/sh", &["-c", "/bin/echo forked; :"]);
+    rig.settle(&id);
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    assert_eq!(tail.stdout, "", "the run forked");
+    assert!(
+        tail.stderr.contains("Resource temporarily unavailable"),
+        "{}",
+        tail.stderr
+    );
+}

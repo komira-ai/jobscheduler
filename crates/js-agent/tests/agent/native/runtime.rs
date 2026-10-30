@@ -63,6 +63,11 @@ fn a_start_makes_a_user_and_a_run_directory_and_runs_the_program_under_the_profi
     let parsed = parse(&run.argv);
     assert_eq!(parsed.tail, ["/usr/bin/id", "-u"]);
     assert_eq!(
+        parsed.limits,
+        ("1048576".to_owned(), "512".to_owned()),
+        "1 GiB in blocks of 1024 bytes, and 512 processes"
+    );
+    assert_eq!(
         parsed.params[0],
         ("RUN".to_owned(), home.display().to_string())
     );
@@ -472,4 +477,21 @@ fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
         let refused = rig.rt.check_native(&body).unwrap_err();
         assert_eq!(refused.code, refusal::NATIVE_UNSUPPORTED);
     }
+}
+
+/// Asserts that the limits of the configuration reach the shell that starts the run: the
+/// file size in blocks of 1024 bytes (at least one) and the process count. It catches a run
+/// that starts without the limits an operator set.
+#[test]
+fn the_configured_limits_are_set_by_the_shell_that_starts_the_run() {
+    let mut rig = Rig::with("limits", |config| {
+        config.max_file_bytes = 10;
+        config.max_processes = 7;
+    });
+    rig.start("r1", "/bin/true", &[]);
+    let parsed = parse(&rig.fake.run_of("7.0").argv);
+    assert_eq!(parsed.limits, ("1".to_owned(), "7".to_owned()));
+    let mut big = Rig::with("limits-big", |config| config.max_file_bytes = 3 << 20);
+    big.start("r1", "/bin/true", &[]);
+    assert_eq!(parse(&big.fake.run_of("7.0").argv).limits.0, "3072");
 }

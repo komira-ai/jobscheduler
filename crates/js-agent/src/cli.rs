@@ -199,9 +199,10 @@ pub struct Cli {
     /// started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes`,
     /// never the defaults of another helper: the agent asks it for its boot reset, which ends
     /// the lease users of whoever used it before and clears the Mac's auto-login. Native runs
-    /// are NOT stopped when the agent stops, restarts or dies, or when its worker dies: they
-    /// end when they exit, at their wall limit if the agent is running, or at the helper's
-    /// next start.
+    /// are NOT stopped when the agent stops, restarts or dies: the lease journal in the state
+    /// root ends them when the agent next starts, or when the rescue of an agent whose worker
+    /// died runs; until then they run on, and their wall limit is enforced only while an
+    /// agent runs.
     #[arg(long, value_name = "PATH")]
     pub native_helper_socket: Option<PathBuf>,
     /// The directory the helper makes its lease users' homes in (its `--homes`), by default
@@ -220,6 +221,16 @@ pub struct Cli {
     /// Name the helper's `--state-dir` here. It must exist. Needs `--native-helper-socket`.
     #[arg(long = "native-deny-read", value_name = "PATH")]
     pub native_deny_read: Vec<PathBuf>,
+    /// The most MiB any one file a native run writes may reach, its output included (the
+    /// run's `RLIMIT_FSIZE`); by default 4096. A run that writes more is ended by
+    /// `SIGXFSZ`. Needs `--native-helper-socket`.
+    #[arg(long, value_name = "MIB")]
+    pub native_max_file_mib: Option<u64>,
+    /// The most processes a native run's user may have (the run's `RLIMIT_NPROC`); by
+    /// default 512. A fork bomb stops there; the helper's kill is not held by it. Needs
+    /// `--native-helper-socket`.
+    #[arg(long, value_name = "N")]
+    pub native_max_processes: Option<u32>,
     /// A directory a native start's program must lie under; repeatable. By default `/usr/bin`,
     /// `/bin`, `/usr/sbin` and `/sbin`. Needs `--native-helper-socket`.
     #[arg(long = "native-tool-root", value_name = "PATH")]
