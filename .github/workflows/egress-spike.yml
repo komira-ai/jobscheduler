@@ -1,0 +1,85 @@
+# The egress spike: real rootless `crun` containers on a hosted ubuntu-24.04 runner trying
+# five ways to give a job a network that reaches a few endpoints while its build command has
+# none (crates/js-contain/tests/egress_spike). The tests are `#[ignore]`d in the other jobs;
+# this one installs what they need and runs them as the runner user, which uses passwordless
+# `sudo` only where a test plays the privileged helper or sets a host sysctl. Each test
+# prints `RESULT` lines; the job summary lists them.
+name: egress-spike
+
+on:
+  pull_request:
+    paths:
+      - crates/js-contain/tests/egress_spike/**
+      - crates/js-contain/Cargo.toml
+      - .github/workflows/egress-spike.yml
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  egress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      JS_EGRESS_SPIKE_STRICT: "1"
+      JS_EGRESS_SPIKE_REPORT: ${{ github.workspace }}/egress-report.txt
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - name: Install the container runtime and network tools from the distribution
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends crun passt nftables uidmap iproute2 util-linux apparmor
+      # Newuidmap needs a subordinate range for the runner user; the live-podman job adds a
+      # range the same way. Ids 300000 to 365535 are above every id the runner's files use.
+      - name: Give the runner user a subordinate id range
+        run: |
+          if ! grep "^$USER:" /etc/subuid > /dev/null; then echo "$USER:300000:65536" | sudo tee -a /etc/subuid; fi
+          if ! grep "^$USER:" /etc/subgid > /dev/null; then echo "$USER:300000:65536" | sudo tee -a /etc/subgid; fi
+          grep "^$USER:" /etc/subuid /etc/subgid
+      - name: Host facts the results depend on
+        run: |
+          uname -r
+          crun --version | head -1
+          pasta --version 2>&1 | head -1 || true
+          nft --version
+          echo "apparmor_restrict_unprivileged_userns = $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>&1)"
+          echo "user.max_user_namespaces = $(cat /proc/sys/user/max_user_namespaces)"
+          ls /etc/apparmor.d | head -50
+          sudo aa-status 2>&1 | grep -E "crun|pasta|passt|unprivileged_userns" || true
+      - name: Build the tests as the runner user
+        run: cargo test -p js-contain --test egress_spike --locked --no-run
+      - name: Run the egress experiments
+        run: cargo test -p js-contain --test egress_spike --locked -- --ignored --test-threads=1 --nocapture
+      - name: Results
+        if: ${{ always() }}
+        run: |
+          {
+            echo "### Egress spike results"
+            echo
+            echo '```'
+            cat "$JS_EGRESS_SPIKE_REPORT" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

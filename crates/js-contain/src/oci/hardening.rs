@@ -3,26 +3,34 @@
 //! the seccomp filter are listed here, from the containers/common release below, and
 //! pinned.
 //!
-//! - **Capabilities:** containers.conf's `default_capabilities` of containers/common
-//!   v0.57.4: the eleven in [`CAPABILITIES`], for the
-//!   bounding, effective, permitted and ambient sets; the inheritable set is empty.
-//!   They are capabilities of the container's own user namespace, whose ids are the
-//!   daemon user's subordinate ids: they give a job's root nothing over an inode
-//!   the daemon user owns, since that user is not mapped.
+//! - **Capabilities:** a job holds none: all five sets of its `process.capabilities` are
+//!   empty (`podman run --cap-drop ALL`), and its seccomp filter is resolved for that
+//!   empty set. The eleven of containers.conf's `default_capabilities` of
+//!   containers/common v0.57.4 in [`CAPABILITIES`] are what a helper container holds
+//!   (`helper`): it runs the daemon's own give and unpack modes, which need to change
+//!   owners. They are capabilities of the container's own user namespace, whose ids
+//!   are the daemon user's subordinate ids: they give its root nothing over an inode the
+//!   daemon user owns, since that user is not mapped.
 //! - **Masked and read-only paths:** `DefaultMaskedPaths` and `DefaultReadOnlyPaths` of
 //!   the same release ([`MASKED_PATHS`], [`READONLY_PATHS`]).
 //! - **Seccomp:** the same release's `pkg/seccomp/seccomp.json`, kept as
 //!   `seccomp.json` beside this file (sha256 [`PROFILE_SHA256`], which a unit test
 //!   checks, so an edit is a reviewed change of the pin), resolved for the container's
-//!   capability set and the node's architecture the way containers/common resolves it:
+//!   capability set (none, for a job) and the node's architecture the way
+//!   containers/common resolves it:
 //!   an entry with `includes.caps` applies only if the container holds all of them, one
 //!   with `excludes.caps` only if it holds none, and one with `arches` only on those
 //!   architectures. The result is a plain OCI `linux.seccomp` section. One edit differs
 //!   from upstream: four `personality` entries that also allow `ADDR_NO_RANDOMIZE`
 //!   (see their `comment` in the profile).
-//! - **Also set:** `oom_score_adj` 0, a private cgroup namespace, and `/sys/fs/cgroup`
-//!   read-only (`spec`). `noNewPrivileges` is false for a job (`spec`) and true for a
-//!   helper container (`helper`).
+//!   The pinned profile allows `clone`, `clone3`, `mount`, `unshare` and (without
+//!   `CAP_SYS_ADMIN`) refuses `setns` whatever the capability set, so what stops a job
+//!   from making a user namespace of its own is the kernel, not the filter. Resolved for
+//!   no capability, the one entry that changes is `chroot`: allowed with `CAP_SYS_CHROOT`,
+//!   refused without.
+//! - **Also set:** `oom_score_adj` 0, a private cgroup namespace, `/sys/fs/cgroup`
+//!   read-only, `RLIMIT_CORE` 0 and `noNewPrivileges` (`spec`; the last is also true for a
+//!   helper container, `helper`).
 //!
 //! Left out, on purpose: the `net.ipv4.ping_group_range` and
 //! `net.ipv4.ip_unprivileged_port_start` sysctls (a job has loopback only) and the
