@@ -54,6 +54,13 @@ fn the_alert_keys_are_read_and_refused_with_their_rules() {
         )
     };
     assert!(load(&scratch, &with(&format!("{url}\n{}", token(&good)))).is_ok());
+    assert!(
+        load(
+            &scratch,
+            &with(&format!("{url}\nalert_repeat_after = \"30m\""))
+        )
+        .is_ok()
+    );
 
     let cases = [
         (
@@ -72,6 +79,15 @@ fn the_alert_keys_are_read_and_refused_with_their_rules() {
         (
             "alert_webhook_url = 5".to_owned(),
             "server.alert_webhook_url: must be a string".to_owned(),
+        ),
+        (
+            "alert_repeat_after = \"1h\"".to_owned(),
+            "server.alert_repeat_after: needs server.alert_webhook_url".to_owned(),
+        ),
+        (
+            format!("{url}\nalert_repeat_after = \"soon\""),
+            "server.alert_repeat_after: must be a positive duration such as 600s, 10m or 1h"
+                .to_owned(),
         ),
     ];
     for (lines, said) in cases {
@@ -160,6 +176,7 @@ async fn a_running_server_sends_its_alerts_to_the_sink() {
     for _ in 0..3 {
         h.ticks.step().await;
     }
+    h.running.scaler().unwrap().flush_alerts();
     assert_eq!(sink.keys(), ["orphan:burst:js-orphan:i-stray-alert"]);
     assert!(sink.sent()[0].text.contains("i-stray-alert"));
     let reply = h.call("GET", "/v1/pools", None).await;
@@ -169,7 +186,8 @@ async fn a_running_server_sends_its_alerts_to_the_sink() {
 }
 
 /// Asserts that a file that names a webhook but has no elastic pool starts and serves
-/// (there is no scaler to give the sink to). It catches a start that refuses a server for
+/// (there is no scaler to give the sink to) and says at start that no alert has a source.
+/// It catches a silent webhook that an operator believes is watching, and a start that refuses a server for
 /// having a place to send alerts it can never raise.
 #[tokio::test]
 async fn a_server_without_a_scaler_starts_with_a_webhook_named() {
@@ -177,7 +195,12 @@ async fn a_server_without_a_scaler_starts_with_a_webhook_named() {
         "alerts_no_scaler",
         "alert_webhook_url = \"http://127.0.0.1:9/never\"",
     );
-    let h = Harness::over(scratch, config.unwrap()).await;
+    let config = config.unwrap();
+    let warned = config.warnings().iter().any(|warning| {
+        warning.contains("server.alert_webhook_url is set but no pool launches machines")
+    });
+    assert!(warned, "{:?}", config.warnings());
+    let h = Harness::over(scratch, config).await;
     let health = h.call("GET", "/healthz", None).await;
     assert_eq!(health.status, 200, "{}", health.body);
 }

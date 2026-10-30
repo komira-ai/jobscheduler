@@ -1,6 +1,6 @@
 //! The lease server's heartbeat and expected state, read from its status page.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_alert::http::{Plain, UrlError, agent, check};
@@ -10,15 +10,26 @@ use ureq::Agent;
 /// The most bytes of status page read.
 const PAGE_LIMIT: u64 = 8 * 1024 * 1024;
 
+/// A machine the server's records hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Machine {
+    /// The name the server gave it, which the cloud instance carries.
+    pub host: String,
+    /// The cloud's id for it, once the cloud has given one. Until then the machine is known
+    /// by its name alone.
+    pub provider_id: Option<String>,
+}
+
 /// What the status page says that the watcher uses.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Status {
-    /// The time of the server's last finished scaler tick, in the server's own
-    /// milliseconds; `None` before its first. Only whether it changes is used, so a skew
-    /// between the two clocks does not matter.
-    pub beat: Option<u64>,
-    /// The names and provider ids of the machines the server's records hold.
-    pub machines: BTreeSet<String>,
+    /// For each pool, the time of the server's last finished scaler tick for it, in the
+    /// server's own milliseconds; `None` before its first. Only whether it changes is
+    /// used, so a skew between the two clocks does not matter. A server with no elastic
+    /// pool shows no pool here and has no heartbeat to watch.
+    pub beats: BTreeMap<String, Option<u64>>,
+    /// The machines the server's records hold, orphans left out.
+    pub machines: Vec<Machine>,
 }
 
 /// The status could not be read. The words hold no secret.
@@ -95,12 +106,13 @@ struct Pools {
 
 #[derive(Deserialize)]
 struct Pool {
+    name: String,
     last_tick_ms: Option<u64>,
-    machines: Vec<Machine>,
+    machines: Vec<WireMachine>,
 }
 
 #[derive(Deserialize)]
-struct Machine {
+struct WireMachine {
     host: String,
     provider_id: Option<String>,
 }
@@ -113,15 +125,21 @@ struct Machine {
 pub fn parse(body: &[u8]) -> Result<Status, StatusError> {
     let page: Pools = serde_json::from_slice(body)
         .map_err(|_| StatusError::new("the status page is not the pools JSON"))?;
-    let beat = page.pools.iter().filter_map(|pool| pool.last_tick_ms).max();
+    let beats = page
+        .pools
+        .iter()
+        .map(|pool| (pool.name.clone(), pool.last_tick_ms))
+        .collect();
     let machines = page
         .pools
         .into_iter()
         .flat_map(|pool| pool.machines)
-        .flat_map(|machine| [Some(machine.host), machine.provider_id])
-        .flatten()
+        .map(|machine| Machine {
+            host: machine.host,
+            provider_id: machine.provider_id,
+        })
         .collect();
-    Ok(Status { beat, machines })
+    Ok(Status { beats, machines })
 }
 
 #[cfg(test)]
@@ -138,28 +156,32 @@ mod tests {
     const PAGE: &str = r#"{"pools":[{"name":"gpu","launch":"live","last_tick_ms":1700,
         "machines":[{"host":"js-a","provider_id":"i-1","state":"registered"},
                     {"host":"js-b","provider_id":null,"state":"planned"}],
-        "orphans":[{"host":"js-o","provider_id":"i-9"}]}],"warnings":[]}"#;
+        "orphans":[{"host":"js-o","provider_id":"i-9"}]},
+        {"name":"cpu","last_tick_ms":null,"machines":[]}],"warnings":[]}"#;
 
-    /// Asserts what the reader takes from the real shape of `GET /v1/pools`: the tick
-    /// time, and the host name and provider id of each machine (a machine without an id
-    /// yet is known by its name), and not the orphans. It catches a reader that counts
+    /// Asserts what the reader takes from the real shape of `GET /v1/pools`: the tick time
+    /// of each pool by name, and each machine with its host name and provider id (null
+    /// until the cloud has given one), and not the orphans. It catches a reader that counts
     /// an orphan as explained, which would silence the alarm for exactly the machines it
-    /// exists to find.
+    /// exists to find, and one that folds the pools into one heartbeat.
     #[test]
-    fn the_status_is_the_tick_time_and_the_machines_not_the_orphans() {
+    fn the_status_is_each_pools_tick_time_and_the_machines_not_the_orphans() {
         let status = parse(PAGE.as_bytes()).unwrap();
-        assert_eq!(status.beat, Some(1700));
-        let machines: Vec<&str> = status.machines.iter().map(String::as_str).collect();
-        assert_eq!(machines, ["i-1", "js-a", "js-b"]);
+        let beats: Vec<(&str, Option<u64>)> = status
+            .beats
+            .iter()
+            .map(|(pool, beat)| (pool.as_str(), *beat))
+            .collect();
+        assert_eq!(beats, [("cpu", None), ("gpu", Some(1700))]);
+        let machines: Vec<(&str, Option<&str>)> = status
+            .machines
+            .iter()
+            .map(|machine| (machine.host.as_str(), machine.provider_id.as_deref()))
+            .collect();
+        assert_eq!(machines, [("js-a", Some("i-1")), ("js-b", None)]);
         let none = parse(br#"{"pools":[]}"#).unwrap();
         assert_eq!(none, Status::default());
         assert!(parse(b"not json").is_err());
-        assert!(
-            parse(br#"{"pools":[{"machines":[]}]}"#)
-                .unwrap()
-                .beat
-                .is_none()
-        );
     }
 
     /// Asserts the three ways a read ends: the page parsed, a non-200 answer, and a body
@@ -171,7 +193,7 @@ mod tests {
         let page = Receiver::start_with(200, PAGE);
         let url = format!("http://{}/v1/pools", page.addr());
         let status = HttpStatus::new(&url, LIMIT).unwrap().read().unwrap();
-        assert_eq!(status.beat, Some(1700));
+        assert_eq!(status.beats["gpu"], Some(1700));
         let head = page.requests()[0].head.to_ascii_lowercase();
         assert!(head.starts_with("get /v1/pools http/1.1"), "{head}");
 

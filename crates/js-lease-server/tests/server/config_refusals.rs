@@ -68,7 +68,7 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
          max_connections, handshake_timeout, header_timeout, read_timeout, write_timeout, \
          max_requests, drain_timeout, agent_hello_burst, agent_hello_interval, \
          require_host_credential, usage_db, usage_off, profile_store_bytes, \
-         alert_webhook_url, alert_webhook_token_file"
+         alert_webhook_url, alert_webhook_token_file, alert_repeat_after"
     );
     let text = file(&server(&scratch, ""), &[&pool.set("colour", "\"red\"")]);
     assert_eq!(

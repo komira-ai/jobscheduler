@@ -10,11 +10,12 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand, ValueEnum};
 use js_alert::{AlertSink, DELIVERY_LIMIT, WebhookSink};
 use js_elastic::SchedulerId;
-use js_provider_lambdalabs::kind::{API_TIMEOUT, DEFAULT_API_URL};
-use js_provider_lambdalabs::{ApiKey, HttpApi, LambdaRead, Reader, SystemClock};
+use js_provider_lambdalabs::kind::API_TIMEOUT;
+use js_provider_lambdalabs::{ApiKey, Reader};
 
-use crate::abort::{LambdaTarget, Target, abort};
-use crate::config::{Config, LambdaTable};
+use crate::abort;
+use crate::client::{Failure, read_handle, refused};
+use crate::config::Config;
 use crate::status::{HttpStatus, StatusSource};
 use crate::view::{CloudView, LambdaView};
 use crate::watcher::Watcher;
@@ -103,7 +104,7 @@ pub fn run(
             cloud: CloudName::Lambda,
             scheduler_id,
             apply,
-        } => stop_all(&config, &scheduler_id, apply, out),
+        } => abort::command(&config, &scheduler_id, apply, out),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -112,20 +113,6 @@ pub fn run(
             ExitCode::from(code)
         }
     }
-}
-
-/// An exit code and what to say.
-type Failure = (u8, String);
-
-fn refused(why: impl std::fmt::Display) -> Failure {
-    (2, why.to_string())
-}
-
-/// The Lambda API client the table describes.
-fn lambda_api(table: &LambdaTable) -> Result<HttpApi, Failure> {
-    let key = ApiKey::from_file(&table.api_key_file).map_err(refused)?;
-    let url = table.api_url.as_deref().unwrap_or(DEFAULT_API_URL);
-    HttpApi::connect(url, &key, None, API_TIMEOUT).map_err(refused)
 }
 
 /// The webhook sink the configuration names.
@@ -156,13 +143,11 @@ fn watch(config: &Path, ticks: Option<u64>, sleep: &dyn Fn(Duration)) -> Result<
         .try_init();
     let config = Config::load(config).map_err(refused)?;
     let scheduler = SchedulerId::new(&config.scheduler_id).map_err(refused)?;
-    let api = Arc::new(lambda_api(config.lambda().map_err(refused)?)?);
-    // From here the watcher holds a reader of the API: the client itself goes no further.
-    let reads: Arc<dyn LambdaRead> = api;
+    let reads = read_handle(config.lambda().map_err(refused)?)?;
     let cloud: Arc<dyn CloudView> = Arc::new(LambdaView::new(Reader::new(reads, scheduler)));
     let status = HttpStatus::new(&config.status_url, API_TIMEOUT).map_err(refused)?;
-    let sink: Arc<dyn AlertSink> = Arc::new(sink(&config)?);
     let status: Arc<dyn StatusSource> = Arc::new(status);
+    let sink: Arc<dyn AlertSink> = Arc::new(sink(&config)?);
     let mut watcher = Watcher::new((cloud, status), sink, config.settings());
     let origin = Instant::now();
     let interval = config.interval();
@@ -179,38 +164,4 @@ fn watch(config: &Path, ticks: Option<u64>, sleep: &dyn Fn(Duration)) -> Result<
         },
     );
     Ok(())
-}
-
-/// `abort`: builds the target from the file and prints what the abort did.
-fn stop_all(
-    config: &Path,
-    scheduler: &str,
-    apply: bool,
-    out: &mut dyn Write,
-) -> Result<(), Failure> {
-    let config = Config::load(config).map_err(refused)?;
-    let id = SchedulerId::new(scheduler).map_err(refused)?;
-    let api = Arc::new(lambda_api(config.lambda().map_err(refused)?)?);
-    let target = LambdaTarget::new(api, id, Arc::new(SystemClock::new()));
-    report(&target, scheduler, apply, out)
-}
-
-/// Runs the abort on `target` and prints it.
-fn report(
-    target: &dyn Target,
-    scheduler: &str,
-    apply: bool,
-    out: &mut dyn Write,
-) -> Result<(), Failure> {
-    let outcome = abort(target, scheduler, apply).map_err(|why| (1, why.to_string()))?;
-    for line in &outcome.lines {
-        let _ = writeln!(out, "{line}");
-    }
-    match outcome.failed {
-        0 => Ok(()),
-        count => Err((
-            1,
-            format!("{count} instance(s) were not stopped; run it again"),
-        )),
-    }
 }

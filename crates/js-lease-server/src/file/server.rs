@@ -40,6 +40,7 @@ const SERVER_KEYS: &[&str] = &[
     "profile_store_bytes",
     "alert_webhook_url",
     "alert_webhook_token_file",
+    "alert_repeat_after",
 ];
 
 /// What the `[server]` table says.
@@ -65,6 +66,8 @@ pub(crate) struct Server {
 pub(crate) struct AlertKeys {
     pub(crate) webhook_url: String,
     pub(crate) token_file: Option<PathBuf>,
+    /// How often an alert that keeps holding is sent again.
+    pub(crate) repeat_after: Duration,
 }
 
 /// The usage keys of `[server]`, as the file gave them: the flags `--usage-db`,
@@ -186,41 +189,26 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     })
 }
 
-/// The alert keys. The token file means something only with the URL.
+/// The alert keys. The token file and the repeat period mean something only with the URL.
 fn read_alerts(s: &mut Section) -> Result<Option<AlertKeys>, StartupError> {
     let url = s.string("alert_webhook_url")?;
     let token_file = s.path("alert_webhook_token_file")?;
-    match (url, token_file) {
-        (Some(webhook_url), token_file) => Ok(Some(AlertKeys {
-            webhook_url,
-            token_file,
-        })),
-        (None, Some(_)) => {
-            Err(s.fail("alert_webhook_token_file", "needs server.alert_webhook_url"))
-        }
-        (None, None) => Ok(None),
-    }
-}
-
-/// The usage keys. The rules are the flags': a budget of at least 1, and no `usage_db`
-/// beside `usage_off = true`.
-fn read_usage(s: &mut Section) -> Result<UsageKeys, StartupError> {
-    let db = s.path("usage_db")?;
-    let off = s.boolean("usage_off")?.unwrap_or(false);
-    let bytes = s.bounded(
-        "profile_store_bytes",
-        1,
-        u64::MAX,
-        DEFAULT_PROFILE_STORE_BYTES,
-    )?;
-    if db.is_some() & off {
-        return Err(s.fail("usage_db", "not allowed with server.usage_off"));
-    }
-    Ok(UsageKeys {
-        db,
-        off,
-        profile_store_bytes: bytes,
-    })
+    let repeat_after = s.duration("alert_repeat_after")?;
+    let Some(webhook_url) = url else {
+        let given = [
+            ("alert_webhook_token_file", token_file.is_some()),
+            ("alert_repeat_after", repeat_after.is_some()),
+        ];
+        return match given.into_iter().find(|(_, set)| *set) {
+            Some((key, _)) => Err(s.fail(key, "needs server.alert_webhook_url")),
+            None => Ok(None),
+        };
+    };
+    Ok(Some(AlertKeys {
+        webhook_url,
+        token_file,
+        repeat_after: repeat_after.unwrap_or(Duration::from_secs(3600)),
+    }))
 }
 
 pub(super) fn read_client_token(server: &Server, ld: &Load<'_>) -> Result<Token, StartupError> {

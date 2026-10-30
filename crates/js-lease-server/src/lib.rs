@@ -93,10 +93,12 @@
 //! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
 //! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456):
 //! # the flags' names, defaults and rules; usage_db is refused beside usage_off = true
-//! # alert_webhook_url, alert_webhook_token_file: every alert of the scaler is also POSTed as
-//! # {source, key, text} JSON to the https URL (http only to a loopback address), once while it
-//! # holds and again if it clears and returns; the token file (owner-only) holds the bearer
-//! # token the receiver wants. The token file is refused without the URL.
+//! # alert_webhook_url, alert_webhook_token_file, alert_repeat_after (1h): every alert of the
+//! # scaler is also POSTed as {source, key, text} JSON
+//! # to the https URL (http only to a loopback address) when it begins to hold, every
+//! # alert_repeat_after while it holds, and again if it clears and returns; delivery is off the
+//! # tick path. The token file (owner-only) holds the bearer token the receiver wants. The token
+//! # file and alert_repeat_after are refused without the URL.
 //!
 //! [[pool]]
 //! name     = "gpu-static"

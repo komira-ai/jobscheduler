@@ -7,11 +7,18 @@
 //! and never touched.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::Arc;
 
 use js_elastic::{ElasticProvider, HostRef, Released, SchedulerId};
-use js_provider_lambdalabs::{Clock, ElasticConfig, LambdaApi, LambdaProvider, OptionTable};
+use js_provider_lambdalabs::{
+    Clock, ElasticConfig, LambdaApi, LambdaProvider, OptionTable, SystemClock,
+};
+
+use crate::client::{Failure, full_handle, refused};
+use crate::config::Config;
 
 /// An instance the abort would stop (or leave alone).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,5 +213,47 @@ impl Target for LambdaTarget {
             ))),
             Released::Unknown => Err(TargetError::new("no answer; run the abort again")),
         }
+    }
+}
+
+/// The `abort` command: reads the configuration, checks that `scheduler` is the one it
+/// names, builds the Lambda target and prints what the abort did. Exit status 2 for a
+/// refused input, 1 when the plan cannot be made or an instance was not stopped.
+pub(crate) fn command(
+    config: &Path,
+    scheduler: &str,
+    apply: bool,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
+    let config = Config::load(config).map_err(refused)?;
+    if config.scheduler_id != scheduler {
+        return Err(refused(format!(
+            "--scheduler-id {scheduler} differs from scheduler_id {} in the configuration; an abort is for the scheduler the file names",
+            config.scheduler_id
+        )));
+    }
+    let id = SchedulerId::new(scheduler).map_err(refused)?;
+    let api = full_handle(config.lambda().map_err(refused)?)?;
+    let target = LambdaTarget::new(api, id, Arc::new(SystemClock::new()));
+    report(&target, scheduler, apply, out)
+}
+
+/// Runs the abort on `target` and prints it.
+fn report(
+    target: &dyn Target,
+    scheduler: &str,
+    apply: bool,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
+    let outcome = abort(target, scheduler, apply).map_err(|why| (1, why.to_string()))?;
+    for line in &outcome.lines {
+        let _ = writeln!(out, "{line}");
+    }
+    match outcome.failed {
+        0 => Ok(()),
+        count => Err((
+            1,
+            format!("{count} instance(s) were not stopped; run it again"),
+        )),
     }
 }

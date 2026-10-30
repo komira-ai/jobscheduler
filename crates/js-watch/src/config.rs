@@ -9,6 +9,7 @@
 //! stale_after_secs = 300    # optional: heartbeat alarm after this long without a tick
 //! confirm_ticks = 2         # optional: ticks an instance must be unexplained
 //! sweep_every_secs = 1800   # optional: time between sweeps for leftovers
+//! repeat_after_secs = 3600  # optional: a holding alert is sent again this often
 //!
 //! [lambda]
 //! api_key_file = "/run/credentials/js-watch/lambda-key"
@@ -42,7 +43,7 @@ pub enum ConfigError {
     Syntax {
         /// The file.
         path: PathBuf,
-        /// The parser's reason (it names a line and a key, not a value).
+        /// What is wrong, by line, key name and expected type; never the value.
         why: String,
     },
     /// A number that must be at least 1 is 0.
@@ -95,6 +96,7 @@ pub struct Config {
     stale_after_secs: Option<u64>,
     confirm_ticks: Option<u32>,
     sweep_every_secs: Option<u64>,
+    repeat_after_secs: Option<u64>,
     /// Lambda's table.
     pub lambda: Option<LambdaTable>,
     /// Where alerts go.
@@ -114,7 +116,7 @@ impl Config {
         })?;
         let config: Self = toml::from_str(&text).map_err(|why| ConfigError::Syntax {
             path: path.to_owned(),
-            why: why.message().to_owned(),
+            why: scrub(&text, &why),
         })?;
         let numbers = [
             ("interval_secs", config.interval_secs.unwrap_or(1)),
@@ -124,6 +126,7 @@ impl Config {
                 u64::from(config.confirm_ticks.unwrap_or(1)),
             ),
             ("sweep_every_secs", config.sweep_every_secs.unwrap_or(1)),
+            ("repeat_after_secs", config.repeat_after_secs.unwrap_or(1)),
         ];
         if let Some((name, _)) = numbers.iter().find(|(_, value)| *value == 0) {
             return Err(ConfigError::Zero(name));
@@ -142,6 +145,7 @@ impl Config {
             stale_after: Duration::from_secs(self.stale_after_secs.unwrap_or(300)),
             confirm_ticks: self.confirm_ticks.unwrap_or(2),
             sweep_every: Duration::from_secs(self.sweep_every_secs.unwrap_or(1800)),
+            repeat_after: Duration::from_secs(self.repeat_after_secs.unwrap_or(3600)),
         }
     }
 
@@ -153,4 +157,32 @@ impl Config {
     pub fn lambda(&self) -> Result<&LambdaTable, ConfigError> {
         self.lambda.as_ref().ok_or(ConfigError::NoLambda)
     }
+}
+
+/// What the parser said, without any value of the file: the line, and the key named by an
+/// unknown or missing field, or the key on that line and the type the value was expected
+/// to have. A parser message otherwise quotes the value it met, and the file may hold a URL
+/// or a path there.
+fn scrub(text: &str, why: &toml::de::Error) -> String {
+    let before = why.span().map_or(0, |span| span.start);
+    let line = text
+        .get(..before)
+        .map_or(0, |head| head.matches('\n').count());
+    let key = text
+        .lines()
+        .nth(line)
+        .and_then(|each| each.split_once('='))
+        .map_or("", |(key, _)| key.trim());
+    let message = why.message();
+    let said = if message.starts_with("unknown field") || message.starts_with("missing field") {
+        message.to_owned()
+    } else {
+        let expected = message
+            .rsplit_once(", expected ")
+            .map_or_else(String::new, |(_, expected)| {
+                format!(", expected {expected}")
+            });
+        format!("{key:?} has a wrong type or form{expected}")
+    };
+    format!("line {}: {said}", line + 1)
 }

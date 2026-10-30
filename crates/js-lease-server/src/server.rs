@@ -127,7 +127,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         _ => None,
     };
     if let (Some(scaler), Some(sink)) = (&scaler, config.alerts.take()) {
-        scaler.set_sink(sink);
+        scaler.set_sink(sink, config.alert_repeat);
     }
     let Seated { provider, unseated } = source.provider(&bookings)?;
     let acceptor = config.tls.as_ref().map(tls::acceptor).transpose()?;

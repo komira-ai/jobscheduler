@@ -173,17 +173,20 @@ fn the_timing_keys_default_and_refuse_zero() {
     assert_eq!(settings.stale_after, Duration::from_secs(300));
     assert_eq!(settings.confirm_ticks, 2);
     assert_eq!(settings.sweep_every, Duration::from_secs(1800));
-    let extra = "interval_secs = 5\nstale_after_secs = 6\nconfirm_ticks = 3\nsweep_every_secs = 7";
+    assert_eq!(settings.repeat_after, Duration::from_secs(3600));
+    let extra = "interval_secs = 5\nstale_after_secs = 6\nconfirm_ticks = 3\nsweep_every_secs = 7\nrepeat_after_secs = 8";
     let set = Config::load(&offline(&scratch, "https://hook.example.org/x", extra)).unwrap();
     assert_eq!(set.interval(), Duration::from_secs(5));
     assert_eq!(set.settings().stale_after, Duration::from_secs(6));
     assert_eq!(set.settings().confirm_ticks, 3);
     assert_eq!(set.settings().sweep_every, Duration::from_secs(7));
+    assert_eq!(set.settings().repeat_after, Duration::from_secs(8));
     for key in [
         "interval_secs",
         "stale_after_secs",
         "confirm_ticks",
         "sweep_every_secs",
+        "repeat_after_secs",
     ] {
         let file = offline(
             &scratch,
@@ -216,6 +219,13 @@ fn a_bad_file_is_refused_by_name() {
         "scheduler_id = \"s\"\ncloud = \"lambda\"\nstatus_url = \"http://127.0.0.1:1\"\n[alerts]\nwebhook_url = \"https://h.example.org\"\n",
         0o600,
     );
+    let nourl = scratch.file(
+        "nourl.toml",
+        "scheduler_id = \"s\"\ncloud = \"lambda\"\n[alerts]\nwebhook_url = \"https://h.example.org\"\n",
+        0o600,
+    );
+    let missing = Config::load(&nourl).unwrap_err().to_string();
+    assert!(missing.contains("missing field `status_url`"), "{missing}");
     let config = Config::load(&bare).unwrap();
     assert_eq!(config.lambda().unwrap_err(), ConfigError::NoLambda);
     let ran = exec(&["run", "--config", path(&bare)]);
@@ -418,16 +428,36 @@ fn abort_refuses_a_bad_id_and_fails_when_the_account_cannot_be_listed() {
     ]);
     assert!(down.exited(1), "{}", down.code);
     assert!(down.out.is_empty(), "{}", down.out);
-    let bad = exec(&[
+    // An id other than the one the file names is refused, whatever it is.
+    let other = exec(&[
         "abort",
         "--config",
         path(&file),
         "--cloud",
         "lambda",
         "--scheduler-id",
+        "someone-else",
+    ]);
+    assert!(other.exited(2), "{}", other.err);
+    assert!(
+        other.err.contains("differs from scheduler_id"),
+        "{}",
+        other.err
+    );
+    // The same id, if it is not an id at all.
+    let text = fs::read_to_string(&file).unwrap();
+    let odd = scratch.file("odd.toml", &text.replacen("sched-one", "bad id!", 1), 0o600);
+    let bad = exec(&[
+        "abort",
+        "--config",
+        path(&odd),
+        "--cloud",
+        "lambda",
+        "--scheduler-id",
         "bad id!",
     ]);
     assert!(bad.exited(2), "{}", bad.err);
+    assert!(!bad.err.contains("differs"), "{}", bad.err);
     let bare = scratch.file(
         "bare.toml",
         "scheduler_id = \"s\"\ncloud = \"lambda\"\nstatus_url = \"http://127.0.0.1:1\"\n[alerts]\nwebhook_url = \"https://h.example.org\"\n",
@@ -455,4 +485,31 @@ fn abort_refuses_a_bad_id_and_fails_when_the_account_cannot_be_listed() {
     );
     let nokey = exec(&abort_args(path(&no_key), &[]));
     assert!(nokey.exited(2), "{}", nokey.err);
+}
+
+/// Asserts that a configuration error never carries a value of the file: a URL typed where
+/// a number belongs, a string where a table belongs, and text that is not TOML all come
+/// back as a line, a key name and an expected type only. It catches a parser message that
+/// quotes the value it met, which here would put a webhook URL or a path in a log.
+#[test]
+fn a_configuration_error_names_the_key_and_the_type_and_never_the_value() {
+    let scratch = Scratch::new("scrub");
+    let hook = "https://hook.example.org/x";
+    let wrong = offline(&scratch, hook, "interval_secs = \"http://PLANTED-VALUE\"");
+    let said = Config::load(&wrong).unwrap_err().to_string();
+    assert!(
+        said.contains("\"interval_secs\" has a wrong type or form"),
+        "{said}"
+    );
+    assert!(said.contains("expected u64"), "{said}");
+    assert!(!said.contains("PLANTED"), "{said}");
+
+    let junk = scratch.file("junk.toml", "scheduler_id = PLANTED-VALUE !\n", 0o600);
+    let said = Config::load(&junk).unwrap_err().to_string();
+    assert!(said.contains("line 1"), "{said}");
+    assert!(!said.contains("PLANTED"), "{said}");
+
+    let table = offline(&scratch, hook, "lambda = \"PLANTED-VALUE\"");
+    let said = Config::load(&table).unwrap_err().to_string();
+    assert!(!said.contains("PLANTED"), "{said}");
 }

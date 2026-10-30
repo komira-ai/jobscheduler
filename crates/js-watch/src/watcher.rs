@@ -9,11 +9,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_alert::{AlertSink, Said};
+use js_alert::{AlertSink, Notifier};
 use tracing::info;
 
-use crate::status::StatusSource;
+use crate::status::{Machine, StatusSource};
 use crate::view::CloudView;
+
+/// The most alerts waiting for the sink; beyond it the oldest is dropped and counted.
+const ALERT_QUEUE: usize = 64;
 
 /// How the watcher judges what it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +29,8 @@ pub struct Settings {
     pub confirm_ticks: u32,
     /// The time between two sweeps for leftovers.
     pub sweep_every: Duration,
+    /// How often an alert that keeps holding is sent again.
+    pub repeat_after: Duration,
 }
 
 /// What one tick found, for the log and for tests.
@@ -45,15 +50,14 @@ pub struct Report {
 pub struct Watcher {
     cloud: Arc<dyn CloudView>,
     status: Arc<dyn StatusSource>,
-    sink: Arc<dyn AlertSink>,
+    notifier: Notifier,
     settings: Settings,
-    said: Said,
-    /// The last tick time the server showed.
-    beat: Option<u64>,
-    /// When the watcher first saw `beat` (or started, before any).
-    moved_at: Option<Duration>,
+    /// The last time the status page was read, or the watcher's start before any read.
+    readable_at: Option<Duration>,
+    /// For each pool, the last tick time the server showed and when the watcher first saw it.
+    beats: BTreeMap<String, (Option<u64>, Duration)>,
     /// The machines the server showed on the last read that worked.
-    expected: Option<BTreeSet<String>>,
+    expected: Option<Vec<Machine>>,
     /// For each unexplained instance, in how many ticks in a row.
     unexplained: BTreeMap<String, u32>,
     /// The leftovers of the last sweep that worked, as alerts by key.
@@ -64,7 +68,8 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    /// A watcher that reads `cloud` and `status` and alerts through `sink`.
+    /// A watcher that reads `cloud` and `status` and alerts through `sink`, delivered on a
+    /// thread of its own (see [`Notifier`]).
     pub fn new(
         (cloud, status): (Arc<dyn CloudView>, Arc<dyn StatusSource>),
         sink: Arc<dyn AlertSink>,
@@ -73,11 +78,10 @@ impl Watcher {
         Self {
             cloud,
             status,
-            sink,
+            notifier: Notifier::new(sink, settings.repeat_after, ALERT_QUEUE),
             settings,
-            said: Said::default(),
-            beat: None,
-            moved_at: None,
+            readable_at: None,
+            beats: BTreeMap::new(),
             expected: None,
             unexplained: BTreeMap::new(),
             strays: BTreeMap::new(),
@@ -99,8 +103,13 @@ impl Watcher {
             strays: self.strays.len(),
             alerts: found.len(),
         };
-        self.said.deliver(&found, self.sink.as_ref());
+        self.notifier.pass(now, &found);
         report
+    }
+
+    /// Waits until every alert handed to the sink has been answered.
+    pub fn flush(&self) {
+        self.notifier.flush();
     }
 
     /// Runs ticks until `pause` says to stop: `clock` gives each tick's time and `pause`
@@ -113,41 +122,49 @@ impl Watcher {
                 break;
             }
         }
+        self.notifier.flush();
     }
 
-    /// Alerts when the server's tick time has not moved for `stale_after`, or its page
-    /// has not been readable that long.
+    /// Alerts when the status page has not been readable for `stale_after`, and for each
+    /// pool whose tick time has not changed for `stale_after`: one wedged pool alarms
+    /// whatever the others do.
     fn heartbeat(&mut self, now: Duration, found: &mut BTreeMap<String, String>) {
-        let since = *self.moved_at.get_or_insert(now);
-        let read = self.status.read();
-        let since = match &read {
+        let readable_at = *self.readable_at.get_or_insert(now);
+        match self.status.read() {
             Ok(status) => {
-                self.expected = Some(status.machines.clone());
-                if status.beat == self.beat {
-                    since
-                } else {
-                    self.beat = status.beat;
-                    now
+                self.readable_at = Some(now);
+                self.expected = Some(status.machines);
+                self.beats.retain(|pool, _| status.beats.contains_key(pool));
+                for (pool, beat) in status.beats {
+                    let seen = self.beats.entry(pool.clone()).or_insert((beat, now));
+                    if seen.0 != beat {
+                        *seen = (beat, now);
+                    }
+                    let silent = now.saturating_sub(seen.1);
+                    if silent >= self.settings.stale_after {
+                        found.insert(
+                            format!("heartbeat:{pool}"),
+                            format!(
+                                "the lease server has not ticked pool {pool} for {} seconds: its status answers but the tick time does not move; check the server, and if it is down check for machines still running",
+                                silent.as_secs()
+                            ),
+                        );
+                    }
                 }
             }
-            Err(_) => since,
-        };
-        self.moved_at = Some(since);
-        let silent = now.saturating_sub(since);
-        if silent < self.settings.stale_after {
-            return;
+            Err(why) => {
+                let silent = now.saturating_sub(readable_at);
+                if silent >= self.settings.stale_after {
+                    found.insert(
+                        "heartbeat".to_owned(),
+                        format!(
+                            "the lease server's status has not been readable for {} seconds ({why}); check the server, and if it is down check for machines still running",
+                            silent.as_secs()
+                        ),
+                    );
+                }
+            }
         }
-        let why = match read {
-            Ok(_) => "its status answers but the tick time does not move".to_owned(),
-            Err(why) => format!("its status cannot be read ({why})"),
-        };
-        found.insert(
-            "heartbeat".to_owned(),
-            format!(
-                "the lease server has not ticked for {} seconds: {why}; check the server, and if it is down check for machines still running",
-                silent.as_secs()
-            ),
-        );
     }
 
     /// Lists the cloud and alerts on each instance the server's status does not show.
@@ -165,14 +182,28 @@ impl Watcher {
         let Some(expected) = &self.expected else {
             return seen.len();
         };
+        // A machine is matched by its provider id when it has one. Only a machine with no
+        // id yet is matched by name, and each such name explains ONE instance: a second
+        // instance with that name (a launch whose answer was lost and was launched again)
+        // is not explained.
+        let ids: BTreeSet<&str> = expected
+            .iter()
+            .filter_map(|machine| machine.provider_id.as_deref())
+            .collect();
+        let mut by_name: BTreeSet<&str> = expected
+            .iter()
+            .filter(|machine| machine.provider_id.is_none())
+            .map(|machine| machine.host.as_str())
+            .collect();
         let confirm = self.settings.confirm_ticks;
         let mut counts = BTreeMap::new();
         for each in &seen {
-            let by_name = each
-                .name
-                .as_deref()
-                .is_some_and(|name| expected.contains(name));
-            if expected.contains(&each.id) || by_name {
+            let explained = ids.contains(each.id.as_str())
+                || each
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| by_name.remove(name));
+            if explained {
                 continue;
             }
             let ticks = self.unexplained.get(&each.id).copied().unwrap_or(0) + 1;
@@ -182,7 +213,7 @@ impl Watcher {
                 found.insert(
                     format!("unexplained:{cloud}:{}", each.id),
                     format!(
-                        "the {cloud} instance {} (name {name}, region {}) is in the provider's list and the lease server's status does not show it; it is billing and nothing owns it: stop it by hand or with `js-watch abort`",
+                        "the {cloud} instance {} (name {name}, region {}) is in the provider's list and the lease server's status does not show it; it is billing and nothing owns it: end it by hand or with `js-watch abort`",
                         each.id, each.region
                     ),
                 );

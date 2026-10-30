@@ -1,16 +1,18 @@
 //! The watcher against fake clouds, fake status pages and the fake sink, on a clock that
 //! moves only when a test moves it. Nothing here dials anything.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use js_alert::FakeSink;
 use js_watch::fake::{FakeCloud, FakeStatus};
-use js_watch::{Seen, Settings, Status, Stray, StrayKind, Watcher};
+use js_watch::status::Machine;
+use js_watch::{Report, Seen, Settings, Status, Stray, StrayKind, Watcher};
 
 const STALE: u64 = 300;
 const SWEEP: u64 = 1800;
+const REPEAT: u64 = 3600;
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -21,6 +23,15 @@ struct Rig {
     status: Arc<FakeStatus>,
     sink: Arc<FakeSink>,
     watcher: Watcher,
+}
+
+impl Rig {
+    /// One tick at `at` seconds, and the wait for the alerts it handed to the sink.
+    fn tick(&mut self, at: u64) -> Report {
+        let report = self.watcher.tick(secs(at));
+        self.watcher.flush();
+        report
+    }
 }
 
 /// A rig whose heartbeat is never stale in the time a test spans.
@@ -37,6 +48,7 @@ fn rig_at(stale: u64) -> Rig {
         stale_after: secs(stale),
         confirm_ticks: 2,
         sweep_every: secs(SWEEP),
+        repeat_after: secs(REPEAT),
     };
     let watcher = Watcher::new((cloud.clone(), status.clone()), sink.clone(), settings);
     Rig {
@@ -47,13 +59,18 @@ fn rig_at(stale: u64) -> Rig {
     }
 }
 
-fn shows(beat: Option<u64>, machines: &[&str]) -> Status {
+/// A status with one pool, `gpu`, at tick time `beat`, holding these machines (host name and
+/// provider id, the id null until the cloud has given one).
+fn shows(beat: Option<u64>, machines: &[(&str, Option<&str>)]) -> Status {
     Status {
-        beat,
+        beats: BTreeMap::from([("gpu".to_owned(), beat)]),
         machines: machines
             .iter()
-            .map(|m| (*m).to_owned())
-            .collect::<BTreeSet<_>>(),
+            .map(|(host, id)| Machine {
+                host: (*host).to_owned(),
+                provider_id: id.map(str::to_owned),
+            })
+            .collect(),
     }
 }
 
@@ -84,23 +101,23 @@ fn a_stale_heartbeat_raises_the_alarm_once_and_again_after_it_clears() {
     let mut r = rig_at(STALE);
     for i in 0..5 {
         r.status.show(shows(Some(100 + i), &[]));
-        r.watcher.tick(secs(i * 60));
+        r.tick(i * 60);
     }
     assert!(r.sink.sent().is_empty());
     // The tick time moved last at 240 s and is frozen from there.
-    r.watcher.tick(secs(240 + STALE - 1));
+    r.tick(240 + STALE - 1);
     assert!(r.sink.sent().is_empty());
-    r.watcher.tick(secs(240 + STALE));
-    r.watcher.tick(secs(240 + STALE + 60));
-    assert_eq!(r.sink.keys(), ["heartbeat"]);
+    r.tick(240 + STALE);
+    r.tick(240 + STALE + 60);
+    assert_eq!(r.sink.keys(), ["heartbeat:gpu"]);
     let text = r.sink.sent()[0].text.clone();
     assert!(text.contains("300 seconds"), "{text}");
     assert!(text.contains("does not move"), "{text}");
 
     r.status.show(shows(Some(999), &[]));
-    r.watcher.tick(secs(900));
-    r.watcher.tick(secs(900 + STALE));
-    assert_eq!(r.sink.keys(), ["heartbeat", "heartbeat"]);
+    r.tick(900);
+    r.tick(900 + STALE);
+    assert_eq!(r.sink.keys(), ["heartbeat:gpu", "heartbeat:gpu"]);
 }
 
 /// Asserts that a status page that cannot be read counts as silence from the first moment
@@ -110,12 +127,12 @@ fn a_stale_heartbeat_raises_the_alarm_once_and_again_after_it_clears() {
 fn an_unreadable_status_page_is_silence_too() {
     let mut r = rig_at(STALE);
     r.status.go_down();
-    r.watcher.tick(secs(0));
-    r.watcher.tick(secs(STALE - 1));
+    r.tick(0);
+    r.tick(STALE - 1);
     assert!(r.sink.sent().is_empty());
-    r.watcher.tick(secs(STALE));
+    r.tick(STALE);
     let text = r.sink.sent()[0].text.clone();
-    assert_eq!(r.sink.keys(), ["heartbeat"]);
+    assert_eq!(r.sink.keys(), ["heartbeat:gpu"]);
     assert!(text.contains("the status page is down"), "{text}");
 }
 
@@ -126,9 +143,9 @@ fn an_unreadable_status_page_is_silence_too() {
 fn a_server_that_never_ticks_is_stale_from_the_watchers_start() {
     let mut r = rig_at(STALE);
     r.status.show(shows(None, &[]));
-    r.watcher.tick(secs(10));
-    r.watcher.tick(secs(10 + STALE));
-    assert_eq!(r.sink.keys(), ["heartbeat"]);
+    r.tick(10);
+    r.tick(10 + STALE);
+    assert_eq!(r.sink.keys(), ["heartbeat:gpu"]);
 }
 
 /// Asserts the orphan path on a manual clock: an instance the provider lists and the
@@ -141,17 +158,18 @@ fn a_server_that_never_ticks_is_stale_from_the_watchers_start() {
 #[test]
 fn an_orphan_in_the_fake_cloud_reaches_the_sink_within_two_ticks() {
     let mut r = rig();
-    r.status.show(shows(Some(1), &["i-1", "js-named"]));
+    r.status
+        .show(shows(Some(1), &[("js-a", Some("i-1")), ("js-named", None)]));
     r.cloud.set_instances(vec![
         seen("i-1", Some("js-a"), "region-a"),
         seen("i-2", Some("js-named"), "region-a"),
         seen("i-9", None, "region-b"),
     ]);
-    let report = r.watcher.tick(secs(0));
+    let report = r.tick(0);
     assert!(r.sink.sent().is_empty());
     assert_eq!(report.instances, 3);
     assert_eq!(report.unexplained, 0);
-    let report = r.watcher.tick(secs(60));
+    let report = r.tick(60);
     assert_eq!(r.sink.keys(), ["unexplained:fakecloud:i-9"]);
     let text = r.sink.sent()[0].text.clone();
     assert!(
@@ -159,16 +177,16 @@ fn an_orphan_in_the_fake_cloud_reaches_the_sink_within_two_ticks() {
         "{text}"
     );
     assert_eq!(report.unexplained, 1);
-    r.watcher.tick(secs(120));
+    r.tick(120);
     assert_eq!(r.sink.keys().len(), 1);
 
     // Gone for a tick, then back: counted from one again, said again at the second sighting.
     r.cloud.set_instances(Vec::new());
-    r.watcher.tick(secs(180));
+    r.tick(180);
     r.cloud.set_instances(vec![seen("i-9", None, "region-b")]);
-    r.watcher.tick(secs(240));
+    r.tick(240);
     assert_eq!(r.sink.keys().len(), 1);
-    r.watcher.tick(secs(300));
+    r.tick(300);
     assert_eq!(r.sink.keys().len(), 2);
 }
 
@@ -179,10 +197,10 @@ fn an_instance_the_server_catches_up_on_is_never_reported() {
     let mut r = rig();
     r.cloud
         .set_instances(vec![seen("i-5", Some("js-new"), "region-a")]);
-    r.watcher.tick(secs(0));
-    r.status.show(shows(Some(2), &["js-new"]));
-    r.watcher.tick(secs(60));
-    r.watcher.tick(secs(120));
+    r.tick(0);
+    r.status.show(shows(Some(2), &[("js-new", None)]));
+    r.tick(60);
+    r.tick(120);
     assert!(r.sink.sent().is_empty());
 }
 
@@ -195,9 +213,9 @@ fn without_any_status_there_are_no_orphans_only_the_heartbeat() {
     let mut r = rig();
     r.status.go_down();
     r.cloud.set_instances(vec![seen("i-5", None, "region-a")]);
-    let report = r.watcher.tick(secs(0));
-    r.watcher.tick(secs(60));
-    r.watcher.tick(secs(120));
+    let report = r.tick(0);
+    r.tick(60);
+    r.tick(120);
     assert!(r.sink.sent().is_empty());
     assert_eq!(report.instances, 1);
     assert_eq!(report.unexplained, 0);
@@ -210,14 +228,14 @@ fn without_any_status_there_are_no_orphans_only_the_heartbeat() {
 fn a_list_that_fails_is_an_alert_and_never_an_empty_cloud() {
     let mut r = rig();
     r.cloud.fail_instances(true);
-    let report = r.watcher.tick(secs(0));
-    r.watcher.tick(secs(60));
+    let report = r.tick(0);
+    r.tick(60);
     assert_eq!(r.sink.keys(), ["list:fakecloud"]);
     assert!(r.sink.sent()[0].text.contains("the instance list is down"));
     assert_eq!(report.instances, 0);
     assert_eq!(report.alerts, 1);
     r.cloud.fail_instances(false);
-    let report = r.watcher.tick(secs(120));
+    let report = r.tick(120);
     assert_eq!(report.alerts, 0);
 }
 
@@ -233,7 +251,7 @@ fn the_sweep_reports_strays_in_a_second_region() {
         stray(StrayKind::Volume, "vol-1", "region-b", Some(1234)),
         stray(StrayKind::FileSystem, "fs-1", "region-b", None),
     ]);
-    let report = r.watcher.tick(secs(0));
+    let report = r.tick(0);
     assert_eq!(
         r.sink.keys(),
         [
@@ -260,19 +278,19 @@ fn the_sweep_reports_strays_in_a_second_region() {
 #[test]
 fn the_sweep_runs_when_due_and_a_cleaned_leftover_clears() {
     let mut r = rig();
-    r.watcher.tick(secs(0));
+    r.tick(0);
     r.cloud
         .set_strays(vec![stray(StrayKind::Address, "ip-1", "region-a", None)]);
-    r.watcher.tick(secs(SWEEP - 1));
+    r.tick(SWEEP - 1);
     assert!(r.sink.sent().is_empty());
-    r.watcher.tick(secs(SWEEP));
-    r.watcher.tick(secs(SWEEP + 60));
+    r.tick(SWEEP);
+    r.tick(SWEEP + 60);
     assert_eq!(r.sink.keys(), ["stray:address:region-a:ip-1"]);
     r.cloud.set_strays(Vec::new());
-    r.watcher.tick(secs(2 * SWEEP));
+    r.tick(2 * SWEEP);
     r.cloud
         .set_strays(vec![stray(StrayKind::Address, "ip-1", "region-a", None)]);
-    r.watcher.tick(secs(3 * SWEEP));
+    r.tick(3 * SWEEP);
     assert_eq!(r.sink.keys().len(), 2);
 }
 
@@ -284,9 +302,9 @@ fn a_failed_sweep_is_an_alert_and_keeps_what_it_knew() {
     let mut r = rig();
     r.cloud
         .set_strays(vec![stray(StrayKind::Disk, "disk-1", "region-a", None)]);
-    r.watcher.tick(secs(0));
+    r.tick(0);
     r.cloud.fail_strays(true);
-    let report = r.watcher.tick(secs(SWEEP));
+    let report = r.tick(SWEEP);
     assert_eq!(
         r.sink.keys(),
         ["stray:disk:region-a:disk-1", "sweep:fakecloud"]
@@ -294,7 +312,7 @@ fn a_failed_sweep_is_an_alert_and_keeps_what_it_knew() {
     assert_eq!(report.strays, 1);
     assert_eq!(report.alerts, 2);
     r.cloud.fail_strays(false);
-    let report = r.watcher.tick(secs(2 * SWEEP));
+    let report = r.tick(2 * SWEEP);
     assert_eq!(report.alerts, 1);
 }
 
@@ -330,4 +348,78 @@ fn drive_ticks_on_the_given_clock_until_the_pause_says_stop() {
     );
     assert_eq!((now, pauses), (180, 3));
     assert_eq!(r.sink.keys(), ["list:fakecloud"]);
+}
+
+/// Asserts that the heartbeat is per pool: with two pools, the one whose tick time moves
+/// raises nothing and the one that is frozen alarms under its own name, whatever the first
+/// does; and a pool that leaves the status is forgotten, so it starts again when it comes
+/// back. It catches one pool's heartbeat hiding another's wedge.
+#[test]
+fn one_wedged_pool_alarms_whatever_the_other_does() {
+    let mut r = rig_at(STALE);
+    let two = |gpu: u64| Status {
+        beats: BTreeMap::from([("gpu".to_owned(), Some(gpu)), ("cpu".to_owned(), Some(5))]),
+        machines: Vec::new(),
+    };
+    for i in 0..7 {
+        r.status.show(two(100 + i));
+        r.tick(i * 60);
+    }
+    assert_eq!(r.sink.keys(), ["heartbeat:cpu"]);
+    assert!(r.sink.sent()[0].text.contains("pool cpu"));
+
+    // The cpu pool leaves and returns still frozen: counted again from its return.
+    r.status.show(shows(Some(200), &[]));
+    r.tick(7 * 60);
+    r.status.show(two(300));
+    r.tick(8 * 60);
+    r.tick(8 * 60 + STALE - 1);
+    assert_eq!(r.sink.keys().len(), 1);
+    r.status.show(two(301));
+    r.tick(8 * 60 + STALE);
+    assert_eq!(r.sink.keys(), ["heartbeat:cpu", "heartbeat:cpu"]);
+}
+
+/// Asserts the pairing of instances and machines for a duplicate: a machine known by name
+/// only (no provider id yet) explains ONE instance of that name, and the second is
+/// reported; a machine with a provider id explains the instance of that id and not another
+/// that shares its name. It catches a relaunch after a lost launch answer (two instances,
+/// one deterministic name) staying explained forever.
+#[test]
+fn a_second_instance_with_a_known_name_is_unexplained() {
+    let mut r = rig();
+    r.status.show(shows(Some(1), &[("js-a", None)]));
+    r.cloud.set_instances(vec![
+        seen("i-1", Some("js-a"), "region-a"),
+        seen("i-2", Some("js-a"), "region-a"),
+    ]);
+    r.tick(0);
+    r.tick(60);
+    assert_eq!(r.sink.keys(), ["unexplained:fakecloud:i-2"]);
+
+    let mut r = rig();
+    r.status.show(shows(Some(1), &[("js-a", Some("i-1"))]));
+    r.cloud.set_instances(vec![
+        seen("i-2", Some("js-a"), "region-a"),
+        seen("i-1", Some("js-a"), "region-a"),
+    ]);
+    r.tick(0);
+    r.tick(60);
+    assert_eq!(r.sink.keys(), ["unexplained:fakecloud:i-2"]);
+}
+
+/// Asserts that a leftover that keeps holding is said again at exactly `repeat_after` after
+/// it was delivered, on the manual clock, and not before. It catches a leak announced only
+/// once, which a single lost message would leave billing unseen.
+#[test]
+fn a_holding_leftover_is_said_again_at_repeat_after() {
+    let mut r = rig();
+    r.cloud
+        .set_strays(vec![stray(StrayKind::Volume, "vol-1", "region-a", None)]);
+    r.tick(0);
+    r.tick(60);
+    r.tick(60 + REPEAT - 1);
+    assert_eq!(r.sink.keys().len(), 1);
+    r.tick(60 + REPEAT);
+    assert_eq!(r.sink.keys().len(), 2);
 }

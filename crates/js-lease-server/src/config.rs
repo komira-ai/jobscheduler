@@ -262,6 +262,10 @@ pub fn parse_duration(text: &str) -> Result<Duration, String> {
     }
 }
 
+/// How often an alert that keeps holding is sent again unless `server.alert_repeat_after`
+/// says otherwise.
+const DEFAULT_ALERT_REPEAT: Duration = Duration::from_secs(3600);
+
 /// The webhook sink `server.alert_webhook_url` names, with the bearer token read from its
 /// owner-only file; `None` when the file names no URL. Nothing is sent here.
 fn alert_sink(
@@ -397,6 +401,8 @@ pub struct Config {
     /// Where the scaler's alerts go besides the log; from `server.alert_webhook_url`, or
     /// [`Config::with_alert_sink`].
     pub(crate) alerts: Option<Arc<dyn AlertSink>>,
+    /// How often an alert that keeps holding is sent to the sink again.
+    pub(crate) alert_repeat: Duration,
 }
 
 /// What `--usage-db`, `--usage-off` and `--profile-store-bytes` decided, and the seams a
@@ -542,6 +548,7 @@ impl Config {
             usage,
             monotonic: Arc::new(SystemMonotonic::default()),
             alerts: None,
+            alert_repeat: DEFAULT_ALERT_REPEAT,
         })
     }
 
@@ -599,11 +606,21 @@ impl Config {
             }
         };
         let alerts = alert_sink(server.alerts.as_ref(), files)?;
+        let alert_repeat = server
+            .alerts
+            .as_ref()
+            .map_or(DEFAULT_ALERT_REPEAT, |keys| keys.repeat_after);
         let state_file = server.state_file;
         let keys = server.usage;
         let usage = usage_setup(keys.off, keys.db, keys.profile_store_bytes, &state_file);
         let settings = with_pool_settings(server.settings, &hosts)?;
         let status = status_policy("server.listen", server.listen, &mut warnings);
+        if alerts.is_some() && elastic.is_none() {
+            warnings.push(
+                "server: warning: server.alert_webhook_url is set but no pool launches machines, so no alert has a source and nothing will be sent"
+                    .to_owned(),
+            );
+        }
         Ok(Self {
             listen: server.listen,
             listen_flag: "server.listen",
@@ -625,6 +642,7 @@ impl Config {
             usage,
             monotonic: Arc::new(SystemMonotonic::default()),
             alerts,
+            alert_repeat,
         })
     }
 

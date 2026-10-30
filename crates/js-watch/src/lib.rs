@@ -2,8 +2,8 @@
 //! server, and the abort that stops everything the scheduler launched.
 //!
 //! The lease server tells an operator about leaks (its alerts), but a server that is down
-//! or wedged tells nobody, exactly when machines leak. This program runs elsewhere (another
-//! host, another account's credentials) and does three things:
+//! or wedged tells nobody, exactly when machines leak. This program runs apart from it
+//! (another host is the point) and does three things:
 //!
 //! - [`Watcher::tick`] compares the cloud's list of the scheduler's instances with the
 //!   machines the server's status page shows ([`status`]), checks that the server's tick
@@ -12,16 +12,21 @@
 //!   gone ([`CloudView::strays`]); they are counted and reported, never released;
 //! - [`abort`] stops every instance of one scheduler id, a dry run unless told to apply.
 //!
-//! The watcher holds a [`CloudView`], a [`StatusSource`] and an alert sink. None of them has
-//! a call that makes or ends anything: for Lambda the view is a `js_provider_lambdalabs::Reader`
-//! over the read-only `LambdaRead`. Only [`abort`], reached from the `abort` subcommand,
-//! holds a client that can terminate.
+//! The watcher reads the same Lambda API key file as the server, and that key can launch and
+//! terminate: nothing about the key is read-only. The limit is by type. The watcher holds a
+//! [`CloudView`], a [`StatusSource`] and an alert sink, none of which has a call that makes
+//! or ends anything; for Lambda the view is a `js_provider_lambdalabs::Reader` over the
+//! read-only `LambdaRead`, and the full client reaches only the `abort` subcommand. A
+//! credential that can only read, kept apart from the server's, would make it true of the
+//! key as well.
 //!
 //! Configuration is one TOML file ([`Config`]); a secret is the path of a file.
 
 pub mod abort;
 mod cli;
+mod client;
 pub mod config;
+#[doc(hidden)]
 pub mod fake;
 pub mod status;
 pub mod view;
