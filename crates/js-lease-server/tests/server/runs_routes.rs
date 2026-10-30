@@ -138,3 +138,45 @@ async fn reply_size_stays_within_caps_with_many_queued_commands() {
     assert!(checked.acks.is_ok());
     assert_eq!(words(&reply.json())[0], "cancel s0");
 }
+
+/// Asserts that the log tail a host reports with a result is returned by the `GET` of that
+/// one run, with the two streams apart and `truncated`, and is left out of the list, which
+/// stays small; and that a run whose result has no tail has no `log_tail` key in either.
+/// It catches a tail dropped on the way from the heartbeat to the client, a list that grows
+/// by 16 KiB a run, and a `null` where the key should be absent.
+#[tokio::test]
+async fn the_log_tail_is_in_the_run_and_not_in_the_list() {
+    let h = start_agents("runs_log_tail", false).await;
+    let me = join(&h, "burst-1").await;
+    let lease = lease(&h).await;
+    let (with, without) = (
+        queued(&h, &lease, 1000).await,
+        queued(&h, &lease, 1000).await,
+    );
+    let running = [held(&with, "running"), held(&without, "running")];
+    crate::runs_support::beat(&h, &me, &running, &[]).await;
+    let mut tailed = crate::runs_support::result(&with, &lease);
+    tailed["log_tail"] = json!({"stdout": "built\n", "stderr": "boom\n", "truncated": true});
+    let plain = crate::runs_support::result(&without, &lease);
+    let exited = [
+        held(&with, "exited_unacked"),
+        held(&without, "exited_unacked"),
+    ];
+    crate::runs_support::beat(&h, &me, &exited, &[tailed, plain]).await;
+
+    let one = h
+        .call("GET", &format!("/v1/leases/{lease}/runs/{with}"), None)
+        .await;
+    assert_eq!(one.status, 200, "{}", one.body);
+    assert_eq!(
+        one.json()["log_tail"],
+        json!({"stdout": "built\n", "stderr": "boom\n", "truncated": true})
+    );
+    let none = h
+        .call("GET", &format!("/v1/leases/{lease}/runs/{without}"), None)
+        .await;
+    assert!(none.json().get("log_tail").is_none(), "{}", none.body);
+    for entry in runs(&h, &lease).await {
+        assert!(entry.get("log_tail").is_none(), "{entry}");
+    }
+}
