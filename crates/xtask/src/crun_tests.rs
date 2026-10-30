@@ -35,6 +35,11 @@ pub const PACKAGE: &str = "js-contain";
 /// The slice the units run in, as a node's agent unit does.
 pub const SLICE: &str = "js-agent.slice";
 
+/// The longest a target's unit may run, in seconds: the bound on a hung test. The tests hold
+/// no timeout or deadline of their own, so this is the only one; the unit is killed at the
+/// limit and the target fails.
+pub const UNIT_MAX_RUNTIME_SECS: u64 = 1200;
+
 /// The real-`crun` test targets (files or directories of the package's `tests/`), in the
 /// order they run.
 pub const TARGETS: &[&str] = &["crun"];
@@ -125,7 +130,8 @@ fn joined(prefix: &str, value: &OsStr) -> OsString {
 
 /// The arguments for `sudo -n` that run one target's binary in its own system unit:
 /// `systemd-run`, waiting for it and passing its output and exit status through, in
-/// [`SLICE`] with `Delegate=yes` and `OOMScoreAdjust=-900`, as the runner user, from the
+/// [`SLICE`] with `Delegate=yes`, `OOMScoreAdjust=-900` and a `RuntimeMaxSec` of
+/// [`UNIT_MAX_RUNTIME_SECS`], as the runner user, from the
 /// package's directory (where `cargo test` runs a binary), with the binary's ignored
 /// tests included.
 ///
@@ -138,6 +144,7 @@ pub fn systemd_run_args(u: &Unit<'_>) -> Vec<OsString> {
     args.push(format!("--unit=js-crun-tests-{}", u.target).into());
     args.push(format!("--slice={SLICE}").into());
     args.extend(["-p", "Delegate=yes", "-p", "OOMScoreAdjust=-900"].map(OsString::from));
+    args.extend(["-p".into(), format!("RuntimeMaxSec={UNIT_MAX_RUNTIME_SECS}").into()]);
     args.push(format!("--uid={}", u.uid).into());
     args.push(format!("--gid={}", u.gid).into());
     args.push(joined("--working-directory=", u.built.dir.as_os_str()));

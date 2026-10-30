@@ -107,7 +107,7 @@ impl Run {
         format!(
             "{cwd}: -n systemd-run --quiet --wait --collect --pipe \
              --unit=js-crun-tests-{target} --slice=js-agent.slice -p Delegate=yes \
-             -p OOMScoreAdjust=-900 --uid={uid} --gid={gid} --working-directory={package} \
+             -p OOMScoreAdjust=-900 -p RuntimeMaxSec=1200 --uid={uid} --gid={gid} --working-directory={package} \
              -E HOME={HOME} -E PATH={PATH} \
              -E JS_TEST_IMAGE=docker://docker.io/library/busybox@{manifest} {exe} \
              --include-ignored\n",

@@ -1,0 +1,72 @@
+# The real-`crun` tests of js-contain (`cargo xtask crun-tests`; crates/js-contain/tests/crun*),
+# on hosted ubuntu-24.04 runners of both architectures. They need the network (the busybox image
+# is pulled by digest from its registry), `sudo` (each test target runs in its own
+# `Delegate=yes` system unit as the runner user) and a runner that lets unprivileged user
+# namespaces be mapped, which is why they are not part of the pull request checks in ci.yml:
+# a pull request runs the fast gate there, and the same tests show as ignored in it.
+#
+# A push to main runs them. A push to a branch named `crun-try/<name>` runs them before the
+# branch merges, and so does a manual run on a branch. A pull request does not.
+name: crun-tests
+
+on:
+  push:
+    branches:
+      - main
+      - 'crun-try/**'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: crun-tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  crun:
+    name: crun (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            runner: ubuntu-24.04
+          - arch: arm
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - run: sudo apt-get update
+      - run: sudo apt-get install --yes --no-install-recommends crun uidmap
+      # The runner user's own ranges, above every id the runner's files use (ids 300000 to
+      # 365535): `newuidmap` maps a container only into a range its caller owns. The tests
+      # use the first range the files list for the user.
+      - run: sudo usermod --add-subuids 300000-365535 --add-subgids 300000-365535 "$USER"
+      - run: cargo xtask crun-tests
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}

@@ -105,7 +105,8 @@ fn args_of(name: &str, home: &OsStr) -> Vec<OsString> {
 
 /// Catches any of the unit's settings dropped or changed: `Delegate=yes` (the tests
 /// cannot set up their cgroup), `OOMScoreAdjust=-900` (the tests see another OOM score
-/// than a job inherits), the slice, the runner's uid and gid (the tests would run as
+/// than a job inherits), `RuntimeMaxSec=1200` (a hung test would hold the job until its
+/// timeout), the slice, the runner's uid and gid (the tests would run as
 /// root), the package directory, an environment variable, a unit that does not wait or
 /// pass the exit status through, and the ignored tests left out.
 #[test]
@@ -124,6 +125,8 @@ fn every_target_s_unit_is_delegated_with_the_agent_s_settings() {
             "Delegate=yes",
             "-p",
             "OOMScoreAdjust=-900",
+            "-p",
+            "RuntimeMaxSec=1200",
             "--uid=1001",
             "--gid=118",
             "--working-directory=/w/crates/js-contain",
