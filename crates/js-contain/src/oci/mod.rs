@@ -74,6 +74,18 @@ pub use crun::{EnvScrub, RunEnd};
 pub use lease::{RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 
+/// The resolved seccomp section for `arch` (Go's name) and a job holding `caps`, as JSON.
+/// Only the egress spike tests (`tests/egress_spike`) call this, so that they apply the
+/// driver's own resolution of the pinned profile and not a copy of it.
+///
+/// # Errors
+/// The text of the profile error (an architecture with no filter).
+#[doc(hidden)]
+pub fn seccomp_section(arch: &str, caps: &[&str]) -> Result<serde_json::Value, String> {
+    let section = hardening::seccomp(arch, caps).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_value(section).expect("a seccomp section is JSON"))
+}
+
 use crate::subids::{DaemonIds, IdFiles, SubidError};
 
 /// Where the OCI backend finds its runtime and the ids it maps.

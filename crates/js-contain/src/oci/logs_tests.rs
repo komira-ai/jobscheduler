@@ -1,13 +1,14 @@
 //! The drain of a job's output, with real `sh` processes in place of `crun`: what is kept,
-//! what is discarded, and that the writer is never held up. No test asserts how long
-//! anything takes; the timeouts are hang guards.
+//! what is discarded, and that the writer is never held up. No test depends on time: the
+//! grace of the drain is a trigger a test fires (or never fires) through `supervise_with`,
+//! and an order is forced by reading until the bytes are in. There is no timeout in a test:
+//! a run that should end and does not hangs, and the CI job's `timeout-minutes` is the
+//! hang guard. (A paused tokio clock cannot stand in for the trigger: it auto-advances
+//! while the real pipes and processes are pending.)
 
 use std::process::Stdio;
 
 use super::*;
-
-/// A hang guard, never a measurement.
-const HANG_GUARD: Duration = Duration::from_secs(120);
 
 fn dir(name: &str) -> crate::test_dir::TestDir {
     crate::unit_dir(&format!("logs-{name}"))
@@ -17,18 +18,42 @@ fn limits(file_cap: u64, tail: usize) -> LogLimits {
     LogLimits {
         file_cap,
         tail,
-        drain_grace: Duration::from_millis(300),
+        // Not read by any test here: the grace is the trigger `supervise_with` is given.
+        drain_grace: DEFAULT_DRAIN_GRACE,
+    }
+}
+
+/// A grace that is never over: the run ends when its pipes close, or the test hangs.
+fn never() -> Grace {
+    Box::new(|_| Box::pin(std::future::pending()))
+}
+
+/// A grace that is over when `trigger` is fired (or dropped).
+fn over_when(trigger: tokio::sync::oneshot::Receiver<()>) -> Grace {
+    Box::new(|_| {
+        Box::pin(async {
+            let _ = trigger.await;
+        })
+    })
+}
+
+/// Returns once `bytes` bytes of the stream have been read: the handshake that orders a
+/// test after the reader, in place of a wait.
+async fn read_until(sink: &Sink, bytes: u64) {
+    while sink.tail().total < bytes {
+        tokio::task::yield_now().await;
     }
 }
 
 /// The launch of `sh -c script` with the pipes as its output; its status is how the run
 /// ended.
-fn sh(script: &'static str) -> Launch {
+fn sh(script: &str) -> Launch {
+    let script = script.to_owned();
     Box::new(move |stdout, stderr| {
         Box::pin(async move {
             let mut child = tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg(script)
+                .arg(&script)
                 .stdin(Stdio::null())
                 .stdout(Stdio::from(stdout))
                 .stderr(Stdio::from(stderr))
@@ -41,11 +66,11 @@ fn sh(script: &'static str) -> Launch {
 }
 
 /// Runs `script` with output kept as `limits` say in `dir`.
-async fn run(dir: &Path, limits: LogLimits, script: &'static str) -> (RunEnd, LogTail) {
+async fn run(dir: &Path, limits: LogLimits, script: &str) -> (RunEnd, LogTail) {
     let capture = Arc::new(Capture::create(dir, limits).expect("files"));
-    let end = tokio::time::timeout(HANG_GUARD, supervise(capture.clone(), sh(script)))
+    let end = supervise_with(pipe::pipe, capture.clone(), sh(script), never())
         .await
-        .expect("the run ended");
+        .0;
     (end, capture.tail())
 }
 
@@ -127,19 +152,58 @@ async fn the_streams_are_kept_apart_and_an_unterminated_last_line_is_kept() {
     );
 }
 
-/// Catches a run that waits for the end of a pipe a process of the job holds: `sh`
-/// leaves a background `sleep` that inherited both pipes and exits. The run ends with the
-/// shell's status after the grace, and what was written before is kept.
+/// Catches a run that waits for the end of a pipe a process of the job holds, and one that
+/// ends the grace without keeping what was read. `sh` leaves a background `read` that
+/// inherited both pipes and blocks on a fifo the test holds open and never writes: it ends
+/// only when the test drops its end, after the run. The grace is fired once `before` has
+/// been read; the run must then end with the shell's status, report that the drain did not
+/// close, and keep "before\n". A `finish` that ignored the grace would hang here (until
+/// the CI job's `timeout-minutes`), since nothing ends the straggler.
 #[tokio::test]
 async fn the_drain_ends_when_a_process_left_behind_holds_the_pipe() {
     let dir = dir("grandchild");
-    let (end, tail) = run(&dir, limits(1024, 1024), "sleep 20 & echo before; exit 3").await;
+    let fifo = dir.join("hold");
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::RWXU,
+        0,
+    )
+    .expect("fifo");
+    // Read-write open of a fifo does not block; this end is never written.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&fifo)
+        .expect("hold");
+    let capture = Arc::new(Capture::create(&dir, limits(1024, 1024)).expect("files"));
+    let (fire, trigger) = tokio::sync::oneshot::channel::<()>();
+    let supervised = supervise_with(
+        pipe::pipe,
+        capture.clone(),
+        sh(&format!(
+            "read x < '{}' & echo before; exit 3",
+            fifo.display()
+        )),
+        over_when(trigger),
+    );
+    let ((end, drained), ()) = tokio::join!(supervised, async {
+        read_until(&capture.out, 7).await;
+        fire.send(()).expect("the run still waits");
+    });
     assert_eq!(end, RunEnd::Exited(3));
-    assert_eq!(tail.stdout.bytes, b"before\n");
+    assert!(!drained, "the grace ended the wait");
+    assert_eq!(capture.tail().stdout.bytes, b"before\n");
+    drop(held);
 }
 
-/// Catches `finish` reporting a drain that did not close as closed (and the reverse), and
-/// readers left running after the wait: one pipe is closed, the other held open.
+/// Catches `finish` reporting a drain that did not close as closed (and the reverse), a
+/// grace that loses what was read, and readers left running after the wait. One pipe is
+/// closed, the other held open and written to: the grace is fired once the bytes are in,
+/// `finish` says false, the tail is those bytes, and the reader is gone (the held write end
+/// then gets `EPIPE`). Then both pipes are closed and the grace never fires: `finish` says
+/// true.
 #[tokio::test]
 async fn a_drain_says_whether_both_pipes_closed() {
     let dir = dir("finish");
@@ -147,11 +211,23 @@ async fn a_drain_says_whether_both_pipes_closed() {
     let (held, rx) = pipe::pipe().expect("pipe");
     let (shut, rx_shut) = pipe::pipe().expect("pipe");
     drop(shut);
+    held.writable().await.expect("writable");
+    assert_eq!(held.try_write(b"tail").expect("write"), 4);
     let drain = Drain {
         out: tokio::spawn(pump(rx, capture.out.clone())),
         err: tokio::spawn(pump(rx_shut, capture.err.clone())),
     };
-    assert!(!drain.finish(Duration::from_millis(100)).await);
+    read_until(&capture.out, 4).await;
+    assert!(!drain.finish(Box::pin(std::future::ready(()))).await);
+    assert_eq!(capture.tail().stdout.bytes, b"tail");
+    // The reader's end is closed once the abort has run; until then a write succeeds.
+    loop {
+        held.writable().await.expect("writable");
+        match held.try_write(b"x") {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => break,
+            _ => tokio::task::yield_now().await,
+        }
+    }
     drop(held);
     let (none, rx) = pipe::pipe().expect("pipe");
     let (also, rx_also) = pipe::pipe().expect("pipe");
@@ -160,7 +236,7 @@ async fn a_drain_says_whether_both_pipes_closed() {
         out: tokio::spawn(pump(rx, capture.out.clone())),
         err: tokio::spawn(pump(rx_also, capture.err.clone())),
     };
-    assert!(drain.finish(HANG_GUARD).await);
+    assert!(drain.finish(Box::pin(std::future::pending())).await);
 }
 
 /// Catches a ring that keeps the wrong bytes across chunk boundaries (an old chunk not
@@ -214,7 +290,9 @@ async fn pipes_that_cannot_be_made_fail_the_run_before_it_starts() {
     }
     let dir = dir("nopipe");
     let capture = Arc::new(Capture::create(&dir, limits(1, 1)).expect("files"));
-    let end = supervise_with(no_pipe, capture, sh("exit 0")).await;
+    let end = supervise_with(no_pipe, capture, sh("exit 0"), never())
+        .await
+        .0;
     assert_eq!(
         end,
         RunEnd::Failed("the pipes of the output: no pipes".to_owned())
@@ -244,16 +322,13 @@ fn the_default_limits_are_a_mebibyte_of_file_and_sixty_four_kibibytes_of_tail() 
 }
 
 /// Catches an agent that keeps a write end of a pipe after the child is gone: the drain
-/// would then wait out the whole grace for an end that never comes. With a grace of an
-/// hour the run completes (the hang guard would fire otherwise) and the tail is whole.
+/// would then wait for an end that never comes. The grace never fires (`run` gives none),
+/// so the run completes only if no write end leaked; if one did, this test hangs and the
+/// CI job's `timeout-minutes` is what fails it. The tail is whole.
 #[tokio::test]
 async fn the_agent_holds_no_write_end_after_the_run() {
     let dir = dir("no-leak");
-    let hour = LogLimits {
-        drain_grace: Duration::from_secs(3600),
-        ..limits(1024, 1024)
-    };
-    let (end, tail) = run(&dir, hour, "echo whole; echo err >&2").await;
+    let (end, tail) = run(&dir, limits(1024, 1024), "echo whole; echo err >&2").await;
     assert_eq!(end, RunEnd::Exited(0));
     assert_eq!(tail.stdout.bytes, b"whole\n");
     assert_eq!(tail.stderr.bytes, b"err\n");
@@ -268,11 +343,7 @@ async fn the_agent_holds_no_write_end_after_the_run() {
 async fn an_aborted_run_keeps_what_was_read() {
     use std::io::Write as _;
     let dir = dir("abort");
-    let hour = LogLimits {
-        drain_grace: Duration::from_secs(3600),
-        ..limits(1024, 1024)
-    };
-    let capture = Arc::new(Capture::create(&dir, hour).expect("files"));
+    let capture = Arc::new(Capture::create(&dir, limits(1024, 1024)).expect("files"));
     let (said, heard) = tokio::sync::oneshot::channel::<()>();
     let launch: Launch = Box::new(move |stdout, _stderr| {
         Box::pin(async move {
@@ -282,19 +353,13 @@ async fn an_aborted_run_keeps_what_was_read() {
             std::future::pending::<RunEnd>().await
         })
     });
-    let supervised = supervise(capture.clone(), launch);
+    let supervised = supervise_with(pipe::pipe, capture.clone(), launch, never());
     tokio::select! {
         _ = supervised => panic!("a run that hangs ended"),
         _ = heard => {}
     }
     // The run is dropped; its readers finish what is in the pipe.
-    tokio::time::timeout(HANG_GUARD, async {
-        while capture.tail().stdout.total < 7 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the readers read what was written");
+    read_until(&capture.out, 7).await;
     assert_eq!(capture.tail().stdout.bytes, b"partial");
 }
 
