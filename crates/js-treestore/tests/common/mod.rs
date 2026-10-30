@@ -12,7 +12,7 @@ use std::sync::{Arc, Barrier, Condvar, Mutex};
 
 use js_bundle::media::LayerEncoding;
 use js_bundle::{DiffId, Limits, pack_layer, pack_tar};
-use js_testkit::TestDir;
+use js_testkit::dir::TestDir;
 use js_treestore::blobstore::{
     AccountHandle, BlobKey, BlobStore, Busy, Holder, PinSet, Pinned, Principal, Release, Source,
     Stats, StoreError, UpstreamError, VerifiedBlob, Wanted,

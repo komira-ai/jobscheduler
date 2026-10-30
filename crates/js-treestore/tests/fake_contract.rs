@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use common::{Rig, run, sized, wanted};
 use js_treestore::Config;
 use js_treestore::blobstore::{
-    AccountHandle, BlobKey, BlobStore, Busy, Holder, Principal, Release, Source, StoreError, Wanted,
+    BlobKey, BlobStore, Busy, Holder, Principal, Release, Source, StoreError, Wanted,
 };
 
 struct Greedy {
@@ -33,7 +33,13 @@ impl Release for Greedy {
             self.store.ensure(&want, &holder).map(|_| ()),
             self.store.ensure_all(&[want], &holder).map(|_| ()),
             self.store
-                .put(&key, 0, &mut std::io::empty(), &holder)
+                .put(
+                    &key,
+                    0,
+                    &mut std::io::empty(),
+                    &holder,
+                    &Principal("lease-1".into()),
+                )
                 .map(|_| ()),
             self.store.release(&holder),
             self.store.account(&holder, "x", 1, 0, release).map(|_| ()),
