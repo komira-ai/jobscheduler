@@ -275,6 +275,10 @@ jobs:
                 bin="${entry##*:}"
                 minos="$(otool -l "target/$TARGET/release/$bin" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')"
                 echo "$bin minos $minos"
+                if [ -z "$minos" ]; then
+                  echo "::error::$bin has no LC_BUILD_VERSION minos to check"
+                  exit 1
+                fi
                 if [ "$(printf '%s\n%s\n' "$minos" 11.0 | sort -V | tail -n 1)" != "11.0" ]; then
                   echo "::error::$bin needs macOS $minos, above the pinned 11.0"
                   exit 1

@@ -339,4 +339,8 @@ fn the_macos_leg_pins_the_deployment_target_and_checks_each_binary() {
         "{build}"
     );
     assert!(build.contains("above the pinned 11.0"), "{build}");
+    assert!(
+        build.contains(r#"if [ -z "$minos" ]; then"#),
+        "a binary with no minos must fail the check, not pass it: {build}"
+    );
 }
