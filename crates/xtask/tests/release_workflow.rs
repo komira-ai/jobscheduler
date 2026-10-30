@@ -312,7 +312,7 @@ fn the_macos_leg_builds_the_client_and_agent_and_packs_with_gnu_tar() {
     let build = job(&jobs, "build").join("\n");
     assert!(
         build.contains(
-            "- target: aarch64-apple-darwin\n            runner: macos-14\n            builds: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle\n"
+            "- target: aarch64-apple-darwin\n            runner: macos-14\n            builds: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision\n"
         ),
         "{build}"
     );
@@ -324,6 +324,7 @@ fn the_macos_leg_builds_the_client_and_agent_and_packs_with_gnu_tar() {
 
 /// Asserts that the `sums` job expects the `js-bundle` archive of both targets, so a build
 /// that stops making one fails before anything is attested, and that both matrix legs build it.
+/// The two Mac host tools are expected for darwin only.
 #[test]
 fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
     let text = workflow();
@@ -331,6 +332,10 @@ fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
     let sums = job(&jobs, "sums").join("\n");
     for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-musl"] {
         let asset = format!("js-bundle-$VERSION-{target}.tar.gz");
+        assert!(sums.contains(&asset), "{asset} is not expected: {sums}");
+    }
+    for tool in ["js-mac-provision", "js-mac-session"] {
+        let asset = format!("{tool}-$VERSION-aarch64-apple-darwin.tar.gz");
         assert!(sums.contains(&asset), "{asset} is not expected: {sums}");
     }
     let build = job(&jobs, "build").join("\n");

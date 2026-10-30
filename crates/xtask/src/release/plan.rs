@@ -51,6 +51,8 @@ pub struct PlanArgs {
             "js-cli".to_owned(),
             "js-agent".to_owned(),
             "js-bundle-cli".to_owned(),
+            "js-mac-session".to_owned(),
+            "js-mac-provision".to_owned(),
         ]
     )]
     pub ship: Vec<String>,

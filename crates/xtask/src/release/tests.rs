@@ -514,7 +514,14 @@ fn this_repositorys_shipped_crates() {
         .expect("cargo metadata");
     assert!(out.status.success());
     let json = String::from_utf8(out.stdout).expect("utf-8");
-    let roots = strings(&["js-lease-server", "js-cli", "js-agent", "js-bundle-cli"]);
+    let roots = strings(&[
+        "js-lease-server",
+        "js-cli",
+        "js-agent",
+        "js-bundle-cli",
+        "js-mac-session",
+        "js-mac-provision",
+    ]);
     let shipped = Metadata::parse(&json)
         .expect("metadata")
         .shipped_dirs(&roots)
