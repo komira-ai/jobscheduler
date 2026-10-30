@@ -476,6 +476,28 @@ async fn a_read_back_that_cannot_be_made_is_an_error() {
     assert!(why.contains(&node.crun.display().to_string()), "{why}");
 }
 
+/// Catches the pid the host wires a container's network by being anything but what `crun
+/// state` reports for the lease's own container: the number it prints, an error naming the
+/// state call while the container is not there, and a number that is not a pid refused
+/// rather than cut to one.
+#[test]
+fn the_container_pid_is_what_crun_state_says() {
+    let node = Node::new("pid", "state-pid 4242");
+    assert_eq!(node.oci().container_pid(&node.spec()), Ok(4242));
+    let node = Node::new("pid-fail", "state-fail no such container");
+    let why = node
+        .oci()
+        .container_pid(&node.spec())
+        .expect_err("not there");
+    assert!(why.starts_with("crun state: "), "{why}");
+    let node = Node::new("pid-wide", "state-pid 4294967296");
+    let why = node
+        .oci()
+        .container_pid(&node.spec())
+        .expect_err("not a pid");
+    assert!(why.contains("4294967296 is not a pid"), "{why}");
+}
+
 /// Catches a bundle that cannot be read, or is not a bundle, passing: a container whose
 /// `config.json` is missing or is not JSON is an error naming the file.
 #[tokio::test]

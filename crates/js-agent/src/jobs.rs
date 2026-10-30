@@ -77,6 +77,7 @@ pub fn start(
         stop_grace,
         drain_wait,
         image_allow: _,
+        egress: _,
     } = local;
     let (Some(settings), Some(scratch), Some(state)) = (container, scratch, state) else {
         return Ok(None);

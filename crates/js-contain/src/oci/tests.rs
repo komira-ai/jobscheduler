@@ -39,6 +39,8 @@ fn config(dir: &Path, ok: bool) -> OciConfig {
         scrub_env: crun::no_scrub,
         job_user: None,
         logs: LogLimits::default(),
+        resolv_conf: RESOLV_CONF.to_owned(),
+        route_wait: None,
     }
 }
 
@@ -791,4 +793,97 @@ fn a_root_daemon_or_a_root_job_user_is_refused() {
         matches!(ids, Err(SubidError::Missing { .. })),
         "a non-root user with no entry is refused for that, not as root: {ids:?}"
     );
+}
+
+/// Catches the egress settings of the backend not reaching a job's bundle: a configured
+/// `resolv.conf` (the resolvers an allow-listed network names, and only those) replaces the
+/// loopback one, and a route wait puts `--wait-route <seconds>` between the init and the
+/// job in the container's arguments, while the defaults leave both as they were.
+#[tokio::test]
+async fn the_resolvers_and_the_route_wait_reach_the_bundle() {
+    let dir = scratch("egress-bundle");
+    let mut configured = config(&dir, true);
+    configured.resolv_conf = "nameserver 192.0.2.53\noptions timeout:1 attempts:1\n".to_owned();
+    configured.route_wait = Some(std::time::Duration::from_secs(7));
+    let oci = start(&configured, &dir.join("scratch")).expect("started");
+    let mut spec = crate::container::tests::spec();
+    spec.dir = dir.join("lease");
+    oci.create(&spec).await.expect("bundle");
+    let resolv = std::fs::read_to_string(spec.dir.join("etc/resolv.conf")).expect("resolv.conf");
+    assert_eq!(
+        resolv,
+        "nameserver 192.0.2.53\noptions timeout:1 attempts:1\n"
+    );
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(spec.dir.join("bundle/config.json")).expect("read"))
+            .expect("json");
+    assert_eq!(
+        config["process"]["args"],
+        json!([
+            "/dev/js-init",
+            "--wait-route",
+            "7",
+            "--",
+            "tool",
+            "--flag",
+            "a b"
+        ])
+    );
+
+    let plain = start(&config_default(&dir), &dir.join("scratch2")).expect("started");
+    let mut spec = crate::container::tests::spec();
+    spec.dir = dir.join("lease2");
+    plain.create(&spec).await.expect("bundle");
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(spec.dir.join("bundle/config.json")).expect("read"))
+            .expect("json");
+    assert_eq!(
+        config["process"]["args"],
+        json!(["/dev/js-init", "--", "tool", "--flag", "a b"])
+    );
+}
+
+/// The default configuration of the tests, with the defaults of the egress settings.
+fn config_default(dir: &Path) -> OciConfig {
+    let config = config(dir, true);
+    assert_eq!(config.resolv_conf, RESOLV_CONF);
+    assert_eq!(config.route_wait, None);
+    config
+}
+
+/// Catches the pinned seccomp profile, resolved for the capability set a job really gets
+/// (none), refusing a system call a job's network path needs: the calls an allow-listed job
+/// makes to open a socket, connect, send, receive and ask the socket about itself are all
+/// in an allow entry. (What stops a job from reconfiguring the network is the kernel and the
+/// empty capability set, not this filter: see `a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace` in the
+/// agent's egress tests.)
+#[test]
+fn the_seccomp_profile_resolved_for_a_job_allows_the_calls_of_a_network_client() {
+    let section = seccomp_section("amd64", &[]).expect("amd64 has a filter");
+    let allowed: std::collections::BTreeSet<&str> = section["syscalls"]
+        .as_array()
+        .expect("syscalls")
+        .iter()
+        .filter(|entry| entry["action"] == "SCMP_ACT_ALLOW")
+        .flat_map(|entry| entry["names"].as_array().expect("names"))
+        .filter_map(|name| name.as_str())
+        .collect();
+    for call in [
+        "socket",
+        "connect",
+        "bind",
+        "sendto",
+        "recvfrom",
+        "sendmsg",
+        "recvmsg",
+        "getsockopt",
+        "setsockopt",
+        "getsockname",
+        "getpeername",
+        "shutdown",
+        "poll",
+        "epoll_wait",
+    ] {
+        assert!(allowed.contains(call), "{call} is not allowed: {allowed:?}");
+    }
 }
