@@ -1,11 +1,9 @@
 //! Single flight on (diff id, blob digest).
 
-mod common;
-
 use std::sync::atomic::Ordering;
 use std::thread;
 
-use common::{Rig, layer, sized, tar_layer, wanted};
+use crate::common::{Rig, layer, sized, tar_layer, wanted};
 use js_treestore::Error;
 
 #[test]

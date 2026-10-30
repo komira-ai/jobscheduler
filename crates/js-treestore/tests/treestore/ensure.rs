@@ -1,10 +1,8 @@
 //! Making a tree from a layer blob, and pinning it for runs.
 
-mod common;
-
 use std::collections::BTreeSet;
 
-use common::{Rig, SEAL_FAILS, SEAL_VANISHES, layer, run, sized, wanted};
+use crate::common::{Rig, SEAL_FAILS, SEAL_VANISHES, layer, run, sized, wanted};
 use js_treestore::{Config, Digest, Error};
 
 #[test]

@@ -1,10 +1,10 @@
 //! Eviction: the budget, the free-space low-water mark, recency, and what is never evicted.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 
-use common::{Rig, size_of, sized, wanted};
+use crate::common::{Rig, size_of, sized, wanted};
 use js_treestore::{Config, Error};
 
 fn budget(rig: &Rig, bytes: u64) -> Config {

@@ -1,11 +1,9 @@
 //! A process that dies after any step of making a tree leaves something the next start
 //! reconciles.
 
-mod common;
-
 use std::sync::Arc;
 
-use common::{Rig, sized, wanted};
+use crate::common::{Rig, sized, wanted};
 use js_treestore::{Config, Error, Step};
 
 const ALL: [Step; 6] = [

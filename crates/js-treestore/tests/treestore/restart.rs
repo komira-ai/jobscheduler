@@ -1,10 +1,8 @@
 //! Start: sweep what a crash left, drop stale pins, keep live ones.
 
-mod common;
-
 use std::collections::BTreeSet;
 
-use common::{Rig, run, sized, wanted};
+use crate::common::{Rig, run, sized, wanted};
 use js_treestore::{Config, Error};
 
 #[test]
