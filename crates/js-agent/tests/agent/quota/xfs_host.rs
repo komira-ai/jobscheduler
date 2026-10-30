@@ -19,7 +19,7 @@
 //! ```
 //!
 //! `JS_QUOTA_XFS_ROOT` is an existing empty directory on the XFS volume, owned by root,
-//! mode 0700. Each test uses a slot of its own (the tests use slots 100 to 105) and removes
+//! mode 0700. Each test uses a slot of its own (the tests use slots 100 to 106) and removes
 //! what it made, also when it fails: a guard removes the run directory and clears the
 //! project on drop, even while panicking. These variables are read by the tests only; the
 //! agent reads none.
@@ -27,7 +27,7 @@
 //! **Leftovers of a failed run are the operator's to clear.** A run that is killed (not
 //! failed) leaves directories with their project ids and limits set, and `ProjectIds::claim`
 //! then refuses those slots with `InUse`. The tests do not weaken `claim` to get past that:
-//! clear the project of slots 100 to 105 first (the held run script does it), then rerun.
+//! clear the project of slots 100 to 106 first (the held run script does it), then rerun.
 //!
 //! A rerun right after a failed run may need to wait a few seconds: XFS frees inodes in the
 //! background, and a `claim` made before that finishes can briefly see `InUse`.
@@ -281,6 +281,60 @@ fn cleanup_clears_the_project_and_the_limit() {
         Usage::ZERO,
         "the directory kept its project"
     );
+}
+
+/// Measures how long the usage of a project takes to read zero after its tree was removed
+/// and the project cleared, which is how long a slot must be held before its id can be
+/// claimed again. A run with a few thousand small files is removed; the project is cleared;
+/// then, with no wait, `claim` and `usage` are read, and the usage is read every 20 ms (at
+/// most 30 s) until it is zero. The readings are printed (run with `--nocapture`):
+///
+/// ```text
+/// usage-lag: first claim after remove+clear: InUse|clean; first usage: N bytes in M inodes;
+///            zero after T ms
+/// ```
+///
+/// The test fails only if the usage does not read zero within the bound. The agent holds a
+/// finished run's slot until it does (`quota-usage-held`), so this number is the longest
+/// time a slot stays out of use after a run.
+///
+/// Run on a provisioned XFS `prjquota` host: see the module documentation.
+#[test]
+#[ignore = "needs an XFS prjquota host: see the module docs"]
+fn usage_lag_after_removal_is_measured() {
+    let (quota, root) = host();
+    let mut run = fresh(&quota, &root, 106, "lag");
+    let project = run.project;
+    quota.apply(&run.dir, project, 64 * MIB, 20_000).unwrap();
+    for n in 0..3000 {
+        fs::write(run.dir.join(format!("f{n}")), vec![7_u8; 4096]).unwrap();
+    }
+    assert!(!quota.usage(project).unwrap().is_zero());
+    fs::remove_dir_all(&run.dir).unwrap();
+    quota.clear(&run.dir, project).unwrap();
+    run.done = true;
+    let began = std::time::Instant::now();
+    let claimed = match ProjectIds::default().claim(&quota, 106) {
+        Ok(_) => "clean".to_owned(),
+        Err(why) => format!("{why}"),
+    };
+    let first = quota.usage(project).unwrap();
+    let mut lag = None;
+    while began.elapsed() < Duration::from_secs(30) {
+        if quota.usage(project).unwrap().is_zero() {
+            lag = Some(began.elapsed());
+            break;
+        }
+        sleep(Duration::from_millis(20));
+    }
+    eprintln!(
+        "usage-lag: first claim after remove+clear: {claimed}; first usage: {} bytes in {} \
+         inodes; zero after {:?}",
+        first.bytes,
+        first.inodes,
+        lag.map(|lag| lag.as_millis())
+    );
+    assert!(lag.is_some(), "usage did not read zero in 30 s");
 }
 
 /// A root on another kind of file system probes to none, with the file system named.

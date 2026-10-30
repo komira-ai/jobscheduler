@@ -130,6 +130,8 @@ pub(super) trait Sys: Send + Sync {
     fn mountinfo(&self) -> io::Result<String>;
     /// The device number of the block device node `path`; none if it is something else.
     fn block_rdev(&self, path: &Path) -> io::Result<Option<u64>>;
+    /// The device number (`st_dev`) of the file system that holds `path`.
+    fn dev_of(&self, path: &Path) -> io::Result<u64>;
     /// `qs_flags` of `Q_XGETQSTAT` for the file system on `device`.
     fn quota_flags(&self, device: &Path) -> io::Result<u16>;
     /// Opens the directory `path` for the calls below: `O_DIRECTORY | O_NOFOLLOW |
@@ -207,6 +209,10 @@ impl Sys for Kernel {
     fn block_rdev(&self, path: &Path) -> io::Result<Option<u64>> {
         let meta = fs::metadata(path)?;
         Ok(meta.file_type().is_block_device().then_some(meta.rdev()))
+    }
+
+    fn dev_of(&self, path: &Path) -> io::Result<u64> {
+        Ok(fs::metadata(path)?.dev())
     }
 
     fn quota_flags(&self, device: &Path) -> io::Result<u16> {
@@ -394,6 +400,9 @@ mod tests {
         assert!(Kernel.mountinfo().unwrap().contains(" - "));
         assert_eq!(Kernel.block_rdev(Path::new("/dev/null")).unwrap(), None);
         assert!(Kernel.block_rdev(Path::new("/dev/none-such")).is_err());
+        let root = Kernel.dev_of(Path::new("/")).unwrap();
+        assert_eq!(root, std::fs::metadata("/").unwrap().dev());
+        assert!(Kernel.dev_of(Path::new("/dev/none-such")).is_err());
     }
 
     /// The quota calls on something that is not a block device fail, for a path the kernel

@@ -14,6 +14,8 @@ mod flags;
 mod logs;
 mod mounts;
 mod owed;
+pub mod quota;
+mod quota_health;
 mod reach;
 mod results;
 mod rules;
@@ -27,11 +29,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
     Capacity, CheckFinding, CheckHook, Config, Event, FilesRoot, Lifecycle, MARKER_FILE,
-    MountRoots, RuntimeError, ScratchRoot, StateRoot,
+    MountRoots, RunQuota, RuntimeError, ScratchRoot, StateRoot,
 };
 use js_agent_wire::{Command, HeartbeatReply, JobSpec, Limits};
 use serde_json::{Value, json};
@@ -64,6 +67,9 @@ pub struct Options {
     pub watch_marker: bool,
     /// Checks to use instead of the scripted ones.
     pub hook: Option<Box<dyn CheckHook>>,
+    /// Run with a scratch quota over this spy (a run without disk books
+    /// [`quota::DEFAULT_BYTES`], a run is limited to [`quota::INODES`] inodes).
+    pub quota: Option<Arc<quota::Spy>>,
 }
 
 impl Harness {
@@ -75,9 +81,18 @@ impl Harness {
     pub fn with(name: &str, options: Options) -> Self {
         let dir = Scratch::new(&format!("life-{name}"));
         let scratch = dir.path("scratch");
-        let config = config_in(&dir, options.allow_host_jobs);
+        let mut config = config_in(&dir, options.allow_host_jobs);
         let (clock, log) = (ManualClock::default(), Log::default());
         let fake = FakeRuntime::new(&log, &clock);
+        if let Some(spy) = &options.quota {
+            config.quota = Some(RunQuota::new(
+                spy.clone(),
+                quota::DEFAULT_BYTES,
+                quota::INODES,
+            ));
+            let seen = spy.clone();
+            fake.watch_quota(move |dir| seen.applied(dir));
+        }
         if options.watch_marker {
             fake.watch_marker(dir.path("state").join(MARKER_FILE));
         }
@@ -188,6 +203,7 @@ pub fn config_in(dir: &Scratch, allow_host_jobs: bool) -> Config {
         files: Some(FilesRoot::open(&dir.path("files")).unwrap()),
         state: StateRoot::open(&state).unwrap(),
         stop_grace: GRACE,
+        quota: None,
     }
 }
 

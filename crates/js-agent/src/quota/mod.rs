@@ -1,9 +1,10 @@
 //! The enforcement half of the per-run scratch disk quota: a mechanism behind
 //! [`ScratchQuota`], and a probe that says whether this host can use it.
 //!
-//! Nothing here is wired into a run yet and no capability is advertised: the agent probes
-//! the scratch root's file system at start and logs the answer ([`probe`]). A run would use
-//! the quota in this order, and each step is a method of the trait:
+//! With `--scratch-quota` the agent probes the scratch root's file system at start ([`system`],
+//! [`ScratchQuota::probe`]) and refuses to start unless it is [`Mode::Project`]; the
+//! lifecycle then uses the quota for every run (`lifecycle::RunQuota`). A run uses the quota
+//! in this order, and each step is a method of the trait:
 //!
 //! 1. [`ProjectIds::claim`] a project id for the run's slot (refused while a run that held
 //!    the id before has usage left on it);
@@ -13,8 +14,9 @@
 //!    not empty);
 //! 3. run the job; [`ScratchQuota::usage`] reads what it has used;
 //! 4. remove the tree (`ScratchRoot::remove`), then [`ScratchQuota::clear`]. A `clear`
-//!    that fails is an error the caller treats as a failed scratch removal: the slot is not
-//!    released (`impl From<QuotaError> for io::Error` is there for that).
+//!    that fails keeps the slot held and is tried again at the next step; a restart clears
+//!    the projects of the directories its sweep removes, and a slot whose id still reads
+//!    usage is parked until it reads zero.
 //!
 //! The mechanism is XFS project quota (`prjquota`), Linux only: the directory gets a
 //! project id and `FS_XFLAG_PROJINHERIT`, so everything below it is counted against the
@@ -27,6 +29,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 mod fake;
 mod ids;
@@ -255,6 +258,23 @@ pub trait ScratchQuota: Send + Sync {
     /// `run_dir` is not a direct child of the scratch root, the root cannot carry a quota,
     /// or a system call failed.
     fn clear(&self, run_dir: &Path, project: ProjectId) -> Result<(), QuotaError>;
+}
+
+/// The quota of the scratch root `scratch_root` on this machine: XFS project quota with the
+/// agent's project ids. On a platform without one, a quota that probes to [`Mode::None`].
+#[cfg(target_os = "linux")]
+pub fn system(scratch_root: &Path) -> Arc<dyn ScratchQuota> {
+    Arc::new(XfsQuota::new(
+        scratch_root.to_owned(),
+        ProjectIds::default(),
+    ))
+}
+
+/// The quota of the scratch root on this machine: on this platform, one that probes to
+/// [`Mode::None`] and refuses every call.
+#[cfg(not(target_os = "linux"))]
+pub fn system(_scratch_root: &Path) -> Arc<dyn ScratchQuota> {
+    Arc::new(FakeQuota::unsupported("no project quota on this platform"))
 }
 
 /// What the file system of `scratch_root` offers: [`Mode::Project`] for XFS mounted with
