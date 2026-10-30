@@ -239,7 +239,7 @@ impl Ledger {
     pub(super) fn record_synced(
         &self,
         entry: &Entry,
-        sync: impl FnOnce(&Self) -> io::Result<()>,
+        sync: fn(&Self) -> io::Result<()>,
     ) -> io::Result<()> {
         let path = self.path_of(&entry.name)?;
         let tmp = self.dir.join(format!(".{}.tmp", entry.name));
