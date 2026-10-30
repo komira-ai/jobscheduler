@@ -445,4 +445,43 @@ fn a_node_with_no_store_collects_nothing() {
         .collect(&std::collections::HashSet::new(), &mut remove)
         .expect("nothing to read is not an error");
     assert_eq!(report, GcReport::default());
+    // A store that cannot be read is an error, not an empty store.
+    std::fs::write(dir.join("a-file"), b"x").expect("file");
+    let broken = Images::new(dir.join("a-file"));
+    let why = broken
+        .collect(&std::collections::HashSet::new(), &mut remove)
+        .expect_err("not a directory");
+    assert!(why.contains("reading the image store"), "{why}");
+}
+
+/// Catches a directory the daemon user may not open being fatal to the measure or
+/// counted for nothing: it counts for its own entry, and the rest of the tree is still
+/// counted.
+#[test]
+fn a_directory_that_cannot_be_opened_counts_for_its_own_entry() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fx = fixture("gc-unreadable");
+    image(&fx.images, 'a', 10_000);
+    let private = fx.images.join(hexn('a')).join("rootfs/private");
+    std::fs::create_dir(&private).expect("private");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let own = std::fs::symlink_metadata(&private).expect("stat").blocks() * 512;
+    let want = image_disk(&fx.images, 'a') + own;
+    let report = fx
+        .oci
+        .collect_images(&[digest('a')], &[])
+        .expect("collected");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!((report.kept, report.kept_bytes), (1, want), "{report:?}");
+}
+
+/// Catches a digest that vanishes under a removal being an error, and a failure to look
+/// at a path being taken for a removal.
+#[test]
+fn removing_an_entry_that_is_gone_is_done_and_one_that_cannot_be_seen_fails() {
+    let fx = fixture("gc-entry");
+    assert_eq!(fx.oci.remove_entry(&fx.images.join(hexn('a'))), Ok(()));
+    std::fs::write(fx.images.join("file"), b"x").expect("file");
+    let why = fx.oci.remove_entry(&fx.images.join("file/below"));
+    assert!(why.is_err(), "{why:?}");
 }

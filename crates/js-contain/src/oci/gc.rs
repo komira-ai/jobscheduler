@@ -13,6 +13,10 @@
 //! every live lease's digest in the second; a lease whose digest is not listed loses its
 //! root filesystem.
 //!
+//! **Order at start.** Leases first, images second: the caller sweeps the leases a dead
+//! daemon left (a separate step that this module does not do), passes the digests of the
+//! leases that remain as `leased`, and only then reads the disk to offer.
+//!
 //! **Safety against a pull in flight.** Every `ensure` of a digest holds an in-use mark
 //! for its whole length ([`Images::begin_use`]); a digest with a mark is kept. A digest
 //! being removed is marked too, and an `ensure` that arrives meanwhile is refused with
@@ -66,18 +70,19 @@ pub struct GcReport {
 
 impl std::fmt::Display for GcReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let failed = if self.failed.is_empty() {
+            String::new()
+        } else {
+            format!(", could not remove: {}", self.failed.join("; "))
+        };
         write!(
             f,
-            "image store: removed {} digest(s) ({} bytes), kept {} ({} bytes in the store)",
+            "image store: removed {} digest(s) ({} bytes), kept {} ({} bytes in the store){failed}",
             self.removed.len(),
             self.removed_bytes,
             self.kept,
             self.kept_bytes
-        )?;
-        if !self.failed.is_empty() {
-            write!(f, ", could not remove: {}", self.failed.join("; "))?;
-        }
-        Ok(())
+        )
     }
 }
 
@@ -224,7 +229,7 @@ impl Oci {
     }
 
     /// Removes one digest directory, or unlinks a digest name that is not a directory.
-    fn remove_entry(&self, path: &Path) -> Result<(), String> {
+    pub(super) fn remove_entry(&self, path: &Path) -> Result<(), String> {
         let meta = match std::fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -233,14 +238,12 @@ impl Oci {
         if !meta.is_dir() {
             return std::fs::remove_file(path).map_err(|e| e.to_string());
         }
-        match crate::remove::remove_tree(path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            // The files are the container's ids': a helper container removes them.
-            Err(_) => self
-                .remove_dir_blocking(path)
-                .map_err(|e: JobError| e.to_string()),
-        }
+        // The files are the container's ids' unless the daemon user may remove them: a
+        // helper container removes what it cannot.
+        crate::remove::remove_tree(path).or_else(|_| {
+            self.remove_dir_blocking(path)
+                .map_err(|e: JobError| e.to_string())
+        })
     }
 }
 
@@ -303,11 +306,14 @@ fn measure_entries(dir: &rustix::fd::OwnedFd, total: &mut u64) -> std::io::Resul
             names.push(OsString::from_vec(name));
         }
     }
+    // An entry that vanished meanwhile is not counted.
+    let stats = names.into_iter().filter_map(|name| {
+        rustix::fs::statat(dir, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW)
+            .ok()
+            .map(|stat| (name, stat))
+    });
     let mut subdirectories = Vec::new();
-    for name in names {
-        let Ok(stat) = rustix::fs::statat(dir, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) else {
-            continue;
-        };
+    for (name, stat) in stats {
         *total += blocks(&stat);
         if FileType::from_raw_mode(stat.st_mode) == FileType::Directory {
             subdirectories.push(name);
