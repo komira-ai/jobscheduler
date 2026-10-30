@@ -4,11 +4,12 @@
 //! suite's are.
 
 use std::fs;
+use std::time::Duration;
 
 use js_agent::crun::Left;
 use js_agent::lifecycle::{Runtime as _, label};
 
-use crate::runtime_suite::{Program, Subject as _, begin, spec_of};
+use crate::runtime_suite::{Program, Subject as _, begin, remove, spec_of, stop};
 use crate::subject::{HOST, crun_subject};
 
 const OTHER: &str = "crun-other";
@@ -30,6 +31,12 @@ fn a_restart_sweeps_the_leases_of_a_dead_process() {
         assert!(s.sidecar(&id.0).is_file(), "{}", id.0);
         assert!(s.lease_cgroup(&id.0).is_dir(), "{}", id.0);
     }
+
+    // The process dies: the container that runs is killed and its `crun run` has ended
+    // (and so has the cleanup it does as it exits) before the next process opens. A runtime
+    // of this process that is still running would race the sweep for the same files.
+    stop(&s, &up, Duration::ZERO);
+    s.settled(&up);
 
     let mut second = s.open_as(HOST);
     let swept = second.swept();
@@ -88,6 +95,8 @@ fn two_agents_on_one_store_never_sweep_each_others_leases() {
     assert!(s.lease_dir(&theirs.0).is_dir());
     assert!(s.lease_cgroup(&theirs.0).is_dir());
     assert!(s.sidecar(&theirs.0).is_file());
+    let kept = fs::read_to_string(s.sidecar(&theirs.0)).expect("read the sidecar");
+    assert!(kept.contains(OTHER) && kept.contains("r2"), "{kept}");
 
     other.remove(&theirs).expect("remove");
     assert!(!s.lease_dir(&theirs.0).exists() && !s.sidecar(&theirs.0).exists());
@@ -182,4 +191,37 @@ fn a_malformed_sidecar_is_left_alone_and_reported() {
         .collect();
     assert_eq!(paths, [junk.clone(), moved.clone()]);
     assert!(junk.is_file() && moved.is_file());
+}
+
+/// Catches a sidecar written after the lease instead of before it (a process that died
+/// between the two would leave a lease nobody can attribute): with a file already where the
+/// run's sidecar goes, the start is refused at the record and nothing of the lease is made
+/// (no directory, no cgroup), and the file stays. A record after the lease would leave the
+/// lease behind, or remove the file with it.
+#[test]
+#[ignore = "real crun: run through cargo xtask crun-tests"]
+fn the_sidecar_is_recorded_before_anything_of_the_lease_is_made() {
+    let mut s = crun_subject("sweep_order");
+    s.prepared();
+    let spec = spec_of(&mut s, "r1", Program::Hold);
+    let first = s.unstarted(&spec);
+    remove(&s, &first);
+    assert!(!s.lease_dir(&first.0).exists() && !s.sidecar(&first.0).exists());
+    fs::write(s.sidecar(&first.0), "in the way").expect("write");
+
+    let why = s
+        .runtime()
+        .borrow_mut()
+        .create_and_start(&spec)
+        .expect_err("refused");
+    assert!(why.to_string().contains("record"), "{why}");
+    assert!(!s.lease_dir(&first.0).exists(), "a lease was made first");
+    assert!(
+        !s.lease_cgroup(&first.0).exists(),
+        "a cgroup was made first"
+    );
+    assert_eq!(
+        fs::read_to_string(s.sidecar(&first.0)).unwrap(),
+        "in the way"
+    );
 }
