@@ -420,12 +420,20 @@ impl Oci {
 
     /// Gives `dir` to the account `crun` runs as (the job user of a root daemon; the daemon
     /// itself otherwise, for which this changes nothing): a helper's state and log are made
-    /// in it by that account.
+    /// in it by that account. The directory is opened without following a link and given by
+    /// its descriptor, so a path replaced by a link is refused, and what is given is what
+    /// was opened.
     fn give_to_job_user(&self, dir: &Path) -> Result<(), JobError> {
-        at(
-            dir,
-            std::os::unix::fs::lchown(dir, Some(self.ids.uid), Some(self.ids.gid)),
-        )
+        use rustix::fs::{Mode, OFlags, fchown};
+        use rustix::process::{Gid, Uid};
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let given = rustix::fs::open(dir, flags, Mode::empty())
+            .and_then(|fd| {
+                let owner = (Uid::from_raw(self.ids.uid), Gid::from_raw(self.ids.gid));
+                fchown(&fd, Some(owner.0), Some(owner.1))
+            })
+            .map_err(std::io::Error::from);
+        at(dir, given)
     }
 
     /// A number unique to this node's run of the daemon.
