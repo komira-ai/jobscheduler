@@ -1,3 +1,6 @@
+# Optional, before the first [[host]]: memory_schedulable_percent = 90 books 90 percent of every
+# host's memory_bytes (a whole number from 1 to 100; absent, all of it).
+#
 # One [[host]] table per machine the operator owns. A host's id is unique in the file.
 # `resources` lists dimensions by name; a name the scheduler does not know is an error.
 # `gpu_class` is required when gpus is above zero and refused otherwise.

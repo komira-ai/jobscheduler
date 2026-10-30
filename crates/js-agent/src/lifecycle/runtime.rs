@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::Isolation;
+use js_agent_wire::{Isolation, LogTail};
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -229,6 +229,18 @@ pub trait ContainerRuntime {
     fn list_ids(&mut self) -> Result<Vec<ContainerId>, RuntimeError> {
         let found = self.list_labelled()?;
         Ok(found.into_iter().map(|one| one.id).collect())
+    }
+
+    /// The end of what the exited container `id` wrote to its standard output and standard
+    /// error, read before the container is removed. `None` is a backend that keeps no log.
+    /// The lifecycle calls it once for each job that exited, and a failure never changes
+    /// the job's result: the result goes out without a tail.
+    ///
+    /// # Errors
+    ///
+    /// The runtime cannot read the log.
+    fn log_tail(&mut self, _id: &ContainerId) -> Result<Option<LogTail>, RuntimeError> {
+        Ok(None)
     }
 
     /// Whether a container made here can use a GPU. A start that names a GPU where this
