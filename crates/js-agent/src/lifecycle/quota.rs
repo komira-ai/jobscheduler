@@ -235,8 +235,7 @@ impl QuotaHealth {
         events: &mut Vec<Event>,
     ) {
         self.failures = self.failures.saturating_add(1);
-        if self.failures < quota.max_failures() || self.unhealthy.is_some() || self.locked.is_some()
-        {
+        if self.failures < quota.max_failures() || self.unhealthy.is_some() {
             return;
         }
         match quota.check(dir) {
