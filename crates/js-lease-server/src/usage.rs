@@ -147,7 +147,8 @@ impl UsageSink for NoUsage {
 /// Which profile a run belongs to: the name the caller supplied for the work the run did
 /// (a key of the caller's own, such as the digest of an estimator row key). The server
 /// never derives it from a work key: the action digest changes with every input, so a name
-/// derived from it would never be seen twice.
+/// derived from it would never be seen twice. By default the server answers from the name
+/// the client gave when it queued the run; a caller may supply another source.
 pub trait KeySource: Send + Sync {
     /// The key of the work run `run_id` did, or `None` when it has none (no profile is
     /// learned from it).
