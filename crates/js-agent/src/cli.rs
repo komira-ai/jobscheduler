@@ -203,6 +203,9 @@ pub struct Cli {
     /// root ends them when the agent next starts, or when the rescue of an agent whose worker
     /// died runs; until then they run on, and their wall limit is enforced only while an
     /// agent runs.
+    /// The profile does not deny System V or POSIX shared memory, semaphores or message
+    /// queues, and the helper reuses uids, so what a run leaves in them can be read by a later
+    /// run that gets the same uid: an open channel between runs on one Mac.
     #[arg(long, value_name = "PATH")]
     pub native_helper_socket: Option<PathBuf>,
     /// The directory the helper makes its lease users' homes in (its `--homes`), by default

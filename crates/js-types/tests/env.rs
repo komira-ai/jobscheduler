@@ -1,7 +1,9 @@
 //! The reserved environment names: every prefix and owned name is pinned, so a change
 //! to the list is a visible change to this table.
 
-use js_types::env::{MAX_ENV_NAME_LEN, OWNED_ENV_NAMES, RESERVED_ENV_PREFIXES, SHELL_ENV_NAMES, env_name_reserved};
+use js_types::env::{
+    MAX_ENV_NAME_LEN, OWNED_ENV_NAMES, RESERVED_ENV_PREFIXES, SHELL_ENV_NAMES, env_name_reserved,
+};
 
 /// The list is exactly the union the loader, the sandbox, launchd, the allocator, the
 /// Objective-C runtime and the agent need.

@@ -48,7 +48,9 @@ fn the_journal_keeps_what_was_added_and_not_marked_done() {
         .unwrap();
     write!(file, "torn\nx 9.9\n+ 1.3").unwrap();
     assert_eq!(journal.live().unwrap(), ["1.2", "1.3"]);
-    journal.retire(&["1.2".to_owned(), "7.7".to_owned()]).unwrap();
+    journal
+        .retire(&["1.2".to_owned(), "7.7".to_owned()])
+        .unwrap();
     assert_eq!(journal.live().unwrap(), ["1.3"]);
 
     let nowhere = Journal::new(&dir.path("no-such-dir").join("j"));

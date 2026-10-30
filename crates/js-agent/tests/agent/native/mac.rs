@@ -216,6 +216,10 @@ fn the_job_environment_cannot_steer_the_shell_that_sets_the_limits() {
     let escaped = marker.exists();
     // Removed before anything is asserted, so a failure leaves nothing behind.
     let _ = fs::remove_file(&marker);
-    assert!(!escaped, "a command ran outside the profile: {}", marker.display());
+    assert!(
+        !escaped,
+        "a command ran outside the profile: {}",
+        marker.display()
+    );
     assert_eq!(status, exited(0));
 }

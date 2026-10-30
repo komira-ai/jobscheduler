@@ -156,7 +156,10 @@ pub struct Parsed {
 pub const LIMITER: &str = "/bin/sh";
 
 pub fn parse(argv: &[String]) -> Parsed {
-    assert_eq!(argv[0], "/usr/bin/sandbox-exec", "nothing runs before the profile");
+    assert_eq!(
+        argv[0], "/usr/bin/sandbox-exec",
+        "nothing runs before the profile"
+    );
     let mut params = Vec::new();
     let mut at = 1;
     while argv[at] == "-D" {

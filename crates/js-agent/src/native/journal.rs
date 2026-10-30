@@ -7,11 +7,17 @@
 //! rescue) reads the journal and ends every lease in it. The file is append-only text, one
 //! `+ <lease>` or `- <lease>` per line; a line that is neither (a torn last line) is
 //! ignored, and the leases that are live are the added ones not yet removed.
+//!
+//! An append and a [`retire`](Journal::retire) hold an exclusive `flock` on `<journal>.lock`
+//! while they work, so a worker that is still alive (wedged, not dead) cannot add a lease
+//! between the read and the rewrite of a retirement and lose it.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+
+use rustix::fs::{FlockOperation, flock};
 
 /// The journal in the file at a path.
 #[derive(Debug, Clone)]
@@ -47,14 +53,30 @@ impl Journal {
     }
 
     fn append(&self, sign: char, lease: &str) -> io::Result<()> {
-        let mut file = OpenOptions::new()
+        self.locked(|| {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&self.path)?;
+            writeln!(file, "{sign} {lease}")?;
+            file.sync_all()?;
+            let dir = self.path.parent().unwrap_or(Path::new("/"));
+            File::open(dir)?.sync_all()
+        })
+    }
+
+    /// Runs `work` holding the exclusive lock of the journal. The lock is released by
+    /// unlocking before the file closes: an `flock` belongs to the open file description,
+    /// which a child forked meanwhile would keep alive.
+    fn locked<T>(&self, work: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        let lock = OpenOptions::new()
             .append(true)
             .create(true)
-            .open(&self.path)?;
-        writeln!(file, "{sign} {lease}")?;
-        file.sync_all()?;
-        let dir = self.path.parent().unwrap_or(Path::new("/"));
-        File::open(dir)?.sync_all()
+            .open(self.path.with_extension("lock"))?;
+        flock(&lock, FlockOperation::LockExclusive)?;
+        let done = work();
+        let _ = flock(&lock, FlockOperation::Unlock);
+        done
     }
 
     /// The leases written and not marked done, in the order they sort. A file that is not
@@ -79,19 +101,22 @@ impl Journal {
         Ok(live.into_iter().collect())
     }
 
-    /// Replaces the journal with one that holds exactly `live`: written beside it, synced
-    /// and renamed over it.
+    /// Removes `ended` from the journal: the leases it holds now, read under the lock
+    /// (so one added since the caller last looked is kept), less `ended`, written beside it,
+    /// synced and renamed over it.
     ///
     /// # Errors
     ///
-    /// The new file cannot be written or moved into place.
-    pub fn rewrite(&self, live: &[String]) -> io::Result<()> {
-        let temp = self.path.with_extension("new");
-        let mut file = File::create(&temp)?;
-        for lease in live {
-            writeln!(file, "+ {lease}")?;
-        }
-        file.sync_all()?;
-        fs::rename(&temp, &self.path)
+    /// The journal cannot be read, or the new file cannot be written or moved into place.
+    pub fn retire(&self, ended: &[String]) -> io::Result<()> {
+        self.locked(|| {
+            let temp = self.path.with_extension("new");
+            let mut file = File::create(&temp)?;
+            for lease in self.live()?.iter().filter(|lease| !ended.contains(lease)) {
+                writeln!(file, "+ {lease}")?;
+            }
+            file.sync_all()?;
+            fs::rename(&temp, &self.path)
+        })
     }
 }

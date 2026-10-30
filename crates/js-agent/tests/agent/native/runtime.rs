@@ -491,7 +491,10 @@ fn nothing_but_sandbox_exec_runs_before_the_profile_applies() {
     let mut body = native("/usr/bin/id", &["-u"]);
     body.env = BTreeMap::from([
         ("SHELLOPTS".to_owned(), "xtrace".to_owned()),
-        ("PS4".to_owned(), "$(touch /private/tmp/js-escape)".to_owned()),
+        (
+            "PS4".to_owned(),
+            "$(touch /private/tmp/js-escape)".to_owned(),
+        ),
     ]);
     let spec = rig.spec("r1", body);
     rig.rt.create_and_start(&spec).unwrap();
