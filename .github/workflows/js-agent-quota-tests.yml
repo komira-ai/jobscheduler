@@ -2,7 +2,8 @@
 # and uploads it, WITHOUT running it. The privileged XFS quota tests
 # (crates/js-agent/tests/agent/quota/xfs_host.rs, `#[ignore]`) need root and an XFS volume
 # mounted with prjquota, so an operator runs them once on a provisioned host that has no
-# toolchain: download the artifact, check SHA256SUMS, copy the binary over and, as root, run
+# toolchain: download the artifact, check SHA256SUMS, copy the binary over, chmod +x it (the
+# artifact zip drops the mode) and, as root, run
 #   JS_QUOTA_XFS_ROOT=<empty 0700 dir on the prjquota XFS volume> JS_QUOTA_OTHER_ROOT=/dev/shm \
 #     ./agent --ignored --test-threads=1 quota::xfs_host
 # (libtest flags come first; the test filter is the positional argument.)
