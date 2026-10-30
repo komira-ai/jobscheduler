@@ -357,6 +357,8 @@ mod tests {
         };
         assert_eq!(sized(r#"{"cpu_millis":1000}"#), 0);
         assert_eq!(sized(r#"{"disk_bytes":1}"#), 1);
+        // An explicit null is the same as a field left out: no disk is booked.
+        assert_eq!(sized(r#"{"disk_bytes":null}"#), 0);
         assert_eq!(sized(r#"{"disk_bytes":70368744177663}"#), (1 << 46) - 1);
         assert_eq!(
             sized(r#"{"cpu_millis":1,"memory_bytes":2,"disk_bytes":3}"#),

@@ -112,8 +112,8 @@ pub fn worker(worker: &WorkerId) -> String {
 
 /// Resources, every axis named. The disk axis is written, as `disk=<n>` between `vms` and
 /// `leases`, only when it is above zero, so the text of a vector with no disk is what it
-/// was before the axis existed and no golden hash of such a trace moves. [`parse_resources`]
-/// reads both.
+/// was before the axis existed and no golden hash of such a trace moves. The test-only
+/// `parse_resources` reads both.
 #[must_use]
 pub fn resources(r: &Resources) -> String {
     let disk = match r.disk_bytes {
@@ -133,8 +133,8 @@ pub fn resources(r: &Resources) -> String {
 /// The resources `text` spells, or `None` if it is not [`resources`]' form. The `disk=`
 /// term may be absent, which is how text written before the axis existed reads: as no disk.
 /// Every other axis is required, in order, and nothing may follow the closing bracket.
-#[must_use]
-pub fn parse_resources(text: &str) -> Option<Resources> {
+#[cfg(test)]
+fn parse_resources(text: &str) -> Option<Resources> {
     let inner = text.strip_prefix("res(")?.strip_suffix(')')?;
     let terms: Vec<&str> = inner.split(' ').collect();
     let value = |index: usize, name: &str| value_of(&terms, index, name);
@@ -158,11 +158,13 @@ pub fn parse_resources(text: &str) -> Option<Resources> {
     })
 }
 
+#[cfg(test)]
 /// The text after `name=` in term `index` of `terms`.
 fn value_of<'a>(terms: &[&'a str], index: usize, name: &str) -> Option<&'a str> {
     terms.get(index)?.strip_prefix(name)?.strip_prefix('=')
 }
 
+#[cfg(test)]
 /// `text` as a decimal number written the way this file writes one: digits only.
 fn plain(text: &str) -> Option<u64> {
     text.bytes()

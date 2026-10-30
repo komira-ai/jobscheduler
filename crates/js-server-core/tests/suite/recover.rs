@@ -341,7 +341,10 @@ fn roomy() -> Reported {
 /// node's booking carries the disk, and a second request for 60 GiB (more than the 40 left)
 /// waits in the queue where a booking that lost the disk would grant it. Catches: a request
 /// row read back without its disk, so that a restart offers the disk of a running lease
-/// to the next request.
+/// to the next request. It cannot see a real codec dropping disk: the test codec keeps the
+/// whole typed value, so this pins the scheduler and core path only. A production codec
+/// with no disk field would lose it on a restart (komira-ai/kbf#1989 files that for the
+/// farm's codec).
 #[test]
 fn a_restart_books_the_disk_of_a_stored_lease_again() {
     let setup = Setup::new();

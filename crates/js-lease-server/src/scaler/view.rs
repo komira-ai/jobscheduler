@@ -12,13 +12,19 @@ const GIB: u64 = 1 << 30;
 /// The shape of a host in the form of an offer, so that one rule judges a host and an
 /// offer alike. The price and availability of a host are not read.
 ///
-/// The disk is what the scheduler can book on the host, never more: the larger of the
-/// scratch disk the pool books for the host (`booked`, which the registry gates every
-/// waiting request against) and the disk the host's `disk-gib` capability reports, which
-/// is what a request's `disk-gib` requirement is judged against. A host that reports
-/// neither offers none, so a request for disk is not counted as served by it. It is never
-/// `u64::MAX`: a host that is said to have all the disk covers a request the scheduler
-/// refuses, and the request would wait with nothing launched for it.
+/// The offer's one disk number serves two checks of [`Offer::fit`]: the scratch disk a
+/// request books and the request's `disk-gib` requirement. It is the larger of the scratch
+/// disk the pool books for the host (`booked`, the shape the scheduler places against and
+/// the registry gates every waiting request on) and the disk the host advertised in its
+/// `disk-gib` capability (from its hello, so it is the host's own word, parsed as whole
+/// GiB; text that is not, or does not fit, counts as none). Taking the larger keeps a
+/// request the registry admitted covered by a host that serves it. A host with neither
+/// offers none, so a request for disk is not counted as served by it. It is never
+/// `u64::MAX`: a host said to have all the disk covers a request the scheduler refuses.
+///
+/// Today only agent pools and static host files can book disk; elastic and joined pools
+/// have no `disk_bytes` key, so a request for disk there is refused before the scaler
+/// sees it.
 fn offer_of(shape: &Shape, booked: &Shape, exec: ExecMode) -> Offer {
     let resources = shape.resources();
     let capabilities = shape.capabilities();
@@ -124,8 +130,8 @@ mod tests {
     }
 
     /// Asserts that a host's offer carries the scratch disk the pool books for it, not
-    /// the disk its hello claims (a claim above the booking is never leased out), and
-    /// that a host with none booked and none reported offers zero. It catches an offer
+    /// the disk the hello's shape claims (a claim above the booking is never leased
+    /// out), and that a host with none booked and none advertised offers zero. It catches an offer
     /// that stays unbounded (`u64::MAX`), which makes the scaler count a host for a
     /// request the scheduler refuses, so that nothing is launched for it.
     #[test]
