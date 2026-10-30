@@ -172,8 +172,8 @@ impl Scheduler {
         self.workers.get(worker).map(|w| &w.phase)
     }
 
-    /// The worker queued whole-machine `operation` holds while it waits for it to empty,
-    /// if any.
+    /// The worker queued `operation` holds while it waits for it to empty, if any: a
+    /// whole-machine lease, or an action that asks for a whole worker.
     #[must_use]
     pub fn reservation(&self, operation: OperationId) -> Option<&WorkerId> {
         self.reservations.get(&operation)
@@ -270,7 +270,10 @@ impl Scheduler {
     /// key's curve at the slot where the lease is charged by one; the same flat figures at
     /// every slot for a lease charged flat, on a worker charged by prediction alone (its
     /// cores are then at least what a lease is charged there) and for an action that would
-    /// own the worker whole. Both are clamped to the worker's capacity. Slots are those of
+    /// own the worker whole. Both are clamped to the worker's capacity. For an action that
+    /// owns its worker this is its predicted cost, as the predicate counts it; the ledger
+    /// charges it the worker's whole capacity once it is placed, which
+    /// [`Scheduler::load_at`] shows. Slots are those of
     /// [`Scheduler::load_at`]. `None` for an operation the scheduler does not hold, a worker
     /// that is not registered or a slot past [`crate::H_PLUS`].
     ///
@@ -328,8 +331,8 @@ impl Scheduler {
             .count()
     }
 
-    /// What `worker` reported it can run at once, if it is registered: its newest
-    /// `Hello`'s capacity. [`Scheduler::booked`] is what its leases hold of it.
+    /// What `worker` can run at once, if it is registered: its newest `Hello`'s capacity,
+    /// its memory cut to the share this scheduler books ([`Scheduler::with_memory_percent`]). [`Scheduler::booked`] is what its leases hold of it.
     #[must_use]
     pub fn capacity(&self, worker: &WorkerId) -> Option<Resources> {
         self.workers.get(worker).map(|w| w.capacity)

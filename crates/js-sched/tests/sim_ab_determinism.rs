@@ -581,6 +581,7 @@ fn submit(s: &mut Scheduler, op: u64, cpu: u64) {
         needs: js_caps::Request::default(),
         hermetic: true,
         do_not_cache: false,
+        whole_worker: false,
     };
     s.apply(at(
         0,

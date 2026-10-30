@@ -11,7 +11,7 @@ use std::sync::Arc;
 use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{
     CapacitySource, Cli, Config, Limits, Running, Seated, SharedClock, StartupError, TickHandle,
-    channel_ticker, start,
+    Ticker, channel_ticker, start_with_checks,
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::Provider;
@@ -35,6 +35,8 @@ pub struct Scratch {
 }
 
 impl Scratch {
+    /// A new, empty directory named for `name`. Tests run side by side, so a name that two
+    /// tests use must not be the same directory: every call gets a directory of its own.
     pub fn new(name: &str) -> Self {
         let owner = TestDir::under(
             Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-lease-server"),
@@ -84,15 +86,47 @@ fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
     assert_eq!(fs::read(kept).unwrap(), b"one");
 }
 
-/// Installs a subscriber that discards what the server logs, so the log calls of the
-/// server run (a call with no subscriber skips evaluating its fields).
+/// Everything any test's server has logged on a thread with no capture of its own,
+/// through [`quiet_logs`]'s subscriber.
+static EVERYTHING: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// A writer into [`EVERYTHING`].
+struct Everything;
+
+impl std::io::Write for Everything {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        EVERYTHING.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Installs the process-wide subscriber, so the log calls of the server run (a call with
+/// no subscriber skips evaluating its fields) and so a line logged from any thread,
+/// the pool for blocking calls included, can be read back with [`logged_with`]. A test
+/// that starts a [`LogCapture`] reads its own thread's lines there instead.
 pub fn quiet_logs() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = tracing_subscriber::fmt()
-            .with_writer(std::io::sink)
+            .with_ansi(false)
+            .with_writer(|| Everything)
             .try_init();
     });
+}
+
+/// The lines logged by the process-wide subscriber that contain `needle`. Tests run side
+/// by side, so a test names something only it logs (a host id of its own).
+pub fn logged_with(needle: &str) -> Vec<String> {
+    let all = EVERYTHING.lock().unwrap();
+    String::from_utf8_lossy(&all)
+        .lines()
+        .filter(|line| line.contains(needle))
+        .map(str::to_string)
+        .collect()
 }
 
 /// The flags every test server gets: ephemeral loopback port, a first boot, the shipped
@@ -140,6 +174,8 @@ pub struct Harness {
     pub running: Running,
     pub clock: ManualClock,
     pub ticks: TickHandle,
+    /// Steps the pool checks of an elastic pool; a server without one ignores it.
+    pub checks: TickHandle,
     pub scratch: Scratch,
 }
 
@@ -176,13 +212,16 @@ impl Harness {
         quiet_logs();
         let clock = ManualClock::new(Timestamp::from_millis(T0));
         let (ticks, ticker) = channel_ticker();
-        let running = start(config, SharedClock::new(clock.clone()), ticker)
+        let (checks, check_ticker) = channel_ticker();
+        let shared = SharedClock::new(clock.clone());
+        let running = start_with_checks(config, shared, ticker, check_ticker)
             .await
             .unwrap();
         Self {
             running,
             clock,
             ticks,
+            checks,
             scratch,
         }
     }
@@ -392,6 +431,18 @@ pub fn first_labels(reply: &Reply) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Starts a server on `config` with a ticker for its table and a ticker for pool checks
+/// that nothing steps. Every test starts its server through [`start_with_checks`], so that
+/// one copy of the generic start-up code runs all of what the tests start.
+pub async fn start<T: Ticker>(
+    config: Config,
+    clock: SharedClock,
+    ticker: T,
+) -> Result<Running, StartupError> {
+    let (_checks, check_ticker) = channel_ticker();
+    start_with_checks(config, clock, ticker, check_ticker).await
+}
+
 /// What the server logs on the calling thread, kept as text until the capture is
 /// dropped. A server started inside the test's own task logs on that thread, so a test
 /// on the default (current thread) runtime sees all of it.
@@ -469,6 +520,59 @@ pub async fn guard<F: std::future::Future>(future: F) -> F::Output {
     }
 }
 
+/// Waits for every labelled task under the same bound as [`guard`]. When the bound is
+/// hit, the panic names the tasks that have not finished and says what `timings` saw.
+pub async fn guard_tasks(
+    mut tasks: Vec<(&'static str, tokio::task::JoinHandle<()>)>,
+    timings: &js_lease::Timings,
+) {
+    let bound = std::time::Duration::from_secs(30);
+    let waited = tokio::time::timeout(bound, async {
+        for (_, task) in &mut tasks {
+            task.await.unwrap();
+        }
+    })
+    .await;
+    if waited.is_err() {
+        let pending: Vec<&str> = tasks
+            .iter()
+            .filter(|(_, task)| !task.is_finished())
+            .map(|(name, _)| *name)
+            .collect();
+        let steps = timings.report();
+        panic!(
+            "still waiting after {bound:?}: unfinished tasks: {pending:?}; lease steps: {steps}"
+        );
+    }
+}
+
+/// A clock that moves by `step` on every reading, so a step timed with one reading
+/// before and one after lasts exactly `step`.
+#[derive(Debug, Clone)]
+pub struct Stepping {
+    micros: Arc<std::sync::atomic::AtomicU64>,
+    step: std::time::Duration,
+}
+
+impl Stepping {
+    pub fn of(step: std::time::Duration) -> Self {
+        Self {
+            micros: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            step,
+        }
+    }
+}
+
+impl js_lease::Monotonic for Stepping {
+    fn reading(&self) -> std::time::Duration {
+        let step = u64::try_from(self.step.as_micros()).unwrap();
+        let before = self
+            .micros
+            .fetch_add(step, std::sync::atomic::Ordering::SeqCst);
+        std::time::Duration::from_micros(before)
+    }
+}
+
 /// Yields to the runtime until `ready` holds, under the same hang guard as [`guard`].
 pub async fn until(mut ready: impl FnMut() -> bool) {
     guard(async {
@@ -477,4 +581,14 @@ pub async fn until(mut ready: impl FnMut() -> bool) {
         }
     })
     .await;
+}
+
+/// Asserts that two scratch directories made with one name are two directories, so tests
+/// that run side by side and pick one name do not share files.
+#[test]
+fn scratch_directories_of_one_name_differ() {
+    let (first, second) = (Scratch::new("same"), Scratch::new("same"));
+    assert_ne!(first.dir, second.dir);
+    first.write("mine", "x", 0o600);
+    assert!(!second.path("mine").exists());
 }

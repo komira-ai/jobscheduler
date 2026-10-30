@@ -564,3 +564,24 @@ fn an_answer_naming_no_instance_is_unknown_and_holds_its_slot() {
         )
     );
 }
+
+/// Asserts that a request carrying a cloud lifetime launches exactly what the same request
+/// without one launches: the same calls, the same region, type, name, key, rulesets and
+/// user data. It proves Lambda, which has no run-duration limit, only carries the field.
+/// A provider that began to read it (a different launch body, an extra call) turns it red.
+#[test]
+fn a_lifetime_on_the_request_changes_nothing_sent_to_lambda() {
+    let plain = rig(live(5));
+    let bounded = rig(live(5));
+    let mut with = ask("a");
+    with.lifetime = Some(Duration::from_secs(5 * 3600));
+    assert_eq!(
+        held_id(&plain.provider.acquire(&ask("a"))),
+        held_id(&bounded.provider.acquire(&with))
+    );
+    assert_eq!(plain.fake.calls(), bounded.fake.calls());
+    let (left, right) = (plain.fake.launches(), bounded.fake.launches());
+    assert_eq!(left.len(), 1);
+    assert_eq!(format!("{left:?}"), format!("{right:?}"));
+    assert_eq!(left[0].user_data(), right[0].user_data());
+}

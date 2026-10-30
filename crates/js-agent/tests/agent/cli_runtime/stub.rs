@@ -18,7 +18,7 @@ use super::{
 };
 use crate::support::Scratch;
 
-const ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+pub(super) const ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// Logs each call (one argument per line, then a marker) in `$0.log` and prints what the
 /// command line would print.
@@ -42,7 +42,7 @@ esac
 /// Runs the stub once so the system has finished with the file: a program that was
 /// written a moment ago can be refused as busy while another thread of the test process
 /// still holds a copy of the descriptor it was written through.
-fn settle(bin: &Path) {
+pub(super) fn settle(bin: &Path) {
     for _ in 0..10_000 {
         match Command::new(bin).arg("--version").output() {
             Err(err) if err.kind() == ErrorKind::ExecutableFileBusy => std::thread::yield_now(),
@@ -154,6 +154,16 @@ fn cli_runtime_argv_snapshot() {
             "core=0",
             "--ipc",
             "private",
+            "--cgroupns",
+            "private",
+            "--sysctl",
+            "net.ipv6.conf.all.disable_ipv6=1",
+            "--log-driver",
+            "json-file",
+            "--log-opt",
+            "max-size=1048576",
+            "--log-opt",
+            "max-file=2",
             "--pull",
             "never",
             "--user",

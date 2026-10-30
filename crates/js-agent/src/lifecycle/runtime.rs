@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::Isolation;
+use js_agent_wire::{Isolation, LogTail};
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -30,6 +30,9 @@ pub mod label {
     pub const CPU_MILLIS: &str = "jobscheduler.dev/cpu-millis";
     /// The booked bytes of memory.
     pub const MEMORY_BYTES: &str = "jobscheduler.dev/memory-bytes";
+    /// The booked bytes of scratch disk. A container without it (made by an earlier agent)
+    /// is read as booking none.
+    pub const DISK_BYTES: &str = "jobscheduler.dev/disk-bytes";
     /// The booked GPU indices, comma separated; empty for none.
     pub const GPUS: &str = "jobscheduler.dev/gpus";
     /// The wall-time limit in milliseconds.
@@ -38,6 +41,9 @@ pub mod label {
     /// without it (made by an earlier agent) is a contained job's. An agent that finds a
     /// `host` one after a restart taints the host.
     pub const ISOLATION: &str = "jobscheduler.dev/isolation";
+    /// The slot the run holds (`slot-uid` of the module documentation of the lifecycle),
+    /// as a number; absent on a container an earlier agent made.
+    pub const SLOT: &str = "jobscheduler.dev/slot";
     /// The id the agent registered under. A runtime puts it on every container it makes
     /// and lists only the containers that carry it, so two agents sharing one runtime
     /// never adopt each other's jobs.
@@ -88,6 +94,12 @@ pub struct ContainerSpec {
     pub mounts: Vec<ResolvedMount>,
     /// The run's scratch directory, mounted read-write.
     pub scratch: PathBuf,
+    /// The directory of the run's files (`0555`, its files `0444`), mounted read-only at
+    /// `/run/js-files`; none for a run without files.
+    pub files: Option<PathBuf>,
+    /// The slot the run holds: its container user and the owner of its scratch directory are
+    /// the slot's ids ([`Settings::slot_ids`](crate::cli_runtime::Settings::slot_ids)).
+    pub slot: u32,
     /// Container or host. The backend decides what a host job gets; the lifecycle only
     /// carries the field.
     pub isolation: Isolation,
@@ -222,9 +234,43 @@ pub trait ContainerRuntime {
         Ok(found.into_iter().map(|one| one.id).collect())
     }
 
+    /// The end of what the exited container `id` wrote to its standard output and standard
+    /// error, read before the container is removed. `None` is a backend that keeps no log.
+    /// The lifecycle calls it once for each job that exited, and a failure never changes
+    /// the job's result: the result goes out without a tail.
+    ///
+    /// # Errors
+    ///
+    /// The runtime cannot read the log.
+    fn log_tail(&mut self, _id: &ContainerId) -> Result<Option<LogTail>, RuntimeError> {
+        Ok(None)
+    }
+
     /// Whether a container made here can use a GPU. A start that names a GPU where this
     /// is false is refused (`gpu-unsupported`) and creates nothing.
     fn supports_gpus(&self) -> bool {
         true
+    }
+
+    /// Whether the network a contained job gets is limited as the agent was told. Called
+    /// before every contained start; a start whose check fails is refused
+    /// (`egress-unchecked`) and creates nothing. A runtime with nothing to check passes.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong with the network or the firewall; the text stays on the host.
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    /// The control group directory (an absolute path of the cgroup version 2 file system)
+    /// of a container that runs, or `None` when the runtime cannot say: the container is
+    /// not in the agent's `/proc`, its control group is not the unified one, or it lies
+    /// outside the control group the agent was told holds its containers. The lifecycle
+    /// asks when a job starts or is adopted and, for a run it started, again at every
+    /// usage window until the runtime can say (`Lifecycle::find_cgroups`); a lease with no
+    /// control group is not sampled. A runtime with no control groups keeps the default.
+    fn cgroup(&mut self, _id: &ContainerId) -> Option<PathBuf> {
+        None
     }
 }

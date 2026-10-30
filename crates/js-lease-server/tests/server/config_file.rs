@@ -89,7 +89,9 @@ fn the_full_file_of_the_design_parses() {
 #[test]
 fn a_pool_that_says_nothing_launches_nothing_and_requires_the_container_contract() {
     let scratch = Scratch::new("config_defaults");
-    let pool = PoolText::elastic(&scratch).without("idle");
+    let pool = PoolText::elastic(&scratch)
+        .set("provider", "{ kind = \"any-mode\" }")
+        .without("idle");
     let config = load(&scratch, &file(&server_with_agents(&scratch), &[&pool])).unwrap();
     let plan = config.elastic_pool().unwrap();
     assert_eq!(plan.launch, Launch::Plan);
@@ -110,10 +112,18 @@ fn a_pool_that_says_nothing_launches_nothing_and_requires_the_container_contract
 fn exec_can_be_opted_out_and_launch_can_be_live() {
     let scratch = Scratch::new("config_optout");
     let server = server_with_agents(&scratch);
+    let dialed = crate::config_support::server(
+        &scratch,
+        "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\nadvertise_url = \"https://js.example:7301\"",
+    );
+    let pin = format!(
+        "{{ x86_64 = {{ url = \"https://pkgs.example.org/agent\", sha256 = \"{}\" }} }}",
+        "5a".repeat(32)
+    );
     let pool = PoolText::elastic(&scratch).set("exec", "\"none\"");
-    let pool = pool.set("launch", "\"live\"");
+    let pool = pool.set("launch", "\"live\"").set("agent", &pin);
     let pool = pool.set("network", "{ kind = \"default\" }");
-    let config = load(&scratch, &file(&server, &[&pool])).unwrap();
+    let config = load(&scratch, &file(&dialed, &[&pool])).unwrap();
     let plan = config.elastic_pool().unwrap();
     assert_eq!(plan.exec, None);
     assert_eq!(plan.launch, Launch::Live);

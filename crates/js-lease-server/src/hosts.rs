@@ -5,7 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use js_agent_wire::Taint;
 use js_provider::HostCapacity;
 use js_registry::{HostMark, HostState, HostView};
-use js_types::{HostId, LeaseId, Shape};
+use js_types::sched::usage::NodeLoad;
+use js_types::{HostId, LeaseId, MemoryHeadroom, Shape};
+
+use crate::sched::map::lease_text as sched_lease_text;
 use serde::Serialize;
 
 /// The body of `GET /v1/hosts`.
@@ -22,6 +25,34 @@ struct ShapeView {
     gpus: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     gpu_class: Option<String>,
+    /// Bytes of scratch disk the host books; left out when it books none, so a body for
+    /// a host without disk reads as before.
+    #[serde(skip_serializing_if = "is_zero")]
+    disk_bytes: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// The memory of a host, or of a pool's floor, as an operator reads it: what was
+/// configured, the percent of it that is booked, and what that comes to (the
+/// `memory_bytes` of a host's `shape`).
+#[derive(Debug, Serialize)]
+pub(crate) struct MemoryView {
+    pub(crate) configured_bytes: u64,
+    pub(crate) schedulable_percent: u8,
+    pub(crate) bookable_bytes: u64,
+}
+
+impl MemoryView {
+    pub(crate) fn of(memory: MemoryHeadroom) -> Self {
+        Self {
+            configured_bytes: memory.configured_bytes(),
+            schedulable_percent: memory.percent().get(),
+            bookable_bytes: memory.bookable_bytes(),
+        }
+    }
 }
 
 /// One host. `source` says where it comes from: `static` for the operator's pool file,
@@ -40,6 +71,7 @@ struct HostEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     lease: Option<String>,
     shape: ShapeView,
+    memory: MemoryView,
     capabilities: BTreeMap<String, String>,
     labels: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,6 +95,86 @@ struct HostEntry {
     /// When a reservation that is draining a busy host is given up, in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     drain_deadline_ms: Option<u64>,
+    /// Set for a registered host whose latest heartbeat carried a load: the reading of
+    /// its actions control group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    load: Option<LoadView>,
+}
+
+/// The latest load of a host, in the units its field names state. It is what the agent
+/// measured and sent, not an estimate: CPU time is a counter, so a rate is the difference
+/// of two readings over the difference of their `mono_usec`.
+#[derive(Debug, Serialize)]
+struct LoadView {
+    /// The reading's number within the agent's process.
+    seq: u64,
+    /// The agent's monotonic clock at the reading, in microseconds.
+    mono_usec: u64,
+    /// Cumulative CPU time of the cgroup that holds every action, in microseconds.
+    cpu_usage_usec: u64,
+    /// Memory in use by the actions, in bytes.
+    memory_working_set_bytes: u64,
+    /// Active file cache, in bytes.
+    memory_active_file_bytes: u64,
+    /// Whether the actions cgroup has a CPU limit.
+    actions_cpu_limited: bool,
+    /// Leases (`term-seq`) that ran the whole window since the previous reading.
+    covered: Vec<String>,
+    /// When each running lease started, in microseconds on the agent's clock.
+    lease_clocks: Vec<LeaseClockView>,
+    /// Closed lease-minutes.
+    minutes: Vec<LeaseMinuteView>,
+}
+
+#[derive(Debug, Serialize)]
+struct LeaseClockView {
+    lease: String,
+    started_mono_usec: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct LeaseMinuteView {
+    lease: String,
+    minute: u32,
+    /// Mean CPU over the observed span, in thousandths of a core.
+    cpu_mean_millis: u32,
+    /// The highest CPU rate of any window in the minute, in thousandths of a core.
+    cpu_peak_window_millis: u32,
+    /// The largest working set seen in the minute, in bytes.
+    ws_max_bytes: u64,
+}
+
+impl LoadView {
+    fn of(load: NodeLoad) -> Self {
+        Self {
+            seq: load.seq,
+            mono_usec: load.mono_usec,
+            cpu_usage_usec: load.cpu_usage_usec,
+            memory_working_set_bytes: load.memory_working_set_bytes,
+            memory_active_file_bytes: load.memory_active_file_bytes,
+            actions_cpu_limited: load.actions_cpu_limited,
+            covered: load.covered.into_iter().map(sched_lease_text).collect(),
+            lease_clocks: load
+                .lease_clocks
+                .into_iter()
+                .map(|clock| LeaseClockView {
+                    lease: sched_lease_text(clock.lease),
+                    started_mono_usec: clock.started_mono_usec,
+                })
+                .collect(),
+            minutes: load
+                .minutes
+                .into_iter()
+                .map(|minute| LeaseMinuteView {
+                    lease: sched_lease_text(minute.lease),
+                    minute: minute.minute,
+                    cpu_mean_millis: minute.cpu_mean_millis,
+                    cpu_peak_window_millis: minute.cpu_peak_window_millis,
+                    ws_max_bytes: minute.ws_max_bytes,
+                })
+                .collect(),
+        }
+    }
 }
 
 fn shape_view(shape: &Shape) -> ShapeView {
@@ -72,6 +184,7 @@ fn shape_view(shape: &Shape) -> ShapeView {
         memory_bytes: resources.memory_bytes(),
         gpus: resources.gpus(),
         gpu_class: resources.gpu_class().map(str::to_string),
+        disk_bytes: resources.disk_bytes(),
     }
 }
 
@@ -89,6 +202,7 @@ impl HostEntry {
             phase: None,
             lease: lease_text(host.leased_to),
             shape: shape_view(&host.shape),
+            memory: MemoryView::of(host.memory),
             capabilities: host.shape.capabilities().clone(),
             labels: BTreeMap::new(),
             agent_version: None,
@@ -97,6 +211,7 @@ impl HostEntry {
             mark: None,
             reserved_for: None,
             drain_deadline_ms: None,
+            load: None,
         }
     }
 
@@ -114,6 +229,7 @@ impl HostEntry {
             phase: Some(String::from(host.phase)),
             lease: lease_text(host.lease),
             shape: shape_view(&host.shape),
+            memory: MemoryView::of(host.memory),
             capabilities: host.shape.capabilities().clone(),
             labels: host.labels,
             agent_version: host.agent_version,
@@ -127,6 +243,7 @@ impl HostEntry {
             }),
             reserved_for: host.reserved_for.map(|id| id.to_string()),
             drain_deadline_ms: host.drain_deadline.map(|at| at.millis()),
+            load: host.load.map(LoadView::of),
         }
     }
 }
@@ -170,14 +287,18 @@ mod tests {
             phase: Phase::Serving,
             lease: None,
             shape: Shape::new(resources, BTreeMap::new()),
+            memory: MemoryHeadroom::full(1 << 20),
+            claim: None,
             labels: BTreeMap::new(),
             agent_version: None,
             epoch: 1,
+            heard_since_hello: true,
             releasing: false,
             taint: None,
             mark,
             reserved_for: None,
             drain_deadline: None,
+            load: None,
         }
     }
 
@@ -203,5 +324,33 @@ mod tests {
             assert_eq!(host.get("mark").and_then(|m| m.as_str()), listed);
             assert_eq!(host.get("mark").is_none(), listed.is_none());
         }
+    }
+
+    /// Asserts that a host that books scratch disk lists it as `shape.disk_bytes`, that a
+    /// host that books none has no such key (so the body is what it was before), and that
+    /// the value is the host's booked shape's. It catches a view that drops the disk,
+    /// and one that writes `0` for every host.
+    #[test]
+    fn the_shape_lists_booked_disk_only_when_there_is_some() {
+        let mut with_disk = view(None);
+        let resources = Resources::new(1000, 1 << 20, 0, None)
+            .unwrap()
+            .with_disk_bytes(5 << 30);
+        with_disk.shape = Shape::new(resources, BTreeMap::new());
+        let list = HostList::of(Vec::new(), vec![with_disk, view(None)], None);
+        let body = serde_json::to_value(&list).unwrap();
+        let shapes: Vec<_> = body["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|host| host["shape"].clone())
+            .collect();
+        assert_eq!(shapes.len(), 2);
+        let sized = shapes
+            .iter()
+            .filter(|shape| shape.get("disk_bytes").is_some());
+        assert_eq!(sized.count(), 1);
+        let disk = shapes.iter().find_map(|shape| shape.get("disk_bytes"));
+        assert_eq!(disk.and_then(|disk| disk.as_u64()), Some(5 << 30));
     }
 }

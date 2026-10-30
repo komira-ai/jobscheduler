@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_caps::NodeCaps;
-use js_sched::{DaemonInstance, Request};
+use js_sched::{DaemonInstance, MemoryPercent, Request};
 use js_state::{Cond, Store, Txn};
 use js_store::test_support::{TestCodec, TestExt};
 use js_store::{EpochPolicy, RowCodec, Rows, SESSION_RENEWAL, StateError, Value, WorkerUp, keys};
@@ -212,6 +212,7 @@ fn asking() -> Request {
         needs: js_caps::Request::default(),
         hermetic: true,
         do_not_cache: false,
+        whole_worker: false,
     }
 }
 
@@ -226,19 +227,55 @@ fn a_request_could_run_if_any_daemon_session_of_the_store_could_run_it() {
         frontend_with(&store, 1, &codec),
         frontend_with(&store, 2, &codec),
     );
-    assert!(!mine.session_could_run(&asking()).expect("no sessions"));
+    assert!(
+        !mine
+            .session_could_run(&asking(), MemoryPercent::FULL)
+            .expect("no sessions")
+    );
     other
         .session(&registered("node-b"))
         .expect("a session of the other frontend");
 
-    assert!(mine.session_could_run(&asking()).expect("a session"));
+    assert!(
+        mine.session_could_run(&asking(), MemoryPercent::FULL)
+            .expect("a session")
+    );
     let mut big = asking();
     big.resources = Resources::new(1_000, 16 << 30);
-    assert!(!mine.session_could_run(&big).expect("a session"));
+    assert!(
+        !mine
+            .session_could_run(&big, MemoryPercent::FULL)
+            .expect("a session")
+    );
     let mut mac = asking();
     let needs = js_caps::Request::from_platform([("OSFamily", "macos")]);
     mac.needs = needs.expect("a platform");
-    assert!(!mine.session_could_run(&mac).expect("a session"));
+    assert!(
+        !mine
+            .session_could_run(&mac, MemoryPercent::FULL)
+            .expect("a session")
+    );
+}
+
+/// Asserts that a session's capacity is cut to the percent before a request is tried
+/// against it. Catches: a hold that judges the raw row, so a request above the cut but
+/// within the raw capacity is held for ever.
+#[test]
+fn a_session_row_is_judged_at_the_cut_capacity() {
+    let store = Racing::new();
+    let codec = Arc::new(TestCodec::new());
+    let rows = frontend_with(&store, 1, &codec);
+    rows.session(&registered("node-a")).expect("a session");
+    let half = MemoryPercent::new(50).expect("in range");
+    let mut between = asking();
+    between.resources = Resources::new(1_000, 6 << 30);
+
+    assert!(
+        rows.session_could_run(&between, MemoryPercent::FULL)
+            .expect("read")
+    );
+    assert!(!rows.session_could_run(&between, half).expect("read"));
+    assert!(rows.session_could_run(&asking(), half).expect("read"));
 }
 
 /// Asserts that a session row that is not a daemon's registration is refused naming the
@@ -255,7 +292,7 @@ fn a_session_row_that_is_not_a_registration_is_refused_naming_it() {
             .expect("store")
             .expect("put");
 
-        let read = rows.session_could_run(&asking());
+        let read = rows.session_could_run(&asking(), MemoryPercent::FULL);
 
         let error = read.expect_err("a corrupt row");
         assert!(error.to_string().contains(key), "{error}");

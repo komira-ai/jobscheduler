@@ -490,6 +490,7 @@ fn job(run: &str) -> JobSpec {
         limits: Limits {
             cpu_millis: 1000,
             memory_bytes: 1 << 20,
+            disk_bytes: None,
             pids: None,
             wall_ms: 60_000,
         },
@@ -498,6 +499,7 @@ fn job(run: &str) -> JobSpec {
         isolation: Isolation::Contained,
         labels: Default::default(),
         heartbeat_seq: 0,
+        files: Vec::new(),
         valid_for_ms: 0,
         bundle: None,
         native: None,

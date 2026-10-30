@@ -170,7 +170,7 @@ pub fn quoted(path: &Path) -> String {
 pub fn server(scratch: &Scratch, extra: &str) -> String {
     let token = scratch.write("client-token", TOKEN, 0o600);
     format!(
-        "[server]\nstate_file = {}\nboot = \"initialise\"\nclient_token_file = {}\n{extra}\n",
+        "[server]\nstate_file = {}\nboot = \"initialise\"\nclient_token_file = {}\nmax_lease_wall = \"2h\"\n{extra}\n",
         quoted(&scratch.state()),
         quoted(&token)
     )
@@ -201,6 +201,18 @@ impl PoolText {
             )
     }
 
+    /// A pool `name` of hand-joined agents: six machines of 8 cores and 16 GiB, with no
+    /// host contract.
+    pub fn joined(name: &str) -> Self {
+        Self(Vec::new())
+            .set("kind", &quote("joined"))
+            .set("name", &quote(name))
+            .set("class", &quote("whole-node"))
+            .set("exec", &quote("none"))
+            .set("max_machines", "6")
+            .set("shape", "{ cpu_millis = 8000, memory_bytes = 17179869184 }")
+    }
+
     /// An elastic pool `gpu` of the stand-in cloud kind with every required key.
     pub fn elastic(scratch: &Scratch) -> Self {
         let key = scratch.write("api-key", API_KEY, 0o600);
@@ -211,6 +223,8 @@ impl PoolText {
             .set("max_spend_per_hour", &quote("12.00"))
             .set("max_spend_per_day", &quote("96.00"))
             .set("idle", &quote("10m"))
+            .set("max_age", &quote("2h"))
+            .set("min_host_lifetime", &quote("5m"))
             .set(
                 "provider",
                 &format!(

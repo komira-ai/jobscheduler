@@ -11,6 +11,7 @@ use js_agent::lifecycle::{
     CheckFinding, CheckHook, Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Finished,
     Found, RuntimeError, Status, label,
 };
+use js_agent_wire::LogTail;
 
 /// A clock that moves only when a test says so. Clones share one reading.
 #[derive(Clone, Default)]
@@ -55,6 +56,12 @@ struct State {
     marker: Option<PathBuf>,
     /// Whether the next create fails as a start that shows the host is not seen.
     blind: bool,
+    /// The log tail `log_tail` answers for the container of a run.
+    tails: BTreeMap<String, LogTail>,
+    /// The control group directory of the container of each run.
+    cgroups: BTreeMap<String, PathBuf>,
+    /// How many times the scripted checks were told the host is idle.
+    idles: u32,
 }
 
 /// A runtime whose containers exit when a test says so, whose calls fail when a test
@@ -83,10 +90,25 @@ impl FakeRuntime {
         }
     }
 
-    /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove` or
+    /// The container of `run_id` has printed `tail`. The log notes `logs <id>` when it is
+    /// read, for a run with a tail or when the read fails and for no other run, so the logs
+    /// of tests that do not care are unchanged.
+    pub fn print(&self, run_id: &str, tail: LogTail) {
+        self.state
+            .borrow_mut()
+            .tails
+            .insert(run_id.to_owned(), tail);
+    }
+
+    /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove`, `logs` or
     /// `list`) fail; `u32::MAX` for as long as the test wants.
     pub fn fail(&self, call: &'static str, times: u32) {
         self.state.borrow_mut().failing.insert(call, times);
+    }
+
+    /// How many times the scripted checks were told the host is idle (`CheckHook::idle`).
+    pub fn idles(&self) -> u32 {
+        self.state.borrow().idles
     }
 
     /// The next `create_and_start` fails as a start does when the agent cannot see the host
@@ -118,6 +140,15 @@ impl FakeRuntime {
     /// Every `create_and_start` takes `ms` on the test's clock.
     pub fn create_takes(&self, ms: u64) {
         self.state.borrow_mut().create_takes_ms = ms;
+    }
+
+    /// The runtime reports `dir` as the control group of the container of `run_id`.
+    pub fn set_cgroup(&self, run_id: &str, dir: &str) {
+        let dir = PathBuf::from(dir);
+        self.state
+            .borrow_mut()
+            .cgroups
+            .insert(run_id.to_owned(), dir);
     }
 
     /// The container of `run_id` exits with `code`.
@@ -274,6 +305,22 @@ impl ContainerRuntime for FakeRuntime {
         Ok(())
     }
 
+    fn log_tail(&mut self, id: &ContainerId) -> Result<Option<LogTail>, RuntimeError> {
+        let tail = {
+            let state = self.state.borrow();
+            let run = state.containers.get(&id.0).map(|c| c.run_id.clone());
+            run.and_then(|run| state.tails.get(&run).cloned())
+        };
+        let failing = self.fails("logs");
+        if tail.is_some() || failing {
+            self.log.borrow_mut().push(format!("logs {}", id.0));
+        }
+        match failing {
+            true => Err(err("logs")),
+            false => Ok(tail),
+        }
+    }
+
     fn remove(&mut self, id: &ContainerId) -> Result<(), RuntimeError> {
         let scratch = self
             .state
@@ -293,6 +340,12 @@ impl ContainerRuntime for FakeRuntime {
         }
         self.state.borrow_mut().containers.remove(&id.0);
         Ok(())
+    }
+
+    fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
+        let state = self.state.borrow();
+        let run = &state.containers.get(&id.0)?.run_id;
+        state.cgroups.get(run).cloned()
     }
 
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
@@ -339,6 +392,10 @@ impl ScriptedChecks {
 }
 
 impl CheckHook for ScriptedChecks {
+    fn idle(&mut self) {
+        self.runtime.state.borrow_mut().idles += 1;
+    }
+
     fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
         let run_id = job.run_id;
         let container = match self.runtime.gone(run_id) {

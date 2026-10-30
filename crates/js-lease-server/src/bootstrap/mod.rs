@@ -12,12 +12,23 @@
 //! nothing else: it never sees a plan, a slot or a network mode.
 //!
 //! What the script does, in order: prepares the image (the provider's `host_prep`),
-//! writes the join token and the instance line, runs the network mode's steps, fetches
-//! the agent and checks its SHA-256 before it can start, and installs and starts the
+//! blocks the metadata address (`metadata`: no container on a bridge network and no user
+//! but root reaches it, and the agent's unit requires the block), makes the user the
+//! jobs' ids are mapped onto and starts the container daemon under that remap (`userns`),
+//! writes the join token and the instance
+//! line, runs the network mode's steps, fetches the agent and checks its SHA-256 before it can start, and installs and starts the
 //! agent's unit. The first command is a `trap` on `EXIT` that removes the secret files
 //! the steps wrote and the traces cloud-init leaves of the script.
 //!
-//! The unit names the container program, the state root and the scratch root
+//! The unit registers the agent under the machine's name (`--host-id`), which is how the
+//! scaler finds the host of a record; pulls an image only when it is missing
+//! (`--container-pull missing`: a machine the scaler launches is new and holds no image, so
+//! the agent's default of `never` would fail every job on it; a run's image must be pinned
+//! by a sha256 digest, so what is pulled is the content the submitter named, and the host
+//! reaches the registry that name gives only over the pool's network); and names a hook program the bootstrap writes
+//! ([`GPU_TOOLKIT_HOOK_PATH`], mode 0700, which runs `nvidia-container-cli info`, so it
+//! fails without a working driver and toolkit). The flag is on every offer: the agent runs
+//! the hook only when the host offers a GPU. The unit names the container program, the state root and the scratch root
 //! ([`CONTAINER_BIN`], [`STATE_ROOT`], [`SCRATCH_ROOT`] of `js-elastic`), and requires the
 //! scratch root's mount (`RequiresMountsFor=`), so a machine whose provider did not mount
 //! it does not start the agent. The script makes the two roots' directories; what puts a
@@ -29,7 +40,9 @@
 //! Not rendered here: the host contract check of what the agent finds, which the agent's
 //! own report makes at admission.
 
+mod metadata;
 mod shell;
+mod userns;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -37,7 +50,11 @@ use std::fmt::Write;
 use js_elastic::{
     BootPayload, BootPlan, BootStep, CONTAINER_BIN, SCRATCH_ROOT, STATE_ROOT, Secret, SlotName,
 };
+pub use metadata::{
+    DROP_RULES, METADATA_ADDRESS, METADATA_RULES_PATH, METADATA_TABLE, METADATA_UNIT, NFT_BIN,
+};
 use shell::{hex, single_quoted, unit_quoted, word};
+pub use userns::{DAEMON_JSON, SUBID_COUNT, SUBID_START, SUBID_USER};
 
 /// What a secret prints as in a masked render.
 pub const MASK: &str = "***";
@@ -59,6 +76,9 @@ pub const INSTANCE_PATH: &str = "/etc/jobscheduler/instance";
 
 /// Where the agent is installed.
 pub const AGENT_PATH: &str = "/usr/local/bin/js-agent";
+
+/// Where the GPU toolkit hook is installed.
+pub const GPU_TOOLKIT_HOOK_PATH: &str = "/usr/local/lib/js-agent/gpu-toolkit-hook";
 
 /// What cloud-init leaves of the script and its user data, removed by the `EXIT` trap.
 /// Each entry is a fixed, shell-safe word and some are globs, so the list is written
@@ -266,6 +286,8 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
     for step in &plan.host_prep {
         w.step(step)?;
     }
+    metadata::write(&mut w);
+    userns::write(&mut w);
     w.line("# identity");
     w.line("mkdir -p /etc/jobscheduler");
     w.secret_file(TOKEN_PATH, &join_slot)?;
@@ -283,19 +305,29 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
     ));
     w.fetch(&plan.agent.url, &plan.agent.sha256, AGENT_PATH);
     w.line(&format!("chmod 0755 {AGENT_PATH}"));
+    w.line("# gpu toolkit hook");
+    w.line("install -d -m 0755 -- /usr/local/lib/js-agent");
+    w.line(&format!("cat > {GPU_TOOLKIT_HOOK_PATH} <<'HOOK'"));
+    w.line("#!/bin/sh");
+    w.line("exec nvidia-container-cli info");
+    w.line("HOOK");
+    w.line(&format!("chmod 0700 {GPU_TOOLKIT_HOOK_PATH}"));
     w.line("cat > /etc/systemd/system/js-agent.service <<'UNIT'");
     w.line("[Unit]");
     w.line("Description=jobscheduler agent");
     w.line("After=network-online.target");
+    w.line(&format!("Requires={METADATA_UNIT}"));
+    w.line(&format!("After={METADATA_UNIT}"));
     w.line("Wants=network-online.target");
     w.line(&format!("RequiresMountsFor={SCRATCH_ROOT}"));
     w.line("");
     w.line("[Service]");
     let _ = writeln!(
         w.out,
-        "ExecStart={AGENT_PATH} --server {} --token-file {TOKEN_PATH} --instance-file {INSTANCE_PATH} --pool {} --container-bin {CONTAINER_BIN} --state-root {STATE_ROOT} --scratch-root {SCRATCH_ROOT}",
+        "ExecStart={AGENT_PATH} --server {} --token-file {TOKEN_PATH} --instance-file {INSTANCE_PATH} --pool {} --host-id {} --container-bin {CONTAINER_BIN} --container-subuid {SUBID_USER} --container-pull missing --gpu-toolkit-hook {GPU_TOOLKIT_HOOK_PATH} --state-root {STATE_ROOT} --scratch-root {SCRATCH_ROOT}",
         unit_quoted(&plan.scheduler_url),
-        unit_quoted(&plan.pool)
+        unit_quoted(&plan.pool),
+        unit_quoted(plan.host.as_str())
     );
     w.line("Restart=always");
     w.line("RestartSec=5");

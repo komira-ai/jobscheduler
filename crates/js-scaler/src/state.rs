@@ -25,6 +25,11 @@ pub struct AcquirePlan {
     pub name: String,
     /// What to launch: the offer the machine's record holds, at the stored price.
     pub offer: Offer,
+    /// The lifetime the cloud is to enforce on the machine ([`Settings::lifetime`](crate::Settings::lifetime)), if the
+    /// pool has one. A provider with a native limit sets it at launch; one without ignores
+    /// it. It is computed from the pool's settings at each call, so a retry carries the
+    /// settings of its time; nothing about it is stored.
+    pub lifetime: Option<Duration>,
 }
 
 /// One thing the caller does. A step lists them in the order to run them: the
@@ -47,6 +52,11 @@ pub enum Action {
     Acquire(Box<AcquirePlan>),
     /// `Registry::drain` the host.
     Drain(String),
+    /// `Registry::retire` the host: drain it whether or not it is busy, because it has
+    /// reached `max_age`. The mark stops new leases and cuts none; the release that follows
+    /// is asked only when the host is quiet. Sent again whenever the registry does not show
+    /// the mark, so a crash between the step and the call loses nothing.
+    Retire(String),
     /// `Registry::undrain` the host.
     Undrain(String),
     /// `Registry::release_host` the host: it marks it only while it is still quiet.
@@ -102,18 +112,44 @@ pub struct State {
     /// restart the idle time counts again from the first step.
     pub(crate) quiet: BTreeMap<String, Millis>,
     /// Since when each registered host the registry does not hear from (lost, or waiting
-    /// to say hello again) has been silent, as this process first saw it. A silent host is
+    /// to say hello again) has been silent, as the scaler first saw it. A silent host is
     /// held and counted until it books nothing and has been silent for `unknown_hold`, so
-    /// this is the age a status page shows. Not written to disk: after a restart the age
-    /// counts again from the first step.
+    /// this is the age a status page shows. Kept in [`Records::silent_since`] too, so a
+    /// restart does not start it again; the time the scaler was down does not count, see
+    /// [`Records::last_step`].
     pub silent: BTreeMap<String, Millis>,
     /// The machines released this step because their host was silent for `unknown_hold`
     /// and booked nothing (its leases given up, or marked releasing). The shell logs each:
     /// a paid machine was released on silence.
     pub silent_released: Vec<String>,
-    /// Since when each registered machine has been missing from a complete registry view,
-    /// unbroken. Not written to disk: after a restart the count starts again.
+    /// Since when each registered machine has been missing from complete registry views,
+    /// unbroken. Kept in [`Records::missing_since`] too.
     pub(crate) missing: BTreeMap<String, Millis>,
+    /// Since when each booting machine past `boot_timeout` has been unheard from on
+    /// complete registry views, unbroken. Not written to disk, on purpose: a booting
+    /// machine is given up on only after a hold in this process, so a restart gives it the
+    /// whole hold again, which is when its agent is about to say hello to the new registry.
+    pub(crate) unheard: BTreeMap<String, Millis>,
+    /// Whether this state was read from records and has not yet taken a step: its first
+    /// step moves the silent and missing times past the time the scaler was down.
+    pub(crate) restored: bool,
+    /// The restored registered machines the registry has not yet heard from since this
+    /// process started, each with the instant of the first step, which is the
+    /// restart. Until its host says hello, up to `boot_timeout` from that instant, such a
+    /// machine covers a request its stored offer fits, so a request it would serve does not
+    /// make a second machine (see `Pass::cover`). Not written to disk, on purpose: a restart
+    /// gives every machine the whole window again, which is when its agent is about to say
+    /// hello to the new registry.
+    ///
+    /// "Restart" is the first step after the process starts; each restart re-stamps every
+    /// window, so a server that keeps crashing within `boot_timeout` can hold a launch for
+    /// as long as it keeps crashing, which is bounded per restart and accepted. A restored
+    /// machine that is dead holds a request its offer fits for up to `boot_timeout`: a
+    /// stated trade-off for not launching twice for a machine that is only slow to say
+    /// hello. A draining machine is not awaited: the step had already decided to take it
+    /// out, and the registry places no new lease on it, so it would hold a request for the
+    /// whole window to no purpose (the request launches anyway at its end).
+    pub(crate) awaiting: BTreeMap<String, Millis>,
 }
 
 impl State {
@@ -121,7 +157,10 @@ impl State {
     #[must_use]
     pub fn new(records: Records) -> Self {
         Self {
+            silent: records.silent_since.clone(),
+            missing: records.missing_since.clone(),
             records,
+            restored: true,
             ..Self::default()
         }
     }

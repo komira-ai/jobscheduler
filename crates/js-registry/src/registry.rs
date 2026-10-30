@@ -3,16 +3,19 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome};
-use js_caps::HostContract;
+use js_caps::{FLAG_SET, HostContract, RUN_FILES, SCRATCH_QUOTA};
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
 use js_provider::Observed;
-use js_types::{HostId, LeaseId, ProviderId, RequestId, Shape};
+use js_types::sched::usage::NodeLoad;
+use js_types::{HostId, LeaseId, MemoryHeadroom, ProviderId, RequestId, Shape};
+use js_usage::ProfileKey;
 
 use crate::config::PoolConfig;
 use crate::credential::{Binding, Credential};
+use crate::load;
 use crate::refusal::Refusal;
-use crate::runs::{RunRefusal, RunView, Runs, Standing, vet};
+use crate::runs::{RunRefusal, RunView, Runs, Standing, quota_default, vet};
 use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
 use crate::whole::ending::Ending;
 use crate::whole::exclusive::Exclusive;
@@ -28,6 +31,7 @@ mod marks;
 mod provider_side;
 mod start;
 
+use demand::waiting_rows;
 pub use demand::{Launchable, Waiting};
 pub use marks::Busy;
 
@@ -54,14 +58,27 @@ pub struct HostView {
     pub phase: Phase,
     /// The lease holding the host, if any.
     pub lease: Option<LeaseId>,
-    /// The shape the pool books for the host (not the host's own claim).
+    /// The shape the pool books for the host (not the host's own claim), with its memory
+    /// cut to the pool's memory percent.
     pub shape: Shape,
+    /// The memory the pool lists for the host, the percent of it that is booked and what
+    /// that comes to (the memory of `shape`).
+    pub memory: MemoryHeadroom,
+    /// The shape the host announced at its last hello, which the registry checked against
+    /// the pool's floor; `None` for a host that has not said hello since a restart. A
+    /// scaler compares it with the machine it launched.
+    pub claim: Option<Shape>,
     /// The labels the host announced.
     pub labels: BTreeMap<String, String>,
     /// The agent version the host announced, once it has.
     pub agent_version: Option<String>,
     /// The current session epoch; 0 for a host that has not yet said hello.
     pub epoch: u64,
+    /// Whether the host has taken a heartbeat since its last hello. It is false only for a
+    /// host that said hello and has not beaten since; a new hello sets it false again. A
+    /// host with no session (not yet heard from since a restart) reads true: the registry
+    /// cannot tell, and a scaler must not read silence there as a failed boot.
+    pub heard_since_hello: bool,
     /// Whether the host holds no lease but is not yet clear of the last one: it still has
     /// runs to finish (runs of a lease that ended, or runs it lists that the server does
     /// not know), or it is restoring after a whole-node lease. It takes no new lease until
@@ -80,6 +97,17 @@ pub struct HostView {
     /// When a reservation that drains a busy host is given up if the host is still not
     /// quiet; `None` unless the host is reserved and was busy when it was set aside.
     pub drain_deadline: Option<Timestamp>,
+    /// The latest load the host reported (in the units of [`NodeLoad`]). Only the latest accepted beat's load is kept: minutes
+    /// it carries that a consumer has not read before the next beat are lost to it, and a beat
+    /// whose reply was lost is sent again, so a consumer that sums minutes must dedupe them by
+    /// (lease, minute). Nothing says how much the agent dropped (the wire has no drop counts),
+    /// so no minutes does not mean none were dropped. After a lost gap a reviving beat that
+    /// repeats the old `seq` leaves the old reading in place; it is stale, not wrong, and carries
+    /// its own `mono_usec`. Zero `cpu_throttled_usec` and
+    /// `cpu_pressure_some_total_usec` mean not measured. `None` when the
+    /// host has not reported one in this session, when its latest heartbeat carried none
+    /// (the agent could not measure), and while the host is lost. A new hello clears it.
+    pub load: Option<NodeLoad>,
 }
 
 /// How a host is set aside: for whole-node use, or to be scaled away.
@@ -123,6 +151,17 @@ struct Record {
     seated: Option<Timestamp>,
     agent_version: Option<String>,
     labels: BTreeMap<String, String>,
+    /// Whether the host's last hello reported the `run-files` capability. It changes only
+    /// at a hello, and a hello of a lost host gives up every run still queued for it, so
+    /// the check at queueing time is the only one a start needs.
+    files: bool,
+    /// The quota in bytes the host's last hello said it enforces on a run that sets no
+    /// `disk_bytes` (`scratch-default-gib`), when it also reported `scratch-quota`; `None`
+    /// for a host that reported no quota, or a default that is missing, not a whole
+    /// number, zero or too large to count. Kept like `files`, and for the same reason: the
+    /// run check sees only the pool's shape otherwise. It changes only at a hello, and a
+    /// run books what it was given at queueing, so a new default never rebooks a live run.
+    quota_default: Option<u64>,
     /// The run ids the host listed as held in its last hello or heartbeat.
     held: BTreeSet<String>,
     /// The heartbeats taken in this session.
@@ -138,6 +177,10 @@ struct Record {
     /// Whether the host is being scaled away (see [`Registry::drain`]). It outlives a
     /// session and is held in memory only.
     leaving: Option<marks::Leaving>,
+    /// The shape the host announced at its last hello.
+    claim: Option<Shape>,
+    /// The load of the host's latest accepted reading, see [`HostView::load`].
+    load: load::Kept,
 }
 
 impl Record {
@@ -155,11 +198,15 @@ impl Record {
             seated: Some(seated),
             agent_version: None,
             labels: BTreeMap::new(),
+            files: false,
+            quota_default: None,
             held: BTreeSet::new(),
             beats: 0,
             exclusive: Exclusive::Free,
             bound: None,
             leaving: None,
+            claim: None,
+            load: load::Kept::default(),
         }
     }
 
@@ -225,6 +272,9 @@ struct State {
     marks: Marks,
     /// Whether a request that finds no host could be served by a launch.
     launchable: Option<Launchable>,
+    /// Hosts that are being given back and are to be marked releasing from their first
+    /// hello, whether or not the registry holds them yet ([`Registry::mark_ending`]).
+    ending: BTreeSet<HostId>,
 }
 
 impl State {
@@ -306,6 +356,7 @@ impl Registry {
             waiting: WaitList::default(),
             marks: Marks::default(),
             launchable: None,
+            ending: BTreeSet::new(),
         };
         Self {
             shared: Arc::new(Shared {
@@ -474,6 +525,13 @@ impl Registry {
         self.shared.config.name().clone()
     }
 
+    /// The whole-node settings of the pool this registry serves, when it has them: the one
+    /// source of the prepare timeout and the other whole-node figures for everything that
+    /// counts them (the registry, the lease table, the scaler).
+    pub fn whole_node(&self) -> Option<&crate::WholeNodeConfig> {
+        self.shared.config.whole_node()
+    }
+
     fn grace_ms(&self) -> u64 {
         self.shared.config.grace_ms()
     }
@@ -514,6 +572,9 @@ impl Registry {
     /// pool-full. The transport must rate-limit hellos per credential, and per-host
     /// credentials (design D18) close it; there is no per-credential cap here.
     ///
+    /// A pool that names `scratch-quota` also refuses (`shape-not-accepted`) a host whose
+    /// quota default does not count (see `quota_default`) or is more than the pool's disk.
+    ///
     /// The runs a hello lists as held are never adopted. A run the registry holds a live
     /// record of stays as it is, now listed by the host; every other listed run is
     /// answered with a cancel in the host's next heartbeat reply (a welcome carries no
@@ -540,6 +601,10 @@ impl Registry {
             known.map_or(Exclusive::Free, |record| record.exclusive.after_hello(now));
         let kept_bound = known.and_then(|record| record.bound);
         let kept_leaving = known.and_then(|record| record.leaving);
+        let kept_leaving = match state.ending.contains(&host) {
+            true => Some(marks::Leaving::Releasing),
+            false => kept_leaving,
+        };
         let instance = hello.instance.as_ref();
         let bound_elsewhere = kept_binding
             .as_ref()
@@ -558,11 +623,20 @@ impl Registry {
             let contract = HostContract::new(exec, floor.resources().gpus() > 0);
             contract.check(&hello.capabilities)?;
         }
-        let offers_floor = hello
-            .to_shape()
-            .ok()
+        let claim = hello.to_shape().ok();
+        let offers_floor = claim
+            .as_ref()
             .is_some_and(|claim| claim.satisfies(floor.resources(), floor.capabilities()));
         if !offers_floor {
+            return Err(Refusal::ShapeNotAccepted);
+        }
+        // A pool that names `scratch-quota` books a default for every run without disk, so
+        // a host must report one that counts and fits the pool's disk: otherwise its runs
+        // without disk would book nothing, or never fit.
+        let quota_pool = floor.capabilities().contains_key(SCRATCH_QUOTA);
+        let default = quota_default(&hello.capabilities);
+        let fits = default.is_some_and(|bytes| bytes <= floor.resources().disk_bytes());
+        if [quota_pool, !fits].into_iter().all(|ok| ok) {
             return Err(Refusal::ShapeNotAccepted);
         }
         let room = state.records.len() < config.max_machines();
@@ -576,9 +650,7 @@ impl Registry {
             .fresh()
             .map(|bytes| secret_text(&bytes))
             .ok_or(Refusal::SessionUnavailable)?;
-        state
-            .book
-            .insert_host(host.clone(), config.booked().clone());
+        config.list_in(&mut state.book, host.clone());
         let held = hello.held.iter().map(|run| run.run_id.clone()).collect();
         state.records.insert(
             host.clone(),
@@ -594,12 +666,16 @@ impl Registry {
                 seated: None,
                 agent_version: Some(hello.agent_version.clone()),
                 labels: hello.labels.clone(),
+                files: hello.capabilities.get(RUN_FILES).map(String::as_str) == Some(FLAG_SET),
+                quota_default: default,
                 held,
                 beats: 0,
                 taint: kept_taint,
                 exclusive: kept_exclusive,
                 bound: kept_bound,
                 leaving: kept_leaving,
+                claim,
+                load: load::Kept::default(),
             },
         );
         state.runs.sync(&host, &hello.held, true);
@@ -699,6 +775,7 @@ impl Registry {
         record.heard = Some(now);
         record.phase = heartbeat.phase;
         record.beats = record.beats.saturating_add(1);
+        record.load.take(heartbeat.load.as_ref());
         record.held = heartbeat
             .held
             .iter()
@@ -775,7 +852,11 @@ impl Registry {
     /// Refused, in this order: [`RunRefusal::HostNotRegistered`] for a host that did not
     /// register itself; the job when it breaks a wire rule ([`RunRefusal::Invalid`]),
     /// asks for host isolation ([`RunRefusal::HostJobsNotAllowed`]) or exceeds the
-    /// booked shape alone ([`RunRefusal::LimitsExceedShape`]); [`RunRefusal::HostLost`]
+    /// booked shape alone ([`RunRefusal::LimitsExceedShape`]); a job with run files for a
+    /// host whose hello did not report the `run-files` capability
+    /// ([`RunRefusal::FilesUnsupported`]); a job with `limits.disk_bytes` for a host whose
+    /// hello did not report `scratch-quota` with a default ([`RunRefusal::DiskUnsupported`]);
+    /// [`RunRefusal::HostLost`]
     /// for a host not heard within the grace period; [`RunRefusal::NotHeld`] when the
     /// registry's booking of `host` is not `lease`; [`RunRefusal::HostTainted`] for a
     /// host that reported a taint; [`RunRefusal::NoCapacity`] when the host is marked
@@ -791,7 +872,20 @@ impl Registry {
         &self,
         host: &HostId,
         lease: &LeaseId,
+        spec: JobSpec,
+    ) -> Result<RunView, RunRefusal> {
+        self.queue_keyed_run(host, lease, spec, None)
+    }
+
+    /// [`Registry::queue_run`] for a run whose work the lease holder named: `profile`, the
+    /// name the holder supplied, is kept beside the run (in memory, like the run) and is what
+    /// [`Registry::profile_of`] answers. It is not part of the job, so the host never receives it.
+    pub fn queue_keyed_run(
+        &self,
+        host: &HostId,
+        lease: &LeaseId,
         mut spec: JobSpec,
+        profile: Option<ProfileKey>,
     ) -> Result<RunView, RunRefusal> {
         spec.lease_id = lease.to_string();
         let now = self.shared.clock.now();
@@ -803,8 +897,14 @@ impl Registry {
             ..
         } = &mut *guard;
         let record = records.get(host).ok_or(RunRefusal::HostNotRegistered)?;
-        let shape = self.shared.config.shape();
+        let shape = self.shared.config.booked();
         vet(&spec, shape.resources())?;
+        if !spec.files.is_empty() && !record.files {
+            return Err(RunRefusal::FilesUnsupported);
+        }
+        if spec.limits.disk_bytes.is_some() && record.quota_default.is_none() {
+            return Err(RunRefusal::DiskUnsupported);
+        }
         if record.state(now, self.grace_ms()) != HostState::Live {
             return Err(RunRefusal::HostLost);
         }
@@ -818,13 +918,31 @@ impl Registry {
         if record.exclusive.awaits_ready() {
             return Err(RunRefusal::NotReady);
         }
-        // A host being scaled away takes no run, as one out of the serving phase takes none.
-        let takes_runs = (record.phase == Phase::Serving) & record.leaving.is_none();
+        // A host being scaled away takes no run, as one out of the serving phase takes none,
+        // with one exception: a retired host (`Registry::retire`, at its maximum age) still
+        // runs work for a lease booked on it, which the check above has just shown this is,
+        // so a retire cuts no lease. No new lease is booked on a marked host. A plainly
+        // drained host (set only on a quiet host) and a releasing one take nothing.
+        let leaving = [None, Some(marks::Leaving::Retiring)].contains(&record.leaving);
+        let takes_runs = (record.phase == Phase::Serving) & leaving;
         if !takes_runs {
             return Err(RunRefusal::NoCapacity);
         }
         let seen = (record.beats, now.millis());
-        runs.admit(host, lease, spec, shape.resources(), seen)
+        runs.admit(
+            host,
+            lease,
+            (spec, profile),
+            shape.resources(),
+            record.quota_default,
+            seen,
+        )
+    }
+
+    /// The profile name the run `run_id` was queued with, or `None` when it was queued
+    /// without one or the registry does not know the run (a restart forgets every run).
+    pub fn profile_of(&self, run_id: &str) -> Option<ProfileKey> {
+        self.lock().runs.profile_of(run_id)
     }
 
     /// Asks for the run `run_id` of `lease` to stop: a retained intent, carried as a stop
@@ -882,7 +1000,7 @@ impl Registry {
         if binding.taint().is_none() || records.contains_key(host) {
             return;
         }
-        book.insert_host(host.clone(), self.shared.config.booked().clone());
+        self.shared.config.list_in(book, host.clone());
         records.insert(host.clone(), Record::awaiting(Some(binding), now));
     }
 
@@ -890,19 +1008,41 @@ impl Registry {
     pub fn hosts(&self) -> Vec<HostView> {
         let now = self.shared.clock.now();
         let state = self.lock_at(now);
+        self.host_views(&state, now)
+    }
+
+    /// The hosts ([`Registry::hosts`]) and the wait list ([`Registry::waiting`]) as of one
+    /// moment, read under one lock: a request is not shown as reserved on a host that the
+    /// hosts do not show as set aside, nor the other way round.
+    pub fn snapshot(&self) -> (Vec<HostView>, Vec<Waiting>) {
+        let now = self.shared.clock.now();
+        let state = self.lock_at(now);
+        (self.host_views(&state, now), waiting_rows(&state))
+    }
+
+    fn host_views(&self, state: &State, now: Timestamp) -> Vec<HostView> {
         let booked = state.book.booked();
-        let shape = self.shared.config.shape();
+        let shape = self.shared.config.booked();
+        let memory = self.shared.config.memory_headroom();
         let marks = state.marks.reservations();
         let set_aside = |id: &HostId| marks.iter().find(|mark| mark.host == *id);
         let views = state.records.iter().map(|(id, record)| HostView {
             id: id.clone(),
             state: record.state(now, self.grace_ms()),
+            load: record
+                .load
+                .latest
+                .clone()
+                .filter(|_| record.state(now, self.grace_ms()) != HostState::Lost),
             phase: record.phase,
             lease: booked.get(id).copied(),
             shape: shape.clone(),
+            memory,
+            claim: record.claim.clone(),
             labels: record.labels.clone(),
             agent_version: record.agent_version.clone(),
             epoch: record.epoch,
+            heard_since_hello: record.session.is_none() | (record.beats > 0),
             releasing: !booked.contains_key(id)
                 & !(record.quiet(&state.runs, id) & record.exclusive.is_free()),
             taint: record.taint.clone(),

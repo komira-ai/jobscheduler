@@ -16,9 +16,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_elastic::{Demand, ElasticProvider};
+use js_elastic::{Artifact, Demand, ElasticProvider, SchedulerId};
+use js_lease::Clock;
 use js_registry::{PoolConfig, WholeNodeConfig};
-use js_types::{Admission, ClassId, ExecMode, ProviderId, ResourceClass, Resources, Shape};
+use js_scaler::{Budgets, Millis};
+use js_types::{
+    Admission, ClassId, ExecMode, MEMORY_PERCENT_KEY, MemoryHeadroom, MemoryPercent, ProviderId,
+    ResourceClass, Resources, Shape,
+};
 
 use crate::adapt::SharedClock;
 use crate::agent_pool::{MIXED_UNSERVED, shipped_class};
@@ -26,13 +31,22 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{Token, parse_duration};
 use crate::error::StartupError;
+use crate::file_checks::{check_listeners, check_live};
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
-use crate::network::{OAuthClient, valid_tag};
+use crate::network::OAuthClient;
 
+mod budget;
+mod joined;
+mod lifetime;
+mod network;
+mod pins;
 mod server;
 
-pub(crate) use server::Server;
-use server::{check_listeners, read_client_token, read_server};
+pub use joined::JoinedPool;
+use network::read_network;
+use pins::{LIVE_NEEDS, read_agents};
+pub(crate) use server::{AlertKeys, Server};
+use server::{read_client_token, read_server};
 
 /// The most instances one pool may allow: the join-token table holds 256 waiting tokens.
 const MAX_INSTANCES: u64 = 255;
@@ -43,18 +57,23 @@ const FLOOR_CPU_MILLIS: u64 = 1000;
 /// The memory a host of an elastic pool must report at least: 1 GiB.
 const FLOOR_MEMORY_BYTES: u64 = 1 << 30;
 
-const ROOT_KEYS: &[&str] = &["server", "pool"];
+const ROOT_KEYS: &[&str] = &["server", "pool", "budget"];
 
 const POOL_KEYS: &[&str] = &[
     "name",
     "class",
     "exec",
+    MEMORY_PERCENT_KEY,
     "max_instances",
     "max_spend_per_hour",
     "max_spend_per_day",
     "idle",
+    "max_age",
+    "min_host_lifetime",
     "boot_timeout",
     "launch",
+    "live_until",
+    "agent",
     "join_token_file",
     "provider",
     "network",
@@ -63,7 +82,7 @@ const POOL_KEYS: &[&str] = &[
 /// Whether an elastic pool launches. A pool starts in `Plan`: it checks and shows its
 /// plan and launches nothing. `Live` is the line that spends money; the scaler honours it,
 /// and until the scaler exists nothing launches in either.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Launch {
     /// Check and plan only.
     Plan,
@@ -92,6 +111,12 @@ pub enum NetworkPlan {
         client: OAuthClient,
         /// The tag every launched host carries, such as `tag:js-agent`.
         tag: String,
+        /// The Tailscale build the host downloads, with its hash. Required when the pool
+        /// launches.
+        binary: Option<Artifact>,
+        /// The address of the Tailscale API, when the file names one (for a test or a
+        /// proxy); the service's own default otherwise.
+        api_url: Option<String>,
     },
 }
 
@@ -113,29 +138,65 @@ pub struct ElasticPlan {
     pub kind: String,
     /// The least the pool's sizes bring, as far as the kind knows it offline.
     pub floor: Floor,
+    /// The floor's memory, the percent of it the pool books and what that comes to.
+    pub memory: MemoryHeadroom,
     /// A request for exactly the floor: what a launch is planned for while no request
     /// waits.
     pub(crate) floor_demand: Demand,
-    /// Whether it launches.
+    /// Whether it launches. A pool whose `live_until` had passed when the file was read is
+    /// `Plan`, whatever the file says.
     pub launch: Launch,
+    /// When the go expires: from then on the pool is in plan mode ([`Settings::mode`]).
+    ///
+    /// [`Settings::mode`]: js_scaler::Settings::mode
+    pub live_until: Option<Millis>,
+    /// The server-wide totals: the `[server]` ones and those of each `[budget.<kind>]`.
+    /// Every pool carries the same.
+    pub budgets: Budgets,
     /// The most instances at once.
     pub max_instances: usize,
     /// The most it may spend in an hour, in cents.
     pub max_spend_per_hour_cents: u64,
     /// The most it may spend in a day, in cents.
     pub max_spend_per_day_cents: u64,
-    /// How long a host may sit idle before it is released, when the file says.
+    /// How long a host may sit idle before it is released, when the file says. Required of
+    /// a pool with accelerators.
     pub idle: Option<Duration>,
+    /// The longest a launched machine lives: at this age its host is drained and released
+    /// whether or not it is idle. Required of a pool with accelerators.
+    pub max_age: Option<Duration>,
+    /// The least a launched machine lives before `idle` may release it, so a short `idle`
+    /// cannot make every billed boot a launch for nothing. Required of a pool with
+    /// accelerators; none for any other pool unless the file says.
+    pub min_host_lifetime: Duration,
+    /// `server.max_lease_wall`: the ceiling on a lease's wall time, so the longest a draining
+    /// host takes to empty. Required of a pool with accelerators, which is why the plan
+    /// holds it.
+    pub max_lease_wall: Option<Duration>,
     /// How long a launched host has to say hello.
     pub boot_timeout: Duration,
     /// The execution mode the hosts must report, or `None` when the pool asked for none.
     pub exec: Option<ExecMode>,
     /// How a launched host reaches the server.
     pub network: NetworkPlan,
+    /// The agent the host downloads, with its hash, by CPU architecture (`x86_64`,
+    /// `aarch64`). A pool that launches needs at least one; an offer of an architecture
+    /// with no entry is never launched with another's.
+    pub agent: BTreeMap<String, Artifact>,
+    /// The id that marks what this scheduler launches (`server.scheduler_id`).
+    pub scheduler: SchedulerId,
+    /// The pool's name as the registry knows it.
+    pub(crate) id: ProviderId,
     pub(crate) provider: Arc<dyn ElasticProvider>,
 }
 
 impl ElasticPlan {
+    /// Takes the network table out of the plan, leaving `default` in its place, for the
+    /// one thing that builds the mode from it (the credential in it cannot be copied).
+    pub(crate) fn take_network(&mut self) -> NetworkPlan {
+        std::mem::replace(&mut self.network, NetworkPlan::Default)
+    }
+
     /// The provider the pool launches with.
     pub fn provider(&self) -> &dyn ElasticProvider {
         self.provider.as_ref()
@@ -148,23 +209,36 @@ impl fmt::Debug for ElasticPlan {
             .field("name", &self.name)
             .field("kind", &self.kind)
             .field("floor", &self.floor)
+            .field("memory", &self.memory)
             .field("launch", &self.launch)
+            .field("live_until", &self.live_until)
+            .field("budgets", &self.budgets)
             .field("max_instances", &self.max_instances)
             .field("max_spend_per_hour_cents", &self.max_spend_per_hour_cents)
             .field("max_spend_per_day_cents", &self.max_spend_per_day_cents)
             .field("idle", &self.idle)
+            .field("max_age", &self.max_age)
+            .field("min_host_lifetime", &self.min_host_lifetime)
+            .field("max_lease_wall", &self.max_lease_wall)
             .field("boot_timeout", &self.boot_timeout)
             .field("exec", &self.exec)
             .field("network", &self.network)
+            .field("agent", &self.agent)
+            .field("scheduler", &self.scheduler)
             .finish_non_exhaustive()
     }
 }
 
 /// The registering pool: the plan, what the registry is built from, and the join tokens.
 pub(crate) struct Registering {
-    pub(crate) plan: ElasticPlan,
+    /// The launching side; `None` for a pool of hand-joined agents.
+    pub(crate) plan: Option<ElasticPlan>,
     pub(crate) pool: PoolConfig,
     pub(crate) tokens: AgentTokens,
+    /// The one `provider` the mint route accepts, when the pool is the only thing that
+    /// admits hosts by hand: a joined pool's name. `None` takes any provider, as an
+    /// elastic pool's launches are minted for under the provider kind's name.
+    pub(crate) mint_provider: Option<String>,
 }
 
 /// The pools of the file, as the sources of hosts they make.
@@ -350,6 +424,18 @@ impl Section {
         Ok(tables)
     }
 
+    /// The pool's `memory_schedulable_percent` when the table gives it: a whole number
+    /// from 1 to 100.
+    fn memory_percent(&mut self) -> Result<Option<MemoryPercent>, StartupError> {
+        let Some(percent) = self.integer(MEMORY_PERCENT_KEY)? else {
+            return Ok(None);
+        };
+        let bounded = MemoryPercent::new(percent);
+        bounded
+            .map(Some)
+            .map_err(|_| self.fail(MEMORY_PERCENT_KEY, "must be from 1 to 100"))
+    }
+
     /// A spend in cents: a string holding a decimal with at most two places, above zero.
     fn spend(&mut self, key: &str) -> Result<Option<u64>, StartupError> {
         let Some(text) = self.string(key)? else {
@@ -420,13 +506,21 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         None => return Err(root.fail("server", "required: add a [server] table")),
     };
     let pools = root.tables("pool")?;
+    let budget = root.table("budget")?;
     let server = read_server(server)?;
+    let budgets = budget::read_budgets(budget, server.totals, ld.kinds)?;
     let client_token = read_client_token(&server, ld)?;
     let mut static_pool = None;
     let mut registering = None;
     let mut names = BTreeSet::new();
     for (index, table) in pools.into_iter().enumerate() {
-        let read = read_pool(table, index + 1, ld, &client_token)?;
+        let ceiling = server.max_lease_wall;
+        let read = read_pool(
+            table,
+            index + 1,
+            ld,
+            (&client_token, &server.scheduler, ceiling, &budgets),
+        )?;
         let pool = format!("pool {:?}", read.name);
         if !names.insert(read.name.clone()) {
             let reason = "also the name of an earlier pool";
@@ -448,6 +542,12 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         }
     }
     let elastic = registering.is_some();
+    // A joined pool has no plan, so only an elastic pool's launch settings are checked.
+    if let Some(registering) = &registering
+        && let Some(plan) = &registering.plan
+    {
+        check_live(&server, plan)?;
+    }
     let hosts = match (static_pool, registering) {
         (static_pool, Some(registering)) => LoadedHosts::Registering {
             static_pool,
@@ -463,7 +563,9 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         let reason = "needs an elastic pool, whose hosts register agents";
         return Err(StartupError::at(format!("server.{key}"), reason));
     }
-    let warnings = check_listeners(&server, elastic)?;
+    let mut warnings = check_listeners(&server, elastic)?;
+    let now = Millis::new(ld.clock.now().millis());
+    warnings.extend(budget::notes(&hosts, &budgets, now));
     Ok(Loaded {
         server,
         client_token,
@@ -490,9 +592,13 @@ struct ElasticKeys {
     hour: Option<u64>,
     day: Option<u64>,
     idle: Option<Duration>,
+    max_age: Option<Duration>,
+    min_host_lifetime: Option<Duration>,
+    live_until: Option<Millis>,
     boot_timeout: Option<Duration>,
     join_token_file: Option<PathBuf>,
     network: Option<toml::Table>,
+    agent: Option<toml::Table>,
 }
 
 impl ElasticKeys {
@@ -504,9 +610,13 @@ impl ElasticKeys {
             ("max_spend_per_hour", self.hour.is_some()),
             ("max_spend_per_day", self.day.is_some()),
             ("idle", self.idle.is_some()),
+            ("max_age", self.max_age.is_some()),
+            ("min_host_lifetime", self.min_host_lifetime.is_some()),
+            ("live_until", self.live_until.is_some()),
             ("boot_timeout", self.boot_timeout.is_some()),
             ("join_token_file", self.join_token_file.is_some()),
             ("network", self.network.is_some()),
+            ("agent", self.agent.is_some()),
         ];
         for (key, set) in given {
             if set {
@@ -521,8 +631,16 @@ fn read_pool(
     table: toml::Table,
     number: usize,
     ld: &Load<'_>,
-    client: &Token,
+    (client, scheduler, max_lease_wall, budgets): (
+        &Token,
+        &SchedulerId,
+        Option<Duration>,
+        &Budgets,
+    ),
 ) -> Result<Read, StartupError> {
+    if table.contains_key("kind") {
+        return joined::read(table, client);
+    }
     // The name, when it is one, so that every refusal below names the pool; otherwise the
     // pool is its number, and the value is not repeated.
     let head = match table.get("name").and_then(toml::Value::as_str) {
@@ -550,14 +668,26 @@ fn read_pool(
         hour: s.spend("max_spend_per_hour")?,
         day: s.spend("max_spend_per_day")?,
         idle: s.duration("idle")?,
+        max_age: s.duration("max_age")?,
+        min_host_lifetime: s.duration("min_host_lifetime")?,
+        live_until: s.timestamp("live_until")?,
         boot_timeout: s.duration("boot_timeout")?,
         join_token_file: s.path("join_token_file")?,
         network: s.table("network")?,
+        agent: s.table("agent")?,
     };
+    let memory_percent = s.memory_percent()?;
     let launch = match s.string("launch")?.as_deref() {
         None | Some("plan") => Launch::Plan,
         Some("live") => Launch::Live,
         Some(_) => return Err(s.fail("launch", "must be plan or live")),
+    };
+    // A go that has expired by the time the file is read is not a go: the pool starts in
+    // plan, as it would have been switched there by the scaler's first step.
+    let now = Millis::new(ld.clock.now().millis());
+    let launch = match (launch, keys.live_until) {
+        (Launch::Live, Some(until)) if now >= until => Launch::Plan,
+        (launch, _) => launch,
     };
     let provider = match s.table("provider")? {
         Some(provider) => provider,
@@ -569,8 +699,12 @@ fn read_pool(
         let ctx = BuildCtx {
             pool: &name,
             class: &class,
+            memory_percent,
             clock: ld.clock.clone(),
             files: ld.files,
+            scheduler,
+            max_instances: keys.max_instances.unwrap_or_default(),
+            launch,
         };
         ld.kinds.build(&kind, &p.map, &ctx)
     };
@@ -595,9 +729,13 @@ fn read_pool(
                 name: &name,
                 id,
                 class,
+                memory_percent: memory_percent.unwrap_or_default(),
                 keys,
                 launch,
                 kind: &kind,
+                scheduler,
+                max_lease_wall,
+                budgets,
             };
             Pool::Elastic(Box::new(elastic.finish(built, client)?))
         }
@@ -611,9 +749,13 @@ struct Elastic<'a> {
     name: &'a str,
     id: ProviderId,
     class: ResourceClass,
+    memory_percent: MemoryPercent,
     keys: ElasticKeys,
     launch: Launch,
     kind: &'a str,
+    scheduler: &'a SchedulerId,
+    max_lease_wall: Option<Duration>,
+    budgets: &'a Budgets,
 }
 
 impl Elastic<'_> {
@@ -623,9 +765,13 @@ impl Elastic<'_> {
             name,
             id,
             class,
+            memory_percent,
             keys,
             launch,
             kind,
+            scheduler,
+            max_lease_wall,
+            budgets,
         } = self;
         let max_instances = require(s, "max_instances", keys.max_instances)?;
         if max_instances == 0 {
@@ -641,6 +787,15 @@ impl Elastic<'_> {
             let reason = "must not be below max_spend_per_hour";
             return Err(s.fail("max_spend_per_day", reason));
         }
+        let boot_timeout = keys.boot_timeout.unwrap_or(Duration::from_secs(900));
+        let given = lifetime::Given {
+            idle: keys.idle,
+            max_age: keys.max_age,
+            min_host_lifetime: keys.min_host_lifetime,
+        };
+        let accelerators = built.floor.gpus > 0;
+        let (max_age, min_host_lifetime) =
+            lifetime::check(s, &given, (accelerators, boot_timeout, max_lease_wall))?;
         let exec = match keys.exec.as_deref().unwrap_or("container") {
             "none" => None,
             other => match other.parse::<ExecMode>() {
@@ -656,6 +811,21 @@ impl Elastic<'_> {
             _ => {}
         }
         let network = read_network(keys.network, format!("{}network.", s.head))?;
+        let agent = match keys.agent {
+            Some(table) => read_agents(table, format!("{}agent.", s.head))?,
+            None => BTreeMap::new(),
+        };
+        let live = launch == Launch::Live;
+        let unpinned = match &network {
+            NetworkPlan::Tailscale { binary: None, .. } => live,
+            _ => false,
+        };
+        if unpinned {
+            return Err(s.fail("network.binary", LIVE_NEEDS));
+        }
+        if live & agent.is_empty() {
+            return Err(s.fail("agent", LIVE_NEEDS));
+        }
         let tokens = match &keys.join_token_file {
             Some(path) => match AgentTokens::open(path, client) {
                 Ok(tokens) => tokens,
@@ -682,23 +852,37 @@ impl Elastic<'_> {
         };
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);
-        let pool = registry_pool(s, id, &class, shape, max, exec)?;
+        let pool = registry_pool(s, id.clone(), &class, shape, max, exec, memory_percent)?;
         let plan = ElasticPlan {
             name: name.to_owned(),
             kind: kind.to_owned(),
             floor: built.floor,
+            memory: pool.memory_headroom(),
             floor_demand,
             launch,
+            live_until: keys.live_until,
+            budgets: budgets.clone(),
             max_instances: max,
             max_spend_per_hour_cents: hour,
             max_spend_per_day_cents: day,
             idle: keys.idle,
-            boot_timeout: keys.boot_timeout.unwrap_or(Duration::from_secs(900)),
+            max_age,
+            min_host_lifetime,
+            max_lease_wall,
+            boot_timeout,
             exec,
             network,
+            agent,
+            scheduler: scheduler.clone(),
+            id,
             provider: Arc::from(built.provider),
         };
-        Ok(Registering { plan, pool, tokens })
+        Ok(Registering {
+            plan: Some(plan),
+            pool,
+            tokens,
+            mint_provider: None,
+        })
     }
 }
 
@@ -711,8 +895,8 @@ fn require(s: &Section, key: &str, value: Option<u64>) -> Result<u64, StartupErr
 }
 
 /// The registry's pool for an elastic pool of `class`: `max` machines, the floor `shape`,
-/// the host contract of `exec` when the pool asks for one, and, for a whole-node class,
-/// the settings of a dedicated pool.
+/// the host contract of `exec` when the pool asks for one, the booked share of the floor's
+/// memory, and, for a whole-node class, the settings of a dedicated pool.
 fn registry_pool(
     s: &Section,
     id: ProviderId,
@@ -720,8 +904,9 @@ fn registry_pool(
     shape: Shape,
     max: usize,
     exec: Option<ExecMode>,
+    memory_percent: MemoryPercent,
 ) -> Result<PoolConfig, StartupError> {
-    let pool = PoolConfig::new(id, class.clone(), shape, max);
+    let pool = PoolConfig::new(id, class.clone(), shape, max).with_memory_percent(memory_percent);
     let pool = match exec {
         Some(mode) => pool.with_exec(mode),
         None => pool,
@@ -732,36 +917,6 @@ fn registry_pool(
             Err(err) => Err(s.fail("class", &err.to_string())),
         },
         _ => Ok(pool),
-    }
-}
-
-fn read_network(table: Option<toml::Table>, head: String) -> Result<NetworkPlan, StartupError> {
-    let Some(table) = table else {
-        return Ok(NetworkPlan::Default);
-    };
-    let mut s = Section::open(table, head);
-    let kind = s.required_string("kind")?;
-    match kind.as_str() {
-        "default" => {
-            s.only(&["kind"])?;
-            Ok(NetworkPlan::Default)
-        }
-        "tailscale" => {
-            s.only(&["kind", "oauth_client_file", "tag"])?;
-            let file = s.required_path("oauth_client_file")?;
-            let tag = s.required_string("tag")?;
-            if !valid_tag(&tag) {
-                return Err(s.fail("tag", "must be \"tag:\" and letters, digits or '-'"));
-            }
-            match OAuthClient::from_file(&file) {
-                Ok(client) => Ok(NetworkPlan::Tailscale { client, tag }),
-                Err(err) => Err(s.fail("oauth_client_file", &err.to_string())),
-            }
-        }
-        _ => {
-            let reason = format!("{kind:?} is not a kind; known: default, tailscale");
-            Err(s.fail("kind", &reason))
-        }
     }
 }
 
@@ -809,17 +964,18 @@ mod tests {
     #[test]
     fn the_registry_pool_takes_the_class_and_the_contract() {
         let id = ProviderId::new("x").unwrap();
+        let full = MemoryPercent::FULL;
         let whole = ResourceClass::whole_node();
-        let refused = registry_pool(&section(), id.clone(), &whole, floor(), 0, None);
+        let refused = registry_pool(&section(), id.clone(), &whole, floor(), 0, None, full);
         let said = refused.err().unwrap().to_string();
         assert!(said.starts_with("pool \"x\": class: "), "{said}");
         assert!(said.ends_with("must be at least 1"), "{said}");
         let exec = Some(ExecMode::Container);
-        let built = registry_pool(&section(), id.clone(), &whole, floor(), 2, exec).unwrap();
+        let built = registry_pool(&section(), id.clone(), &whole, floor(), 2, exec, full).unwrap();
         assert_eq!(built.whole_node().unwrap().max_whole_node, 2);
         assert_eq!(built.exec(), exec);
         let gpu = ResourceClass::gpu_host();
-        let plain = registry_pool(&section(), id, &gpu, floor(), 2, None).unwrap();
+        let plain = registry_pool(&section(), id, &gpu, floor(), 2, None, full).unwrap();
         assert!(plain.whole_node().is_none());
         assert_eq!(plain.exec(), None);
     }

@@ -366,6 +366,9 @@ impl WorkerLoad {
     /// (its `seq` is above the last accepted one and neither the clock nor the counter
     /// went back) and the figures are plausible: no more cores than
     /// [`IMPLAUSIBLE_FACTOR`] times the worker's, no more memory than that times its.
+    /// The cores are judged against `capacity` and the memory against `raw_memory_bytes`,
+    /// what the worker reported: a working set is measured on the whole machine, so the
+    /// share admission books does not make a legitimate reading implausible.
     /// A dropped reading forgets the baseline too, so the worker is charged by
     /// prediction until two readings in a row are accepted again.
     pub(crate) fn accept(
@@ -373,6 +376,7 @@ impl WorkerLoad {
         load: NodeLoad,
         now: FarmTime,
         capacity: &Resources,
+        raw_memory_bytes: u64,
         cfg: &LoadConfig,
         counters: &mut LoadCounters,
     ) {
@@ -387,9 +391,8 @@ impl WorkerLoad {
             capacity.cpu_millis > 0
                 && u64::from(cores) > capacity.cpu_millis.saturating_mul(IMPLAUSIBLE_FACTOR)
         });
-        let too_much_memory = capacity.memory_bytes > 0
-            && load.memory_working_set_bytes
-                > capacity.memory_bytes.saturating_mul(IMPLAUSIBLE_FACTOR);
+        let too_much_memory = raw_memory_bytes > 0
+            && load.memory_working_set_bytes > raw_memory_bytes.saturating_mul(IMPLAUSIBLE_FACTOR);
         if too_many_cores || too_much_memory {
             return self.drop_readings(counters);
         }
@@ -763,6 +766,7 @@ mod tests {
             read(1, Vec::new(), Vec::new()),
             now,
             &capacity,
+            capacity.memory_bytes,
             &cfg,
             &mut counters,
         );
@@ -776,7 +780,14 @@ mod tests {
             lease_clocks: vec![clock(1, 1), clock(2, 0)],
             ..second
         };
-        load.accept(second, now, &capacity, &cfg, &mut counters);
+        load.accept(
+            second,
+            now,
+            &capacity,
+            capacity.memory_bytes,
+            &cfg,
+            &mut counters,
+        );
         let t = load.totals();
         assert!(t.has_timed());
         // Covered by curve (lease 1: 60 cores from its minute 1); covered flat to a life

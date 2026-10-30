@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 
 use js_caps::NodeCaps;
+use js_types::sched::usage::LeaseCost;
 use js_types::sched::{FarmTime, LeaseId, LeaseKind, NodePhase, Resources};
 
 use crate::admission::{Left, WorkerLoad};
@@ -14,6 +15,10 @@ use crate::load::Load;
 #[derive(Clone, Debug)]
 pub(crate) struct Worker {
     pub(crate) capacity: Resources,
+    /// The memory the worker reported, before the cut to the share admission books
+    /// ([`crate::MemoryPercent`]). Only the plausibility of a reading is judged against it:
+    /// a working set is measured on the whole machine.
+    pub(crate) raw_memory_bytes: u64,
     pub(crate) caps: NodeCaps,
     pub(crate) booked: Resources,
     /// How many leases it holds.
@@ -91,9 +96,38 @@ impl Worker {
     /// of the memory ladder, which the cap is): it runs with no other lease on the node,
     /// and none is placed beside it, as a whole-machine lease does. A request for no
     /// memory is not.
+    ///
+    /// A request that owns its worker ([`Request::owns_worker`]) is exclusive on every
+    /// worker, whatever its memory.
     pub(crate) fn exclusive(&self, request: &Request) -> bool {
-        request.resources.memory_bytes > 0
-            && request.resources.memory_bytes >= self.capacity.memory_bytes
+        request.owns_worker()
+            || (request.resources.memory_bytes > 0
+                && request.resources.memory_bytes >= self.capacity.memory_bytes)
+    }
+
+    /// What the lease of `request` books on it: all its capacity for a whole-machine
+    /// lease or a request that owns the worker, else the request's resources.
+    pub(crate) fn booking(&self, request: &Request) -> Resources {
+        match request.kind {
+            LeaseKind::WholeMachine => self.capacity,
+            _ if request.owns_worker() => self.capacity,
+            LeaseKind::Action | LeaseKind::Vm => request.resources,
+        }
+    }
+
+    /// `cost`, the charge of the lease of `request` on the load ledger, made the whole
+    /// worker's CPUs and memory when the request owns it.
+    pub(crate) fn charged_whole(&self, request: &Request, cost: LeaseCost) -> LeaseCost {
+        if request.owns_worker() {
+            LeaseCost {
+                cpu_millis: self.capacity.cpu_millis,
+                memory_bytes: self.capacity.memory_bytes,
+                limit_bytes: self.capacity.memory_bytes,
+                ..cost
+            }
+        } else {
+            cost
+        }
     }
 
     /// Whether `request` can be placed on it now, platform and kind aside: an action
@@ -102,7 +136,9 @@ impl Worker {
     /// one), and its memory capacity is at least the request's memory; a VM if no
     /// whole-machine lease holds it, it holds fewer leases than its cap, and its free CPUs,
     /// memory, GPUs and VM slots hold the request; a whole-machine lease if it holds no
-    /// lease and its capacity holds the request. A
+    /// lease and its capacity holds the request. An action that owns its worker
+    /// ([`Request::owns_worker`]) also needs it to hold no lease, and its CPUs and
+    /// memory are not compared with the worker's. A
     /// request for an iOS device also needs a free device that satisfies it
     /// ([`Worker::free_device`]).
     ///
@@ -120,7 +156,7 @@ impl Worker {
             LeaseKind::Action => {
                 // Under the load predicate the booked CPUs are not summed, but the
                 // request must still be one the worker's CPUs could ever hold.
-                let needs = if by_load {
+                let needs = if by_load || request.owns_worker() {
                     Resources {
                         cpu_millis: 0,
                         ..request.resources.without_memory()
@@ -128,10 +164,11 @@ impl Worker {
                 } else {
                     request.resources.without_memory()
                 };
+                let owns = request.owns_worker();
                 !self.whole
                     && self.free().fits(&needs)
-                    && request.resources.cpu_millis <= self.capacity.cpu_millis
-                    && request.resources.memory_bytes <= self.capacity.memory_bytes
+                    && (owns || request.resources.cpu_millis <= self.capacity.cpu_millis)
+                    && (owns || request.resources.memory_bytes <= self.capacity.memory_bytes)
                     && self.under_lease_cap()
                     && (!self.exclusive(request) || self.leases == 0)
             }

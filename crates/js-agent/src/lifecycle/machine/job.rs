@@ -3,10 +3,11 @@
 //! spec that follow from a job.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::PathBuf;
 
 use js_agent_wire::{HeldRun, HeldState, Isolation, JobSpec, Outcome, RunResult, Taint};
 
-use super::RETIRED_CAP;
+use super::{RETIRED_CAP, SLOTS};
 use crate::lifecycle::runtime::{ContainerId, ContainerSpec, Exit, Found, ResolvedMount};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, label};
@@ -91,16 +92,18 @@ pub(super) enum Cause {
 pub(super) struct Booking {
     pub(super) cpu_millis: u64,
     pub(super) memory_bytes: u64,
+    pub(super) disk_bytes: u64,
     pub(super) gpus: Vec<u32>,
 }
 
 impl Booking {
-    /// Whether this booking fits beside `used` in what `offered` has: the CPU and memory
-    /// within what is left, and every GPU offered and not used.
+    /// Whether this booking fits beside `used` in what `offered` has: the CPU, memory and
+    /// disk within what is left, and every GPU offered and not used.
     pub(super) fn fits(&self, offered: &Capacity, used: &Capacity) -> bool {
         [
             self.cpu_millis <= offered.cpu_millis.saturating_sub(used.cpu_millis),
             self.memory_bytes <= offered.memory_bytes.saturating_sub(used.memory_bytes),
+            self.disk_bytes <= offered.disk_bytes.saturating_sub(used.disk_bytes),
             self.gpus
                 .iter()
                 .all(|gpu| offered.gpus.contains(gpu) && !used.gpus.contains(gpu)),
@@ -109,7 +112,7 @@ impl Booking {
         .all(|ok| ok)
     }
 
-    /// What the labels of a container say it booked: all three are numbers and no GPU is
+    /// What the labels of a container say it booked: the CPU, memory and GPU labels are present and readable, the disk label is a number when there is one, and no GPU is
     /// named twice (the agent never writes such a booking).
     pub(super) fn from_labels(found: &Found) -> Option<Self> {
         let gpus = found
@@ -124,6 +127,13 @@ impl Booking {
         Some(Self {
             cpu_millis: label_number(found, label::CPU_MILLIS)?,
             memory_bytes: label_number(found, label::MEMORY_BYTES)?,
+            // Absent in a container an earlier agent made: it books no disk, the same 0 a
+            // job without `disk_bytes` books now, so a restart adopts it. A value that is
+            // there and is not a number is an unreadable booking like any other.
+            disk_bytes: match found.labels.get(label::DISK_BYTES) {
+                None => 0,
+                Some(text) => text.parse().ok()?,
+            },
             gpus,
         })
     }
@@ -133,9 +143,16 @@ impl Booking {
         Self {
             cpu_millis: offered.cpu_millis,
             memory_bytes: offered.memory_bytes,
+            disk_bytes: offered.disk_bytes,
             gpus: offered.gpus.iter().copied().collect(),
         }
     }
+}
+
+/// The slot a found container's labels name, when they name one that exists.
+pub(super) fn slot_label(found: &Found) -> Option<u32> {
+    let slot = label_number(found, label::SLOT)?;
+    u32::try_from(slot).ok().filter(|slot| *slot < SLOTS)
 }
 
 /// The label `key` of a found container, as a number.
@@ -150,12 +167,17 @@ pub(super) struct Stuck {
     pub(super) booking: Booking,
     /// The run its labels name, whose scratch directory the container may still use.
     pub(super) run_id: Option<String>,
+    /// The slot its labels name: its uid may still be alive, so the slot is quarantined.
+    pub(super) slot: Option<u32>,
 }
 
 pub(super) struct Job {
     pub(super) run_id: String,
     pub(super) lease_id: String,
     pub(super) booking: Booking,
+    /// The slot the run holds, none for a run that was refused and one taken over from a
+    /// container no slot is written on.
+    pub(super) slot: Option<u32>,
     /// On the agent's clock.
     pub(super) deadline_ms: u64,
     pub(super) stage: Stage,
@@ -170,7 +192,22 @@ pub(super) struct Job {
     pub(super) owed: bool,
     pub(super) result: Option<RunResult>,
     pub(super) findings: Vec<Finding>,
+    /// When the container started, on the agent's monotonic clock, in microseconds (the
+    /// lifecycle's clock counts milliseconds, so the stamp is a whole number of them). For
+    /// an adopted job it is when the runtime says the container began; `None` when that was
+    /// before the clock did, which the clock cannot say.
+    pub(super) started_usec: Option<u64>,
+    /// The container's control group directory, asked of the runtime when the job starts
+    /// or is adopted and, while it is not known, again by `Lifecycle::find_cgroups`.
+    pub(super) cgroup: Option<PathBuf>,
+    /// The operator was told that the control group is not known yet.
+    pub(super) cgroup_missing_told: bool,
+    /// Taken over from an earlier process of the agent: its first minutes were not seen.
+    pub(super) adopted: bool,
 }
+
+/// Microseconds in a millisecond.
+const USEC_PER_MS: u64 = 1000;
 
 impl Job {
     pub(super) fn report(
@@ -185,6 +222,7 @@ impl Job {
             outcome,
             exit_code,
             detail: detail.map(str::to_owned),
+            log_tail: None,
         }
     }
 
@@ -262,16 +300,19 @@ impl Retired {
 }
 
 impl Job {
-    /// A job for `spec` in `stage`, booking what the spec asks.
-    pub(super) fn of(spec: &JobSpec, stage: Stage, deadline_ms: u64) -> Self {
+    /// A job for `spec` in `stage`, booking what the spec asks, in `slot`.
+    pub(super) fn of(spec: &JobSpec, stage: Stage, deadline_ms: u64, slot: Option<u32>) -> Self {
         Self {
             run_id: spec.run_id.clone(),
             lease_id: spec.lease_id.clone(),
             booking: Booking {
                 cpu_millis: spec.limits.cpu_millis,
                 memory_bytes: spec.limits.memory_bytes,
+                // No default booking for a job without `disk_bytes` yet.
+                disk_bytes: spec.limits.disk_bytes.unwrap_or(0),
                 gpus: spec.gpu_indices.clone(),
             },
+            slot,
             deadline_ms,
             stage,
             cause: None,
@@ -281,6 +322,10 @@ impl Job {
             owed: false,
             result: None,
             findings: Vec::new(),
+            started_usec: None,
+            cgroup: None,
+            cgroup_missing_told: false,
+            adopted: false,
         }
     }
 
@@ -289,10 +334,15 @@ impl Job {
         let booking = Booking::from_labels(found)?;
         let wall_ms = label_number(found, label::WALL_MS)?;
         let remaining = wall_ms.saturating_sub(found.running_ms);
+        let slot = match found.labels.contains_key(label::SLOT) {
+            true => Some(slot_label(found)?),
+            false => None,
+        };
         Some(Self {
             run_id: label_id(found, label::RUN)?.to_owned(),
             lease_id: label_id(found, label::LEASE)?.to_owned(),
             booking,
+            slot,
             deadline_ms: now.saturating_add(remaining),
             stage: Stage::Running(found.id.clone()),
             cause: None,
@@ -302,7 +352,18 @@ impl Job {
             owed: false,
             result: None,
             findings: Vec::new(),
+            started_usec: now
+                .checked_sub(found.running_ms)
+                .map(|started| started.saturating_mul(USEC_PER_MS)),
+            cgroup: None,
+            cgroup_missing_told: false,
+            adopted: true,
         })
+    }
+
+    /// Marks the job as started `now_ms` on the agent's clock.
+    pub(super) fn started_at(&mut self, now_ms: u64) {
+        self.started_usec = Some(now_ms.saturating_mul(USEC_PER_MS));
     }
 }
 
@@ -353,6 +414,8 @@ pub(super) fn container_spec(
     spec: &JobSpec,
     mounts: Vec<ResolvedMount>,
     scratch: std::path::PathBuf,
+    files: Option<std::path::PathBuf>,
+    slot: u32,
 ) -> ContainerSpec {
     let gpus: Vec<String> = spec.gpu_indices.iter().map(u32::to_string).collect();
     let own = [
@@ -360,7 +423,12 @@ pub(super) fn container_spec(
         (label::LEASE, spec.lease_id.clone()),
         (label::CPU_MILLIS, spec.limits.cpu_millis.to_string()),
         (label::MEMORY_BYTES, spec.limits.memory_bytes.to_string()),
+        (
+            label::DISK_BYTES,
+            spec.limits.disk_bytes.unwrap_or(0).to_string(),
+        ),
         (label::GPUS, gpus.join(",")),
+        (label::SLOT, slot.to_string()),
         (label::WALL_MS, spec.limits.wall_ms.to_string()),
         (
             label::ISOLATION,
@@ -382,6 +450,8 @@ pub(super) fn container_spec(
         gpu_indices: spec.gpu_indices.clone(),
         mounts,
         scratch,
+        files,
+        slot,
         isolation: spec.isolation,
         labels,
     }

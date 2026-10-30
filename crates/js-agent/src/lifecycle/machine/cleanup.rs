@@ -4,7 +4,7 @@
 use super::Lifecycle;
 use super::job::{Cause, Stage, check_taint, cleanup_taint, outcome};
 use crate::lifecycle::runtime::{ContainerId, Status};
-use crate::lifecycle::{CheckFinding, Event, Finished, code};
+use crate::lifecycle::{CheckFinding, Config, Event, Finished, code};
 
 impl Lifecycle {
     /// Watches one running job: the wall-time limit, a stop that is owed, the exit.
@@ -55,7 +55,16 @@ impl Lifecycle {
                 let cause = job.cause.filter(|_| exit.is_none() || job.stop_sent);
                 let (how, status) = outcome(cause, exit);
                 if !job.silent {
-                    job.result = Some(job.report(how, status, None));
+                    let mut result = job.report(how, status, None);
+                    // The container is still there: it is removed in the next stage. A log
+                    // that cannot be read costs the result its tail and nothing else.
+                    if exit.is_some() {
+                        match runtime.log_tail(&id) {
+                            Ok(tail) => result.log_tail = tail,
+                            Err(why) => job.note(code::LOGS_FAILED, why.to_string(), events),
+                        }
+                    }
+                    job.result = Some(result);
                     events.push(Event::ResultReady {
                         run_id: job.run_id.clone(),
                     });
@@ -78,12 +87,23 @@ impl Lifecycle {
             .filter_map(|(_, job)| job.stage.container().cloned())
             .chain(self.stuck.iter().map(|held| held.id.clone()))
             .collect();
+        // The slots of the other jobs whose containers are still on the host.
+        let live_slots: Vec<u32> = self
+            .jobs
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .filter(|(_, job)| job.stage.container().is_some())
+            .filter_map(|(_, job)| job.slot)
+            .chain(self.stuck.iter().filter_map(|held| held.slot))
+            .collect();
         let Self {
             jobs,
             runtime,
             config,
             checks,
             taint,
+            slots,
             ..
         } = self;
         let job = &mut jobs[index];
@@ -118,7 +138,7 @@ impl Lifecycle {
                         return;
                     }
                 },
-                Stage::Scratch => match config.scratch.remove(&run_id) {
+                Stage::Scratch => match remove_run_dirs(config, &run_id) {
                     Ok(()) => {
                         events.push(Event::ScratchRemoved {
                             run_id: run_id.clone(),
@@ -135,6 +155,8 @@ impl Lifecycle {
                 Stage::Checks => match checks.run(&Finished {
                     run_id: &run_id,
                     live: &live,
+                    slot: job.slot,
+                    live_slots: &live_slots,
                 }) {
                     // A marker that is not on disk yet (it could not be written when the
                     // host was tainted) holds the slot, whatever the job left; so does a
@@ -152,6 +174,11 @@ impl Lifecycle {
                             run_id: run_id.clone(),
                         });
                         job.stage = Stage::Freed;
+                        // The cleanup passed: no container, no scratch directory and no
+                        // process of the slot's uid. Only here does the slot come back.
+                        if let Some(slot) = job.slot {
+                            slots.release(slot);
+                        }
                         events.push(Event::SlotFreed {
                             run_id: run_id.clone(),
                         });
@@ -167,6 +194,11 @@ impl Lifecycle {
                         job.taint(taint, check_taint(&run_id, &found), events);
                         job.note(found.code(), message, events);
                         job.stage = Stage::Blocked;
+                        // Whatever the check found may be a process of the slot's uid: the
+                        // slot takes no new run.
+                        if let Some(slot) = job.slot {
+                            slots.quarantine(slot);
+                        }
                         // The checks have run. The record that they were owed goes once
                         // the taint is on disk; until then it stays, so that a crash
                         // still taints the host at the next start. If it cannot be
@@ -181,4 +213,15 @@ impl Lifecycle {
             }
         }
     }
+}
+
+/// Removes the run's scratch directory and its files directory; both are tried, and the
+/// first failure is the one reported.
+fn remove_run_dirs(config: &Config, run_id: &str) -> std::io::Result<()> {
+    let scratch = config.scratch.remove(run_id);
+    let files = config
+        .files
+        .as_ref()
+        .map_or(Ok(()), |root| root.remove(run_id));
+    scratch.and(files)
 }

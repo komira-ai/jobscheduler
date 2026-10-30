@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::fake::FakeMachine;
 use super::{private, user};
-use crate::server::{Agent, Counting, POOL_RUNS_TOML, Redirect, Server};
+use crate::server::{Agent, Counting, POOL_RUNS_TOML, Recorder, Redirect, Server};
 use crate::support::{Ran, Scratch, code, linux_host};
 
 /// A server with one agent that runs containers, and a lease on its host.
@@ -55,6 +55,8 @@ fn rig_over<C: js_agent::Connector + Send + 'static>(
         &exec,
         "--container-user",
         &user,
+        "--container-subuid",
+        "jobmap",
         "--state-root",
         &state,
         "--scratch-root",
@@ -215,6 +217,52 @@ fn a_stop_is_delivered_and_the_run_is_killed() {
     let expected = ["create", "stop", "remove"].map(|call| format!("{call} {run}"));
     assert_eq!(order, expected.iter().collect::<Vec<_>>());
     rig.agent.stop();
+}
+
+/// Asserts the usage through the agent as the program assembles it, against a real server:
+/// with `--actions-cgroup` the heartbeats the agent posts carry a load once a run is
+/// running (the node's memory, one clock for the run), and the server goes on accepting
+/// them (the run reads running). It catches a flag that is checked and never reaches the
+/// worker and the session, and a load the real server would refuse.
+#[test]
+fn the_agent_sends_its_load_to_a_real_server() {
+    let server = Server::start_pool("jobs_e2e_load", &[], POOL_RUNS_TOML);
+    let address = Arc::new(Mutex::new(server.url()));
+    let posts = Recorder::default();
+    let posted = posts.0.clone();
+    let slice = "/sys/fs/cgroup/jobs.slice";
+    let flags = ["--actions-cgroup", slice, "--drain-wait", "0"];
+    let rig = rig_over(server, address, "jobs_e2e_load", &flags, move |_| {
+        posts.clone()
+    });
+    rig.machine.world.set_cgroup_base(slice);
+    let run = rig.queued(1000);
+    for dir in [slice.to_owned(), format!("{slice}/docker-{run}.scope")] {
+        let files = &rig.machine.files;
+        files.set(&format!("{dir}/cpu.stat"), "usage_usec 10\n");
+        files.set(&format!("{dir}/memory.current"), "4096\n");
+        files.set(&format!("{dir}/cpu.max"), "max 100000\n");
+        files.set(
+            &format!("{dir}/memory.stat"),
+            "inactive_file 0\nactive_file 0\n",
+        );
+    }
+    rig.machine.clock.advance(5_000);
+    rig.until_running(&run);
+    rig.beat();
+
+    let loads: Vec<Value> = posted
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|beat| beat.get("load").cloned())
+        .collect();
+    assert!(!loads.is_empty(), "no heartbeat carried a load");
+    assert_eq!(loads[0]["working_set_bytes"], 4096);
+    assert_eq!(loads[0]["clocks"].as_array().map(Vec::len), Some(1));
+    assert_eq!(rig.view(&run).0, "running");
+    let ran = rig.drain_now();
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
 }
 
 /// Asserts what a server that forgot a run does to the agent's work: after the server

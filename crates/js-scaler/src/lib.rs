@@ -20,12 +20,23 @@
 //!   takes it back ([`Action::Undrain`]) instead of launching.
 //!   [`Offer::fit`](js_elastic::Offer::fit) judges every fit, so a request never lands on
 //!   an offer of another operating system or architecture.
-//! * Launch. Up to `max_step` launches per step, to the cheapest fitting offer, when the
-//!   pool is in `Live` mode, its checks pass, its list of machines was read, it is not
+//! * Launch. Up to `max_step` launches per step, to the cheapest fitting offer that has a
+//!   price above zero (an offer with no price, or a price of zero, is never launched: zero
+//!   would pass both spend caps; a request that fits only such an offer shows
+//!   [`Blocked::Unpriced`]), when the pool is in `Live` mode, its checks pass, its list of machines was read, it is not
 //!   cooling off, no launch of it is waiting for the time its provider named, and the caps
 //!   hold: `max_instances`, `max_spend_per_hour` over the stored prices of the machines
 //!   held, and `max_spend_per_day` over what the machines cost in the last 24 hours (a
 //!   machine that still runs keeps accruing, a launch that waits counts at its least cost).
+//!   Server-wide totals ([`Budgets`]) are held beside the pool's caps: over the records of
+//!   every pool of the server, and of every pool of the provider kind, the cost in the last 24
+//!   hours, in the last 30 days (rolling) and since the pool's go ([`Go`]: its first launch since it
+//!   was last in `Plan`, written to the records with that launch and lost when the pool is seen
+//!   in `Plan`) may not
+//!   pass a total with the new machine's least cost added ([`Blocked::MaxSpendTotal`]). A pool
+//!   whose `live_until` has come is in `Plan` ([`Settings::mode`]). A total only keeps a launch
+//!   from being made; the overrun it allows is bounded by [`overrun`]. Records are kept until
+//!   their billed time has left the 30 days.
 //!   The acquire id is the pool and 128 random bits the caller gives in [`Input::entropy`].
 //!   A launch the provider told to wait is retried when its time comes, if the pool is
 //!   `Live` and every cap still holds.
@@ -39,22 +50,44 @@
 //!   nothing: drained and marked for release, which the registry checks when the actions
 //!   run, then released when the mark is read back; [`State::silent_released`] names it for
 //!   the shell to log. A host that shows a lease, a run, a stream or a `Held` or `Reserved`
-//!   mark is never released. A registered host never heard from since its hello
-//!   ([`HostFacts::heard_since_hello`] false: its Welcome was lost) that books nothing is a
-//!   failed boot, released at `boot_timeout` after its launch with the boot-failure cooldown,
-//!   unless it was seen live and heard from on an earlier step ([`Record::seen_live`]): a
-//!   host whose agent restarted and said hello again is not a lost Welcome.
-//!   Hosts the scaler did not launch are never released. One the
-//!   registry no longer shows is released too, but only on a complete registry view
+//!   mark is never released, except that a silent host whose leases the registry gave up
+//!   ([`HostFacts::lease_given_up`]) is not kept by the runs and streams it lists, which a
+//!   job that can no longer report leaves behind. A registered host never heard from since
+//!   its hello ([`HostFacts::heard_since_hello`] false: its Welcome was lost) that books
+//!   nothing is a failed boot, released at `boot_timeout` after its launch with the
+//!   boot-failure cooldown, unless it was seen live and heard from on an earlier step
+//!   ([`Record::seen_live`]): a host whose agent restarted and said hello again is not a
+//!   lost Welcome. Hosts the scaler did not launch are never released. One the registry no
+//!   longer shows is released too, but only on a complete registry view
 //!   ([`Input::registry_complete`], the shell's duty to vouch for) with the machine missing
-//!   on two steps `unknown_hold` apart; otherwise it is held and counted. A booting
-//!   machine is given up on at `boot_timeout` on a complete view only. One the provider
-//!   says it no longer has ([`Input::not_found`]) is settled.
+//!   on complete views `unknown_hold` apart; otherwise it is held and counted. A booting
+//!   machine is given up on at `boot_timeout` on a complete view only, and only once its
+//!   host has been missing on complete views for a third of `boot_timeout`, so a restart
+//!   does not release a machine whose agent is about to say hello. The times a silent host
+//!   was first seen silent and a machine was first seen missing are in [`Records`] with the
+//!   time of the step that wrote them, so a scaler whose restarts are further apart than the save
+//!   interval (the lesser of a sixth of `unknown_hold` and five minutes) still reaches the
+//!   hold by the time it observed; a faster crash loop keeps the host held and counted. The
+//!   time it was down is not counted.
+//!   One the provider says it no longer has ([`Input::not_found`]) is settled.
 //! * Scale down. A registered host quiet for `idle` is drained; a drained host that is
 //!   still quiet is marked for release; once the registry shows the mark the token is
 //!   revoked and the machine released, every step, until a read by id says gone. There is
 //!   no deadline on any of this, and nothing is released that the registry did not
 //!   mark while quiet, except a machine the registry has forgotten, which holds no work.
+//!   `idle` drains a host only once it has lived `min_host_lifetime`, so a short `idle`
+//!   cannot turn each billed boot into a launch for nothing.
+//! * Machines that reach `max_age`. A live registered host whose machine was launched
+//!   `max_age` ago is retired ([`Action::Retire`]) whether or not it is busy: the mark
+//!   takes no new start and cuts no work, adds no deadline, and is never undone for a
+//!   request. The release is asked, as for an idle host, only when the host is quiet, and
+//!   the machine is not released while the registry books a lease on it. A lease ends within the
+//!   server's ceiling on `max_wall`, so the host empties within it. The age is counted from
+//!   [`Record::launched_at`], which is stored, so a restart neither resets it nor stops it
+//!   (the cloud bills through the time the scaler was down). A host the registry does not
+//!   hear from is left to the silence rules above. Each launch also carries
+//!   [`Settings::lifetime`] in [`AcquirePlan::lifetime`]: `max_age` plus the ceiling plus
+//!   the prepare timeout, `unknown_hold` and a margin, which a provider with a native limit enforces in the cloud.
 //!
 //! * Machines the scaler does not release. An orphan (a listed machine no record knows, or
 //!   one a launch answer named and could not confirm released) is counted and reported and
@@ -74,7 +107,9 @@
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 #![forbid(unsafe_code)]
 
+mod budget;
 mod caps;
+mod go;
 mod input;
 mod pass;
 mod record;
@@ -91,12 +126,13 @@ use crate::caps::{check, choose};
 use crate::pass::{Pass, host_named};
 use crate::scale::Claims;
 
+pub use budget::{Budgets, Totals, overrun};
 pub use input::{
     AcquireResult, HostFacts, HostState, Input, Mark, PoolInput, ReleaseResult, Waiting,
 };
 pub use record::{
-    Cooldown, CooldownReason, Phase, Record, Records, RecordsError, StoredExec, StoredOffer,
-    VERSION,
+    Cooldown, CooldownReason, Go, OLDEST, Phase, Record, Records, RecordsError, StoredExec,
+    StoredOffer, VERSION,
 };
 pub use settings::{Blocked, Health, LaunchMode, Settings};
 pub use state::{AcquirePlan, Action, PlanLine, State};
@@ -110,6 +146,7 @@ pub use time::Millis;
 pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>) {
     let before = state.records.clone();
     let mut pass = Pass::new(state, input, now);
+    pass.end_go();
     for pool in &input.pools {
         pass.reconcile(pool);
     }
@@ -171,11 +208,17 @@ pub fn launchable(state: &State, input: &Input, now: Millis, demand: &Demand) ->
         let price = choose(settings, &pool.offers, demand, &[])
             .and_then(|offer| offer.price_cents_per_hour);
         let within = price.is_some_and(|price| {
-            check(settings, now, &state.records.instances, &[], &idle, price).is_ok()
+            let all = (state.records.instances.as_slice(), [].as_slice());
+            [
+                check(settings, now, &state.records.instances, &[], &idle, price).is_ok(),
+                budget::check(input, &state.records, settings, now, all, price).is_ok(),
+            ]
+            .into_iter()
+            .all(|ok| ok)
         });
         [
             pool.health == Health::Available,
-            settings.launch == LaunchMode::Live,
+            settings.mode(now) == LaunchMode::Live,
             within,
         ]
         .into_iter()

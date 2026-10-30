@@ -73,7 +73,7 @@ fn a_pool_needs_a_name_a_class_and_a_provider() {
 
 /// Asserts that a kind the server does not have is refused with the kinds it has, for the
 /// provider and for the network mode (`none` and `script` are not modes), and that the
-/// server as shipped has only `static`. It catches a kind name read as a default.
+/// server as shipped has `lambdalabs` and `static`. It catches a kind name read as a default.
 #[test]
 fn an_unknown_kind_is_refused_with_the_known_ones() {
     let scratch = Scratch::new("pool_kinds");
@@ -111,8 +111,11 @@ fn an_unknown_kind_is_refused_with_the_known_ones() {
     let shipped = Config::from_config_file(&path, &Kinds::standard(), &OwnerOnlyFiles, clock());
     assert_eq!(
         shipped.err().unwrap().to_string(),
-        "pool \"gpu\": provider.kind: \"lambdalabs\" is not a kind; known: static"
+        "pool \"gpu\": provider.types: required"
     );
+    let mut names = Kinds::standard().names();
+    names.sort_unstable();
+    assert_eq!(names, ["lambdalabs", "static"]);
 }
 
 /// Asserts the unknown fields of a provider table and of a network table, each naming
@@ -146,7 +149,7 @@ fn unknown_provider_and_network_fields_are_refused_and_no_secret_has_a_key() {
     let pool = PoolText::elastic(&scratch).set("network", &status);
     assert_eq!(
         elastic(&scratch, &pool),
-        "pool \"gpu\": network.status_token_file: unknown field; known: kind, oauth_client_file, tag"
+        "pool \"gpu\": network.status_token_file: unknown field; known: kind, oauth_client_file, tag, binary, api_url"
     );
     let extra =
         PoolText::elastic(&scratch).set("network", "{ kind = \"default\", tag = \"tag:js\" }");
@@ -453,6 +456,8 @@ fn pools_are_counted_and_a_static_pool_launches_nothing() {
         ("max_spend_per_hour", "\"1.00\""),
         ("max_spend_per_day", "\"2.00\""),
         ("idle", "\"1m\""),
+        ("max_age", "\"6h\""),
+        ("min_host_lifetime", "\"1m\""),
         ("boot_timeout", "\"1m\""),
         ("join_token_file", "\"/x\""),
         ("network", "{ kind = \"default\" }"),

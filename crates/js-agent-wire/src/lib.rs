@@ -64,6 +64,11 @@
 //!   as [`Command::Unknown`]), so an agent never runs a job it cannot classify, while an
 //!   absent one means [`Isolation::Contained`].
 //!
+//! A field an old receiver would silently ignore cannot carry something the job needs.
+//! `JobSpec::files` is such a field (a presigned URL is a secret the task cannot run
+//! without), so an agent that can write them reports the capability `run-files` in its
+//! hello, and the server queues and sends a start with files only to a host that did.
+//!
 //! # Not here yet
 //!
 //! Fields of design 5.2 that a later change adds, as optional fields of the types here:
@@ -98,6 +103,7 @@ mod check;
 mod command;
 mod credential;
 mod error;
+mod files;
 mod heartbeat;
 mod hello;
 mod image;
@@ -110,9 +116,10 @@ pub mod refusal;
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use credential::HostCredential;
 pub use error::{Rule, ValidationError};
+pub use files::{RunFile, validate_files};
 pub use heartbeat::{
-    Ack, ExclusiveRefusal, Heartbeat, HeartbeatReply, HeldRun, HeldState, Outcome, RefusalReason,
-    RefusedCommand, ReplyCheck, ResultAck, RunResult, Taint,
+    Ack, ExclusiveRefusal, Heartbeat, HeartbeatReply, HeldRun, HeldState, LogTail, Outcome,
+    RefusalReason, RefusedCommand, ReplyCheck, ResultAck, RunResult, Taint,
 };
 pub use hello::{
     GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireShape,
@@ -128,6 +135,19 @@ pub const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 5_000;
 /// How long a host may stay silent before the server treats it as lost, unless its
 /// configuration says otherwise, in milliseconds.
 pub const DEFAULT_GRACE_MS: u64 = 15_000;
+
+/// The longest `Retry-After` an agent obeys: a server that asks for more is not allowed
+/// to silence the host for longer. It bounds the wait before an agent's next hello, so a
+/// server that restarts must allow for it before it reads a missing host as gone.
+pub const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The hellos one credential may say in a burst, unless the server's configuration says
+/// otherwise (`--agent-hello-burst`).
+pub const DEFAULT_HELLO_BURST: u32 = 60;
+
+/// How often a credential that spent its burst is allowed one more hello, unless the
+/// server's configuration says otherwise (`--agent-hello-interval`).
+pub const DEFAULT_HELLO_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Whether a grace period is long enough for the heartbeat interval: more than two
 /// intervals, so one lost heartbeat never makes a live host look lost.

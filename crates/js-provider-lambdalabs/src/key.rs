@@ -93,11 +93,24 @@ impl ApiKey {
                 owner: probe.owner,
             });
         }
+        Self::parse(path, &probe.bytes)
+    }
+
+    /// The key in `bytes`, the content of the file at `path` that a caller with its own
+    /// way of reading owner-only files has read (the service reads every secret file one
+    /// way). The same content rules as [`ApiKey::from_file`]: one key of printable ASCII,
+    /// trailing whitespace dropped, at most 4096 bytes. `path` only names the file in the
+    /// refusal.
+    ///
+    /// # Errors
+    ///
+    /// [`KeyError::TooLarge`], [`KeyError::Empty`] or [`KeyError::NotPlain`].
+    pub fn parse(path: &Path, bytes: &[u8]) -> Result<Self, KeyError> {
         let path = path.to_owned();
-        if probe.bytes.len() > MAX_KEY_FILE {
+        if bytes.len() > MAX_KEY_FILE {
             return Err(KeyError::TooLarge { path });
         }
-        let key = probe.bytes.trim_ascii_end();
+        let key = bytes.trim_ascii_end();
         match (key.is_empty(), key.iter().all(u8::is_ascii_graphic)) {
             (true, _) => Err(KeyError::Empty { path }),
             (false, false) => Err(KeyError::NotPlain { path }),
@@ -105,8 +118,10 @@ impl ApiKey {
         }
     }
 
-    /// The `Authorization` header value.
-    pub(crate) fn authorization(&self) -> String {
+    /// The `Authorization` header value, `Bearer <key>`. For a caller that sends the key
+    /// somewhere else it was given for (the watcher's webhook token): it is a secret, so
+    /// it is never logged.
+    pub fn authorization(&self) -> String {
         format!("Bearer {}", self.0)
     }
 }

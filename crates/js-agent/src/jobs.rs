@@ -12,6 +12,7 @@ use crate::lifecycle::{Capacity, Config, Local};
 use crate::readiness::WorkerHook;
 use crate::session::Drain;
 use crate::system::Machine;
+use crate::usage::Outbox;
 use crate::worker::{Handle, Plan, STEP_EVERY, Worker};
 
 /// How long after it stops the jobs a drain goes on heartbeating, on top of the stop
@@ -35,7 +36,9 @@ pub struct Seams<'a> {
 /// without it registers and heartbeats and runs no job. The worker has built the
 /// lifecycle and adopted the containers an earlier process left when this returns, and
 /// the lines it has to say (the engine's warnings, what it adopted) are written to `err`.
-/// The hook of `seams` is handed a [`Handle`] to the worker.
+/// The hook of `seams` is handed a [`Handle`] to the worker. The outbox returned is where
+/// the worker publishes the usage of the leases (nothing, without `--actions-cgroup`) and
+/// the session takes it from.
 ///
 /// # Errors
 ///
@@ -48,10 +51,13 @@ pub fn start(
     platform: &Platform,
     seams: Seams<'_>,
     err: &mut dyn Write,
-) -> Result<Option<(Worker, Drain)>, String> {
+) -> Result<Option<(Worker, Drain, Arc<Outbox>)>, String> {
     let Local {
         mounts,
         scratch,
+        files,
+        files_warning: _,
+        scratch_quota: _,
         container,
         state,
         watch,
@@ -66,9 +72,11 @@ pub fn start(
         allow_host_jobs: false,
         mounts,
         scratch,
+        files,
         state,
         stop_grace,
     };
+    let outbox = Arc::new(Outbox::new());
     let worker = Worker::start(Plan {
         config,
         settings,
@@ -77,6 +85,7 @@ pub fn start(
         watch,
         machine: seams.machine.clone(),
         step_every: STEP_EVERY,
+        usage: Some(outbox.clone()),
         rescue_bound: seams.rescue_bound,
         readiness: seams.readiness,
     })
@@ -90,5 +99,5 @@ pub fn start(
         wait: drain_wait,
         settle,
     };
-    Ok(Some((worker, drain)))
+    Ok(Some((worker, drain, outbox)))
 }

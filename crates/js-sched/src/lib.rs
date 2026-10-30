@@ -46,7 +46,14 @@
 //!   that could run it, in queue (QoS) order, and less urgent work is not placed there
 //!   until it has emptied (with [`Scheduler::with_whole_node`] the worker is the one
 //!   cheapest to drain: the latest end bound of its leases, then the fewest leases). An
-//!   action at the whole memory of a worker (the last step of the memory ladder) holds
+//!   action asking for a whole worker ([`Request::whole_worker`]) is placed only on a
+//!   worker with no lease, books all of its CPUs, memory, GPUs and VM slots (its
+//!   `Start` carries them), fits a worker of any size, and holds a worker while it
+//!   waits, as a whole-machine lease does without a whole-node pool (the worker with the
+//!   fewest leases that could run it; no later request is placed there). Its memory
+//!   limit is the worker's, so a kill at its own limit has nowhere to climb and
+//!   finishes `OutOfMemory`. An action at the whole memory of a worker (the last step of
+//!   the memory ladder) holds
 //!   none: it waits until some worker's free memory meets its request, which under
 //!   sustained spread load can be long, and nothing reserves a worker for it;
 //! - work no live worker can run (none satisfies its platform, or none that does is
@@ -101,6 +108,7 @@ mod cordon;
 mod devices;
 pub mod fence;
 pub mod harness;
+mod headroom;
 mod input;
 mod load;
 pub use load::{
@@ -120,6 +128,7 @@ pub use admission::{
 pub use cordon::Cordon;
 pub use devices::DEVICE_LEASES_PER_WORKER;
 pub use fence::SelfFence;
+pub use headroom::{MEMORY_SCHEDULABLE_PERCENT, MemoryPercent, PercentError};
 pub use input::{DaemonInstance, Event, Input, Request};
 pub use js_types::sched::NodePhase;
 pub use requeue::{Gib, Requeue, RequeueReason};

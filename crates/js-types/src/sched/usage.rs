@@ -80,7 +80,8 @@ pub struct NodeLoad {
     /// since an earlier reading are still included.
     pub cpu_usage_usec: u64,
     /// Memory in use by the actions cgroup that cannot simply be dropped: `memory.current`
-    /// minus the inactive file pages.
+    /// minus the inactive file pages. Clamped at 0 when the inactive file is the
+    /// larger.
     pub memory_working_set_bytes: u64,
     /// The actions cgroup's active file pages (`active_file` of `memory.stat`), in bytes.
     /// Hot page cache that `memory_working_set_bytes` still counts; admission caps this part.
@@ -90,9 +91,11 @@ pub struct NodeLoad {
     pub covered: Vec<LeaseId>,
     /// Whether the actions cgroup has a CPU limit.
     pub actions_cpu_limited: bool,
-    /// Cumulative time the actions cgroup was throttled, in microseconds. Telemetry only.
+    /// Cumulative time the actions cgroup was throttled, in microseconds. Telemetry only. A node whose agent
+    /// does not send it (the lease server's wire load) reads 0: not measured.
     pub cpu_throttled_usec: u64,
-    /// Cumulative `some` total of the CPU pressure, in microseconds. Telemetry only.
+    /// Cumulative `some` total of the CPU pressure, in microseconds. Telemetry only. 0 when not
+    /// measured, as for `cpu_throttled_usec`.
     pub cpu_pressure_some_total_usec: u64,
     /// When each running lease started, on the agent's clock.
     pub lease_clocks: Vec<LeaseClock>,
@@ -187,6 +190,7 @@ pub struct CurveTooLong {
 pub struct Curve {
     points: Vec<MinutePoint>,
     runs: u16,
+    cores_known: bool,
 }
 
 impl Curve {
@@ -198,7 +202,29 @@ impl Curve {
         if points.len() > MAX_CURVE_POINTS {
             return Err(CurveTooLong { len: points.len() });
         }
-        Ok(Self { points, runs })
+        Ok(Self {
+            points,
+            runs,
+            cores_known: true,
+        })
+    }
+
+    /// A curve of `points` whose cores are unknown: only the working sets are learned, and
+    /// the cores of every point are to be ignored (the caller charges the request's own).
+    ///
+    /// # Errors
+    /// [`CurveTooLong`] when there are more than [`MAX_CURVE_POINTS`] points.
+    pub fn memory_only(points: Vec<MinutePoint>, runs: u16) -> Result<Self, CurveTooLong> {
+        Self::new(points, runs).map(|c| Self {
+            cores_known: false,
+            ..c
+        })
+    }
+
+    /// Whether the cores of the points were learned; false for a [`Curve::memory_only`].
+    #[must_use]
+    pub const fn cores_known(&self) -> bool {
+        self.cores_known
     }
 
     /// The points, minute 0 first.
@@ -334,6 +360,7 @@ impl KeySource for NoKeys {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn load(cpu: u64, mono: u64) -> NodeLoad {
@@ -360,6 +387,21 @@ mod tests {
     fn curve(points: &[(u32, u64)]) -> Curve {
         let points = points.iter().map(|&(c, w)| pt(c, w)).collect();
         Curve::new(points, 5).unwrap()
+    }
+
+    /// Catches: a memory-only curve claiming known cores, a plain curve claiming unknown
+    /// ones, and the points, runs or length limit not carried over.
+    #[test]
+    fn a_memory_only_curve_says_its_cores_are_unknown() {
+        let points = vec![pt(0, 5), pt(0, 6)];
+        let full = Curve::new(points.clone(), 4).unwrap();
+        let mem = Curve::memory_only(points.clone(), 4).unwrap();
+        assert!(full.cores_known());
+        assert!(!mem.cores_known());
+        assert_eq!((mem.points(), mem.runs()), (points.as_slice(), 4));
+        assert_ne!(full, mem);
+        let over = vec![MinutePoint::default(); MAX_CURVE_POINTS + 1];
+        assert!(Curve::memory_only(over, 4).is_err());
     }
 
     #[test]

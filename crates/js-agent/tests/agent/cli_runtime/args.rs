@@ -6,8 +6,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use js_agent::cli_runtime::{
-    ArgsError, DEFAULT_PIDS, Engine, SCRATCH_TARGET, Settings, hardening_args, label_args,
-    limits_to_args,
+    ArgsError, DEFAULT_PIDS, Engine, FILES_TARGET, SCRATCH_TARGET, Settings, binds_of,
+    hardening_args, label_args, limits_to_args,
 };
 
 use super::{BIN, DOCKER_SCRATCH, mount, settings, spec};
@@ -125,7 +125,9 @@ fn a_limit_of_zero_is_refused() {
 /// Asserts that every contained job gets the hardening whatever it asked for: all
 /// capabilities dropped, no new privileges, no network by default, a read-only root
 /// with a `/tmp` that is a tmpfs which cannot run programs or hold devices or set-uid
-/// files and is limited in size, no core dumps, a private IPC namespace (and for Podman,
+/// files and is limited in size, no core dumps, a private IPC namespace, a private control
+/// group namespace (which the integrity checks rely on: a job sees only its own group, and
+/// cannot move a process out of it), (and for Podman,
 /// the only one of the two that takes the value, a private PID namespace), no pull, a
 /// user that is not root, and no `--rm` (the lifecycle removes the container after it
 /// has read the result). It catches a flag dropped from the list, a default network that
@@ -150,16 +152,113 @@ fn hardening_flags_always_present() {
         "core=0",
         "--ipc",
         "private",
+        "--cgroupns",
+        "private",
     ];
-    let tail = ["--pull", "never", "--user", "65534:65534"];
-    assert_eq!(docker, strings(&[&common[..], &tail[..]].concat()));
+    let docker_log = [
+        "--log-driver",
+        "json-file",
+        "--log-opt",
+        "max-size=1048576",
+        "--log-opt",
+        "max-file=2",
+    ];
+    let podman_log = ["--log-driver", "k8s-file", "--log-opt", "max-size=1048576"];
+    let tail = ["--pull", "never"];
+    assert_eq!(
+        docker,
+        strings(&[&common[..], &docker_log[..], &tail[..]].concat())
+    );
     assert!(!docker.iter().any(|arg| arg == "--rm" || arg == "--pid"));
 
     let podman = hardening_args(&settings(), Engine::Podman, PROFILE);
+    let at = common.iter().position(|arg| *arg == "--ulimit").unwrap();
+    let (before, after) = common.split_at(at);
+    let tmpfs = [
+        "--tmpfs",
+        "/var/tmp:rw,noexec,nosuid,nodev,size=64m",
+        "--tmpfs",
+        "/run:rw,noexec,nosuid,nodev,size=64m",
+    ];
     assert_eq!(
         podman,
-        strings(&[&common[..], &["--pid", "private"][..], &tail[..]].concat())
+        strings(
+            &[
+                before,
+                &tmpfs[..],
+                after,
+                &["--pid", "private"][..],
+                &podman_log[..],
+                &tail[..]
+            ]
+            .concat()
+        )
     );
+}
+
+/// Asserts that on Podman, whose `--read-only` also mounts writable tmpfs mounts at
+/// `/var/tmp` and at the image's run path (4.9.3 sets `--read-only-tmpfs` on by default,
+/// and those mounts have neither `noexec` nor a size), the agent names both itself, with
+/// the options and the size of `/tmp` (so the size setting reaches them), and that
+/// Docker, whose `--read-only` adds no such mounts, is given only `/tmp`. It catches a
+/// writable `/var/tmp` or `/run` where a job can run a program of its own making, or fill
+/// the memory, and a Docker container given writable directories it did not have.
+#[test]
+fn podman_hardens_var_tmp_and_run_like_tmp() {
+    let set = Settings::new(Path::new(BIN), None, None)
+        .unwrap()
+        .with_tmp_size(Some("2g"))
+        .unwrap();
+    let tmpfs_of = |engine| -> Vec<String> {
+        let args = hardening_args(&set, engine, PROFILE);
+        args.windows(2)
+            .filter(|pair| pair[0] == "--tmpfs")
+            .map(|pair| pair[1].clone())
+            .collect()
+    };
+    assert_eq!(
+        tmpfs_of(Engine::Podman),
+        [
+            "/tmp:rw,noexec,nosuid,nodev,size=2g",
+            "/var/tmp:rw,noexec,nosuid,nodev,size=2g",
+            "/run:rw,noexec,nosuid,nodev,size=2g",
+        ]
+    );
+    assert_eq!(
+        tmpfs_of(Engine::Docker),
+        ["/tmp:rw,noexec,nosuid,nodev,size=2g"]
+    );
+    let podman = hardening_args(&set, Engine::Podman, PROFILE);
+    assert!(
+        !podman
+            .iter()
+            .any(|arg| arg.starts_with("--read-only-tmpfs"))
+    );
+}
+
+/// Asserts that the log of every container is bounded at creation, on both engines: the
+/// driver is named (Podman's default, `journald`, has no size bound and is read back from
+/// a journal), `max-size` is a plain byte count that both engines read, Docker keeps a
+/// second file so a rotation does not empty the tail, and the bound does not depend on the
+/// settings. It catches a job that prints without end filling the host's disk, and a
+/// tail read just after a rotation that finds an empty file.
+#[test]
+fn the_log_is_bounded_on_both_engines() {
+    let value = |args: &[String], flag: &str| -> Vec<String> {
+        args.windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+            .collect()
+    };
+    let docker = hardening_args(&settings(), Engine::Docker, PROFILE);
+    assert_eq!(value(&docker, "--log-driver"), ["json-file"]);
+    assert_eq!(
+        value(&docker, "--log-opt"),
+        ["max-size=1048576", "max-file=2"]
+    );
+    let podman = hardening_args(&settings(), Engine::Podman, PROFILE);
+    assert_eq!(value(&podman, "--log-driver"), ["k8s-file"]);
+    assert_eq!(value(&podman, "--log-opt"), ["max-size=1048576"]);
 }
 
 /// Asserts, for both engines, the properties of the hardening list that keep a job
@@ -193,8 +292,8 @@ fn hardening_pins_privileges_and_the_syscall_filter() {
     }
 }
 
-/// Asserts that the settings reach the hardening list: the network, the user, the pull
-/// policy and the size of `/tmp`. It catches a flag that is checked and not used.
+/// Asserts that the settings reach the hardening list: the network, the pull policy and
+/// the size of `/tmp`; the user is not in it (it is the slot's, see `create.rs`). It catches a flag that is checked and not used.
 #[test]
 fn hardening_follows_the_settings() {
     let set = Settings::new(Path::new(BIN), Some("jobs"), Some("5:6"))
@@ -206,9 +305,38 @@ fn hardening_follows_the_settings() {
     let args = hardening_args(&set, Engine::Docker, PROFILE);
     let value = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
     assert_eq!(value("--network"), "jobs");
-    assert_eq!(value("--user"), "5:6");
     assert_eq!(value("--pull"), "missing");
     assert_eq!(value("--tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=2g");
+}
+
+/// Asserts the golden tail of the hardening list with `--actions-cgroup`: `--cgroup-parent`
+/// comes last with the slice name for a slice and the path with a leading `/` otherwise, on
+/// both engines, and the list without the flag has none. It catches a configured control
+/// group that is checked and never reaches `create`, which leaves the containers outside
+/// the cgroup the node's usage is read from.
+#[test]
+fn the_actions_cgroup_becomes_the_cgroup_parent() {
+    let with = |dir: &str| {
+        Settings::new(Path::new(BIN), None, None)
+            .unwrap()
+            .with_actions_cgroup(Some(Path::new(dir)))
+            .unwrap()
+    };
+    let rows = [
+        ("/sys/fs/cgroup/jobscheduler.slice", "jobscheduler.slice"),
+        ("/sys/fs/cgroup/js/actions", "/js/actions"),
+    ];
+    for (dir, parent) in rows {
+        for engine in [Engine::Docker, Engine::Podman] {
+            let args = hardening_args(&with(dir), engine, PROFILE);
+            assert_eq!(
+                args[args.len() - 2..],
+                strings(&["--cgroup-parent", parent])
+            );
+        }
+    }
+    let plain = hardening_args(&settings(), Engine::Docker, PROFILE);
+    assert!(!plain.iter().any(|arg| arg == "--cgroup-parent"));
 }
 
 /// Asserts that the Docker flag names the exact indices and nothing else, that Podman
@@ -348,6 +476,43 @@ fn podman_mounts_are_nosuid_nodev() {
     assert!(!docker[1..].iter().any(|m| m.contains("nosuid")));
 }
 
+/// Asserts that the run's files directory is mounted read-only at `/run/js-files` after
+/// the job's own mounts, with the recursive read-only options when the engine takes them
+/// and `nosuid,nodev` on Podman, and that a run without files has no such mount. It
+/// catches a files mount that is writable, one that skips the Podman options every other
+/// mount has, and one added to every run.
+#[test]
+fn the_files_mount_is_read_only_at_the_fixed_path() {
+    let mut job = spec("r1");
+    assert!(
+        !mounts_of(&limits_to_args(Engine::Podman, &job, false).unwrap())
+            .iter()
+            .any(|m| m.contains("/run/js-files"))
+    );
+    job.mounts = vec![mount("/srv/data/in", "/mnt/data/in", true)];
+    job.files = Some("/work/scratch/r1@files".into());
+    assert_eq!(FILES_TARGET, "/run/js-files");
+    let podman = limits_to_args(Engine::Podman, &job, true).unwrap();
+    assert_eq!(
+        mounts_of(&podman).last().unwrap().as_str(),
+        "type=bind,src=/work/scratch/r1@files,dst=/run/js-files,readonly,bind-recursive=readonly,bind-propagation=rprivate,nosuid,nodev"
+    );
+    let docker = limits_to_args(Engine::Docker, &job, false).unwrap();
+    assert_eq!(
+        mounts_of(&docker).last().unwrap().as_str(),
+        "type=bind,src=/work/scratch/r1@files,dst=/run/js-files,readonly"
+    );
+    let binds = binds_of(&job);
+    assert_eq!(
+        binds.last().unwrap(),
+        &(
+            "/work/scratch/r1@files".to_owned(),
+            "/run/js-files".to_owned(),
+            false
+        )
+    );
+}
+
 /// Asserts that a mount path that could add an option to the comma-separated `--mount`
 /// value is refused, and nothing is built: a comma, a double quote, a colon (the
 /// separator of the short form, which the mount roots refuse too, so the claim that it is
@@ -422,4 +587,31 @@ fn labels_are_pairs_and_keys_are_checked() {
         assert_eq!(label_args(&bad), Err(ArgsError::LabelKey), "{key:?}");
     }
     assert!(label_args(&BTreeMap::new()).unwrap().is_empty());
+}
+
+/// Asserts that each `--container-add-host` entry reaches `create` as its own
+/// `--add-host <name>:<ip>` pair, for both engines, in the order given, and that none is
+/// passed when none is configured. It catches an entry that is checked and dropped, one
+/// merged into another argument, and a stray `--add-host` by default.
+#[test]
+fn add_hosts_reach_create() {
+    let none = hardening_args(&settings(), Engine::Podman, PROFILE);
+    assert!(!none.iter().any(|a| a == "--add-host"));
+    let entries = strings(&["store.example:192.0.2.10", "kbf.example:2001:db8::1"]);
+    let set = Settings::new(Path::new(BIN), Some("jobs"), None)
+        .unwrap()
+        .with_add_hosts(&entries)
+        .unwrap();
+    for engine in [Engine::Docker, Engine::Podman] {
+        let args = hardening_args(&set, engine, PROFILE);
+        let pairs: Vec<&str> = args
+            .windows(2)
+            .filter(|w| w[0] == "--add-host")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert_eq!(
+            pairs,
+            ["store.example:192.0.2.10", "kbf.example:2001:db8::1"]
+        );
+    }
 }

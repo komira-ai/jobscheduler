@@ -31,6 +31,7 @@ pub fn hello() -> Hello {
             cpu_millis: 8000,
             memory_bytes: 1 << 34,
             gpus: 1,
+            disk_bytes: 0,
             gpu_class: Some("nvidia-a100".into()),
             max_leases: Some(4),
         },
@@ -62,6 +63,7 @@ pub fn job() -> JobSpec {
         limits: Limits {
             cpu_millis: 2000,
             memory_bytes: 1 << 30,
+            disk_bytes: None,
             pids: Some(512),
             wall_ms: 60_000,
         },
@@ -74,6 +76,7 @@ pub fn job() -> JobSpec {
         isolation: Isolation::Host,
         labels: map(&[("team", "infra")]),
         heartbeat_seq: 7,
+        files: Vec::new(),
         valid_for_ms: 10_000,
         bundle: None,
         native: None,
@@ -87,6 +90,7 @@ pub fn result() -> RunResult {
         outcome: Outcome::TimedOut,
         exit_code: Some(137),
         detail: Some("wall limit".into()),
+        log_tail: None,
     }
 }
 

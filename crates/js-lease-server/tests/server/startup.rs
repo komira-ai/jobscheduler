@@ -5,9 +5,11 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::ExitCode;
 
-use js_lease_server::{SharedClock, channel_ticker, parse_duration, run, start};
+use js_lease_server::{SharedClock, channel_ticker, parse_duration, run};
 
-use crate::support::{Harness, Scratch, TOKEN, args_with, base_args, config, replace, request};
+use crate::support::{
+    Harness, Scratch, TOKEN, args_with, base_args, config, replace, request, start,
+};
 
 /// The flag a refusal names, and that its reason is not empty.
 fn flag_of<T>(result: Result<T, js_lease_server::StartupError>) -> &'static str {
@@ -106,6 +108,15 @@ fn durations_parse_and_settings_are_checked() {
     for (text, seconds) in cases {
         assert_eq!(parse_duration(text).unwrap().as_secs(), seconds, "{text}");
     }
+    let millis = [
+        ("1ms", 1),
+        ("250ms", 250),
+        ("1500ms", 1500),
+        ("90000ms", 90_000),
+    ];
+    for (text, count) in millis {
+        assert_eq!(parse_duration(text).unwrap().as_millis(), count, "{text}");
+    }
     let refused = [
         "",
         "0",
@@ -114,6 +125,12 @@ fn durations_parse_and_settings_are_checked() {
         "-5",
         "1.5s",
         "5d",
+        "0ms",
+        "ms",
+        "1.5ms",
+        "5mss",
+        "18446744073709551615ms0",
+        "18446744073709551615m",
         "5 s",
         "99999999999999999999",
         "18446744073709551615h",
@@ -409,4 +426,32 @@ fn write_timeout_and_request_limit_are_flags() {
     assert_eq!(limits.read_timeout.as_secs(), 4);
     assert_eq!(limits.write_timeout.as_secs(), 3);
     assert_eq!(limits.max_requests, 7);
+}
+
+/// Asserts that a server given a listener the caller bound serves on exactly that
+/// address, and that after the server is shut down the caller's clone of the listener
+/// still holds the port: nothing else can bind it, and the clone, accepting, takes the
+/// connections that come.
+#[tokio::test]
+async fn a_server_on_a_listener_the_caller_bound_leaves_the_port_with_the_caller() {
+    let scratch = Scratch::new("startup_prebound");
+    let config = config(base_args(&scratch)).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let kept = listener.try_clone().unwrap();
+    let addr = listener.local_addr().unwrap();
+    let h = Harness::over(scratch, config.with_listener(listener)).await;
+    assert_eq!(h.addr(), addr);
+    assert_eq!(h.call("GET", "/v1/leases", None).await.status, 200);
+    // The flag is shared with the clone: with nothing waiting, an accept returns at once.
+    assert_eq!(
+        kept.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    h.running.shutdown().await.unwrap();
+    kept.set_nonblocking(false).unwrap();
+    let err = std::net::TcpListener::bind(addr).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse, "{err}");
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    let (served, _) = kept.accept().unwrap();
+    drop((client, served));
 }

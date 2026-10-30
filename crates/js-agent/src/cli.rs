@@ -79,14 +79,49 @@ pub struct Cli {
     pub allow_host_jobs: bool,
     /// A directory jobs may mount from, as `name=path`; the name is what a mount in a
     /// start refers to. May be given more than once. The path must be an existing
-    /// directory; it is canonicalised when the agent starts. No root, no mount.
+    /// directory; it is canonicalised when the agent starts. No root, no mount. With
+    /// `--scratch-quota` it may not be on the scratch root's file system; that check sees
+    /// the root's own device only, not a scratch device mounted below it (a submount a
+    /// recursive bind brings along), which the operator must see to be absent.
     #[arg(long = "mount-root", value_name = "NAME=PATH", value_parser = named_path)]
     pub mount_roots: Vec<(String, PathBuf)>,
+    /// A directory jobs may mount from read-only, as `name=path`; like `--mount-root`, and
+    /// it shares its namespace of names, except that a start with a read-write mount from
+    /// it is refused. Unlike `--mount-root`, it may be on the scratch root's file system
+    /// when `--scratch-quota` is given. May be given more than once. The comparison of file
+    /// systems sees the root's own device only: a scratch device mounted below a root (a
+    /// submount that a recursive bind brings along) is not seen, and the operator must
+    /// see to it that there is none.
+    #[arg(long = "mount-root-ro", value_name = "NAME=PATH", value_parser = named_path)]
+    pub mount_roots_ro: Vec<(String, PathBuf)>,
+    /// The scratch root's file system is to bound each run's disk with a quota. Today the
+    /// flag only makes the agent refuse to start when a `--mount-root` is on the same file
+    /// system as the scratch root (a read-write mount there would be an unbounded path to
+    /// its disk); `--mount-root-ro` roots may be there. It enables no quota yet and
+    /// advertises nothing. Needs `--scratch-root`.
+    #[arg(long)]
+    pub scratch_quota: bool,
+    /// The most GiB of the scratch root's free disk the agent keeps back from jobs: the
+    /// disk it offers is the free space of that volume when the agent starts minus this
+    /// (0 when this is more). Needs `--scratch-root`. Without it, the free space is offered.
+    #[arg(long, value_name = "GIB")]
+    pub scratch_low_water_gib: Option<u64>,
     /// The directory under which every run gets a private scratch directory (`0700`). It
     /// must be owned by the user running the agent, with no permission for group or
     /// others.
     #[arg(long, value_name = "PATH")]
     pub scratch_root: Option<PathBuf>,
+    /// The directory under which each run's files (`files` of a start: URLs and tokens) are
+    /// written, `0555` with `0444` files, and mounted read-only at `/run/js-files`. Made
+    /// `0700` when missing. It must be on a `tmpfs` so the secrets never reach a disk; the
+    /// agent refuses to start when it is not. A reboot clears it, which is fine: a run does
+    /// not survive a reboot. A tmpfs can be swapped to disk when the host has swap, so run hosts
+    /// that handle these secrets with swap off or encrypted. It may not be, hold or lie in
+    /// the state, scratch or a mount root. Needs `--container-bin`. Without the flag `/run/js-agent/files` is used when it can be
+    /// made; when it cannot, the agent runs without run files and does not report the
+    /// `run-files` capability.
+    #[arg(long, value_name = "PATH")]
+    pub run_files_root: Option<PathBuf>,
     /// The directory the agent keeps its taint marker and its host credential in: it must be
     /// owned by the user running the agent, with no permission for group or others.
     /// Required with `--container-bin`. Giving it also lets a server issue the host a
@@ -132,9 +167,10 @@ pub struct Cli {
     /// (`nvidia.com/gpu=<index>`) the operator has generated. Rootless engines are not
     /// supported: the engine gets none of `XDG_RUNTIME_DIR`, `HOME` or the D-Bus session
     /// that a rootless Podman needs (it may then run containers without their limits), so
-    /// use a rootful engine, without user-namespace remapping (`userns-remap` shows the
-    /// container user as another uid on the host, and the check for a job's leftover
-    /// processes would miss them). The agent must see the host: it must be in the pid and
+    /// use a rootful engine. Every job runs in a user namespace mapped onto the
+    /// `--container-subuid` range (Podman: per container; Docker: the daemon must run with
+    /// `userns-remap` set to that user, or the agent does not start). The agent must see
+    /// the host: it must be in the pid and
     /// mount namespaces of `init` (not in a container, and not under a service manager's
     /// `PrivatePIDs`, `PrivateMounts` or `ProtectSystem`), and able to read
     /// `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start.
@@ -146,12 +182,28 @@ pub struct Cli {
     /// the agent warns at start. Needs `--container-bin`.
     #[arg(long, value_name = "NAME")]
     pub container_network: Option<String>,
-    /// The `<uid>:<gid>` containers run as, both above zero. By default `65534:65534`.
-    /// The run's scratch directory is private to the agent: an agent that runs as root
-    /// gives it to this user, any other agent refuses to start unless this is its own
-    /// `<uid>:<gid>`. Needs `--container-bin`.
+    /// The `<uid>:<gid>` of the first slot, the base of the users containers run as:
+    /// container ids, both above zero (see `--container-subuid`). By default `1000:1000`.
+    /// A run in slot `k` (from 0; one slot for each run the agent can hold, 4096) runs as
+    /// the base plus `k` for the uid and the gid, so both numbers must be at most 61440.
+    /// The run's scratch directory is private to the agent, which gives it to its slot's
+    /// host ids: the start of the `--container-subuid` range plus the slot's ids. Needs
+    /// `--container-bin`.
     #[arg(long, value_name = "UID:GID")]
     pub container_user: Option<String>,
+    /// The user whose subordinate id range every job's user namespace is mapped onto, such
+    /// as `jobmap`. When it starts the agent reads that user's range from `/etc/subuid`
+    /// and `/etc/subgid` and refuses to start unless both have an entry of at least 65536
+    /// ids that does not begin at 0 and holds no id of `/etc/passwd` or `/etc/group`.
+    /// Container ids 0 to 65535 are host ids of that range, so no id in a container is a
+    /// host id. With Podman every container is created with `--uidmap` and `--gidmap` of
+    /// the range. Docker has no such option per container: its daemon must run with
+    /// `"userns-remap"` set to this user in `daemon.json`, and the agent refuses to start
+    /// when it does not. A second agent on the host whose range overlaps one in use is
+    /// refused. The agent must run as root: it gives each run's scratch directory to the
+    /// job's mapped user. Required with `--container-bin`, and needs it.
+    #[arg(long, value_name = "USER")]
+    pub container_subuid: Option<String>,
     /// The engine to talk to, as `unix:///<path>`: a socket on this machine; given to the
     /// program as `DOCKER_HOST` and `CONTAINER_HOST` for its calls only. By default none
     /// is given and the engine uses its own default. Any other address (`tcp://`,
@@ -172,6 +224,38 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SIZE")]
     pub container_tmp_size: Option<String>,
+    /// A static host entry for every container, `<dns-name>:<ip>` (IPv4 or IPv6); repeatable,
+    /// at most 16; passed at create as `--add-host`. A network made without DNS resolves
+    /// nothing, and a presigned URL names its host (the signature covers it), so each
+    /// endpoint a job may reach is given here. `host-gateway` and anything that is not an
+    /// address are refused. Needs `--container-bin`.
+    #[arg(long, value_name = "NAME:IP")]
+    pub container_add_host: Vec<String>,
+    /// An endpoint a named network may reach, `IPV4:PORT` or `CIDR:PORT` (a prefix of 24
+    /// to 32, outside 169.254.0.0/16 and the network's own subnet); repeatable, at most 16.
+    /// Required with a named `--container-network`. Before every job is created the agent
+    /// reads back the network (a bridge, DNS off, no IPv6) and the nftables table
+    /// `inet js_egress` that `deploy/js-agent/egress-network.sh` installs, and refuses the
+    /// job (`egress-unchecked`) unless the table holds exactly the rules for these
+    /// endpoints. Podman only; `br_netfilter` must be active.
+    #[arg(long, value_name = "IP:PORT")]
+    pub container_egress_allow: Vec<String>,
+    /// The absolute path of the `nft` program the egress check runs, by default
+    /// `/usr/sbin/nft`. Needs `--container-egress-allow`.
+    #[arg(long, value_name = "PATH")]
+    pub container_nft: Option<String>,
+    /// The control group that holds every container the agent starts, as a directory of
+    /// the cgroup version 2 file system below `/sys/fs/cgroup` (such as
+    /// `/sys/fs/cgroup/jobscheduler.slice`). The operator makes and delegates it. The
+    /// agent starts each container in it (`--cgroup-parent`: the slice name for a
+    /// one-component path that ends in `.slice`, which the systemd cgroup driver takes,
+    /// and the path below `/sys/fs/cgroup` with a leading `/` otherwise, for the cgroupfs
+    /// driver) and reads the CPU and memory of the directory and of each container's
+    /// control group to send what each lease costs on the heartbeat. Without it containers
+    /// land where the engine puts them and the heartbeat carries no load. Needs
+    /// `--container-bin`.
+    #[arg(long, value_name = "PATH")]
+    pub actions_cgroup: Option<PathBuf>,
     /// The absolute path of a program that checks the host's GPU container toolkit, run
     /// once at start when the host offers a GPU. Exit 0 makes the hello report
     /// `gpu-toolkit`; any other outcome (another exit status, no output within the probe

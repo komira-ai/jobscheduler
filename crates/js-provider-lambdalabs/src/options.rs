@@ -96,7 +96,20 @@ impl OptionTable {
             }
             rows.push(row);
         }
-        Ok(Self { rows })
+        Ok(Self::from_rows(rows))
+    }
+
+    /// A table of `rows`, which the caller has checked: each row's instance type is
+    /// 1 to 64 lower case letters, digits or `_`, no two rows name one type, and there is
+    /// at least one row ([`OptionTable::parse`] and the `lambdalabs` kind check as much).
+    pub fn from_rows(rows: Vec<OptionRow>) -> Self {
+        Self { rows }
+    }
+
+    /// A table with no row, for a caller that never launches (it has no instance type to
+    /// offer): a tool that only reads or terminates.
+    pub fn empty() -> Self {
+        Self { rows: Vec::new() }
     }
 
     /// The rows.

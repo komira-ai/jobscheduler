@@ -13,7 +13,9 @@ use std::path::Path;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, limits};
 use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig, WholeNodeConfig};
-use js_types::{Admission, ClassId, ExecMode, ProviderId, ResourceClass, Resources, Shape};
+use js_types::{
+    Admission, ClassId, ExecMode, MemoryPercent, ProviderId, ResourceClass, Resources, Shape,
+};
 use serde::Deserialize;
 use tracing::warn;
 
@@ -32,6 +34,8 @@ struct RawPool {
     class: String,
     max_machines: usize,
     shape: RawShape,
+    // The share of `shape.memory_bytes` the pool books, from 1 to 100; absent, all of it.
+    memory_schedulable_percent: Option<u64>,
     #[serde(default)]
     capabilities: BTreeMap<String, String>,
     heartbeat_interval: Option<String>,
@@ -89,6 +93,11 @@ struct RawShape {
     #[serde(default)]
     gpus: u64,
     gpu_class: Option<String>,
+    /// Bytes of scratch disk the pool books for every host and the floor a host's hello
+    /// must meet. Zero or absent books no disk. A pool that names `scratch-quota` in its
+    /// capabilities must set it above zero ([`PoolConfig::checked`]).
+    #[serde(default)]
+    disk_bytes: u64,
 }
 
 /// Reads the pool file at `path`.
@@ -141,13 +150,16 @@ fn parse_with(
         limits::MAX_MEMORY_BYTES,
     )?;
     within("shape.gpus", shape.gpus, limits::MAX_GPUS)?;
+    let disk_bytes = shape.disk_bytes;
+    within("shape.disk_bytes", disk_bytes, limits::MAX_DISK_BYTES)?;
     let resources = Resources::new(
         shape.cpu_millis,
         shape.memory_bytes,
         shape.gpus,
         raw.shape.gpu_class,
     )
-    .map_err(|err| format!("shape: {err}"))?;
+    .map_err(|err| format!("shape: {err}"))?
+    .with_disk_bytes(disk_bytes);
     capabilities_fit(&raw.capabilities)?;
     let interval = millis(
         "heartbeat_interval",
@@ -155,8 +167,15 @@ fn parse_with(
         DEFAULT_HEARTBEAT_INTERVAL_MS,
     )?;
     let grace = millis("grace", raw.grace, DEFAULT_GRACE_MS)?;
+    let percent = match raw.memory_schedulable_percent {
+        Some(percent) => MemoryPercent::new(percent).map_err(|err| err.to_string())?,
+        None => MemoryPercent::FULL,
+    };
     let shape = Shape::new(resources, raw.capabilities);
     let pool = PoolConfig::new(name, class, shape, raw.max_machines)
+        .checked()
+        .map_err(|err| format!("shape.disk_bytes: {err}"))?
+        .with_memory_percent(percent)
         .with_timing(interval, grace)
         .map_err(|err| format!("heartbeat_interval and grace: {err}"))?;
     let retention = millis(
@@ -265,7 +284,7 @@ fn within(field: &str, value: u64, max: u64) -> Result<(), String> {
 
 /// Refuses capabilities no hello could report: more than the wire allows, or a key or
 /// value longer than it allows.
-fn capabilities_fit(capabilities: &BTreeMap<String, String>) -> Result<(), String> {
+pub(crate) fn capabilities_fit(capabilities: &BTreeMap<String, String>) -> Result<(), String> {
     let few = capabilities.len() <= limits::MAX_CAPABILITIES;
     let short = capabilities.iter().all(|(key, value)| {
         let key_fits = key.len() <= limits::MAX_CAPABILITY_KEY_LEN;
@@ -285,7 +304,8 @@ fn millis(field: &str, text: Option<String>, default: u64) -> Result<u64, String
         return Ok(default);
     };
     let parsed = parse_duration(&text).map_err(|err| format!("{field}: {err}"))?;
-    u64::try_from(parsed.as_millis()).map_err(|_| format!("{field}: is too long"))
+    // A parsed duration is a `u64` count of milliseconds, so the conversion cannot fail.
+    Ok(u64::try_from(parsed.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]
@@ -341,6 +361,84 @@ mod tests {
         assert_eq!(container.exec(), Some(ExecMode::Container));
         let mac = parse(&with("exec = \"sandbox-exec\"")).unwrap();
         assert_eq!(mac.exec(), Some(ExecMode::SandboxExec));
+    }
+
+    /// Asserts that a pool whose capabilities name `scratch-quota` is refused at load when
+    /// its shape books no disk, whether `disk_bytes` is left out or written as zero, with
+    /// a reason naming both the key and the capability; and that the same file loads once
+    /// `disk_bytes` is above zero, with that disk in the pool's shape. It catches a loader
+    /// that accepts a quota pool with no disk, which would admit hosts and then refuse
+    /// every run for want of room.
+    #[test]
+    fn quota_pool_zero_disk_refused_at_load() {
+        let quota = "[capabilities]\nscratch-quota = \"project\"\n";
+        let absent = parse(&format!("{MINIMAL}{quota}")).unwrap_err();
+        let zero = parse(&format!("{MINIMAL}disk_bytes = 0\n{quota}")).unwrap_err();
+        for reason in [absent, zero] {
+            assert!(reason.contains("shape.disk_bytes"), "{reason}");
+            assert!(reason.contains("scratch-quota"), "{reason}");
+        }
+        let loaded = parse(&format!("{MINIMAL}disk_bytes = 1073741824\n{quota}")).unwrap();
+        let resources = Resources::new(4000, 8_589_934_592, 0, None).unwrap();
+        let shape = Shape::new(
+            resources.with_disk_bytes(1 << 30),
+            BTreeMap::from([("scratch-quota".to_owned(), "project".to_owned())]),
+        );
+        let name = ProviderId::new("mac").unwrap();
+        let built = PoolConfig::new(name, class("mac-host").unwrap(), shape, 4);
+        assert_eq!(loaded, built);
+    }
+
+    /// Asserts that a pool that does not name `scratch-quota` loads with `disk_bytes`
+    /// left out and equals the pool built with a shape of no disk (a pool that books no
+    /// disk), that `disk_bytes` set on it is carried into the shape, and that a value
+    /// above the wire's maximum is refused by name. It catches a disk key read and
+    /// dropped, and a floor no hello could meet.
+    #[test]
+    fn disk_bytes_is_optional_carried_and_bounded() {
+        let none = parse(MINIMAL).unwrap();
+        assert_eq!(none, parse(&format!("{MINIMAL}disk_bytes = 0\n")).unwrap());
+        let sized = parse(&format!("{MINIMAL}disk_bytes = 4096\n")).unwrap();
+        assert_ne!(sized, none);
+        let resources = Resources::new(4000, 8_589_934_592, 0, None).unwrap();
+        let shape = Shape::new(resources.with_disk_bytes(4096), BTreeMap::new());
+        let name = ProviderId::new("mac").unwrap();
+        assert_eq!(
+            sized,
+            PoolConfig::new(name, class("mac-host").unwrap(), shape, 4)
+        );
+        let max = limits::MAX_DISK_BYTES;
+        assert!(parse(&format!("{MINIMAL}disk_bytes = {max}\n")).is_ok());
+        let over = parse(&format!("{MINIMAL}disk_bytes = {}\n", max + 1)).unwrap_err();
+        assert!(over.contains("shape.disk_bytes"), "{over}");
+    }
+
+    /// `memory_schedulable_percent` cuts the memory of `[shape]` the pool books, rounding
+    /// down, and leaves the floor a host must meet whole; a file without it books all of
+    /// it; 0, 101, -1, a word and 90.5 are refused naming the key; the key placed after `[shape]` is a key of
+    /// that table and refused. It catches a percent read and dropped, one that cuts the
+    /// floor instead of the booking, and one that rounds up.
+    #[test]
+    fn the_memory_percent_cuts_what_is_booked_and_not_the_floor() {
+        let whole = parse(MINIMAL).unwrap().memory_headroom();
+        assert_eq!(whole.percent(), MemoryPercent::FULL);
+        assert_eq!(whole.bookable_bytes(), 8_589_934_592);
+        let cut = parse(&with("memory_schedulable_percent = 90")).unwrap();
+        assert_eq!(cut.memory_headroom().configured_bytes(), 8_589_934_592);
+        assert_eq!(cut.memory_headroom().percent().get(), 90);
+        assert_eq!(cut.memory_headroom().bookable_bytes(), 7_730_941_132);
+        assert_eq!(cut.memory_percent().get(), 90);
+        for bad in ["0", "101"] {
+            let said = parse(&with(&format!("memory_schedulable_percent = {bad}"))).unwrap_err();
+            assert_eq!(said, "memory_schedulable_percent must be from 1 to 100");
+        }
+        for bad in ["-1", "\"ninety\"", "90.5"] {
+            let said = parse(&with(&format!("memory_schedulable_percent = {bad}"))).unwrap_err();
+            assert!(said.contains("memory_schedulable_percent"), "{bad}: {said}");
+        }
+        let inside = format!("{MINIMAL}memory_schedulable_percent = 90\n");
+        let said = parse(&inside).unwrap_err();
+        assert!(said.contains("memory_schedulable_percent"), "{said}");
     }
 
     /// A file in the temp directory that is removed when the guard drops, so a failing
@@ -454,12 +552,38 @@ mod tests {
         assert!(parse(&value_long).unwrap_err().contains("capabilities"));
     }
 
-    /// A duration too long to count in milliseconds is refused rather than wrapped; the
-    /// flags' durations are whole seconds in a `u64`, so only the conversion can fail.
+    /// A duration too long to count in milliseconds is refused with the field's name
+    /// rather than wrapped.
     #[test]
     fn a_duration_that_overflows_milliseconds_is_refused() {
         let text = Some("18446744073709551615s".to_string());
-        assert!(millis("grace", text, 0).is_err());
+        assert!(millis("grace", text, 0).unwrap_err().starts_with("grace:"));
+    }
+
+    /// Asserts that the heartbeat interval takes milliseconds down to the wire's 250 ms
+    /// minimum and no lower, naming the field below it, and that second-based values read
+    /// as before. It catches an `ms` suffix that is refused, a minimum that drifts from
+    /// the wire's, and a unit scaled wrongly (`1s` read as 1 ms, or `250ms` as 250 s).
+    #[test]
+    fn heartbeat_interval_takes_milliseconds_down_to_the_wire_minimum() {
+        let base = parse(MINIMAL).unwrap();
+        let cases = [
+            ("250ms", 250),
+            ("1500ms", 1500),
+            ("10s", 10_000),
+            ("10", 10_000),
+        ];
+        for (text, millis) in cases {
+            let got = parse(&with(&format!(
+                "heartbeat_interval = \"{text}\"\ngrace = \"1m\""
+            )))
+            .unwrap();
+            let want = base.clone().with_timing(millis, 60_000).unwrap();
+            assert_eq!(got, want, "{text}");
+        }
+        let low = "heartbeat_interval = \"249ms\"\ngrace = \"1m\"";
+        let refused = parse(&with(low)).unwrap_err();
+        assert!(refused.contains("heartbeat_interval"), "{refused}");
     }
 
     fn whole(extra: &str) -> String {

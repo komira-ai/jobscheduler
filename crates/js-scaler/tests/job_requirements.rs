@@ -91,23 +91,27 @@ fn an_offer_of_the_other_mode_is_refused_and_the_miss_is_named() {
 #[test]
 fn a_host_covers_a_request_only_if_disk_and_mode_fit() {
     let cases: [Case<js_scaler::HostFacts>; 5] = [
-        (|h| h.shape.disk_bytes = 99 << 30, &[("disk-gib", "100")], 1),
         (
-            |h| h.shape.disk_bytes = 100 << 30,
+            |h| shape(h).disk_bytes = 99 << 30,
+            &[("disk-gib", "100")],
+            1,
+        ),
+        (
+            |h| shape(h).disk_bytes = 100 << 30,
             &[("disk-gib", "100")],
             0,
         ),
         (
-            |h| h.shape.exec = ExecMode::SandboxExec,
+            |h| shape(h).exec = ExecMode::SandboxExec,
             &[("exec", "container")],
             1,
         ),
         (
-            |h| h.shape.exec = ExecMode::SandboxExec,
+            |h| shape(h).exec = ExecMode::SandboxExec,
             &[("exec", "sandbox-exec")],
             0,
         ),
-        (|h| h.shape.exec = ExecMode::SandboxExec, &[], 0),
+        (|h| shape(h).exec = ExecMode::SandboxExec, &[], 0),
     ];
     for (n, (change, pairs, launches)) in cases.into_iter().enumerate() {
         let mut rig = Rig::new(settings("gpu"));

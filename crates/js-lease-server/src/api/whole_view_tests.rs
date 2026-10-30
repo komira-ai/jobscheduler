@@ -104,6 +104,7 @@ impl Rig {
                 cpu_millis: 8000,
                 memory_bytes: 16 << 30,
                 gpus: 0,
+                disk_bytes: 0,
                 gpu_class: None,
                 max_leases: None,
             },
@@ -130,8 +131,15 @@ impl Rig {
         let agents = Agents::over(registry.clone(), &shared_clock, &dir);
         let token = parse_token(&[b'c'; 40]).unwrap();
         let shared = Shared::new(table, token, Some(Arc::new(agents)));
-        let served =
-            status.then(|| Arc::new(Status::new(None, None, Vec::new(), shared_clock.clone())));
+        let served = status.then(|| {
+            Arc::new(Status::new(
+                None,
+                None,
+                None,
+                Vec::new(),
+                shared_clock.clone(),
+            ))
+        });
         let shared = Arc::new(shared.with_status(served));
         Self {
             shared,
@@ -254,7 +262,7 @@ async fn a_committed_host_lists_as_held() {
     assert!(!body.contains("reserved_for") && !body.contains("drain_deadline_ms"));
 }
 
-const GOLDEN: &str = r#"{"hosts":[{"id":"a","source":"registered","state":"live","lost":false,"phase":"serving","lease":"1-1","shape":{"cpu_millis":4000,"memory_bytes":8589934592,"gpus":0},"capabilities":{"os":"macos"},"labels":{},"agent_version":"0.1.0","releasing":false,"mark":"reserved","reserved_for":"r1","drain_deadline_ms":1030000}]}"#;
+const GOLDEN: &str = r#"{"hosts":[{"id":"a","source":"registered","state":"live","lost":false,"phase":"serving","lease":"1-1","shape":{"cpu_millis":4000,"memory_bytes":8589934592,"gpus":0},"memory":{"configured_bytes":8589934592,"schedulable_percent":100,"bookable_bytes":8589934592},"capabilities":{"os":"macos"},"labels":{},"agent_version":"0.1.0","releasing":false,"mark":"reserved","reserved_for":"r1","drain_deadline_ms":1030000}]}"#;
 
 /// A writer the log lines of a test go to.
 #[derive(Clone, Default)]

@@ -273,6 +273,20 @@ fn a_command_that_ignores_sigterm_is_killed_after_the_grace_period() {
     }
 }
 
+/// Asserts that a stopped server's port stays taken for the rest of the test: no other
+/// server can bind it, and a request to it fails like one to a server that is gone.
+#[test]
+fn a_stopped_server_keeps_its_port_and_refuses_every_request() {
+    let mut h = Harness::new("stopped_keeps_port");
+    let addr = h.js.server.strip_prefix("http://").unwrap().to_owned();
+    h.stop();
+    let err = std::net::TcpListener::bind(&addr).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse, "{err}");
+    let got = h.js.go(&["lease", "list"]);
+    assert_ne!(got.code, 0, "{}", got.err);
+    assert!(got.err.contains("cannot talk to"), "{}", got.err);
+}
+
 /// Asserts that a renewal that fails for another reason (the server is gone) is
 /// reported and tried again at the next period instead of stopping the command, and
 /// that a release that fails every try is reported, after the pauses between the tries

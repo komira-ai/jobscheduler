@@ -3,15 +3,21 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::*;
 use js_elastic::Offer;
-use js_scaler::{Cooldown, CooldownReason, Phase, Record, Records, StoredExec, StoredOffer};
+use js_scaler::{
+    Cooldown, CooldownReason, OLDEST, Phase, Record, Records, StoredExec, StoredOffer, VERSION,
+};
 use js_types::ExecMode;
 
-const GOLDEN: &str = include_str!("golden/records_v1.json");
+const GOLDEN: &str = include_str!("golden/records_v2.json");
+const GOLDEN_V1: &str = include_str!("golden/records_v1.json");
 
 /// The records the golden file holds: one launch with every optional field empty, and
-/// an orphan with every one of them set, in the other execution mode.
+/// an orphan with every one of them set, in the other execution mode, one silent machine
+/// and one missing machine.
 fn sample() -> Records {
     let launching = record(Phase::Launching, 60, 0);
     let mut orphan = record(Phase::Orphan, 90, MINUTE);
@@ -30,6 +36,7 @@ fn sample() -> Records {
     orphan.seen_live = true;
     let mut records = Records {
         instances: vec![launching, orphan],
+        last_step: Some(at(40 * SECOND)),
         ..Records::default()
     };
     records.cooldowns.insert(
@@ -40,9 +47,15 @@ fn sample() -> Records {
         },
     );
     records
+        .silent_since
+        .insert("js-made-0-60".to_owned(), at(30 * SECOND));
+    records
+        .missing_since
+        .insert("js-gone-away".to_owned(), at(2 * MINUTE));
+    records
 }
 
-/// Asserts the literal text of the records file, version 1, for a launch and for an
+/// Asserts the literal text of the records file, version 2, for a launch and for an
 /// orphan with every field set: names, order, the phase and reason spellings, the
 /// execution mode spelling and the times as milliseconds. A renamed or reordered field,
 /// or a changed spelling, changes the text.
@@ -61,6 +74,78 @@ fn the_golden_text_reads_back() {
     );
 }
 
+/// Asserts that a file of version 1, written before the silent and missing times were
+/// kept, still reads: its machines and cooldowns are what they were and the times are
+/// empty, so the counts start again; and that what is written back is version 2.
+#[test]
+fn a_version_1_file_is_read_and_written_back_as_version_2() {
+    let old = Records::decode(GOLDEN_V1).unwrap();
+    let expected = Records {
+        silent_since: BTreeMap::new(),
+        missing_since: BTreeMap::new(),
+        last_step: None,
+        ..sample()
+    };
+    assert_eq!(old, expected);
+    let text = old.encode().unwrap();
+    assert!(text.starts_with("{\n  \"version\": 2,"), "{text}");
+    assert_eq!(Records::decode(&text).unwrap(), expected);
+
+    let extra = GOLDEN_V1.replace("\"version\": 1,", "\"version\": 1, \"silent_since\": {},");
+    let error = Records::decode(&extra).unwrap_err();
+    assert!(error.to_string().contains("silent_since"), "{error}");
+}
+
+/// Asserts that a file of version 2 that names no time of its last write reads with none:
+/// the scaler then takes the whole span back to each saved time as downtime.
+#[test]
+fn a_version_2_file_without_the_time_of_its_last_write_reads_with_none() {
+    let old = GOLDEN.replace(",\n  \"last_step\": 1000000040000", "");
+    assert!(!old.contains("last_step"), "{old}");
+    let records = Records::decode(&old).unwrap();
+    assert_eq!(records.last_step, None);
+    assert_eq!(
+        records,
+        Records {
+            last_step: None,
+            ..sample()
+        }
+    );
+}
+
+/// Asserts that every version from `OLDEST` to `VERSION` reads, each from its own golden
+/// file, and is written back as `VERSION`; and that the versions on either side, and a
+/// number that only wraps into the range, are refused. Raising `OLDEST` or `VERSION` alone
+/// changes what this reads, so a golden is owed for each version in the range.
+#[test]
+fn every_version_in_the_supported_range_reads() {
+    for version in OLDEST..=VERSION {
+        let path = format!(
+            "{}/tests/golden/records_v{version}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let records = Records::decode(&text).unwrap();
+        let again = records.encode().unwrap();
+        assert!(again.starts_with(&format!("{{\n  \"version\": {VERSION},")));
+        assert_eq!(Records::decode(&again).unwrap(), records);
+    }
+    for version in [
+        u64::from(OLDEST) - 1,
+        u64::from(VERSION) + 1,
+        u64::from(u32::MAX) + 2,
+    ] {
+        let text = GOLDEN.replace("\"version\": 2", &format!("\"version\": {version}"));
+        let error = Records::decode(&text).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("records: version Some({version})")),
+            "{error}"
+        );
+    }
+}
+
 /// Asserts what is refused: text that is not JSON, a file of another version or of none,
 /// a field the format does not have, a missing field, and an acquire id that is not one.
 /// Each error says what is wrong.
@@ -69,20 +154,20 @@ fn a_file_that_is_not_records_of_this_version_is_refused() {
     let broken = Records::decode("{not json").unwrap_err();
     assert!(broken.to_string().starts_with("records: "), "{broken}");
 
-    let other = GOLDEN.replace("\"version\": 1", "\"version\": 2");
+    let other = GOLDEN.replace("\"version\": 2", "\"version\": 3");
     let error = Records::decode(&other).unwrap_err();
     assert_eq!(
         error.to_string(),
-        "records: version Some(2), this reader reads 1"
+        "records: version Some(3), this reader reads 1 to 2"
     );
 
     let none = Records::decode("{}").unwrap_err();
     assert_eq!(
         none.to_string(),
-        "records: version None, this reader reads 1"
+        "records: version None, this reader reads 1 to 2"
     );
 
-    let extra = GOLDEN.replace("\"version\": 1,", "\"version\": 1, \"surprise\": 1,");
+    let extra = GOLDEN.replace("\"version\": 2,", "\"version\": 2, \"surprise\": 1,");
     let error = Records::decode(&extra).unwrap_err();
     assert!(error.to_string().contains("surprise"), "{error}");
 
@@ -113,6 +198,25 @@ fn seen_live_is_kept_and_an_old_file_without_it_reads_true() {
     let mut expected = sample();
     expected.instances[0].seen_live = true;
     assert_eq!(read, expected);
+}
+
+/// Asserts the same for a file of version 1: the field is read where the file has it, reads
+/// `true` where it has none, and is written back, as version 2, with the value read.
+#[test]
+fn seen_live_reads_from_a_version_1_file_with_and_without_it() {
+    let with = Records::decode(GOLDEN_V1).unwrap();
+    assert!(!with.instances[0].seen_live);
+    assert!(with.instances[1].seen_live);
+
+    let old: String = GOLDEN_V1
+        .replace(",\n      \"seen_live\": false", "")
+        .replace(",\n      \"seen_live\": true", "");
+    assert!(!old.contains("seen_live"));
+    let read = Records::decode(&old).unwrap();
+    assert!(read.instances.iter().all(|each| each.seen_live));
+    let text = read.encode().unwrap();
+    assert!(text.starts_with("{\n  \"version\": 2,"), "{text}");
+    assert!(!text.contains("\"seen_live\": false"), "{text}");
 }
 
 /// Asserts that an offer's shape survives the file: both execution modes, a gpu class and
@@ -215,4 +319,36 @@ fn only_some_phases_count() {
     let mut settled: Record = record(Phase::Failed, 60, 0);
     settled.clean_lists = 2;
     assert!(!settled.counts());
+}
+
+/// Asserts that the `go` and `pool_kinds` keys are read, not dropped: a file of version 2 that
+/// holds them reads with the go and the kinds as written, writes them back, and reads again as
+/// the same records. A `go` of the wrong type is refused, as any other field is. The keys are
+/// absent from a file written while no pool has launched, and the earlier reader that ignores
+/// them (#452) reads either. It catches a key that is read and lost on the next save.
+#[test]
+fn the_go_and_pool_kinds_keys_are_read_and_written_back() {
+    let with = GOLDEN.replacen(
+        "\"last_step\"",
+        "\"go\": {\"gpu\": {\"at\": 5, \"settled\": 7}},\n  \"pool_kinds\": {\"gpu\": \"x\"},\n  \"last_step\"",
+        1,
+    );
+    let records = Records::decode(&with).unwrap();
+    let go = js_scaler::Go {
+        at: js_scaler::Millis::new(5),
+        settled: 7,
+    };
+    assert_eq!(records.go["gpu"], go);
+    assert_eq!(records.pool_kinds["gpu"], "x");
+    let text = records.encode().unwrap();
+    assert!(
+        text.contains("\"go\"") && text.contains("\"pool_kinds\""),
+        "{text}"
+    );
+    assert_eq!(Records::decode(&text).unwrap(), records);
+
+    let without = Records::decode(GOLDEN).unwrap();
+    assert!(without.go.is_empty() && without.pool_kinds.is_empty());
+    let odd = GOLDEN.replacen("\"last_step\"", "\"go\": 3,\n  \"last_step\"", 1);
+    assert!(Records::decode(&odd).is_err());
 }

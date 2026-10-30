@@ -7,9 +7,9 @@ use js_agent_wire::Taint;
 
 use super::job::{
     Booking, Job, Retired, Stuck, cleanup_taint, host_taint, host_taint_of, label_id,
-    may_change_host,
+    may_change_host, slot_label,
 };
-use super::{Lifecycle, MAX_JOBS};
+use super::{Lifecycle, MAX_JOBS, SLOTS, Slots};
 use crate::lifecycle::runtime::{ContainerRuntime, Found, RuntimeError, Status};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{CheckHook, Clock, Config, Event, Finding, code, label};
@@ -80,6 +80,7 @@ impl Lifecycle {
             jobs: Vec::new(),
             stuck: Vec::new(),
             retired: Retired::default(),
+            slots: Slots::new(SLOTS),
             taint,
             exclusive: None,
             adopted_leases: Vec::new(),
@@ -91,6 +92,7 @@ impl Lifecycle {
             let now = this.clock.now_ms();
             match this.adoptable(&container, now) {
                 Ok(mut job) => {
+                    job.cgroup = this.runtime.cgroup(&container.id);
                     // A host job that outlived the agent changed the host, and a marker
                     // written when it started may be all that was lost.
                     if job.host {
@@ -99,6 +101,10 @@ impl Lifecycle {
                     events.push(Event::Adopted {
                         run_id: job.run_id.clone(),
                     });
+                    // Its slot is held until its cleanup passes, as for a run started here.
+                    if let Some(slot) = job.slot {
+                        this.slots.hold(slot);
+                    }
                     this.jobs.push(job);
                 }
                 Err(why) => stuck.extend(this.evict(&container, why, &mut events)),
@@ -106,12 +112,28 @@ impl Lifecycle {
         }
         // Booked only now, so that a container that cannot be removed never makes a
         // container that runs look like one that does not fit.
+        // A container that is still there may still run a process of its slot's uid, and no
+        // cleanup check will run for it: the slot is not used again.
+        for slot in stuck.iter().filter_map(|held: &Stuck| held.slot) {
+            this.slots.quarantine(slot);
+        }
         this.stuck = stuck;
         this.adopted_leases = this.jobs.iter().map(|job| job.lease_id.clone()).collect();
         // A container that could not be removed may still use its run's directory.
         let kept = this.jobs.iter().map(|job| job.run_id.as_str());
         let held = this.stuck.iter().filter_map(|held| held.run_id.as_deref());
-        this.config.scratch.sweep(kept.chain(held));
+        let owned: Vec<&str> = kept.chain(held).collect();
+        this.config.scratch.sweep(owned.iter().copied());
+        if let Some(files) = &this.config.files {
+            // A root that cannot be listed leaves earlier runs' secrets in place; say so.
+            if let Err(why) = files.sweep(owned.iter().copied()) {
+                events.push(Event::Finding(Finding {
+                    run_id: None,
+                    code: code::SCRATCH_FAILED,
+                    message: format!("the run files root cannot be swept: {why}"),
+                }));
+            }
+        }
         Ok((this, events))
     }
 
@@ -156,11 +178,25 @@ impl Lifecycle {
                 "its run id is held already",
             ),
             (
+                job.slot.is_some_and(|slot| !self.slots.is_free(slot)),
+                "its slot is held already",
+            ),
+            (
                 self.jobs.len() >= MAX_JOBS,
                 "the agent holds as many runs as a heartbeat can list",
             ),
             (
-                !job.booking.fits(&self.config.capacity, &used),
+                // The disk term is left out of this fit: the offered disk is the scratch
+                // volume's free space read at start, which already excludes what the
+                // adopted runs have written, so their bookings can exceed it and must not
+                // evict them. This undercounts free space by the adopted runs' actual
+                // usage; new runs are still held to the offer minus the adopted bookings
+                // (`admit`). The wiring PR can refine it with the quota's usage.
+                !Booking {
+                    disk_bytes: 0,
+                    ..job.booking.clone()
+                }
+                .fits(&self.config.capacity, &used),
                 "its booking does not fit the machine beside the jobs taken over",
             ),
         ];
@@ -195,6 +231,7 @@ impl Lifecycle {
                     format!("not removed, still on the host and booked: {failed}"),
                     Some(Stuck {
                         run_id: label_id(found, label::RUN).map(str::to_owned),
+                        slot: slot_label(found),
                         id: id.clone(),
                         booking: Booking::from_labels(found)
                             .unwrap_or_else(|| Booking::everything(&self.config.capacity)),

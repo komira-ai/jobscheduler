@@ -107,6 +107,46 @@ fn a_request_larger_than_the_pool_is_still_no_fit() {
     assert_eq!(provider.start(spec), refused(RefusalCode::NoFit));
 }
 
+/// Asserts the scratch disk of a whole-node request against the pool: a pool that books
+/// 100 GiB of disk refuses a request for one byte more `no-fit` with or without a request
+/// id and keeps no entry (the request can never be served by a machine of the pool, so
+/// nothing may be launched for it), while a request for exactly 100 GiB is neither refused
+/// for fit nor for lack of a host. It catches a pool whose fit ignores the disk of the
+/// request, which would queue it for a launch that cannot serve it.
+#[test]
+fn a_request_for_more_disk_than_the_pool_books_is_no_fit_and_not_queued() {
+    let name = ProviderId::new("builders").unwrap();
+    let resources = js_types::Resources::new(4000, 8 << 30, 0, None)
+        .unwrap()
+        .with_disk_bytes(100 << 30);
+    let shape = js_types::Shape::new(resources, map(&[("os", "macos")]));
+    let fx = fixture_of(PoolConfig::new(name, whole(), shape, 4));
+    let mut hello = hello("a");
+    hello.shape.disk_bytes = 200 << 30;
+    fx.hello(&hello, &cred("t")).unwrap();
+    let asking = |sequence: u64, disk: u64, name: Option<&str>| {
+        let mut big = whole_request();
+        big.resources = big.resources.with_disk_bytes(disk);
+        let spec = StartSpec::new(lease(sequence), big, &[whole()]).unwrap();
+        match name {
+            Some(name) => spec.with_request_id(id(name)),
+            None => spec,
+        }
+    };
+    let mut provider = fx.registry.provider();
+    let no_fit = refused(RefusalCode::NoFit);
+    assert_eq!(provider.start(asking(1, (100 << 30) + 1, None)), no_fit);
+    assert_eq!(
+        provider.start(asking(2, (100 << 30) + 1, Some("r1"))),
+        no_fit
+    );
+    assert_eq!(fx.registry.queue_position(&id("r1")), None);
+    assert!(fx.registry.waiting().is_empty());
+    let exact = provider.start(asking(3, 100 << 30, Some("r2")));
+    assert_ne!(exact, no_fit);
+    assert_ne!(exact, refused(RefusalCode::NoCapableHost));
+}
+
 /// Asserts that a pool whose only host is tainted refuses a whole request
 /// `no-capable-host` at once, with a request id too, and keeps no entry.
 #[test]

@@ -7,13 +7,13 @@ use std::time::Duration;
 use js_lease::Clock;
 use serde_json::{Value, json};
 
-use js_lease_server::{SharedClock, channel_ticker, start};
+use js_lease_server::{SharedClock, channel_ticker};
 
 use crate::agents_support::{
     JOIN, Session, agent_args, hello_body, hello_with, hosts, listed, post, restarted, session,
     start_agents,
 };
-use crate::support::{Harness, LogCapture, Reply, TOKEN, config, replace, request};
+use crate::support::{Harness, LogCapture, Reply, TOKEN, config, replace, request, start};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -406,7 +406,10 @@ async fn a_second_server_over_the_same_state_is_refused() {
     let h = start_agents("joins_second_server", false).await;
     let token = minted(&h, "i-1").await;
     assert_eq!(hello(&h, &token, "burst-1", "i-1").await.status, 200);
-    let args = replace(agent_args(&h.scratch, false), "--boot", "resume");
+    // Usage is off for the second server: the usage file is locked by the first as well,
+    // and the lock under test is the state file's.
+    let mut args = replace(agent_args(&h.scratch, false), "--boot", "resume");
+    args.push("--usage-off".into());
     let (_, ticker) = channel_ticker();
     let clock = SharedClock::new(js_lease::ManualClock::default());
     let started = start(config(args).unwrap(), clock, ticker).await;

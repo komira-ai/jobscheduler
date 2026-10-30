@@ -5,19 +5,23 @@ use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use js_lease::{Boot, Settings, SystemClock};
+use js_alert::AlertSink;
+use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
 
 use js_registry::{Credential, PoolConfig, WholeNodeConfig};
+use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
 use crate::agent_pool;
 use crate::agent_tokens::AgentTokens;
+use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
 use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
@@ -25,6 +29,8 @@ use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
+use crate::usage::{KeySource, ProfileKey, UsageSink};
+use crate::usage_setup::{UsageSetup, usage_setup};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -77,15 +83,17 @@ pub struct Cli {
     #[arg(long)]
     pub agent_pool_config: Option<PathBuf>,
     /// The hellos one join token may say in a burst before it is held to one per
-    /// `--agent-hello-interval`. Needs `--agent-pool-config`.
+    /// `--agent-hello-interval`. Needs `--agent-pool-config`. The scaler's wait to hear from
+    /// the hosts after a restart assumes the default burst and interval; a smaller burst or
+    /// a longer interval is bounded by its ten minute quiet period only.
     #[arg(
         long,
-        default_value = "60",
+        default_value_t = js_agent_wire::DEFAULT_HELLO_BURST,
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub agent_hello_burst: u32,
     /// How often a join token that spent its burst is allowed one more hello. Needs
-    /// `--agent-pool-config`.
+    /// `--agent-pool-config`. See `--agent-hello-burst` for what the scaler assumes of it.
     #[arg(
         long,
         default_value = "1s",
@@ -143,6 +151,23 @@ pub struct Cli {
     /// How long a stop waits for the requests in flight before it cuts what is left.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub drain_timeout: Duration,
+    /// The file the per-minute usage of the nodes and the learned cost curves are kept
+    /// in. Beside `--state-file`, as `usage.db`, unless given. Only agent registration
+    /// reports usage.
+    #[arg(long, conflicts_with = "usage_off")]
+    pub usage_db: Option<PathBuf>,
+    /// Turns the recording of usage, and its read routes, off. For an emergency: usage
+    /// is on by default and the per-minute series is meant to be always collected.
+    #[arg(long)]
+    pub usage_off: bool,
+    /// The most bytes the learned cost curves may take in the usage file; the keys used
+    /// longest ago are dropped to stay under it. At least 1.
+    #[arg(
+        long,
+        default_value = "268435456",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub profile_store_bytes: u64,
 }
 
 /// What a client may hold open (see the module doc of `listener`). The flags set
@@ -212,23 +237,26 @@ impl From<BootMode> for Boot {
     }
 }
 
-/// A duration in whole seconds: `90`, `90s`, `15m` or `2h`. Zero is refused.
+/// A duration: a whole count with an optional unit, `90`, `90s`, `250ms`, `15m` or `2h`.
+/// A bare count is seconds. Zero is refused.
 pub fn parse_duration(text: &str) -> Result<Duration, String> {
     let digits = text
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(text.len());
     let (count, unit) = text.split_at(digits);
-    let factor = ["", "s", "m", "h"].iter().position(|known| *known == unit);
-    let factor = factor.map(|at| [1u64, 1, 60, 3600][at]);
-    let seconds = count
+    let millis_per_unit = ["", "ms", "s", "m", "h"]
+        .iter()
+        .position(|known| *known == unit)
+        .map(|at| [1000u64, 1, 1000, 60_000, 3_600_000][at]);
+    let millis = count
         .parse::<u64>()
         .ok()
-        .zip(factor)
+        .zip(millis_per_unit)
         .and_then(|(count, factor)| count.checked_mul(factor));
-    match seconds {
-        Some(seconds) if seconds > 0 => Ok(Duration::from_secs(seconds)),
+    match millis {
+        Some(millis) if millis > 0 => Ok(Duration::from_millis(millis)),
         _ => Err(format!(
-            "{text:?} is not a positive duration such as 600, 600s, 10m or 1h"
+            "{text:?} is not a positive duration such as 600, 600s, 250ms, 10m or 1h"
         )),
     }
 }
@@ -315,6 +343,8 @@ pub struct Config {
     pub(crate) listen: SocketAddr,
     /// What names the listen address in a refusal: `--listen` or `server.listen`.
     pub(crate) listen_flag: &'static str,
+    /// A listener the caller bound, served in place of binding `listen`.
+    pub(crate) bound: Option<std::net::TcpListener>,
     pub(crate) agent_listen: Option<SocketAddr>,
     pub(crate) advertise_url: Option<String>,
     pub(crate) warnings: Vec<String>,
@@ -330,6 +360,13 @@ pub struct Config {
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) limits: Limits,
     pub(crate) hosts: Hosts,
+    pub(crate) usage: UsageSetup,
+    pub(crate) monotonic: Arc<dyn Monotonic>,
+    /// Where the scaler's alerts go besides the log; from `server.alert_webhook_url`, or
+    /// [`Config::with_alert_sink`].
+    pub(crate) alerts: Option<Arc<dyn AlertSink>>,
+    /// How often an alert that keeps holding is sent to the sink again.
+    pub(crate) alert_repeat: Duration,
 }
 
 /// Where the hosts come from: the operator's pool file alone, or that file (when given)
@@ -351,6 +388,8 @@ pub(crate) enum Hosts {
 pub(crate) struct AgentSetup {
     pub(crate) tokens: AgentTokens,
     pub(crate) pool: PoolConfig,
+    /// The one provider the mint route accepts, when the configuration names it.
+    pub(crate) mint_provider: Option<String>,
     pub(crate) hello_limit: HelloLimit,
     /// `--require-host-credential`.
     pub(crate) require_host_credential: bool,
@@ -378,18 +417,26 @@ impl Config {
         let limits = Limits::from(&cli);
         let hosts = hosts(&cli, &token)?;
         let settings = with_pool_settings(settings, &hosts)?;
+        let state_file = required(cli.state_file.clone(), "--state-file")?;
+        let usage = usage_setup(
+            cli.usage_off,
+            cli.usage_db.clone(),
+            cli.profile_store_bytes,
+            &state_file,
+        );
         let mut warnings = Vec::new();
         let status = status_policy("--listen", cli.listen, &mut warnings);
         Ok(Self {
             listen: cli.listen,
             listen_flag: "--listen",
+            bound: None,
             agent_listen: None,
             advertise_url: None,
             warnings,
             status,
             launch_inputs: LaunchInputs::default(),
             elastic: None,
-            state_file: required(cli.state_file, "--state-file")?,
+            state_file,
             boot: required(cli.boot, "--boot")?.into(),
             settings,
             tick: cli.tick,
@@ -397,6 +444,10 @@ impl Config {
             tls,
             limits,
             hosts,
+            usage,
+            monotonic: Arc::new(SystemMonotonic::default()),
+            alerts: None,
+            alert_repeat: DEFAULT_ALERT_REPEAT,
         })
     }
 
@@ -431,10 +482,16 @@ impl Config {
                 static_pool,
                 registering,
             } => {
-                let Registering { plan, pool, tokens } = *registering;
+                let Registering {
+                    plan,
+                    pool,
+                    tokens,
+                    mint_provider,
+                } = *registering;
                 let agents = Box::new(AgentSetup {
                     tokens,
                     pool,
+                    mint_provider,
                     hello_limit: server.agents.hello_limit(),
                     require_host_credential: server.agents.require_host_credential(),
                 });
@@ -443,22 +500,37 @@ impl Config {
                         static_pool,
                         agents,
                     },
-                    Some(plan),
+                    plan,
                 )
             }
         };
+        let alerts = alert_sink(server.alerts.as_ref(), files)?;
+        let alert_repeat = server
+            .alerts
+            .as_ref()
+            .map_or(DEFAULT_ALERT_REPEAT, |keys| keys.repeat_after);
+        let state_file = server.state_file;
+        let keys = server.usage;
+        let usage = usage_setup(keys.off, keys.db, keys.profile_store_bytes, &state_file);
         let settings = with_pool_settings(server.settings, &hosts)?;
         let status = status_policy("server.listen", server.listen, &mut warnings);
+        if alerts.is_some() && elastic.is_none() {
+            warnings.push(
+                "server: warning: server.alert_webhook_url is set but no pool launches machines, so no alert has a source and nothing will be sent"
+                    .to_owned(),
+            );
+        }
         Ok(Self {
             listen: server.listen,
             listen_flag: "server.listen",
+            bound: None,
             agent_listen: server.agent_listen,
             advertise_url: server.advertise_url,
             warnings,
             status,
             launch_inputs: LaunchInputs::default(),
             elastic,
-            state_file: server.state_file,
+            state_file,
             boot: server.boot.into(),
             settings,
             tick: server.tick,
@@ -466,7 +538,18 @@ impl Config {
             tls: server.tls,
             limits: server.limits,
             hosts,
+            usage,
+            monotonic: Arc::new(SystemMonotonic::default()),
+            alerts,
+            alert_repeat,
         })
+    }
+
+    /// The same configuration with every alert of the scaler also sent to `sink`, in
+    /// place of the one the file names.
+    pub fn with_alert_sink(mut self, sink: Arc<dyn AlertSink>) -> Self {
+        self.alerts = Some(sink);
+        self
     }
 
     /// The limits on what a client may hold open.
@@ -512,6 +595,20 @@ impl Config {
         self
     }
 
+    /// The same configuration serving on `listener`, which the caller has already bound,
+    /// in place of binding `--listen`. The caller owns the socket: the server makes its
+    /// copy non-blocking and closes only that copy when it stops, so a clone of the
+    /// listener (`try_clone`) the caller kept still holds the port afterwards. The
+    /// server sets the socket non-blocking (a flag of the open file description, which
+    /// clones share), so a clone the caller kept is non-blocking too until it calls
+    /// `set_nonblocking(false)` on it, which it should do only once the server has
+    /// stopped. The caller must not accept on a clone while the server runs, since the
+    /// copies share one queue of connections. `Running::addr` is the address of `listener`.
+    pub fn with_listener(mut self, listener: std::net::TcpListener) -> Self {
+        self.bound = Some(listener);
+        self
+    }
+
     /// The elastic pool of the file, when it has one.
     pub fn elastic_pool(&self) -> Option<&ElasticPlan> {
         self.elastic.as_ref()
@@ -536,9 +633,53 @@ impl Config {
         self
     }
 
+    /// The same configuration timing the lease table's steps on `clock`.
+    pub fn with_monotonic(mut self, clock: Arc<dyn Monotonic>) -> Self {
+        self.monotonic = clock;
+        self
+    }
+
     /// How often the production ticker ticks (`--tick`).
     pub fn tick_period(&self) -> Duration {
         self.tick
+    }
+
+    /// The usage file (`--usage-db`, or `usage.db` beside the lease file), or `None`
+    /// when `--usage-off` turned usage off.
+    pub fn usage_db(&self) -> Option<&Path> {
+        self.usage.db.as_deref()
+    }
+
+    /// The most bytes the learned cost curves may take (`--profile-store-bytes`).
+    pub fn profile_store_bytes(&self) -> u64 {
+        self.usage.profile_store_bytes
+    }
+
+    /// The same configuration measuring usage with `sink` instead of the sink that opens
+    /// the usage file. Usage that `--usage-off` turned off stays off.
+    pub fn with_usage_sink(mut self, sink: Arc<dyn UsageSink>) -> Self {
+        self.usage.sink = Some(sink);
+        self
+    }
+
+    /// The same configuration naming the key of a run with `keys` instead of the profile
+    /// name the client gave when it queued the run (the default).
+    pub fn with_key_source(mut self, keys: Arc<dyn KeySource>) -> Self {
+        self.usage.keys = Some(keys);
+        self
+    }
+
+    /// The same configuration telling admission's curve reads (`usage_curves`) which
+    /// profile a work key has. The server never derives a profile name from a work key:
+    /// the name is the one the caller supplied for the run (see [`KeySource`]), so only
+    /// the caller knows which work key has which. Without it every work key is charged
+    /// flat.
+    pub fn with_curve_names(
+        mut self,
+        names: impl Fn(&WorkKey) -> Option<ProfileKey> + Send + Sync + 'static,
+    ) -> Self {
+        self.usage.names = Some(Arc::new(names));
+        self
     }
 }
 
@@ -596,6 +737,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                 agents: Box::new(AgentSetup {
                     tokens,
                     pool: agent_pool::read(pool)?,
+                    mint_provider: None,
                     hello_limit: HelloLimit {
                         burst: cli.agent_hello_burst,
                         interval: cli.agent_hello_interval,

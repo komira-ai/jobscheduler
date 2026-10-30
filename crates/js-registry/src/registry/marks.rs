@@ -25,7 +25,14 @@
 //!
 //! The marks are held in memory only, like the whole-node marks. A restart forgets them: a
 //! host that was draining is a plain idle host again, and the scaler that owns the
-//! decision drains it again.
+//! decision drains it again. A host whose release was already under way is the exception
+//! that cannot wait for the scaler's next step: the scaler's own records say which hosts
+//! those are, and it marks them with [`Registry::mark_ending`] before any hello is
+//! admitted, so such a host that says hello again is admitted already `Releasing`.
+//!
+//! So after a restart a host the scaler had retired ([`Registry::retire`]) is bookable again
+//! until the scaler's next tick retires it again: a lease may be booked on it in that gap, bounded
+//! by one tick plus the margin of the cloud lifetime.
 
 use js_pool_static::HostBook;
 use js_types::HostId;
@@ -38,13 +45,17 @@ use crate::whole::reserve::Marks;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Leaving {
     Draining,
+    /// Draining because the host reached its maximum age ([`Registry::retire`]): it shows
+    /// as `Draining`, and unlike a plain drain (set only on a quiet host) it still runs
+    /// work for a lease already booked on it.
+    Retiring,
     Releasing,
 }
 
 impl Leaving {
     pub(super) fn mark(self) -> HostMark {
         match self {
-            Self::Draining => HostMark::Draining,
+            Self::Draining | Self::Retiring => HostMark::Draining,
             Self::Releasing => HostMark::Releasing,
         }
     }
@@ -101,12 +112,43 @@ impl Registry {
         let record = records.get_mut(host).ok_or(Busy::UnknownHost)?;
         match record.leaving {
             Some(Leaving::Releasing) => return Err(Busy::Releasing),
-            Some(Leaving::Draining) => return Ok(()),
+            Some(Leaving::Draining | Leaving::Retiring) => return Ok(()),
             None => {}
         }
         quiet(book, runs, marks, host, record)?;
         record.leaving = Some(Leaving::Draining);
         Ok(())
+    }
+
+    /// Marks `host` [`HostMark::Draining`] whether or not it is quiet, for a host that has
+    /// reached the scaler's `max_age`. From then on it takes no start (no lease, no
+    /// reservation, no run) and no work it has is cut: a lease already booked runs to its
+    /// own end, which the server's ceiling on the wall time bounds. The mark wins over a
+    /// `Reserved` or `Held` one in what [`Registry::hosts`](crate::Registry) shows. The
+    /// release still goes through [`Registry::release_host`], which asks the host to be
+    /// quiet. A request set aside the host loses its reservation. Retiring a retired host is
+    /// `Ok` and changes nothing; retiring a plainly draining one makes it retired.
+    ///
+    /// # Errors
+    ///
+    /// [`Busy::UnknownHost`] when the registry does not hold the host, and
+    /// [`Busy::Releasing`] when it is releasing: that mark is not undone.
+    pub fn retire(&self, host: &HostId) -> Result<(), Busy> {
+        let mut guard = self.lock();
+        let State { records, marks, .. } = &mut *guard;
+        let record = records.get_mut(host).ok_or(Busy::UnknownHost)?;
+        match record.leaving {
+            Some(Leaving::Releasing) => Err(Busy::Releasing),
+            _ => {
+                record.leaving = Some(Leaving::Retiring);
+                // A request set aside this host would wait on a host that is leaving,
+                // and no machine is launched for a request that holds one: it is let go,
+                // so the scaler sees it unreserved. A whole-node lease already committed
+                // on the host is not a mark and runs on.
+                marks.drop_host(host);
+                Ok(())
+            }
+        }
     }
 
     /// Clears the draining mark of `host`, so it takes starts again. A host with no mark
@@ -121,7 +163,7 @@ impl Registry {
         let record = guard.records.get_mut(host).ok_or(Busy::UnknownHost)?;
         match record.leaving {
             Some(Leaving::Releasing) => Err(Busy::Releasing),
-            Some(Leaving::Draining) | None => {
+            Some(Leaving::Draining | Leaving::Retiring) | None => {
                 record.leaving = None;
                 Ok(())
             }
@@ -151,7 +193,7 @@ impl Registry {
         match record.leaving {
             None => return Err(Busy::NotDraining),
             Some(Leaving::Releasing) => return Ok(()),
-            Some(Leaving::Draining) => {}
+            Some(Leaving::Draining | Leaving::Retiring) => {}
         }
         quiet(book, runs, marks, host, record)?;
         record.leaving = Some(Leaving::Releasing);
@@ -174,9 +216,11 @@ impl Registry {
             book,
             records,
             runs,
+            ending,
             ..
         } = &mut *guard;
         let Some(record) = records.get(host) else {
+            ending.remove(host);
             return Ok(());
         };
         if record.leaving != Some(Leaving::Releasing) {
@@ -187,7 +231,26 @@ impl Registry {
         }
         records.remove(host);
         runs.forget(host);
+        ending.remove(host);
         Ok(())
+    }
+
+    /// Marks `host` [`HostMark::Releasing`] whether or not it is quiet, and keeps the mark
+    /// for a host the registry does not hold yet: its first hello is admitted already
+    /// marked. For a caller that has decided the machine is being given back and must not
+    /// take work, however the registry came to hold it: a scaler that restarts with a
+    /// release in flight calls this for every such machine before the server admits a
+    /// hello, because the marks are held in memory and a host whose release was under way
+    /// would otherwise say hello again unmarked and be booked before its machine is gone.
+    /// A lease already booked on the host is not cut; the mark only stops new starts, and
+    /// [`Registry::remove`] answers [`Busy::Lease`] until that lease is over. Marking a
+    /// releasing host again changes nothing. [`Registry::remove`] ends it.
+    pub fn mark_ending(&self, host: &HostId) {
+        let mut guard = self.lock();
+        guard.ending.insert(host.clone());
+        if let Some(record) = guard.records.get_mut(host) {
+            record.leaving = Some(Leaving::Releasing);
+        }
     }
 }
 

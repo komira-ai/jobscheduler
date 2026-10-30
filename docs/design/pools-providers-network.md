@@ -295,15 +295,20 @@ class = "whole-node"
 max_instances = 4
 max_spend_per_hour = "12.00"      # required for every elastic pool, no default
 max_spend_per_day  = "96.00"      # required too: the hard total bound (6.2 Caps)
-idle = "10m"
+idle = "10m"                      # required of a pool with accelerators (6.4)
+max_age = "6h"                    # required of a pool with accelerators: a host is retired at this age, busy or not
+min_host_lifetime = "15m"         # required of a pool with accelerators: idle never releases a younger host
 provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key",
              types = [{ name = "gpu_1x_a10", gpu = "nvidia-a10", gpus = 1 }] }
 network  = { kind = "tailscale", oauth_client_file = "/run/credentials/js/ts-oauth",
              tag = "tag:js-agent" }
+agent    = { x86_64 = { url = "https://pkgs.example.org/js-agent-x86_64", sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" } }
 ```
 
-That is the whole pool (eleven lines with the two spend keys). Not in it: the bootstrap, join
-tokens, Tailscale keys, the firewall, the agent download, the CA file. The service makes them.
+That is the whole pool (twelve lines with the two spend keys; `agent` is needed once the pool is
+`live`, and `plan` leaves it out). Not in it: the bootstrap, join tokens, Tailscale keys, the
+firewall, the CA file. The service makes them. The agent download is the operator's pin, one
+entry per CPU architecture the pool's offers have (7.3).
 Two things the ten lines depend on, stated plainly:
 
 - The `types` row names the gpu class by hand. Lambda's catalog gives the GPU as free text (3.5),
@@ -336,6 +341,7 @@ boot           = "resume"                                # or "initialise"
 client_token_file = "/run/credentials/js/client-token"   # the existing client token (today --token-file), same file and check; no new key or field
 tls_cert       = "/run/credentials/js/tls-cert"
 tls_key        = "/run/credentials/js/tls-key"
+max_lease_wall = "2h"                                    # the longest max_wall a lease may ask for; required with an accelerator pool (6.4)
 # tick, default_ttl, max_ttl, timeouts: same names and defaults as today's flags
 
 [[pool]]
@@ -351,6 +357,8 @@ max_instances = 4
 max_spend_per_hour = "12.00"
 max_spend_per_day  = "96.00"
 idle = "10m"
+max_age = "6h"
+min_host_lifetime = "15m"
 boot_timeout = "15m"          # default
 launch = "plan"               # default; "live" spends money
 provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key",
@@ -358,6 +366,8 @@ provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key
              types = [{ name = "gpu_1x_a10", gpu = "nvidia-a10", gpus = 1 },
                       { name = "gpu_2x_a10", gpu = "nvidia-a10", gpus = 2 }] }
 network  = { kind = "tailscale", oauth_client_file = "/run/credentials/js/ts-oauth", tag = "tag:js-agent" }
+agent    = { x86_64  = { url = "https://pkgs.example.org/js-agent-x86_64",  sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
+             aarch64 = { url = "https://pkgs.example.org/js-agent-aarch64", sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" } }
 ```
 
 A pool whose hosts already have a route to the scheduler omits `network` (mode `default`). The
@@ -394,6 +404,7 @@ message naming pool and field:
 | unknown `provider.kind` or `network.kind` | `pool "gpu": provider.kind: "lambda" is not a kind; known: lambdalabs, static` |
 | credential file missing, not regular, not owned by the service user, or group/other readable | `pool "gpu": provider.api_key_file: mode 0644, must be 0600 or 0400` (the `read_token` rule in `config.rs`) |
 | type name not 1 to 64 lower case letters, digits or `_`; gpu class not in the agent's spelling (`GpuClass::parse`); a type twice; two gpu classes in one pool | `pool "gpu": provider.types[1].name: ...` |
+| elastic pool with accelerators (a floor of one GPU or more) without `idle`, `max_age` or `min_host_lifetime`, or under a `[server]` without `max_lease_wall`; `max_age` not longer than `boot_timeout`; `min_host_lifetime` longer than `max_age` | `pool "gpu": max_age: required of a pool with accelerators: ...` |
 | elastic pool without `max_instances`, `max_spend_per_hour` and `max_spend_per_day`; a spend value not a decimal with at most two places, or zero; a day cap below the hour cap | `pool "gpu": max_spend_per_day: required` |
 | `max_instances` of 256 or more (the join-token table holds 256 waiting tokens, `MAX_WAITING` in `join_tokens.rs`) | `pool "gpu": max_instances: 300 exceeds 255` |
 | `launch = "live"` on a pool whose provider cannot be built | `pool "gpu": launch: ...` |
@@ -602,7 +613,7 @@ pub enum NetworkStep { Run(Vec<String>),                       // argv, never a 
     Fetch { url: String, sha256: [u8; 32], dest: String } }
 ```
 
-The launch path in the shell (`scaler.rs`) is `mode.prepare` to `BootPlan` to `render` to
+The launch path in the shell (`scaler/launch.rs`) is `mode.prepare` to `BootPlan` to `render` to
 `provider.acquire(payload)`. The shell is the only place that holds both a mode and a provider;
 neither knows the other. The renderer quotes every argv element, so no step can add shell syntax.
 `default` returns an empty `Contribution`; its `check` confirms `advertise_url` parses and, for
@@ -616,9 +627,16 @@ neither knows the other. The renderer quotes every argv element, so no step can 
 
 Crate `js-scaler` is pure: no clock reads, no I/O, no threads. It takes the previous `State`, one
 `Input` and the time now, and returns the next `State` and the `Vec<Action>`. The shell lives in
-`crates/js-lease-server/src/scaler.rs` and runs on the existing tick (`--tick`, `ticker.rs`, 5 s default): once per tick it snapshots, calls
-`step`, runs the actions on a `blocking()` task (`util.rs`), and feeds the answers into the
-next step. No lock is held across a provider call. Lambda allows one launch per 12 s
+`crates/js-lease-server/src/scaler/` and runs on the tick (`--tick`, `ticker.rs`, 5 s default): once per tick it snapshots the registry
+(hosts and wait list under one lock), calls `step`, runs the actions on a `blocking()` task
+(`util.rs`), and feeds the answers into the next step. The scaler ticks on a task of its own, so a
+slow provider call does not hold back the table's lease expiry, and a tick that finds the scaler
+still at the last one skips it. No lock is held across a provider call, nor the lock of the shell's
+own memory (a tick works on a copy and swaps it in), so the status page is answered during one. A
+panic in the scaler's tick ends its task: `/healthz` answers 503 and the supervisor of the process
+must restart the server (the records are on disk before any call they describe, so a restart launches
+nothing twice). A registry refusal to remove the host of a machine that is gone is kept and tried
+again at every tick, and alerted. Lambda allows one launch per 12 s
 (`ElasticConfig::launch_interval`); `Acquired::Deferred { wait }` is honoured by skipping
 the pool until the injected clock passes it.
 
@@ -644,7 +662,7 @@ fails fast with the existing code instead of waiting on a dead cloud.
 // crates/js-scaler/src/lib.rs
 pub struct Input { pub scheduler: SchedulerId /* names the hosts it launches */,
     pub pools: Vec<PoolInput> /* the order requests fall through */, pub waiting: Vec<Waiting>,
-    pub hosts: Vec<HostFacts> /* id, pool, state (Live, Lost, Awaiting), shape, mark, busy, lease_given_up */,
+    pub hosts: Vec<HostFacts> /* id, pool, state (Live, Lost, Awaiting), shape: Option<Offer>, mark, busy, lease_given_up */,
     pub registry_complete: bool /* hosts is the registry's whole, settled view */,
     pub acquired: Vec<AcquireResult> /* answers to acquires, with the attempt they answer */,
     pub released: Vec<ReleaseResult> /* answers to releases, read back */,
@@ -663,12 +681,44 @@ pub enum Action { Save(Box<Records>) /* the whole records, written first when a 
 pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>);
 ```
 
+What the shell owes the host facts, because the step cannot tell otherwise:
+
+- `shape` is `Some` only for a host that announced one (the registry's `claim`), and `None`
+  for a host that has not since the registry was put back after a restart (`Awaiting`). The
+  shell never fills it with a stand-in such as the pool floor or the shape a record stored:
+  the first hello is compared with the offer, and a floor below the offer would condemn a
+  healthy machine and start the boot cooldown. A host with no shape covers no request.
+- `busy` for a host that is not `Live` is a booked lease, read from the lease table. It is
+  not the runs the host last listed: the registry keeps that listing until it forgets the
+  host, so a host that went lost in the middle of a job would look busy for a day. So for a
+  silent host `busy` and `lease_given_up` never hold together: the first says a lease is
+  booked, the second says none is. A `Held` or `Reserved` mark still keeps the host. For a
+  `Live` host `busy` is leases, runs and streams.
+- `registry_complete` means settled, not only loaded. The registry keeps no idle or booting
+  host in memory across a restart, so every one is absent until its agent says hello, which
+  takes the agent's longest retry wait (two minutes) and longer when many agents share a
+  hello limit. The step does not lean on the shell's settle alone (6.2, Booting to
+  Releasing and Lost), but the shell should not report a view complete before the agents
+  have had that wait.
+- A price of zero in the catalog is no price: the step never launches it. A request that
+  fits only an offer with no price, or a price of zero, shows the pool as `blocked: unpriced`
+  in the state, so the operator sees it before the shell's catalog check exists.
+- The records carry the first-seen times of silent and missing hosts (6.2, Lost), so the
+  shell writes and reads them like the rest of the records file.
+
 ### 6.2 State machine of one instance
 
 A record exists for each acquire, written to `<state file>.scaler` before the call it
 describes (write-whole-file-and-rename, as `agent_state::replace` does for `join_tokens.rs`
 and the bindings file). A pool starts in `Checking`: nothing launches before the first full
 check pass succeeds (10.1).
+
+The file is never taken to be empty by default. A pool with `launch = "live"` whose file is
+missing does not start: a start with no records forgets the machines in flight and the day's
+spend, and could launch twice. The operator who says this is the first start does it with the
+flag that already says it for the lease file, `--boot initialise` (`boot = "initialise"`); every
+later start is `--boot resume`, which also refuses a missing records file. A pool in `plan`
+mode starts without the file.
 
 ```
 Planned -> Launching -> Booting -> Registered -> Draining -> Releasing -> Gone
@@ -703,7 +753,10 @@ Rules, each tied to a requirement or to existing behaviour:
   below `max_instances`; the sum of stored prices of those machines plus the candidate's is
   at or below `max_spend_per_hour`; the day total (below) plus the candidate's minimum cost
   is at or below `max_spend_per_day`; the candidate has a price in the pool's unit. An offer
-  without a price is not launchable when a cap is set, and a cap is always set. The price is
+  without a price is not launchable when a cap is set, and a cap is always set. A price of
+  zero is no price: it would pass every cap for any number of machines, so such an offer is
+  never chosen, and a machine found at the provider whose offer the catalog prices at zero
+  is counted at the whole hourly cap, as one the catalog does not know is. The price is
   stored in the record at launch, so a later catalog change cannot hide a held machine from
   the sum. A machine in Unresolved counts at its offer's price until a list settles it. When
   caps fail, the pool shows `blocked: max_instances`, `blocked: max_spend` or
@@ -790,7 +843,19 @@ Rules, each tied to a requirement or to existing behaviour:
   that has not been heard from since its hello and books nothing (a lost Welcome, 7.2) is released at `boot_timeout`
   from the launch, with the same cooldown. Only a complete
   registry view gives up on a machine: on an incomplete one its host may have said hello and be
-  missing from the part that was read, so the machine is held and counted. The instance is released. Any boot failure blocks new
+  missing from the part that was read, so the machine is held and counted. Even on a complete
+  view the machine is given up on only once its host has been missing from complete views for
+  the boot hold, a third of `boot_timeout` (5 min by default, never more than
+  `unknown_hold`). The registry keeps no booting host in memory across a restart, and an agent
+  that was waiting to retry says hello again within its longest wait (2 min) plus the time to
+  be admitted; without the hold, a machine launched before a restart would be past
+  `boot_timeout` at the very first complete view and released seconds before its hello. The
+  count begins at the first complete view that lacks the host and an incomplete view neither
+  adds to it nor resets it. In steady state it has run since the launch, so the machine is
+  still given up on at `boot_timeout`; after a restart it starts again, deliberately: it is
+  not written to the records. A third of `boot_timeout` was chosen over `unknown_hold` (30 min)
+  because a failed boot is billed for the whole wait and this one is only about the agent's
+  retry. The instance is released. Any boot failure blocks new
   launches in the pool for `boot_fail_cooldown` (default 10 min, a fixed value; PROPOSAL,
   14 Q14) and shows `blocked: boot_failed`. The billed minutes of the failed boot stay in the
   day total. Counting failures, doubling the cooldown and suppressing a single offer are
@@ -828,7 +893,30 @@ Rules, each tied to a requirement or to existing behaviour:
   and read back to Gone once the registry shows the mark. A silent host the scaler had already
   marked `Releasing` needs no flag. The step names each machine it releases this way for the
   shell to log. A host that shows a lease, a run or a stream, or a `Held` or `Reserved` mark, is
-  never released, whatever the flag says. A registered host that said hello and has not been heard from since
+  never released, whatever the flag says, with one exception: once `lease_given_up` is true the
+  runs and streams a silent host lists are stale (the job cannot report, and the registry
+  keeps the listing until it forgets the host), so they do not keep it; a `Held` or `Reserved`
+  mark still does. Release then waits for the registry to accept `release_host`, which is its
+  own check under its lock. Today `js_registry`'s `quiet()` counts the stale listing of a
+  silent host with no lease, so the registry answers `Busy` to `Drain` and `ReleaseHost` and
+  the step asks again every tick, with no log line, until the registry forgets the host.
+  `quiet()` must stop counting a silent host's stale listing; once it does, that refusal is
+  gone and the hold (`unknown_hold` of silence, no booked lease, no `Held` or `Reserved`
+  mark) is the only guard against releasing a host that is alive. The time a host was first
+  seen silent is kept in the records (`silent_since`), with the time of the step that wrote
+  them (`last_step`). A scaler whose restarts are further apart than the save interval
+  below still reaches the hold, because the time it observed before and after adds up. A
+  crash loop faster than that interval loses each run's observed time, so the host stays
+  held and counted and is never released on silence: the safe direction. The time it was down does
+  not count: no host could say hello meanwhile, so the first step after a restart moves
+  every saved silent and missing time forward by the span since `last_step`, and records
+  with no `last_step` begin the counts again at that step. `last_step` is written only with
+  the records, never alone, so it is a lower bound on the last step the old process ran,
+  and a restart errs toward counting less. While a silent or missing time is pending, the
+  step saves the records at least every `min(unknown_hold / 6, 5 minutes)` of observed time
+  (derived, not a setting), so a restart loses at most that much; with none pending it
+  writes nothing for `last_step`.
+  A registered host that said hello and has not been heard from since
   (`heard_since_hello` false in the host facts: the shell sets it from the registry; a lost Welcome leaves a host that cannot
   heartbeat) and books nothing is a failed boot, not a silent host: it is released at `boot_timeout` after the launch and the boot-failure
   cooldown starts. One that heartbeated once keeps the rules above. Hosts of a static pool are never released by the
@@ -837,9 +925,13 @@ Rules, each tied to a requirement or to existing behaviour:
 - A machine whose host the registry no longer shows (it ran `forget_lost`) is released the same
   way, but only on a complete, settled registry view (the shell says so in the input; a view
   read while the registry is loading, or in part, is incomplete and holds everything) and when
-  the machine has been missing on two steps at least `unknown_hold` apart, with no step between
-  that showed it or had an incomplete view. Releasing on a view that merely lacks hosts would
-  cut work after a registry restart.
+  the machine has been missing on two complete steps at least `unknown_hold` apart, with no step
+  between that showed it. An incomplete view neither releases nor resets the count: it says
+  nothing about the host either way, and the next complete view must still show it missing.
+  The time of the first complete view that lacked it is kept in the records
+  (`missing_since`), so a restart of the scaler, which is followed by incomplete views while
+  the registry settles, does not start the hold again. Releasing on a view that merely lacks
+  hosts would cut work after a registry restart.
 - Orphans: an instance in `list` with our marks and no record (a lost state file). Policy
   is in 6.4.
 
@@ -901,7 +993,54 @@ Rules, each tied to a requirement or to existing behaviour:
 - `max_spend_per_hour` caps the rate. `max_spend_per_day` is in the first slice (6.2 Caps)
   and bounds spend over time even when a stuck or Lost machine is counted forever. A Lost
   host that the provider still lists keeps accruing in the day total until released; status
-  shows its age. `max_age` is Later.
+  shows its age. The day cap gates new launches only: machines already running when it is
+  reached keep running (and accruing) until they are released; what bounds them is `max_age`.
+- Host lifetime. A pool with accelerators (a floor of one GPU or more) must set `idle`, `max_age`
+  and `min_host_lifetime`, and the `[server]` table `max_lease_wall`. At `max_age`, counted from
+  the machine's launch, the scaler retires the host: the registry marks it draining whether or not
+  it is busy (`Registry::retire`), which takes no new lease and cuts none, and the release is asked
+  only once the host is quiet. `max_lease_wall` is the ceiling on the `max_wall` a lease may ask
+  for (a 422 `wall-time-above-ceiling` above it), and a lease never outlives its `max_wall`
+  whatever its renewals, so a retired host empties within the ceiling. Every launch also carries
+  `max_age + max_lease_wall + prepare_timeout + unknown_hold + 10 minutes` as the lifetime the cloud
+  itself should enforce, in `AcquireRequest::lifetime` (the prepare timeout and `unknown_hold` are
+  the two waits a retire can meet: a whole-node lease's wall time starts after the first, a silent
+  host is released after the second). A provider whose cloud has a run-duration limit or a shutdown
+  timer sets it. Lambda has neither and ignores it, so on Lambda only `max_age` with a live
+  scheduler bounds the cost: if the scheduler is dead, nothing stops the bill. The server-dead bound
+  needs a provider whose cloud enforces the lifetime. `max_age` and `max_lease_wall` are at most 30 days.
+  The lifetime sum leaves out, to be fitted in the 10 minute margin: the lease grace and regain
+  grace before a silent host's lease is given up, the release retry loop (no deadline), the gap
+  between the recorded launch time and the machine's real creation, and a tick. After a registry
+  restart the marks are gone, so until the scaler's next tick an aged host is bookable again; that is
+  bounded by one tick plus the margin. One case is unbounded by js: a run the host keeps listing
+  after its lease ended keeps it from being quiet (`quiet()` counts listed runs), so `release_host`
+  is refused with no deadline. A cloud that enforces the lifetime cuts it there; on Lambda it lasts
+  until an operator acts (the alert watcher of cost part 0d is what is meant to tell them). `min_host_lifetime` is the least a machine
+  lives before `idle` may drain it, so a short `idle` against a billed boot cannot launch a
+  machine per job. Changing `max_lease_wall` does not shorten a lease already granted.
+- Server-wide totals and `live_until`. A pool's caps count its own machines over 24 hours, so a
+  day cap D allows 30 times D in a month left alone and the exposure of a server is the sum of its
+  pools' caps. Three totals count the records of every pool: `max_spend_per_day_total` (24 hours),
+  `max_spend_per_month_total` (30 days, rolling) and `max_spend_since_go_total`. The keys sit in
+  `[server]` (all pools) and in `[budget.<kind>]` (the pools of a provider kind); a launch must
+  hold both, and breaking either shows `blocked: max_spend_total`. Records are kept for the
+  month window, not the day, and the cost of a record over a window is the pool cap's rule (billed
+  time, whole minutes then whole cents). The month is rolling because it holds at every instant: a
+  calendar month would allow the figure twice across the turn of the month. A go is the first launch of a pool
+  since it was last in `plan`; it is written to the records with that launch (`go`: the instant and
+  the cost of the machines already forgotten), a pool seen in `plan` loses it, and the next go begins
+  a new `max_spend_since_go_total`. A total only stops launches. The machines admitted before it was
+  reached run on, so a window can pass its total. `js_scaler::overrun` bounds that by
+  `max_spend_per_hour` times the lifetime of a launch, but only when the pool has both `max_age`
+  and the server `max_lease_wall` (a busy host with no `max_age` is never retired) and the releases
+  succeed (a machine nobody can release runs on; an alert says so, no cap does). The file warns when
+  a total is set and a live pool lacks either key. The server's since-go total is the sum of the go of
+  each pool that has one, not a stable figure when pools come and go: a pool taken out of the file
+  for good keeps its go, and its settled spend stays in the sum, until the pool is put back in `plan`
+  for one step (the step that sees a pool in plan ends its go). A kind total remembers the kind of a
+  removed pool in the records (`pool_kinds`); records that name none count in every kind. `live_until` ends a go: at that instant the pool is in `plan`,
+  in the step (`Settings::mode`) and in a file read afterwards.
 
 ### 6.5 What the single-pool slice costs
 
@@ -1044,16 +1183,46 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
 3. Run the network steps the pool's mode contributed (`tailscale`: binary fetched with checksum,
    `tailscale up`; `default`: nothing).
 4. Fetch the agent for the offer's arch from `BootPlan.agent.url`, verify the sha256 before
-   the agent ever starts, install to `/usr/local/bin/js-agent`.
+   the agent ever starts, install to `/usr/local/bin/js-agent`. The pool's `agent` table pins
+   one artifact (`url`, `sha256`) per CPU architecture; the launch takes the entry for the
+   offer's architecture and never another's. An offer whose architecture has no entry is not
+   launched: the pool's checks mark it unavailable naming the offer, the architecture and the
+   field (`agent.<arch>`), and a launch that reaches the provider layer anyway is refused with
+   a `Shape` refusal. Write the GPU toolkit hook (`/usr/local/lib/js-agent/gpu-toolkit-hook`,
+   mode 0700), a program that runs `nvidia-container-cli info`, which fails without a working
+   driver and toolkit (`--version` would prove nothing).
 5. Make the agent's state root. `js-agent` with `--container-bin` requires `--state-root`
    on a different device from every mount root and the scratch root and refuses to start
    otherwise (`crates/js-agent/src/cli.rs`). Lambda instances have one root disk. PROPOSAL:
    a small ext4 image file attached with `losetup` and mounted as the state root, which has
    its own `st_dev`. A tmpfs is wrong: the agent says a taint on a tmpfs is lost at reboot.
    Needs one live test (Open questions 5).
+5a. Make the jobs' user namespace. The agent refuses to start with `--container-bin` and
+   without `--container-subuid <user>`, and checks that `/etc/subuid` and `/etc/subgid` give
+   the user one entry of exactly 65536 ids, not from 0, overlapping no host id, and that the
+   Docker daemon runs `userns-remap` set to that user. The renderer (`bootstrap/userns.rs`)
+   first creates a missing `/etc/subuid` or `/etc/subgid` empty with mode 0644, then fails if
+   either id file holds an entry for `js-jobs` or any entry overlapping the range (comment
+   lines skipped; LXD conventionally owns `root:1000000:1000000000`, so the range sits at
+   2000000000), merges `"userns-remap": "js-jobs"` into `/etc/docker/daemon.json` with a
+   constant `python3 -I` heredoc (every other key is kept, as the NVIDIA toolkit writes
+   `runtimes` there; an empty file counts as `{}`; a different remap already set is refused,
+   before anything else is written; the file is replaced by a rename of a complete temporary
+   file), makes a system user `js-jobs`, appends `js-jobs:2000000000:65536` to both id files,
+   restarts the daemon, and the agent's unit passes `--container-subuid js-jobs`. No
+   path of `dockerd` and no unit file is named: the agent reads the remap from `docker info`,
+   so the configuration file is as good as a command-line flag. Whether `python3` and the merge
+   work on the stock image is checked live (Open questions 5).
 6. Write and start `js-agent.service` with `--server`, `--token-file`, `--instance-file`,
-   `--pool`, `--container-bin`, `--state-root`, `--scratch-root`, the `--watch-dir` list the
-   agent's help suggests, and labels.
+   `--pool`, `--host-id` (the machine's `HostName`, which is how the scaler finds the host of
+   a record), `--container-bin`, `--container-pull missing` (a launched machine is new and holds no image, so
+   the agent's default `never`, which exists so that a job cannot make a host reach a registry of
+   its choosing, would fail every job on it; the server refuses a run whose image is not pinned by
+   a sha256 digest, so a pull fetches the content the submitter named, and the host reaches the
+   registry only over the pool's network; a pool-level setting is Later), `--gpu-toolkit-hook` (on every
+   offer; the agent runs the hook only when the host offers a GPU, and a pool with GPUs refuses
+   a host without it as `host-contract` on `gpu-toolkit`), `--state-root`, `--scratch-root`, the
+   `--watch-dir` list the agent's help suggests, and labels.
 7. Cleanup, from a `trap ... EXIT` installed as the first line of the script, so a failure at any
    earlier step still runs it. It removes (with `rm`; on a journaling or copy-on-write
    filesystem that does not erase blocks, and nothing here claims it does) the secret files used
@@ -1064,12 +1233,37 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
    5); until that run exists the design does not claim removal. After the Welcome credential
    (7.2) a surviving token copy is useless, so cleanup is defence in depth, not the guard.
 8. Block metadata for jobs. A process that reaches the provider's metadata address can read the
-   user data again, and the host runs untrusted GPU jobs in containers. The template drops traffic
-   from the container networks (and the job user) to the metadata address before the agent starts,
-   and the agent runs containers on a bridge, never the host network. The address and the way to
-   drop it on the stock image are not verified (Open questions 5); the live checklist (13.4) tests
-   that a container cannot read user data. No job runs before the first hello, and the token is
-   retired at it, so the window between boot and first hello holds no job.
+   user data again, and the host runs untrusted GPU jobs in containers. The renderer (one for
+   every provider, `crates/js-lease-server/src/bootstrap/metadata.rs`) writes, after the provider's
+   `host_prep` and before the token, the network steps and the agent's unit, an `nftables`
+   rules file (`/etc/jobscheduler/metadata-block.nft`) and `js-metadata-block.service`, a
+   oneshot that loads it and is enabled for boot. `nft` is part of the Ubuntu 24.04 server
+   image; the script checks the program with `test -x` and stops if it is missing, so the
+   agent never starts without the block. The table `inet js_metadata` has two chains at
+   priority -10 (ahead of the container engine's own rules; both accept by default):
+   `forward` drops traffic to `169.254.169.254`, which covers a container on a bridge network
+   (the engine's NAT forwards its packets through the host), and `output` drops the same for every uid but 0. Root keeps the address: the
+   agent and the bootstrap run as root, and no step after boot needs it, so a blanket drop
+   would also work; the rule exempts root so that a later step that does need it fails
+   in one place, not everywhere. The unit
+   is ordered `After=nftables.service` (the image's own service, when enabled, flushes the whole
+   ruleset as it starts) and `Before=network-pre.target js-agent.service`, the file is reloaded at every
+   boot (the table is deleted and made again, so a second load changes nothing), and the
+   agent's unit has `Requires=` and `After=` on it. The script reads the loaded table back
+   before it goes on: `nft` lists the table and the script fails unless exactly two lines drop
+   (the two rules), so a table that lost a chain does not pass. The agent is started without
+   `--container-network`, so containers get the agent's default, no network at all; a pool
+   that later gives jobs egress names a bridge there, and the rule covers it with no change.
+   The rule does not cover every network an engine can make: a rootful `slirp4netns` or
+   `pasta` network egresses as host uid 0, which the `output` chain exempts, and a `macvlan`
+   or `ipvlan` network never passes the host's forward hook. The agent refuses only `host`
+   by name and cannot know the driver behind a network, so a pool that names one must name a
+   bridge network. The
+   address is not verified for Lambda (Open questions 5) and is one named constant; the
+   IPv6 address of the service is not blocked, because this design does not name one. The
+   live checklist (13.4) tests that a container cannot read user data. No job runs before
+   the first hello, and the token is retired at it, so the window between boot and first
+   hello holds no job.
 
 Hardening of the template, each a golden test of the rendered text with every secret
 masked: `write_files` mode 0600 for every secret; no `set -x` and no `echo` of a secret;
@@ -1077,12 +1271,12 @@ every download checksummed before use; secret files removed after use by the EXI
 Tailscale key is removed with `rm` after `tailscale up`; no claim of erasure); the whole render
 below the user_data limit.
 
-The agent artifact. The service image carries the agent binaries for the arches it can
-launch and serves them at `GET /v1/bootstrap/agent/<arch>` with no token (a binary is not a
-secret; its sha256 is computed at start and is what the bootstrap checks). The host fetches
-from `advertise_url`. PROPOSAL; the alternative is a pinned URL table (Open questions 6). A
-checksum in `user_data` guards against a corrupt or swapped download from a reachable
-server; it does not guard against a compromised service, which can mint tokens anyway.
+The agent artifact. The operator pins it per CPU architecture in the pool's `agent` table
+(`url` over https and `sha256`, 4.1), and the host fetches from that address; the service
+serves nothing for it, so its API is its only surface and no route is unauthenticated for
+the download. A checksum in `user_data` guards against a corrupt or swapped download from a
+reachable server; it does not guard against a compromised service, which can mint tokens
+anyway.
 
 The launch call carries: region and instance type from the offer, the one ssh key name, the
 one no-inbound ruleset id, `user_data` (the opaque payload from the service, a `Secret`), the `HostName` as
@@ -1141,17 +1335,18 @@ compromised GPU host to the agent port, so the design does not leave it unchecke
   `server.listen` and the network decides who reaches them (9). A launched host carries
   `tag:js-agent`, and one port cannot tell agent routes from operator routes. So the split is in
   the first slice (PR 4): `server.agent_listen` is required with an elastic pool and serves only
-  the agent routes (hello, heartbeat, bootstrap agent route); the agent routes are not served on
+  the agent routes (hello, heartbeat); the agent routes are not served on
   `listen`, and the other routes are not served on `agent_listen`. The policy snippet gives the tag
   the agent port only. Without the split the network could not separate a launched host from the
-  operator routes, which is why it is not optional. The bootstrap agent route is unauthenticated
-  on purpose (a binary is not a secret). Open risk: the split holds only while the operator's
+  operator routes, which is why it is not optional. Open risk: the split holds only while the operator's
   policy gives the tag the agent port alone; the service cannot verify the policy (the warning
   above is best effort), so 13.4 checks it live.
 
 After release, `forget(host)` looks up the device by hostname and deletes it. The device is
 ephemeral and drops when offline anyway; the delete frees the name. A failed delete is logged and
-shown and does not block the release.
+shown and does not block the release. It is sent once, after the machine is confirmed gone;
+the keys are single-use, ephemeral and tagged, so a device whose delete failed drops when it
+goes offline.
 
 ### 8.5 Live check
 
@@ -1166,7 +1361,7 @@ boot is Open questions 11.
 The service does not join the tailnet. The deployment does (the host's own `tailscaled`, or
 a sidecar), and `advertise_url` names it. Nothing in `js-lease-server`'s core modules,
 `js-scaler`, `js-elastic`, `js-registry` or any provider crate names `network::`; only `kinds.rs`
-and the launch shell (`scaler.rs`, through the trait) do. A CI check greps for the path and fails
+and the launch shell (`scaler/`, through the trait) do. A CI check greps for the path and fails
 if a file other than those and `network/` names it
 (PR 10). Nothing depends on our hosts either (requirement 5): no address, name or path of ours
 appears in a default.
@@ -1245,7 +1440,7 @@ field. A launched host must not reach these routes: the ACL gives it the agent p
     "credentials": { "ok": true, "checked_at_ms": 0 },
     "network_check": { "ok": false, "reason": "oauth: invalid_client", "checked_at_ms": 0 },
     "instances": { "n": 1, "max": 4, "spend_cents_per_hour": 129, "max_spend_cents_per_hour": 1200 },
-    "blocked": null,       // max_instances | max_spend | max_spend_day | boot_failed | unavailable
+    "blocked": null,       // max_instances | max_spend | max_spend_day | max_spend_total | boot_failed | unavailable
     "no_offer": null,      // or { "request": "...", "dimension": "gpus" }
     "last_launch": { "at_ms": 0, "outcome": "accepted", "host": "js-ab12-cd34" },
     "machines": [ { "host": "js-ab12-cd34", "state": "registered", "offer": "gpu_1x_a10",
@@ -1315,7 +1510,7 @@ Each PR is green alone, and `launch = "plan"` is the only reachable mode until P
 PR 7b is required before the go (7.2). Later, each behind its own need and not built first:
 price-drift marking; per-offer suppression and doubling backoff; counting boot failures;
 `zeroize`, `RLIMIT_CORE` and a panic hook; a separate `js-network` crate; orphan release
-(`release_orphans`); `max_age`; the `exec` kind; a `script` network mode (needs limits and a
+(`release_orphans`); the `exec` kind; a `script` network mode (needs limits and a
 review story for operator output); a public scheduler listener (it needs a full in-service
 client-auth story: client keys, rotation, rate limits, audit).
 
@@ -1362,8 +1557,8 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
   `agent_listen`, or `agent_listen` equal to `listen`, is refused naming `server.agent_listen`.
   `listen = "0.0.0.0:7300"` is accepted and shows the `server: warning: binds all interfaces` status
   line (default mode on a VPC stays supported).
-- Route split (PR 4), against a real server with both ports bound: `hello`, heartbeat and the
-  bootstrap agent route answer on `agent_listen` and get 404 on `listen`; `GET /v1/pools`,
+- Route split (PR 4), against a real server with both ports bound: `hello` and heartbeat
+  answer on `agent_listen` and get 404 on `listen`; `GET /v1/pools`,
   `/status`, the client routes and the operator routes answer on `listen` and get 404 on
   `agent_listen`. Catches a route left on the wrong port, which would let a tag that may reach
   only the agent port reach operator routes. With one port in the test the same check cannot fail,
@@ -1438,6 +1633,13 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
   hangs or bills past `boot_timeout`, and a `default` render that still contains a Tailscale step.
 - Status at each step carries state and the masked plan and none of the test secrets.
 
+The tests of this section run from `crates/js-lease-server/tests/server/lambda_e2e.rs` and
+`lambda_e2e_failures.rs`, over `FakeLambda`, the server's Tailscale mode and an HTTP server on
+127.0.0.1 that plays the Tailscale API. The agent's hello is built from the rendered unit's
+`ExecStart` flags (host id, container binary, GPU toolkit hook), so a flag the unit does not pass
+shows as a refused or misnamed host. The pool status does not list machines yet, so the tests assert
+that the status routes show no secret, not the machine's state.
+
 ### 13.4 Live (not in CI)
 
 After the operator's go: one launch, `max_instances = 1`. Before it, a person checks that the instance
@@ -1472,9 +1674,19 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
    secret type next to the token? Recommendation: yes.
 5. The stock Lambda image: driver, runtime, toolkit, and a state root on its own device (loop
    image). Not verified. Recommendation: the install table starts empty, the live run fills it, and
-   the bootstrap fails visibly rather than guessing.
-6. Where the host gets the agent binary. Recommendation: from the service, checksummed; the
-   alternative, a release URL table, adds an outbound dependency to every new host.
+   the bootstrap fails visibly rather than guessing. Also to check live: that the metadata
+   address is `169.254.169.254` on this image, whether the service also answers on its IPv6
+   address (the block drops IPv4 only, and no IPv6 address is named here), that `nft` is on
+   the image, and that `python3` is on the image. GPU containers under `userns-remap` are an open live
+   question (reports say they can break under a remap). The live checks, on a launched host:
+   `docker info` lists `name=userns` in `SecurityOptions` and shows the remapped
+   `DockerRootDir`; a real `--gpus device=0` job runs a CUDA device query and a small kernel (not `nvidia-smi` alone), on the first live run before any scale-up; the scratch
+   directory is writable by container uid 65534 (host uid 2000065534 under the remap); and `/etc/docker/daemon.json`
+   still holds the toolkit's `runtimes` beside `userns-remap`. The id-file check and the `daemon.json` merge are proven by text only; the first live run confirms them (`cat /etc/subuid /etc/subgid`; `cat /etc/docker/daemon.json`). If the GPU job fails under the remap, the fallback is Podman on launched hosts: the same engine and `--uidmap` path used elsewhere, so one engine serves Linux everywhere. It is not a change to the agent's Docker rule. If the Docker daemon is
+   instead configured by a unit that overrides `daemon.json`, `systemctl show -p ExecStart
+   docker.service` shows it.
+6. Where the host gets the agent binary. Decided: from the operator's pin per architecture
+   (`agent` in the pool, 7.3), checksummed; the service serves no download.
 7. Provider hierarchy (`providers.md`). Recommendation: one provider per pool, pools chosen by
    label; add pool priority only if a consumer needs fall-through.
 8. Orphans: report-only, adopted and counted. Recommendation: a `release_orphans = true` pool

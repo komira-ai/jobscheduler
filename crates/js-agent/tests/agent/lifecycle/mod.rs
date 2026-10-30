@@ -6,16 +6,22 @@
 
 mod adopt;
 mod cleanup;
+mod disk;
 mod exclusive;
 pub mod fake;
+mod files;
 mod flags;
+mod logs;
 mod mounts;
 mod owed;
 mod reach;
 mod results;
 mod rules;
+mod running;
 mod scratch;
+mod slots;
 mod taint;
+mod taint_idle;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -24,8 +30,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Capacity, CheckFinding, CheckHook, Config, Event, Lifecycle, MARKER_FILE, MountRoots,
-    RuntimeError, ScratchRoot, StateRoot,
+    Capacity, CheckFinding, CheckHook, Config, Event, FilesRoot, Lifecycle, MARKER_FILE,
+    MountRoots, RuntimeError, ScratchRoot, StateRoot,
 };
 use js_agent_wire::{Command, HeartbeatReply, JobSpec, Limits};
 use serde_json::{Value, json};
@@ -173,11 +179,13 @@ pub fn config_in(dir: &Scratch, allow_host_jobs: bool) -> Config {
         capacity: Capacity {
             cpu_millis: 4000,
             memory_bytes: 8 << 30,
+            disk_bytes: 10 << 30,
             gpus: BTreeSet::from([0, 1]),
         },
         allow_host_jobs,
         mounts: MountRoots::new(&[("data".to_owned(), dir.path("data"))]).unwrap(),
         scratch: ScratchRoot::open(&scratch).unwrap(),
+        files: Some(FilesRoot::open(&dir.path("files")).unwrap()),
         state: StateRoot::open(&state).unwrap(),
         stop_grace: GRACE,
     }
@@ -208,6 +216,7 @@ pub fn job(run_id: &str) -> JobSpec {
         limits: Limits {
             cpu_millis: 1000,
             memory_bytes: 1 << 30,
+            disk_bytes: None,
             pids: Some(100),
             wall_ms: 60_000,
         },
@@ -216,6 +225,7 @@ pub fn job(run_id: &str) -> JobSpec {
         isolation: js_agent_wire::Isolation::Contained,
         labels: std::collections::BTreeMap::new(),
         heartbeat_seq: 0,
+        files: Vec::new(),
         valid_for_ms: 0,
         bundle: None,
         native: None,

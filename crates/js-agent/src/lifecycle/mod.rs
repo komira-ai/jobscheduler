@@ -115,6 +115,15 @@
 //!   says). The scheduler reruns a lease the agent no longer reports.
 //! - **A `Stop` or `Cancel` of a run the agent does not hold retires the run id on
 //!   purpose**, so that a `Start` that arrives after it never runs.
+//! - **Each run has a slot, and each slot a user of its own.** A run in slot `k` (the lowest
+//!   free one, from 0) runs as the base of `--container-user` plus `k`, so runs held at once
+//!   never share a host uid. A slot is free again only when the cleanup of its last run
+//!   passed (container and scratch gone, the post-job check clean); when the check finds
+//!   something, or a container cannot be removed, the slot is quarantined and takes no run
+//!   for as long as the agent lives (the host is tainted then, and refuses starts, as
+//!   before). A restart reads a run's slot from its container's label; a container
+//!   without the label (an earlier agent made it) is taken over holding no slot, so its
+//!   uid is not protected. See [`Slots`].
 //! - **Cgroup emptiness is not checked.** A container is removed, and nothing reads its
 //!   control group to see that no process of the job is left in it.
 //! - **A user-namespace remapping engine is not supported.** The container user would be
@@ -147,6 +156,7 @@
 
 mod machine;
 mod mounts;
+mod run_files;
 mod runtime;
 mod scratch;
 pub mod taint;
@@ -162,8 +172,9 @@ use crate::FileReader;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
 
-pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored};
+pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, RunningLease, SLOTS, Slots};
 pub use mounts::{MountError, MountRoots};
+pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
     ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount, RuntimeError, Status,
     label,
@@ -180,6 +191,17 @@ pub mod detail {
     /// The job names a GPU and the runtime's containers cannot use one (a container on a
     /// Mac cannot reach the Apple GPU). Nothing is created.
     pub const GPU_UNSUPPORTED: &str = "gpu-unsupported";
+    /// The job carries run files and this agent has no files root. A server sends files
+    /// only to an agent that reported the `run-files` capability, so this is a fault of the
+    /// sender.
+    pub const FILES_UNSUPPORTED: &str = "files-unsupported";
+    /// The job is a host job and carries run files, which only a container can be given
+    /// (they are mounted read-only at `/run/js-files`). Nothing is created.
+    pub const FILES_NEED_CONTAINER: &str = "files-need-container";
+    /// The network the job would get is not limited as the agent was told
+    /// (`--container-egress-allow`): the firewall table or the network is missing or
+    /// changed. Nothing is created.
+    pub const EGRESS_UNCHECKED: &str = "egress-unchecked";
     /// The job may change the host and the taint marker could not be written, so the job
     /// was not started.
     pub const TAINT_FAILED: &str = "taint-failed";
@@ -187,6 +209,12 @@ pub mod detail {
 
 /// The codes of a [`Finding`].
 pub mod code {
+    /// The log tails of the held results did not fit the heartbeat even cut down; the tail
+    /// of this run was left out of its result.
+    pub const LOG_TAIL_SHED: &str = "log-tail-shed";
+    /// The runtime could not read the log of a job that exited; its result goes without a
+    /// tail.
+    pub const LOGS_FAILED: &str = "logs-failed";
     /// The runtime could not tell whether a container has exited.
     pub const POLL_FAILED: &str = "poll-failed";
     /// The runtime could not stop a container.
@@ -234,6 +262,10 @@ pub struct Finished<'a> {
     /// exited and not yet removed), and those that could not be removed. What they run and
     /// mount is not the finished job's, so a check must not count it against the job.
     pub live: &'a [ContainerId],
+    /// The slot the finished run held, when it held one.
+    pub slot: Option<u32>,
+    /// The slots of the jobs in `live` (those whose container is still on the host).
+    pub live_slots: &'a [u32],
 }
 
 /// Runs after every job, after cleanup and before the slot is freed (design 5.12). The
@@ -435,6 +467,8 @@ pub struct Capacity {
     pub cpu_millis: u64,
     /// Bytes of memory.
     pub memory_bytes: u64,
+    /// Bytes of scratch disk.
+    pub disk_bytes: u64,
     /// The GPU device indices on offer.
     pub gpus: BTreeSet<u32>,
 }
@@ -445,6 +479,7 @@ impl Capacity {
         Self {
             cpu_millis: hello.shape.cpu_millis,
             memory_bytes: hello.shape.memory_bytes,
+            disk_bytes: hello.shape.disk_bytes,
             gpus: hello.gpu_devices.iter().map(|gpu| gpu.index).collect(),
         }
     }
@@ -461,6 +496,9 @@ pub struct Config {
     pub mounts: MountRoots,
     /// Where the runs' scratch directories go.
     pub scratch: ScratchRoot,
+    /// Where the runs' files go (on a tmpfs); none when the agent was started without a
+    /// usable `--run-files-root`, and then a start with files is refused.
+    pub files: Option<FilesRoot>,
     /// Where the taint marker is kept.
     pub state: StateRoot,
     /// How long a container gets to stop on its own before it is killed.
@@ -470,10 +508,18 @@ pub struct Config {
 /// The flags that configure jobs, checked.
 #[derive(Debug, Clone)]
 pub struct Local {
-    /// The `--mount-root` flags, canonicalised.
+    /// The `--mount-root` and `--mount-root-ro` flags, canonicalised.
     pub mounts: MountRoots,
+    /// `--scratch-quota` was given.
+    pub scratch_quota: bool,
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
+    /// `--run-files-root`, or the default under `/run` when that can be made; always none
+    /// without `--container-bin`.
+    pub files: Option<FilesRoot>,
+    /// Why the default run files root could not be used, for a warning; none when it was
+    /// used, was not needed, or `--run-files-root` was given (then a fault is an error).
+    pub files_warning: Option<String>,
     /// `--container-bin`, `--container-network` and `--container-user`, when containers
     /// are enabled by `--container-bin`.
     pub container: Option<Settings>,
@@ -515,6 +561,20 @@ impl Local {
     ///
     /// The text names the flag at fault.
     pub fn from_cli(cli: &Cli) -> Result<Self, String> {
+        Self::from_cli_with_default_files_root(cli, Path::new(DEFAULT_RUN_FILES_ROOT))
+    }
+
+    /// [`Local::from_cli`] with `default_files_root` where the run files go when
+    /// `--run-files-root` is not given (a seam for tests; the agent uses
+    /// [`DEFAULT_RUN_FILES_ROOT`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Local::from_cli`].
+    pub fn from_cli_with_default_files_root(
+        cli: &Cli,
+        default_files_root: &Path,
+    ) -> Result<Self, String> {
         if cli.allow_host_jobs {
             return Err(
                 "--allow-host-jobs: host jobs are not available yet: the scheduler \
@@ -522,7 +582,7 @@ impl Local {
                     .to_owned(),
             );
         }
-        let mounts = MountRoots::new(&cli.mount_roots)?;
+        let mounts = MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;
         let scratch = cli
             .scratch_root
             .as_deref()
@@ -536,6 +596,11 @@ impl Local {
                 host: cli.container_host.as_deref(),
                 pull: cli.container_pull.as_deref(),
                 tmp_size: cli.container_tmp_size.as_deref(),
+                add_hosts: &cli.container_add_host,
+                egress_allow: &cli.container_egress_allow,
+                nft: cli.container_nft.as_deref(),
+                actions_cgroup: cli.actions_cgroup.as_deref(),
+                subuid: cli.container_subuid.as_deref(),
             },
             (
                 rustix::process::geteuid().as_raw(),
@@ -546,6 +611,9 @@ impl Local {
         let state = cli.state_root.as_deref().map(StateRoot::open).transpose()?;
         if container.is_none() && !cli.watch_dirs.is_empty() {
             return Err("--watch-dir: needs --container-bin".to_owned());
+        }
+        if container.is_none() && cli.run_files_root.is_some() {
+            return Err("--run-files-root: needs --container-bin".to_owned());
         }
         if container.is_some() && state.is_none() {
             return Err(
@@ -570,10 +638,48 @@ impl Local {
                 );
             }
         }
+        let (files, files_warning) = match (&cli.run_files_root, container.is_some()) {
+            (_, false) => (None, None),
+            (Some(path), true) => (Some(FilesRoot::open(path)?), None),
+            (None, true) => match FilesRoot::open(default_files_root) {
+                Ok(root) => (Some(root), None),
+                Err(why) => (None, Some(format!("run files unavailable: {why}"))),
+            },
+        };
+        // The files root is swept at every start (everything in it that is not an adopted
+        // run's directory is removed) and its directories are the agent's to remove, so it
+        // may not be, hold or lie in any other root of the agent: a sweep over the state
+        // root would delete the taint marker and the host credential, and a mount root
+        // that holds it would show every run's secrets to a job.
+        let overlap = files.as_ref().and_then(|root| {
+            let others = mounts
+                .paths()
+                .map(|path| ("--mount-root", path))
+                .chain(scratch.iter().map(|r| ("--scratch-root", r.path())))
+                .chain(state.iter().map(|r| ("--state-root", r.path())));
+            let mut clash = others.filter(|(_, other)| {
+                root.path().starts_with(other) || other.starts_with(root.path())
+            });
+            clash.next().map(|(flag, other)| {
+                format!(
+                    "--run-files-root: is, holds or lies in the {flag} {}: the roots must be \
+                     separate directories",
+                    other.display()
+                )
+            })
+        });
+        // A root the operator named is an error; the default, which they did not name, only
+        // turns run files off, so it never changes which error an unrelated flag gets.
+        let (files, files_warning) = match (overlap, cli.run_files_root.is_some()) {
+            (None, _) => (files, files_warning),
+            (Some(why), true) => return Err(why),
+            (Some(why), false) => (None, Some(format!("run files unavailable: {why}"))),
+        };
         let busy: Vec<&Path> = mounts
             .paths()
             .chain(scratch.iter().map(ScratchRoot::path))
             .chain(state.iter().map(StateRoot::path))
+            .chain(files.iter().map(FilesRoot::path))
             .collect();
         let watch = watch_dirs(&cli.watch_dirs, &busy)?;
         if container.is_some() && scratch.is_none() {
@@ -586,7 +692,10 @@ impl Local {
         Ok(Self {
             watch,
             mounts,
+            scratch_quota: cli.scratch_quota,
             scratch,
+            files,
+            files_warning,
             container,
             state,
             stop_grace,
@@ -603,10 +712,26 @@ impl Local {
     /// not prove (subvolumes sharing free space have distinct device numbers), and the
     /// engine's data root and container layers are not compared.
     ///
+    /// The run files root (`--run-files-root`, or the default under `/run`) must be on a
+    /// `tmpfs`; one that is not, or cannot be looked at, stops the agent.
+    ///
     /// # Errors
     ///
     /// The text names the flags at fault; a path that cannot be looked at is an error too.
     pub fn check_filesystems(&self, files: &dyn FileReader) -> Result<(), String> {
+        if let Some(root) = &self.files {
+            let on_tmpfs = files.is_tmpfs(root.path()).map_err(|why| {
+                format!("--run-files-root: cannot tell what file system it is on: {why}")
+            })?;
+            if !on_tmpfs {
+                return Err(format!(
+                    "--run-files-root: {} is not on a tmpfs: a run's files hold secrets that \
+                     must not reach a disk",
+                    root.path().display()
+                ));
+            }
+        }
+        self.check_mount_roots_off_scratch(files)?;
         let Some(state) = &self.state else {
             return Ok(());
         };
@@ -629,6 +754,36 @@ impl Local {
             if device(root)? == own {
                 return Err(format!(
                     "--state-root: on the same file system as {flag} {}: a job could fill it and the taint marker could not be written",
+                    root.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Local {
+    /// With `--scratch-quota`, refuses a `--mount-root` on the file system of the scratch
+    /// root (the same `st_dev` comparison as the state root's): a job with a read-write
+    /// mount there writes to the disk the quota is to bound, outside it. `--mount-root-ro`
+    /// roots are not compared: a mount from one is read-only. Without the flag nothing is
+    /// compared.
+    fn check_mount_roots_off_scratch(&self, files: &dyn FileReader) -> Result<(), String> {
+        let (true, Some(scratch)) = (self.scratch_quota, &self.scratch) else {
+            return Ok(());
+        };
+        let device = |path: &Path| {
+            files
+                .device(path)
+                .map_err(|why| format!("--scratch-quota: cannot compare file systems: {why}"))
+        };
+        let own = device(scratch.path())?;
+        for root in self.mounts.writable_paths() {
+            if device(root)? == own {
+                return Err(format!(
+                    "--mount-root: {} is on the same file system as the --scratch-root, which \
+                     --scratch-quota bounds: a read-write mount there is outside the quota; \
+                     give it as --mount-root-ro or move it",
                     root.display()
                 ));
             }

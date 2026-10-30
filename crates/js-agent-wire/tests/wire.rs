@@ -24,6 +24,7 @@ fn refusal_codes_snapshot() {
         refusal::INVALID_IMAGE,
         refusal::IMAGE_DIGEST_REQUIRED,
         refusal::INVALID_MOUNT,
+        refusal::INVALID_FILE,
         refusal::HOST_LIVE,
         refusal::HOST_TAINTED,
         refusal::STALE_EPOCH,
@@ -62,7 +63,7 @@ fn refusal_codes_snapshot() {
     assert_eq!(
         codes.join(" "),
         "invalid-hello reserved-label wall-time-not-positive invalid-job invalid-image \
-         image-digest-required invalid-mount host-live host-tainted stale-epoch unknown-host not-held host-lost \
+         image-digest-required invalid-mount invalid-file host-live host-tainted stale-epoch unknown-host not-held host-lost \
          no-capacity host-not-registered limits-exceed-shape host-jobs-not-allowed \
          unsupported-protocol invalid-heartbeat invalid-welcome invalid-reply unknown-pool \
          shape-not-accepted host-contract execution-mismatch pool-full host-bound session-mismatch session-unavailable host-listed rate-limited \
@@ -185,6 +186,7 @@ fn round_trip_of_every_message() {
         cpu_millis: 1,
         memory_bytes: 1,
         gpus: 0,
+        disk_bytes: 0,
         gpu_class: None,
         max_leases: None,
     };

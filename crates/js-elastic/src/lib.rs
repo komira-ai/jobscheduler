@@ -4,6 +4,8 @@
 //! - [`ElasticProvider`] is the trait a provider implements. It takes an
 //!   [`AcquireRequest`] whose [`BootPayload`] is rendered by the service and delivered by
 //!   the provider as it is: a provider never sees a network mode or a boot plan.
+//! - [`ReadHandle`] is a provider seen through its reads only: code that holds one cannot
+//!   acquire or release, which is how a pool in plan mode is kept from spending.
 //! - [`Offer`] is what one launchable thing would give, and [`Offer::fit`] says whether
 //!   it serves a [`Demand`] (an alias of `js_types::Requirements`), naming the
 //!   [`Dimension`] it fails.
@@ -27,6 +29,7 @@ mod boot;
 mod ids;
 mod offer;
 mod provider;
+mod read;
 mod secret;
 
 pub use answer::{
@@ -36,4 +39,5 @@ pub use boot::{Artifact, BootPlan, BootStep, CONTAINER_BIN, SCRATCH_ROOT, STATE_
 pub use ids::{AcquireId, HostName, HostRef, InvalidId, SchedulerId};
 pub use offer::{Demand, Dimension, GpuClass, Offer, PriceUnit};
 pub use provider::{AcquireRequest, CheckResult, ElasticProvider, ProviderError};
+pub use read::ReadHandle;
 pub use secret::{BootPayload, Secret};

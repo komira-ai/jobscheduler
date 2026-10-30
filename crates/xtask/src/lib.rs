@@ -5,7 +5,7 @@
 //!   ([`fetch`]): a pinned tool, downloaded over HTTPS and refused unless its SHA-256
 //!   matches, before anything is unpacked or written.
 //!
-//! - `release plan --head <sha> --tip <sha>` and `release stamp --to <version>`
+//! - `release plan --head <sha>` and `release stamp --to <version>`
 //!   ([`release`]): whether a commit of main is released and as which version, and setting
 //!   that version in the CI checkout before the build (docs/release.md).
 //!

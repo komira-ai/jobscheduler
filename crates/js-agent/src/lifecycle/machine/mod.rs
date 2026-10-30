@@ -8,8 +8,11 @@ mod adopt;
 mod cleanup;
 mod exclusive;
 mod job;
+mod slots;
+mod tails;
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use js_agent_wire::{
     Ack, Command, HeartbeatReply, HeldRun, HeldState, Isolation, JobSpec, Outcome, ResultAck,
@@ -18,6 +21,7 @@ use js_agent_wire::{
 
 pub use self::exclusive::{Quiet, Restored};
 use self::job::{Job, Retired, Stage, Stuck, blind_taint, container_spec, host_taint};
+pub use self::slots::Slots;
 use super::runtime::{ContainerRuntime, ResolvedMount};
 use super::taint::TaintState;
 use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, code, detail};
@@ -32,6 +36,26 @@ pub const RETIRED_CAP: usize = limits::MAX_HELD;
 const MAX_JOBS: usize = limits::MAX_HELD;
 const _: () = assert!(limits::MAX_HELD <= limits::MAX_RESULTS);
 
+/// A run that is running, as far as its usage is concerned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningLease {
+    /// The lease the run belongs to.
+    pub lease_id: String,
+    /// The container's control group directory, when the runtime could say.
+    pub cgroup: Option<PathBuf>,
+    /// When the container started, on the agent's monotonic clock in microseconds, to the
+    /// millisecond. `None` for an adopted run that started before the clock began.
+    pub started_usec: Option<u64>,
+    /// The run was taken over from an earlier process of the agent, so the minutes before
+    /// the takeover were never seen.
+    pub adopted: bool,
+}
+
+/// How many slots the agent has: one for each run it can hold. A slot's container user is
+/// the base of `--container-user` plus the slot, so the base plus this many must fit in the
+/// ids of a user namespace, which the agent checks when it starts.
+pub const SLOTS: u32 = MAX_JOBS as u32;
+
 /// A refusal: the wire code and a local explanation.
 type Refusal = (&'static str, String);
 
@@ -45,6 +69,8 @@ pub struct Lifecycle {
     /// Containers no job stands for that could not be removed; not held runs.
     stuck: Vec<Stuck>,
     retired: Retired,
+    /// The slots the runs hold, and the ones taken out of use.
+    slots: Slots,
     taint: TaintState,
     /// The whole-node lease the server told this host to prepare for, and whether the host
     /// has been found quiet for it (see `exclusive`).
@@ -129,6 +155,7 @@ impl Lifecycle {
             self.clean(index, &mut events);
         }
         self.retry_stuck(&mut events);
+        self.fit_log_tails_to_beat(&mut events);
         self.sweep();
         events
     }
@@ -149,6 +176,52 @@ impl Lifecycle {
             .collect()
     }
 
+    /// The runs that are running, one for each lease (a second run of a lease already named
+    /// is left out), in the order of [`Lifecycle::held`].
+    pub fn running(&self) -> Vec<RunningLease> {
+        let mut named = BTreeSet::new();
+        let running = self
+            .jobs
+            .iter()
+            .filter(|job| matches!(job.stage, Stage::Running(_)));
+        running
+            .filter(|job| named.insert(job.lease_id.as_str()))
+            .map(|job| RunningLease {
+                lease_id: job.lease_id.clone(),
+                cgroup: job.cgroup.clone(),
+                started_usec: job.started_usec,
+                adopted: job.adopted,
+            })
+            .collect()
+    }
+
+    /// Asks the runtime again for the control group of each run that is running, was
+    /// started by this process and has none yet; the usage of a lease with no control group
+    /// is not sampled, and a runtime that could not say once (a container it had just
+    /// started) may say later. Returns one line for each run that is still without, the
+    /// first time only. Adopted runs are left alone: they are never sampled.
+    pub fn find_cgroups(&mut self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for job in &mut self.jobs {
+            let Stage::Running(id) = &job.stage else {
+                continue;
+            };
+            if job.adopted || job.cgroup.is_some() {
+                continue;
+            }
+            job.cgroup = self.runtime.cgroup(id);
+            if job.cgroup.is_none() && !job.cgroup_missing_told {
+                job.cgroup_missing_told = true;
+                lines.push(format!(
+                    "usage: the control group of run {} is not known; \
+                     looking again at every window",
+                    job.run_id
+                ));
+            }
+        }
+        lines
+    }
+
     /// The results the server has not acknowledged, for the next heartbeat.
     pub fn results(&self) -> Vec<RunResult> {
         self.jobs
@@ -157,12 +230,23 @@ impl Lifecycle {
             .collect()
     }
 
+    /// The slots held by a run that has not passed its cleanup.
+    pub fn busy_slots(&self) -> Vec<u32> {
+        self.slots.held()
+    }
+
+    /// The slots that take no new run because the cleanup of their last run did not pass.
+    pub fn quarantined_slots(&self) -> Vec<u32> {
+        self.slots.quarantined()
+    }
+
     /// What is still free to book.
     pub fn free(&self) -> Capacity {
         let (offered, used) = (&self.config.capacity, self.booked());
         Capacity {
             cpu_millis: offered.cpu_millis.saturating_sub(used.cpu_millis),
             memory_bytes: offered.memory_bytes.saturating_sub(used.memory_bytes),
+            disk_bytes: offered.disk_bytes.saturating_sub(used.disk_bytes),
             gpus: offered.gpus.difference(&used.gpus).copied().collect(),
         }
     }
@@ -181,6 +265,7 @@ impl Lifecycle {
         let mut used = Capacity {
             cpu_millis: 0,
             memory_bytes: 0,
+            disk_bytes: 0,
             gpus: BTreeSet::new(),
         };
         let jobs = self.jobs.iter().filter(|job| job.stage != Stage::Freed);
@@ -190,6 +275,7 @@ impl Lifecycle {
         for booking in bookings {
             used.cpu_millis = used.cpu_millis.saturating_add(booking.cpu_millis);
             used.memory_bytes = used.memory_bytes.saturating_add(booking.memory_bytes);
+            used.disk_bytes = used.disk_bytes.saturating_add(booking.disk_bytes);
             used.gpus.extend(booking.gpus.iter().copied());
         }
         used
@@ -240,6 +326,18 @@ impl Lifecycle {
                 "this agent runs no host jobs",
             ));
         }
+        if !spec.files.is_empty() && spec.isolation == Isolation::Host {
+            return Err(no(
+                detail::FILES_NEED_CONTAINER,
+                "run files are delivered to contained jobs only",
+            ));
+        }
+        if !spec.files.is_empty() && self.config.files.is_none() {
+            return Err(no(
+                detail::FILES_UNSUPPORTED,
+                "this agent has no run files directory",
+            ));
+        }
         if !spec.gpu_indices.is_empty() && !self.runtime.supports_gpus() {
             return Err(no(
                 detail::GPU_UNSUPPORTED,
@@ -250,6 +348,7 @@ impl Lifecycle {
         let exists = [
             want.cpu_millis <= offered.cpu_millis,
             want.memory_bytes <= offered.memory_bytes,
+            want.disk_bytes.unwrap_or(0) <= offered.disk_bytes,
             spec.gpu_indices
                 .iter()
                 .all(|gpu| offered.gpus.contains(gpu)),
@@ -264,7 +363,9 @@ impl Lifecycle {
         let room = [
             want.cpu_millis <= offered.cpu_millis.saturating_sub(used.cpu_millis),
             want.memory_bytes <= offered.memory_bytes.saturating_sub(used.memory_bytes),
+            want.disk_bytes.unwrap_or(0) <= offered.disk_bytes.saturating_sub(used.disk_bytes),
             spec.gpu_indices.iter().all(|gpu| !used.gpus.contains(gpu)),
+            self.slots.has_room(),
         ];
         if !room.into_iter().all(|ok| ok) {
             return Err(no(
@@ -272,11 +373,20 @@ impl Lifecycle {
                 "the job does not fit what is free",
             ));
         }
-        spec.mounts
+        let mounts = spec
+            .mounts
             .iter()
             .map(|mount| self.config.mounts.resolve(mount))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|why| (refusal::INVALID_MOUNT, why.to_string()))
+            .map_err(|why| (refusal::INVALID_MOUNT, why.to_string()))?;
+        // Last, so that a job refused for another reason costs no call. Before every
+        // contained create: the firewall can change between two jobs.
+        if spec.isolation == Isolation::Contained {
+            self.runtime
+                .check_egress()
+                .map_err(|why| (detail::EGRESS_UNCHECKED, why.to_string()))?;
+        }
+        Ok(mounts)
     }
 
     /// Taints the host for a job that may change it, and writes the marker.
@@ -327,7 +437,7 @@ impl Lifecycle {
         let mounts = match admitted {
             Ok(mounts) => mounts,
             Err((wire, why)) => {
-                let mut job = Job::of(spec, Stage::Freed, 0);
+                let mut job = Job::of(spec, Stage::Freed, 0, None);
                 job.result = Some(job.report(Outcome::FailedToStart, None, Some(wire)));
                 self.jobs.push(job);
                 events.push(Event::Refused {
@@ -341,19 +451,35 @@ impl Lifecycle {
         // On a host no other job is on, what changed since the last check is the host's. A
         // container that could not be removed, or a check that found something, has tainted
         // the host, and `admit` refused this start; so every other job being freed is enough.
+        // The baseline is retaken before this run's scratch directory and files exist, so
+        // neither becomes part of it.
         if self.jobs.iter().all(|job| job.stage == Stage::Freed) {
             self.checks.idle();
         }
-        let started = self.config.scratch.create(run_id).map_err(|why| {
+        // The slot is held from here until the run's cleanup has passed (`clean`); `admit`
+        // found one free.
+        let slot = self.slots.take();
+        let failed = |why: std::io::Error| {
             (
                 detail::SCRATCH_FAILED,
                 code::SCRATCH_FAILED,
                 why.to_string(),
                 false,
             )
-        });
+        };
+        let started = self.config.scratch.create(run_id).map_err(failed);
+        // The files are written before the container exists, and only here: a start that
+        // is sent again finds its job above and never reaches this point. `admit` has
+        // seen to it that a start with files has a files root.
         let started = started.and_then(|scratch| {
-            let container = container_spec(spec, mounts, scratch);
+            let written = match (&self.config.files, spec.files.is_empty()) {
+                (Some(root), false) => root.write(run_id, &spec.files).map(Some),
+                _ => Ok(None),
+            };
+            written.map(|files| (scratch, files)).map_err(failed)
+        });
+        let started = started.and_then(|(scratch, files)| {
+            let container = container_spec(spec, mounts, scratch, files, slot);
             self.runtime.create_and_start(&container).map_err(|why| {
                 (
                     detail::RUNTIME_FAILED,
@@ -365,14 +491,19 @@ impl Lifecycle {
         });
         match started {
             Ok(id) => {
-                let deadline = self.clock.now_ms().saturating_add(spec.limits.wall_ms);
-                self.jobs.push(Job::of(spec, Stage::Running(id), deadline));
+                let now = self.clock.now_ms();
+                let deadline = now.saturating_add(spec.limits.wall_ms);
+                let cgroup = self.runtime.cgroup(&id);
+                let mut job = Job::of(spec, Stage::Running(id), deadline, Some(slot));
+                job.started_at(now);
+                job.cgroup = cgroup;
+                self.jobs.push(job);
                 events.push(Event::Started {
                     run_id: run_id.clone(),
                 });
             }
             Err((why, finding, message, blind)) => {
-                let mut job = Job::of(spec, Stage::Scratch, 0);
+                let mut job = Job::of(spec, Stage::Scratch, 0, Some(slot));
                 // A host the agent cannot see is not known to be checkable: tainted as
                 // unchecked, before the finding that follows from it.
                 if blind {

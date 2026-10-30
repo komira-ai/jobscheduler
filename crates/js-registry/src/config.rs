@@ -1,7 +1,10 @@
 use js_agent_wire::{
     DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, PROTOCOL_MAJOR, ValidationError, Welcome,
 };
-use js_types::{Admission, ExecMode, ProviderId, ResourceClass, Shape};
+use js_pool_static::HostBook;
+use js_types::{
+    Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, ProviderId, ResourceClass, Shape,
+};
 
 use crate::WholeNodeConfig;
 
@@ -36,6 +39,10 @@ pub enum ConfigError {
     /// A dedicated pool that allows more whole hosts than it has machines.
     #[error("max_whole_node must not exceed max_machines")]
     WholeAboveMachines,
+    /// A pool whose capabilities name `scratch-quota` books no disk: the quota every run is
+    /// held to would be booked against a shape of zero bytes, and every run refused.
+    #[error("a pool that names scratch-quota must set a disk_bytes above zero")]
+    QuotaWithoutDisk,
 }
 
 /// What an operator decides about a pool of self-registering hosts.
@@ -45,6 +52,7 @@ pub struct PoolConfig {
     class: ResourceClass,
     shape: Shape,
     booked: Shape,
+    memory_percent: MemoryPercent,
     max_machines: usize,
     heartbeat_interval_ms: u64,
     grace_ms: u64,
@@ -57,10 +65,12 @@ impl PoolConfig {
     /// A pool called `name` that leases `class`, holds at most `max_machines` hosts, and
     /// books every host as `shape`.
     ///
-    /// `shape` is both the floor a host's claim must meet to join and the shape the
-    /// pool books: a lease is placed and sized against it, never against what a host
-    /// says about itself, so a host that claims more than the pool promises gains
-    /// nothing. Timing starts at the wire defaults, and a lost host that holds no
+    /// `shape` is both the floor a host's claim must meet to join and, cut to the pool's
+    /// [`memory percent`](PoolConfig::with_memory_percent) (all of it unless set), the
+    /// shape the pool books: a lease is placed and sized against the booked shape, never
+    /// against what a host says about itself, so a host that claims more than the pool
+    /// promises gains nothing. Its `disk_bytes` is both floor and booking, uncut. Timing
+    /// starts at the wire defaults, and a lost host that holds no
     /// booking is kept for [`DEFAULT_LOST_RETENTION_MS`].
     pub fn new(name: ProviderId, class: ResourceClass, shape: Shape, max_machines: usize) -> Self {
         Self {
@@ -68,12 +78,31 @@ impl PoolConfig {
             class,
             booked: shape.clone(),
             shape,
+            memory_percent: MemoryPercent::FULL,
             max_machines,
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
             grace_ms: DEFAULT_GRACE_MS,
             lost_retention_ms: DEFAULT_LOST_RETENTION_MS,
             whole_node: None,
             exec: None,
+        }
+    }
+
+    /// The pool, or the refusal of a disk setting that would admit hosts and then refuse
+    /// every run. A pool whose capabilities name `scratch-quota` must book disk
+    /// (`disk_bytes` above zero in its shape), because a run without its own `disk_bytes`
+    /// is booked the host's default quota, and a pool that books none could never hold
+    /// one. A pool that does not name `scratch-quota` may leave `disk_bytes` at zero,
+    /// which books no disk for any run. Every loader of an operator's pool file calls
+    /// this once the pool is built; [`PoolConfig::new`] cannot, being infallible.
+    pub fn checked(self) -> Result<Self, ConfigError> {
+        let quota = self
+            .shape
+            .capabilities()
+            .contains_key(js_caps::SCRATCH_QUOTA);
+        match (quota, self.shape.resources().disk_bytes()) {
+            (true, 0) => Err(ConfigError::QuotaWithoutDisk),
+            _ => Ok(self),
         }
     }
 
@@ -137,12 +166,49 @@ impl PoolConfig {
     #[must_use]
     pub fn with_exec(mut self, exec: ExecMode) -> Self {
         self.exec = Some(exec);
-        let mut capabilities = self.shape.capabilities().clone();
-        capabilities
-            .entry(js_types::EXEC_KEY.to_owned())
-            .or_insert_with(|| exec.name().to_owned());
-        self.booked = Shape::new(self.shape.resources().clone(), capabilities);
+        self.rebook();
         self
+    }
+
+    /// The same pool booking `percent` of the memory of its shape, rounded down, for
+    /// every host: a lease, a whole-node lease, a run and a reservation are all placed and
+    /// sized against the cut memory. A host's hello is still held to the whole shape, so a
+    /// host must really have the memory the pool lists; the pool books less of it.
+    ///
+    /// The cut is made here and nowhere else, on the memory the operator configured, and
+    /// never on what a host claims.
+    #[must_use]
+    pub fn with_memory_percent(mut self, percent: MemoryPercent) -> Self {
+        self.memory_percent = percent;
+        self.rebook();
+        self
+    }
+
+    /// The booked shape from the shape, the execution mode and the memory percent.
+    fn rebook(&mut self) {
+        let mut capabilities = self.shape.capabilities().clone();
+        if let Some(exec) = self.exec {
+            capabilities
+                .entry(js_types::EXEC_KEY.to_owned())
+                .or_insert_with(|| exec.name().to_owned());
+        }
+        let cut = self
+            .shape
+            .resources()
+            .with_memory_percent(self.memory_percent);
+        self.booked = Shape::new(cut, capabilities);
+    }
+
+    /// The percent of its memory the pool books.
+    pub fn memory_percent(&self) -> MemoryPercent {
+        self.memory_percent
+    }
+
+    /// The memory the pool lists for a host, the percent of it that is booked and what
+    /// that comes to.
+    pub fn memory_headroom(&self) -> MemoryHeadroom {
+        let configured = self.shape.resources().memory_bytes();
+        MemoryHeadroom::new(configured, self.memory_percent)
     }
 
     /// The execution mode the pool's hosts must run jobs in, when the pool declares one.
@@ -198,14 +264,20 @@ impl PoolConfig {
         &self.class
     }
 
-    pub(crate) fn shape(&self) -> &Shape {
+    /// The shape the pool books for every host of it.
+    pub fn shape(&self) -> &Shape {
         &self.shape
     }
 
-    /// The shape every host of the pool is booked as: [`Self::shape`], with the pool's
-    /// execution mode when it declares one.
+    /// The shape every host of the pool is booked as: [`Self::shape`], with its memory cut
+    /// to the pool's memory percent and the pool's execution mode when it declares one.
     pub(crate) fn booked(&self) -> &Shape {
         &self.booked
+    }
+
+    /// Lists `host` in `book`, free, as the pool books it.
+    pub(crate) fn list_in(&self, book: &mut HostBook, host: HostId) {
+        book.insert_host_with(host, self.booked.clone(), self.memory_headroom());
     }
 
     pub(crate) fn max_machines(&self) -> usize {

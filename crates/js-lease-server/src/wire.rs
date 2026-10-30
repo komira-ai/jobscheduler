@@ -6,6 +6,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use js_agent_wire::limits;
 use js_lease::{AcquireError, LeaseInfo, ReleaseError, RenewError};
 use js_provider::RefusalCode;
 use js_types::{ClassId, LeaseId, Request, Requirements, RequirementsError, Resources};
@@ -43,11 +44,16 @@ struct ResourcesBody {
     gpus: u64,
     #[serde(default)]
     gpu_class: Option<String>,
+    /// Bytes of scratch disk the lease books; above zero and at most
+    /// [`limits::MAX_DISK_BYTES`] when present. Left out, the lease books none, as a body
+    /// from a client that predates the field does.
+    #[serde(default)]
+    disk_bytes: Option<u64>,
 }
 
 impl AcquireBody {
-    /// The request and the ttl asked for, or the 400 for a body that names an id or a
-    /// GPU class the types refuse, or a `disk-gib` or `exec` capability that is not a
+    /// The request and the ttl asked for, or the 400 for a body that names an id, a
+    /// GPU class or a `disk_bytes` the types refuse, or a `disk-gib` or `exec` capability that is not a
     /// requirement (the registry and the scaler read them as the job's disk and mode).
     pub(crate) fn into_parts(self) -> Result<(Request, Option<Duration>), ApiError> {
         let class = ClassId::new(&self.class)
@@ -58,6 +64,17 @@ impl AcquireBody {
             Resources::new(cpu, memory, gpus, self.resources.gpu_class).map_err(|_| {
                 ApiError::bad_request("gpu_class must be named exactly when gpus is above zero")
             })?;
+        let resources = match self.resources.disk_bytes {
+            None => resources,
+            Some(disk) if (1..=limits::MAX_DISK_BYTES).contains(&disk) => {
+                resources.with_disk_bytes(disk)
+            }
+            Some(_) => {
+                return Err(ApiError::bad_request(
+                    "disk_bytes must be above zero and at most 2^46 - 1",
+                ));
+            }
+        };
         let request = Request {
             class,
             resources,
@@ -238,6 +255,11 @@ impl From<AcquireError> for ApiError {
         match err {
             AcquireError::TtlNotPositive => Self::bad_request("ttl_seconds must be positive"),
             AcquireError::Refused(code) => Self::coded(refusal_status(code), code.as_str()),
+            // The server's ceiling on `max_wall_seconds`: the request broke a rule of the
+            // server, as a start-contract refusal does.
+            AcquireError::WallAboveCeiling { .. } => {
+                Self::coded(StatusCode::UNPROCESSABLE_ENTITY, "wall-time-above-ceiling")
+            }
             // The table has issued its last lease id; nothing was booked. The server can
             // issue no lease until the operator restores the state file (js-lease docs).
             AcquireError::IdsExhausted => {
@@ -315,6 +337,56 @@ mod tests {
         let (request, _) = body(r#"{"os":"macos"}"#).into_parts().unwrap();
         let wanted = Requirements::from_request(&request);
         assert_eq!((wanted.disk_bytes, wanted.exec), (None, None));
+    }
+
+    fn body_with_resources(resources: &str) -> AcquireBody {
+        let text =
+            format!(r#"{{"class":"whole-node","resources":{resources},"max_wall_seconds":60}}"#);
+        parse(text.as_bytes()).unwrap()
+    }
+
+    /// Asserts that `resources.disk_bytes` reaches the request's resources as booked
+    /// scratch disk, at its edges (1 and 2^46 - 1), and that a body without it (from a
+    /// client that predates the field) books none. It catches a field that is read and
+    /// dropped, and one that is required.
+    #[test]
+    fn disk_bytes_reaches_the_resources_and_is_optional() {
+        let sized = |text: &str| {
+            let (request, _) = body_with_resources(text).into_parts().unwrap();
+            request.resources.disk_bytes()
+        };
+        assert_eq!(sized(r#"{"cpu_millis":1000}"#), 0);
+        assert_eq!(sized(r#"{"disk_bytes":1}"#), 1);
+        // An explicit null is the same as a field left out: no disk is booked.
+        assert_eq!(sized(r#"{"disk_bytes":null}"#), 0);
+        assert_eq!(sized(r#"{"disk_bytes":70368744177663}"#), (1 << 46) - 1);
+        assert_eq!(
+            sized(r#"{"cpu_millis":1,"memory_bytes":2,"disk_bytes":3}"#),
+            3
+        );
+    }
+
+    /// Asserts that a `disk_bytes` of zero or above 2^46 - 1 is a 400 naming the field, as
+    /// is one that is not an unsigned number at all (a parse error, not a booking). It
+    /// catches a bound that is missing, which lets a sum over many leases overflow, and a
+    /// zero that is taken for "no disk" when the caller asked for a bound.
+    #[test]
+    fn disk_bytes_out_of_range_is_a_400() {
+        for bad in ["0", "70368744177664", "18446744073709551615"] {
+            let err = body_with_resources(&format!(r#"{{"disk_bytes":{bad}}}"#))
+                .into_parts()
+                .unwrap_err();
+            assert_eq!(err.status, StatusCode::BAD_REQUEST, "{bad}");
+            let reason = err.reason.as_deref().unwrap();
+            assert!(reason.starts_with("disk_bytes"), "{reason}");
+        }
+        for bad in ["-1", "1.5", "\"7\""] {
+            let text = format!(
+                r#"{{"class":"whole-node","resources":{{"disk_bytes":{bad}}},"max_wall_seconds":60}}"#
+            );
+            let err = parse::<AcquireBody>(text.as_bytes()).unwrap_err();
+            assert_eq!(err.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
     }
 
     /// Asserts that a disk or mode that is not a requirement is a 400 that says which
@@ -414,5 +486,17 @@ mod tests {
                 code.as_str()
             );
         }
+    }
+
+    /// Asserts that an acquire above the server's ceiling on the wall time is a 422 with
+    /// the code `wall-time-above-ceiling`, which names the rule and no value of the request.
+    #[test]
+    fn a_wall_time_above_the_ceiling_is_a_named_422() {
+        let err = ApiError::from(AcquireError::WallAboveCeiling {
+            ceiling: Duration::from_secs(600),
+        });
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.code, "wall-time-above-ceiling");
+        assert_eq!(err.reason, None);
     }
 }

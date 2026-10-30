@@ -8,7 +8,7 @@
 //!   refuse a start (a token file anyone can read, a listen address off the loopback
 //!   without TLS).
 //! - [`Kinds`]: the provider kinds a `[[pool]]` of the configuration file may name,
-//!   compiled in (`static` today).
+//!   compiled in (`static` and `lambdalabs`).
 //! - [`CapacitySource`]: where the hosts come from. [`StaticPoolSource`] reads the
 //!   operator's pool file. With agent registration on (see "Agents" below), the static
 //!   pool and the hosts agents register are two sources of the same trait, layered
@@ -16,7 +16,15 @@
 //! - [`network`]: how a machine the service launches reaches it (the `default` and
 //!   `tailscale` modes), and [`bootstrap`]: the script such a machine boots with, rendered
 //!   from a plan with its secrets masked or filled. A provider receives the rendered
-//!   payload and no network type. Nothing in the server's routes calls either yet.
+//!   payload and no network type. The scaler's launch step ([`Launcher`]) is the one place
+//!   that holds both a mode and a provider.
+//! - [`Scaler`]: the shell that runs [`js_scaler::step`] on the server's tick for an
+//!   elastic pool: it reads the registry and the provider, runs the step's actions in
+//!   order, and keeps the pool's records in `<state file>.scaler` ([`RecordsFile`]), owner
+//!   only and written whole before the call a record describes, and the hosts the registry
+//!   refused to remove in `<state file>.scaler.unremoved` ([`UnremovedFile`]), written the
+//!   same way and before the registry is asked to remove a host, so that a restart tries
+//!   them again.
 //! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`],
 //!   [`Ticker`]) so a test steps both.
 //!
@@ -31,13 +39,13 @@
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
 //! | `--state-file <path>` | the lease file |
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
-//! | `--pool-config <path>` | the static pool file ([`js_pool_static`]); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
+//! | `--pool-config <path>` | the static pool file ([`js_pool_static`]; its top-level `memory_schedulable_percent`, 1 to 100 and default 100, is the share of each host's `memory_bytes` that is booked, rounded down); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
 //! | `--agent-token-file <path>` | the pool's shared join tokens, one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Optional: without it the pool admits only hosts whose one-time join token verifies. Needs `--agent-pool-config` |
-//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]`, `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on |
+//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]` (`cpu_millis`, `memory_bytes`, `gpus?`, `gpu_class?`, `disk_bytes?`: the scratch disk the pool books for every host and the floor a hello must meet; zero or absent books none; required above zero when `[capabilities]` names `scratch-quota`, or the file is refused; a pool that books disk and does not name `scratch-quota` refuses every agent that does not report disk, which no current agent does; a pool that names `scratch-quota` refuses a host whose `scratch-quota` is not `project`, whose `scratch-default-gib` is absent, zero or above the wire maximum, or whose default is more than `disk_bytes`, with `shape-not-accepted`), `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `memory_schedulable_percent` (1 to 100, default 100: the share of `[shape]` `memory_bytes` the pool books, rounded down; a hello is still held to the whole shape; write it before `[shape]`), `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on |
 //! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
 //! | `--require-host-credential` | off by default: turn it on once every agent is new. The first hello of a one-time join token must then say the agent keeps a host credential, or it is refused `join-token-credential-required` (403) and the token stays unused; so the token of every launched host is dead after its first hello. Pool join tokens are not affected. Needs `--agent-pool-config` |
 //! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start |
-//! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `15m`, `2h` |
+//! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `250ms`, `15m`, `2h` |
 //! | `--tick` | how often the table is ticked and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
 //! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file. Both are read at start only: renew a certificate by restarting the server |
 //! | `--max-connections` | connections open at once, `256` unless given; at the cap the server stops accepting |
@@ -47,6 +55,9 @@
 //! | `--write-timeout` | how long a write to a client may make no progress before the connection is closed, `10s` |
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
+//! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given. Needs agent registration to have anything to keep. Not with `--usage-off` |
+//! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
+//! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
 //! hello limit flags and `--require-host-credential` need `--agent-pool-config`, and are
@@ -69,7 +80,8 @@
 //! [server]
 //! listen            = "100.64.0.1:7300"   # default 127.0.0.1:7300; off the loopback it needs tls_cert and tls_key
 //! agent_listen      = "100.64.0.1:7301"   # agent routes only; required with an elastic pool
-//! advertise_url     = "https://js.example.ts.net:7301"   # what agents dial; http:// off the loopback is refused with an elastic pool
+//! advertise_url     = "https://js.example.ts.net:7301"   # what agents dial; http:// off the loopback is refused with an elastic pool; required when a pool is live
+//! scheduler_id      = "js"                               # default "js": marks what this scheduler launches; give each scheduler on one cloud account its own
 //! state_file        = "/var/lib/jobscheduler/state"      # required
 //! boot              = "resume"                           # required: "initialise" or "resume"
 //! client_token_file = "/run/credentials/js/client-token" # required: the file --token-file names
@@ -79,6 +91,17 @@
 //! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
 //! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
+//! # max_lease_wall: the most a lease's max_wall_seconds may ask for; none by default, and
+//! # required by a pool with accelerators (a floor of one GPU or more); a lease asking for
+//! # more is refused 422 `wall-time-above-ceiling`; config file only, there is no flag
+//! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456):
+//! # the flags' names, defaults and rules; usage_db is refused beside usage_off = true
+//! # alert_webhook_url, alert_webhook_token_file, alert_repeat_after (1h): every alert of the
+//! # scaler is also POSTed as {source, key, text} JSON
+//! # to the https URL (http only to a loopback address) when it begins to hold, every
+//! # alert_repeat_after while it holds, and again if it clears and returns; delivery is off the
+//! # tick path. The token file (owner-only) holds the bearer token the receiver wants. The token
+//! # file and alert_repeat_after are refused without the URL.
 //!
 //! [[pool]]
 //! name     = "gpu-static"
@@ -89,13 +112,88 @@
 //! A pool whose provider launches machines (an elastic pool) also has `max_instances`
 //! (1 to 255), `max_spend_per_hour` and `max_spend_per_day` (strings: a decimal with at
 //! most two places, above zero, the day cap not below the hour cap), and optionally `idle`,
-//! `boot_timeout` (`15m`), `launch`, `exec`, `join_token_file` and `network`.
-//! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing.
+//! `max_age`, `min_host_lifetime`, `boot_timeout` (`15m`), `launch`, `exec`, `join_token_file`, `agent` and `network`.
+//! Every pool, static or elastic, may set `memory_schedulable_percent`, a whole number from
+//! 1 to 100 (default 100): the share of the pool's configured memory that is booked, rounded
+//! down. A static pool books that share of each host's `memory_bytes` (the pool's key
+//! replaces the one in its hosts file); an elastic pool books that share of its floor's
+//! memory, 1 GiB. An agent's own claim never raises it, and a hello must still meet the
+//! whole floor. `0`, above `100`, a negative number or a word is refused naming the pool and
+//! the field.
+//! An elastic pool may also set `live_until`, a TOML date-time with an offset such as
+//! `2027-01-01T12:00:00Z`: from that instant the pool is in `plan` (the scaler's step ends the
+//! go, and a file read after it starts the pool in `plan` with a warning), so a forgotten
+//! `launch = "live"` stops spending by itself. Beside the pools' own caps, three totals count
+//! the machines of every pool: `max_spend_per_day_total` (the last 24 hours),
+//! `max_spend_per_month_total` (the last 30 days, rolling) and `max_spend_since_go_total`
+//! (since each pool's go, its first launch since it was last in `plan`; the budget begins
+//! again at the next go). They are strings like the pool caps, may be set in `[server]` (all pools) and
+//! in a `[budget.<kind>]` table (the pools of that provider kind), and a launch must hold
+//! both; a month total below the day total is refused, and a `[budget]` table of a kind the
+//! server does not build is refused. A total only stops launches (`blocked` shows
+//! `max_spend_total` in `GET /v1/pools`): it never drains or releases a machine, so the
+//! machines admitted before it was reached run on, and can take the window past the figure. The
+//! overrun is bounded by `max_spend_per_hour` for the cloud lifetime of a launch only when the
+//! pool has both `max_age` and `server.max_lease_wall` (a busy host with no `max_age` is never
+//! retired) and the releases succeed (a machine the provider will not release, or that the
+//! cloud does not end, runs on: an alert says so, no cap does); the file warns when a total is
+//! set and a live pool lacks either key. The totals are sums over the pools of their scope:
+//! the server's since-go total adds the go of each pool that has one, so it is not a stable
+//! figure when pools come and go. A pool taken out of the file for good keeps its go, and its
+//! settled spend stays in that sum, until the pool is put back in `plan` for one step (the
+//! step that sees a pool in plan ends its go), after which it can be taken out. `GET
+//! /v1/pools` shows `launch` as the mode the pool is in now (`plan` once `live_until` has
+//! passed) and `live_until_ms`.
+//!
+//! Rolling back to a server older than the totals: it reads the records file, but its next
+//! save drops `go` and `pool_kinds` and it forgets records after 24 hours. After rolling forward
+//! again the budget since the go starts afresh at the pool's next launch (the old go and what
+//! was settled into it are forgotten), and the month window holds only the days since the
+//! rollback, for up to 30 days. For that period tighten the totals, or hold the pools in
+//! `plan`. A retry of a launch the provider told to wait (a `Planned` record), made when the
+//! pool has no go, begins none: that launch is outside any go, and is bounded by the day and
+//! month totals only.
+//! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing, and
+//! one that is `live` launches machines for requests that wait, within `max_instances`,
+//! `max_spend_per_hour` and `max_spend_per_day`, and releases them when they have been
+//! idle for `idle` (ten minutes unless the file says) and have lived `min_host_lifetime`
+//! (none unless the file says). A host is also drained and released at `max_age` from its
+//! launch whether or not it is idle, without cutting its work: the drain only stops new
+//! leases, and a lease ends within `server.max_lease_wall`. A pool with accelerators (its
+//! provider's floor has one GPU or more) must set `idle`, `max_age` and `min_host_lifetime`,
+//! and the file `server.max_lease_wall`; `max_age` must be longer than `boot_timeout` and
+//! `min_host_lifetime` no longer than `max_age`. Each launch carries `max_age`
+//! plus `max_lease_wall` plus the prepare timeout, `unknown_hold` and 10 minutes as the
+//! lifetime the cloud is to enforce (a provider whose cloud cannot, Lambda, ignores it: there
+//! only `max_age` with a live server bounds the cost). `max_age` and `max_lease_wall` are at
+//! most 30 days. A `live` pool also needs `agent =
+//! { x86_64 = { url = "https://...", sha256 = "<64 hex digits>" } }`, the build of the agent
+//! the launched machine downloads and checks, one for each CPU architecture its offers
+//! have (an offer of another is never launched with a build of this one), and `server.advertise_url`; with a Tailscale
+//! network it needs `binary = { url = ..., sha256 = ... }` for the Tailscale build too
+//! (`api_url` there names another Tailscale API, for a test). After a boot that fails
+//! the pool launches nothing for ten minutes.
 //! `exec` is `container` unless the file says `sandbox-exec`, or `none` for a pool whose
 //! hosts predate the host contract: the hosts must report a `runtime` of that mode, and
 //! `gpu-toolkit` when the pool has GPUs. `network` is `{ kind = "default" }`, which is
 //! what a pool without it gets, or `{ kind = "tailscale", oauth_client_file = ..., tag
 //! = ... }`. At most one elastic pool and one static pool are served in this version.
+//!
+//! A pool of machines that run `js-agent` and are started by hand has `kind = "joined"`
+//! and no `provider`. Its keys are `name`, `class`, `shape` (`{ cpu_millis, memory_bytes }`
+//! and optionally `gpus` and `gpu_class`), `max_machines` (from 1 to 262144; required, as
+//! in the agent pool file), and optionally `capabilities` (a table of text values, as the
+//! agent pool file's `[capabilities]`: a lease request is matched against them, and a
+//! host is admitted only if its hello reports each with the same value; a pool without
+//! them fits no request that requires a capability), `exec` (as above, but absent is
+//! `none`), `heartbeat_interval`, `grace`, `lost_retention` and `join_token_file` (the
+//! shared pool token). It launches nothing: `launch`, `network`, `provider`,
+//! `max_instances`, `max_spend_per_hour`, `max_spend_per_day`, `idle`, `max_age`, `min_host_lifetime` and `boot_timeout`
+//! are each refused naming the key. It is the pool that registers agents, so it excludes
+//! an elastic pool, and `server.agent_listen` is required. One-time tokens for its nodes
+//! come from `POST /v1/agent/join-tokens` with `provider` the pool's name and
+//! `instance_id` the node's; a mint naming another provider is refused 400. An embedder
+//! builds the pool from its own settings with [`JoinedPool`] and [`JoinedPool::validate`].
 //!
 //! # API
 //!
@@ -119,13 +217,13 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; 422 for a start-contract refusal (`wall-time-not-positive`, `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`) |
+//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none). A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` only to a server that has it. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools and static host files can book disk: elastic and joined pools have no `disk_bytes` key, so a request for disk there is refused `no-fit` and never waits |
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms, host_reserved?}`, where `host_reserved: true` says the host the lease holds is set aside for a waiting whole-node request (the renewal is not refused for it; the field is left out when false); 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
-//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape, capabilities, labels, lease?, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (no lease, runs still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when a reservation draining a busy host is given up) are those of a registered host |
+//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape {cpu_millis, memory_bytes, gpus, gpu_class?, disk_bytes?}, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, lease?, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (no lease, runs still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when a reservation draining a busy host is given up) are those of a registered host |
 //! | `GET /healthz` | 200 `ok`, no token; 503 once the tick loop has stopped |
-//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines, orphans, next_launch}], warnings}`; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
+//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings}`; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
 //! | `GET /status` | 200 the same data as a page; same rules |
 //!
 //! An unknown route is a 404, a known route with another method a 405, a body that is
@@ -244,9 +342,9 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases/{id}/runs` | body: `image`, `args?`, `limits {cpu_millis, memory_bytes, pids?, wall_ms?}`, `gpu_indices?`, `mounts?`, `isolation?`, `labels?`. 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `not-ready` (a whole-node lease whose agent has not reported `exclusive_ready`), `no-capacity`, `host-not-registered` (a lease on a static host); 422 `limits-exceed-shape`, `invalid-image`, `image-digest-required` (the image has no `@sha256:<64 lower case hex>` digest; `name:tag@sha256:...` is accepted), `invalid-mount`, `invalid-job`, `wall-time-not-positive`, `host-jobs-not-allowed`; 400 for a body that is not this |
+//! | `POST /v1/leases/{id}/runs` | body: `image`, `args?`, `limits {cpu_millis, memory_bytes, disk_bytes?, pids?, wall_ms?}` (`disk_bytes`: the most scratch disk the run may use, above zero and below 2^46), `gpu_indices?`, `mounts?`, `files?` (`[{name, contents}]`: secret text files the agent writes before the container starts and mounts read-only at `/run/js-files/<name>`, mode 0444; at most 8, names `[A-Za-z0-9._-]` and unique, 16 KiB each and 64 KiB in all, no NUL; contained runs only; the list, a run's entry and the logs never show the contents), `isolation?`, `labels?`, `profile?` (a string of 1 to 128 bytes of `0-9`, `a-z`, `.`, `_` and `-`, the first a digit or a letter: the name of the profile a clean run's cost curve is learned under, the client's own key for the work the run does). 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `not-ready` (a whole-node lease whose agent has not reported `exclusive_ready`), `no-capacity`, `host-not-registered` (a lease on a static host), `files-unsupported` (the body has `files` and the host's agent did not report the `run-files` capability, so it would ignore them), `disk-unsupported` (the body has `limits.disk_bytes` and the host's agent did not report the `scratch-quota` capability, so it would run the job unbounded); 422 `limits-exceed-shape`, `invalid-image`, `image-digest-required` (the image has no `@sha256:<64 lower case hex>` digest; `name:tag@sha256:...` is accepted), `invalid-mount`, `invalid-job`, `invalid-profile` (a `profile` that is not that grammar), `wall-time-not-positive`, `host-jobs-not-allowed`; 400 `invalid-file` (a file is badly named, repeated, too large or holds a NUL, or there are too many) and 400 for a body that is not this |
 //! | `GET /v1/leases/{id}/runs` | 200 `{runs: [{run_id, state, outcome?, exit_code?, detail?}]}`, oldest first; `state` is `queued`, `starting`, `running`, `exited` (the container has exited and its result is held, a stop asked for or not), `stopping`, `ended` or `never-started` |
-//! | `GET /v1/leases/{id}/runs/{run_id}` | 200 one entry of the list; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
+//! | `GET /v1/leases/{id}/runs/{run_id}` | 200 one entry of the list, with `log_tail {stdout, stderr, truncated}` when the host read the end of the job's output (a contained run that exited; at most 8 KiB of each stream; the list leaves it out); the text is the job's own, returned as written to whoever can read the run, so a task must not print secrets; it is untrusted bytes (it may hold ANSI escapes, U+202E or NUL), so a consumer that prints it to a terminal must strip control characters; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
 //! | `DELETE /v1/leases/{id}/runs/{run_id}` | 202 `{run_id, state}`; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
 //!
 //! - **Delivery.** A run is carried to the host on its next heartbeat reply as a start, and
@@ -358,6 +456,40 @@
 //! written (the failure is logged and counted) a lease granted meanwhile survives a
 //! restart without its binding until a later tick writes it.
 //!
+//! # Usage
+//!
+//! With agents on (and no `--usage-off`) a heartbeat may carry the node's load. After the
+//! registry accepted the beat, the server checks the load, turns it into plain values and
+//! gives it to a [`UsageSink`]; the sink owns the arithmetic and the storage. A load that
+//! is bad costs nothing but its own data: the beat's results, held list and taint are
+//! handled as ever and the reply is unchanged (the load is counted in
+//! [`Running::usage_counters`]). A beat the registry refuses (unknown host, stale epoch,
+//! wrong session) records nothing. Runs that ended cleanly (an `ACCEPTED` result with the
+//! outcome `succeeded` or `failed`) are handed to the sink with their series once the
+//! host has sent two more beats, so the lease's last partial minute is not lost, if a
+//! [`KeySource`] names the work they did; by default that is the `profile` name the client
+//! supplied when it queued the run, so a run queued without one is not learned from and
+//! `runs_without_key` counts it. The seam types and
+//! [`NoUsage`] are public so that a test or an embedding program can supply its own
+//! ([`Config::with_usage_sink`], [`Config::with_key_source`]). Without a sink of its own
+//! the server records into the SQLite file `--usage-db` names (beside the lease file by
+//! default): node minutes are written by the flush, and the profiles learned from clean
+//! runs are kept under `--profile-store-bytes`; a file that cannot be opened refuses the
+//! start. `--usage-off` leaves the usage side out altogether.
+//!
+//! Every tick acts by the wall clock of the server: the sink is flushed every five
+//! minutes and once more at shutdown, and pruned at the first tick and once a day. A
+//! flush logs one `node minute` line for each node minute it closed and a warning for
+//! each node and minute that had readings dropped.
+//!
+//! | request | answers |
+//! |---|---|
+//! | `GET /v1/usage/nodes/{id}?from=<minute>&to=<minute>` | 200 `{host, from, to, rows: [{minute, cpu_millis, ws_bytes, leases}], next}`; minutes are wall minutes since the Unix epoch, default the last 60 minutes up to now, at most 1,440 rows, and `next` is the minute to ask from for the rest (else `null`); a node with no rows is 200 with none, so an unknown node and a quiet one look alike; 400 for an id that is not exactly an id (capitals, escapes, slashes, dot-only segments, over 63 bytes), a query that is not `from` and `to` once each in digits, or `to` before `from`; 503 `usage-unavailable` |
+//! | `GET /v1/usage/keys/{key}` | 200 `{key, runs, curve, last_used_day, stale}`, `curve` being `null` until there are enough runs, else `[{minute, cores_milli, ws_bytes}]` (`cores_milli` is `null` when the fit did not learn cores: too few runs outside node pressure, a memory-only curve); 404 `unknown-key`; 400 for a key that is not 1 to 128 characters of `[0-9a-z._-]` starting with a letter or digit; 503 `usage-unavailable` |
+//!
+//! Both are behind the client token (a join token is a 401), exist only when usage is on,
+//! and never echo the request in an answer or a log line.
+//!
 //! # Ticks
 //!
 //! Only a tick expires a lease, retries a stop or resolves a pending start. The server
@@ -376,6 +508,7 @@ mod agent_pool;
 mod agent_state;
 mod agent_tokens;
 mod agents;
+mod alerts;
 mod api;
 pub mod bootstrap;
 mod capacity;
@@ -383,6 +516,7 @@ mod checks;
 mod config;
 mod error;
 mod file;
+mod file_checks;
 mod flags;
 mod hosts;
 mod io_timeout;
@@ -395,11 +529,18 @@ pub mod network;
 mod pool;
 mod rate;
 mod run_api;
+mod scaler;
 mod sched;
 mod server;
 mod status;
 mod ticker;
 mod tls;
+mod usage;
+mod usage_api;
+mod usage_hub;
+mod usage_js;
+mod usage_map;
+mod usage_setup;
 mod util;
 mod wire;
 
@@ -420,15 +561,25 @@ pub use config::{
     parse_duration,
 };
 pub use error::StartupError;
-pub use file::{ElasticPlan, Launch, NetworkPlan};
+pub use file::{ElasticPlan, JoinedPool, Launch, NetworkPlan};
 pub use kinds::{
     BuildCtx, Built, Ctor, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, SecretFiles,
 };
 #[doc(hidden)]
 pub use layered::LayeredProvider;
 pub use pool::LaunchInputs;
+pub use scaler::{
+    Call, Effects, KEY_VALID_FOR, Launcher, REGISTRY_FLOOR, REGISTRY_QUIET, RETRY_AFTER,
+    RecordsFile, Scaler, UnremovedFile,
+};
 pub use server::{Running, start, start_with_checks};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
+pub use usage::{
+    BadKey, ClockIn, DropReason, Fit, HostLimits, KeyProfile, KeySource, LoadIn, MAX_KEY_LEN,
+    MinuteIn, NoKeys, NoUsage, NodeRow, Observation, Observed, ProfileCurves, ProfileKey, RunEnd,
+    RunMinute, RunSeries, SinkCounters, UsageFault, UsageSink,
+};
+pub use usage_hub::UsageCounters;
 
 use error::Failure;
 

@@ -73,6 +73,13 @@ pub struct AcquireRequest {
     pub name: HostName,
     /// What to launch.
     pub offer: Offer,
+    /// The longest the cloud itself may keep the machine, if the pool has a bound: the
+    /// scheduler's `max_age` plus its ceiling on a lease's wall time plus a margin. A
+    /// provider whose cloud can enforce a lifetime (a run-duration limit, a shutdown timer)
+    /// sets it at launch, so billing stops even if the scheduler is dead; one whose cloud
+    /// has none (Lambda: `shutdown -h` leaves billing on) ignores it. `None` for a pool
+    /// with no bound. Nothing in this crate reads it.
+    pub lifetime: Option<std::time::Duration>,
     /// More marks for the machine: key and value.
     pub labels: Vec<(String, String)>,
     /// What the machine boots with, delivered as it is.
@@ -129,6 +136,22 @@ pub trait ElasticProvider: Send + Sync {
     /// answer is [`Released::Refused`] with [`crate::Claim::Foreign`], a definite answer that is
     /// never [`Released::Gone`], and nothing is sent to the provider.
     fn release(&self, id: &HostRef) -> Released;
+
+    /// The acquire ids with a call that got no answer and may have landed: while an id is
+    /// here, [`ElasticProvider::acquire`] with it does not launch again but answers
+    /// [`Acquired::Deferred`], and a retry settles the call once a list shows the machine
+    /// or the provider's hold has run out. The scheduler keeps a launch it planned for such
+    /// an id instead of forgetting it. A provider that holds no such call has none.
+    fn unresolved(&self) -> Vec<AcquireId> {
+        Vec::new()
+    }
+
+    /// Whether a read of the machine `id` by id says the provider no longer has it. Only a
+    /// definite answer counts: a failed read, a machine in any state (terminated
+    /// included) and a provider that cannot read by id are all `false`.
+    fn is_gone(&self, _id: &HostRef) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -138,6 +161,38 @@ mod tests {
     use super::*;
     use crate::ids::SchedulerId;
     use crate::offer::{GpuClass, PriceUnit};
+
+    fn offer() -> Offer {
+        Offer {
+            id: "type".to_owned(),
+            zone: None,
+            cpu_millis: 1,
+            memory_bytes: 1,
+            disk_bytes: 1,
+            gpus: 1,
+            gpu_class: Some(GpuClass::parse("x").unwrap()),
+            os: "linux".to_owned(),
+            arch: "x86_64".to_owned(),
+            exec: ExecMode::Container,
+            price_cents_per_hour: None,
+            price_unit: PriceUnit::UsCents,
+            available: true,
+        }
+    }
+
+    fn request() -> AcquireRequest {
+        let scheduler = SchedulerId::new("s").unwrap();
+        let acquire = AcquireId::new("a").unwrap();
+        AcquireRequest {
+            name: HostName::derive(&scheduler, &acquire),
+            acquire,
+            pool: "gpu".to_owned(),
+            lifetime: None,
+            offer: offer(),
+            labels: Vec::new(),
+            payload: BootPayload::new("join-token-MARKER".to_owned()),
+        }
+    }
 
     /// Asserts that an error reads as the provider's words and compares by them, and
     /// that a request prints its payload as `***` and not as text.
@@ -150,33 +205,57 @@ mod tests {
             ProviderError::new(String::from("the list is not complete"))
         );
 
-        let scheduler = SchedulerId::new("s").unwrap();
-        let acquire = AcquireId::new("a").unwrap();
-        let request = AcquireRequest {
-            name: HostName::derive(&scheduler, &acquire),
-            acquire,
-            pool: "gpu".to_owned(),
-            offer: Offer {
-                id: "type".to_owned(),
-                zone: None,
-                cpu_millis: 1,
-                memory_bytes: 1,
-                disk_bytes: 1,
-                gpus: 1,
-                gpu_class: Some(GpuClass::parse("x").unwrap()),
-                os: "linux".to_owned(),
-                arch: "x86_64".to_owned(),
-                exec: ExecMode::Container,
-                price_cents_per_hour: None,
-                price_unit: PriceUnit::UsCents,
-                available: true,
-            },
-            labels: Vec::new(),
-            payload: BootPayload::new("join-token-MARKER".to_owned()),
-        };
+        let request = request();
         let shown = format!("{request:?}");
         assert!(!shown.contains("MARKER"), "{shown}");
         assert!(shown.contains("***"), "{shown}");
         assert!(shown.contains("gpu"));
+    }
+
+    /// A provider that implements only the required calls.
+    struct Bare;
+
+    impl ElasticProvider for Bare {
+        fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {
+            Vec::new()
+        }
+
+        fn payload_limit(&self) -> usize {
+            0
+        }
+
+        fn acquire(&self, _request: &AcquireRequest) -> Acquired {
+            Acquired::Unknown
+        }
+
+        fn list(&self) -> Result<Vec<Held>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        fn release(&self, _id: &HostRef) -> Released {
+            Released::Unknown
+        }
+    }
+
+    /// Asserts the defaults of the two optional calls: a provider that does not say it
+    /// holds an unresolved call has none, and one that cannot read by id never says a
+    /// machine is gone. It catches a default that reads "no answer" as "gone", which would
+    /// have the scheduler settle a machine that may exist.
+    #[test]
+    fn a_provider_that_says_nothing_has_no_unresolved_call_and_finds_nothing_gone() {
+        let id = HostRef("i-1".to_owned());
+        assert!(Bare.unresolved().is_empty());
+        assert!(!Bare.is_gone(&id));
+        // The required calls of the stand-in, so that it is whole.
+        assert_eq!(Bare.catalog(), Ok(Vec::new()));
+        assert!(Bare.host_prep(&offer()).is_empty());
+        assert_eq!(Bare.payload_limit(), 0);
+        assert_eq!(Bare.list(), Ok(Vec::new()));
+        assert_eq!(Bare.release(&id), Released::Unknown);
+        assert_eq!(Bare.acquire(&request()), Acquired::Unknown);
     }
 }

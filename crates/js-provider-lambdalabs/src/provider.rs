@@ -636,6 +636,10 @@ impl ElasticProvider for LambdaProvider {
         PAYLOAD_LIMIT
     }
 
+    // `request.lifetime` is not read: Lambda has no run-duration limit, and `shutdown -h` on
+    // the instance leaves billing on. So on Lambda nothing bounds the cost if the scheduler
+    // is dead; only `max_age` with a live scheduler does. The server-dead bound needs a
+    // provider whose cloud enforces the lifetime.
     fn acquire(&self, request: &AcquireRequest) -> Acquired {
         if !self.config.enabled {
             return Self::refuse(RefusalCode::Denied, Reason::Disabled);
@@ -705,6 +709,22 @@ impl ElasticProvider for LambdaProvider {
             Err(_) => Released::Refused(Claim::Foreign),
         }
     }
+
+    fn unresolved(&self) -> Vec<AcquireId> {
+        let gate = self.launching();
+        let ids = gate.unknown.keys();
+        ids.filter_map(|id| AcquireId::new(id).ok()).collect()
+    }
+
+    fn is_gone(&self, id: &HostRef) -> bool {
+        let Ok(id) = InstanceId::new(id.as_str()) else {
+            return false;
+        };
+        match self.api.get_instance(&id) {
+            Ok(_) => false,
+            Err(error) => self.trust_absent(&error),
+        }
+    }
 }
 
 impl LambdaProvider {
@@ -746,7 +766,7 @@ fn provider_error(error: ApiError) -> ProviderError {
 }
 
 /// The scheduler's view of an instance.
-fn held_of(instance: &Instance) -> Held {
+pub(crate) fn held_of(instance: &Instance) -> Held {
     Held {
         id: instance.id.host_ref(),
         acquire: Owner::acquire_of(instance).unwrap_or_default().to_owned(),

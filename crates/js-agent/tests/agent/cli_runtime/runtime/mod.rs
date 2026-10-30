@@ -3,6 +3,7 @@
 //! the cleanup of a failed create, the mount read-back, `poll`, `stop` and `remove`, the
 //! listing, and the engine's environment, scratch and clock.
 
+mod cgroup;
 mod cleanup;
 mod create;
 mod engine;
@@ -10,6 +11,7 @@ mod list;
 mod mounts;
 mod poll;
 mod seen;
+mod userns;
 
 use js_agent::cli_runtime::CliRuntime;
 use js_agent::lifecycle::{ContainerId, ContainerRuntime};

@@ -277,6 +277,12 @@ reservation). One reservation per pool: a second blocked head waits until the fi
 signal goes stale stays and uses the fallback figures. Bound: the head starts within the longest remaining lease at reservation, plus `2W`, plus one
 round. Work ahead of the head is never held back.
 
+## Whole-worker actions
+
+An action with `whole_worker` set (`Request::whole_worker`) is placed only on a worker with no lease, and books every CPU, byte of memory, GPU and VM slot of it: its `Start`, the worker's booking and its ledger cost are the worker's capacity, and the request's own CPU and memory are not compared with the worker's, so it fits a worker of any size and is servable whenever any eligible worker (driver, platform, devices, not cordoned) exists. While it waits it holds one worker, as a whole-machine lease does when no whole-node pool is configured: the one with the fewest leases (then the least booked, then first by name) that could run it, kept while it still could; requests after it in queue order are not placed there. It is not scored and takes no key floor. A kill at its own memory limit fails the operation with `OutOfMemory`, as a kill at the cap does, since no node has more. With the flag unset nothing above applies. The flag lives on the in-process `Request`; an embedder whose row codec stores requests must carry it, and rows written without it decode as `false`.
+
+Servable means eligible, not placeable now: the request is servable whenever any eligible worker exists, but placement still goes through the load predicate, which can refuse a worker that holds no lease and shows measured load (its own processes, say). The request then holds that worker, as above, until the load falls or another worker is free. The predicate is not changed for it, and is not charged the worker's capacity (it would refuse every worker). The hold prefers the worker with the fewest leases, the same heuristic as a whole-machine lease, so it holds a worker and is not guaranteed the one that empties soonest.
+
 ## Lying or stuck node, restart
 - **Plausibility.** Lease CPU arrives only when a result does, so a long lease would lag any comparison (its hours of CPU would land in one short
   span). The check therefore uses only leases that were admitted and ended inside the span, and compares their summed `cpu_usage_us` with the growth of

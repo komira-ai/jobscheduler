@@ -75,6 +75,7 @@ fn job(run: &str) -> JobSpec {
         limits: Limits {
             cpu_millis: 1000,
             memory_bytes: 1 << 30,
+            disk_bytes: None,
             pids: None,
             wall_ms: 60_000,
         },
@@ -83,6 +84,7 @@ fn job(run: &str) -> JobSpec {
         isolation: Isolation::Contained,
         labels: BTreeMap::new(),
         heartbeat_seq: 0,
+        files: Vec::new(),
         valid_for_ms: 0,
         bundle: None,
         native: None,
@@ -199,11 +201,13 @@ impl Agent {
             capacity: Capacity {
                 cpu_millis: 4000,
                 memory_bytes: 8 << 30,
+                disk_bytes: 0,
                 gpus: Default::default(),
             },
             allow_host_jobs: false,
             mounts: MountRoots::new(&[]).unwrap(),
             scratch: ScratchRoot::open(dir.path()).unwrap(),
+            files: None,
             state: StateRoot::open(state.path()).unwrap(),
             stop_grace: Duration::from_secs(1),
         };

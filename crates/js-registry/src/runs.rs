@@ -16,9 +16,11 @@ use js_agent_wire::{
     Ack, Command, Heartbeat, HeartbeatReply, HeldRun, HeldState, Isolation, JobSpec, ResultAck,
     RunResult, ValidationError, WireShape, limits,
 };
+use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
 use js_pool_static::HostBook;
 use js_provider::Observed;
 use js_types::{HostId, LeaseId, Resources};
+use js_usage::ProfileKey;
 
 /// The most runs a host may hold live at once: queued, starting, running or exited but
 /// not yet gone from its held list. It keeps the commands of one reply, a start or a stop
@@ -89,6 +91,10 @@ pub struct RunView {
     pub state: RunState,
     /// The result the host reported and the server accepted, once there is one.
     pub result: Option<RunResult>,
+    /// The profile name the lease holder supplied for the work the run does, when it did.
+    pub profile: Option<ProfileKey>,
+    /// The labels the run was queued with.
+    pub labels: BTreeMap<String, String>,
 }
 
 /// Why a run was not queued, or not stopped. Each has a constant code
@@ -131,6 +137,14 @@ pub enum RunRefusal {
     /// The run id is already in use. A caller that mints ids never sees it.
     #[error("the run id is in use")]
     RunExists,
+    /// The job carries run files and the host did not report the `run-files` capability:
+    /// an agent without it would ignore the files and run the job without its secrets.
+    #[error("the host does not deliver run files")]
+    FilesUnsupported,
+    /// The job sets `limits.disk_bytes` and the host did not report the `scratch-quota`
+    /// capability: an agent without it would run the job with no disk bound.
+    #[error("the host does not bound a run's disk")]
+    DiskUnsupported,
     /// The lease has no such run.
     #[error("the lease has no such run")]
     UnknownRun,
@@ -152,9 +166,28 @@ impl RunRefusal {
             Self::HostTainted => refusal::HOST_TAINTED,
             Self::NotReady => refusal::NOT_READY,
             Self::RunExists => "run-exists",
+            Self::FilesUnsupported => "files-unsupported",
+            Self::DiskUnsupported => "disk-unsupported",
             Self::UnknownRun => "unknown-run",
         }
     }
+}
+
+/// The quota in bytes a host enforces on a run that sets no `disk_bytes`: its
+/// `scratch-default-gib` whole GiB, when it reports `scratch-quota` as `project`. `None`
+/// when it does not, or when the default is absent, not a whole number, zero, or too
+/// large to count in bytes (above the wire's `MAX_DISK_BYTES`): a host that says it bounds disk and not by how much is
+/// treated as one that does not, so the server never books a guess.
+pub(crate) fn quota_default(capabilities: &BTreeMap<String, String>) -> Option<u64> {
+    let quota = capabilities
+        .get(SCRATCH_QUOTA)
+        .is_some_and(|value| value == SCRATCH_QUOTA_PROJECT);
+    let gib = capabilities
+        .get(SCRATCH_DEFAULT_GIB)
+        .and_then(|value| value.parse::<u64>().ok());
+    let bytes = gib.and_then(|gib| gib.checked_mul(1 << 30));
+    let counts = |bytes: &u64| (1..=limits::MAX_DISK_BYTES).contains(bytes);
+    bytes.filter(|bytes| [quota, counts(bytes)].into_iter().all(|ok| ok))
 }
 
 /// Checks a job against the wire rules and the shape a lease books, before any state is
@@ -205,10 +238,16 @@ struct Run {
     host: HostId,
     lease: LeaseId,
     spec: JobSpec,
+    profile: Option<ProfileKey>,
     life: Life,
     stop: Stop,
     result: Option<RunResult>,
     order: u64,
+    /// The bytes of scratch disk the run was booked at `admit`: its `limits.disk_bytes`, or
+    /// the host's default quota at that time when it set none, or zero when the pool books
+    /// no disk. Fixed for the life of the run, so a later hello that changes the host's
+    /// default does not change what a live run holds.
+    disk: u64,
     /// The instant (milliseconds on the registry's clock) the run's bound ends: the lease
     /// end it was queued with. `None` for a run queued without a bound.
     ends: Option<u64>,
@@ -223,6 +262,8 @@ impl Run {
     fn ask_stop(&mut self) {
         if let (Life::Queued | Life::Held(_), Stop::No) = (self.life, self.stop) {
             self.stop = Stop::Wanted;
+            // A stopped run's start is never sent, so its files are not kept.
+            self.spec.files = Vec::new();
         }
     }
 
@@ -269,6 +310,8 @@ impl Run {
             host: self.host.clone(),
             state: self.state(),
             result: self.result.clone(),
+            profile: self.profile.clone(),
+            labels: self.spec.labels.clone(),
         }
     }
 
@@ -345,16 +388,20 @@ impl Runs {
     /// Queues `spec` as a run of `lease` on `host`, which has taken `beats` heartbeats in
     /// its session, at `now`. The caller has vetted the job and checked the host and the
     /// lease; this checks what is left of the lease's budget: the live runs of the host,
-    /// their limits and their GPU indices together with this run's must fit `shape`.
+    /// their limits, their booked disk and their GPU indices together with this run's must
+    /// fit `shape`. `quota_default` is the quota the host enforces on a run that sets no
+    /// `disk_bytes`, when it reported one.
     ///
     /// A `spec.valid_for_ms` above zero is the time the lease has left: the run ends its
-    /// bound that long after `now`.
+    /// bound that long after `now`. `profile` is the name the lease holder supplied for the
+    /// run's work; the registry keeps it beside the run and never sends it to the host.
     pub(crate) fn admit(
         &mut self,
         host: &HostId,
         lease: &LeaseId,
-        mut spec: JobSpec,
+        (mut spec, profile): (JobSpec, Option<ProfileKey>),
         shape: &Resources,
+        quota_default: Option<u64>,
         (beats, now): (u64, u64),
     ) -> Result<RunView, RunRefusal> {
         if self.map.contains_key(&spec.run_id) {
@@ -368,6 +415,16 @@ impl Runs {
         let memory = live.iter().fold(limits.memory_bytes, |sum, run| {
             sum.saturating_add(run.spec.limits.memory_bytes)
         });
+        // A pool that books no disk (shape disk zero) books none for any run; otherwise a
+        // run books what it asks for, or the host's default quota when it asks for none
+        // (a host with no quota has no default, and books none).
+        let disk = match shape.disk_bytes() {
+            0 => 0,
+            _ => limits.disk_bytes.or(quota_default).unwrap_or(0),
+        };
+        let disk_sum = live
+            .iter()
+            .fold(disk, |sum, run| sum.saturating_add(run.disk));
         let taken = live.iter().flat_map(|run| run.spec.gpu_indices.iter());
         let taken = taken.collect::<BTreeSet<_>>();
         let clash = spec.gpu_indices.iter().any(|index| taken.contains(index));
@@ -375,6 +432,7 @@ impl Runs {
             live.len() < MAX_LIVE_RUNS,
             cpu <= shape.cpu_millis(),
             memory <= shape.memory_bytes(),
+            disk_sum <= shape.disk_bytes(),
             !clash,
         ];
         if !room.into_iter().all(|ok| ok) {
@@ -387,15 +445,23 @@ impl Runs {
             host: host.clone(),
             lease: *lease,
             spec,
+            profile,
             life: Life::Queued,
             stop: Stop::No,
             result: None,
             order: self.next_order,
+            disk,
         };
         self.next_order = self.next_order.saturating_add(1);
         let view = run.view();
         self.map.insert(run.spec.run_id.clone(), run);
         Ok(view)
+    }
+
+    /// The profile name the lease holder supplied for run `run_id`, when the run is known
+    /// and was queued with one.
+    pub(crate) fn profile_of(&self, run_id: &str) -> Option<ProfileKey> {
+        self.map.get(run_id).and_then(|run| run.profile.clone())
     }
 
     /// Asks every live run of `lease` to stop: the lease ended or is being released.
@@ -435,6 +501,12 @@ impl Runs {
             let state = listed.get(run.spec.run_id.as_str()).copied();
             let abandoned = [gap, run.stop == Stop::Sent].into_iter().any(|set| set);
             run.life = next_life(run.life, state, abandoned);
+            // Once the host lists the run (or the run is given up) no start will be
+            // sent again, so the secret files are not kept: they are held only until
+            // the agent has taken the start.
+            if run.life != Life::Queued {
+                run.spec.files = Vec::new();
+            }
         }
     }
 
@@ -577,6 +649,26 @@ mod tests {
     use super::*;
     use js_agent_wire::{Limits, Phase};
 
+    /// Asserts the bytes of a default: the largest whole-GiB default within the wire's
+    /// `MAX_DISK_BYTES` counts and the next GiB does not, and the quota capability is
+    /// needed. It catches a default accepted above the wire maximum, which a sum over
+    /// 2^18 runs could overflow.
+    #[test]
+    fn the_default_is_bounded_by_the_wire_maximum() {
+        let caps = |quota: &str, gib: &str| {
+            BTreeMap::from([
+                (SCRATCH_QUOTA.to_owned(), quota.to_owned()),
+                (SCRATCH_DEFAULT_GIB.to_owned(), gib.to_owned()),
+            ])
+        };
+        let top = limits::MAX_DISK_BYTES >> 30;
+        assert_eq!(top, 65_535);
+        assert_eq!(quota_default(&caps("project", "65535")), Some(top << 30));
+        assert_eq!(quota_default(&caps("project", "65536")), None);
+        assert_eq!(quota_default(&caps("project", "1")), Some(1 << 30));
+        assert_eq!(quota_default(&caps("no", "1")), None);
+    }
+
     fn job() -> JobSpec {
         JobSpec {
             run_id: "r1".into(),
@@ -588,6 +680,7 @@ mod tests {
             limits: Limits {
                 cpu_millis: 1000,
                 memory_bytes: 1 << 20,
+                disk_bytes: None,
                 pids: None,
                 wall_ms: 60_000,
             },
@@ -596,6 +689,7 @@ mod tests {
             isolation: Isolation::Contained,
             labels: Default::default(),
             heartbeat_seq: 0,
+            files: Vec::new(),
             valid_for_ms: 0,
             bundle: None,
             native: None,
@@ -627,8 +721,15 @@ mod tests {
         let book = HostBook::new();
         let shape = Resources::new(4000, 8 << 30, 0, None).unwrap();
         let mut runs = Runs::default();
-        runs.admit(&host, &LeaseId::new(1, 1), job(), &shape, (0, 0))
-            .unwrap();
+        runs.admit(
+            &host,
+            &LeaseId::new(1, 1),
+            (job(), None),
+            &shape,
+            None,
+            (0, 0),
+        )
+        .unwrap();
         let held = |unready| Standing {
             gap: false,
             tainted: false,
@@ -638,5 +739,93 @@ mod tests {
         assert!(reply.commands.is_empty());
         let reply = runs.answer(&host, &beat(), held(false), (&book, 0));
         assert!(matches!(reply.commands[..], [Command::Start(_)]));
+    }
+
+    /// Asserts that a run's files are kept while its start can still be resent and dropped
+    /// from the stored run once the host lists it: every beat before the listing carries
+    /// the start with the files, the beat that lists it does not resend them, and the
+    /// stored run holds none afterwards. It catches secrets kept in the registry's memory
+    /// for the whole life of the run.
+    #[test]
+    fn files_are_dropped_once_the_host_lists_the_run() {
+        use js_agent_wire::{HeldRun, HeldState, RunFile};
+        let host = HostId::new("a").unwrap();
+        let (book, shape) = (
+            HostBook::new(),
+            Resources::new(4000, 8 << 30, 0, None).unwrap(),
+        );
+        let mut spec = job();
+        spec.files = vec![RunFile {
+            name: "tok".into(),
+            contents: "x".into(),
+        }];
+        let mut runs = Runs::default();
+        runs.admit(
+            &host,
+            &LeaseId::new(1, 1),
+            (spec.clone(), None),
+            &shape,
+            None,
+            (0, 0),
+        )
+        .unwrap();
+        let open = Standing {
+            gap: false,
+            tainted: false,
+            unready: false,
+        };
+        for _ in 0..2 {
+            let reply = runs.answer(&host, &beat(), open, (&book, 0));
+            // The whole command is compared, so no arm exists for a reply that is not
+            // the start.
+            assert_eq!(reply.commands, vec![Command::Start(Box::new(spec.clone()))]);
+        }
+        assert_eq!(runs.map["r1"].spec.files, spec.files);
+        let mut listed = beat();
+        listed.held = vec![HeldRun {
+            run_id: "r1".into(),
+            state: HeldState::Starting,
+        }];
+        let reply = runs.answer(&host, &listed, open, (&book, 0));
+        assert!(reply.commands.is_empty());
+        assert!(runs.map["r1"].spec.files.is_empty());
+    }
+
+    /// Asserts that a queued run that is stopped before the host lists it drops its files
+    /// at once and its start is never sent. It catches secrets kept in memory for a run
+    /// that can no longer start.
+    #[test]
+    fn a_stopped_queued_run_drops_its_files() {
+        use js_agent_wire::RunFile;
+        let host = HostId::new("a").unwrap();
+        let (book, shape) = (
+            HostBook::new(),
+            Resources::new(4000, 8 << 30, 0, None).unwrap(),
+        );
+        let mut spec = job();
+        spec.files = vec![RunFile {
+            name: "tok".into(),
+            contents: "x".into(),
+        }];
+        let lease = LeaseId::new(1, 1);
+        let mut runs = Runs::default();
+        runs.admit(&host, &lease, (spec, None), &shape, None, (0, 0))
+            .unwrap();
+        runs.stop_run(&lease, "r1").unwrap();
+        assert!(runs.map["r1"].spec.files.is_empty());
+        let open = Standing {
+            gap: false,
+            tainted: false,
+            unready: false,
+        };
+        let reply = runs.answer(&host, &beat(), open, (&book, 0));
+        assert!(
+            reply
+                .commands
+                .iter()
+                .all(|c| !matches!(c, Command::Start(_))),
+            "{:?}",
+            reply.commands
+        );
     }
 }

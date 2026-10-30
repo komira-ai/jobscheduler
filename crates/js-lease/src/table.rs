@@ -5,9 +5,10 @@ use js_provider::{Provider, StartSpec};
 use js_types::{LeaseId, Request};
 
 use crate::book::{self, Book, Seen, Step};
-use crate::clock::{Clock, Timestamp};
+use crate::clock::{Clock, Monotonic, Timestamp};
 use crate::error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError};
 use crate::state::LeaseState;
+use crate::timings::Timings;
 use crate::types::{
     Booking, Boot, Lease, LeaseInfo, ReleaseOutcome, ReservationRecord, Settings, TickReport,
 };
@@ -52,7 +53,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
             let now = table.clock.now();
             table.book.settle_observe(&id, seen, now);
         }
-        table.save()?;
+        table.save("open")?;
         Ok(table)
     }
 
@@ -75,16 +76,36 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         ttl: Option<Duration>,
     ) -> Result<Lease, AcquireError> {
         let ttl = self.book.grant(ttl).ok_or(AcquireError::TtlNotPositive)?;
+        if let Some(ceiling) = self
+            .book
+            .max_wall()
+            .filter(|ceiling| request.max_wall > *ceiling)
+        {
+            return Err(AcquireError::WallAboveCeiling { ceiling });
+        }
         let now = self.clock.now();
         let id = self.book.next_id().ok_or(AcquireError::IdsExhausted)?;
         let known = self.provider.classes();
         let spec = StartSpec::new(id, request, &known).map_err(AcquireError::Refused)?;
         let record = self.book.insert_pending(&spec, now, ttl);
-        self.save()?;
+        self.save("acquire")?;
         let ack = self.provider.start(spec);
         let settled = self.book.settle_start(record, ack);
-        let _ = self.save();
+        let _ = self.save("acquire-settled");
         settled
+    }
+
+    /// Measures each save of the lease file with `clock` instead of the system's
+    /// monotonic clock, into a new record (see [`Self::timings`]). Tests use it to say
+    /// how long a save took.
+    pub fn watch_saves(&mut self, clock: impl Monotonic + 'static) {
+        self.book.watch_saves(clock);
+    }
+
+    /// The record of how long the table's steps took, shared with the table: a caller
+    /// keeps the handle and reads [`Timings::report`] whenever it wants.
+    pub fn timings(&self) -> Timings {
+        self.book.timings()
     }
 
     /// Extends a held lease and returns its new expiry: `now + ttl` clamped as in
@@ -94,7 +115,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     pub fn renew(&mut self, id: &LeaseId, ttl: Option<Duration>) -> Result<Timestamp, RenewError> {
         let now = self.clock.now();
         let expires_at = self.book.renew(id, ttl, now)?;
-        self.save()?;
+        self.save("renew")?;
         Ok(expires_at)
     }
 
@@ -105,9 +126,9 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     pub fn release(&mut self, id: &LeaseId) -> Result<ReleaseOutcome, ReleaseError> {
         let marked = self.book.mark_releasing(id);
         marked.ok_or(ReleaseError::Unknown(*id))?;
-        self.save()?;
+        self.save("release")?;
         let freed = self.stop(id);
-        let _ = self.save();
+        let _ = self.save("release-settled");
         match freed {
             true => Ok(ReleaseOutcome::Freed),
             false => Ok(ReleaseOutcome::Releasing),
@@ -154,7 +175,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         report.pending = self.book.count(LeaseState::Pending);
         report.releasing = self.book.count(LeaseState::Releasing);
         if report.changed() | self.book.unsaved() {
-            report.save_error = self.save().err();
+            report.save_error = self.save("tick").err();
         }
         report
     }
@@ -211,8 +232,8 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         self.book.settle_absence(id, &seen)
     }
 
-    fn save(&mut self) -> Result<(), SaveError> {
-        self.book.save()
+    fn save(&mut self, operation: &'static str) -> Result<(), SaveError> {
+        self.book.save(operation)
     }
 }
 

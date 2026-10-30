@@ -15,7 +15,7 @@
 //! | lease | `<term>.<seq>` |
 //! | operation | `op<n>` |
 //! | waiter | `w<n>` |
-//! | resources | `res(cpu=<n> mem=<n> gpus=<n> vms=<n> leases=<n or ->)` |
+//! | resources | `res(cpu=<n> mem=<n> gpus=<n> vms=<n> [disk=<n> ]leases=<n or ->)`; `disk=` is written only above zero |
 //! | outcome | `done(<digest>)` or `failed(<failure>)` |
 //! | control record | `lease(<lease> <op> <worker>)`, `result(<lease> <op> <outcome>)`, `refusal(<op> <s>)` |
 //!
@@ -110,17 +110,67 @@ pub fn worker(worker: &WorkerId) -> String {
     worker.as_str().to_owned()
 }
 
-/// Resources, every axis named.
+/// Resources, every axis named. The disk axis is written, as `disk=<n>` between `vms` and
+/// `leases`, only when it is above zero, so the text of a vector with no disk is what it
+/// was before the axis existed and no golden hash of such a trace moves. The test-only
+/// `parse_resources` reads both.
 #[must_use]
 pub fn resources(r: &Resources) -> String {
+    let disk = match r.disk_bytes {
+        0 => String::new(),
+        bytes => format!("disk={bytes} "),
+    };
     format!(
-        "res(cpu={} mem={} gpus={} vms={} leases={})",
+        "res(cpu={} mem={} gpus={} vms={} {disk}leases={})",
         r.cpu_millis,
         r.memory_bytes,
         r.gpus,
         r.vms,
         r.leases.map_or_else(|| "-".to_owned(), |n| n.to_string())
     )
+}
+
+/// The resources `text` spells, or `None` if it is not [`resources`]' form. The `disk=`
+/// term may be absent, which is how text written before the axis existed reads: as no disk.
+/// Every other axis is required, in order, and nothing may follow the closing bracket.
+#[cfg(test)]
+fn parse_resources(text: &str) -> Option<Resources> {
+    let inner = text.strip_prefix("res(")?.strip_suffix(')')?;
+    let terms: Vec<&str> = inner.split(' ').collect();
+    let value = |index: usize, name: &str| value_of(&terms, index, name);
+    let with_disk = terms.get(4).is_some_and(|term| term.starts_with("disk="));
+    let (disk_bytes, leases_at) = if with_disk {
+        (plain(value(4, "disk")?)?, 5)
+    } else {
+        (0, 4)
+    };
+    let leases = match value(leases_at, "leases")? {
+        "-" => None,
+        count => Some(plain(count)?),
+    };
+    (terms.len() == leases_at + 1).then_some(Resources {
+        cpu_millis: plain(value(0, "cpu")?)?,
+        memory_bytes: plain(value(1, "mem")?)?,
+        gpus: plain(value(2, "gpus")?)?,
+        vms: plain(value(3, "vms")?)?,
+        disk_bytes,
+        leases,
+    })
+}
+
+#[cfg(test)]
+/// The text after `name=` in term `index` of `terms`.
+fn value_of<'a>(terms: &[&'a str], index: usize, name: &str) -> Option<&'a str> {
+    terms.get(index)?.strip_prefix(name)?.strip_prefix('=')
+}
+
+#[cfg(test)]
+/// `text` as a decimal number written the way this file writes one: digits only.
+fn plain(text: &str) -> Option<u64> {
+    text.bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| text.parse().ok())
+        .flatten()
 }
 
 /// A lease kind: `action`, `whole_machine` or `vm`.
@@ -425,6 +475,51 @@ mod tests {
             ),
             "res(cpu=1 mem=2 gpus=3 vms=4 leases=5)"
         );
+    }
+
+    /// Catches: disk dropped from the text (two traces that differ only in booked disk
+    /// would share a hash), a zero-disk vector whose text moved (every golden hash of an
+    /// existing trace would change), a parser that needs `disk=` (old text unreadable), one
+    /// that reads disk as another axis, and one that accepts text it did not write.
+    #[test]
+    fn resources_carry_disk_and_old_text_reads_as_no_disk() {
+        let with_disk = Resources::new(1, 2)
+            .with_gpus(3)
+            .with_vms(4)
+            .with_disk_bytes(7)
+            .with_lease_cap(5);
+        let text = resources(&with_disk);
+        assert_eq!(text, "res(cpu=1 mem=2 gpus=3 vms=4 disk=7 leases=5)");
+        assert_eq!(parse_resources(&text), Some(with_disk));
+        let none = Resources::new(1_000, 2_048);
+        assert_eq!(
+            resources(&none),
+            "res(cpu=1000 mem=2048 gpus=0 vms=0 leases=-)"
+        );
+        assert_eq!(parse_resources(&resources(&none)), Some(none));
+        let old = parse_resources("res(cpu=1 mem=2 gpus=3 vms=4 leases=5)").unwrap();
+        assert_eq!(old.disk_bytes, 0);
+        assert_eq!(
+            old,
+            Resources::new(1, 2)
+                .with_gpus(3)
+                .with_vms(4)
+                .with_lease_cap(5)
+        );
+        for bad in [
+            "",
+            "res(cpu=1 mem=2 gpus=3 vms=4)",
+            "res(cpu=1 mem=2 gpus=3 vms=4 disk=7)",
+            "res(cpu=1 mem=2 gpus=3 vms=4 disk=7 leases=5 extra=1)",
+            "res(cpu=1 mem=2 gpus=3 vms=4 leases=5) ",
+            "res(cpu=1 mem=2 gpus=3 vms=4 disk=-7 leases=5)",
+            "res(cpu=1 mem=2 gpus=3 vms=4 disk=+7 leases=5)",
+            "res(cpu=1 mem=2 gpus=3 vms=4 disk= leases=5)",
+            "res(mem=2 cpu=1 gpus=3 vms=4 leases=5)",
+            "res(cpu=1 mem=2 gpus=3 vms=4 leases=)",
+        ] {
+            assert_eq!(parse_resources(bad), None, "{bad:?}");
+        }
     }
 
     /// Catches: two variants of one enum sharing a spelling (two runs that differ only

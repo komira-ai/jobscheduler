@@ -21,6 +21,9 @@ use crate::error::StartupError;
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
+use crate::usage_hub::Usage;
+use crate::usage_map::limits_of;
+use crate::usage_setup::UsageSetup;
 use crate::util::blocking;
 
 /// What the agent routes and the tick share. Agent handlers take the registry's lock and
@@ -31,6 +34,8 @@ pub(crate) struct Agents {
     pub(crate) tokens: AgentTokens,
     /// The one-time tokens minted for launched instances.
     pub(crate) joins: JoinTokens,
+    /// The one provider the mint route accepts, or `None` for any.
+    pub(crate) mint_provider: Option<String>,
     pub(crate) limiter: HelloLimiter,
     /// The server's clock, which bounds a run by the time its lease has left.
     pub(crate) clock: SharedClock,
@@ -38,11 +43,14 @@ pub(crate) struct Agents {
     runs_minted: AtomicU64,
     store: BindingStore,
     errors: AtomicU64,
+    /// The usage side, unless `--usage-off`. Its lock is a leaf, taken after the registry's
+    /// call has returned.
+    pub(crate) usage: Option<Arc<Usage>>,
 }
 
 /// Where a file of the agent side is kept: beside the lease file at `state_file`, with
 /// `suffix` added to its name.
-fn state_path(state_file: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn state_path(state_file: &Path, suffix: &str) -> PathBuf {
     let mut name = state_file.file_name().unwrap_or_default().to_os_string();
     name.push(suffix);
     state_file.with_file_name(name)
@@ -59,6 +67,7 @@ pub(crate) type Assembled = (Box<dyn CapacitySource>, Option<Arc<Agents>>);
 /// with the bindings the previous run persisted.
 pub(crate) fn assemble(
     hosts: Hosts,
+    usage: UsageSetup,
     clock: &SharedClock,
     state_file: &Path,
 ) -> Result<Assembled, StartupError> {
@@ -71,6 +80,7 @@ pub(crate) fn assemble(
             let AgentSetup {
                 tokens,
                 pool,
+                mint_provider,
                 hello_limit,
                 require_host_credential,
             } = *agents;
@@ -82,7 +92,10 @@ pub(crate) fn assemble(
             )?
             .requiring_credential(require_host_credential);
             let bindings = agent_state::load(&path)?;
+            let booked = pool.shape().resources();
+            let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
             let registry = Registry::new(pool, clock.clone());
+            let usage = usage.build(clock, limits, &registry)?;
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());
             }
@@ -91,11 +104,13 @@ pub(crate) fn assemble(
                 registry,
                 tokens,
                 joins,
+                mint_provider,
                 limiter: HelloLimiter::new(hello_limit, clock.clone()),
                 clock: clock.clone(),
                 runs_minted: AtomicU64::new(0),
                 store: BindingStore::new(path, bindings),
                 errors: AtomicU64::new(0),
+                usage,
             };
             Ok((Box::new(source), Some(Arc::new(agents))))
         }
@@ -128,11 +143,13 @@ impl Agents {
             registry,
             tokens: AgentTokens::open(&tokens, &client).unwrap(),
             joins,
+            mint_provider: None,
             limiter: HelloLimiter::new(limit, clock.clone()),
             clock: clock.clone(),
             runs_minted: AtomicU64::new(0),
             store: BindingStore::new(dir.join("bindings"), Default::default()),
             errors: AtomicU64::new(0),
+            usage: None,
         }
     }
 
@@ -184,8 +201,6 @@ impl Agents {
     /// # Errors
     ///
     /// [`MintError`] as for the route.
-    // The scaler of a later change is the caller.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn mint_for(
         &self,
         pool: &ProviderId,
@@ -203,7 +218,6 @@ impl Agents {
     /// # Errors
     ///
     /// [`RevokeError::Unsaved`] when the file could not be written; nothing was dropped.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn revoke_for(
         &self,
         pool: &ProviderId,
@@ -253,7 +267,7 @@ impl Agents {
     /// hello limits of those that left the file, and make the file of bindings current
     /// (a write that failed earlier is tried again here; so is the removal of a host the
     /// registry has forgotten). A token file that cannot be read keeps the tokens in
-    /// force, and their limits.
+    /// force, and their limits. The usage side, when there is one, is ticked last.
     pub(crate) async fn refresh(self: &Arc<Self>) {
         let this = Arc::clone(self);
         match blocking(move || this.tokens.reload()).await {
@@ -264,6 +278,9 @@ impl Agents {
             }
         }
         self.save_bindings().await;
+        if let Some(usage) = &self.usage {
+            usage.tick().await;
+        }
     }
 
     /// Makes the file of bindings hold what the registry has bound, on the pool for

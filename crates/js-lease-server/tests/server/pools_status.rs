@@ -46,7 +46,7 @@ async fn the_next_launch_is_the_cheapest_offer_with_a_masked_plan() {
     };
     let plan = BootPlan {
         agent: Artifact {
-            url: format!("{ADVERTISE}/v1/bootstrap/agent/x86_64"),
+            url: format!("{ADVERTISE}/agent"),
             sha256: [0xab; 32],
         },
         scheduler_url: ADVERTISE.to_owned(),

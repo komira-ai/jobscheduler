@@ -26,10 +26,13 @@ use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use js_agent_wire::{Isolation, JobSpec, Limits, Mount, Outcome, limits};
+use js_agent_wire::{
+    Isolation, JobSpec, Limits, LogTail, Mount, Outcome, RunFile, limits, validate_files,
+};
 use js_lease::{Clock, LeaseInfo, LeaseState};
 use js_registry::{RunRefusal, RunView};
 use js_types::LeaseId;
+use js_usage::ProfileKey;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -71,10 +74,31 @@ struct RunBody {
     gpu_indices: Vec<u32>,
     #[serde(default)]
     mounts: Vec<Mount>,
+    /// Secret files the job reads at `/run/js-files/<name>` (see [`RunFile`]).
+    #[serde(default)]
+    files: Vec<RunFile>,
     #[serde(default)]
     isolation: Isolation,
     #[serde(default)]
     labels: std::collections::BTreeMap<String, String>,
+    /// The name of the profile the run's cost curve is learned under, when the client knows
+    /// one: its own key for the work the run does, in the grammar of [`ProfileKey`]. Absent
+    /// means the run teaches the server nothing.
+    ///
+    /// Usage tracks are per lease: when runs of one lease name different profiles, the first
+    /// accepted result takes the whole lease series under its own name. The server has one
+    /// trust domain: any holder of the client token can name any profile, so a wrong or
+    /// hostile run can skew that profile's curve.
+    #[serde(default)]
+    profile: Option<String>,
+}
+
+/// The profile name of a [`RunBody`], or the 422 `invalid-profile` when it is not a
+/// [`ProfileKey`] (1 to 128 bytes of `0-9`, `a-z`, `.`, `_` and `-`, the first a digit or a
+/// letter).
+fn profile_of(text: &str) -> Result<ProfileKey, ApiError> {
+    ProfileKey::parse(text)
+        .map_err(|_| ApiError::coded(StatusCode::UNPROCESSABLE_ENTITY, "invalid-profile"))
 }
 
 /// The limits of a [`RunBody`]. The wall time is bounded by what the lease has left
@@ -84,6 +108,8 @@ struct RunBody {
 struct LimitsBody {
     cpu_millis: u64,
     memory_bytes: u64,
+    #[serde(default)]
+    disk_bytes: Option<u64>,
     #[serde(default)]
     pids: Option<u64>,
     #[serde(default)]
@@ -108,17 +134,41 @@ struct RunEntry {
     exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// The labels the client sent when it queued the run; left out when there are none.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    labels: std::collections::BTreeMap<String, String>,
+    /// The end of the job's output; only the entry of one run carries it, the list leaves
+    /// it out to stay small.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    log_tail: Option<LogTail>,
+}
+
+impl RunEntry {
+    /// The entry of one run, with the tail of its output.
+    fn with_log(run: RunView) -> Self {
+        let log_tail = run
+            .result
+            .as_ref()
+            .and_then(|result| result.log_tail.clone());
+        Self {
+            log_tail,
+            ..Self::from(run)
+        }
+    }
 }
 
 impl From<RunView> for RunEntry {
+    /// The entry of the list: no tail.
     fn from(run: RunView) -> Self {
         let result = run.result;
         Self {
+            log_tail: None,
             run_id: run.run_id,
             state: run.state.as_str(),
             outcome: result.as_ref().map(|result| result.outcome),
             exit_code: result.as_ref().and_then(|result| result.exit_code),
             detail: result.and_then(|result| result.detail),
+            labels: run.labels,
         }
     }
 }
@@ -145,6 +195,8 @@ impl From<RunRefusal> for ApiError {
             | RunRefusal::HostTainted
             | RunRefusal::NotReady
             | RunRefusal::NoCapacity
+            | RunRefusal::FilesUnsupported
+            | RunRefusal::DiskUnsupported
             | RunRefusal::RunExists => StatusCode::CONFLICT,
         };
         ApiError::coded(status, refusal.code())
@@ -188,6 +240,11 @@ async fn start(
 ) -> Result<Response, ApiError> {
     let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
     let body = parse::<RunBody>(&body)?;
+    // A bad file is the body's fault, whatever the lease or the host: answered before any
+    // state is read. The error names the rule and never repeats a name or contents.
+    validate_files(&body.files)
+        .map_err(|err| ApiError::coded(StatusCode::BAD_REQUEST, err.code()))?;
+    let profile = body.profile.as_deref().map(profile_of).transpose()?;
     let table = api.shared.table().lock().await;
     let lease = find(table.list(), &id)?;
     let ends = lease.expires_at.millis().min(lease.ends_at.millis());
@@ -207,11 +264,13 @@ async fn start(
         limits: Limits {
             cpu_millis: body.limits.cpu_millis,
             memory_bytes: body.limits.memory_bytes,
+            disk_bytes: body.limits.disk_bytes,
             pids: body.limits.pids,
             wall_ms: asked.map_or(wall_cap, |asked| asked.min(wall_cap)),
         },
         gpu_indices: body.gpu_indices,
         mounts: body.mounts,
+        files: body.files,
         isolation: body.isolation,
         labels: body.labels,
         heartbeat_seq: 0,
@@ -219,7 +278,10 @@ async fn start(
         bundle: None,
         native: None,
     };
-    let queued = api.agents.registry.queue_run(&host, &id, spec)?;
+    let queued = api
+        .agents
+        .registry
+        .queue_keyed_run(&host, &id, spec, profile)?;
     info!(lease = %id, host = %host, run = %run_id, "run queued");
     let accepted = Accepted {
         run_id,
@@ -238,7 +300,9 @@ async fn list(State(api): State<RunApi>, Path(id): Path<String>) -> Result<Respo
     Ok(json(StatusCode::OK, &RunList { runs }))
 }
 
-/// One run of the lease, as the list shows it. A run id of an earlier boot is 410
+/// One run of the lease, as the list shows it, and with the tail of its output (`log_tail`
+/// `{stdout, stderr, truncated}`, when the host read one; it is the job's own text, so what
+/// the job printed is shown to whoever can read the run). A run id of an earlier boot is 410
 /// `run-forgotten` (the server restarted and the run's work is lost); an id the lease
 /// does not have is 404 `unknown-run`.
 async fn show(
@@ -254,7 +318,7 @@ async fn show(
     let run = runs
         .find(|run| run.run_id == run_id)
         .ok_or(RunRefusal::UnknownRun)?;
-    Ok(json(StatusCode::OK, &RunEntry::from(run)))
+    Ok(json(StatusCode::OK, &RunEntry::with_log(run)))
 }
 
 /// Asks for a run to stop: a retained intent, carried on every heartbeat reply until the

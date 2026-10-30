@@ -310,8 +310,33 @@ pub struct Cooldown {
     pub reason: CooldownReason,
 }
 
-/// The version of the records file. A reader refuses any other.
-pub const VERSION: u32 = 1;
+/// A pool's go: the instant of its first launch since it was last in `Plan`, and what its
+/// machines had cost by the time they left the records. Kept for as long as the pool stays
+/// live. The cost since
+/// the go is `settled` plus what the machines still in the records cost from `at` on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Go {
+    /// When the go began: the step that made the pool's first launch since the pool was last
+    /// in `Plan`. It is written with the record of that launch.
+    pub at: Millis,
+    /// The cost since `at`, in cents, of the machines whose records were forgotten when
+    /// their billed time left the month window.
+    pub settled: u64,
+}
+
+/// The version of the records file this writer writes. Version 2 added the silent and
+/// missing times and the time of the last write.
+pub const VERSION: u32 = 2;
+
+/// The first version that has the silent and missing times and the time of the last write.
+/// A file of an older version is read with them empty.
+const TIMES_FROM: u32 = 2;
+
+/// The oldest version a reader still reads. A file of an older version is read as if it
+/// had been written by this one with the fields it lacks empty, and the next save writes
+/// it as [`VERSION`].
+pub const OLDEST: u32 = 1;
 
 /// Everything the scaler remembers. The caller writes all of it, as one file, whenever a
 /// step returns [`Action::Save`](crate::Action::Save), before it runs any other action of
@@ -322,6 +347,38 @@ pub struct Records {
     pub instances: Vec<Record>,
     /// The pools that are waiting out a failure, by name.
     pub cooldowns: BTreeMap<String, Cooldown>,
+    /// Since when each registered machine whose host the registry shows but does not hear
+    /// from has been silent, as the scaler first saw it. Written so that a scaler whose
+    /// restarts are further apart than the save interval still reaches the hold; a faster
+    /// crash loop keeps the host held and counted. The time the scaler
+    /// was down is not part of it: see [`Records::last_step`].
+    pub silent_since: BTreeMap<String, Millis>,
+    /// Since when each registered machine the registry does not show has been missing from
+    /// complete views, unbroken, for the same reason. A restart of the scaler does not
+    /// reset it, and nor does an incomplete view; a step that shows the host does.
+    pub missing_since: BTreeMap<String, Millis>,
+    /// The time of the step that last wrote these records. A scaler that starts from them
+    /// was down from then until its first step, and the hosts could not say hello meanwhile,
+    /// so that span says nothing about them: the first step moves every silent and missing
+    /// time forward by it, and only time the scaler observed counts toward the holds. It is
+    /// written with every save and by no step on its own, so it is a lower bound on the
+    /// last step the old process ran, which errs toward counting less. While a silent or
+    /// missing time is pending the records are saved at least every sixth of `unknown_hold`
+    /// (at most five minutes) of observed time, so the bound is that close; with none
+    /// pending nothing is written for it. `None` in a file
+    /// that has none: the whole span back to each time is taken as downtime.
+    pub last_step: Option<Millis>,
+    /// The go of each pool that has launched since it was last in `Plan`, by name ([`Go`]).
+    /// The step that makes the first such launch writes it, and the first step that sees the
+    /// pool in `Plan` mode (or past `live_until`) removes it, which is how a new go begins a
+    /// new budget.
+    /// Absent in files written before it existed, which read it empty.
+    pub go: BTreeMap<String, Go>,
+    /// The provider kind each pool launched with, by pool name, noted at its launches. A kind
+    /// total still counts the records of a pool that has been taken out of the file because
+    /// the records remember its kind; a pool with no entry (records from before it existed)
+    /// counts in every kind's total. Absent in files written before it existed.
+    pub pool_kinds: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -329,11 +386,37 @@ struct WireOut<'a> {
     version: u32,
     instances: &'a [Record],
     cooldowns: &'a BTreeMap<String, Cooldown>,
+    silent_since: &'a BTreeMap<String, Millis>,
+    missing_since: &'a BTreeMap<String, Millis>,
+    last_step: Option<Millis>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    go: &'a BTreeMap<String, Go>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pool_kinds: &'a BTreeMap<String, String>,
 }
 
+/// Version 2.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireIn {
+    #[serde(rename = "version")]
+    _version: u32,
+    instances: Vec<Record>,
+    cooldowns: BTreeMap<String, Cooldown>,
+    silent_since: BTreeMap<String, Millis>,
+    missing_since: BTreeMap<String, Millis>,
+    #[serde(default)]
+    last_step: Option<Millis>,
+    #[serde(default)]
+    go: BTreeMap<String, Go>,
+    #[serde(default)]
+    pool_kinds: BTreeMap<String, String>,
+}
+
+/// Version 1: the same without the two times.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireV1 {
     #[serde(rename = "version")]
     _version: u32,
     instances: Vec<Record>,
@@ -346,8 +429,13 @@ pub enum RecordsError {
     /// The text is not records of this version's shape.
     #[error("records: {0}")]
     Format(#[from] serde_json::Error),
-    /// The file is of another version (or names none), so it is not read.
-    #[error("records: version {found:?}, this reader reads {}", VERSION)]
+    /// The file is of a version this reader does not read (or names none), so it is not
+    /// read.
+    #[error(
+        "records: version {found:?}, this reader reads {} to {}",
+        OLDEST,
+        VERSION
+    )]
     Version {
         /// The version the file names.
         found: Option<u64>,
@@ -365,11 +453,16 @@ impl Records {
             version: VERSION,
             instances: &self.instances,
             cooldowns: &self.cooldowns,
+            silent_since: &self.silent_since,
+            missing_since: &self.missing_since,
+            last_step: self.last_step,
+            go: &self.go,
+            pool_kinds: &self.pool_kinds,
         };
         Ok(serde_json::to_string_pretty(&wire)?)
     }
 
-    /// The records in `text`.
+    /// The records in `text`. A file of version 1 is read with no silent or missing times.
     ///
     /// # Errors
     ///
@@ -378,13 +471,29 @@ impl Records {
     pub fn decode(text: &str) -> Result<Self, RecordsError> {
         let value: serde_json::Value = serde_json::from_str(text)?;
         let found = value.get("version").and_then(serde_json::Value::as_u64);
-        if found != Some(u64::from(VERSION)) {
-            return Err(RecordsError::Version { found });
+        // The versions from `OLDEST` to `VERSION` are read; any other is refused.
+        let version = found
+            .and_then(|found| u32::try_from(found).ok())
+            .filter(|version| (OLDEST..=VERSION).contains(version))
+            .ok_or(RecordsError::Version { found })?;
+        if version < TIMES_FROM {
+            let wire: WireV1 = serde_json::from_value(value)?;
+            Ok(Self {
+                instances: wire.instances,
+                cooldowns: wire.cooldowns,
+                ..Self::default()
+            })
+        } else {
+            let wire: WireIn = serde_json::from_value(value)?;
+            Ok(Self {
+                instances: wire.instances,
+                cooldowns: wire.cooldowns,
+                silent_since: wire.silent_since,
+                missing_since: wire.missing_since,
+                last_step: wire.last_step,
+                go: wire.go,
+                pool_kinds: wire.pool_kinds,
+            })
         }
-        let wire: WireIn = serde_json::from_value(value)?;
-        Ok(Self {
-            instances: wire.instances,
-            cooldowns: wire.cooldowns,
-        })
     }
 }

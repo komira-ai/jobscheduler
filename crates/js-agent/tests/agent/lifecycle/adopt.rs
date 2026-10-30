@@ -15,6 +15,7 @@ fn labels<'a>(run: &'a str, gpus: &'a str) -> Vec<(&'static str, &'a str)> {
         (label::LEASE, "lease-old"),
         (label::CPU_MILLIS, "1000"),
         (label::MEMORY_BYTES, "1073741824"),
+        (label::DISK_BYTES, "0"),
         (label::GPUS, gpus),
         (label::WALL_MS, "60000"),
         (label::ISOLATION, "contained"),
@@ -216,6 +217,11 @@ fn a_container_that_cannot_be_removed_stays_booked_and_is_retried() {
     );
     assert!(h.life.free().gpus.is_empty());
     assert_eq!(h.life.free().memory_bytes, 0);
+    assert_eq!(
+        h.life.free().disk_bytes,
+        0,
+        "unknown booking: all the disk too"
+    );
     assert!(
         matches!(
             h.start(job("late")).as_slice(),

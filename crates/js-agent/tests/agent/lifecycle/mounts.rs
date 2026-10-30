@@ -345,3 +345,72 @@ fn the_scratch_root_is_kept_by_its_canonical_path() {
     assert_eq!(scratch.of("r1"), expected);
     assert!(!scratch.of("r1").starts_with(&alias));
 }
+
+/// The harness with the root `data` given as read-only (`--mount-root-ro`), and the
+/// directory `data/sub` to mount.
+fn harness_with_read_only_root(name: &str) -> Harness {
+    let mut h = Harness::new(name);
+    fs::create_dir(h.dir.path("data/sub")).unwrap();
+    h.config.mounts =
+        MountRoots::with_read_only(&[], &[("data".to_owned(), h.dir.path("data"))]).unwrap();
+    h.restart().unwrap();
+    h
+}
+
+fn job_mounting(run: &str, ro: bool) -> js_agent_wire::JobSpec {
+    let mut spec = job(run);
+    spec.mounts = vec![Mount {
+        root_name: "data".to_owned(),
+        rel: "sub".to_owned(),
+        ro,
+    }];
+    spec
+}
+
+/// Asserts that a start asking for a read-write mount from a read-only root is refused
+/// `invalid-mount` (a refusal that is not retried) when it starts, with nothing created:
+/// no container, no scratch directory. It catches a read-only root that lets a job write
+/// into it, which is the unbounded path to the scratch disk that the root's existence on
+/// that disk was allowed for.
+#[test]
+fn rw_mount_from_ro_root_refused_at_job_start() {
+    let mut h = harness_with_read_only_root("mounts-ro-rw");
+    let events = names(&h.start(job_mounting("rw", false)));
+    assert_eq!(events, ["refused rw invalid-mount"]);
+    assert!(
+        h.fake.created().is_empty(),
+        "nothing was mounted or created"
+    );
+    assert!(!h.scratch_of("rw").exists(), "no scratch directory either");
+    let mut mixed = job_mounting("mixed", true);
+    fs::create_dir(h.dir.path("data/sub2")).unwrap();
+    mixed.mounts.push(Mount {
+        root_name: "data".to_owned(),
+        rel: "sub2".to_owned(),
+        ro: false,
+    });
+    assert_eq!(names(&h.start(mixed)), ["refused mixed invalid-mount"]);
+    assert!(h.fake.created().is_empty());
+}
+
+/// Asserts that a read-only mount from a read-only root runs, and the container gets it
+/// read-only at the root's path. It catches a read-only root that refuses everything.
+#[test]
+fn ro_mount_from_ro_root_runs() {
+    let mut h = harness_with_read_only_root("mounts-ro-ro");
+    assert_eq!(names(&h.start(job_mounting("ro", true))), ["started ro"]);
+    let created = h.fake.created();
+    let mounts = &created[0].mounts;
+    assert_eq!(mounts.len(), 1);
+    assert!(mounts[0].ro);
+    assert_eq!(mounts[0].target, "/mnt/data/sub");
+}
+
+/// Asserts that a root given as `--mount-root` still takes a read-write mount, so the
+/// read-only rule is the new flag's only. It catches a rule applied to every root.
+#[test]
+fn rw_mount_from_a_plain_root_still_runs() {
+    let mut h = Harness::new("mounts-plain-rw");
+    fs::create_dir(h.dir.path("data/sub")).unwrap();
+    assert_eq!(names(&h.start(job_mounting("rw", false))), ["started rw"]);
+}
