@@ -260,3 +260,67 @@ fn minutes_of_an_undelivered_heartbeat_go_out_on_the_next() {
     assert_eq!(again["minutes"], lost["minutes"]);
     assert_eq!(again["seq"], 3);
 }
+
+/// Asserts the text of the note for a failed reading, and that a lease that is over leaves
+/// the next reading's clocks and coverage (its minute is closed, not carried). It catches a
+/// note that prints nothing useful and a finished run that is sampled for ever.
+#[test]
+fn the_note_names_the_file_and_an_ended_lease_is_dropped() {
+    let note = Note::NoLoad {
+        reason: SampleError::NodeCpuStat,
+    };
+    assert_eq!(
+        note.to_string(),
+        "no load is sent: the node cpu.stat cannot be read"
+    );
+    let rig = rig(Vec::new());
+    let live = Live(RefCell::new(files(5_000_000, 400_000, 3_000_000_001, true)));
+    let clock: SharedClock = rig.machine.clock.clone();
+    let mut reader = LoadReader::new(&live, ACTIONS, clock);
+    let lease = running("3-7", Some(LEASE_DIR), Some(500_000));
+    let window = Duration::from_secs(60);
+    rig.machine.clock.advance(500);
+    let first = reader.read(std::slice::from_ref(&lease), window).unwrap();
+    assert_eq!(first.clocks.len(), 1);
+    rig.machine.clock.advance(60_000);
+    let second = reader.read(&[], window).unwrap();
+    assert_eq!((second.clocks.len(), second.covered.len()), (0, 0));
+    assert_eq!(second.seq, 2);
+}
+
+/// Asserts that a run with no start time, and one whose control group path is not text, are
+/// not sampled, and that a reference to a file reader reads the same files. It catches a
+/// lease sampled from a directory it cannot name and a forwarding reader that answers for
+/// another file.
+#[test]
+fn unsampleable_runs_are_left_out_and_a_reference_reads_alike() {
+    use std::os::unix::ffi::OsStrExt;
+    let rig = rig(Vec::new());
+    let live = Live(RefCell::new(files(5_000_000, 400_000, 3_000_000_001, true)));
+    let clock: SharedClock = rig.machine.clock.clone();
+    let mut reader = LoadReader::new(&live, ACTIONS, clock);
+    let odd = PathBuf::from(std::ffi::OsStr::from_bytes(b"/sys/fs/cgroup/\xff"));
+    let leases = [
+        running("3-7", Some(LEASE_DIR), None),
+        RunningLease {
+            cgroup: Some(odd),
+            ..running("3-8", None, Some(1))
+        },
+    ];
+    let load = reader.read(&leases, Duration::from_secs(5)).unwrap();
+    assert!(load.clocks.is_empty());
+    let files = FakeFiles::default()
+        .with("/a", "text")
+        .with_link("/l", "target");
+    let by_ref: &dyn FileReader = &&files;
+    assert_eq!(by_ref.read("/a").unwrap(), "text");
+    assert_eq!(by_ref.link("/l").unwrap(), "target");
+    assert_eq!(
+        by_ref.device(Path::new("/a")).unwrap(),
+        files.device(Path::new("/a")).unwrap()
+    );
+    assert_eq!(
+        by_ref.is_tmpfs(Path::new("/a")).unwrap(),
+        files.is_tmpfs(Path::new("/a")).unwrap()
+    );
+}
