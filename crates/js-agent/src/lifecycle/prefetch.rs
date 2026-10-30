@@ -18,6 +18,8 @@
 //! A pull that panics is a failed pull. The prefetcher must be dropped from a plain
 //! thread, not from inside an async task (tokio refuses to drop a runtime there).
 
+#![allow(dead_code, unused_imports)]
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
