@@ -151,18 +151,17 @@ impl Layers {
         }
     }
 
+    /// Takes one ensure's use of each layer back; an entry nobody uses is dropped. Written
+    /// without a branch for "the last one" so that a table that is only ever used by one
+    /// ensure at a time and one used by two at once are the same code.
     fn remove(&self, layers: &[Descriptor]) {
         let mut table = self.table();
         for layer in layers {
-            let key = layer.digest().as_str();
-            let last = table.get_mut(key).is_some_and(|entry| {
-                entry.0 -= 1;
-                entry.0 == 0
-            });
-            if last {
-                table.remove(key);
-            }
+            table
+                .entry(layer.digest().as_str().to_owned())
+                .and_modify(|entry| entry.0 -= 1);
         }
+        table.retain(|_, entry| entry.0 > 0);
     }
 }
 
