@@ -98,6 +98,15 @@ pub enum ProvisionError {
     /// pf is not enabled, so no rule is enforced.
     #[error("pf is not enabled (pfctl -s info does not say Status: Enabled)")]
     PfDisabled,
+    /// The anchor reads back with fewer rules than the policy renders (none, when its
+    /// `-sr` printed nothing), so it cannot be what was loaded.
+    #[error("the anchor reads back {got} rules, fewer than the {want} the policy renders")]
+    BadReadback {
+        /// Rule lines read back.
+        got: usize,
+        /// Rule lines rendered.
+        want: usize,
+    },
     /// The main ruleset does not evaluate the anchor, so its rules would never run.
     #[error(
         "the main ruleset has no anchor rule that reaches {0}: add `anchor \"{0}\"` (or a \
@@ -166,7 +175,7 @@ impl<'a> Provisioner<'a> {
             .mode(0o700)
             .create(self.dir)
             .map_err(state)?;
-        let temp = self.state(&format!("{name}.tmp"));
+        let temp = self.state(&format!("{name}.{}.tmp", std::process::id()));
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -202,7 +211,12 @@ impl<'a> Provisioner<'a> {
             );
             let _ = fs::remove_file(&pending);
         }
-        let rules = self.write(RULES_FILE, &render(uids, endpoints, self.anchor))?;
+        // The readback goes first: until the load below succeeds and is read back, what
+        // `check` would compare (the new rules file, the old readback) says nothing about
+        // what is loaded, so a failed load must leave `check` unable to pass.
+        self.discard(READBACK_FILE)?;
+        let rendered = render(uids, endpoints, self.anchor);
+        let rules = self.write(RULES_FILE, &rendered)?;
         self.pfctl(&["-a", self.anchor.as_str(), "-f", &path_arg(&rules)])?;
         let enabled = is_enabled(&self.pfctl(&["-s", "info"])?.stdout);
         let held = self.stored_token().is_some() || self.state(NO_TOKEN_FILE).exists();
@@ -210,6 +224,7 @@ impl<'a> Provisioner<'a> {
             self.enable()?;
         }
         let readback = self.pfctl(&["-a", self.anchor.as_str(), "-sr"])?;
+        enough_rules(&readback.stdout, &rendered)?;
         self.write(READBACK_FILE, &readback.stdout)?;
         self.check(uids, endpoints)
     }
@@ -257,7 +272,8 @@ impl<'a> Provisioner<'a> {
         if !references(&main.stdout, self.anchor) {
             return Err(ProvisionError::NotReferenced(self.anchor.to_string()));
         }
-        let rendered = lines(&render(uids, endpoints, self.anchor));
+        let text = render(uids, endpoints, self.anchor);
+        let rendered = lines(&text);
         let installed = lines(&self.read(RULES_FILE)?);
         if installed != rendered {
             return Err(ProvisionError::Drift {
@@ -265,7 +281,9 @@ impl<'a> Provisioner<'a> {
                 loaded: installed,
             });
         }
-        let stored = lines(&self.read(READBACK_FILE)?);
+        let stored = self.read(READBACK_FILE)?;
+        enough_rules(&stored, &text)?;
+        let stored = lines(&stored);
         let live = lines(&self.pfctl(&["-a", self.anchor.as_str(), "-sr"])?.stdout);
         if stored == live {
             return Ok(());
@@ -299,14 +317,19 @@ impl<'a> Provisioner<'a> {
             PENDING_FILE,
             NO_TOKEN_FILE,
         ] {
-            let path = self.state(name);
-            match fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => return Err(ProvisionError::State { path, source }),
-            }
+            self.discard(name)?;
         }
         Ok(())
+    }
+
+    /// Deletes a state file; one that is not there is fine.
+    fn discard(&self, name: &str) -> Result<(), ProvisionError> {
+        let path = self.state(name);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(ProvisionError::State { path, source }),
+        }
     }
 
     /// The token the last install stored, if there is one.
@@ -386,6 +409,24 @@ pub fn references(main_rules: &str, anchor: &AnchorName) -> bool {
                 .rsplit_once('/')
                 .is_some_and(|(parent, _)| pattern.strip_suffix("/*") == Some(parent))
     })
+}
+
+/// The rule lines of `text`: non-blank lines that are not comments.
+fn rule_count(text: &str) -> usize {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .count()
+}
+
+/// Refuses a readback with fewer rules than the rendered text: an empty `-sr` would
+/// otherwise equal an empty stored copy and pass for an enforced anchor.
+fn enough_rules(readback: &str, rendered: &str) -> Result<(), ProvisionError> {
+    let (got, want) = (rule_count(readback), rule_count(rendered));
+    if got < want {
+        return Err(ProvisionError::BadReadback { got, want });
+    }
+    Ok(())
 }
 
 /// The non-blank lines of `text`, trimmed, one per line: pf's printing of a ruleset with
@@ -483,7 +524,11 @@ mod tests {
             assert_eq!(mode(&state.join(f)), 0o600, "{f}");
         }
         // No temporary file is left.
-        assert!(!state.join("pool.pf.tmp").exists());
+        assert!(
+            !state
+                .join(format!("pool.pf.{}.tmp", std::process::id()))
+                .exists()
+        );
     }
 
     #[test]
@@ -680,7 +725,7 @@ mod tests {
             .install(uids(), &eps())
             .unwrap_err();
         assert!(matches!(err, ProvisionError::State { .. }));
-        assert!(err.to_string().contains(RULES_FILE));
+        assert!(err.to_string().contains("file/state"));
         assert!(pf.calls().is_empty());
     }
 
@@ -700,7 +745,7 @@ mod tests {
     #[test]
     fn a_temporary_file_that_cannot_be_opened_is_a_state_error() {
         let dir = dir("notemp");
-        fs::create_dir(dir.join("pool.pf.tmp")).unwrap();
+        fs::create_dir(dir.join(format!("pool.pf.{}.tmp", std::process::id()))).unwrap();
         let pf = Fake::new(dir.path());
         let a = anchor();
         let err = Provisioner::new(&pf, &a, dir.path())
@@ -777,6 +822,78 @@ mod tests {
         assert!(shown.contains("\nloaded:\npass out quick all"));
         assert!(shown.contains("\nexpected:\n# js-mac-provision"));
         assert!(shown.contains("block return out quick"));
+    }
+
+    #[test]
+    fn a_failed_load_leaves_check_unable_to_pass_for_either_policy() {
+        let (dir, mut pf) = installed("failed-load");
+        let a = anchor();
+        let other: Vec<Endpoint> = vec!["192.0.2.11:443".parse().unwrap()];
+        // The calls of the first install are 0..7; the next load is call 7.
+        pf.fail = Some((7, false));
+        let p = Provisioner::new(&pf, &a, dir.path());
+        assert!(matches!(
+            p.install(uids(), &other),
+            Err(ProvisionError::Failed { .. })
+        ));
+        // The new rules file is there, the old readback is not: nothing says what is loaded.
+        assert!(matches!(
+            p.check(uids(), &other),
+            Err(ProvisionError::State { .. })
+        ));
+        assert!(matches!(
+            p.check(uids(), &eps()),
+            Err(ProvisionError::Drift { .. })
+        ));
+    }
+
+    #[test]
+    fn install_refuses_an_empty_or_short_readback_and_stores_none() {
+        for text in ["", "\n  \n", "# only a comment\n", "pass out quick all\n"] {
+            let dir = dir("short");
+            let pf = Fake::new(dir.path());
+            *pf.loaded.borrow_mut() = Some(text.to_owned());
+            let a = anchor();
+            let err = Provisioner::new(&pf, &a, dir.path())
+                .install(uids(), &eps())
+                .unwrap_err();
+            assert!(
+                matches!(err, ProvisionError::BadReadback { .. }),
+                "{text:?}"
+            );
+            assert!(err.to_string().contains("fewer than the 5"), "{err}");
+            assert!(!dir.join(READBACK_FILE).exists());
+        }
+    }
+
+    #[test]
+    fn check_refuses_an_empty_stored_readback_even_when_the_anchor_reads_empty() {
+        let (dir, pf) = installed("empty-stored");
+        fs::write(dir.join(READBACK_FILE), "\n").unwrap();
+        *pf.loaded.borrow_mut() = Some(String::new());
+        let a = anchor();
+        let err = Provisioner::new(&pf, &a, dir.path())
+            .check(uids(), &eps())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ProvisionError::BadReadback { got: 0, want: 5 }
+        ));
+    }
+
+    #[test]
+    fn a_readback_file_that_cannot_be_discarded_is_a_state_error() {
+        let dir = dir("discard");
+        let stuck = dir.join(READBACK_FILE);
+        fs::create_dir(&stuck).unwrap();
+        fs::write(stuck.join("inner"), "x").unwrap();
+        let pf = Fake::new(dir.path());
+        let a = anchor();
+        let err = Provisioner::new(&pf, &a, dir.path())
+            .install(uids(), &eps())
+            .unwrap_err();
+        assert!(matches!(err, ProvisionError::State { .. }));
+        assert!(pf.calls().is_empty());
     }
 
     #[test]

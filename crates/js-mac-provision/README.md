@@ -52,6 +52,10 @@ block return out quick proto { tcp, udp } from any to any user 600:699
   state file goes through a temporary file and a rename), loads them with
   `pfctl -a <anchor> -f <file>`, takes a pf enable reference if it holds none, stores what
   `pfctl -a <anchor> -sr` prints right after the load in `anchor.sr`, then runs **check**.
+  It deletes `anchor.sr` before it writes `pool.pf` and writes it again only after a
+  successful load and readback, so a failed load leaves `check` with no readback to pass on
+  (a refusal); it refuses a readback with fewer rule lines than the policy renders (an empty
+  `-sr`), and `check` refuses such a stored one.
   It replaces the anchor's rules whole, so it is safe to run again. A reload does not touch
   pf's state table: a connection to an endpoint the new rules refuse stays open until it ends.
 - **check** is the enforcement question (below, `enforced`) and **changes nothing**: pf is
