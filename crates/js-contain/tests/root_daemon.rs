@@ -554,7 +554,7 @@ fn the_keeper_of_a_root_daemon_runs_as_the_job_user_with_a_clean_environment() {
     assert_eq!(
         fs::read_to_string(&dropped.out).unwrap(),
         format!(
-            "Uid: {uid} {uid} {uid} {uid}\nGid: {gid} {gid} {gid} {gid}\nGroups: \ncwd /\n\
+            "Uid: {uid} {uid} {uid} {uid}\nGid: {gid} {gid} {gid} {gid}\nGroups:\ncwd /\n\
              home /\nsentinel unset\nkill {}\n",
             kill.display()
         )
