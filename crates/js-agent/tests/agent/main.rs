@@ -22,6 +22,8 @@ mod e2e;
 mod exclusive;
 mod facts;
 mod flags;
+#[cfg(target_os = "linux")]
+mod helper_modes;
 mod integrity;
 mod jobs;
 mod lifecycle;

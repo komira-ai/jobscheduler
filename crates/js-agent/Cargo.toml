@@ -28,6 +28,10 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "signal"] }
 
+# The helper modes this binary answers when a helper container runs it (`main`).
+[target.'cfg(target_os = "linux")'.dependencies]
+js-contain = { path = "../js-contain" }
+
 [dev-dependencies]
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
@@ -37,6 +41,7 @@ js-registry = { path = "../js-registry" }
 js-testkit = { path = "../js-testkit" }
 clap.workspace = true
 rustix = { workspace = true, features = ["process"] }
+tar.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 
 [lints]

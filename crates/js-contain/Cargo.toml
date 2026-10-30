@@ -13,18 +13,29 @@ name = "js-fake-crun"
 path = "tests/bin/fake_crun.rs"
 test = false
 
+# The tests' stand-in for the daemon's own binary in a helper container: it answers the
+# helper modes (`src/modes.rs`) and nothing else. Not shipped.
+[[bin]]
+name = "js-helper"
+path = "tests/bin/helper.rs"
+test = false
+
 [dependencies]
 async-trait.workspace = true
+flate2.workspace = true
 js-types = { path = "../js-types" }
 oci-spec.workspace = true
 runc.workspace = true
 rustix = { workspace = true, features = ["fs", "process"] }
 serde_json.workspace = true
+tar.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "process", "rt", "sync", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]
+# The registry client the real-crun tests pull busybox with (tests/crun/source.rs).
+js-oci = { path = "../js-oci" }
 hex.workspace = true
 sha2.workspace = true
 # gettid, for the test that finds the child of its own thread.
