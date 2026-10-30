@@ -640,6 +640,7 @@ fn probe_listed_port_connect_repeated() {
     let scene = Scene::new("probe", "run");
     let one = TcpListener::bind("127.0.0.1:0").expect("listener");
     let port_one = one.local_addr().expect("addr").port();
+    std::thread::spawn(move || for _ in one.incoming() {});
     let to_one = connect_to(port_one);
     let only_one = Net::Ports(Ports::new(&[port_one]).expect("ports"));
     let mut bad = Vec::new();
