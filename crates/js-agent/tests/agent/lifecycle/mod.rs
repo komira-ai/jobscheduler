@@ -10,6 +10,7 @@ mod exclusive;
 pub mod fake;
 mod files;
 mod flags;
+mod logs;
 mod mounts;
 mod owed;
 mod reach;

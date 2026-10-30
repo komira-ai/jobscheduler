@@ -77,6 +77,28 @@ pub struct RunResult {
     /// A refusal code or short text saying why, when the outcome is not a clean exit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// The end of what the job printed, when the agent could read it (a contained run whose
+    /// container had not been removed yet). Returned verbatim to whoever can read the run,
+    /// so a task must not print secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_tail: Option<LogTail>,
+}
+
+/// The last bytes a contained job wrote to its standard output and standard error, kept
+/// apart. Each stream is at most [`limits::MAX_LOG_STREAM_LEN`] bytes of UTF-8 (a cut never
+/// splits a character), and `truncated` says that the job printed more than is kept of
+/// either one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogTail {
+    /// The tail of the job's standard output.
+    #[serde(default)]
+    pub stdout: String,
+    /// The tail of the job's standard error.
+    #[serde(default)]
+    pub stderr: String,
+    /// Whether the job printed more than the two tails hold.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// A host's report that it can no longer be trusted clean (design 5.12), sent in every
@@ -305,6 +327,18 @@ impl RunResult {
         check::ident(at.field("results.lease_id"), &self.lease_id)?;
         let detail = at.field("results.detail");
         check::opt_text(detail, self.detail.as_ref(), limits::MAX_DETAIL_LEN)?;
+        if let Some(tail) = &self.log_tail {
+            // Free text, so only its length is checked (a log holds newlines and escapes).
+            let streams = [
+                (at.field("results.log_tail.stdout"), &tail.stdout),
+                (at.field("results.log_tail.stderr"), &tail.stderr),
+            ];
+            for (field, text) in streams {
+                if text.len() > limits::MAX_LOG_STREAM_LEN {
+                    return Err(field.fail(Rule::TooLong));
+                }
+            }
+        }
         match (self.outcome, self.exit_code) {
             (Outcome::Succeeded, Some(code)) if code != 0 => {
                 Err(at.field("results.exit_code").fail(Rule::Inconsistent))
