@@ -5,7 +5,7 @@
 # runs them once on a provisioned Mac that has no toolchain. Download the artifact, check
 # SHA256SUMS, copy the binary over, chmod +x it (the artifact zip drops the mode) and, as
 # root, run
-#   JS_TREESTORE_PRIV_ROOT=<empty directory on the APFS volume> \
+#   JS_TREESTORE_PRIV_PARENT=<its parent> JS_TREESTORE_PRIV_ROOT=<root-owned 0755 directory on the APFS volume> \
 #     JS_TREESTORE_PRIV_UID=<uid> JS_TREESTORE_PRIV_GID=<gid> \
 #     ./privileged --ignored --test-threads=1
 # (libtest flags come first.)

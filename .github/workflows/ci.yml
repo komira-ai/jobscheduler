@@ -150,7 +150,7 @@ jobs:
             exit 0
           fi
           macos=false
-          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
+          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^crates/js-treestore/(src/mac/|tests/(privileged|treestore/mac_))|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
             macos=true
           elif printf '%s\n' "$patch" | grep -Ev '^(\+\+\+|---) ' | grep -Eq '^[+-].*target_(os[[:space:]]*=[[:space:]]*"macos"|vendor[[:space:]]*=[[:space:]]*"apple")'; then
             macos=true

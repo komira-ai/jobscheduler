@@ -3,11 +3,14 @@
 //! to `clonefile`, `link` and ownership, recorded as `PROBE` lines.
 //!
 //! Every test is `#[ignore]`d: they run only on a provisioned Mac, as root, through the
-//! `js-treestore-privileged-tests` workflow's binary. They read three variables (a
+//! `js-treestore-privileged-tests` workflow's binary. They read these variables (a
 //! flag-free test binary has no other way to take them):
 //!
-//! - `JS_TREESTORE_PRIV_ROOT`: an empty directory on the APFS volume to work in;
-//! - `JS_TREESTORE_PRIV_UID` and `JS_TREESTORE_PRIV_GID`: an unprivileged user and group.
+//! - `JS_TREESTORE_PRIV_ROOT`: a directory on the APFS volume to work in, owned by root,
+//!   not writable by others, not a link, and directly under `JS_TREESTORE_PRIV_PARENT`
+//!   (both absolute, no `..`);
+//! - `JS_TREESTORE_PRIV_UID` and `JS_TREESTORE_PRIV_GID`: an unprivileged user and group
+//!   (neither 0).
 //!
 //! Run as root: `./privileged --ignored --test-threads=1`.
 #![cfg(target_os = "macos")]
@@ -16,7 +19,7 @@ use std::ffi::{CString, c_char, c_int};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::process::CommandExt as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use js_treestore::Sealer as _;
@@ -33,30 +36,75 @@ struct Work {
     sealer: MacSealer,
 }
 
+/// The work root, checked: absolute, no `..`, a real directory (not a link) owned by root
+/// and not writable by group or others, directly under the parent the caller names.
+fn checked_root() -> PathBuf {
+    let absolute = |var: &str| -> PathBuf {
+        let path = PathBuf::from(std::env::var(var).unwrap_or_else(|_| panic!("{var} is not set")));
+        assert!(path.is_absolute(), "{var} must be absolute: {path:?}");
+        assert!(
+            path.components()
+                .all(|c| !matches!(c, Component::ParentDir | Component::CurDir)),
+            "{var} must not contain . or ..: {path:?}"
+        );
+        path
+    };
+    let root = absolute("JS_TREESTORE_PRIV_ROOT");
+    let parent = absolute("JS_TREESTORE_PRIV_PARENT");
+    assert_eq!(
+        root.parent(),
+        Some(parent.as_path()),
+        "the root must be directly under the parent"
+    );
+    assert_ne!(parent.parent(), None, "the parent must not be /");
+    let meta = std::fs::symlink_metadata(&root).expect("the root must exist");
+    assert!(
+        meta.is_dir(),
+        "the root must be a directory, not a link: {root:?}"
+    );
+    assert_eq!(meta.uid(), 0, "the root must be owned by root: {root:?}");
+    assert_eq!(
+        meta.mode() & 0o022,
+        0,
+        "the root must not be group or world writable"
+    );
+    root
+}
+
 impl Work {
     fn new(name: &str) -> Work {
         assert_eq!(rustix::process::geteuid().as_raw(), 0, "run as root");
-        let base =
-            PathBuf::from(std::env::var("JS_TREESTORE_PRIV_ROOT").expect("JS_TREESTORE_PRIV_ROOT"));
+        let base = checked_root();
         let number = |var: &str| -> u32 { std::env::var(var).expect(var).parse().expect(var) };
+        let (uid, gid) = (
+            number("JS_TREESTORE_PRIV_UID"),
+            number("JS_TREESTORE_PRIV_GID"),
+        );
+        assert!(
+            uid != 0 && gid != 0,
+            "the other user must not be root (uid {uid}, gid {gid})"
+        );
         let work = Work {
             dir: base.join(format!("{name}-{}", std::process::id())),
-            uid: number("JS_TREESTORE_PRIV_UID"),
-            gid: number("JS_TREESTORE_PRIV_GID"),
+            uid,
+            gid,
             sealer: MacSealer::new(Owner::root(), js_treestore::mac::Fchflags),
         };
-        work.clear();
+        work.clear().expect("clear a former work directory");
         std::fs::create_dir(&work.dir).unwrap();
         std::fs::set_permissions(&work.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         work
     }
 
     /// Removes the work directory, clearing `uchg` first.
-    fn clear(&self) {
+    fn clear(&self) -> Result<(), String> {
         if self.dir.exists() {
-            self.sealer.unseal_for_delete(&self.dir).unwrap();
-            std::fs::remove_dir_all(&self.dir).unwrap();
+            self.sealer
+                .unseal_for_delete(&self.dir)
+                .map_err(|e| e.to_string())?;
+            std::fs::remove_dir_all(&self.dir).map_err(|e| e.to_string())?;
         }
+        Ok(())
     }
 
     /// `root/{a.txt, sub/b.txt}`, readable by everyone.
@@ -85,7 +133,10 @@ impl Work {
 
 impl Drop for Work {
     fn drop(&mut self) {
-        self.clear();
+        // Best effort: a panic here during an unwind would abort and hide the real failure.
+        if let Err(error) = self.clear() {
+            eprintln!("could not clear {:?}: {error}", self.dir);
+        }
     }
 }
 

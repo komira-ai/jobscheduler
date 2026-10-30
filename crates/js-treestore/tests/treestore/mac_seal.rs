@@ -256,6 +256,23 @@ fn an_absolute_symlink_is_refused() {
 }
 
 #[test]
+fn a_symlink_pointing_outside_the_tree_is_never_followed_by_sealing_or_unsealing() {
+    let rig = Rig::new();
+    let root = rig.tree();
+    let outside = rig.dir.path().join("outside.txt");
+    std::fs::write(&outside, b"not part of the tree").unwrap();
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o664)).unwrap();
+    std::os::unix::fs::symlink("../../outside.txt", root.join("sub/out")).unwrap();
+    std::os::unix::fs::symlink("../..", root.join("sub/up")).unwrap();
+    rig.sealer.seal(&root).unwrap();
+    rig.sealer.unseal_for_delete(&root).unwrap();
+    assert!(!rig.flags.touched(&outside));
+    assert_eq!(mode(&outside), 0o664);
+    assert_eq!(rig.flags.of(rig.dir.path()), 0);
+    assert!(!rig.flags.touched(rig.dir.path()));
+}
+
+#[test]
 fn a_tree_nested_to_the_depth_limit_is_sealed_and_one_level_deeper_is_refused() {
     let rig = Rig::new();
     let ok = rig.dir.path().join("ok");

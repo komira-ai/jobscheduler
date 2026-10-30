@@ -71,7 +71,8 @@ impl Owner {
 /// flag on every file and directory, through a way to set user flags.
 ///
 /// Sealing re-checks the stage by descriptor, never following a link: only directories,
-/// regular files and symlinks with a relative target pass; a file with a second hard link
+/// regular files and symlinks with a relative target pass (that a target stays inside the
+/// tree is the extractor's check, not repeated here); a file with a second hard link
 /// or with extended attributes is refused, and so is nesting deeper than
 /// [`js_bundle::MAX_DEPTH`]. Directories end `0555`, files `0555` if the owner could
 /// execute them and `0444` otherwise, and every file and directory is synced. The entry and
@@ -180,7 +181,7 @@ impl<F: UserFlags> FlagSealer<F> {
         rustix::fs::fchown(fd, Some(self.owner.uid), Some(self.owner.gid))?;
         rustix::fs::fchmod(fd, Mode::from_bits_truncate(mode))?;
         self.flags.set(fd.as_fd(), IMMUTABLE)?;
-        rustix::fs::fsync(fd)?;
+        sync_to_disk(fd)?;
         *bytes += blocks(stat);
         Ok(())
     }
@@ -272,6 +273,18 @@ impl<F: UserFlags> Unsealing<'_, F> {
             _ => Ok(()),
         }
     }
+}
+
+/// Flushes the file or directory to the drive, as `File::sync_all` does: on macOS plain
+/// `fsync` leaves the data in the drive's cache and `F_FULLFSYNC` does not, and the store
+/// writes a tree's record on the strength of this call. (Seen to compile and pass on the
+/// macOS job; a test cannot tell the two apart.)
+fn sync_to_disk(fd: &OwnedFd) -> Result<(), SealError> {
+    #[cfg(target_os = "macos")]
+    rustix::fs::fcntl_fullfsync(fd)?;
+    #[cfg(not(target_os = "macos"))]
+    rustix::fs::fsync(fd)?;
+    Ok(())
 }
 
 fn refuse(at: &Path, what: &str) -> SealError {
