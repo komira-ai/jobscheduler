@@ -1,7 +1,7 @@
 //! The reserved environment names: every prefix and owned name is pinned, so a change
 //! to the list is a visible change to this table.
 
-use js_types::env::{MAX_ENV_NAME_LEN, OWNED_ENV_NAMES, RESERVED_ENV_PREFIXES, env_name_reserved};
+use js_types::env::{MAX_ENV_NAME_LEN, OWNED_ENV_NAMES, RESERVED_ENV_PREFIXES, SHELL_ENV_NAMES, env_name_reserved};
 
 /// The list is exactly the union the loader, the sandbox, launchd, the allocator, the
 /// Objective-C runtime and the agent need.
@@ -10,7 +10,28 @@ fn the_reserved_lists_are_pinned() {
     assert_eq!(
         RESERVED_ENV_PREFIXES,
         [
-            "DYLD_", "LD_", "SANDBOX_", "JS_", "__XPC_", "MALLOC", "Malloc", "OBJC_"
+            "DYLD_",
+            "LD_",
+            "SANDBOX_",
+            "JS_",
+            "__XPC_",
+            "MALLOC",
+            "Malloc",
+            "OBJC_",
+            "BASH_FUNC_"
+        ]
+    );
+    assert_eq!(
+        SHELL_ENV_NAMES,
+        [
+            "SHELLOPTS",
+            "BASHOPTS",
+            "BASH_ENV",
+            "ENV",
+            "PS4",
+            "PROMPT_COMMAND",
+            "IFS",
+            "CDPATH"
         ]
     );
     assert_eq!(
@@ -53,6 +74,16 @@ fn reserved_names_are_refused_and_near_misses_are_not() {
         "XDG_CACHE_HOME",
         "CLANG_MODULE_CACHE_PATH",
         "DEVELOPER_DIR",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "BASH_ENV",
+        "ENV",
+        "PS4",
+        "PROMPT_COMMAND",
+        "IFS",
+        "CDPATH",
+        "BASH_FUNC_ulimit%%",
+        "BASH_FUNC_",
     ];
     for name in reserved {
         assert!(env_name_reserved(name), "{name}");
@@ -74,6 +105,12 @@ fn reserved_names_are_refused_and_near_misses_are_not() {
         "home",
         "TMPDIRS",
         "DEVELOPER_DIRS",
+        "ENVIRONMENT",
+        "PS1",
+        "PS44",
+        "BASH",
+        "BASH_FUNC",
+        "shellopts",
         "",
     ];
     for name in free {
@@ -89,6 +126,15 @@ fn every_listed_entry_is_reserved() {
         assert!(env_name_reserved(&format!("{prefix}X")), "{prefix}X");
     }
     for name in OWNED_ENV_NAMES {
+        assert!(env_name_reserved(name), "{name}");
+    }
+}
+
+/// Every shell-affecting name is refused: a shell reads each before its first command, so
+/// a job that could set one would steer the shell that starts it.
+#[test]
+fn every_shell_name_is_reserved() {
+    for name in SHELL_ENV_NAMES {
         assert!(env_name_reserved(name), "{name}");
     }
 }

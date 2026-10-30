@@ -183,3 +183,39 @@ fn a_run_cannot_fork_past_the_process_limit() {
         tail.stderr
     );
 }
+
+/// Asserts that a job's environment cannot make the shell that sets the limits run a
+/// command outside the profile: the environment asks the shell to trace with a `PS4` that
+/// touches a file in a directory every user may write, and to run an imported `ulimit`
+/// function that does the same. The file must not exist afterwards, and the run still ends
+/// well. It catches a limiting shell that runs before the profile is applied, as the lease
+/// user, with the job's environment.
+#[test]
+fn the_job_environment_cannot_steer_the_shell_that_sets_the_limits() {
+    static UNIQUE: AtomicU32 = AtomicU32::new(0);
+    let mut rig = Rig::new("mac-shell-env");
+    rig.fake.real_runs();
+    let marker = std::path::PathBuf::from(format!(
+        "/private/tmp/js-native-escape-{}-{}",
+        std::process::id(),
+        UNIQUE.fetch_add(1, Ordering::SeqCst)
+    ));
+    let touch = format!("/usr/bin/touch {}", marker.display());
+    let mut body = super::native("/bin/echo", &["done"]);
+    body.env = std::collections::BTreeMap::from([
+        ("SHELLOPTS".to_owned(), "xtrace".to_owned()),
+        ("PS4".to_owned(), format!("$({touch}) ")),
+        (
+            "BASH_FUNC_ulimit%%".to_owned(),
+            format!("() {{ {touch}; }}"),
+        ),
+    ]);
+    let spec = rig.spec("r1", body);
+    let id = rig.rt.create_and_start(&spec).unwrap();
+    let status = rig.settle(&id);
+    let escaped = marker.exists();
+    // Removed before anything is asserted, so a failure leaves nothing behind.
+    let _ = fs::remove_file(&marker);
+    assert!(!escaped, "a command ran outside the profile: {}", marker.display());
+    assert_eq!(status, exited(0));
+}

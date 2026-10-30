@@ -139,7 +139,8 @@ pub fn native(program: &str, args: &[&str]) -> NativeSpec {
 pub const WRAPPER: &str = "ulimit -f \"$1\" && ulimit -u \"$2\" && shift 2 && exec \"$@\"";
 
 /// The command line the runtime sent the helper, taken apart: `sandbox-exec`, the `-D`
-/// parameters, `-p` and the profile, then the program and its arguments.
+/// parameters, `-p` and the profile, then the shell that sets the run's limits inside the
+/// profile, then the program and its arguments.
 pub struct Parsed {
     /// The limits the shell wrapper sets: the file size in 1024-byte blocks and the most
     /// processes.
@@ -149,11 +150,13 @@ pub struct Parsed {
     pub tail: Vec<String>,
 }
 
+/// The shell that sets the limits: it is the profile's first program, so nothing the job's
+/// environment steers (a shell reads `SHELLOPTS`, `PS4`, `ENV` and imported functions
+/// before its first command) runs outside the profile.
+pub const LIMITER: &str = "/bin/sh";
+
 pub fn parse(argv: &[String]) -> Parsed {
-    assert_eq!(&argv[..4], ["/bin/sh", "-c", WRAPPER, "js-native"]);
-    let limits = (argv[4].clone(), argv[5].clone());
-    let argv = &argv[6..];
-    assert_eq!(argv[0], "/usr/bin/sandbox-exec");
+    assert_eq!(argv[0], "/usr/bin/sandbox-exec", "nothing runs before the profile");
     let mut params = Vec::new();
     let mut at = 1;
     while argv[at] == "-D" {
@@ -162,10 +165,13 @@ pub fn parse(argv: &[String]) -> Parsed {
         at += 2;
     }
     assert_eq!(argv[at], "-p");
+    let profile = argv[at + 1].clone();
+    let rest = &argv[at + 2..];
+    assert_eq!(&rest[..4], [LIMITER, "-c", WRAPPER, "js-native"]);
     Parsed {
-        limits,
+        limits: (rest[4].clone(), rest[5].clone()),
         params,
-        profile: argv[at + 1].clone(),
-        tail: argv[at + 2..].to_vec(),
+        profile,
+        tail: rest[6..].to_vec(),
     }
 }
