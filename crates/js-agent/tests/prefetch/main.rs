@@ -1,10 +1,9 @@
 //! The prefetcher: pulls run on a runtime of its own, and the caller's questions never
 //! wait for one. The pull functions here are gated on a `Notify` the test releases, so no
-//! test measures time; a guard thread ends the process if a test hangs.
+//! test measures time or holds a timeout.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 use js_agent::lifecycle::{Prefetcher, Prepared, PullFuture, Ticket};
 use tokio::sync::Notify;
@@ -13,16 +12,6 @@ const A: &str =
     "registry.example/a@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const B: &str =
     "registry.example/b@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-/// Ends the process with a message if a test is still running after two minutes: a hang
-/// guard, never a measurement.
-fn guard() {
-    std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_secs(120));
-        eprintln!("a prefetch test hung");
-        std::process::exit(101);
-    });
-}
 
 fn failed(text: &str) -> Prepared {
     Prepared::Failed(js_agent::lifecycle::RuntimeError::new(text))
@@ -37,7 +26,6 @@ fn boom() -> Result<(), String> {
 /// until the pull ends and `Ready` after.
 #[test]
 fn two_runs_naming_one_image_pull_it_once() {
-    guard();
     let (pulls, gate) = (Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new()));
     let (counted, held) = (Arc::clone(&pulls), Arc::clone(&gate));
     let prefetcher = Prefetcher::new(2, move |_| -> PullFuture {
@@ -70,7 +58,6 @@ fn two_runs_naming_one_image_pull_it_once() {
 /// `Pending` until it is released.
 #[test]
 fn a_pull_under_way_blocks_neither_the_caller_nor_another_image() {
-    guard();
     let gate = Arc::new(Notify::new());
     let held = Arc::clone(&gate);
     let prefetcher = Prefetcher::new(2, move |image| -> PullFuture {
@@ -97,7 +84,6 @@ fn a_pull_under_way_blocks_neither_the_caller_nor_another_image() {
 /// ticket starts a new pull, which can succeed.
 #[test]
 fn a_failed_pull_is_reported_to_every_waiter_and_a_new_call_pulls_again() {
-    guard();
     let pulls = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&pulls);
     let prefetcher = Prefetcher::new(1, move |_| -> PullFuture {
@@ -126,7 +112,6 @@ fn a_failed_pull_is_reported_to_every_waiter_and_a_new_call_pulls_again() {
 /// ticket than the failed pull's starts a new pull.
 #[test]
 fn a_failure_is_reported_only_to_the_ticket_of_the_pull_that_failed() {
-    guard();
     let pulls = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&pulls);
     let prefetcher = Prefetcher::new(1, move |_| -> PullFuture {
@@ -156,7 +141,6 @@ fn a_failure_is_reported_only_to_the_ticket_of_the_pull_that_failed() {
 /// result has been offered before the check.
 #[test]
 fn a_forgotten_image_is_pulled_again_and_a_pull_let_go_is_ignored() {
-    guard();
     let (pulls, gate) = (Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new()));
     let (ended, ended_rx) = std::sync::mpsc::channel();
     let (counted, held) = (Arc::clone(&pulls), Arc::clone(&gate));
@@ -215,7 +199,6 @@ async fn it_can_be_dropped_inside_an_async_task() {
 /// the caller, and the next call, whose function works, pulls it.
 #[test]
 fn a_pull_function_that_panics_leaves_no_trace() {
-    guard();
     let calls = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&calls);
     let prefetcher = Prefetcher::new(1, move |_| -> PullFuture {
@@ -236,7 +219,6 @@ fn a_pull_function_that_panics_leaves_no_trace() {
 /// A pull that panics is a failed pull, not an image that stays `Pending` for ever.
 #[test]
 fn a_pull_that_panics_is_a_failed_pull() {
-    guard();
     let prefetcher =
         Prefetcher::new(1, |_| -> PullFuture { Box::pin(async { boom() }) }).expect("a runtime");
     match prefetcher.wait(A) {
