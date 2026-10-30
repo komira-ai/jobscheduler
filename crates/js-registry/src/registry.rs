@@ -8,6 +8,7 @@ use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
 use js_provider::Observed;
 use js_types::{HostId, LeaseId, MemoryHeadroom, ProviderId, RequestId, Shape};
+use js_usage::ProfileKey;
 
 use crate::config::PoolConfig;
 use crate::credential::{Binding, Credential};
@@ -834,7 +835,20 @@ impl Registry {
         &self,
         host: &HostId,
         lease: &LeaseId,
+        spec: JobSpec,
+    ) -> Result<RunView, RunRefusal> {
+        self.queue_keyed_run(host, lease, spec, None)
+    }
+
+    /// [`Registry::queue_run`] for a run whose work the lease holder named: `profile`, the
+    /// name the holder supplied, is kept beside the run (in memory, like the run) and is what
+    /// [`Registry::profile_of`] answers. It is not part of the job, so the host never receives it.
+    pub fn queue_keyed_run(
+        &self,
+        host: &HostId,
+        lease: &LeaseId,
         mut spec: JobSpec,
+        profile: Option<ProfileKey>,
     ) -> Result<RunView, RunRefusal> {
         spec.lease_id = lease.to_string();
         let now = self.shared.clock.now();
@@ -876,11 +890,17 @@ impl Registry {
         runs.admit(
             host,
             lease,
-            spec,
+            (spec, profile),
             shape.resources(),
             record.quota_default,
             seen,
         )
+    }
+
+    /// The profile name the run `run_id` was queued with, or `None` when it was queued
+    /// without one or the registry does not know the run (a restart forgets every run).
+    pub fn profile_of(&self, run_id: &str) -> Option<ProfileKey> {
+        self.lock().runs.profile_of(run_id)
     }
 
     /// Asks for the run `run_id` of `lease` to stop: a retained intent, carried as a stop

@@ -490,11 +490,11 @@ fn execute(
     // thread (see `WorkerHost`), so the heartbeat loop never waits for a check or the hook.
     let mut host = jobs
         .as_ref()
-        .map(|(worker, _)| WorkerHost::new(worker.handle()));
-    let clock = jobs.as_ref().map(|(worker, _)| worker.clock());
+        .map(|(worker, ..)| WorkerHost::new(worker.handle()));
+    let clock = jobs.as_ref().map(|(worker, ..)| worker.clock());
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
-    if let Some((worker, drain)) = &jobs {
-        session = session.with_jobs(worker, *drain);
+    if let Some((worker, drain, outbox)) = &jobs {
+        session = session.with_jobs(worker, *drain).with_usage(outbox.clone());
     }
     if let (Some(host), Some(clock)) = (host.as_mut(), clock.as_ref()) {
         session = session.with_default_quiesce(host, clock);

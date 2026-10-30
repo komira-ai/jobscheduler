@@ -3,8 +3,11 @@
 //! when a test moves it, so no test waits and none asserts a duration.
 
 mod cgroup;
+mod collect;
+mod outbox;
 mod sampler;
 mod tail;
+mod wiring;
 
 use std::cell::Cell;
 
