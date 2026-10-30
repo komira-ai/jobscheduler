@@ -37,7 +37,7 @@ fn opening_gives_the_job_user_only_the_cgroup_file_crun_moves_processes_with() {
         given(&node.dir),
         [
             (node.cgroups.join("root/cgroup.procs"), uid, gid),
-            (helpers.join(""), uid, gid),
+            (helpers.clone(), uid, gid),
             (helpers.join("cgroup.procs"), uid, gid),
             (helpers.join("cgroup.threads"), uid, gid),
             (helpers.join("cgroup.subtree_control"), uid, gid),

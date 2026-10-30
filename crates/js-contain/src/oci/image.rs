@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::{JobError, Oci, at};
 
@@ -93,7 +93,9 @@ pub const STAGE_PREFIX: &str = ".stage-";
 #[derive(Debug)]
 pub(crate) struct Images {
     dir: PathBuf,
-    flights: Mutex<HashMap<String, Arc<OnceCell<()>>>>,
+    /// One gate for each digest: whether the image was fetched and unpacked by this
+    /// daemon (`true`), held while it is being fetched or removed, so the two never overlap.
+    flights: Mutex<HashMap<String, Arc<AsyncMutex<bool>>>>,
 }
 
 /// The hex of an image's `sha256:<hex>` digest, the name of its directory.
@@ -146,12 +148,40 @@ impl Images {
         if self.has(image) {
             return Ok(());
         }
-        let flight = {
-            let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
-            Arc::clone(flights.entry(hex_of(image)).or_default())
-        };
-        flight.get_or_try_init(|| self.acquire(oci, image)).await?;
+        let flight = self.gate(image);
+        // Concurrent first uses wait here for one fetch and unpack; a use that finds it
+        // done is done. A fetch that failed or was cancelled leaves the gate open for the
+        // next use to try again.
+        let mut fetched = flight.lock().await;
+        if !*fetched {
+            self.acquire(oci, image).await?;
+            *fetched = true;
+        }
         Ok(())
+    }
+
+    /// The gate of `image`.
+    fn gate(&self, image: &PinnedImage) -> Arc<AsyncMutex<bool>> {
+        let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(flights.entry(hex_of(image)).or_default())
+    }
+
+    /// Removes the image's directory (an image already gone is not an error) and forgets
+    /// that it was fetched, so that the next use fetches it again. It waits for a fetch of
+    /// the same image under way, and a fetch started meanwhile waits for it, so the two
+    /// never work in the directory together. The caller must see to it that no container
+    /// still runs on the image (its root is the lower layer of a container's mounts).
+    ///
+    /// # Errors
+    /// The directory could not be removed.
+    pub(crate) async fn remove(&self, image: &PinnedImage) -> std::io::Result<()> {
+        let flight = self.gate(image);
+        let mut fetched = flight.lock().await;
+        *fetched = false;
+        match crate::remove::remove_tree(&self.dir_of(&image.digest)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
     }
 
     /// Fetches the layers into a directory of blobs, unpacks them into a stage directory,

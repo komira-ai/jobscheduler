@@ -847,3 +847,48 @@ fn a_helpers_directory_is_given_by_descriptor_and_never_through_a_link() {
         dir.join("s/oci-images").join("ab".repeat(32))
     );
 }
+
+/// A source that counts its fetches and publishes nothing.
+#[derive(Debug, Default)]
+struct Counting(std::sync::atomic::AtomicUsize);
+
+#[async_trait::async_trait]
+impl ImageSource for Counting {
+    async fn fetch(&self, _: &PinnedImage, _: &Path) -> Result<Vec<String>, FetchError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+}
+
+/// Catches an image that is removed and then never fetched again by the daemon that fetched
+/// it once (the memory of the fetch outliving the files), and one fetched twice when it was
+/// not removed: a second use fetches nothing, a removal makes the next use fetch again, a
+/// removal of what is gone is no error, and the image is there after.
+#[tokio::test]
+async fn a_removed_image_is_fetched_again_and_a_present_one_is_not() {
+    let dir = scratch("image-removed");
+    let source = Arc::new(Counting::default());
+    let oci = Oci::on(
+        &config(&dir, true),
+        source.clone(),
+        &dir.join("s"),
+        "/actions",
+        "x86_64",
+    )
+    .expect("starts");
+    let image = PinnedImage {
+        reference: format!("r/x@sha256:{}", "ab".repeat(32)),
+        digest: format!("sha256:{}", "ab".repeat(32)),
+    };
+    let fetched = || source.0.load(std::sync::atomic::Ordering::SeqCst);
+    oci.check_pinned(&image).await.expect("fetched");
+    oci.check_pinned(&image).await.expect("not again");
+    assert_eq!(fetched(), 1);
+    assert!(oci.image_dir(&image).is_dir());
+    oci.remove_image(&image).await.expect("removed");
+    assert!(!oci.image_dir(&image).exists());
+    oci.remove_image(&image).await.expect("already gone");
+    oci.check_pinned(&image).await.expect("fetched again");
+    assert_eq!(fetched(), 2);
+    assert!(oci.image_dir(&image).is_dir());
+}
