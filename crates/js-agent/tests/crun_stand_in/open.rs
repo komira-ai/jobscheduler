@@ -15,8 +15,9 @@ fn why(result: Result<CrunRuntime, CrunError>) -> String {
 
 /// Proves a runtime opens on a node with the system's own hooks, and that opening gives the
 /// job user the one file of the agent's cgroup `crun`, run as that user, needs to move its
-/// first process into a lease's cgroup (`cgroup.procs` of the delegated cgroup), and nothing
-/// of the directory the leases' cgroups are in. Catches a `crun` that cannot start a
+/// first process into a lease's cgroup (`cgroup.procs` of the delegated cgroup) and the
+/// cgroup the helper containers are made in, and nothing of the directory the leases'
+/// cgroups are in. Catches a `crun` that cannot start a
 /// container, and a job user that can make or remove the cgroups of other leases.
 #[test]
 fn opening_gives_the_job_user_only_the_cgroup_file_crun_moves_processes_with() {
@@ -25,9 +26,17 @@ fn opening_gives_the_job_user_only_the_cgroup_file_crun_moves_processes_with() {
     assert!(format!("{opened:?}").contains("node-1"));
     drop(opened);
     node.open();
+    let helpers = node.cgroups.join("actions/helpers");
+    let (uid, gid) = (node.uid, node.gid);
     assert_eq!(
         given(&node.dir),
-        [(node.cgroups.join("root/cgroup.procs"), node.uid, node.gid)]
+        [
+            (node.cgroups.join("root/cgroup.procs"), uid, gid),
+            (helpers.join(""), uid, gid),
+            (helpers.join("cgroup.procs"), uid, gid),
+            (helpers.join("cgroup.threads"), uid, gid),
+            (helpers.join("cgroup.subtree_control"), uid, gid),
+        ]
     );
 }
 
@@ -81,6 +90,12 @@ fn a_node_that_cannot_run_containers_is_refused_when_the_runtime_opens() {
 
     let settings = node.settings("/refuse-root");
     assert!(why(open(settings)).contains("to the job user"));
+
+    // The cgroup of the helpers is there, as a file.
+    let other = Node::new("open-unfit-file");
+    std::fs::write(other.cgroups.join("actions/helpers"), b"a file").expect("a file");
+    let why = why(open(other.settings("/root")));
+    assert!(why.contains("cgroup of the helper containers"), "{why}");
 }
 
 /// Proves `prepare` is the pull and unpack in the background: an image the store has is

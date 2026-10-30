@@ -14,9 +14,10 @@
 //!   server's booking assumes) and given to the job user, who makes the container's cgroup
 //!   `<name>/ctr` under it ([`Runtime::cgroup`]). The job user is given nothing of the
 //!   directory the leases' cgroups are in (it could make or remove the cgroups of other
-//!   leases there) and one file of the agent's own cgroup, `cgroup.procs`: `crun` moves its
-//!   first process from the agent's cgroup into the container's, which the kernel allows
-//!   with write access to the `cgroup.procs` of their nearest common ancestor;
+//!   leases there) except the cgroup `helpers` below it, where the helper containers are
+//!   made, and one file of the agent's own cgroup, `cgroup.procs`: `crun` moves its first
+//!   process from the agent's cgroup into the container's, which the kernel allows with
+//!   write access to the `cgroup.procs` of their nearest common ancestor;
 //! - the run's scratch directory, given to the job's host id and bound at `/scratch`; the
 //!   run's mounts, and its files at `/run/js-files` read-only, are bound after it;
 //! - a bundle of the image's unpacked root (read-only), an overlay of an empty input root
@@ -189,6 +190,14 @@ pub enum CrunError {
         /// The reason.
         why: io::Error,
     },
+    /// The cgroup of the helper containers could not be made or given to the job user.
+    #[error("the cgroup of the helper containers {path}: {why}")]
+    Helpers {
+        /// The cgroup.
+        path: PathBuf,
+        /// The reason.
+        why: io::Error,
+    },
     /// The directory of the image configs could not be made.
     #[error("the directory of the image configs {path}: {why}")]
     Configs {
@@ -301,24 +310,31 @@ impl CrunRuntime {
         source: Arc<dyn ImageSource>,
         hooks: Hooks,
     ) -> Result<Self, CrunError> {
-        settings.oci.job_user.ok_or(CrunError::NoJobUser)?;
-        let oci = Oci::new(
-            &settings.oci,
-            source,
-            &settings.scratch,
-            &settings.cgroups.actions,
-        )?;
-        let rt = Builder::new_current_thread().enable_all().build()?;
-        let (uid, gid) = oci.job_ids();
+        let (uid, gid) = settings.oci.job_user.ok_or(CrunError::NoJobUser)?;
         let cgroups = settings.cgroups;
         // `crun`, run as the job user, moves its first process from the agent's cgroup into
         // the container's, which needs write access to the `cgroup.procs` of their nearest
-        // common ancestor: the agent's own cgroup. The cgroup the leases are in stays the
-        // agent's (a lease's cgroup is given to the job user when it is made).
+        // common ancestor: the agent's own cgroup.
         for file in ROOT_OWNED_FILES {
             let path = cgroup_dir(&cgroups.mount, &cgroups.root).join(file);
             (hooks.chown)(&path, uid, gid).map_err(|why| CrunError::Delegation { path, why })?;
         }
+        // The helper containers (unpack, removal) are made by `crun` as the job user in a
+        // cgroup of their own, so that the job user is given nothing of the directory the
+        // leases' cgroups are in (it could make or remove the cgroups of other leases
+        // there). A lease's cgroup is given to the job user when it is made. It exists
+        // before the backend does: the backend sweeps old unpacks with a helper when it
+        // starts.
+        let helpers = format!("{}/helpers", cgroups.actions.trim_end_matches('/'));
+        let helpers_dir = cgroup_dir(&cgroups.mount, &helpers);
+        make_helper_cgroup(&helpers_dir, hooks.chown, (uid, gid)).map_err(|why| {
+            CrunError::Helpers {
+                path: helpers_dir.clone(),
+                why,
+            }
+        })?;
+        let oci = Oci::new(&settings.oci, source, &settings.scratch, &helpers)?;
+        let rt = Builder::new_current_thread().enable_all().build()?;
         let configs = config_dir(&settings.scratch);
         std::fs::create_dir_all(&configs).map_err(|why| CrunError::Configs {
             path: configs.clone(),
@@ -532,6 +548,18 @@ impl CrunRuntime {
         run.state = State::Ended(exit);
         Status::Exited(exit)
     }
+}
+
+/// Makes the cgroup `dir` of the helper containers (once: one that is there is kept), hands
+/// the controllers to its children and gives it to the job user.
+fn make_helper_cgroup(dir: &Path, chown: Chown, (uid, gid): (u32, u32)) -> io::Result<()> {
+    if !dir.is_dir() {
+        std::fs::create_dir(dir)?;
+    }
+    std::fs::write(dir.join("cgroup.subtree_control"), "+cpu +memory +pids")?;
+    JOB_OWNED_FILES
+        .iter()
+        .try_for_each(|file| chown(&dir.join(file), uid, gid))
 }
 
 /// The directory of the cgroup `name` (relative to `mount`, starting with `/`).
