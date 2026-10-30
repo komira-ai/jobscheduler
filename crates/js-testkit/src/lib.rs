@@ -13,6 +13,9 @@
 //!   never reads the host's settings file.
 //! - `database` (feature `postgres`): a Postgres database a test owns, made on the test server
 //!   `KBF_TEST_POSTGRES_URL` names and dropped on drop; a test without the variable fails.
+//! - `oci_registry` (feature `oci-registry`): the registry in this process that js-oci's own
+//!   tests pull from (TLS on a loopback socket, with a token challenge, redirects and
+//!   tampered bytes on demand), for the tests of a crate that pulls through js-oci.
 //! - [`dir`]: a scratch directory a test owns and that is removed on drop.
 //! - [`port`]: loopback ports a test can rely on (dead ones, and ones held until used).
 //! - [`forked`]: a child held between `fork` and `exec`, to show what a lock or a file
@@ -63,6 +66,8 @@ pub mod fake;
 pub mod forked;
 pub mod m2;
 pub mod node_view;
+#[cfg(feature = "oci-registry")]
+pub mod oci_registry;
 pub mod port;
 pub mod probe;
 pub mod reaped;

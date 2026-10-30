@@ -315,6 +315,13 @@ pub struct Cli {
         allow_hyphen_values = true
     )]
     pub readiness_hook_args: Vec<String>,
+    /// A registry and namespace an image may be pulled from, `HOST[:PORT]/PREFIX` such as
+    /// `ghcr.io/komira-ai/`; repeatable. The prefix is whole path components, and a bare
+    /// host (every account on it) is refused at start. An image on no entry is never
+    /// pulled. The runtime that pulls with js-oci reads the list; the Docker and Podman
+    /// runtimes do not.
+    #[arg(long, value_name = "HOST/PREFIX")]
+    pub image_allow: Vec<String>,
     /// How many seconds a container gets to stop on its own before it is killed, whenever
     /// the agent stops one: a `Stop` or `Cancel` from the server, a job past its wall-time
     /// limit, the end of a drain. By default 10; at most 3600. Needs `--container-bin`.
@@ -326,6 +333,79 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SECONDS")]
     pub drain_wait: Option<u64>,
+
+    /// The bundle store: the directory a Mac keeps unpacked toolchain bundles in (`--bundle-*`
+    /// flags need it). Absolute; on the same APFS volume as `--scratch-root` (cloning needs
+    /// one volume) mounted with ownership honoured and not `noexec`, and the kernel's
+    /// securelevel must be 0 or less; the agent refuses to start otherwise, and on a host
+    /// that is not a Mac. Needs `--scratch-root` and `--bundle-budget-gib`. The disk the agent
+    /// offers (`disk-gib`) is reduced by the part of the budget the store has not used yet.
+    /// The hello reports `bundle-root` (this path) and `bundle` (the manifest digests the
+    /// store holds, that the deny and allow lists let through) only when the agent can run a
+    /// bundle, which this build cannot, so for now it reports neither. Until a server says it
+    /// takes a longer value, `bundle` holds one digest. Roll out servers first, then agents,
+    /// then this flag, then placement by `bundle`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_store: Option<PathBuf>,
+    /// The most GiB the store's trees (and the trees waiting to be deleted) may take
+    /// together. Required with `--bundle-store`; above 0.
+    #[arg(long, value_name = "GIB")]
+    pub bundle_budget_gib: Option<u64>,
+    /// New fetches are refused (`bundle-no-space`) while the store volume has less than this
+    /// many GiB free. By default 0. Needs `--bundle-store`.
+    #[arg(long, value_name = "GIB")]
+    pub bundle_low_water_gib: Option<u64>,
+    /// Whether a bundle that is not in the store is fetched: `never` (the default: the
+    /// operator, or the updater, puts it there first, and a job that names another is
+    /// refused `bundle-not-held`) or `missing` (only with `--bundle-trust list`, and at
+    /// least one registry flag). This build has no fetcher, so a fetch ends
+    /// `bundle-fetch-failed`. Needs `--bundle-store`.
+    #[arg(long, value_name = "never|missing")]
+    pub bundle_pull: Option<String>,
+    /// A registry and namespace a bundle may be fetched from, `HOST[:PORT]/PREFIX`
+    /// (`ghcr.io/example/`); not a bare host. A job's bundle must name one when any is
+    /// given. May be given more than once. Needs `--bundle-store`.
+    #[arg(long = "bundle-registry-allow", value_name = "HOST[:PORT]/PREFIX")]
+    pub bundle_registry_allow: Vec<String>,
+    /// Like `--bundle-registry-allow`, for a registry on a private address, and for that
+    /// registry only. May be given more than once. Needs `--bundle-store`.
+    #[arg(
+        long = "bundle-registry-allow-private",
+        value_name = "HOST[:PORT]/PREFIX"
+    )]
+    pub bundle_registry_allow_private: Vec<String>,
+    /// Minutes a bundle's trees are kept after their last use before they may be evicted.
+    /// By default 30. Needs `--bundle-store`.
+    #[arg(long, value_name = "MINUTES")]
+    pub bundle_min_age_min: Option<u64>,
+    /// A root-owned file of manifest digests (`sha256:<hex>`, one a line, `#` comments) the
+    /// store never evicts. Needs `--bundle-store`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_keep_file: Option<PathBuf>,
+    /// A file of manifest digests (same form) that are refused (`bundle-denied`) even when
+    /// listed. Read at every start of a job, so a change takes effect at once. Needs
+    /// `--bundle-store`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_deny_file: Option<PathBuf>,
+    /// A file of manifest digests (same form) a fetcher puts in the store ahead of the jobs
+    /// that name them. Checked at start; this build has no fetcher. Needs `--bundle-store`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_prefetch_file: Option<PathBuf>,
+    /// Which digests may run: `list` (the default: only those in `--bundle-allow-file`) or
+    /// `digest` (any a job names; for developer hosts only, and never with
+    /// `--bundle-pull missing`). Needs `--bundle-store`.
+    #[arg(long, value_name = "list|digest")]
+    pub bundle_trust: Option<String>,
+    /// The allow list for `--bundle-trust list`: manifest digests (same form), one a line.
+    /// Required with `list` and must hold a digest; refused with `digest`. Read at every
+    /// start of a job, so a change takes effect at once. A job whose digest is not in it is
+    /// refused `bundle-not-allowed`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_allow_file: Option<PathBuf>,
+    /// The read model of a run's profile: `open` (the default) or `allow`. `allow` is not
+    /// available yet: the agent refuses it at start.
+    #[arg(long, value_name = "open|allow")]
+    pub read_model: Option<String>,
 }
 
 /// `name=path` split at the first `=`.
