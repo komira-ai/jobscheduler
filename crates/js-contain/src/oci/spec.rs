@@ -343,7 +343,7 @@ pub(crate) fn action_config(
             .capabilities(capabilities)
             .rlimits(vec![
                 rlimit(PosixRlimitType::RlimitNofile, spec.limits.nofile),
-                rlimit(PosixRlimitType::RlimitNproc, crate::container::NPROC_HIGH),
+                rlimit(PosixRlimitType::RlimitNproc, spec.limits.nproc),
                 rlimit(PosixRlimitType::RlimitCore, 0),
             ])
             .no_new_privileges(false)
