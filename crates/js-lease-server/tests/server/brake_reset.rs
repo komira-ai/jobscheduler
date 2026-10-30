@@ -29,6 +29,7 @@ async fn tripped(name: &str) -> Harness {
         tripped_at: Some(Millis::new(T0)),
     };
     brake.insert("burst".to_owned(), trip);
+    brake.insert("retired".to_owned(), trip);
     let records = Records {
         brake,
         ..Default::default()
@@ -48,7 +49,7 @@ async fn pool(h: &Harness) -> Value {
 }
 
 /// Asserts what a restarted server shows of a tripped pool: it is in plan, `blocked` says
-/// `brake`, and one alert names the pool and the way out. It catches a trip the records hold
+/// `brake`, and an alert for it and one for a pool the file no longer has name the way out. It catches a trip the records hold
 /// and the status does not show, which an operator would only find by a request that never
 /// gets a machine.
 #[tokio::test]
@@ -59,10 +60,16 @@ async fn a_tripped_pool_is_in_plan_with_an_alert() {
     assert_eq!(view["launch"], "plan");
     assert_eq!(view["blocked"], "brake");
     let alerts = view["alerts"].as_array().unwrap();
-    assert_eq!(alerts.len(), 1, "{view}");
-    let said = alerts[0].as_str().unwrap();
-    assert!(said.contains("failure brake"), "{said}");
-    assert!(said.contains("/v1/pools/burst/brake/reset"), "{said}");
+    assert_eq!(alerts.len(), 2, "{view}");
+    let said: Vec<&str> = alerts.iter().map(|each| each.as_str().unwrap()).collect();
+    assert!(
+        said.iter().all(|each| each.contains("failure brake")),
+        "{said:?}"
+    );
+    for pool in ["burst", "retired"] {
+        let route = format!("/v1/pools/{pool}/brake/reset");
+        assert!(said.iter().any(|each| each.contains(&route)), "{said:?}");
+    }
 }
 
 /// Asserts the reset route: no token or a wrong one is a 401, a pool the server does not
@@ -83,6 +90,8 @@ async fn the_reset_needs_the_token_and_a_known_pool_and_is_idempotent() {
         .call("POST", "/v1/pools/elsewhere/brake/reset", None)
         .await;
     assert_eq!(other.status, 404);
+    let gone = h.call("POST", "/v1/pools/retired/brake/reset", None).await;
+    assert_eq!(gone.status, 202, "{}", gone.body);
     h.ticks.step().await;
     assert_eq!(pool(&h).await["blocked"], "brake");
 
@@ -95,7 +104,7 @@ async fn the_reset_needs_the_token_and_a_known_pool_and_is_idempotent() {
     assert_ne!(view["blocked"], "brake");
     assert_eq!(view["alerts"], json!([]));
     let on_disk = RecordsFile::new(records_path(&h.scratch)).load().unwrap();
-    assert!(on_disk.brake.is_empty());
+    assert!(on_disk.brake.is_empty(), "{:?}", on_disk.brake);
 
     let again = h.call("POST", path, None).await;
     assert_eq!(again.status, 202);

@@ -42,8 +42,9 @@
 //!   after the n-th in a row is `boot_fail_cooldown` doubled n-1 times up to
 //!   `boot_fail_cooldown_max`, and `boot_fail_trip_after` in a row trip the pool to `Plan`
 //!   ([`Blocked::Tripped`]) until the step is given the pool's name in
-//!   [`Input::brake_resets`]. A machine whose host is first heard from ends the count; the
-//!   trip stays. It only removes launches.
+//!   [`Input::brake_resets`]. A pool is struck at most once in a step. A machine whose host has
+//!   been heard from, unbroken, for `boot_fail_reset_after` ends the count; the trip stays. It
+//!   only removes launches.
 //!   The acquire id is the pool and 128 random bits the caller gives in [`Input::entropy`].
 //!   A launch the provider told to wait is retried when its time comes, if the pool is
 //!   `Live` and every cap still holds.
@@ -143,7 +144,8 @@ pub use record::{
     StoredOffer, VERSION,
 };
 pub use settings::{
-    BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_TRIP_AFTER, Blocked, Health, LaunchMode, Settings,
+    BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_RESET_AFTER, BOOT_FAIL_TRIP_AFTER, Blocked, Health,
+    LaunchMode, Settings,
 };
 pub use state::{AcquirePlan, Action, PlanLine, State};
 pub use time::Millis;

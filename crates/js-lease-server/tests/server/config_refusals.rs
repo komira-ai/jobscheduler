@@ -77,7 +77,7 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
         "pool \"hosts\": colour: unknown field; known: name, class, exec, \
          memory_schedulable_percent, max_instances, max_spend_per_hour, max_spend_per_day, \
          idle, max_age, min_host_lifetime, boot_timeout, boot_fail_cooldown_max, \
-         boot_fail_trip_after, launch, live_until, agent, join_token_file, provider, network"
+         boot_fail_trip_after, boot_fail_reset_after, launch, live_until, agent, join_token_file, provider, network"
     );
 }
 

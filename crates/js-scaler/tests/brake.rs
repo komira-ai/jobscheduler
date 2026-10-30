@@ -193,6 +193,8 @@ fn a_preemption_counts_and_the_replacement_is_not_delayed() {
     assert!(sim.rig.state.records.cooldowns.is_empty());
     assert_eq!(sim.acquires(), 2);
     sim.run(8);
+    assert_eq!(brake(&sim).unwrap().failures, 1);
+    sim.run(10);
     assert_eq!(brake(&sim), None);
 }
 
@@ -365,6 +367,8 @@ fn a_success_ends_the_count_but_not_the_trip() {
     sim.rig.state.records.brake.insert(POOL.to_owned(), brake);
     sim.run(8);
     assert_eq!(sim.phases(), [Phase::Registered]);
+    assert_eq!(brake_of(&sim).failures, 3);
+    sim.run(10);
     let after = brake_of(&sim);
     assert_eq!(after.failures, 0);
     assert_eq!(after.tripped_at, Some(now));
@@ -387,4 +391,109 @@ fn the_status_names_a_trip_and_a_cap_and_nothing_else() {
 
 fn brake_of(sim: &Sim) -> Brake {
     brake(sim).unwrap()
+}
+
+/// Asserts that a wave of preemptions read in one step is one strike: three registered
+/// machines reclaimed together leave a count of one on a pool that trips at three, and the
+/// replacement is asked for. It catches a pool tripped by a single spot reclaim wave before any
+/// replacement could boot.
+#[test]
+fn a_wave_of_preemptions_in_one_step_is_one_strike() {
+    let mut sim = Sim::new(pool(3, minutes(120)), Billing::Lambda);
+    sim.waiting = 3;
+    sim.run(30);
+    assert_eq!(sim.fake.running().len(), 3);
+    for id in sim.fake.running() {
+        sim.fake.preempt(&id);
+    }
+    sim.tick(None);
+    assert_eq!(brake(&sim).unwrap().failures, 1);
+    assert!(!sim.rig.state.records.tripped(POOL));
+    assert_eq!(sim.acquires(), 4);
+}
+
+/// Asserts that refusals answered in one step are one strike: three launches of one step all
+/// refused count once, so a pool that trips at three is not tripped by one bad step, and the
+/// next two steps with a refusal each do trip it. It catches a bad step that trips a pool alone.
+#[test]
+fn refusals_answered_in_one_step_are_one_strike() {
+    let settings = Settings {
+        max_step: 3,
+        ..pool(3, minutes(120))
+    };
+    let mut sim = refused(settings, RefusalCode::Quota);
+    sim.waiting = 3;
+    learn(&mut sim, 3);
+    assert_eq!(brake(&sim).unwrap().failures, 1);
+    assert!(!sim.rig.state.records.tripped(POOL));
+    learn(&mut sim, 6);
+    assert_eq!(brake(&sim).unwrap().failures, 2);
+    learn(&mut sim, 9);
+    assert!(sim.rig.state.records.tripped(POOL));
+}
+
+/// Asserts that a host that says hello and then dies does not end the count: each cycle of a
+/// machine that registers and is reclaimed strikes once, and the third cycle trips a pool that
+/// trips at three. It catches a count that a hello alone resets, which lets a bad image loop for
+/// ever.
+#[test]
+fn hello_then_die_cycles_trip_the_pool() {
+    let mut sim = Sim::new(pool(3, minutes(120)), Billing::Lambda);
+    sim.waiting = 1;
+    for _ in 0..3 {
+        for _ in 0..20 {
+            sim.tick(None);
+            if sim.phases().last() == Some(&Phase::Registered) {
+                break;
+            }
+        }
+        assert_eq!(sim.phases().last(), Some(&Phase::Registered));
+        let id = sim.fake.running()[0].clone();
+        sim.fake.preempt(&id);
+        sim.tick(None);
+    }
+    assert!(sim.rig.state.records.tripped(POOL));
+    assert_eq!(sim.acquires(), 3);
+}
+
+/// Asserts that a host heard from for ten minutes ends the count and one heard from for less
+/// does not: a count of two stands while the machine's host has been heard for a few minutes
+/// and is gone after ten. It catches a threshold that is ignored in either direction.
+#[test]
+fn a_host_heard_for_ten_minutes_ends_the_count() {
+    let mut sim = Sim::new(pool(3, minutes(120)), Billing::Lambda);
+    sim.waiting = 1;
+    sim.tick(None);
+    let seed = Brake {
+        failures: 2,
+        tripped_at: None,
+    };
+    sim.rig.state.records.brake.insert(POOL.to_owned(), seed);
+    sim.run(6);
+    assert_eq!(sim.phases(), [Phase::Registered]);
+    assert_eq!(brake_of(&sim).failures, 2);
+    sim.run(14);
+    assert_eq!(brake(&sim), None);
+}
+
+/// Asserts the order of a reset and a failure in one step: the reset is applied first, so a
+/// refusal answered in that very step counts from one and the cooldown is the first (ten
+/// minutes), not what two earlier failures would have made. It catches a reset applied after
+/// the step's failures, which would erase the new failure.
+#[test]
+fn a_reset_in_the_step_of_a_failure_counts_the_failure_from_one() {
+    let mut sim = refused(pool(3, minutes(120)), RefusalCode::Quota);
+    learn(&mut sim, 2);
+    assert_eq!(brake(&sim).unwrap().failures, 2);
+    while sim.acquires() < 3 {
+        sim.tick(None);
+    }
+    sim.rig.input.brake_resets = vec![POOL.to_owned()];
+    sim.tick(None);
+    sim.rig.input.brake_resets.clear();
+    assert_eq!(brake(&sim).unwrap().failures, 1);
+    assert!(!sim.rig.state.records.tripped(POOL));
+    let wait = remaining(&sim);
+    assert!((9 * MINUTE..=10 * MINUTE).contains(&wait), "{wait}");
+    assert_eq!(sim.acquires(), 3);
 }

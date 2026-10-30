@@ -467,3 +467,7 @@ accepts the `brake` key (deploy that release before the brake release; a build o
 refuses to start on the file). It drops the key at its next save, so it forgets a tripped pool
 and launches again, and the operator's reset is not served. Hold every pool in `plan` for the
 rollback, and after rolling forward check `GET /v1/pools` for `blocked` of `brake`.
+
+Before rolling back to the reader release or any older one, remove `boot_fail_cooldown_max`,
+`boot_fail_trip_after` and `boot_fail_reset_after` from every pool in the config file: an older
+server refuses the unknown pool keys at startup.

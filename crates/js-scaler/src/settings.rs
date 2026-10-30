@@ -57,6 +57,9 @@ pub struct Settings {
     /// The longest that cooldown grows to: it doubles with each failure in a row, from
     /// `boot_fail_cooldown`, and stops here (never below `boot_fail_cooldown` itself).
     pub boot_fail_cooldown_max: Duration,
+    /// How long a machine's host must be heard from, unbroken, before the machine ends the
+    /// count of failures in a row. A host that says hello and then goes quiet never does.
+    pub boot_fail_reset_after: Duration,
     /// How many failures in a row trip the pool to `Plan` until an operator resets it; at
     /// least 1 (a smaller figure is read as 1).
     pub boot_fail_trip_after: u32,
@@ -107,6 +110,9 @@ const PREPARE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// The default of [`Settings::boot_fail_cooldown_max`]: 2 hours.
 pub const BOOT_FAIL_COOLDOWN_MAX: Duration = Duration::from_secs(2 * 3600);
 
+/// The default of [`Settings::boot_fail_reset_after`]: 10 minutes.
+pub const BOOT_FAIL_RESET_AFTER: Duration = Duration::from_secs(10 * 60);
+
 /// The default of [`Settings::boot_fail_trip_after`]: 3 failures in a row.
 pub const BOOT_FAIL_TRIP_AFTER: u32 = 3;
 
@@ -133,6 +139,7 @@ impl Settings {
             boot_fail_cooldown: Duration::from_secs(10 * 60),
             boot_fail_cooldown_max: BOOT_FAIL_COOLDOWN_MAX,
             boot_fail_trip_after: BOOT_FAIL_TRIP_AFTER,
+            boot_fail_reset_after: BOOT_FAIL_RESET_AFTER,
             unknown_hold: Duration::from_secs(30 * 60),
             max_step: 1,
             max_age: None,

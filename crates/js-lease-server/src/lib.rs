@@ -112,7 +112,7 @@
 //! A pool whose provider launches machines (an elastic pool) also has `max_instances`
 //! (1 to 255), `max_spend_per_hour` and `max_spend_per_day` (strings: a decimal with at
 //! most two places, above zero, the day cap not below the hour cap), and optionally `idle`,
-//! `max_age`, `min_host_lifetime`, `boot_timeout` (`15m`), `boot_fail_cooldown_max`, `boot_fail_trip_after`, `launch`, `exec`, `join_token_file`, `agent` and `network`.
+//! `max_age`, `min_host_lifetime`, `boot_timeout` (`15m`), `boot_fail_cooldown_max`, `boot_fail_trip_after`, `boot_fail_reset_after`, `launch`, `exec`, `join_token_file`, `agent` and `network`.
 //! Every pool, static or elastic, may set `memory_schedulable_percent`, a whole number from
 //! 1 to 100 (default 100): the share of the pool's configured memory that is booked, rounded
 //! down. A static pool books that share of each host's `memory_bytes` (the pool's key
@@ -146,15 +146,18 @@
 //! passed) and `live_until_ms`.
 //!
 //! Failure brake. A refused launch (quota, denied, a shape that fits nothing), a boot given up
-//! on, and a spot preemption count as failures; a machine that boots and is heard from ends the
-//! count. After a boot failure or a refusal the pool launches nothing for 10 minutes, doubled
+//! on, and a spot preemption count as failures, but a pool is struck at most once in a step
+//! (a wave of reclaims, or several launches of one step refused together, is one failure). A
+//! machine whose host has been heard from, unbroken, for `boot_fail_reset_after` (`"10m"`, at
+//! least a minute) ends the count; a host that says hello and goes quiet does not. After a boot failure or a refusal the pool launches nothing for 10 minutes, doubled
 //! for each further failure in a row up to `boot_fail_cooldown_max` (`"2h"`, at least 10
 //! minutes); after `boot_fail_trip_after` failures in a row (3, from 1 to 100) the brake trips
 //! the pool to `plan`: it launches nothing, `GET /v1/pools` shows `launch` as `plan` and
 //! `blocked` as `brake`, and the alert `brake:<pool>` is raised. A preemption counts toward the
 //! trip but starts no cooldown. Time does not end the trip, and it survives a restart (it is in
 //! the scaler's records). Only `POST /v1/pools/{pool}/brake/reset` (the client token; 202,
-//! applied at the next tick, 404 for a pool the server does not have, harmless to repeat) clears
+//! applied at the next tick, 404 for a pool that is neither the server's nor one the records
+//! still hold a trip for, harmless to repeat) clears
 //! the count, the trip and the cooldown. The brake only stops launches: it never drains or
 //! releases a machine. Rolling back to a server that predates the brake: it starts on the
 //! records file, but its next save drops the brake, so a rolled-back server forgets a trip;
@@ -578,7 +581,7 @@ pub use config::{
     parse_duration,
 };
 pub use error::StartupError;
-pub use file::{ElasticPlan, JoinedPool, Launch, NetworkPlan};
+pub use file::{BrakePlan, ElasticPlan, JoinedPool, Launch, NetworkPlan};
 pub use kinds::{
     BuildCtx, Built, Ctor, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, SecretFiles,
 };

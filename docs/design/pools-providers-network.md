@@ -860,7 +860,8 @@ Rules, each tied to a requirement or to existing behaviour:
   failure in a row up to `boot_fail_cooldown_max`, 2 h by default) and shows `blocked: boot_failed`.
   After `boot_fail_trip_after` failures in a row (3) the pool is tripped to plan until an
   operator resets it (`POST /v1/pools/{pool}/brake/reset`); refusals for quota, denial and shape
-  and spot preemptions count too, and a host first heard from ends the count. The billed minutes
+  and spot preemptions count too (a pool is struck once per step at most), and a host heard from
+  for `boot_fail_reset_after` (10 min) ends the count. The billed minutes
   of the failed boot stay in the day total. Suppressing a single offer is Later (section 12).
 - Registered to Draining: the host holds no lease and no runs for `idle`
   (`HostView.releasing` false and `lease` none, `registry.rs::hosts`) and carries no mark.

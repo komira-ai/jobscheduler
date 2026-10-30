@@ -10,8 +10,9 @@
 //! `plan`, raises the alert `brake:<pool>` and keeps it there until a person asks for this.
 //! Time does not clear it. The route is behind the client token, like the lease routes and
 //! the join-token routes: the server has no operator credential of its own, and whoever may
-//! admit machines may re-enable the pool that launches them. A pool the server does not have
-//! is a 404.
+//! admit machines may re-enable the pool that launches them. A pool that is neither the
+//! server's own nor one the records still hold a brake for is a 404; a pool taken out of the
+//! file keeps its trip and its alert until it is reset here.
 //!
 //! The reset clears the pool's failure count, its trip and its cooldown at the scaler's next
 //! tick, and that tick writes the records. The 202 means the request is queued, not done:
@@ -54,10 +55,9 @@ async fn reset(
     State(scaler): State<Scaler>,
     Path(pool): Path<String>,
 ) -> Result<Response, ApiError> {
-    if scaler.settings().pool != pool {
+    if !scaler.reset_brake(&pool) {
         return Err(ApiError::coded(StatusCode::NOT_FOUND, "unknown-pool"));
     }
-    scaler.reset_brake();
     info!(%pool, "an operator asked to reset the failure brake");
     let body = Requested {
         pool,

@@ -20,16 +20,19 @@ fn the_brake_keys_default_and_reach_the_plan() {
     let plain = PoolText::elastic(&scratch);
     let config = load(&scratch, &file(&server, &[&plain])).unwrap();
     let plan = config.elastic_pool().unwrap();
-    assert_eq!(plan.boot_fail_cooldown_max, mins(120));
-    assert_eq!(plan.boot_fail_trip_after, 3);
+    assert_eq!(plan.brake.cooldown_max, mins(120));
+    assert_eq!(plan.brake.trip_after, 3);
+    assert_eq!(plan.brake.reset_after, mins(10));
 
     let given = plain
         .set("boot_fail_cooldown_max", &quote("30m"))
-        .set("boot_fail_trip_after", "5");
+        .set("boot_fail_trip_after", "5")
+        .set("boot_fail_reset_after", &quote("3m"));
     let config = load(&scratch, &file(&server, &[&given])).unwrap();
     let plan = config.elastic_pool().unwrap();
-    assert_eq!(plan.boot_fail_cooldown_max, mins(30));
-    assert_eq!(plan.boot_fail_trip_after, 5);
+    assert_eq!(plan.brake.cooldown_max, mins(30));
+    assert_eq!(plan.brake.trip_after, 5);
+    assert_eq!(plan.brake.reset_after, mins(3));
 }
 
 /// Asserts the refusals, each naming the pool and the key: a trip count of 0, above 100, not
@@ -49,6 +52,11 @@ fn a_bad_brake_value_is_refused_by_name() {
             "boot_fail_cooldown_max",
             "\"9m\"",
             "must be at least 10 minutes, the first cooldown",
+        ),
+        (
+            "boot_fail_reset_after",
+            "\"59s\"",
+            "must be at least 1 minute",
         ),
         (
             "boot_fail_cooldown_max",
@@ -75,6 +83,7 @@ fn a_bad_brake_value_is_refused_by_name() {
         ("boot_fail_trip_after", "1"),
         ("boot_fail_trip_after", "100"),
         ("boot_fail_cooldown_max", "\"10m\""),
+        ("boot_fail_reset_after", "\"1m\""),
     ] {
         let pool = PoolText::elastic(&scratch).set(key, value);
         assert!(load(&scratch, &file(&server, &[&pool])).is_ok(), "{key}");
@@ -90,6 +99,7 @@ fn a_static_pool_is_refused_the_brake_keys() {
     for (key, value) in [
         ("boot_fail_trip_after", "3"),
         ("boot_fail_cooldown_max", "\"1h\""),
+        ("boot_fail_reset_after", "\"5m\""),
     ] {
         let pool = PoolText::static_pool(&scratch, "fixed").set(key, value);
         let said = refusal(&scratch, &file(&server, &[&pool]));

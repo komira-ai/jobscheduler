@@ -7,8 +7,9 @@
 
 use std::time::Duration;
 
+use crate::input::PoolInput;
 use crate::pass::Pass;
-use crate::record::{Cooldown, CooldownReason, Records};
+use crate::record::{Cooldown, CooldownReason, Phase, Records};
 use crate::settings::Settings;
 
 /// How long the pool waits after its `failures`-th failure in a row: `boot_fail_cooldown`
@@ -32,12 +33,15 @@ impl Records {
 }
 
 impl Pass<'_> {
-    /// Counts one failure of the pool: toward the trip, and toward the length of the next
-    /// cooldown. Returns the count.
+    /// Counts a failure of the pool: toward the trip, and toward the length of the next
+    /// cooldown. A pool is struck at most once in a step, however many machines failed in it
+    /// (a wave of preemptions, several refused launches of one step), so one bad step cannot
+    /// trip a pool alone. Returns the count.
     pub(crate) fn strike(&mut self, settings: &Settings) -> u32 {
         let now = self.now;
+        let again = !self.struck.insert(settings.pool.clone());
         let brake = self.records.brake.entry(settings.pool.clone()).or_default();
-        brake.failures = brake.failures.saturating_add(1);
+        brake.failures = brake.failures.saturating_add(u32::from(!again));
         if brake.failures >= settings.boot_fail_trip_after.max(1) {
             brake.tripped_at.get_or_insert(now);
         }
@@ -61,9 +65,27 @@ impl Pass<'_> {
             .insert(settings.pool.clone(), Cooldown { until, reason });
     }
 
-    /// A machine of `pool` booted and was heard from: the count of failures in a row starts
-    /// again. A trip stays: only a reset ends it.
-    pub(crate) fn succeeded(&mut self, pool: &str) {
+    /// Notes that the host of record `i` was heard from at this step, and ends the count of
+    /// failures in a row once the host has been heard from at every step for
+    /// `boot_fail_reset_after`. A host that came up short does not. The time is not written to
+    /// disk, so a restart only delays the end of the count.
+    pub(crate) fn credit(&mut self, pool: &PoolInput, i: usize, heard: bool) {
+        let record = &self.records.instances[i];
+        let held = [Phase::Registered, Phase::Draining].contains(&record.phase);
+        if !(heard & held & !record.condemned) {
+            return;
+        }
+        let name = record.name.clone();
+        let since = self.heard.get(&name).copied().unwrap_or(self.now);
+        self.heard_now.insert(name.clone(), since);
+        let long = self.now.since(since) >= pool.settings.boot_fail_reset_after;
+        if long && self.credited.insert(name) {
+            self.succeeded(&pool.settings.pool);
+        }
+    }
+
+    /// The count of failures in a row starts again. A trip stays: only a reset ends it.
+    fn succeeded(&mut self, pool: &str) {
         if let Some(brake) = self.records.brake.get_mut(pool) {
             brake.failures = 0;
             if brake.tripped_at.is_none() {

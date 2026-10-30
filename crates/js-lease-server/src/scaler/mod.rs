@@ -74,7 +74,6 @@ mod unremoved;
 mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -157,11 +156,10 @@ struct Core {
     /// Where each alert is sent besides the log; set once, at start. Its delivery runs on a
     /// thread of its own, so a slow or refusing receiver never holds up a tick.
     sink: OnceLock<Mutex<Notifier>>,
-    /// Whether an operator has asked to reset the pool's failure brake and no tick has taken
-    /// the request yet. The next tick takes it and puts it back if its records were not
-    /// written, so the request is dropped only by a restart before the write; asking again is
-    /// harmless.
-    brake_reset: AtomicBool,
+    /// The pools whose failure brake an operator has asked to reset and no tick has taken yet.
+    /// The next tick takes them and puts them back if its records were not written, so a
+    /// request is dropped only by a restart before the write; asking again is harmless.
+    brake_resets: Mutex<BTreeSet<String>>,
 }
 
 /// The scaler of one elastic pool. A handle: clones share one scaler.
@@ -238,7 +236,7 @@ impl Scaler {
             memory: Mutex::new(memory),
             last: Arc::new(Mutex::new(None)),
             sink: OnceLock::new(),
-            brake_reset: AtomicBool::new(false),
+            brake_resets: Mutex::new(BTreeSet::new()),
         };
         Self {
             core: Arc::new(core),
@@ -336,10 +334,23 @@ impl Scaler {
         blocking(move || core.tick()).await;
     }
 
-    /// Asks for the pool's failure brake to be reset at the next tick: its count, its trip and
-    /// its cooldown are cleared and the records written. Idempotent.
-    pub fn reset_brake(&self) {
-        self.core.brake_reset.store(true, Ordering::SeqCst);
+    /// Asks for the failure brake of `pool` to be reset at the next tick: its count, its trip
+    /// and its cooldown are cleared and the records written. Idempotent. The pool is the
+    /// server's own or one the records still hold a brake for (a pool taken out of the file
+    /// keeps its trip, and its alert, until this is asked); `false`, and nothing done, for any
+    /// other name.
+    pub fn reset_brake(&self, pool: &str) -> bool {
+        let held = self.core.memory().state.records.brake.contains_key(pool);
+        let known = held || pool == self.core.settings.pool;
+        if known {
+            let mut asked = self
+                .core
+                .brake_resets
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            asked.insert(pool.to_owned());
+        }
+        known
     }
 
     /// The settings the scaler was built with.
@@ -381,14 +392,21 @@ impl Core {
         self.retry_revokes(&mut work);
         self.retry_removes(&mut work);
         let mut input = self.input(&work, now);
-        let reset = self.brake_reset.swap(false, Ordering::SeqCst);
-        if reset {
-            input.brake_resets = vec![self.settings.pool.clone()];
-        }
+        let asked = std::mem::take(
+            &mut *self
+                .brake_resets
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        input.brake_resets = asked.iter().cloned().collect();
         let (next, actions) = step(work.state.clone(), &input, now);
         let Some(answers) = self.run(&mut work, actions) else {
             // The records were not written, so the reset is not made: ask again.
-            self.brake_reset.fetch_or(reset, Ordering::SeqCst);
+            let mut again = self
+                .brake_resets
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            again.extend(asked);
             *self.memory() = work;
             return;
         };

@@ -739,6 +739,10 @@ impl Pass<'_> {
                 .all(|ok| ok)
             })
             .collect();
+        let credited = std::mem::take(&mut self.credited)
+            .into_iter()
+            .filter(|name| self.records.instances.iter().any(|each| each.name == *name))
+            .collect();
         let state = State {
             awaiting,
             records: self.records,
@@ -747,6 +751,8 @@ impl Pass<'_> {
             no_offer,
             refused: self.refused,
             quiet,
+            heard: self.heard_now,
+            credited,
             silent: self.silent_now,
             silent_released: self.silent_released,
             missing: self.missing_now,

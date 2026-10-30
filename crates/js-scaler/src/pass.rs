@@ -19,6 +19,13 @@ pub(crate) struct Pass<'a> {
     pub(crate) records: Records,
     pub(crate) quiet: BTreeMap<String, Millis>,
     pub(crate) quiet_now: BTreeSet<String>,
+    /// Since when each machine's host was heard from unbroken, at the last step and now
+    /// ([`State::heard`]), and the machines that have ended the count already.
+    pub(crate) heard: BTreeMap<String, Millis>,
+    pub(crate) heard_now: BTreeMap<String, Millis>,
+    pub(crate) credited: BTreeSet<String>,
+    /// The pools that have already been struck in this step ([`Pass::strike`]).
+    pub(crate) struck: BTreeSet<String>,
     /// Since when each silent host was silent at the last step, and at this one.
     silent: BTreeMap<String, Millis>,
     pub(crate) silent_now: BTreeMap<String, Millis>,
@@ -164,6 +171,10 @@ impl<'a> Pass<'a> {
             records: state.records,
             quiet: state.quiet,
             quiet_now: BTreeSet::new(),
+            heard: state.heard,
+            heard_now: BTreeMap::new(),
+            credited: state.credited,
+            struck: BTreeSet::new(),
             silent,
             silent_now: BTreeMap::new(),
             silent_released: Vec::new(),
@@ -505,7 +516,6 @@ impl<'a> Pass<'a> {
                     .all(|ok| ok)
             });
             let phase = record.phase;
-            let first = heard & !record.seen_live;
             self.records.instances[i].seen_live |= heard;
             match (phase, host) {
                 (Phase::Booting, Some(host)) => self.on_hello(pool, i, host),
@@ -513,11 +523,7 @@ impl<'a> Pass<'a> {
                 (Phase::Registered | Phase::Draining, host) => self.on_held(pool, i, host),
                 _ => {}
             }
-            // The first time a machine's host is heard from, if it is not one that came up
-            // short, the machine booted: the failures in a row end.
-            if first & !self.records.instances[i].condemned {
-                self.succeeded(&pool.settings.pool);
-            }
+            self.credit(pool, i, heard);
         }
     }
 

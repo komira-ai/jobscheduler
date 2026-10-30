@@ -83,6 +83,7 @@ const LAUNCHING: &[&str] = &[
     "boot_timeout",
     "boot_fail_cooldown_max",
     "boot_fail_trip_after",
+    "boot_fail_reset_after",
 ];
 
 const LAUNCHES_NOTHING: &str =
@@ -448,6 +449,7 @@ mod tests {
             ("boot_timeout", "\"5m\""),
             ("boot_fail_cooldown_max", "\"1h\""),
             ("boot_fail_trip_after", "3"),
+            ("boot_fail_reset_after", "\"5m\""),
         ];
         for (key, value) in launching {
             let said = refused(with(&format!("{key} = {value}")));

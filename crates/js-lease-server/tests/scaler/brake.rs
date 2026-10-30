@@ -52,8 +52,8 @@ async fn a_reset_is_applied_at_the_next_tick_and_written_first() {
     rig.scaler.tick().await;
     assert_eq!(rig.scaler.alerts().len(), 1);
 
-    rig.scaler.reset_brake();
-    rig.scaler.reset_brake();
+    assert!(rig.scaler.reset_brake("gpu"));
+    assert!(rig.scaler.reset_brake("gpu"));
     rig.advance(Duration::from_secs(5));
     rig.scaler.tick().await;
     let log = rig.log();
@@ -80,7 +80,7 @@ async fn a_reset_that_cannot_be_written_is_asked_again() {
     let rig = rig(tripped(), live());
     rig.scaler.tick().await;
     rig.world().save_ok = false;
-    rig.scaler.reset_brake();
+    assert!(rig.scaler.reset_brake("gpu"));
     rig.scaler.tick().await;
     assert_eq!(rig.log(), ["save"]);
     assert!(rig.scaler.state().records.tripped("gpu"));
@@ -98,10 +98,44 @@ async fn a_reset_that_cannot_be_written_is_asked_again() {
 async fn a_reset_with_nothing_to_reset_writes_nothing() {
     let rig = rig(Records::default(), live());
     for _ in 0..3 {
-        rig.scaler.reset_brake();
+        assert!(rig.scaler.reset_brake("gpu"));
         rig.scaler.tick().await;
         rig.advance(Duration::from_secs(5));
     }
     assert!(rig.log().is_empty(), "{:?}", rig.log());
     assert!(rig.world().saved.is_none());
+}
+
+/// Asserts that a pool the server no longer has but whose trip the records still hold can be
+/// reset by name, that it alerts until then, and that a name with no brake and not the server's
+/// pool is refused and changes nothing. It catches a trip that nobody can end after its pool is
+/// taken out of the file, which would alert for ever.
+#[tokio::test]
+async fn the_trip_of_a_pool_the_server_no_longer_has_can_be_reset() {
+    let mut records = tripped();
+    let brake = Brake {
+        failures: 3,
+        tripped_at: Some(Millis::new(START)),
+    };
+    records.brake.insert("retired".to_owned(), brake);
+    let rig = rig(records, live());
+    rig.scaler.tick().await;
+    assert_eq!(rig.scaler.alerts().len(), 2);
+
+    assert!(!rig.scaler.reset_brake("nowhere"));
+    assert!(rig.scaler.reset_brake("retired"));
+    rig.advance(Duration::from_secs(5));
+    rig.scaler.tick().await;
+    let state = rig.scaler.state();
+    assert!(!state.records.brake.contains_key("retired"));
+    assert!(state.records.tripped("gpu"));
+    assert_eq!(rig.scaler.alerts().len(), 1);
+    assert!(
+        !rig.world()
+            .saved
+            .as_ref()
+            .unwrap()
+            .brake
+            .contains_key("retired")
+    );
 }
