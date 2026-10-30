@@ -1002,6 +1002,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-bundle-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "js-bundle",
+ "js-oci",
+ "js-testkit",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "js-caps"
 version = "0.1.0"
 dependencies = [
