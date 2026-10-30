@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use js_agent::cli_runtime::{CliError, CliRuntime, Settings, SubidError};
 use js_agent::integrity::{FakeHost, Integrity};
-use js_agent::lifecycle::ContainerRuntime;
+use js_agent::lifecycle::Runtime;
 
 use super::super::scripted::Scripted;
 use super::super::subid::host;

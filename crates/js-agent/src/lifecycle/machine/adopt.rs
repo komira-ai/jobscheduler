@@ -10,7 +10,7 @@ use super::job::{
     may_change_host, slot_label,
 };
 use super::{Lifecycle, MAX_JOBS, SLOTS, Slots};
-use crate::lifecycle::runtime::{ContainerRuntime, Found, RuntimeError, Status};
+use crate::lifecycle::runtime::{Found, Runtime, RuntimeError, Status};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{CheckHook, Clock, Config, Event, Finding, code, label};
 
@@ -43,7 +43,7 @@ impl Lifecycle {
     /// order the runtime lists them in. When the offer is lower than at the last start,
     /// the jobs that no longer fit are therefore the newest, and they are evicted.
     ///
-    /// What the runtime lists is the agent's own ([`ContainerRuntime::list_labelled`] is
+    /// What the runtime lists is the agent's own ([`Runtime::list_labelled`] is
     /// scoped by the agent label); the listing removes nothing, so a container that was
     /// created and never started is evicted here like one whose labels are unreadable.
     ///
@@ -58,7 +58,7 @@ impl Lifecycle {
     /// empty held list then: it does not know what it holds.
     pub fn adopt(
         config: Config,
-        mut runtime: Box<dyn ContainerRuntime>,
+        mut runtime: Box<dyn Runtime>,
         checks: Box<dyn CheckHook>,
         clock: Box<dyn Clock>,
     ) -> Result<(Self, Vec<Event>), RuntimeError> {

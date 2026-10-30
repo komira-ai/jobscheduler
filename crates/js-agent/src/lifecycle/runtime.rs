@@ -55,7 +55,7 @@ pub mod label {
 
 /// A container's id as the runtime names it. Opaque to the agent.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ContainerId(pub String);
+pub struct RunHandle(pub String);
 
 /// A mount whose host path the agent has resolved against one of its own roots.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,15 +73,25 @@ pub struct ResolvedMount {
     pub ro: bool,
 }
 
-/// Everything a runtime needs to create and start one container.
+/// What a run executes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContainerSpec {
-    /// The run's id; also in [`ContainerSpec::labels`].
+pub enum Body {
+    /// A container: an image and the command line after it.
+    Container {
+        /// The image.
+        image: String,
+        /// The command line after the image.
+        args: Vec<String>,
+    },
+}
+
+/// Everything a runtime needs to create and start one run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunSpec {
+    /// The run's id; also in [`RunSpec::labels`].
     pub run_id: String,
-    /// The image.
-    pub image: String,
-    /// The command line after the image.
-    pub args: Vec<String>,
+    /// What the run executes.
+    pub body: Body,
     /// Thousandths of a CPU core.
     pub cpu_millis: u64,
     /// Bytes of memory.
@@ -122,7 +132,7 @@ pub enum Status {
     /// It runs, or it is created and about to: the agent polls only a container it has
     /// started, so a backend reports a created one as running. (One that was created and
     /// never started, found after a restart, is no job: see
-    /// [`ContainerRuntime::list_labelled`].)
+    /// [`Runtime::list_labelled`].)
     Running,
     /// It has exited.
     Exited(Exit),
@@ -137,7 +147,7 @@ pub enum Status {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     /// The container.
-    pub id: ContainerId,
+    pub id: RunHandle,
     /// Its labels.
     pub labels: BTreeMap<String, String>,
     /// How long it has been running, in milliseconds, as the runtime reports it; counted
@@ -175,14 +185,14 @@ impl RuntimeError {
 }
 
 /// What the lifecycle needs of a container runtime.
-pub trait ContainerRuntime {
+pub trait Runtime {
     /// Creates and starts the container of `spec`. A call that fails leaves no
     /// container behind: the backend rolls back what it created.
     ///
     /// # Errors
     ///
     /// The image cannot be had, the container cannot be created or it cannot start.
-    fn create_and_start(&mut self, spec: &ContainerSpec) -> Result<ContainerId, RuntimeError>;
+    fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError>;
 
     /// Whether the container runs, has exited or is gone, without waiting. A backend maps
     /// the runtime's "no such container" to [`Status::Gone`], not to an error: an error
@@ -191,21 +201,21 @@ pub trait ContainerRuntime {
     /// # Errors
     ///
     /// The runtime cannot say.
-    fn poll(&mut self, id: &ContainerId) -> Result<Status, RuntimeError>;
+    fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError>;
 
     /// Asks the container to stop, and kills it when it has not exited after `grace`.
     ///
     /// # Errors
     ///
     /// The runtime cannot stop it.
-    fn stop(&mut self, id: &ContainerId, grace: Duration) -> Result<(), RuntimeError>;
+    fn stop(&mut self, id: &RunHandle, grace: Duration) -> Result<(), RuntimeError>;
 
     /// Removes the container, running or not. Removing one that is gone succeeds.
     ///
     /// # Errors
     ///
     /// The runtime cannot remove it.
-    fn remove(&mut self, id: &ContainerId) -> Result<(), RuntimeError>;
+    fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError>;
 
     /// Every container carrying the run label ([`label::RUN`]) and this agent's label
     /// ([`label::AGENT`], the host id the backend puts on every container it makes), running
@@ -221,7 +231,7 @@ pub trait ContainerRuntime {
     /// The runtime cannot list.
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError>;
 
-    /// The ids of the containers [`ContainerRuntime::list_labelled`] would list, without
+    /// The ids of the containers [`Runtime::list_labelled`] would list, without
     /// reading each one. The rescue at the agent's end uses it: it needs only the ids, and
     /// a container that cannot be read must still be stopped. A backend that can list
     /// without reading overrides it; the default lists in full.
@@ -229,7 +239,7 @@ pub trait ContainerRuntime {
     /// # Errors
     ///
     /// The runtime cannot list.
-    fn list_ids(&mut self) -> Result<Vec<ContainerId>, RuntimeError> {
+    fn list_ids(&mut self) -> Result<Vec<RunHandle>, RuntimeError> {
         let found = self.list_labelled()?;
         Ok(found.into_iter().map(|one| one.id).collect())
     }
@@ -242,7 +252,7 @@ pub trait ContainerRuntime {
     /// # Errors
     ///
     /// The runtime cannot read the log.
-    fn log_tail(&mut self, _id: &ContainerId) -> Result<Option<LogTail>, RuntimeError> {
+    fn log_tail(&mut self, _id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
         Ok(None)
     }
 
@@ -270,7 +280,7 @@ pub trait ContainerRuntime {
     /// asks when a job starts or is adopted and, for a run it started, again at every
     /// usage window until the runtime can say (`Lifecycle::find_cgroups`); a lease with no
     /// control group is not sampled. A runtime with no control groups keeps the default.
-    fn cgroup(&mut self, _id: &ContainerId) -> Option<PathBuf> {
+    fn cgroup(&mut self, _id: &RunHandle) -> Option<PathBuf> {
         None
     }
 }

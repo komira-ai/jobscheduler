@@ -105,3 +105,18 @@ pub fn fs_type(path: &Path) -> io::Result<String> {
     let name = unsafe { std::ffi::CStr::from_ptr(st.f_fstypename.as_ptr()) };
     Ok(name.to_string_lossy().into_owned())
 }
+
+/// The device, mount point and mount flags (`f_flags`) of the volume holding `path`.
+pub fn mount_info(path: &Path) -> io::Result<(String, String, u32)> {
+    let path = cpath(path)?;
+    // SAFETY: `statfs` is plain data; zero is a valid starting value.
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `path` is NUL-terminated and `st` is a `statfs`.
+    status(unsafe { libc::statfs(path.as_ptr(), &raw mut st) })?;
+    let text = |raw: &[c_char]| {
+        // SAFETY: the kernel NUL-terminates these fixed-size name fields.
+        let name = unsafe { std::ffi::CStr::from_ptr(raw.as_ptr()) };
+        name.to_string_lossy().into_owned()
+    };
+    Ok((text(&st.f_mntfromname), text(&st.f_mntonname), st.f_flags))
+}

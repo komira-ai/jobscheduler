@@ -5,7 +5,7 @@ defined here. Capabilities and constraints (what picks a host and an image) are 
 
 ## 5.14 The VM backend of `js-agent`
 
-`js-agent` runs a job in a container (the merged `ContainerRuntime`) or in a virtual machine. Two rules govern the VM path and are not
+`js-agent` runs a job in a container (the merged `Runtime`) or in a virtual machine. Two rules govern the VM path and are not
 options:
 
 1. **A fresh VM per run. A VM is never reused.** Every run gets a VM cloned from its base image for that run and destroyed when the run
@@ -17,10 +17,10 @@ options:
 
 ### Where it fits: one lifecycle, two backend traits
 
-The merged lifecycle (`js-agent::lifecycle`) is a state machine over `ContainerRuntime`, `CheckHook` and `Clock`. `ContainerRuntime`
+The merged lifecycle (`js-agent::lifecycle`) is a state machine over `Runtime`, `CheckHook` and `Clock`. `Runtime`
 stays as merged (and as the docker and podman backend in review implements it). The VM path gets a **second trait, `VmRuntime`**, and the
 lifecycle reaches both through a small internal seam, `Sandbox`: `start`, `poll`, `stop`, `destroy`, `adopt`. A `ContainerSandbox`
-wraps a `ContainerRuntime`; a `VmSandbox` wraps a `VmRuntime`. The job's `runtime` field picks one.
+wraps a `Runtime`; a `VmSandbox` wraps a `VmRuntime`. The job's `runtime` field picks one.
 
 Reasons for two traits and not one widened trait: a VM starts in stages with their own failures (clone, boot, guest ready) and a channel
 to talk through, where a container has `create_and_start`; its destroy deletes a disk clone, where a container's `remove` deletes a
@@ -30,7 +30,7 @@ and code in review for no gain. The cost, a second fake and a second conformance
 steps, result handling, idempotence on the run id, the wall-time clock and the slot accounting are written once, in the lifecycle.
 
 ```rust
-trait VmRuntime {                      // blocking calls on the lifecycle's worker thread, as ContainerRuntime (its threading contract)
+trait VmRuntime {                      // blocking calls on the lifecycle's worker thread, as Runtime (its threading contract)
     fn images(&mut self) -> Result<Vec<BaseImage>, RuntimeError>;               // name, digest, profile (capabilities.md)
     fn clone_and_boot(&mut self, spec: &VmSpec) -> Result<VmId, RuntimeError>;  // returns when the VM process runs, not when the guest is ready
     fn poll(&mut self, id: &VmId) -> Result<VmStatus, RuntimeError>;            // Booting | Up | Exited | Gone
