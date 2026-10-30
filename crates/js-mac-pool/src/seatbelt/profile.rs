@@ -12,14 +12,19 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// Lines before every grant: allow everything, then take away what a run gets back only
 /// narrowly. `job-creation` and `lsopen` are also in the floor: launchd refuses a job from
 /// a sandboxed process regardless, and Launch Services would start an application outside
-/// the sandbox.
-const HEAD: [&str; 6] = [
+/// the sandbox. The IPC classes are denied because a user's System V and POSIX shared
+/// memory and semaphores outlive its processes: a later run on the same uid (the helper
+/// reuses uids) would find the earlier run's.
+const HEAD: [&str; 9] = [
     "(version 1)",
     "(allow default)",
     "(deny file-write*)",
     "(deny job-creation)",
     "(deny lsopen)",
     "(deny user-preference-write)",
+    "(deny ipc-sysv*)",
+    "(deny ipc-posix-sem*)",
+    "(deny ipc-posix-shm-write*)",
 ];
 
 /// Process visibility. Measured on a hosted runner: with this rule, with narrower ones

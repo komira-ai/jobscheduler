@@ -59,10 +59,16 @@ impl Rig {
 
     /// A rig whose configuration `adjust` has changed.
     pub fn with(name: &str, adjust: impl FnOnce(&mut NativeConfig)) -> Self {
+        Self::in_dir(name, |config, _| adjust(config))
+    }
+
+    /// A rig whose configuration `adjust` has changed, knowing the directory the rig works
+    /// in (the runs' scratch directories are made below `scratch` there).
+    pub fn in_dir(name: &str, adjust: impl FnOnce(&mut NativeConfig, &Scratch)) -> Self {
         let dir = Scratch::new(&format!("native-{name}"));
         let fake = FakeHelper::start(&dir);
         let mut config = config(&fake);
-        adjust(&mut config);
+        adjust(&mut config, &dir);
         let rt = NativeRuntime::open(fake.client(), config, TERM).unwrap();
         Self { fake, rt, dir }
     }

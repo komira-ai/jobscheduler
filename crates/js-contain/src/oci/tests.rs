@@ -37,6 +37,7 @@ fn config(dir: &Path, ok: bool) -> OciConfig {
         init_dest: init::DEFAULT_DEST.to_owned(),
         helper_modes: helper::HelperModes::default(),
         scrub_env: crun::no_scrub,
+        logs: LogLimits::default(),
     }
 }
 
@@ -695,4 +696,17 @@ async fn the_bundle_names_the_init_where_the_config_says() {
     let text = std::fs::read_to_string(spec.dir.join("bundle/config.json")).expect("config");
     assert!(text.contains("/dev/other-init"), "{text}");
     assert!(!text.contains("/dev/js-init"), "{text}");
+}
+
+/// Asserts what the egress spike tests rely on: the exposed section is the resolution of the
+/// pinned profile for a job with no capability (26 entries on amd64: a change to the profile
+/// or to the resolution moves this number, and the spike with it), carries the default
+/// action, and an architecture without a filter is an error naming it.
+#[test]
+fn the_exposed_seccomp_section_is_the_resolved_pinned_profile() {
+    let section = seccomp_section("amd64", &[]).expect("amd64 has a filter");
+    assert_eq!(section["syscalls"].as_array().expect("syscalls").len(), 26);
+    assert!(section["defaultAction"].is_string(), "{section}");
+    let error = seccomp_section("riscv64", &[]).expect_err("no filter");
+    assert!(error.contains("riscv64"), "{error}");
 }

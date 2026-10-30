@@ -278,17 +278,47 @@ fn a_removal_kills_and_deletes_the_user_and_forgets_the_run() {
     assert_eq!(rig.rt.log_tail(&id).unwrap(), None);
 }
 
-/// Asserts that a start the helper refuses at `user-create` goes no further: no run
-/// directory, no `run`, no rollback of a user that does not exist. It catches a start that
-/// goes on without a user.
+/// Asserts that a start the helper refuses at `user-create` removes what the helper may
+/// have recorded before it refused: the helper records the lease in its ledger, holding a
+/// uid, before it makes the home and the account, so a refusal after that point leaves a
+/// live lease. The start asks for a kill and a delete of the lease, and when that fails too
+/// the error says so. A refusal that the lease was used before is the one exception: that
+/// lease is not ours to remove. It catches a helper whose uid range is used up by failed
+/// starts.
 #[test]
-fn a_user_the_helper_refuses_to_make_ends_the_start() {
+fn a_user_the_helper_refuses_to_make_is_removed_again() {
     let mut rig = Rig::new("nouser");
     rig.fake.refuse("user-create", "range full");
     let spec = rig.spec("r1", native("/bin/true", &[]));
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(error.0.starts_with("user-create: "), "{}", error.0);
     assert!(error.0.contains("range full"));
+    assert_eq!(
+        rig.fake.verbs(),
+        [
+            "boot-reset",
+            "user-create 7.0",
+            "kill-uid 7.0",
+            "user-delete 7.0"
+        ]
+    );
+
+    rig.fake.refuse("kill-uid", "stuck");
+    rig.fake.refuse("user-delete", "busy");
+    let spec = rig.spec("r2", native("/bin/true", &[]));
+    let error = rig.rt.create_and_start(&spec).unwrap_err();
+    assert!(error.0.contains("range full"), "{}", error.0);
+    for told in ["kill-uid: ", "stuck", "user-delete: ", "busy"] {
+        assert!(error.0.contains(told), "{told}: {}", error.0);
+    }
+
+    let mut rig = Rig::new("used");
+    rig.fake.refuse(
+        "user-create",
+        "lease 7.0 was used before; a lease user's name is never reused",
+    );
+    let spec = rig.spec("r1", native("/bin/true", &[]));
+    rig.rt.create_and_start(&spec).unwrap_err();
     assert_eq!(rig.fake.verbs(), ["boot-reset", "user-create 7.0"]);
 }
 

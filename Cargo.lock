@@ -1066,6 +1066,7 @@ dependencies = [
  "async-trait",
  "hex",
  "js-types",
+ "libc",
  "oci-spec",
  "runc",
  "rustix",
@@ -1201,6 +1202,15 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "js-mac-provision"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "js-testkit",
+ "thiserror",
 ]
 
 [[package]]
