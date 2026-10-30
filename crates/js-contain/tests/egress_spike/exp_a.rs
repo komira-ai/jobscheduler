@@ -34,6 +34,10 @@ impl Case {
         self.inner.get("steps") == "all ok"
             && self.inner.get("inner.loopback") == "ok"
             && self.inner.get("inner.ifaces") == "lo"
+            && self
+                .inner
+                .get(&format!("inner.connect.{}", endpoints::ALLOWED_A))
+                .ends_with("errno 101")
     }
 }
 
@@ -172,9 +176,14 @@ fn a4_an_unprofiled_crun_is_blocked_by_the_restriction() {
         Some(crun_copy()),
     );
     assert!(
-        !case.works(),
-        "the restriction did not block: {:?}",
-        case.inner
+        !case.container_started(),
+        "the container started: {:?}",
+        case.started
+    );
+    assert!(
+        case.started.first_error().contains("setresuid"),
+        "{:?}",
+        case.started
     );
 }
 

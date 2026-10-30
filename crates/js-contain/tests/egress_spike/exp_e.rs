@@ -9,8 +9,9 @@
 //!   the helper plumbs the network namespace by pid; the container joins both by path.
 //!   Joining the pair is the one way a rootless `crun` can use a namespace made before it.
 //!
-//! The helper runs through `sudo -n`; each call it makes is one a unit with
-//! `CAP_NET_ADMIN`, `CAP_SYS_ADMIN` and `CAP_SYS_PTRACE` could make.
+//! The helper runs through `sudo -n setpriv` with a bounding and inheritable set of exactly
+//! `CAP_NET_ADMIN`, `CAP_SYS_ADMIN` and `CAP_SYS_PTRACE` (`host::helper`), so every call it
+//! makes here is one a unit with those capabilities could make.
 
 use std::time::Duration;
 
@@ -22,7 +23,8 @@ use crate::scenario::{
     assert_job_cannot_tamper, counter, enter_as_root, listing, record_suite,
 };
 
-const TOOLS: [&str; 8] = [
+const TOOLS: [&str; 9] = [
+    "setpriv",
     "crun",
     "newuidmap",
     "newgidmap",
@@ -66,7 +68,7 @@ fn plumb(pid: u32, host_end: &str, peer: &str) -> Veth {
         "",
     );
     assert!(off.status.success(), "{}", host::text(&off));
-    host::sudo_must(
+    host::helper_must(
         "ip",
         &[
             "link",
@@ -82,8 +84,8 @@ fn plumb(pid: u32, host_end: &str, peer: &str) -> Veth {
         ],
     );
     let veth = Veth(host_end.to_owned());
-    host::sudo_must("ip", &["addr", "add", "192.0.2.1/24", "dev", host_end]);
-    host::sudo_must("ip", &["link", "set", host_end, "up"]);
+    host::helper_must("ip", &["addr", "add", "192.0.2.1/24", "dev", host_end]);
+    host::helper_must("ip", &["link", "set", host_end, "up"]);
     for args in [
         vec!["addr", "add", "192.0.2.2/24", "dev", peer],
         vec!["link", "set", peer, "up"],
@@ -176,4 +178,27 @@ fn e2_container_joins_a_user_and_network_namespace_pair_made_by_the_daemon() {
     ));
     assert_eq!(outcome.exit, Some(0), "{outcome:?}");
     assert_whole(&outcome, &table);
+}
+
+/// Asserts that the helper really runs with exactly the three capabilities the other tests
+/// name (its effective set is bits 12, 19 and 21), so their passing is a proof that these
+/// are enough and not a statement about full root.
+#[test]
+#[ignore = "needs crun, nsenter, nft, passwordless sudo: see the egress-spike workflow"]
+fn e0_the_helper_runs_with_exactly_three_capabilities() {
+    let _serial = serial();
+    if !host::require(&TOOLS) || !host::require(&["grep"]) {
+        return;
+    }
+    let status = host::helper_must("grep", &["^Cap", "/proc/self/status"]);
+    row(
+        "e0 helper capability sets",
+        "status",
+        status.replace('\n', " "),
+    );
+    let effective = status
+        .lines()
+        .find(|l| l.starts_with("CapEff"))
+        .unwrap_or("");
+    assert!(effective.ends_with(host::HELPER_CAPEFF), "{status}");
 }

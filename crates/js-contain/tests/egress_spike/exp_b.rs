@@ -50,6 +50,11 @@ fn b1_a_namespace_owned_by_the_initial_userns_cannot_be_joined() {
     );
     assert_ne!(outcome.exit, Some(0), "{outcome:?}");
     assert_eq!(outcome.get("uid"), "-", "the job ran: {outcome:?}");
+    assert!(
+        outcome.first_error().contains("cannot setns")
+            && outcome.first_error().contains("Operation not permitted"),
+        "{outcome:?}"
+    );
 }
 
 /// Asserts that a network namespace owned by a user namespace the daemon itself made cannot
@@ -79,6 +84,11 @@ fn b2_a_daemon_owned_netns_cannot_be_joined_from_a_new_userns() {
     );
     assert_ne!(outcome.exit, Some(0), "{outcome:?}");
     assert_eq!(outcome.get("uid"), "-", "the job ran: {outcome:?}");
+    assert!(
+        outcome.first_error().contains("cannot setns")
+            && outcome.first_error().contains("Operation not permitted"),
+        "{outcome:?}"
+    );
 }
 
 /// Asserts that the daemon, with no capability, cannot open the namespaces of a container
@@ -117,6 +127,9 @@ fn b3_the_daemon_cannot_enter_the_namespaces_of_a_created_container() {
         "nsenter --net as the daemon",
         host::text(&net_only).trim(),
     );
-    assert!(!user.status.success());
-    assert!(!net_only.status.success());
+    assert!(host::text(&user).contains("Permission denied"), "{user:?}");
+    assert!(
+        host::text(&net_only).contains("Permission denied"),
+        "{net_only:?}"
+    );
 }

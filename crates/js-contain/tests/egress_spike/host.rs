@@ -134,14 +134,6 @@ pub fn sudo(program: &str, args: &[&str]) -> Output {
     run_timeout(cmd, Duration::from_secs(60))
 }
 
-/// `sudo -n program args...` with `stdin`.
-pub fn sudo_stdin(program: &str, args: &[&str], stdin: &str) -> Output {
-    let program = bin(program);
-    let mut all = vec!["-n", program.as_str()];
-    all.extend_from_slice(args);
-    run_with_stdin("sudo", &all, stdin)
-}
-
 /// `sudo -n program args...`, which must succeed; returns its output.
 pub fn sudo_must(program: &str, args: &[&str]) -> String {
     let output = sudo(program, args);
@@ -313,4 +305,42 @@ pub mod endpoints {
         "198.51.100.99",
         "169.254.169.254",
     ];
+}
+
+/// The capabilities the privileged helper is run with: `CAP_NET_ADMIN` (links, addresses,
+/// routes, nft in a namespace), `CAP_SYS_ADMIN` (`setns` into a namespace owned by another
+/// user namespace) and `CAP_SYS_PTRACE` (open the namespace files of another user's process).
+pub const HELPER_CAPS: &str = "-all,+net_admin,+sys_admin,+sys_ptrace";
+
+/// What `CapEff` reads for [`HELPER_CAPS`]: bits 12, 19 and 21.
+pub const HELPER_CAPEFF: &str = "0000000000281000";
+
+/// `program args...` as the privileged helper: root, but with a bounding and inheritable
+/// set of exactly [`HELPER_CAPS`] (`setpriv`), so a call that needs more fails.
+pub fn helper(program: &str, args: &[&str], stdin: &str) -> Output {
+    let setpriv = bin("setpriv");
+    let program = bin(program);
+    let mut all = vec![
+        "-n",
+        setpriv.as_str(),
+        "--bounding-set",
+        HELPER_CAPS,
+        "--inh-caps",
+        "-all",
+        "--",
+        program.as_str(),
+    ];
+    all.extend_from_slice(args);
+    run_with_stdin("sudo", &all, stdin)
+}
+
+/// [`helper`], which must succeed; returns its output.
+pub fn helper_must(program: &str, args: &[&str]) -> String {
+    let output = helper(program, args, "");
+    assert!(
+        output.status.success(),
+        "helper {program} {args:?} failed: {}",
+        text(&output)
+    );
+    text(&output)
 }

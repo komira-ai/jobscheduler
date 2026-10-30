@@ -36,7 +36,16 @@ pub fn entry() {
         "id" => id(),
         "userns-netns" => userns_netns(),
         "after-netns" => after_netns(),
-        "suite" => suite(),
+        "suite" => {
+            suite_body();
+            wait_gate();
+        }
+        "composite" => {
+            suite_body();
+            userns_netns();
+            wait_gate();
+        }
+        "v6" => v6(),
         "hold" => {
             let mut sink = Vec::new();
             let _ = std::io::stdin().read_to_end(&mut sink);
@@ -334,7 +343,7 @@ fn tamper() {
     emit("tamper.succeeded", succeeded);
 }
 
-fn suite() {
+fn suite_body() {
     let targets = std::env::var("JS_EGRESS_TARGETS").unwrap_or_default();
     let targets: Vec<&str> = targets.split(',').filter(|t| !t.is_empty()).collect();
     id();
@@ -347,10 +356,38 @@ fn suite() {
         emit(&format!("after.{target}"), connect(target));
     }
     emit("suite.done", 1);
+}
+
+fn wait_gate() {
     if let Ok(gate) = std::env::var("JS_EGRESS_GATE") {
         let deadline = Instant::now() + Duration::from_secs(90);
         while !std::path::Path::new(&gate).exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+}
+
+/// Whether the namespace has a usable IPv6 loopback: binds `[::1]` and connects to it.
+fn v6() {
+    let result = TcpListener::bind("[::1]:0")
+        .and_then(|listener| {
+            let addr = listener.local_addr()?;
+            TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map(drop)
+        })
+        .map_or_else(
+            |error| {
+                format!(
+                    "err {:?} errno {}",
+                    error.kind(),
+                    error.raw_os_error().unwrap_or(0)
+                )
+            },
+            |()| "ok".to_owned(),
+        );
+    emit("v6.loopback", result);
+    emit(
+        "v6.disable_all",
+        std::fs::read_to_string("/proc/sys/net/ipv6/conf/all/disable_ipv6")
+            .map_or_else(|_| "absent".to_owned(), |v| v.trim().to_owned()),
+    );
 }

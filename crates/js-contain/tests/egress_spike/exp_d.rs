@@ -33,7 +33,7 @@ const TOOLS: [&str; 9] = [
 const RESTRICT: &str = "kernel.apparmor_restrict_unprivileged_userns";
 
 /// A running `pasta`, killed when dropped.
-struct Pasta(Child);
+pub struct Pasta(Child);
 
 impl Drop for Pasta {
     fn drop(&mut self) {
@@ -99,15 +99,9 @@ fn attach_pasta(pid: u32, log: &std::path::Path) -> Pasta {
     }
 }
 
-fn run(label: &str, restricted: bool, rules: bool) -> Run {
-    let _restrict = Sysctl::set(RESTRICT, if restricted { "1" } else { "0" });
-    let profile = restricted.then(|| Profile::load(JOB_PROFILE_NAME, JOB_PROFILE));
-    let _fixture = Fixture::new();
-    let holder = Holder::start();
-    let mut spec = pair_spec("d", "suite", &holder);
-    spec.apparmor = profile.as_ref().map(|p| p.name().to_owned());
-    let bundle = Bundle::new(&spec);
-    let log = bundle.dir.join("pasta.log");
+/// What the daemon does to a pair before the job: IPv6 off, pasta attached, and (when
+/// `rules`) the table loaded. The returned guard keeps pasta alive.
+pub fn prepare_pair(holder: &Holder, log: &std::path::Path, rules: bool) -> Pasta {
     let off = enter_as_owner(
         holder.pid(),
         "sysctl",
@@ -123,7 +117,7 @@ fn run(label: &str, restricted: bool, rules: bool) -> Run {
         "daemon could not switch IPv6 off in the namespace: {}",
         host::text(&off)
     );
-    let _pasta = attach_pasta(holder.pid(), &log);
+    let pasta = attach_pasta(holder.pid(), log);
     if rules {
         let loaded = enter_as_owner(holder.pid(), "nft", &["-f", "-"], ALLOW_LIST);
         assert!(
@@ -132,6 +126,27 @@ fn run(label: &str, restricted: bool, rules: bool) -> Run {
             host::text(&loaded)
         );
     }
+    pasta
+}
+
+fn run(label: &str, restricted: bool, job_profile: bool, rules: bool, seccomp: bool) -> Run {
+    let _restrict = Sysctl::set(RESTRICT, if restricted { "1" } else { "0" });
+    let profile = job_profile.then(|| Profile::load(JOB_PROFILE_NAME, JOB_PROFILE));
+    let _fixture = Fixture::new();
+    let holder = Holder::start();
+    let mut spec = pair_spec("d", "suite", &holder);
+    spec.seccomp = seccomp;
+    if seccomp {
+        row(
+            label,
+            "seccomp entries applied",
+            crate::seccomp::section().1,
+        );
+    }
+    spec.apparmor = profile.as_ref().map(|p| p.name().to_owned());
+    let bundle = Bundle::new(&spec);
+    let log = bundle.dir.join("pasta.log");
+    let _pasta = prepare_pair(&holder, &log, rules);
     let outcome = bundle.run();
     let table = table_of(&holder);
     record_suite(label, &outcome);
@@ -176,7 +191,13 @@ fn d1_pasta_with_a_namespace_allow_list() {
     if !host::require(&TOOLS) {
         return;
     }
-    assert_whole(&run("d1 pasta + nft in the netns", false, true));
+    assert_whole(&run(
+        "d1 pasta + nft in the netns",
+        false,
+        false,
+        true,
+        false,
+    ));
 }
 
 /// Asserts the control: with no table, pasta relays to every host address, the metadata
@@ -188,7 +209,7 @@ fn d2_pasta_alone_filters_nothing() {
     if !host::require(&TOOLS) {
         return;
     }
-    let run = run("d2 control: pasta, no table", false, false);
+    let run = run("d2 control: pasta, no table", false, false, false, false);
     let seen = reach(&run.outcome, "before");
     assert!(connected(&seen["allowed-a"]), "{seen:?}");
     assert!(
@@ -210,6 +231,43 @@ fn d3_pasta_with_a_namespace_allow_list_when_userns_is_restricted() {
     }
     assert_whole(&run(
         "d3 pasta + nft, userns restricted + job profile",
+        true,
+        true,
+        true,
+        false,
+    ));
+}
+
+/// Asserts the first test with the container runner's real seccomp profile in the bundle:
+/// crun's join of the pair, pasta's relay and the job's network calls all still work.
+#[test]
+#[ignore = "needs crun, pasta, nft, passwordless sudo: see the egress-spike workflow"]
+fn d4_pasta_with_a_namespace_allow_list_under_the_real_seccomp_profile() {
+    let _serial = serial();
+    if !host::require(&TOOLS) {
+        return;
+    }
+    assert_whole(&run(
+        "d4 pasta + nft, real seccomp",
+        false,
+        false,
+        true,
+        true,
+    ));
+}
+
+/// The same with the restriction on and the distribution's crun profile (no job profile).
+#[test]
+#[ignore = "needs crun, pasta, nft, passwordless sudo: see the egress-spike workflow"]
+fn d5_pasta_with_a_namespace_allow_list_under_seccomp_and_the_restriction() {
+    let _serial = serial();
+    if !host::require(&TOOLS) {
+        return;
+    }
+    assert_whole(&run(
+        "d5 pasta + nft, real seccomp, restriction on, shipped crun profile",
+        true,
+        false,
         true,
         true,
     ));

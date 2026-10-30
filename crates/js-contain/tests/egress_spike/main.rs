@@ -22,10 +22,12 @@ mod exp_b;
 mod exp_c;
 mod exp_d;
 mod exp_e;
+mod exp_f;
 mod host;
 mod probe;
 mod report;
 mod scenario;
+mod seccomp;
 
 /// The program the container runs: does what `JS_EGRESS_PROBE` says (see `probe`) and
 /// prints `PROBE key=value` lines. Without the variable it does nothing.

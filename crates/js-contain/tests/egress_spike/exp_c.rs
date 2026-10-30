@@ -44,6 +44,16 @@ fn c1_the_job_cannot_edit_the_allow_list_in_its_netns() {
         host::text(&loaded)
     );
     let outcome = Bundle::new(&pair_spec("c1", "suite", &holder)).run();
+    // A route for `ip route flush all` to find: without one the flush fails with "FIB table
+    // does not exist", which says nothing about permission.
+    let route = enter_as_owner(
+        holder.pid(),
+        "ip",
+        &["route", "add", "unreachable", "203.0.113.0/24"],
+        "",
+    );
+    assert!(route.status.success(), "{}", host::text(&route));
+    let routes = host::text(&enter_as_owner(holder.pid(), "ip", &["route", "show"], ""));
     let after = table_of(&holder);
     record_suite("c1 allow-list in the pair's netns, job tampers", &outcome);
     assert_eq!(outcome.exit, Some(0), "{outcome:?}");
@@ -54,6 +64,10 @@ fn c1_the_job_cannot_edit_the_allow_list_in_its_netns() {
             "rule {comment} is gone after the job ran:\n{after}"
         );
     }
+    assert!(
+        routes.contains("203.0.113.0/24"),
+        "the job removed the route: {routes}"
+    );
     row(
         "c1 allow-list in the pair's netns, job tampers",
         "table intact after the job",

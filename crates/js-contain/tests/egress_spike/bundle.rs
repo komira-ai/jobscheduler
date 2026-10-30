@@ -5,8 +5,9 @@
 //! `/proc`, a tmpfs `/dev` and `/tmp`, and this test binary bound at `/probe`. Container id
 //! 0 is the first id of the runner's subordinate range, as the job runner's containers do
 //! (`crates/js-contain/src/oci/mod.rs`), and the job runs as id 1000 with no capabilities and
-//! `no_new_privs`. No seccomp filter and no cgroup limits: neither is under test, and the
-//! driver runs `crun` with `--cgroup-manager=disabled`.
+//! `no_new_privs`. No seccomp filter unless `Spec::seccomp` asks for the real one, and no
+//! cgroup limits (not under test; the
+//! driver runs `crun` with `--cgroup-manager=disabled`).
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _, symlink};
@@ -51,6 +52,8 @@ pub struct Spec {
     pub gate: bool,
     /// The `crun` program to run, when not the distribution's.
     pub crun: Option<PathBuf>,
+    /// Apply the container runner's seccomp profile (no capabilities).
+    pub seccomp: bool,
 }
 
 impl Spec {
@@ -67,6 +70,7 @@ impl Spec {
             apparmor: None,
             gate: false,
             crun: None,
+            seccomp: false,
         }
     }
 }
@@ -293,6 +297,9 @@ impl Bundle {
             Join::Path(path) => namespaces.push(json!({"type": "user", "path": path})),
         }
         linux["namespaces"] = json!(namespaces);
+        if spec.seccomp {
+            linux["seccomp"] = crate::seccomp::section().0;
+        }
         json!({
             "ociVersion": "1.0.2",
             "process": process,

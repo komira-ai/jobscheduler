@@ -81,7 +81,7 @@ pub fn enter_as_root(pid: u32, program: &str, args: &[&str], stdin: &str) -> Out
     let resolved = host::bin(program);
     let mut all = vec!["--target", pid.as_str(), "--net", "--", resolved.as_str()];
     all.extend_from_slice(args);
-    host::sudo_stdin("nsenter", &all, stdin)
+    host::helper("nsenter", &all, stdin)
 }
 
 /// The packet count of the rule commented `comment` in an `nft list table` text.
@@ -159,6 +159,19 @@ pub fn assert_job_cannot_tamper(outcome: &Outcome) {
         "{:?}",
         outcome.probe()
     );
+    for key in [
+        "nft_flush",
+        "nft_delete_table",
+        "nft_add_accept",
+        "ip_lo_down",
+        "ip_route_flush",
+    ] {
+        let value = outcome.get(&format!("tamper.{key}"));
+        assert!(
+            value.contains("Operation not permitted"),
+            "tamper.{key} was not refused with EPERM: {value}"
+        );
+    }
 }
 
 /// Records every probe key of the suite as a result row of `experiment`.
