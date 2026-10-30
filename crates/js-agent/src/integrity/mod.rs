@@ -129,6 +129,15 @@
 //!   does a process in the agent's own control group (read from `/proc/self/cgroup` when
 //!   the agent starts; an agent that cannot read it does not start) or below it, other than
 //!   a Podman monitor's scope there.
+//! - **The direct runner's layout.** A container is the group `<actions>/<lease>/ctr`; the
+//!   agent's own group is beside `actions/`, not above it, so a process left there would
+//!   look like a system service's. A path with a `ctr` just below a `lease-<n>` group, or
+//!   with a group named `actions` in it, names a container and counts. The runner's own
+//!   processes (`crun run`, `kill`, `delete`, the keeper) are children of the agent, alive
+//!   under a parent that is not `init`, in the agent's group exactly: they are not counted.
+//! - **A runtime that cannot see a container's group** is blind: see
+//!   [`Runtime::places_in_cgroup`](crate::lifecycle::Runtime::places_in_cgroup); the
+//!   lifecycle taints the host as unchecked when such a run ends with no group ever named.
 //! - **A network namespace Podman pins** (`nsfs` at `/run/netns/<name>`: one per container,
 //!   a neighbour's included, named without the container id), **the bind of `/run/netns`
 //!   onto itself** (`tmpfs`, root `/netns`) that the first container after a boot makes,
@@ -401,7 +410,7 @@ fn hosts_own_process(cgroup: &str, own: Option<&str>) -> bool {
     if agents {
         return false;
     }
-    if units.iter().any(|unit| names_a_container(unit)) {
+    if names_a_container(&units) {
         return false;
     }
     match units.as_slice() {
@@ -421,11 +430,36 @@ fn unified(cgroup: &str) -> Option<&str> {
         .find_map(|line| line.strip_prefix("0::"))
 }
 
-/// Whether the control group `unit` is one a container engine makes for a container.
-fn names_a_container(unit: &str) -> bool {
+/// The name of the runner's group that holds every lease's group (js-contain's `actions/`).
+const ACTIONS: &str = "actions";
+
+/// Whether the control groups `units` (the names in a unified path) hold a container's: a
+/// group an engine makes for one (`libpod-<id>`, `docker-<id>`, ...), the direct runner's
+/// `<lease>/ctr` (a `ctr` just below a `lease-<n>` group, however deep the path goes on, and
+/// wherever the lease group sits), or any group in or below the runner's `actions` group,
+/// which holds nothing but leases. A name that only looks like these (`actions-old`,
+/// `lease-1/ctrl`, `xlease-1/ctr`) is not one.
+fn names_a_container(units: &[&str]) -> bool {
     const ENGINES: [&str; 4] = ["libpod-", "docker-", "crio-", "cri-containerd-"];
-    ENGINES.iter().any(|prefix| unit.starts_with(prefix))
-        || ["docker", "libpod_parent", "machine.slice"].contains(&unit)
+    let engine = |unit: &&str| {
+        ENGINES.iter().any(|prefix| unit.starts_with(prefix))
+            || ["docker", "libpod_parent", "machine.slice"].contains(unit)
+    };
+    units.iter().any(engine)
+        || units.contains(&ACTIONS)
+        || units
+            .windows(2)
+            .any(|pair| pair[0].starts_with("lease-") && pair[1] == "ctr")
+}
+
+/// Whether `process` is one of the direct runner's own: a child of the agent (its parent is
+/// alive and is not `init`) in the agent's own control group exactly. The runner's `crun
+/// run`, `crun kill` and `crun delete` and the keeper are started by the agent and stay in
+/// its group; no job process can be in it, since a container's processes are in its own
+/// group and cannot leave it. A process the agent no longer holds (parent `init`) is not
+/// the runner's, nor is one in a group below the agent's.
+fn runners_own(process: &Process, own: Option<&str>) -> bool {
+    process.ppid != 1 && own.is_some() && unified(&process.cgroup) == own
 }
 
 /// Whether `mount` is one the host makes while jobs run, which no job can have left: the
@@ -579,6 +613,7 @@ impl Integrity {
                 !known.contains(&process.key())
                     && !mine(&process.cgroup)
                     && !hosts_own_process(&process.cgroup, self.own.as_deref())
+                    && !runners_own(process, self.own.as_deref())
             })
             .collect();
         let own = job.slot.and_then(|slot| self.slot_host_uid(slot));

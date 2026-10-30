@@ -302,6 +302,7 @@ use crate::facts::{CommandRunner, FileReader, Platform, SystemCommands, SystemFi
 use crate::lifecycle::{
     Body, Exit, Found, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
 };
+use crate::usage::layout_of;
 
 /// How long one call of the runtime may take, besides the stop grace it is given: long
 /// enough for an image to be pulled by `create`.
@@ -937,7 +938,7 @@ impl CliRuntime {
             .0;
         let table = (self.proc_read)(&format!("/proc/{pid}/cgroup"))?;
         let dir = Path::new(CGROUP_ROOT).join(unified_path(&table)?);
-        (dir.starts_with(actions) && dir != actions).then_some(dir)
+        layout_of(&dir, actions).map(|_| dir)
     }
 
     /// Gives the run's scratch directory to the container's user, when the agent is root:

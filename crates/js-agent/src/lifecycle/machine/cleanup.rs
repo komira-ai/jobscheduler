@@ -2,7 +2,7 @@
 //! cleanup in order.
 
 use super::Lifecycle;
-use super::job::{Cause, Stage, check_taint, cleanup_taint, outcome};
+use super::job::{Cause, Stage, blind_taint, check_taint, cleanup_taint, outcome};
 use crate::lifecycle::runtime::{RunHandle, Status};
 use crate::lifecycle::{CheckFinding, Config, Event, Finding, Finished, code};
 
@@ -18,6 +18,7 @@ impl Lifecycle {
             jobs,
             runtime,
             config,
+            taint,
             ..
         } = self;
         let job = &mut jobs[index];
@@ -58,6 +59,16 @@ impl Lifecycle {
                 // tell, so the cause stands.
                 let cause = job.cause.filter(|_| exit.is_none() || job.stop_sent);
                 let (how, status) = outcome(cause, exit);
+                // A runtime that puts every container in a group the agent can read, and
+                // whose group for this run was never named (not at the start, not at any
+                // window, not now), left the agent blind to the container: its usage was
+                // not sampled and what it left is not known to be checkable.
+                if runtime.places_in_cgroup() && job.cgroup.is_none() {
+                    job.cgroup = runtime.cgroup(&id);
+                    if job.cgroup.is_none() {
+                        job.taint(taint, blind_taint(&job.run_id), events);
+                    }
+                }
                 if !job.silent {
                     let mut result = job.report(how, status, None);
                     // The container is still there: it is removed in the next stage. A log
