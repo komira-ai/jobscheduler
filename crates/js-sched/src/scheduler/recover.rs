@@ -310,19 +310,17 @@ impl Scheduler {
 /// Books the lease of `request`, which the state store holds, on `worker`: returns what it
 /// books.
 fn book(worker: &mut Worker, request: &Request, lease: LeaseId, cost: LeaseCost) -> Resources {
-    let booked = match request.kind {
-        LeaseKind::WholeMachine => {
-            worker.whole = true;
-            worker.capacity
-        }
+    let booked = worker.booking(request);
+    match request.kind {
+        LeaseKind::WholeMachine => worker.whole = true,
         LeaseKind::Action | LeaseKind::Vm => {
             worker.whole |= worker.exclusive(request);
+            let cost = worker.charged_whole(request, cost);
             worker
                 .load_state
                 .insert(lease, cost, request.kind == LeaseKind::Vm, None);
-            request.resources
         }
-    };
+    }
     worker.booked = worker.booked.saturating_add(booked);
     worker.leases += 1;
     booked

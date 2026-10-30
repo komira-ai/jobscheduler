@@ -138,6 +138,7 @@ pub(crate) fn job(request: &Request, dedup: &str) -> Result<SchedRequest, MapErr
         needs: needs(request)?,
         hermetic: false,
         do_not_cache: true,
+        whole_worker: false,
     })
 }
 

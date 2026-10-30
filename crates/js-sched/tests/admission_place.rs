@@ -159,6 +159,7 @@ fn the_off_switch_places_by_the_booked_rule() {
             needs: js_caps::Request::default(),
             hermetic: true,
             do_not_cache: false,
+            whole_worker: false,
         };
         s.apply(Input::new(
             FarmTime::from_millis(0),
@@ -497,6 +498,7 @@ fn placed_with_grants(n: u64) -> (Scheduler, Vec<js_types::sched::LeaseGrant>) {
             needs: js_caps::Request::default(),
             hermetic: true,
             do_not_cache: false,
+            whole_worker: false,
         };
         s.apply(Input::new(
             t,
@@ -614,6 +616,7 @@ fn a_restart_keeps_the_admitted_costs_and_sums() {
                 needs: js_caps::Request::default(),
                 hermetic: true,
                 do_not_cache: false,
+                whole_worker: false,
             };
             s.apply(Input::new(
                 t,
@@ -747,6 +750,7 @@ fn a_worker_charged_by_prediction_alone_charges_a_key_with_a_curve_flat_and_coun
             needs: js_caps::Request::default(),
             hermetic: true,
             do_not_cache: false,
+            whole_worker: false,
         };
         s.apply(Input::new(
             t,
