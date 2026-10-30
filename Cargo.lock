@@ -968,6 +968,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-alert"
+version = "0.1.0"
+dependencies = [
+ "rustls",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "js-bundle"
 version = "0.1.0"
 dependencies = [
@@ -1138,6 +1149,7 @@ dependencies = [
  "hyper-util",
  "js-agent",
  "js-agent-wire",
+ "js-alert",
  "js-caps",
  "js-elastic",
  "js-elastic-fake",
@@ -1458,6 +1470,23 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "thiserror",
+]
+
+[[package]]
+name = "js-watch"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "js-alert",
+ "js-elastic",
+ "js-provider-lambdalabs",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]
