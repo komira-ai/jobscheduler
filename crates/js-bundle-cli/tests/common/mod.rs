@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use js_oci::Digest;
-use js_testkit::TestDir;
+use js_testkit::dir::TestDir;
 use serde_json::Value;
 
 /// What a run of the program did.
