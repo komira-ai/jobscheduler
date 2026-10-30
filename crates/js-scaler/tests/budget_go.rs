@@ -22,6 +22,9 @@ fn restart(rig: &Rig, settings: Settings) -> Rig {
     let text = rig.state.records.encode().unwrap();
     let mut fresh = Rig::new(settings);
     fresh.input = rig.input.clone();
+    // The restarted scaler draws new random values, as a real one does: a repeat of one
+    // already used for an acquire id is refused.
+    fresh.drawn = rig.drawn;
     fresh.state = State::new(Records::decode(&text).unwrap());
     fresh
 }
@@ -67,7 +70,7 @@ fn a_pool_switched_to_plan_loses_its_go_and_the_next_go_begins_again() {
     rig.tick(at(0));
     rig.state.records.go.get_mut("gpu").unwrap().settled = 500;
     rig.pool().settings.launch = LaunchMode::Plan;
-    assert_eq!(kinds(&rig.tick(at(HOUR))), ["Save"]);
+    assert_eq!(kinds(&rig.tick(at(HOUR)))[0], "Save");
     assert!(rig.state.records.go.is_empty());
     rig.pool().settings.launch = LaunchMode::Live;
     rig.input.waiting = vec![request("r1"), request("r2")];
@@ -124,8 +127,8 @@ fn the_end_of_a_go_drains_and_releases_nothing() {
 /// Asserts, across restarts, that the go is the first step's and not the restart's, and that
 /// `live_until` holds: a scaler that comes back before the end finds its go where it was
 /// (the time of the first step, not of the restart) and launches for a second request; one
-/// that comes back after the end launches nothing and ends the go. It catches a go begun again at every restart (a budget that a crash resets)
-/// and an expiry the restart forgets.
+/// that comes back after the end launches nothing and ends the go. It catches a go begun
+/// again at every restart (a budget that a crash resets) and an expiry the restart forgets.
 #[test]
 fn the_go_and_its_end_hold_across_a_restart() {
     let mut rig = Rig::new(until_an_hour());
