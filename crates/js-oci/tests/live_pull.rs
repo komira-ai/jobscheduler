@@ -85,6 +85,15 @@ async fn the_probe_reports_a_token_a_redirect_and_verified_digests() {
     let token =
         format!("{other} GET /token?service=fake-registry&scope=repository:team/bundle:pull []");
     assert!(log.contains(&token), "{log:?}");
+    let manifest = format!(
+        "{registry} GET /v2/{REPO}/manifests/{} [Bearer tok]",
+        artifact.digest
+    );
+    let config = format!(
+        "{registry} GET /v2/{REPO}/blobs/{} [Bearer tok]",
+        Digest::of(CONFIG.as_bytes())
+    );
+    assert!(log.contains(&manifest) && log.contains(&config), "{log:?}");
     let blob = format!("{registry} GET /v2/{REPO}/blobs/{digest} [Bearer tok]");
     let cdn = format!("{other} GET /cdn/{digest} []");
     assert!(log.contains(&blob) && log.contains(&cdn), "{log:?}");
