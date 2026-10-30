@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 //! The privilege model of js-agent when it launches jobs through the rootless crun runner
 //! instead of podman, settled by what the kernel does. Two shapes are compared, each duty
 //! of the agent against each (see `docs/design/agent-privilege.md`):
@@ -16,6 +15,7 @@
 //!
 //! The XFS tests need a prjquota file system: the workflow mounts a loop image and names it
 //! in `JS_PRIV_XFS_ROOT`. A missing variable is a failure, never a skip.
+#![cfg(target_os = "linux")]
 
 mod egress;
 mod harness;

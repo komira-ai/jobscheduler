@@ -121,13 +121,16 @@ impl Volume {
 /// A: a non-root agent that owns the scratch root and the run directory but holds no
 /// capability cannot bound the run: the limits are set with `Q_XSETQLIM`, which the kernel
 /// allows only to `CAP_SYS_ADMIN`, so `apply` fails with EPERM and the project holds no
-/// limit. It catches a design that counts on directory ownership alone for the quota.
+/// limit, although the same agent's probe (which makes a directory and sets a project id on
+/// it as its owner) succeeds. It catches a design that counts on directory ownership alone
+/// for the quota.
 #[test]
 #[ignore = "needs root and a prjquota XFS volume: see the module docs of tests/privilege/main.rs"]
 fn a_non_root_agent_without_a_capability_cannot_set_the_limits_of_its_own_directory() {
     let volume = Volume::new("priv-quota-none", AGENT);
     let run = volume.run_dir("run", 0o700, AGENT);
     let report = volume.agent(&[], "quota_apply", &run, 510);
+    report.expect("probe", "project");
     report.expect("apply", &format!("errno:{EPERM}"));
     assert_eq!(volume.limits(510), (0, 0), "nothing was set");
     volume.clean(&run, 510);
