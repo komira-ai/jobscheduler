@@ -17,22 +17,40 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
     // proves nothing and the run fails here.
     let control_dir = scratch.control.join("tool");
     let sandboxed_dir = scratch.places.run.join("tool");
-    case(scratch, report, "control", &Mode::Control, &control_dir);
+    case(
+        scratch,
+        report,
+        "control",
+        &Mode::Control,
+        &control_dir,
+        true,
+    );
     case(
         scratch,
         report,
         "sandboxed",
         &Mode::Sandboxed(&off, ""),
         &sandboxed_dir,
+        true,
     );
 }
 
-fn case(scratch: &Scratch, report: &mut Report, label: &str, mode: &Mode<'_>, dir: &Path) {
+/// The toolchain steps once. `asserted` false makes every step a reported fact (a trace run,
+/// whose behaviour is not known beforehand).
+pub fn case(
+    scratch: &Scratch,
+    report: &mut Report,
+    label: &str,
+    mode: &Mode<'_>,
+    dir: &Path,
+    asserted: bool,
+) {
     let setup = fs::create_dir_all(dir)
         .and_then(|()| fs::write(dir.join("hello.c"), HELLO_C))
         .and_then(|()| fs::write(dir.join("hello.swift"), HELLO_SWIFT));
     if let Err(err) = setup {
-        report.push(Probe::asserted(&format!("toolchain/{label}/setup"), false).fact("error", err));
+        let name = format!("toolchain/{label}/setup");
+        report.push(Probe::asserted(&name, false).fact("error", err));
         return;
     }
     let places = &scratch.places;
@@ -41,7 +59,12 @@ fn case(scratch: &Scratch, report: &mut Report, label: &str, mode: &Mode<'_>, di
         |report: &mut Report, name: &str, program: &OsStr, args: &[&OsStr], expect_hello: bool| {
             let outcome = run(places.command(mode, program, args));
             let hello = !expect_hello || outcome.stdout == "hello\n";
-            let probe = Probe::asserted(&format!("toolchain/{label}/{name}"), outcome.ok && hello);
+            let (full, held) = (format!("toolchain/{label}/{name}"), outcome.ok && hello);
+            let probe = if asserted {
+                Probe::asserted(&full, held)
+            } else {
+                Probe::info(&full).fact("held", held)
+            };
             report.push(describe(probe, "", &outcome));
         };
     let (hello_c, hello_s) = (path("hello_c"), path("hello_s"));
