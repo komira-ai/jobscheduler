@@ -337,6 +337,13 @@ fn a_tree_being_deleted_cannot_be_pinned_and_a_caller_for_it_waits_then_rebuilds
             store.pin(&a.diff_id, &run("r1")),
             Err(Error::Absent(_))
         ));
+        // The tree being deleted is no candidate for another caller's room.
+        let c = sized("f", 100, 3);
+        rig.have(&c);
+        assert!(matches!(
+            store.ensure(&wanted(&c)),
+            Err(Error::NoSpace { .. })
+        ));
         let wanting = scope.spawn(|| store.ensure(&wanted(&a)));
         while store.stats().waiting < 1 {
             thread::yield_now();
