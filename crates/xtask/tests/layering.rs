@@ -172,7 +172,7 @@ fn a_renamed_dependency_is_judged_by_its_package() {
 #[test]
 fn a_crate_must_be_in_exactly_one_layer() {
     let copy = Copy::new("membership");
-    copy.edit("layers.toml", "crates = [\"js-client\", ", "crates = [");
+    copy.edit("layers.toml", "\"js-client\", ", "");
     copy.edit(
         "layers.toml",
         "crates = [\"js-lease-server\"]",

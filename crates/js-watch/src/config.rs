@@ -126,7 +126,7 @@ impl Config {
             ("sweep_every_secs", config.sweep_every_secs.unwrap_or(1)),
         ];
         if let Some((name, _)) = numbers.iter().find(|(_, value)| *value == 0) {
-            return Err(ConfigError::Zero(*name));
+            return Err(ConfigError::Zero(name));
         }
         Ok(config)
     }
