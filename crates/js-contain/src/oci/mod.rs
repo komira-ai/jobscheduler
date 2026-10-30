@@ -60,6 +60,18 @@ use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 pub use crun::{EnvScrub, RunEnd};
 pub use lease::{RESOLV_CONF, Reports};
 
+/// The resolved seccomp section for `arch` (Go's name) and a job holding `caps`, as JSON.
+/// Only the egress spike tests (`tests/egress_spike`) call this, so that they apply the
+/// driver's own resolution of the pinned profile and not a copy of it.
+///
+/// # Errors
+/// The text of the profile error.
+#[doc(hidden)]
+pub fn seccomp_section(arch: &str, caps: &[&str]) -> Result<serde_json::Value, String> {
+    let section = hardening::seccomp(arch, caps).map_err(|e| e.to_string())?;
+    serde_json::to_value(section).map_err(|e| e.to_string())
+}
+
 use crate::subids::{DaemonIds, IdFiles, SubidError};
 
 /// Where the OCI backend finds its runtime and the ids it maps.
