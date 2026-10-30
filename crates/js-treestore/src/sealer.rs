@@ -14,6 +14,18 @@ pub struct Sealed {
 #[error("{0}")]
 pub struct SealError(pub String);
 
+impl From<std::io::Error> for SealError {
+    fn from(error: std::io::Error) -> SealError {
+        SealError(error.to_string())
+    }
+}
+
+impl From<rustix::io::Errno> for SealError {
+    fn from(error: rustix::io::Errno) -> SealError {
+        SealError(std::io::Error::from(error).to_string())
+    }
+}
+
 /// The platform's way to make a tree immutable. The macOS sealer (root, `uchg`) is a
 /// separate component; the tests use a fake.
 ///

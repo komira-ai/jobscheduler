@@ -24,11 +24,15 @@
 //! counted in the budget or the free-space check. The record is not bound to the tree's
 //! contents; a scrub that re-hashes trees is a later step.
 //!
+//! The [`mac`] module holds the macOS side of a [`Sealer`] (root-owned trees with `uchg`)
+//! and the checks made before a store starts on a Mac: the volume and the securelevel.
+//!
 //! Crash safety is stage, rename, record: a tree counts as present only with a current
 //! record. [`TreeStore::open`] clears `tmp/`, `stage/` and `trash/`, trashes a tree with no
 //! valid record and drops pins of runs that are not live.
 
 mod error;
+pub mod mac;
 mod record;
 mod sealer;
 mod source;

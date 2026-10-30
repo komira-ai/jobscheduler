@@ -1423,6 +1423,8 @@ dependencies = [
  "hex",
  "js-bundle",
  "js-testkit",
+ "libc",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.1",

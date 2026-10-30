@@ -80,6 +80,16 @@ pub enum Error {
     /// for the new content.
     #[error("tree {0} is in place but is not one this store holds")]
     Conflict(String),
+    /// An operation failed, and putting things right afterwards failed too: a tree that
+    /// could not be moved out of the way and could not be sealed again, or a placement that
+    /// failed and whose tree could not then be moved out.
+    #[error("{cause}; then: {cleanup}")]
+    Cleanup {
+        /// What failed first.
+        cause: Box<Error>,
+        /// What failed in putting it right.
+        cleanup: Box<Error>,
+    },
     /// The crash hook stopped the operation after the step, as a dying process would.
     #[error("stopped after {0:?}")]
     Crashed(Step),

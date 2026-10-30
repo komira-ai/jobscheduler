@@ -130,6 +130,10 @@ pub struct FakeSealer {
     /// Calling `unseal_for_delete` on a tree in place makes the trash directory exist again,
     /// as clearing immutability makes a refused move possible.
     pub unseal_repairs_trash: Arc<AtomicBool>,
+    /// Calls of `unseal_for_delete` on a tree in place that fail.
+    pub fail_unseals_in_place: Arc<AtomicUsize>,
+    /// Calls of `seal` on a tree in place fail.
+    pub fail_seals_in_place: Arc<AtomicBool>,
 }
 
 impl FakeSealer {
@@ -143,6 +147,8 @@ impl FakeSealer {
             hold_unseal: Arc::new(Mutex::new(None)),
             panic_unseals: Arc::new(AtomicUsize::new(0)),
             unseal_repairs_trash: Arc::new(AtomicBool::new(false)),
+            fail_unseals_in_place: Arc::new(AtomicUsize::new(0)),
+            fail_seals_in_place: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -171,7 +177,8 @@ impl Sealer for FakeSealer {
     fn seal(&self, stage: &Path) -> Result<Sealed, SealError> {
         self.seals.fetch_add(1, Ordering::SeqCst);
         let mode = self.mode.load(Ordering::SeqCst);
-        if mode == SEAL_FAILS {
+        let in_place = stage.parent().is_some_and(|p| p.ends_with("trees"));
+        if mode == SEAL_FAILS || (in_place && self.fail_seals_in_place.load(Ordering::SeqCst)) {
             return Err(SealError("refused".into()));
         }
         if mode == SEAL_VANISHES {
@@ -196,6 +203,12 @@ impl Sealer for FakeSealer {
                 .unwrap()
                 .join("trash");
             std::fs::create_dir_all(trash).unwrap();
+        }
+        let failing = self.fail_unseals_in_place.load(Ordering::SeqCst);
+        if in_place && failing > 0 {
+            self.fail_unseals_in_place
+                .store(failing - 1, Ordering::SeqCst);
+            return Err(SealError("cannot clear flags".into()));
         }
         let panicking = self.panic_unseals.load(Ordering::SeqCst);
         if deleting && panicking > 0 {
