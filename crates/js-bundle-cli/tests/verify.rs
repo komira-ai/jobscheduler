@@ -150,14 +150,11 @@ fn an_index_that_is_a_fifo_is_refused_without_blocking() {
     let work = work("verify-fifoindex");
     let (layout, _) = packed(&work, "out", "a");
     fs::remove_file(layout.join("index.json")).unwrap();
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        layout.join("index.json"),
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        0,
-    )
-    .unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(layout.join("index.json"))
+        .status()
+        .unwrap();
+    assert!(made.success());
     let (verified, scratch) = verify(&layout, &work);
     refused(&verified, &scratch, "is not a regular file");
 }
