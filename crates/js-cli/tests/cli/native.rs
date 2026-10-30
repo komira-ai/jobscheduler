@@ -146,6 +146,19 @@ fn the_bundle_and_the_wall_time_are_sent_when_given() {
     );
 }
 
+/// Asserts that each network level of `--network` is sent under its own name.
+#[test]
+fn each_network_level_is_sent_by_name() {
+    for level in ["off", "loopback", "on"] {
+        let scratch = Scratch::new(&format!("native_network_{level}"));
+        let (server, seen) = recording(http("202 Accepted", QUEUED));
+        let js = against(&server, &scratch);
+        let got = js.go(&words(&["--program", "/usr/bin/true", "--network", level]));
+        assert_eq!(got.code, 0, "{level}: {}", got.err);
+        assert_eq!(seen.lock().unwrap()[0].1["native"]["network"], level);
+    }
+}
+
 /// Asserts the exit status of each answer: 409 is a refusal (3) with the code, 422 and
 /// 400 reject the request (4), 404 is a refusal, and anything else is a server failure
 /// (1); and that a 202 whose body has no run id is a server failure too.
