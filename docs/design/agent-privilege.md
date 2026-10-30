@@ -294,7 +294,7 @@ five duties behind the helper interfaces one at a time. To keep that open, the P
 should put quota, egress, the init-namespace check, watch reads and the files hand-over behind
 traits that the root and helper forms both implement; `ScratchQuota` already is one.
 
-If the CEO prefers A now, the cost to plan for is the helper (its protocol and its argument
+If the owner prefers A now, the cost to plan for is the helper (its protocol and its argument
 checks), the unit pair, and a watch list that either gets `rx` ACLs or goes through the helper;
 the tests here already fix what each call needs.
 

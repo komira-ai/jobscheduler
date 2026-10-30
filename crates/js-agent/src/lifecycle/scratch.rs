@@ -69,9 +69,9 @@ impl DirLayout {
             return Ok(());
         }
         for ancestor in canonical.ancestors().skip(1) {
-            let meta = fs::metadata(ancestor)
-                .map_err(|_| format!("cannot read {}", ancestor.display()))?;
-            if meta.mode() & 0o001 == 0 {
+            // A directory that cannot be looked at cannot be searched either.
+            let searchable = fs::metadata(ancestor).is_ok_and(|meta| meta.mode() & 0o001 != 0);
+            if !searchable {
                 return Err(format!(
                     "{} is not searchable by others: the job's user could not reach a directory below it",
                     ancestor.display()
