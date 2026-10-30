@@ -111,20 +111,20 @@ fn a_volume_that_cannot_be_read_is_an_error_naming_which() {
 
 #[test]
 fn the_default_macos_securelevel_and_zero_are_accepted() {
-    check_securelevel(|| Ok(-1)).unwrap();
-    check_securelevel(|| Ok(0)).unwrap();
+    check_securelevel(&|| Ok(-1)).unwrap();
+    check_securelevel(&|| Ok(0)).unwrap();
 }
 
 #[test]
 fn a_securelevel_above_zero_is_refused() {
     for level in [1, 2] {
-        let error = check_securelevel(|| Ok(level)).unwrap_err();
+        let error = check_securelevel(&|| Ok(level)).unwrap_err();
         assert!(matches!(error, SecurelevelError::TooHigh(got) if got == level));
     }
 }
 
 #[test]
 fn an_unreadable_securelevel_is_refused() {
-    let error = check_securelevel(|| Err(io::Error::other("no sysctl"))).unwrap_err();
+    let error = check_securelevel(&|| Err(io::Error::other("no sysctl"))).unwrap_err();
     assert!(matches!(error, SecurelevelError::Read(_)));
 }

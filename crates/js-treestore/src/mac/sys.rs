@@ -24,10 +24,13 @@ pub fn statfs_facts(path: &Path) -> io::Result<VolumeFacts> {
     }
     // SAFETY: the kernel NUL-terminates the type name inside its 16 bytes.
     let fs_type = unsafe { CStr::from_ptr(buf.f_fstypename.as_ptr()) };
+    // SAFETY: `fsid_t` is two `i32`s whose field is private in `libc`; `transmute` checks
+    // that the sizes are equal.
+    let fsid: [i32; 2] = unsafe { std::mem::transmute(buf.f_fsid) };
     Ok(VolumeFacts {
         fs_type: fs_type.to_string_lossy().into_owned(),
         flags: buf.f_flags,
-        fsid: buf.f_fsid.val,
+        fsid,
     })
 }
 
@@ -74,6 +77,6 @@ pub enum StartError {
 /// The first check that fails.
 pub fn start_checks(store: &Path, scratch: &Path) -> Result<(), StartError> {
     check_volumes(store, scratch, statfs_facts)?;
-    check_securelevel(securelevel)?;
+    check_securelevel(&securelevel)?;
     Ok(())
 }
