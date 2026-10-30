@@ -142,14 +142,10 @@ mod tests {
         let config = bundle(&[("/workspace", "bind", &["rbind", "rw", "nosuid", "nodev"])]);
         let both = problems(&config, &line("/workspace", "rw,relatime"));
         assert_eq!(both.len(), 2, "{both:?}");
-        assert!(
-            both[0].starts_with("/workspace: ") && both[0].contains("nosuid"),
-            "{both:?}"
-        );
-        assert!(
-            both[1].starts_with("/workspace: ") && both[1].contains("nodev"),
-            "{both:?}"
-        );
+        assert!(both[0].starts_with("/workspace: "), "{both:?}");
+        assert!(both[0].contains("nosuid"), "{both:?}");
+        assert!(both[1].starts_with("/workspace: "), "{both:?}");
+        assert!(both[1].contains("nodev"), "{both:?}");
         let one = problems(&config, &line("/workspace", "rw,nosuid,relatime"));
         assert_eq!(one.len(), 1, "{one:?}");
         assert!(one[0].contains("nodev"), "{one:?}");
@@ -170,14 +166,10 @@ mod tests {
         .concat();
         let found = problems(&config, &info);
         assert_eq!(found.len(), 2, "{found:?}");
-        assert!(
-            found[0].starts_with("/tmp: ") && found[0].contains("noexec"),
-            "{found:?}"
-        );
-        assert!(
-            found[1].starts_with("/run/js-files: ") && found[1].contains("ro"),
-            "{found:?}"
-        );
+        assert!(found[0].starts_with("/tmp: "), "{found:?}");
+        assert!(found[0].contains("noexec"), "{found:?}");
+        assert!(found[1].starts_with("/run/js-files: "), "{found:?}");
+        assert!(found[1].contains("ro"), "{found:?}");
     }
 
     /// Catches a read-write bind that is read-only (a job that cannot write its scratch)
