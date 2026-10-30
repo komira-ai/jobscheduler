@@ -406,7 +406,8 @@ impl Ledger {
         tear_down: impl FnOnce(&Entry) -> Result<(), String>,
     ) -> Result<(), String> {
         tear_down(entry)?;
-        self.forget(&entry.name)
+        self.path_of(&entry.name)
+            .map(|_| ())
             .map_err(|why| format!("remove the sidecar: {why}"))
     }
 
