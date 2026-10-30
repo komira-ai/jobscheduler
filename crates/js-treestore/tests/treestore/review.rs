@@ -85,9 +85,10 @@ fn concurrent_ensures_of_two_trees_hold_the_budget() {
             thread::yield_now();
         }
         // The other tree does not fit beside the one being placed.
-        assert!(matches!(store.ensure(&wb), Err(Error::NoSpace { .. })));
+        let other = store.ensure(&wb);
         held.open();
         x.join().unwrap().unwrap();
+        assert!(matches!(other, Err(Error::NoSpace { .. })));
     });
     assert!(store.stats().used <= 150);
     assert!(rig.present(&a.diff_id));
