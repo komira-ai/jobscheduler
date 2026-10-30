@@ -108,7 +108,12 @@ pub(super) fn notes(hosts: &LoadedHosts, budgets: &Budgets, now: Millis) -> Vec<
         .chain(budgets.kinds.values().copied())
         .any(|each| each != Totals::default());
     let unbounded = [plan.max_age.is_none(), plan.max_lease_wall.is_none()];
-    if totals && plan.launch == Launch::Live && unbounded.contains(&true) {
+    let risky = [
+        totals,
+        plan.launch == Launch::Live,
+        unbounded.contains(&true),
+    ];
+    if risky.into_iter().all(|each| each) {
         said.push(format!(
             "pool {name:?}: spend totals are set but the pool has no max_age or no server.max_lease_wall, so a host that stays busy is never retired and a total bounds only the launches, not what the machines already launched cost"
         ));
