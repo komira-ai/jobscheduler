@@ -45,10 +45,6 @@ fn major() -> MacosMajor {
         .unwrap_or_else(|| panic!("macOS {version} has no base set"))
 }
 
-fn argv_ok(argv: &[OsString]) -> bool {
-    run(argv, &[], None, None).ok
-}
-
 #[test]
 fn the_self_test_passes_on_this_host_with_a_fixture_tree_and_the_real_xcode() {
     let fixture = mac("selftest");
@@ -85,15 +81,22 @@ fn the_open_model_leaves_every_canary_readable_and_the_self_test_refuses_it() {
         .map(|step| match step.role() {
             Role::Denied => {
                 let (program, args) = step.command();
-                argv_ok(&open.argv(program, args))
+                let argv = open.argv(program, args);
+                run(&argv, step.env(), Some(step.cwd()), None).ok
             }
-            Role::Control | Role::Allowed => argv_ok(&step.argv()),
+            Role::Control | Role::Allowed => {
+                run(&step.argv(), step.env(), Some(step.cwd()), None).ok
+            }
         })
         .collect();
     let failures = test
         .judge(&results)
         .expect_err("an open profile is refused");
-    let readable: Vec<Class> = failures.iter().map(|failure| failure.class).collect();
+    let readable: Vec<Class> = failures
+        .iter()
+        .filter(|failure| failure.why == Why::Readable)
+        .map(|failure| failure.class)
+        .collect();
     assert_eq!(
         readable,
         [
