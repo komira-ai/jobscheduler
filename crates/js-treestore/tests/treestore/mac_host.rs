@@ -9,7 +9,9 @@ use std::path::Path;
 
 use js_testkit::dir::TestDir;
 use js_treestore::Sealer as _;
-use js_treestore::mac::{Clonefile, Fchflags, IMMUTABLE, MacSealer, Owner, start_checks};
+use js_treestore::mac::{
+    Clonefile, Fchflags, IMMUTABLE, MacSealer, Owner, UserFlags as _, start_checks,
+};
 
 fn flags_of(path: &Path) -> u32 {
     let path = CString::new(path.as_os_str().as_bytes()).unwrap();
@@ -145,4 +147,86 @@ fn a_link_is_not_followed_when_it_is_the_source_of_a_clone() {
             .is_err()
     );
     assert!(!dst.exists());
+}
+
+fn set_flags(path: &Path, flags: u32) {
+    use std::os::fd::AsFd as _;
+    let file = std::fs::File::open(path).unwrap();
+    Fchflags.set(file.as_fd(), flags).unwrap();
+}
+
+fn has_acl(path: &Path) -> bool {
+    use std::os::fd::AsFd as _;
+    let file = std::fs::File::open(path).unwrap();
+    Fchflags.has_acl(file.as_fd()).unwrap()
+}
+
+/// Gives the file an access control list, as its owner can.
+fn add_acl(path: &Path) {
+    let done = std::process::Command::new("/bin/chmod")
+        .args(["+a", "everyone allow read"])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(done.success());
+}
+
+#[test]
+fn a_file_with_an_acl_is_refused_by_sealing() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-host");
+    let root = tree(&dir);
+    add_acl(&root.join("sub/b.txt"));
+    assert!(has_acl(&root.join("sub/b.txt")));
+    let sealer = MacSealer::new(Owner::caller(), Fchflags, Clonefile);
+    let error = sealer.seal(&root).unwrap_err();
+    assert!(error.0.contains("ACL"), "{error}");
+    sealer.unseal_for_delete(&root).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_clone_has_no_acl_though_the_sealed_original_has_one() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-host");
+    let root = tree(&dir);
+    let sealer = MacSealer::new(Owner::caller(), Fchflags, Clonefile);
+    sealer.seal(&root).unwrap();
+    // The ACL arrives after sealing: open the file's flag, add it, close it again.
+    let file = root.join("a.txt");
+    set_flags(&file, 0);
+    add_acl(&file);
+    set_flags(&file, IMMUTABLE);
+    let dst = dir.path().join("writable");
+    sealer.clone_writable(&root, &dst, Owner::caller()).unwrap();
+    assert!(has_acl(&file));
+    assert!(!has_acl(&dst.join("a.txt")));
+    std::fs::write(dst.join("a.txt"), b"changed").unwrap();
+    std::fs::remove_dir_all(&dst).unwrap();
+    sealer.unseal_for_delete(&root).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_clone_that_fails_midway_leaves_nothing_behind() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-host");
+    let root = tree(&dir);
+    let sealer = MacSealer::new(Owner::caller(), Fchflags, Clonefile);
+    sealer.seal(&root).unwrap();
+    // A branch nested past the depth limit, which the walk refuses wherever it meets it;
+    // the rest of the tree is still sealed, so the clean-up has flags to clear.
+    set_flags(&root, 0);
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut deep = root.join("deep");
+    for _ in 0..=js_bundle::MAX_DEPTH {
+        deep.push("d");
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    let dst = dir.path().join("writable");
+    let error = sealer
+        .clone_writable(&root, &dst, Owner::caller())
+        .unwrap_err();
+    assert!(error.0.contains("deeper"), "{error}");
+    assert!(!dst.exists());
+    // Too deep for the unsealing too: it clears what it reaches and says so.
+    let _ = sealer.unseal_for_delete(&root);
+    std::fs::remove_dir_all(&root).unwrap();
 }

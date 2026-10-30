@@ -20,6 +20,8 @@ struct FakeFlags {
     touched: Arc<Mutex<BTreeSet<u64>>>,
     /// Inodes in the order their flags were set.
     order: Arc<Mutex<Vec<u64>>>,
+    /// Inodes that carry an access control list.
+    acls: Arc<Mutex<BTreeSet<u64>>>,
     fail: Arc<AtomicUsize>,
 }
 
@@ -36,12 +38,33 @@ impl UserFlags for FakeFlags {
         self.order.lock().unwrap().push(ino);
         Ok(())
     }
+
+    fn has_acl(&self, file: BorrowedFd<'_>) -> io::Result<bool> {
+        let ino = rustix::fs::fstat(file)?.st_ino;
+        Ok(self.acls.lock().unwrap().contains(&ino))
+    }
+
+    fn clear_acl(&self, file: BorrowedFd<'_>) -> io::Result<()> {
+        let ino = rustix::fs::fstat(file)?.st_ino;
+        self.acls.lock().unwrap().remove(&ino);
+        Ok(())
+    }
 }
 
 impl FakeFlags {
     fn of(&self, path: &Path) -> u32 {
         let ino = std::fs::symlink_metadata(path).unwrap().ino();
         self.flags.lock().unwrap().get(&ino).copied().unwrap_or(0)
+    }
+
+    fn plant_acl(&self, path: &Path) {
+        let ino = std::fs::symlink_metadata(path).unwrap().ino();
+        self.acls.lock().unwrap().insert(ino);
+    }
+
+    fn acl_of(&self, path: &Path) -> bool {
+        let ino = std::fs::symlink_metadata(path).unwrap().ino();
+        self.acls.lock().unwrap().contains(&ino)
     }
 
     fn touched(&self, path: &Path) -> bool {
@@ -71,6 +94,29 @@ impl FakeFlags {
             .filter(|flags| **flags != 0)
             .count()
     }
+}
+
+/// Where the open directory is, for a fake that works with paths.
+#[cfg(target_os = "linux")]
+fn fd_path(fd: BorrowedFd<'_>) -> PathBuf {
+    use std::os::fd::AsRawFd as _;
+    std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).unwrap()
+}
+
+#[cfg(target_os = "macos")]
+fn fd_path(fd: BorrowedFd<'_>) -> PathBuf {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buf = [0 as libc::c_char; libc::PATH_MAX as usize];
+    // SAFETY: `F_GETPATH` writes a NUL-terminated path of at most PATH_MAX bytes into
+    // `buf`, which is that long.
+    assert_eq!(
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) },
+        0
+    );
+    // SAFETY: the kernel NUL-terminated `buf`.
+    let path = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    PathBuf::from(OsStr::from_bytes(path.to_bytes()))
 }
 
 /// A copy that keeps modes, links and pipes, and gives each new inode the flags of the one
@@ -110,17 +156,20 @@ impl FakeClone {
     }
 
     fn give_flags(&self, from: &std::fs::Metadata, to: &Path) {
+        let ino = std::fs::symlink_metadata(to).unwrap().ino();
         let flags = self.flags.flags.lock().unwrap().get(&from.ino()).copied();
         if let Some(flags) = flags {
-            let ino = std::fs::symlink_metadata(to).unwrap().ino();
             self.flags.flags.lock().unwrap().insert(ino, flags);
+        }
+        if self.flags.acls.lock().unwrap().contains(&from.ino()) {
+            self.flags.acls.lock().unwrap().insert(ino);
         }
     }
 }
 
 impl Cloner for FakeClone {
-    fn clone_dir(&self, src: &Path, dst: &Path) -> io::Result<()> {
-        self.copy(src, dst, &mut BTreeMap::new())
+    fn clone_dir(&self, src: &Path, dst_dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<()> {
+        self.copy(src, &fd_path(dst_dir).join(name), &mut BTreeMap::new())
     }
 
     fn clone_file(
@@ -628,6 +677,7 @@ fn a_file_with_a_second_hard_link_in_the_clone_is_refused() {
         .clone_writable(&root, &dst, Owner::caller())
         .unwrap_err();
     assert!(error.0.contains("hard link"), "{error}");
+    assert!(!dst.exists(), "the part made copy is removed");
 }
 
 #[test]
@@ -645,6 +695,7 @@ fn a_pipe_in_the_clone_is_refused() {
         .clone_writable(&root, &dst, Owner::caller())
         .unwrap_err();
     assert!(error.0.contains("file type"), "{error}");
+    assert!(!dst.exists(), "the part made copy is removed");
 }
 
 #[test]
@@ -669,6 +720,7 @@ fn a_tree_nested_to_the_depth_limit_is_cloned_and_one_level_deeper_is_refused() 
         .clone_writable(&deep, &deep_dst, Owner::caller())
         .unwrap_err();
     assert!(error.0.contains("deeper"), "{error}");
+    assert!(!deep_dst.exists());
 }
 
 #[test]
@@ -685,6 +737,7 @@ fn a_flag_call_that_fails_fails_the_clone_and_the_error_names_both_paths() {
     assert!(error.0.contains("fchflags refused"), "{error}");
     assert!(error.0.contains("tree"), "{error}");
     assert!(error.0.contains("writable"), "{error}");
+    assert!(!dst.exists());
 }
 
 #[test]
@@ -791,4 +844,96 @@ fn an_owner_is_made_from_ids_but_not_from_the_value_chown_reads_as_unchanged() {
     assert_eq!(Owner::new(501, 20).map(Owner::ids), Some((501, 20)));
     assert_eq!(Owner::new(u32::MAX, 20), None);
     assert_eq!(Owner::new(501, u32::MAX), None);
+}
+
+#[test]
+fn a_clone_whose_removal_fails_too_says_so_and_leaves_the_copy_to_the_caller() {
+    let rig = Rig::new();
+    let (root, dst) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let _clean_dst = rig.guard(&dst);
+    // The clone's first flag call fails, and so does the one that would open its root up
+    // for removal: the root stays read-only.
+    rig.flags.fail.store(2, Ordering::SeqCst);
+    let error = rig
+        .sealer
+        .clone_writable(&root, &dst, Owner::caller())
+        .unwrap_err();
+    assert!(error.0.contains("fchflags refused"), "{error}");
+    assert!(error.0.contains("removing the copy failed"), "{error}");
+    assert!(dst.exists());
+}
+
+#[test]
+fn a_failed_clone_of_one_file_leaves_no_file() {
+    let rig = Rig::new();
+    let (root, _) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let dst = rig.dir.path().join("copy.txt");
+    rig.flags.fail.store(1, Ordering::SeqCst);
+    let error = rig
+        .sealer
+        .clone_writable(&root.join("a.txt"), &dst, Owner::caller())
+        .unwrap_err();
+    assert!(error.0.contains("fchflags refused"), "{error}");
+    assert!(!dst.exists());
+}
+
+#[test]
+fn a_directory_clone_needs_a_destination_with_a_name_too() {
+    let rig = Rig::new();
+    let (root, _) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let error = rig
+        .sealer
+        .clone_writable(&root, Path::new("/"), Owner::caller())
+        .unwrap_err();
+    assert!(error.0.contains("no parent"), "{error}");
+}
+
+#[test]
+fn a_file_or_directory_with_an_acl_is_refused_by_sealing() {
+    for planted in ["a.txt", "sub"] {
+        let rig = Rig::new();
+        let root = rig.tree();
+        let _clean = rig.guard(&root);
+        rig.flags.plant_acl(&root.join(planted));
+        let error = rig.sealer.seal(&root).unwrap_err();
+        assert!(error.0.contains("ACL"), "{planted}: {error}");
+    }
+}
+
+#[test]
+fn a_clone_has_no_acl_on_any_entry_and_the_original_keeps_its_own() {
+    let rig = Rig::new();
+    let (root, dst) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let _clean_dst = rig.guard(&dst);
+    // An ACL the sealed tree gained (or was made with) after sealing.
+    for path in ["a.txt", "sub", "sub/deeper/c.txt", ""] {
+        rig.flags.plant_acl(&root.join(path));
+    }
+    rig.sealer
+        .clone_writable(&root, &dst, Owner::caller())
+        .unwrap();
+    for path in TREE_PATHS {
+        assert!(!rig.flags.acl_of(&dst.join(path)), "clone {path:?}");
+    }
+    for path in ["a.txt", "sub", "sub/deeper/c.txt", ""] {
+        assert!(rig.flags.acl_of(&root.join(path)), "original {path:?}");
+    }
+}
+
+#[test]
+fn unsealing_leaves_the_flags_of_a_file_with_another_hard_link_and_says_so() {
+    let rig = Rig::new();
+    let (root, _) = rig.cloned();
+    let _clean = rig.guard(&root);
+    std::fs::set_permissions(root.join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::hard_link(root.join("a.txt"), root.join("sub/again")).unwrap();
+    let error = rig.sealer.unseal_for_delete(&root).unwrap_err();
+    assert!(error.0.contains("hard link"), "{error}");
+    assert_eq!(rig.flags.of(&root.join("a.txt")), IMMUTABLE);
+    assert_eq!(rig.flags.of(&root.join("run.sh")), 0);
+    assert_eq!(rig.flags.of(&root.join("sub/b.txt")), 0);
 }

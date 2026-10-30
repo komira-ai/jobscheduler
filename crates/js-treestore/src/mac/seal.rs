@@ -24,24 +24,39 @@ const FILE_OPEN: OFlags = OFlags::RDONLY
     .union(OFlags::NONBLOCK)
     .union(OFlags::CLOEXEC);
 
-/// Sets the BSD user flags of an open file.
+/// The per-file metadata a sealed tree carries beyond its mode: the BSD user flags and the
+/// access control list, on an open file.
 pub trait UserFlags: Send + Sync + 'static {
     /// Sets the flags of `file` to exactly `flags`.
     ///
     /// # Errors
     /// The call failed.
     fn set(&self, file: BorrowedFd<'_>, flags: u32) -> io::Result<()>;
+
+    /// Whether `file` has an access control list (which `clonefile` copies and a listing of
+    /// extended attributes does not show).
+    ///
+    /// # Errors
+    /// The call failed.
+    fn has_acl(&self, file: BorrowedFd<'_>) -> io::Result<bool>;
+
+    /// Removes the access control list of `file`.
+    ///
+    /// # Errors
+    /// The call failed.
+    fn clear_acl(&self, file: BorrowedFd<'_>) -> io::Result<()>;
 }
 
 /// Copy-on-write copies, as `clonefile(2)` makes them: the copy has its own inodes and
 /// shares the data blocks, and keeps the owner, mode and flags of what it copies.
 pub trait Cloner: Send + Sync + 'static {
-    /// Clones the directory tree at `src` to `dst`, which must not exist. A link at `src` is
-    /// cloned as a link, not followed.
+    /// Clones the directory tree at `src` to `name` in the directory `dst_dir`, which must
+    /// not hold `name`. The destination is named by descriptor and leaf so that it is
+    /// resolved once.
     ///
     /// # Errors
     /// The call failed.
-    fn clone_dir(&self, src: &Path, dst: &Path) -> io::Result<()>;
+    fn clone_dir(&self, src: &Path, dst_dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<()>;
 
     /// Clones the open file `src` to `name` in the directory `dst_dir`, which must not
     /// hold `name`.
@@ -99,23 +114,68 @@ impl<F: UserFlags, C: Cloner> FlagSealer<F, C> {
 
     fn clone_to(&self, src: &Path, dst: &Path, owner: Owner) -> Result<(), SealError> {
         let source = rustix::fs::openat(CWD, src, FILE_OPEN, Mode::empty())?;
-        match FileType::from_raw_mode(rustix::fs::fstat(&source)?.st_mode) {
-            FileType::Directory => {
-                self.cloner.clone_dir(src, dst)?;
-                let root = rustix::fs::openat(CWD, dst, DIR_OPEN, Mode::empty())?;
-                self.writable_dir(&root, owner, Path::new(""), 0)
-            }
-            FileType::RegularFile => {
-                let (Some(parent), Some(name)) = (dst.parent(), dst.file_name()) else {
-                    return Err(refuse(dst, "has no parent directory and name"));
-                };
-                let dir = rustix::fs::openat(CWD, parent, DIR_OPEN, Mode::empty())?;
-                self.cloner.clone_file(source.as_fd(), dir.as_fd(), name)?;
-                let file = rustix::fs::openat(&dir, name, FILE_OPEN, Mode::empty())?;
-                self.writable_file(&file, owner, Path::new(""))
-            }
-            _ => Err(refuse(src, "is neither a directory nor a regular file")),
+        let kind = FileType::from_raw_mode(rustix::fs::fstat(&source)?.st_mode);
+        if !matches!(kind, FileType::Directory | FileType::RegularFile) {
+            return Err(refuse(src, "is neither a directory nor a regular file"));
         }
+        let (Some(parent), Some(name)) = (dst.parent(), dst.file_name()) else {
+            return Err(refuse(dst, "has no parent directory and name"));
+        };
+        // The parent is opened once; the clone is made in it, found in it and, if the walk
+        // fails, removed from it, so a path above `dst` swapped meanwhile changes nothing.
+        let dir = rustix::fs::openat(CWD, parent, DIR_OPEN, Mode::empty())?;
+        if kind.is_dir() {
+            self.cloner.clone_dir(src, dir.as_fd(), name)?;
+        } else {
+            self.cloner.clone_file(source.as_fd(), dir.as_fd(), name)?;
+        }
+        // From here `dst` exists and is ours alone: a failure takes it away again.
+        self.convert(&dir, name, kind.is_dir(), owner)
+            .map_err(|error| self.discard(&dir, name, kind.is_dir(), error))
+    }
+
+    fn convert(
+        &self,
+        dir: &OwnedFd,
+        name: &OsStr,
+        is_dir: bool,
+        owner: Owner,
+    ) -> Result<(), SealError> {
+        if is_dir {
+            let root = rustix::fs::openat(dir, name, DIR_OPEN, Mode::empty())?;
+            self.writable_dir(&root, owner, Path::new(""), 0)
+        } else {
+            let file = rustix::fs::openat(dir, name, FILE_OPEN, Mode::empty())?;
+            self.writable_file(&file, owner, Path::new(""))
+        }
+    }
+
+    /// Removes the clone `name` of `dir`, part made, by descriptor: flags first, then the
+    /// entries. Returns `error`, with what went wrong in removing appended.
+    fn discard(&self, dir: &OwnedFd, name: &OsStr, is_dir: bool, error: SealError) -> SealError {
+        match self.remove_clone(dir, name, is_dir) {
+            Ok(()) => error,
+            Err(left) => SealError(format!("{error}; then removing the copy failed: {left}")),
+        }
+    }
+
+    fn remove_clone(&self, dir: &OwnedFd, name: &OsStr, is_dir: bool) -> Result<(), SealError> {
+        if is_dir {
+            let root = rustix::fs::openat(dir, name, DIR_OPEN, Mode::empty())?;
+            let mut run = Unsealing {
+                flags: &self.flags,
+                first: None,
+            };
+            let done = run.root(&root);
+            run.note(done);
+            remove_below(&root)?;
+            rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR)?;
+        } else {
+            let file = rustix::fs::openat(dir, name, FILE_OPEN, Mode::empty())?;
+            self.flags.set(file.as_fd(), 0)?;
+            rustix::fs::unlinkat(dir, name, AtFlags::empty())?;
+        }
+        Ok(())
     }
 
     /// Hands a cloned directory and everything in it to `owner`.
@@ -173,9 +233,13 @@ impl<F: UserFlags, C: Cloner> FlagSealer<F, C> {
     }
 
     /// Clears the flags of one open file or directory (before anything else, which an
-    /// immutable one would refuse), gives it to `owner` and sets the exact mode.
+    /// immutable one would refuse) and its access control list, gives it to `owner` and
+    /// sets the exact mode.
     fn writable(&self, fd: &OwnedFd, owner: Owner, mode: Mode) -> Result<(), SealError> {
         self.flags.set(fd.as_fd(), 0)?;
+        if self.flags.has_acl(fd.as_fd())? {
+            self.flags.clear_acl(fd.as_fd())?;
+        }
         rustix::fs::fchown(fd, Some(owner.uid()), Some(owner.gid()))?;
         rustix::fs::fchmod(fd, mode)?;
         Ok(())
@@ -261,6 +325,9 @@ impl<F: UserFlags, C: Cloner> FlagSealer<F, C> {
         let no_buffer: &mut [u8] = &mut [];
         if rustix::fs::flistxattr(fd, no_buffer)? > 0 {
             return Err(refuse(at, "has extended attributes"));
+        }
+        if self.flags.has_acl(fd.as_fd())? {
+            return Err(refuse(at, "has an ACL"));
         }
         let exec = Mode::from_raw_mode(stat.st_mode).contains(Mode::XUSR);
         let mode = if dir | exec { 0o555 } else { 0o444 };
@@ -364,12 +431,34 @@ impl<F: UserFlags> Unsealing<'_, F> {
                 self.dir(&child, depth + 1)
             }
             FileType::RegularFile => {
+                // An inode with another name may belong to someone else: its flags stay.
+                if stat.st_nlink > 1 {
+                    return Err(refuse(
+                        Path::new(name),
+                        &format!("has {} hard links, so its flags are left", stat.st_nlink),
+                    ));
+                }
                 let file = rustix::fs::openat(dir, name, FILE_OPEN, Mode::empty())?;
                 Ok(self.flags.set(file.as_fd(), 0)?)
             }
             _ => Ok(()),
         }
     }
+}
+
+/// Removes everything under `dir`, by descriptor, following nothing.
+fn remove_below(dir: &OwnedFd) -> Result<(), SealError> {
+    for name in list(dir)? {
+        let stat = rustix::fs::statat(dir, &name, AtFlags::SYMLINK_NOFOLLOW)?;
+        if FileType::from_raw_mode(stat.st_mode).is_dir() {
+            let child = rustix::fs::openat(dir, &name, DIR_OPEN, Mode::empty())?;
+            remove_below(&child)?;
+            rustix::fs::unlinkat(dir, &name, AtFlags::REMOVEDIR)?;
+        } else {
+            rustix::fs::unlinkat(dir, &name, AtFlags::empty())?;
+        }
+    }
+    Ok(())
 }
 
 /// Flushes the file or directory to the drive, as `File::sync_all` does: on macOS plain
@@ -415,12 +504,21 @@ const CLONE_NOFOLLOW: u32 = 0x0001;
 
 #[cfg(target_os = "macos")]
 impl Cloner for Clonefile {
-    fn clone_dir(&self, src: &Path, dst: &Path) -> io::Result<()> {
-        let (src, dst) = (c_path(src.as_os_str())?, c_path(dst.as_os_str())?);
-        // FFI-BOUNDARY: both paths are NUL-terminated and outlive the call, which keeps
-        // neither.
+    fn clone_dir(&self, src: &Path, dst_dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let (src, name) = (c_path(src.as_os_str())?, c_path(name)?);
+        // FFI-BOUNDARY: the descriptor is borrowed and open, both strings are NUL-terminated
+        // and outlive the call, which keeps none of them.
         // SAFETY: as above.
-        check(unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), CLONE_NOFOLLOW) })
+        check(unsafe {
+            libc::clonefileat(
+                libc::AT_FDCWD,
+                src.as_ptr(),
+                dst_dir.as_raw_fd(),
+                name.as_ptr(),
+                CLONE_NOFOLLOW,
+            )
+        })
     }
 
     fn clone_file(
@@ -476,6 +574,58 @@ impl UserFlags for Fchflags {
             Err(io::Error::last_os_error())
         }
     }
+
+    fn has_acl(&self, file: BorrowedFd<'_>) -> io::Result<bool> {
+        use std::os::fd::AsRawFd as _;
+        // FFI-BOUNDARY: the descriptor is borrowed and open for the call. A non-null
+        // `acl_t` it returns is ours and is freed here, once, on the one path that gets it.
+        // SAFETY: as above.
+        let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+        if acl.is_null() {
+            let error = io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ENOENT) {
+                Ok(false)
+            } else {
+                Err(error)
+            };
+        }
+        // SAFETY: `acl` came from `acl_get_fd_np` and is freed only here.
+        unsafe { acl_free(acl) };
+        Ok(true)
+    }
+
+    fn clear_acl(&self, file: BorrowedFd<'_>) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: `acl_init` allocates an empty list or returns null.
+        let empty = unsafe { acl_init(0) };
+        if empty.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        // FFI-BOUNDARY: the descriptor is borrowed and open for the call; `empty` is ours,
+        // read by `acl_set_fd` (an empty list removes the ACL) and freed once after it.
+        // SAFETY: as above.
+        let done = unsafe { acl_set_fd(file.as_raw_fd(), empty) };
+        let error = io::Error::last_os_error();
+        // SAFETY: `empty` came from `acl_init` and is freed only here.
+        unsafe { acl_free(empty) };
+        if done == 0 { Ok(()) } else { Err(error) }
+    }
+}
+
+/// The ACL calls of `<sys/acl.h>` (in libSystem; the `libc` crate has none).
+#[cfg(target_os = "macos")]
+type AclT = *mut std::ffi::c_void;
+
+/// `ACL_TYPE_EXTENDED`.
+#[cfg(target_os = "macos")]
+const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn acl_init(count: libc::c_int) -> AclT;
+    fn acl_free(object: AclT) -> libc::c_int;
+    fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> AclT;
+    fn acl_set_fd(fd: libc::c_int, acl: AclT) -> libc::c_int;
 }
 
 /// The sealer for a Mac host.
