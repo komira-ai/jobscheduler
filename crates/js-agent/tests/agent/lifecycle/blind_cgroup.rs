@@ -65,6 +65,21 @@ fn a_run_whose_group_is_known_taints_nothing() {
     assert!(!h.life.is_tainted());
 }
 
+/// Asserts that a run whose group the runtime names only when the run ends (never at the
+/// start, never at a window) is not blind: the last look at the end finds it. It catches a
+/// taint decided without that look.
+#[test]
+fn a_group_named_only_at_the_end_is_found_by_the_last_look() {
+    let mut h = Harness::new("late-cgroup");
+    h.fake.promise_cgroups(true);
+    h.start(job("r1"));
+    h.fake
+        .set_cgroup("r1", "/sys/fs/cgroup/actions/lease-r1/ctr");
+    h.fake.exit("r1", 0);
+    h.life.step();
+    assert!(!h.life.is_tainted());
+}
+
 /// Asserts that a runtime that does not place its containers in readable groups (the
 /// default: the engines, which may run with no `--actions-cgroup`) is not tainted for a run
 /// with no group. It catches a taint that would hit every run of every such agent.

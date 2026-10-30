@@ -6,7 +6,7 @@ use std::ffi::OsStr;
 use std::path::{Component, Path};
 
 /// How a lease's control group sits below the actions control group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Layout {
     /// A container engine's own placement: any directory strictly below the actions group
     /// (Podman's `libpod-<id>.scope` and its `container` child).

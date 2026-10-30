@@ -459,7 +459,7 @@ fn names_a_container(units: &[&str]) -> bool {
 /// group and cannot leave it. A process the agent no longer holds (parent `init`) is not
 /// the runner's, nor is one in a group below the agent's.
 fn runners_own(process: &Process, own: Option<&str>) -> bool {
-    process.ppid != 1 && own.is_some() && unified(&process.cgroup) == own
+    process.ppid != 1 && unified(&process.cgroup).is_some_and(|path| Some(path) == own)
 }
 
 /// Whether `mount` is one the host makes while jobs run, which no job can have left: the
