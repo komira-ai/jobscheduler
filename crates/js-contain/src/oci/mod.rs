@@ -22,10 +22,15 @@
 //! **What the container sees:** the unpacked image, read-only, as `/`; the input root
 //! as an overlay at [`ContainerSpec::exec_root`](crate::container::ContainerSpec::exec_root) (lower: the lease's input root; upper: the lease's
 //! upper directory, which outputs are read from); shared read-only trees
-//! ([`SharedMount`](crate::container::SharedMount)) bound inside it; `/tmp`, `/var/tmp`, `/run` and
-//! `/root` as the lease's own disk directories (`spec::WRITABLE`); `/dev`, `/proc`,
-//! `/sys` and `/dev/shm` as for any container. The image is read-only; those four
-//! directories are where a job writes besides the exec root.
+//! ([`SharedMount`](crate::container::SharedMount)) bound inside it; `/tmp`, `/var/tmp`
+//! and `/run` as size-limited `noexec` tmpfs mounts; `/root` as a disk directory of the
+//! lease (`spec::WRITABLE`); the host directories of
+//! [`ContainerSpec::mounts`](crate::container::ContainerSpec::mounts) (the run's scratch,
+//! the `--mount-root` mounts, the run's files) as recursive binds with `nosuid` and
+//! `nodev`; `/dev`, `/proc`, `/sys` and `/dev/shm` as for any container. The image is
+//! read-only; those are where a job writes besides the exec root. A job holds no
+//! capability, gains no privilege and writes no core dump (`hardening`, `spec`), and
+//! [`Oci::verify_mounts`] reads the mounts back from the running container.
 //!
 //! **Ids:** inside the container, id 0 is the first subordinate id of the daemon user
 //! ([`DaemonIds`]), the daemon user itself is not mapped, so
@@ -34,6 +39,10 @@
 //! `/etc/subuid` and `/etc/subgid`, and every directory from `/` down to the scratch
 //! directory must be searchable by others (the container's ids are not the daemon
 //! user's): [`Oci::new`] checks both.
+//!
+//! **Output:** the container's stdout and stderr are pipes the agent drains for as long as
+//! the container lives, into a file a stream in the lease directory (capped) and a tail in
+//! memory (`logs`).
 //!
 //! **cgroups:** the container's cgroup is `<lease cgroup>/ctr`, made by `crun` in the
 //! daemon's delegated subtree with the pids limit and `memory.oom.group=1`; memory and
@@ -45,9 +54,13 @@ pub mod helper;
 pub mod image;
 pub mod init;
 mod lease;
+pub(crate) mod logs;
+pub mod mounts;
 pub(crate) mod spec;
 pub mod words;
 
+#[cfg(test)]
+mod parity_tests;
 #[cfg(test)]
 mod tests;
 
@@ -59,6 +72,19 @@ use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
 pub use crun::{EnvScrub, RunEnd};
 pub use lease::{RESOLV_CONF, Reports};
+pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
+
+/// The resolved seccomp section for `arch` (Go's name) and a job holding `caps`, as JSON.
+/// Only the egress spike tests (`tests/egress_spike`) call this, so that they apply the
+/// driver's own resolution of the pinned profile and not a copy of it.
+///
+/// # Errors
+/// The text of the profile error (an architecture with no filter).
+#[doc(hidden)]
+pub fn seccomp_section(arch: &str, caps: &[&str]) -> Result<serde_json::Value, String> {
+    let section = hardening::seccomp(arch, caps).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_value(section).expect("a seccomp section is JSON"))
+}
 
 use crate::subids::{DaemonIds, IdFiles, SubidError};
 
@@ -89,6 +115,9 @@ pub struct OciConfig {
     /// The directories `newuidmap` and `newgidmap` are looked for in (`crun` runs them
     /// by name to map the container's ids). By default the daemon's `PATH`.
     pub id_tool_path: Option<std::ffi::OsString>,
+    /// How much of a job's output is kept (`logs`): by default 1 MiB of each stream in a
+    /// file of the lease directory and the last 64 KiB of it in memory.
+    pub logs: LogLimits,
 }
 
 impl Default for OciConfig {
@@ -102,6 +131,7 @@ impl Default for OciConfig {
             init_dest: init::DEFAULT_DEST.to_owned(),
             helper_modes: helper::HelperModes::default(),
             scrub_env: crun::no_scrub,
+            logs: LogLimits::default(),
         }
     }
 }
@@ -222,6 +252,9 @@ pub enum JobError {
     /// `crun` failed, in its own words.
     #[error("{0}")]
     Crun(String),
+    /// A running container's mounts differ from its bundle ([`mounts::problems`]).
+    #[error("mounts differ from the bundle: {}", .0.join("; "))]
+    Mounts(Vec<String>),
 }
 
 impl From<String> for JobError {
@@ -264,6 +297,7 @@ pub struct Oci {
     /// helper uses is bounded by the node's jobs budget and `crun` makes (and kills,
     /// on its removal) no cgroup of its own choosing.
     cgroup_parent: String,
+    logs: LogLimits,
 }
 
 impl Oci {
@@ -335,6 +369,7 @@ impl Oci {
             images: image::Images::new(scratch.join("oci-images")),
             helpers: AtomicU64::new(0),
             cgroup_parent: cgroup_parent.to_owned(),
+            logs: config.logs,
         });
         let leftovers = oci.images.sweep(&oci);
         leftovers.map_err(OciError::Prepare)?;
