@@ -305,6 +305,16 @@ jobs:
         run: cargo test -p js-agent --test live_podman --locked --no-run
       # Root runs the test (the agent refuses to map jobs otherwise), with the runner's
       # toolchain and home.
+      - name: Pull the probe image and build the kbf-task tests
+        run: |
+          sudo podman pull docker.io/library/ubuntu:24.04
+          git init "$RUNNER_TEMP/kbf"
+          git -C "$RUNNER_TEMP/kbf" fetch --depth 1 https://github.com/komira-ai/kbf 08cab26d0d8eb143cf645caed128d1f34385ea87
+          git -C "$RUNNER_TEMP/kbf" checkout --detach FETCH_HEAD
+          cd "$RUNNER_TEMP/kbf"
+          rustup toolchain install
+          cargo test -p kbf-task --test network --no-run --locked
+          ls target/debug/deps | grep '^network-' || true
       - name: Run one job in Podman and assert its sandbox
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test live_podman --locked -- --ignored --nocapture
       - name: Podman state after a failure

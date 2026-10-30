@@ -26,9 +26,9 @@ use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use js_agent::cli_runtime::{system_runner, CliRuntime, Settings};
+use js_agent::lifecycle::{label, ContainerRuntime, ContainerSpec, Exit, Status};
 use js_agent::Platform;
-use js_agent::cli_runtime::{CliRuntime, Settings, system_runner};
-use js_agent::lifecycle::{ContainerRuntime, ContainerSpec, Exit, Status, label};
 use js_agent_wire::Isolation;
 use js_testkit::dir::TestDir;
 
@@ -350,4 +350,108 @@ fn a_job_in_real_podman_sees_the_sandbox_the_flags_describe() {
     for (name, uid, gid) in owners {
         assert_eq!((uid, gid), (want_uid, want_gid), "owner of {name}");
     }
+}
+
+/// Probe (not a regression test): kbf-task's network tests, built on the runner, run
+/// inside a container with the agent's hardening (job user, pinned seccomp profile, all
+/// capabilities dropped, no-new-privileges, the engine's default AppArmor profile, no
+/// network, read-only root, noexec tmpfs). The clone is mounted read-only at the path it
+/// was built at, because the tests find their helper binaries by absolute path baked in
+/// at compile time. Prints `PROBE2` lines and fails only if a run cannot be started.
+#[test]
+#[ignore = "probe: needs the kbf checkout the workflow builds"]
+fn kbf_task_probe() {
+    use std::process::Command;
+    assert!(rustix::process::geteuid().is_root(), "run as root: sudo -E");
+    let dir = need("KBF_PROBE_DIR");
+    let user = need("JS_LIVE_SUBUID_USER");
+    let (uid_start, _) = range_of("/etc/subuid", &user);
+    let (gid_start, _) = range_of("/etc/subgid", &user);
+    let deps = Path::new(&dir).join("target/debug/deps");
+    let exe = fs::read_dir(&deps)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| {
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            name.starts_with("network-") && !name.contains('.')
+        })
+        .expect("the network test executable");
+    println!("PROBE2 exe={}", exe.display());
+
+    let root = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "kbf-probe");
+    let profile = root.path().join("seccomp.json");
+    fs::write(&profile, js_agent::cli_runtime::PROFILE).unwrap();
+    let pinned = format!("seccomp={}", profile.display());
+    let uidmap = format!("0:{uid_start}:{RANGE_LEN}");
+    let gidmap = format!("0:{gid_start}:{RANGE_LEN}");
+    let bind = format!("type=bind,src={dir},dst={dir},ro,nosuid,nodev");
+    let tmpfs = "rw,noexec,nosuid,nodev,size=64m";
+    let run = |tag: &str, args: &[&str]| {
+        let mut cmd = Command::new(PODMAN);
+        cmd.args(["run", "--rm", "--pull", "never", "--cap-drop", "ALL"]);
+        cmd.args([
+            "--security-opt",
+            "no-new-privileges",
+            "--security-opt",
+            &pinned,
+        ]);
+        cmd.args(["--network", "none", "--read-only", "--ulimit", "core=0"]);
+        cmd.args([
+            "--ipc",
+            "private",
+            "--cgroupns",
+            "private",
+            "--pid",
+            "private",
+        ]);
+        cmd.args([
+            "--pids-limit",
+            "512",
+            "--memory",
+            "2g",
+            "--user",
+            "1000:1000",
+        ]);
+        for t in ["/tmp", "/var/tmp", "/run"] {
+            cmd.args(["--tmpfs", &format!("{t}:{tmpfs}")]);
+        }
+        cmd.args(["--uidmap", &uidmap, "--gidmap", &gidmap, "--mount", &bind]);
+        cmd.args([
+            "--env",
+            "HOME=/tmp",
+            "--workdir",
+            &format!("{dir}/crates/kbf-task"),
+        ]);
+        cmd.args(["--", "docker.io/library/ubuntu:24.04"]);
+        cmd.args(args);
+        let out = cmd.output().expect("podman runs");
+        for (stream, bytes) in [("out", &out.stdout), ("err", &out.stderr)] {
+            for l in String::from_utf8_lossy(bytes).lines() {
+                println!("PROBE2 {tag} {stream}| {l}");
+            }
+        }
+        println!("PROBE2 {tag} podman_exit={:?}", out.status.code());
+    };
+    run(
+        "context",
+        &[
+            "sh",
+            "-c",
+            "echo apparmor=$(cat /proc/self/attr/current); grep -E '^(Uid|Seccomp|NoNewPrivs|CapEff)' /proc/self/status; cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+        ],
+    );
+    let exe = exe.to_str().unwrap();
+    run(
+        "strict",
+        &[
+            exe,
+            "--ignored",
+            "netns_layer_is_active_strict",
+            "--exact",
+            "--nocapture",
+        ],
+    );
+    run("suite", &[exe, "--nocapture", "--test-threads=1"]);
+    println!("PROBE2 ran=true");
 }
