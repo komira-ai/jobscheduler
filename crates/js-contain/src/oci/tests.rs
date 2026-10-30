@@ -37,6 +37,7 @@ fn config(dir: &Path, ok: bool) -> OciConfig {
         init_dest: init::DEFAULT_DEST.to_owned(),
         helper_modes: helper::HelperModes::default(),
         scrub_env: crun::no_scrub,
+        logs: LogLimits::default(),
     }
 }
 
