@@ -23,7 +23,7 @@ pub use self::exclusive::{Quiet, Restored};
 use self::job::{Job, Retired, Stage, Stuck, blind_taint, container_spec, host_taint};
 pub use self::slots::Slots;
 use super::quota::QuotaHealth;
-use super::runtime::{ContainerRuntime, ResolvedMount};
+use super::runtime::{ResolvedMount, Runtime};
 use super::taint::TaintState;
 use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, code, detail};
 use crate::quota::QuotaError;
@@ -67,7 +67,7 @@ type Refusal = (&'static str, String);
 /// The jobs of one agent. See the [module](super) for what it guarantees.
 pub struct Lifecycle {
     config: Config,
-    runtime: Box<dyn ContainerRuntime>,
+    runtime: Box<dyn Runtime>,
     checks: Box<dyn CheckHook>,
     clock: Box<dyn Clock>,
     jobs: Vec<Job>,

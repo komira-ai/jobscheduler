@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use js_agent::cli_runtime::{CGROUP_ROOT, ProcRead, Settings};
-use js_agent::lifecycle::ContainerRuntime;
+use js_agent::lifecycle::Runtime;
 
 use super::super::scripted::Scripted;
 use super::super::{BIN, docker, in_another_pid_namespace, open_with, spec};

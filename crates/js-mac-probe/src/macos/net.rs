@@ -1,4 +1,4 @@
-//! The network under a profile: loopback under the off policy, DNS, and port ranges.
+//! The network under a profile: loopback under the off policy, name resolution, and port ranges.
 
 use std::ffi::OsStr;
 use std::net::TcpListener;
@@ -41,8 +41,9 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
         &allowed,
     ));
 
-    // Reported: an outbound connect, and whether names still resolve under the off policy
-    // (mDNSResponder is reached over mach, not through the network rules).
+    // Reported: an outbound connect, and whether names still resolve under the off policy.
+    // Only the observation is recorded; which rule stops a lookup is not established here
+    // (the resolver daemon is reached over mach, and nothing below separates the causes).
     let outbound = |mode: &Mode<'_>| connect(mode, EXTERNAL);
     let external_control = outbound(&Mode::Control);
     let external_off = outbound(&Mode::Sandboxed(&off, ""));

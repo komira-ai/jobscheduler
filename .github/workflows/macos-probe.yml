@@ -1,9 +1,9 @@
 # What a native (sandbox-exec) runtime relies on, probed on a hosted macOS runner.
 # crates/js-mac-probe prints a JSON report and exits non-zero when a probe with an
 # expected outcome is wrong; probes whose answer is unknown only report. No sudo: the
-# probe runs as the runner's own user. The image is pinned to macos-14, as ci.yml's macos
-# job pins it. It runs only when the probe crate or this file changes (not on lockfile or
-# toolchain bumps), to spare the scarce macOS runners.
+# probe runs as the runner's own user; the trace file is uploaded with the report. The image
+# is pinned to macos-14, as ci.yml's macos job pins it. It runs only when the probe crate or
+# this file changes (not on lockfile or toolchain bumps), to spare the scarce macOS runners.
 name: macos-probe
 
 on:
@@ -41,7 +41,7 @@ jobs:
       - name: Probe
         run: |
           mkdir -p "$RUNNER_TEMP/report"
-          cargo run -q -p js-mac-probe --locked -- report --work "$RUNNER_TEMP" --home "$HOME" --out "$RUNNER_TEMP/report/report.json"
+          cargo run -q -p js-mac-probe --locked -- report --work "$RUNNER_TEMP" --home "$HOME" --out "$RUNNER_TEMP/report/report.json" --trace-out "$RUNNER_TEMP/report/trace.sb"
       - name: Report
         if: ${{ !cancelled() }}
         run: |
@@ -52,5 +52,7 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           name: macos-probe-report
-          path: ${{ runner.temp }}/report/report.json
+          path: |
+            ${{ runner.temp }}/report/report.json
+            ${{ runner.temp }}/report/trace.sb
           if-no-files-found: ignore
