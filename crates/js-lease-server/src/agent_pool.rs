@@ -294,7 +294,8 @@ fn millis(field: &str, text: Option<String>, default: u64) -> Result<u64, String
         return Ok(default);
     };
     let parsed = parse_duration(&text).map_err(|err| format!("{field}: {err}"))?;
-    u64::try_from(parsed.as_millis()).map_err(|_| format!("{field}: is too long"))
+    // A parsed duration is a `u64` count of milliseconds, so the conversion cannot fail.
+    Ok(u64::try_from(parsed.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]
@@ -491,12 +492,38 @@ mod tests {
         assert!(parse(&value_long).unwrap_err().contains("capabilities"));
     }
 
-    /// A duration too long to count in milliseconds is refused rather than wrapped; the
-    /// flags' durations are whole seconds in a `u64`, so only the conversion can fail.
+    /// A duration too long to count in milliseconds is refused with the field's name
+    /// rather than wrapped.
     #[test]
     fn a_duration_that_overflows_milliseconds_is_refused() {
         let text = Some("18446744073709551615s".to_string());
-        assert!(millis("grace", text, 0).is_err());
+        assert!(millis("grace", text, 0).unwrap_err().starts_with("grace:"));
+    }
+
+    /// Asserts that the heartbeat interval takes milliseconds down to the wire's 250 ms
+    /// minimum and no lower, naming the field below it, and that second-based values read
+    /// as before. It catches an `ms` suffix that is refused, a minimum that drifts from
+    /// the wire's, and a unit scaled wrongly (`1s` read as 1 ms, or `250ms` as 250 s).
+    #[test]
+    fn heartbeat_interval_takes_milliseconds_down_to_the_wire_minimum() {
+        let base = parse(MINIMAL).unwrap();
+        let cases = [
+            ("250ms", 250),
+            ("1500ms", 1500),
+            ("10s", 10_000),
+            ("10", 10_000),
+        ];
+        for (text, millis) in cases {
+            let got = parse(&with(&format!(
+                "heartbeat_interval = \"{text}\"\ngrace = \"1m\""
+            )))
+            .unwrap();
+            let want = base.clone().with_timing(millis, 60_000).unwrap();
+            assert_eq!(got, want, "{text}");
+        }
+        let low = "heartbeat_interval = \"249ms\"\ngrace = \"1m\"";
+        let refused = parse(&with(low)).unwrap_err();
+        assert!(refused.contains("heartbeat_interval"), "{refused}");
     }
 
     fn whole(extra: &str) -> String {
