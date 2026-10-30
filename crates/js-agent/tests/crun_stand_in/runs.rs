@@ -361,7 +361,7 @@ fn a_lease_that_fails_to_be_made_is_taken_apart_at_every_step() {
 }
 
 /// Proves the runtime's `log_tail` through its own state: an ended container gives what it
-/// wrote to each stream apart (read twice, the same), one that did not run gives crun's
+/// wrote to each stream apart (read twice, the same), one that did not run gives the report of its end (`exited 1`)
 /// words after its (empty) standard error, a running one gives what it has written so far
 /// (nothing), a staged one an empty tail, and a container that is not there none. Catches
 /// a tail lost when the end is read, a failed start with nothing to read, and an error for
@@ -392,8 +392,7 @@ fn the_log_tail_follows_the_state_of_the_container() {
     assert!(matches!(runtime.poll(&id), Ok(Status::Exited(_))));
     let tail = runtime.log_tail(&id).expect("reads").expect("a tail");
     assert_eq!(tail.stdout, "");
-    assert!(tail.stderr.starts_with("crun: "), "{}", tail.stderr);
-    assert!(tail.stderr.contains("cgroup: no"), "{}", tail.stderr);
+    assert_eq!(tail.stderr, "crun: exited 1\n");
     runtime.remove(&id).expect("removed");
 
     let id = runtime.stage(&node.spec("r8-hold")).expect("staged");
