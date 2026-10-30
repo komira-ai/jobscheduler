@@ -9,11 +9,12 @@ use std::time::Duration;
 use js_provider::{Observed, StartAck, StartSpec, StopAck};
 use js_types::{Admission, HostId, LabelError, Labels, LeaseId, ReservedKey};
 
-use crate::clock::Timestamp;
+use crate::clock::{Monotonic, SystemMonotonic, Timestamp};
 use crate::error::{AcquireError, OpenError, RenewError, SaveError};
 use crate::reservations;
 use crate::state::LeaseState;
 use crate::store::{self, Document, FORMAT_VERSION, StoredLease};
+use crate::timings::Timings;
 use crate::types::{Booking, Boot, Lease, LeaseInfo, ReservationRecord, Settings};
 
 /// What a tick does with one lease.
@@ -265,6 +266,8 @@ pub(crate) struct Book {
     /// Set when a save failed and not yet cleared by one that worked: the file is
     /// behind the table.
     unsaved: bool,
+    /// Times each save of the file, for the slow-step warning.
+    timings: Timings,
 }
 
 impl Book {
@@ -315,11 +318,23 @@ impl Book {
             version: document.version,
             extra: document.extra,
             unsaved: false,
+            timings: Timings::new(SystemMonotonic::default()),
         })
     }
 
-    /// Writes the table to its file, and remembers whether that worked.
-    pub(crate) fn save(&mut self) -> Result<(), SaveError> {
+    /// Times the saves that follow with `clock`, into a new record.
+    pub(crate) fn watch_saves(&mut self, clock: impl Monotonic + 'static) {
+        self.timings = Timings::new(clock);
+    }
+
+    /// The record of the saves.
+    pub(crate) fn timings(&self) -> Timings {
+        self.timings.clone()
+    }
+
+    /// Writes the table to its file, and remembers whether that worked. A write that took
+    /// longer than a second is logged as a warning naming `operation`, the step that saved.
+    pub(crate) fn save(&mut self, operation: &'static str) -> Result<(), SaveError> {
         let document = Document {
             version: self.version.max(FORMAT_VERSION),
             term: self.term,
@@ -332,7 +347,9 @@ impl Book {
                 .collect(),
             extra: self.extra.clone(),
         };
+        let timer = self.timings.begin(operation);
         let saved = store::write(&self.path, &document);
+        timer.finish();
         self.unsaved = saved.is_err();
         saved
     }

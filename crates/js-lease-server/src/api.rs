@@ -12,11 +12,11 @@ use axum::http::{StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
-use js_lease::{AcquireError, LeaseTable, ReleaseOutcome, TickReport};
+use js_lease::{AcquireError, LeaseTable, ReleaseOutcome, TickReport, Timings};
 use js_provider::Provider;
 use js_registry::{Registry, WholeCounts};
 use serde::Serialize;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tracing::{error, info};
 
 use crate::adapt::{BoxedProvider, SharedClock};
@@ -27,6 +27,9 @@ use crate::hosts::HostList;
 use crate::join_api;
 use crate::run_api;
 use crate::status::{self, Status};
+use crate::usage::ProfileCurves;
+use crate::usage_api;
+use crate::usage_hub::{Usage, UsageCounters};
 use crate::wire::{
     AcquireBody, ApiError, Granted, LeaseList, Pending, Released, RenewBody, Renewed, parse,
     parse_id,
@@ -43,6 +46,8 @@ pub(crate) type Table = LeaseTable<BoxedProvider, SharedClock>;
 /// register hosts.
 pub(crate) struct Shared {
     table: Mutex<Table>,
+    /// How long the table's saves and the handlers' waits for its lock took.
+    timings: Timings,
     token: Token,
     agents: Option<Arc<Agents>>,
     /// What `/v1/pools` and `/status` read; `None` when the listen address is not a
@@ -58,6 +63,7 @@ pub(crate) struct Shared {
 impl Shared {
     pub(crate) fn new(table: Table, token: Token, agents: Option<Arc<Agents>>) -> Self {
         Self {
+            timings: table.timings(),
             table: Mutex::new(table),
             token,
             agents,
@@ -81,9 +87,40 @@ impl Shared {
         &self.table
     }
 
+    /// The record of the table's saves and of the lock waits.
+    pub(crate) fn timings(&self) -> Timings {
+        self.timings.clone()
+    }
+
+    /// The table's lock, with the wait for it timed under `operation`.
+    async fn lock(&self, operation: &'static str) -> MutexGuard<'_, Table> {
+        let waiting = self.timings.begin(operation);
+        let table = self.table.lock().await;
+        waiting.finish();
+        table
+    }
+
     /// A handle on the agent registry; `None` without agent flags.
     pub(crate) fn registry(&self) -> Option<Registry> {
         self.agents.as_ref().map(|agents| agents.registry.clone())
+    }
+
+    /// The usage side; `None` without agents or with `--usage-off`.
+    pub(crate) fn usage(&self) -> Option<&Arc<Usage>> {
+        self.agents
+            .as_ref()
+            .and_then(|agents| agents.usage.as_ref())
+    }
+
+    /// The learned curves; `None` without a usage side or with a sink that learns none.
+    pub(crate) fn usage_curves(&self) -> Option<Arc<ProfileCurves>> {
+        self.usage().and_then(|usage| usage.curves())
+    }
+
+    /// What the usage side has counted; all zero without one.
+    pub(crate) fn usage_counters(&self) -> UsageCounters {
+        self.usage()
+            .map_or_else(UsageCounters::default, |usage| usage.counters())
     }
 
     /// How many times the agent side could not read or write its files; 0 without agents.
@@ -173,7 +210,7 @@ pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
         .route("/status", get(status_page))
         .with_state(shared.clone());
     let app = open.merge(guarded);
-    match &shared.agents {
+    let app = match &shared.agents {
         Some(agents) => {
             let app = app
                 .merge(join_api::router(shared.clone(), agents.clone()))
@@ -183,6 +220,10 @@ pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
                 false => app,
             }
         }
+        None => app,
+    };
+    match shared.usage() {
+        Some(usage) => app.merge(usage_api::router(shared.clone(), usage.clone())),
         None => app,
     }
 }
@@ -293,7 +334,7 @@ fn json<T: Serialize>(status: StatusCode, body: &T) -> Response {
 
 async fn acquire(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
     let (request, ttl) = parse::<AcquireBody>(&body)?.into_parts()?;
-    let outcome = shared.table.lock().await.acquire(request, ttl);
+    let outcome = shared.lock("wait-acquire").await.acquire(request, ttl);
     match outcome {
         Ok(lease) => {
             let granted = Granted {
@@ -326,7 +367,7 @@ async fn renew(
     };
     let ttl = ask.ttl_seconds.map(std::time::Duration::from_secs);
     // The table's lock is held while the registry is asked, as the lock order says.
-    let mut table = shared.table.lock().await;
+    let mut table = shared.lock("wait-renew").await;
     let expires_at = table.renew(&id, ttl)?;
     let host_reserved = shared.agents.as_ref().is_some_and(|agents| {
         let host = agents.registry.host_of(&id);
@@ -345,7 +386,7 @@ async fn release(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
-    let outcome = shared.table.lock().await.release(&id)?;
+    let outcome = shared.lock("wait-release").await.release(&id)?;
     Ok(match outcome {
         ReleaseOutcome::Freed => json(StatusCode::OK, &Released { state: "freed" }),
         ReleaseOutcome::Releasing => json(StatusCode::ACCEPTED, &Released { state: "releasing" }),

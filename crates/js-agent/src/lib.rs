@@ -157,7 +157,8 @@
 //! (and the hook, if any, agreed), and a start for any other lease is refused (`no-capacity`)
 //! from the reply that names the lease until the one that stops naming it. The readiness
 //! hook (`--readiness-hook`, see `readiness`) runs once for each lease, after the agent's
-//! own checks passed, and its verdict is kept for the lease. The deadline is
+//! own checks passed, and its verdict is kept for the lease; an agent that restarts while it
+//! holds no run of the lease prepares it again, and the hook runs again. The deadline is
 //! [`PREPARE_TIMEOUT`] until a flag sets it, counted on the worker's clock. An agent without
 //! `--container-bin` runs no job and has no host to prepare, so it ignores `exclusive`. The
 //! VM check of the design is a later change. [`Hooked`] is the same hook rule as a wrapper
@@ -214,15 +215,15 @@ pub use credential::{CREDENTIAL_FILE, CREDENTIAL_TEMP_FILE, CredentialFile, Cred
 pub use exclusive::{PREPARE_TIMEOUT, Quiesce};
 pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
-    Platform, Ran, SystemCommands, SystemFiles, detect, host_id, machine_id,
+    Platform, Ran, Streams, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
 pub use host::{Offer, offer};
 pub use jobs::DRAIN_SETTLE;
 use jobs::Seams;
 use lifecycle::{Local, StateRoot};
 pub use readiness::{
-    EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner, Hooked,
-    ReadinessHook, Verdict, WorkerHook, hook_runner,
+    EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner,
+    HookWindow, Hooked, ReadinessHook, Verdict, WorkerHook, hook_runner,
 };
 pub use run::{Exit, Sleeper, Wake, drive};
 pub use session::{
@@ -489,11 +490,11 @@ fn execute(
     // thread (see `WorkerHost`), so the heartbeat loop never waits for a check or the hook.
     let mut host = jobs
         .as_ref()
-        .map(|(worker, _)| WorkerHost::new(worker.handle()));
-    let clock = jobs.as_ref().map(|(worker, _)| worker.clock());
+        .map(|(worker, ..)| WorkerHost::new(worker.handle()));
+    let clock = jobs.as_ref().map(|(worker, ..)| worker.clock());
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
-    if let Some((worker, drain)) = &jobs {
-        session = session.with_jobs(worker, *drain);
+    if let Some((worker, drain, outbox)) = &jobs {
+        session = session.with_jobs(worker, *drain).with_usage(outbox.clone());
     }
     if let (Some(host), Some(clock)) = (host.as_mut(), clock.as_ref()) {
         session = session.with_default_quiesce(host, clock);

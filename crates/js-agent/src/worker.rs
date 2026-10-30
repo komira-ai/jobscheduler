@@ -23,18 +23,27 @@
 //!   needs no `Send` bound. The lifecycle is built (and the containers the previous
 //!   process left are adopted) before [`Worker::start`] returns, so the first hello can
 //!   list them.
+//! - **The worker samples the usage** of the leases that run, once per heartbeat interval,
+//!   when `--actions-cgroup` is given: after a step it asks its [`Collector`] whether a
+//!   window has passed and, if so, reads the cgroup files on its own thread and publishes
+//!   the reading in the [`Outbox`] the session takes it from. The session never reads a
+//!   cgroup file.
 //! - **A whole-node lease is prepared on the worker's thread.** The post-job checks and the
 //!   readiness hook block, so the session asks through [`WorkerHost`]: it sends a prepare or
 //!   restore order without waiting and reads the last answer the worker published, which
 //!   is tagged with the lease it is about. An answer for another lease is never handed
 //!   back; the worker drops its answers when its lifecycle follows a different lease. The
-//!   hook runs here, once for each lease.
+//!   hook runs here, once for each grant (and again after an agent restart that holds no run
+//!   of the lease, which prepares it afresh; a lease taken over with a run held runs none).
 //!   Because the hook runs on the worker's thread it holds the worker for as long as it
 //!   runs, up to its bound (twice `prepare_timeout`): no reply is applied meanwhile, so
 //!   starts, stops and acknowledgements wait in the queue (a start's validity counts from
 //!   its arrival and may pass), and replies beyond the queue are dropped and sent again.
-//!   Heartbeats go on. The watchdog allows the worker that long for the hook, and no longer
-//!   for anything else.
+//!   Heartbeats go on. The watchdog allows the worker that long for the hook, only while the
+//!   hook runs: its limit grows by the bound when the hook is about to start, and when the hook
+//!   returns it is the order's plain limit moved later by the time the hook really took
+//!   ([`HookWindow`]), so the rest of the order has the plain stall bound counted from its
+//!   own start, less nothing the hook used.
 //! - **What the worker does is logged by the session thread**: the lifecycle's events
 //!   are kept as lines ([`Worker::take_lines`]; at most [`LINES_CAP`] wait, the rest are
 //!   counted and dropped) and the loop around the session prints them.
@@ -73,6 +82,7 @@
 //! A start the worker is already inside when it is closed is not undone: its container may
 //! be made after the rescue listed, and then it is the next process's to adopt.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -87,11 +97,12 @@ use crate::cli_runtime::{CALL_LIMIT, Settings};
 use crate::facts::Platform;
 use crate::integrity::Integrity;
 use crate::lifecycle::{Config, Event, Lifecycle, Status};
-use crate::readiness::WorkerHook;
+use crate::readiness::{HookWindow, WorkerHook};
 
 mod quiesce;
 
 use crate::system::{Machine, RuntimeBuild, SharedClock};
+use crate::usage::{Collector, Outbox};
 use quiesce::take_asked;
 pub use quiesce::{LeaseAnswers, WorkerHost};
 
@@ -142,6 +153,9 @@ pub struct Plan {
     pub machine: Arc<dyn Machine>,
     /// How long the worker waits for an order before it steps by itself.
     pub step_every: Duration,
+    /// Where the usage of the leases is published for the session to take. Without it, or
+    /// without `--actions-cgroup` in the settings, nothing is sampled.
+    pub usage: Option<Arc<Outbox>>,
     /// The bound of the [`Rescue`] in place of [`RESCUE_BOUND`]: for a test.
     pub rescue_bound: Option<Duration>,
     /// The readiness hook the worker runs for a whole-node lease whose host it found quiet;
@@ -497,11 +511,11 @@ impl Worker {
                 Err(why) => {
                     let _ = ready.send(Err(why));
                 }
-                Ok((life, lines)) => {
+                Ok((life, usage, lines)) => {
                     own.publish(Snapshot::of(&life), &LeaseAnswers::default(), lines);
                     let _ = ready.send(Ok(()));
                     let seams = (step_every, stop_grace);
-                    work(life, hook, (&inbox, &own, &thread_clock), seams);
+                    work(life, usage, hook, (&inbox, &own, &thread_clock), seams);
                 }
             }
         });
@@ -648,9 +662,13 @@ impl Worker {
     }
 }
 
-/// The lifecycle, built and with the previous process's containers adopted, and the lines
-/// to print about it.
-fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), String> {
+/// What `build` makes: the lifecycle, the usage collector when there is one, and the lines
+/// to print.
+type Built = (Lifecycle, Option<Collector>, Vec<String>);
+
+/// The lifecycle, built and with the previous process's containers adopted, the collector of
+/// the usage, and the lines to print about them.
+fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     let Plan {
         config,
         settings,
@@ -658,6 +676,7 @@ fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), Str
         platform,
         watch,
         machine,
+        usage,
         ..
     } = plan;
     let stop_grace = config.stop_grace;
@@ -676,25 +695,45 @@ fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), Str
     let (life, events) = Lifecycle::adopt(config, runtime, Box::new(checks), Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
     lines.extend(describe(&events));
-    Ok((life, lines))
+    let collector = usage.and_then(|outbox| match settings.actions_cgroup() {
+        Some(dir) => Some(Collector::new(
+            machine.cgroup_files(),
+            dir,
+            machine.usage_clock(),
+            outbox,
+        )),
+        None => {
+            lines.push(NO_ACTIONS_CGROUP.to_owned());
+            None
+        }
+    });
+    Ok((life, collector, lines))
 }
+
+/// Why the heartbeat carries no load.
+const NO_ACTIONS_CGROUP: &str =
+    "usage: --actions-cgroup is not given: the heartbeat carries no load";
 
 /// The worker's loop: an order or a step interval, then a step, then a publication.
 fn work(
     mut life: Lifecycle,
+    mut usage: Option<Collector>,
     hook: Option<WorkerHook>,
     (inbox, shared, clock): (&Receiver<Order>, &Shared, &SharedClock),
     (step_every, stop_grace): (Duration, Duration),
 ) {
     let mut answers = LeaseAnswers::default();
-    // A readiness hook that takes its whole time is not a stuck worker: the watchdog's
-    // limit grows by the hook's bound when (and only when) a hook starts.
-    let extend = |bound: Duration| {
-        let ms = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
-        let due = shared.busy_until.load(Ordering::SeqCst);
-        shared
-            .busy_until
-            .store(due.saturating_add(ms), Ordering::SeqCst);
+    // A readiness hook that takes its whole time is not a stuck worker: while a hook runs
+    // the watchdog's limit is its bound longer, and when the hook returns the order has its
+    // plain limit again, moved later by the time the hook really took. (The worker is the
+    // only writer of `busy_until` during an order.)
+    let (plain, opened) = (Cell::new(0), Cell::new(0));
+    let watch = |window: HookWindow| {
+        let limit = shared.busy_until.load(Ordering::SeqCst);
+        let now = clock.now_ms();
+        let moved = window.moves(limit, plain.get(), opened.get(), now);
+        shared.busy_until.store(moved, Ordering::SeqCst);
+        opened.set(now);
     };
     loop {
         let mut lines = Vec::new();
@@ -704,12 +743,14 @@ fn work(
             Order::Reply { reply, .. } => reply.commands.len().saturating_mul(CALLS_PER_START),
             _ => 0,
         });
-        // A run held may cost two calls (a stop, then an inspect or a remove).
-        let calls = life.held().len().saturating_mul(2).saturating_add(asked);
+        // A run held may cost three calls (a stop, then an inspect, the read of its log
+        // and a remove).
+        let calls = life.held().len().saturating_mul(3).saturating_add(asked);
         let bound = stall_bound(stop_grace, calls);
         let bound = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
         let due = clock.now_ms().saturating_add(bound).saturating_add(1);
         shared.busy_until.store(due, Ordering::SeqCst);
+        plain.set(due);
         match order {
             Ok(Order::Reply { reply, received_ms }) => {
                 let closed = shared.closed.load(Ordering::SeqCst);
@@ -727,7 +768,7 @@ fn work(
                 let asked = take_asked(&shared.asked_prepare);
                 let mut events = Vec::new();
                 asked.into_iter().for_each(|lease| {
-                    answers.prepare(&mut life, hook.as_ref(), lease, &mut events, &extend);
+                    answers.prepare(&mut life, hook.as_ref(), lease, &mut events, &watch);
                 });
                 lines.extend(describe(&events));
             }
@@ -749,6 +790,15 @@ fn work(
         }
         lines.extend(describe(&life.step()));
         answers.follow(life.exclusive());
+        let sampled = usage
+            .as_mut()
+            .filter(|collector| collector.due())
+            .map(|collector| {
+                let mut said = life.find_cgroups();
+                said.extend(collector.run(&life.running()));
+                said
+            });
+        lines.extend(sampled.into_iter().flatten());
         shared.publish(Snapshot::of(&life), &answers, lines);
         shared.busy_until.store(0, Ordering::SeqCst);
         settle.iter().for_each(|done| {

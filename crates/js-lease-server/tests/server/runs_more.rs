@@ -292,3 +292,57 @@ async fn a_start_refused_as_host_tainted_taints_the_host() {
         (409, json!({ "error": "host-tainted" }))
     );
 }
+
+/// Asserts that the labels a client queued a run with come back in the listing and in the
+/// single-run read, key for key, after the run is queued, after the host lists it as
+/// running and after it has ended; that a second run queued with other labels keeps its
+/// own; and that a run queued without labels lists no `labels` field. It catches a listing
+/// that drops the labels, one that mixes the labels of two runs, and an empty map that
+/// breaks older clients by appearing where they expect nothing.
+#[tokio::test]
+async fn run_labels_round_trip_through_post_and_get() {
+    let h = start_agents("runs_labels", false).await;
+    let me = join(&h, "burst-1").await;
+    let lease = lease(&h).await;
+    let mut tagged = run_body(1000);
+    tagged["labels"] = json!({ "job": "build-7", "attempt": "2" });
+    let first = queue(&h, &lease, &tagged).await;
+    assert_eq!(first.status, 202, "{}", first.body);
+    let first = first.json()["run_id"].as_str().unwrap().to_string();
+    let mut other = run_body(1000);
+    other["labels"] = json!({ "job": "build-8" });
+    let second = queue(&h, &lease, &other).await;
+    let second = second.json()["run_id"].as_str().unwrap().to_string();
+    let bare = queued(&h, &lease, 1000).await;
+
+    let expect = |listing: &[Value]| {
+        let at = |run: &str| listing.iter().find(|entry| entry["run_id"] == run).unwrap();
+        assert_eq!(
+            at(&first)["labels"],
+            json!({ "job": "build-7", "attempt": "2" })
+        );
+        assert_eq!(at(&second)["labels"], json!({ "job": "build-8" }));
+        assert!(at(&bare).get("labels").is_none(), "{:?}", at(&bare));
+    };
+    expect(&runs(&h, &lease).await);
+
+    let running = [
+        held(&first, "running"),
+        held(&second, "running"),
+        held(&bare, "running"),
+    ];
+    beat(&h, &me, &running, &[]).await;
+    expect(&runs(&h, &lease).await);
+    let read = show(&h, &lease, &first).await;
+    assert_eq!(read.status, 200, "{}", read.body);
+    assert_eq!(
+        read.json()["labels"],
+        json!({ "job": "build-7", "attempt": "2" })
+    );
+    let read = show(&h, &lease, &bare).await;
+    assert!(read.json().get("labels").is_none(), "{}", read.body);
+
+    beat(&h, &me, &[], &[]).await;
+    assert_eq!(state(&h, &lease, &first).await, "ended");
+    expect(&runs(&h, &lease).await);
+}

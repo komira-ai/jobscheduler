@@ -247,6 +247,8 @@ pub struct Scheduler {
     size_keys: BTreeMap<OperationId, u64>,
     /// The rungs of an action's memory booking ([`memory`]).
     ladder: MemoryLadder,
+    /// Whether an own-limit kill climbs the ladder ([`Scheduler::set_memory_climb`]).
+    climb: bool,
     /// Workers a recovered scheduler holds leases for that have not registered yet, and
     /// until when they may take to ([`Scheduler::recover`]).
     awaited: BTreeMap<WorkerId, FarmTime>,
@@ -306,6 +308,7 @@ impl Scheduler {
             memory: Box::default(),
             size_keys: BTreeMap::new(),
             ladder: MemoryLadder::default(),
+            climb: true,
             awaited: BTreeMap::new(),
             other_process: BTreeMap::new(),
             store_down: false,
@@ -697,17 +700,15 @@ impl Scheduler {
             } else if !fitted && request.kind != LeaseKind::WholeMachine {
                 whole.waiting_ordinary(position, id);
             }
-            if !fitted && request.kind == LeaseKind::WholeMachine && verdict == Verdict::Servable {
+            // A whole-machine request holds a worker while it waits for it to empty, and so
+            // does an action that owns its worker; the drain order of a configured
+            // whole-node pool is for whole-machine requests alone.
+            if !fitted
+                && (request.kind == LeaseKind::WholeMachine || request.owns_worker())
+                && verdict == Verdict::Servable
+            {
                 let held = match &self.whole_node {
-                    None => servable.reserve(
-                        &self.workers,
-                        request,
-                        &reserved,
-                        &op.avoid,
-                        self.reservations.get(&id),
-                        None,
-                    ),
-                    Some(cfg) => {
+                    Some(cfg) if request.kind == LeaseKind::WholeMachine => {
                         let turn = self.drain.turn(id, op.queued_at, now, cfg);
                         turn.and_then(|turn| {
                             match self.hold_whole(
@@ -729,6 +730,14 @@ impl Scheduler {
                             }
                         })
                     }
+                    _ => servable.reserve(
+                        &self.workers,
+                        request,
+                        &reserved,
+                        &op.avoid,
+                        self.reservations.get(&id),
+                        None,
+                    ),
                 };
                 if let Some(name) = held {
                     reserved.insert(name.clone());

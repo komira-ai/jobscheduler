@@ -21,7 +21,7 @@ use js_registry::{
 use js_scaler::{
     AcquirePlan, Health, LaunchMode, Millis, Phase, Record, Records, Settings, StoredOffer,
 };
-use js_types::{ExecMode, HostId, RequestId, Requirements, Resources, Shape};
+use js_types::{ExecMode, HostId, MemoryHeadroom, RequestId, Requirements, Resources, Shape};
 
 /// The wall time every test clock starts at.
 pub const START: u64 = 1_000_000_000_000;
@@ -455,6 +455,7 @@ pub fn view(name: &str) -> HostView {
         phase: WirePhase::Serving,
         lease: None,
         shape: Shape::new(resources, BTreeMap::new()),
+        memory: MemoryHeadroom::full(1 << 30),
         claim: Some(Shape::new(announced, BTreeMap::new())),
         labels: BTreeMap::new(),
         agent_version: None,
@@ -465,6 +466,7 @@ pub fn view(name: &str) -> HostView {
         mark: None,
         reserved_for: None,
         drain_deadline: None,
+        load: None,
     }
 }
 

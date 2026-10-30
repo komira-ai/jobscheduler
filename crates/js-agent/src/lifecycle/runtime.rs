@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::Isolation;
+use js_agent_wire::{Isolation, LogTail};
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -231,6 +231,18 @@ pub trait ContainerRuntime {
         Ok(found.into_iter().map(|one| one.id).collect())
     }
 
+    /// The end of what the exited container `id` wrote to its standard output and standard
+    /// error, read before the container is removed. `None` is a backend that keeps no log.
+    /// The lifecycle calls it once for each job that exited, and a failure never changes
+    /// the job's result: the result goes out without a tail.
+    ///
+    /// # Errors
+    ///
+    /// The runtime cannot read the log.
+    fn log_tail(&mut self, _id: &ContainerId) -> Result<Option<LogTail>, RuntimeError> {
+        Ok(None)
+    }
+
     /// Whether a container made here can use a GPU. A start that names a GPU where this
     /// is false is refused (`gpu-unsupported`) and creates nothing.
     fn supports_gpus(&self) -> bool {
@@ -252,8 +264,9 @@ pub trait ContainerRuntime {
     /// of a container that runs, or `None` when the runtime cannot say: the container is
     /// not in the agent's `/proc`, its control group is not the unified one, or it lies
     /// outside the control group the agent was told holds its containers. The lifecycle
-    /// asks once, when a job starts or is adopted, and a lease with no control group is
-    /// simply not sampled. A runtime with no control groups keeps the default.
+    /// asks when a job starts or is adopted and, for a run it started, again at every
+    /// usage window until the runtime can say (`Lifecycle::find_cgroups`); a lease with no
+    /// control group is not sampled. A runtime with no control groups keeps the default.
     fn cgroup(&mut self, _id: &ContainerId) -> Option<PathBuf> {
         None
     }

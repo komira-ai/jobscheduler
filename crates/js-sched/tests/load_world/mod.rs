@@ -289,6 +289,7 @@ impl World {
             needs: spec.needs.clone().unwrap_or_default(),
             hermetic: true,
             do_not_cache: false,
+            whole_worker: false,
         };
         let op = self.s.next_operation();
         feed(
