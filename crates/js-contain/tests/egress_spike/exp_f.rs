@@ -45,7 +45,8 @@ fn composite(label: &str, seccomp: bool) -> (Outcome, String) {
     (outcome, table)
 }
 
-fn assert_composite(outcome: &Outcome, table: &str) {
+fn assert_composite(outcome: &Outcome, table: &str, seccomp: bool) {
+    assert_eq!(outcome.get("seccomp"), if seccomp { "2" } else { "0" });
     assert_allow_list_enforced(outcome, "before");
     assert_allow_list_enforced(outcome, "after");
     assert_job_cannot_tamper(outcome);
@@ -76,7 +77,7 @@ fn f1_composite_pair_pasta_table_and_inner_unshare() {
         return;
     }
     let (outcome, table) = composite("f1 composite, restriction on, shipped crun profile", false);
-    assert_composite(&outcome, &table);
+    assert_composite(&outcome, &table, false);
 }
 
 /// Asserts the same with the real seccomp profile of the container runner in the bundle.
@@ -92,7 +93,7 @@ fn f2_composite_under_the_real_seccomp_profile() {
         "f2 composite, restriction on, shipped crun profile, real seccomp",
         true,
     );
-    assert_composite(&outcome, &table);
+    assert_composite(&outcome, &table, true);
 }
 
 /// Asserts the IPv6 control: usable before the daemon turns it off, unusable after.

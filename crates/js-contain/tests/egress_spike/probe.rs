@@ -69,6 +69,7 @@ fn id() {
     emit("cap_eff", status_field("CapEff"));
     emit("cap_bnd", status_field("CapBnd"));
     emit("no_new_privs", status_field("NoNewPrivs"));
+    emit("seccomp", status_field("Seccomp"));
     emit(
         "uid_map",
         std::fs::read_to_string("/proc/self/uid_map")

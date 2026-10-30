@@ -44,6 +44,7 @@ impl Drop for Pasta {
 
 /// What a run gave.
 struct Run {
+    seccomp: bool,
     outcome: Outcome,
     table: String,
 }
@@ -156,10 +157,18 @@ fn run(label: &str, restricted: bool, job_profile: bool, rules: bool, seccomp: b
         std::fs::read_to_string(&log).unwrap_or_default().trim(),
     );
     assert_eq!(outcome.exit, Some(0), "{outcome:?}");
-    Run { outcome, table }
+    Run {
+        seccomp,
+        outcome,
+        table,
+    }
 }
 
 fn assert_whole(run: &Run) {
+    assert_eq!(
+        run.outcome.get("seccomp"),
+        if run.seccomp { "2" } else { "0" }
+    );
     assert_allow_list_enforced(&run.outcome, "before");
     assert_allow_list_enforced(&run.outcome, "after");
     assert_job_cannot_tamper(&run.outcome);
