@@ -18,6 +18,12 @@
 //! `actions/`, which the daemon writes from the actions memory limit (or the
 //! operator sets). CPU is compressible: `cpu.weight` from the booked CPU, never
 //! `cpu.max`.
+//!
+//! [`LeasePolicy::Hard`] is the other policy, for a backend that replaces an engine
+//! whose limits were the booking (`--memory` equal to `--memory-swap`, `--cpus`):
+//! `memory.max` the booking, `memory.swap.max` 0, and `cpu.max` the booked cores. A lease
+//! booking is then what the lease-server's arithmetic assumes it is, and an OOM kill is
+//! the job's own. [`SwapKill`] has nothing to watch under it (no swap).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -56,6 +62,41 @@ pub fn memory_max(memory_bytes: u64) -> Option<u64> {
 #[must_use]
 pub fn cpu_weight(cpu_millis: u64) -> Option<u64> {
     (cpu_millis > 0).then(|| (cpu_millis / 10).clamp(1, 10_000))
+}
+
+/// How a lease's cgroup limits follow its booking.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LeasePolicy {
+    /// The build-host policy above: `memory.max` 1.5 x the booking + 512 MiB, swap allowed,
+    /// `cpu.weight` only.
+    #[default]
+    BuildHost,
+    /// The booking is the limit: `memory.max` the booking, `memory.swap.max` 0, `cpu.max` the
+    /// booked CPUs.
+    Hard,
+}
+
+/// The hard `memory.max` for a lease that booked `memory_bytes` under [`LeasePolicy::Hard`].
+#[must_use]
+pub fn hard_memory_max(memory_bytes: u64) -> Option<u64> {
+    (memory_bytes > 0).then_some(memory_bytes)
+}
+
+/// The CFS period of `cpu.max`, in microseconds: the kernel's default, and what the
+/// engine this backend replaces used for `--cpus`.
+const CPU_PERIOD: u64 = 100_000;
+/// The least quota the kernel takes, in microseconds.
+const CPU_QUOTA_FLOOR: u64 = 1000;
+
+/// The `cpu.max` text for a lease that booked `cpu_millis` under [`LeasePolicy::Hard`]:
+/// the booked cores as a quota per period (`--cpus 1.5` is `150000 100000`), never below
+/// the kernel's least. `None` when nothing was booked.
+#[must_use]
+pub fn cpu_max(cpu_millis: u64) -> Option<String> {
+    (cpu_millis > 0).then(|| {
+        let quota = (cpu_millis.saturating_mul(CPU_PERIOD / 1000)).max(CPU_QUOTA_FLOOR);
+        format!("{quota} {CPU_PERIOD}")
+    })
 }
 
 /// When the driver kills a lease that keeps pushing into swap at its own cap.
@@ -239,6 +280,16 @@ impl LeaseCgroup {
     /// With a `pin` (the `numa-node` lease placement) the lease also gets `cpuset.cpus` and
     /// `cpuset.mems`, and hands `cpuset` to the container's cgroup, which inherits both.
     pub fn create(&self, resources: &Resources, pin: Option<&Pin>) -> io::Result<()> {
+        self.create_with(resources, pin, LeasePolicy::BuildHost)
+    }
+
+    /// [`LeaseCgroup::create`] with the limits `policy` derives from the booking.
+    pub fn create_with(
+        &self,
+        resources: &Resources,
+        pin: Option<&Pin>,
+        policy: LeasePolicy,
+    ) -> io::Result<()> {
         std::fs::create_dir(&self.dir)?;
         let subtree = if pin.is_some() {
             SUBTREE_PINNED
@@ -248,11 +299,26 @@ impl LeaseCgroup {
         self.write("cgroup.subtree_control", subtree)?;
         // Before the container exists, so nothing in the lease ever runs without it.
         self.write("memory.oom.group", "1")?;
-        if let Some(max) = memory_max(resources.memory_bytes()) {
-            self.write("memory.max", &max.to_string())?;
-        }
-        if let Some(weight) = cpu_weight(resources.cpu_millis()) {
-            self.write("cpu.weight", &weight.to_string())?;
+        match policy {
+            LeasePolicy::BuildHost => {
+                if let Some(max) = memory_max(resources.memory_bytes()) {
+                    self.write("memory.max", &max.to_string())?;
+                }
+                if let Some(weight) = cpu_weight(resources.cpu_millis()) {
+                    self.write("cpu.weight", &weight.to_string())?;
+                }
+            }
+            LeasePolicy::Hard => {
+                // A kernel without swap accounting has no `memory.swap.max`: the write
+                // then fails and so does the lease, rather than a job that can swap.
+                if let Some(max) = hard_memory_max(resources.memory_bytes()) {
+                    self.write("memory.max", &max.to_string())?;
+                    self.write("memory.swap.max", "0")?;
+                }
+                if let Some(cpu) = cpu_max(resources.cpu_millis()) {
+                    self.write("cpu.max", &cpu)?;
+                }
+            }
         }
         if let Some(pin) = pin {
             self.write("cpuset.cpus", &pin.cpus().to_string())?;

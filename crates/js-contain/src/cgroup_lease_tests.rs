@@ -331,3 +331,102 @@ fn memory_max_agrees_with_the_copies_it_replaced_on_every_booking() {
     assert_eq!(memory_max(0), None);
     assert_eq!(memory_max(u64::MAX), Some(u64::MAX));
 }
+
+/// A booking of `cpu_millis` and `memory_bytes`, no GPUs.
+fn booking(cpu_millis: u64, memory_bytes: u64) -> Resources {
+    Resources::new(cpu_millis, memory_bytes, 0, None).expect("a booking without GPUs")
+}
+
+/// What a lease cgroup made under `policy` for `resources` holds, file by file.
+fn made(
+    name: &str,
+    resources: &Resources,
+    policy: LeasePolicy,
+) -> impl Fn(&str) -> Option<String> + use<> {
+    let root = mount(name);
+    std::fs::create_dir(root.join("actions")).expect("mkdir");
+    let lease = LeaseCgroup::at(&root, "/actions", "lease-1-1");
+    lease.create_with(resources, None, policy).expect("created");
+    let dir = lease.dir().to_owned();
+    // The directory is removed with the guard; read every file the test asks for now.
+    let files: Vec<(String, Option<String>)> = [
+        "memory.max",
+        "memory.swap.max",
+        "memory.high",
+        "memory.oom.group",
+        "cpu.max",
+        "cpu.weight",
+        "cgroup.subtree_control",
+    ]
+    .iter()
+    .map(|f| ((*f).to_owned(), std::fs::read_to_string(dir.join(f)).ok()))
+    .collect();
+    drop(root);
+    move |file: &str| {
+        files
+            .iter()
+            .find(|(f, _)| f == file)
+            .and_then(|(_, text)| text.clone())
+    }
+}
+
+/// Catches a Hard lease whose memory cap is not the booking (the booking times 1.5 plus
+/// 512 MiB lets a job use what it did not book, which podman's `--memory` never did), or
+/// whose swap is not 0 (a job pressed at its cap would be moved to swap, which podman's
+/// `--memory-swap` equal to `--memory` forbids), or that lost the OOM group.
+#[test]
+fn a_hard_lease_caps_memory_at_the_booking_and_forbids_swap() {
+    let read = made("hard-memory", &booking(2000, 3 << 30), LeasePolicy::Hard);
+    assert_eq!(read("memory.max"), Some((3u64 << 30).to_string()));
+    assert_eq!(read("memory.swap.max").as_deref(), Some("0"));
+    assert_eq!(read("memory.oom.group").as_deref(), Some("1"));
+    assert_eq!(read("memory.high"), None);
+}
+
+/// Catches a Hard lease without a hard CPU cap (a `cpu.weight` alone lets a job use idle
+/// cores, which `--cpus` never did) and a cap that is not `cpu_millis` thousandths of a
+/// core per 100 ms period: 2500 booked is `250000 100000`, as `--cpus 2.500` makes.
+#[test]
+fn a_hard_lease_caps_cpu_at_the_booked_cores() {
+    let read = made("hard-cpu", &booking(2500, 1 << 30), LeasePolicy::Hard);
+    assert_eq!(read("cpu.max").as_deref(), Some("250000 100000"));
+    assert_eq!(cpu_max(1500).as_deref(), Some("150000 100000"));
+    assert_eq!(
+        cpu_max(1).as_deref(),
+        Some("1000 100000"),
+        "the kernel's least quota"
+    );
+    assert_eq!(cpu_max(0), None);
+    assert_eq!(hard_memory_max(1 << 30), Some(1 << 30));
+    assert_eq!(hard_memory_max(0), None);
+}
+
+/// Catches a Hard lease that booked nothing getting a limit of 0 (a `memory.max` of 0
+/// kills every process at once) and a swap limit with no memory limit beside it.
+#[test]
+fn a_hard_lease_that_booked_nothing_has_no_limits() {
+    let read = made("hard-none", &Resources::default(), LeasePolicy::Hard);
+    for file in ["memory.max", "memory.swap.max", "cpu.max", "cpu.weight"] {
+        assert_eq!(read(file), None, "{file}");
+    }
+    assert_eq!(read("memory.oom.group").as_deref(), Some("1"));
+}
+
+/// Catches the build-host policy (kbf's) changing with the new one: `create` and
+/// `create_with(BuildHost)` write 1.5 x + 512 MiB, a CPU weight and no swap or `cpu.max`.
+#[test]
+fn the_build_host_policy_is_unchanged_and_the_default() {
+    assert_eq!(LeasePolicy::default(), LeasePolicy::BuildHost);
+    let read = made(
+        "build-host",
+        &booking(2000, 1 << 30),
+        LeasePolicy::BuildHost,
+    );
+    assert_eq!(
+        read("memory.max"),
+        Some(((3u64 << 29) + (512 << 20)).to_string())
+    );
+    assert_eq!(read("cpu.weight").as_deref(), Some("200"));
+    assert_eq!(read("memory.swap.max"), None);
+    assert_eq!(read("cpu.max"), None);
+}
