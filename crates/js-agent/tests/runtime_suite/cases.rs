@@ -27,7 +27,7 @@ pub fn a_container_goes_through_create_start_poll_stop_remove(s: &mut dyn Subjec
         found[0].labels.get(label::RUN).map(String::as_str),
         Some("r1")
     );
-    assert!(found[0].labels.contains_key(label::AGENT));
+    assert_eq!(found[0].labels.get(label::AGENT), Some(&s.host_id()));
     assert!(!found[0].never_started);
     stop(s, &id, LONG);
     s.settled(&id);

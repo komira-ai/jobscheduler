@@ -129,6 +129,9 @@ pub trait Subject {
     /// The runtime. Every call returns a handle to the same one.
     fn runtime(&self) -> Shared;
 
+    /// The id the runtime was opened with for the agent label of its containers.
+    fn host_id(&self) -> String;
+
     /// The pinned image every run names.
     fn image(&self) -> String;
 

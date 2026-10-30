@@ -14,6 +14,10 @@ on:
     paths:
       - '.github/workflows/js-agent-crun-runtime.yml'
       - 'crates/js-agent/**'
+      - 'crates/js-agent-wire/**'
+      - 'crates/js-caps/**'
+      - 'crates/js-bundle/**'
+      - 'crates/js-testkit/**'
       - 'crates/js-contain/**'
       - 'crates/js-oci/**'
       - 'crates/js-types/**'
@@ -24,6 +28,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
