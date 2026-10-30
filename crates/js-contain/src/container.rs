@@ -35,11 +35,12 @@ pub struct ContainerLimits {
     /// `RLIMIT_NOFILE`, soft and hard. Rootless, it cannot exceed the daemon's own hard
     /// limit.
     pub nofile: u64,
-    /// `RLIMIT_NPROC`, soft and hard. A rootless daemon cannot set it above its own hard
-    /// limit ([`own_nproc_hard_limit`]; [`ContainerLimits::within_nproc`]). The kernel
-    /// counts a user namespace's processes against its creator's, and every container's
-    /// namespace is made by the daemon user, so what bounds all the node's jobs together is
-    /// the daemon's own limit; the `pids` of each lease is the per-job bound.
+    /// `RLIMIT_NPROC`, soft and hard ([`ContainerLimits::within_nproc`] cuts it to the
+    /// daemon's own hard limit). Rootless, the daemon cannot raise a hard limit and the
+    /// kernel counts every job's processes against the daemon user's limit, so that limit
+    /// bounds all jobs together. A root daemon can raise it, and the job's processes count
+    /// against the job user's limit, not the daemon's; either way the `pids` of each lease
+    /// is the per-job bound.
     pub nproc: u64,
     /// The size of the container's `/tmp` tmpfs, in MiB.
     pub tmp_mib: u64,
@@ -48,8 +49,9 @@ pub struct ContainerLimits {
 /// The `RLIMIT_NPROC` a job is given unless the caller says otherwise: the kernel's
 /// largest pid (`PID_MAX_LIMIT` on a 64-bit machine), so that the lease's `pids.max` is
 /// the only bound on a job's processes. A rootless daemon cannot raise a hard limit above
-/// its own ([`own_nproc_hard_limit`]), so [`ContainerLimits::within_nproc`] cuts this to
-/// what the daemon may give.
+/// its own ([`own_nproc_hard_limit`]; a root daemon, holding `CAP_SYS_RESOURCE`, can), so
+/// [`ContainerLimits::within_nproc`] cuts this to what the daemon may give: a cap at the
+/// agent's own hard limit, harmless for a root agent.
 pub const NPROC_HIGH: u64 = 4_194_304;
 
 impl ContainerLimits {
