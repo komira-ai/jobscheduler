@@ -21,7 +21,7 @@ use std::sync::PoisonError;
 use js_elastic::Demand;
 use js_lease::{Clock, Timestamp};
 use js_registry::Registry;
-use js_scaler::{Millis, Phase, Record, Records};
+use js_scaler::{LaunchMode, Millis, Phase, Record, Records};
 use js_types::ExecMode;
 use serde::Serialize;
 
@@ -56,7 +56,11 @@ struct PoolView {
     network: &'static str,
     /// The execution mode the hosts must report, or `none` for a pool that asked for none.
     exec: String,
+    /// The mode the pool is in now: `plan` once its `live_until` has passed, whatever the
+    /// file says.
     launch: &'static str,
+    /// When the pool's go ends, in milliseconds since the epoch, if the file sets one.
+    live_until_ms: Option<u64>,
     /// The memory of the pool's floor, the percent of it the pool books and what that
     /// comes to.
     memory: MemoryView,
@@ -282,11 +286,25 @@ impl Status {
                 Next::NoOffer(none) => (None, Some(none)),
             },
         };
+        let now = Millis::new(self.clock.now().millis());
+        let settings = self.scaler.as_ref().map(Scaler::settings);
+        let launch = settings.map_or(pool.launch, |set| match set.mode(now) {
+            LaunchMode::Live => "live",
+            LaunchMode::Plan => "plan",
+        });
+        let live_until_ms = settings
+            .and_then(|set| set.live_until)
+            .map(Millis::as_millis);
+        let scaled = self.scaler.as_ref().map(|scaler| scaler.state());
+        // The checks first; once they pass, the cap that keeps the scaler from launching.
+        let capped = scaled
+            .as_ref()
+            .and_then(|seen| seen.blocked.get(&pool.name));
         let blocked = match state {
-            State::Available => None,
+            State::Available => capped.and_then(|why| why.cap_name()),
             _ => Some("unavailable"),
         };
-        let records = self.scaler.as_ref().map(|scaler| scaler.state().records);
+        let records = scaled.map(|seen| seen.records);
         let (machines, orphans, last_launch) = held(&records.unwrap_or_default(), &pool.name);
         let spend = machines
             .iter()
@@ -297,7 +315,8 @@ impl Status {
             kind: pool.kind.clone(),
             network: pool.network_kind,
             exec: exec_name(pool.exec),
-            launch: pool.launch,
+            launch,
+            live_until_ms,
             memory: MemoryView::of(pool.memory),
             state,
             reasons: health.reasons(),

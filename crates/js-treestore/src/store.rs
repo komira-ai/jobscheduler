@@ -77,7 +77,9 @@ pub struct Config {
     /// The free bytes of the volume the directory is on.
     pub free_space: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// Asked after each step of making a tree; `true` stops the operation there as a dying
-    /// process would, leaving what the step left.
+    /// process would, leaving what the step left, torn on purpose. For tests only: nothing
+    /// in production sets it.
+    #[doc(hidden)]
     pub crash: Option<Arc<dyn Fn(Step) -> bool + Send + Sync>>,
 }
 
@@ -248,7 +250,7 @@ impl<S: Sealer, F: LayerSource> Reservation<'_, S, F> {
 
 impl<S: Sealer, F: LayerSource> Drop for Reservation<'_, S, F> {
     fn drop(&mut self) {
-        self.inner.lock().reserved -= self.bytes;
+        self.inner.lock_in_drop().reserved -= self.bytes;
     }
 }
 
@@ -263,7 +265,7 @@ struct Flight<'a, S: Sealer, F: LayerSource> {
 
 impl<S: Sealer, F: LayerSource> Drop for Flight<'_, S, F> {
     fn drop(&mut self) {
-        let mut state = self.inner.lock();
+        let mut state = self.inner.lock_in_drop();
         if std::thread::panicking() {
             let _ = std::fs::remove_dir_all(&self.stage);
             let _ = std::fs::remove_file(&self.part);
@@ -286,7 +288,7 @@ impl<S: Sealer, F: LayerSource> Drop for Deletion<'_, S, F> {
     fn drop(&mut self) {
         if std::thread::panicking() {
             let in_place = self.inner.tree_path(&self.diff_id).exists();
-            let mut state = self.inner.lock();
+            let mut state = self.inner.lock_in_drop();
             if in_place {
                 let _ = state.trees.get_mut(&self.diff_id).map(|e| e.doomed = false);
             } else {
@@ -314,7 +316,7 @@ impl<S: Sealer, F: LayerSource> Drop for Placing<'_, S, F> {
             let dest = self.inner.unique("trash", self.diff_id.hex());
             let _ = std::fs::rename(self.inner.tree_path(&self.diff_id), dest);
         }
-        self.inner.lock().placing.remove(&self.diff_id);
+        self.inner.lock_in_drop().placing.remove(&self.diff_id);
         self.inner.done.notify_all();
     }
 }
@@ -338,6 +340,17 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 impl<S: Sealer, F: LayerSource> Inner<S, F> {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().expect("tree store state poisoned")
+    }
+
+    /// The lock for a guard's `drop`. A panic in a caller's closure (the clock, the
+    /// free-space reading) while the lock is held poisons it; the guards that clean up as
+    /// that panic unwinds take it anyway, since a second panic in a drop would abort the
+    /// process. Everything they change is a count or a set that stays consistent.
+    fn lock_in_drop(&self) -> MutexGuard<'_, State> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     fn now(&self) -> u64 {
@@ -387,9 +400,10 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
 
     /// Moves a tree out of its place and deletes it with its record and pins. A tree that is
     /// already gone counts as moved. A tree that will not move is unsealed (an immutable
-    /// directory may refuse to move) and moved again; if it still will not move, it is
-    /// sealed again, so that a tree that stays in place stays immutable. Once the move has
-    /// happened what is left of the deletion is for the next start's sweep.
+    /// directory may refuse to move) and moved again; if it still will not move, or could
+    /// not be unsealed, it is sealed again, so that a tree that stays in place stays
+    /// immutable, and the error says so if that fails too. Once the move has happened what
+    /// is left of the deletion is for the next start's sweep.
     fn trash_tree(&self, diff_id: &DiffId) -> Result<(), Error> {
         let tree = self.tree_path(diff_id);
         let dest = self.unique("trash", diff_id.hex());
@@ -398,18 +412,32 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
                 self.forget_files(diff_id);
                 return Ok(());
             }
-            self.sealer.unseal_for_delete(&tree)?;
-            if let Err(source) = std::fs::rename(&tree, &dest) {
-                let _ = self.sealer.seal(&tree);
-                return Err(Error::Io {
-                    what: "move tree to trash",
-                    source,
-                });
-            }
+            self.sealer
+                .unseal_for_delete(&tree)
+                .map_err(Error::Seal)
+                .and_then(|()| {
+                    std::fs::rename(&tree, &dest).map_err(|source| Error::Io {
+                        what: "move tree to trash",
+                        source,
+                    })
+                })
+                .map_err(|error| self.seal_again(&tree, error))?;
         }
         self.forget_files(diff_id);
         self.discard(&dest);
         Ok(())
+    }
+
+    /// Puts the seal back on a tree that stays in place after `error`: that error, or the
+    /// two if the seal fails too.
+    fn seal_again(&self, tree: &Path, error: Error) -> Error {
+        match self.sealer.seal(tree) {
+            Ok(_) => error,
+            Err(again) => Error::Cleanup {
+                cause: Box::new(error),
+                cleanup: Box::new(Error::Seal(again)),
+            },
+        }
     }
 
     /// Deletes a tree and, if that succeeds, takes it out of the table.
@@ -588,15 +616,6 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
         self.place(want, stage, sealed_bytes, reservation, run, &mut placing)
     }
 
-    /// Moves a tree just placed out of the way, with its record, so that a retry can place
-    /// it again.
-    fn abandon(&self, diff_id: &DiffId) {
-        let dest = self.unique("trash", diff_id.hex());
-        let _ = std::fs::rename(self.tree_path(diff_id), &dest);
-        let _ = std::fs::remove_file(self.record_path(diff_id));
-        self.discard(&dest);
-    }
-
     /// The steps between the rename and the table entry. A failure other than a simulated
     /// death leaves nothing in place.
     fn record_placed(&self, want: &TreeWanted, sealed_bytes: u64) -> Result<(), Error> {
@@ -631,8 +650,14 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
                     Ok(()) => {}
                     Err(Error::Crashed(step)) => return Err(Error::Crashed(step)),
                     Err(error) => {
-                        self.abandon(diff_id);
-                        return Err(error);
+                        // Out of the way, with its record, so that a retry can place it.
+                        return Err(match self.trash_tree(diff_id) {
+                            Ok(()) => error,
+                            Err(cleanup) => Error::Cleanup {
+                                cause: Box::new(error),
+                                cleanup: Box::new(cleanup),
+                            },
+                        });
                     }
                 }
                 let mut state = self.lock();

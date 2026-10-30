@@ -150,14 +150,14 @@ jobs:
             exit 0
           fi
           macos=false
-          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
+          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^crates/js-treestore/(src/mac/|tests/(privileged|treestore/mac_))|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
             macos=true
           elif printf '%s\n' "$patch" | grep -Ev '^(\+\+\+|---) ' | grep -Eq '^[+-].*target_(os[[:space:]]*=[[:space:]]*"macos"|vendor[[:space:]]*=[[:space:]]*"apple")'; then
             macos=true
           fi
           echo "macos=$macos" >> "$GITHUB_OUTPUT"
 
-  # js-agent and js-cli (with the crates their tests start) build and pass their tests on
+  # js-agent, js-cli (with the crates their tests start) and js-treestore build and pass their tests on
   # Apple silicon. Tests that need Linux (pidfds, /proc) are cfg-gated, not removed; the
   # coverage and the Postgres tests stay on Linux.
   macos:
@@ -191,8 +191,8 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - run: cargo build --locked -p js-agent -p js-cli
-      - run: cargo test --locked -p js-agent -p js-cli
+      - run: cargo build --locked -p js-agent -p js-cli -p js-treestore
+      - run: cargo test --locked -p js-agent -p js-cli -p js-treestore
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

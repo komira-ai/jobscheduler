@@ -120,6 +120,39 @@
 //! memory, 1 GiB. An agent's own claim never raises it, and a hello must still meet the
 //! whole floor. `0`, above `100`, a negative number or a word is refused naming the pool and
 //! the field.
+//! An elastic pool may also set `live_until`, a TOML date-time with an offset such as
+//! `2027-01-01T12:00:00Z`: from that instant the pool is in `plan` (the scaler's step ends the
+//! go, and a file read after it starts the pool in `plan` with a warning), so a forgotten
+//! `launch = "live"` stops spending by itself. Beside the pools' own caps, three totals count
+//! the machines of every pool: `max_spend_per_day_total` (the last 24 hours),
+//! `max_spend_per_month_total` (the last 30 days, rolling) and `max_spend_since_go_total`
+//! (since each pool's go, its first launch since it was last in `plan`; the budget begins
+//! again at the next go). They are strings like the pool caps, may be set in `[server]` (all pools) and
+//! in a `[budget.<kind>]` table (the pools of that provider kind), and a launch must hold
+//! both; a month total below the day total is refused, and a `[budget]` table of a kind the
+//! server does not build is refused. A total only stops launches (`blocked` shows
+//! `max_spend_total` in `GET /v1/pools`): it never drains or releases a machine, so the
+//! machines admitted before it was reached run on, and can take the window past the figure. The
+//! overrun is bounded by `max_spend_per_hour` for the cloud lifetime of a launch only when the
+//! pool has both `max_age` and `server.max_lease_wall` (a busy host with no `max_age` is never
+//! retired) and the releases succeed (a machine the provider will not release, or that the
+//! cloud does not end, runs on: an alert says so, no cap does); the file warns when a total is
+//! set and a live pool lacks either key. The totals are sums over the pools of their scope:
+//! the server's since-go total adds the go of each pool that has one, so it is not a stable
+//! figure when pools come and go. A pool taken out of the file for good keeps its go, and its
+//! settled spend stays in that sum, until the pool is put back in `plan` for one step (the
+//! step that sees a pool in plan ends its go), after which it can be taken out. `GET
+//! /v1/pools` shows `launch` as the mode the pool is in now (`plan` once `live_until` has
+//! passed) and `live_until_ms`.
+//!
+//! Rolling back to a server older than the totals: it reads the records file, but its next
+//! save drops `go` and `pool_kinds` and it forgets records after 24 hours. After rolling forward
+//! again the budget since the go starts afresh at the pool's next launch (the old go and what
+//! was settled into it are forgotten), and the month window holds only the days since the
+//! rollback, for up to 30 days. For that period tighten the totals, or hold the pools in
+//! `plan`. A retry of a launch the provider told to wait (a `Planned` record), made when the
+//! pool has no go, begins none: that launch is outside any go, and is bounded by the day and
+//! month totals only.
 //! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing, and
 //! one that is `live` launches machines for requests that wait, within `max_instances`,
 //! `max_spend_per_hour` and `max_spend_per_day`, and releases them when they have been

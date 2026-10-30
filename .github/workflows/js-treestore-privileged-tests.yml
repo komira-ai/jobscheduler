@@ -1,0 +1,83 @@
+# Builds the js-treestore privileged integration test binary (`--test privileged`) for
+# aarch64-apple-darwin and uploads it, WITHOUT running it. These tests (crates/js-treestore/
+# tests/privileged.rs, all `#[ignore]`) seal a tree as root and need root, an unprivileged
+# user and a work directory on an APFS volume, which a hosted runner is not for: an operator
+# runs them once on a provisioned Mac that has no toolchain. Download the artifact, check
+# SHA256SUMS, copy the binary over, chmod +x it (the artifact zip drops the mode) and, as
+# root, run
+#   JS_TREESTORE_PRIV_PARENT=<its parent> JS_TREESTORE_PRIV_ROOT=<root-owned 0755 directory on the APFS volume> \
+#     JS_TREESTORE_PRIV_UID=<uid> JS_TREESTORE_PRIV_GID=<gid> \
+#     ./privileged --ignored --test-threads=1
+# (libtest flags come first.)
+#
+# Manual runs only. It publishes nothing: the binary is a workflow artifact for seven days.
+name: js-treestore-privileged-tests
+
+on:
+  # No inputs: it builds exactly the commit it is dispatched on.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  TARGET: aarch64-apple-darwin
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: rustup target add "$TARGET"
+      - name: Build the test binary without running it
+        run: |
+          set -euo pipefail
+          cargo test -p js-treestore --test privileged --no-run --locked --target "$TARGET" --message-format=json > build.json
+      - name: Pick the binary and check what it is
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          short="${commit:0:12}"
+          # The test executable of the `privileged` integration test: a compiler-artifact
+          # message with profile.test and that target's name and kind, never a guess by file name.
+          exe="$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "privileged" and (.target.kind | index("test")) != null and .executable != null) | .executable' build.json)"
+          if [ "$(printf '%s\n' "$exe" | grep -c .)" != 1 ]; then
+            echo "::error::expected exactly one privileged test executable, got: $exe"
+            exit 1
+          fi
+          mkdir dist
+          cp "$exe" dist/privileged
+          description="$(file dist/privileged)"
+          echo "$description"
+          case "$description" in
+            *"Mach-O 64-bit executable arm64"*) ;;
+            *)
+              echo "::error::dist/privileged is not an arm64 Mach-O executable"
+              exit 1
+              ;;
+          esac
+          (cd dist && shasum -a 256 privileged > SHA256SUMS)
+          sha="$(cut -d ' ' -f 1 dist/SHA256SUMS)"
+          {
+            echo "### js-treestore privileged test binary"
+            echo
+            echo "- commit: \`$commit\`"
+            echo "- target: \`$TARGET\`"
+            echo "- sha256: \`$sha\`"
+            echo "- file: $description"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "SHORT=$short" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-treestore-privileged-tests-${{ env.SHORT }}
+          path: |
+            dist/privileged
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7

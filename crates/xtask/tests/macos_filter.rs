@@ -177,6 +177,32 @@ fn a_change_under_a_js_mac_crate_runs_the_job() {
 }
 
 #[test]
+fn a_change_to_the_tree_store_s_macos_code_or_tests_runs_the_job() {
+    for (i, path) in [
+        "crates/js-treestore/src/mac/seal.rs",
+        "crates/js-treestore/tests/privileged.rs",
+        "crates/js-treestore/tests/treestore/mac_seal.rs",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            pr(&format!("treestore{i}"), &[(path, "fn a() {}\n")]),
+            "true",
+            "{path}"
+        );
+    }
+    // The rest of the crate is portable code and does not start the job.
+    assert_eq!(
+        pr(
+            "treestore-rest",
+            &[("crates/js-treestore/src/store.rs", "fn a() {}\n")]
+        ),
+        "false"
+    );
+}
+
+#[test]
 fn a_change_to_the_toolchain_pin_runs_the_job_and_one_to_the_lockfile_does_not() {
     assert_eq!(pr("pin", &[("rust-toolchain.toml", "# pin\n")]), "true");
     assert_eq!(pr("lock", &[("Cargo.lock", "# lock\n")]), "false");

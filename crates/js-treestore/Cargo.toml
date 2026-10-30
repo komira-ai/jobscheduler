@@ -10,6 +10,8 @@ publish.workspace = true
 [dependencies]
 hex.workspace = true
 js-bundle = { path = "../js-bundle" }
+libc.workspace = true
+rustix = { workspace = true, features = ["fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
