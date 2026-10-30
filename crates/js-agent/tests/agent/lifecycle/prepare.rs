@@ -4,9 +4,9 @@
 //! is the test's, so nothing here waits or measures time.
 
 use js_agent::lifecycle::code;
-use js_agent_wire::{Command, HeldRun, HeldState, JobSpec, Outcome};
+use js_agent_wire::{Command, HeldRun, HeldState, Isolation, JobSpec, Outcome};
 
-use super::{Harness, cleanup, job, names};
+use super::{Harness, Options, cleanup, job, names};
 
 const COLD: &str = "registry.example/cold:1@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
@@ -23,6 +23,27 @@ fn held(h: &Harness) -> Vec<(String, HeldState)> {
         .into_iter()
         .map(|HeldRun { run_id, state }| (run_id, state))
         .collect()
+}
+
+/// A host-isolation run is never asked about an image: even with its image scripted to
+/// be `Pending`, it starts at once and `prepare` is not consulted. It catches a start that
+/// makes a job that does not use the image store wait on it.
+#[test]
+fn a_host_isolation_run_starts_at_once_and_prepare_is_not_asked() {
+    let mut h = Harness::with(
+        "prepare-host-run",
+        Options {
+            allow_host_jobs: true,
+            ..Options::default()
+        },
+    );
+    h.fake.pull_pending(COLD);
+    let mut spec = cold("r1");
+    spec.isolation = Isolation::Host;
+    let events = names(&h.start(spec));
+    assert!(events.contains(&"started r1".to_owned()), "{events:?}");
+    assert_eq!(held(&h), [("r1".to_owned(), HeldState::Running)]);
+    assert!(h.fake.asks(COLD).is_empty());
 }
 
 /// A run whose image is being pulled is held as `starting`, books its CPU, memory and
@@ -239,7 +260,8 @@ fn every_run_that_waited_on_a_failed_fetch_ends() {
 
 /// A run that waited for its image is held to the end of its lease: a start that
 /// is valid for 30 s and asks for a minute, whose image arrives after 20 s, gets 10 s, not
-/// a fresh minute; one that names no lease end gets its whole limit.
+/// a fresh minute. (A start that names no lease end gets its whole limit: that half is in
+/// the wall-clock test above.)
 #[test]
 fn a_run_that_waited_never_outlives_its_lease() {
     let mut h = Harness::new("prepare-lease");

@@ -65,7 +65,10 @@ fn a_run_is_made_started_read_and_removed() {
 
     let bundle: Value =
         serde_json::from_str(&read(&lease.join("bundle/config.json"))).expect("a config");
-    assert_eq!(bundle["process"]["args"], json!(["/bin/tool", "--go"]));
+    assert_eq!(
+        bundle["process"]["args"],
+        json!(["/dev/js-init", "--", "/bin/tool", "--go"])
+    );
     assert!(
         bundle["process"]["env"]
             .as_array()
@@ -274,7 +277,7 @@ fn a_start_that_cannot_run_crun_is_taken_apart() {
 #[test]
 fn the_files_of_a_run_are_given_to_the_job() {
     let node = Node::new("run-files");
-    let root = node.files_root();
+    let (_files_dir, root) = node.files_root();
     let mut settings = node.settings("/root");
     settings.files = Some(root.clone());
     let hooks = Node::hooks(LONG, LONG);
