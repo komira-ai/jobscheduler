@@ -363,6 +363,11 @@ impl Agent {
             .expect("the agent started no job worker")
     }
 
+    /// The handle to the agent's job worker, or `Err` when the agent ended without one.
+    pub fn try_worker(&self) -> Result<Handle, ()> {
+        self.worker.recv_timeout(HANG_GUARD).map_err(|_| ())
+    }
+
     /// Delivers a stop request, as a signal would, without waiting for the agent to end.
     pub fn signal(&self) {
         self.go.send(Wake::Stop).unwrap();

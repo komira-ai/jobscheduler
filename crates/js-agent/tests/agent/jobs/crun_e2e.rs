@@ -380,7 +380,13 @@ fn an_agent_started_with_runtime_crun_runs_a_job_through_crun() {
         Redirect(address),
         machine,
     );
-    let worker = agent.worker();
+    let worker = match agent.try_worker() {
+        Ok(worker) => worker,
+        Err(()) => panic!(
+            "the agent ended before its worker started: {}",
+            agent.finish().err
+        ),
+    };
     assert_eq!(agent.next_wait(), Duration::from_secs(5), "the hello");
     let body = json!({
         "class": "mac",
