@@ -41,6 +41,8 @@ struct Container {
     labels: BTreeMap<String, String>,
     running_ms: u64,
     exit: Option<Exit>,
+    /// Whether it was started: a staged one (see [`FakeRuntime::stage`]) was only created.
+    started: bool,
 }
 
 #[derive(Default)]
@@ -74,6 +76,11 @@ struct State {
     asks: BTreeMap<String, Vec<Option<Ticket>>>,
     /// The ticket the next scripted pull is given.
     generation: u64,
+    /// Whether the runtime cannot use a GPU (`supports_gpus` says so).
+    gpus_off: bool,
+    /// The exit code of a container that handles SIGTERM, by run id: a stop ends it with
+    /// that code instead of the kill's 137.
+    term_exits: BTreeMap<String, i32>,
 }
 
 /// Where a scripted pull stands.
@@ -106,6 +113,43 @@ impl FakeRuntime {
             log: Rc::clone(log),
             clock: clock.clone(),
         }
+    }
+
+    /// The same runtime, which cannot use a GPU: `supports_gpus` is false.
+    #[must_use]
+    pub fn without_gpus(self) -> Self {
+        self.state.borrow_mut().gpus_off = true;
+        self
+    }
+
+    /// The container of `run_id` handles SIGTERM: a stop ends it with `code` (the kill of a
+    /// program that ignores the signal ends it with 137, which is what a stop does by
+    /// default).
+    pub fn on_term(&self, run_id: &str, code: i32) {
+        self.state
+            .borrow_mut()
+            .term_exits
+            .insert(run_id.to_owned(), code);
+    }
+
+    /// Creates the container of `spec` and does not start it, as a runtime does that is
+    /// stopped between the two.
+    pub fn stage(&self, spec: &RunSpec) -> RunHandle {
+        let mut state = self.state.borrow_mut();
+        state.next += 1;
+        let id = format!("c{}", state.next);
+        state.containers.insert(
+            id.clone(),
+            Container {
+                run_id: spec.run_id.clone(),
+                scratch: spec.scratch.clone(),
+                labels: spec.labels.clone(),
+                running_ms: 0,
+                exit: None,
+                started: false,
+            },
+        );
+        RunHandle(id)
     }
 
     /// The container of `run_id` has printed `tail`. The log notes `logs <id>` when it is
@@ -265,6 +309,7 @@ impl FakeRuntime {
                 labels,
                 running_ms,
                 exit: None,
+                started: true,
             },
         );
         id
@@ -347,6 +392,7 @@ impl Runtime for FakeRuntime {
                 labels: spec.labels.clone(),
                 running_ms: 0,
                 exit: None,
+                started: true,
             },
         );
         Ok(RunHandle(id))
@@ -371,11 +417,17 @@ impl Runtime for FakeRuntime {
         let mut state = self.state.borrow_mut();
         state.stops.push((id.0.clone(), grace));
         let exits = state.stop_exits;
+        let term = state
+            .containers
+            .get(&id.0)
+            .and_then(|c| state.term_exits.get(&c.run_id))
+            .copied()
+            .unwrap_or(137);
         let container = state.containers.get_mut(&id.0);
         container.into_iter().for_each(|c| {
             if exits && c.exit.is_none() {
                 c.exit = Some(Exit {
-                    code: 137,
+                    code: term,
                     oom_killed: false,
                 });
             }
@@ -420,6 +472,10 @@ impl Runtime for FakeRuntime {
         Ok(())
     }
 
+    fn supports_gpus(&self) -> bool {
+        !self.state.borrow().gpus_off
+    }
+
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         let state = self.state.borrow();
         let run = &state.containers.get(&id.0)?.run_id;
@@ -438,7 +494,7 @@ impl Runtime for FakeRuntime {
                 id: RunHandle(id.clone()),
                 labels: c.labels.clone(),
                 running_ms: c.running_ms,
-                never_started: false,
+                never_started: !c.started,
             })
             .collect())
     }
