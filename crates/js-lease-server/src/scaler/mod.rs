@@ -82,8 +82,8 @@ use js_elastic::{Acquired, HostRef, Released, SchedulerId, Secret};
 use js_lease::{Booking, Clock};
 use js_registry::{HostState, HostView, Launchable, SessionSource};
 use js_scaler::{
-    AcquireResult, Action, Input, Millis, Phase, PoolInput, Records, ReleaseResult, Settings,
-    State, launchable, step,
+    AcquireResult, Action, Budgets, Input, Millis, Phase, PoolInput, Records, ReleaseResult,
+    Settings, State, launchable, step,
 };
 use js_types::ExecMode;
 use tracing::{debug, warn};
@@ -144,6 +144,8 @@ struct Core {
     scheduler: SchedulerId,
     exec: ExecMode,
     settings: Settings,
+    /// The server-wide totals every step is given.
+    budgets: Budgets,
     /// What decides whether the registry's view is complete (the `complete` module).
     gate: Mutex<complete::Gate>,
     /// Held for the whole of a tick, so that two ticks never work on the same copy.
@@ -182,8 +184,22 @@ impl Scaler {
         effects: Box<dyn Effects>,
         clock: SharedClock,
         entropy: Box<dyn SessionSource>,
-        (scheduler, exec): (SchedulerId, ExecMode),
+        wiring: (SchedulerId, ExecMode),
         settings: Settings,
+        records: Records,
+    ) -> Self {
+        let budgets = (settings, Budgets::default());
+        Self::budgeted(effects, clock, entropy, wiring, budgets, records)
+    }
+
+    /// A scaler as [`Scaler::new`] makes one, whose steps also hold the server-wide
+    /// `budgets` ([`Budgets`]).
+    pub fn budgeted(
+        effects: Box<dyn Effects>,
+        clock: SharedClock,
+        entropy: Box<dyn SessionSource>,
+        (scheduler, exec): (SchedulerId, ExecMode),
+        (settings, budgets): (Settings, Budgets),
         records: Records,
     ) -> Self {
         let mut unrevoked = BTreeSet::new();
@@ -210,6 +226,7 @@ impl Scaler {
             scheduler,
             exec,
             settings,
+            budgets,
             gate: Mutex::new(gate),
             one_tick: Mutex::new(()),
             memory: Mutex::new(memory),
@@ -512,6 +529,7 @@ impl Core {
             released: memory.released.clone(),
             not_found,
             entropy: draws.map(|bytes| tail(&bytes)).collect(),
+            budgets: self.budgets.clone(),
         }
     }
 

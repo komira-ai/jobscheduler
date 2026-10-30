@@ -321,39 +321,36 @@ fn only_some_phases_count() {
     assert!(!settled.counts());
 }
 
-/// Asserts that a file of version 2 that holds a `go` or a `pool_kinds` key (a later writer's) reads under this
-/// reader, whatever the key holds, and reads as the same records without it; written back,
-/// the file has no `go`. It catches a reader that refuses a key it does not know, which would
-/// keep a server rolled back from a newer one from starting.
+/// Asserts that the `go` and `pool_kinds` keys are read, not dropped: a file of version 2 that
+/// holds them reads with the go and the kinds as written, writes them back, and reads again as
+/// the same records. A `go` of the wrong type is refused, as any other field is. The keys are
+/// absent from a file written while no pool has launched, and the earlier reader that ignores
+/// them (#452) reads either. It catches a key that is read and lost on the next save.
 #[test]
-fn a_file_holding_a_go_key_reads_and_the_key_is_dropped() {
+fn the_go_and_pool_kinds_keys_are_read_and_written_back() {
     let with = GOLDEN.replacen(
         "\"last_step\"",
-        "\"go\": {\"gpu\": {\"at\": 5, \"settled\": 7}},\n  \"last_step\"",
+        "\"go\": {\"gpu\": {\"at\": 5, \"settled\": 7}},\n  \"pool_kinds\": {\"gpu\": \"x\"},\n  \"last_step\"",
         1,
     );
-    assert!(with.contains("\"go\""), "{with}");
     let records = Records::decode(&with).unwrap();
-    assert_eq!(records, Records::decode(GOLDEN).unwrap());
-    assert!(!records.encode().unwrap().contains("\"go\""));
-    let odd = GOLDEN.replacen("\"last_step\"", "\"go\": 3,\n  \"last_step\"", 1);
-    assert!(Records::decode(&odd).is_ok());
-    let kinds = GOLDEN.replacen(
-        "\"last_step\"",
-        "\"pool_kinds\": {\"gpu\": \"x\"},\n  \"last_step\"",
-        1,
-    );
-    assert_eq!(
-        Records::decode(&kinds).unwrap(),
-        Records::decode(GOLDEN).unwrap()
-    );
+    let go = js_scaler::Go {
+        at: js_scaler::Millis::new(5),
+        settled: 7,
+    };
+    assert_eq!(records.go["gpu"], go);
+    assert_eq!(records.pool_kinds["gpu"], "x");
+    let text = records.encode().unwrap();
     assert!(
-        !Records::decode(&kinds)
-            .unwrap()
-            .encode()
-            .unwrap()
-            .contains("pool_kinds")
+        text.contains("\"go\"") && text.contains("\"pool_kinds\""),
+        "{text}"
     );
+    assert_eq!(Records::decode(&text).unwrap(), records);
+
+    let without = Records::decode(GOLDEN).unwrap();
+    assert!(without.go.is_empty() && without.pool_kinds.is_empty());
+    let odd = GOLDEN.replacen("\"last_step\"", "\"go\": 3,\n  \"last_step\"", 1);
+    assert!(Records::decode(&odd).is_err());
 }
 
 /// Asserts that a file of version 2 that holds a `brake` key (a later writer's failure count

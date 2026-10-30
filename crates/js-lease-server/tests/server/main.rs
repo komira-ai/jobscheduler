@@ -15,6 +15,7 @@ mod agents_whole;
 mod alerts;
 mod auth;
 mod binary;
+mod config_budget;
 mod config_file;
 mod config_joined;
 mod config_launch;
