@@ -6,7 +6,7 @@ use std::time::Duration;
 use js_client::Client;
 
 use crate::api::{Freed, Granted, Lease, Routes, Standing, entries};
-use crate::cli::{AcquireArgs, IdArgs, RenewArgs};
+use crate::cli::{AcquireArgs, IdArgs, NativeArgs, RenewArgs};
 use crate::events::{ForwardedSignal, Waiter};
 use crate::failure::{Failure, exit};
 use crate::render::Render;
@@ -136,5 +136,17 @@ pub(crate) fn list(client: &Client, render: Render, out: &mut dyn Write) -> Resu
     let body = client.list()?;
     let listing = render.listing(&body, &entries(&body)?);
     let _ = out.write_all(listing.as_bytes());
+    Ok(exit::OK)
+}
+
+/// `lease native`: queues the job and prints the run's id and state.
+pub(crate) fn native(
+    client: &Client,
+    render: Render,
+    args: &NativeArgs,
+    out: &mut dyn Write,
+) -> Result<u8, Failure> {
+    let queued = client.queue_run(&args.id, &args.body())?;
+    let _ = out.write_all(render.queued(&queued).as_bytes());
     Ok(exit::OK)
 }

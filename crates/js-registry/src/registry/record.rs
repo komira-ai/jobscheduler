@@ -20,6 +20,12 @@ pub(super) struct Record {
     /// at a hello, and a hello of a lost host gives up every run still queued for it, so
     /// the check at queueing time is the only one a start needs.
     pub(super) files: bool,
+    /// Whether the host's last hello reported `exec` as `sandbox-exec`: it runs native
+    /// jobs. Kept like `files`, and for the same reason.
+    pub(super) native: bool,
+    /// Whether the host's last hello reported a bundle store (`bundle-root`). Kept like
+    /// `files`.
+    pub(super) bundles: bool,
     /// The quota in bytes the host's last hello said it enforces on a run that sets no
     /// `disk_bytes` (`scratch-default-gib`), when it also reported `scratch-quota`; `None`
     /// for a host that reported no quota, or a default that is missing, not a whole
@@ -64,6 +70,8 @@ impl Record {
             agent_version: None,
             labels: BTreeMap::new(),
             files: false,
+            native: false,
+            bundles: false,
             quota_default: None,
             held: BTreeSet::new(),
             beats: 0,

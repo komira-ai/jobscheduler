@@ -167,3 +167,56 @@ fn a_home_that_is_not_utf8_reaches_the_unit_as_it_is() {
     want.push(home);
     assert!(args.contains(&want), "{args:?}");
 }
+
+/// Catches a root target's unit that differs from the agent's in anything but who runs it
+/// and what it reads: the same `Delegate=yes`, slice, OOM score, directory and arguments as
+/// the rootless units, no `--uid` or `--gid` (the unit would run as the invoking user), and
+/// an environment of `PATH` and the job user only (no `HOME` of the invoking user, no
+/// image).
+#[test]
+fn a_root_target_s_unit_is_delegated_and_runs_as_root_for_the_job_user() {
+    let built = Built {
+        executable: "/w/target/debug/deps/crun_root-0f1e".into(),
+        dir: "/w/crates/js-contain".into(),
+    };
+    let got: Vec<String> = root_systemd_run_args(&RootUnit {
+        target: "crun_root",
+        built: &built,
+        job_user: "js-job",
+        path: OsStr::new("/usr/bin:/bin"),
+    })
+    .iter()
+    .map(|a| a.to_str().expect("utf-8").to_owned())
+    .collect();
+    let want = [
+        "systemd-run",
+        "--quiet",
+        "--wait",
+        "--collect",
+        "--pipe",
+        "--unit=js-crun-tests-crun_root",
+        "--slice=js-agent.slice",
+        "-p",
+        "Delegate=yes",
+        "-p",
+        "OOMScoreAdjust=-900",
+        "--working-directory=/w/crates/js-contain",
+        "-E",
+        "PATH=/usr/bin:/bin",
+        "-E",
+        "JS_JOB_USER=js-job",
+        "/w/target/debug/deps/crun_root-0f1e",
+        "--include-ignored",
+    ];
+    assert_eq!(got, want);
+}
+
+/// Catches the root targets run under another name than the test file's (cargo would build
+/// nothing) and mixed into the rootless ones (they would run without a job user).
+#[test]
+fn the_root_targets_are_their_own_list() {
+    assert_eq!(ROOT_TARGETS, ["crun_root"]);
+    for target in ROOT_TARGETS {
+        assert!(!TARGETS.contains(target), "{target}");
+    }
+}

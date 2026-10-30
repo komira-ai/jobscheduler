@@ -135,3 +135,57 @@ impl Subject for FakeSubject {
 }
 
 conformance!(fake_subject, any());
+
+/// A runtime that gives only what the trait requires.
+struct Bare;
+
+impl js_agent::lifecycle::Runtime for Bare {
+    fn create_and_start(
+        &mut self,
+        _spec: &RunSpec,
+    ) -> Result<RunHandle, js_agent::lifecycle::RuntimeError> {
+        Err(js_agent::lifecycle::RuntimeError::new("no"))
+    }
+
+    fn poll(
+        &mut self,
+        _id: &RunHandle,
+    ) -> Result<js_agent::lifecycle::Status, js_agent::lifecycle::RuntimeError> {
+        Ok(js_agent::lifecycle::Status::Gone)
+    }
+
+    fn stop(
+        &mut self,
+        _id: &RunHandle,
+        _grace: std::time::Duration,
+    ) -> Result<(), js_agent::lifecycle::RuntimeError> {
+        Ok(())
+    }
+
+    fn remove(&mut self, _id: &RunHandle) -> Result<(), js_agent::lifecycle::RuntimeError> {
+        Ok(())
+    }
+
+    fn list_labelled(
+        &mut self,
+    ) -> Result<Vec<js_agent::lifecycle::Found>, js_agent::lifecycle::RuntimeError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Proves the defaults of the trait are what the documentation says: a runtime that says
+/// nothing of GPUs supports them, has nothing to check of its network, has no control group
+/// for a container, keeps no log, is always ready for an image and lists the ids it lists.
+/// Catches a default that changes under the runtimes that rely on it.
+#[test]
+fn a_runtime_that_overrides_nothing_gets_the_documented_defaults() {
+    use js_agent::lifecycle::{Prepared, Runtime as _};
+    let mut bare = Bare;
+    let id = RunHandle("c1".to_owned());
+    assert!(bare.supports_gpus());
+    assert_eq!(bare.check_egress(), Ok(()));
+    assert_eq!(bare.cgroup(&id), None);
+    assert_eq!(bare.log_tail(&id), Ok(None));
+    assert_eq!(bare.prepare("image", None), Prepared::Ready);
+    assert_eq!(bare.list_ids(), Ok(Vec::new()));
+}
