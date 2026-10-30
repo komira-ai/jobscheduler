@@ -279,7 +279,7 @@ fn a_lost_answer_that_landed_leaves_a_machine_and_an_unresolved_id_until_a_list_
     assert_eq!(cloud.acquire(&request("a1")), Acquired::Unknown);
     assert_eq!(cloud.launched(), 1);
     let id = AcquireId::new("a1").unwrap();
-    assert_eq!(cloud.unresolved(), [id.clone()]);
+    assert_eq!(cloud.unresolved(), std::slice::from_ref(&id));
     assert_eq!(
         cloud.acquire(&request("a1")),
         Acquired::Deferred { wait: mins(30) }
@@ -358,7 +358,7 @@ fn a_429_storm_makes_no_machine_ends_none_and_passes_when_it_ends() {
     assert!(error.to_string().contains("429"), "{error}");
     cloud.clock().advance(mins(3));
     assert_eq!(cloud.release(&id), Released::Unknown);
-    assert_eq!(cloud.running(), [id.clone()]);
+    assert_eq!(cloud.running(), std::slice::from_ref(&id));
     assert_eq!(cloud.bill(), owed(180_000));
 
     cloud.script_forever(Call::List, Step::Pass);
@@ -464,7 +464,7 @@ fn a_release_that_is_refused_forever_ends_nothing_and_the_bill_keeps_running() {
     for hour in 1..=3 {
         cloud.clock().advance(mins(60));
         assert_eq!(cloud.release(&id), Released::Refused(Claim::Suspect));
-        assert_eq!(cloud.running(), [id.clone()]);
+        assert_eq!(cloud.running(), std::slice::from_ref(&id));
         assert!(!cloud.is_gone(&id));
         assert_eq!(cloud.bill(), owed(hour * 3_600_000));
     }

@@ -195,6 +195,7 @@ async fn a_quota_denial_or_shape_refusal_holds_the_pool_for_the_cooldown() {
         assert!(rig.state().records.instances.is_empty());
 
         rig.advance(9 * 60);
+        rig.wait();
         rig.tick().await;
         assert_eq!(
             cloud.count(Call::Acquire),
@@ -203,6 +204,7 @@ async fn a_quota_denial_or_shape_refusal_holds_the_pool_for_the_cooldown() {
         );
         rig.advance(2 * 60);
         rig.h.checks.step().await;
+        rig.wait();
         rig.tick().await;
         assert_eq!(cloud.launched(), 1, "{code:?}");
     }
@@ -307,6 +309,7 @@ async fn a_list_that_fails_forever_launches_nothing_and_the_scaler_says_why() {
     rig.wait();
     for minute in 0..30 {
         rig.advance(60);
+        rig.wait();
         rig.tick().await;
         let blocked = rig.state().blocked["burst"];
         assert_eq!(blocked, Blocked::ListFailed, "minute {minute}");
@@ -317,6 +320,7 @@ async fn a_list_that_fails_forever_launches_nothing_and_the_scaler_says_why() {
     assert_eq!(rig.registry().waiting().len(), 1);
 
     cloud.script_forever(Call::List, Step::Pass);
+    rig.wait();
     rig.tick().await;
     assert_eq!(cloud.launched(), 1);
 }
@@ -335,6 +339,7 @@ async fn a_429_storm_on_launches_keeps_one_record_and_launches_when_it_ends() {
     rig.wait();
     for _ in 0..20 {
         rig.advance(30);
+        rig.wait();
         rig.tick().await;
     }
     assert_eq!(cloud.launched(), 0);
@@ -345,6 +350,7 @@ async fn a_429_storm_on_launches_keeps_one_record_and_launches_when_it_ends() {
     cloud.script_forever(Call::Acquire, Step::Pass);
     for _ in 0..4 {
         rig.advance(30);
+        rig.wait();
         rig.tick().await;
     }
     assert_eq!(cloud.launched(), 1);
