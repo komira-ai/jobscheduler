@@ -112,6 +112,7 @@ case "$cmd" in
     echo $$ > "$root/pid"
     case "$name" in
       *-exit) exit 3;;
+      *-say) echo to-stdout; echo to-stderr >&2; exit 0;;
       *-fail) echo '{"level":"error","msg":"cgroup: no"}' >> "$log"; exit 1;;
       *-oom) printf 'low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n' > "$cg/memory.events"; exit 137;;
       *-busy) printf 'low 0\nhigh 0\nmax 0\noom 0\noom_kill 1\n' > "$cg/memory.events"; exit 137;;

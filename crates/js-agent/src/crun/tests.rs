@@ -371,4 +371,11 @@ fn a_container_that_did_not_run_gives_its_words_in_the_standard_error() {
     assert_eq!(tail.stderr, "crun: cannot start\n");
     assert_eq!(not_run_words(&Ok(Ended::Exited(1))), None);
     assert!(!log_tail_of(&written, None).stderr.contains("crun:"));
+    // A stream that already ends in a newline gets no blank line before the words.
+    let lined = Captured {
+        stdout: stream(b"", 0),
+        stderr: stream(b"partial\n", 8),
+    };
+    let tail = log_tail_of(&lined, Some("exited 1"));
+    assert_eq!(tail.stderr, "partial\ncrun: exited 1\n");
 }
