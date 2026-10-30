@@ -32,6 +32,8 @@ tokio = { workspace = true, features = ["rt", "signal"] }
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
 js-pool-static = { path = "../js-pool-static" }
+js-provider = { path = "../js-provider" }
+js-registry = { path = "../js-registry" }
 js-testkit = { path = "../js-testkit" }
 clap.workspace = true
 rustix = { workspace = true, features = ["process"] }

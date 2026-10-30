@@ -4,7 +4,11 @@
 use super::Lifecycle;
 use super::job::{Cause, Stage, check_taint, cleanup_taint, outcome};
 use crate::lifecycle::runtime::{RunHandle, Status};
-use crate::lifecycle::{CheckFinding, Config, Event, Finished, code};
+use crate::lifecycle::{CheckFinding, Config, Event, Finding, Finished, code};
+
+/// How often a finished run's usage that stays nonzero is reported again while the agent
+/// waits for it (one hour).
+const REMIND_HELD_MS: u64 = 3_600_000;
 
 impl Lifecycle {
     /// Watches one running job: the wall-time limit, a stop that is owed, the exit.
@@ -104,6 +108,8 @@ impl Lifecycle {
             checks,
             taint,
             slots,
+            quota_health,
+            clock,
             ..
         } = self;
         let job = &mut jobs[index];
@@ -140,6 +146,69 @@ impl Lifecycle {
                 },
                 Stage::Scratch => match remove_run_dirs(config, &run_id) {
                     Ok(()) => {
+                        // The tree is gone; now the bound comes off its project, and the
+                        // slot stays held until the project reads no usage (the file system
+                        // frees the inodes of a removed tree in the background, and a run
+                        // that took the slot sooner would be counted with them). The booked
+                        // bytes stay held with it: the server counts them as free once the
+                        // run has ended, so holding them a little longer only makes the
+                        // agent refuse later than the server admits for the seconds the
+                        // lag lasts, the same as for every other booked dimension, which
+                        // are held until this cleanup has passed. A failure is tried again
+                        // at the next step, together with the removal, which finds nothing
+                        // to do. None of it taints: nothing is left on disk.
+                        if let (Some(quota), Some(slot)) = (&config.quota, job.slot) {
+                            let dir = config.scratch.of(&run_id);
+                            let now = clock.now_ms();
+                            let health = config.scratch.health_dir();
+                            if let Err(why) = quota.clear(&dir, slot) {
+                                quota_health.failed(quota, now, &health, events);
+                                job.note(code::QUOTA_CLEAR_FAILED, why.to_string(), events);
+                                return;
+                            }
+                            match quota.usage(slot) {
+                                Ok(used) if used.is_zero() => quota_health.ok(),
+                                Ok(used) => {
+                                    let held = format!(
+                                        "the project still holds {} bytes in {} inodes",
+                                        used.bytes, used.inodes
+                                    );
+                                    let (since, reported) =
+                                        *job.usage_held.get_or_insert((now, now));
+                                    if now.saturating_sub(since) < quota.usage_wait_ms() {
+                                        job.note(code::QUOTA_USAGE_HELD, held.clone(), events);
+                                        if now.saturating_sub(reported) >= REMIND_HELD_MS {
+                                            job.usage_held = Some((since, now));
+                                            events.push(Event::Finding(Finding {
+                                                run_id: Some(run_id.clone()),
+                                                code: code::QUOTA_USAGE_HELD,
+                                                message: held,
+                                            }));
+                                        }
+                                        return;
+                                    }
+                                    // The usage never reached zero in the time the agent waits
+                                    // (a file held open outside the container, accounting that
+                                    // drifted): the slot is parked instead of held for good, the
+                                    // cleanup goes on, so the run's place and bytes are given
+                                    // back, and the quota counts a failure.
+                                    let gave_up = format!(
+                                        "{held} {} seconds after its tree was removed: the slot is \
+                                         parked and the cleanup goes on",
+                                        quota.usage_wait_ms() / 1000
+                                    );
+                                    job.note(code::QUOTA_USAGE_ABANDONED, gave_up, events);
+                                    job.slot_parked = true;
+                                    quota_health.failed(quota, now, &health, events);
+                                    quota_health.abandoned(quota, now, events);
+                                }
+                                Err(why) => {
+                                    quota_health.failed(quota, now, &health, events);
+                                    job.note(code::QUOTA_CLEAR_FAILED, why.to_string(), events);
+                                    return;
+                                }
+                            }
+                        }
                         events.push(Event::ScratchRemoved {
                             run_id: run_id.clone(),
                         });
@@ -176,8 +245,10 @@ impl Lifecycle {
                         job.stage = Stage::Freed;
                         // The cleanup passed: no container, no scratch directory and no
                         // process of the slot's uid. Only here does the slot come back.
-                        if let Some(slot) = job.slot {
-                            slots.release(slot);
+                        match (job.slot, job.slot_parked) {
+                            (Some(slot), true) => slots.park(slot),
+                            (Some(slot), false) => slots.release(slot),
+                            (None, _) => {}
                         }
                         events.push(Event::SlotFreed {
                             run_id: run_id.clone(),

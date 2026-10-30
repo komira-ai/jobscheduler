@@ -17,6 +17,10 @@ use crate::quota::{MAX_BLOCK_LIMIT_BYTES, MAX_INODE_LIMIT, Mode, ProjectIds};
 struct St {
     mountinfo: String,
     rdev: Option<u64>,
+    /// The `st_dev` of the root; the mount's own device when not set.
+    root_dev: Option<u64>,
+    /// The device each `set_limits` was aimed at.
+    aimed: Vec<PathBuf>,
     flags: u16,
     attrs: BTreeMap<PathBuf, Fsx>,
     /// The path each open descriptor was opened from (the script has no real project ids).
@@ -71,6 +75,11 @@ impl Sys for Arc<Script> {
         Ok(self.st().rdev)
     }
 
+    fn dev_of(&self, _path: &Path) -> io::Result<u64> {
+        self.enter("dev_of")?;
+        Ok(self.st().root_dev.unwrap_or(DEV))
+    }
+
     fn quota_flags(&self, _device: &Path) -> io::Result<u16> {
         self.enter("flags")?;
         Ok(self.st().flags)
@@ -120,9 +129,10 @@ impl Sys for Arc<Script> {
         dq.ok_or_else(|| io::ErrorKind::NotFound.into())
     }
 
-    fn set_limits(&self, _device: &Path, project: u32, blocks: u64, inodes: u64) -> io::Result<()> {
+    fn set_limits(&self, device: &Path, project: u32, blocks: u64, inodes: u64) -> io::Result<()> {
         self.enter("set_limits")?;
         let mut st = self.st();
+        st.aimed.push(device.to_owned());
         let dq = st.dq.entry(project).or_default();
         dq.blocks_limit = blocks;
         dq.inodes_limit = inodes;
@@ -162,7 +172,10 @@ impl Rig {
     }
 
     fn mountinfo(fstype: &str, source: &str, root: &Path) -> String {
-        let (major, minor) = (7, 5);
+        Self::mountinfo_on(fstype, source, root, (7, 5))
+    }
+
+    fn mountinfo_on(fstype: &str, source: &str, root: &Path, (major, minor): (u64, u64)) -> String {
         let point = root.display();
         format!(
             "1 0 {major}:{minor} / / rw - rootfs rootfs rw\n40 1 {major}:{minor} / {point} rw - {fstype} {source} rw\n"
@@ -351,6 +364,7 @@ fn apply_sets_the_project_then_the_limits() {
         [
             "mountinfo",
             "rdev",
+            "dev_of",
             "open_dir",
             "is_empty",
             "get_attr",
@@ -568,14 +582,8 @@ fn clear_removes_the_limits_then_the_project() {
     rig.quota.clear(&dir, project).unwrap();
     assert_eq!(
         rig.script.log(),
-        [
-            "mountinfo",
-            "rdev",
-            "set_limits",
-            "open_dir",
-            "get_attr",
-            "set_attr"
-        ]
+        ["set_limits", "open_dir", "get_attr", "set_attr"],
+        "the device found by the apply is remembered"
     );
     let attr = rig.script.st().attrs[&dir];
     assert_eq!((attr.projid, attr.xflags & XFLAG_PROJINHERIT), (0, 0));
@@ -619,4 +627,72 @@ fn clear_reports_each_failed_call() {
         rig.script.st().fail.clear();
         rig.quota.clear(&dir, project).unwrap();
     }
+}
+
+/// The mount table is read once for the calls after the probe or the first call, not by
+/// each of them (a restart reads the usage of thousands of slots), and a call that fails
+/// drops what was remembered, so the next one reads the table again. It catches a read of
+/// `/proc/self/mountinfo` per call, and a device remembered after the mount changed.
+#[test]
+fn the_device_is_read_once_and_forgotten_after_a_failed_call() {
+    let rig = Rig::new("device-cache");
+    let project = rig.project(4);
+    let reads = |rig: &Rig| {
+        rig.script
+            .log()
+            .iter()
+            .filter(|op| **op == "mountinfo")
+            .count()
+    };
+    for _ in 0..5 {
+        rig.quota.usage(project).unwrap();
+    }
+    assert_eq!(reads(&rig), 1);
+    rig.script.fail("get_quota");
+    assert!(rig.quota.usage(project).is_err());
+    rig.script.st().fail.clear();
+    rig.quota.usage(project).unwrap();
+    assert_eq!(reads(&rig), 2, "the failed call dropped it, once");
+    assert_eq!(rig.quota.probe().mode, Mode::Project);
+    assert_eq!(reads(&rig), 3, "a probe always reads");
+    rig.quota.usage(project).unwrap();
+    assert_eq!(reads(&rig), 3, "and what it found is used");
+}
+
+/// A volume swapped under the scratch root's path (another device is mounted there) is
+/// noticed at the next `apply`: the remembered device is not the root's any more, so the
+/// mount table is read again and the limits are aimed at the new device, not the old one.
+/// A root that stays where it was keeps the remembered device (no read). It catches limits
+/// set on the file system that used to be there, which would leave the run unbounded.
+#[test]
+fn a_swapped_volume_makes_apply_find_the_device_again() {
+    let rig = Rig::new("swap");
+    let project = rig.project(5);
+    rig.quota
+        .apply(&rig.run_dir("r1"), project, 4096, 10)
+        .unwrap();
+    let reads = |rig: &Rig| {
+        rig.script
+            .log()
+            .iter()
+            .filter(|op| **op == "mountinfo")
+            .count()
+    };
+    rig.quota
+        .apply(&rig.run_dir("r2"), project, 4096, 10)
+        .unwrap();
+    assert_eq!(reads(&rig), 1, "the same volume: no read");
+    {
+        let mut st = rig.script.st();
+        st.mountinfo = Rig::mountinfo_on("xfs", "/dev/other", &rig.root, (8, 1));
+        st.rdev = Some(makedev(8, 1));
+        st.root_dev = Some(makedev(8, 1));
+    }
+    rig.quota
+        .apply(&rig.run_dir("r3"), project, 4096, 10)
+        .unwrap();
+    assert_eq!(reads(&rig), 2, "another volume: found again");
+    let aimed = rig.script.st().aimed.clone();
+    let names: Vec<_> = aimed.iter().map(|d| d.display().to_string()).collect();
+    assert_eq!(names, ["/dev/test", "/dev/test", "/dev/other"]);
 }
