@@ -200,7 +200,7 @@ pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
     Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
 };
-pub use scratch::ScratchRoot;
+pub use scratch::{DirLayout, ScratchRoot};
 pub use taint::{MARKER_FILE, StateRoot};
 
 /// The `detail` of a `failed_to_start` result when the cause is not a wire refusal code.
