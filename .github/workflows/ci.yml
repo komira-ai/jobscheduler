@@ -416,6 +416,87 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
+  # The container runtime against a real `crun`, in a `Delegate=yes` system unit each, with
+  # every step one command (`cargo xtask crun-tests`, crates/xtask/src/crun_tests.rs; the
+  # tests are crates/js-contain/tests/crun and crates/js-contain/tests/crun_root, `#[ignore]`d
+  # in every other job).
+  #
+  # `crun-rootless` runs the tests as an ordinary user: the image unpack and a job over the
+  # unpacked root, with the runner user's own subordinate ids.
+  #
+  # `crun-root` runs them as the agent runs on a node: a ROOT process that starts every
+  # container as a dedicated non-root job user (`js-job`, which `useradd` gives a range of
+  # subordinate ids), and reads from inside each container the ids it runs as, its
+  # capabilities, the seccomp filter, the read-only root, `/tmp`, the network namespace, the
+  # OOM group and the exec-root overlay's options; that an out-of-memory kill is the lease's
+  # own, that a kill leaves no process or cgroup, and that one job at its process limit does
+  # not stop another from forking. The AppArmor restriction on user namespaces stays at the
+  # runner's default (on): the distribution's `/usr/bin/crun` profile lets the job user's
+  # `crun` make one. A hosted runner's kernel and AppArmor policy are not a node's, so a
+  # node's own canary stays the gate. The jobs stand alone: a failure here blocks no other.
+  crun-rootless:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y --no-install-recommends crun uidmap
+      - run: cargo xtask crun-tests
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  crun-root:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y --no-install-recommends crun uidmap busybox-static apparmor
+      - run: sudo useradd --create-home --shell /usr/sbin/nologin js-job
+      - run: cargo xtask crun-tests --job-user js-job
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   # Licences, advisories, bans and sources, as deny.toml configures them. cargo-deny is
   # the release binary, checked against its SHA-256 before use.
   deny:
