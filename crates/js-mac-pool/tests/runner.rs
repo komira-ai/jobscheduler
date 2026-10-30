@@ -636,62 +636,35 @@ fn the_dev_fd_grant_lets_a_shell_write_through_a_descriptor_path() {
 }
 
 #[test]
-fn probe_listed_port_connect_repeated() {
-    let scene = Scene::new("probe", "run");
+fn probe_errno_by_level() {
+    let scene = Scene::new("probe3", "run");
     let one = TcpListener::bind("127.0.0.1:0").expect("listener");
-    let port_one = one.local_addr().expect("addr").port();
+    let port = one.local_addr().expect("addr").port();
     std::thread::spawn(move || for _ in one.incoming() {});
-    let to_one = connect_to(port_one);
-    let only_one = Net::Ports(Ports::new(&[port_one]).expect("ports"));
-    let mut bad = Vec::new();
-    for i in 0..300 {
-        let out = scene.sandboxed(only_one.clone(), "/usr/bin/nc", &to_one);
-        if !out.status.success() {
-            bad.push(format!("#{i}: {}", describe(&out)));
-        }
-    }
-    let mut ctl_bad = Vec::new();
-    for i in 0..300 {
-        let out = control("/usr/bin/nc", &to_one);
-        if !out.status.success() {
-            ctl_bad.push(format!("#{i}: {}", describe(&out)));
-        }
-    }
-    assert!(
-        bad.is_empty() && ctl_bad.is_empty(),
-        "PROBE sandboxed fails {} of 300, control fails {} of 300; first: {:?} / {:?}",
-        bad.len(),
-        ctl_bad.len(),
-        bad.first(),
-        ctl_bad.first()
-    );
-}
-
-#[test]
-fn probe_resolve_repeated() {
-    let scene = Scene::new("probe-dns", "run");
-    let mut bad = Vec::new();
-    for i in 0..100 {
-        let out = scene.sandboxed(Net::On, "/usr/bin/perl", &perl(RESOLVE, &[]));
-        if !out.status.success() {
-            bad.push(format!("#{i}: {}", describe(&out)));
-        }
-    }
-    let local = r#"exit(gethostbyname("localhost") ? 0 : 1)"#;
+    let script = r#"use IO::Socket::INET; my $s = IO::Socket::INET->new(PeerAddr => "127.0.0.1", PeerPort => $ARGV[0]); exit 0 if $s; print STDERR ($!+0), " $!"; exit 1"#;
+    let to = perl(script, &[OsString::from(port.to_string())]);
     let mut report = Vec::new();
     for (name, net) in [
-        ("on", Net::On),
-        ("off", Net::Off),
+        ("ports", Net::Ports(Ports::new(&[port]).expect("ports"))),
         ("loopback", Net::Loopback),
+        ("on", Net::On),
     ] {
-        let out = scene.sandboxed(net, "/usr/bin/perl", &perl(local, &[]));
-        report.push(format!("{name}:{}", out.status.success()));
+        let mut bad = Vec::new();
+        for i in 0..400 {
+            let out = scene.sandboxed(net.clone(), "/usr/bin/perl", &to);
+            if !out.status.success() {
+                bad.push(format!("#{i}: {}", describe(&out)));
+            }
+        }
+        report.push(format!("{name}: {} of 400 failed, first {:?}", bad.len(), bad.first()));
     }
-    assert!(
-        bad.len() > 1000,
-        "PROBE example.com under On failed {} of 100, first {:?}; localhost: {:?}",
-        bad.len(),
-        bad.first(),
-        report
-    );
+    let mut dns = Vec::new();
+    let v = vec![OsString::from("-V")];
+    let c = control("/usr/bin/dns-sd", &v);
+    dns.push(format!("control {} {:?} {:?}", describe(&c), String::from_utf8_lossy(&c.stdout), 0));
+    for (name, net) in [("on", Net::On), ("off", Net::Off), ("loopback", Net::Loopback)] {
+        let o = scene.sandboxed(net, "/usr/bin/dns-sd", &v);
+        dns.push(format!("{name} {} {:?}", describe(&o), String::from_utf8_lossy(&o.stdout)));
+    }
+    assert!(report.len() > 100, "PROBE3 {report:?} DNSSD {dns:?}");
 }
