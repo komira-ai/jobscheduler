@@ -17,7 +17,7 @@ const GIB: u64 = 1 << 30;
 /// stop the agent while the check passes (the probe says project and a trial bound works:
 /// the counter starts again); once the probe says none, the next run of failures makes the
 /// quota unhealthy at the third failure, reported once, and every start is then refused
-/// `quota-unavailable` (not `no-capacity`: the server counts it against no run) with
+/// `quota-unavailable` (not `no-capacity`: it says the host's quota is unavailable) with
 /// nothing created; the report
 /// comes again after a minute, not before; and when the probe says project again a step
 /// reports the recovery and runs start again. It catches a host that keeps taking runs it
@@ -278,4 +278,59 @@ fn the_check_reports_a_trial_that_cannot_be_made_or_cleared() {
         "{}",
         reported[0]
     );
+}
+
+/// Asserts the cumulative limit on slots given up on: with a limit of two, a run that ends
+/// well between two abandoned slots does not take the first back, and the second makes the
+/// quota unavailable (reported, with the way out: restart the agent); every start is then
+/// refused `quota-unavailable`, the report repeats every minute, and a check that would pass
+/// does not end it. It catches a counter that a good run resets, which would let a leak that
+/// takes one slot in a thousand runs park every slot unnoticed.
+#[test]
+fn slots_given_up_on_are_counted_for_good_and_lock_the_quota_at_the_limit() {
+    let (mut h, spy) = with_quota("quota-abandon-limit");
+    h.config.quota = Some(
+        RunQuota::new(spy.clone(), DEFAULT_BYTES, INODES)
+            .with_usage_wait_ms(1000)
+            .with_abandon_limit(2),
+    );
+    h.restart().unwrap();
+    let unavailable = "finding - quota-unhealthy".to_owned();
+
+    spy.set_lag(u32::MAX);
+    h.start(job("r1"));
+    h.fake.exit("r1", 0);
+    h.life.step();
+    h.clock.advance(1000);
+    let first = names(&h.life.step());
+    assert!(
+        first.contains(&"finding r1 quota-usage-abandoned".to_owned()),
+        "{first:?}"
+    );
+    assert!(!first.contains(&unavailable));
+
+    spy.end_lag();
+    spy.set_lag(0);
+    h.start(job("r2"));
+    h.fake.exit("r2", 0);
+    h.life.step();
+    assert!(h.life.busy_slots().is_empty(), "a good run ends well");
+
+    spy.end_lag();
+    spy.set_lag(u32::MAX);
+    h.start(job("r3"));
+    h.fake.exit("r3", 0);
+    h.life.step();
+    h.clock.advance(1000);
+    let second = names(&h.life.step());
+    assert!(second.contains(&unavailable), "{second:?}");
+    assert_eq!(names(&h.start(job("r4"))), ["refused r4 quota-unavailable"]);
+
+    h.clock.advance(60_000);
+    assert_eq!(
+        names(&h.life.step()),
+        [unavailable],
+        "repeated every minute"
+    );
+    assert_eq!(names(&h.start(job("r5"))), ["refused r5 quota-unavailable"]);
 }

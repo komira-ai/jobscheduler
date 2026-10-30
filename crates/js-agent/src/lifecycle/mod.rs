@@ -572,6 +572,9 @@ pub struct Local {
     /// `--scratch-usage-wait-secs`, or [`DEFAULT_SCRATCH_USAGE_WAIT_SECS`]. Meaningful with
     /// `--scratch-quota` only.
     pub scratch_usage_wait_secs: u64,
+    /// `--scratch-abandon-limit`, or [`DEFAULT_SCRATCH_ABANDON_LIMIT`]. Meaningful with
+    /// `--scratch-quota` only.
+    pub scratch_abandon_limit: u32,
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
     /// `--run-files-root`, or the default under `/run` when that can be made; always none
@@ -607,6 +610,13 @@ pub const DEFAULT_SCRATCH_USAGE_WAIT_SECS: u64 = 600;
 
 /// The most seconds `--scratch-usage-wait-secs` takes: a day.
 pub const MAX_SCRATCH_USAGE_WAIT_SECS: u64 = 86_400;
+
+/// The slots given up on (see `--scratch-usage-wait-secs`) after which the quota is
+/// unavailable until the agent is restarted, when `--scratch-abandon-limit` is not given.
+pub const DEFAULT_SCRATCH_ABANDON_LIMIT: u32 = 8;
+
+/// The most `--scratch-abandon-limit` takes.
+pub const MAX_SCRATCH_ABANDON_LIMIT: u32 = 1_000_000;
 
 /// The most `--scratch-quota-failures` takes.
 pub const MAX_SCRATCH_QUOTA_FAILURES: u32 = 1_000_000;
@@ -774,7 +784,7 @@ impl Local {
                     .to_owned(),
             );
         }
-        let (default_gib, max_inodes, failures, usage_wait) = scratch_quota_limits(cli)?;
+        let (default_gib, max_inodes, failures, usage_wait, abandon) = scratch_quota_limits(cli)?;
         Ok(Self {
             watch,
             mounts,
@@ -783,6 +793,7 @@ impl Local {
             scratch_max_inodes: max_inodes,
             scratch_quota_failures: failures,
             scratch_usage_wait_secs: usage_wait,
+            scratch_abandon_limit: abandon,
             scratch,
             files,
             files_warning,
@@ -797,12 +808,13 @@ impl Local {
 /// The default GiB and the inode limit of `--scratch-quota`, checked: the two flags need
 /// `--scratch-quota`, the default is at least 1 GiB and its bytes fit the wire, and the
 /// inode limit is at least 1 and fits what the quota takes.
-fn scratch_quota_limits(cli: &Cli) -> Result<(u64, u64, u32, u64), String> {
+fn scratch_quota_limits(cli: &Cli) -> Result<(u64, u64, u32, u64, u32), String> {
     let given = [
         ("--scratch-default-gib", cli.scratch_default_gib),
         ("--scratch-max-inodes", cli.scratch_max_inodes),
         ("--scratch-quota-failures", cli.scratch_quota_failures),
         ("--scratch-usage-wait-secs", cli.scratch_usage_wait_secs),
+        ("--scratch-abandon-limit", cli.scratch_abandon_limit),
     ];
     if let Some((flag, _)) = given
         .iter()
@@ -842,7 +854,18 @@ fn scratch_quota_limits(cli: &Cli) -> Result<(u64, u64, u32, u64), String> {
             "--scratch-usage-wait-secs: {wait} is not from 1 to {MAX_SCRATCH_USAGE_WAIT_SECS}"
         ));
     }
-    Ok((gib, inodes, failures, wait))
+    let abandon = cli
+        .scratch_abandon_limit
+        .unwrap_or(u64::from(DEFAULT_SCRATCH_ABANDON_LIMIT));
+    let abandon = u32::try_from(abandon)
+        .ok()
+        .filter(|n| (1..=MAX_SCRATCH_ABANDON_LIMIT).contains(n))
+        .ok_or_else(|| {
+            format!(
+                "--scratch-abandon-limit: {abandon} is not from 1 to {MAX_SCRATCH_ABANDON_LIMIT}"
+            )
+        })?;
+    Ok((gib, inodes, failures, wait, abandon))
 }
 
 impl Local {
@@ -857,6 +880,7 @@ impl Local {
         )
         .with_max_failures(self.scratch_quota_failures)
         .with_usage_wait_ms(self.scratch_usage_wait_secs.saturating_mul(1000))
+        .with_abandon_limit(self.scratch_abandon_limit)
     }
 
     /// Refuses a state root whose device number (`st_dev`) equals that of a mount root or

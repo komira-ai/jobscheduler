@@ -28,6 +28,7 @@ pub struct RunQuota {
     max_inodes: u64,
     max_failures: u32,
     usage_wait_ms: u64,
+    abandon_limit: u32,
 }
 
 impl fmt::Debug for RunQuota {
@@ -38,6 +39,7 @@ impl fmt::Debug for RunQuota {
             .field("max_inodes", &self.max_inodes)
             .field("max_failures", &self.max_failures)
             .field("usage_wait_ms", &self.usage_wait_ms)
+            .field("abandon_limit", &self.abandon_limit)
             .finish_non_exhaustive()
     }
 }
@@ -54,6 +56,7 @@ impl RunQuota {
             max_inodes,
             max_failures: super::DEFAULT_SCRATCH_QUOTA_FAILURES,
             usage_wait_ms: super::DEFAULT_SCRATCH_USAGE_WAIT_SECS * 1000,
+            abandon_limit: super::DEFAULT_SCRATCH_ABANDON_LIMIT,
         }
     }
 
@@ -73,6 +76,21 @@ impl RunQuota {
             usage_wait_ms: ms.max(1),
             ..self
         }
+    }
+
+    /// The same quota that is unavailable until the agent is restarted once `limit` slots
+    /// were given up on (at least 1).
+    pub fn with_abandon_limit(self, limit: u32) -> Self {
+        Self {
+            abandon_limit: limit.max(1),
+            ..self
+        }
+    }
+
+    /// The slots given up on, over the life of the agent, after which the quota is
+    /// unavailable.
+    pub fn abandon_limit(&self) -> u32 {
+        self.abandon_limit
     }
 
     /// How long a finished run's slot is held for its usage to read zero.
@@ -153,7 +171,7 @@ fn problem(what: &str, result: Result<(), impl fmt::Display>) -> Option<String> 
 /// (a mount that lost `prjquota`, a failing `apply`, `clear` or usage read) is checked
 /// again ([`RunQuota::check`]: the probe, and a trial bound on a directory of its own); one
 /// that fails the check is *unhealthy*: no run starts on it (each start is refused
-/// `quota-unavailable`, which the server counts against nobody and which taints nothing),
+/// `quota-unavailable`, which says the host's quota is unavailable and taints nothing),
 /// it is reported again every [`REPROBE_MS`], and it is probed again then, so a host that
 /// recovers takes runs again without a restart.
 #[derive(Default)]
@@ -161,6 +179,10 @@ pub(super) struct QuotaHealth {
     failures: u32,
     unhealthy: Option<String>,
     next_ms: u64,
+    /// The slots given up on since the agent started. A good run does not take one back.
+    abandoned: u32,
+    /// Set when `abandoned` reached the limit; only a restart of the agent clears it.
+    locked: Option<String>,
 }
 
 impl QuotaHealth {
@@ -171,7 +193,36 @@ impl QuotaHealth {
 
     /// Why the quota is unhealthy, when it is.
     pub(super) fn why(&self) -> Option<&str> {
-        self.unhealthy.as_deref()
+        self.locked.as_deref().or(self.unhealthy.as_deref())
+    }
+
+    /// A finished run's slot was given up on (its usage never read zero). The count is
+    /// cumulative and a run that ends well does not reduce it: at the limit the quota is
+    /// unavailable until the agent is restarted, which is reported every minute.
+    pub(super) fn abandoned(&mut self, quota: &RunQuota, now_ms: u64, events: &mut Vec<Event>) {
+        self.abandoned = self.abandoned.saturating_add(1);
+        if self.abandoned == quota.abandon_limit() {
+            self.next_ms = now_ms.saturating_add(REPROBE_MS);
+            let why = Self::locked_text(self.abandoned);
+            events.push(Self::locked_event(&why));
+            self.locked = Some(why);
+        }
+    }
+
+    fn locked_text(abandoned: u32) -> String {
+        format!(
+            "{abandoned} slots were given up on because their usage never read zero \
+             (see the quota-usage-abandoned findings; look for files held open on the scratch \
+             volume): no run starts here until the agent is restarted"
+        )
+    }
+
+    fn locked_event(why: &str) -> Event {
+        Event::Finding(Finding {
+            run_id: None,
+            code: code::QUOTA_UNHEALTHY,
+            message: format!("the scratch quota is unavailable: {why}"),
+        })
     }
 
     /// A call failed. After `max_failures` in a row the quota is probed; if the probe is not
@@ -184,7 +235,8 @@ impl QuotaHealth {
         events: &mut Vec<Event>,
     ) {
         self.failures = self.failures.saturating_add(1);
-        if self.failures < quota.max_failures() || self.unhealthy.is_some() {
+        if self.failures < quota.max_failures() || self.unhealthy.is_some() || self.locked.is_some()
+        {
             return;
         }
         match quota.check(dir) {
@@ -217,13 +269,19 @@ impl QuotaHealth {
         dir: &Path,
         events: &mut Vec<Event>,
     ) {
-        if self.unhealthy.is_none() || now_ms < self.next_ms {
+        if now_ms < self.next_ms || (self.unhealthy.is_none() && self.locked.is_none()) {
+            return;
+        }
+        if let Some(why) = &self.locked {
+            self.next_ms = now_ms.saturating_add(REPROBE_MS);
+            events.push(Self::locked_event(why));
             return;
         }
         self.next_ms = now_ms.saturating_add(REPROBE_MS);
         match quota.check(dir) {
             Ok(()) => {
-                *self = Self::default();
+                self.failures = 0;
+                self.unhealthy = None;
                 events.push(Event::Finding(Finding {
                     run_id: None,
                     code: code::QUOTA_RECOVERED,

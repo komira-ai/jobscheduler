@@ -182,6 +182,18 @@ fn the_quota_flags_are_checked() {
             &["--scratch-quota", "--scratch-usage-wait-secs", "86401"],
             "--scratch-usage-wait-secs: 86401 is not from 1 to 86400",
         ),
+        (
+            &["--scratch-abandon-limit", "8"],
+            "--scratch-abandon-limit: needs --scratch-quota",
+        ),
+        (
+            &["--scratch-quota", "--scratch-abandon-limit", "0"],
+            "--scratch-abandon-limit: 0 is not from 1 to 1000000",
+        ),
+        (
+            &["--scratch-quota", "--scratch-abandon-limit", "1000001"],
+            "--scratch-abandon-limit: 1000001 is not from 1 to 1000000",
+        ),
     ];
     for (n, (extra, said)) in refused.iter().copied().enumerate() {
         let (ran, hello) = start(&format!("quota-flag-{n}"), FakeMachine::new(), 10, extra);
@@ -199,6 +211,8 @@ fn the_quota_flags_are_checked() {
         "1000000",
         "--scratch-usage-wait-secs",
         "86400",
+        "--scratch-abandon-limit",
+        "1000000",
     ];
     let (ran, hello) = start("quota-flag-edges", FakeMachine::new(), 10, &edges);
     assert_ne!(hello, Value::Null, "{}", ran.err);

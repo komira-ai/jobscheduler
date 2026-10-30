@@ -67,6 +67,7 @@ pub fn start(
         scratch_max_inodes: _,
         scratch_quota_failures: _,
         scratch_usage_wait_secs: _,
+        scratch_abandon_limit: _,
         container,
         state,
         watch,

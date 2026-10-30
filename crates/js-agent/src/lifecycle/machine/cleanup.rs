@@ -200,6 +200,7 @@ impl Lifecycle {
                                     job.note(code::QUOTA_USAGE_ABANDONED, gave_up, events);
                                     job.slot_parked = true;
                                     quota_health.failed(quota, now, &health, events);
+                                    quota_health.abandoned(quota, now, events);
                                 }
                                 Err(why) => {
                                     quota_health.failed(quota, now, &health, events);

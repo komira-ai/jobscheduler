@@ -125,6 +125,13 @@ pub struct Cli {
     /// failure. From 1 to 86400; default 600. Needs `--scratch-quota`.
     #[arg(long, value_name = "SECS")]
     pub scratch_usage_wait_secs: Option<u64>,
+    /// The slots the agent may give up on (their usage never read zero within
+    /// `--scratch-usage-wait-secs`) over its life before the quota is unavailable: no run
+    /// starts, each start is refused `quota-unavailable`, until the agent is restarted. A
+    /// run that ends well does not take one back. From 1; default 8. Needs
+    /// `--scratch-quota`.
+    #[arg(long, value_name = "N")]
+    pub scratch_abandon_limit: Option<u64>,
     /// The most GiB of the scratch root's free disk the agent keeps back from jobs: the
     /// disk it offers is the free space of that volume when the agent starts minus this
     /// (0 when this is more). Needs `--scratch-root`. Without it, the free space is offered.

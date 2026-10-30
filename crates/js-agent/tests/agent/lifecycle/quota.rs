@@ -774,6 +774,15 @@ fn the_failure_flag_reaches_the_quota() {
     assert_eq!(default_wait.usage_wait_ms(), 600_000);
     let wait = local_with("quota-wait", &["--scratch-usage-wait-secs", "30"]);
     assert_eq!(wait.run_quota(fake()).usage_wait_ms(), 30_000);
+    assert_eq!(default_wait.abandon_limit(), 8);
+    let limit = local_with("quota-limit", &["--scratch-abandon-limit", "2"]);
+    assert_eq!(limit.run_quota(fake()).abandon_limit(), 2);
+    assert_eq!(
+        RunQuota::new(fake(), GIB, 1)
+            .with_abandon_limit(0)
+            .abandon_limit(),
+        1
+    );
     let shown = format!("{:?}", wait.run_quota(fake()));
     assert!(shown.contains("usage_wait_ms: 30000"), "{shown}");
     assert_eq!(
