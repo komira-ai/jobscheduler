@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rustix::fs::{Mode, OFlags};
 use sha2::{Digest, Sha256};
@@ -344,6 +344,8 @@ pub fn pack_layer(root: &Path) -> Result<Packed, PackError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     /// A fresh directory for one test, removed by the test.
