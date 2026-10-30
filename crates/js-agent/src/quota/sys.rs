@@ -145,12 +145,18 @@ pub(super) trait Sys: Send + Sync {
 /// The real calls.
 pub(super) struct Kernel;
 
+/// `Ok` for a call that returned 0, the error of `errno` for one that returned -1.
+fn check(ret: libc::c_int) -> io::Result<()> {
+    match ret < 0 {
+        true => Err(io::Error::last_os_error()),
+        false => Ok(()),
+    }
+}
+
 /// Runs a call that fills `arg` and returns -1 with `errno` set when it fails.
 fn syscall<T>(mut arg: T, call: impl FnOnce(&mut T) -> libc::c_int) -> io::Result<T> {
-    match call(&mut arg) < 0 {
-        true => Err(io::Error::last_os_error()),
-        false => Ok(arg),
-    }
+    check(call(&mut arg))?;
+    Ok(arg)
 }
 
 /// `qs_flags` of what `Q_XGETQSTAT` filled in.
@@ -232,17 +238,15 @@ impl Sys for Kernel {
 
     fn set_attr(&self, dir: &Path, attr: Fsx) -> io::Result<()> {
         let dir = open_dir(dir)?;
-        syscall(attr, |attr| {
-            // FFI-BOUNDARY: as `get_attr`, but the kernel only reads `attr`.
-            unsafe {
-                libc::ioctl(
-                    dir.as_raw_fd(),
-                    FS_IOC_FSSETXATTR as _,
-                    std::ptr::from_mut(attr),
-                )
-            }
+        let mut attr = attr;
+        // FFI-BOUNDARY: as `get_attr`, but the kernel only reads `attr`.
+        check(unsafe {
+            libc::ioctl(
+                dir.as_raw_fd(),
+                FS_IOC_FSSETXATTR as _,
+                std::ptr::from_mut(&mut attr),
+            )
         })
-        .map(|_| ())
     }
 
     fn get_quota(&self, device: &Path, project: u32) -> io::Result<Dq> {
@@ -265,7 +269,7 @@ impl Sys for Kernel {
 
     fn set_limits(&self, device: &Path, project: u32, blocks: u64, inodes: u64) -> io::Result<()> {
         let special = cstr(device)?;
-        let wanted = DiskQuota {
+        let mut wanted = DiskQuota {
             version: FS_DQUOT_VERSION,
             flags: FS_PROJ_QUOTA,
             fieldmask: FS_DQ_HARD_LIMITS,
@@ -274,19 +278,16 @@ impl Sys for Kernel {
             ino_hardlimit: inodes,
             ..DiskQuota::default()
         };
-        syscall(wanted, |quota| {
-            // FFI-BOUNDARY: as `get_quota`, but the kernel only reads `quota`, and only the
-            // fields `fieldmask` names.
-            unsafe {
-                libc::quotactl(
-                    qcmd(Q_XSETQLIM),
-                    special.as_ptr(),
-                    project as libc::c_int,
-                    std::ptr::from_mut(quota).cast(),
-                )
-            }
+        // FFI-BOUNDARY: as `get_quota`, but the kernel only reads `wanted`, and only the
+        // fields `fieldmask` names.
+        check(unsafe {
+            libc::quotactl(
+                qcmd(Q_XSETQLIM),
+                special.as_ptr(),
+                project as libc::c_int,
+                std::ptr::from_mut(&mut wanted).cast(),
+            )
         })
-        .map(|_| ())
     }
 }
 
@@ -326,6 +327,8 @@ mod tests {
         assert_eq!(ok.unwrap(), 2);
         let failed = syscall((), |_| -1);
         assert!(failed.is_err());
+        assert!(check(0).is_ok());
+        assert!(check(-1).is_err());
     }
 
     /// What the kernel filled in is read from the right fields: the flags of the state, and
