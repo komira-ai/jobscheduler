@@ -353,12 +353,31 @@ jobs:
           sudo mkdir -p "$JS_PRIV_XFS_ROOT"
           sudo mount -o loop,prjquota "$RUNNER_TEMP/js-priv-xfs.img" "$JS_PRIV_XFS_ROOT"
           findmnt "$JS_PRIV_XFS_ROOT"
+      # Option B, against a real crun: a root daemon starts every container as a dedicated
+      # job user. The user has a subordinate id range (made here if useradd did not).
+      - name: Install crun, uidmap and busybox and make the job user
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends crun uidmap busybox-static
+          sudo useradd --create-home --shell /usr/sbin/nologin js-job
+          grep -q '^js-job:' /etc/subuid || echo 'js-job:300000:65536' | sudo tee -a /etc/subuid
+          grep -q '^js-job:' /etc/subgid || echo 'js-job:300000:65536' | sudo tee -a /etc/subgid
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "JS_B_CRUN=$(command -v crun)" >> "$GITHUB_ENV"
+          echo "JS_B_BUSYBOX=$(command -v busybox)" >> "$GITHUB_ENV"
+          echo "JS_B_UID=$(id -u js-job)" >> "$GITHUB_ENV"
+          echo "JS_B_GID=$(id -g js-job)" >> "$GITHUB_ENV"
+          crun --version | head -1
       - name: Build the tests as the runner user
-        run: cargo test -p js-agent --test privilege --locked --no-run
+        run: |
+          cargo test -p js-agent --test privilege --locked --no-run
+          cargo test -p js-contain --test root_daemon --locked --no-run
       # Root runs the tests (they start the unprivileged children themselves), with the
       # runner's toolchain and home.
       - name: Run the privilege tests as root
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test privilege --locked -- --ignored --nocapture --test-threads=1
+      - name: Run js-contain's Oci under a root daemon, as the job user
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-contain --test root_daemon --locked -- --ignored --nocapture
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

@@ -89,6 +89,11 @@ pub struct OciConfig {
     /// The directories `newuidmap` and `newgidmap` are looked for in (`crun` runs them
     /// by name to map the container's ids). By default the daemon's `PATH`.
     pub id_tool_path: Option<std::ffi::OsString>,
+    /// The `(uid, gid)` of the dedicated job user, when the daemon is not that user
+    /// (a root daemon): the subordinate ranges the containers map are that user's, not
+    /// the daemon's own, and `scrub_env` is expected to start every program as that
+    /// user. By default `None`: the daemon's own user.
+    pub job_user: Option<(u32, u32)>,
 }
 
 impl Default for OciConfig {
@@ -102,6 +107,7 @@ impl Default for OciConfig {
             init_dest: init::DEFAULT_DEST.to_owned(),
             helper_modes: helper::HelperModes::default(),
             scrub_env: crun::no_scrub,
+            job_user: None,
         }
     }
 }
@@ -297,7 +303,10 @@ impl Oci {
         cgroup_parent: &str,
         rust_arch: &str,
     ) -> Result<Arc<Self>, OciError> {
-        let ids = crate::subids::daemon_ids(&config.id_files)?;
+        let ids = match config.job_user {
+            Some((uid, gid)) => crate::subids::user_ids(&config.id_files, uid, gid)?,
+            None => crate::subids::daemon_ids(&config.id_files)?,
+        };
         for program in [&config.runtime, &config.daemon] {
             if !program.is_file() {
                 return Err(OciError::NoRuntime(program.clone()));
