@@ -26,12 +26,13 @@ const OCI_VERSION: &str = "1.0.0";
 pub(crate) const HOSTNAME: &str = "localhost";
 
 /// The lease directories a job's container writes to, and the destination of each:
-/// disk-backed (a `tmpfs` would count against the lease's memory), owned by the
-/// container's root, discarded with the lease. The image's root is read-only; these and
-/// `/tmp` (a size-limited tmpfs, see [`tmp`]) are the places a job writes besides the
-/// exec root.
-pub(crate) const WRITABLE: [(&str, &str); 3] =
-    [("var-tmp", "/var/tmp"), ("run", "/run"), ("home", "/root")];
+/// disk-backed, owned by the container's root, discarded with the lease (the home
+/// directory). The image's root is read-only; these and the tmpfs mounts of [`TMPFS`] are
+/// the places a job writes besides the exec root.
+pub(crate) const WRITABLE: [(&str, &str); 1] = [("home", "/root")];
+
+/// The places a job gets a size-limited, `noexec` tmpfs, as podman made them.
+const TMPFS: [&str; 3] = ["/tmp", "/var/tmp", "/run"];
 
 /// The directory of the lease holding [`WRITABLE`]'s directories.
 pub(crate) const WRITABLE_DIR: &str = "rw";
@@ -133,14 +134,14 @@ pub(crate) struct Placement<'a> {
     pub init_dest: &'a str,
 }
 
-/// The job's `/tmp`: a tmpfs of `size_mib` that holds no program (`noexec`), no set-uid
+/// The job's tmpfs at `destination` (`/tmp`, `/var/tmp`, `/run`), of `size_mib`, that holds no program (`noexec`), no set-uid
 /// file and no device node, and that anyone may write to (`mode=1777`). It counts against
 /// the lease's memory, as the engine this backend replaces made it
-/// (`--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m`).
-fn tmp(size_mib: u64) -> Mount {
+/// (`--tmpfs <dir>:rw,noexec,nosuid,nodev,size=64m`).
+fn tmp(destination: &str, size_mib: u64) -> Mount {
     let size = format!("size={size_mib}m");
     filesystem(
-        "/tmp",
+        destination,
         "tmpfs",
         &["nosuid", "noexec", "nodev", "mode=1777", &size],
     )
@@ -217,7 +218,7 @@ fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
             &["rbind", "ro", "nosuid", "nodev"],
         ));
     }
-    mounts.push(tmp(spec.limits.tmp_mib));
+    mounts.extend(TMPFS.map(|dest| tmp(dest, spec.limits.tmp_mib)));
     for (name, destination) in WRITABLE {
         let source = spec.dir.join(WRITABLE_DIR).join(name);
         mounts.push(bind(

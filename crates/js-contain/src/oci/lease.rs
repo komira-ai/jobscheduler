@@ -119,8 +119,7 @@ impl Oci {
     }
 
     /// One helper container runs this daemon's give mode ([`helper::HelperModes`]) over the directories
-    /// (the lease's `rw` directory, which holds `/var/tmp` and the other places the job
-    /// writes, among them).
+    /// (the lease's `rw` directory, which holds the job's home directory, among them).
     ///
     /// # Errors
     /// The helper could not be made or failed, in `crun`'s words.

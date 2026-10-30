@@ -22,9 +22,9 @@
 //! **What the container sees:** the unpacked image, read-only, as `/`; the input root
 //! as an overlay at [`ContainerSpec::exec_root`](crate::container::ContainerSpec::exec_root) (lower: the lease's input root; upper: the lease's
 //! upper directory, which outputs are read from); shared read-only trees
-//! ([`SharedMount`](crate::container::SharedMount)) bound inside it; `/tmp` as a
-//! size-limited `noexec` tmpfs; `/var/tmp`, `/run` and `/root` as the lease's own disk
-//! directories (`spec::WRITABLE`); the host directories of
+//! ([`SharedMount`](crate::container::SharedMount)) bound inside it; `/tmp`, `/var/tmp`
+//! and `/run` as size-limited `noexec` tmpfs mounts; `/root` as a disk directory of the
+//! lease (`spec::WRITABLE`); the host directories of
 //! [`ContainerSpec::mounts`](crate::container::ContainerSpec::mounts) (the run's scratch,
 //! the `--mount-root` mounts, the run's files) as recursive binds with `nosuid` and
 //! `nodev`; `/dev`, `/proc`, `/sys` and `/dev/shm` as for any container. The image is
