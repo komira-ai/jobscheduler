@@ -31,7 +31,16 @@
 //! js lease list
 //! js lease run  <the flags of acquire> [--renew-every <dur>] [--stop-grace <dur>]
 //!               -- <command> [args...]
+//! js lease native <id> --program <path|@bundle/entry> [--arg A ...] [--network off|loopback|on]
+//!                 [--bundle name[:tag]@sha256:<digest>] --cpu-millis N --memory-bytes N
+//!                 [--wall <dur>]
 //! ```
+//!
+//! `native` queues a native job (a program run on the host, no image) on a held lease and
+//! prints `run <id> <state>`. The server refuses it (exit 3) when the lease's host does not
+//! run native jobs (`native-unsupported`) or holds no bundle store for `--bundle`
+//! (`bundle-unsupported`); a body that breaks a rule (a program that is not an absolute
+//! path, a bundle without a digest) is exit 4.
 //!
 //! Durations are whole seconds: `90`, `90s`, `15m`, `2h`. `acquire` prints
 //! `lease <id> host <host> expires <ms>` (`expires` is the server's clock in
@@ -216,5 +225,6 @@ fn dispatch(
         Action::Release(args) => leases::release(&client, render, &args, out),
         Action::List => leases::list(&client, render, out),
         Action::Run(args) => run::run(&client, render, &args, services, err),
+        Action::Native(args) => leases::native(&client, render, &args, out),
     }
 }
