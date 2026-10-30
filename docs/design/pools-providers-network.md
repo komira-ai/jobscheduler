@@ -295,7 +295,9 @@ class = "whole-node"
 max_instances = 4
 max_spend_per_hour = "12.00"      # required for every elastic pool, no default
 max_spend_per_day  = "96.00"      # required too: the hard total bound (6.2 Caps)
-idle = "10m"
+idle = "10m"                      # required of a pool with accelerators (6.4)
+max_age = "6h"                    # required of a pool with accelerators: a host is retired at this age, busy or not
+min_host_lifetime = "15m"         # required of a pool with accelerators: idle never releases a younger host
 provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key",
              types = [{ name = "gpu_1x_a10", gpu = "nvidia-a10", gpus = 1 }] }
 network  = { kind = "tailscale", oauth_client_file = "/run/credentials/js/ts-oauth",
@@ -339,6 +341,7 @@ boot           = "resume"                                # or "initialise"
 client_token_file = "/run/credentials/js/client-token"   # the existing client token (today --token-file), same file and check; no new key or field
 tls_cert       = "/run/credentials/js/tls-cert"
 tls_key        = "/run/credentials/js/tls-key"
+max_lease_wall = "2h"                                    # the longest max_wall a lease may ask for; required with an accelerator pool (6.4)
 # tick, default_ttl, max_ttl, timeouts: same names and defaults as today's flags
 
 [[pool]]
@@ -354,6 +357,8 @@ max_instances = 4
 max_spend_per_hour = "12.00"
 max_spend_per_day  = "96.00"
 idle = "10m"
+max_age = "6h"
+min_host_lifetime = "15m"
 boot_timeout = "15m"          # default
 launch = "plan"               # default; "live" spends money
 provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key",
@@ -399,6 +404,7 @@ message naming pool and field:
 | unknown `provider.kind` or `network.kind` | `pool "gpu": provider.kind: "lambda" is not a kind; known: lambdalabs, static` |
 | credential file missing, not regular, not owned by the service user, or group/other readable | `pool "gpu": provider.api_key_file: mode 0644, must be 0600 or 0400` (the `read_token` rule in `config.rs`) |
 | type name not 1 to 64 lower case letters, digits or `_`; gpu class not in the agent's spelling (`GpuClass::parse`); a type twice; two gpu classes in one pool | `pool "gpu": provider.types[1].name: ...` |
+| elastic pool with accelerators (a floor of one GPU or more) without `idle`, `max_age` or `min_host_lifetime`, or under a `[server]` without `max_lease_wall`; `max_age` not longer than `boot_timeout`; `min_host_lifetime` longer than `max_age` | `pool "gpu": max_age: required of a pool with accelerators: ...` |
 | elastic pool without `max_instances`, `max_spend_per_hour` and `max_spend_per_day`; a spend value not a decimal with at most two places, or zero; a day cap below the hour cap | `pool "gpu": max_spend_per_day: required` |
 | `max_instances` of 256 or more (the join-token table holds 256 waiting tokens, `MAX_WAITING` in `join_tokens.rs`) | `pool "gpu": max_instances: 300 exceeds 255` |
 | `launch = "live"` on a pool whose provider cannot be built | `pool "gpu": launch: ...` |
@@ -987,8 +993,32 @@ Rules, each tied to a requirement or to existing behaviour:
 - `max_spend_per_hour` caps the rate. `max_spend_per_day` is in the first slice (6.2 Caps)
   and bounds spend over time even when a stuck or Lost machine is counted forever. A Lost
   host that the provider still lists keeps accruing in the day total until released; status
-  shows its age. `max_age` is Later. The day cap gates new launches only: machines already
-  running when it is reached keep running (and accruing) until they are released.
+  shows its age. The day cap gates new launches only: machines already running when it is
+  reached keep running (and accruing) until they are released; what bounds them is `max_age`.
+- Host lifetime. A pool with accelerators (a floor of one GPU or more) must set `idle`, `max_age`
+  and `min_host_lifetime`, and the `[server]` table `max_lease_wall`. At `max_age`, counted from
+  the machine's launch, the scaler retires the host: the registry marks it draining whether or not
+  it is busy (`Registry::retire`), which takes no new lease and cuts none, and the release is asked
+  only once the host is quiet. `max_lease_wall` is the ceiling on the `max_wall` a lease may ask
+  for (a 422 `wall-time-above-ceiling` above it), and a lease never outlives its `max_wall`
+  whatever its renewals, so a retired host empties within the ceiling. Every launch also carries
+  `max_age + max_lease_wall + prepare_timeout + unknown_hold + 10 minutes` as the lifetime the cloud
+  itself should enforce, in `AcquireRequest::lifetime` (the prepare timeout and `unknown_hold` are
+  the two waits a retire can meet: a whole-node lease's wall time starts after the first, a silent
+  host is released after the second). A provider whose cloud has a run-duration limit or a shutdown
+  timer sets it. Lambda has neither and ignores it, so on Lambda only `max_age` with a live
+  scheduler bounds the cost: if the scheduler is dead, nothing stops the bill. The server-dead bound
+  needs a provider whose cloud enforces the lifetime. `max_age` and `max_lease_wall` are at most 30 days.
+  The lifetime sum leaves out, to be fitted in the 10 minute margin: the lease grace and regain
+  grace before a silent host's lease is given up, the release retry loop (no deadline), the gap
+  between the recorded launch time and the machine's real creation, and a tick. After a registry
+  restart the marks are gone, so until the scaler's next tick an aged host is bookable again; that is
+  bounded by one tick plus the margin. One case is unbounded by js: a run the host keeps listing
+  after its lease ended keeps it from being quiet (`quiet()` counts listed runs), so `release_host`
+  is refused with no deadline. A cloud that enforces the lifetime cuts it there; on Lambda it lasts
+  until an operator acts (the alert watcher of cost part 0d is what is meant to tell them). `min_host_lifetime` is the least a machine
+  lives before `idle` may drain it, so a short `idle` against a billed boot cannot launch a
+  machine per job. Changing `max_lease_wall` does not shorten a lease already granted.
 
 ### 6.5 What the single-pool slice costs
 
@@ -1458,7 +1488,7 @@ Each PR is green alone, and `launch = "plan"` is the only reachable mode until P
 PR 7b is required before the go (7.2). Later, each behind its own need and not built first:
 price-drift marking; per-offer suppression and doubling backoff; counting boot failures;
 `zeroize`, `RLIMIT_CORE` and a panic hook; a separate `js-network` crate; orphan release
-(`release_orphans`); `max_age`; the `exec` kind; a `script` network mode (needs limits and a
+(`release_orphans`); the `exec` kind; a `script` network mode (needs limits and a
 review story for operator output); a public scheduler listener (it needs a full in-service
 client-auth story: client keys, rotation, rate limits, audit).
 

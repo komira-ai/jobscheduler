@@ -125,6 +125,12 @@ impl Marks {
         self.0.retain(|_, mark| mark.request != *id);
     }
 
+    /// Drops the mark on `host`, if it has one: the request that held it is set aside for
+    /// no host and is placed again at the next pass.
+    pub(crate) fn drop_host(&mut self, host: &HostId) {
+        self.0.remove(host);
+    }
+
     /// Drops every mark whose request is not on the wait list.
     pub(crate) fn retain_waiting(&mut self, waiting: &WaitList) {
         self.0.retain(|_, mark| waiting.holds(&mark.request));

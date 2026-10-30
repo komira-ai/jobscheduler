@@ -74,6 +74,7 @@ fn ask(acquire: &str) -> AcquireRequest {
         name: HostName::derive(&SchedulerId::new("sched-one").unwrap(), &acquire),
         acquire,
         pool: "pool-a".to_owned(),
+        lifetime: None,
         offer: Offer {
             id: "gpu_1x_sample".to_owned(),
             zone: Some("region-a".to_owned()),

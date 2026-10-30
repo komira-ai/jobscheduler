@@ -91,6 +91,9 @@
 //! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
 //! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
+//! # max_lease_wall: the most a lease's max_wall_seconds may ask for; none by default, and
+//! # required by a pool with accelerators (a floor of one GPU or more); a lease asking for
+//! # more is refused 422 `wall-time-above-ceiling`; config file only, there is no flag
 //! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456):
 //! # the flags' names, defaults and rules; usage_db is refused beside usage_off = true
 //!
@@ -103,7 +106,7 @@
 //! A pool whose provider launches machines (an elastic pool) also has `max_instances`
 //! (1 to 255), `max_spend_per_hour` and `max_spend_per_day` (strings: a decimal with at
 //! most two places, above zero, the day cap not below the hour cap), and optionally `idle`,
-//! `boot_timeout` (`15m`), `launch`, `exec`, `join_token_file`, `agent` and `network`.
+//! `max_age`, `min_host_lifetime`, `boot_timeout` (`15m`), `launch`, `exec`, `join_token_file`, `agent` and `network`.
 //! Every pool, static or elastic, may set `memory_schedulable_percent`, a whole number from
 //! 1 to 100 (default 100): the share of the pool's configured memory that is booked, rounded
 //! down. A static pool books that share of each host's `memory_bytes` (the pool's key
@@ -114,7 +117,17 @@
 //! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing, and
 //! one that is `live` launches machines for requests that wait, within `max_instances`,
 //! `max_spend_per_hour` and `max_spend_per_day`, and releases them when they have been
-//! idle for `idle` (ten minutes unless the file says). A `live` pool also needs `agent =
+//! idle for `idle` (ten minutes unless the file says) and have lived `min_host_lifetime`
+//! (none unless the file says). A host is also drained and released at `max_age` from its
+//! launch whether or not it is idle, without cutting its work: the drain only stops new
+//! leases, and a lease ends within `server.max_lease_wall`. A pool with accelerators (its
+//! provider's floor has one GPU or more) must set `idle`, `max_age` and `min_host_lifetime`,
+//! and the file `server.max_lease_wall`; `max_age` must be longer than `boot_timeout` and
+//! `min_host_lifetime` no longer than `max_age`. Each launch carries `max_age`
+//! plus `max_lease_wall` plus the prepare timeout, `unknown_hold` and 10 minutes as the
+//! lifetime the cloud is to enforce (a provider whose cloud cannot, Lambda, ignores it: there
+//! only `max_age` with a live server bounds the cost). `max_age` and `max_lease_wall` are at
+//! most 30 days. A `live` pool also needs `agent =
 //! { x86_64 = { url = "https://...", sha256 = "<64 hex digits>" } }`, the build of the agent
 //! the launched machine downloads and checks, one for each CPU architecture its offers
 //! have (an offer of another is never launched with a build of this one), and `server.advertise_url`; with a Tailscale
@@ -136,7 +149,7 @@
 //! them fits no request that requires a capability), `exec` (as above, but absent is
 //! `none`), `heartbeat_interval`, `grace`, `lost_retention` and `join_token_file` (the
 //! shared pool token). It launches nothing: `launch`, `network`, `provider`,
-//! `max_instances`, `max_spend_per_hour`, `max_spend_per_day`, `idle` and `boot_timeout`
+//! `max_instances`, `max_spend_per_hour`, `max_spend_per_day`, `idle`, `max_age`, `min_host_lifetime` and `boot_timeout`
 //! are each refused naming the key. It is the pool that registers agents, so it excludes
 //! an elastic pool, and `server.agent_listen` is required. One-time tokens for its nodes
 //! come from `POST /v1/agent/join-tokens` with `provider` the pool's name and
@@ -165,7 +178,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; 422 for a start-contract refusal (`wall-time-not-positive`, `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`) |
+//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`) |
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms, host_reserved?}`, where `host_reserved: true` says the host the lease holds is set aside for a waiting whole-node request (the renewal is not refused for it; the field is left out when false); 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |

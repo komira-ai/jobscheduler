@@ -266,6 +266,11 @@ impl Scaler {
         blocking(move || core.tick()).await;
     }
 
+    /// The settings the scaler was built with.
+    pub fn settings(&self) -> &Settings {
+        &self.core.settings
+    }
+
     /// What the last tick left: the records, why each pool launches nothing, what a plan
     /// pool would launch.
     pub fn state(&self) -> State {
@@ -492,6 +497,7 @@ impl Core {
                     });
                 }
                 Action::Drain(host) => self.effects.call(Call::Drain, &host),
+                Action::Retire(host) => self.effects.call(Call::Retire, &host),
                 Action::Undrain(host) => self.effects.call(Call::Undrain, &host),
                 Action::ReleaseHost(host) => self.effects.call(Call::ReleaseHost, &host),
                 Action::Revoke(host) => self.revoke(memory, host),
