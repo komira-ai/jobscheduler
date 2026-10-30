@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use js_contain::container::{CONTAINER_OWNER, ContainerLimits, ContainerSpec, Dirs, Ended};
+use js_contain::container::{
+    CONTAINER_OWNER, ContainerLimits, ContainerSpec, Dirs, Ended, HostMount,
+};
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
-use js_contain::oci::{Oci, OciConfig};
+use js_contain::oci::{LogLimits, Oci, OciConfig, stderr_path, stdout_path};
 use js_contain::subids::IdFiles;
 
 /// A source nothing is fetched from: these tests never name an image.
@@ -80,6 +82,21 @@ impl Node {
         .expect("starts")
     }
 
+    /// The backend with `logs` as the limits on a job's output.
+    fn oci_keeping(&self, logs: LogLimits) -> Arc<Oci> {
+        let config = OciConfig {
+            logs,
+            ..self.config()
+        };
+        Oci::new(
+            &config,
+            Arc::new(NoImages),
+            &self.dir.join("scratch"),
+            "/js.slice/actions",
+        )
+        .expect("starts")
+    }
+
     /// Every line the stand-in recorded: one call each, its arguments joined by spaces.
     fn calls(&self) -> Vec<String> {
         std::fs::read_to_string(self.crun.with_extension("calls"))
@@ -107,6 +124,17 @@ impl Node {
             argv: vec!["tool".to_owned()],
             limits: ContainerLimits::DEFAULT,
             shared: Vec::new(),
+            mounts: [
+                ("/scratch", false),
+                ("/workspace", false),
+                ("/run/js-files", true),
+            ]
+            .map(|(target, read_only)| HostMount {
+                target: target.to_owned(),
+                source: PathBuf::from("/srv/host-mount"),
+                read_only,
+            })
+            .to_vec(),
         }
     }
 }
@@ -114,9 +142,7 @@ impl Node {
 /// Runs the container of `spec` to its end and says how it ended.
 async fn run(oci: &Oci, spec: &ContainerSpec) -> Result<Ended, String> {
     oci.create(spec).await.expect("bundle");
-    let stdout = std::fs::File::create(spec.dir.join("stdout")).expect("stdout");
-    let stderr = std::fs::File::create(spec.dir.join("stderr")).expect("stderr");
-    let mut running = oci.start(spec, stdout, stderr).expect("started");
+    let mut running = oci.start(spec).expect("started");
     running.wait().await;
     oci.ended(spec, &running).await
 }
@@ -179,8 +205,7 @@ async fn a_container_that_did_not_run_is_told_by_the_words_of_crun_and_the_init(
     let spec = node.spec();
     let oci = node.oci();
     oci.create(&spec).await.expect("bundle");
-    let null = || std::fs::File::create(spec.dir.join("out")).expect("file");
-    let mut running = oci.start(&spec, null(), null()).expect("started");
+    let mut running = oci.start(&spec).expect("started");
     running.wait().await;
     // The init writes its report to the file `start` made, once the container is going.
     std::fs::write(
@@ -300,8 +325,10 @@ async fn directories_are_opened_and_given_by_a_helper() {
         .expect("given, directories only");
     let mode = |p: PathBuf| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
     assert_eq!(mode(spec.dir.clone()), 0o755);
-    for name in ["tmp", "var-tmp", "run", "home"] {
-        assert_eq!(mode(spec.dir.join("rw").join(name)), 0o755, "{name}");
+    assert_eq!(mode(spec.dir.join("rw/home")), 0o755);
+    // `/tmp`, `/var/tmp` and `/run` are tmpfs mounts, not directories of the lease.
+    for name in ["tmp", "var-tmp", "run"] {
+        assert!(!spec.dir.join("rw").join(name).exists(), "{name}");
     }
     let helpers: Vec<_> = node
         .calls()
@@ -373,4 +400,176 @@ async fn a_directory_is_removed_by_a_helper_and_layers_unpacked_by_one() {
         assert!(why.contains("not removed"), "{why}");
     }
     assert!(kept.exists());
+}
+
+/// Reads back the mounts of the container `lease-1-2` after its bundle is written.
+async fn verified(node: &Node, bundle: Option<&str>) -> Result<(), String> {
+    let spec = node.spec();
+    let oci = node.oci();
+    oci.create(&spec).await.expect("bundle");
+    if let Some(bundle) = bundle {
+        std::fs::write(spec.dir.join("bundle/config.json"), bundle).expect("config");
+    }
+    oci.verify_mounts(&spec)
+}
+
+/// Catches mounts never read back (a bind without `nosuid`, or one not made at all, goes
+/// unnoticed), a read of the wrong process, and a read that finds fault with a bundle that
+/// asks for nothing: the container's pid comes from `crun state` of the lease's own state
+/// directory, its mounts from that process's `mountinfo`, compared with the `config.json`
+/// the runner wrote. The test process stands in for the container: its mountinfo has none
+/// of the job's mount points, so the real bundle's binds are reported, and a bundle with
+/// no mounts is clean.
+#[tokio::test]
+async fn the_mounts_of_a_started_container_are_read_back_against_its_bundle() {
+    let script = format!("state-pid {}", std::process::id());
+    let node = Node::new("verify", &script);
+    let why = verified(&node, None).await.expect_err("binds not mounted");
+    for target in ["/scratch", "/workspace", "/run/js-files"] {
+        assert!(
+            why.contains(&format!("{target}: not mounted")),
+            "{target} in {why}"
+        );
+    }
+    let lease = node.spec().dir.display().to_string();
+    let calls = node.calls();
+    let want = format!("--root {lease}/crun state lease-1-2");
+    assert!(
+        calls.iter().any(|c| c.contains(&want)),
+        "{want:?} not in {calls:?}"
+    );
+
+    let node = Node::new("verify-clean", &script);
+    verified(&node, Some("{\"ociVersion\":\"1.0.0\"}"))
+        .await
+        .expect("no mounts asked for");
+}
+
+/// Catches a failing `crun state`, an answer that is not a state, and a process that is
+/// gone each reported as a pass: the container is not running yet (or any more), and the
+/// caller must hear it. Each error names what failed.
+#[tokio::test]
+async fn a_read_back_that_cannot_be_made_is_an_error() {
+    let node = Node::new("verify-state-fail", "state-fail no such container");
+    let why = verified(&node, None).await.expect_err("state fails");
+    assert!(why.starts_with("crun state: "), "{why}");
+    assert!(why.contains("no such container"), "{why}");
+
+    let node = Node::new("verify-not-json", "state-raw not json");
+    let why = verified(&node, None).await.expect_err("not a state");
+    assert!(why.starts_with("crun state: "), "{why}");
+
+    let node = Node::new("verify-no-pid", "state-raw {\"status\":\"created\"}");
+    let why = verified(&node, None).await.expect_err("no pid");
+    assert!(why.starts_with("crun state: "), "{why}");
+
+    // The highest pid the kernel can give is 4194303: none runs at 4194304.
+    let node = Node::new("verify-gone", "state-pid 4194304");
+    let why = verified(&node, None).await.expect_err("process gone");
+    assert!(why.contains("/proc/4194304/mountinfo"), "{why}");
+
+    let node = Node::new("verify-no-runtime", "");
+    let spec = node.spec();
+    let oci = node.oci();
+    std::fs::remove_file(&node.crun).expect("remove the runtime");
+    let why = oci.verify_mounts(&spec).expect_err("no runtime");
+    assert!(why.contains(&node.crun.display().to_string()), "{why}");
+}
+
+/// Catches a bundle that cannot be read, or is not a bundle, passing: a container whose
+/// `config.json` is missing or is not JSON is an error naming the file.
+#[tokio::test]
+async fn a_bundle_that_cannot_be_read_back_is_an_error() {
+    let script = format!("state-pid {}", std::process::id());
+    let node = Node::new("verify-bad-config", &script);
+    let why = verified(&node, Some("not json"))
+        .await
+        .expect_err("not json");
+    assert!(why.starts_with("config.json: "), "{why}");
+
+    let node = Node::new("verify-no-config", &script);
+    let spec = node.spec();
+    let oci = node.oci();
+    let why = oci.verify_mounts(&spec).expect_err("no bundle");
+    assert!(why.contains("config.json"), "{why}");
+}
+
+/// Catches a job's output sent anywhere but the two pipes the backend drains (a file the
+/// runtime was handed, or one stream's text in the other), and an unterminated or
+/// terminated last line lost: each stream's text is in its own file and in the tail, as
+/// written.
+#[tokio::test]
+async fn the_output_of_a_container_is_kept_apart_in_files_and_the_tail() {
+    let node = Node::new("out", "run-out to stdout\nrun-err to stderr");
+    let spec = node.spec();
+    // An hour of grace: a write end the backend kept would make the run wait it out, which
+    // the hang guard turns into a failure (the wait is not timed).
+    let oci = node.oci_keeping(LogLimits {
+        drain_grace: std::time::Duration::from_secs(3600),
+        ..LogLimits::default()
+    });
+    oci.create(&spec).await.expect("bundle");
+    let mut running = oci.start(&spec).expect("started");
+    tokio::time::timeout(std::time::Duration::from_secs(120), running.wait())
+        .await
+        .expect("the run ended without waiting out the drain");
+    assert_eq!(oci.ended(&spec, &running).await, Ok(Ended::Exited(0)));
+    assert_eq!(
+        std::fs::read_to_string(stdout_path(&spec.dir)).expect("stdout"),
+        "to stdout\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(stderr_path(&spec.dir)).expect("stderr"),
+        "to stderr\n"
+    );
+    let tail = running.tail();
+    assert_eq!(tail.stdout.bytes, b"to stdout\n");
+    assert_eq!(tail.stderr.bytes, b"to stderr\n");
+    assert_eq!((tail.stdout.total, tail.stderr.total), (10, 10));
+}
+
+/// Catches an output that is not bounded on disk, a drain that stops at the cap (the
+/// stand-in would block on a full pipe and never exit), and a tail that is not the end
+/// of the stream: 1 MiB written through caps of 10 KiB (file) and 1 KiB (tail).
+#[tokio::test]
+async fn a_container_that_prints_more_than_the_cap_exits_and_leaves_a_bounded_log() {
+    const WRITTEN: usize = 1024 * 1024;
+    let node = Node::new("flood", &format!("run-flood {WRITTEN}\nrun-exit 4"));
+    let spec = node.spec();
+    let limits = LogLimits {
+        file_cap: 10 * 1024,
+        tail: 1024,
+        ..LogLimits::default()
+    };
+    let oci = node.oci_keeping(limits);
+    oci.create(&spec).await.expect("bundle");
+    let mut running = oci.start(&spec).expect("started");
+    running.wait().await;
+    assert_eq!(oci.ended(&spec, &running).await, Ok(Ended::Exited(4)));
+    let file = std::fs::read(stdout_path(&spec.dir)).expect("stdout");
+    assert_eq!(file.len(), 10 * 1024);
+    assert!(file.iter().all(|b| *b == b'x'));
+    let tail = running.tail();
+    assert_eq!(tail.stdout.total, WRITTEN as u64);
+    assert!(tail.stdout.file_cut);
+    assert_eq!(tail.stdout.bytes.len(), 1024);
+    assert_eq!(tail.stdout.bytes.last(), Some(&b'\n'));
+    assert_eq!(tail.stderr.total, 0);
+    assert!(!tail.stderr.file_cut);
+}
+
+/// Catches a start that goes on when the file of a stream cannot be made: the error
+/// names the path.
+#[tokio::test]
+async fn a_log_file_that_cannot_be_made_is_a_start_error_naming_it() {
+    let node = Node::new("nofile", "");
+    let spec = node.spec();
+    let oci = node.oci();
+    oci.create(&spec).await.expect("bundle");
+    std::fs::create_dir(stdout_path(&spec.dir)).expect("a directory in the way");
+    let why = oci.start(&spec).expect_err("no file");
+    assert!(
+        why.contains(&stdout_path(&spec.dir).display().to_string()),
+        "{why}"
+    );
 }

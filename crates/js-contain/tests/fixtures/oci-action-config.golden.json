@@ -220,35 +220,38 @@
     {
       "destination": "/tmp",
       "options": [
-        "rbind",
-        "rw",
         "nosuid",
-        "nodev"
+        "noexec",
+        "nodev",
+        "mode=1777",
+        "size=106m"
       ],
-      "source": "/scratch/lease-1-2/rw/tmp",
-      "type": "bind"
+      "source": "tmpfs",
+      "type": "tmpfs"
     },
     {
       "destination": "/var/tmp",
       "options": [
-        "rbind",
-        "rw",
         "nosuid",
-        "nodev"
+        "noexec",
+        "nodev",
+        "mode=1777",
+        "size=106m"
       ],
-      "source": "/scratch/lease-1-2/rw/var-tmp",
-      "type": "bind"
+      "source": "tmpfs",
+      "type": "tmpfs"
     },
     {
       "destination": "/run",
       "options": [
-        "rbind",
-        "rw",
         "nosuid",
-        "nodev"
+        "noexec",
+        "nodev",
+        "mode=1777",
+        "size=106m"
       ],
-      "source": "/scratch/lease-1-2/rw/run",
-      "type": "bind"
+      "source": "tmpfs",
+      "type": "tmpfs"
     },
     {
       "destination": "/root",
@@ -259,6 +262,39 @@
         "nodev"
       ],
       "source": "/scratch/lease-1-2/rw/home",
+      "type": "bind"
+    },
+    {
+      "destination": "/scratch",
+      "options": [
+        "rbind",
+        "rw",
+        "nosuid",
+        "nodev"
+      ],
+      "source": "/scratch/lease-1-2/job",
+      "type": "bind"
+    },
+    {
+      "destination": "/workspace",
+      "options": [
+        "rbind",
+        "rw",
+        "nosuid",
+        "nodev"
+      ],
+      "source": "/srv/mount-root",
+      "type": "bind"
+    },
+    {
+      "destination": "/run/js-files",
+      "options": [
+        "rbind",
+        "ro",
+        "nosuid",
+        "nodev"
+      ],
+      "source": "/run/js-agent/files/1-2",
       "type": "bind"
     }
   ],
@@ -273,46 +309,10 @@
     ],
     "capabilities": {
       "ambient": [],
-      "bounding": [
-        "CAP_CHOWN",
-        "CAP_DAC_OVERRIDE",
-        "CAP_FOWNER",
-        "CAP_FSETID",
-        "CAP_KILL",
-        "CAP_NET_BIND_SERVICE",
-        "CAP_SETFCAP",
-        "CAP_SETGID",
-        "CAP_SETPCAP",
-        "CAP_SETUID",
-        "CAP_SYS_CHROOT"
-      ],
-      "effective": [
-        "CAP_CHOWN",
-        "CAP_DAC_OVERRIDE",
-        "CAP_FOWNER",
-        "CAP_FSETID",
-        "CAP_KILL",
-        "CAP_NET_BIND_SERVICE",
-        "CAP_SETFCAP",
-        "CAP_SETGID",
-        "CAP_SETPCAP",
-        "CAP_SETUID",
-        "CAP_SYS_CHROOT"
-      ],
+      "bounding": [],
+      "effective": [],
       "inheritable": [],
-      "permitted": [
-        "CAP_CHOWN",
-        "CAP_DAC_OVERRIDE",
-        "CAP_FOWNER",
-        "CAP_FSETID",
-        "CAP_KILL",
-        "CAP_NET_BIND_SERVICE",
-        "CAP_SETFCAP",
-        "CAP_SETGID",
-        "CAP_SETPCAP",
-        "CAP_SETUID",
-        "CAP_SYS_CHROOT"
-      ]
+      "permitted": []
     },
     "cwd": "/job/root/pkg",
     "env": [
@@ -320,7 +320,7 @@
       "HOSTNAME=localhost",
       "HOME=/root"
     ],
-    "noNewPrivileges": false,
+    "noNewPrivileges": true,
     "oomScoreAdj": 0,
     "rlimits": [
       {
@@ -332,6 +332,11 @@
         "hard": 104,
         "soft": 104,
         "type": "RLIMIT_NPROC"
+      },
+      {
+        "hard": 0,
+        "soft": 0,
+        "type": "RLIMIT_CORE"
       }
     ],
     "terminal": false,

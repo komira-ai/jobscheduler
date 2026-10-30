@@ -20,7 +20,7 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
-use crate::location::{Authority, HTTPS_PORT};
+use crate::location::{Authority, HTTP_PORT, HTTPS_PORT};
 use crate::text;
 use crate::{Error, Policy};
 
@@ -73,6 +73,42 @@ pub struct RootSummary {
 
 /// Redirects followed for one request.
 const MAX_REDIRECTS: usize = 5;
+
+/// Where a request may go, given the registry (or token endpoint) it began at.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Reach<'a> {
+    /// Https to any host the policy allows, on port 443 or `own`'s.
+    Https(&'a Authority),
+    /// Plain http to this authority, a loopback IP literal, and to nothing else: no
+    /// other host, port or scheme, and no TLS.
+    PlainLoopback(&'a Authority),
+}
+
+impl Reach<'_> {
+    /// The authority a hop to `uri` (`url` is its text) goes to, or why it may not.
+    fn authority(self, uri: &Uri, url: &str) -> Result<Authority, Error> {
+        match self {
+            Self::Https(own) => {
+                let authority =
+                    Authority::of_uri(uri).filter(|_| uri.scheme_str() == Some("https"));
+                let Some(authority) = authority else {
+                    return Err(Error::Insecure(text::url(url)));
+                };
+                if ![HTTPS_PORT, own.port()].contains(&authority.port()) {
+                    return Err(Error::Port {
+                        host: text::escape(authority.host()),
+                        port: authority.port(),
+                        own: own.port(),
+                    });
+                }
+                Ok(authority)
+            }
+            Self::PlainLoopback(own) => Authority::of_uri_or(uri, HTTP_PORT)
+                .filter(|a| uri.scheme_str() == Some("http") && a == own)
+                .ok_or_else(|| Error::PlainHttp(text::url(url))),
+        }
+    }
+}
 
 /// The roots a client trusts.
 #[derive(Clone, Debug)]
@@ -182,19 +218,20 @@ impl Http {
     }
 
     /// GETs `url` with `headers`, following redirects. The headers go to `url` only: a
-    /// redirect target (a blob's CDN) gets the request without `Authorization`. `own`
-    /// is the registry (or token endpoint) the request began at: every hop may use port
-    /// 443 or `own`'s port and no other.
+    /// redirect target (a blob's CDN) gets the request without `Authorization`.
+    /// `reach` says where every hop may go: https on port 443 or the port of the
+    /// registry (or token endpoint) the request began at, or, for a plain-http entry,
+    /// plain http to that exact authority.
     pub(crate) async fn get(
         &self,
         url: &str,
         headers: &[(HeaderName, String)],
-        own: &Authority,
+        reach: Reach<'_>,
     ) -> Result<Response<Incoming>, Error> {
         let mut url = url.to_owned();
         let mut headers = headers.to_vec();
         for _ in 0..=MAX_REDIRECTS {
-            let response = self.get_once(&url, &headers, own).await?;
+            let response = self.get_once(&url, &headers, reach).await?;
             if !response.status().is_redirection() {
                 return Ok(response);
             }
@@ -219,7 +256,7 @@ impl Http {
         &self,
         url: &str,
         headers: &[(HeaderName, String)],
-        own: &Authority,
+        reach: Reach<'_>,
     ) -> Result<Response<Incoming>, Error> {
         // What an error may say of the URL: no query, fragment or userinfo.
         let transport = |why: String| Error::Transport {
@@ -227,38 +264,44 @@ impl Http {
             why: text::escape(&why),
         };
         let uri: Uri = url.parse().map_err(|e| transport(format!("{e}")))?;
-        let authority = Authority::of_uri(&uri).filter(|_| uri.scheme_str() == Some("https"));
-        let Some(authority) = authority else {
-            return Err(Error::Insecure(text::url(url)));
-        };
-        if ![HTTPS_PORT, own.port()].contains(&authority.port()) {
-            return Err(Error::Port {
-                host: text::escape(authority.host()),
-                port: authority.port(),
-                own: own.port(),
-            });
-        }
+        let authority = reach.authority(&uri, url)?;
         // Before connecting: a name that cannot be a server's is no reason to dial.
-        let name = ServerName::try_from(authority.host().to_owned())
-            .map_err(|e| transport(e.to_string()))?;
+        let tls_name = match reach {
+            Reach::Https(_) => Some(
+                ServerName::try_from(authority.host().to_owned())
+                    .map_err(|e| transport(e.to_string()))?,
+            ),
+            Reach::PlainLoopback(_) => None,
+        };
         let connect = async {
             let addrs = self.addresses(&authority).await?;
             let tcp = TcpStream::connect(addrs.as_slice())
                 .await
                 .map_err(|e| transport(format!("connect: {e}")))?;
-            let stream = self
-                .connector()?
-                .0
-                .connect(name, tcp)
-                .await
-                .map_err(|e| transport(format!("TLS: {e}")))?;
-            Ok::<_, Error>(send(TokioIo::new(stream)).await)
+            Ok::<_, Error>(match tls_name {
+                Some(name) => {
+                    let stream = self
+                        .connector()?
+                        .0
+                        .connect(name, tcp)
+                        .await
+                        .map_err(|e| transport(format!("TLS: {e}")))?;
+                    send(TokioIo::new(stream)).await
+                }
+                None => send(TokioIo::new(tcp)).await,
+            })
         };
         let mut sender = tokio::time::timeout(self.timeouts.connect, connect)
             .await
             .map_err(|_| transport("connecting timed out".to_owned()))??;
         let mut request = Request::get(uri.path_and_query().map_or("/", |p| p.as_str()))
-            .header(HOST, authority.header())
+            .header(
+                HOST,
+                authority.header_or(match reach {
+                    Reach::Https(_) => HTTPS_PORT,
+                    Reach::PlainLoopback(_) => HTTP_PORT,
+                }),
+            )
             .header(USER_AGENT, "js-oci")
             .header(CONNECTION, "close");
         for (name, value) in headers {
