@@ -115,8 +115,8 @@ jobs:
   #   - the pull request carries the label `macos`;
   #   - a changed path contains darwin, apple, macos or seatbelt (any case), is under a
   #     js-mac-* crate (crates/js-mac-), or is rust-toolchain.toml or this file;
-  #   - the diff adds or removes a line with `target_os = "macos"` (the cfg( ), cfg!( ),
-  #     cfg(any( ... )) and `target_os="macos"` spellings all contain it).
+  #   - the diff adds or removes a line with `target_os = "macos"` or `target_vendor = "apple"`
+  #     (the cfg( ), cfg!( ), cfg(any( ... )) and no-space spellings all contain it).
   # If the diff cannot be computed the job runs (fail closed). The label needs the
   # `labeled` pull request event at the top, and a label other than `macos` skips every job.
   # crates/xtask/tests/macos_filter.rs runs this script
@@ -155,7 +155,7 @@ jobs:
           macos=false
           if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
             macos=true
-          elif printf '%s\n' "$patch" | grep -Ev '^(\+\+\+|---) ' | grep -Eq '^[+-].*target_os[[:space:]]*=[[:space:]]*"macos"'; then
+          elif printf '%s\n' "$patch" | grep -Ev '^(\+\+\+|---) ' | grep -Eq '^[+-].*target_(os[[:space:]]*=[[:space:]]*"macos"|vendor[[:space:]]*=[[:space:]]*"apple")'; then
             macos=true
           fi
           echo "macos=$macos" >> "$GITHUB_OUTPUT"

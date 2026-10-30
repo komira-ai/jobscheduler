@@ -3,7 +3,7 @@
 //! repositories, so each trigger is pinned by what it does: a push to main always runs the
 //! job; a pull request runs it only when it carries the label `macos`, changes a path that
 //! names darwin, apple, macos or seatbelt (any case), a `js-mac-*` crate or ci.yml, or
-//! adds or removes a `target_os = "macos"` line; and a diff that cannot be computed runs it.
+//! adds or removes a `target_os = "macos"` or `target_vendor = "apple"` line; and a diff that cannot be computed runs it.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -199,6 +199,9 @@ fn an_added_or_removed_target_os_macos_line_runs_the_job() {
         "#[cfg(any(unix, target_os = \"macos\"))]\n",
         "if cfg!(target_os = \"macos\") {}\n",
         "#[cfg(not(target_os = \"macos\"))]\n",
+        "#[cfg(target_vendor = \"apple\")]\n",
+        "#[cfg(target_vendor=\"apple\")]\n",
+        "#[cfg(any(unix, target_vendor  =  \"apple\"))]\n",
     ];
     for (i, line) in spellings.iter().enumerate() {
         let content = format!("fn a() {{}}\n{line}");
@@ -208,6 +211,25 @@ fn an_added_or_removed_target_os_macos_line_runs_the_job() {
                 &[("crates/js-agent/src/other.rs", &content)]
             ),
             "true",
+            "{line}"
+        );
+    }
+    // Other platform words stay out: unix, another vendor, linux.
+    for (i, line) in [
+        "#[cfg(unix)]\n",
+        "#[cfg(target_vendor = \"unknown\")]\n",
+        "#[cfg(target_os = \"linux\")]\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let content = format!("fn a() {{}}\n{line}");
+        assert_eq!(
+            pr(
+                &format!("neg{i}"),
+                &[("crates/js-agent/src/other.rs", &content)]
+            ),
+            "false",
             "{line}"
         );
     }
