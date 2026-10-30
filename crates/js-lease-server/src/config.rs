@@ -342,6 +342,8 @@ pub struct Config {
     pub(crate) listen: SocketAddr,
     /// What names the listen address in a refusal: `--listen` or `server.listen`.
     pub(crate) listen_flag: &'static str,
+    /// A listener the caller bound, served in place of binding `listen`.
+    pub(crate) bound: Option<std::net::TcpListener>,
     pub(crate) agent_listen: Option<SocketAddr>,
     pub(crate) advertise_url: Option<String>,
     pub(crate) warnings: Vec<String>,
@@ -486,6 +488,7 @@ impl Config {
         Ok(Self {
             listen: cli.listen,
             listen_flag: "--listen",
+            bound: None,
             agent_listen: None,
             advertise_url: None,
             warnings,
@@ -566,6 +569,7 @@ impl Config {
         Ok(Self {
             listen: server.listen,
             listen_flag: "server.listen",
+            bound: None,
             agent_listen: server.agent_listen,
             advertise_url: server.advertise_url,
             warnings,
@@ -625,6 +629,20 @@ impl Config {
     /// the agent binary's digest, the Tailscale build, or a stand-in network mode.
     pub fn with_launch_inputs(mut self, inputs: LaunchInputs) -> Self {
         self.launch_inputs = inputs;
+        self
+    }
+
+    /// The same configuration serving on `listener`, which the caller has already bound,
+    /// in place of binding `--listen`. The caller owns the socket: the server makes its
+    /// copy non-blocking and closes only that copy when it stops, so a clone of the
+    /// listener (`try_clone`) the caller kept still holds the port afterwards. The
+    /// server sets the socket non-blocking (a flag of the open file description, which
+    /// clones share), so a clone the caller kept is non-blocking too until it calls
+    /// `set_nonblocking(false)` on it, which it should do only once the server has
+    /// stopped. The caller must not accept on a clone while the server runs, since the
+    /// copies share one queue of connections. `Running::addr` is the address of `listener`.
+    pub fn with_listener(mut self, listener: std::net::TcpListener) -> Self {
+        self.bound = Some(listener);
         self
     }
 
