@@ -313,11 +313,16 @@ impl Lifecycle {
         if self.taint.is_tainted() {
             return Err(no(refusal::HOST_TAINTED, "this host is tainted"));
         }
-        if spec.native.is_some() {
-            return Err(no(
-                refusal::NATIVE_UNSUPPORTED,
-                "this agent runs no native jobs",
-            ));
+        if let Some(native) = &spec.native {
+            self.runtime
+                .check_native(native)
+                .map_err(|refused| (refused.code, refused.why))?;
+            if !spec.files.is_empty() {
+                return Err(no(
+                    detail::FILES_NEED_CONTAINER,
+                    "run files are delivered to containers only",
+                ));
+            }
         }
         self.admit_exclusive(spec)?;
         if (spec.isolation, self.config.allow_host_jobs) == (Isolation::Host, false) {

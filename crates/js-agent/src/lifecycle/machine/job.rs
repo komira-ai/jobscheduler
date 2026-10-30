@@ -443,9 +443,12 @@ pub(super) fn run_spec(
     labels.extend(own.map(|(key, value)| (key.to_owned(), value)));
     RunSpec {
         run_id: spec.run_id.clone(),
-        body: Body::Container {
-            image: spec.image.clone(),
-            args: spec.args.clone(),
+        body: match &spec.native {
+            Some(native) => Body::Native(native.clone()),
+            None => Body::Container {
+                image: spec.image.clone(),
+                args: spec.args.clone(),
+            },
         },
         cpu_millis: spec.limits.cpu_millis,
         memory_bytes: spec.limits.memory_bytes,

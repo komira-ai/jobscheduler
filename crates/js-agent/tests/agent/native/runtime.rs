@@ -293,11 +293,10 @@ fn a_user_the_helper_refuses_to_make_ends_the_start() {
 }
 
 /// Asserts that every failure after the user exists leaves nothing behind: the helper is
-/// asked to kill and delete the user, and the start's error is the first failure's. The
+/// asked to kill and delete the user, and the start's error names the first failure. The
 /// failures: the helper refusing `run`, no home to make the run directory in, a log file
-/// that cannot be made (each stream), a program the profile cannot name and a policy over
-/// the profile's bounds. It catches a lease user, and a home, left on the Mac by a start
-/// that failed.
+/// that cannot be made (each stream) and a program the profile cannot name. It catches a
+/// lease user, and a home, left on the Mac by a start that failed.
 #[test]
 fn a_start_that_fails_after_the_user_exists_removes_the_user() {
     let rollback = ["kill-uid 7.0", "user-delete 7.0"];
