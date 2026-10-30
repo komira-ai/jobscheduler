@@ -718,6 +718,7 @@ fn accepted(gpus: Gpus) -> Result<Gpus, String> {
             cpu_millis: 0,
             memory_bytes: 0,
             gpus: gpus.count,
+            disk_bytes: 0,
             gpu_class: gpus.class.clone(),
             max_leases: None,
         },

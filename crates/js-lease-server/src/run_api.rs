@@ -90,6 +90,8 @@ struct LimitsBody {
     cpu_millis: u64,
     memory_bytes: u64,
     #[serde(default)]
+    disk_bytes: Option<u64>,
+    #[serde(default)]
     pids: Option<u64>,
     #[serde(default)]
     wall_ms: Option<u64>,
@@ -171,6 +173,7 @@ impl From<RunRefusal> for ApiError {
             | RunRefusal::NotReady
             | RunRefusal::NoCapacity
             | RunRefusal::FilesUnsupported
+            | RunRefusal::DiskUnsupported
             | RunRefusal::RunExists => StatusCode::CONFLICT,
         };
         ApiError::coded(status, refusal.code())
@@ -237,6 +240,7 @@ async fn start(
         limits: Limits {
             cpu_millis: body.limits.cpu_millis,
             memory_bytes: body.limits.memory_bytes,
+            disk_bytes: body.limits.disk_bytes,
             pids: body.limits.pids,
             wall_ms: asked.map_or(wall_cap, |asked| asked.min(wall_cap)),
         },

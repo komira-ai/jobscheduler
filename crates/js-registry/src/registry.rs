@@ -12,7 +12,7 @@ use js_types::{HostId, LeaseId, ProviderId, RequestId, Shape};
 use crate::config::PoolConfig;
 use crate::credential::{Binding, Credential};
 use crate::refusal::Refusal;
-use crate::runs::{RunRefusal, RunView, Runs, Standing, vet};
+use crate::runs::{RunRefusal, RunView, Runs, Standing, quota_default, vet};
 use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
 use crate::whole::ending::Ending;
 use crate::whole::exclusive::Exclusive;
@@ -137,6 +137,13 @@ struct Record {
     /// at a hello, and a hello of a lost host gives up every run still queued for it, so
     /// the check at queueing time is the only one a start needs.
     files: bool,
+    /// The quota in bytes the host's last hello said it enforces on a run that sets no
+    /// `disk_bytes` (`scratch-default-gib`), when it also reported `scratch-quota`; `None`
+    /// for a host that reported no quota, or a default that is missing, not a whole
+    /// number, zero or too large to count. Kept like `files`, and for the same reason: the
+    /// run check sees only the pool's shape otherwise. It changes only at a hello, and a
+    /// run books what it was given at queueing, so a new default never rebooks a live run.
+    quota_default: Option<u64>,
     /// The run ids the host listed as held in its last hello or heartbeat.
     held: BTreeSet<String>,
     /// The heartbeats taken in this session.
@@ -172,6 +179,7 @@ impl Record {
             agent_version: None,
             labels: BTreeMap::new(),
             files: false,
+            quota_default: None,
             held: BTreeSet::new(),
             beats: 0,
             exclusive: Exclusive::Free,
@@ -621,6 +629,7 @@ impl Registry {
                 agent_version: Some(hello.agent_version.clone()),
                 labels: hello.labels.clone(),
                 files: hello.capabilities.get(RUN_FILES).map(String::as_str) == Some(FLAG_SET),
+                quota_default: quota_default(&hello.capabilities),
                 held,
                 beats: 0,
                 taint: kept_taint,
@@ -805,7 +814,9 @@ impl Registry {
     /// asks for host isolation ([`RunRefusal::HostJobsNotAllowed`]) or exceeds the
     /// booked shape alone ([`RunRefusal::LimitsExceedShape`]); a job with run files for a
     /// host whose hello did not report the `run-files` capability
-    /// ([`RunRefusal::FilesUnsupported`]); [`RunRefusal::HostLost`]
+    /// ([`RunRefusal::FilesUnsupported`]); a job with `limits.disk_bytes` for a host whose
+    /// hello did not report `scratch-quota` with a default ([`RunRefusal::DiskUnsupported`]);
+    /// [`RunRefusal::HostLost`]
     /// for a host not heard within the grace period; [`RunRefusal::NotHeld`] when the
     /// registry's booking of `host` is not `lease`; [`RunRefusal::HostTainted`] for a
     /// host that reported a taint; [`RunRefusal::NoCapacity`] when the host is marked
@@ -838,6 +849,9 @@ impl Registry {
         if !spec.files.is_empty() && !record.files {
             return Err(RunRefusal::FilesUnsupported);
         }
+        if spec.limits.disk_bytes.is_some() && record.quota_default.is_none() {
+            return Err(RunRefusal::DiskUnsupported);
+        }
         if record.state(now, self.grace_ms()) != HostState::Live {
             return Err(RunRefusal::HostLost);
         }
@@ -857,7 +871,14 @@ impl Registry {
             return Err(RunRefusal::NoCapacity);
         }
         let seen = (record.beats, now.millis());
-        runs.admit(host, lease, spec, shape.resources(), seen)
+        runs.admit(
+            host,
+            lease,
+            spec,
+            shape.resources(),
+            record.quota_default,
+            seen,
+        )
     }
 
     /// Asks for the run `run_id` of `lease` to stop: a retained intent, carried as a stop

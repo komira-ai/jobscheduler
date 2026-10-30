@@ -24,6 +24,7 @@ fn job(run: &str, cpu: u64) -> JobSpec {
         limits: Limits {
             cpu_millis: cpu,
             memory_bytes: 1 << 20,
+            disk_bytes: None,
             pids: None,
             wall_ms: 60_000,
         },

@@ -18,6 +18,7 @@ pub fn hello(host: &str, shape: &Shape) -> Hello {
             cpu_millis: resources.cpu_millis(),
             memory_bytes: resources.memory_bytes(),
             gpus: resources.gpus(),
+            disk_bytes: resources.disk_bytes(),
             gpu_class: resources.gpu_class().map(str::to_string),
             max_leases: None,
         },

@@ -20,7 +20,7 @@ pub struct Request {
     /// serving the kind. An `action` books `resources`; a `whole_machine` lease waits
     /// for an empty worker at least `resources` large and books all of it.
     pub kind: LeaseKind,
-    /// The CPU, memory and GPUs to book for it (for a `whole_machine` lease, the least
+    /// The CPU, memory, GPUs and scratch disk to book for it (for a `whole_machine` lease, the least
     /// worker it may run on).
     pub resources: Resources,
     /// What a worker must offer to run it, from the action's platform properties. The

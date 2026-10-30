@@ -94,13 +94,19 @@ impl fmt::Display for Unservable {
                     lacks.join(", ")
                 )
             }
-            Self::TooLarge { matching, asked } => write!(
-                f,
-                "the {matching} live worker(s) that satisfy the action's platform are all \
-                 smaller than its request ({} millicores, {} bytes of memory, {} GPU(s), \
-                 {} VM slot(s))",
-                asked.cpu_millis, asked.memory_bytes, asked.gpus, asked.vms
-            ),
+            Self::TooLarge { matching, asked } => {
+                write!(
+                    f,
+                    "the {matching} live worker(s) that satisfy the action's platform are all \
+                     smaller than its request ({} millicores, {} bytes of memory, {} GPU(s), \
+                     {} VM slot(s)",
+                    asked.cpu_millis, asked.memory_bytes, asked.gpus, asked.vms
+                )?;
+                if asked.disk_bytes > 0 {
+                    write!(f, ", {} bytes of disk", asked.disk_bytes)?;
+                }
+                f.write_str(")")
+            }
             Self::Cordoned { workers } => {
                 let held = if workers
                     .iter()

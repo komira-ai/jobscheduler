@@ -89,6 +89,11 @@ struct RawShape {
     #[serde(default)]
     gpus: u64,
     gpu_class: Option<String>,
+    /// Bytes of scratch disk the pool books for every host and the floor a host's hello
+    /// must meet. Zero or absent books no disk. A pool that names `scratch-quota` in its
+    /// capabilities must set it above zero ([`PoolConfig::checked`]).
+    #[serde(default)]
+    disk_bytes: u64,
 }
 
 /// Reads the pool file at `path`.
@@ -141,13 +146,16 @@ fn parse_with(
         limits::MAX_MEMORY_BYTES,
     )?;
     within("shape.gpus", shape.gpus, limits::MAX_GPUS)?;
+    let disk_bytes = shape.disk_bytes;
+    within("shape.disk_bytes", disk_bytes, limits::MAX_DISK_BYTES)?;
     let resources = Resources::new(
         shape.cpu_millis,
         shape.memory_bytes,
         shape.gpus,
         raw.shape.gpu_class,
     )
-    .map_err(|err| format!("shape: {err}"))?;
+    .map_err(|err| format!("shape: {err}"))?
+    .with_disk_bytes(disk_bytes);
     capabilities_fit(&raw.capabilities)?;
     let interval = millis(
         "heartbeat_interval",
@@ -157,6 +165,8 @@ fn parse_with(
     let grace = millis("grace", raw.grace, DEFAULT_GRACE_MS)?;
     let shape = Shape::new(resources, raw.capabilities);
     let pool = PoolConfig::new(name, class, shape, raw.max_machines)
+        .checked()
+        .map_err(|err| format!("shape.disk_bytes: {err}"))?
         .with_timing(interval, grace)
         .map_err(|err| format!("heartbeat_interval and grace: {err}"))?;
     let retention = millis(
@@ -341,6 +351,56 @@ mod tests {
         assert_eq!(container.exec(), Some(ExecMode::Container));
         let mac = parse(&with("exec = \"sandbox-exec\"")).unwrap();
         assert_eq!(mac.exec(), Some(ExecMode::SandboxExec));
+    }
+
+    /// Asserts that a pool whose capabilities name `scratch-quota` is refused at load when
+    /// its shape books no disk, whether `disk_bytes` is left out or written as zero, with
+    /// a reason naming both the key and the capability; and that the same file loads once
+    /// `disk_bytes` is above zero, with that disk in the pool's shape. It catches a loader
+    /// that accepts a quota pool with no disk, which would admit hosts and then refuse
+    /// every run for want of room.
+    #[test]
+    fn quota_pool_zero_disk_refused_at_load() {
+        let quota = "[capabilities]\nscratch-quota = \"project\"\n";
+        let absent = parse(&format!("{MINIMAL}{quota}")).unwrap_err();
+        let zero = parse(&format!("{MINIMAL}disk_bytes = 0\n{quota}")).unwrap_err();
+        for reason in [absent, zero] {
+            assert!(reason.contains("shape.disk_bytes"), "{reason}");
+            assert!(reason.contains("scratch-quota"), "{reason}");
+        }
+        let loaded = parse(&format!("{MINIMAL}disk_bytes = 1073741824\n{quota}")).unwrap();
+        let resources = Resources::new(4000, 8_589_934_592, 0, None).unwrap();
+        let shape = Shape::new(
+            resources.with_disk_bytes(1 << 30),
+            BTreeMap::from([("scratch-quota".to_owned(), "project".to_owned())]),
+        );
+        let name = ProviderId::new("mac").unwrap();
+        let built = PoolConfig::new(name, class("mac-host").unwrap(), shape, 4);
+        assert_eq!(loaded, built);
+    }
+
+    /// Asserts that a pool that does not name `scratch-quota` loads with `disk_bytes`
+    /// left out and equals the pool built with a shape of no disk (a pool that books no
+    /// disk), that `disk_bytes` set on it is carried into the shape, and that a value
+    /// above the wire's maximum is refused by name. It catches a disk key read and
+    /// dropped, and a floor no hello could meet.
+    #[test]
+    fn disk_bytes_is_optional_carried_and_bounded() {
+        let none = parse(MINIMAL).unwrap();
+        assert_eq!(none, parse(&format!("{MINIMAL}disk_bytes = 0\n")).unwrap());
+        let sized = parse(&format!("{MINIMAL}disk_bytes = 4096\n")).unwrap();
+        assert_ne!(sized, none);
+        let resources = Resources::new(4000, 8_589_934_592, 0, None).unwrap();
+        let shape = Shape::new(resources.with_disk_bytes(4096), BTreeMap::new());
+        let name = ProviderId::new("mac").unwrap();
+        assert_eq!(
+            sized,
+            PoolConfig::new(name, class("mac-host").unwrap(), shape, 4)
+        );
+        let max = limits::MAX_DISK_BYTES;
+        assert!(parse(&format!("{MINIMAL}disk_bytes = {max}\n")).is_ok());
+        let over = parse(&format!("{MINIMAL}disk_bytes = {}\n", max + 1)).unwrap_err();
+        assert!(over.contains("shape.disk_bytes"), "{over}");
     }
 
     /// A file in the temp directory that is removed when the guard drops, so a failing

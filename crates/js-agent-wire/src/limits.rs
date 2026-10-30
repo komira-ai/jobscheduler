@@ -26,7 +26,7 @@
 //! | GPUs | [`MAX_GPUS`] devices or indices; uuid and model [`MAX_GPU_TEXT_LEN`] bytes |
 //! | lists in a heartbeat or reply | [`MAX_HELD`] held runs, [`MAX_RESULTS`] results or acks, [`MAX_COMMANDS`] commands |
 //! | node load in a heartbeat | [`MAX_LOAD_LEASES`] ids in each of `covered` and `clocks`, [`MAX_LOAD_MINUTES`] minute records, minute index 0 to [`TAIL_MINUTE`], lease ids [`MAX_LEASE_REF_LEN`] bytes |
-//! | shape and limits | [`MAX_CPU_MILLIS`], [`MAX_MEMORY_BYTES`], [`MAX_PIDS`], [`MAX_WALL_MS`], [`MAX_LEASE_CAP`] |
+//! | shape and limits | [`MAX_CPU_MILLIS`], [`MAX_MEMORY_BYTES`], [`MAX_DISK_BYTES`], [`MAX_PIDS`], [`MAX_WALL_MS`], [`MAX_LEASE_CAP`] |
 //! | session timing | [`MIN_HEARTBEAT_INTERVAL_MS`], [`MAX_HEARTBEAT_INTERVAL_MS`], [`MAX_GRACE_MS`] |
 
 /// Longest id, in bytes: run, lease, host, pool, instance and provider ids.
@@ -117,6 +117,17 @@ pub const MAX_COMMANDS: usize = 1024;
 pub const MAX_CPU_MILLIS: u64 = 1 << 32;
 /// Most bytes of memory a host or job may name (32 TiB); see [`MAX_CPU_MILLIS`].
 pub const MAX_MEMORY_BYTES: u64 = 1 << 45;
+/// Most bytes of scratch disk a host or job may name: 2^46 - 1, one byte short of 64 TiB.
+/// The bound is one short of 2^46 so that the sum over 2^18 hosts or jobs (the bound
+/// [`MAX_CPU_MILLIS`] and [`MAX_MEMORY_BYTES`] keep) stays below `u64::MAX`: 2^18 values
+/// of 2^46 would sum to exactly 2^64.
+pub const MAX_DISK_BYTES: u64 = (1 << 46) - 1;
+
+const _: () = assert!(
+    MAX_DISK_BYTES.checked_mul(1 << 18).is_some(),
+    "the sum of disk over 2^18 jobs must fit u64"
+);
+
 /// Most processes a job may be limited to (the Linux default `pid_max` ceiling).
 pub const MAX_PIDS: u64 = 4_194_304;
 /// Longest wall-time limit of one job, in milliseconds (seven days).

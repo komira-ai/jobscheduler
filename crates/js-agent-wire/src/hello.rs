@@ -79,6 +79,11 @@ pub struct WireShape {
     pub memory_bytes: u64,
     /// Whole GPU devices; at most [`limits::MAX_GPUS`].
     pub gpus: u64,
+    /// Bytes of scratch disk; at most [`limits::MAX_DISK_BYTES`]. Absent reads as zero, so
+    /// a hello from a host that predates the field is a host with no disk to book, and a
+    /// shape with no disk is written without the field.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub disk_bytes: u64,
     /// The class of the GPUs; required exactly when `gpus` is above zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_class: Option<String>,
@@ -88,6 +93,10 @@ pub struct WireShape {
     pub max_leases: Option<u64>,
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 impl WireShape {
     /// The wire form of a resource vector, with no lease-count cap.
     pub fn from_resources(resources: &Resources) -> Self {
@@ -95,6 +104,7 @@ impl WireShape {
             cpu_millis: resources.cpu_millis(),
             memory_bytes: resources.memory_bytes(),
             gpus: resources.gpus(),
+            disk_bytes: resources.disk_bytes(),
             gpu_class: resources.gpu_class().map(str::to_string),
             max_leases: None,
         }
@@ -108,6 +118,7 @@ impl WireShape {
             self.gpus,
             self.gpu_class.clone(),
         )
+        .map(|resources| resources.with_disk_bytes(self.disk_bytes))
     }
 
     fn check(&self, at: At) -> Result<(), ValidationError> {
@@ -115,6 +126,8 @@ impl WireShape {
         check::range(cpu, self.cpu_millis, 0, limits::MAX_CPU_MILLIS)?;
         let memory = at.field("shape.memory_bytes");
         check::range(memory, self.memory_bytes, 0, limits::MAX_MEMORY_BYTES)?;
+        let disk = at.field("shape.disk_bytes");
+        check::range(disk, self.disk_bytes, 0, limits::MAX_DISK_BYTES)?;
         let gpus = at.field("shape.gpus");
         check::range(gpus, self.gpus, 0, limits::MAX_GPUS)?;
         let class = at.field("shape.gpu_class");

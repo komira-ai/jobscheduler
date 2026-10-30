@@ -54,11 +54,12 @@ pub(crate) enum MapError {
     LeaseText(String),
 }
 
-/// The booking vector of `resources`: CPU, memory and GPU count. The GPU class has no
+/// The booking vector of `resources`: CPU, memory, GPU count and disk. The GPU class has no
 /// place in it; see [`needs`] and [`node_caps`].
 pub(crate) fn booking(resources: &Resources) -> js_types::sched::Resources {
     js_types::sched::Resources::new(resources.cpu_millis(), resources.memory_bytes())
         .with_gpus(resources.gpus())
+        .with_disk_bytes(resources.disk_bytes())
 }
 
 /// What a host of `shape` offers the scheduler: its capacity, and the capabilities its
@@ -246,6 +247,40 @@ mod tests {
         assert_eq!(got.memory_bytes, 7 << 30);
         assert_eq!(got.gpus, 2);
         assert_eq!(got.vms, 0);
+    }
+
+    /// Disk reaches the scheduler's ledger on both sides: a request's `disk_bytes` lands
+    /// in its booking, a shape's lands in the host's capacity, and a request larger than
+    /// the host's disk is not runnable on it though cpu and memory fit. Catches a mapping
+    /// that copies cpu, memory and GPUs only, which leaves disk 0 on request and capacity,
+    /// so nothing is ever refused for disk.
+    #[test]
+    fn lease_disk_reaches_ledger() {
+        let got = booking(&resources(1, 2, 0, None).with_disk_bytes(9 << 30));
+        assert_eq!(got.disk_bytes, 9 << 30);
+        assert_eq!((got.cpu_millis, got.memory_bytes), (1, 2));
+        let (capacity, caps) = host(&shape(
+            resources(8000, 1 << 30, 0, None).with_disk_bytes(100 << 30),
+            &[],
+        ))
+        .unwrap();
+        assert_eq!(capacity.disk_bytes, 100 << 30);
+        let fits = job(
+            &request(resources(1000, 1, 0, None).with_disk_bytes(100 << 30), &[]),
+            "j",
+        )
+        .unwrap();
+        assert_eq!(fits.resources.disk_bytes, 100 << 30);
+        assert!(fits.runnable_on(&caps, &capacity));
+        let too_big = job(
+            &request(
+                resources(1000, 1, 0, None).with_disk_bytes((100 << 30) + 1),
+                &[],
+            ),
+            "j",
+        )
+        .unwrap();
+        assert!(!too_big.runnable_on(&caps, &capacity));
     }
 
     /// A request that needs the standard host's class is runnable on that host; one that

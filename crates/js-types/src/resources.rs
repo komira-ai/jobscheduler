@@ -21,6 +21,8 @@ pub enum Dim {
     MemoryBytes,
     /// Whole GPU devices. Fractions are out of scope.
     Gpus,
+    /// Bytes of scratch disk.
+    DiskBytes,
 }
 
 impl Dim {
@@ -30,6 +32,7 @@ impl Dim {
             "cpu_millis" => Ok(Self::CpuMillis),
             "memory_bytes" => Ok(Self::MemoryBytes),
             "gpus" => Ok(Self::Gpus),
+            "disk_bytes" => Ok(Self::DiskBytes),
             other => Err(TypeError::UnknownDimension(other.to_string())),
         }
     }
@@ -40,6 +43,7 @@ impl Dim {
             Self::CpuMillis => "cpu_millis",
             Self::MemoryBytes => "memory_bytes",
             Self::Gpus => "gpus",
+            Self::DiskBytes => "disk_bytes",
         }
     }
 }
@@ -65,6 +69,7 @@ pub struct Resources {
     memory_bytes: u64,
     gpus: u64,
     gpu_class: Option<String>,
+    disk_bytes: u64,
 }
 
 impl Resources {
@@ -83,7 +88,15 @@ impl Resources {
             memory_bytes,
             gpus,
             gpu_class,
+            disk_bytes: 0,
         })
+    }
+
+    /// This vector with `disk_bytes` of scratch disk. [`Resources::new`] keeps its
+    /// signature (other repositories pin this crate by revision), so disk is a builder.
+    pub fn with_disk_bytes(mut self, disk_bytes: u64) -> Self {
+        self.disk_bytes = disk_bytes;
+        self
     }
 
     /// A vector from `(dimension name, count)` pairs; a dimension left out is zero.
@@ -92,16 +105,17 @@ impl Resources {
         dims: impl IntoIterator<Item = (&'a str, u64)>,
         gpu_class: Option<String>,
     ) -> Result<Self, TypeError> {
-        let mut counts = [0u64; 3];
+        let mut counts = [0u64; 4];
         for (name, count) in dims {
             let slot = match Dim::from_name(name)? {
                 Dim::CpuMillis => 0,
                 Dim::MemoryBytes => 1,
                 Dim::Gpus => 2,
+                Dim::DiskBytes => 3,
             };
             counts[slot] = count;
         }
-        Self::new(counts[0], counts[1], counts[2], gpu_class)
+        Ok(Self::new(counts[0], counts[1], counts[2], gpu_class)?.with_disk_bytes(counts[3]))
     }
 
     /// Thousandths of a CPU core.
@@ -117,6 +131,11 @@ impl Resources {
     /// Whole GPU devices.
     pub fn gpus(&self) -> u64 {
         self.gpus
+    }
+
+    /// Bytes of scratch disk; zero when the vector books none.
+    pub fn disk_bytes(&self) -> u64 {
+        self.disk_bytes
     }
 
     /// The class of the GPUs, set exactly when [`Resources::gpus`] is above zero.
@@ -135,6 +154,7 @@ impl Resources {
             self.cpu_millis <= offered.cpu_millis,
             self.memory_bytes <= offered.memory_bytes,
             self.gpus <= offered.gpus,
+            self.disk_bytes <= offered.disk_bytes,
             class_matches,
         ]
         .into_iter()
@@ -154,6 +174,7 @@ impl Resources {
             memory_bytes: self.memory_bytes.checked_add(other.memory_bytes)?,
             gpus: self.gpus.checked_add(other.gpus)?,
             gpu_class,
+            disk_bytes: self.disk_bytes.checked_add(other.disk_bytes)?,
         })
     }
 }
@@ -170,7 +191,7 @@ mod tests {
     /// refused with the name in the error.
     #[test]
     fn dimension_names_round_trip_and_unknown_is_refused() {
-        for dim in [Dim::CpuMillis, Dim::MemoryBytes, Dim::Gpus] {
+        for dim in [Dim::CpuMillis, Dim::MemoryBytes, Dim::Gpus, Dim::DiskBytes] {
             assert_eq!(Dim::from_name(dim.name()), Ok(dim));
             assert_eq!(dim.to_string(), dim.name());
         }
@@ -213,6 +234,21 @@ mod tests {
         );
     }
 
+    /// Asserts that `from_named` reads `disk_bytes`, that `new` leaves disk at zero and
+    /// that the builder sets it without touching the other dimensions.
+    #[test]
+    fn disk_bytes_is_built_by_builder_and_from_named() {
+        assert_eq!(res(1, 2, 0, None).disk_bytes(), 0);
+        let built = res(1, 2, 1, Some("a100")).with_disk_bytes(9);
+        assert_eq!(
+            (built.cpu_millis(), built.memory_bytes(), built.gpus()),
+            (1, 2, 1)
+        );
+        assert_eq!(built.disk_bytes(), 9);
+        let named = Resources::from_named([("disk_bytes", 7), ("cpu_millis", 3)], None).unwrap();
+        assert_eq!((named.cpu_millis(), named.disk_bytes()), (3, 7));
+    }
+
     /// Asserts that fit compares every dimension and the GPU class when GPUs are
     /// wanted.
     #[test]
@@ -225,6 +261,34 @@ mod tests {
         assert!(!res(8000, 100, 5, Some("a100")).fits_in(&host));
         assert!(!res(8000, 100, 1, Some("h100")).fits_in(&host));
         assert!(!res(0, 0, 1, Some("a100")).fits_in(&res(1, 1, 0, None)));
+    }
+
+    /// Asserts that fit refuses a request for more disk than offered, and that disk
+    /// alone decides it when every other dimension fits.
+    #[test]
+    fn fits_in_checks_disk() {
+        let host = res(8, 8, 0, None).with_disk_bytes(100);
+        assert!(res(8, 8, 0, None).with_disk_bytes(100).fits_in(&host));
+        assert!(!res(8, 8, 0, None).with_disk_bytes(101).fits_in(&host));
+        assert!(res(8, 8, 0, None).fits_in(&res(8, 8, 0, None)));
+        assert!(
+            !res(0, 0, 0, None)
+                .with_disk_bytes(1)
+                .fits_in(&res(8, 8, 0, None))
+        );
+    }
+
+    /// Asserts that addition sums disk and refuses a disk overflow.
+    #[test]
+    fn checked_add_sums_disk_and_refuses_overflow() {
+        let a = res(1, 1, 0, None).with_disk_bytes(5);
+        let b = res(1, 1, 0, None).with_disk_bytes(6);
+        assert_eq!(a.checked_add(&b).unwrap().disk_bytes(), 11);
+        let max = res(0, 0, 0, None).with_disk_bytes(u64::MAX);
+        assert_eq!(
+            max.checked_add(&res(0, 0, 0, None).with_disk_bytes(1)),
+            None
+        );
     }
 
     /// Asserts that addition sums counts, merges the GPU class from either side, and
