@@ -30,7 +30,7 @@ fn seed(rig: &Rig, text: &str) {
 
 /// Asserts the journal's own rules: a file that is not there is empty, an added lease is
 /// live until it is marked done, a line that is neither an addition nor a removal (a torn
-/// one) is ignored, a rewrite holds exactly what it is given, and every way the file cannot
+/// one) is ignored, a retirement drops exactly the leases it names, and every way the file cannot
 /// be read, written or replaced is an error. It catches a journal that forgets a lease or
 /// keeps one that was ended.
 #[test]
@@ -48,14 +48,63 @@ fn the_journal_keeps_what_was_added_and_not_marked_done() {
         .unwrap();
     write!(file, "torn\nx 9.9\n+ 1.3").unwrap();
     assert_eq!(journal.live().unwrap(), ["1.2", "1.3"]);
-    journal.rewrite(&["2.2".to_owned()]).unwrap();
-    assert_eq!(journal.live().unwrap(), ["2.2"]);
+    journal.retire(&["1.2".to_owned(), "7.7".to_owned()]).unwrap();
+    assert_eq!(journal.live().unwrap(), ["1.3"]);
 
     let nowhere = Journal::new(&dir.path("no-such-dir").join("j"));
     assert!(nowhere.add("1.1").is_err());
-    assert!(nowhere.rewrite(&[]).is_err());
+    assert!(nowhere.retire(&[]).is_err());
     let unreadable = Journal::new(&dir.path(""));
     assert!(unreadable.live().is_err());
+}
+
+/// Asserts that a lease added between the read of the journal and its retirement survives:
+/// a worker that is still alive (wedged, not dead) appends `+ lease` while `reclaim` is
+/// ending the leases it read. It catches a retirement that writes back what was read, which
+/// forgets a user nothing else will end.
+#[test]
+fn a_lease_added_while_others_are_retired_is_kept() {
+    let dir = Scratch::new("journal-race");
+    let journal = Journal::new(&dir.path("j"));
+    journal.add("1.1").unwrap();
+    journal.add("1.2").unwrap();
+    let read = journal.live().unwrap();
+    journal.add("9.9").unwrap();
+    journal.retire(&read).unwrap();
+    assert_eq!(journal.live().unwrap(), ["9.9"]);
+}
+
+/// Asserts the same with real concurrency: threads add leases while another retires others
+/// over and over. Whatever the interleaving, every lease that was added and not named is
+/// live at the end (the assertion does not depend on timing; only a lost write fails it).
+/// It catches an append and a retirement that do not exclude each other.
+#[test]
+fn concurrent_adds_are_never_lost_to_a_retirement() {
+    const THREADS: usize = 4;
+    const EACH: usize = 40;
+    let dir = Scratch::new("journal-threads");
+    let journal = Journal::new(&dir.path("j"));
+    let workers: Vec<_> = (0..THREADS)
+        .map(|thread| {
+            let journal = journal.clone();
+            std::thread::spawn(move || {
+                for n in 0..EACH {
+                    journal.add(&format!("keep.{thread}.{n}")).unwrap();
+                }
+            })
+        })
+        .collect();
+    for round in 0..EACH {
+        let gone = format!("gone.{round}");
+        journal.add(&gone).unwrap();
+        journal.retire(&[gone]).unwrap();
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    let live = journal.live().unwrap();
+    assert_eq!(live.len(), THREADS * EACH, "{live:?}");
+    assert!(live.iter().all(|lease| lease.starts_with("keep.")));
 }
 
 /// Asserts that a lease is in the journal when the helper is asked to make its user, and
