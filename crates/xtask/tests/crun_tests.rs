@@ -172,7 +172,7 @@ fn every_target_runs_in_its_own_delegated_unit() {
 #[test]
 fn a_failed_target_fails_the_verb_after_it_ran() {
     let run = Run::new("fail");
-    let (code, _, err) = run.xtask(Path::new(FAKE), None, Some("tests-fail"));
+    let (code, _, err) = run.xtask(Path::new(FAKE), None, Some("fails:--include-ignored"));
     assert_eq!(code, Some(1), "{err}");
     assert_eq!(run.sudo_args(), run.units());
     let failed = |target: &str| {
