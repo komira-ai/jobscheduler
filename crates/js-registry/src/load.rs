@@ -8,7 +8,20 @@
 //!
 //! Two fields exist only on the scheduler's side, `cpu_throttled_usec` and
 //! `cpu_pressure_some_total_usec` (telemetry the wire does not carry yet); they read 0
-//! here, and nothing in the conversion invents any other value.
+//! here, and 0 there means **not measured**, not "no throttling". Nothing else in the
+//! conversion invents a value. The working set is the agent's `memory.current` less
+//! `inactive_file`, clamped at 0 when the inactive file is larger.
+//!
+//! # What is kept
+//!
+//! Only the latest accepted beat's load is kept for a host. Closed minutes the beat
+//! carries that a consumer has not read before the next beat replaces it are lost to
+//! that consumer, and a beat the registry took whose reply was lost is sent again by the
+//! agent, so a consumer that drains and sums the minutes must dedupe them by
+//! `(lease, minute)`. Nothing here says how much the agent dropped: the wire carries no
+//! drop counts (the agent's sampler counts gaps, clock steps and aged-out minutes, and a
+//! lease it cannot read is left out), so "no minutes" does not tell "nothing was
+//! dropped".
 
 use js_agent_wire::{NodeLoad as WireLoad, lease_parts};
 use js_types::sched::LeaseId;
@@ -71,19 +84,34 @@ pub fn node_load(wire: &WireLoad) -> Result<NodeLoad, BadLease> {
     })
 }
 
-/// What a heartbeat's load leaves of the host's stored one.
-///
-/// - No load, or one that does not pass [`vet`](WireLoad::vet) or convert: the host has no
-///   load now (a stale reading would read as current).
-/// - A reading whose `seq` is not above the stored one: the stored one stays (a delayed or
-///   repeated heartbeat).
-/// - Otherwise the new reading.
-pub(crate) fn after_beat(stored: Option<NodeLoad>, wire: Option<&WireLoad>) -> Option<NodeLoad> {
-    let wire = wire?;
-    if stored.as_ref().is_some_and(|last| wire.seq <= last.seq) {
-        return stored;
+/// What the registry keeps of a host's load: the latest reading, and the highest `seq` it
+/// has seen in this session (kept apart from the reading, so a clear does not let an older
+/// beat back in). A hello makes a new, empty one.
+#[derive(Debug, Default)]
+pub(crate) struct Kept {
+    pub(crate) latest: Option<NodeLoad>,
+    seen: Option<u64>,
+}
+
+impl Kept {
+    /// Takes in the load of a heartbeat.
+    ///
+    /// - No load: the host has none now (a stale reading would read as current); the
+    ///   high-water `seq` stays.
+    /// - A reading whose `seq` is not above the highest seen, cleared or not: nothing
+    ///   changes (a delayed or repeated heartbeat).
+    /// - Otherwise the `seq` is recorded, and the reading replaces the stored one; one
+    ///   that does not pass [`vet`](WireLoad::vet) or convert leaves the host with none.
+    pub(crate) fn take(&mut self, wire: Option<&WireLoad>) {
+        let Some(wire) = wire else {
+            self.latest = None;
+            return;
+        };
+        if self.seen.is_some_and(|seen| wire.seq <= seen) {
+            return;
+        }
+        self.seen = Some(wire.seq);
+        let mut vetted = wire.clone();
+        self.latest = vetted.vet().ok().and_then(|()| node_load(&vetted).ok());
     }
-    let mut vetted = wire.clone();
-    vetted.vet().ok()?;
-    node_load(&vetted).ok()
 }

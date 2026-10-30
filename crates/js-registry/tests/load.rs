@@ -264,3 +264,35 @@ fn a_hello_clears_the_load_and_a_lost_host_shows_none() {
     beat_with(&fx, "a", again, Some(at(1)));
     assert_eq!(stored(&fx, "a").unwrap().seq, 1);
 }
+
+/// Asserts that the highest `seq` seen survives a clear: after a beat with no load (or a
+/// load that fails vetting) removed the stored one, a delayed or retried older beat does not
+/// bring a stale load back, and a newer one is taken. A hello starts the count again. It
+/// catches a guard that only holds while a load is stored.
+#[test]
+fn an_older_beat_does_not_come_back_after_a_clear() {
+    let fx = fixture(1);
+    let a = fx.join("a", "t");
+    beat_with(&fx, "a", a, Some(at(7)));
+    beat_with(&fx, "a", a, None);
+    assert_eq!(stored(&fx, "a"), None);
+    beat_with(&fx, "a", a, Some(at(6)));
+    assert_eq!(stored(&fx, "a"), None, "a late beat 6 after the clear");
+    beat_with(&fx, "a", a, Some(at(7)));
+    assert_eq!(stored(&fx, "a"), None, "a repeat of 7");
+    let mut huge = at(9);
+    huge.working_set_bytes = MAX_MEMORY_BYTES + 1;
+    beat_with(&fx, "a", a, Some(huge));
+    beat_with(&fx, "a", a, Some(at(8)));
+    assert_eq!(
+        stored(&fx, "a"),
+        None,
+        "8 is below the 9 that failed vetting"
+    );
+    beat_with(&fx, "a", a, Some(at(10)));
+    assert_eq!(stored(&fx, "a").unwrap().seq, 10);
+    fx.pass_grace();
+    let again = fx.join("a", "t");
+    beat_with(&fx, "a", again, Some(at(1)));
+    assert_eq!(stored(&fx, "a").unwrap().seq, 1);
+}

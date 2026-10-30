@@ -10,6 +10,10 @@
 //! clock (the clock the lifecycle stamps a run's start with, whole milliseconds counted as
 //! microseconds).
 //!
+//! The working set is `memory.current` less `inactive_file`, clamped at 0 when the inactive
+//! file is the larger. The wire carries no drop counts: what the sampler sets aside (a
+//! lease it cannot read, a gap, a clock step, minutes too old) is not reported.
+//!
 //! # Absent versus zero
 //!
 //! A reading that cannot be taken gives an error, never a load of zeros: the heartbeat then

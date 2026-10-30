@@ -92,7 +92,12 @@ pub struct HostView {
     /// When a reservation that drains a busy host is given up if the host is still not
     /// quiet; `None` unless the host is reserved and was busy when it was set aside.
     pub drain_deadline: Option<Timestamp>,
-    /// The latest load the host reported (in the units of [`NodeLoad`]); `None` when the
+    /// The latest load the host reported (in the units of [`NodeLoad`]). Only the latest accepted beat's load is kept: minutes
+    /// it carries that a consumer has not read before the next beat are lost to it, and a beat
+    /// whose reply was lost is sent again, so a consumer that sums minutes must dedupe them by
+    /// (lease, minute). Nothing says how much the agent dropped (the wire has no drop counts),
+    /// so no minutes does not mean none were dropped. Zero `cpu_throttled_usec` and
+    /// `cpu_pressure_some_total_usec` mean not measured. `None` when the
     /// host has not reported one in this session, when its latest heartbeat carried none
     /// (the agent could not measure), and while the host is lost. A new hello clears it.
     pub load: Option<NodeLoad>,
@@ -161,7 +166,7 @@ struct Record {
     /// The shape the host announced at its last hello.
     claim: Option<Shape>,
     /// The load of the host's latest accepted reading, see [`HostView::load`].
-    load: Option<NodeLoad>,
+    load: load::Kept,
 }
 
 impl Record {
@@ -186,7 +191,7 @@ impl Record {
             bound: None,
             leaving: None,
             claim: None,
-            load: None,
+            load: load::Kept::default(),
         }
     }
 
@@ -637,7 +642,7 @@ impl Registry {
                 bound: kept_bound,
                 leaving: kept_leaving,
                 claim,
-                load: None,
+                load: load::Kept::default(),
             },
         );
         state.runs.sync(&host, &hello.held, true);
@@ -737,7 +742,7 @@ impl Registry {
         record.heard = Some(now);
         record.phase = heartbeat.phase;
         record.beats = record.beats.saturating_add(1);
-        record.load = load::after_beat(record.load.take(), heartbeat.load.as_ref());
+        record.load.take(heartbeat.load.as_ref());
         record.held = heartbeat
             .held
             .iter()
@@ -956,6 +961,7 @@ impl Registry {
             state: record.state(now, self.grace_ms()),
             load: record
                 .load
+                .latest
                 .clone()
                 .filter(|_| record.state(now, self.grace_ms()) != HostState::Lost),
             phase: record.phase,
