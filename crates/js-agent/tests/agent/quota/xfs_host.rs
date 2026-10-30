@@ -29,6 +29,9 @@
 //! then refuses those slots with `InUse`. The tests do not weaken `claim` to get past that:
 //! clear the project of slots 100 to 105 first (the held run script does it), then rerun.
 //!
+//! A rerun right after a failed run may need to wait a few seconds: XFS frees inodes in the
+//! background, and a `claim` made before that finishes can briefly see `InUse`.
+//!
 //! **What a job sees at a project quota.** XFS reports a hit on a *project* quota as
 //! `ENOSPC` ("No space left on device"): the project looks like a full file system. User
 //! and group quotas give `EDQUOT`. The tests accept either, and prove it was the quota and
@@ -147,7 +150,8 @@ fn is_quota_hit(err: &io::Error) -> bool {
 
 /// A write past the limit gets `ENOSPC` (`EDQUOT` is accepted too) and stops at the limit,
 /// a neighbour run under its own project is not affected (which also shows the file system
-/// was not full), and the usage reads what was written. It catches a limit
+/// was not full), and the usage after the refused write is between 3/4 of the limit and
+/// the limit (so a refusal far below the limit, from a full file system, fails). It catches a limit
 /// that is not enforced, one counted in the wrong unit, and one shared between projects.
 ///
 /// Run on a provisioned XFS `prjquota` host: see the module documentation.
@@ -166,7 +170,10 @@ fn project_quota_enforced() {
         "expected ENOSPC (XFS project quota) or EDQUOT, got: {over}"
     );
     let held = quota.usage(small.project).unwrap();
-    assert!(held.bytes <= MIB && held.bytes > 0, "{held:?}");
+    assert!(
+        held.bytes >= MIB * 3 / 4 && held.bytes <= MIB,
+        "usage must be at least 3/4 of the 1 MiB limit (else this was not the quota) and at most the limit: {held:?}"
+    );
 
     // The file system itself has room: the neighbour project writes 4 MiB.
     write_file(&big.dir, "fill", 4 * MIB).unwrap();
@@ -213,6 +220,8 @@ fn inode_flood_hits_limit() {
     // Outside the project a file can be made: the refusal was the quota, not a full table.
     let sibling = Plain(root.join(format!("sibling-{}", std::process::id())));
     fs::create_dir(&sibling.0).unwrap();
+    // The documented setup has the XFS root in project 0, so the sibling is outside any
+    // project (the quota module has no call that reads a directory's project id).
     File::create(sibling.0.join("free")).unwrap();
     run.finish();
 }

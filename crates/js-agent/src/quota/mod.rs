@@ -222,8 +222,8 @@ pub trait ScratchQuota: Send + Sync {
     /// Bounds the **empty** directory `run_dir` (a direct child of the scratch root) as project
     /// `project`: everything made below it is counted against the project and is refused
     /// (`ENOSPC` on XFS project quota) at `block_limit_bytes` of space or `inode_limit`
-    /// inodes. Call it before the directory is chowned or written to. A failed call may leave the project id on the
-    /// directory; the run is not started, and the directory is removed.
+    /// inodes. Call it before the directory is chowned or written to. A failed call may leave
+    /// the project id on the directory; the run is not started, and the directory is removed.
     ///
     /// # Errors
     ///
