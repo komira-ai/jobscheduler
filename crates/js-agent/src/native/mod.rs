@@ -77,6 +77,7 @@ use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
 use js_mac_session::lease::{Dotted, user_name};
 use js_types::LeaseId;
+use js_types::env::OWNED_ENV_NAMES;
 
 use crate::bundle::{Pinned, Placer};
 use crate::lifecycle::{
@@ -234,9 +235,9 @@ impl NativeRuntime {
                     network: prepared.network,
                     ..native.clone()
                 };
-                (body, with_tmp(prepared.env, &tmp))
+                (body, prepared.env)
             }
-            None => (native.clone(), with_tmp(native.env.clone(), &tmp)),
+            None => (native.clone(), plain_env(native, &tmp)),
         };
         let argv = profile_argv(&self.config, &native, &home)?;
         let logs = [logs::STDIN, logs::STDOUT, logs::STDERR]
@@ -321,15 +322,32 @@ impl NativeRuntime {
     }
 }
 
-/// `env` with the agent's `TMPDIR`, once and last, over any the job or a bundle gave: the
-/// run's temporary files are inside its home whatever the environment says.
-fn with_tmp(env: impl IntoIterator<Item = (String, String)>, tmp: &Path) -> Vec<(String, String)> {
-    let mut env: Vec<(String, String)> = env
-        .into_iter()
-        .filter(|(name, _)| name != "TMPDIR")
+/// The environment of a run that pins no bundle: the job's own, then `TMPDIR`.
+fn plain_env(native: &NativeSpec, tmp: &Path) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = native
+        .env
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
     env.push(("TMPDIR".to_owned(), tmp.display().to_string()));
     env
+}
+
+/// Refuses a job environment that names a variable the agent sets (`TMPDIR`, `HOME`, ...):
+/// the wire refuses them too, and a bundle run is refused the same way by its config, so the
+/// one rule holds for every run, before any user is made.
+fn check_env(native: &NativeSpec) -> Result<(), RuntimeError> {
+    let owned = native
+        .env
+        .keys()
+        .find(|name| OWNED_ENV_NAMES.contains(&name.as_str()));
+    match owned {
+        Some(name) => Err(fail(
+            &"the job env",
+            &format!("{name:?}: the agent sets this name"),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Asks the helper for its boot reset; one that ran already is as good as one that ran now.
@@ -374,6 +392,7 @@ impl Runtime for NativeRuntime {
         let id = LeaseId::new(self.term, self.next);
         self.next += 1;
         let lease = Dotted(id).to_string();
+        check_env(native)?;
         // A start that cannot have its bundle makes no user at all.
         let pinned = self.pin_bundle(spec, native, &lease)?;
         // Written and synced before the helper hears of the lease, so a process that dies
