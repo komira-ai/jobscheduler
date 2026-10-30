@@ -628,7 +628,7 @@ impl Lifecycle {
         // The image is asked for after the slot is taken and before anything is made: a run
         // whose image is still being fetched waits as `starting`, holding its booking, and
         // costs the worker nothing until the image is here (see `Runtime::prepare`).
-        match Prepared::Ready {
+        match self.runtime.prepare(&spec.image) {
             Prepared::Pending => {
                 let waiting = Waiting {
                     spec: spec.clone(),
