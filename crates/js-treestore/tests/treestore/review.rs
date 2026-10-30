@@ -583,3 +583,119 @@ fn a_panic_after_the_rename_leaves_nothing_in_place_and_does_not_block_a_retry()
     store.ensure(&wanted(&a)).unwrap();
     assert!(rig.present(&a.diff_id));
 }
+
+/// A store whose record write fails after the rename (the `tmp` directory is removed at
+/// that step) and, when `lose_trash`, whose `trash` directory is gone too, so that a plain
+/// move of the placed tree is refused.
+fn failing_placement(rig: &Rig, lose_trash: bool) -> crate::common::Store {
+    let root = rig.root();
+    let once = Arc::new(AtomicBool::new(true));
+    rig.open(Config {
+        crash: Some(Arc::new(move |step| {
+            if step == Step::Renamed && once.swap(false, Ordering::SeqCst) {
+                std::fs::remove_dir_all(root.join("tmp")).unwrap();
+                if lose_trash {
+                    std::fs::remove_dir(root.join("trash")).unwrap();
+                }
+            }
+            false
+        })),
+        ..rig.cfg()
+    })
+}
+
+#[test]
+fn a_placed_tree_whose_move_out_is_refused_is_unsealed_and_moved_on_the_second_try() {
+    let rig = Rig::new();
+    let a = sized("f", 10, 1);
+    rig.have(&a);
+    let store = failing_placement(&rig, true);
+    rig.sealer
+        .unseal_repairs_trash
+        .store(true, Ordering::SeqCst);
+    assert!(matches!(store.ensure(&wanted(&a)), Err(Error::Io { .. })));
+    assert!(!rig.root().join("trees").join(a.diff_id.hex()).exists());
+    // Nothing is stuck in the way of a retry.
+    std::fs::create_dir(rig.root().join("tmp")).unwrap();
+    store.ensure(&wanted(&a)).unwrap();
+    assert!(rig.present(&a.diff_id));
+}
+
+#[test]
+fn a_placed_tree_that_cannot_be_moved_out_is_sealed_again_and_the_failure_is_reported() {
+    let rig = Rig::new();
+    let a = sized("f", 10, 1);
+    rig.have(&a);
+    let store = failing_placement(&rig, true);
+    let error = store.ensure(&wanted(&a)).unwrap_err();
+    match error {
+        Error::Cleanup { cause, cleanup } => {
+            assert!(
+                matches!(
+                    *cause,
+                    Error::Io {
+                        what: "create record",
+                        ..
+                    }
+                ),
+                "{cause}"
+            );
+            assert!(
+                matches!(
+                    *cleanup,
+                    Error::Io {
+                        what: "move tree to trash",
+                        ..
+                    }
+                ),
+                "{cleanup}"
+            );
+        }
+        other => panic!("{other}"),
+    }
+    // Sealed for the placement, and put back after the unseal and the refused second move.
+    assert_eq!(rig.sealer.seal_count(), 2);
+    assert!(rig.root().join("trees").join(a.diff_id.hex()).exists());
+}
+
+#[test]
+fn a_tree_that_cannot_be_unsealed_for_the_move_is_sealed_again_and_stays_counted() {
+    let rig = Rig::new();
+    let (store, a, b) = vanished_pair(&rig, 100);
+    std::fs::remove_dir(rig.root().join("trash")).unwrap();
+    rig.sealer.fail_unseals_in_place.store(1, Ordering::SeqCst);
+    let error = store.ensure(&wanted(&b)).unwrap_err();
+    assert!(matches!(error, Error::Seal(_)), "{error}");
+    // a's seal, b's seal, and the seal put back on a, which the failed unseal may have
+    // left partly open.
+    assert_eq!(rig.sealer.seal_count(), 3);
+    assert!(rig.present(&a.diff_id));
+    assert_eq!(store.stats().used, 100);
+}
+
+#[test]
+fn a_move_that_stays_refused_and_a_seal_that_cannot_be_put_back_are_both_reported() {
+    let rig = Rig::new();
+    let (store, a, b) = vanished_pair(&rig, 100);
+    std::fs::remove_dir(rig.root().join("trash")).unwrap();
+    rig.sealer.fail_seals_in_place.store(true, Ordering::SeqCst);
+    let error = store.ensure(&wanted(&b)).unwrap_err();
+    match error {
+        Error::Cleanup { cause, cleanup } => {
+            assert!(
+                matches!(
+                    *cause,
+                    Error::Io {
+                        what: "move tree to trash",
+                        ..
+                    }
+                ),
+                "{cause}"
+            );
+            assert!(matches!(*cleanup, Error::Seal(_)), "{cleanup}");
+        }
+        other => panic!("{other}"),
+    }
+    assert!(rig.present(&a.diff_id));
+    assert_eq!(store.stats().used, 100);
+}

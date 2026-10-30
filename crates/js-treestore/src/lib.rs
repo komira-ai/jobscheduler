@@ -29,6 +29,7 @@
 //! valid record and drops pins of runs that are not live.
 
 mod error;
+pub mod mac;
 mod record;
 mod sealer;
 mod source;
