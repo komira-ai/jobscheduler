@@ -289,8 +289,21 @@ fn cgroup_parent(path: &str) -> Result<(), Failure> {
     })
 }
 
-/// Takes the lock of the store, held until the returned file is dropped.
-fn lock(root: &Path) -> Result<std::fs::File, Failure> {
+/// The lock of the store, released when this is dropped.
+///
+/// It is released with an explicit unlock, not by closing the file: a lock belongs to the
+/// open file description, which a child forked by another thread of this process holds a
+/// copy of until it execs, so closing alone can leave the store locked for a moment.
+struct Held(std::fs::File);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+    }
+}
+
+/// Takes the lock of the store, held until the returned guard is dropped.
+fn lock(root: &Path) -> Result<Held, Failure> {
     let path = root.join(LOCK);
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -307,5 +320,5 @@ fn lock(root: &Path) -> Result<std::fs::File, Failure> {
             ))
         },
     )?;
-    Ok(file)
+    Ok(Held(file))
 }

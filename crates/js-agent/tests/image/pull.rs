@@ -419,6 +419,8 @@ async fn a_second_pull_is_refused_while_another_holds_the_store() {
         Vec::<String>::new(),
         "the registry was asked"
     );
+    // Unlocked, not just closed: another test's fork may hold a copy of the descriptor.
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock).expect("released");
     drop(lock);
     let ran = run_flags(&fx, &cell, &reference(&fx, &artifact));
     assert_eq!(ran.status, exit_status(0), "{}", ran.stderr);
