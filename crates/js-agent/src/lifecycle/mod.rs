@@ -257,6 +257,10 @@ pub mod code {
     /// takes no run. The slot is read again at every step and is free once the usage reads
     /// zero; it is reported when it is parked, and again every hour while it stays parked.
     pub const QUOTA_SLOT_BUSY: &str = "quota-slot-busy";
+    /// A finished run's project still read usage after the time the agent waits for it
+    /// (`--scratch-usage-wait-secs`): the run's cleanup went on, the slot was parked and the
+    /// run's place and booked bytes were given back, and the quota counted one failure.
+    pub const QUOTA_USAGE_ABANDONED: &str = "quota-usage-abandoned";
     /// A parked slot read zero usage again and takes runs.
     pub const QUOTA_SLOT_RELEASED: &str = "quota-slot-released";
     /// A finished run's project still reads usage after its tree was removed (the file
@@ -565,6 +569,9 @@ pub struct Local {
     /// `--scratch-quota-failures`, or [`DEFAULT_SCRATCH_QUOTA_FAILURES`]. Meaningful with
     /// `--scratch-quota` only.
     pub scratch_quota_failures: u32,
+    /// `--scratch-usage-wait-secs`, or [`DEFAULT_SCRATCH_USAGE_WAIT_SECS`]. Meaningful with
+    /// `--scratch-quota` only.
+    pub scratch_usage_wait_secs: u64,
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
     /// `--run-files-root`, or the default under `/run` when that can be made; always none
@@ -593,6 +600,13 @@ pub const DEFAULT_SCRATCH_GIB: u64 = 2;
 /// The failed quota calls in a row after which the quota is probed again, when
 /// `--scratch-quota-failures` is not given.
 pub const DEFAULT_SCRATCH_QUOTA_FAILURES: u32 = 3;
+
+/// The seconds a finished run's slot is held for its usage to read zero, when
+/// `--scratch-usage-wait-secs` is not given.
+pub const DEFAULT_SCRATCH_USAGE_WAIT_SECS: u64 = 600;
+
+/// The most seconds `--scratch-usage-wait-secs` takes: a day.
+pub const MAX_SCRATCH_USAGE_WAIT_SECS: u64 = 86_400;
 
 /// The most `--scratch-quota-failures` takes.
 pub const MAX_SCRATCH_QUOTA_FAILURES: u32 = 1_000_000;
@@ -760,7 +774,7 @@ impl Local {
                     .to_owned(),
             );
         }
-        let (default_gib, max_inodes, failures) = scratch_quota_limits(cli)?;
+        let (default_gib, max_inodes, failures, usage_wait) = scratch_quota_limits(cli)?;
         Ok(Self {
             watch,
             mounts,
@@ -768,6 +782,7 @@ impl Local {
             scratch_default_gib: default_gib,
             scratch_max_inodes: max_inodes,
             scratch_quota_failures: failures,
+            scratch_usage_wait_secs: usage_wait,
             scratch,
             files,
             files_warning,
@@ -782,11 +797,12 @@ impl Local {
 /// The default GiB and the inode limit of `--scratch-quota`, checked: the two flags need
 /// `--scratch-quota`, the default is at least 1 GiB and its bytes fit the wire, and the
 /// inode limit is at least 1 and fits what the quota takes.
-fn scratch_quota_limits(cli: &Cli) -> Result<(u64, u64, u32), String> {
+fn scratch_quota_limits(cli: &Cli) -> Result<(u64, u64, u32, u64), String> {
     let given = [
         ("--scratch-default-gib", cli.scratch_default_gib),
         ("--scratch-max-inodes", cli.scratch_max_inodes),
         ("--scratch-quota-failures", cli.scratch_quota_failures),
+        ("--scratch-usage-wait-secs", cli.scratch_usage_wait_secs),
     ];
     if let Some((flag, _)) = given
         .iter()
@@ -818,7 +834,15 @@ fn scratch_quota_limits(cli: &Cli) -> Result<(u64, u64, u32), String> {
                 "--scratch-quota-failures: {failures} is not from 1 to {MAX_SCRATCH_QUOTA_FAILURES}"
             )
         })?;
-    Ok((gib, inodes, failures))
+    let wait = cli
+        .scratch_usage_wait_secs
+        .unwrap_or(DEFAULT_SCRATCH_USAGE_WAIT_SECS);
+    if !(1..=MAX_SCRATCH_USAGE_WAIT_SECS).contains(&wait) {
+        return Err(format!(
+            "--scratch-usage-wait-secs: {wait} is not from 1 to {MAX_SCRATCH_USAGE_WAIT_SECS}"
+        ));
+    }
+    Ok((gib, inodes, failures, wait))
 }
 
 impl Local {
@@ -832,6 +856,7 @@ impl Local {
             self.scratch_max_inodes,
         )
         .with_max_failures(self.scratch_quota_failures)
+        .with_usage_wait_ms(self.scratch_usage_wait_secs.saturating_mul(1000))
     }
 
     /// Refuses a state root whose device number (`st_dev`) equals that of a mount root or

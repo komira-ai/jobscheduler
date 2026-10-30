@@ -15,6 +15,7 @@ mod logs;
 mod mounts;
 mod owed;
 pub mod quota;
+mod quota_health;
 mod reach;
 mod results;
 mod rules;

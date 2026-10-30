@@ -204,6 +204,12 @@ pub(super) struct Job {
     pub(super) cgroup_missing_told: bool,
     /// Taken over from an earlier process of the agent: its first minutes were not seen.
     pub(super) adopted: bool,
+    /// When the project of the finished run first read usage after its tree was removed,
+    /// and when that was last reported (on the agent's clock).
+    pub(super) usage_held: Option<(u64, u64)>,
+    /// The agent gave up waiting for the usage: the slot is parked, not released, when the
+    /// cleanup passes.
+    pub(super) slot_parked: bool,
 }
 
 /// Microseconds in a millisecond.
@@ -332,6 +338,8 @@ impl Job {
             cgroup: None,
             cgroup_missing_told: false,
             adopted: false,
+            usage_held: None,
+            slot_parked: false,
         }
     }
 
@@ -364,6 +372,8 @@ impl Job {
             cgroup: None,
             cgroup_missing_told: false,
             adopted: true,
+            usage_held: None,
+            slot_parked: false,
         })
     }
 

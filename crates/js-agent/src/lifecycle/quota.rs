@@ -27,6 +27,7 @@ pub struct RunQuota {
     default_disk_bytes: u64,
     max_inodes: u64,
     max_failures: u32,
+    usage_wait_ms: u64,
 }
 
 impl fmt::Debug for RunQuota {
@@ -36,6 +37,7 @@ impl fmt::Debug for RunQuota {
             .field("default_disk_bytes", &self.default_disk_bytes)
             .field("max_inodes", &self.max_inodes)
             .field("max_failures", &self.max_failures)
+            .field("usage_wait_ms", &self.usage_wait_ms)
             .finish_non_exhaustive()
     }
 }
@@ -51,6 +53,7 @@ impl RunQuota {
             default_disk_bytes,
             max_inodes,
             max_failures: super::DEFAULT_SCRATCH_QUOTA_FAILURES,
+            usage_wait_ms: super::DEFAULT_SCRATCH_USAGE_WAIT_SECS * 1000,
         }
     }
 
@@ -63,14 +66,56 @@ impl RunQuota {
         }
     }
 
+    /// The same quota that gives up waiting for a finished run's usage to read zero after
+    /// `ms` milliseconds (at least 1).
+    pub fn with_usage_wait_ms(self, ms: u64) -> Self {
+        Self {
+            usage_wait_ms: ms.max(1),
+            ..self
+        }
+    }
+
+    /// How long a finished run's slot is held for its usage to read zero.
+    pub fn usage_wait_ms(&self) -> u64 {
+        self.usage_wait_ms
+    }
+
     /// The failed calls in a row after which the quota is probed again.
     pub fn max_failures(&self) -> u32 {
         self.max_failures
     }
 
-    /// Whether the scratch root can still enforce the quota, and why not.
-    pub(super) fn probe(&self) -> crate::quota::Probe {
-        self.quota.probe()
+    /// Whether the quota works: the probe says project, and a bound can be set on a
+    /// directory of its own (`dir`, made and removed here), its usage read, and the bound
+    /// taken off, with the id the probe uses. The probe alone can say project while a call
+    /// keeps failing (a limit the kernel refuses), so what failed is exercised too.
+    pub(super) fn check(&self, dir: &Path) -> Result<(), String> {
+        let probe = self.quota.probe();
+        if probe.mode != Mode::Project {
+            return Err(probe.reason);
+        }
+        let project = self.ids.probe_id();
+        let _ = std::fs::remove_dir(dir);
+        std::fs::create_dir(dir)
+            .map_err(|why| format!("cannot make the trial directory: {why}"))?;
+        let tried = self
+            .quota
+            .apply(dir, project, 1 << 20, 16)
+            .and_then(|()| self.quota.usage(project).map(|_| ()));
+        let removed = std::fs::remove_dir(dir);
+        let cleared = self.quota.clear(dir, project);
+        let problems = [
+            tried
+                .err()
+                .map(|why| format!("a trial bound failed: {why}")),
+            removed
+                .err()
+                .map(|why| format!("the trial directory stays: {why}")),
+            cleared
+                .err()
+                .map(|why| format!("clearing the trial bound failed: {why}")),
+        ];
+        problems.into_iter().flatten().next().map_or(Ok(()), Err)
     }
 
     /// The bytes a run without `disk_bytes` books.
@@ -106,9 +151,10 @@ impl RunQuota {
 }
 
 /// Whether the quota still works. A quota whose calls fail `max_failures` times in a row
-/// (a mount that lost `prjquota`, a failing `apply`, `clear` or usage read) is probed
-/// again; one the probe no longer calls `Project` is *unhealthy*: no run starts on it (it
-/// is refused `no-capacity`, the one retriable code the wire has; no taint is written),
+/// (a mount that lost `prjquota`, a failing `apply`, `clear` or usage read) is checked
+/// again ([`RunQuota::check`]: the probe, and a trial bound on a directory of its own); one
+/// that fails the check is *unhealthy*: no run starts on it (each start is refused
+/// `quota-unavailable`, which the server counts against nobody and which taints nothing),
 /// it is reported again every [`REPROBE_MS`], and it is probed again then, so a host that
 /// recovers takes runs again without a restart.
 #[derive(Default)]
@@ -131,18 +177,23 @@ impl QuotaHealth {
 
     /// A call failed. After `max_failures` in a row the quota is probed; if the probe is not
     /// `Project` the quota is unhealthy from now.
-    pub(super) fn failed(&mut self, quota: &RunQuota, now_ms: u64, events: &mut Vec<Event>) {
+    pub(super) fn failed(
+        &mut self,
+        quota: &RunQuota,
+        now_ms: u64,
+        dir: &Path,
+        events: &mut Vec<Event>,
+    ) {
         self.failures = self.failures.saturating_add(1);
         if self.failures < quota.max_failures() || self.unhealthy.is_some() {
             return;
         }
-        let probe = quota.probe();
-        match probe.mode {
-            Mode::Project => self.failures = 0,
-            Mode::None => {
+        match quota.check(dir) {
+            Ok(()) => self.failures = 0,
+            Err(reason) => {
                 self.next_ms = now_ms.saturating_add(REPROBE_MS);
-                events.push(Self::report(&probe.reason, self.failures));
-                self.unhealthy = Some(probe.reason);
+                events.push(Self::report(&reason, self.failures));
+                self.unhealthy = Some(reason);
             }
         }
     }
@@ -160,14 +211,19 @@ impl QuotaHealth {
 
     /// Called at every step: an unhealthy quota is probed again and reported again once
     /// every [`REPROBE_MS`]; one that probes `Project` again is healthy.
-    pub(super) fn tick(&mut self, quota: &RunQuota, now_ms: u64, events: &mut Vec<Event>) {
+    pub(super) fn tick(
+        &mut self,
+        quota: &RunQuota,
+        now_ms: u64,
+        dir: &Path,
+        events: &mut Vec<Event>,
+    ) {
         if self.unhealthy.is_none() || now_ms < self.next_ms {
             return;
         }
-        let probe = quota.probe();
         self.next_ms = now_ms.saturating_add(REPROBE_MS);
-        match probe.mode {
-            Mode::Project => {
+        match quota.check(dir) {
+            Ok(()) => {
                 *self = Self::default();
                 events.push(Event::Finding(Finding {
                     run_id: None,
@@ -175,9 +231,9 @@ impl QuotaHealth {
                     message: "the scratch quota works again: runs start here".to_owned(),
                 }));
             }
-            Mode::None => {
-                events.push(Self::report(&probe.reason, self.failures));
-                self.unhealthy = Some(probe.reason);
+            Err(reason) => {
+                events.push(Self::report(&reason, self.failures));
+                self.unhealthy = Some(reason);
             }
         }
     }

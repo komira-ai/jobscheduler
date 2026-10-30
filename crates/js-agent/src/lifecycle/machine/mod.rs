@@ -58,6 +58,9 @@ pub struct RunningLease {
 /// ids of a user namespace, which the agent checks when it starts.
 pub const SLOTS: u32 = MAX_JOBS as u32;
 
+/// How many free slots a start tries before it is refused `no-capacity` (see `take_slot`).
+const MAX_SLOT_ATTEMPTS: usize = 8;
+
 /// A refusal: the wire code and a local explanation.
 type Refusal = (&'static str, String);
 
@@ -336,7 +339,7 @@ impl Lifecycle {
         }
         if let Some(why) = self.quota_health.why() {
             return Err(no(
-                refusal::NO_CAPACITY,
+                refusal::QUOTA_UNAVAILABLE,
                 &format!("the scratch quota is unhealthy: {why}"),
             ));
         }
@@ -438,8 +441,9 @@ impl Lifecycle {
     /// Takes the lowest free slot whose project id holds no usage, when a scratch quota is
     /// on. A slot whose project still holds usage (a finished run's files that the file
     /// system has not freed yet, or what a crash left) is parked and reported, and the next
-    /// free slot is tried: there are thousands, so the run is refused `no-capacity` only
-    /// when none of the free slots is clean. A usage that cannot be read parks that slot
+    /// free slot is tried, up to [`MAX_SLOT_ATTEMPTS`] times: the run is refused
+    /// `no-capacity` when none of those is clean, so a fault that makes every slot read in
+    /// use costs a start eight reads and eight findings, not thousands. A usage that cannot be read parks that slot
     /// and refuses the run `scratch-failed` at once (the host's quota fails; trying the
     /// other slots would park them all), and counts toward the quota's health.
     fn take_slot(&mut self, run_id: &str, events: &mut Vec<Event>) -> Result<u32, Refusal> {
@@ -450,7 +454,10 @@ impl Lifecycle {
             refusal::NO_CAPACITY,
             "the project of every free slot still holds usage".to_owned(),
         );
-        while self.slots.has_room() {
+        for _ in 0..MAX_SLOT_ATTEMPTS {
+            if !self.slots.has_room() {
+                break;
+            }
             let slot = self.slots.take();
             let Err(why) = quota.claim(slot) else {
                 return Ok(slot);
@@ -465,8 +472,8 @@ impl Lifecycle {
                 refusal = (refusal::NO_CAPACITY, why.to_string());
                 continue;
             }
-            let now = self.clock.now_ms();
-            self.quota_health.failed(&quota, now, events);
+            let (now, dir) = (self.clock.now_ms(), self.config.scratch.health_dir());
+            self.quota_health.failed(&quota, now, &dir, events);
             return Err((detail::SCRATCH_FAILED, why.to_string()));
         }
         Err(refusal)
@@ -488,8 +495,8 @@ impl Lifecycle {
         match &bound {
             Ok(()) => self.quota_health.ok(),
             Err(_) => {
-                let now = self.clock.now_ms();
-                self.quota_health.failed(&quota, now, events);
+                let (now, dir) = (self.clock.now_ms(), self.config.scratch.health_dir());
+                self.quota_health.failed(&quota, now, &dir, events);
             }
         }
         bound
@@ -502,7 +509,8 @@ impl Lifecycle {
             return;
         };
         let now = self.clock.now_ms();
-        self.quota_health.tick(&quota, now, events);
+        let dir = self.config.scratch.health_dir();
+        self.quota_health.tick(&quota, now, &dir, events);
         let parked = self.parked_slots();
         if parked.is_empty() {
             self.parked_reminded_ms = None;

@@ -119,6 +119,12 @@ pub struct Cli {
     /// `--scratch-quota`.
     #[arg(long, value_name = "N")]
     pub scratch_quota_failures: Option<u64>,
+    /// The seconds a finished run's slot is held for its project's usage to read zero (the
+    /// file system frees a removed tree's inodes in the background). After that the slot is
+    /// parked, the run's place and booked bytes are given back, and the quota counts one
+    /// failure. From 1 to 86400; default 600. Needs `--scratch-quota`.
+    #[arg(long, value_name = "SECS")]
+    pub scratch_usage_wait_secs: Option<u64>,
     /// The most GiB of the scratch root's free disk the agent keeps back from jobs: the
     /// disk it offers is the free space of that volume when the agent starts minus this
     /// (0 when this is more). Needs `--scratch-root`. Without it, the free space is offered.

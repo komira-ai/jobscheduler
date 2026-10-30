@@ -128,7 +128,7 @@ fn a_passing_probe_advertises_the_quota_and_its_default() {
 
 /// Asserts the checks of the new flags: all need `--scratch-quota`; the default is from 1
 /// to 65535 GiB (its bytes must fit the wire's disk limit) and the inode limit from 1 to
-/// 4294967295, the failures from 1 to 1000000; the edges are accepted. Each refusal ends the agent with status 2, names the
+/// 4294967295, the failures from 1 to 1000000, the usage wait from 1 to 86400 seconds; the edges are accepted. Each refusal ends the agent with status 2, names the
 /// flag, and sends nothing. It catches a flag that does nothing without `--scratch-quota`,
 /// a default of 0 (which would book no disk), and one whose bytes overflow the wire.
 #[test]
@@ -170,6 +170,18 @@ fn the_quota_flags_are_checked() {
             &["--scratch-quota", "--scratch-quota-failures", "1000001"],
             "--scratch-quota-failures: 1000001 is not from 1 to 1000000",
         ),
+        (
+            &["--scratch-usage-wait-secs", "30"],
+            "--scratch-usage-wait-secs: needs --scratch-quota",
+        ),
+        (
+            &["--scratch-quota", "--scratch-usage-wait-secs", "0"],
+            "--scratch-usage-wait-secs: 0 is not from 1 to 86400",
+        ),
+        (
+            &["--scratch-quota", "--scratch-usage-wait-secs", "86401"],
+            "--scratch-usage-wait-secs: 86401 is not from 1 to 86400",
+        ),
     ];
     for (n, (extra, said)) in refused.iter().copied().enumerate() {
         let (ran, hello) = start(&format!("quota-flag-{n}"), FakeMachine::new(), 10, extra);
@@ -185,6 +197,8 @@ fn the_quota_flags_are_checked() {
         "4294967295",
         "--scratch-quota-failures",
         "1000000",
+        "--scratch-usage-wait-secs",
+        "86400",
     ];
     let (ran, hello) = start("quota-flag-edges", FakeMachine::new(), 10, &edges);
     assert_ne!(hello, Value::Null, "{}", ran.err);

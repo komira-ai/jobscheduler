@@ -366,3 +366,31 @@ fn a_listed_run_keeps_its_disk() {
         Err(RunRefusal::NoCapacity)
     );
 }
+
+/// Asserts how the server answers a start that an agent refused in its result: a refusal
+/// with `quota-unavailable` is the host's fault and not a taint (the run `r1` is answered
+/// like any result and the host takes the next run), while one with `host-tainted` taints
+/// the host (the next run is refused `host-tainted`). It catches a server that taints a clean
+/// host for a quota that is out of order, which only a reimage would then end.
+#[test]
+fn a_start_refused_for_the_quota_does_not_taint_the_host() {
+    let refused = |fx: &Fixture, run: &str, detail: &str| {
+        let mut message = fx.heartbeat("a", 1);
+        message.results = vec![RunResult {
+            run_id: run.into(),
+            lease_id: lease(1).to_string(),
+            outcome: Outcome::FailedToStart,
+            exit_code: None,
+            detail: Some(detail.into()),
+            log_tail: None,
+        }];
+        fx.registry.heartbeat(&message, &cred("t")).unwrap();
+    };
+    let hello = host_hello(25 * GIB, Some("project"), Some("10"), &[]);
+    let fx = leased(pool(25 * GIB, true), &hello);
+    assert_eq!(queue(&fx, "r1", None), Ok(()));
+    refused(&fx, "r1", js_agent_wire::refusal::QUOTA_UNAVAILABLE);
+    assert_eq!(queue(&fx, "r2", None), Ok(()), "not tainted");
+    refused(&fx, "r2", js_agent_wire::refusal::HOST_TAINTED);
+    assert_eq!(queue(&fx, "r3", None), Err(RunRefusal::HostTainted));
+}

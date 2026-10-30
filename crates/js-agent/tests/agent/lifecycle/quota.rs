@@ -39,6 +39,7 @@ pub struct Spy {
     lag: Mutex<u32>,
     probe_none: Mutex<Option<String>>,
     fail_usage: Mutex<bool>,
+    fail_runs_apply: Mutex<bool>,
 }
 
 impl Spy {
@@ -56,6 +57,7 @@ impl Spy {
             lag: Mutex::default(),
             probe_none: Mutex::default(),
             fail_usage: Mutex::default(),
+            fail_runs_apply: Mutex::default(),
         }
     }
 
@@ -73,6 +75,23 @@ impl Spy {
             .probe_none
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = reason.map(str::to_owned);
+    }
+
+    /// While set, `apply` fails for every run's directory and works for the directory of the
+    /// quota's own health check (`.js-health`): a failure the check does not see.
+    pub fn set_fail_runs_apply(&self, fail: bool) {
+        *self
+            .fail_runs_apply
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = fail;
+    }
+
+    /// Ends every lag: the usage of a project reads what it holds from now.
+    pub fn end_lag(&self) {
+        self.lagging
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 
     /// While set, reading a usage fails.
@@ -131,9 +150,19 @@ impl ScratchQuota for Spy {
         inode_limit: u64,
     ) -> Result<(), QuotaError> {
         let empty = fs::read_dir(run_dir).is_ok_and(|mut entries| entries.next().is_none());
-        let done = self
-            .inner
-            .apply(run_dir, project, block_limit_bytes, inode_limit);
+        let failing = *self
+            .fail_runs_apply
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let done = match failing && leaf(run_dir) != ".js-health" {
+            true => Err(QuotaError::Io {
+                what: "set the bound",
+                source: std::io::Error::other("scripted failure"),
+            }),
+            false => self
+                .inner
+                .apply(run_dir, project, block_limit_bytes, inode_limit),
+        };
         self.note(format!(
             "apply {} empty={empty} ok={}",
             leaf(run_dir),
@@ -195,11 +224,11 @@ impl ScratchQuota for Spy {
     }
 }
 
-fn project(slot: u32) -> ProjectId {
+pub(super) fn project(slot: u32) -> ProjectId {
     ProjectIds::default().of_slot(slot).unwrap()
 }
 
-fn with_quota(name: &str) -> (Harness, Arc<Spy>) {
+pub(super) fn with_quota(name: &str) -> (Harness, Arc<Spy>) {
     let spy = Arc::new(Spy::new());
     let options = Options {
         quota: Some(spy.clone()),
@@ -208,7 +237,7 @@ fn with_quota(name: &str) -> (Harness, Arc<Spy>) {
     (Harness::with(name, options), spy)
 }
 
-fn applies(spy: &Spy) -> Vec<Call> {
+pub(super) fn applies(spy: &Spy) -> Vec<Call> {
     let calls = spy.inner.calls();
     calls
         .into_iter()
@@ -216,7 +245,7 @@ fn applies(spy: &Spy) -> Vec<Call> {
         .collect()
 }
 
-fn clears(spy: &Spy) -> Vec<Call> {
+pub(super) fn clears(spy: &Spy) -> Vec<Call> {
     let calls = spy.inner.calls();
     calls
         .into_iter()
@@ -424,12 +453,13 @@ fn a_slot_whose_project_holds_usage_is_parked_and_the_run_takes_the_next_one() {
     );
 }
 
-/// Asserts that a run is refused only when no free slot is clean: with every project in use
-/// the run is refused `no-capacity` with nothing created (no directory, no container, no
-/// project touched), every slot is parked and reported, and the result carries the code. It
-/// catches a refusal while a clean slot exists, and a run started when none is.
+/// Asserts that a start tries at most eight free slots: with every project in use the run is
+/// refused `no-capacity` after eight reads and eight findings (not thousands), nothing is
+/// created (no directory, no container, no project touched), exactly those eight slots are
+/// parked, and the result carries the code. It catches a fault that makes every slot read in
+/// use costing a start thousands of reads and findings, and a run started when none is clean.
 #[test]
-fn a_run_is_refused_only_when_no_free_slot_is_clean() {
+fn a_run_is_refused_when_eight_free_slots_in_a_row_are_in_use() {
     let (mut h, spy) = with_quota("quota-all-busy");
     let used = Usage {
         bytes: 4096,
@@ -438,21 +468,23 @@ fn a_run_is_refused_only_when_no_free_slot_is_clean() {
     for slot in 0..4096 {
         spy.inner.charge(project(slot), used);
     }
+    let before = spy.inner.calls().len();
     let events = names(&h.start(job("r1")));
-    assert_eq!(events.len(), 4097);
+    assert_eq!(events.len(), 9);
     assert_eq!(
         events.last().map(String::as_str),
         Some("refused r1 no-capacity")
     );
     assert!(
-        events[..4096]
+        events[..8]
             .iter()
             .all(|line| line == "finding r1 quota-slot-busy")
     );
+    assert_eq!(spy.inner.calls().len() - before, 8, "eight reads");
     assert!(h.fake.created().is_empty());
     assert!(!h.scratch_of("r1").exists());
     assert!(applies(&spy).is_empty());
-    assert_eq!(h.life.parked_slots().len(), 4096);
+    assert_eq!(h.life.parked_slots(), [0, 1, 2, 3, 4, 5, 6, 7]);
     let result = &h.life.results()[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("no-capacity"));
@@ -524,106 +556,6 @@ fn a_usage_that_cannot_be_read_at_the_end_holds_the_slot() {
         names(&h.life.step()),
         ["scratch removed r1", "checks passed r1", "freed r1"]
     );
-}
-
-/// Asserts the quota's health: calls that fail in a row (`apply` here) do not stop the
-/// agent while the probe still says project (the counter starts again); once the probe says
-/// none, the next run of failures makes the quota unhealthy at the third failure, reported
-/// once, and every start is then refused `no-capacity` with nothing created; the report
-/// comes again after a minute, not before; and when the probe says project again a step
-/// reports the recovery and runs start again. It catches a host that keeps taking runs it
-/// cannot bound, one that never takes runs again, and a probe on every failure.
-#[test]
-fn a_quota_that_fails_in_a_row_and_probes_none_stops_taking_runs_until_it_recovers() {
-    let (mut h, spy) = with_quota("quota-health");
-    spy.inner.set_fail_apply(true);
-    for run in ["w1", "w2", "w3", "w4"] {
-        assert_eq!(
-            names(&h.start(job(run))),
-            [
-                format!("finding {run} scratch-failed"),
-                format!("result {run}")
-            ],
-            "a working probe: only the run fails"
-        );
-    }
-    h.life.step();
-    spy.set_probe_none(Some("remounted without prjquota"));
-    h.start(job("a"));
-    h.start(job("b"));
-    assert_eq!(
-        names(&h.start(job("c"))),
-        [
-            "finding - quota-unhealthy",
-            "finding c scratch-failed",
-            "result c"
-        ]
-    );
-    assert_eq!(names(&h.start(job("d"))), ["refused d no-capacity"]);
-    assert!(h.fake.created().is_empty());
-    assert!(!h.scratch_of("d").exists());
-    assert_eq!(
-        h.life.results().last().unwrap().detail.as_deref(),
-        Some("no-capacity")
-    );
-    assert!(!h.life.is_tainted());
-
-    h.life.step();
-    h.clock.advance(59_999);
-    assert!(!names(&h.life.step()).contains(&"finding - quota-unhealthy".to_owned()));
-    h.clock.advance(1);
-    assert_eq!(names(&h.life.step()), ["finding - quota-unhealthy"]);
-
-    spy.set_probe_none(None);
-    spy.inner.set_fail_apply(false);
-    h.clock.advance(60_000);
-    assert_eq!(names(&h.life.step()), ["finding - quota-recovered"]);
-    assert_eq!(names(&h.start(job("e"))), ["started e"]);
-}
-
-/// Asserts that failed `clear` calls count toward the health as `apply` does: three steps
-/// that fail to clear, on a probe that says none, make the quota unhealthy at the third.
-#[test]
-fn clear_failures_in_a_row_make_the_quota_unhealthy() {
-    let (mut h, spy) = with_quota("quota-health-clear");
-    h.start(job("r1"));
-    h.fake.exit("r1", 0);
-    spy.inner.set_fail_clear(true);
-    spy.set_probe_none(Some("remounted without prjquota"));
-    h.life.step();
-    assert!(!names(&h.life.step()).contains(&"finding - quota-unhealthy".to_owned()));
-    assert!(names(&h.life.step()).contains(&"finding - quota-unhealthy".to_owned()));
-    // Another failure while unhealthy counts but does not probe or report again.
-    assert!(
-        names(&h.life.step())
-            .iter()
-            .all(|line| !line.contains("quota-unhealthy"))
-    );
-    assert_eq!(names(&h.start(job("r2"))), ["refused r2 no-capacity"]);
-}
-
-/// Asserts that slots that stay parked are reported again after an hour and not before. It
-/// catches a slot that is lost to the operator after one line in a log.
-#[test]
-fn a_slot_that_stays_parked_is_reported_again_every_hour() {
-    let (mut h, spy) = with_quota("quota-remind");
-    spy.inner.charge(
-        project(0),
-        Usage {
-            bytes: 4096,
-            inodes: 2,
-        },
-    );
-    // A wall limit above the hours the test lets pass, so the run is not timed out.
-    let mut long = job("r1");
-    long.limits.wall_ms = 10_000_000;
-    h.start(long);
-    h.life.step();
-    h.clock.advance(3_599_999);
-    assert!(names(&h.life.step()).is_empty());
-    h.clock.advance(1);
-    assert_eq!(names(&h.life.step()), ["finding - quota-slot-busy"]);
-    assert!(names(&h.life.step()).is_empty(), "once an hour");
 }
 
 /// Asserts that a restart with another `--scratch-default-gib` leaves an adopted run's
@@ -838,6 +770,12 @@ fn the_failure_flag_reaches_the_quota() {
     assert_eq!(default.max_failures(), 3);
     let five = local_with("quota-failures-five", &["--scratch-quota-failures", "5"]);
     assert_eq!(five.run_quota(fake()).max_failures(), 5);
+    let default_wait = local_with("quota-wait-default", &[]).run_quota(fake());
+    assert_eq!(default_wait.usage_wait_ms(), 600_000);
+    let wait = local_with("quota-wait", &["--scratch-usage-wait-secs", "30"]);
+    assert_eq!(wait.run_quota(fake()).usage_wait_ms(), 30_000);
+    let shown = format!("{:?}", wait.run_quota(fake()));
+    assert!(shown.contains("usage_wait_ms: 30000"), "{shown}");
     assert_eq!(
         RunQuota::new(fake(), GIB, 1)
             .with_max_failures(0)

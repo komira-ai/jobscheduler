@@ -31,7 +31,7 @@ pub struct XfsQuota {
     /// The device the probe (or the first call after it) found, so the mount table is not
     /// read again by every call: a restart reads the usage of thousands of slots. It is
     /// forgotten when a call that uses it fails, and found again by the next one.
-    device: Mutex<Option<PathBuf>>,
+    device: Mutex<Option<(PathBuf, u64)>>,
 }
 
 impl XfsQuota {
@@ -63,8 +63,9 @@ impl XfsQuota {
         Ok((dq.blocks_limit.saturating_mul(512), dq.inodes_limit))
     }
 
-    /// The block device node of the root's file system, if it is XFS; otherwise why not.
-    fn find_device(&self) -> Result<PathBuf, String> {
+    /// The block device node of the root's file system and the device number (`st_dev`) the
+    /// mount reports, if it is XFS; otherwise why not.
+    fn find_device(&self) -> Result<(PathBuf, u64), String> {
         let root = self.root.display();
         let text = self
             .sys
@@ -83,7 +84,7 @@ impl XfsQuota {
             ));
         }
         match self.sys.block_rdev(source) {
-            Ok(Some(rdev)) if rdev == mount.dev => Ok(source.to_owned()),
+            Ok(Some(rdev)) if rdev == mount.dev => Ok((source.to_owned(), mount.dev)),
             Ok(Some(_)) => Err(format!(
                 "{} is not the device the mount reports (a different major:minor)",
                 mount.source
@@ -101,8 +102,9 @@ impl XfsQuota {
         }
     }
 
-    /// The device of the root: the one remembered, or found from the mount table now.
-    fn device(&self) -> Result<PathBuf, QuotaError> {
+    /// The device of the root and its number: the one remembered, or found from the mount
+    /// table now.
+    fn known(&self) -> Result<(PathBuf, u64), QuotaError> {
         let mut known = self.device.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(device) = known.as_ref() {
             return Ok(device.clone());
@@ -110,6 +112,25 @@ impl XfsQuota {
         let found = self.find_device().map_err(QuotaError::Unsupported)?;
         *known = Some(found.clone());
         Ok(found)
+    }
+
+    /// The device of the root: the one remembered, or found from the mount table now.
+    fn device(&self) -> Result<PathBuf, QuotaError> {
+        self.known().map(|(device, _)| device)
+    }
+
+    /// The device for an `apply`: the one remembered, unless the root is on another file
+    /// system than it names (a volume that was swapped under the same path): then it is
+    /// forgotten and found again. A cached node is otherwise trusted for every call, so the
+    /// check is made where a run's limits are set, once for each run.
+    fn device_of_the_root_now(&self) -> Result<PathBuf, QuotaError> {
+        let (device, dev) = self.known()?;
+        let root = io_err(self.sys.dev_of(&self.root), "look at the scratch root")?;
+        if root == dev {
+            return Ok(device);
+        }
+        self.forget_device();
+        self.device()
     }
 
     /// Drops the remembered device, after a call that used it failed (the mount may have
@@ -156,7 +177,7 @@ impl XfsQuota {
         // The probe always reads the mount table, and what it finds is what later calls use.
         let found = self.find_device();
         *self.device.lock().unwrap_or_else(PoisonError::into_inner) = found.as_ref().ok().cloned();
-        let device = found?;
+        let (device, _) = found?;
         let flags = self
             .sys
             .quota_flags(&device)
@@ -212,7 +233,7 @@ impl ScratchQuota for XfsQuota {
     ) -> Result<(), QuotaError> {
         let blocks = check_limits(block_limit_bytes, inode_limit)?;
         self.require_child(run_dir)?;
-        let device = self.device()?;
+        let device = self.device_of_the_root_now()?;
         // One descriptor for everything: what is checked empty is what gets the project id.
         let dir = io_err(
             self.sys.open_dir(run_dir),

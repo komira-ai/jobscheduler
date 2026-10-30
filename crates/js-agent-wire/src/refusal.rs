@@ -125,3 +125,11 @@ pub const NO_MATCHING_POOL: &str = "no-matching-pool";
 /// the lease holds the host, but the host is still being prepared. Used by the server,
 /// not by the agent.
 pub const NOT_READY: &str = "not-ready";
+/// As the detail of a `failed_to_start` result: the agent's scratch disk quota is not
+/// working (it failed several calls in a row and no longer probes as project quota), so
+/// the `Start` was refused and nothing was created. It is the host's fault and not the
+/// run's: the server must not count it against the run's retries, and, unlike
+/// [`HOST_TAINTED`], it does not taint the host (the host is clean; a remount or a
+/// repaired quota ends it, and the agent reports when it has). The run may be sent to
+/// another host.
+pub const QUOTA_UNAVAILABLE: &str = "quota-unavailable";

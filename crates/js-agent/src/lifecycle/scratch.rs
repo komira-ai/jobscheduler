@@ -77,6 +77,12 @@ impl ScratchRoot {
         self.path.join(".js-swept")
     }
 
+    /// The directory the quota's health check makes and removes (see `RunQuota::check`):
+    /// directly below the root, and, as no run id starts with a dot, never a run's.
+    pub(super) fn health_dir(&self) -> PathBuf {
+        self.path.join(".js-health")
+    }
+
     /// Makes the run's directory, mode `0700` whatever the umask. A directory left by an
     /// earlier agent for this run id is removed first: the run is new, so it is garbage.
     ///
