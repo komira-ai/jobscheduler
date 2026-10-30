@@ -11,6 +11,7 @@ use js_elastic::{
     AcquireId, AcquireRequest, Acquired, BootStep, ElasticProvider, GpuClass, Held, HostName,
     HostRef, Offer, ProviderError, Released,
 };
+use js_elastic_fake::ElasticFake;
 use js_lease_server::{
     BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, Kinds, Launch, OwnerOnlyFiles,
     channel_ticker, start_with_checks,
@@ -32,6 +33,17 @@ use crate::support::{Harness, Reply, Scratch, request};
 /// The accounts in memory, by the path of the key file that names them: a kind is a plain
 /// function and holds nothing, so a test leaves the account here for it to find.
 static ACCOUNTS: Mutex<BTreeMap<String, Arc<FakeLambda>>> = Mutex::new(BTreeMap::new());
+
+/// The elastic fake clouds, by the path of the key file that names them, left for the same
+/// kind to find (see [`elastic_cloud`]).
+static CLOUDS: Mutex<BTreeMap<String, ElasticFake>> = Mutex::new(BTreeMap::new());
+
+/// Leaves `cloud` where the `fake-cloud` kind finds it for the key file `scratch` makes: the
+/// pool launches on it, and not on a Lambda account in memory.
+pub fn elastic_cloud(scratch: &Scratch, cloud: &ElasticFake) {
+    let key = scratch.path("api-key").display().to_string();
+    CLOUDS.lock().unwrap().insert(key, cloud.clone());
+}
 
 /// The key files whose pool has a provider that panics when the scaler lists its machines.
 static PANICKY: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
@@ -96,6 +108,21 @@ pub const AGENT_SHA256: &str = "00112233445566778899aabbccddeeff0011223344556677
 /// is. Its floor is one GPU of class `nvidia-a100`.
 fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
     let path = table.get("api_key_file").and_then(toml::Value::as_str);
+    let elastic = CLOUDS
+        .lock()
+        .unwrap()
+        .get(path.unwrap_or_default())
+        .cloned();
+    if let Some(cloud) = elastic {
+        return Ok(Built::Elastic(ElasticBuilt {
+            provider: Box::new(cloud),
+            floor: Floor {
+                gpus: 1,
+                gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
+            },
+            exec: vec![ExecMode::Container],
+        }));
+    }
     let account = ACCOUNTS
         .lock()
         .unwrap()
