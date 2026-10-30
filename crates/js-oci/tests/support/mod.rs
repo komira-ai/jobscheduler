@@ -182,7 +182,16 @@ impl Fixture {
         Self::start_on(None).await
     }
 
+    /// A registry over plain http on `[::1]`.
+    pub async fn start_plain_v6() -> Self {
+        Self::start_at("[::1]:0", None).await
+    }
+
     async fn start_on(tls: Option<Vec<String>>) -> Self {
+        Self::start_at("127.0.0.1:0", tls).await
+    }
+
+    async fn start_at(bind: &str, tls: Option<Vec<String>>) -> Self {
         let names = tls.clone().unwrap_or_else(|| vec![REGISTRY.to_owned()]);
         let made = rcgen::generate_simple_self_signed(names).expect("certificate");
         let cert = made.cert.der().clone();
@@ -196,7 +205,7 @@ impl Fixture {
         .with_single_cert(vec![cert.clone()], key)
         .expect("server config");
         let acceptor = tls.map(|_| TlsAcceptor::from(Arc::new(config)));
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = TcpListener::bind(bind).await.expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let state = Arc::new(Mutex::new(State {
             plain: acceptor.is_none(),

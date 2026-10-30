@@ -112,6 +112,8 @@ async fn a_flagged_loopback_entry_is_pulled_over_plain_http() {
     for to in [
         "/cdn/{digest}".to_owned(),
         format!("http://127.0.0.1:{}/cdn/{{digest}}", fx.port),
+        format!("//127.0.0.1:{}/cdn/{{digest}}", fx.port),
+        format!("http://user:pw@127.0.0.1:{}/cdn/{{digest}}", fx.port),
     ] {
         fx.behave(|b| b.redirect_blobs = Some(to));
         let bytes = pull_first(&client, here(&fx), &artifact)
@@ -322,4 +324,72 @@ async fn the_flag_on_an_entry_does_not_affect_other_entries() {
         .expect_err("sibling entry");
     assert!(matches!(err, Error::Transport { .. }), "{err}");
     assert_eq!(fx.requests().len(), before, "{:?}", fx.requests());
+}
+
+/// Proves the flag is loud when the address exemption is missing: a flagged entry
+/// without `loopback()` fails with the address error, and nothing is sent.
+#[tokio::test]
+async fn a_flagged_entry_without_the_loopback_exemption_fails_with_an_address_error() {
+    let artifact = bundle();
+    let fx = plain(&artifact).await;
+    let entry = Allow::parse(&format!("127.0.0.1:{}/team", fx.port))
+        .expect("entry")
+        .plain_http_loopback();
+    let err = pull_first(&client(vec![entry]), here(&fx), &artifact)
+        .await
+        .expect_err("no exemption");
+    assert!(matches!(err, Error::Address { .. }), "{err}");
+    assert!(fx.requests().is_empty(), "{:?}", fx.requests());
+}
+
+/// Proves an IPv6 loopback literal is pulled over plain http end to end: the Host header
+/// is bracketed and a token realm at the same authority is accepted.
+#[tokio::test]
+async fn a_bracketed_ipv6_loopback_entry_is_pulled_over_plain_http() {
+    let artifact = bundle();
+    let fx = Fixture::start_plain_v6().await;
+    fx.publish(&artifact);
+    fx.behave(|b| b.token = Some("tok".to_owned()));
+    let entry = Allow::parse(&format!("[::1]:{}/team", fx.port))
+        .expect("entry")
+        .loopback()
+        .plain_http_loopback();
+    let location = Location::parse(&format!("[::1]:{}/{REPO}", fx.port)).expect("location");
+    let bytes = pull_first(&client(vec![entry]), location, &artifact)
+        .await
+        .expect("over ::1");
+    assert_eq!(bytes, b"first layer");
+    let host = format!("[::1]:{}", fx.port);
+    assert!(
+        fx.requests().iter().all(|r| r.starts_with(&host)),
+        "{:?}",
+        fx.requests()
+    );
+    assert!(fx.requests().iter().any(|r| r.contains("GET /token")));
+}
+
+/// Proves overlapping entries are decided by the most specific one: a pin under an
+/// unflagged entry nested in a flagged one is pulled over https, so the plain registry
+/// sees nothing, while the flagged namespace still pulls.
+#[tokio::test]
+async fn the_most_specific_entry_decides_whether_a_pin_goes_over_plain_http() {
+    let artifact = bundle();
+    let fx = plain(&artifact).await;
+    let nested = Allow::parse(&format!("127.0.0.1:{}/team/secure", fx.port))
+        .expect("entry")
+        .loopback();
+    let client = client(vec![flagged(&fx), nested]);
+    assert_eq!(
+        pull_first(&client, here(&fx), &artifact)
+            .await
+            .expect("flagged namespace"),
+        b"first layer"
+    );
+    let seen = fx.requests().len();
+    let pin = Location::parse(&format!("127.0.0.1:{}/team/secure/bundle", fx.port)).expect("pin");
+    let err = pull_first(&client, pin, &artifact)
+        .await
+        .expect_err("nested entry");
+    assert!(matches!(err, Error::Transport { .. }), "{err}");
+    assert_eq!(fx.requests().len(), seen);
 }

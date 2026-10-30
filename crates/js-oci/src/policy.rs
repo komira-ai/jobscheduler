@@ -770,10 +770,11 @@ mod tests {
         assert!(!policy.realm_ok(&host("b.example:8443"), &endpoint));
     }
 
-    /// Catches the flag honoured for more than the two loopback literals: `127.0.0.1` and
-    /// `[::1]`, with or without a port, are plain http; a name (`localhost` included),
-    /// another loopback address, a mapped form, a private address, a public one and an
-    /// unflagged entry are not.
+    /// Catches the flag honoured for more than the two loopback literals with an explicit
+    /// port: `127.0.0.1:PORT` and `[::1]:PORT` are plain http; the same without a port
+    /// (which would mean port 443 over http), a name (`localhost` included), another
+    /// loopback address, a mapped form, a private address, a public one and an unflagged
+    /// entry are not.
     #[test]
     fn plain_http_is_honoured_only_for_the_loopback_literals() {
         let policy = |entry: &str, flagged: bool| {
@@ -785,16 +786,17 @@ mod tests {
             }])
         };
         for entry in [
-            "127.0.0.1/team",
             "127.0.0.1:5000/team",
-            "[::1]/team",
             "[::1]:5000/team",
+            "127.0.0.1:443/team",
         ] {
             let pin = entry.replace("/team", "/team/x");
             assert!(policy(entry, true).plain_http(&location(&pin)), "{entry}");
             assert!(!policy(entry, false).plain_http(&location(&pin)), "{entry}");
         }
         for entry in [
+            "127.0.0.1/team",
+            "[::1]/team",
             "localhost:5000/team",
             "registry.test:5000/team",
             "127.0.0.2:5000/team",
@@ -808,6 +810,34 @@ mod tests {
             let pin = entry.replace("/team", "/team/x");
             assert!(!policy(entry, true).plain_http(&location(&pin)), "{entry}");
         }
+    }
+
+    /// Catches overlapping entries deciding by the wrong one: the longest prefix that
+    /// admits the pin says how it is pulled, whatever the order, and a tie with an
+    /// unflagged entry stays https.
+    #[test]
+    fn plain_http_follows_the_most_specific_entry_that_admits_the_pin() {
+        let flagged = |prefix: &str| {
+            Allow::parse(&format!("127.0.0.1:5000/{prefix}"))
+                .expect("entry")
+                .plain_http_loopback()
+        };
+        let open = |prefix: &str| Allow::parse(&format!("127.0.0.1:5000/{prefix}")).expect("entry");
+        let pin = |path: &str| location(&format!("127.0.0.1:5000/{path}"));
+        for order in [false, true] {
+            let mut entries = vec![flagged("team"), open("team/sub")];
+            if order {
+                entries.reverse();
+            }
+            let policy = Policy::new(entries);
+            assert!(policy.plain_http(&pin("team/x")));
+            assert!(!policy.plain_http(&pin("team/sub/x")));
+        }
+        let policy = Policy::new(vec![open("team"), flagged("team/sub")]);
+        assert!(!policy.plain_http(&pin("team/x")));
+        assert!(policy.plain_http(&pin("team/sub/x")));
+        let tie = Policy::new(vec![flagged("team"), open("team")]);
+        assert!(!tie.plain_http(&pin("team/x")));
     }
 
     /// Catches the flag taken from a neighbour: only the entry that admits the pin says
