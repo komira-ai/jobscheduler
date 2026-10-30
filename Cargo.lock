@@ -1395,6 +1395,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-treestore"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "js-bundle",
+ "js-testkit",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
+]
+
+[[package]]
 name = "js-types"
 version = "0.1.0"
 dependencies = [
