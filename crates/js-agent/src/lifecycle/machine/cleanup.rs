@@ -46,7 +46,21 @@ impl Lifecycle {
             }
         }
         match seen {
-            Ok(Status::Running) => {}
+            Ok(Status::Running) => {
+                // A runtime that puts every container in a group the agent can read, and
+                // cannot name this running container's group (not at the start, not at a
+                // window, not now), left the agent blind to it: its usage is not sampled
+                // and what it leaves is not known to be checkable. A run seen only after
+                // it ended has no group to look at (`cgroup` says `None` for it): that is
+                // not blindness.
+                if runtime.places_in_cgroup() && job.cgroup.is_none() && !job.blind_told {
+                    job.cgroup = runtime.cgroup(&id);
+                    if job.cgroup.is_none() {
+                        job.blind_told = true;
+                        job.taint(taint, blind_taint(&job.run_id), events);
+                    }
+                }
+            }
             Ok(ended @ (Status::Exited(_) | Status::Gone)) => {
                 let exit = match ended {
                     Status::Exited(exit) => Some(exit),
@@ -59,16 +73,6 @@ impl Lifecycle {
                 // tell, so the cause stands.
                 let cause = job.cause.filter(|_| exit.is_none() || job.stop_sent);
                 let (how, status) = outcome(cause, exit);
-                // A runtime that puts every container in a group the agent can read, and
-                // whose group for this run was never named (not at the start, not at any
-                // window, not now), left the agent blind to the container: its usage was
-                // not sampled and what it left is not known to be checkable.
-                if runtime.places_in_cgroup() && job.cgroup.is_none() {
-                    job.cgroup = runtime.cgroup(&id);
-                    if job.cgroup.is_none() {
-                        job.taint(taint, blind_taint(&job.run_id), events);
-                    }
-                }
                 if !job.silent {
                     let mut result = job.report(how, status, None);
                     // The container is still there: it is removed in the next stage. A log

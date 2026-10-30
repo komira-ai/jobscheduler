@@ -220,6 +220,8 @@ pub(super) struct Job {
     pub(super) cgroup: Option<PathBuf>,
     /// The operator was told that the control group is not known yet.
     pub(super) cgroup_missing_told: bool,
+    /// The host was tainted because the runtime could not name this run's group.
+    pub(super) blind_told: bool,
     /// Taken over from an earlier process of the agent: its first minutes were not seen.
     pub(super) adopted: bool,
     /// When the project of the finished run first read usage after its tree was removed,
@@ -369,6 +371,7 @@ impl Job {
             started_usec: None,
             cgroup: None,
             cgroup_missing_told: false,
+            blind_told: false,
             adopted: false,
             usage_held: None,
             slot_parked: false,
@@ -403,6 +406,7 @@ impl Job {
                 .map(|started| started.saturating_mul(USEC_PER_MS)),
             cgroup: None,
             cgroup_missing_told: false,
+            blind_told: false,
             adopted: true,
             usage_held: None,
             slot_parked: false,

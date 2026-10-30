@@ -137,7 +137,7 @@
 //!   under a parent that is not `init`, in the agent's group exactly: they are not counted.
 //! - **A runtime that cannot see a container's group** is blind: see
 //!   [`Runtime::places_in_cgroup`](crate::lifecycle::Runtime::places_in_cgroup); the
-//!   lifecycle taints the host as unchecked when such a run ends with no group ever named.
+//!   lifecycle taints the host as unchecked when it sees such a run, still running, with no group.
 //! - **A network namespace Podman pins** (`nsfs` at `/run/netns/<name>`: one per container,
 //!   a neighbour's included, named without the container id), **the bind of `/run/netns`
 //!   onto itself** (`tmpfs`, root `/netns`) that the first container after a boot makes,

@@ -330,7 +330,7 @@ pub trait Runtime {
     /// Whether every container this runtime starts is in a control group the agent can
     /// read ([`Runtime::cgroup`]). A runtime that says so and then cannot name a run's
     /// control group is blind to that run: the lifecycle taints the host as unchecked
-    /// when the run ends. The default is `false`: a runtime that keeps no control groups
+    /// when it watches the run. The default is `false`: a runtime that keeps no control groups
     /// of its own is never blind for lack of one.
     fn places_in_cgroup(&self) -> bool {
         false
