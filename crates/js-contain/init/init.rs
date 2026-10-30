@@ -7,8 +7,15 @@
 //! reap; without this program the job itself was the container's first process and
 //! did not.
 //!
-//! Usage: `js-init -- <program> [argument...]`, with the working directory and the
-//! environment the program is to have.
+//! Usage: `js-init [--wait-route <seconds>] -- <program> [argument...]`, with the working
+//! directory and the environment the program is to have.
+//!
+//! - With `--wait-route` the program is not started until the container's network namespace
+//!   has a default route (a line of `/proc/net/route` with destination and mask 0 and the
+//!   route up), for at most that many seconds: the host's agent wires the namespace from
+//!   outside while this program waits, and adds the default route last, so the job's first
+//!   packet leaves a network that is complete. A namespace with no route in time is the
+//!   node's failure (exit 126, a line in the report, the program never started).
 //!
 //! - The program is looked up as `crun` looks it up: a name with a slash as it is (a
 //!   relative one from the working directory), a bare name on the environment's `PATH`
@@ -85,7 +92,18 @@ struct Refused {
 
 fn main() {
     let mut args = std::env::args_os().skip(1);
-    let (Some(dashes), Some(program)) = (args.next(), args.next()) else {
+    let mut first = args.next();
+    let mut wait_route = None;
+    if first.as_deref() == Some(OsStr::new("--wait-route")) {
+        wait_route = Some(
+            args.next()
+                .and_then(|text| text.to_str().and_then(|text| text.parse::<u64>().ok()))
+                .filter(|secs| (1..=3600).contains(secs))
+                .unwrap_or_else(|| usage()),
+        );
+        first = args.next();
+    }
+    let (Some(dashes), Some(program)) = (first, args.next()) else {
         usage();
     };
     if dashes != "--" {
@@ -120,6 +138,16 @@ fn main() {
         // program it starts is dumpable again, as every exec makes it.
         if prctl(PR_SET_DUMPABLE, 0u64) != 0 {
             broken("prctl(PR_SET_DUMPABLE)");
+        }
+    }
+
+    if let Some(secs) = wait_route {
+        if !default_route_within(secs) {
+            let words =
+                format!("js-init: the network is not ready: no default route within {secs} s");
+            eprintln!("{words}");
+            report(&words);
+            std::process::exit(126);
         }
     }
 
@@ -163,8 +191,37 @@ fn broken(what: &str) -> ! {
     std::process::exit(126);
 }
 
+/// Whether this network namespace has a default route within `secs` seconds: polled every
+/// 10 ms in `/proc/net/route` (read as the namespace's own, which is the reader's).
+fn default_route_within(secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let table = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
+        if has_default_route(&table) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Whether a `/proc/net/route` listing holds a route that is up with destination and mask
+/// 0 (the header line and short lines name no route).
+fn has_default_route(table: &str) -> bool {
+    table.lines().skip(1).any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let up = fields
+            .get(3)
+            .and_then(|flags| u32::from_str_radix(flags, 16).ok())
+            .is_some_and(|flags| flags & 1 != 0);
+        up && fields.get(1) == Some(&"00000000") && fields.get(7) == Some(&"00000000")
+    })
+}
+
 fn usage() -> ! {
-    eprintln!("usage: js-init -- <program> [argument...]");
+    eprintln!("usage: js-init [--wait-route <seconds>] -- <program> [argument...]");
     std::process::exit(2);
 }
 
