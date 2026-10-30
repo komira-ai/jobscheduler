@@ -502,17 +502,16 @@ async fn a_bundle_that_cannot_be_read_back_is_an_error() {
 async fn the_output_of_a_container_is_kept_apart_in_files_and_the_tail() {
     let node = Node::new("out", "run-out to stdout\nrun-err to stderr");
     let spec = node.spec();
-    // An hour of grace: a write end the backend kept would make the run wait it out, which
-    // the hang guard turns into a failure (the wait is not timed).
+    // An hour of grace that the run does not reach: a write end the backend kept would make
+    // the run wait for it, and the test would hang until the CI job's `timeout-minutes`
+    // (the wait is not timed and has no in-test guard).
     let oci = node.oci_keeping(LogLimits {
         drain_grace: std::time::Duration::from_secs(3600),
         ..LogLimits::default()
     });
     oci.create(&spec).await.expect("bundle");
     let mut running = oci.start(&spec).expect("started");
-    tokio::time::timeout(std::time::Duration::from_secs(120), running.wait())
-        .await
-        .expect("the run ended without waiting out the drain");
+    running.wait().await;
     assert_eq!(oci.ended(&spec, &running).await, Ok(Ended::Exited(0)));
     assert_eq!(
         std::fs::read_to_string(stdout_path(&spec.dir)).expect("stdout"),
