@@ -988,8 +988,8 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "js-types",
- "ruzstd",
  "rustix",
+ "ruzstd",
  "serde",
  "serde_json",
  "sha2 0.11.1",
