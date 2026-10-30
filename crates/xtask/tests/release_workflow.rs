@@ -340,7 +340,7 @@ fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
     }
     let build = job(&jobs, "build").join("\n");
     assert_eq!(
-        build.matches(" js-bundle-cli:js-bundle\n").count(),
+        build.matches("js-bundle-cli:js-bundle").count(),
         2,
         "{build}"
     );

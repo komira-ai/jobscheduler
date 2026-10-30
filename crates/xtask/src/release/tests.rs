@@ -272,6 +272,14 @@ fn includes_are_read_as_paths_from_the_source() {
         ]
     );
     assert_eq!(include::targets("a.rs", "fn main() {}"), Ok(vec![]));
+    // A build script's output is not a repository file and is skipped, not an error.
+    assert_eq!(
+        include::targets(
+            "a.rs",
+            "include_bytes!(concat!(env!(\"OUT_DIR\"), \"/x\")); include_str!(\"y\");"
+        ),
+        Ok(vec!["y".to_owned()])
+    );
     // Not a string literal, a raw string and an escape cannot be resolved.
     for (bad, line) in [
         ("\n\ninclude_str!(concat!(\"a\", \"b\"));", 3),

@@ -7,12 +7,17 @@
 //!
 //! An include is read as `name!(` and a plain string literal, with the path relative to
 //! the source file. Anything else after the parenthesis (`concat!`, `env!`, a raw string,
-//! an escape) cannot be resolved here and is an error, not a guess.
+//! an escape) cannot be resolved here and is an error, not a guess. The one exception is
+//! `concat!(env!("OUT_DIR"), ...)`, a file the build script writes: it is not in the
+//! repository, and the build script is shipped with its crate.
 
 use super::Error;
 
 /// The macros that compile a file in.
 const MACROS: [&str; 3] = ["include_str!", "include_bytes!", "include!"];
+
+/// How an include of a build script's output starts.
+const OUT_DIR_PREFIX: &str = "concat!(env!(\"OUT_DIR\"),";
 
 /// The files the source `text` of `file` includes, as paths relative to the repository
 /// root (`file` is one too).
@@ -25,6 +30,11 @@ pub fn targets(file: &str, text: &str) -> Result<Vec<String>, Error> {
             let Some(args) = after.strip_prefix('(') else {
                 continue;
             };
+            // A file the build script writes into `OUT_DIR` is not in the repository: the
+            // script that writes it is a shipped file already.
+            if args.trim_start().starts_with(OUT_DIR_PREFIX) {
+                continue;
+            }
             let path = args
                 .trim_start()
                 .strip_prefix('"')
