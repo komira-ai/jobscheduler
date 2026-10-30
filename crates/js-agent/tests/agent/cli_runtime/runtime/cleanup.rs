@@ -2,7 +2,7 @@
 //! is the agent's own container of the run.
 
 use js_agent::cli_runtime::CliRuntime;
-use js_agent::lifecycle::{ContainerRuntime, label};
+use js_agent::lifecycle::{Runtime, label};
 
 use super::super::scripted::Scripted;
 use super::super::{

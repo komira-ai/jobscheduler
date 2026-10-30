@@ -28,7 +28,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use js_agent::Platform;
 use js_agent::cli_runtime::{CliRuntime, Settings, system_runner};
-use js_agent::lifecycle::{ContainerRuntime, ContainerSpec, Exit, Status, label};
+use js_agent::lifecycle::{Body, Exit, RunSpec, Runtime, Status, label};
 use js_agent_wire::Isolation;
 use js_testkit::dir::TestDir;
 
@@ -94,15 +94,17 @@ fn now_ms() -> u64 {
 }
 
 /// The job: the pulled image running `SCRIPT`, with the limits and labels a real start has.
-fn job(image: &str, scratch: &Path) -> ContainerSpec {
+fn job(image: &str, scratch: &Path) -> RunSpec {
     let labels: BTreeMap<String, String> = [(label::RUN, "live1"), (label::LEASE, "lease-live")]
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
         .collect();
-    ContainerSpec {
+    RunSpec {
         run_id: "live1".to_owned(),
-        image: image.to_owned(),
-        args: ["sh", "-c", SCRIPT].map(str::to_owned).to_vec(),
+        body: Body::Container {
+            image: image.to_owned(),
+            args: ["sh", "-c", SCRIPT].map(str::to_owned).to_vec(),
+        },
         cpu_millis: 1000,
         memory_bytes: 256 << 20,
         pids: Some(64),
@@ -117,7 +119,7 @@ fn job(image: &str, scratch: &Path) -> ContainerSpec {
 }
 
 /// Polls until the container has exited, and returns how.
-fn wait_for_exit(rt: &mut CliRuntime, id: &js_agent::lifecycle::ContainerId) -> Exit {
+fn wait_for_exit(rt: &mut CliRuntime, id: &js_agent::lifecycle::RunHandle) -> Exit {
     let started = Instant::now();
     loop {
         match rt.poll(id) {

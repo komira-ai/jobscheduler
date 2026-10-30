@@ -125,6 +125,15 @@ pub const NO_MATCHING_POOL: &str = "no-matching-pool";
 /// the lease holds the host, but the host is still being prepared. Used by the server,
 /// not by the agent.
 pub const NOT_READY: &str = "not-ready";
+/// As the detail of a `failed_to_start` result: the agent's scratch disk quota is not
+/// working (it failed several calls in a row and no longer passes its own check, or too many
+/// slots were given up on), so the `Start` was refused and nothing was created. It tells the
+/// consumer that this host's quota is unavailable: the host's fault and not the run's, and,
+/// unlike [`HOST_TAINTED`], not a taint (the host is clean; a repaired quota, or a restart
+/// of the agent after it gave up on too many slots, ends it). The run may be sent to
+/// another host. Whether a retry is charged to the run is the consumer's choice; nothing in
+/// the scheduler counts retries.
+pub const QUOTA_UNAVAILABLE: &str = "quota-unavailable";
 
 /// A capabilities frame whose digests, root or Xcode builds are malformed.
 pub const INVALID_CAPS: &str = "invalid-caps";

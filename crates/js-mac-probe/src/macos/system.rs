@@ -2,10 +2,21 @@
 
 use std::path::Path;
 
-use super::exec::first_line;
+use super::exec::{first_line, lines};
 use crate::report::Probe;
 
+/// `df -h`, printed to stderr as well so it is in the log before anything else runs.
+pub fn df() -> Probe {
+    let rows = lines("/bin/df", &["-h"]);
+    for row in &rows {
+        eprintln!("{row}");
+    }
+    Probe::info("system/df").fact("df_h", rows.join(" | "))
+}
+
 pub fn probe() -> Probe {
+    let xcodebuild = lines("/usr/bin/xcodebuild", &["-version"]);
+    let xcode_line = |at: usize| xcodebuild.get(at).cloned().unwrap_or_default();
     let var = |name: &str| std::env::var(name).unwrap_or_default();
     let exists = |path: &str| Path::new(path).exists();
     // SAFETY: geteuid has no preconditions.
@@ -39,6 +50,17 @@ pub fn probe() -> Probe {
             "boot_session_uuid_length",
             first_line("/usr/sbin/sysctl", &["-n", "kern.bootsessionuuid"]).len(),
         )
+        .fact("xcode_version", xcode_line(0))
+        .fact("xcode_build", xcode_line(1))
+        .fact(
+            "csrutil_status",
+            first_line("/usr/bin/csrutil", &["status"]),
+        )
+        .fact(
+            "vm_cs_library_validation",
+            first_line("/usr/sbin/sysctl", &["-n", "vm.cs_library_validation"]),
+        )
+        .fact("spctl_status", first_line("/usr/sbin/spctl", &["--status"]))
         .fact("sandbox_exec_present", exists("/usr/bin/sandbox-exec"))
         .fact("pfctl_present", exists("/sbin/pfctl"))
         .fact("hdiutil_present", exists("/usr/bin/hdiutil"))

@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
 pub mod child;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod parse;
 pub mod report;
 
 use report::Report;
@@ -43,6 +44,9 @@ pub enum Command {
         /// Also write the report to this file.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Write the sandbox trace of the toolchain steps to this file.
+        #[arg(long)]
+        trace_out: Option<PathBuf>,
     },
     /// A program the probe runs inside a sandbox profile.
     #[command(subcommand)]
@@ -54,7 +58,12 @@ pub enum Command {
 pub fn run(cli: &Cli) -> ExitCode {
     match &cli.command {
         Command::Child(child) => child::run(child),
-        Command::Report { work, home, out } => report_command(work, home, out.as_deref()),
+        Command::Report {
+            work,
+            home,
+            out,
+            trace_out,
+        } => report_command(work, home, out.as_deref(), trace_out.as_deref()),
     }
 }
 
@@ -62,8 +71,9 @@ fn report_command(
     work: &std::path::Path,
     home: &std::path::Path,
     out: Option<&std::path::Path>,
+    trace_out: Option<&std::path::Path>,
 ) -> ExitCode {
-    let report = collect(work, home);
+    let report = collect(work, home, trace_out);
     let mut json = Vec::new();
     let written = report
         .write_json(&mut json)
@@ -81,12 +91,20 @@ fn report_command(
 }
 
 #[cfg(target_os = "macos")]
-fn collect(work: &std::path::Path, home: &std::path::Path) -> Report {
-    macos::collect(work, home)
+fn collect(
+    work: &std::path::Path,
+    home: &std::path::Path,
+    trace_out: Option<&std::path::Path>,
+) -> Report {
+    macos::collect(work, home, trace_out)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn collect(_work: &std::path::Path, _home: &std::path::Path) -> Report {
+fn collect(
+    _work: &std::path::Path,
+    _home: &std::path::Path,
+    _trace_out: Option<&std::path::Path>,
+) -> Report {
     let mut report = Report::default();
     report.push(report::Probe::asserted("platform/macos", false).fact("os", std::env::consts::OS));
     report

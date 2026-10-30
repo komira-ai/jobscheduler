@@ -13,8 +13,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Capacity, Clock, Config, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, Lifecycle,
-    MountRoots, NoChecks, RuntimeError, ScratchRoot, StateRoot, Status,
+    Capacity, Clock, Config, Exit, Found, Lifecycle, MountRoots, NoChecks, RunHandle, RunSpec,
+    Runtime, RuntimeError, ScratchRoot, StateRoot, Status,
 };
 use js_agent_wire::{
     Ack, Command, Heartbeat, HeartbeatReply, Isolation, JobSpec, Limits, Outcome, Phase,
@@ -122,8 +122,8 @@ impl Fake {
     }
 }
 
-impl ContainerRuntime for Fake {
-    fn create_and_start(&mut self, spec: &ContainerSpec) -> Result<ContainerId, RuntimeError> {
+impl Runtime for Fake {
+    fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
         let mut world = self.0.borrow_mut();
         world.next += 1;
         let id = format!("c{}", world.next);
@@ -131,10 +131,10 @@ impl ContainerRuntime for Fake {
         world
             .containers
             .insert(id.clone(), (spec.run_id.clone(), None));
-        Ok(ContainerId(id))
+        Ok(RunHandle(id))
     }
 
-    fn poll(&mut self, id: &ContainerId) -> Result<Status, RuntimeError> {
+    fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
         let world = self.0.borrow();
         Ok(match world.containers.get(&id.0) {
             None => Status::Gone,
@@ -142,7 +142,7 @@ impl ContainerRuntime for Fake {
         })
     }
 
-    fn stop(&mut self, id: &ContainerId, _grace: Duration) -> Result<(), RuntimeError> {
+    fn stop(&mut self, id: &RunHandle, _grace: Duration) -> Result<(), RuntimeError> {
         let mut world = self.0.borrow_mut();
         if let Some((_, exit)) = world.containers.get_mut(&id.0) {
             exit.get_or_insert(Exit {
@@ -153,7 +153,7 @@ impl ContainerRuntime for Fake {
         Ok(())
     }
 
-    fn remove(&mut self, id: &ContainerId) -> Result<(), RuntimeError> {
+    fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         self.0.borrow_mut().containers.remove(&id.0);
         Ok(())
     }
@@ -211,6 +211,7 @@ impl Agent {
             state: StateRoot::open(state.path()).unwrap(),
             stop_grace: Duration::from_secs(1),
             bundle: None,
+            quota: None,
         };
         let fake = Fake::default();
         let (life, _) = Lifecycle::adopt(

@@ -10,6 +10,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use js_agent::Machine;
 use js_agent::quota::{
     Call, FakeQuota, MAX_BLOCK_LIMIT_BYTES, MAX_INODE_LIMIT, MAX_SLOTS, Mode, Probe, ProjectId,
     ProjectIds, QuotaError, ScratchQuota, Usage, probe,
@@ -283,4 +284,18 @@ fn a_root_that_is_not_on_xfs_probes_to_none() {
         false => "no project quota on this platform",
     };
     assert!(probe.reason.contains(want), "{probe}");
+}
+
+/// Asserts that the quota the machine hands the agent for a scratch root is the one `probe`
+/// describes: `quota::system` and the default `Machine::scratch_quota` of the real machine
+/// give the same answer as the free function, on a directory that is not on a project-quota
+/// file system as well as on one that is. It catches a machine seam that is wired to another
+/// root or another mechanism than the one the probe reports.
+#[test]
+fn the_machines_quota_probes_like_the_free_function() {
+    let scratch = Scratch::new("quota-system");
+    let dir = run_dir(&scratch, "root");
+    let want = probe(&dir);
+    assert_eq!(js_agent::quota::system(&dir).probe(), want);
+    assert_eq!(js_agent::System::new().scratch_quota(&dir).probe(), want);
 }

@@ -10,7 +10,7 @@ use js_bundle::media::LayerEncoding;
 use js_bundle::{DiffId, Limits, pack_layer, pack_tar};
 use js_testkit::dir::TestDir;
 use js_treestore::{
-    BlobRef, BlobSink, Config, Digest, FetchError, LayerSource, SealError, Sealed, Sealer,
+    BlobRef, BlobSink, Config, Digest, FetchError, LayerSource, Owner, SealError, Sealed, Sealer,
     TreeStore, TreeWanted,
 };
 use sha2::{Digest as _, Sha256};
@@ -222,6 +222,10 @@ impl Sealer for FakeSealer {
         }
         self.unsealed.lock().unwrap().push(tree.to_owned());
         Ok(())
+    }
+
+    fn clone_writable(&self, _src: &Path, _dst: &Path, _owner: Owner) -> Result<(), SealError> {
+        Err(SealError("the store does not clone".into()))
     }
 }
 

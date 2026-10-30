@@ -1,7 +1,7 @@
 //! A job's life on the host: from the `Start` that names it, through its container, to the
 //! result the server acknowledges and the slot that frees (design 5.4 and 5.10).
 //!
-//! [`Lifecycle`] is a state machine over three seams: a [`ContainerRuntime`], a
+//! [`Lifecycle`] is a state machine over three seams: a [`Runtime`], a
 //! [`CheckHook`] and a [`Clock`]. It consumes the wire types in memory only (it reads a
 //! [`HeartbeatReply`](js_agent_wire::HeartbeatReply) and offers the
 //! [`HeldRun`](js_agent_wire::HeldRun)s and [`RunResult`](js_agent_wire::RunResult)s of
@@ -53,6 +53,15 @@
 //!   with nothing booked for it. Containers are taken over in the order of their age
 //!   (those that have exited first, then the longest running), so an offer lowered since
 //!   the last start evicts the newest jobs that no longer fit.
+//!
+//! - **A scratch quota bounds the run before anything is written** (`--scratch-quota`, see
+//!   [`RunQuota`]). A run books its own `disk_bytes` or the quota's default (the number the
+//!   server books for it too) and is limited to the bytes it books and to an inode limit.
+//!   The slot's project is claimed before anything is made (a project that still holds
+//!   usage parks the slot and refuses the run `no-capacity`), the limits are set on the empty
+//!   scratch directory before the container is created, and at the end the project is
+//!   cleared after the tree is removed; a failed clear holds the slot and is retried at every
+//!   step. The sweep of a restart clears the projects of the leftover directories it removes.
 //!
 //! - **A host that is not known to be clean is tainted** (design 5.12, see the [`taint`]
 //!   module). A check that finds something or cannot run, a container or scratch
@@ -136,7 +145,7 @@
 //!
 //! # The threading contract of the runtime seam
 //!
-//! [`ContainerRuntime`] calls block (an image pull, the grace of a stop, a slow daemon).
+//! [`Runtime`] calls block (an image pull, the grace of a stop, a slow daemon).
 //! They are made by [`Lifecycle`] only, and a [`Lifecycle`] is driven from its own worker
 //! thread (see [`Worker`](crate::Worker)), never from the session's heartbeat loop, so
 //! that a slow runtime call delays the next [`Lifecycle::step`] but never a heartbeat, and
@@ -156,6 +165,8 @@
 
 mod machine;
 mod mounts;
+mod quota;
+mod quota_flags;
 mod run_files;
 mod runtime;
 mod scratch;
@@ -164,6 +175,7 @@ pub mod taint;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{Hello, Taint};
@@ -172,13 +184,20 @@ use crate::FileReader;
 use crate::bundle::Admission;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
+use crate::quota::ScratchQuota;
 
 pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, RunningLease, SLOTS, Slots};
 pub use mounts::{MountError, MountRoots};
+pub use quota::RunQuota;
+use quota_flags::scratch_quota_limits;
+pub use quota_flags::{
+    DEFAULT_SCRATCH_ABANDON_LIMIT, DEFAULT_SCRATCH_GIB, DEFAULT_SCRATCH_MAX_INODES,
+    DEFAULT_SCRATCH_QUOTA_FAILURES, DEFAULT_SCRATCH_USAGE_WAIT_SECS, MAX_SCRATCH_ABANDON_LIMIT,
+    MAX_SCRATCH_GIB, MAX_SCRATCH_QUOTA_FAILURES, MAX_SCRATCH_USAGE_WAIT_SECS,
+};
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
-    ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount, RuntimeError, Status,
-    label,
+    Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
 };
 pub use scratch::ScratchRoot;
 pub use taint::{MARKER_FILE, StateRoot};
@@ -241,6 +260,28 @@ pub mod code {
     /// cannot be written the job's container is not removed; while it cannot be removed
     /// the job's slot is not freed.
     pub const OWED_FAILED: &str = "owed-record-failed";
+    /// The project id of a slot still holds usage (or its usage cannot be read), so the slot
+    /// takes no run. The slot is read again at every step and is free once the usage reads
+    /// zero; it is reported when it is parked, and again every hour while it stays parked.
+    pub const QUOTA_SLOT_BUSY: &str = "quota-slot-busy";
+    /// A finished run's project still read usage after the time the agent waits for it
+    /// (`--scratch-usage-wait-secs`): the run's cleanup went on, the slot was parked and the
+    /// run's place and booked bytes were given back, and the quota counted one failure.
+    pub const QUOTA_USAGE_ABANDONED: &str = "quota-usage-abandoned";
+    /// A parked slot read zero usage again and takes runs.
+    pub const QUOTA_SLOT_RELEASED: &str = "quota-slot-released";
+    /// A finished run's project still reads usage after its tree was removed (the file
+    /// system frees inodes in the background): the slot stays held and is read again at
+    /// every step.
+    pub const QUOTA_USAGE_HELD: &str = "quota-usage-held";
+    /// The quota failed several calls in a row and the probe no longer finds project quota:
+    /// no run starts until it works again. Reported again every minute.
+    pub const QUOTA_UNHEALTHY: &str = "quota-unhealthy";
+    /// An unhealthy quota probed `Project` again.
+    pub const QUOTA_RECOVERED: &str = "quota-recovered";
+    /// The quota of a finished run's scratch directory could not be cleared. The tree is
+    /// gone; the slot stays held and the clear is tried again at every step.
+    pub const QUOTA_CLEAR_FAILED: &str = "quota-clear-failed";
     /// The records of owed checks in the state root could not be listed when the agent
     /// started, so the host is tainted ([`reason::CHECK_OWED`](super::taint::reason)).
     pub const OWED_UNREADABLE: &str = "owed-records-unreadable";
@@ -262,7 +303,7 @@ pub struct Finished<'a> {
     /// The containers of the agent's other jobs that are still on the host (running, or
     /// exited and not yet removed), and those that could not be removed. What they run and
     /// mount is not the finished job's, so a check must not count it against the job.
-    pub live: &'a [ContainerId],
+    pub live: &'a [RunHandle],
     /// The slot the finished run held, when it held one.
     pub slot: Option<u32>,
     /// The slots of the jobs in `live` (those whose container is still on the host).
@@ -507,6 +548,19 @@ pub struct Config {
     /// The rules for a start that names a bundle; none when the agent has no bundle store,
     /// and then such a start is refused `bundle-unsupported`.
     pub bundle: Option<Admission>,
+    /// The disk quota of the runs' scratch directories; none without `--scratch-quota`, and
+    /// then a run without `disk_bytes` books none and nothing bounds a run's disk.
+    pub quota: Option<RunQuota>,
+}
+
+impl Config {
+    /// The bytes of disk a run with `limits` books: its own `disk_bytes`, or the quota's
+    /// default for a run that names none (the number the server books for it too), or 0
+    /// without a quota.
+    pub fn disk_of(&self, limits: &js_agent_wire::Limits) -> u64 {
+        let default = self.quota.as_ref().map_or(0, RunQuota::default_disk_bytes);
+        limits.disk_bytes.unwrap_or(default)
+    }
 }
 
 /// The flags that configure jobs, checked.
@@ -516,6 +570,21 @@ pub struct Local {
     pub mounts: MountRoots,
     /// `--scratch-quota` was given.
     pub scratch_quota: bool,
+    /// `--scratch-default-gib`, or [`DEFAULT_SCRATCH_GIB`]: the GiB a run without
+    /// `disk_bytes` books. Meaningful with `--scratch-quota` only.
+    pub scratch_default_gib: u64,
+    /// `--scratch-max-inodes`, or [`DEFAULT_SCRATCH_MAX_INODES`]: the inode limit of a
+    /// run. Meaningful with `--scratch-quota` only.
+    pub scratch_max_inodes: u64,
+    /// `--scratch-quota-failures`, or [`DEFAULT_SCRATCH_QUOTA_FAILURES`]. Meaningful with
+    /// `--scratch-quota` only.
+    pub scratch_quota_failures: u32,
+    /// `--scratch-usage-wait-secs`, or [`DEFAULT_SCRATCH_USAGE_WAIT_SECS`]. Meaningful with
+    /// `--scratch-quota` only.
+    pub scratch_usage_wait_secs: u64,
+    /// `--scratch-abandon-limit`, or [`DEFAULT_SCRATCH_ABANDON_LIMIT`]. Meaningful with
+    /// `--scratch-quota` only.
+    pub scratch_abandon_limit: u32,
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
     /// `--run-files-root`, or the default under `/run` when that can be made; always none
@@ -693,10 +762,16 @@ impl Local {
                     .to_owned(),
             );
         }
+        let (default_gib, max_inodes, failures, usage_wait, abandon) = scratch_quota_limits(cli)?;
         Ok(Self {
             watch,
             mounts,
             scratch_quota: cli.scratch_quota,
+            scratch_default_gib: default_gib,
+            scratch_max_inodes: max_inodes,
+            scratch_quota_failures: failures,
+            scratch_usage_wait_secs: usage_wait,
+            scratch_abandon_limit: abandon,
             scratch,
             files,
             files_warning,
@@ -709,6 +784,20 @@ impl Local {
 }
 
 impl Local {
+    /// The quota the flags ask for over `quota`: a run without `disk_bytes` books
+    /// `--scratch-default-gib`, and a run is bounded to the bytes it books and to
+    /// `--scratch-max-inodes` inodes.
+    pub fn run_quota(&self, quota: Arc<dyn ScratchQuota>) -> RunQuota {
+        RunQuota::new(
+            quota,
+            self.scratch_default_gib << 30,
+            self.scratch_max_inodes,
+        )
+        .with_max_failures(self.scratch_quota_failures)
+        .with_usage_wait_ms(self.scratch_usage_wait_secs.saturating_mul(1000))
+        .with_abandon_limit(self.scratch_abandon_limit)
+    }
+
     /// Refuses a state root whose device number (`st_dev`) equals that of a mount root or
     /// the scratch root. A job with a read-write mount, or its own scratch directory, can
     /// fill that file system, and the taint marker could then not be written. This is a
