@@ -111,6 +111,12 @@ impl Oci {
         }
     }
 
+    /// The directory of `image` in the store (its unpacked root is in it), which a caller
+    /// that finds the image unfit removes to have it fetched again.
+    pub fn image_dir(&self, image: &PinnedImage) -> PathBuf {
+        self.images.dir_of(&image.digest)
+    }
+
     /// The job user's uid and gid: the owner of the lease directory ([`Owner::Job`]).
     pub fn job_ids(&self) -> (u32, u32) {
         (self.ids.uid, self.ids.gid)
@@ -189,6 +195,16 @@ impl Oci {
     /// The image cannot be fetched or unpacked, or names an index.
     pub async fn check_pinned(&self, image: &PinnedImage) -> Result<(), ImageCheckError> {
         self.images.ensure(self, image).await
+    }
+
+    /// Removes `image` from the store (a root daemon removes the files of any owner) so that
+    /// the next [`Oci::check_pinned`] fetches it again, waiting for a fetch of it under way.
+    /// No container may run on it: its root is the lower layer of the mounts of one.
+    ///
+    /// # Errors
+    /// The directory could not be removed.
+    pub async fn remove_image(&self, image: &PinnedImage) -> std::io::Result<()> {
+        self.images.remove(image).await
     }
 
     /// One helper container runs this daemon's give mode ([`helper::HelperModes`]) over the directories
