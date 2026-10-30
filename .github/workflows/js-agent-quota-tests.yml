@@ -8,10 +8,22 @@
 #     ./agent --ignored --test-threads=1 quota::xfs_host
 # (libtest flags come first; the test filter is the positional argument.)
 #
-# Manual runs only. It publishes nothing: the binary is a workflow artifact for seven days.
+# A manual run uploads the binary as a workflow artifact for seven days. A pull request that
+# changes a crate, the toolchain, the lock file or this workflow builds the same binary (the
+# musl build of js-agent and its dependencies, js-contain's static init included) and checks
+# that it is static, so a break shows on the pull request; it uploads nothing. Nothing is
+# published.
 name: js-agent-quota-tests
 
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/js-agent-quota-tests.yml'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
   workflow_dispatch:
     inputs:
       ref:
@@ -85,7 +97,8 @@ jobs:
             echo "- file: $description"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "SHORT=$short" >> "$GITHUB_ENV"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: js-agent-quota-tests-${{ env.SHORT }}
           path: |

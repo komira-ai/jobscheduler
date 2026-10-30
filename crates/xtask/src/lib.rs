@@ -12,6 +12,9 @@
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
 //!   order and waiting for it to converge (docs/release.md).
+//! - `crun-tests [--sudo <path>] [--root <dir>]` ([`crun_tests`]): the real-`crun` tests of
+//!   `js-contain` (every one `#[ignore]`d under a plain `cargo test`), each test target built
+//!   as this user and run in a `Delegate=yes` system unit of its own.
 //! - `pkg check-deb --deb F --version X.Y.Z --binary B --packaging DIR --license F` ([`pkg`]):
 //!   refuses a js-agent deb that is not exactly the package `packaging/js-agent` describes, or
 //!   whose binary is not a static x86-64 Linux executable.
@@ -27,11 +30,13 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+pub mod crun_tests;
 pub mod deploy;
 pub mod fetch;
 pub mod layering;
 pub mod pkg;
 pub mod release;
+pub mod test_build;
 
 /// Why a verb failed.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -48,6 +53,9 @@ pub enum Error {
     /// A package check failed.
     #[error(transparent)]
     Pkg(#[from] pkg::Error),
+    /// The real-crun tests, or the build of their targets, failed.
+    #[error(transparent)]
+    CrunTests(#[from] test_build::Error),
     /// Flags that do not fit together (exit status 2, like a clap error).
     #[error("{0}")]
     Usage(String),
@@ -84,6 +92,16 @@ enum Verb {
     },
     /// Set the release's version for services on the update coordinator and wait for them.
     Deploy(deploy::Args),
+    /// Run the real-crun tests of js-contain, each test target in its own `Delegate=yes`
+    /// system unit as this user (a Linux host with crun, uidmap and passwordless sudo).
+    CrunTests {
+        /// The sudo program; it is run with `-n`, so it never prompts.
+        #[arg(long, default_value = "sudo")]
+        sudo: PathBuf,
+        /// The repository root, where cargo builds the test targets.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
     /// The js-agent Linux package.
     Pkg {
         /// Which step.
@@ -129,6 +147,15 @@ fn run(cli: Cli) -> Result<String, Error> {
             Ok(fetch::fetch(&url, &sha256, &unpack, &out, &roots)?)
         }
         Verb::Deploy(args) => Ok(deploy::run(&args)?),
+        Verb::CrunTests { sudo, root } => {
+            // `cargo xtask` runs this program under cargo, which sets `CARGO`.
+            let cargo = std::env::var_os("CARGO").unwrap_or_default();
+            Ok(crun_tests::run(&crun_tests::CrunTests {
+                cargo: &cargo,
+                sudo: &sudo,
+                root: &root,
+            })?)
+        }
         Verb::Pkg { verb } => Ok(match verb {
             PkgVerb::CheckDeb(args) => pkg::check(&args)?,
         }),
