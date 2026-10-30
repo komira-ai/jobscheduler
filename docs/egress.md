@@ -150,3 +150,27 @@ podman run --rm --network jobs --pull never --add-host store.example:198.51.100.
 
 With the table removed (`nft delete table inet js_egress`), the agent refuses the next job
 with `egress-unchecked`; with `--container-network absent` it does not start.
+
+## Egress on a Mac pool (pf)
+
+A Mac has no network namespace, and a Seatbelt profile cannot allow-list remote hosts (its
+`remote ip` filter takes only `*` and `localhost`). The control on a Mac is a pf anchor keyed
+on the uid range of the pool's users, loaded by the host step `js-mac-provision`
+(`crates/js-mac-provision`, its README is the full text). A pool user may connect over TCP
+to the endpoints the policy names (IPv4 `host:port` literals, the store and the frontend),
+and to IPv4 loopback; everything else over TCP and UDP is refused at once, the whole of
+`169.254.0.0/16` (the cloud metadata address) first, and IPv6 is denied.
+
+- The rules are a pure function of the uid range, the endpoints and the anchor name;
+  a range that reaches below uid 500, an empty range and a non-IPv4 endpoint are refused.
+- `install` loads the anchor under its own anchor point, enables pf with a counted token,
+  checks that the main ruleset evaluates the anchor and reads the rules back; `check`
+  compares the loaded rules with the rendered ones; `remove` flushes only this anchor.
+  A LaunchDaemon runs `install` at boot and on an interval.
+- Unlike the Linux check above, nothing reads the rules back before each job yet: `check`
+  is the verb a caller can run (the agent's use of it is a follow-up).
+- Limits: pf matches `user` on TCP and UDP only; loopback between pool users cannot be
+  narrowed by the sender's uid and stays open; the node's own address is refused unless it
+  is a listed endpoint; DNS through mDNSResponder (a unix socket) is outside pf; and the
+  behaviour on a Mac is shown only by the root test, `tests/pf_as_root.rs`, which a farm
+  Mac runs through a held script.
