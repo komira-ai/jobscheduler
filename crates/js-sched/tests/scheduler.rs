@@ -36,6 +36,7 @@ fn request(n: u8) -> Request {
         resources: Resources::new(1_000, GIB),
         hermetic: true,
         do_not_cache: false,
+        whole_worker: false,
         needs: js_caps::Request::default(),
     }
 }
@@ -565,6 +566,7 @@ fn in_flight_dedup_joins_only_the_same_instance_and_digest() {
         5,
         Request {
             do_not_cache: true,
+            whole_worker: false,
             ..request(1)
         },
     );
@@ -619,6 +621,7 @@ fn twin_and_next_operation_name_the_operation_a_submission_gets() {
     expect(&mut h, 4, networked, false);
     let uncached = Request {
         do_not_cache: true,
+        whole_worker: false,
         ..request(1)
     };
     expect(&mut h, 5, uncached, false);

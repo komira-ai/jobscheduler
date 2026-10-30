@@ -46,6 +46,7 @@ fn request(n: u8, memory: u64) -> Request {
         resources: Resources::new(1_000, memory),
         hermetic: true,
         do_not_cache: false,
+        whole_worker: false,
         needs: js_caps::Request::from_platform([("OSFamily", "linux")]).unwrap(),
     }
 }
@@ -196,6 +197,23 @@ fn farm_with_floor_16() -> Farm {
     assert!(f.end(&second, ok()).is_empty());
     assert_eq!(f.s.key_floor(KEY), Some(16 * GIB));
     f
+}
+
+both_rules! {
+/// Catches: a key floor applied to an action that owns its worker. With a floor on its
+/// size key it is placed at once on an idle worker, books the whole worker, and leaves
+/// the floor as it was.
+fn a_whole_worker_request_takes_no_key_floor() {
+    let mut f = farm_with_floor_16();
+    let request = Request {
+        whole_worker: true,
+        ..request(2, 4 * GIB)
+    };
+    f.submit_keyed(2, request, KEY);
+    let start = only(f.tick());
+    assert_eq!(start.resources, Resources::new(8_000, 64 * GIB));
+    assert_eq!(f.s.key_floor(KEY), Some(16 * GIB));
+}
 }
 
 both_rules! {

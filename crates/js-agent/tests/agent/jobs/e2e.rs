@@ -241,6 +241,7 @@ fn the_agent_sends_its_load_to_a_real_server() {
         let files = &rig.machine.files;
         files.set(&format!("{dir}/cpu.stat"), "usage_usec 10\n");
         files.set(&format!("{dir}/memory.current"), "4096\n");
+        files.set(&format!("{dir}/cpu.max"), "max 100000\n");
         files.set(
             &format!("{dir}/memory.stat"),
             "inactive_file 0\nactive_file 0\n",

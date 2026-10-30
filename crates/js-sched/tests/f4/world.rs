@@ -813,6 +813,7 @@ impl World {
                 .expect("valid platform"),
             hermetic: rng.chance(Chance::percent(85)),
             do_not_cache: rng.chance(Chance::percent(5)),
+            whole_worker: false,
         };
         Template {
             request,

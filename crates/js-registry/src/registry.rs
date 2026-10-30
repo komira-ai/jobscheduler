@@ -7,11 +7,13 @@ use js_caps::{FLAG_SET, HostContract, RUN_FILES, SCRATCH_QUOTA};
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
 use js_provider::Observed;
+use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, LeaseId, MemoryHeadroom, ProviderId, RequestId, Shape};
 use js_usage::ProfileKey;
 
 use crate::config::PoolConfig;
 use crate::credential::{Binding, Credential};
+use crate::load;
 use crate::refusal::Refusal;
 use crate::runs::{RunRefusal, RunView, Runs, Standing, quota_default, vet};
 use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
@@ -95,6 +97,17 @@ pub struct HostView {
     /// When a reservation that drains a busy host is given up if the host is still not
     /// quiet; `None` unless the host is reserved and was busy when it was set aside.
     pub drain_deadline: Option<Timestamp>,
+    /// The latest load the host reported (in the units of [`NodeLoad`]). Only the latest accepted beat's load is kept: minutes
+    /// it carries that a consumer has not read before the next beat are lost to it, and a beat
+    /// whose reply was lost is sent again, so a consumer that sums minutes must dedupe them by
+    /// (lease, minute). Nothing says how much the agent dropped (the wire has no drop counts),
+    /// so no minutes does not mean none were dropped. After a lost gap a reviving beat that
+    /// repeats the old `seq` leaves the old reading in place; it is stale, not wrong, and carries
+    /// its own `mono_usec`. Zero `cpu_throttled_usec` and
+    /// `cpu_pressure_some_total_usec` mean not measured. `None` when the
+    /// host has not reported one in this session, when its latest heartbeat carried none
+    /// (the agent could not measure), and while the host is lost. A new hello clears it.
+    pub load: Option<NodeLoad>,
 }
 
 /// How a host is set aside: for whole-node use, or to be scaled away.
@@ -166,6 +179,8 @@ struct Record {
     leaving: Option<marks::Leaving>,
     /// The shape the host announced at its last hello.
     claim: Option<Shape>,
+    /// The load of the host's latest accepted reading, see [`HostView::load`].
+    load: load::Kept,
 }
 
 impl Record {
@@ -191,6 +206,7 @@ impl Record {
             bound: None,
             leaving: None,
             claim: None,
+            load: load::Kept::default(),
         }
     }
 
@@ -652,6 +668,7 @@ impl Registry {
                 bound: kept_bound,
                 leaving: kept_leaving,
                 claim,
+                load: load::Kept::default(),
             },
         );
         state.runs.sync(&host, &hello.held, true);
@@ -751,6 +768,7 @@ impl Registry {
         record.heard = Some(now);
         record.phase = heartbeat.phase;
         record.beats = record.beats.saturating_add(1);
+        record.load.take(heartbeat.load.as_ref());
         record.held = heartbeat
             .held
             .iter()
@@ -999,6 +1017,11 @@ impl Registry {
         let views = state.records.iter().map(|(id, record)| HostView {
             id: id.clone(),
             state: record.state(now, self.grace_ms()),
+            load: record
+                .load
+                .latest
+                .clone()
+                .filter(|_| record.state(now, self.grace_ms()) != HostState::Lost),
             phase: record.phase,
             lease: booked.get(id).copied(),
             shape: shape.clone(),
