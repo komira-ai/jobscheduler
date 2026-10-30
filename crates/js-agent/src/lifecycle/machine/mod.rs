@@ -195,6 +195,33 @@ impl Lifecycle {
             .collect()
     }
 
+    /// Asks the runtime again for the control group of each run that is running, was
+    /// started by this process and has none yet; the usage of a lease with no control group
+    /// is not sampled, and a runtime that could not say once (a container it had just
+    /// started) may say later. Returns one line for each run that is still without, the
+    /// first time only. Adopted runs are left alone: they are never sampled.
+    pub fn find_cgroups(&mut self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for job in &mut self.jobs {
+            let Stage::Running(id) = &job.stage else {
+                continue;
+            };
+            if job.adopted || job.cgroup.is_some() {
+                continue;
+            }
+            job.cgroup = self.runtime.cgroup(id);
+            if job.cgroup.is_none() && !job.cgroup_missing_told {
+                job.cgroup_missing_told = true;
+                lines.push(format!(
+                    "usage: the control group of run {} is not known; \
+                     looking again at every window",
+                    job.run_id
+                ));
+            }
+        }
+        lines
+    }
+
     /// The results the server has not acknowledged, for the next heartbeat.
     pub fn results(&self) -> Vec<RunResult> {
         self.jobs

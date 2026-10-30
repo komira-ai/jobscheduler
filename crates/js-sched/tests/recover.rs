@@ -37,6 +37,7 @@ fn request(tag: u8) -> Request {
         resources: Resources::new(1_000, GIB),
         hermetic: true,
         do_not_cache: false,
+        whole_worker: false,
         needs: js_caps::Request::default(),
     }
 }
@@ -318,6 +319,34 @@ fn an_exclusive_recovered_lease_keeps_its_node_to_itself() {
             "{effects:?}"
         );
     }
+}
+
+/// Catches: a recovered whole-worker lease booked as the request's resources (which
+/// name no size), leaving the node open to other work beside it.
+#[test]
+fn a_recovered_whole_worker_lease_books_its_whole_node() {
+    let held = Request {
+        whole_worker: true,
+        resources: Resources::new(1_000, GIB),
+        ..request(3)
+    };
+    let mut s = recovered(vec![leased(3, held, 5, "node-a")]);
+    up(&mut s, 5, "node-a");
+    assert_eq!(
+        s.booked(&node("node-a")),
+        Some(Resources::new(4_000, 8 * GIB))
+    );
+    assert_eq!(s.load_at(&node("node-a"), 0), Some((4_000, 8 * GIB)));
+    let submit = Event::Submit {
+        waiter: WaiterId(99),
+        request: request(9),
+    };
+    assert!(feed(&mut s, 5, submit).is_empty());
+    let effects = feed(&mut s, 5, Event::Tick);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Commit(_))),
+        "{effects:?}"
+    );
 }
 
 /// Catches: a fate a scheduler ignores (the operation books its submitted memory again

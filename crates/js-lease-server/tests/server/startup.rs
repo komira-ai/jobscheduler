@@ -427,3 +427,31 @@ fn write_timeout_and_request_limit_are_flags() {
     assert_eq!(limits.write_timeout.as_secs(), 3);
     assert_eq!(limits.max_requests, 7);
 }
+
+/// Asserts that a server given a listener the caller bound serves on exactly that
+/// address, and that after the server is shut down the caller's clone of the listener
+/// still holds the port: nothing else can bind it, and the clone, accepting, takes the
+/// connections that come.
+#[tokio::test]
+async fn a_server_on_a_listener_the_caller_bound_leaves_the_port_with_the_caller() {
+    let scratch = Scratch::new("startup_prebound");
+    let config = config(base_args(&scratch)).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let kept = listener.try_clone().unwrap();
+    let addr = listener.local_addr().unwrap();
+    let h = Harness::over(scratch, config.with_listener(listener)).await;
+    assert_eq!(h.addr(), addr);
+    assert_eq!(h.call("GET", "/v1/leases", None).await.status, 200);
+    // The flag is shared with the clone: with nothing waiting, an accept returns at once.
+    assert_eq!(
+        kept.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    h.running.shutdown().await.unwrap();
+    kept.set_nonblocking(false).unwrap();
+    let err = std::net::TcpListener::bind(addr).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse, "{err}");
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    let (served, _) = kept.accept().unwrap();
+    drop((client, served));
+}
