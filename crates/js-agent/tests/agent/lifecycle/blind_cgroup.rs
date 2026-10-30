@@ -56,6 +56,8 @@ fn a_run_whose_group_is_known_taints_nothing() {
     h.fake
         .set_cgroup("r1", "/sys/fs/cgroup/actions/lease-r1/ctr");
     h.start(job("r1"));
+    h.life.step();
+    assert!(!h.life.is_tainted(), "watched while it runs");
     h.fake.exit("r1", 0);
     h.life.step();
     assert!(!h.life.is_tainted());
