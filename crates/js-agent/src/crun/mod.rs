@@ -102,7 +102,7 @@ use crate::lifecycle::{
     RuntimeError, Status, Ticket, label,
 };
 use ledger::{Entry, Ledger, Read};
-pub use ledger::{Failed, Left, Removed, SweepReport};
+pub use ledger::{Failed, LedgerError, Left, Removed, SweepReport};
 use spec::{container_spec, exit_of, pinned};
 
 /// How long a pull and unpack of one image may take before it counts as failed.
@@ -210,13 +210,8 @@ pub enum CrunError {
     #[error("the threads of the crun runtime: {0}")]
     Threads(#[from] io::Error),
     /// The directory of the leases' labels could not be made or listed.
-    #[error("the directory of the leases' labels {path}: {why}")]
-    Ledger {
-        /// The directory.
-        path: PathBuf,
-        /// The reason.
-        why: io::Error,
-    },
+    #[error("the directory of the leases' labels {0}")]
+    Ledger(#[from] LedgerError),
 }
 
 /// Why a run could not be made into a container.
@@ -346,8 +341,7 @@ impl CrunRuntime {
             path: configs.clone(),
             why,
         })?;
-        let ledger = Ledger::open(&settings.scratch, &settings.host_id)
-            .map_err(|(path, why)| CrunError::Ledger { path, why })?;
+        let ledger = Ledger::open(&settings.scratch, &settings.host_id)?;
         let pulling = Arc::clone(&oci);
         let limit = hooks.pull_limit;
         let pulls = Prefetcher::new(settings.pull_threads, move |image| {
@@ -399,28 +393,21 @@ impl CrunRuntime {
 
     /// [`CrunRuntime::swept`]'s sweep: every lease of this agent in the ledger.
     fn sweep(&self) -> Result<SweepReport, CrunError> {
-        self.ledger
-            .sweep(|entry| self.tear_down(&entry.name))
-            .map_err(|why| CrunError::Ledger {
-                path: self.ledger.dir().to_owned(),
-                why,
-            })
+        Ok(self.ledger.sweep(|entry| self.tear_down(&entry.name))?)
     }
 
     /// Removes the lease `name` of an earlier process, if the ledger holds it as this
     /// agent's. Returns whether it did.
     fn remove_leftover(&self, name: &str) -> Result<bool, String> {
         match self.ledger.read(name) {
-            Read::Absent => Ok(false),
-            Read::Mine(entry) => {
-                self.tear_down(&entry.name)?;
+            None => Ok(false),
+            Some(Read::Mine(entry)) => {
                 self.ledger
-                    .forget(&entry.name)
-                    .map_err(|why| format!("remove the sidecar: {why}"))?;
+                    .discard(&entry, |entry| self.tear_down(&entry.name))?;
                 Ok(true)
             }
-            Read::Foreign(entry) => Err(format!("it belongs to agent {:?}", entry.agent)),
-            Read::Malformed(why) => Err(format!("its sidecar is not well formed: {why}")),
+            Some(Read::Foreign(entry)) => Err(format!("it belongs to agent {:?}", entry.agent)),
+            Some(Read::Malformed(why)) => Err(format!("its sidecar is not well formed: {why}")),
         }
     }
 
@@ -429,26 +416,24 @@ impl CrunRuntime {
     fn tear_down(&self, name: &str) -> Result<(), String> {
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
         let lease = self.oci.lease_dirs(name);
-        if cgroup.dir().exists() {
+        let (has_cgroup, has_dir) = (cgroup.dir().exists(), lease.dir.exists());
+        if has_cgroup {
             // A process the dead agent's keeper did not reach; the removals below retry.
             let _ = cgroup.kill();
         }
-        if lease.dir.exists() {
-            self.oci
-                .remove(name)
-                .map_err(|why| format!("delete the container: {why}"))?;
+        if has_dir {
+            step("delete the container", self.oci.remove(name))?;
         }
-        if cgroup.dir().exists() {
-            cgroup
-                .remove()
-                .map_err(|why| format!("remove the lease's cgroup: {why}"))?;
+        if has_cgroup {
+            step("remove the lease's cgroup", cgroup.remove())?;
         }
-        match js_contain::remove::remove_tree(&lease.dir) {
-            Err(why) if why.kind() != io::ErrorKind::NotFound => {
-                Err(format!("remove the lease directory: {why}"))
-            }
-            _ => Ok(()),
+        if has_dir {
+            step(
+                "remove the lease directory",
+                js_contain::remove::remove_tree(&lease.dir),
+            )?;
         }
+        Ok(())
     }
 
     /// [`Runtime::prepare`], waiting for the fetch to end: `Ready` or `Failed`. For a
@@ -528,14 +513,9 @@ impl CrunRuntime {
         if let Err(fault) = self.make_resources(spec, &container, &lease, &cgroup) {
             // What the failed step left; none of it is a container. The sidecar goes with
             // it, or stays for the next sweep when some of it cannot be removed.
-            let cgroup_gone = !cgroup.dir().exists() || cgroup.remove().is_ok();
-            let dir_gone = match js_contain::remove::remove_tree(&lease.dir) {
-                Ok(()) => true,
-                Err(why) => why.kind() == io::ErrorKind::NotFound,
-            };
-            if cgroup_gone && dir_gone {
-                let _ = self.ledger.forget(&name);
-            }
+            let _ = self
+                .ledger
+                .discard(&entry, |entry| self.tear_down(&entry.name));
             return Err(fault);
         }
         self.runs.insert(
@@ -642,6 +622,11 @@ impl CrunRuntime {
         run.state = State::Ended(exit);
         Status::Exited(exit)
     }
+}
+
+/// `result`, with the step that failed named.
+fn step<T>(what: &str, result: Result<T, impl std::fmt::Display>) -> Result<T, String> {
+    result.map_err(|why| format!("{what}: {why}"))
 }
 
 /// The directory of the cgroup `name` (relative to `mount`, starting with `/`).

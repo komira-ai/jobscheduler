@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
@@ -34,7 +35,7 @@ fn file_of(ledger: &Ledger, entry: &Entry) -> PathBuf {
 fn files(ledger: &Ledger) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(ledger.dir())
         .expect("list the ledger")
-        .map(|e| e.expect("entry").file_name().into_string().expect("text"))
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
     names
@@ -119,8 +120,8 @@ fn two_agents_on_one_store_never_sweep_each_others_leases() {
         owner.record(e).expect("record");
         leases.make(&e.name);
     }
-    assert_eq!(a.read(&theirs.name), Read::Foreign(theirs.clone()));
-    assert_eq!(b.read(&mine.name), Read::Foreign(mine.clone()));
+    assert_eq!(a.read(&theirs.name), Some(Read::Foreign(theirs.clone())));
+    assert_eq!(b.read(&mine.name), Some(Read::Foreign(mine.clone())));
 
     let report = a.sweep(|e| leases.tear_down(e)).expect("sweep a");
     assert_eq!(leases.asked(), std::slice::from_ref(&mine.name));
@@ -175,6 +176,20 @@ fn a_sidecar_that_is_malformed_is_left_alone_and_reported() {
     // The sidecar of run `other`, under the name of run `moved`.
     fs::write(at(&named(&entry("agent-a", "moved"))), &text).expect("write");
     fs::write(at("..json"), &text).expect("write");
+    // Under its own name, but of an agent that does not give that name.
+    fs::write(
+        at(&named(&other)),
+        text.replace("\"agent\":\"agent-a\"", "\"agent\":\"agent-zz\""),
+    )
+    .expect("write");
+    // A name that is not text.
+    fs::write(
+        ledger
+            .dir()
+            .join(std::ffi::OsStr::from_bytes(b"js-\xff.json")),
+        &text,
+    )
+    .expect("write");
     symlink(at(&named(&good)), at("js-0000000000000004-link.json")).expect("link");
     fs::create_dir(at("js-0000000000000005-dir.json")).expect("dir");
     fs::write(at("js-0000000000000006-big.json"), vec![b' '; 70 * 1024]).expect("write");
@@ -264,8 +279,8 @@ fn a_sidecar_is_read_back_with_its_labels_and_forgotten_by_name() {
     let (one, two) = (entry("agent-a", "r1"), entry("agent-a", "r2"));
     ledger.record(&one).expect("record");
     ledger.record(&two).expect("record");
-    assert_eq!(ledger.read(&one.name), Read::Mine(one.clone()));
-    let Read::Mine(read) = ledger.read(&two.name) else {
+    assert_eq!(ledger.read(&one.name), Some(Read::Mine(one.clone())));
+    let Some(Read::Mine(read)) = ledger.read(&two.name) else {
         panic!("not this agent's");
     };
     assert_eq!(read.labels[label::RUN], "r2");
@@ -273,8 +288,12 @@ fn a_sidecar_is_read_back_with_its_labels_and_forgotten_by_name() {
 
     ledger.forget(&one.name).expect("forget");
     ledger.forget(&one.name).expect("forget again is quiet");
-    assert_eq!(ledger.read(&one.name), Read::Absent);
-    assert_eq!(ledger.read(&two.name), Read::Mine(two.clone()), "the other");
+    assert_eq!(ledger.read(&one.name), None);
+    assert_eq!(
+        ledger.read(&two.name),
+        Some(Read::Mine(two.clone())),
+        "the other"
+    );
     assert_eq!(
         files(&ledger),
         [format!("{}.json", two.name)],
@@ -296,15 +315,71 @@ fn a_sidecar_is_never_written_over_and_a_bad_name_is_refused() {
     second.labels.insert("k".to_owned(), "v".to_owned());
     let why = ledger.record(&second).expect_err("a second record");
     assert_eq!(why.kind(), io::ErrorKind::AlreadyExists);
-    assert_eq!(ledger.read(&first.name), Read::Mine(first.clone()));
+    assert_eq!(ledger.read(&first.name), Some(Read::Mine(first.clone())));
 
-    for bad in ["", ".", "..", ".hidden", "a/b", "../x"] {
+    let long = "a".repeat(256);
+    for bad in ["", ".", "..", ".hidden", "a/b", "../x", long.as_str()] {
         let mut named = first.clone();
         named.name = bad.to_owned();
         assert!(ledger.record(&named).is_err(), "{bad:?} recorded");
         assert!(ledger.forget(bad).is_err(), "{bad:?} forgotten");
-        assert!(matches!(ledger.read(bad), Read::Malformed(_)), "{bad:?}");
+        assert!(
+            matches!(ledger.read(bad), Some(Read::Malformed(_))),
+            "{bad:?}"
+        );
     }
     assert_eq!(files(&ledger), [format!("{}.json", first.name)]);
     assert!(dir.path().join(DIR).is_dir());
+}
+
+/// Catches a `forget` that reports a sidecar removed when it could not be (the lease would
+/// be swept again for ever, or its removal reported done): a name that is a directory is an
+/// error of the call, and a sweep whose lease is gone but whose sidecar cannot be removed
+/// reports the lease as failed, not removed.
+#[test]
+fn a_sidecar_that_cannot_be_removed_is_an_error_and_a_failed_lease() {
+    let dir = TestDir::under(std::env::temp_dir(), "ledger-forget");
+    let ledger = ledger(&dir, "agent-a");
+    let one = entry("agent-a", "r1");
+    ledger.record(&one).expect("record");
+    let file = file_of(&ledger, &one);
+    fs::remove_file(&file).expect("remove");
+    // A directory where the file was is a sidecar that is not one; `forget` cannot remove it.
+    fs::create_dir(&file).expect("dir");
+    assert!(ledger.forget(&one.name).is_err());
+
+    // The same through a sweep of a sidecar that was read as good before it was replaced.
+    let two = entry("agent-a", "r2");
+    ledger.record(&two).expect("record");
+    let report = ledger
+        .sweep(|e| {
+            let path = file_of(&ledger, e);
+            fs::remove_file(&path).expect("remove");
+            fs::create_dir(&path).expect("dir");
+            Ok(())
+        })
+        .expect("sweep");
+    assert!(report.removed.is_empty(), "{report:?}");
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert!(report.failed[0].why.contains("remove the sidecar"));
+}
+
+/// Catches a ledger that opens where it cannot: a file where its directory goes is an error
+/// that names the directory, and the directory of one that opens is `0700`.
+#[test]
+fn a_ledger_cannot_open_over_a_file_and_is_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = TestDir::under(std::env::temp_dir(), "ledger-open");
+    let first = ledger(&dir, "agent-a");
+    let mode = fs::metadata(first.dir())
+        .expect("stat")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+
+    let other = TestDir::under(std::env::temp_dir(), "ledger-open-file");
+    fs::write(other.path().join(DIR), "a file").expect("write");
+    let why = Ledger::open(&other, "agent-a").expect_err("a file");
+    assert_eq!(why.path, other.path().join(DIR));
+    assert!(why.to_string().contains(DIR), "{why}");
 }

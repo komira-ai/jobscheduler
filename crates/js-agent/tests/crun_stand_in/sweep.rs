@@ -327,3 +327,78 @@ fn a_malformed_sidecar_is_left_alone_and_reported() {
     assert_eq!(paths, [junk.clone(), moved.clone()]);
     assert!(junk.is_file() && moved.is_file());
 }
+
+/// Proves a run that cannot be recorded is refused and makes nothing: with the sidecar of
+/// its name there already (a lease of another process of the agent), the start fails naming
+/// the labels, and neither a directory nor a cgroup is made for it. Catches two leases of
+/// one name, the second hiding the first from the sweep.
+#[test]
+fn a_run_whose_sidecar_exists_is_refused_before_anything_is_made() {
+    let node = Node::new("sweep-twice");
+    let mut one = node.open();
+    let mut two = node.open();
+    let id = staged(&node, &mut one, "r1-exit");
+    let why = two
+        .stage(&node.spec("r1-exit"))
+        .expect_err("a second lease");
+    assert!(
+        why.to_string().contains("record the lease's labels"),
+        "{why}"
+    );
+    assert_eq!(left_of(&node, &id.0).len(), 3, "the first lease is intact");
+    assert!(two.list_labelled().expect("lists").is_empty());
+}
+
+/// Proves the orphan removal refuses what it cannot attribute: a run id that cannot name a
+/// lease is an error, and a sidecar of the lease's name that is not well formed is left
+/// where it is with the reason. Catches an orphan removal that removes a lease on the word
+/// of a file it cannot read.
+#[test]
+fn an_orphan_removal_refuses_a_bad_run_id_and_a_sidecar_it_cannot_read() {
+    let node = Node::new("sweep-refused");
+    let mut runtime = node.open();
+    assert!(runtime.remove_orphan("a/b").is_err());
+    let mut dead = node.open();
+    let id = staged(&node, &mut dead, "r1-exit");
+    std::fs::write(sidecar(&node, &id.0), "not json").expect("write");
+    let why = runtime.remove_orphan("r1-exit").expect_err("malformed");
+    assert!(why.to_string().contains("not well formed"), "{why}");
+    assert_eq!(left_of(&node, &id.0).len(), 3);
+}
+
+/// Proves a runtime does not open where it cannot keep its ledger: with a file where the
+/// ledger's directory goes, opening fails naming it, and nothing is swept. Catches a
+/// runtime that runs without the record that lets its leases be cleaned up.
+#[test]
+fn a_runtime_does_not_open_without_its_ledger() {
+    let node = Node::new("sweep-noledger");
+    std::fs::create_dir_all(&node.scratch).expect("scratch");
+    std::fs::write(node.scratch.join("oci-labels"), "a file").expect("write");
+    let why = CrunRuntime::open_with(
+        node.settings("/root"),
+        Arc::new(NoImages),
+        Node::hooks(LONG, LONG),
+    )
+    .expect_err("no ledger");
+    assert!(why.to_string().contains("oci-labels"), "{why}");
+}
+
+/// Proves a removal that cannot take the sidecar last is an error and keeps the container
+/// listed: with a directory where the sidecar was, the lease is gone and the call fails
+/// naming the sidecar. Catches a removal reported done while a sidecar would make the next
+/// start report a run it already ended.
+#[test]
+fn a_removal_that_cannot_remove_the_sidecar_fails() {
+    let node = Node::new("sweep-sidecar-stuck");
+    let mut runtime = node.open();
+    let id = staged(&node, &mut runtime, "r1-exit");
+    let file = sidecar(&node, &id.0);
+    std::fs::remove_file(&file).expect("remove");
+    std::fs::create_dir(&file).expect("a directory");
+    let why = runtime.remove(&id).expect_err("not removed");
+    assert!(
+        why.to_string().contains("remove the lease's sidecar"),
+        "{why}"
+    );
+    assert_eq!(runtime.list_labelled().expect("lists").len(), 1);
+}

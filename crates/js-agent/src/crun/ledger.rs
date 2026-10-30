@@ -105,11 +105,27 @@ pub enum Left {
     },
 }
 
+/// Why the ledger's directory could not be made or listed.
+#[derive(Debug, thiserror::Error)]
+#[error("{}: {why}", .path.display())]
+pub struct LedgerError {
+    /// The directory.
+    pub path: PathBuf,
+    /// The reason.
+    pub why: io::Error,
+}
+
+/// `result`, with the directory `dir` named if it failed.
+fn at<T>(dir: &Path, result: io::Result<T>) -> Result<T, LedgerError> {
+    result.map_err(|why| LedgerError {
+        path: dir.to_owned(),
+        why,
+    })
+}
+
 /// What reading one sidecar found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Read {
-    /// There is none.
-    Absent,
     /// This agent's.
     Mine(Entry),
     /// Another agent's.
@@ -179,11 +195,11 @@ pub(super) struct Ledger {
 
 impl Ledger {
     /// The ledger of `agent` in `scratch`, made `0700` if it is not there.
-    pub(super) fn open(scratch: &Path, agent: &str) -> Result<Self, (PathBuf, io::Error)> {
+    pub(super) fn open(scratch: &Path, agent: &str) -> Result<Self, LedgerError> {
         let dir = scratch.join(DIR);
         let made = fs::create_dir_all(&dir)
             .and_then(|()| fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)));
-        made.map_err(|why| (dir.clone(), why))?;
+        at(&dir, made)?;
         Ok(Self {
             dir,
             agent: agent.to_owned(),
@@ -191,6 +207,7 @@ impl Ledger {
     }
 
     /// The directory of the sidecars.
+    #[cfg(test)]
     pub(super) fn dir(&self) -> &Path {
         &self.dir
     }
@@ -216,12 +233,9 @@ impl Ledger {
         let path = self.path_of(&entry.name)?;
         let tmp = self.dir.join(format!(".{}.tmp", entry.name));
         let body = serde_json::to_vec(entry).map_err(io::Error::other)?;
-        // A file a dead process left under this name is nobody's.
-        match fs::remove_file(&tmp) {
-            Ok(()) => {}
-            Err(why) if why.kind() == io::ErrorKind::NotFound => {}
-            Err(why) => return Err(why),
-        }
+        // A file a dead process left under this name is nobody's; one that stays makes
+        // the `create_new` below fail.
+        let _ = fs::remove_file(&tmp);
         let written = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -256,26 +270,35 @@ impl Ledger {
         File::open(&self.dir)?.sync_all()
     }
 
-    /// Reads the sidecar of the lease `name`.
-    pub(super) fn read(&self, name: &str) -> Read {
+    /// Reads the sidecar of the lease `name`; `None` if there is no file of that name.
+    pub(super) fn read(&self, name: &str) -> Option<Read> {
         let Ok(path) = self.path_of(name) else {
-            return Read::Malformed(format!("{name:?} is not a lease name"));
+            return Some(Read::Malformed(format!("{name:?} is not a lease name")));
         };
-        self.load(name, &path)
+        // A link that points nowhere is a file of that name, and malformed.
+        if fs::symlink_metadata(&path).is_err() {
+            return None;
+        }
+        Some(self.classify(self.load(name, &path)))
+    }
+
+    /// Whose a sidecar that was read is.
+    fn classify(&self, loaded: Result<Entry, String>) -> Read {
+        match loaded {
+            Ok(entry) if entry.agent == self.agent => Read::Mine(entry),
+            Ok(entry) => Read::Foreign(entry),
+            Err(why) => Read::Malformed(why),
+        }
     }
 
     /// Reads the file `path`, which must be the sidecar of the lease `stem`.
-    fn load(&self, stem: &str, path: &Path) -> Read {
+    fn load(&self, stem: &str, path: &Path) -> Result<Entry, String> {
         // A link is refused, not followed.
         let opened = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(path);
-        let file = match opened {
-            Ok(file) => file,
-            Err(why) if why.kind() == io::ErrorKind::NotFound => return Read::Absent,
-            Err(why) => return Read::Malformed(format!("cannot be opened: {why}")),
-        };
+        let file = opened.map_err(|why| format!("cannot be opened: {why}"))?;
         let mut body = Vec::new();
         let read = file
             .metadata()
@@ -287,42 +310,34 @@ impl Ledger {
                 }
             })
             .and_then(|()| file.take(MAX_BYTES + 1).read_to_end(&mut body));
-        if let Err(why) = read {
-            return Read::Malformed(why.to_string());
-        }
+        read.map_err(|why| why.to_string())?;
         if u64::try_from(body.len()).unwrap_or(u64::MAX) > MAX_BYTES {
-            return Read::Malformed(format!("it is longer than {MAX_BYTES} bytes"));
+            return Err(format!("it is longer than {MAX_BYTES} bytes"));
         }
-        let entry: Entry = match serde_json::from_slice(&body) {
-            Ok(entry) => entry,
-            Err(why) => return Read::Malformed(format!("it is not a sidecar: {why}")),
-        };
+        let entry: Entry =
+            serde_json::from_slice(&body).map_err(|why| format!("it is not a sidecar: {why}"))?;
         if entry.version != VERSION {
-            return Read::Malformed(format!("its form is version {}", entry.version));
+            return Err(format!("its form is version {}", entry.version));
         }
         let named = container_name(&entry.agent, &entry.run_id).ok();
         if entry.name != stem || named.as_deref() != Some(stem) {
-            return Read::Malformed(format!(
+            return Err(format!(
                 "it names the lease {:?}, which is not its own name's",
                 entry.name
             ));
         }
-        if entry.agent == self.agent {
-            Read::Mine(entry)
-        } else {
-            Read::Foreign(entry)
-        }
+        Ok(entry)
     }
 
     /// Every file of the ledger: this agent's sidecars by name, and what is left alone.
     ///
     /// # Errors
     /// The directory could not be listed.
-    pub(super) fn survey(&self) -> io::Result<Survey> {
+    pub(super) fn survey(&self) -> Result<Survey, LedgerError> {
         let mut names: Vec<String> = Vec::new();
         let mut survey = Survey::default();
-        for entry in fs::read_dir(&self.dir)? {
-            let entry = entry?;
+        for entry in at(&self.dir, fs::read_dir(&self.dir))? {
+            let entry = at(&self.dir, entry)?;
             match entry.file_name().into_string() {
                 Ok(name) => names.push(name),
                 Err(_) => survey.left.push(Left::Malformed {
@@ -342,39 +357,49 @@ impl Ledger {
                 });
                 continue;
             };
-            match self.load(stem, &path) {
+            match self.classify(self.load(stem, &path)) {
                 Read::Mine(entry) => survey.mine.push(entry),
                 Read::Foreign(entry) => survey.left.push(Left::Foreign {
                     path,
                     agent: entry.agent,
                 }),
                 Read::Malformed(why) => survey.left.push(Left::Malformed { path, why }),
-                // Removed since the listing: nothing to report.
-                Read::Absent => {}
             }
         }
         Ok(survey)
     }
 
-    /// Removes every lease of this agent that the ledger records, with `tear_down`, which
-    /// removes what one lease made. The sidecar of a lease goes once `tear_down` says it is
-    /// all gone, and stays when it does not.
+    /// Removes the lease of `entry` with `tear_down` (which removes what the lease made) and
+    /// then its sidecar. The sidecar stays when `tear_down` fails.
+    ///
+    /// # Errors
+    /// What failed, as text.
+    pub(super) fn discard(
+        &self,
+        entry: &Entry,
+        tear_down: impl FnOnce(&Entry) -> Result<(), String>,
+    ) -> Result<(), String> {
+        tear_down(entry)?;
+        self.forget(&entry.name)
+            .map_err(|why| format!("remove the sidecar: {why}"))
+    }
+
+    /// Removes every lease of this agent that the ledger records, with `tear_down`; the
+    /// sidecar of one that cannot be removed stays.
     ///
     /// # Errors
     /// The ledger could not be listed.
     pub(super) fn sweep(
         &self,
         mut tear_down: impl FnMut(&Entry) -> Result<(), String>,
-    ) -> io::Result<SweepReport> {
+    ) -> Result<SweepReport, LedgerError> {
         let survey = self.survey()?;
         let mut report = SweepReport {
             left: survey.left,
             ..SweepReport::default()
         };
         for entry in survey.mine {
-            let gone = tear_down(&entry)
-                .and_then(|()| self.forget(&entry.name).map_err(|why| why.to_string()));
-            match gone {
+            match self.discard(&entry, &mut tear_down) {
                 Ok(()) => report.removed.push(Removed {
                     run_id: entry.run_id,
                     name: entry.name,
