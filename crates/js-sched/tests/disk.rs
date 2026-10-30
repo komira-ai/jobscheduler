@@ -29,6 +29,7 @@ fn request(n: u8, disk: u64) -> Request {
         hermetic: true,
         do_not_cache: false,
         needs: js_caps::Request::default(),
+        whole_worker: false,
     }
 }
 

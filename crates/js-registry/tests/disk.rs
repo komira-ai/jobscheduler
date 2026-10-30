@@ -300,7 +300,8 @@ fn beat(fx: &Fixture, epoch: u64, held: &[&str], done: &[&str]) {
 /// the registry remembers instead of the live ones.
 #[test]
 fn an_ended_run_frees_its_disk() {
-    let ends: [(&str, fn(&Fixture, u64)); 3] = [
+    type End = fn(&Fixture, u64);
+    let ends: [(&str, End); 3] = [
         ("finished", |fx, epoch| {
             beat(fx, epoch, &["r1"], &[]);
             beat(fx, epoch, &[], &["r1"]);
