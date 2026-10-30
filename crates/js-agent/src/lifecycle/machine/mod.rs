@@ -720,8 +720,7 @@ impl Lifecycle {
         let job = match started {
             Ok(id) => {
                 let now = self.clock.now_ms();
-                let deadline = now.saturating_add(spec.limits.wall_ms);
-                let _ = cap;
+                let deadline = now.saturating_add(spec.limits.wall_ms).min(cap);
                 let cgroup = self.runtime.cgroup(&id);
                 let mut job = Job::of(spec, Stage::Running(id), deadline, Some(slot), booked);
                 job.started_at(now);
