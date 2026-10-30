@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 use super::gc::GcReport;
-use super::image::{FetchError, ImageCheckError, ImageSource, Images, PinnedImage, ROOTFS};
+use super::image::{FetchError, ImageSource, Images, PinnedImage, ROOTFS};
 use super::tests::{config, scratch};
 use super::*;
 
@@ -224,48 +224,43 @@ async fn an_unpack_in_flight_is_not_disturbed() {
     assert!(fx.images.join(hexn('a')).is_dir());
 }
 
-/// Catches a digest with an `ensure` under way being collected (the mark), a mark that
-/// is dropped by the first of two uses, and one that is never released.
+/// Catches a digest whose gate is held (a fetch or unpack under way) being collected, and
+/// a gate that stays held after: the digest is kept while another holds its gate and
+/// removed once the gate is free.
 #[test]
-fn a_digest_in_use_is_kept_until_the_last_use_ends() {
-    let dir = scratch("gc-using");
+fn a_digest_whose_gate_is_held_is_kept_until_it_is_let_go() {
+    let dir = scratch("gc-gate");
     let store = Images::new(dir.join("oci-images"));
     image(&dir.join("oci-images"), 'a', 100);
-    let first = store.begin_use(&hexn('a')).expect("marked");
-    let second = store.begin_use(&hexn('a')).expect("marked twice");
+    let gate = store.gate_of(&hexn('a'));
     let mut remove = |p: &Path| crate::remove::remove_tree(p).map_err(|e| e.to_string());
     let keep = std::collections::HashSet::new();
-    let held = store.collect(&keep, &mut remove).expect("collected");
-    assert_eq!((held.removed.len(), held.kept), (0, 1), "{held:?}");
-    drop(first);
-    let held = store.collect(&keep, &mut remove).expect("collected");
-    assert_eq!(held.removed.len(), 0, "one use is still under way");
-    drop(second);
+    let held = gate.try_lock().expect("free");
+    let kept = store.collect(&keep, &mut remove).expect("collected");
+    assert_eq!((kept.removed.len(), kept.kept), (0, 1), "{kept:?}");
+    drop(held);
     let freed = store.collect(&keep, &mut remove).expect("collected");
     assert_eq!(freed.removed, [digest('a')]);
 }
 
-/// Catches an `ensure` that starts on a digest while it is being removed being let
-/// through to see half an image: it is refused, and accepted again once the removal
-/// ends.
+/// Catches a removal that runs without the digest's gate, so that a fetch could start
+/// in the directory being removed: the gate is held while `remove` runs, and free after.
 #[test]
-fn an_ensure_that_meets_a_removal_is_refused_then_accepted() {
+fn the_gate_is_held_while_a_digest_is_removed() {
     let dir = scratch("gc-removing");
     let store = Images::new(dir.join("oci-images"));
     image(&dir.join("oci-images"), 'a', 100);
+    let gate = store.gate_of(&hexn('a'));
     let mut during = None;
     let mut remove = |p: &Path| {
-        during = Some(store.begin_use(&hexn('a')).map(|_| ()));
+        during = Some(gate.try_lock().is_err());
         crate::remove::remove_tree(p).map_err(|e| e.to_string())
     };
     store
         .collect(&std::collections::HashSet::new(), &mut remove)
         .expect("collected");
-    let Some(Err(ImageCheckError::Failed(why))) = during else {
-        panic!("an ensure met a removal and was let in");
-    };
-    assert!(why.contains("being removed"), "{why}");
-    assert!(store.begin_use(&hexn('a')).is_ok());
+    assert_eq!(during, Some(true), "the removal did not hold the gate");
+    assert!(gate.try_lock().is_ok());
 }
 
 /// Catches a removed digest that a later `ensure` takes for present because its single

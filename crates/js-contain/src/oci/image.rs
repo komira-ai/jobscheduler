@@ -25,13 +25,13 @@
 //! different random name each time; the leftovers are removed by the sweep at the next
 //! start).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::{JobError, Oci, at};
 
@@ -93,16 +93,9 @@ pub const STAGE_PREFIX: &str = ".stage-";
 #[derive(Debug)]
 pub(crate) struct Images {
     dir: PathBuf,
-    book: Mutex<Book>,
-}
-
-/// What the store knows of digests in motion: the single flights, the `ensure`s under
-/// way and the digests a collection is removing (`gc`).
-#[derive(Debug, Default)]
-pub(super) struct Book {
-    pub(super) flights: HashMap<String, Arc<OnceCell<()>>>,
-    pub(super) using: HashMap<String, usize>,
-    pub(super) removing: HashSet<String>,
+    /// One gate for each digest: whether the image was fetched and unpacked by this
+    /// daemon (`true`), held while it is being fetched or removed, so the two never overlap.
+    flights: Mutex<HashMap<String, Arc<AsyncMutex<bool>>>>,
 }
 
 /// The hex of an image's `sha256:<hex>` digest, the name of its directory.
@@ -118,18 +111,8 @@ impl Images {
     pub(crate) fn new(dir: PathBuf) -> Self {
         Self {
             dir,
-            book: Mutex::new(Book::default()),
+            flights: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// The directory of the store.
-    pub(super) fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    /// The book, whatever a panicking holder left.
-    pub(super) fn book(&self) -> std::sync::MutexGuard<'_, Book> {
-        self.book.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The directory of the image whose digest is `digest` (`sha256:<hex>`), which holds its
@@ -162,14 +145,53 @@ impl Images {
         oci: &Oci,
         image: &PinnedImage,
     ) -> Result<(), ImageCheckError> {
-        // Held to the end: a collection leaves a digest with an `ensure` under way alone.
-        let _in_use = self.begin_use(&hex_of(image))?;
         if self.has(image) {
             return Ok(());
         }
-        let flight = Arc::clone(self.book().flights.entry(hex_of(image)).or_default());
-        flight.get_or_try_init(|| self.acquire(oci, image)).await?;
+        let flight = self.gate(image);
+        // Concurrent first uses wait here for one fetch and unpack; a use that finds it
+        // done is done. A fetch that failed or was cancelled leaves the gate open for the
+        // next use to try again.
+        let mut fetched = flight.lock().await;
+        if !*fetched {
+            self.acquire(oci, image).await?;
+            *fetched = true;
+        }
         Ok(())
+    }
+
+    /// The gate of `image`.
+    fn gate(&self, image: &PinnedImage) -> Arc<AsyncMutex<bool>> {
+        self.gate_of(&hex_of(image))
+    }
+
+    /// The gate of the digest whose hex is `hex`.
+    pub(super) fn gate_of(&self, hex: &str) -> Arc<AsyncMutex<bool>> {
+        let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(flights.entry(hex.to_owned()).or_default())
+    }
+
+    /// The directory of the store.
+    pub(super) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Removes the image's directory (an image already gone is not an error) and forgets
+    /// that it was fetched, so that the next use fetches it again. It waits for a fetch of
+    /// the same image under way, and a fetch started meanwhile waits for it, so the two
+    /// never work in the directory together. The caller must see to it that no container
+    /// still runs on the image (its root is the lower layer of a container's mounts).
+    ///
+    /// # Errors
+    /// The directory could not be removed.
+    pub(crate) async fn remove(&self, image: &PinnedImage) -> std::io::Result<()> {
+        let flight = self.gate(image);
+        let mut fetched = flight.lock().await;
+        *fetched = false;
+        match crate::remove::remove_tree(&self.dir_of(&image.digest)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
     }
 
     /// Fetches the layers into a directory of blobs, unpacks them into a stage directory,

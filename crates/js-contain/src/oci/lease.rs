@@ -197,6 +197,16 @@ impl Oci {
         self.images.ensure(self, image).await
     }
 
+    /// Removes `image` from the store (a root daemon removes the files of any owner) so that
+    /// the next [`Oci::check_pinned`] fetches it again, waiting for a fetch of it under way.
+    /// No container may run on it: its root is the lower layer of the mounts of one.
+    ///
+    /// # Errors
+    /// The directory could not be removed.
+    pub async fn remove_image(&self, image: &PinnedImage) -> std::io::Result<()> {
+        self.images.remove(image).await
+    }
+
     /// One helper container runs this daemon's give mode ([`helper::HelperModes`]) over the directories
     /// (the lease's `rw` directory, which holds the job's home directory, among them).
     ///

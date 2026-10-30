@@ -17,13 +17,15 @@
 //! daemon left (a separate step that this module does not do), passes the digests of the
 //! leases that remain as `leased`, and only then reads the disk to offer.
 //!
-//! **Safety against a pull in flight.** Every `ensure` of a digest holds an in-use mark
-//! for its whole length ([`Images::begin_use`]); a digest with a mark is kept. A digest
-//! being removed is marked too, and an `ensure` that arrives meanwhile is refused with
-//! words that say to ask again, so it never sees an image half gone. The stage and blobs
-//! directories of an unpack are not digest names and are never touched here (the sweep
-//! at start removes the ones a dead daemon left). A removed digest also forgets its
-//! single flight, or a later `ensure` would take the old success for the image.
+//! **Safety against a pull in flight.** Each digest has one gate (`image`): a fetch holds
+//! it for its whole length, and so does a removal. The collection only *tries* the gate of
+//! a digest it would remove; a digest whose gate is held (a fetch or unpack under way, or
+//! a removal by another caller) is kept, and one it removes has its gate marked "not
+//! fetched" so the next use fetches it again. An `ensure` that arrives during a removal
+//! waits for it. The stage and blobs directories of an unpack are not digest names and are
+//! never touched here (the sweep at start removes the ones a dead daemon left). What no
+//! gate can see is a use that already returned (`has` answered true) and runs a container:
+//! that is the `leased` list's job, and the collection belongs before the first prepare.
 //!
 //! **Safety against a hostile tree.** An image's files are the container's, not the
 //! daemon user's: a directory is removed with [`crate::remove::remove_tree`] (no
@@ -46,7 +48,7 @@ use std::path::Path;
 
 use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode};
 
-use super::image::{ImageCheckError, Images, ROOTFS};
+use super::image::{Images, ROOTFS};
 use super::{JobError, Oci};
 use crate::walk::{DIRECTORY, Identity, back_to_parent, identity};
 
@@ -86,62 +88,7 @@ impl std::fmt::Display for GcReport {
     }
 }
 
-/// An `ensure` of a digest in progress: the digest is not collected while this lives.
-pub(crate) struct InUse<'a> {
-    images: &'a Images,
-    hex: String,
-}
-
-impl Drop for InUse<'_> {
-    fn drop(&mut self) {
-        let mut book = self.images.book();
-        let left = book.using.get_mut(&self.hex).map(|n| {
-            *n = n.saturating_sub(1);
-            *n
-        });
-        if left == Some(0) {
-            book.using.remove(&self.hex);
-        }
-    }
-}
-
 impl Images {
-    /// Marks `hex` in use until the result is dropped.
-    ///
-    /// # Errors
-    /// The digest is being removed by a collection: the caller asks again.
-    pub(crate) fn begin_use(&self, hex: &str) -> Result<InUse<'_>, ImageCheckError> {
-        let mut book = self.book();
-        if book.removing.contains(hex) {
-            return Err(ImageCheckError::Failed(format!(
-                "image sha256:{hex} is being removed from the store; ask again"
-            )));
-        }
-        *book.using.entry(hex.to_owned()).or_default() += 1;
-        Ok(InUse {
-            images: self,
-            hex: hex.to_owned(),
-        })
-    }
-
-    /// Takes the digest `hex` for removal unless it is in use.
-    fn claim(&self, hex: &str) -> bool {
-        let mut book = self.book();
-        if book.using.contains_key(hex) {
-            return false;
-        }
-        book.removing.insert(hex.to_owned())
-    }
-
-    /// Ends the removal of `hex`; a removed digest forgets its single flight.
-    fn release(&self, hex: &str, removed: bool) {
-        let mut book = self.book();
-        book.removing.remove(hex);
-        if removed {
-            book.flights.remove(hex);
-        }
-    }
-
     /// Removes every complete or partial digest directory not in `keep` (hex digests) and
     /// not in use, with `remove` (which gets the path and must not follow symlinks), and
     /// a digest directory that is not complete (no `rootfs`) whether or not it is named:
@@ -175,13 +122,22 @@ impl Images {
         for hex in hexes {
             let path = self.dir().join(&hex);
             let bytes = tree_bytes(&path).unwrap_or(0);
-            if (keep.contains(&hex) && is_complete(&path)) || !self.claim(&hex) {
+            let gate = self.gate_of(&hex);
+            let held = if keep.contains(&hex) && is_complete(&path) {
+                None
+            } else {
+                gate.try_lock().ok()
+            };
+            let Some(mut fetched) = held else {
                 report.kept += 1;
                 report.kept_bytes += bytes;
                 continue;
-            }
+            };
             let result = remove(&path);
-            self.release(&hex, result.is_ok());
+            if result.is_ok() {
+                *fetched = false;
+            }
+            drop(fetched);
             match result {
                 Ok(()) => {
                     report.removed.push(format!("sha256:{hex}"));
