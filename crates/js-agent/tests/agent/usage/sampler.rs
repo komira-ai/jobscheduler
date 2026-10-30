@@ -219,22 +219,23 @@ fn the_clock_is_read_after_the_node_cpu_stat() {
     assert_eq!(clock.reads(), 1);
 }
 
-/// Asserts `cpu.max`: absent or unparsable counts as limited, `max` as not, a quota as
-/// limited. It catches an inverted default, which would call an unknown node unlimited.
+/// Asserts `cpu.max`: `max` is not limited and a quota is limited, and a file that is
+/// absent or unparsable fails the sample with its own error instead of a guessed value.
+/// It catches a made-up `actions_cpu_limited` on the wire for a node whose limit is unknown.
 #[test]
-fn cpu_max_missing_counts_as_limited() {
+fn cpu_max_that_cannot_be_read_fails_the_sample() {
     let limited = |files: FakeFiles| sample(files, &[]).unwrap().cpu_limited;
     let whole = node(1, 2, 0, 0, "max 100000\n");
     assert!(!limited(whole.clone()));
-    assert!(limited(
-        whole.clone().without(&format!("{ACTIONS}/cpu.max"))
-    ));
     assert!(limited(
         whole
             .clone()
             .with(&format!("{ACTIONS}/cpu.max"), "50000 100000\n")
     ));
-    assert!(limited(whole.with(&format!("{ACTIONS}/cpu.max"), "x\n")));
+    let missing = whole.clone().without(&format!("{ACTIONS}/cpu.max"));
+    assert_eq!(sample(missing, &[]), Err(SampleError::NodeCpuMax));
+    let junk = whole.with(&format!("{ACTIONS}/cpu.max"), "x\n");
+    assert_eq!(sample(junk, &[]), Err(SampleError::NodeCpuMax));
 }
 
 /// Asserts a thousand readings of the production clock never go back.

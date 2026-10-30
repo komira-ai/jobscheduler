@@ -25,8 +25,8 @@ pub struct Sample {
     pub working_set_bytes: u64,
     /// The actions cgroup's `active_file`.
     pub active_file_bytes: u64,
-    /// Whether the actions cgroup has a CPU limit. An unreadable or unparsable `cpu.max`
-    /// counts as limited, the weaker reading.
+    /// Whether the actions cgroup has a CPU limit, from its `cpu.max`. A reader that cannot
+    /// tell fails the whole sample instead of guessing.
     pub cpu_limited: bool,
     /// The leases that could be read.
     pub leases: Vec<LeaseSample>,

@@ -33,6 +33,7 @@ fn counters(machine: &FakeMachine, k: u64) {
     let dirs = [SLICE.to_owned(), format!("{SLICE}/docker-r1.scope")];
     for dir in dirs {
         machine.files.set(&format!("{dir}/cpu.stat"), &usage);
+        machine.files.set(&format!("{dir}/cpu.max"), "max 100000\n");
         machine
             .files
             .set(&format!("{dir}/memory.current"), &format!("{MEMORY}\n"));

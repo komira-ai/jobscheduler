@@ -23,7 +23,12 @@ pub(crate) fn lease_of(text: &str) -> Option<LeaseId> {
     lease_parts(text).map(|(term, seq)| LeaseId::new(term, seq))
 }
 
-/// `load` as plain values. Records with an id that does not parse are dropped and
+/// `load` as plain values. [`js_registry::node_load`] is the other converter of the wire
+/// load (for the hosts view): the two agree except that the active file pages are 0 here,
+/// as `NodeLoad::from(LoadIn)` sets them on purpose, and `node_load` keeps them; a test
+/// pins that.
+///
+/// Records with an id that does not parse are dropped and
 /// counted in [`Mapped::unparsable`].
 pub(crate) fn load_in(load: &NodeLoad) -> Mapped {
     let covered: Vec<LeaseId> = load.covered.iter().filter_map(|id| lease_of(id)).collect();
@@ -90,6 +95,36 @@ mod tests {
     use js_agent_wire::{LeaseClock, LeaseMinute, LoadDrops};
 
     use super::*;
+
+    /// Asserts the two converters of a wire load agree: for a vetted load,
+    /// `js_registry::node_load` with the active file pages zeroed equals
+    /// `NodeLoad::from(load_in(..).load)`, and the active file pages are the only
+    /// difference. It catches one converter gaining or changing a field the other does not.
+    #[test]
+    fn the_registry_converter_and_the_usage_converter_agree() {
+        let mut load = wire();
+        load.seq = u64::MAX;
+        load.active_file_bytes = 12_345;
+        load.actions_cpu_limited = false;
+        load.covered.push("5-6".into());
+        load.clocks.push(LeaseClock {
+            lease_id: "5-6".into(),
+            started_mono_usec: 2_000_000,
+        });
+        load.minutes.push(LeaseMinute {
+            lease_id: "5-6".into(),
+            minute: 63,
+            cpu_mean_millis: 7,
+            cpu_peak_window_millis: 9,
+            ws_max_bytes: 11,
+        });
+        load.vet().unwrap();
+        let mut ours = js_registry::node_load(&load).unwrap();
+        assert_eq!(ours.memory_active_file_bytes, 12_345);
+        ours.memory_active_file_bytes = 0;
+        let theirs = js_types::sched::usage::NodeLoad::from(load_in(&load).load);
+        assert_eq!(ours, theirs);
+    }
 
     fn wire() -> NodeLoad {
         NodeLoad {

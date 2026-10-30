@@ -80,7 +80,8 @@ pub struct NodeLoad {
     /// since an earlier reading are still included.
     pub cpu_usage_usec: u64,
     /// Memory in use by the actions cgroup that cannot simply be dropped: `memory.current`
-    /// minus the inactive file pages.
+    /// minus the inactive file pages. Clamped at 0 when the inactive file is the
+    /// larger.
     pub memory_working_set_bytes: u64,
     /// The actions cgroup's active file pages (`active_file` of `memory.stat`), in bytes.
     /// Hot page cache that `memory_working_set_bytes` still counts; admission caps this part.
@@ -90,9 +91,11 @@ pub struct NodeLoad {
     pub covered: Vec<LeaseId>,
     /// Whether the actions cgroup has a CPU limit.
     pub actions_cpu_limited: bool,
-    /// Cumulative time the actions cgroup was throttled, in microseconds. Telemetry only.
+    /// Cumulative time the actions cgroup was throttled, in microseconds. Telemetry only. A node whose agent
+    /// does not send it (the lease server's wire load) reads 0: not measured.
     pub cpu_throttled_usec: u64,
-    /// Cumulative `some` total of the CPU pressure, in microseconds. Telemetry only.
+    /// Cumulative `some` total of the CPU pressure, in microseconds. Telemetry only. 0 when not
+    /// measured, as for `cpu_throttled_usec`.
     pub cpu_pressure_some_total_usec: u64,
     /// When each running lease started, on the agent's clock.
     pub lease_clocks: Vec<LeaseClock>,
