@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_provider::{HostCapacity, Observed, RefusalCode, StartAck, StartSpec};
-use js_types::{HostId, LeaseId, ResourceClass, Shape};
+use js_types::{HostId, LeaseId, MemoryHeadroom, ResourceClass, Shape};
 
 /// Why [`HostBook::seat`] booked nothing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -33,6 +33,7 @@ pub enum SeatError {
 #[derive(Debug)]
 struct Host {
     shape: Shape,
+    memory: MemoryHeadroom,
     lease: Option<LeaseId>,
 }
 
@@ -65,10 +66,23 @@ impl HostBook {
         Self::default()
     }
 
-    /// Lists `id` with `shape`, free. A host already listed keeps its shape and its
-    /// booking.
+    /// Lists `id` with `shape`, free, all of whose memory is booked. A host already listed
+    /// keeps its shape and its booking.
     pub fn insert_host(&mut self, id: HostId, shape: Shape) {
-        self.hosts.entry(id).or_insert(Host { shape, lease: None });
+        let memory = MemoryHeadroom::full(shape.resources().memory_bytes());
+        self.insert_host_with(id, shape, memory);
+    }
+
+    /// Lists `id` with `shape`, free, as [`insert_host`](HostBook::insert_host) does, and
+    /// remembers `memory`: the memory the operator configured and the percent of it that
+    /// `shape` books. The caller has already cut the memory of `shape`; the book books
+    /// `shape` and never applies the percent itself, so the cut is made once.
+    pub fn insert_host_with(&mut self, id: HostId, shape: Shape, memory: MemoryHeadroom) {
+        self.hosts.entry(id).or_insert(Host {
+            shape,
+            memory,
+            lease: None,
+        });
     }
 
     /// Unlists `id` when it is listed and free; answers whether it did. A booked host is
@@ -180,6 +194,7 @@ impl HostBook {
         let listed = listed.map(|(id, host)| HostCapacity {
             host: id.clone(),
             shape: host.shape.clone(),
+            memory: host.memory,
             leased_to: host.lease,
         });
         listed.collect()

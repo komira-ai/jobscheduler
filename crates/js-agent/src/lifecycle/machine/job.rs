@@ -187,8 +187,11 @@ pub(super) struct Job {
     /// an adopted job it is when the runtime says the container began; `None` when that was
     /// before the clock did, which the clock cannot say.
     pub(super) started_usec: Option<u64>,
-    /// The container's control group directory, asked of the runtime once.
+    /// The container's control group directory, asked of the runtime when the job starts
+    /// or is adopted and, while it is not known, again by `Lifecycle::find_cgroups`.
     pub(super) cgroup: Option<PathBuf>,
+    /// The operator was told that the control group is not known yet.
+    pub(super) cgroup_missing_told: bool,
     /// Taken over from an earlier process of the agent: its first minutes were not seen.
     pub(super) adopted: bool,
 }
@@ -209,6 +212,7 @@ impl Job {
             outcome,
             exit_code,
             detail: detail.map(str::to_owned),
+            log_tail: None,
         }
     }
 
@@ -308,6 +312,7 @@ impl Job {
             findings: Vec::new(),
             started_usec: None,
             cgroup: None,
+            cgroup_missing_told: false,
             adopted: false,
         }
     }
@@ -339,6 +344,7 @@ impl Job {
                 .checked_sub(found.running_ms)
                 .map(|started| started.saturating_mul(USEC_PER_MS)),
             cgroup: None,
+            cgroup_missing_told: false,
             adopted: true,
         })
     }
@@ -396,6 +402,7 @@ pub(super) fn container_spec(
     spec: &JobSpec,
     mounts: Vec<ResolvedMount>,
     scratch: std::path::PathBuf,
+    files: Option<std::path::PathBuf>,
     slot: u32,
 ) -> ContainerSpec {
     let gpus: Vec<String> = spec.gpu_indices.iter().map(u32::to_string).collect();
@@ -427,6 +434,7 @@ pub(super) fn container_spec(
         gpu_indices: spec.gpu_indices.clone(),
         mounts,
         scratch,
+        files,
         slot,
         isolation: spec.isolation,
         labels,

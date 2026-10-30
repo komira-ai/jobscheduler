@@ -12,18 +12,22 @@ mod e2e;
 mod ends;
 mod exclusive;
 pub mod fake;
+mod files_flags;
 mod quiesce;
 mod session;
 mod system;
+mod usage;
 mod worker;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::cli_runtime::Settings;
-use js_agent::lifecycle::{Capacity, Config, MountRoots, ScratchRoot, StateRoot};
+use js_agent::lifecycle::{Capacity, Config, FilesRoot, MountRoots, ScratchRoot, StateRoot};
+use js_agent::usage::Outbox;
 use js_agent::{Plan, Platform, Rescue, Worker};
 use js_agent_wire::{Command, HeartbeatReply};
 use serde_json::{Value, json};
@@ -61,6 +65,12 @@ pub fn settings(dir: &Scratch) -> Settings {
     settings.with_agent(uid, gid).unwrap()
 }
 
+/// The checked container flags with `--actions-cgroup` set to `actions`.
+pub fn settings_in(dir: &Scratch, actions: Option<&str>) -> Settings {
+    let actions = actions.map(Path::new);
+    settings(dir).with_actions_cgroup(actions).unwrap()
+}
+
 /// What a worker is made from, under `dir`: eight CPUs and 16 GiB, a scratch root and a
 /// state root of their own, and `machine`.
 pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan {
@@ -73,6 +83,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         allow_host_jobs: false,
         mounts: MountRoots::new(&[]).unwrap(),
         scratch: ScratchRoot::open(&private(dir, "scratch")).unwrap(),
+        files: Some(FilesRoot::open(&private(dir, "files")).unwrap()),
         state: StateRoot::open(&private(dir, "state")).unwrap(),
         stop_grace: Duration::from_secs(1),
     };
@@ -87,8 +98,26 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         watch: Vec::new(),
         machine: Arc::new(machine.clone()),
         step_every,
+        usage: None,
         rescue_bound: Some(crate::support::RESCUE_TEST_BOUND),
         readiness: None,
+    }
+}
+
+/// A worker over `machine` that steps only when asked and publishes its usage in `outbox`,
+/// with `actions` as the actions control group.
+pub fn start_with_usage(
+    dir: &Scratch,
+    machine: &FakeMachine,
+    outbox: &Arc<Outbox>,
+    actions: Option<&str>,
+) -> Worker {
+    let mut plan = plan(dir, machine, STEP_NEVER);
+    plan.settings = settings_in(dir, actions);
+    plan.usage = Some(outbox.clone());
+    match Worker::start(plan) {
+        Ok(worker) => worker,
+        Err(why) => panic!("the worker did not start: {why}"),
     }
 }
 

@@ -19,6 +19,7 @@ use js_agent_wire::{
 use js_pool_static::HostBook;
 use js_provider::Observed;
 use js_types::{HostId, LeaseId, Resources};
+use js_usage::ProfileKey;
 
 /// The most runs a host may hold live at once: queued, starting, running or exited but
 /// not yet gone from its held list. It keeps the commands of one reply, a start or a stop
@@ -89,6 +90,10 @@ pub struct RunView {
     pub state: RunState,
     /// The result the host reported and the server accepted, once there is one.
     pub result: Option<RunResult>,
+    /// The profile name the lease holder supplied for the work the run does, when it did.
+    pub profile: Option<ProfileKey>,
+    /// The labels the run was queued with.
+    pub labels: BTreeMap<String, String>,
 }
 
 /// Why a run was not queued, or not stopped. Each has a constant code
@@ -131,6 +136,10 @@ pub enum RunRefusal {
     /// The run id is already in use. A caller that mints ids never sees it.
     #[error("the run id is in use")]
     RunExists,
+    /// The job carries run files and the host did not report the `run-files` capability:
+    /// an agent without it would ignore the files and run the job without its secrets.
+    #[error("the host does not deliver run files")]
+    FilesUnsupported,
     /// The lease has no such run.
     #[error("the lease has no such run")]
     UnknownRun,
@@ -152,6 +161,7 @@ impl RunRefusal {
             Self::HostTainted => refusal::HOST_TAINTED,
             Self::NotReady => refusal::NOT_READY,
             Self::RunExists => "run-exists",
+            Self::FilesUnsupported => "files-unsupported",
             Self::UnknownRun => "unknown-run",
         }
     }
@@ -205,6 +215,7 @@ struct Run {
     host: HostId,
     lease: LeaseId,
     spec: JobSpec,
+    profile: Option<ProfileKey>,
     life: Life,
     stop: Stop,
     result: Option<RunResult>,
@@ -223,6 +234,8 @@ impl Run {
     fn ask_stop(&mut self) {
         if let (Life::Queued | Life::Held(_), Stop::No) = (self.life, self.stop) {
             self.stop = Stop::Wanted;
+            // A stopped run's start is never sent, so its files are not kept.
+            self.spec.files = Vec::new();
         }
     }
 
@@ -269,6 +282,8 @@ impl Run {
             host: self.host.clone(),
             state: self.state(),
             result: self.result.clone(),
+            profile: self.profile.clone(),
+            labels: self.spec.labels.clone(),
         }
     }
 
@@ -348,12 +363,13 @@ impl Runs {
     /// their limits and their GPU indices together with this run's must fit `shape`.
     ///
     /// A `spec.valid_for_ms` above zero is the time the lease has left: the run ends its
-    /// bound that long after `now`.
+    /// bound that long after `now`. `profile` is the name the lease holder supplied for the
+    /// run's work; the registry keeps it beside the run and never sends it to the host.
     pub(crate) fn admit(
         &mut self,
         host: &HostId,
         lease: &LeaseId,
-        mut spec: JobSpec,
+        (mut spec, profile): (JobSpec, Option<ProfileKey>),
         shape: &Resources,
         (beats, now): (u64, u64),
     ) -> Result<RunView, RunRefusal> {
@@ -387,6 +403,7 @@ impl Runs {
             host: host.clone(),
             lease: *lease,
             spec,
+            profile,
             life: Life::Queued,
             stop: Stop::No,
             result: None,
@@ -396,6 +413,12 @@ impl Runs {
         let view = run.view();
         self.map.insert(run.spec.run_id.clone(), run);
         Ok(view)
+    }
+
+    /// The profile name the lease holder supplied for run `run_id`, when the run is known
+    /// and was queued with one.
+    pub(crate) fn profile_of(&self, run_id: &str) -> Option<ProfileKey> {
+        self.map.get(run_id).and_then(|run| run.profile.clone())
     }
 
     /// Asks every live run of `lease` to stop: the lease ended or is being released.
@@ -435,6 +458,12 @@ impl Runs {
             let state = listed.get(run.spec.run_id.as_str()).copied();
             let abandoned = [gap, run.stop == Stop::Sent].into_iter().any(|set| set);
             run.life = next_life(run.life, state, abandoned);
+            // Once the host lists the run (or the run is given up) no start will be
+            // sent again, so the secret files are not kept: they are held only until
+            // the agent has taken the start.
+            if run.life != Life::Queued {
+                run.spec.files = Vec::new();
+            }
         }
     }
 
@@ -596,6 +625,7 @@ mod tests {
             isolation: Isolation::Contained,
             labels: Default::default(),
             heartbeat_seq: 0,
+            files: Vec::new(),
             valid_for_ms: 0,
             bundle: None,
             native: None,
@@ -627,7 +657,7 @@ mod tests {
         let book = HostBook::new();
         let shape = Resources::new(4000, 8 << 30, 0, None).unwrap();
         let mut runs = Runs::default();
-        runs.admit(&host, &LeaseId::new(1, 1), job(), &shape, (0, 0))
+        runs.admit(&host, &LeaseId::new(1, 1), (job(), None), &shape, (0, 0))
             .unwrap();
         let held = |unready| Standing {
             gap: false,
@@ -638,5 +668,92 @@ mod tests {
         assert!(reply.commands.is_empty());
         let reply = runs.answer(&host, &beat(), held(false), (&book, 0));
         assert!(matches!(reply.commands[..], [Command::Start(_)]));
+    }
+
+    /// Asserts that a run's files are kept while its start can still be resent and dropped
+    /// from the stored run once the host lists it: every beat before the listing carries
+    /// the start with the files, the beat that lists it does not resend them, and the
+    /// stored run holds none afterwards. It catches secrets kept in the registry's memory
+    /// for the whole life of the run.
+    #[test]
+    fn files_are_dropped_once_the_host_lists_the_run() {
+        use js_agent_wire::{HeldRun, HeldState, RunFile};
+        let host = HostId::new("a").unwrap();
+        let (book, shape) = (
+            HostBook::new(),
+            Resources::new(4000, 8 << 30, 0, None).unwrap(),
+        );
+        let mut spec = job();
+        spec.files = vec![RunFile {
+            name: "tok".into(),
+            contents: "x".into(),
+        }];
+        let mut runs = Runs::default();
+        runs.admit(
+            &host,
+            &LeaseId::new(1, 1),
+            (spec.clone(), None),
+            &shape,
+            (0, 0),
+        )
+        .unwrap();
+        let open = Standing {
+            gap: false,
+            tainted: false,
+            unready: false,
+        };
+        for _ in 0..2 {
+            let reply = runs.answer(&host, &beat(), open, (&book, 0));
+            // The whole command is compared, so no arm exists for a reply that is not
+            // the start.
+            assert_eq!(reply.commands, vec![Command::Start(Box::new(spec.clone()))]);
+        }
+        assert_eq!(runs.map["r1"].spec.files, spec.files);
+        let mut listed = beat();
+        listed.held = vec![HeldRun {
+            run_id: "r1".into(),
+            state: HeldState::Starting,
+        }];
+        let reply = runs.answer(&host, &listed, open, (&book, 0));
+        assert!(reply.commands.is_empty());
+        assert!(runs.map["r1"].spec.files.is_empty());
+    }
+
+    /// Asserts that a queued run that is stopped before the host lists it drops its files
+    /// at once and its start is never sent. It catches secrets kept in memory for a run
+    /// that can no longer start.
+    #[test]
+    fn a_stopped_queued_run_drops_its_files() {
+        use js_agent_wire::RunFile;
+        let host = HostId::new("a").unwrap();
+        let (book, shape) = (
+            HostBook::new(),
+            Resources::new(4000, 8 << 30, 0, None).unwrap(),
+        );
+        let mut spec = job();
+        spec.files = vec![RunFile {
+            name: "tok".into(),
+            contents: "x".into(),
+        }];
+        let lease = LeaseId::new(1, 1);
+        let mut runs = Runs::default();
+        runs.admit(&host, &lease, (spec, None), &shape, (0, 0))
+            .unwrap();
+        runs.stop_run(&lease, "r1").unwrap();
+        assert!(runs.map["r1"].spec.files.is_empty());
+        let open = Standing {
+            gap: false,
+            tainted: false,
+            unready: false,
+        };
+        let reply = runs.answer(&host, &beat(), open, (&book, 0));
+        assert!(
+            reply
+                .commands
+                .iter()
+                .all(|c| !matches!(c, Command::Start(_))),
+            "{:?}",
+            reply.commands
+        );
     }
 }

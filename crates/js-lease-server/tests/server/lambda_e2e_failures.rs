@@ -110,7 +110,6 @@ async fn assert_released_once(rig: &Rig, name: &str, token: &str) {
 /// the record is Releasing and the machine is terminated. It catches a machine kept and
 /// billed past its boot time because its host registered and then went silent.
 #[tokio::test]
-#[ignore = "needs #387: the registry does not yet report heard-since-hello"]
 async fn a_lost_welcome_is_released_at_boot_timeout() {
     let rig = Rig::start("e2e_lost_welcome").await;
     let (name, token) = lose_the_welcome(&rig).await;

@@ -81,6 +81,33 @@ pub trait CommandRunner {
     /// Like [`CommandRunner::run`], but the program's environment is exactly `env`: the
     /// environment of the agent is not passed on.
     fn run_in(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String, String>;
+
+    /// Like [`CommandRunner::run_in`], but both of the program's output streams are read,
+    /// each kept to its last `keep` bytes: a program that prints more is not an error, the
+    /// older bytes are dropped and [`Streams::dropped`] says so. The call fails when the
+    /// program has not exited within `limit`. A runner that cannot read the second stream
+    /// reports that and does not guess.
+    fn run_streams(
+        &self,
+        program: &str,
+        _args: &[&str],
+        _env: &[(&str, &str)],
+        _keep: usize,
+        _limit: Duration,
+    ) -> Result<Streams, String> {
+        Err(format!("{program}: this runner reads no standard error"))
+    }
+}
+
+/// The last bytes of the two output streams of a program that exited with status 0.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Streams {
+    /// The end of standard output.
+    pub stdout: Vec<u8>,
+    /// The end of standard error.
+    pub stderr: Vec<u8>,
+    /// Whether either stream printed more than was kept.
+    pub dropped: bool,
 }
 
 /// Reads a text file, and looks at the files around it.
@@ -96,6 +123,28 @@ pub trait FileReader {
     /// The device number of the file system that holds `path` (`st_dev`; a link is
     /// followed), or the system's reason it cannot be looked at.
     fn device(&self, path: &Path) -> Result<u64, String>;
+
+    /// Whether `path` is on a `tmpfs` (Linux; anywhere else, no), or the system's reason it
+    /// cannot be looked at.
+    fn is_tmpfs(&self, path: &Path) -> Result<bool, String>;
+}
+
+impl FileReader for Box<dyn FileReader> {
+    fn read(&self, path: &str) -> Result<String, String> {
+        (**self).read(path)
+    }
+
+    fn link(&self, path: &str) -> Result<String, String> {
+        (**self).link(path)
+    }
+
+    fn device(&self, path: &Path) -> Result<u64, String> {
+        (**self).device(path)
+    }
+
+    fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
+        (**self).is_tmpfs(path)
+    }
 }
 
 /// How long a helper may take to print its output, and again to exit once it has.
@@ -256,6 +305,56 @@ pub enum Ran {
     Spawn(String),
 }
 
+impl SystemCommands {
+    /// Starts `program` and reads both its streams, each kept to its last `keep` bytes,
+    /// while it runs (neither stream can block it). The call fails when the program does
+    /// not exit with status 0, or does not finish within `limit` (it is
+    /// then killed and collected); a program that prints more than `keep` is not an error.
+    fn start_streams(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        keep: usize,
+        limit: Duration,
+    ) -> Result<Streams, String> {
+        let failed = |err: io::Error| format!("{program}: {err}");
+        let (out_reader, out_writer) = io::pipe().map_err(failed)?;
+        let (err_reader, err_writer) = io::pipe().map_err(failed)?;
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(out_writer)
+            .stderr(err_writer)
+            .env_clear()
+            .envs(env.iter().copied());
+        if self.group {
+            command.process_group(0);
+        }
+        let spawned = command.spawn();
+        // The command (and with it the parent's copies of the write ends) is gone here, so
+        // the readers see the end of the output.
+        drop(command);
+        let child = spawned.map_err(failed)?;
+        let pid = child.id();
+        let (done, finished) = mpsc::channel();
+        // This thread owns the child from here on and always collects it.
+        thread::spawn(move || {
+            let _ = done.send(watch_streams(child, out_reader, err_reader, keep));
+        });
+        match finished.recv_timeout(limit) {
+            Ok((streams, status)) if status.code == Some(0) => Ok(streams),
+            Ok((_, status)) => Err(format!("{program}: {}", status.text)),
+            Err(_) => {
+                kill(pid, self.group);
+                let _ = finished.recv_timeout(COLLECT_WAIT);
+                Err(format!("{program}: timed out after {limit:?}"))
+            }
+        }
+    }
+}
+
 impl CommandRunner for SystemCommands {
     fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
         self.start(program, args, None)
@@ -264,6 +363,77 @@ impl CommandRunner for SystemCommands {
     fn run_in(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
         self.start(program, args, Some(env))
     }
+
+    fn run_streams(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        keep: usize,
+        limit: Duration,
+    ) -> Result<Streams, String> {
+        self.start_streams(program, args, env, keep, limit)
+    }
+}
+
+/// Reads both streams of `child` to their ends, then waits for it. The standard error is
+/// read on a thread of its own, so a program that fills one pipe while the other is read
+/// is not stalled.
+fn watch_streams(
+    mut child: Child,
+    out: PipeReader,
+    err: PipeReader,
+    keep: usize,
+) -> (Streams, Status) {
+    let mut out = out;
+    let err_reader = thread::spawn(move || {
+        let mut err = err;
+        read_tail(&mut err, keep)
+    });
+    let (stdout, cut_out, _) = read_tail(&mut out, keep);
+    let (stderr, cut_err, _) = err_reader.join().unwrap_or_default();
+    let lost = Status {
+        code: None,
+        text: "could not be collected".to_owned(),
+    };
+    let status = child.wait().map_or(lost, |status| Status {
+        code: status.code(),
+        text: status.to_string(),
+    });
+    let streams = Streams {
+        stdout,
+        stderr,
+        dropped: cut_out || cut_err,
+    };
+    (streams, status)
+}
+
+/// The last `keep` bytes `reader` yields, whether it yielded more, and the most the buffer
+/// held at any moment. The buffer is trimmed whenever it holds twice `keep` (and one read
+/// is at most 8 KiB), so memory stays bounded however much is read. It takes a `dyn Read`
+/// so the one body is measured once, not once per reader type.
+fn read_tail(reader: &mut dyn Read, keep: usize) -> (Vec<u8>, bool, usize) {
+    let mut kept: Vec<u8> = Vec::new();
+    let mut dropped = false;
+    let mut peak = 0;
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let n = match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        kept.extend_from_slice(&chunk[..n]);
+        peak = peak.max(kept.len());
+        if kept.len() >= keep.saturating_mul(2).max(chunk.len()) {
+            kept.drain(..kept.len() - keep);
+            dropped = true;
+        }
+    }
+    if kept.len() > keep {
+        kept.drain(..kept.len() - keep);
+        dropped = true;
+    }
+    (kept, dropped, peak)
 }
 
 /// How a started program ended, as `watch` reports it.
@@ -329,6 +499,20 @@ impl FileReader for SystemFiles {
         std::fs::metadata(path)
             .map(|meta| meta.dev())
             .map_err(|err| format!("{}: {err}", path.display()))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
+        /// `TMPFS_MAGIC` of `statfs(2)`.
+        const TMPFS_MAGIC: u64 = 0x0102_1994;
+        rustix::fs::statfs(path)
+            .map(|found| u64::try_from(found.f_type).ok() == Some(TMPFS_MAGIC))
+            .map_err(|err| format!("{}: {err}", path.display()))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn is_tmpfs(&self, _path: &Path) -> Result<bool, String> {
+        Ok(false)
     }
 }
 
@@ -695,6 +879,47 @@ pub fn host_id(machine_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reader that yields `total` bytes of a counting pattern, 8 KiB at a time.
+    struct Counting {
+        at: usize,
+        total: usize,
+    }
+
+    impl Read for Counting {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = buf.len().min(self.total - self.at);
+            for byte in &mut buf[..n] {
+                *byte = u8::try_from(self.at % 251).unwrap();
+                self.at += 1;
+            }
+            Ok(n)
+        }
+    }
+
+    /// Asserts that the reader of a stream that prints far more than it keeps holds at
+    /// most twice `keep` plus one read at any moment, returns exactly the last `keep`
+    /// bytes, and says it dropped some; and that a stream that fits is kept whole and not
+    /// marked. It catches a buffer that grows with the output (a job's log is read into
+    /// the agent's memory) and a window that keeps the head or the wrong end.
+    #[test]
+    fn the_stream_reader_keeps_the_end_in_bounded_memory() {
+        let (keep, total) = (1000, 5_000_000);
+        let (bytes, dropped, peak) = read_tail(&mut Counting { at: 0, total }, keep);
+        assert!(dropped);
+        assert!(peak <= 2 * keep + 8192, "{peak}");
+        assert_eq!(bytes.len(), keep);
+        let first = total - keep;
+        assert!(
+            bytes
+                .iter()
+                .enumerate()
+                .all(|(i, b)| usize::from(*b) == (first + i) % 251)
+        );
+
+        let (bytes, dropped, _) = read_tail(&mut Counting { at: 0, total: keep }, keep);
+        assert_eq!((bytes.len(), dropped), (keep, false));
+    }
 
     struct Absent;
 

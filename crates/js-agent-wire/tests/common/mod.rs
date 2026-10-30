@@ -74,6 +74,7 @@ pub fn job() -> JobSpec {
         isolation: Isolation::Host,
         labels: map(&[("team", "infra")]),
         heartbeat_seq: 7,
+        files: Vec::new(),
         valid_for_ms: 10_000,
         bundle: None,
         native: None,
@@ -87,6 +88,7 @@ pub fn result() -> RunResult {
         outcome: Outcome::TimedOut,
         exit_code: Some(137),
         detail: Some("wall limit".into()),
+        log_tail: None,
     }
 }
 

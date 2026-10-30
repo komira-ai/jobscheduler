@@ -18,6 +18,7 @@
 //! | native `env` | [`MAX_ENV`] entries; key [`MAX_ENV_KEY_LEN`] bytes; value [`MAX_ENV_VALUE_LEN`]; [`MAX_ENV_TOTAL_BYTES`] in all |
 //! | native `inputs`, `outputs` | [`MAX_INPUTS`], [`MAX_OUTPUTS`] entries; paths as a mount's `rel`, [`MAX_REL_LEN`] bytes |
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
+//! | run files | [`MAX_RUN_FILES`] entries; name [`MAX_RUN_FILE_NAME_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric, none twice; contents [`MAX_RUN_FILE_LEN`] bytes each and [`MAX_RUN_FILES_TOTAL_BYTES`] in all, no NUL |
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
 //! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`] |
 //! | free text (`agent_version`, taint, `detail`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control or format character |
@@ -59,6 +60,14 @@ pub const MAX_MOUNTS: usize = 64;
 pub const MAX_ROOT_NAME_LEN: usize = 64;
 /// Longest path below a mount root, in bytes.
 pub const MAX_REL_LEN: usize = 4096;
+/// Most files one job may be given (`JobSpec::files`).
+pub const MAX_RUN_FILES: usize = 8;
+/// Longest run file name, in bytes; the same grammar and cap as a mount root name.
+pub const MAX_RUN_FILE_NAME_LEN: usize = MAX_ROOT_NAME_LEN;
+/// Most bytes of contents in one run file.
+pub const MAX_RUN_FILE_LEN: usize = 16 * 1024;
+/// Most bytes of contents all the run files of one job may hold together.
+pub const MAX_RUN_FILES_TOTAL_BYTES: usize = 64 * 1024;
 /// Most labels on a hello or a job.
 pub const MAX_LABELS: usize = 64;
 /// Longest label key, in bytes.
@@ -84,6 +93,11 @@ pub const MAX_VERSION_LEN: usize = 64;
 pub const MAX_TAINT_TEXT_LEN: usize = 256;
 /// Longest result `detail` text, in bytes.
 pub const MAX_DETAIL_LEN: usize = 1024;
+/// Longest tail of one stream of a run's log in a result, in bytes. A result is resent in
+/// every heartbeat until acknowledged and the heartbeat body is held to
+/// [`HEARTBEAT_BODY_BUDGET`], so the tail is kept small: two streams at this size are a
+/// quarter of the budget, before JSON escaping.
+pub const MAX_LOG_STREAM_LEN: usize = 8 * 1024;
 /// Longest `detail` of an exclusive refusal, in bytes; the scheduler never parses it.
 pub const MAX_REFUSAL_DETAIL: usize = 256;
 /// Longest refusal code, in bytes.
@@ -132,6 +146,10 @@ pub const TAIL_MINUTE: u16 = 63;
 /// Longest lease id in a load, in bytes: `u64::MAX-u64::MAX`. A load's lease id is held to
 /// this and to the `term-seq` form, not to [`MAX_ID_LEN`].
 pub const MAX_LEASE_REF_LEN: usize = 41;
+/// The most a [`crate::NodeLoad`] at every cap serialises to, in bytes (a test builds one
+/// and holds it to this). A host that reports a load must leave this much of the heartbeat
+/// body for it.
+pub const MAX_LOAD_BYTES: usize = 28 * 1024;
 /// The body a server reads for a heartbeat, in bytes; the server's own limit must equal
 /// it. A load at every cap here is about 25 KB, and beside 96 held runs and 8 results at
 /// the longest ids a beat stays under three quarters of it; a test fixes those totals.

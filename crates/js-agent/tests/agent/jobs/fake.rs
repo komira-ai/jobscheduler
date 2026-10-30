@@ -8,9 +8,10 @@
 //! guard that fails the test with a message; none is a time the test expects.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::ThreadId;
 use std::time::Duration;
 
 use js_agent::cli_runtime::Mapping;
@@ -18,7 +19,7 @@ use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
 use js_agent::lifecycle::{
     Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, RuntimeError, Status, label,
 };
-use js_agent::{Machine, RuntimeBuild, SharedClock};
+use js_agent::{FileReader, Machine, RuntimeBuild, SharedClock};
 
 /// How long a test waits for the other thread before it fails.
 pub const HANG_GUARD: Duration = Duration::from_secs(120);
@@ -55,12 +56,19 @@ struct State {
     hold_creates: bool,
     /// `list_labelled` waits while this is set.
     hold_lists: bool,
+    /// The host view's process listing (the first thing a post-job check reads) waits while
+    /// this is set.
+    hold_checks: bool,
+    /// How many process listings have begun, counted again from zero by [`World::hold_checks`].
+    checking: u32,
     /// How many `create_and_start` calls have begun.
     entered: u32,
     /// The calls, in order: `create r1`, `stop r1`, `remove r1`, `list`.
     log: Vec<String>,
     /// The call that panics, once.
     panic_at: Option<&'static str>,
+    /// The directory every container is in, as `<dir>/docker-<run>.scope`.
+    cgroup_base: Option<PathBuf>,
 }
 
 struct Inner {
@@ -92,6 +100,11 @@ impl World {
             code,
             oom_killed: false,
         });
+    }
+
+    /// Every container is in `<dir>/docker-<run>.scope`.
+    pub fn set_cgroup_base(&self, dir: &str) {
+        self.lock().cgroup_base = Some(dir.into());
     }
 
     /// The calls so far, in order.
@@ -132,11 +145,20 @@ impl World {
         self.lock().hold_lists = true;
     }
 
-    /// Lets the held `create_and_start` and `list_labelled` calls go on.
+    /// From now on a post-job check waits, before it reads anything, for
+    /// [`World::release`]; [`World::wait_checking`] counts the checks that began from here.
+    pub fn hold_checks(&self) {
+        let mut state = self.lock();
+        state.hold_checks = true;
+        state.checking = 0;
+    }
+
+    /// Lets the held `create_and_start`, `list_labelled` and check calls go on.
     pub fn release(&self) {
         let mut state = self.lock();
         state.hold_creates = false;
         state.hold_lists = false;
+        state.hold_checks = false;
         drop(state);
         self.0.changed.notify_all();
     }
@@ -153,6 +175,41 @@ impl World {
             !waited.1.timed_out(),
             "the worker never reached the runtime"
         );
+    }
+
+    /// Waits until `n` post-job checks have begun since [`World::hold_checks`].
+    pub fn wait_checking(&self, n: u32) {
+        let state = self.lock();
+        let waited = self
+            .0
+            .changed
+            .wait_timeout_while(state, HANG_GUARD, |state| state.checking < n)
+            .unwrap_or_else(PoisonError::into_inner);
+        assert!(!waited.1.timed_out(), "the worker never began a check");
+    }
+
+    /// How many post-job checks have begun in this world (the agent's start takes a baseline
+    /// of the host, which counts as one), or since [`World::hold_checks`].
+    pub fn checked(&self) -> u32 {
+        self.lock().checking
+    }
+
+    /// A check begins: counted, and held while [`World::hold_checks`] is set.
+    fn begin_check(&self) {
+        let mut state = self.lock();
+        state.checking += 1;
+        self.0.changed.notify_all();
+        while state.hold_checks {
+            let (held, waited) = self
+                .0
+                .changed
+                .wait_timeout(state, HANG_GUARD)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = held;
+            if waited.timed_out() {
+                break;
+            }
+        }
     }
 
     /// The runtime of the agent `host_id` on this world: it labels what it makes with the
@@ -275,6 +332,20 @@ impl ContainerRuntime for Runtime {
         Ok(())
     }
 
+    fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
+        let state = self.0.lock();
+        let run = &state.containers.get(&id.0)?.run_id;
+        let base = state.cgroup_base.as_ref()?;
+        Some(base.join(format!("docker-{run}.scope")))
+    }
+
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        match self.0.lock().fails("egress") {
+            true => Err(failed("egress")),
+            false => Ok(()),
+        }
+    }
+
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
         let world = &self.0;
         let mut state = world.lock();
@@ -331,6 +402,52 @@ pub struct FakeMachine {
     pub world: World,
     pub clock: Arc<TestClock>,
     pub build: Build,
+    pub files: SharedFiles,
+}
+
+/// Cgroup files the test writes and the worker thread reads, and the threads that read.
+#[derive(Clone, Default)]
+pub struct SharedFiles(Arc<Mutex<Files>>);
+
+#[derive(Default)]
+struct Files {
+    text: BTreeMap<String, String>,
+    readers: Vec<ThreadId>,
+}
+
+impl SharedFiles {
+    /// The file at `path` holds `text` from now on.
+    pub fn set(&self, path: &str, text: &str) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.text.insert(path.to_owned(), text.to_owned());
+    }
+
+    /// The threads that read a file, one entry for each read.
+    pub fn readers(&self) -> Vec<ThreadId> {
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.readers.clone()
+    }
+}
+
+impl FileReader for SharedFiles {
+    fn read(&self, path: &str) -> Result<String, String> {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.readers.push(std::thread::current().id());
+        let found = state.text.get(path).cloned();
+        found.ok_or_else(|| format!("{path}: No such file or directory"))
+    }
+
+    fn link(&self, _path: &str) -> Result<String, String> {
+        Err("no links here".to_owned())
+    }
+
+    fn device(&self, _path: &Path) -> Result<u64, String> {
+        Err("no devices here".to_owned())
+    }
+
+    fn is_tmpfs(&self, _path: &Path) -> Result<bool, String> {
+        Err("no file systems here".to_owned())
+    }
 }
 
 impl FakeMachine {
@@ -344,6 +461,7 @@ impl FakeMachine {
             world: world.clone(),
             clock: Arc::default(),
             build: Build::Fine,
+            files: SharedFiles::default(),
         }
     }
 
@@ -379,20 +497,26 @@ impl Machine for FakeMachine {
         }
     }
 
+    fn cgroup_files(&self) -> Box<dyn FileReader> {
+        Box::new(self.files.clone())
+    }
+
     fn view(&self) -> Box<dyn HostView> {
         let host = FakeHost::quiet();
         if self.build == Build::HostNotSeen {
             host.move_to_namespace("self", "pid", "pid:[4026539999]");
         }
-        Box::new(AnyDirectory(host))
+        Box::new(AnyDirectory(host, self.world.clone()))
     }
 }
 
-/// A quiet host whose every watched directory exists and never changes.
-struct AnyDirectory(FakeHost);
+/// A quiet host whose every watched directory exists and never changes. Its process listing
+/// can be held by the test (see [`World::hold_checks`]).
+struct AnyDirectory(FakeHost, World);
 
 impl HostView for AnyDirectory {
     fn processes(&self) -> Result<Vec<Process>, String> {
+        self.1.begin_check();
         self.0.processes()
     }
 

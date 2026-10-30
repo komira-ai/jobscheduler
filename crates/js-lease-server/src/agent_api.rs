@@ -27,6 +27,7 @@ use tracing::{info, warn};
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
 use crate::join_tokens::{Admission, JoinRefusal};
+use crate::util::blocking;
 
 /// The agent routes. The caller merges them into the server's router; they have no
 /// fallback of their own.
@@ -200,13 +201,17 @@ async fn heartbeat(
     one_time: Option<Extension<OneTime>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<HeartbeatReply>, Refused> {
-    let heartbeat: Heartbeat = decode(
+    let mut heartbeat: Heartbeat = decode(
         &read(body, refusal::INVALID_HEARTBEAT)?,
         refusal::INVALID_HEARTBEAT,
     )?;
     heartbeat
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
+    // The load is telemetry: it is taken out here and only looked at after the registry
+    // has accepted the beat, so a beat the registry refuses records nothing, and nothing
+    // about the load can change the reply.
+    let load = heartbeat.load.take();
     if let Some(Extension(OneTime(presented))) = one_time {
         let served = agents
             .serve_join(presented, heartbeat.host_id.clone())
@@ -231,6 +236,18 @@ async fn heartbeat(
         reply.taint_ack = agents.save_bindings().await;
     } else if refused {
         agents.save_bindings().await;
+    }
+    if let Some(usage) = &agents.usage {
+        let usage = Arc::clone(usage);
+        let acks = reply.result_acks.clone();
+        let registry = agents.registry.clone();
+        blocking(move || {
+            let holds = |lease: &js_types::LeaseId, host: &js_types::HostId| {
+                registry.host_of(lease).as_ref() == Some(host)
+            };
+            usage.on_beat(&heartbeat, load, &acks, &holds);
+        })
+        .await;
     }
     Ok(Json(reply))
 }

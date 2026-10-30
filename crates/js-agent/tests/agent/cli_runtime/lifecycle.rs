@@ -1,8 +1,10 @@
 //! The lifecycle's rules, driven over `CliRuntime` and the scripted command line instead
 //! of the in-memory fake: the same jobs, the same results, the same order of cleanup.
 
+use std::os::unix::fs::PermissionsExt;
+
 use js_agent::lifecycle::{Config, Event, Lifecycle, NoChecks, label};
-use js_agent_wire::{Command, Outcome};
+use js_agent_wire::{Command, Outcome, RunFile};
 
 use super::scripted::Scripted;
 use super::{HOST, docker, made_at, open_at, thirty_seconds_on};
@@ -69,6 +71,9 @@ fn a_job_runs_to_its_result_and_is_cleaned_up() {
     assert_eq!(events[0], "result r1");
     assert_eq!(events[1..], cleanup("r1"));
     assert_eq!(w.outcomes(), [Outcome::Succeeded]);
+    // The log was read once, before the removal, and a read that works notes no finding.
+    assert_eq!(w.docker.calls_of("logs").len(), 1);
+    assert!(w.life.findings().is_empty());
     assert!(w.docker.ids().is_empty(), "the container was removed");
     assert_eq!(w.life.free().cpu_millis, 4000);
 
@@ -344,4 +349,88 @@ fn an_agent_that_does_not_see_the_containers_process_taints_the_host() {
     assert!(life.is_tainted());
     assert_eq!(start(&mut life, "r2"), ["refused r2 host-tainted"]);
     assert_eq!(docker.calls_of("create").len(), 1);
+}
+
+/// A planted secret in a run file reaches no argument of any call the command line runtime
+/// makes (create, start, inspect, rm), and no event, result or held run the lifecycle
+/// reports, on the path that starts and on the path whose files cannot be written. The
+/// create argument holds the files directory's path and nothing of its contents. Catches a
+/// secret passed on a command line (readable by every user through `ps`) or logged.
+#[test]
+fn a_planted_secret_is_on_no_command_line_and_in_no_report() {
+    const SECRET: &str = "SECRET-PLANTED-7f3a";
+    let mut w = World::new("secret", "linux");
+    let with_secret = |run: &str| {
+        let mut spec = job(run);
+        spec.files = vec![RunFile {
+            name: "tok".to_owned(),
+            contents: SECRET.to_owned(),
+        }];
+        reply(vec![Command::Start(Box::new(spec))])
+    };
+    let mut shown = vec![format!("{:?}", w.life.apply(&with_secret("r1")))];
+    let create = super::created(&w.docker, "r1");
+    assert!(
+        create
+            .iter()
+            .any(|arg| arg.contains(",dst=/run/js-files,readonly")),
+        "{create:?}"
+    );
+    // The files root becomes a file, so the second start cannot write its files. The
+    // first run's files directory is read-only (0555), so it is made writable first: a
+    // runner that is not root cannot unlink in it otherwise.
+    let root = w._dir.path("files");
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let dir = entry.unwrap().path();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::write(&root, "in the way").unwrap();
+    shown.push(format!("{:?}", w.life.apply(&with_secret("r2"))));
+    w.docker.exit("r1", 0);
+    shown.push(format!("{:?}", w.life.step()));
+    shown.push(format!("{:?} {:?}", w.life.results(), w.life.held()));
+    for call in ["create", "start", "inspect", "stop", "rm", "ps"] {
+        shown.push(format!("{:?}", w.docker.calls_of(call)));
+    }
+    for text in shown {
+        assert!(!text.contains("SECRET-PLANTED"), "{text}");
+    }
+}
+
+/// The delivery contract of run files, as it stands: the job gets its files directory
+/// read-only (the mount argument says `readonly`, the directory is `0555` and each file
+/// `0444`, so it can neither edit nor delete them), and the agent, not the job, removes
+/// them at the end of the run, in the cleanup step that also removes the scratch directory
+/// and before the post-job checks run. It catches a files mount a job could write, files
+/// left on the tmpfs after the run, and files still present while the host is checked (so
+/// they would be part of what the checks see).
+#[test]
+fn run_files_are_read_only_to_the_job_and_removed_by_the_agent_at_run_end() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut w = World::new("files-contract", "linux");
+    let mut spec = job("r1");
+    spec.files = vec![RunFile {
+        name: "tok".to_owned(),
+        contents: "x".to_owned(),
+    }];
+    w.life.apply(&reply(vec![Command::Start(Box::new(spec))]));
+    let create = super::created(&w.docker, "r1");
+    let mount = create
+        .iter()
+        .find(|arg| arg.contains(",dst=/run/js-files"))
+        .unwrap();
+    assert!(mount.contains(",readonly"), "{mount}");
+    let dir = w.config.files.as_ref().unwrap().of("r1");
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!((mode(&dir), mode(&dir.join("tok"))), (0o555, 0o444));
+    w.docker.exit("r1", 0);
+    let events = names(&w.life.step());
+    assert_eq!(
+        events[1..],
+        cleanup("r1"),
+        "scratch (and files) go before the checks"
+    );
+    assert!(!dir.exists());
 }
