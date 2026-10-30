@@ -74,9 +74,10 @@ mod unremoved;
 mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
+use js_alert::{AlertSink, Said};
 use js_elastic::{Acquired, HostRef, Released, SchedulerId, Secret};
 use js_lease::{Booking, Clock};
 use js_registry::{HostState, HostView, Launchable, SessionSource};
@@ -123,6 +124,8 @@ struct Memory {
     unremoved_failed: bool,
     /// The alerts that hold now, by key, with their text.
     alerts: BTreeMap<String, String>,
+    /// The alerts the sink has been given and that still hold.
+    said: Said,
     save_errors: u64,
 }
 
@@ -147,6 +150,8 @@ struct Core {
     /// Held only to copy [`Memory`] out and to swap it back in, never across a call.
     memory: Mutex<Memory>,
     last: Arc<Mutex<Option<Snapshot>>>,
+    /// Where each alert is sent besides the log; set once, at start.
+    sink: OnceLock<Arc<dyn AlertSink>>,
 }
 
 /// The scaler of one elastic pool. A handle: clones share one scaler.
@@ -193,6 +198,7 @@ impl Scaler {
             unremoved_dirty: false,
             unremoved_failed: false,
             alerts: BTreeMap::new(),
+            said: Said::default(),
             save_errors: 0,
         };
         let gate = complete::Gate::starting(Millis::new(clock.now().millis()));
@@ -207,6 +213,7 @@ impl Scaler {
             one_tick: Mutex::new(()),
             memory: Mutex::new(memory),
             last: Arc::new(Mutex::new(None)),
+            sink: OnceLock::new(),
         };
         Self {
             core: Arc::new(core),
@@ -233,6 +240,25 @@ impl Scaler {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         gate.bound((now, cap), leased.iter().map(|b| b.host.to_string()));
+    }
+
+    /// Sends every alert the scaler raises to `sink` as well as the log, each once while it
+    /// holds and again if it clears and returns. An alert the sink refuses is sent again at
+    /// the next tick. Set once, before the first tick; a second call changes nothing.
+    pub fn set_sink(&self, sink: Arc<dyn AlertSink>) {
+        let _ = self.core.sink.set(sink);
+    }
+
+    /// The server's time at the end of the last tick that finished, in milliseconds; `None`
+    /// before the first. The status page shows it, and a watcher outside the server reads
+    /// it as the server's heartbeat.
+    pub fn last_tick(&self) -> Option<Millis> {
+        let seen = self
+            .core
+            .last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        seen.as_ref().map(|seen| seen.now)
     }
 
     /// Whether the last tick vouched for the registry's view; false before the first.
@@ -396,6 +422,9 @@ impl Core {
             if !memory.alerts.contains_key(key) {
                 warn!("{message}");
             }
+        }
+        if let Some(sink) = self.sink.get() {
+            memory.said.deliver(&found, sink.as_ref());
         }
         memory.alerts = found;
     }

@@ -21,7 +21,7 @@ use std::sync::PoisonError;
 use js_elastic::Demand;
 use js_lease::{Clock, Timestamp};
 use js_registry::Registry;
-use js_scaler::{Phase, Record, Records};
+use js_scaler::{Millis, Phase, Record, Records};
 use js_types::ExecMode;
 use serde::Serialize;
 
@@ -77,6 +77,9 @@ struct PoolView {
     /// removal, a release the provider does not confirm, an orphan, a silent host that
     /// nothing releases.
     alerts: Vec<String>,
+    /// The server's time at the end of the scaler's last finished tick, in milliseconds;
+    /// null before the first. A watcher outside the server reads it as the heartbeat.
+    last_tick_ms: Option<u64>,
     next_launch: Option<NextLaunch>,
 }
 
@@ -105,6 +108,9 @@ struct MachineView {
     offer: String,
     zone: Option<String>,
     price_cents_per_hour: u64,
+    /// The provider's id for the machine, once the provider has given one: what a watcher
+    /// outside the server matches the provider's list against.
+    provider_id: Option<String>,
 }
 
 /// A machine of the scheduler's that no record knew: counted, never released by the
@@ -206,6 +212,7 @@ fn held(records: &Records, pool: &str) -> (Vec<MachineView>, Vec<OrphanView>, Op
             offer: record.offer.id.clone(),
             zone: record.offer.zone.clone(),
             price_cents_per_hour: record.price_cents_per_hour,
+            provider_id: record.cloud_id.clone(),
         })
         .collect();
     let orphans = ours
@@ -306,6 +313,11 @@ impl Status {
             machines,
             orphans,
             alerts: self.scaler.as_ref().map(Scaler::alerts).unwrap_or_default(),
+            last_tick_ms: self
+                .scaler
+                .as_ref()
+                .and_then(Scaler::last_tick)
+                .map(Millis::as_millis),
             next_launch,
         }
     }

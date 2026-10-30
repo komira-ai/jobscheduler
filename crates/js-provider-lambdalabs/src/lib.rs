@@ -19,6 +19,10 @@
 //! - the typed answers ([`InstanceTypeOffer`], [`Instance`]) and the errors
 //!   ([`ApiError`], [`ErrorCode`]), which are matched on Lambda's `code`, never on its
 //!   message text;
+//! - [`LambdaRead`] and [`Reader`], the read-only side of the API: a handle that can list the
+//!   account's instances and prices and has no launch or terminate to call, and a view of the
+//!   instances that carry one scheduler's marks (whole or partial), for a watcher that must
+//!   not be able to spend;
 //! - [`ApiKey`], the key read from an owner-only file and never printed;
 //! - [`OptionTable`], the `[[option]]` rows of the configuration, parsed and checked;
 //! - [`kind::build`], the `lambdalabs` kind of the service's table of provider kinds: the
@@ -78,6 +82,7 @@ mod model;
 mod options;
 mod own;
 mod provider;
+mod read;
 mod select;
 mod wire;
 
@@ -99,3 +104,4 @@ pub use model::{
 pub use options::{OptionRow, OptionTable, OptionsError};
 pub use own::{ACQUIRE_TAG, LabelError, MAX_TAGS, POOL_TAG, SCHEDULER_TAG};
 pub use provider::{LambdaProvider, PAYLOAD_LIMIT, PrepareError, Sweep};
+pub use read::{LambdaRead, Reader, Tagged};

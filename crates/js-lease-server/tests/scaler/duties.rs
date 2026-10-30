@@ -5,8 +5,10 @@
 //! alerts an operator must see. Time is an injected clock; nothing sleeps.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
+use js_alert::FakeSink;
 use js_elastic::{Claim, Released};
 use js_lease_server::REGISTRY_QUIET;
 use js_registry::{HostState, SessionSource};
@@ -609,4 +611,97 @@ async fn retry_removals_adds_to_the_hosts_it_has() {
     let log = rig.log();
     assert!(log.contains(&"remove:js-retry-a".to_owned()), "{log:?}");
     assert!(log.contains(&"remove:js-retry-b".to_owned()), "{log:?}");
+}
+
+/// A host the registry has lost, as the registry's view shows it.
+fn lost(name: &str) -> js_registry::HostView {
+    let mut lost = view(name);
+    lost.state = HostState::Lost;
+    lost
+}
+
+/// Asserts that an alert reaches the sink the scaler was given exactly as it reaches the
+/// log and the status: once however many ticks it holds for, with the text `alerts()`
+/// shows, nothing when it clears, and once more when it clears and returns. The alert here
+/// is a host the registry will not remove; it clears when the registry takes the host and
+/// returns when the host is queued again and refused again. It catches a sink that is
+/// flooded every tick, one that hears nothing, and one that goes quiet for good after the
+/// first alert.
+#[tokio::test]
+async fn an_alert_reaches_the_sink_once_and_again_after_it_clears_and_returns() {
+    let sink = Arc::new(FakeSink::new());
+    let rig = rig(records(vec![registered("js-sink-alert", "i-gone")]), live());
+    rig.scaler.set_sink(sink.clone());
+    rig.world().hosts = vec![lost("js-sink-alert")];
+    rig.world().gone = vec!["i-gone".to_owned()];
+    rig.world().remove_ok = false;
+    for _ in 0..3 {
+        rig.scaler.tick().await;
+    }
+    assert_eq!(sink.keys(), ["remove:js-sink-alert"]);
+    assert_eq!(sink.sent()[0].text, rig.scaler.alerts()[0]);
+
+    rig.world().remove_ok = true;
+    for _ in 0..2 {
+        rig.scaler.tick().await;
+    }
+    assert!(rig.scaler.alerts().is_empty());
+    assert_eq!(sink.keys().len(), 1);
+
+    rig.world().hosts = vec![lost("js-sink-alert")];
+    rig.world().remove_ok = false;
+    rig.scaler
+        .retry_removals(BTreeSet::from(["js-sink-alert".to_owned()]));
+    for _ in 0..2 {
+        rig.scaler.tick().await;
+    }
+    assert_eq!(
+        sink.keys(),
+        ["remove:js-sink-alert", "remove:js-sink-alert"]
+    );
+}
+
+/// Asserts that an alert the sink refuses is sent again at the next tick and not before it
+/// is accepted, and that a sink set twice keeps the first. It catches an alert lost for
+/// good because the receiver was down at the moment it first held.
+#[tokio::test]
+async fn a_refused_alert_is_sent_again_and_the_first_sink_stays() {
+    let sink = Arc::new(FakeSink::new());
+    let other = Arc::new(FakeSink::new());
+    let rig = rig(
+        records(vec![registered("js-refused-sink", "i-gone")]),
+        live(),
+    );
+    rig.scaler.set_sink(sink.clone());
+    rig.scaler.set_sink(other.clone());
+    rig.world().hosts = vec![lost("js-refused-sink")];
+    rig.world().gone = vec!["i-gone".to_owned()];
+    rig.world().remove_ok = false;
+    sink.refuse_next(1);
+    rig.scaler.tick().await;
+    assert!(sink.sent().is_empty());
+    rig.scaler.tick().await;
+    rig.scaler.tick().await;
+    assert_eq!(sink.keys(), ["remove:js-refused-sink"]);
+    assert!(other.sent().is_empty());
+}
+
+/// Asserts the heartbeat the status page serves: nothing before the first tick, and after a
+/// tick the server's time of that tick. It catches a heartbeat read from the wrong clock
+/// and one that is not `None` before anything ran.
+#[tokio::test]
+async fn the_last_tick_is_the_servers_time_at_the_end_of_a_tick() {
+    let rig = rig(records(Vec::new()), live());
+    assert_eq!(rig.scaler.last_tick(), None);
+    rig.scaler.tick().await;
+    assert_eq!(
+        rig.scaler.last_tick(),
+        Some(Millis::new(crate::fakes::START))
+    );
+    rig.advance(Duration::from_secs(5));
+    rig.scaler.tick().await;
+    assert_eq!(
+        rig.scaler.last_tick(),
+        Some(Millis::new(crate::fakes::START + 5000))
+    );
 }

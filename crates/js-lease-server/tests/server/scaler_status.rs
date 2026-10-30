@@ -60,6 +60,8 @@ async fn a_launched_machine_is_in_the_status_and_its_token_is_not() {
     h.ticks.step().await;
     let (before, _) = pool(&h).await;
     assert_eq!(before["machines"], json!([]));
+    // The heartbeat a watcher outside the server reads: the time of the tick that ran.
+    assert_eq!(before["last_tick_ms"], T0);
     assert_eq!(before["last_launch"], Value::Null);
     assert_eq!(before["instances"]["n"], 0);
 
@@ -74,7 +76,8 @@ async fn a_launched_machine_is_in_the_status_and_its_token_is_not() {
     let (after, body) = pool(&h).await;
     let machine = json!({
         "host": held.name, "state": "booting", "offer": "gpu_1x_a100",
-        "zone": "us-west-1", "price_cents_per_hour": 129
+        "zone": "us-west-1", "price_cents_per_hour": 129,
+        "provider_id": held.cloud_id
     });
     assert_eq!(after["machines"], json!([machine]));
     assert_eq!(after["orphans"], json!([]));
@@ -127,13 +130,16 @@ async fn the_status_lists_the_machines_the_orphans_and_the_newest_launch_of_the_
     let again = text(&scratch, "live", "resume");
     let h = start(scratch, &again).await;
     let (view, _) = pool(&h).await;
-    let one = |host: &str, state: &str| {
+    let one = |host: &str, state: &str, id: Option<&str>| {
         json!({
             "host": host, "state": state, "offer": "gpu_1x_a100",
-            "zone": "us-west-1", "price_cents_per_hour": 129
+            "zone": "us-west-1", "price_cents_per_hour": 129, "provider_id": id
         })
     };
-    let machines = json!([one("js-a", "registered"), one("js-new", "planned")]);
+    let machines = json!([
+        one("js-a", "registered", Some("i-1")),
+        one("js-new", "planned", None)
+    ]);
     assert_eq!(view["machines"], machines);
     assert_eq!(
         view["orphans"],

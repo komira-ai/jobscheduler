@@ -16,6 +16,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout` | `server.<name>`, same defaults |
 | `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, same defaults; refused unless a pool registers agents |
 | `--usage-db`, `--usage-off`, `--profile-store-bytes` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, same defaults and rules (`usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1) |
+| none (the file only) | `server.alert_webhook_url` and `server.alert_webhook_token_file`: every alert of the scaler is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address), once while it holds and again if it clears and returns; the token file is owner-only and holds the bearer token the receiver wants, and is refused without the URL |
 | `--token-file` | `server.client_token_file` |
 | `--pool-config` | a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` |
 | `--agent-pool-config` | a `[[pool]]` with `kind = "joined"` for machines started by hand (the pool's shape and timing are its keys), or with an elastic provider for machines the server launches |

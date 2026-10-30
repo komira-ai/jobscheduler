@@ -9,11 +9,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
+use js_alert::{AlertSink, DELIVERY_LIMIT, WebhookSink};
 use js_lease::{Boot, Clock, Monotonic, Settings, SystemClock, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
 
+use js_provider_lambdalabs::ApiKey;
 use js_registry::{Credential, PoolConfig, Registry, WholeNodeConfig};
 use js_types::sched::WorkKey;
 
@@ -22,7 +24,7 @@ use crate::agent_pool;
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
-use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
+use crate::file::{self, AlertKeys, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
 use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
@@ -260,6 +262,37 @@ pub fn parse_duration(text: &str) -> Result<Duration, String> {
     }
 }
 
+/// The webhook sink `server.alert_webhook_url` names, with the bearer token read from its
+/// owner-only file; `None` when the file names no URL. Nothing is sent here.
+fn alert_sink(
+    keys: Option<&AlertKeys>,
+    files: &dyn SecretFiles,
+) -> Result<Option<Arc<dyn AlertSink>>, StartupError> {
+    let Some(keys) = keys else {
+        return Ok(None);
+    };
+    let place = "server.alert_webhook_token_file";
+    let authorization = match &keys.token_file {
+        Some(path) => {
+            let bytes = files
+                .read(path)
+                .map_err(|why| StartupError::at(place, why))?;
+            let key = ApiKey::parse(path, &bytes)
+                .map_err(|why| StartupError::at(place, why.to_string()))?;
+            Some(key.authorization())
+        }
+        None => None,
+    };
+    let sink = WebhookSink::new(
+        &keys.webhook_url,
+        authorization,
+        "lease-server",
+        DELIVERY_LIMIT,
+    )
+    .map_err(|why| StartupError::at("server.alert_webhook_url", why))?;
+    Ok(Some(Arc::new(sink)))
+}
+
 /// Whether `ip` is an address only a private network reaches: the loopback, the private
 /// ranges (10/8, 172.16/12, 192.168/16, and fc00::/7), link-local addresses, the shared
 /// range a tailnet uses (100.64/10; its IPv6 range is in fc00::/7), and, because a
@@ -361,6 +394,9 @@ pub struct Config {
     pub(crate) hosts: Hosts,
     pub(crate) usage: UsageSetup,
     pub(crate) monotonic: Arc<dyn Monotonic>,
+    /// Where the scaler's alerts go besides the log; from `server.alert_webhook_url`, or
+    /// [`Config::with_alert_sink`].
+    pub(crate) alerts: Option<Arc<dyn AlertSink>>,
 }
 
 /// What `--usage-db`, `--usage-off` and `--profile-store-bytes` decided, and the seams a
@@ -505,6 +541,7 @@ impl Config {
             hosts,
             usage,
             monotonic: Arc::new(SystemMonotonic::default()),
+            alerts: None,
         })
     }
 
@@ -561,6 +598,7 @@ impl Config {
                 )
             }
         };
+        let alerts = alert_sink(server.alerts.as_ref(), files)?;
         let state_file = server.state_file;
         let keys = server.usage;
         let usage = usage_setup(keys.off, keys.db, keys.profile_store_bytes, &state_file);
@@ -586,7 +624,15 @@ impl Config {
             hosts,
             usage,
             monotonic: Arc::new(SystemMonotonic::default()),
+            alerts,
         })
+    }
+
+    /// The same configuration with every alert of the scaler also sent to `sink`, in
+    /// place of the one the file names.
+    pub fn with_alert_sink(mut self, sink: Arc<dyn AlertSink>) -> Self {
+        self.alerts = Some(sink);
+        self
     }
 
     /// The limits on what a client may hold open.
