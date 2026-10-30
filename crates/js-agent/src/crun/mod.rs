@@ -54,14 +54,22 @@
 //! [`Exit::oom_killed`](crate::lifecycle::Exit::oom_killed) set.
 //!
 //! A container that did not run to an exit (`crun` or the init reported an error) polls as
-//! exited with code 126; the words are in the lease's `crun.log` and init report until the
-//! log tail (P12c) carries them.
+//! exited with code 126, and the words they gave end its standard error tail.
+//!
+//! # Logs
+//!
+//! `crun run`'s output is captured by js-contain: two capped files in the lease and a ring
+//! of the last bytes of each stream, whatever the job prints and however slowly anything
+//! reads it. [`Runtime::log_tail`] gives the ring of an ended container as text (each
+//! stream at most the wire's limit, `truncated` when the job wrote more than that), and
+//! keeps it with the end, so it can be read again. A container never started has an empty
+//! tail; one still running has what it wrote so far.
 //!
 //! # Not here
 //!
 //! No network (a job has loopback only; `check_egress` has nothing to check), no GPUs
-//! (`supports_gpus` is false and a start naming one is refused), no host jobs, no
-//! read-back of the container's mounts, and no log tail.
+//! (`supports_gpus` is false and a start naming one is refused), no host jobs and no
+//! read-back of the container's mounts.
 
 mod spec;
 #[cfg(test)]
@@ -73,6 +81,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use js_agent_wire::LogTail;
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
@@ -87,7 +96,7 @@ use crate::lifecycle::{
     Body, Exit, FilesRoot, Found, Prefetcher, Prepared, PullFuture, RunHandle, RunSpec, Runtime,
     RuntimeError, Status, Ticket, label,
 };
-use spec::{container_spec, exit_of, pinned};
+use spec::{container_spec, ctr_of, end_of, log_tail_of, not_run_words, pinned};
 
 /// How long a pull and unpack of one image may take before it counts as failed.
 pub const PULL_LIMIT: Duration = Duration::from_secs(30 * 60);
@@ -258,8 +267,8 @@ enum State {
     Created,
     /// `crun run` runs (or has ended and not been read).
     Running { run: Running, since_ms: u64 },
-    /// Ended, as read once.
-    Ended(Exit),
+    /// Ended, as read once: the exit, and the tail of what the run wrote.
+    Ended(Exit, LogTail),
 }
 
 /// One container.
@@ -546,15 +555,21 @@ impl CrunRuntime {
         };
         let ended = match &run.state {
             State::Created => return Status::Running,
-            State::Ended(exit) => return Status::Exited(*exit),
+            State::Ended(exit, _) => return Status::Exited(*exit),
             State::Running { run: running, .. } if running.try_end().is_none() => {
                 return Status::Running;
             }
-            State::Running { run: running, .. } => rt.block_on(oci.ended(&run.spec, running)),
+            State::Running { run: running, .. } => {
+                // The drain of the streams is over once `ended` returns: what it kept is
+                // all the run wrote.
+                let ended = rt.block_on(oci.ended(&run.spec, running));
+                (ended, running.tail())
+            }
         };
-        let oom = run.cgroup.oom_outcome(run.cap, run.backstop).ok().flatten();
-        let exit = exit_of(ended, oom.as_ref());
-        run.state = State::Ended(exit);
+        let (ended, captured) = ended;
+        let tail = log_tail_of(&captured, not_run_words(&ended));
+        let exit = end_of(ended, &run.cgroup, run.cap, run.backstop);
+        run.state = State::Ended(exit, tail);
         Status::Exited(exit)
     }
 }
@@ -707,7 +722,7 @@ impl Runtime for CrunRuntime {
                 labels: run.labels.clone(),
                 running_ms: match &run.state {
                     State::Running { since_ms, .. } => now.saturating_sub(*since_ms),
-                    State::Created | State::Ended(_) => 0,
+                    State::Created | State::Ended(..) => 0,
                 },
                 never_started: matches!(run.state, State::Created),
             })
@@ -718,9 +733,18 @@ impl Runtime for CrunRuntime {
         false
     }
 
+    fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
+        Ok(self.runs.get(&id.0).map(|run| match &run.state {
+            State::Created => LogTail::default(),
+            // Read before the end was read: what the run has written so far.
+            State::Running { run, .. } => log_tail_of(&run.tail(), None),
+            State::Ended(_, tail) => tail.clone(),
+        }))
+    }
+
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         let run = self.runs.get(&id.0)?;
-        let ctr = run.cgroup.dir().join("ctr");
+        let ctr = ctr_of(run.cgroup.dir());
         matches!(run.state, State::Running { .. })
             .then_some(ctr)
             .filter(|ctr| ctr.is_dir())

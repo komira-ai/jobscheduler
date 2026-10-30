@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt as _;
 
 use js_agent::lifecycle::{Body, Exit, Prepared, RunHandle, RunSpec, Runtime, Status, label};
 use js_agent_wire::Isolation;
-use js_agent_wire::RunFile;
+use js_agent_wire::{LogTail, RunFile};
 use serde_json::{Value, json};
 
 use crate::node::{LONG, Node, SUB_GID, SUB_UID, given};
@@ -360,6 +360,51 @@ fn a_lease_that_fails_to_be_made_is_taken_apart_at_every_step() {
     assert!(left.is_empty(), "{left:?}");
 }
 
+/// Proves the runtime's `log_tail` through its own state: an ended container gives what it
+/// wrote to each stream apart (read twice, the same), one that did not run gives the report of its end (`exited 1`)
+/// words after its (empty) standard error, a running one gives what it has written so far
+/// (nothing), a staged one an empty tail, and a container that is not there none. Catches
+/// a tail lost when the end is read, a failed start with nothing to read, and an error for
+/// a container the lifecycle asks about before its end was read.
+#[test]
+fn the_log_tail_follows_the_state_of_the_container() {
+    let node = Node::new("run-tail");
+    let mut runtime = node.open();
+    let id = runtime
+        .create_and_start(&node.spec("r6-say"))
+        .expect("started");
+    runtime.wait_ended(&id);
+    assert!(matches!(runtime.poll(&id), Ok(Status::Exited(_))));
+    let want = LogTail {
+        stdout: "to-stdout\n".to_owned(),
+        stderr: "to-stderr\n".to_owned(),
+        truncated: false,
+    };
+    assert_eq!(runtime.log_tail(&id), Ok(Some(want.clone())));
+    assert_eq!(runtime.log_tail(&id), Ok(Some(want)));
+    runtime.remove(&id).expect("removed");
+    assert_eq!(runtime.log_tail(&id), Ok(None));
+
+    let id = runtime
+        .create_and_start(&node.spec("r7-fail"))
+        .expect("started");
+    runtime.wait_ended(&id);
+    assert!(matches!(runtime.poll(&id), Ok(Status::Exited(_))));
+    let tail = runtime.log_tail(&id).expect("reads").expect("a tail");
+    assert_eq!(tail.stdout, "");
+    assert_eq!(tail.stderr, "crun: exited 1\n");
+    runtime.remove(&id).expect("removed");
+
+    let id = runtime.stage(&node.spec("r8-hold")).expect("staged");
+    assert_eq!(runtime.log_tail(&id), Ok(Some(LogTail::default())));
+    node.pipe(&id.0);
+    runtime.start_staged(&id).expect("started");
+    node.up(&id);
+    assert_eq!(runtime.log_tail(&id), Ok(Some(LogTail::default())));
+    runtime.stop(&id, LONG).expect("stopped");
+    runtime.wait_ended(&id);
+    runtime.remove(&id).expect("removed");
+}
 /// Proves a create is bounded like a pull: an image the store lacks, with a source that never
 /// answers, fails the create saying it took longer than the limit (given as zero), instead of
 /// holding the lifecycle's worker. Catches an evicted image and a hung registry blocking
