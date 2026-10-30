@@ -212,6 +212,10 @@ fn the_unit_uses_the_paths_of_the_elastic_agent() {
         path(&cli.container_bin),
         Some(js_elastic::CONTAINER_BIN.into())
     );
+    // The Docker units name their runtime: only the Linux farm's unit (js_agent_farm_unit)
+    // names crun, and no host gets a runtime by default.
+    assert_eq!(cli.runtime, Some(js_agent::RuntimeKind::Docker));
+    assert_eq!(js_elastic::RUNTIME, "docker");
     assert_eq!(path(&cli.state_root), Some(js_elastic::STATE_ROOT.into()));
     assert_eq!(
         path(&cli.scratch_root),

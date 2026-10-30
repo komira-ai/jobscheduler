@@ -8,6 +8,10 @@ use crate::ids::HostName;
 /// unit and checks it exists; a provider whose image keeps it elsewhere installs it here.
 pub const CONTAINER_BIN: &str = "/usr/bin/docker";
 
+/// The runtime the agent runs jobs with (`--runtime`): named in the agent's unit, since the
+/// Linux farm's own unit names `crun` and no host gets a runtime by default.
+pub const RUNTIME: &str = "docker";
+
 /// The agent's state root, which the bootstrap creates (owner-only) and names in the
 /// agent's unit. It lies on the machine's root disk.
 pub const STATE_ROOT: &str = "/var/lib/js-agent/state";
