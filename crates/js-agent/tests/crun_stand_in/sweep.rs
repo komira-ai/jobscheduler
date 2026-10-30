@@ -283,8 +283,11 @@ fn a_lease_that_cannot_be_removed_is_kept_for_the_next_open() {
     assert!(swept.removed.is_empty(), "{swept:?}");
     assert_eq!(swept.failed.len(), 1, "{swept:?}");
     assert_eq!(swept.failed[0].name, id.0);
+    // `crun delete` failing is where it stops, or (the stand-in's state being gone) the
+    // cgroup it left; either way the lease is reported with the step.
+    let why = &swept.failed[0].why;
     assert!(
-        swept.failed[0].why.contains("delete the container"),
+        why.contains("delete the container") || why.contains("remove the lease's cgroup"),
         "{swept:?}"
     );
     assert!(sidecar(&node, &id.0).is_file() && node.lease_of(&id.0).is_dir());
