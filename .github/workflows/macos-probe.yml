@@ -2,7 +2,7 @@
 # crates/js-mac-probe prints a JSON report and exits non-zero when a probe with an
 # expected outcome is wrong; probes whose answer is unknown only report. No sudo: the
 # probe runs as the runner's own user; the trace file is uploaded with the report. The image
-# is pinned to macos-14, as ci.yml's macos job pins it. It runs only when the probe crate or
+# is pinned to macos-15 (macos-14 retires on 2026-11-02). It runs only when the probe crate or
 # this file changes (not on lockfile or toolchain bumps), to spare the scarce macOS runners.
 name: macos-probe
 
@@ -24,10 +24,11 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
   CARGO_INCREMENTAL: 0
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
 
 jobs:
   probe:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     permissions:
       contents: read
