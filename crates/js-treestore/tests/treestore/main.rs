@@ -5,4 +5,5 @@ mod crash;
 mod ensure;
 mod evict;
 mod flight;
+mod probe;
 mod restart;
