@@ -334,6 +334,13 @@ impl CrunRuntime {
         self.pulls.wait(image)
     }
 
+    /// Forgets what is known of the pull of `image` ([`Prefetcher::forget`]): the owner of
+    /// an image store that removes or evicts an image must call it, or the image is still
+    /// answered `Ready` after it is gone. The next [`Runtime::prepare`] pulls it again.
+    pub fn forget(&self, image: &str) {
+        self.pulls.forget(image);
+    }
+
     /// Waits until the container `id` has exited (one that is gone, never started or ended
     /// already returns at once). The lifecycle polls instead; this is for a caller with
     /// nothing else to do.
