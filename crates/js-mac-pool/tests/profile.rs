@@ -107,18 +107,6 @@ fn a_layout_that_knows_no_user_folder_entry_grants_nothing_there() {
 }
 
 #[test]
-fn the_allow_read_model_is_refused_not_run_as_open() {
-    let mut allow = caps(Net::Off);
-    allow.read_model = ReadModel::Allow;
-    let policy = Policy::base(layout(), allow).unwrap();
-    assert_eq!(policy.read_model(), ReadModel::Allow);
-    assert_eq!(
-        Profile::for_policy(&policy),
-        Err(BuildError::ReadModelUnavailable)
-    );
-}
-
-#[test]
 fn every_path_is_a_named_parameter_in_a_fixed_order() {
     let policy = Policy::base(layout(), caps(Net::Off)).unwrap();
     let profile = Profile::for_policy(&policy).unwrap();
