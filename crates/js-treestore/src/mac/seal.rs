@@ -85,7 +85,6 @@ pub struct FlagSealer<F: UserFlags, C: Cloner> {
     cloner: C,
 }
 
-#[allow(dead_code)]
 impl<F: UserFlags, C: Cloner> FlagSealer<F, C> {
     /// A sealer that gives trees to `owner`, sets flags through `flags` and makes clones
     /// through `cloner`.
@@ -302,10 +301,14 @@ impl<F: UserFlags, C: Cloner> Sealer for FlagSealer<F, C> {
         })
     }
 
-    fn clone_writable(&self, _src: &Path, _dst: &Path, _owner: Owner) -> Result<(), SealError> {
-        // Copies the directory and nothing else.
-        self.cloner.clone_dir(_src, _dst)?;
-        Ok(())
+    fn clone_writable(&self, src: &Path, dst: &Path, owner: Owner) -> Result<(), SealError> {
+        self.clone_to(src, dst, owner).map_err(|error| {
+            SealError(format!(
+                "clone {} to {}: {error}",
+                src.display(),
+                dst.display()
+            ))
+        })
     }
 }
 
