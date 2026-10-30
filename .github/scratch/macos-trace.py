@@ -57,7 +57,7 @@ def say(text=""):
 
 def sh(argv, env=None, cwd=None, timeout=300):
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=cwd, timeout=timeout)
+        p = subprocess.run(argv, capture_output=True, text=True, errors="replace", env=env, cwd=cwd, timeout=timeout)
         return p.returncode, p.stdout, p.stderr
     except Exception as e:  # noqa: BLE001
         return 99, "", f"{type(e).__name__}: {e}"
@@ -357,7 +357,7 @@ if not base_alone_ok:
 for c in cands:
     n2 = [n for n in names if not (c[0] == "name" and n == c[1])]
     r2 = [r for r in reads if not (c[0] == "read" and r == c[1:])]
-    e2 = [r for r in extra if not (c[0] == "extra" and r == c[1:])]
+    e2 = [r for r in extra if not (c[0] == "extra" and r == c[1:])] if not base_alone_ok else []
     res = run_all(profile(n2, r2 + e2, setuid_deny))
     fails = sorted(k for k, v in res.items() if not v[0])
     needed[c] = fails
