@@ -29,6 +29,9 @@ impl Clock for ManualClock {
     }
 }
 
+/// The agent label of every container the fake makes.
+const AGENT: &str = "fake-host";
+
 /// Says whether a scratch directory has its quota.
 type QuotaWatch = Box<dyn Fn(&Path) -> bool>;
 
@@ -138,12 +141,14 @@ impl FakeRuntime {
         let mut state = self.state.borrow_mut();
         state.next += 1;
         let id = format!("c{}", state.next);
+        let mut labels = spec.labels.clone();
+        labels.insert(label::AGENT.to_owned(), AGENT.to_owned());
         state.containers.insert(
             id.clone(),
             Container {
                 run_id: spec.run_id.clone(),
                 scratch: spec.scratch.clone(),
-                labels: spec.labels.clone(),
+                labels,
                 running_ms: 0,
                 exit: None,
                 started: false,
@@ -381,15 +386,24 @@ impl Runtime for FakeRuntime {
             ));
         }
         let mut state = self.state.borrow_mut();
+        // Refused as a real runtime refuses them, before anything is made.
+        if !spec.gpu_indices.is_empty() && state.gpus_off {
+            return Err(RuntimeError::new("this runtime cannot use a GPU"));
+        }
+        if state.containers.values().any(|c| c.run_id == spec.run_id) {
+            return Err(RuntimeError::new("a container of this run exists"));
+        }
         state.next += 1;
         let id = format!("c{}", state.next);
         state.creates.push(spec.clone());
+        let mut labels = spec.labels.clone();
+        labels.insert(label::AGENT.to_owned(), AGENT.to_owned());
         state.containers.insert(
             id.clone(),
             Container {
                 run_id: spec.run_id.clone(),
                 scratch: spec.scratch.clone(),
-                labels: spec.labels.clone(),
+                labels,
                 running_ms: 0,
                 exit: None,
                 started: true,
