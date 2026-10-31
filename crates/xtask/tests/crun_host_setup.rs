@@ -37,16 +37,13 @@ const GUARDED: [&str; 14] = [
 ];
 
 /// The real programs the script may run: plain file tools.
-const TOOLS: [&str; 12] = [
+const TOOLS: [&str; 9] = [
     "cat",
     "chmod",
     "dirname",
     "install",
-    "ls",
     "mkdir",
     "mv",
-    "rm",
-    "rmdir",
     "sed",
     "sha256sum",
     "stat",
@@ -110,7 +107,6 @@ struct Out {
 
 /// One fake host: a root, the stand-ins and the answers they give.
 struct Rig {
-    dir: PathBuf,
     root: PathBuf,
     shim: PathBuf,
     tools: PathBuf,
@@ -143,7 +139,6 @@ impl Rig {
             symlink(real(name), tools.join(name)).expect("a tool");
         }
         let rig = Self {
-            dir,
             root,
             shim,
             tools,
@@ -154,6 +149,11 @@ impl Rig {
         rig.write("etc/group", "root:x:0:\n");
         rig.write("etc/subuid", "");
         rig.write("etc/subgid", "");
+        rig.write(
+            "sys/fs/cgroup/cgroup.controllers",
+            "cpuset cpu io memory pids\n",
+        );
+        std::fs::create_dir_all(rig.path("var/lib")).expect("directory");
         rig.write("etc/tmpfiles.d/.keep", "");
         std::fs::create_dir_all(rig.path("usr/bin")).expect("directory");
         std::fs::copy(SHIM, rig.path("usr/bin/js-agent")).expect("the agent's stand-in");
