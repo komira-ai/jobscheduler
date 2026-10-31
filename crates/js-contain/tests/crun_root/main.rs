@@ -12,6 +12,8 @@
 //!   forking (the limit is the lease cgroup's `pids.max` or the job's `RLIMIT_NPROC`, and
 //!   both jobs run as the same ids).
 //! - `isolation`: a lease cannot see a sibling lease's directory.
+//! - `pull`: an image pulled through the real unpack helper is published owned by the
+//!   helper's id, in a store other accounts cannot list or write.
 //!
 //! Every test is `#[ignore]`: they need root, `crun` at `/usr/bin/crun`, `uidmap`, a static
 //! `busybox`, a job user with a subordinate id range (named by `JS_JOB_USER`) and a
@@ -27,7 +29,12 @@
 //! unpacking), seeded into the image store as an unpack leaves it. The hosted runner's
 //! kernel and AppArmor policy differ from a node's, so a node's own canary stays the gate.
 
+#[allow(dead_code)]
+#[path = "../support/mod.rs"]
+mod support;
+
 mod cell;
 mod inside;
 mod isolation;
 mod limits;
+mod pull;
