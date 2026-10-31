@@ -214,6 +214,11 @@ pub fn unit_verdict(show: &str) -> Result<(), String> {
         get("ExecMainStatus")?,
         get("LoadState")?,
     );
+    // A pass with `LoadState=not-found` is sound: without `--collect` systemd collects a unit
+    // only when it ended cleanly (inactive, not failed), and a failed unit stays loaded, so a
+    // failure is read from the unit itself and never lands in this arm. The collected unit
+    // reports its defaults (`ExecMainCode=0`), hence `code` is not checked then; `Result` and
+    // `ExecMainStatus` must still read as a clean exit.
     if result == "success" && status == "0" && (code == "1" || load == "not-found") {
         return Ok(());
     }
@@ -223,14 +228,26 @@ pub fn unit_verdict(show: &str) -> Result<(), String> {
     ))
 }
 
+/// Clears `unit`'s failed state after its result was read as `shown`. A unit that was
+/// collected (`LoadState=not-found`) is not loaded, so `reset-failed` would only print
+/// "not loaded"; it is skipped then. Any other `reset-failed` error is reported by `sudo`
+/// and never changes the verdict.
+fn reset_unit(sudo: &dyn Sudo, unit: &str, shown: &Result<String, Error>) {
+    let collected = shown
+        .as_ref()
+        .is_ok_and(|text| text.lines().any(|l| l == "LoadState=not-found"));
+    if !collected {
+        let _ = sudo.run(&reset_args(unit));
+    }
+}
+
 /// Runs the `systemd-run` command `args` for `unit`, then reads and resets the unit: `Ok`
 /// only when `systemd-run` exited 0 and the unit's own result is a clean exit. Every
 /// reason it is not, joined.
 fn run_unit(sudo: &dyn Sudo, unit: &str, args: &[OsString]) -> Result<(), String> {
     let ran = sudo.run(args);
     let shown = sudo.read(&show_args(unit));
-    // Best effort: a unit that ended cleanly may be gone already.
-    let _ = sudo.run(&reset_args(unit));
+    reset_unit(sudo, unit, &shown);
     let mut why = Vec::new();
     match ran {
         Ok(status) if status.success() => {}
@@ -255,7 +272,7 @@ fn run_unit(sudo: &dyn Sudo, unit: &str, args: &[OsString]) -> Result<(), String
 /// The unit's result could not be read or is not a clean exit.
 pub fn check_unit(sudo: &dyn Sudo, unit: &str) -> Result<String, Error> {
     let shown = sudo.read(&show_args(unit));
-    let _ = sudo.run(&reset_args(unit));
+    reset_unit(sudo, unit, &shown);
     let text = shown
         .map_err(|e| Error::Failed(format!("could not read the result of unit {unit}: {e}")))?;
     unit_verdict(&text).map_err(|why| Error::Failed(format!("unit {unit}: {why}")))?;
