@@ -9,8 +9,10 @@ use std::time::Duration;
 use js_lease_server::BODY_LIMIT;
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, Session, hello_body, post, restarted, session, start_agents};
-use crate::joins::{beat_with, code, minted};
+use crate::agents_support::{
+    JOIN, Session, entry, hello_body, hosts, post, restarted, session, start_agents,
+};
+use crate::joins::{beat_with, code, hello, minted};
 use crate::support::{Harness, Reply, T0, lease_body, request};
 
 /// The default length of a cordon asked for with no length, and the longest one a request
@@ -573,4 +575,138 @@ async fn a_new_hello_moves_the_session_marker_and_a_silent_agent_does_not() {
         (fresh["epoch"].clone(), fresh["session_started_ms"].clone()),
         (json!(2), json!(T0 + 40_000))
     );
+}
+
+/// The three calls an own-host route has: a read, a cordon and an uncordon.
+const FORMS: [(&str, &str); 3] = [("GET", ""), ("POST", ":cordon"), ("POST", ":uncordon")];
+
+/// What a call answers: the status, and the code of its error (empty for none).
+type Expect = (u16, &'static str);
+
+const NOT_ADMITTED: Expect = (403, "join-token-not-admitted");
+const NOT_FOUND: Expect = (404, "not-found");
+const UNROUTED: Expect = (401, "");
+
+/// The code of a reply, or empty for a reply that has no body.
+fn code_of(reply: &Reply) -> String {
+    match reply.body.is_empty() {
+        true => String::new(),
+        false => code(reply),
+    }
+}
+
+/// Asserts the answer of every shape of path an own-host route can be asked for, with the
+/// credential of `burst-1` and for each of the three calls: a foreign credential on a host
+/// that does not exist is the 403 of any other host (the credential is checked before the
+/// host is looked up, so it tells nothing of which hosts exist); an id with an encoded
+/// slash, a doubly encoded colon, an empty id, or a colon in it that makes it another host
+/// is not the credential's host (403); an encoded colon is the colon, so a verb that is
+/// empty, repeated, or in capitals is no action (404); a trailing slash is no route (the
+/// 401 of the client routes). It catches a path that reaches the host of another by
+/// encoding, one that is looked up before it is checked, and a verb matched loosely.
+#[tokio::test]
+async fn the_auth_matrix_of_the_paths() {
+    let h = start_agents("cordon_matrix", false).await;
+    let one = enrolled(&h, "burst-1", "i-1").await;
+    let _two = enrolled(&h, "burst-2", "i-2").await;
+    // (path with `{S}` for the verb of the form, the form's answer for a read and for a post)
+    let rows: [(&str, Expect, Expect); 11] = [
+        ("burst-9{S}", NOT_ADMITTED, NOT_ADMITTED),
+        ("burst-2{S}", NOT_ADMITTED, NOT_ADMITTED),
+        ("burst-1%2Fx{S}", NOT_ADMITTED, NOT_ADMITTED),
+        ("burst-1%253Acordon", NOT_ADMITTED, NOT_ADMITTED),
+        ("a:b:cordon", NOT_ADMITTED, NOT_ADMITTED),
+        ("burst-1%3A{S}", NOT_FOUND, NOT_FOUND),
+        ("burst-1{S}:b:cordon", NOT_FOUND, NOT_FOUND),
+        ("burst-1:CORDON", NOT_FOUND, NOT_FOUND),
+        ("burst-1:Uncordon", NOT_FOUND, NOT_FOUND),
+        ("burst-1{S}/", UNROUTED, UNROUTED),
+        ("{S}", UNROUTED, NOT_ADMITTED),
+    ];
+    for (template, read, post) in rows {
+        for (method, verb) in FORMS {
+            let expect = match method {
+                "GET" => read,
+                _ => post,
+            };
+            let at = format!("/v1/hosts/{}", template.replace("{S}", verb));
+            let reply = request(h.addr(), method, &at, Some(&one.credential), None).await;
+            assert_eq!(
+                (reply.status, code_of(&reply)),
+                (expect.0, expect.1.to_string()),
+                "{method} {at}: {}",
+                reply.body
+            );
+        }
+    }
+    assert!(show(&h, "burst-1", &one).await.get("cordon").is_none());
+}
+
+/// Asserts what a one-time join token is on these routes: while it is the credential of the
+/// host it registered (the hello did not swap it) it serves that host, for the three calls,
+/// and no other; a token minted and not yet used registers no host, so it is refused 403
+/// like a foreign one; and a token a host credential replaced is no credential at all (401).
+/// It catches a token that serves before it has a host, and one that outlives its swap.
+#[tokio::test]
+async fn a_one_time_token_serves_its_host_while_it_is_the_credential() {
+    let h = start_agents("cordon_tokens", false).await;
+    let registered = minted(&h, "i-1").await;
+    let welcome = hello(&h, &registered, "burst-1", "i-1").await;
+    assert_eq!(welcome.status, 200, "{}", welcome.body);
+    let unregistered = minted(&h, "i-2").await;
+    let swapped = minted(&h, "i-3").await;
+    let asked = post(
+        &h,
+        "/v1/agent/hello",
+        Some(&swapped),
+        &asking("burst-3", "i-3"),
+    )
+    .await;
+    assert_eq!(asked.status, 200, "{}", asked.body);
+
+    for (method, verb) in FORMS {
+        let at = |host: &str| format!("/v1/hosts/{host}{verb}");
+        let own = request(h.addr(), method, &at("burst-1"), Some(&registered), None).await;
+        assert_eq!(own.status, 200, "{method} {verb}: {}", own.body);
+        let other = request(h.addr(), method, &at("burst-2"), Some(&registered), None).await;
+        assert_eq!(
+            (other.status, code(&other)),
+            (403, "join-token-not-admitted".into())
+        );
+        for host in ["burst-2", "burst-1"] {
+            let idle = request(h.addr(), method, &at(host), Some(&unregistered), None).await;
+            assert_eq!(
+                (idle.status, code(&idle)),
+                (403, "join-token-not-admitted".into())
+            );
+        }
+        let retired = request(h.addr(), method, &at("burst-3"), Some(&swapped), None).await;
+        assert_eq!(retired.status, 401, "{method} {verb}: {}", retired.body);
+    }
+}
+
+/// Asserts that the listing of hosts shows a cordon, and only the cordon of the reading: a
+/// cordoned registered host has `cordon {expires_at_ms}` and none of the epoch, runtime or
+/// session start the host's own reading has, the entry of a host that is not cordoned has
+/// no `cordon` key, and the key leaves with the uncordon. It catches a listing that hides a
+/// cordon an operator must find after the hook that placed it died, and one that grows the
+/// whole reading.
+#[tokio::test]
+async fn the_listing_shows_a_cordon_and_only_the_cordon() {
+    let h = start_agents("cordon_listing", false).await;
+    let one = enrolled(&h, "burst-1", "i-1").await;
+    let _two = enrolled(&h, "burst-2", "i-2").await;
+    assert!(entry(&hosts(&h).await, "burst-1").get("cordon").is_none());
+
+    assert_eq!(cordon(&h, "burst-1", &one, 60).await.status, 200);
+    let listing = hosts(&h).await;
+    let cordoned = entry(&listing, "burst-1");
+    assert_eq!(cordoned["cordon"], json!({ "expires_at_ms": T0 + 60_000 }));
+    for key in ["epoch", "runtime", "session_started_ms", "leases"] {
+        assert!(cordoned.get(key).is_none(), "{key}: {cordoned}");
+    }
+    assert!(entry(&listing, "burst-2").get("cordon").is_none());
+
+    assert_eq!(uncordon(&h, "burst-1", &one).await.status, 200);
+    assert!(entry(&hosts(&h).await, "burst-1").get("cordon").is_none());
 }
