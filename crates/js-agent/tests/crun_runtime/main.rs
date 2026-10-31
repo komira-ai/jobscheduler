@@ -15,6 +15,7 @@
 
 #[path = "../runtime_suite/mod.rs"]
 mod runtime_suite;
+mod planted;
 mod subject;
 mod sweep;
 

@@ -94,6 +94,7 @@ fn args_of(name: &str, home: &OsStr) -> Vec<OsString> {
     };
     systemd_run_args(&Unit {
         target: name,
+        unit: &unit_name(name, 4242),
         built: &built,
         uid: 1001,
         gid: 118,
@@ -106,8 +107,8 @@ fn args_of(name: &str, home: &OsStr) -> Vec<OsString> {
 /// Catches any of the unit's settings dropped or changed: `Delegate=yes` (the tests
 /// cannot set up their cgroup), `OOMScoreAdjust=-900` (the tests see another OOM score
 /// than a job inherits), the slice, the runner's uid and gid (the tests would run as
-/// root), the package directory, an environment variable, a unit that does not wait or
-/// pass the exit status through, and the ignored tests left out.
+/// root), the package directory, an environment variable, a unit that does not wait, one that
+/// is collected on exit (a failed one could not be read), and the ignored tests left out.
 #[test]
 fn every_target_s_unit_is_delegated_with_the_agent_s_settings() {
     let home = OsStr::new("/srv/runner");
@@ -116,9 +117,8 @@ fn every_target_s_unit_is_delegated_with_the_agent_s_settings() {
             "systemd-run",
             "--quiet",
             "--wait",
-            "--collect",
             "--pipe",
-            &format!("--unit=js-crun-tests-{target}"),
+            &format!("--unit=js-crun-tests-{target}-4242"),
             "--slice=js-agent.slice",
             "-p",
             "Delegate=yes",
@@ -181,6 +181,7 @@ fn a_root_target_s_unit_is_delegated_and_runs_as_root_for_the_job_user() {
     };
     let got: Vec<String> = root_systemd_run_args(&RootUnit {
         target: "crun_root",
+        unit: &unit_name("crun_root", 4242),
         built: &built,
         job_user: "js-job",
         path: OsStr::new("/usr/bin:/bin"),
@@ -192,9 +193,8 @@ fn a_root_target_s_unit_is_delegated_and_runs_as_root_for_the_job_user() {
         "systemd-run",
         "--quiet",
         "--wait",
-        "--collect",
         "--pipe",
-        "--unit=js-crun-tests-crun_root",
+        "--unit=js-crun-tests-crun_root-4242",
         "--slice=js-agent.slice",
         "-p",
         "Delegate=yes",
@@ -219,4 +219,202 @@ fn the_root_targets_are_their_own_list() {
     for target in ROOT_TARGETS {
         assert!(!TARGETS.contains(target), "{target}");
     }
+}
+
+use std::cell::RefCell;
+use std::os::unix::process::ExitStatusExt;
+
+/// A fake `sudo -n`: records every command (its first words) and answers `systemd-run` with
+/// `run_status` and `systemctl show` with `show`.
+struct FakeSudo {
+    run_status: i32,
+    show: Result<String, String>,
+    calls: RefCell<Vec<String>>,
+}
+
+impl FakeSudo {
+    fn new(run_status: i32, show: Result<&str, &str>) -> FakeSudo {
+        FakeSudo {
+            run_status,
+            show: show.map(str::to_owned).map_err(str::to_owned),
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn note(&self, args: &[OsString]) {
+        let words: Vec<String> = args
+            .iter()
+            .take(3)
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        self.calls.borrow_mut().push(words.join(" "));
+    }
+}
+
+impl Sudo for FakeSudo {
+    fn run(&self, args: &[OsString]) -> Result<ExitStatus, Error> {
+        self.note(args);
+        // A wait status: the exit code is in the second byte.
+        Ok(ExitStatus::from_raw(self.run_status << 8))
+    }
+
+    fn read(&self, args: &[OsString]) -> Result<String, Error> {
+        self.note(args);
+        self.show.clone().map_err(Error::Failed)
+    }
+}
+
+const EXITED_0: &str = "Result=success\nExecMainCode=1\nExecMainStatus=0\nLoadState=loaded\n";
+const EXITED_101: &str = "Result=exit-code\nExecMainCode=1\nExecMainStatus=101\nLoadState=loaded\n";
+
+/// `run_unit` for a fake sudo, with the command the real verb would build.
+fn judged(sudo: &FakeSudo) -> Result<(), String> {
+    run_unit(
+        sudo,
+        "js-crun-tests-crun-7",
+        &[OsString::from("systemd-run")],
+    )
+}
+
+/// The bug: `systemd-run` exited 0 while the test binary in the unit exited 101. Catches a
+/// verb that trusts `systemd-run`'s exit status: the unit's own result must fail it, saying
+/// what the unit did.
+#[test]
+fn a_unit_whose_binary_failed_fails_though_systemd_run_exited_0() {
+    let sudo = FakeSudo::new(0, Ok(EXITED_101));
+    let why = judged(&sudo).expect_err("the unit failed");
+    assert!(why.contains("Result=exit-code"), "{why}");
+    assert!(why.contains("ExecMainStatus=101"), "{why}");
+}
+
+/// Catches a verb that fails a unit that exited 0, and one that does not clear the unit
+/// after the read: the unit is read (not just run), then reset, in that order.
+#[test]
+fn a_unit_that_exited_0_passes_and_is_read_then_reset() {
+    let sudo = FakeSudo::new(0, Ok(EXITED_0));
+    assert_eq!(judged(&sudo), Ok(()));
+    assert_eq!(
+        *sudo.calls.borrow(),
+        [
+            "systemd-run",
+            "systemctl show js-crun-tests-crun-7",
+            "systemctl reset-failed js-crun-tests-crun-7"
+        ]
+    );
+}
+
+/// Catches a unit read that is trusted over `systemd-run` failing: both must say so, and a
+/// failed `systemd-run` fails the target even when the unit reads clean.
+#[test]
+fn a_systemd_run_that_failed_fails_even_when_the_unit_reads_clean() {
+    let sudo = FakeSudo::new(101, Ok(EXITED_0));
+    let why = judged(&sudo).expect_err("systemd-run failed");
+    assert!(why.starts_with("systemd-run: exit status: 101"), "{why}");
+}
+
+/// Catches a read that fails counted as a pass (nothing known about the unit is not a
+/// success), and the reason lost.
+#[test]
+fn a_failed_read_of_the_unit_fails_the_target() {
+    let sudo = FakeSudo::new(0, Err("systemctl show failed: exit status: 1"));
+    let why = judged(&sudo).expect_err("no result");
+    assert!(
+        why.contains("could not read the result of unit js-crun-tests-crun-7"),
+        "{why}"
+    );
+    assert!(why.contains("exit status: 1"), "{why}");
+    // The unit is still reset.
+    assert_eq!(sudo.calls.borrow().len(), 3);
+}
+
+/// Catches output that is not read strictly: a line that is not `Key=Value`, empty output,
+/// a missing property and a value that is not a clean exit are each a failure, so garbage
+/// can never read as success.
+#[test]
+fn garbled_or_incomplete_output_is_a_failure() {
+    let cases = [
+        "garbage\n",
+        "",
+        "Result=success\nExecMainCode=1\nExecMainStatus=0\n",
+        "ExecMainCode=1\nExecMainStatus=0\nLoadState=loaded\n",
+        "Result=success\nExecMainCode=1\nExecMainStatus=\nLoadState=loaded\n",
+        "Result=success\nExecMainCode=1\nExecMainStatus=00\nLoadState=loaded\n",
+        "Result=signal\nExecMainCode=2\nExecMainStatus=9\nLoadState=loaded\n",
+        "Result=success\nExecMainCode=0\nExecMainStatus=0\nLoadState=loaded\n",
+        "Result=exit-code\nExecMainCode=1\nExecMainStatus=0\nLoadState=loaded\n",
+    ];
+    for show in cases {
+        let sudo = FakeSudo::new(0, Ok(show));
+        assert!(judged(&sudo).is_err(), "{show:?}");
+    }
+}
+
+/// Catches a unit that ended cleanly and was unloaded (a unit is collected when inactive
+/// unless it failed) read as a failure: systemd reports its defaults with
+/// `LoadState=not-found`. A failed unit is never unloaded, so `not-found` with a failing
+/// result is still a failure.
+#[test]
+fn a_cleanly_ended_unit_that_is_already_unloaded_passes() {
+    let gone = "Result=success\nExecMainCode=0\nExecMainStatus=0\nLoadState=not-found\n";
+    assert_eq!(judged(&FakeSudo::new(0, Ok(gone))), Ok(()));
+    let failed_gone = "Result=exit-code\nExecMainCode=1\nExecMainStatus=101\nLoadState=not-found\n";
+    assert!(judged(&FakeSudo::new(0, Ok(failed_gone))).is_err());
+}
+
+/// Catches `unit-result` (for a step that ran its own `systemd-run`) passing on anything
+/// but the unit's own clean exit, or not clearing the unit.
+#[test]
+fn checking_a_unit_a_step_started_reads_its_result() {
+    let sudo = FakeSudo::new(0, Ok(EXITED_0));
+    assert_eq!(
+        check_unit(&sudo, "js-crun-runtime"),
+        Ok("ok: unit js-crun-runtime exited 0".to_owned())
+    );
+    assert_eq!(
+        *sudo.calls.borrow(),
+        [
+            "systemctl show js-crun-runtime",
+            "systemctl reset-failed js-crun-runtime"
+        ]
+    );
+    let failed = check_unit(&FakeSudo::new(0, Ok(EXITED_101)), "js-crun-runtime");
+    assert!(
+        matches!(&failed, Err(Error::Failed(why)) if why.contains("ExecMainStatus=101")),
+        "{failed:?}"
+    );
+    assert!(check_unit(&FakeSudo::new(0, Err("no")), "js-crun-runtime").is_err());
+}
+
+/// Catches two runs' units sharing a name (a read could be about another run's unit), and
+/// two targets of one run sharing one.
+#[test]
+fn a_unit_is_named_for_its_target_and_its_run() {
+    assert_eq!(unit_name("crun", 7), "js-crun-tests-crun-7");
+    assert_ne!(unit_name("crun", 7), unit_name("crun", 8));
+    assert_ne!(unit_name("crun", 7), unit_name("crun_root", 7));
+}
+
+/// Catches the read asking for fewer properties than the verdict needs.
+#[test]
+fn the_read_asks_for_every_property_the_verdict_needs() {
+    let got: Vec<String> = show_args("u")
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        got,
+        [
+            "systemctl",
+            "show",
+            "u",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainCode",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "LoadState"
+        ]
+    );
 }
