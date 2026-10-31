@@ -24,10 +24,12 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   TARGET: aarch64-apple-darwin
+  # The oldest macOS the binaries must run on; a newer image must not raise it.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
