@@ -196,6 +196,10 @@ fn a_first_install_has_no_agent_to_drain_and_no_host_to_cordon() {
     assert_eq!(record.cordon, Cordon::default());
     assert_eq!(spy.log().len(), 1, "the version check only");
     assert_eq!(rig.world.ticks(), 0);
+    // A rerun finds the record and leaves it as it is.
+    let before = rig.record_bytes();
+    assert_eq!(Spy::new(&rig).prepare(&rig).outcome, Outcome::Success);
+    assert_eq!(rig.record_bytes(), before);
 }
 
 #[test]

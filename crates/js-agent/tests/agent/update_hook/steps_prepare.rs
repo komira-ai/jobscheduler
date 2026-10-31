@@ -77,7 +77,7 @@ fn a_clean_prepare_records_then_cordons_waits_for_the_drain_and_succeeds() {
     let first = START + LEASE_SECS * 1000;
     assert_eq!(expiries, [first, first + step, first + 2 * step]);
     let end = rig.record().unwrap();
-    assert_eq!(end.cordon.placed, true);
+    assert!(end.cordon.placed);
     assert_eq!(end.cordon.first_ms, START);
     assert_eq!(end.cordon.expires_ms, first + 3 * step);
     assert_eq!(rig.cordon_expiry(), Some(end.cordon.expires_ms));
@@ -98,7 +98,7 @@ fn a_clean_prepare_records_then_cordons_waits_for_the_drain_and_succeeds() {
     // The cordon calls, and nothing else done to the machine.
     let acts: Vec<_> = spy.log().into_iter().skip(1).collect();
     assert_eq!(acts, vec![format!("cordon({LEASE_SECS})"); 4]);
-    assert_eq!(rig.host().cordon.is_some(), true, "left for cutover");
+    assert!(rig.host().cordon.is_some(), "left for cutover");
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn a_host_with_no_lease_needs_no_wait() {
     assert_eq!(done.outcome, Outcome::Success);
     assert_eq!(rig.world.ticks(), 0);
     assert_eq!(spy.log().len(), 2, "the version check and one cordon");
-    assert_eq!(rig.record().unwrap().cordon.placed, true);
+    assert!(rig.record().unwrap().cordon.placed);
 }
 
 #[test]

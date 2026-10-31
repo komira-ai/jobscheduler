@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{
     AtFlags, FileType, FlockOperation, Mode, OFlags, flock, fsync, openat, renameat, statat,
+    unlinkat,
 };
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
@@ -575,8 +576,18 @@ impl Held {
     /// # Errors
     /// What [`Held::load`] says of the record that is there, or [`StateError::Io`].
     pub fn delete(&self) -> Result<(), StateError> {
-        // TODO(red): not implemented yet.
-        Ok(())
+        self.load()?;
+        // The temporary file first: a delete killed between the two leaves the record, which
+        // the next step deletes again.
+        for name in [TEMP_FILE, RECORD_FILE] {
+            match unlinkat(&self.fd, name, AtFlags::empty()) {
+                Ok(()) | Err(Errno::NOENT) => {}
+                Err(errno) => return Err(at(&self.dir.join(name))(errno.into())),
+            }
+        }
+        fsync(&self.fd)
+            .map_err(io::Error::from)
+            .map_err(at(&self.dir))
     }
 }
 
