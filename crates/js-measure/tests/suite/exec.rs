@@ -287,14 +287,14 @@ fn the_command_setter_runs_a_program() {
     assert_eq!(NoSetter.apply("fill", "0.8", &arm(false)), Ok(()));
 }
 
-/// Asserts that every line a plan emits is read by a struct identical to the analysis
-/// crate's `RunRecord` (unknown fields refused), field for field, and written back as the
+/// Asserts that every line a plan emits is read by the analysis crate's own `RunRecord`
+/// (unknown fields refused), field for field, and written back as the
 /// same line: setting and arm as the cell's texts, `run_index` the executed order, the
 /// label `warmup` or empty, a number or `null` for each metric. It catches a field added
 /// to or dropped from the emitted line, and a value the reader would take for another.
 #[test]
 fn every_emitted_line_is_what_the_analysis_reads() {
-    use crate::support::AnalysisRunRecord;
+    use js_analysis::RunRecord as AnalysisRunRecord;
     let p = plan_over(&["0.8", "1.0"], &["whole", "booked"], 1, 1, 3);
     let clock = FakeClock::at(T0);
     let farm = farm(&clock);

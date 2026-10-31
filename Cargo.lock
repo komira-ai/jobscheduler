@@ -1284,6 +1284,7 @@ name = "js-measure"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "js-analysis",
  "js-client",
  "js-testkit",
  "serde",

@@ -19,6 +19,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+js-analysis = { path = "../js-analysis" }
 js-testkit = { path = "../js-testkit" }
 
 [lints]

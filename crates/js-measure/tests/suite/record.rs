@@ -47,6 +47,8 @@ fn the_analysis_example_line_round_trips() {
     assert_eq!(record.metrics["queue_wait_s"], Some(12.5));
     assert_eq!(record.metrics["makespan_s"], None);
     assert_eq!(serde_json::to_string(&record).unwrap(), line);
+    let theirs: js_analysis::RunRecord = serde_json::from_str(line).unwrap();
+    assert_eq!(serde_json::to_string(&theirs).unwrap(), line);
     let bare = r#"{"setting":"s","arm":"a","run_index":0,"seed":1,"commit":"c","metrics":{}}"#;
     assert_eq!(serde_json::from_str::<Record>(bare).unwrap().label, "");
 }

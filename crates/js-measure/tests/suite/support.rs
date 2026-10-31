@@ -58,19 +58,3 @@ pub fn job(name: &str, wall_ms: u64, profile: Option<&str>) -> Job {
         submit_at_ms: 0,
     }
 }
-
-/// The record as the analysis crate defines it (`RunRecord`, read with
-/// `deny_unknown_fields`), copied field for field so that a line this crate emits is
-/// checked against the reader's own shape without depending on the reader.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AnalysisRunRecord {
-    pub setting: String,
-    pub arm: String,
-    pub run_index: u32,
-    pub seed: u64,
-    pub commit: String,
-    #[serde(default)]
-    pub label: String,
-    pub metrics: std::collections::BTreeMap<String, Option<f64>>,
-}
