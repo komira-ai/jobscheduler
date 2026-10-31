@@ -9,7 +9,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use js_mac_provision::daemon::{AGENT_LABEL, Daemon, RELEASE_LINK, SESSION_LABEL};
+#[cfg(target_os = "linux")]
+use js_mac_provision::daemon::{AGENT_LABEL, SESSION_LABEL};
+use js_mac_provision::daemon::{Daemon, RELEASE_LINK};
 use js_testkit::dir::TestDir;
 use xtask::macpkg::{
     Entry, Error, IDENTIFIER, Inspected, Kind, StageArgs, entries, postinstall_script, problems,
@@ -30,10 +32,12 @@ struct Check {
     args: xtask::macpkg::CheckArgs,
 }
 
+#[cfg(target_os = "linux")]
 fn root() -> &'static Path {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
 }
 
+#[cfg(target_os = "linux")]
 fn read(path: &str) -> String {
     std::fs::read_to_string(root().join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
 }
@@ -480,6 +484,7 @@ fn every_part_of_an_lsbom_line_is_needed() {
 
 // ---- the files of packaging/js-agent-macos ----
 
+#[cfg(target_os = "linux")]
 const DIR: &str = "packaging/js-agent-macos";
 
 /// The `<string>` items of a plist's `ProgramArguments`, XML characters unescaped.

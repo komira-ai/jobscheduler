@@ -1,6 +1,6 @@
 # The js-agent installer package for macOS (packaging/js-agent-macos): built on a hosted
 # Apple silicon runner from the release build of js-agent, js-mac-session and js-mac-provision,
-# with pkgbuild and productbuild, and read back by `cargo xtask pkg check-macos`, which
+# with pkgbuild and productbuild, and read back by the xtask `pkg check-macos` verb, which
 # refuses anything but the files, modes, owners and script the package is meant to have. It
 # publishes nothing: the package and its SHA256SUMS are a workflow artifact for seven days.
 #

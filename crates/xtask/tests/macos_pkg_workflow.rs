@@ -146,7 +146,8 @@ fn a_secret_is_named_only_in_the_jobs_environment_and_in_the_readme() {
         let t = line.trim();
         let (name, value) = t.split_once(": ").unwrap_or_else(|| panic!("{line}"));
         assert!(
-            name.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
+            name.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
             "{line}"
         );
         assert!(
