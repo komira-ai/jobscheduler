@@ -398,3 +398,32 @@ fn an_agent_that_cannot_list_its_containers_does_not_start() {
     assert_eq!(h.restart().err().unwrap().to_string(), "list failed");
     assert!(h.restart().is_ok(), "and once the runtime answers it does");
 }
+
+/// Asserts what a restart over a runtime that lists no container does, which is what every
+/// restart of an agent on `crun` is (a container never outlives the process that ran it):
+/// nothing is adopted and no event is raised, the held list is empty (so the first beat
+/// lists no run, which is how the lease server learns the runs are lost), the booking is
+/// free again, the scratch directory of the dead run is swept, and a start the server
+/// sends afterwards runs as a new run. It catches an agent that refuses to start without a
+/// container to adopt, one that keeps the dead run's booking or directory, and one that
+/// holds a run it cannot account for.
+#[test]
+fn a_restart_over_an_empty_listing_holds_nothing_and_sweeps_what_the_dead_run_left() {
+    let mut h = Harness::new("adopt-empty");
+    let whole = h.life.free();
+    h.start(job("r1"));
+    let left = h.scratch_of("r1");
+    assert!(left.is_dir());
+    assert_ne!(h.life.free().cpu_millis, whole.cpu_millis, "the run books");
+    h.fake.vanish("r1");
+
+    let events = h.restart().unwrap();
+    assert!(names(&events).is_empty(), "{:?}", names(&events));
+    assert!(h.held().is_empty());
+    assert_eq!(h.life.free(), whole);
+    assert!(!left.exists(), "the dead run's directory stayed");
+
+    h.start(job("r1"));
+    assert_eq!(h.held(), ["r1"]);
+    assert_eq!(h.fake.created().len(), 2, "the run is made again");
+}

@@ -319,7 +319,7 @@ const ID_LEN: usize = 64;
 const ENGINE_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// What a container's name starts with; the run id follows.
-const NAME_PREFIX: &str = "js-";
+pub(crate) const NAME_PREFIX: &str = "js-";
 
 /// The digits of the agent tag in a container's name.
 const TAG_LEN: usize = 16;
@@ -1204,7 +1204,7 @@ pub(crate) fn container_name(host_id: &str, run_id: &str) -> Result<String, CliE
 /// A host id as [`TAG_LEN`] hexadecimal digits (FNV-1a over its bytes): a short stable
 /// stand-in that is in the grammar of container names whatever the id holds. The labels
 /// still say whose a container is; the tag only keeps the names apart.
-fn agent_tag(host_id: &str) -> String {
+pub(crate) fn agent_tag(host_id: &str) -> String {
     let hash = host_id
         .bytes()
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
