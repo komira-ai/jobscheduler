@@ -792,3 +792,37 @@ fn only_a_second_holder_is_locked_and_every_other_error_is_state_invalid() {
     };
     assert_eq!(dir.to_string(), "state directory /s: is a symbolic link");
 }
+
+#[test]
+fn delete_removes_the_record_and_a_leftover_temporary_file_and_nothing_else() {
+    let dir = cell("hook-record-delete");
+    let held = Held::open(dir.path(), &as_root).unwrap();
+    held.save(&record("1.4.0")).unwrap();
+    held.write_temp(&record("1.4.1")).unwrap();
+    held.delete().unwrap();
+    assert_eq!(held.load().unwrap(), None);
+    assert!(!held.record_path().exists());
+    assert!(!dir.path().join(TEMP_FILE).exists());
+    assert!(dir.path().join(LOCK_FILE).exists(), "the lock stays");
+    // The next step starts from nothing, and a delete of nothing is a success.
+    held.delete().unwrap();
+    held.save(&record("1.4.2")).unwrap();
+    assert_eq!(held.load().unwrap(), Some(record("1.4.2")));
+}
+
+#[test]
+fn delete_refuses_a_record_it_cannot_load_and_reports_what_it_cannot_remove() {
+    let dir = cell("hook-record-delete-refused");
+    let held = Held::open(dir.path(), &as_root).unwrap();
+    let future = br#"{"schema":2}"#;
+    fs::write(held.record_path(), future).unwrap();
+    assert!(matches!(held.delete(), Err(StateError::Newer { found: 2 })));
+    assert_eq!(fs::read(held.record_path()).unwrap(), future);
+
+    let other = cell("hook-record-delete-io");
+    let held = Held::open(other.path(), &as_root).unwrap();
+    held.save(&record("1.4.0")).unwrap();
+    // A directory where the temporary file belongs cannot be unlinked as a file.
+    fs::create_dir(other.path().join(TEMP_FILE)).unwrap();
+    assert!(matches!(held.delete(), Err(StateError::Io { .. })));
+}

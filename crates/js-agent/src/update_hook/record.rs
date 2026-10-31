@@ -567,6 +567,17 @@ impl Held {
             .map_err(io::Error::from)
             .map_err(at(&self.dir))
     }
+
+    /// Deletes the record, and a temporary file a killed save left, and syncs the directory.
+    /// Does nothing to a directory with no record. Refuses to delete a record [`Held::load`]
+    /// refuses, as a save does.
+    ///
+    /// # Errors
+    /// What [`Held::load`] says of the record that is there, or [`StateError::Io`].
+    pub fn delete(&self) -> Result<(), StateError> {
+        // TODO(red): not implemented yet.
+        Ok(())
+    }
 }
 
 impl Drop for Held {

@@ -20,6 +20,7 @@ mod plain;
 mod ports;
 mod record;
 mod report;
+pub mod step;
 mod validate;
 
 use std::ffi::OsString;

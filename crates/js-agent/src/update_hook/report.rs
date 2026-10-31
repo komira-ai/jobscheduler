@@ -61,16 +61,37 @@ pub enum Reason {
     Locked,
     /// The state directory, the record or the declaration is not as the hook requires.
     StateInvalid,
+    /// The agent is tainted: no version can repair it (exit 76).
+    Tainted,
+    /// A job's post-job checks are owed: no version can repair it (exit 76).
+    OwedCheck,
+    /// The staged release is not an agent this hook can run.
+    BadArtifact,
+    /// The staged agent is not the version, or lacks the runtime, the order names.
+    VersionMismatch,
+    /// The drain bound passed with a lease still running (exit 75).
+    DrainBound,
+    /// The lease server could not be reached, or refused the request.
+    LeaseUnreachable,
+    /// `cleanup` before a `verify` succeeded.
+    NotVerified,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 5] = [
+    pub const ALL: [Reason; 12] = [
         Reason::NotImplemented,
         Reason::BadArgs,
         Reason::BadParams,
         Reason::Locked,
         Reason::StateInvalid,
+        Reason::Tainted,
+        Reason::OwedCheck,
+        Reason::BadArtifact,
+        Reason::VersionMismatch,
+        Reason::DrainBound,
+        Reason::LeaseUnreachable,
+        Reason::NotVerified,
     ];
 
     /// The token in the JSON.
@@ -82,6 +103,13 @@ impl Reason {
             Reason::BadParams => "bad_params",
             Reason::Locked => "locked",
             Reason::StateInvalid => "state_invalid",
+            Reason::Tainted => "tainted",
+            Reason::OwedCheck => "owed_check",
+            Reason::BadArtifact => "bad_artifact",
+            Reason::VersionMismatch => "version_mismatch",
+            Reason::DrainBound => "drain_bound",
+            Reason::LeaseUnreachable => "lease_unreachable",
+            Reason::NotVerified => "not_verified",
         }
     }
 }
