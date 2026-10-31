@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::plain::is_plain;
+
 /// Where the declaration is installed.
 pub const DECLARATION_PATH: &str = "/etc/updater.d/js-agent.toml";
 
@@ -114,9 +116,20 @@ impl Declaration {
             write_paths: wire.hook.write_paths,
             timeouts: wire.hook.timeout_secs,
         };
-        let mut paths = std::iter::once(&declaration.state_dir).chain(&declaration.write_paths);
-        if paths.any(|path| !path.is_absolute()) {
+        let state_dir = &declaration.state_dir;
+        let paths = &declaration.write_paths;
+        if !is_plain(state_dir) || !paths.iter().all(|path| is_plain(path)) {
             return Err(DeclarationError::NotPlain);
+        }
+        if !paths.contains(state_dir) {
+            return Err(DeclarationError::StateDirNotListed);
+        }
+        let nested = paths
+            .iter()
+            .filter(|path| *path != state_dir)
+            .any(|path| path.starts_with(state_dir) || state_dir.starts_with(path));
+        if nested {
+            return Err(DeclarationError::StateDirNested);
         }
         if declaration.units.is_empty() {
             return Err(DeclarationError::NoUnits);

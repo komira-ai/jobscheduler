@@ -7,6 +7,7 @@
 //! the reason `state_invalid` and changes nothing. Where the record and the system disagree
 //! about what was done, the system is believed; that is a step's decision and not a rule here.
 
+use std::ffi::OsStr;
 use std::path::Path;
 
 use super::declaration::Declaration;
@@ -103,11 +104,12 @@ fn release_path(field: &'static str, path: &Path, state_dir: &Path) -> Result<()
     usable.then_some(()).ok_or(Invalid::Path { field })
 }
 
-/// The record's value is the params table's.
-fn agrees<T: PartialEq + ?Sized>(
+/// The record's value is the params table's, spelt the same: compared as the bytes they are,
+/// so `/opt/x` and `/opt/x/` are two values.
+fn agrees(
     field: &'static str,
-    record: Option<&T>,
-    params: Option<&T>,
+    record: Option<&OsStr>,
+    params: Option<&OsStr>,
 ) -> Result<(), Invalid> {
     if record == params {
         Ok(())
@@ -119,6 +121,8 @@ fn agrees<T: PartialEq + ?Sized>(
 /// A version string.
 fn is_version(text: &str) -> bool {
     (1..=MAX_VERSION_LEN).contains(&text.len())
+        && !text.starts_with('-')
+        && !text.contains("..")
         && text
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'~' | b'-'))
@@ -171,26 +175,35 @@ pub fn validate(
     if let Some(previous) = &update.previous_target {
         release_path("previous_target", previous, state_dir)?;
     }
+    if update.previous.is_some() != update.previous_target.is_some() {
+        return Err(Invalid::Unpaired { side: "record" });
+    }
+    if params.previous_version.is_some() != params.previous_release.is_some() {
+        return Err(Invalid::Unpaired { side: "params" });
+    }
+    if update.previous_target.as_deref() == Some(update.staged.as_path()) {
+        return Err(Invalid::SameRelease);
+    }
     // The updater's table is the order; the record must say what the order said.
     agrees(
         "target",
-        Some(update.target.as_str()),
-        Some(params.target_version.as_str()),
+        Some(OsStr::new(&update.target)),
+        Some(OsStr::new(&params.target_version)),
     )?;
     agrees(
         "previous",
-        update.previous.as_deref(),
-        params.previous_version.as_deref(),
+        update.previous.as_deref().map(OsStr::new),
+        params.previous_version.as_deref().map(OsStr::new),
     )?;
     agrees(
         "staged",
-        Some(update.staged.as_path()),
-        Some(params.staged_release.as_path()),
+        Some(update.staged.as_os_str()),
+        Some(params.staged_release.as_os_str()),
     )?;
     agrees(
         "previous_target",
-        update.previous_target.as_deref(),
-        params.previous_release.as_deref(),
+        update.previous_target.as_deref().map(Path::as_os_str),
+        params.previous_release.as_deref().map(Path::as_os_str),
     )?;
     cordon(record, params)?;
     marks(record)
