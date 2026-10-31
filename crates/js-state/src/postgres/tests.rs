@@ -435,7 +435,10 @@ fn a_read_that_fails_keeps_its_session_only_when_the_server_refused_a_statement(
         .read(|s| s.client.query("SELECT $1::int8", &[&"not a number"]))
         .expect_err("the client cannot encode the parameter");
     let second = backend_pid(&store);
-    assert_ne!(second, first, "a failure the server did not answer drops it");
+    assert_ne!(
+        second, first,
+        "a failure the server did not answer drops it"
+    );
 
     let mut before = second;
     for _ in 0..50 {
@@ -474,7 +477,9 @@ fn a_commit_the_server_ends_the_backend_in_does_not_return_its_session() {
         let pending = store
             .begin(Txn::new().put("k", "v", Cond::Any))
             .expect("runs to the commit");
-        pending.commit().expect_err("the backend ends in the commit");
+        pending
+            .commit()
+            .expect_err("the backend ends in the commit");
         let after = backend_pid(&store);
         assert_ne!(after, before, "the dead session was handed out again");
         before = after;

@@ -54,6 +54,14 @@ impl Loan<'_> {
         &mut self.0.client
     }
 
+    /// Reports a failed call made on [`Loan::conn`], so the loan ends with the connection
+    /// dropped unless the server only refused a statement. A caller that returns its error
+    /// through [`store_error`] should report it here first: the client's own flag for a
+    /// closed connection can still read open just after the call that met the end.
+    pub fn note_failure(&mut self, err: &postgres::Error) {
+        self.0.note_failure(err);
+    }
+
     /// Drops the connection when the loan ends instead of pooling it: call it when the
     /// connection may be mid-transaction or otherwise in a state the next caller must not meet.
     pub fn discard(&mut self) {

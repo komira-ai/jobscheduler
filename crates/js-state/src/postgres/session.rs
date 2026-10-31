@@ -244,7 +244,6 @@ impl Session {
     /// the connection) marks it broken, without asking [`Conn::is_closed`]: the client
     /// reports the error to the caller before its connection task has finished, so the
     /// flag can still read open and the pool would hand the dead session out again.
-    #[allow(dead_code)]
     pub(super) fn note_failure(&mut self, err: &postgres::Error) {
         let kept = err
             .as_db_error()
