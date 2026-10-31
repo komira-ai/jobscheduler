@@ -246,6 +246,8 @@ mod session;
 mod signals;
 mod system;
 mod transport;
+#[cfg(target_os = "linux")]
+pub mod update_hook;
 pub mod usage;
 mod worker;
 
@@ -426,6 +428,24 @@ pub fn main_with(
         .is_some_and(|verb| verb.to_str() == Some(image::pull::VERB))
     {
         return image::pull::run(&args, out, err, &image::pull::Host::system());
+    }
+    // The updater's hook is answered here too, before `install()`: it is a short-lived
+    // step of another program, and installs no signal handler.
+    #[cfg(target_os = "linux")]
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(update_hook::VERB))
+    {
+        return update_hook::run(&args, out, err, &update_hook::Host::system());
+    }
+    // The verb's name is spelt out: its module is Linux code.
+    #[cfg(not(target_os = "linux"))]
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some("update-hook"))
+    {
+        let _ = writeln!(err, "update-hook: linux only");
+        return ExitCode::from(exit::FAILED);
     }
     match install() {
         Err(why) => fail(err, &why, exit::FAILED),
