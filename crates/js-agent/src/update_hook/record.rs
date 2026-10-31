@@ -324,13 +324,23 @@ impl Held {
     pub fn load(&self) -> Result<Option<Record>, StateError> {
         let path = self.record_path();
         let mut bytes = Vec::new();
-        match File::open(&path) {
+        // Without following a link and without waiting for a writer: a pipe put in the
+        // record's place is refused below, not waited on.
+        let opened = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path);
+        match opened {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(at(&path)(source)),
-            Ok(file) => file
-                .take(RECORD_MAX + 1)
-                .read_to_end(&mut bytes)
-                .map_err(at(&path))?,
+            Ok(file) => {
+                if !file.metadata().map_err(at(&path))?.is_file() {
+                    return Err(StateError::Corrupt("not a regular file".to_owned()));
+                }
+                file.take(RECORD_MAX + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(at(&path))?
+            }
         };
         if bytes.len() as u64 > RECORD_MAX {
             return Err(StateError::Corrupt(format!("more than {RECORD_MAX} bytes")));
@@ -357,17 +367,18 @@ impl Held {
     /// # Errors
     /// What [`Held::load`] says of the record that is there, or [`StateError::Io`].
     pub fn save(&self, record: &Record) -> Result<(), StateError> {
-        self.load()?;
         self.write_temp(record)?;
         self.commit()
     }
 
     /// The first half of a save: `record` written to the temporary file and synced. Public
-    /// so a test can stop here, as a crash does; the record is still the old one.
+    /// so a test can stop here, as a crash does; the record is still the old one. Like the
+    /// whole save, it refuses when the record that is there cannot be loaded.
     ///
     /// # Errors
-    /// [`StateError::Io`].
+    /// What [`Held::load`] says of the record that is there, or [`StateError::Io`].
     pub fn write_temp(&self, record: &Record) -> Result<(), StateError> {
+        self.load()?;
         let temp = self.dir.join(TEMP_FILE);
         let mut body = serde_json::to_vec_pretty(record)
             .map_err(io::Error::other)
@@ -378,6 +389,7 @@ impl Held {
             .create(true)
             .truncate(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(&temp)
             .map_err(at(&temp))?;
         file.write_all(&body)
@@ -389,8 +401,10 @@ impl Held {
     /// synced.
     ///
     /// # Errors
-    /// [`StateError::Io`], for instance when there is no temporary file.
+    /// What [`Held::load`] says of the record that is there, or [`StateError::Io`], for
+    /// instance when there is no temporary file.
     pub fn commit(&self) -> Result<(), StateError> {
+        self.load()?;
         let record = self.record_path();
         fs::rename(self.dir.join(TEMP_FILE), &record).map_err(at(&record))?;
         File::open(&self.dir)

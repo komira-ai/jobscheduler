@@ -1,4 +1,5 @@
-//! The two routes agents call, behind the join tokens.
+//! The routes agents call, behind the join tokens: the hello and the heartbeat, and the
+//! routes a host calls about itself ([`own_host`]).
 //!
 //! Every answer is a status and `{"error": "<code>"}` with a code from
 //! [`js_agent_wire::refusal`], or the message the route returns. Nothing the peer sent
@@ -17,7 +18,7 @@ use axum::extract::{DefaultBodyLimit, Extension, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, ProtocolRange, Welcome, refusal};
 use js_registry::{Credential, Refusal};
 use serde::Serialize;
@@ -29,6 +30,8 @@ use crate::api::{BODY_LIMIT, bearer};
 use crate::join_tokens::{Admission, JoinRefusal};
 use crate::util::blocking;
 
+mod own_host;
+
 /// The agent routes. The caller merges them into the server's router; they have no
 /// fallback of their own.
 pub(crate) fn router(agents: Arc<Agents>) -> Router {
@@ -36,6 +39,10 @@ pub(crate) fn router(agents: Arc<Agents>) -> Router {
     Router::new()
         .route("/v1/agent/hello", hello)
         .route("/v1/agent/heartbeat", post(heartbeat))
+        .route(
+            "/v1/hosts/{target}",
+            get(own_host::show).post(own_host::act),
+        )
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(from_fn_with_state(agents.clone(), authenticate))
         .with_state(agents)

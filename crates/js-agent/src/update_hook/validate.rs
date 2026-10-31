@@ -7,10 +7,12 @@
 //! the reason `state_invalid` and changes nothing. Where the record and the system disagree
 //! about what was done, the system is believed; that is a step's decision and not a rule here.
 
-use std::path::{Component, Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::Path;
 
 use super::declaration::Declaration;
 use super::params::Params;
+use super::plain::is_plain;
 use super::record::{Record, SCHEMA};
 
 /// The longest version string a record may hold.
@@ -58,6 +60,17 @@ pub enum Invalid {
         /// The record field.
         field: &'static str,
     },
+    /// Exactly one of the previous version and the previous release is present.
+    #[error(
+        "the previous version and the previous release must both be present or both absent in the {side}"
+    )]
+    Unpaired {
+        /// `record` or `params`.
+        side: &'static str,
+    },
+    /// The staged release and the previous release are the same directory.
+    #[error("the staged release and the previous release are the same")]
+    SameRelease,
     /// The target and the previous version are the same: there is nothing to update.
     #[error("target and previous version are the same")]
     SameVersion,
@@ -85,28 +98,18 @@ pub enum Invalid {
     },
 }
 
-/// Whether `path` is spelt the way it would be after canonicalising it lexically: absolute,
-/// no `.` or `..`, no doubled or trailing slash.
-fn is_plain(path: &Path) -> bool {
-    let rebuilt: PathBuf = path.components().collect();
-    path.is_absolute()
-        && path
-            .components()
-            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
-        && rebuilt.as_os_str() == path.as_os_str()
-}
-
 /// A release path: plain, not the root, and not in the state directory.
 fn release_path(field: &'static str, path: &Path, state_dir: &Path) -> Result<(), Invalid> {
     let usable = is_plain(path) && path.parent().is_some() && !path.starts_with(state_dir);
     usable.then_some(()).ok_or(Invalid::Path { field })
 }
 
-/// The record's value is the params table's.
-fn agrees<T: PartialEq + ?Sized>(
+/// The record's value is the params table's, spelt the same: compared as the bytes they are,
+/// so `/opt/x` and `/opt/x/` are two values.
+fn agrees(
     field: &'static str,
-    record: Option<&T>,
-    params: Option<&T>,
+    record: Option<&OsStr>,
+    params: Option<&OsStr>,
 ) -> Result<(), Invalid> {
     if record == params {
         Ok(())
@@ -118,6 +121,8 @@ fn agrees<T: PartialEq + ?Sized>(
 /// A version string.
 fn is_version(text: &str) -> bool {
     (1..=MAX_VERSION_LEN).contains(&text.len())
+        && !text.starts_with('-')
+        && !text.contains("..")
         && text
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'~' | b'-'))
@@ -170,26 +175,35 @@ pub fn validate(
     if let Some(previous) = &update.previous_target {
         release_path("previous_target", previous, state_dir)?;
     }
+    if update.previous.is_some() != update.previous_target.is_some() {
+        return Err(Invalid::Unpaired { side: "record" });
+    }
+    if params.previous_version.is_some() != params.previous_release.is_some() {
+        return Err(Invalid::Unpaired { side: "params" });
+    }
+    if update.previous_target.as_deref() == Some(update.staged.as_path()) {
+        return Err(Invalid::SameRelease);
+    }
     // The updater's table is the order; the record must say what the order said.
     agrees(
         "target",
-        Some(update.target.as_str()),
-        Some(params.target_version.as_str()),
+        Some(OsStr::new(&update.target)),
+        Some(OsStr::new(&params.target_version)),
     )?;
     agrees(
         "previous",
-        update.previous.as_deref(),
-        params.previous_version.as_deref(),
+        update.previous.as_deref().map(OsStr::new),
+        params.previous_version.as_deref().map(OsStr::new),
     )?;
     agrees(
         "staged",
-        Some(update.staged.as_path()),
-        Some(params.staged_release.as_path()),
+        Some(update.staged.as_os_str()),
+        Some(params.staged_release.as_os_str()),
     )?;
     agrees(
         "previous_target",
-        update.previous_target.as_deref(),
-        params.previous_release.as_deref(),
+        update.previous_target.as_deref().map(Path::as_os_str),
+        params.previous_release.as_deref().map(Path::as_os_str),
     )?;
     cordon(record, params)?;
     marks(record)

@@ -371,17 +371,115 @@ fn what_is_not_a_record_of_this_schema_is_corrupt() {
     assert_eq!(held.load().unwrap(), Some(record("1.4.0")));
 }
 
+/// Runs `work` on a thread and fails the test, instead of hanging it, if it does not return.
+fn within<T: Send + 'static>(what: &str, work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(work());
+    });
+    receive
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .unwrap_or_else(|_| panic!("{what} blocked"))
+}
+
+fn fifo(path: &Path) {
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        0,
+    )
+    .unwrap();
+}
+
 #[test]
-fn a_record_that_cannot_be_read_is_an_io_error() {
-    let dir = cell("hook-record-unreadable");
+fn a_directory_in_place_of_the_record_is_not_a_record() {
+    let dir = cell("hook-record-irregular");
     let held = Held::open(dir.path(), &as_root).unwrap();
-    // A directory opens and cannot be read.
     fs::create_dir(held.record_path()).unwrap();
+    assert!(matches!(held.load(), Err(StateError::Corrupt(_))));
+}
+
+#[test]
+fn a_fifo_in_place_of_the_record_is_refused_without_blocking() {
+    let dir = cell("hook-record-fifo");
+    let record = dir.path().join(RECORD_FILE);
+    fifo(&record);
+    let path = dir.path().to_owned();
+    let loaded = within("loading a FIFO record", move || {
+        Held::open(&path, &as_root).unwrap().load()
+    });
+    assert!(matches!(loaded, Err(StateError::Corrupt(_))), "{loaded:?}");
+}
+
+#[test]
+fn a_symbolic_link_in_place_of_the_record_or_its_temporary_file_is_not_followed() {
+    let dir = cell("hook-record-links");
+    let held = Held::open(dir.path(), &as_root).unwrap();
+    let elsewhere = dir.path().join("elsewhere");
+    fs::write(&elsewhere, serde_json::to_string(&record("1.4.0")).unwrap()).unwrap();
+    // A link to a good record is not that record.
+    symlink(&elsewhere, held.record_path()).unwrap();
     assert!(matches!(held.load(), Err(StateError::Io { .. })));
-    fs::remove_dir(held.record_path()).unwrap();
-    // A link to itself cannot be opened, and is not "absent".
+    fs::remove_file(held.record_path()).unwrap();
+    // A link to itself, and a dangling one, are not "absent".
     symlink(RECORD_FILE, held.record_path()).unwrap();
     assert!(matches!(held.load(), Err(StateError::Io { .. })));
+    fs::remove_file(held.record_path()).unwrap();
+    symlink(dir.path().join("nothing"), held.record_path()).unwrap();
+    assert!(matches!(held.load(), Err(StateError::Io { .. })));
+    fs::remove_file(held.record_path()).unwrap();
+
+    // The temporary file is not written through a link.
+    let before = fs::read(&elsewhere).unwrap();
+    symlink(&elsewhere, dir.path().join(TEMP_FILE)).unwrap();
+    assert!(matches!(
+        held.write_temp(&record("1.5.0")),
+        Err(StateError::Io { .. })
+    ));
+    assert_eq!(fs::read(&elsewhere).unwrap(), before);
+}
+
+#[test]
+fn a_fifo_in_place_of_the_temporary_file_does_not_block_the_save() {
+    let dir = cell("hook-record-fifo-temp");
+    let path = dir.path().to_owned();
+    fifo(&path.join(TEMP_FILE));
+    let saved = within("saving over a FIFO", move || {
+        Held::open(&path, &as_root).unwrap().save(&record("1.4.0"))
+    });
+    assert!(matches!(saved, Err(StateError::Io { .. })), "{saved:?}");
+}
+
+#[test]
+fn the_size_limit_is_exact() {
+    let dir = cell("hook-record-limit");
+    let held = Held::open(dir.path(), &as_root).unwrap();
+    let good = serde_json::to_string(&record("1.4.0")).unwrap();
+    let limit = usize::try_from(RECORD_MAX).unwrap();
+    let padded = |len: usize| format!("{good}{}", " ".repeat(len - good.len()));
+    fs::write(held.record_path(), padded(limit)).unwrap();
+    assert_eq!(held.load().unwrap(), Some(record("1.4.0")));
+    fs::write(held.record_path(), padded(limit + 1)).unwrap();
+    assert!(matches!(held.load(), Err(StateError::Corrupt(_))));
+}
+
+#[test]
+fn both_halves_of_a_save_refuse_a_record_of_a_newer_schema() {
+    let dir = cell("hook-record-newer-halves");
+    let held = Held::open(dir.path(), &as_root).unwrap();
+    let future = br#"{"schema":2}"#;
+    fs::write(held.record_path(), future).unwrap();
+    assert!(matches!(
+        held.write_temp(&record("1.4.0")),
+        Err(StateError::Newer { found: 2 })
+    ));
+    assert!(!dir.path().join(TEMP_FILE).exists());
+    // A temporary file that is there (a crash, or another hand) is not committed over it.
+    fs::write(dir.path().join(TEMP_FILE), "{}").unwrap();
+    assert!(matches!(held.commit(), Err(StateError::Newer { found: 2 })));
+    assert_eq!(fs::read(held.record_path()).unwrap(), future);
 }
 
 #[test]

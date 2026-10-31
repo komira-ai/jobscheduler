@@ -16,6 +16,7 @@
 mod args;
 mod declaration;
 mod params;
+mod plain;
 mod ports;
 mod record;
 mod report;
