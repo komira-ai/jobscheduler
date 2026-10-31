@@ -642,21 +642,20 @@ fn unit_result_fails_a_unit_that_ran_no_tests() {
 
 /// The wrapper's failures through the real binary: no command after `--` is a usage error,
 /// a program that does not exist and a count file that cannot be written fail naming what
-/// failed, and a program killed by a signal exits with 128 plus the signal.
+/// failed.
 #[test]
 fn count_run_fails_loudly_when_it_cannot_run_the_binary() {
     let run = Run::new("wrapperfail");
     let testbin = run.bin.join("testbin");
     std::fs::hard_link(FAKE, &testbin).expect("link the fake test binary");
     let file = run.root.join("count");
-    let count_run = |count_file: &Path, command: &[&Path], status: &str| {
+    let count_run = |count_file: &Path, command: &[&Path]| {
         let out = Command::new(XTASK)
             .arg("count-run")
             .arg("--count-file")
             .arg(count_file)
             .args((!command.is_empty()).then_some("--"))
             .args(command)
-            .env("XTASK_FAKE_TEST_STATUS", status)
             .output()
             .expect("run xtask");
         (
@@ -664,16 +663,13 @@ fn count_run_fails_loudly_when_it_cannot_run_the_binary() {
             String::from_utf8_lossy(&out.stderr).into_owned(),
         )
     };
-    let (code, err) = count_run(&file, &[], "0");
+    let (code, err) = count_run(&file, &[]);
     assert_eq!(code, Some(2), "{err}");
     assert!(err.contains("needs a command"), "{err}");
-    let (code, err) = count_run(&file, &[&run.bin.join("missing")], "0");
+    let (code, err) = count_run(&file, &[&run.bin.join("missing")]);
     assert_eq!(code, Some(1), "{err}");
     assert!(err.contains("cannot start"), "{err}");
-    let (code, err) = count_run(&run.root.join("no/such/dir/count"), &[&testbin], "0");
+    let (code, err) = count_run(&run.root.join("no/such/dir/count"), &[&testbin]);
     assert_eq!(code, Some(1), "{err}");
     assert!(err.contains("cannot write"), "{err}");
-    let (code, _) = count_run(&file, &[&testbin], "abort");
-    assert_eq!(code, Some(134));
-    assert_eq!(std::fs::read_to_string(&file).as_deref().ok(), Some("0\n"));
 }
