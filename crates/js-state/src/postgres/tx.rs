@@ -138,9 +138,10 @@ impl<'p> Tx<'p> {
         self.open = false;
         if let Err(err) = self.session.client.batch_execute("COMMIT") {
             // A refusal from the server (a serialization failure) leaves the session
-            // usable. A lost connection leaves it unknown whether the commit happened,
-            // and the session is not reused.
-            self.session.broken = err.as_db_error().is_none();
+            // usable. A lost connection, including the server's FATAL as it ends the
+            // backend, leaves it unknown whether the commit happened, and the session is
+            // not reused.
+            self.session.note_failure(&err);
             return Err(err.into());
         }
         Ok(())
