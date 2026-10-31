@@ -80,7 +80,8 @@ pub fn run(count_file: &Path, command: &[OsString]) -> Result<String, Error> {
     let (mut count, mut line) = (0u64, Vec::new());
     loop {
         line.clear();
-        if !matches!(reader.read_until(b'\n', &mut line), Ok(n) if n > 0) {
+        // A read that fails ends the reading like the end of the output does.
+        if reader.read_until(b'\n', &mut line).unwrap_or(0) == 0 {
             break;
         }
         count += passed_in(String::from_utf8_lossy(&line).trim_end()).unwrap_or(0);
