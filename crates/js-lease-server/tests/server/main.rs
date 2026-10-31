@@ -5,6 +5,7 @@
 //! runs a lease holder queues on a registered host.
 
 mod agents;
+mod agents_cordon;
 mod agents_contract;
 mod agents_load;
 mod agents_no_shared_token;
