@@ -4,9 +4,11 @@ use crate::facts::FileReader;
 
 pub use js_agent_usage::{LeaseSample, Sample};
 
+use std::path::Path;
+
 use super::cgroup::{
-    cpu_limited, parse_active_file, parse_inactive_file, parse_single_u64, parse_usage_usec,
-    working_set,
+    cpu_limited, layout_of, parse_active_file, parse_inactive_file, parse_single_u64,
+    parse_usage_usec, working_set,
 };
 use super::clock::UsageClock;
 
@@ -103,6 +105,9 @@ impl<F: FileReader> Sampler<F> {
 
     fn lease(&self, lease: &LeaseCgroup) -> Option<LeaseSample> {
         let dir = lease.dir.as_str();
+        // A directory that is not below the actions group is not a lease's: its numbers
+        // would be another tree's, or the node's, reported as the lease's.
+        layout_of(Path::new(dir), Path::new(&self.actions_dir))?;
         let cpu = self.value(dir, "cpu.stat", parse_usage_usec)?;
         let current = self.value(dir, "memory.current", parse_single_u64)?;
         let inactive = self.value(dir, "memory.stat", parse_inactive_file)?;

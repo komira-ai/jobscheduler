@@ -1,5 +1,50 @@
-//! Readers for the text of cgroup version 2 files. Each returns `None` for text it does
-//! not fully understand; none guesses a number.
+//! Readers for the text of cgroup version 2 files, and the rule for which directories a
+//! lease's usage may be read from. Each reader returns `None` for text it does not fully
+//! understand; none guesses a number.
+
+use std::ffi::OsStr;
+use std::path::{Component, Path};
+
+/// How a lease's control group sits below the actions control group.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// A container engine's own placement: any directory strictly below the actions group
+    /// (Podman's `libpod-<id>.scope` and its `container` child).
+    Engine,
+    /// The direct runner's placement: `<actions>/<lease>/ctr`, the container's group as a
+    /// child of its lease's group.
+    Crun,
+}
+
+/// The name of a container's group below its lease's, as the direct runner makes it.
+const CTR: &str = "ctr";
+
+/// The layout of `dir` below `actions`, or `None` when `dir` is not a lease's group: both
+/// paths must be absolute and free of `..`, and `dir` must be strictly below `actions`,
+/// compared by whole path components (a name that only starts like `actions` is another
+/// group).
+pub fn layout_of(dir: &Path, actions: &Path) -> Option<Layout> {
+    let plain = |path: &Path| {
+        path.is_absolute()
+            && path
+                .components()
+                .all(|part| !matches!(part, Component::ParentDir | Component::CurDir))
+    };
+    if !plain(dir) || !plain(actions) {
+        return None;
+    }
+    let below: Vec<&OsStr> = dir
+        .strip_prefix(actions)
+        .ok()?
+        .components()
+        .map(Component::as_os_str)
+        .collect();
+    match below.as_slice() {
+        [] => None,
+        [_, ctr] if *ctr == CTR => Some(Layout::Crun),
+        _ => Some(Layout::Engine),
+    }
+}
 
 /// The value of the line `key value` in a flat-keyed file such as `cpu.stat`.
 ///
