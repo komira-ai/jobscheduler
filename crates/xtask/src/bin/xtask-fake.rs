@@ -11,6 +11,12 @@
 //!   `systemctl show <unit> ...`, it prints the properties of a unit whose main process
 //!   exited 0; asked for `systemctl reset-failed`, it does nothing.
 //!
+//!   Asked for `systemd-run ... count-run --count-file <path> -- ...`, it writes the count file
+//!   the real wrapper would have, as the defect asks: `3` (no defect), or `0` (`zero-tests`),
+//!   nothing (`no-count`), `many` (`garbled-count`).
+//! - Run as `testbin`, it is a test binary: it prints the environment's `XTASK_FAKE_TEST_OUTPUT`
+//!   and exits with `XTASK_FAKE_TEST_STATUS` (default 0).
+//!
 //! `XTASK_FAKE_DEFECT` asks for one failure of the real programs: `build-fails` (every build
 //! exits 101) or `fails:<a>,<b>,...` (sudo exits 101, as a failed test binary does, when one
 //! of its arguments is one of `<a>`, `<b>`, ...: an argument every unit has fails them all,
@@ -63,11 +69,40 @@ fn sudo(me: &Path, args: &[String]) -> ExitCode {
     if args.get(1).is_some_and(|program| program == "systemctl") {
         return systemctl(&args[2..], &defect);
     }
+    if args.get(1).is_some_and(|program| program == "systemd-run") {
+        write_count(args, &defect);
+    }
     if failing {
         ExitCode::from(101)
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// What the wrapper in a `systemd-run` command would have written to its count file.
+fn write_count(args: &[String], defect: &str) {
+    let Some(at) = args.iter().position(|a| a == "--count-file") else {
+        return;
+    };
+    let text = match defect {
+        "no-count" => return,
+        "zero-tests" => "0\n",
+        "garbled-count" => "many\n",
+        _ => "3\n",
+    };
+    let file = Path::new(&args[at + 1]);
+    std::fs::create_dir_all(file.parent().expect("parent")).expect("directory");
+    std::fs::write(file, text).expect("write the count");
+}
+
+/// The fake test binary: prints what the test asked for and exits as it asked.
+fn testbin() -> ExitCode {
+    print!(
+        "{}",
+        std::env::var("XTASK_FAKE_TEST_OUTPUT").unwrap_or_default()
+    );
+    let status = std::env::var("XTASK_FAKE_TEST_STATUS").unwrap_or_default();
+    ExitCode::from(status.parse().unwrap_or(0))
 }
 
 /// The fake `systemctl`, behind sudo: what `show` prints for the unit, as asked.
@@ -90,8 +125,11 @@ fn main() -> ExitCode {
     let mut argv = std::env::args();
     let me = std::path::PathBuf::from(argv.next().expect("argv0"));
     let args: Vec<String> = argv.collect();
-    if me.file_name().is_some_and(|name| name == "sudo") {
+    let name = me.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    if name == "sudo" {
         sudo(&me, &args)
+    } else if name == "testbin" {
+        testbin()
     } else {
         cargo(&args)
     }

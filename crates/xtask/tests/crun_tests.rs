@@ -575,7 +575,12 @@ fn count_run_counts_the_tests_the_binary_reports() {
             .output()
             .expect("run xtask");
         assert_eq!(out.status.code(), *want_code, "case {i}");
-        assert_eq!(String::from_utf8_lossy(&out.stdout), *output, "case {i}");
+        let said = if *want_code == Some(0) {
+            format!("{output}{} tests ran\n", want_count.trim())
+        } else {
+            (*output).to_owned()
+        };
+        assert_eq!(String::from_utf8_lossy(&out.stdout), said, "case {i}");
         assert_eq!(
             std::fs::read_to_string(&file).as_deref().ok(),
             Some(*want_count),
