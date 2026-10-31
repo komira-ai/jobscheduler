@@ -225,6 +225,7 @@ pub mod image;
 pub mod integrity;
 mod jobs;
 pub mod lifecycle;
+pub mod native;
 pub mod quota;
 mod readiness;
 mod run;

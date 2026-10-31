@@ -267,8 +267,9 @@
 
 mod args;
 mod logs;
-pub use logs::LOGS_LIMIT;
+#[cfg(target_os = "linux")]
 pub(crate) use logs::text_of;
+pub use logs::{LOGS_LIMIT, tail_of};
 mod seccomp;
 mod settings;
 mod subid;
@@ -379,6 +380,9 @@ pub enum CliError {
     /// A host job reached the container runtime.
     #[error("only a contained job runs in a container")]
     NotContained,
+    /// A native body reached the container runtime.
+    #[error("a native job does not run in a container")]
+    NativeBody,
     /// A job named a GPU on a host whose containers cannot reach one.
     #[error("containers on this host cannot use a GPU")]
     GpuUnsupported,
@@ -821,7 +825,10 @@ impl CliRuntime {
         let Body::Container {
             image,
             args: command,
-        } = &spec.body;
+        } = &spec.body
+        else {
+            return Err(CliError::NativeBody);
+        };
         args.extend(["--".to_owned(), image.clone()]);
         args.extend(command.iter().cloned());
         Ok(args)
