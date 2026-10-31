@@ -215,7 +215,7 @@ fn usage_errors_and_help() {
     // The line the node-setup script reads to know `--runtime crun` is wired.
     let runtimes = match cfg!(target_os = "linux") {
         true => "runtimes: docker crun",
-        false => "runtimes: docker",
+        false => "runtimes: docker native",
     };
     let lines: Vec<&str> = version.out.lines().collect();
     assert_eq!(lines.len(), 2, "{}", version.out);
