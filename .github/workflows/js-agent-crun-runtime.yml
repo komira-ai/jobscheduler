@@ -77,13 +77,15 @@ jobs:
             aarch64) manifest=$BUSYBOX_ARM64 ;;
             *) echo "no busybox for $(uname -m)"; exit 1 ;;
           esac
+          rc=0
           sudo -n systemd-run --quiet --wait --pipe \
             --unit=js-crun-runtime --slice=js-agent.slice \
             -p Delegate=yes -p OOMScoreAdjust=-900 \
             --working-directory="$GITHUB_WORKSPACE/crates/js-agent" \
             -E "PATH=$PATH" -E JS_JOB_USER=js-job \
             -E "JS_TEST_IMAGE=docker://docker.io/library/busybox@$manifest" \
-            "$EXE" --include-ignored --test-threads=2
+            "$EXE" --include-ignored --test-threads=2 || rc=$?
           # systemd-run's exit status is not trusted (it exited 0 after a unit's binary
-          # failed): the unit's own result is read, and the unit is reset.
+          # failed): the unit's own result is read whatever it said, and the unit is reset.
           cargo xtask unit-result --unit js-crun-runtime
+          exit "$rc"

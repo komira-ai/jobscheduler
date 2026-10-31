@@ -59,8 +59,11 @@ fn sudo(me: &Path, args: &[String]) -> ExitCode {
     let failing = defect
         .strip_prefix("fails:")
         .is_some_and(|list| list.split(',').any(|name| args.iter().any(|a| a == name)));
-    if args.first().is_some_and(|a| a == "systemctl") {
-        return systemctl(&args[1..], &defect);
+    // `sudo -n <command>...`.
+    if let [_, program, rest @ ..] = args
+        && program == "systemctl"
+    {
+        return systemctl(rest, &defect);
     }
     if failing {
         ExitCode::from(101)
