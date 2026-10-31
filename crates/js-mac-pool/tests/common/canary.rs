@@ -4,18 +4,23 @@
 //! entry, a link included, without following it), under a name nobody can predict, and a
 //! path is recorded for removal only when this call made the file.
 
+use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 /// Makes `path` with `content`, failing if anything is there, a symbolic link included.
 pub fn create_exclusive(path: &Path, content: &str) -> std::io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = open_exclusive(path)?;
+    file.write_all(content.as_bytes())
+}
+
+fn open_exclusive(path: &Path) -> std::io::Result<File> {
+    std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o644)
-        .open(path)?;
-    file.write_all(content.as_bytes())
+        .open(path)
 }
 
 /// Eight random bytes as hex, from the system's source.
@@ -43,9 +48,26 @@ impl Cleanup {
     /// Makes a file named `<prefix>-<random>` in `dir`, records it, and returns its path.
     /// A name that is taken (a planted entry, say) is skipped, never written through.
     pub fn create_unique(&mut self, dir: &Path, prefix: &str, content: &str) -> PathBuf {
+        self.create_unique_with(dir, prefix, unpredictable, |file| {
+            file.write_all(content.as_bytes())
+        })
+    }
+
+    /// `create_unique` with the name source and the writer given, so a test can make a
+    /// name collide or a write fail.
+    pub fn create_unique_with(
+        &mut self,
+        dir: &Path,
+        prefix: &str,
+        mut name: impl FnMut() -> String,
+        mut write: impl FnMut(&mut File) -> std::io::Result<()>,
+    ) -> PathBuf {
         for _ in 0..16 {
-            let path = dir.join(format!("{prefix}-{}", unpredictable()));
-            if create_exclusive(&path, content).is_ok() {
+            let path = dir.join(format!("{prefix}-{}", name()));
+            let Ok(mut file) = open_exclusive(&path) else {
+                continue;
+            };
+            if write(&mut file).is_ok() {
                 self.record(path.clone());
                 return path;
             }
