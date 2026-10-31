@@ -163,6 +163,15 @@ impl World {
         fs::remove_file(self.lease_file()).unwrap();
     }
 
+    /// The server loses its state file as well: nothing saved is restored by the next hello.
+    ///
+    /// # Panics
+    /// A file cannot be removed.
+    pub fn lose_state_file(&self) {
+        self.forget_host();
+        let _ = fs::remove_file(self.world.join("lease-saved.json"));
+    }
+
     /// Changes the server's stored view of the host, as the server would on its own.
     ///
     /// # Panics

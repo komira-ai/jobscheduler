@@ -292,8 +292,11 @@ fn a_server_that_restarted_forgets_the_host_and_the_next_hello_makes_it_again_fr
         (1, Some("1.4.0"))
     );
     assert_eq!(host.session_started_ms, Some(START_MS + 5_000));
-    assert_eq!(host.cordon, None, "the new server holds no cordon");
     assert_eq!(host.id, HOST, "the host keeps its id");
+    // The cordon was saved with the host's binding: a restart does not lift it.
+    assert_eq!(host.cordon.unwrap().expires_at_ms, START_MS + 60_000);
+    w.pause(Duration::from_secs(55));
+    assert_eq!(w.host().unwrap().cordon, None, "it lapses when it was to");
 }
 
 #[test]
@@ -396,4 +399,59 @@ fn a_first_install_has_no_link_and_the_server_knows_no_host() {
     assert_eq!(rig.world.target(link), Ok(None));
     assert_eq!(rig.world.host().unwrap_err(), LeaseError::UnknownHost);
     assert_eq!(rig.points(), 0);
+}
+
+#[test]
+fn a_restart_keeps_a_saved_taint_and_a_cordon_that_lapsed_meanwhile_is_not_restored() {
+    let rig = Rig::new("hook-fake-restart-taint");
+    let w = &rig.world;
+    w.seed_host(HOST, "1.0");
+    w.alter_host(|host| {
+        host.taint = Some(Taint {
+            reason: "residue".to_owned(),
+            run_id: None,
+            check: None,
+        });
+    });
+    w.cordon(30).unwrap();
+    w.forget_host();
+    w.pause(Duration::from_secs(31));
+    w.hello("1.1").unwrap();
+    let host = w.host().unwrap();
+    assert_eq!(host.taint.unwrap().reason, "residue");
+    assert_eq!(host.cordon, None);
+    assert_eq!(host.epoch, 1);
+}
+
+#[test]
+fn losing_the_state_file_loses_the_cordon_and_the_taint_too() {
+    let rig = Rig::new("hook-fake-state-file-lost");
+    let w = &rig.world;
+    w.seed_host(HOST, "1.0");
+    w.alter_host(|host| {
+        host.taint = Some(Taint {
+            reason: "residue".to_owned(),
+            run_id: None,
+            check: None,
+        });
+    });
+    w.cordon(60).unwrap();
+    w.lose_state_file();
+    w.hello("1.1").unwrap();
+    let host = w.host().unwrap();
+    assert_eq!((host.cordon, host.taint), (None, None));
+}
+
+#[test]
+fn starting_a_unit_from_a_release_the_params_never_named_fails_and_changes_nothing() {
+    let rig = Rig::new("hook-fake-unregistered");
+    let w = &rig.world;
+    w.relink(
+        Path::new("/opt/js-agent/current"),
+        Path::new("/opt/js-agent/releases/mystery"),
+    )
+    .unwrap();
+    let why = w.start(UNIT).unwrap_err();
+    assert!(format!("{why}").contains("mystery"), "{why}");
+    assert_eq!(w.is_active(UNIT), Ok(false));
 }
