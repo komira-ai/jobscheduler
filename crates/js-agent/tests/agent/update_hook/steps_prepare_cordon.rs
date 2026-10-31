@@ -6,7 +6,7 @@
 use std::fs;
 
 use js_agent::update_hook::{
-    Class, Cordon, DirStat, Done, Held, Lease, Outcome, Reason, StateError, step, validate,
+    Class, Clock, Cordon, DirStat, Done, Held, Lease, Outcome, Reason, StateError, step, validate,
 };
 use serde_json::{Value, json};
 
@@ -295,18 +295,83 @@ fn a_lease_server_that_fails_during_the_wait_ends_the_step_there() {
     assert_eq!(rig.world.ticks(), 16);
 }
 
-#[test]
-fn a_cordon_that_cannot_be_lifted_after_the_bound_is_a_failure_that_keeps_the_record() {
-    let rig = Rig::new("hook-prepare-down-uncordon");
+/// Runs the prepare that ends at the drain bound with the final uncordon failing.
+fn blipped(rig: &Rig) -> (Done, Vec<String>) {
     rig.set_leases(1);
-    let spy = Spy::new(&rig);
+    let spy = Spy::new(rig);
     spy.fail("uncordon");
-    lease_unreachable(&spy.prepare(&rig));
-    assert!(
-        rig.record().unwrap().cordon.placed,
-        "a retry or a rollback lifts it"
+    let done = spy.prepare(rig);
+    (done, spy.log())
+}
+
+#[test]
+fn a_blip_on_the_final_uncordon_still_defers_with_the_failure_in_the_detail() {
+    let rig = Rig::new("hook-prepare-blip-uncordon");
+    let (done, _) = blipped(&rig);
+    assert_eq!(done.outcome, Outcome::Deferred);
+    assert_eq!(done.report.reason, Some(Reason::DrainBound));
+    assert_eq!(done.report.class, Class::Environment);
+    assert_eq!(
+        done.report.retry_after_secs,
+        Some(rig.params.defer_retry_secs)
     );
-    assert!(rig.cordon_expiry().is_some());
+    let detail = done.report.detail.unwrap();
+    assert!(detail.contains("uncordon is down"), "{detail}");
+}
+
+#[test]
+fn a_blip_on_the_final_uncordon_leaves_the_recorded_cordon_with_its_expiry() {
+    let rig = Rig::new("hook-prepare-blip-record");
+    blipped(&rig);
+    let record = rig.record().unwrap();
+    assert!(record.cordon.placed && !record.cordon.provisional);
+    assert_eq!(record.cordon.first_ms, START);
+    assert_eq!(Some(record.cordon.expires_ms), rig.cordon_expiry());
+    assert_eq!(validate(&record, &rig.declaration, &rig.params), Ok(()));
+}
+
+#[test]
+fn a_blip_on_the_final_uncordon_stops_no_unit_and_moves_no_link() {
+    let rig = Rig::new("hook-prepare-blip-no-acts");
+    let (_, log) = blipped(&rig);
+    assert!(
+        log.iter()
+            .all(|call| !call.starts_with("units.") && !call.starts_with("link.")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_rerun_after_a_blip_on_the_final_uncordon_adopts_its_own_cordon() {
+    let rig = Rig::new("hook-prepare-blip-rerun");
+    blipped(&rig);
+    let first = rig.record().unwrap().cordon;
+    rig.set_leases(0);
+    let spy = Spy::new(&rig);
+    assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
+    let cordon = rig.record().unwrap().cordon;
+    assert!(cordon.placed && !cordon.provisional);
+    assert_eq!(cordon.first_ms, START);
+    assert!(cordon.expires_ms >= first.expires_ms);
+}
+
+#[test]
+fn a_rerun_after_a_blip_on_the_final_uncordon_places_again_once_the_cordon_lapsed() {
+    let rig = Rig::new("hook-prepare-blip-lapsed");
+    blipped(&rig);
+    let first = rig.record().unwrap().cordon;
+    rig.world
+        .pause(std::time::Duration::from_secs(2 * LEASE_SECS));
+    assert_eq!(rig.cordon_expiry(), None, "lapsed on its own");
+    rig.set_leases(0);
+    let spy = Spy::new(&rig);
+    assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
+    let cordon = rig.record().unwrap().cordon;
+    assert!(cordon.placed && !cordon.provisional);
+    assert_eq!(cordon.first_ms, START);
+    assert!(cordon.expires_ms > first.expires_ms);
+    assert_eq!(Some(cordon.expires_ms), rig.cordon_expiry());
+    assert_eq!(cordon_calls(&spy).len(), 1);
 }
 
 /// A record that breaks a rule is refused with nothing changed.

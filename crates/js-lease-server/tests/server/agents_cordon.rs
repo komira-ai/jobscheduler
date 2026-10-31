@@ -10,10 +10,11 @@ use js_lease_server::BODY_LIMIT;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, Session, entry, hello_body, hosts, post, restarted, session, start_agents,
+    JOIN, POOL, Session, agent_args, entry, hello_body, hosts, post, restarted, session,
+    start_agents,
 };
 use crate::joins::{beat_with, code, hello, minted};
-use crate::support::{Harness, Reply, T0, lease_body, request};
+use crate::support::{Harness, Reply, Scratch, T0, lease_body, request};
 
 /// The default length of a cordon asked for with no length, and the longest one a request
 /// can ask for, in seconds.
@@ -709,4 +710,51 @@ async fn the_listing_shows_a_cordon_and_only_the_cordon() {
 
     assert_eq!(uncordon(&h, "burst-1", &one).await.status, 200);
     assert!(entry(&hosts(&h).await, "burst-1").get("cordon").is_none());
+}
+
+/// A server with agent registration on whose pool serves the `whole-node` class.
+async fn start_whole(name: &str) -> Harness {
+    let scratch = Scratch::new(name);
+    let args = agent_args(&scratch, false);
+    let pool = POOL.replace("gpu-host", "whole-node");
+    scratch.write("agent-pool.toml", &pool, 0o644);
+    Harness::with(scratch, args, None).await
+}
+
+/// Asserts the `mark` of the host's own reading: a host that is not set aside reads without
+/// the key, as it does in the listing; a host a whole-node lease is committed on reads with
+/// the mark, pending and held, and it is the very value `GET /v1/hosts` lists for it. It
+/// catches a reading that leaves the mark out, which would make a host that is set aside look
+/// idle to a caller that reads only its own host, and a mark that names a state differently
+/// from the listing.
+#[tokio::test]
+async fn a_host_that_is_set_aside_reads_the_mark_the_listing_shows() {
+    let h = start_whole("cordon_mark").await;
+    let me = enrolled(&h, "burst-1", "i-1").await;
+    let plain = show(&h, "burst-1", &me).await;
+    assert!(plain.get("mark").is_none(), "{plain}");
+    assert!(entry(&hosts(&h).await, "burst-1").get("mark").is_none());
+
+    let mut body = lease_body();
+    body["class"] = json!("whole-node");
+    let asked = h.call("POST", "/v1/leases", Some(&body)).await;
+    assert_eq!(asked.status, 202, "{}", asked.body);
+    let waiting = show(&h, "burst-1", &me).await;
+    assert_eq!(
+        waiting.get("mark"),
+        entry(&hosts(&h).await, "burst-1").get("mark"),
+        "{waiting}"
+    );
+
+    let beat = beat_with(&h, &me.credential, &me.session).await;
+    let lease = beat.json()["exclusive"].as_str().unwrap().to_string();
+    let mut ready = me.session.beat();
+    ready["exclusive_ready"] = json!(lease);
+    let sent = post(&h, "/v1/agent/heartbeat", Some(&me.credential), &ready).await;
+    assert_eq!(sent.status, 200, "{}", sent.body);
+    h.ticks.step().await;
+    let held = show(&h, "burst-1", &me).await;
+    let listed = entry(&hosts(&h).await, "burst-1");
+    assert!(held["mark"].is_string(), "{held}");
+    assert_eq!(held.get("mark"), listed.get("mark"), "{held} {listed}");
 }

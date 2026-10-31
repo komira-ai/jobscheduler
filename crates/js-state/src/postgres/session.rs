@@ -6,6 +6,7 @@
 use std::ops::{Bound, Deref, DerefMut};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
+use postgres::error::Severity;
 use postgres::{Config, Statement};
 
 use super::Fail;
@@ -234,6 +235,23 @@ fn connect(config: &Config, schema: &str, judge: Option<Supported>) -> Result<Se
         st,
         broken: false,
     })
+}
+
+impl Session {
+    /// Records a failed call on this session. Only an error the server answered with, and
+    /// that leaves the connection open (a statement refused), keeps the session fit for
+    /// reuse. Any other error (a lost connection, a `FATAL` the server sent as it closed
+    /// the connection) marks it broken, without asking [`Conn::is_closed`]: the client
+    /// reports the error to the caller before its connection task has finished, so the
+    /// flag can still read open and the pool would hand the dead session out again.
+    pub(super) fn note_failure(&mut self, err: &postgres::Error) {
+        let kept = err
+            .as_db_error()
+            .is_some_and(|db| db.parsed_severity() == Some(Severity::Error));
+        if !kept {
+            self.broken = true;
+        }
+    }
 }
 
 fn refuse(err: SchemaError) -> Fail {

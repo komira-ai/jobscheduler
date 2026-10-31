@@ -16,6 +16,7 @@ mod bounds;
 mod bundle;
 mod cli_runtime;
 mod container;
+mod cordon;
 mod credential;
 mod credential_e2e;
 #[cfg(target_os = "linux")]

@@ -1,7 +1,8 @@
 //! `prepare` (host-updates design, 4.2, 3.6): check that the host can take the update, then
 //! cordon it and wait for it to hold no lease. Nothing a client sees changes, and the agent is
 //! never stopped or signalled here: a drain bound that passes with a lease still running lifts
-//! the cordon this step placed and ends deferred (75).
+//! the cordon this step placed and ends deferred (75); if the lift fails the cordon stays as
+//! recorded and the step still ends deferred.
 //!
 //! In this order, each before anything is written unless it says so:
 //! 1. the lock, the record (if there is one) and the params agree; a record that breaks a rule
@@ -191,6 +192,10 @@ pub(super) fn place(
     let ours_before = record.cordon.placed;
     let ask = ask_secs(&record.cordon, params, now);
     if ask == 0 {
+        // The cap bounds the host's total time out of service across retries, counted from the
+        // first placement. A prepare resumed after `cordon_max_secs` has passed since then
+        // fails here on every retry, until rollback deletes the record: deliberate, not a
+        // bug to retry past.
         // The host's own history, not the release: an environment matter.
         let mut done = failure(
             Reason::CordonCapReached,
@@ -286,11 +291,28 @@ fn defer(
     params: &Params,
     host: &HostReading,
 ) -> Result<Done, Done> {
+    // A cordon that cannot be lifted is left as recorded (placed, with its expiry): the next
+    // prepare, cleanup or rollback handles it, and it lapses on its own within one lease. The
+    // deferral stands; the failure goes in the detail.
+    let mut left = None;
     if record.cordon.placed {
         env.ports.point();
-        env.ports.lease.uncordon().map_err(lease_failure)?;
-        record.cordon = Cordon::default();
-        save(env, held, record)?;
+        match env.ports.lease.uncordon() {
+            Ok(_) => {
+                record.cordon = Cordon::default();
+                save(env, held, record)?;
+            }
+            Err(error) => left = Some(error),
+        }
+    }
+    let mut detail = format!(
+        "the host still held {} lease(s) after {} s",
+        host.leases, params.drain_wait_secs
+    );
+    if let Some(error) = left {
+        detail.push_str(&format!(
+            "; the cordon could not be lifted and is left to lapse: {error}"
+        ));
     }
     Ok(Done {
         outcome: Outcome::Deferred,
@@ -298,10 +320,7 @@ fn defer(
             reason: Some(Reason::DrainBound),
             class: Class::Environment,
             retry_after_secs: Some(params.defer_retry_secs),
-            detail: Some(format!(
-                "the host still held {} lease(s) after {} s",
-                host.leases, params.drain_wait_secs
-            )),
+            detail: Some(detail),
             ..Report::default()
         },
     })

@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{OneTime, Refused, decode, read};
 use crate::agents::Agents;
-use crate::hosts::state_text;
+use crate::hosts::{mark_text, state_text};
 use crate::join_tokens::JoinRefusal;
 
 /// The length of a cordon asked for without one.
@@ -97,6 +97,10 @@ struct Reading {
     lease: Option<String>,
     /// The host holds no lease but has runs to finish.
     releasing: bool,
+    /// How the host is set aside, as `GET /v1/hosts` lists it: `reserved`, `held`, `draining` or
+    /// `releasing`. Absent for a host that is not set aside.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mark: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cordon: Option<CordonView>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -126,6 +130,7 @@ impl Reading {
             leases: usize::from(host.lease.is_some()),
             lease: host.lease.map(|lease| lease.to_string()),
             releasing: host.releasing,
+            mark: host.mark.map(mark_text),
             cordon: own.cordon_until.map(|until| CordonView {
                 expires_at_ms: until.millis(),
                 expires_in_ms: until.millis().saturating_sub(now),
