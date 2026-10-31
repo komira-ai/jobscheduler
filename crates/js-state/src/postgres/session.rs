@@ -245,12 +245,9 @@ impl Session {
     /// reports the error to the caller before its connection task has finished, so the
     /// flag can still read open and the pool would hand the dead session out again.
     pub(super) fn note_failure(&mut self, err: &postgres::Error) {
-        let kept = err.as_db_error().is_some_and(|db| {
-            !matches!(
-                db.parsed_severity(),
-                Some(Severity::Fatal | Severity::Panic) | None
-            )
-        });
+        let kept = err
+            .as_db_error()
+            .is_some_and(|db| db.parsed_severity() == Some(Severity::Error));
         if !kept {
             self.broken = true;
         }
@@ -441,7 +438,7 @@ mod tests {
     }
 
     // Catches a failed call that leaves its session in the pool: an error that is not the
-    // server refusing a statement (here the server ended the connection) must mark the
+    // server refusing a statement (here the backend ended its own connection) must mark the
     // session broken whatever the client's connection flag says, while a statement the
     // server refused leaves the session in use.
     #[test]
@@ -450,9 +447,10 @@ mod tests {
         let config = PostgresConfig::parse(&url)
             .and_then(|config| config.with_schema("kbf_unit_pool_failure"))
             .expect("a usable URL");
-        let mut admin = postgres::Client::connect(&url, postgres::NoTls).expect("connects");
-        admin
-            .batch_execute("DROP SCHEMA IF EXISTS kbf_unit_pool_failure CASCADE")
+        postgres::Client::connect(&url, postgres::NoTls)
+            .and_then(|mut client| {
+                client.batch_execute("DROP SCHEMA IF EXISTS kbf_unit_pool_failure CASCADE")
+            })
             .expect("a clean schema");
         crate::postgres::schema::apply(
             &config,
@@ -476,34 +474,12 @@ mod tests {
         session.note_failure(&refused);
         assert!(!session.broken, "a refused statement keeps the session");
 
-        let pid: i32 = session
-            .client
-            .query_one("SELECT pg_backend_pid()", &[])
-            .expect("pid")
-            .get(0);
-        admin
-            .execute("SELECT pg_terminate_backend($1)", &[&pid])
-            .expect("terminates");
-        let gone = std::time::Instant::now();
-        while admin
-            .query_one(
-                "SELECT count(*) FROM pg_stat_activity WHERE pid = $1",
-                &[&pid],
-            )
-            .expect("the activity view")
-            .get::<_, i64>(0)
-            > 0
-        {
-            assert!(
-                gone.elapsed() < std::time::Duration::from_secs(60),
-                "the backend did not exit"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        // The backend ends itself while it runs the statement: the server answers with a
+        // FATAL error and closes the connection, so there is no moment to wait for.
         let lost = session
             .client
-            .batch_execute("SELECT 1")
-            .expect_err("the connection is gone");
+            .batch_execute("SELECT pg_terminate_backend(pg_backend_pid())")
+            .expect_err("the server ends the connection");
         session.note_failure(&lost);
         assert!(session.broken, "a lost connection breaks the session");
     }
