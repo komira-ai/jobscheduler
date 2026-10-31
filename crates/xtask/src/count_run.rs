@@ -87,23 +87,26 @@ pub fn run(count_file: &Path, command: &[OsString]) -> Result<String, Error> {
         count += passed_in(String::from_utf8_lossy(&line).trim_end()).unwrap_or(0);
         let _ = stdout.write_all(&line).and_then(|()| stdout.flush());
     }
-    let status = child
-        .wait()
-        .map_err(io_failed("cannot wait for the tests".to_owned()))?;
+    // A wait that fails leaves no status: the program counts as failed.
+    let status = child.wait().ok();
     std::fs::write(count_file, format!("{count}\n"))
         .map_err(io_failed(format!("cannot write {}", count_file.display())))?;
-    if status.success() {
+    if status.is_some_and(|status| status.success()) {
         return Ok(format!("{count} tests ran"));
     }
-    Err(Error::Child(exit_code(&status)))
+    Err(Error::Child(exit_code(status)))
 }
 
-/// The exit code a failed child maps to: its own, or 128 plus the signal that ended it.
-fn exit_code(status: &std::process::ExitStatus) -> u8 {
+/// The exit code a failed child maps to: its own, or 128 plus the signal that ended it, or 1
+/// when its status is not known.
+fn exit_code(status: Option<std::process::ExitStatus>) -> u8 {
     use std::os::unix::process::ExitStatusExt;
     status
-        .code()
-        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .and_then(|status| {
+            status
+                .code()
+                .or_else(|| status.signal().map(|signal| 128 + signal))
+        })
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1)
 }

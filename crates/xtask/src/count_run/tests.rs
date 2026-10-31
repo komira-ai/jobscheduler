@@ -29,9 +29,10 @@ fn the_passed_count_is_read_from_a_summary_line_only() {
 #[test]
 fn a_failed_child_keeps_its_exit_code() {
     use std::os::unix::process::ExitStatusExt;
-    let code = |raw: i32| exit_code(&std::process::ExitStatus::from_raw(raw));
+    let code = |raw: i32| exit_code(Some(std::process::ExitStatus::from_raw(raw)));
     assert_eq!(code(101 << 8), 101);
     assert_eq!(code(9), 137);
+    assert_eq!(exit_code(None), 1);
 }
 
 /// The wrapper's own failures: an empty command is a usage error, a program that does not

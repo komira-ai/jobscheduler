@@ -141,7 +141,7 @@ enum Verb {
         #[arg(long)]
         count_file: PathBuf,
         /// The test binary and its arguments.
-        #[arg(last = true, required = true)]
+        #[arg(last = true)]
         command: Vec<std::ffi::OsString>,
     },
     /// The js-agent Linux package.

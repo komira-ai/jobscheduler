@@ -15,7 +15,7 @@
 //!   the real wrapper would have, as the defect asks: `3` (no defect), or `0` (`zero-tests`),
 //!   nothing (`no-count`), `many` (`garbled-count`).
 //! - Run as `testbin`, it is a test binary: it prints the environment's `XTASK_FAKE_TEST_OUTPUT`
-//!   and exits with `XTASK_FAKE_TEST_STATUS` (default 0).
+//!   and exits with `XTASK_FAKE_TEST_STATUS` (default 0; `abort`: dies of SIGABRT).
 //!
 //! `XTASK_FAKE_DEFECT` asks for one failure of the real programs: `build-fails` (every build
 //! exits 101) or `fails:<a>,<b>,...` (sudo exits 101, as a failed test binary does, when one
@@ -102,6 +102,9 @@ fn testbin() -> ExitCode {
         std::env::var("XTASK_FAKE_TEST_OUTPUT").unwrap_or_default()
     );
     let status = std::env::var("XTASK_FAKE_TEST_STATUS").unwrap_or_default();
+    if status == "abort" {
+        std::process::abort();
+    }
     ExitCode::from(status.parse().unwrap_or(0))
 }
 
