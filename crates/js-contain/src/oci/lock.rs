@@ -72,15 +72,8 @@ impl ScratchLock {
         let alone = exclusive.is_ok();
         match (how, exclusive) {
             (_, Ok(())) => {}
-            (Use::Exclusive, Err(why)) => {
-                return Err(OciError::Locked {
-                    path,
-                    why: why.to_string(),
-                });
-            }
-            (Use::Shared, Err(_)) => {
-                flock(&file, Op::LockShared).map_err(|why| prepare_io(&path, why))?;
-            }
+            (Use::Exclusive, Err(why)) => return Err(locked(&path, why)),
+            (Use::Shared, Err(_)) => flock(&file, Op::LockShared).map_err(|e| locked(&path, e))?,
         }
         Ok(Self {
             file,
@@ -102,18 +95,18 @@ impl ScratchLock {
     pub(crate) fn share(&self) -> Result<(), OciError> {
         if self.converts {
             rustix::fs::flock(&self.file, rustix::fs::FlockOperation::LockShared)
-                .map_err(|why| prepare_io(Path::new(LOCK_FILE), why))?;
+                .map_err(|e| locked(Path::new(LOCK_FILE), e))?;
         }
         Ok(())
     }
 }
 
-/// A failed `flock` as a start-up error.
-fn prepare_io(path: &Path, why: rustix::io::Errno) -> OciError {
-    prepare(super::JobError::Io {
+/// The lock could not be had, as the error says it.
+fn locked(path: &Path, why: rustix::io::Errno) -> OciError {
+    OciError::Locked {
         path: path.to_owned(),
-        source: std::io::Error::from(why),
-    })
+        why: why.to_string(),
+    }
 }
 
 impl Drop for ScratchLock {
