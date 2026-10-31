@@ -32,6 +32,10 @@ contents:
     dst: /usr/lib/tmpfiles.d/js-agent.conf
     file_info:
       mode: 0644
+  - src: packaging/js-agent/crun_host_setup.sh
+    dst: /usr/share/js-agent/crun_host_setup.sh
+    file_info:
+      mode: 0755
   - src: LICENSE
     dst: /usr/share/doc/js-agent/copyright
     file_info:

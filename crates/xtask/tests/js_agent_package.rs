@@ -387,6 +387,7 @@ fn the_nfpm_configuration_lists_the_files_of_the_checker() {
                 Source::Binary => format!("target/{target}/release/js-agent"),
                 Source::Service => "packaging/js-agent/js-agent.service".to_owned(),
                 Source::Tmpfiles => "packaging/js-agent/tmpfiles.conf".to_owned(),
+                Source::HostSetup => "packaging/js-agent/crun_host_setup.sh".to_owned(),
                 Source::License => "LICENSE".to_owned(),
             };
             (src, (*path).to_owned(), *mode)
