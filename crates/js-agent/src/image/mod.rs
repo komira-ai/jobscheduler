@@ -21,5 +21,5 @@
 mod config;
 mod source;
 
-pub use config::{CONFIG_LIMIT_BYTES, ConfigError, DEFAULT_PATH, ImageConfig};
+pub use config::{CONFIG_LIMIT_BYTES, ConfigError, DEFAULT_PATH, ImageConfig, config_path};
 pub use source::RegistryImages;

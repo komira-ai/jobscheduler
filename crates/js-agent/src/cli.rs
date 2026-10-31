@@ -309,6 +309,43 @@ pub struct Cli {
     /// `/usr/sbin/nft`. Needs `--container-egress-allow`.
     #[arg(long, value_name = "PATH")]
     pub container_nft: Option<String>,
+    /// The network a job's `crun` container gets: `none` (the default: loopback only, no
+    /// route) or `allow-list` (one interface to the host, which forwards only what
+    /// `--egress-allow` and `--egress-dns` name and refuses everything else, the metadata
+    /// range and all IPv6 first). The agent, as root in the host's network namespace, wires
+    /// each container from outside and keeps the firewall; see `docs/design/agent-egress.md`.
+    /// Only the `crun` runtime reads it, and this build cannot select that runtime yet, so
+    /// anything but `none` is refused at start; the Podman network flags above are the
+    /// Podman runtime's own and are refused together with this one.
+    #[arg(long, value_name = "none|allow-list")]
+    pub egress: Option<String>,
+    /// An endpoint an `allow-list` may reach, `IPV4:PORT` or `CIDR:PORT` (TCP; a prefix of
+    /// 24 to 32, outside 169.254.0.0/16 and the pool); repeatable, at most 16; at least one
+    /// is required by `--egress allow-list`.
+    #[arg(long, value_name = "IP:PORT")]
+    pub egress_allow: Vec<String>,
+    /// A resolver an `allow-list` may ask (UDP and TCP, port 53), and the only nameserver of
+    /// a job's `/etc/resolv.conf`; an IPv4 address, repeatable, at most 4. Without one a job
+    /// resolves no name.
+    #[arg(long, value_name = "IP")]
+    pub egress_dns: Vec<String>,
+    /// The IPv4 network the jobs' addresses are taken from, one /30 each, `<addr>/16` to
+    /// `<addr>/24`; by default `198.18.0.0/16`. Needs `--egress allow-list`.
+    #[arg(long, value_name = "CIDR")]
+    pub egress_pool: Option<String>,
+    /// The absolute path of the `ip` program the egress setup runs, by default
+    /// `/usr/sbin/ip`. Needs `--egress allow-list`.
+    #[arg(long, value_name = "PATH")]
+    pub egress_ip: Option<String>,
+    /// The absolute path of the `nft` program the egress setup runs, by default
+    /// `/usr/sbin/nft`. Needs `--egress allow-list`.
+    #[arg(long, value_name = "PATH")]
+    pub egress_nft: Option<String>,
+    /// The absolute path of the `nsenter` program the egress setup runs to configure a
+    /// job's network namespace from outside, by default `/usr/bin/nsenter`. Needs
+    /// `--egress allow-list`.
+    #[arg(long, value_name = "PATH")]
+    pub egress_nsenter: Option<String>,
     /// The control group that holds every container the agent starts, as a directory of
     /// the cgroup version 2 file system below `/sys/fs/cgroup` (such as
     /// `/sys/fs/cgroup/jobscheduler.slice`). The operator makes and delegates it. The

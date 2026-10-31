@@ -268,6 +268,7 @@
 mod args;
 mod logs;
 pub use logs::{LOGS_LIMIT, tail_of};
+pub(crate) use logs::text_of;
 mod seccomp;
 mod settings;
 mod subid;
@@ -1197,7 +1198,7 @@ fn major_of(text: &str) -> Option<u32> {
 
 /// `js-<agent tag>-<run id>`, when that is a name the engines take. The tag is the host
 /// id's hash ([`agent_tag`]), so two agents on one runtime never name a container alike.
-fn container_name(host_id: &str, run_id: &str) -> Result<String, CliError> {
+pub(crate) fn container_name(host_id: &str, run_id: &str) -> Result<String, CliError> {
     let word = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-');
     let fits = !run_id.is_empty()
         && NAME_PREFIX.len() + TAG_LEN + 1 + run_id.len() <= NAME_MAX
