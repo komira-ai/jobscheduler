@@ -137,6 +137,10 @@ use spec::{container_spec, ctr_of, end_of, log_tail_of, not_run_words, pinned};
 /// How long a pull and unpack of one image may take before it counts as failed.
 pub const PULL_LIMIT: Duration = Duration::from_secs(30 * 60);
 
+/// How long a `crun kill` may take before it is given up: a hung `crun` must not stall the
+/// single worker. The stop goes on to the lease cgroup's kill.
+pub const CALL_LIMIT: Duration = Duration::from_secs(120);
+
 /// How long a run is waited for after its cgroup was killed. A process in an
 /// uninterruptible sleep outlasts it; the stop then fails and is tried again.
 pub const KILL_WAIT: Duration = Duration::from_secs(60);
@@ -188,6 +192,8 @@ pub struct Hooks {
     pub kill_wait: Duration,
     /// How long a pull and unpack of one image may take ([`PULL_LIMIT`]).
     pub pull_limit: Duration,
+    /// How long a `crun kill` may take before it is given up ([`CALL_LIMIT`]).
+    pub call_limit: Duration,
 }
 
 impl Default for Hooks {
@@ -197,6 +203,7 @@ impl Default for Hooks {
             now_ms: system_now_ms,
             kill_wait: KILL_WAIT,
             pull_limit: PULL_LIMIT,
+            call_limit: CALL_LIMIT,
         }
     }
 }
@@ -780,6 +787,7 @@ impl Runtime for CrunRuntime {
 
     fn stop(&mut self, id: &RunHandle, grace: Duration) -> Result<(), RuntimeError> {
         let (rt, oci, kill_wait) = (&self.rt, &self.oci, self.hooks.kill_wait);
+        let call_limit = self.hooks.call_limit;
         let Some(Run {
             state: State::Running { run, .. },
             cgroup,
@@ -796,7 +804,10 @@ impl Runtime for CrunRuntime {
         // A SIGTERM that fails (the container is not made yet, or already over) is not
         // the stop's failure: the wait below ends at once for a container that is over,
         // and the kill does the rest for one that is not.
-        let _ = rt.block_on(oci.terminate(&spec.name));
+        // Nor is a `crun kill` that does not answer within the call limit (it is dropped,
+        // which kills it): the cgroup kill below does the rest.
+        let _ = rt
+            .block_on(async { tokio::time::timeout(call_limit, oci.terminate(&spec.name)).await });
         if rt
             .block_on(async { tokio::time::timeout(grace, run.wait()).await })
             .is_ok()

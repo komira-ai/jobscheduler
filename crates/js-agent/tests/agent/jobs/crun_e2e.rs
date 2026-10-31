@@ -179,6 +179,7 @@ fn seams() -> Seams {
             now_ms: || 5_000,
             kill_wait: LONG,
             pull_limit: LONG,
+            call_limit: LONG,
         },
         host: || self::node().host.clone(),
         ids: IdSources {

@@ -1,10 +1,14 @@
 //! Stopping, killing and removing a container that runs, and removals that fail.
 
 use std::os::unix::fs::PermissionsExt as _;
+use std::sync::Arc;
+use std::time::Duration;
+
+use js_agent::crun::Hooks;
 
 use js_agent::lifecycle::{Exit, RunHandle, Runtime, Status};
 
-use crate::node::{LONG, Node};
+use crate::node::{LONG, NoImages, Node};
 
 /// Stages the run `run`, starts it once it can say it is up, and waits for that.
 fn started_and_up(node: &Node, runtime: &mut js_agent::crun::CrunRuntime, run: &str) -> RunHandle {
@@ -58,6 +62,24 @@ fn a_job_that_ignores_sigterm_is_ended_through_the_lease_cgroup() {
     let mut runtime = node.open();
     let id = started_and_up(&node, &mut runtime, "r2-stubborn");
     assert_eq!(runtime.stop(&id, std::time::Duration::ZERO), Ok(()));
+    assert_eq!(runtime.poll(&id), Ok(exited(137)));
+    assert_eq!(runtime.remove(&id), Ok(()));
+}
+
+/// Proves a `crun kill` that never answers does not stall the stop: with the call limit
+/// given as zero the hung `crun` is given up at once, the grace (zero) is spent, and the
+/// lease's `cgroup.kill` ends the job with 137. Catches a stop that waits on a hung `crun`
+/// for ever, and one that gives up on the job when the signal could not be sent.
+#[test]
+fn a_crun_kill_that_hangs_is_given_up_and_the_job_ended_through_the_cgroup() {
+    let node = Node::new("stop-hung-kill");
+    let hooks = Hooks {
+        call_limit: Duration::ZERO,
+        ..Node::hooks(LONG, LONG)
+    };
+    let mut runtime = node.open_with(hooks, Arc::new(NoImages));
+    let id = started_and_up(&node, &mut runtime, "r9-killhang");
+    assert_eq!(runtime.stop(&id, Duration::ZERO), Ok(()));
     assert_eq!(runtime.poll(&id), Ok(exited(137)));
     assert_eq!(runtime.remove(&id), Ok(()));
 }

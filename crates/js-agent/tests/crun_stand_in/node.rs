@@ -147,7 +147,7 @@ case "$cmd" in
         trap 'kill $c; exit 143' TERM
         echo up > "$DIR/ready-$name"
         wait $c;;
-      *-stubborn)
+      *-stubborn|*-killhang)
         trap '' TERM
         mkfifo "$cg/cgroup.kill"
         echo up > "$DIR/ready-$name"
@@ -162,6 +162,7 @@ case "$cmd" in
       *) exit 0;;
     esac;;
   kill)
+    case "$name" in *-killhang) exec sleep 600;; esac
     kill -TERM "$(cat "$root/pid")";;
   delete)
     if [ -e "$DIR/delete-fails" ]; then echo boom >&2; exit 1; fi
@@ -272,6 +273,7 @@ impl Node {
             now_ms: clock,
             kill_wait,
             pull_limit,
+            call_limit: LONG,
         }
     }
 
