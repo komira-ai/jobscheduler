@@ -19,12 +19,14 @@ MDM_DNS_NAME=mdm.example.com
 # Required. The LAN address the HTTPS proxy binds, and the only one: refused unless it
 # is private (an RFC 1918 range) and inside MDM_LAN_CIDR.
 MDM_BIND=10.0.0.10
-# Required. The LAN in CIDR form, 8 to 30 bits: the proxy talks to it and to loopback
-# only (systemd IPAddressAllow=).
+# Required. The LAN in CIDR form: the proxy talks to it and to loopback only (systemd
+# IPAddressAllow=). It must lie inside the private block of MDM_BIND: at least 8 bits in
+# 10/8, 12 in 172.16/12, 16 in 192.168/16, and at most 30. (A wider prefix would be read
+# by systemd as public space.)
 MDM_LAN_CIDR=10.0.0.0/24
 
 # --- the services ---------------------------------------------------------------
-# Required. The system user every service runs as.
+# Required. The system user every service runs as: an unprivileged account (not root).
 MDM_USER=js-mdm
 # Required. State (database, SCEP CA, DEP token, TLS key): owned by MDM_USER, mode 0700.
 MDM_STATE=/var/lib/js-mdm
@@ -48,12 +50,14 @@ MDM_TASKS_MAX=256
 # digits and `-`, starting with a letter, at most 40 characters. Two kits on one host
 # need two prefixes.
 MDM_UNIT_PREFIX=js-mdm
-# Default <MDM_UNIT_PREFIX>.slice. The slice that caps the services: a name ending in
-# `.slice`.
+# Default <MDM_UNIT_PREFIX>.slice. The slice that caps the services: MDM_UNIT_PREFIX or a
+# name below it (<prefix>-<more>), ending in `.slice`. systemd's own slices are refused.
 MDM_SLICE=js-mdm.slice
 
 # --- Apple ----------------------------------------------------------------------
-# Required. NanoDEP's name for the Apple Business Manager server token.
+# Required. NanoDEP's name for the Apple Business Manager server token. Letters, digits,
+# `.`, `_`, `-`, starting with a letter or digit (it is a command-line argument and a URL
+# path part).
 MDM_DEP_NAME=example
 # Required. The organisation shown with the SCEP CA, the enrollment profile and the ADE
 # profile.
@@ -65,7 +69,7 @@ MDM_PROFILE_ID=com.example.mdm
 MDM_PROFILE_DISPLAY_NAME=Example MDM
 # Default "<MDM_ORG> MDM". The ADE profile's name, as Apple stores it with the profile.
 MDM_ADE_PROFILE_NAME=Example MDM
-# Default <MDM_UNIT_PREFIX>. The ADE profile's org_magic. Letters, digits, `.`, `_`, `-`.
+# Default <MDM_UNIT_PREFIX>. The ADE profile's org_magic. Letters, digits, `.`, `_`, `-`, starting with a letter or digit.
 MDM_ADE_ORG_MAGIC=js-mdm
 # Default: Accessibility Appearance AppleID AppStore Biometric Diagnostics DisplayTone
 # FileVault iCloudDiagnostics iCloudStorage Intelligence Privacy ScreenTime Siri
@@ -85,7 +89,7 @@ MDM_SCEP_CA_OU=js-mdm
 # Default 10. The SCEP CA's validity in years, 1 to 30.
 MDM_SCEP_CA_YEARS=10
 # Default <MDM_UNIT_PREFIX>. The common name of the DEP token certificate that Apple
-# Business Manager is given. Letters, digits, `.`, `_`, `-`.
+# Business Manager is given. Letters, digits, `.`, `_`, `-`, starting with a letter or digit.
 MDM_DEP_CERT_CN=js-mdm
 # Default 7. That certificate's validity in days, 1 to 365.
 MDM_DEP_CERT_DAYS=7
@@ -110,7 +114,7 @@ MDM_ACME_PROPAGATION_WAIT=300s
 
 # --- the erase path -------------------------------------------------------------
 # Default <MDM_UNIT_PREFIX>-erase. The ssh signature namespace of an erase request.
-# Letters, digits, `.`, `_`, `-`.
+# Letters, digits, `.`, `_`, `-`, starting with a letter or digit.
 MDM_SIGNATURE_NAMESPACE=js-mdm-erase
 # The principal of the operator's key. Accepted here so one file serves the whole kit;
 # the unit and profile builders do not read it.

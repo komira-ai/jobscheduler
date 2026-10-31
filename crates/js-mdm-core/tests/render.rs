@@ -104,11 +104,11 @@ fn strip_comments_drops_only_whole_comment_lines() {
 /// started by exists under the configured prefix.
 #[test]
 fn names_follow_the_prefix_and_the_slice_and_units_refer_to_each_other_by_them() {
-    let text =
-        with("MDM_UNIT_PREFIX", "site-a").replace("MDM_SLICE=js-mdm.slice", "MDM_SLICE=cap.slice");
+    let text = with("MDM_UNIT_PREFIX", "site-a")
+        .replace("MDM_SLICE=js-mdm.slice", "MDM_SLICE=site-a-cap.slice");
     let c = MdmConfig::parse(&text).expect("valid");
     let n = UnitNames::new(&c);
-    assert_eq!(n.slice, "cap.slice");
+    assert_eq!(n.slice, "site-a-cap.slice");
     assert_eq!(n.scep, "site-a-scep.service");
     assert_eq!(n.proxy, "site-a-proxy.service");
     assert_eq!(n.reload_path, "site-a-proxy-reload.path");
@@ -133,11 +133,15 @@ fn names_follow_the_prefix_and_the_slice_and_units_refer_to_each_other_by_them()
     let slice = r
         .units
         .iter()
-        .find(|u| u.name == "cap.slice")
+        .find(|u| u.name == "site-a-cap.slice")
         .expect("the slice");
     assert!(slice.text.contains("Description=site-a services (capped)"));
     for unit in &r.units[1..] {
-        assert!(unit.text.contains("Slice=cap.slice\n"), "{}", unit.name);
+        assert!(
+            unit.text.contains("Slice=site-a-cap.slice\n"),
+            "{}",
+            unit.name
+        );
     }
 }
 

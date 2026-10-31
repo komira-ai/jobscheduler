@@ -64,6 +64,7 @@ fn providers_are_named_and_know_their_variables() {
 fn a_bad_acme_setting_is_refused_naming_its_key() {
     let cases = [
         ("MDM_ACME_EMAIL", "admin"),
+        ("MDM_ACME_EMAIL", "-x@example.com"),
         ("MDM_ACME_EMAIL", "@example.com"),
         ("MDM_ACME_EMAIL", "a@b@example.com"),
         ("MDM_ACME_EMAIL", "a@localhost"),

@@ -13,6 +13,17 @@
 //! ADE profile's text, the signature namespace) moved into settings, so the crate holds
 //! no name of any one site.
 //!
+//! # Security notes for the host layer
+//!
+//! * The enrollment profile carries the SCEP challenge, and the proxy serves the file at
+//!   `/enroll` with no authentication, on the LAN address only (the design kbf-deploy
+//!   has). Whoever can reach that address can read the challenge, so the LAN must be one
+//!   whose members may enroll. The host layer must write the file with mode 0640 or
+//!   tighter, owned by root and readable by the service group only.
+//! * The check that `MDM_STATE`, `MDM_ETC` and `MDM_BIN` do not equal or nest in each
+//!   other is lexical: symbolic links and mounts are not resolved, so the host layer must
+//!   not accept a link that makes one of them point into another.
+//!
 //! # Where to start
 //!
 //! * [`config::MdmConfig::parse`] and [`acme::Acme::parse`] read a settings file

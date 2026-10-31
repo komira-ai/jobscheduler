@@ -99,7 +99,7 @@ fn every_new_key_can_be_set_away_from_its_default() {
     let mut text = minimal();
     for line in [
         "MDM_UNIT_PREFIX=site-a",
-        "MDM_SLICE=site-b.slice",
+        "MDM_SLICE=site-a-b.slice",
         "MDM_PROFILE_DISPLAY_NAME=Site A Macs",
         "MDM_ADE_PROFILE_NAME=Site A enrollment",
         "MDM_ADE_ORG_MAGIC=site.a_1",
@@ -119,7 +119,7 @@ fn every_new_key_can_be_set_away_from_its_default() {
     let c = MdmConfig::parse(&text).expect("valid");
     assert_eq!(
         (c.unit_prefix.as_str(), c.slice.as_str()),
-        ("site-a", "site-b.slice")
+        ("site-a", "site-a-b.slice")
     );
     assert_eq!(c.profile_display_name, "Site A Macs");
     assert_eq!(c.ade.profile_name, "Site A enrollment");
@@ -184,6 +184,30 @@ fn a_bad_setting_is_refused_naming_its_key() {
         ("MDM_UNIT_PREFIX", "js-"),
         ("MDM_UNIT_PREFIX", "js--mdm"),
         ("MDM_SLICE", "a--b.slice"),
+        ("MDM_SLICE", "system.slice"),
+        ("MDM_SLICE", "user.slice"),
+        ("MDM_SLICE", "machine.slice"),
+        ("MDM_SLICE", "init.slice"),
+        ("MDM_SLICE", "system-js.slice"),
+        ("MDM_SLICE", "-.slice"),
+        ("MDM_SLICE", "other.slice"),
+        ("MDM_SLICE", "js-mdmx.slice"),
+        ("MDM_USER", "root"),
+        ("MDM_USER", "toor"),
+        ("MDM_LAN_CIDR", "192.168.0.0/8"),
+        ("MDM_LAN_CIDR", "172.16.0.0/8"),
+        ("MDM_LAN_CIDR", "172.16.0.0/11"),
+        ("MDM_LAN_CIDR", "10.0.0.0/7"),
+        ("MDM_DEP_NAME", "-h"),
+        ("MDM_DEP_NAME", "-"),
+        ("MDM_DEP_NAME", "."),
+        ("MDM_DEP_NAME", ".."),
+        ("MDM_DEP_CERT_CN", "-x"),
+        ("MDM_DEP_CERT_CN", ".x"),
+        ("MDM_ADE_ORG_MAGIC", "-x"),
+        ("MDM_ADE_ORG_MAGIC", ".x"),
+        ("MDM_SIGNATURE_NAMESPACE", "-x"),
+        ("MDM_SIGNATURE_NAMESPACE", ".x"),
         ("MDM_SLICE", "a-.slice"),
         ("MDM_UNIT_PREFIX", long.as_str()),
         ("MDM_SLICE", "js-mdm"),
@@ -409,4 +433,27 @@ fn a_network_of_zero_or_thirty_two_bits_does_not_overflow() {
     };
     assert!(one.contains(Ipv4Addr::new(10, 0, 0, 7)));
     assert!(!one.contains(Ipv4Addr::new(10, 0, 0, 8)));
+}
+
+/// Catches a LAN network that widens past private space, and one that is refused though
+/// it is exactly a private block: systemd reads `192.168.0.0/8` as `192.0.0.0/8`, so the
+/// proxy would be allowed to talk to public addresses. The exact /8, /12 and /16 are
+/// accepted, and so is a narrower network inside each.
+#[test]
+fn a_lan_network_stays_inside_its_private_block() {
+    let ok = [
+        ("10.0.0.10", "10.0.0.0/8"),
+        ("10.0.0.10", "10.0.0.0/30"),
+        ("172.16.0.5", "172.16.0.0/12"),
+        ("172.31.255.5", "172.16.0.0/12"),
+        ("172.20.1.5", "172.20.0.0/16"),
+        ("192.168.1.5", "192.168.0.0/16"),
+        ("192.168.1.5", "192.168.1.0/24"),
+    ];
+    for (bind, net) in ok {
+        let text = with("MDM_BIND", bind)
+            .replace("MDM_LAN_CIDR=10.0.0.0/24", &format!("MDM_LAN_CIDR={net}"));
+        let c = MdmConfig::parse(&text).unwrap_or_else(|e| panic!("{bind} {net}: {e}"));
+        assert_eq!(c.lan.to_string(), net);
+    }
 }
