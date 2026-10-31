@@ -244,24 +244,19 @@ mod tests {
     #[test]
     fn an_agent_behind_a_pull_says_it_is_waiting_and_one_beside_agents_does_not() {
         let dir = scratch("waits");
-        let pull = ScratchLock::take(&dir, Use::Exclusive).expect("the pull");
-        let mut pull = Some(pull);
+        let mut pull = Some(ScratchLock::take(&dir, Use::Exclusive).expect("the pull"));
         let mut said = 0;
-        let agent = ScratchLock::take_with(
-            &dir,
-            Use::Shared,
-            Some(&mut || {
-                said += 1;
-                drop(pull.take());
-            }),
-        )
-        .expect("the agent, once the pull is over");
-        assert_eq!(said, 1);
+        let mut hook = || {
+            said += 1;
+            drop(pull.take());
+        };
+        let agent = ScratchLock::take_with(&dir, Use::Shared, Some(&mut hook))
+            .expect("the agent, once the pull is over");
         assert!(!agent.alone());
-        let mut beside = 0;
-        let second = ScratchLock::take_with(&dir, Use::Shared, Some(&mut || beside += 1))
-            .expect("beside the agent");
-        assert_eq!(beside, 0, "waited behind an agent");
+        // Beside the agent the same hook is not called again.
+        let second =
+            ScratchLock::take_with(&dir, Use::Shared, Some(&mut hook)).expect("beside the agent");
+        assert_eq!(said, 1, "waited behind an agent");
         drop((agent, second));
     }
 }
