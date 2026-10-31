@@ -255,6 +255,22 @@ pub async fn presses_into_swap(
     }
 }
 
+/// The files of a cgroup directory that make it the job user's to manage, for a root daemon
+/// whose `crun` runs as that user: the directory itself, and the files a process is moved
+/// with and controllers are enabled through. The lease's cgroup, and the cgroup the leases
+/// are made in, are given with these.
+pub const JOB_OWNED_FILES: [&str; 4] = [
+    "",
+    "cgroup.procs",
+    "cgroup.threads",
+    "cgroup.subtree_control",
+];
+
+/// The files of the daemon's own delegated cgroup the job user is given: `crun` moves its
+/// first process from the daemon's cgroup into the container's, which the kernel allows
+/// only with write access to the `cgroup.procs` of their nearest common ancestor.
+pub const ROOT_OWNED_FILES: [&str; 1] = ["cgroup.procs"];
+
 /// One lease's cgroup.
 #[derive(Debug)]
 pub struct LeaseCgroup {

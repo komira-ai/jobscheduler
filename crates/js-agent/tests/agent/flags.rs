@@ -427,3 +427,59 @@ fn a_low_water_mark_without_a_scratch_root_is_refused() {
         "{said}"
     );
 }
+
+/// Asserts the egress flags. The default is no network and is accepted with and without
+/// `--egress none`; every flag of an allow-list names the mode it needs; a mode that is not
+/// one of the two is refused; and an allow-list is refused at start, whatever else it says
+/// (only the `crun` runtime enforces it and this build cannot select that runtime), as is
+/// the Podman network flag beside it, so an operator who asks for a network never gets a
+/// different one. It catches an allow-list that starts and runs with no network at all, and
+/// one that is accepted together with `--container-network`.
+#[test]
+fn egress_flags_default_to_none_and_an_allow_list_is_refused_until_crun_is_selectable() {
+    let host = linux_host();
+    let hello = hello_of(&["--egress", "none"], &host);
+    assert_eq!(hello["phase"], "serving");
+    let said = refused(&["--egress", "open"], &host);
+    assert!(
+        said.contains("--egress: expected none or allow-list"),
+        "{said}"
+    );
+    for (flags, name) in [
+        (&["--egress-allow", "192.0.2.10:443"][..], "--egress-allow"),
+        (&["--egress-dns", "192.0.2.53"][..], "--egress-dns"),
+        (&["--egress-pool", "198.18.0.0/16"][..], "--egress-pool"),
+        (&["--egress-nft", "/bin/sh"][..], "--egress-nft"),
+        (&["--egress-nsenter", "/bin/sh"][..], "--egress-nsenter"),
+    ] {
+        let said = refused(flags, &host);
+        assert!(
+            said.contains(&format!("{name}: needs --egress allow-list")),
+            "{said}"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let allow = [
+            "--egress",
+            "allow-list",
+            "--egress-allow",
+            "192.0.2.10:443",
+            "--egress-ip",
+            "/bin/sh",
+            "--egress-nft",
+            "/bin/sh",
+        ];
+        let said = refused(&allow, &host);
+        assert!(
+            said.contains("--egress allow-list: only the crun runtime enforces it"),
+            "{said}"
+        );
+        let mut both = allow.to_vec();
+        both.extend(["--container-network", "jsnet"]);
+        let said = refused(&both, &host);
+        assert!(said.contains("give only one"), "{said}");
+        let said = refused(&["--egress", "allow-list"], &host);
+        assert!(said.contains("needs at least one --egress-allow"), "{said}");
+    }
+}

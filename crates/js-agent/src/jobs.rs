@@ -79,6 +79,7 @@ pub fn start(
         stop_grace,
         drain_wait,
         image_allow: _,
+        egress: _,
     } = local;
     // `Local` holds at most one of the two, and a state root and a scratch root with it.
     let (backend, scratch, state) = match (container, native, scratch, state) {
