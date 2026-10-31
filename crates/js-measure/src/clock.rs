@@ -5,7 +5,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A clock the driver can read and wait on.
 pub trait Clock {
-    /// Milliseconds since the Unix epoch (the lease server's own time base).
+    /// Milliseconds since the Unix epoch. The harness buckets usage minutes with this
+    /// clock while the lease server buckets its rows with its own, so the two are assumed
+    /// to be in sync; skew moves usage into a neighbouring minute.
     fn now_ms(&self) -> u64;
     /// Waits `ms` milliseconds.
     fn sleep_ms(&self, ms: u64);

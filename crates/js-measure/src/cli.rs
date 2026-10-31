@@ -114,6 +114,9 @@ pub enum CliError {
     /// A client flag is unusable.
     #[error(transparent)]
     Client(#[from] ClientError),
+    /// A flag is out of range.
+    #[error("{0}")]
+    Usage(String),
     /// The output could not be written.
     #[error("cannot write the output: {0}")]
     Output(#[from] io::Error),
@@ -171,13 +174,16 @@ pub fn execute(command: Command, out: &mut dyn Write) -> Result<(), CliError> {
             ca_cert,
             fake_hosts,
         } => {
+            let deadline_ms = deadline_secs.checked_mul(1000).ok_or_else(|| {
+                CliError::Usage(format!("--deadline-secs {deadline_secs} is too large"))
+            })?;
             let job = RunArgs {
                 plan: read_json(&plan)?,
                 workload: read_json(&workload)?,
                 dir,
                 commit,
                 poll_ms,
-                deadline_ms: deadline_secs * 1000,
+                deadline_ms,
             };
             let setter: Box<dyn Setter> = match apply_command {
                 Some(program) => Box::new(CommandSetter { program }),
@@ -238,6 +244,11 @@ impl RunArgs {
         out: &mut dyn Write,
     ) -> Result<(), CliError> {
         let jobs = self.workload.expand()?;
+        let taken = self.dir.join("records.jsonl");
+        if fs::metadata(&taken).is_ok_and(|meta| meta.len() > 0) {
+            let why = "already holds records; a second run in it would repeat run_index, give --out a new directory";
+            return Err(file_error(&taken, why));
+        }
         fs::create_dir_all(&self.dir).map_err(|err| file_error(&self.dir, err))?;
         let open = |name: &str| -> Result<File, CliError> {
             let path = self.dir.join(name);

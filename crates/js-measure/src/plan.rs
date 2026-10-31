@@ -91,6 +91,15 @@ impl Rng {
     }
 }
 
+/// The first `count` raw draws of the generator for `seed`, so that a test can pin them to
+/// the published SplitMix64 vector (`tests/reference/schedule.py`).
+#[doc(hidden)]
+#[must_use]
+pub fn draws(seed: u64, count: usize) -> Vec<u64> {
+    let mut rng = Rng(seed);
+    (0..count).map(|_| rng.draw()).collect()
+}
+
 impl Plan {
     /// Checks the plan.
     ///

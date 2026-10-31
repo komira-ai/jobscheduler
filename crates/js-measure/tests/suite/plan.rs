@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use js_measure::plan::draws;
 use js_measure::{Plan, PlanError, Slot};
 
 use crate::support::{plan, plan_over};
@@ -12,8 +13,9 @@ fn arms_of(slots: &[Slot]) -> Vec<usize> {
 }
 
 /// Asserts that the same plan and seed give the same schedule, that the schedule is the
-/// one a reference implementation of the draw gives for a pinned seed (so it is the same
-/// on every machine), and that another seed gives another order.
+/// one the reference in `tests/reference/schedule.py` (SplitMix64 and Fisher-Yates, run
+/// and checked there) gives for a pinned seed, so it is the same on every machine, and
+/// that another seed gives another order.
 #[test]
 fn the_order_is_reproducible_from_the_seed() {
     let one = plan(&["a", "b", "c"], 2, 1, 42);
@@ -131,4 +133,22 @@ fn every_setting_and_arm_pair_is_a_cell_run_n_times() {
     }
     assert_eq!(counts.len(), 4);
     assert!(counts.values().all(|n| *n == 2));
+}
+
+/// Asserts that the generator is SplitMix64: its first draws for seed 1234567 are the
+/// published test vector (the same five numbers as in the rand_xoshiro crate's reference
+/// test), which `tests/reference/schedule.py` also checks. It catches a changed constant or
+/// shift that would still give a reproducible, but different, order.
+#[test]
+fn the_generator_is_splitmix64() {
+    assert_eq!(
+        draws(1_234_567, 5),
+        vec![
+            6_457_827_717_110_365_317,
+            3_203_168_211_198_807_973,
+            9_817_491_932_198_370_423,
+            4_593_380_528_125_082_431,
+            16_408_922_859_458_223_821,
+        ]
+    );
 }

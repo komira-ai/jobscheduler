@@ -123,6 +123,8 @@ impl Experiment<'_> {
             .iter()
             .filter_map(|job| job.host.as_ref())
             .collect();
+        // The minutes of the usage store are the server's; these are this clock's, assumed
+        // to be in sync with it (see `Clock::now_ms`).
         let (from, to) = (obs.t0_ms / MINUTE_MS, obs.end_ms / MINUTE_MS);
         let hosts = used
             .into_iter()

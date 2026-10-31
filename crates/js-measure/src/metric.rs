@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// The metric names of a run record. A per-job row (`jobs.jsonl`) uses the `JOB_*` names.
 pub mod name {
-    /// First submit to last finish, in milliseconds.
+    /// First submit to last finish, in milliseconds; null when any job has no finish.
     pub const MAKESPAN_MS: &str = "makespan_ms";
     /// Jobs of the workload.
     pub const JOBS: &str = "jobs";
@@ -19,7 +19,7 @@ pub mod name {
     /// Jobs whose outcome was `out_of_memory`.
     pub const MEMORY_KILLS: &str = "memory_kills";
     /// Mean over jobs of the wait from the job's planned submit time to the first poll that
-    /// saw its run running.
+    /// saw its run running (good to two poll intervals).
     pub const QUEUE_WAIT_MS_MEAN: &str = "queue_wait_ms_mean";
     /// Largest of the same.
     pub const QUEUE_WAIT_MS_MAX: &str = "queue_wait_ms_max";

@@ -8,9 +8,16 @@
 //!   CPU and the largest working set of each minute of a node) over the host's `shape` in
 //!   `GET /v1/hosts`.
 //! - **queue wait**: the job's planned submit time to the first poll that saw its run
-//!   `running`. The run API carries no timestamps, so this is good to one poll interval.
+//!   `running`. The run API carries no timestamps. A job is submitted at the first poll at
+//!   or after its planned time and its run is seen at a later poll, so this is good to two
+//!   poll intervals (one on each end), and a run that was over before a poll saw it
+//!   running has none.
+//! - **minutes**: the usage store buckets by the lease server's clock and this harness
+//!   buckets its windows by its own. They are assumed to be in sync (the same host, or
+//!   hosts under time sync); skew moves usage into a neighbouring minute.
 //! - **request to token**: the lease request sent to the lease seen held.
-//! - **makespan**: the first lease request to the last poll that saw a run over.
+//! - **makespan**: the first lease request to the last poll that saw a run over; not
+//!   available when any job has no finish (it failed or was given up).
 //! - **predicted vs actual**: the curve `GET /v1/usage/keys/{profile}` returns (its length
 //!   is the predicted run time in minutes, its largest working set the predicted memory)
 //!   against the observed run time and the host's peak working set. The curve is the only
@@ -376,7 +383,13 @@ fn run_metrics(
     let cpu = values(minutes.iter().map(|m| m.cpu_share));
     let ram = values(minutes.iter().map(|m| m.ram_share));
     let first = obs.jobs.iter().filter_map(|j| j.requested_ms).min();
-    let last = obs.jobs.iter().filter_map(|j| j.finished_ms).max();
+    // Every job must have finished: a failed or given-up job would otherwise shorten it.
+    let last = obs
+        .jobs
+        .iter()
+        .map(|j| j.finished_ms)
+        .collect::<Option<Vec<u64>>>()
+        .and_then(|all| all.into_iter().max());
     let both: Vec<&JobFacts> = facts
         .iter()
         .filter(|f| f.booked_cpu_milli_ms.is_some() && f.used_cpu_milli_ms.is_some())

@@ -6,7 +6,9 @@ use crate::clock::Clock;
 use crate::farm::{Acquired, Farm, FarmError, Phase, Standing};
 use crate::workload::Job;
 
-/// When things happened to one job. Times are milliseconds on the clock's time base.
+/// When things happened to one job. Times are milliseconds on the clock's time base, each
+/// good to one poll interval (a job is submitted at the first poll at or after its planned
+/// time, and a lease or a run is seen at a later poll).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobTiming {
     /// The job's name.
@@ -25,7 +27,7 @@ pub struct JobTiming {
     pub host: Option<String>,
     /// How the run ended, as the server names it.
     pub outcome: Option<String>,
-    /// Why the job did not get through, when it did not.
+    /// Why the job did not get through, when it did not; also a release the server refused.
     pub failure: Option<String>,
 }
 
@@ -56,6 +58,14 @@ impl Live {
     fn fail(&mut self, why: String) {
         self.timing.failure = Some(why);
         self.stage = Stage::Done;
+    }
+
+    /// Adds a word to the failure, keeping what was there.
+    fn note(&mut self, why: String) {
+        self.timing.failure = Some(match self.timing.failure.take() {
+            Some(before) => format!("{before}; {why}"),
+            None => why,
+        });
     }
 }
 
@@ -121,16 +131,24 @@ impl Driver<'_> {
                 Phase::Over => {
                     live.timing.finished_ms = Some(now);
                     live.timing.outcome = standing.outcome;
-                    let _ = self.farm.release(&lease);
+                    self.release(live, &lease);
                 }
             },
             Err(err) => self.give_up(live, &lease, &err),
         }
     }
 
+    /// Releases a lease; a release the server refuses is noted on the job, since the host
+    /// stays leased and the next run's minutes on it are shared.
+    fn release(&self, live: &mut Live, lease: &str) {
+        if let Err(err) = self.farm.release(lease) {
+            live.note(format!("release of {lease} failed: {err}"));
+        }
+    }
+
     fn give_up(&self, live: &mut Live, lease: &str, err: &FarmError) {
-        let _ = self.farm.release(lease);
         live.fail(err.to_string());
+        self.release(live, lease);
     }
 
     fn abandon(&self, live: &mut Live) {
@@ -138,11 +156,11 @@ impl Driver<'_> {
             Stage::Pending(lease) | Stage::Running { lease, .. } => Some(lease.clone()),
             Stage::Waiting | Stage::Done => None,
         };
-        if let Some(lease) = lease {
-            let _ = self.farm.release(&lease);
-        }
         if !matches!(live.stage, Stage::Done) {
             live.fail("deadline".to_owned());
+        }
+        if let Some(lease) = lease {
+            self.release(live, &lease);
         }
     }
 }
