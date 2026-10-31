@@ -264,7 +264,8 @@ fn a_lease_server_that_fails_during_the_wait_ends_the_step_there() {
         }
     });
     lease_unreachable(&spy.prepare(&rig));
-    assert_eq!(rig.world.ticks(), 1);
+    // The first renewal is due when less than half of the 300 s lease is left: at 160 s.
+    assert_eq!(rig.world.ticks(), 16);
 }
 
 #[test]
