@@ -25,7 +25,7 @@ fn strings(parts: &[&str]) -> Vec<String> {
 }
 
 /// A spec whose program, environment and directory are placeholders a test sees replaced.
-fn spec() -> ContainerSpec {
+pub fn spec() -> ContainerSpec {
     ContainerSpec {
         name: "lease-1-2".to_owned(),
         image: format!("ghcr.io/komira-ai/task@sha256:{}", "a".repeat(64)),

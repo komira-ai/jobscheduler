@@ -230,7 +230,9 @@ pub trait Runtime {
     }
 
     /// Creates and starts the container of `spec`. A call that fails leaves no
-    /// container behind: the backend rolls back what it created.
+    /// container behind: the backend rolls back what it created. A run id that already has a
+    /// container (running, exited or not yet removed) is refused, and that container is left
+    /// as it is.
     ///
     /// # Errors
     ///
