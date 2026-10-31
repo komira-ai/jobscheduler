@@ -296,11 +296,13 @@ jobs:
               done
               ;;
           esac
-          # Every binary runs on the build host and prints the release version.
+          # Every binary runs on the build host and prints the release version on the first
+          # line of --version; js-agent prints a `runtimes:` line after it.
           for entry in $BUILDS; do
             bin="${entry##*:}"
             printed="$("target/$TARGET/release/$bin" --version)"
             echo "$printed"
+            printed="$(printf '%s\n' "$printed" | sed -n 1p)"
             case "$printed" in
               *" $VERSION") ;;
               *)
