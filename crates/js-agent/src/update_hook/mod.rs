@@ -19,10 +19,14 @@ mod report;
 
 use std::ffi::OsString;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 pub use args::{ArgsError, Invocation, Step};
-pub use params::{CORDON_LEASE_KEY, CORDON_MAX_KEY, PROMOTION_CEILING_KEY, Params, ParamsError};
+pub use params::{
+    CORDON_LEASE_KEY, CORDON_MAX_KEY, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY,
+    PROMOTION_CEILING_KEY, Params, ParamsError, STAGED_RELEASE_KEY, TARGET_VERSION_KEY,
+};
 pub use report::{Class, MAX_REASON_LEN, Reason, Report, is_reason_token};
 
 /// The first argument that selects the verb.
@@ -108,13 +112,18 @@ enum Refusal {
     Args(ArgsError),
     #[error("{0}")]
     Params(ParamsError),
+    #[error(
+        "the artifact {given:?} is not the staged release {STAGED_RELEASE_KEY} names ({staged:?})"
+    )]
+    #[allow(dead_code)] // the next commit constructs it
+    Artifact { given: PathBuf, staged: PathBuf },
 }
 
 impl Refusal {
     /// The failure the updater is told of: nothing was done, so nothing is irreversible.
     fn done(&self) -> Done {
         let reason = match self {
-            Refusal::Args(_) => Reason::BadArgs,
+            Refusal::Args(_) | Refusal::Artifact { .. } => Reason::BadArgs,
             Refusal::Params(_) => Reason::BadParams,
         };
         Done {
