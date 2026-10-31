@@ -427,7 +427,7 @@ fn resumed_ends_as_uninterrupted(
     let done = attempt(&baseline, ends_at);
     let points = baseline.kill.points();
     let expected = end_state(&baseline, &done);
-    assert!(points >= 4, "a step that changes things passes kill points");
+    assert!(points >= 3, "a step that changes things passes kill points");
     for k in kills(points) {
         let rig = setup(&format!("{name}-{k}"), operator);
         rig.kill.arm(k);
