@@ -46,7 +46,8 @@ impl Cleanup {
     }
 
     /// Makes a file named `<prefix>-<random>` in `dir`, records it, and returns its path.
-    /// A name that is taken (a planted entry, say) is skipped, never written through.
+    /// A name that is taken (a planted entry, say) is skipped, never written through; any other
+    /// error, from the open or the write, ends the call at once.
     pub fn create_unique(&mut self, dir: &Path, prefix: &str, content: &str) -> PathBuf {
         self.create_unique_with(dir, prefix, unpredictable, |file| {
             file.write_all(content.as_bytes())
@@ -62,17 +63,30 @@ impl Cleanup {
         mut name: impl FnMut() -> String,
         mut write: impl FnMut(&mut File) -> std::io::Result<()>,
     ) -> PathBuf {
-        for _ in 0..16 {
+        const TRIES: usize = 16;
+        let mut last = std::io::Error::from(std::io::ErrorKind::AlreadyExists);
+        for _ in 0..TRIES {
             let path = dir.join(format!("{prefix}-{}", name()));
-            let Ok(mut file) = open_exclusive(&path) else {
-                continue;
+            let mut file = match open_exclusive(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last = error;
+                    continue;
+                }
+                Err(error) => panic!("cannot make a file in {}: {error}", dir.display()),
             };
-            if write(&mut file).is_ok() {
-                self.record(path.clone());
-                return path;
+            // The file is ours from here: the guard removes it however this call ends.
+            self.record(path.clone());
+            if let Err(error) = write(&mut file) {
+                let _ = std::fs::remove_file(&path);
+                panic!("cannot write {}: {error}", path.display());
             }
+            return path;
         }
-        panic!("no unused name in {}", dir.display());
+        panic!(
+            "no unused name in {} after {TRIES} tries, last error: {last}",
+            dir.display()
+        );
     }
 }
 

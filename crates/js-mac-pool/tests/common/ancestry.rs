@@ -36,6 +36,24 @@ pub fn allowed_owners(root: &Path) -> Vec<u32> {
 /// The nearest ancestor of `root`, up to and including `top`, that is owned by a uid not
 /// in `allowed`, or is group- or other-writable without the sticky bit.
 pub fn untrusted_ancestor(root: &Path, top: &Path, allowed: &[u32]) -> Option<Refusal> {
-    let _ = (root, top, allowed);
+    for dir in root.ancestors().skip(1) {
+        let meta = std::fs::symlink_metadata(dir).expect("an ancestor of the work root");
+        let mode = meta.mode();
+        if !allowed.contains(&meta.uid()) {
+            return Some(Refusal {
+                path: dir.to_owned(),
+                reason: Reason::Owner(meta.uid()),
+            });
+        }
+        if mode & GROUP_OR_OTHER_WRITE != 0 && mode & STICKY == 0 {
+            return Some(Refusal {
+                path: dir.to_owned(),
+                reason: Reason::Writable(mode & 0o7777),
+            });
+        }
+        if dir == top {
+            break;
+        }
+    }
     None
 }
