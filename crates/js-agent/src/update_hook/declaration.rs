@@ -137,6 +137,9 @@ impl Declaration {
         if declaration.units.is_empty() {
             return Err(DeclarationError::NoUnits);
         }
+        if declaration.units.len() > 1 {
+            return Err(DeclarationError::ManyUnits);
+        }
         Ok(declaration)
     }
 }

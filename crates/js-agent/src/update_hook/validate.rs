@@ -129,7 +129,7 @@ fn is_version(text: &str) -> bool {
 }
 
 /// A digest as the registry writes it.
-fn is_digest(text: &str) -> bool {
+pub(super) fn is_digest(text: &str) -> bool {
     text.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     })
@@ -196,6 +196,11 @@ pub fn validate(
         params.previous_version.as_deref().map(OsStr::new),
     )?;
     agrees(
+        "artifact_digest",
+        Some(OsStr::new(&update.artifact_digest)),
+        Some(OsStr::new(&params.artifact_digest)),
+    )?;
+    agrees(
         "staged",
         Some(update.staged.as_os_str()),
         Some(params.staged_release.as_os_str()),
@@ -214,7 +219,7 @@ pub fn validate(
 fn cordon(record: &Record, params: &Params) -> Result<(), Invalid> {
     let cordon = &record.cordon;
     if !cordon.placed {
-        return if (cordon.first_ms, cordon.expires_ms) == (0, 0) {
+        return if (cordon.first_ms, cordon.expires_ms) == (0, 0) && !cordon.provisional {
             Ok(())
         } else {
             Err(Invalid::CordonStamps)

@@ -31,7 +31,8 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
             "the record does not say that verify succeeded",
         ));
     }
-    if record.cordon.placed {
+    // A cordon that has lapsed is gone: one in force now is someone else's.
+    if record.cordon.placed && env.ports.clock.now_ms() < record.cordon.expires_ms {
         env.ports.point();
         env.ports.lease.uncordon().map_err(lease_failure)?;
     }

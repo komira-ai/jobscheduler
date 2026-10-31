@@ -12,6 +12,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::validate::is_digest;
+
 /// The reserved key the updater sets from the declaration's `promotion_ceiling_secs`.
 pub const PROMOTION_CEILING_KEY: &str = "updater.promotion_ceiling_secs";
 
@@ -129,15 +131,28 @@ impl Params {
         if let Some((key, _)) = table.iter().find(|(_, value)| !is_scalar(value)) {
             return Err(ParamsError::NotScalar(key.clone()));
         }
+        let cordon_lease_secs = positive(&table, CORDON_LEASE_KEY)?;
+        let cordon_max_secs = positive(&table, CORDON_MAX_KEY)?;
+        let drain_wait_secs = positive(&table, DRAIN_WAIT_KEY)?;
+        let defer_retry_secs =
+            seconds(&table, DEFER_RETRY_KEY)?.ok_or(ParamsError::Missing(DEFER_RETRY_KEY))?;
+        if cordon_max_secs < drain_wait_secs {
+            return Err(ParamsError::CapBelowWait {
+                cap: cordon_max_secs,
+                wait: drain_wait_secs,
+            });
+        }
+        let artifact_digest = string_of(&table, ARTIFACT_DIGEST_KEY)?
+            .ok_or(ParamsError::Missing(ARTIFACT_DIGEST_KEY))?;
+        if !is_digest(&artifact_digest) {
+            return Err(ParamsError::NotDigest(ARTIFACT_DIGEST_KEY.to_owned()));
+        }
         Ok(Params {
-            cordon_lease_secs: seconds(&table, CORDON_LEASE_KEY)?
-                .ok_or(ParamsError::Missing(CORDON_LEASE_KEY))?,
-            cordon_max_secs: seconds(&table, CORDON_MAX_KEY)?
-                .ok_or(ParamsError::Missing(CORDON_MAX_KEY))?,
-            // TODO(red): the three new keys are not read yet.
-            drain_wait_secs: 3600,
-            defer_retry_secs: 300,
-            artifact_digest: String::new(),
+            cordon_lease_secs,
+            cordon_max_secs,
+            drain_wait_secs,
+            defer_retry_secs,
+            artifact_digest,
             promotion_ceiling_secs: seconds(&table, PROMOTION_CEILING_KEY)?,
             staged_release: path(&table, STAGED_RELEASE_KEY)?
                 .ok_or(ParamsError::Missing(STAGED_RELEASE_KEY))?,
@@ -146,6 +161,14 @@ impl Params {
                 .ok_or(ParamsError::Missing(TARGET_VERSION_KEY))?,
             previous_version: string_of(&table, PREVIOUS_VERSION_KEY)?,
         })
+    }
+}
+
+/// A required key that is a whole number of seconds and not zero.
+fn positive(table: &toml::Table, key: &'static str) -> Result<u64, ParamsError> {
+    match seconds(table, key)?.ok_or(ParamsError::Missing(key))? {
+        0 => Err(ParamsError::Zero(key.to_owned())),
+        secs => Ok(secs),
     }
 }
 

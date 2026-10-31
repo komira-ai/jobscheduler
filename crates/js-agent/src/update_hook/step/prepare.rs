@@ -20,27 +20,16 @@
 //! running unit's (design 4.2, "new work" 6). The unit manager port reads `ActiveState` and
 //! `SubState` only, and the staged release carries no unit file the hook is told of.
 
-use std::fs;
-use std::io;
-use std::path::Path;
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
-
 use crate::update_hook::{
-    Cordon, Done, Held, HostReading, Outcome, Params, Reason, Record, Report, UpdateInfo,
+    Class, Cordon, Done, Held, HostReading, Outcome, Params, Reason, Record, Report, UpdateInfo,
 };
 
 use super::{Env, check, failure, lease_failure, open_state, save, success};
 
-/// How long the wait for the host to hold no lease lasts: the agent's own `--drain-wait`.
-const DRAIN_WAIT_SECS: u64 = 3600;
-
 /// The time between two looks at the host, and two renewals of the cordon.
 const POLL_SECS: u64 = 10;
-
-/// What a deferred `prepare` tells the coordinator to wait before ordering the host again.
-const RETRY_AFTER_SECS: u64 = 300;
 
 /// The agent's file in a release directory.
 const AGENT_BINARY: &str = "js-agent";
@@ -55,16 +44,17 @@ pub fn prepare(env: &Env<'_>, params: &Params) -> Done {
 
 fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     let (held, loaded) = open_state(env, params)?;
+    // Before anything else is looked at or written: no version can repair a taint.
+    refuse_host(env)?;
     let fresh = loaded.is_none();
     let mut record = match loaded {
         Some(record) => record,
         None => {
-            let record = new_record(env, params)?;
+            let record = new_record(env, params);
             check(env, params, &record)?;
             record
         }
     };
-    refuse_host(env)?;
     check_agent(env, params)?;
     if params.previous_version.is_none() {
         if fresh {
@@ -76,23 +66,18 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     wait(env, &held, &mut record, params)
 }
 
-/// The record of an update that is just beginning: nothing done, no cordon.
-fn new_record(env: &Env<'_>, params: &Params) -> Result<Record, Done> {
-    let digest = digest_of(&params.staged_release.join(AGENT_BINARY)).map_err(bad_artifact)?;
-    Ok(Record::new(UpdateInfo {
+/// The record of an update that is just beginning: nothing done, no cordon. The digest is the
+/// updater's; the staged tree is never hashed again.
+fn new_record(env: &Env<'_>, params: &Params) -> Record {
+    Record::new(UpdateInfo {
         target: params.target_version.clone(),
         previous: params.previous_version.clone(),
         staged: params.staged_release.clone(),
         previous_target: params.previous_release.clone(),
+        // The declaration names exactly one unit (it is refused at the parse otherwise).
         unit: env.declaration.units.first().cloned().unwrap_or_default(),
-        artifact_digest: digest,
-    }))
-}
-
-/// `sha256:<hex>` of the file.
-fn digest_of(path: &Path) -> io::Result<String> {
-    let bytes = fs::read(path)?;
-    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+        artifact_digest: params.artifact_digest.clone(),
+    })
 }
 
 fn bad_artifact(why: impl ToString) -> Done {
@@ -190,10 +175,12 @@ fn expiry_of(host: &HostReading) -> u64 {
 /// Writes the record, places the cordon and records whose it is.
 ///
 /// A cordon in force when the step looks is an operator's and is not ours. Otherwise the
-/// record is written with the cordon marked as ours *before* it is placed, so that a step
-/// killed after the placing finds it marked and lifts it. The reply of the lease server
-/// corrects the mark if the host was cordoned in between. A cordon that lapsed between the
-/// look and the call is placed and not marked; it lapses by itself within one lease.
+/// record is written with the cordon marked as ours and *provisional* before it is placed, so
+/// that a step killed after the placing finds it marked. A reply that says the host was not
+/// cordoned confirms the mark. A reply that says it was cordoned is only ours if the mark is
+/// confirmed and has not lapsed: after a kill before the confirmation, or after the expiry,
+/// the cordon found may be anyone's, and it is left alone (ours, if it was, lapses within one
+/// lease).
 fn place(
     env: &Env<'_>,
     held: &Held,
@@ -205,23 +192,25 @@ fn place(
     let now = env.ports.clock.now_ms();
     let ours_before = record.cordon.placed;
     let ask = ask_secs(&record.cordon, params, now);
-    let provisional = !ours_before && looked.cordon.is_none();
-    if provisional {
+    let mark = !ours_before && looked.cordon.is_none();
+    if mark {
         record.cordon = Cordon {
             placed: true,
-            provisional: false,
+            provisional: true,
             first_ms: now,
             expires_ms: now.saturating_add(ask.saturating_mul(1000)),
         };
     }
-    if fresh || provisional {
+    if fresh || mark {
         save(env, held, record)?;
     }
+    let unsure = record.cordon.provisional || now >= record.cordon.expires_ms;
     env.ports.point();
     let reply = env.ports.lease.cordon(ask).map_err(lease_failure)?;
-    let ours = record.cordon.placed && (ours_before || !reply.already_cordoned);
+    let ours = record.cordon.placed && !(reply.already_cordoned && unsure);
     let cordon = if ours {
         Cordon {
+            provisional: false,
             expires_ms: record.cordon.expires_ms.max(expiry_of(&reply.host)),
             ..record.cordon
         }
@@ -235,9 +224,15 @@ fn place(
     Ok(())
 }
 
-/// Extends the cordon we placed, if the cap leaves anything to ask for. The record follows.
+/// Extends the cordon we placed when less than half a lease is left of it, if the cap leaves
+/// anything to ask for. The record follows when the expiry moves.
 fn renew(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Result<(), Done> {
-    let ask = ask_secs(&record.cordon, params, env.ports.clock.now_ms());
+    let now = env.ports.clock.now_ms();
+    let half_lease_ms = params.cordon_lease_secs.saturating_mul(500);
+    if record.cordon.expires_ms.saturating_sub(now) >= half_lease_ms {
+        return Ok(());
+    }
+    let ask = ask_secs(&record.cordon, params, now);
     if ask == 0 {
         return Ok(());
     }
@@ -260,8 +255,8 @@ fn wait(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Res
             return Ok(success());
         }
         let waited = env.ports.clock.now_ms().saturating_sub(started);
-        if waited >= DRAIN_WAIT_SECS * 1000 {
-            return defer(env, held, record, &host);
+        if waited >= params.drain_wait_secs.saturating_mul(1000) {
+            return defer(env, held, record, params, &host);
         }
         env.ports.clock.pause(Duration::from_secs(POLL_SECS));
         if record.cordon.placed {
@@ -276,6 +271,7 @@ fn defer(
     env: &Env<'_>,
     held: &Held,
     record: &mut Record,
+    params: &Params,
     host: &HostReading,
 ) -> Result<Done, Done> {
     if record.cordon.placed {
@@ -288,10 +284,11 @@ fn defer(
         outcome: Outcome::Deferred,
         report: Report {
             reason: Some(Reason::DrainBound),
-            retry_after_secs: Some(RETRY_AFTER_SECS),
+            class: Class::Environment,
+            retry_after_secs: Some(params.defer_retry_secs),
             detail: Some(format!(
-                "the host still held {} lease(s) after {DRAIN_WAIT_SECS} s",
-                host.leases
+                "the host still held {} lease(s) after {} s",
+                host.leases, params.drain_wait_secs
             )),
             ..Report::default()
         },

@@ -429,6 +429,7 @@ fn resumed_ends_as_uninterrupted(
     name: &str,
     ends_at: Option<usize>,
     operator: bool,
+    leaks_at: Option<u32>,
     kills: impl FnOnce(u32) -> Vec<u32>,
 ) {
     let baseline = setup(&format!("{name}-base"), operator);
@@ -445,27 +446,33 @@ fn resumed_ends_as_uninterrupted(
         );
         rig.kill.disarm();
         let done = attempt(&rig, ends_at);
+        // A kill after the server has our cordon and before the record confirms it leaves a
+        // cordon that is not known to be ours: the rerun does not claim it, and it lapses.
+        let mut expected = expected.clone();
+        if leaks_at == Some(k) {
+            expected["record"]["cordon"]["placed"] = json!(false);
+        }
         assert_eq!(end_state(&rig, &done), expected, "killed at point {k}");
     }
 }
 
 #[test]
 fn a_prepare_killed_at_any_point_and_run_again_ends_as_an_uninterrupted_one() {
-    resumed_ends_as_uninterrupted("hook-prepare-kill-clean", Some(3), false, |n| {
+    resumed_ends_as_uninterrupted("hook-prepare-kill-clean", Some(3), false, Some(4), |n| {
         (1..=n).collect()
     });
 }
 
 #[test]
 fn a_prepare_killed_at_any_point_leaves_an_operators_cordon_alone() {
-    resumed_ends_as_uninterrupted("hook-prepare-kill-operator", Some(2), true, |n| {
+    resumed_ends_as_uninterrupted("hook-prepare-kill-operator", Some(2), true, None, |n| {
         (1..=n).collect()
     });
 }
 
 #[test]
 fn a_deferred_prepare_killed_near_either_end_and_run_again_ends_deferred_with_no_cordon() {
-    resumed_ends_as_uninterrupted("hook-prepare-kill-deferred", None, false, |n| {
+    resumed_ends_as_uninterrupted("hook-prepare-kill-deferred", None, false, None, |n| {
         (1..=6).chain(n - 4..=n).collect()
     });
 }
