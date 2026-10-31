@@ -6,6 +6,7 @@
 use std::ops::{Bound, Deref, DerefMut};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
+use postgres::error::Severity;
 use postgres::{Config, Statement};
 
 use super::Fail;
@@ -236,6 +237,26 @@ fn connect(config: &Config, schema: &str, judge: Option<Supported>) -> Result<Se
     })
 }
 
+impl Session {
+    /// Records a failed call on this session. Only an error the server answered with, and
+    /// that leaves the connection open (a statement refused), keeps the session fit for
+    /// reuse. Any other error (a lost connection, a `FATAL` the server sent as it closed
+    /// the connection) marks it broken, without asking [`Conn::is_closed`]: the client
+    /// reports the error to the caller before its connection task has finished, so the
+    /// flag can still read open and the pool would hand the dead session out again.
+    pub(super) fn note_failure(&mut self, err: &postgres::Error) {
+        let kept = err.as_db_error().is_some_and(|db| {
+            !matches!(
+                db.parsed_severity(),
+                Some(Severity::Fatal | Severity::Panic) | None
+            )
+        });
+        if !kept {
+            self.broken = true;
+        }
+    }
+}
+
 fn refuse(err: SchemaError) -> Fail {
     Fail::Refused(err.to_string())
 }
@@ -417,5 +438,73 @@ mod tests {
         drop(first);
         let mut second = pool.checkout().expect("the same session again");
         assert_eq!(pid(&mut second), first_pid);
+    }
+
+    // Catches a failed call that leaves its session in the pool: an error that is not the
+    // server refusing a statement (here the server ended the connection) must mark the
+    // session broken whatever the client's connection flag says, while a statement the
+    // server refused leaves the session in use.
+    #[test]
+    fn a_failure_marks_the_session_broken_unless_the_server_only_refused_a_statement() {
+        let url = js_testkit::database::server_url();
+        let config = PostgresConfig::parse(&url)
+            .and_then(|config| config.with_schema("kbf_unit_pool_failure"))
+            .expect("a usable URL");
+        let mut admin = postgres::Client::connect(&url, postgres::NoTls).expect("connects");
+        admin
+            .batch_execute("DROP SCHEMA IF EXISTS kbf_unit_pool_failure CASCADE")
+            .expect("a clean schema");
+        crate::postgres::schema::apply(
+            &config,
+            &crate::postgres::schema::embedded(),
+            crate::postgres::schema::latest(),
+        )
+        .expect("the installer's step");
+        let pool = Pool::open(
+            config.pg.clone(),
+            "kbf_unit_pool_failure".to_owned(),
+            1,
+            config.supported,
+        )
+        .expect("opens");
+        let mut session = pool.checkout().expect("a session");
+
+        let refused = session
+            .client
+            .batch_execute("SELECT 1/0")
+            .expect_err("the server refuses the statement");
+        session.note_failure(&refused);
+        assert!(!session.broken, "a refused statement keeps the session");
+
+        let pid: i32 = session
+            .client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .expect("pid")
+            .get(0);
+        admin
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .expect("terminates");
+        let gone = std::time::Instant::now();
+        while admin
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity WHERE pid = $1",
+                &[&pid],
+            )
+            .expect("the activity view")
+            .get::<_, i64>(0)
+            > 0
+        {
+            assert!(
+                gone.elapsed() < std::time::Duration::from_secs(60),
+                "the backend did not exit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let lost = session
+            .client
+            .batch_execute("SELECT 1")
+            .expect_err("the connection is gone");
+        session.note_failure(&lost);
+        assert!(session.broken, "a lost connection breaks the session");
     }
 }
