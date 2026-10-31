@@ -22,13 +22,13 @@ fn names(dir: &std::path::Path) -> Vec<String> {
     names
 }
 
-/// Catches a collection that works on daemon-owned trees only: two images are unpacked
-/// through the real helper (each directory belongs to the helper's id, which the root
-/// daemon's own removal cannot empty by walking: the contents are owned by that id and the
-/// directory is not the daemon's to write below). Collecting with one digest named removes
-/// the other, reports it removed and nothing failed, and the named image keeps its files
-/// (the layer's file, its owner, no stage or blobs directory left). Collecting with
-/// nothing named removes the rest and leaves the store empty.
+/// Catches a collection that only works on trees the test makes by hand: two images are
+/// unpacked through the real helper under a root daemon (each directory belongs to the
+/// helper's id). Collecting with one digest named removes the other, reports it removed
+/// and nothing failed, and the named image keeps its files (the layer's file, its owner,
+/// no stage or blobs directory left). Collecting with nothing named removes the rest and
+/// leaves the store empty. A root daemon can unlink any file itself, so the helper
+/// fallback is not exercised here; the unprivileged daemon's test is in `tests/crun`.
 #[tokio::test]
 #[ignore = "real crun: run through cargo xtask crun-tests"]
 async fn a_collection_removes_what_the_helper_owns_and_keeps_what_is_named() {
