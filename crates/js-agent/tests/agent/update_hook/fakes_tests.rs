@@ -133,12 +133,18 @@ fn a_link_without_a_file_name_is_refused() {
 }
 
 #[test]
-fn the_server_knows_no_host_until_it_is_seeded() {
+fn the_server_knows_no_host_until_it_is_seeded_or_says_hello() {
     let rig = Rig::new("hook-fake-unknown");
     assert_eq!(rig.world.host().unwrap_err(), LeaseError::UnknownHost);
     assert_eq!(rig.world.cordon(60).unwrap_err(), LeaseError::UnknownHost);
     assert_eq!(rig.world.uncordon().unwrap_err(), LeaseError::UnknownHost);
-    assert_eq!(rig.world.hello("1.0").unwrap_err(), LeaseError::UnknownHost);
+    // A hello is how the server comes to know a host: it makes it.
+    rig.world.hello("1.0").unwrap();
+    let made = rig.world.host().unwrap();
+    assert_eq!((made.epoch, made.state.as_str()), (1, "live"));
+    assert_eq!(made.session_started_ms, Some(START_MS));
+    assert_eq!(made.agent_version.as_deref(), Some("1.0"));
+    assert_eq!(made.cordon, None);
 }
 
 #[test]
@@ -248,6 +254,47 @@ fn starting_the_unit_makes_the_agent_of_the_linked_release_say_hello() {
 }
 
 #[test]
+fn a_first_install_starts_cleanly_and_the_hello_makes_the_host() {
+    let rig = Rig::new("hook-fake-first-start");
+    let w = &rig.world;
+    let link = Path::new("/opt/js-agent/current");
+    let first = params(false);
+    w.seed_update(link, HOST, &first);
+    w.relink(link, &first.staged_release).unwrap();
+    w.start(UNIT).unwrap();
+    assert_eq!(w.is_active(UNIT), Ok(true));
+    let host = w.host().unwrap();
+    assert_eq!((host.epoch, host.state.as_str()), (1, "live"));
+    assert_eq!(host.agent_version.as_deref(), Some("1.4.0"));
+    assert_eq!(host.session_started_ms, Some(START_MS));
+}
+
+#[test]
+fn a_server_that_restarted_forgets_the_host_and_the_next_hello_makes_it_again_from_epoch_1() {
+    let rig = Rig::new("hook-fake-server-restart");
+    let w = &rig.world;
+    let link = Path::new("/opt/js-agent/current");
+    let update = params(true);
+    w.seed_update(link, HOST, &update);
+    w.hello("1.3.0").unwrap();
+    w.cordon(60).unwrap();
+    w.pause(Duration::from_secs(5));
+    w.forget_host();
+    assert_eq!(w.host().unwrap_err(), LeaseError::UnknownHost);
+    assert_eq!(w.cordon(60).unwrap_err(), LeaseError::UnknownHost);
+    w.relink(link, &update.staged_release).unwrap();
+    w.start(UNIT).unwrap();
+    let host = w.host().unwrap();
+    assert_eq!(
+        (host.epoch, host.agent_version.as_deref()),
+        (1, Some("1.4.0"))
+    );
+    assert_eq!(host.session_started_ms, Some(START_MS + 5_000));
+    assert_eq!(host.cordon, None, "the new server holds no cordon");
+    assert_eq!(host.id, HOST, "the host keeps its id");
+}
+
+#[test]
 fn a_host_reading_carries_the_leases_taint_and_release_state_the_server_holds() {
     let rig = Rig::new("hook-fake-reading");
     let w = &rig.world;
@@ -336,6 +383,7 @@ fn an_update_starts_from_the_previous_release_exactly_as_the_params_spell_it() {
     );
     let host = rig.world.host().unwrap();
     assert_eq!(host.agent_version.as_deref(), Some("1.3.0"));
+    assert_eq!(rig.points(), 0, "seeding passes no kill point");
 }
 
 #[test]

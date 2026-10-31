@@ -16,7 +16,7 @@ use js_testkit::dir::TestDir;
 
 use crate::support::FakeCommands;
 
-const SHOW: &str = "/usr/bin/systemctl show -p ActiveState,SubState js-agent-crun.service";
+const SHOW: &str = "/usr/bin/systemctl show -p ActiveState,SubState -- js-agent-crun.service";
 const UNIT: &str = "js-agent-crun.service";
 
 fn dir(name: &str) -> TestDir {
@@ -54,8 +54,8 @@ fn show_names_what_is_missing_and_what_failed() {
 
 #[test]
 fn stop_is_asked_without_waiting_and_start_by_name() {
-    let stop = format!("/usr/bin/systemctl stop --no-block {UNIT}");
-    let start = format!("/usr/bin/systemctl start {UNIT}");
+    let stop = format!("/usr/bin/systemctl stop --no-block -- {UNIT}");
+    let start = format!("/usr/bin/systemctl start -- {UNIT}");
     let runner = FakeCommands::default()
         .with(&stop, Ok(""))
         .with(&start, Ok(""));
@@ -79,7 +79,7 @@ fn a_failed_stop_or_start_is_an_error_naming_the_program() {
 
 #[test]
 fn is_active_is_true_only_for_active_and_a_failure_reads_as_not_active() {
-    let line = format!("/usr/bin/systemctl is-active {UNIT}");
+    let line = format!("/usr/bin/systemctl is-active -- {UNIT}");
     for (answer, want) in [
         (Ok("active\n"), true),
         (Ok("activating\n"), false),
@@ -89,6 +89,49 @@ fn is_active_is_true_only_for_active_and_a_failure_reads_as_not_active() {
         assert_eq!(SystemUnits::new(&runner).is_active(UNIT), Ok(want));
         assert_eq!(runner.ran.borrow().as_slice(), std::slice::from_ref(&line));
     }
+}
+
+#[test]
+fn show_refuses_an_empty_value_and_a_property_printed_twice() {
+    for (text, why) in [
+        (
+            "ActiveState=\nSubState=dead\n",
+            "systemctl show printed an empty ActiveState",
+        ),
+        (
+            "ActiveState=active\nSubState=\n",
+            "systemctl show printed an empty SubState",
+        ),
+        (
+            "ActiveState=active\nSubState=running\nSubState=dead\n",
+            "systemctl show printed SubState twice",
+        ),
+    ] {
+        let runner = FakeCommands::default().with(SHOW, Ok(text));
+        let got = SystemUnits::new(&runner).show(UNIT).unwrap_err();
+        assert_eq!(got, PortError::Parse(why.to_owned()), "{text:?}");
+    }
+}
+
+#[test]
+fn a_unit_named_like_an_option_is_passed_after_the_end_of_options() {
+    let runner = FakeCommands::default();
+    let units = SystemUnits::new(&runner);
+    let _ = (
+        units.show("-x"),
+        units.stop_no_block("-x"),
+        units.start("-x"),
+    );
+    let _ = units.is_active("-x");
+    assert_eq!(
+        *runner.ran.borrow(),
+        [
+            "/usr/bin/systemctl show -p ActiveState,SubState -- -x",
+            "/usr/bin/systemctl stop --no-block -- -x",
+            "/usr/bin/systemctl start -- -x",
+            "/usr/bin/systemctl is-active -- -x",
+        ]
+    );
 }
 
 fn target_of(link: &Path) -> PathBuf {
@@ -147,6 +190,26 @@ fn a_swap_that_cannot_complete_leaves_the_link_as_it_was() {
     assert_eq!(target_of(&link), Path::new("old"));
     let err = SystemLink.relink(&link, Path::new("new")).unwrap_err();
     assert!(matches!(err, PortError::Io(_)), "{err:?}");
+}
+
+#[test]
+fn a_swap_never_replaces_something_that_is_not_a_link() {
+    let tmp = dir("hook-relink-nonlink");
+    let file = tmp.path().join("current");
+    fs::write(&file, "a regular file").unwrap();
+    assert!(swap_link(&file, Path::new("new")).is_err());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "a regular file");
+    let folder = tmp.path().join("releases");
+    fs::create_dir(&folder).unwrap();
+    fs::write(folder.join("keep"), "x").unwrap();
+    assert!(swap_link(&folder, Path::new("new")).is_err());
+    assert!(matches!(
+        SystemLink.relink(&folder, Path::new("new")),
+        Err(PortError::Io(_))
+    ));
+    assert_eq!(fs::read_to_string(folder.join("keep")).unwrap(), "x");
+    assert!(fs::symlink_metadata(&folder).unwrap().is_dir());
+    assert!(!tmp.path().join("releases.relink").exists());
 }
 
 #[test]

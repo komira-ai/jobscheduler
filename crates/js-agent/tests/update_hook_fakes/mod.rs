@@ -138,6 +138,25 @@ impl World {
         }
     }
 
+    /// Tells the fakes which version the release directory `path` holds, as the params of an
+    /// update do: an agent started from a link to `path` says hello with this version.
+    ///
+    /// # Panics
+    /// The file cannot be written.
+    pub fn register_release(&self, path: &Path, version: &str) {
+        let mut text = fs::read_to_string(self.control.join("releases")).unwrap_or_default();
+        text.push_str(&format!("{}\t{version}\n", path.display()));
+        fs::write(self.control.join("releases"), text).unwrap();
+    }
+
+    /// The server forgets the host, as it does when it restarts: the next hello makes it again.
+    ///
+    /// # Panics
+    /// The file cannot be removed.
+    pub fn forget_host(&self) {
+        fs::remove_file(self.lease_file()).unwrap();
+    }
+
     /// Changes the server's stored view of the host, as the server would on its own.
     ///
     /// # Panics
