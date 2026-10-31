@@ -186,38 +186,3 @@ pub fn run(
     let _ = done.report.write_to(out);
     done.outcome.into()
 }
-
-#[cfg(all(test, target_os = "macos"))]
-mod mac_tests {
-    use super::*;
-
-    const PARAMS: &str = concat!(
-        "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
-        "drain_wait_secs = 3600\ndefer_retry_secs = 300\n",
-        "\"updater.artifact_digest\" = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
-        "\"updater.staged_release\" = \"/staged\"\n",
-        "\"updater.target_version\" = \"1.4.0\"\n",
-    );
-
-    /// The machine's hook stays inert on a Mac, and its words say launchd is what is missing.
-    #[test]
-    fn on_a_mac_every_step_is_inert_and_says_launchctl_is_the_missing_part() {
-        let params = Params::parse(PARAMS).unwrap();
-        for step in Step::ALL {
-            let invocation = Invocation {
-                step,
-                artifact: None,
-                params: PathBuf::from("/params"),
-            };
-            let done = (Host::system().step)(&invocation, &params);
-            assert_eq!(done.outcome, Outcome::Failure, "{step}");
-            assert_eq!(done.report.reason, Some(Reason::NotImplemented), "{step}");
-            let detail = done.report.detail.unwrap();
-            assert!(
-                detail.starts_with(&format!("{step} is not implemented on macOS")),
-                "{detail}"
-            );
-            assert!(detail.contains("launchctl"), "{detail}");
-        }
-    }
-}

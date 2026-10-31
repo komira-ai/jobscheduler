@@ -182,8 +182,7 @@ fn launchctl_for<'a>(
     volume: &std::path::Path,
     real: &'a SystemLaunchctl,
 ) -> Option<&'a dyn Launchctl> {
-    let _ = (volume, real);
-    None
+    (volume == std::path::Path::new("/")).then_some(real)
 }
 
 /// Runs the verb of `cli` over `pf`, printing to `out`. `Ok(false)` is a verb that ran

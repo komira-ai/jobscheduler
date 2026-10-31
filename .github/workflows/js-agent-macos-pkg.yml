@@ -1,0 +1,150 @@
+# The js-agent installer package for macOS (packaging/js-agent-macos): built on a hosted
+# Apple silicon runner from the release build of js-agent, js-mac-session and js-mac-provision,
+# with pkgbuild and productbuild, and read back by `cargo xtask pkg check-macos`, which
+# refuses anything but the files, modes, owners and script the package is meant to have. It
+# publishes nothing: the package and its SHA256SUMS are a workflow artifact for seven days.
+#
+# The package is built unsigned. It is signed when the repository holds the installer
+# certificate secrets, and notarized when it also holds the notary key; without them those two
+# steps are skipped and the job stays green (packaging/js-agent-macos/README.md names the
+# secrets). Each secret is named once, in the job's environment, and no command expands an
+# expression: a script reads the environment. The package is checked before it is signed and
+# again after, so a signed or stapled package is the same package.
+#
+# A pull request that changes the package, its checker, a crate or the toolchain builds it as
+# version 0.0.0. A manual run builds the version typed. crates/xtask/tests/macos_pkg_workflow.rs
+# pins these rules.
+name: js-agent-macos-pkg
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/js-agent-macos-pkg.yml'
+      - 'packaging/js-agent-macos/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'LICENSE'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The package version, MAJOR.MINOR.PATCH
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: js-agent-macos-pkg-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  VERSION: ${{ inputs.version || '0.0.0' }}
+  # The oldest macOS the programs must run on, as in the release build.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+jobs:
+  pkg:
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      MACOS_INSTALLER_CERT_P12: ${{ secrets.MACOS_INSTALLER_CERT_P12 }}
+      MACOS_INSTALLER_CERT_PASSWORD: ${{ secrets.MACOS_INSTALLER_CERT_PASSWORD }}
+      MACOS_INSTALLER_IDENTITY: ${{ secrets.MACOS_INSTALLER_IDENTITY }}
+      MACOS_NOTARY_KEY_P8: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+      MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+      MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Stamp the version
+        run: cargo xtask release stamp --to "$VERSION"
+      - name: Build the programs
+        run: cargo build --locked --release -p js-agent -p js-mac-session -p js-mac-provision
+      - name: The programs print the version
+        run: |
+          set -euo pipefail
+          for bin in js-agent js-mac-session js-mac-provision; do
+            printed="$(target/release/$bin --version | sed -n 1p)"
+            echo "$printed"
+            case "$printed" in
+              *" $VERSION") ;;
+              *)
+                echo "::error::$bin prints '$printed', not $VERSION"
+                exit 1
+                ;;
+            esac
+          done
+      - name: Stage the payload and the scripts
+        run: |
+          set -euo pipefail
+          mkdir inputs
+          target/release/js-mac-provision agent-plist --server SET-THE-SERVER --pool default > inputs/agent.plist
+          target/release/js-mac-provision session-plist --daemon-requirement SET-THE-DAEMON-REQUIREMENT --socket-group SET-THE-SOCKET-GROUP > inputs/session.plist
+          plutil -lint inputs/agent.plist inputs/session.plist
+          cargo xtask pkg stage-macos --version "$VERSION" --bin-dir target/release --license LICENSE --agent-plist inputs/agent.plist --session-plist inputs/session.plist --declaration packaging/js-agent-macos/updater.toml --out stage
+      - name: Build the package
+        run: |
+          set -euo pipefail
+          mkdir dist
+          pkgbuild --root stage/root --scripts stage/scripts --identifier com.komira.js-agent --version "$VERSION" --install-location / --ownership recommended stage/component.pkg
+          productbuild --package stage/component.pkg --version "$VERSION" "dist/js-agent-$VERSION-aarch64-apple-darwin.pkg"
+      - name: The unsigned package is the package
+        run: cargo xtask pkg check-macos --pkg "dist/js-agent-$VERSION-aarch64-apple-darwin.pkg" --version "$VERSION"
+      - name: Sign the package
+        if: ${{ env.MACOS_INSTALLER_CERT_P12 != '' }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/js-agent-signing.keychain-db"
+          password="$(uuidgen)"
+          cleanup() {
+            security delete-keychain "$keychain" || true
+            rm -f "$RUNNER_TEMP/installer.p12"
+          }
+          trap cleanup EXIT
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$MACOS_INSTALLER_CERT_P12" | base64 --decode > "$RUNNER_TEMP/installer.p12"
+          security import "$RUNNER_TEMP/installer.p12" -P "$MACOS_INSTALLER_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          pkg="dist/js-agent-$VERSION-aarch64-apple-darwin.pkg"
+          productsign --sign "$MACOS_INSTALLER_IDENTITY" --keychain "$keychain" "$pkg" "$pkg.signed"
+          mv "$pkg.signed" "$pkg"
+          pkgutil --check-signature "$pkg"
+      - name: Notarize the package
+        if: ${{ env.MACOS_INSTALLER_CERT_P12 != '' && env.MACOS_NOTARY_KEY_P8 != '' }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/notary.p8"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$MACOS_NOTARY_KEY_P8" > "$key"
+          pkg="dist/js-agent-$VERSION-aarch64-apple-darwin.pkg"
+          xcrun notarytool submit "$pkg" --key "$key" --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER_ID" --wait
+          xcrun stapler staple "$pkg"
+          xcrun stapler validate "$pkg"
+      - name: Say the package is unsigned
+        if: ${{ env.MACOS_INSTALLER_CERT_P12 == '' }}
+        run: echo "::notice::the package is unsigned, the installer signing secrets are not present"
+      - name: The final package is the package
+        run: cargo xtask pkg check-macos --pkg "dist/js-agent-$VERSION-aarch64-apple-darwin.pkg" --version "$VERSION"
+      - name: Sum the package
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 "js-agent-$VERSION-aarch64-apple-darwin.pkg" > SHA256SUMS
+          shasum -a 256 --check SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-agent-macos-pkg
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
