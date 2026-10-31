@@ -551,7 +551,7 @@ fn a_start_refuses_names_that_steer_the_shell_before_a_user_is_made() {
             "{name} was not refused by name: {text:?}"
         );
     }
-    assert_eq!(rig.fake.verbs(), Vec::<String>::new());
+    assert_eq!(rig.fake.verbs(), ["boot-reset"], "only the reset of open");
     assert!(
         !rig.dir.path("native-leases").exists(),
         "the journal was touched"
