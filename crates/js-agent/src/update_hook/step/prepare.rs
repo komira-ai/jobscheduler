@@ -191,10 +191,13 @@ fn place(
     let ours_before = record.cordon.placed;
     let ask = ask_secs(&record.cordon, params, now);
     if ask == 0 {
-        return Err(failure(
+        // The host's own history, not the release: an environment matter.
+        let mut done = failure(
             Reason::CordonCapReached,
             "the cordon's cap leaves no time to ask a cordon for",
-        ));
+        );
+        done.report.class = Class::Environment;
+        return Err(done);
     }
     let mark = !ours_before && looked.cordon.is_none();
     if mark {
