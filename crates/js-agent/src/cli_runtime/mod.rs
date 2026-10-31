@@ -267,8 +267,9 @@
 
 mod args;
 mod logs;
-pub use logs::{LOGS_LIMIT, tail_of};
+#[cfg(target_os = "linux")]
 pub(crate) use logs::text_of;
+pub use logs::{LOGS_LIMIT, tail_of};
 mod seccomp;
 mod settings;
 mod subid;
