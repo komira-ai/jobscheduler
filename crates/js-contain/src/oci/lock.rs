@@ -69,11 +69,12 @@ impl ScratchLock {
         let file = at(&path, opened).map_err(prepare)?;
         let exclusive = flock(&file, Op::NonBlockingLockExclusive);
         let alone = exclusive.is_ok();
-        match (how, exclusive) {
-            (_, Ok(())) => {}
-            (Use::Exclusive, Err(why)) => return Err(locked(&path, why)),
-            (Use::Shared, Err(_)) => flock(&file, Op::LockShared).map_err(|e| locked(&path, e))?,
-        }
+        let taken = if how == Use::Shared && !alone {
+            flock(&file, Op::LockShared)
+        } else {
+            exclusive
+        };
+        held(&path, taken)?;
         Ok(Self {
             file,
             alone,
@@ -93,18 +94,18 @@ impl ScratchLock {
     /// The conversion failed (the lock is then still held as it was).
     pub(crate) fn share(&self) -> Result<(), OciError> {
         if self.converts {
-            flock(&self.file, Op::LockShared).map_err(|e| locked(Path::new(LOCK_FILE), e))?;
+            held(Path::new(LOCK_FILE), flock(&self.file, Op::LockShared))?;
         }
         Ok(())
     }
 }
 
-/// The lock could not be had, as the error says it.
-fn locked(path: &Path, why: rustix::io::Errno) -> OciError {
-    OciError::Locked {
+/// The outcome of a `flock` on the lock file `path`, as the error says it.
+fn held(path: &Path, got: Result<(), rustix::io::Errno>) -> Result<(), OciError> {
+    got.map_err(|why| OciError::Locked {
         path: path.to_owned(),
         why: why.to_string(),
-    }
+    })
 }
 
 impl Drop for ScratchLock {
