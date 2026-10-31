@@ -184,17 +184,19 @@ fn a_run_cannot_fork_past_the_process_limit() {
     );
 }
 
-/// Asserts that a job's environment cannot make the shell that sets the limits run a
-/// command outside the profile: the environment asks the shell to trace with a `PS4` that
-/// touches a file in a directory every user may write, and to run an imported `ulimit`
-/// function that does the same. The file must not exist afterwards, and the run still ends
-/// well. It catches a limiting shell that runs before the profile is applied, as the lease
-/// user, with the job's environment.
+/// Asserts that the command line the runtime builds keeps the shell that sets the limits
+/// inside the profile: it is run for real with an environment that asks the shell to trace
+/// with a `PS4` that touches a file in a directory every user may write, and to run an
+/// imported `ulimit` function that does the same. The file must not exist afterwards, and
+/// the run still ends well. The runtime refuses these names itself (see
+/// `a_start_refuses_names_that_steer_the_shell_before_a_user_is_made`), so this applies the
+/// command line without the runtime's checks, as a second line behind them. It catches a
+/// limiting shell that runs before the profile is applied, as the lease user, with the
+/// job's environment.
 #[test]
 fn the_job_environment_cannot_steer_the_shell_that_sets_the_limits() {
     static UNIQUE: AtomicU32 = AtomicU32::new(0);
-    let mut rig = Rig::new("mac-shell-env");
-    rig.fake.real_runs();
+    let rig = Rig::new("mac-shell-env");
     let marker = std::path::PathBuf::from(format!(
         "/private/tmp/js-native-escape-{}-{}",
         std::process::id(),
@@ -210,9 +212,19 @@ fn the_job_environment_cannot_steer_the_shell_that_sets_the_limits() {
             format!("() {{ {touch}; }}"),
         ),
     ]);
-    let spec = rig.spec("r1", body);
-    let id = rig.rt.create_and_start(&spec).unwrap();
-    let status = rig.settle(&id);
+    let home = rig.fake.home_of("7.0");
+    let exec = home.join("exec");
+    fs::create_dir_all(&exec).unwrap();
+    fs::create_dir_all(home.join("tmp")).unwrap();
+    let config = super::config(&rig.fake);
+    let argv = js_agent::native::profile_argv(&config, &body, &home).unwrap();
+    let out = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .envs(&body.env)
+        .current_dir(&exec)
+        .output()
+        .unwrap();
     let escaped = marker.exists();
     // Removed before anything is asserted, so a failure leaves nothing behind.
     let _ = fs::remove_file(&marker);
@@ -221,5 +233,6 @@ fn the_job_environment_cannot_steer_the_shell_that_sets_the_limits() {
         "a command ran outside the profile: {}",
         marker.display()
     );
-    assert_eq!(status, exited(0));
+    assert!(out.status.success(), "{:?}", out.status);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("done"));
 }

@@ -77,7 +77,7 @@ use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
 use js_mac_session::lease::{Dotted, user_name};
 use js_types::LeaseId;
-use js_types::env::OWNED_ENV_NAMES;
+use js_types::env::env_name_reserved;
 
 use crate::bundle::{Pinned, Placer};
 use crate::lifecycle::{
@@ -333,29 +333,26 @@ fn plain_env(native: &NativeSpec, tmp: &Path) -> Vec<(String, String)> {
     env
 }
 
-/// Refuses a job environment that names a variable the agent sets (`TMPDIR`, `HOME`, ...):
-/// the wire refuses them too, and a bundle run is refused the same way by its config, so the
-/// one rule holds for every run, before any user is made.
-fn check_env(native: &NativeSpec) -> Result<(), RuntimeError> {
-    let owned = native
-        .env
-        .keys()
-        .find(|name| OWNED_ENV_NAMES.contains(&name.as_str()));
-    match owned {
-        Some(name) => Err(fail(
-            &"the job env",
-            &format!("{name:?}: the agent sets this name"),
-        )),
-        None => Ok(()),
-    }
-}
-
 /// Asks the helper for its boot reset; one that ran already is as good as one that ran now.
 fn reset(helper: &Client) -> Result<(), RuntimeError> {
     match helper.boot_reset(&[]) {
         Ok(_) => Ok(()),
         Err(ClientError::Refused(why)) if why == RESET_ALREADY => Ok(()),
         Err(why) => Err(fail(&"the boot reset", &why)),
+    }
+}
+
+/// Refuses a body whose environment names a variable a job may not set
+/// ([`js_types::env::env_name_reserved`]: the names that steer the shell that sets the
+/// limits, the agent's own names, and the prefixes of the loader, the sandbox and imported
+/// shell functions). The wire checks these too; this is the last check before a user is
+/// made, for a body that did not pass through it.
+fn check_env(native: &NativeSpec) -> Result<(), RuntimeError> {
+    match native.env.keys().find(|name| env_name_reserved(name)) {
+        Some(name) => Err(RuntimeError::new(format!(
+            "native.env: {name} is a reserved name"
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -388,11 +385,11 @@ impl Runtime for NativeRuntime {
         let Body::Native(native) = &spec.body else {
             return Err(RuntimeError::new("this runtime runs native bodies only"));
         };
+        check_env(native)?;
         self.ready()?;
         let id = LeaseId::new(self.term, self.next);
         self.next += 1;
         let lease = Dotted(id).to_string();
-        check_env(native)?;
         // A start that cannot have its bundle makes no user at all.
         let pinned = self.pin_bundle(spec, native, &lease)?;
         // Written and synced before the helper hears of the lease, so a process that dies
@@ -568,7 +565,12 @@ const LIMIT_SCRIPT: &str = "ulimit -f \"$1\" && ulimit -u \"$2\" && shift 2 && e
 /// environment, and `SHELLOPTS`, `PS4` or an imported function would run a command of the
 /// job's choosing there. The environment names that steer a shell are reserved as well
 /// (`js_types::env::SHELL_ENV_NAMES`), so the job cannot change the limits either.
-fn profile_argv(
+///
+/// # Errors
+///
+/// The policy or the profile cannot be built, or `native.program` is not an absolute path.
+/// The environment is not read here: [`NativeRuntime`] checks it before it makes a user.
+pub fn profile_argv(
     config: &NativeConfig,
     native: &NativeSpec,
     home: &Path,
