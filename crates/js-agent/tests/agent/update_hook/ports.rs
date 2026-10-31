@@ -87,7 +87,7 @@ fn is_active_is_true_only_for_active_and_a_failure_reads_as_not_active() {
     ] {
         let runner = FakeCommands::default().with(&line, answer);
         assert_eq!(SystemUnits::new(&runner).is_active(UNIT), Ok(want));
-        assert_eq!(*runner.ran.borrow(), [line.clone()]);
+        assert_eq!(runner.ran.borrow().as_slice(), std::slice::from_ref(&line));
     }
 }
 

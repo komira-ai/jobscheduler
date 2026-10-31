@@ -195,65 +195,112 @@ impl World {
     }
 }
 
-// The trait impls are stubs: the unit never changes, no link is made, the server answers
-// nothing, the clock stands still.
 impl Units for World {
-    fn show(&self, _unit: &str) -> Result<UnitState, PortError> {
-        Ok(UnitState {
-            active: "inactive".to_owned(),
-            sub: "dead".to_owned(),
-        })
+    fn show(&self, unit: &str) -> Result<UnitState, PortError> {
+        match fs::read_to_string(self.unit_file(unit)) {
+            Ok(text) => {
+                let (active, sub) = text.split_once(' ').unwrap_or((&text, ""));
+                Ok(UnitState {
+                    active: active.to_owned(),
+                    sub: sub.to_owned(),
+                })
+            }
+            // The manager knows a unit it has never run as inactive.
+            Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(UnitState {
+                active: "inactive".to_owned(),
+                sub: "dead".to_owned(),
+            }),
+            Err(why) => Err(io_err(&why)),
+        }
     }
 
-    fn stop_no_block(&self, _unit: &str) -> Result<(), PortError> {
-        Ok(())
+    fn stop_no_block(&self, unit: &str) -> Result<(), PortError> {
+        if self.show(unit)?.active == "inactive" {
+            return Ok(());
+        }
+        self.put_unit(unit, "inactive", "dead")
     }
 
-    fn start(&self, _unit: &str) -> Result<(), PortError> {
-        let _ = (World::put_unit, World::linked_version, World::hello);
-        Ok(())
+    fn start(&self, unit: &str) -> Result<(), PortError> {
+        if self.show(unit)?.active == "active" {
+            return Ok(());
+        }
+        self.put_unit(unit, "active", "running")?;
+        // The agent that starts says hello with the version of the release the link names.
+        match self.linked_version() {
+            Some(version) => self
+                .hello(&version)
+                .map_err(|why| PortError::Io(why.to_string())),
+            None => Ok(()),
+        }
     }
 
-    fn is_active(&self, _unit: &str) -> Result<bool, PortError> {
-        Ok(false)
+    fn is_active(&self, unit: &str) -> Result<bool, PortError> {
+        self.show(unit).map(|state| state.active == "active")
     }
 }
 
 impl Link for World {
-    fn target(&self, _link: &Path) -> Result<Option<PathBuf>, PortError> {
-        let _ = (World::link_file, read_link, swap_link);
-        Ok(None)
+    fn target(&self, link: &Path) -> Result<Option<PathBuf>, PortError> {
+        read_link(&self.link_file(link)?).map_err(|why| io_err(&why))
     }
 
-    fn relink(&self, _link: &Path, _target: &Path) -> Result<(), PortError> {
-        Ok(())
+    fn relink(&self, link: &Path, target: &Path) -> Result<(), PortError> {
+        let file = self.link_file(link)?;
+        if read_link(&file).map_err(|why| io_err(&why))?.as_deref() == Some(target) {
+            return Ok(());
+        }
+        self.gate();
+        swap_link(&file, target).map_err(|why| io_err(&why))
     }
 }
 
 impl Lease for World {
-    fn cordon(&self, _lease_secs: u64) -> Result<Cordoned, LeaseError> {
-        let _ = (
-            World::save,
-            MAX_CORDON_SECS,
-            CordonView { expires_at_ms: 0 },
-        );
-        Err(LeaseError::UnknownHost)
+    fn cordon(&self, lease_secs: u64) -> Result<Cordoned, LeaseError> {
+        if lease_secs == 0 {
+            return Err(LeaseError::Refused("invalid-cordon".to_owned()));
+        }
+        let mut host = self.live()?;
+        let asked = self.now_ms() + lease_secs.min(MAX_CORDON_SECS) * 1000;
+        let already_cordoned = host.cordon.is_some();
+        let expires_at_ms = host
+            .cordon
+            .map_or(asked, |cordon| cordon.expires_at_ms.max(asked));
+        host.cordon = Some(CordonView { expires_at_ms });
+        self.save(&host)?;
+        Ok(Cordoned {
+            already_cordoned,
+            host,
+        })
     }
 
     fn uncordon(&self) -> Result<Uncordoned, LeaseError> {
-        Err(LeaseError::UnknownHost)
+        let mut host = self.live()?;
+        let lifted = host.cordon.take().is_some();
+        if lifted {
+            self.save(&host)?;
+        }
+        Ok(Uncordoned { lifted, host })
     }
 
     fn host(&self) -> Result<HostReading, LeaseError> {
-        let _ = World::live;
-        Err(LeaseError::UnknownHost)
+        self.live()
     }
 }
 
 impl Clock for World {
     fn now_ms(&self) -> u64 {
-        START_MS
+        fs::read_to_string(self.control.join("clock"))
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(START_MS)
     }
 
-    fn pause(&self, _span: Duration) {}
+    fn pause(&self, span: Duration) {
+        let moved = self.now_ms() + u64::try_from(span.as_millis()).unwrap();
+        fs::write(self.control.join("clock"), moved.to_string()).unwrap();
+        let mut ticks = fs::read_to_string(self.control.join("ticks")).unwrap_or_default();
+        ticks.push('.');
+        fs::write(self.control.join("ticks"), ticks).unwrap();
+    }
 }
