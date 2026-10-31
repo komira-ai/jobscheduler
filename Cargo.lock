@@ -1270,6 +1270,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-measure"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "js-client",
+ "js-testkit",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "js-oci"
 version = "0.1.0"
 dependencies = [

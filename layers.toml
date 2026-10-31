@@ -40,5 +40,5 @@ planned = ["js-coordinator", "js-server-core"]
 # Programs, their libraries and the repository's tools.
 [[layer]]
 name = "app"
-crates = ["js-agent", "js-bundle-cli", "js-cli", "js-conformance", "js-coverage", "js-guest", "js-mac-probe", "js-mac-provision", "js-mac-session", "js-vmm", "js-watch", "xtask"]
+crates = ["js-agent", "js-bundle-cli", "js-cli", "js-conformance", "js-coverage", "js-guest", "js-mac-probe", "js-mac-provision", "js-mac-session", "js-measure", "js-vmm", "js-watch", "xtask"]
 planned = ["js-host", "js-host-install", "js-installer", "js-node", "js-node-bin", "js-updater"]
