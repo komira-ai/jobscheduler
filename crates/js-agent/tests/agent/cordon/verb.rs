@@ -307,7 +307,10 @@ fn the_default_host_is_the_one_the_agent_registers_under() {
             "--for",
             "1m",
         ];
-        let ran = drive(&more, &host, &FakeLease::new(), &mut FakePace::new());
+        // The server answers for the host it is asked about, as the real one does.
+        let lease = FakeLease::new();
+        lease.set(|state| state.id = js_agent::host_id(&machine));
+        let ran = drive(&more, &host, &lease, &mut FakePace::new());
         assert_eq!(ran.status, code(0), "{}", ran.err);
         assert_eq!(ran.seen[0].host, js_agent::host_id(&machine));
         assert_eq!(ran.seen[0].host.len(), 34);
