@@ -70,7 +70,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
-pub use crun::{EnvScrub, RunEnd};
+pub use crun::{EnvScrub, JobDrop, RunEnd};
 pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 
@@ -355,8 +355,25 @@ impl Oci {
         cgroup_parent: &str,
         rust_arch: &str,
     ) -> Result<Arc<Self>, OciError> {
-        let daemon_uid = rustix::process::getuid().as_raw();
-        let ids = run_ids(config, daemon_uid, rustix::process::getgid().as_raw())?;
+        let daemon = (
+            rustix::process::getuid().as_raw(),
+            rustix::process::getgid().as_raw(),
+        );
+        Self::on_as(config, source, scratch, cgroup_parent, rust_arch, daemon)
+    }
+
+    /// [`Oci::on`] for a daemon whose uid and gid are `(daemon_uid, daemon_gid)` (the
+    /// process's own, except in a test, which cannot be root).
+    fn on_as(
+        config: &OciConfig,
+        source: Arc<dyn image::ImageSource>,
+        scratch: &Path,
+        cgroup_parent: &str,
+        rust_arch: &str,
+        (daemon_uid, daemon_gid): (u32, u32),
+    ) -> Result<Arc<Self>, OciError> {
+        let ids = run_ids(config, daemon_uid, daemon_gid)?;
+        let job = crun::JobDrop::new(config.job_user, config.id_tool_path.as_deref(), daemon_uid);
         for program in [&config.runtime, &config.daemon] {
             if !program.is_file() {
                 return Err(OciError::NoRuntime(program.clone()));
@@ -381,11 +398,7 @@ impl Oci {
             at(scratch, helper::install_daemon(scratch, &config.daemon)).map_err(prepare)?;
         let init = at(scratch, init::install(scratch)).map_err(prepare)?;
         let oci = Arc::new(Self {
-            crun: crun::Crun::new(
-                config.runtime.clone(),
-                config.scrub_env,
-                crun::JobDrop::new(config.job_user, config.id_tool_path.as_deref(), daemon_uid),
-            ),
+            crun: crun::Crun::new(config.runtime.clone(), config.scrub_env, job),
             daemon,
             modes: config.helper_modes.clone(),
             init_dest: config.init_dest.clone(),
@@ -407,6 +420,14 @@ impl Oci {
         let leftovers = oci.images.sweep(&oci);
         leftovers.map_err(OciError::Prepare)?;
         Ok(oci)
+    }
+
+    /// The drop to the job user that every program this backend starts gets, for a root
+    /// daemon; the lease's keeper is started with it too
+    /// ([`Keeper::watch_as`](crate::keeper::Keeper::watch_as)).
+    #[must_use]
+    pub fn job_drop(&self) -> Option<&JobDrop> {
+        self.crun.job()
     }
 
     /// The source the image store fetches with.

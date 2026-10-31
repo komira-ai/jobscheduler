@@ -280,7 +280,9 @@ fn the_job_cannot_reach_the_runtimes_options() {
             _ => {}
         }
         rt.create_and_start(&job).unwrap();
-        let Body::Container { image, args } = job.body.clone();
+        let Body::Container { image, args } = job.body.clone() else {
+            panic!("the body was set to a container above");
+        };
         kinds.push((job.run_id.clone(), image, args));
     }
     let profile = profile_option();
@@ -401,9 +403,9 @@ fn a_configured_network_and_user_are_used() {
 }
 
 /// Asserts the refusals that create nothing and run nothing: a host job, a mount path
-/// that is not safe, a label key that is not, and a run id that cannot be a container
-/// name. It catches a host job run in a container, and a refused job that still reaches
-/// the runtime.
+/// that is not safe, a label key that is not, a run id that cannot be a container name,
+/// and a native body. It catches a host job or a native program run in a container, and a
+/// refused job that still reaches the runtime.
 #[test]
 fn refused_jobs_reach_the_runtime_not_at_all() {
     let world = docker();
@@ -416,12 +418,23 @@ fn refused_jobs_reach_the_runtime_not_at_all() {
     let mut bad_label = spec("r3");
     bad_label.labels.insert("a=b".to_owned(), "v".to_owned());
     let bad_name = spec("r 4");
-    let said =
-        [host, bad_mount, bad_label, bad_name].map(|job| rt.create_and_start(&job).unwrap_err());
+    let mut native = spec("r5");
+    native.body = Body::Native(js_agent_wire::NativeSpec {
+        program: "/usr/bin/true".to_owned(),
+        args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        cwd: String::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        network: js_agent_wire::NetworkLevel::Off,
+    });
+    let said = [host, bad_mount, bad_label, bad_name, native]
+        .map(|job| rt.create_and_start(&job).unwrap_err());
     assert_eq!(said[0].0, "only a contained job runs in a container");
     assert!(said[1].0.contains("mount path"), "{}", said[1].0);
     assert!(said[2].0.contains("label key"), "{}", said[2].0);
     assert_eq!(said[3].0, "the run id cannot be made a container name");
+    assert_eq!(said[4].0, "a native job does not run in a container");
     assert_eq!(
         world.calls().len(),
         before,

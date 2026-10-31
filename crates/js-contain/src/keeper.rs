@@ -28,6 +28,8 @@ use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
+use crate::oci::JobDrop;
+
 /// How many times, a second apart, the keeper writes `cgroup.kill`.
 pub const KILL_TRIES: u32 = 30;
 
@@ -37,7 +39,9 @@ pub trait KeeperLauncher {
     /// is closed, writes `1` to the file `kill` up to `tries` times a second apart. It must
     /// ignore SIGHUP, SIGINT and SIGTERM and write [`KeeperLauncher::ready`] to its stdout
     /// once it does. The handle sets its stdin and stdout to pipes, its stderr to null
-    /// and its process group; the launcher sets the rest.
+    /// and its process group; the launcher sets the rest, except that a launcher used with
+    /// [`Keeper::watch_as`] passes only the arguments and the descriptors: the drop erases
+    /// the environment and the working directory the launcher set.
     fn command(&self, kill: &Path, tries: u32) -> Command;
 
     /// What the keeper writes to its stdout when it runs as a keeper.
@@ -60,12 +64,31 @@ impl Keeper {
     /// The keeper could not be started, or its program did not answer as a keeper (the
     /// process is killed and reaped).
     pub fn watch(launcher: &impl KeeperLauncher, kill: &Path) -> io::Result<Self> {
+        Self::watch_as(launcher, kill, None)
+    }
+
+    /// [`Keeper::watch`] for a root daemon: with `job` (from
+    /// [`Oci::job_drop`](crate::Oci::job_drop)) the keeper runs as the job user, dropped as
+    /// every `crun` is (`setgroups([])`, the gid, the uid, from `/`, with an environment of
+    /// `PATH` and `HOME=/` only). It then needs write access to the `kill` file, which
+    /// this crate never gives it: a caller that starts a keeper this way hands over that one
+    /// file (`cgroup.kill` of the lease's cgroup, by descriptor, as the agent's runtime hands
+    /// over the files of [`JOB_OWNED_FILES`](crate::cgroup::JOB_OWNED_FILES), which leave it
+    /// out on purpose). The agent's `CrunRuntime` starts no keeper: the agent writes the
+    /// lease's `cgroup.kill` itself.
+    ///
+    /// Start-up does not check that the job user can write the `kill` file: a keeper that
+    /// cannot write it starts, says it is ready and kills nothing.
+    ///
+    /// # Errors
+    /// As [`Keeper::watch`], and the drop failing in the child.
+    pub fn watch_as(
+        launcher: &impl KeeperLauncher,
+        kill: &Path,
+        job: Option<&JobDrop>,
+    ) -> io::Result<Self> {
         let mut command = launcher.command(kill, KILL_TRIES);
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0);
+        prepare(&mut command, job);
         let child = command.spawn().map_err(cannot_start)?;
         // Dropped on an error below, the keeper is killed and reaped.
         let mut this = Self { child };
@@ -88,6 +111,18 @@ impl Keeper {
     pub fn orphan(&mut self) {
         drop(self.child.stdin.take());
     }
+}
+
+/// Sets up the keeper's command line after the launcher has: the drop to the job user (which
+/// clears the environment and the working directory the launcher set), then the pipes and
+/// the process group.
+fn prepare(command: &mut Command, job: Option<&JobDrop>) {
+    job.into_iter().for_each(|job| job.apply(command));
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
 }
 
 /// `e`, saying that the lease's keeper could not be started.
@@ -170,6 +205,71 @@ mod tests {
             .child
             .wait()
             .expect("the keeper ends once its pipe closes");
+    }
+
+    /// Catches a keeper started without the job-user drop, or with the launcher's
+    /// environment kept: with a drop the command line has the drop's working directory and an
+    /// environment of `PATH` and `HOME=/` alone (the launcher's `TOKEN` is gone), and without
+    /// one the launcher's command is left as it made it.
+    #[test]
+    fn the_keeper_command_gets_the_job_drops_environment_only_when_there_is_a_drop() {
+        let drop = JobDrop::new(Some((900, 901)), Some("/id/tools".as_ref()), 0).expect("drop");
+        let made = || {
+            let mut command = Command::new("true");
+            command.env("TOKEN", "x");
+            command
+        };
+        let mut dropped = made();
+        prepare(&mut dropped, Some(&drop));
+        let envs: Vec<_> = dropped.get_envs().collect();
+        assert_eq!(
+            envs,
+            [
+                (
+                    std::ffi::OsStr::new("HOME"),
+                    Some(std::ffi::OsStr::new("/"))
+                ),
+                (
+                    std::ffi::OsStr::new("PATH"),
+                    Some(std::ffi::OsStr::new("/id/tools"))
+                ),
+            ]
+        );
+        assert_eq!(dropped.get_current_dir(), Some(Path::new("/")));
+        let mut plain = made();
+        prepare(&mut plain, None);
+        let envs: Vec<_> = plain.get_envs().collect();
+        assert_eq!(
+            envs,
+            [(
+                std::ffi::OsStr::new("TOKEN"),
+                Some(std::ffi::OsStr::new("x"))
+            )]
+        );
+        assert_eq!(plain.get_current_dir(), None);
+    }
+
+    /// Catches a drop that is built into the keeper's command line but never run in the
+    /// child: the drop's `setgroups` needs privilege, so as an ordinary user the keeper fails
+    /// to start with the kernel's refusal, and as root it starts (the same expression says
+    /// which, from whether this process is root). Each CI leg proves a different half: the
+    /// ordinary-user leg that the drop runs in the child (it is refused), the root leg that
+    /// a drop to `nobody` succeeds.
+    #[test]
+    fn a_keeper_started_with_the_drop_runs_it_in_the_child() {
+        let is_root = rustix::process::getuid().is_root();
+        // A drop to root is refused, so root drops to `nobody`'s ids instead (chosen by index,
+        // so the arm the ordinary-user leg does not take is not a branch to cover).
+        let own = (
+            rustix::process::getuid().as_raw(),
+            rustix::process::getgid().as_raw(),
+        );
+        let (uid, gid) = [own, (65534, 65534)][usize::from(is_root)];
+        let drop = JobDrop::new(Some((uid, gid)), Some("/usr/bin:/bin".as_ref()), 0).expect("drop");
+        let started = Keeper::watch_as(&Stand::cat(), Path::new("/k"), Some(&drop));
+        assert_eq!(started.is_ok(), is_root, "{started:?}");
+        let plain = Keeper::watch_as(&Stand::cat(), Path::new("/k"), None);
+        assert!(plain.is_ok(), "without a drop nothing is refused");
     }
 
     /// Catches a keeper that cannot be started taken for one that runs, and an error

@@ -33,7 +33,12 @@
 //! `crun run` is a foreground child of the agent, one thread each ([`Running`]), so the
 //! runtime keeps its containers in memory: a container exists from its creation to its
 //! [`Runtime::remove`], and [`Runtime::list_labelled`] lists those and no others. A
-//! restarted agent finds none: `crun run` died with the process that started it.
+//! restarted agent finds none. An agent that exits gracefully takes its `crun run` with it
+//! (js-contain's `KillOnDrop` and `Reaped`); nothing ties them to a crash (SIGKILL, `panic=abort`): no
+//! `PR_SET_PDEATHSIG`. What ends them then is the unit's `KillMode=mixed`
+//! (`js-agent-crun.service`): the lease cgroups sit under the unit's delegated cgroup, so
+//! systemd kills what is left when the main process dies. That holds only for an agent run
+//! under that unit.
 //!
 //! # Labels, the sweep and the lost run
 //!
@@ -273,6 +278,8 @@ enum Fault {
     NotContained,
     #[error("containers on this runtime cannot use a GPU")]
     Gpu,
+    #[error("this runtime runs container jobs only")]
+    Native,
     #[error("{0}")]
     Image(String),
     #[error("run id {0:?} cannot name a container")]
@@ -555,7 +562,9 @@ impl CrunRuntime {
         if !spec.gpu_indices.is_empty() {
             return Err(Fault::Gpu);
         }
-        let Body::Container { image: given, args } = &spec.body;
+        let Body::Container { image: given, args } = &spec.body else {
+            return Err(Fault::Native);
+        };
         let image = pinned(given).map_err(Fault::Image)?;
         let name = container_name(&self.host_id, &spec.run_id)
             .map_err(|_| Fault::Name(spec.run_id.clone()))?;

@@ -19,8 +19,10 @@ use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
 use js_agent::lifecycle::{
     Clock, Exit, Found, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
 };
+use js_agent::native::NativeRuntime;
 use js_agent::quota::{FakeQuota, ScratchQuota};
-use js_agent::{FileReader, Machine, RuntimeBuild, SharedClock};
+use js_agent::{Backend, FileReader, Machine, RuntimeBuild, SharedClock};
+use js_mac_session::client::Client;
 
 /// How long a test waits for the other thread before it fails.
 pub const HANG_GUARD: Duration = Duration::from_secs(120);
@@ -406,6 +408,8 @@ pub struct FakeMachine {
     pub files: SharedFiles,
     /// The scratch quota of the machine: one that works, unless a test replaces it.
     pub quota: Arc<FakeQuota>,
+    /// For each native runtime made: whether its settings carried a bundle store.
+    pub bundles_seen: Arc<Mutex<Vec<bool>>>,
 }
 
 /// Cgroup files the test writes and the worker thread reads, and the threads that read.
@@ -466,7 +470,13 @@ impl FakeMachine {
             build: Build::Fine,
             files: SharedFiles::default(),
             quota: Arc::new(FakeQuota::new()),
+            bundles_seen: Arc::default(),
         }
+    }
+
+    /// For each native runtime made: whether its settings carried a bundle store.
+    pub fn bundles_seen(&self) -> Vec<bool> {
+        self.bundles_seen.lock().unwrap().clone()
     }
 
     /// The same machine with `quota` as its scratch quota.
@@ -497,7 +507,26 @@ impl Machine for FakeMachine {
             Build::Fine | Build::HostNotSeen => {
                 // What opening the real runtime does for jobs mapped onto a range: the
                 // checks take the range from the settings (the fake engine maps nothing).
-                build.settings.resolve(Mapping::new(231_072, 462_144));
+                let settings = match build.backend {
+                    Backend::Container(settings) => settings,
+                    // A native agent's runtime is the real one, over whatever helper the
+                    // flags name (the tests serve a fake one on that socket).
+                    Backend::Native(native) => {
+                        let helper = Client::new(native.socket());
+                        let opened = NativeRuntime::open(helper, native.config().clone(), 1);
+                        let runtime = opened.map_err(|why| why.to_string())?;
+                        self.bundles_seen
+                            .lock()
+                            .unwrap()
+                            .push(native.bundles().is_some());
+                        let runtime = match native.bundles() {
+                            Some(store) => runtime.with_bundles(Arc::clone(store)),
+                            None => runtime,
+                        };
+                        return Ok((Box::new(runtime), Vec::new()));
+                    }
+                };
+                settings.resolve(Mapping::new(231_072, 462_144));
                 Ok((
                     Box::new(self.world.runtime(build.host_id)),
                     vec!["the fake engine is ready".to_owned()],

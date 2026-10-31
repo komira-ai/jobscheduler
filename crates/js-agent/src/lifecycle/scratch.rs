@@ -44,7 +44,7 @@ impl DirLayout {
     }
 
     /// Whether `mode` (the permission bits of an existing root) is acceptable.
-    const fn allows(self, mode: u32) -> bool {
+    pub(crate) const fn allows(self, mode: u32) -> bool {
         match self {
             Self::Private => mode & 0o077 == 0,
             Self::Searchable => mode & 0o066 == 0 && mode & 0o001 != 0 && mode & 0o700 == 0o700,
@@ -52,7 +52,7 @@ impl DirLayout {
     }
 
     /// Why a root whose mode `allows` refuses is refused.
-    const fn refusal(self) -> &'static str {
+    pub(crate) const fn refusal(self) -> &'static str {
         match self {
             Self::Private => "group and others must have no permission",
             Self::Searchable => {

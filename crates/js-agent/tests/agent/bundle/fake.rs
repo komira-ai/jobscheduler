@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use js_agent::bundle::{BundleHost, Fetch, HostXcode, Needs};
+use js_agent::bundle::{BundleHost, Fetch, HostXcode, Needs, Placer, Settings};
 use js_bundle::DottedVersion;
 use js_treestore::mac::{VolumeFacts, check_securelevel, check_volumes};
 
@@ -36,6 +36,10 @@ pub struct State {
     pub long_values: bool,
     pub fetches: Vec<(String, String)>,
     pub started: Vec<(PathBuf, PathBuf)>,
+    /// What opening the store gives.
+    pub open: Result<Option<Arc<Placer>>, String>,
+    /// How many times the store was opened.
+    pub opens: usize,
 }
 
 impl Default for State {
@@ -55,6 +59,8 @@ impl Default for State {
             long_values: true,
             fetches: Vec::new(),
             started: Vec::new(),
+            open: Ok(None),
+            opens: 0,
         }
     }
 }
@@ -139,6 +145,11 @@ impl BundleHost for FakeHost {
 
     fn can_run(&self) -> bool {
         self.get(|s| s.can_run)
+    }
+
+    fn open(&self, _settings: &Settings) -> Result<Option<Arc<Placer>>, String> {
+        self.set(|s| s.opens += 1);
+        self.get(|s| s.open.clone())
     }
 
     fn fetch(&self, _store: &Path, name: &str, digest: &str) -> Fetch {
