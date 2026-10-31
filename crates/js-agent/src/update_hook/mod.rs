@@ -16,6 +16,7 @@
 mod args;
 mod declaration;
 mod params;
+mod ports;
 mod record;
 mod report;
 mod validate;
@@ -27,6 +28,11 @@ use std::process::ExitCode;
 pub use args::{ArgsError, Invocation, Step};
 pub use declaration::{DECLARATION_PATH, Declaration, DeclarationError, Timeouts};
 pub use params::{CORDON_LEASE_KEY, CORDON_MAX_KEY, PROMOTION_CEILING_KEY, Params, ParamsError};
+pub use ports::{
+    Clock, Cordoned, CordonView, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS, NoGate,
+    PortError, Ports, SYSTEMCTL, StateView, SystemClock, SystemLink, SystemUnits, Uncordoned,
+    UnitState, Units, read_link, swap_link,
+};
 pub use record::{
     Cordon, DirProblem, DirStat, Held, LOCK_FILE, RECORD_FILE, RECORD_MAX, Record, Rollback,
     SCHEMA, StateError, TEMP_FILE, UpdateInfo, check_dir, system_stat,

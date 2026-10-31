@@ -6,8 +6,14 @@
 
 mod args;
 mod declaration;
+#[allow(dead_code)]
+#[path = "../../update_hook_fakes/mod.rs"]
+mod fakes;
+mod fakes_tests;
 mod params;
+mod ports;
 mod record;
 mod report;
 mod validate;
 mod verb;
+mod fake_bin;

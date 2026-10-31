@@ -11,6 +11,13 @@ publish.workspace = true
 name = "js-agent"
 path = "src/main.rs"
 
+# `js-agent update-hook` over the fake ports (tests/update_hook_fakes), for the conformance
+# harness. Not shipped.
+[[bin]]
+name = "js-update-hook-fake"
+path = "tests/bin/update_hook_fake.rs"
+test = false
+
 [dependencies]
 js-agent-usage = { path = "../js-agent-usage" }
 js-agent-wire = { path = "../js-agent-wire" }
