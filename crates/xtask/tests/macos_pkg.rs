@@ -271,6 +271,48 @@ fn staging_refuses_an_output_directory_that_exists_and_a_source_that_does_not() 
     assert!(err.to_string().contains("js-mac-session"), "{err}");
 }
 
+#[test]
+fn the_program_stages_the_package_when_asked_to() {
+    let s = sources("macpkg-stage-binary");
+    let a = &s.args;
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["pkg", "stage-macos", "--version", VERSION])
+        .arg("--bin-dir")
+        .arg(&a.bin_dir)
+        .arg("--license")
+        .arg(&a.license)
+        .arg("--agent-plist")
+        .arg(&a.agent_plist)
+        .arg("--session-plist")
+        .arg(&a.session_plist)
+        .arg("--declaration")
+        .arg(&a.declaration)
+        .arg("--out")
+        .arg(&a.out)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8(out.stdout).unwrap();
+    assert!(said.starts_with("staged js-agent 1.2.3"), "{said}");
+    assert!(a.out.join("scripts/postinstall").is_file());
+}
+
+#[test]
+fn the_program_refuses_a_package_it_cannot_read_with_status_1() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["pkg", "check-macos", "--pkg", "/nonexistent/js-agent.pkg"])
+        .args(["--version", VERSION])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).starts_with("xtask: "));
+    assert!(out.stdout.is_empty());
+}
+
 // ---- check ----
 
 fn bom_of(all: &[Entry]) -> String {
@@ -390,6 +432,19 @@ fn a_link_or_a_file_where_a_directory_belongs_is_refused() {
     assert_eq!(
         refused(&p),
         ["usr/local/js-agent/link/current: is not a file or a directory (mode 120755)"]
+    );
+}
+
+#[test]
+fn a_directory_where_a_file_belongs_is_refused() {
+    let mut p = good();
+    p.bom = p.bom.replace(
+        "releases/1.2.3/LICENSE\t100644\t0/0\t12\t3456",
+        "releases/1.2.3/LICENSE\t40755\t0/0",
+    );
+    assert_eq!(
+        refused(&p),
+        ["usr/local/js-agent/releases/1.2.3/LICENSE: is a directory, not a file"]
     );
 }
 
