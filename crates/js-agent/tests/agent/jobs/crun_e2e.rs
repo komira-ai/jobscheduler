@@ -328,6 +328,10 @@ impl Runtime for Noting {
         self.inner.supports_gpus()
     }
 
+    fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {
+        self.inner.lease_dir(run_id)
+    }
+
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         self.inner.cgroup(id)
     }
