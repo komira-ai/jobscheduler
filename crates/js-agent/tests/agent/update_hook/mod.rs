@@ -6,6 +6,7 @@
 
 mod args;
 mod declaration;
+mod fake_bin;
 #[allow(dead_code)]
 #[path = "../../update_hook_fakes/mod.rs"]
 mod fakes;
@@ -16,4 +17,3 @@ mod record;
 mod report;
 mod validate;
 mod verb;
-mod fake_bin;
