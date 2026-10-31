@@ -480,6 +480,7 @@ pub fn view(name: &str) -> HostView {
         mark: None,
         reserved_for: None,
         drain_deadline: None,
+        cordon_until: None,
         load: None,
     }
 }

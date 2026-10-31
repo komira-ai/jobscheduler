@@ -102,6 +102,9 @@ pub struct HostView {
     /// When a reservation that drains a busy host is given up if the host is still not
     /// quiet; `None` unless the host is reserved and was busy when it was set aside.
     pub drain_deadline: Option<Timestamp>,
+    /// When the host's cordon lapses, when it is cordoned ([`Registry::cordon`]): it
+    /// takes no new lease until then.
+    pub cordon_until: Option<Timestamp>,
     /// The latest load the host reported (in the units of [`NodeLoad`]). Only the latest accepted beat's load is kept: minutes
     /// it carries that a consumer has not read before the next beat are lost to it, and a beat
     /// whose reply was lost is sent again, so a consumer that sums minutes must dedupe them by
@@ -890,8 +893,9 @@ impl Registry {
 
     /// What every known host id is bound to, in id order, with the taint the host
     /// reported when it has and the cordon that has not lapsed when it is cordoned. A
-    /// caller that persists bindings writes this, so that a restart can hand the bindings to [`crate::RegisteredProvider::seat`] and the tainted hosts
-    /// to [`Registry::restore_tainted`].
+    /// caller that persists bindings writes this, so that a restart can hand the bindings
+    /// to [`crate::RegisteredProvider::seat`] and the tainted or cordoned hosts to
+    /// [`Registry::restore_tainted`].
     pub fn bindings(&self) -> BTreeMap<HostId, Binding> {
         let now = self.shared.clock.now();
         let state = self.lock_at(now);
@@ -1000,6 +1004,7 @@ impl Registry {
                 drain_deadline: set_aside(id)
                     .filter(|mark| !mark.assigned)
                     .map(|mark| mark.deadline),
+                cordon_until: record.cordon.filter(|until| *until > now),
             }
         }
     }

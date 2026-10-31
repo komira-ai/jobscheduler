@@ -22,7 +22,11 @@
 //!
 //! A cordon is written to the agent state file before it is acknowledged: when that fails
 //! the answer is 503 `cordon-unsaved`, the cordon holds on this server all the same, and
-//! the same call repeated is the retry.
+//! the same call repeated is the retry. Until a save succeeds a server restart loses that
+//! cordon, or brings back one that an unsaved uncordon lifted (for at most the
+//! [`MAX_CORDON`] it was asked for). Every call, the read too, checks the credential
+//! with `JoinTokens::serves`, which renews the host credential and may write the join
+//! token file; a failed write is logged and does not fail the call.
 
 use std::sync::Arc;
 use std::time::Duration;
