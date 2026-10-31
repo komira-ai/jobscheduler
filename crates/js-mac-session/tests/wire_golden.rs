@@ -196,6 +196,28 @@ fn every_request_has_its_bytes() {
     }
 }
 
+/// Catches: a `run` that cannot carry the limits the helper sets (the file size in bytes
+/// and the most processes), that writes them under other names, or that accepts a limit it
+/// does not know, a limit missing one of its two fields or a negative one: the helper takes
+/// no shell to set them, so a limit it silently dropped would be no limit at all.
+#[test]
+fn a_run_carries_its_limits_and_refuses_what_it_does_not_know() {
+    let head = r#"{"verb":"run","lease":"3.7","argv":["/bin/true"],"env":[]"#;
+    let good = format!(r#"{head},"limits":{{"file_bytes":1048576,"processes":512}}}}"#);
+    let request = serde_json::from_str::<Request>(&good).unwrap();
+    assert_eq!(serde_json::to_string(&request).unwrap(), good);
+    for limits in [
+        r#"{"file_bytes":1048576,"processes":512,"nofile":3}"#,
+        r#"{"file_bytes":1048576}"#,
+        r#"{"processes":512}"#,
+        r#"{"file_bytes":-1,"processes":512}"#,
+        r#"{"file_bytes":1048576,"processes":"512"}"#,
+    ] {
+        let text = format!(r#"{head},"limits":{limits}}}"#);
+        assert!(serde_json::from_str::<Request>(&text).is_err(), "{text}");
+    }
+}
+
 /// Catches: a reply variant renamed or reshaped, which a daemon would read as a refusal
 /// or not at all.
 #[test]
