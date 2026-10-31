@@ -56,6 +56,11 @@
 //! | `--container-add-host <name>:<ip>` | a static host entry for every container, passed at create as `--add-host`; repeatable, at most 16; the name is a DNS name, the address IPv4 or IPv6 (`host-gateway` and anything else is refused, a name twice too); a network made without DNS resolves nothing, and a presigned URL names its host (its signature covers the Host header), so every endpoint a job may reach is given this way; needs `--container-bin` |
 //! | `--container-egress-allow <ip:port>` | an endpoint a named network may reach, `IPV4:PORT` or `CIDR:PORT` (prefix 24 to 32, outside 169.254.0.0/16 and the network's own subnet); repeatable, at most 16; required with a named `--container-network` (the agent does not start without it); before every job is created the agent reads back the network (a bridge, DNS off, no IPv6, one IPv4 subnet), `br_netfilter` and the nftables table `inet js_egress`, and refuses the job (`egress-unchecked`) unless the table holds exactly the rules for these endpoints; Podman only; see docs/egress.md; needs `--container-bin` |
 //! | `--container-nft <path>` | the absolute path of `nft` for that check; by default `/usr/sbin/nft`; needs `--container-egress-allow` |
+//! | `--egress <none\|allow-list>` | the network a job's `crun` container gets: `none` (the default) loopback only, no route; `allow-list` one interface to the host, which forwards only what `--egress-allow` and `--egress-dns` name; the agent, as root, wires each container from outside and keeps the firewall (docs/design/agent-egress.md); only the `crun` runtime reads it and this build cannot select that runtime yet, so `allow-list` is refused at start, as is `--container-network` beside it |
+//! | `--egress-allow <ip:port>` | an endpoint an allow-list may reach, `IPV4:PORT` or `CIDR:PORT` (TCP; prefix 24 to 32, outside 169.254.0.0/16 and the pool); repeatable, at most 16; at least one is required; needs `--egress allow-list` |
+//! | `--egress-dns <ip>` | a resolver an allow-list may ask (UDP and TCP port 53) and the only nameserver of a job's `resolv.conf`; repeatable, at most 4; without one a job resolves no name; needs `--egress allow-list` |
+//! | `--egress-pool <cidr>` | the IPv4 network the jobs' addresses come from, one /30 each, `/16` to `/24`; by default `198.18.0.0/16`; needs `--egress allow-list` |
+//! | `--egress-ip <path>`, `--egress-nft <path>`, `--egress-nsenter <path>` | the absolute paths of the `ip`, `nft` and `nsenter` programs the egress setup runs, by default `/usr/sbin/ip`, `/usr/sbin/nft` and `/usr/bin/nsenter`; need `--egress allow-list` |
 //! | `--actions-cgroup <path>` | the cgroup version 2 directory below `/sys/fs/cgroup` that holds every container (made and delegated by the operator): each container is created with `--cgroup-parent` naming it (the slice name for one `.slice` directly below `/sys/fs/cgroup`, the systemd driver; the path with a leading `/` otherwise, the cgroupfs driver), and the heartbeat carries the usage of the directory and of each lease's cgroup (see [`usage`]); without it the heartbeat carries no load, and the agent says so at start; needs `--container-bin` |
 //! | `--gpu-toolkit-hook <path>` | the absolute path of a program that checks the GPU container toolkit, run once at start when the host offers a GPU; exit 0 makes the hello report `gpu-toolkit`, anything else leaves it out and warns; needs `--container-bin` |
 //! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci; the Docker and Podman runtimes pull as `--container-pull` says and do not read it |
@@ -211,6 +216,9 @@ pub mod cli_runtime;
 mod container;
 mod contract;
 mod credential;
+#[cfg(target_os = "linux")]
+pub mod crun;
+pub mod egress;
 mod exclusive;
 mod facts;
 mod host;

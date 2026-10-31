@@ -71,7 +71,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
 pub use crun::{EnvScrub, RunEnd};
-pub use lease::{RESOLV_CONF, Reports};
+pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 
 /// The resolved seccomp section for `arch` (Go's name) and a job holding `caps`, as JSON.
@@ -126,6 +126,16 @@ pub struct OciConfig {
     /// How much of a job's output is kept (`logs`): by default 1 MiB of each stream in a
     /// file of the lease directory and the last 64 KiB of it in memory.
     pub logs: LogLimits,
+    /// The `/etc/resolv.conf` every job's container gets. By default [`RESOLV_CONF`]: one
+    /// nameserver, loopback, which nothing listens on. A node whose jobs have an allow-listed
+    /// network (the agent's egress mode) names the configured resolvers here, and only them.
+    pub resolv_conf: String,
+    /// With `Some(limit)` the container's init does not start the job until the container's
+    /// network namespace has a default route, and gives up after `limit` (whole seconds, 1 to
+    /// 3600): the host wires the namespace from outside after the container is up
+    /// ([`Oci::container_pid`]) and adds the route last. By default `None`: nothing is
+    /// waited for (a namespace with loopback only).
+    pub route_wait: Option<std::time::Duration>,
 }
 
 impl Default for OciConfig {
@@ -141,6 +151,8 @@ impl Default for OciConfig {
             scrub_env: crun::no_scrub,
             job_user: None,
             logs: LogLimits::default(),
+            resolv_conf: RESOLV_CONF.to_owned(),
+            route_wait: None,
         }
     }
 }
@@ -307,6 +319,9 @@ pub struct Oci {
     /// on its removal) no cgroup of its own choosing.
     cgroup_parent: String,
     logs: LogLimits,
+    resolv_conf: String,
+    /// Whole seconds the init waits for a default route; 0 for not at all.
+    route_wait_secs: u64,
 }
 
 impl Oci {
@@ -384,6 +399,10 @@ impl Oci {
             helpers: AtomicU64::new(0),
             cgroup_parent: cgroup_parent.to_owned(),
             logs: config.logs,
+            resolv_conf: config.resolv_conf.clone(),
+            route_wait_secs: config
+                .route_wait
+                .map_or(0, |limit| limit.as_secs().clamp(1, 3600)),
         });
         let leftovers = oci.images.sweep(&oci);
         leftovers.map_err(OciError::Prepare)?;
@@ -418,6 +437,24 @@ impl Oci {
         Ok(bundle)
     }
 
+    /// Gives `dir` to the account `crun` runs as (the job user of a root daemon; the daemon
+    /// itself otherwise, for which this changes nothing): a helper's state and log are made
+    /// in it by that account. The directory is opened without following a link and given by
+    /// its descriptor, so a path replaced by a link is refused, and what is given is what
+    /// was opened.
+    fn give_to_job_user(&self, dir: &Path) -> Result<(), JobError> {
+        use rustix::fs::{Mode, OFlags, fchown};
+        use rustix::process::{Gid, Uid};
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let given = rustix::fs::open(dir, flags, Mode::empty())
+            .and_then(|fd| {
+                let owner = (Uid::from_raw(self.ids.uid), Gid::from_raw(self.ids.gid));
+                fchown(&fd, Some(owner.0), Some(owner.1))
+            })
+            .map_err(std::io::Error::from);
+        at(dir, given)
+    }
+
     /// A number unique to this node's run of the daemon.
     fn next(&self) -> u64 {
         self.helpers.fetch_add(1, Ordering::Relaxed)
@@ -445,6 +482,7 @@ impl Oci {
         job: &helper::Job,
     ) -> Result<(), JobError> {
         at(dir, std::fs::create_dir_all(dir))?;
+        self.give_to_job_user(dir)?;
         let id = self.helper_id(what);
         let bundle = self.helper_bundle(dir, mapping, &id, job)?;
         let state = dir.join("helper-state");
@@ -489,6 +527,7 @@ impl Oci {
     pub fn remove_dir_blocking(&self, dir: &Path) -> Result<(), JobError> {
         let work = self.job_dir("rm");
         at(&work, std::fs::create_dir_all(&work))?;
+        self.give_to_job_user(&work)?;
         let id = self.helper_id("rm");
         let job = helper::remove_job(dir);
         let bundle = self.helper_bundle(&work, Mapping::Setup, &id, &job)?;

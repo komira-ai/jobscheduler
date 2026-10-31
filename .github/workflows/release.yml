@@ -195,18 +195,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The lease server is Linux-only; the client and the agent also build for Apple
-        # silicon.
+        # The lease server is Linux-only; the client, the agent, the js-bundle CLI and the
+        # Mac host tools (js-mac-session, js-mac-provision) also build for Apple silicon.
         include:
           # Static musl binaries: they run on gcr.io/distroless/cc-debian12 and on any
           # Linux host, whatever its libc. rustls links ring, which compiles C, hence
           # musl-tools.
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
-            builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent
+            builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent js-bundle-cli:js-bundle
           - target: aarch64-apple-darwin
             runner: macos-15
-            builds: js-cli:js js-agent:js-agent
+            builds: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.plan.outputs.version }}
@@ -337,7 +337,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          expected="js-$VERSION-aarch64-apple-darwin.tar.gz js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-aarch64-apple-darwin.tar.gz js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          expected="js-$VERSION-aarch64-apple-darwin.tar.gz js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-aarch64-apple-darwin.tar.gz js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-bundle-$VERSION-aarch64-apple-darwin.tar.gz js-bundle-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz js-mac-provision-$VERSION-aarch64-apple-darwin.tar.gz js-mac-session-$VERSION-aarch64-apple-darwin.tar.gz"
           actual="$(ls | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
           if [ "$actual" != "$expected" ]; then
             echo "::error::unexpected assets: '$actual' (expected '$expected')"
@@ -454,7 +454,7 @@ jobs:
           # A draft for this version at this commit (tag_name and target_commitish).
           new_draft() {
             gh api "$api/releases" -f tag_name="$TAG" -f target_commitish="$COMMIT" -f name="jobscheduler $VERSION" \
-              -f body="js-lease-server, js and js-agent $VERSION. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
+              -f body="js-lease-server, js, js-agent, js-bundle and the Mac host tools $VERSION. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
               -F draft=true -F generate_release_notes=true --jq .id
           }
           # `plan` found no tag for this version: one that exists now was made since, and

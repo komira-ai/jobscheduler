@@ -31,6 +31,9 @@ mod lifecycle;
 mod native;
 mod quota;
 mod readiness;
+mod runtime_conformance;
+#[path = "../runtime_suite/mod.rs"]
+mod runtime_suite;
 mod server;
 mod session;
 mod support;

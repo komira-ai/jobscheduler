@@ -146,7 +146,12 @@ pub fn fixture(grants: Vec<ReadGrant>) -> Fixture {
 
 /// The assurance of a self-test that went right, for tests of what an assurance allows.
 pub fn assurance() -> Assurance {
-    let test = SelfTest::new(MacosMajor::Macos14, fixture(Vec::new())).expect("steps");
+    assurance_for(MacosMajor::Macos14)
+}
+
+/// The assurance of a self-test that went right on a host of `major`.
+pub fn assurance_for(major: MacosMajor) -> Assurance {
+    let test = SelfTest::new(major, fixture(Vec::new())).expect("steps");
     let ran: Vec<Outcome> = test
         .steps()
         .iter()
