@@ -13,9 +13,10 @@ fn arms_of(slots: &[Slot]) -> Vec<usize> {
 }
 
 /// Asserts that the same plan and seed give the same schedule, that the schedule is the
-/// one the reference in `tests/reference/schedule.py` (SplitMix64 and Fisher-Yates, run
-/// and checked there) gives for a pinned seed, so it is the same on every machine, and
-/// that another seed gives another order.
+/// one pinned for a seed, so it is the same on every machine, and that another seed gives
+/// another order. The pinned orders follow from the generator, pinned to the published
+/// SplitMix64 vector by `the_generator_is_splitmix64`, plus a standard Fisher-Yates
+/// shuffle from the last index down to 1.
 #[test]
 fn the_order_is_reproducible_from_the_seed() {
     let one = plan(&["a", "b", "c"], 2, 1, 42);
@@ -136,9 +137,10 @@ fn every_setting_and_arm_pair_is_a_cell_run_n_times() {
 }
 
 /// Asserts that the generator is SplitMix64: its first draws for seed 1234567 are the
-/// published test vector (the same five numbers as in the rand_xoshiro crate's reference
-/// test), which `tests/reference/schedule.py` also checks. It catches a changed constant or
-/// shift that would still give a reproducible, but different, order.
+/// published test vector: the five numbers of the `reference` test of the rand_xoshiro
+/// crate's `SplitMix64` (seed 1234567), an implementation of Vigna's `splitmix64.c`
+/// (https://prng.di.unimi.it/splitmix64.c). It catches a changed constant or shift that
+/// would still give a reproducible, but different, order.
 #[test]
 fn the_generator_is_splitmix64() {
     assert_eq!(
