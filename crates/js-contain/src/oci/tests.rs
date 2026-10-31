@@ -1079,6 +1079,8 @@ fn a_lease_names_its_directories_and_who_owns_them() {
     );
     assert_eq!(oci.job_ids(), (uid, gid));
     assert_eq!(oci.container_ids(), (101_000, 201_000));
+    // No job user is configured, so nothing is dropped to for the keeper either.
+    assert!(oci.job_drop().is_none());
 }
 
 /// Catches a helper's directory given by a path that was replaced by a link (the link, not
@@ -1367,4 +1369,38 @@ fn a_work_directory_is_given_by_descriptor_and_never_through_a_link() {
     std::os::unix::fs::symlink(&real, &link).expect("link");
     assert!(chown_dir(&link, uid, gid).is_err(), "followed a link");
     assert!(chown_dir(&dir.join("absent"), uid, gid).is_err());
+}
+
+/// Catches a backend whose `job_drop` is empty or built from other ids than the job user it
+/// was configured with: a daemon that is root (told so, as a test cannot be root) with a job
+/// user returns the drop for exactly that user and the configured tool path, and a daemon that
+/// is not root returns none.
+#[test]
+fn a_root_daemon_with_a_job_user_hands_out_the_drop_for_that_user() {
+    let dir = scratch("job-drop");
+    let mut config = config(&dir, true);
+    let job = rustix::process::getuid().as_raw() + 1;
+    let ids = IdFiles::in_dir(&dir.join("ids"));
+    std::fs::write(&ids.passwd, format!("job:x:{job}:{job}::/:/bin/sh\n")).expect("passwd");
+    std::fs::write(&ids.subuid, "job:300000:65536\n").expect("subuid");
+    std::fs::write(&ids.subgid, "job:400000:65536\n").expect("subgid");
+    config.job_user = Some((job, job + 5));
+    let on = |daemon: (u32, u32)| {
+        Oci::on_as(
+            &config,
+            Arc::new(NoImages),
+            &dir.join(format!("s{}", daemon.0)),
+            "/actions",
+            "x86_64",
+            daemon,
+        )
+    };
+    let root = on((0, 0)).expect("starts as root");
+    assert_eq!(
+        root.job_drop(),
+        crate::oci::JobDrop::new(Some((job, job + 5)), config.id_tool_path.as_deref(), 0).as_ref()
+    );
+    assert!(root.job_drop().is_some());
+    let user = on((job, job)).expect("starts as the job user");
+    assert!(user.job_drop().is_none());
 }
