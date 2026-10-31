@@ -122,3 +122,15 @@ fn every_reason_the_hook_gives_is_a_token_and_they_differ() {
         assert!(seen.insert(reason.as_str()), "{reason:?} repeated");
     }
 }
+
+#[test]
+fn the_reasons_of_cutover_are_these_exact_tokens() {
+    assert_eq!(Reason::StopFailed.as_str(), "stop_failed");
+    assert_eq!(Reason::LinkFailed.as_str(), "link_failed");
+    assert_eq!(Reason::StartFailed.as_str(), "start_failed");
+}
+
+#[test]
+fn the_reason_of_an_unconfirmed_cordon_is_this_exact_token() {
+    assert_eq!(Reason::CordonUnconfirmed.as_str(), "cordon_unconfirmed");
+}

@@ -77,11 +77,20 @@ pub enum Reason {
     NotVerified,
     /// The cordon's cap leaves nothing to ask for.
     CordonCapReached,
+    /// The unit could not be stopped, or did not stop in time.
+    StopFailed,
+    /// The release link could not be moved.
+    LinkFailed,
+    /// The unit could not be started, or did not become active in time.
+    StartFailed,
+    /// A cordon is in force but the record's mark of it was never confirmed: it may lapse
+    /// during the stop, and nothing renews it.
+    CordonUnconfirmed,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 13] = [
+    pub const ALL: [Reason; 17] = [
         Reason::NotImplemented,
         Reason::BadArgs,
         Reason::BadParams,
@@ -95,6 +104,10 @@ impl Reason {
         Reason::LeaseUnreachable,
         Reason::NotVerified,
         Reason::CordonCapReached,
+        Reason::StopFailed,
+        Reason::LinkFailed,
+        Reason::StartFailed,
+        Reason::CordonUnconfirmed,
     ];
 
     /// The token in the JSON.
@@ -114,6 +127,10 @@ impl Reason {
             Reason::LeaseUnreachable => "lease_unreachable",
             Reason::NotVerified => "not_verified",
             Reason::CordonCapReached => "cordon_cap_reached",
+            Reason::StopFailed => "stop_failed",
+            Reason::LinkFailed => "link_failed",
+            Reason::StartFailed => "start_failed",
+            Reason::CordonUnconfirmed => "cordon_unconfirmed",
         }
     }
 }

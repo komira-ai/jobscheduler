@@ -28,6 +28,13 @@ pub const EXPIRY_SLACK_MS: u64 = 1_000;
 /// version check, the cordon calls and the record writes happen around the wait.
 pub const PREPARE_MARGIN_SECS: u64 = 60;
 
+/// How long a started unit has to become active, in seconds.
+pub const START_WAIT_SECS: u64 = 120;
+
+/// The margin `cutover` keeps between the end of its wait for the stop and the declared
+/// timeout, besides the start wait, in seconds.
+pub const CUTOVER_MARGIN_SECS: u64 = 60;
+
 /// The rule a record broke.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Invalid {
@@ -40,6 +47,14 @@ pub enum Invalid {
         prepare: u64,
         /// `drain_wait_secs`.
         wait: u64,
+    },
+    /// The declared `cutover` timeout leaves no time to wait for the stop.
+    #[error(
+        "the declared cutover timeout {cutover} s leaves no time to stop: it must exceed {START_WAIT_SECS} s plus {CUTOVER_MARGIN_SECS} s"
+    )]
+    CutoverTimeout {
+        /// `[hook.timeout_secs] cutover`.
+        cutover: u64,
     },
     /// The record's schema is not the one this hook writes.
     #[error("schema {found} is not {SCHEMA}")]
@@ -167,6 +182,12 @@ pub fn validate(
             wait: params.drain_wait_secs,
         });
     }
+    // The wait for the stop ends before the declared bound by the start wait and a margin.
+    if declaration.timeouts.cutover <= START_WAIT_SECS + CUTOVER_MARGIN_SECS {
+        return Err(Invalid::CutoverTimeout {
+            cutover: declaration.timeouts.cutover,
+        });
+    }
     if record.schema != SCHEMA {
         return Err(Invalid::Schema {
             found: record.schema,
@@ -263,7 +284,7 @@ fn cordon(record: &Record, params: &Params) -> Result<(), Invalid> {
     Ok(())
 }
 
-/// Each mark is written after the act it names, and an act follows the one before it: a mark
+/// Each mark is written before the act it names, and an act follows the one before it: a mark
 /// set without the one it follows from cannot have been written by this hook.
 fn marks(record: &Record) -> Result<(), Invalid> {
     let rb = &record.rb;
@@ -272,7 +293,8 @@ fn marks(record: &Record) -> Result<(), Invalid> {
             "link_moved",
             record.link_moved,
             "stop_begun",
-            record.stop_begun,
+            // A first install has no unit to stop: the link move is its first act.
+            record.stop_begun || record.update.previous.is_none(),
         ),
         (
             "start_issued",
