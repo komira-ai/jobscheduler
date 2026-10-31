@@ -192,6 +192,11 @@ pub struct Input {
     pub entropy: Vec<[u8; 16]>,
     /// The server-wide totals ([`Budgets`]); none by default.
     pub budgets: Budgets,
+    /// The pools whose failure brake an operator has asked to reset. The step clears the
+    /// brake of each (the count, the trip and the cooldown). A name the records hold no brake
+    /// for changes nothing, so asking twice is the same as asking once, and the caller may
+    /// keep sending a name until a step that carried it has been saved.
+    pub brake_resets: Vec<String>,
 }
 
 impl Input {

@@ -1,6 +1,6 @@
 //! What a step returns: the actions the caller runs, and the state to give the next step.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_elastic::{AcquireId, Dimension, HostRef, Offer};
@@ -150,6 +150,14 @@ pub struct State {
     /// out, and the registry places no new lease on it, so it would hold a request for the
     /// whole window to no purpose (the request launches anyway at its end).
     pub(crate) awaiting: BTreeMap<String, Millis>,
+    /// Since when each registered or draining machine's host has been heard from at every
+    /// step, unbroken. Not written to disk, on purpose: a restart starts the time again, which
+    /// only delays the end of the brake's count of failures.
+    pub(crate) heard: BTreeMap<String, Millis>,
+    /// The machines whose host has been heard from for `boot_fail_reset_after` and so already
+    /// ended the count of failures once. Not written to disk: after a restart a machine can
+    /// end the count once more.
+    pub(crate) credited: BTreeSet<String>,
 }
 
 impl State {

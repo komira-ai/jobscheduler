@@ -856,10 +856,13 @@ Rules, each tied to a requirement or to existing behaviour:
   not written to the records. A third of `boot_timeout` was chosen over `unknown_hold` (30 min)
   because a failed boot is billed for the whole wait and this one is only about the agent's
   retry. The instance is released. Any boot failure blocks new
-  launches in the pool for `boot_fail_cooldown` (default 10 min, a fixed value; PROPOSAL,
-  14 Q14) and shows `blocked: boot_failed`. The billed minutes of the failed boot stay in the
-  day total. Counting failures, doubling the cooldown and suppressing a single offer are
-  Later (section 12); the caps bound the loss meanwhile.
+  launches in the pool for `boot_fail_cooldown` (10 min for the first failure, doubled for each
+  failure in a row up to `boot_fail_cooldown_max`, 2 h by default) and shows `blocked: boot_failed`.
+  After `boot_fail_trip_after` failures in a row (3) the pool is tripped to plan until an
+  operator resets it (`POST /v1/pools/{pool}/brake/reset`); refusals for quota, denial and shape
+  and spot preemptions count too (a pool is struck once per step at most), and a host heard from
+  for `boot_fail_reset_after` (10 min) ends the count. The billed minutes
+  of the failed boot stay in the day total. Suppressing a single offer is Later (section 12).
 - Registered to Draining: the host holds no lease and no runs for `idle`
   (`HostView.releasing` false and `lease` none, `registry.rs::hosts`) and carries no mark.
   The scaler asks `Registry::drain(host)` (6.3). `drain` fails with `Busy` if the host has

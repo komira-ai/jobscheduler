@@ -180,7 +180,11 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         clock.clone(),
     );
     let status = config.status.then(|| Arc::new(status));
-    let shared = Arc::new(Shared::new(table, config.token, agents).with_status(status));
+    let shared = Arc::new(
+        Shared::new(table, config.token, agents)
+            .with_status(status)
+            .with_scaler(scaler.clone()),
+    );
     let split = agent_listener.is_some();
     let (stop, stopped) = oneshot::channel::<()>();
     let slots = Arc::new(Slots::new(config.limits.max_connections));

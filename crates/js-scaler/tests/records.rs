@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use common::*;
 use js_elastic::Offer;
 use js_scaler::{
-    Cooldown, CooldownReason, OLDEST, Phase, Record, Records, StoredExec, StoredOffer, VERSION,
+    Brake, Cooldown, CooldownReason, OLDEST, Phase, Record, Records, StoredExec, StoredOffer,
+    VERSION,
 };
 use js_types::ExecMode;
 
@@ -353,24 +354,42 @@ fn the_go_and_pool_kinds_keys_are_read_and_written_back() {
     assert!(Records::decode(&odd).is_err());
 }
 
-/// Asserts that a file of version 2 that holds a `brake` key (a later writer's failure count
-/// and trip) reads under this reader, whatever the key holds, and reads as the same records
-/// without it; written back, the file has no `brake`. It catches a reader that refuses the
-/// key, which would keep a server rolled back from a newer one from starting.
+/// Asserts that the failure brake is written and read back whole (the count and the instant
+/// of the trip, a pool with neither a count nor a trip is not written), that a file written
+/// before the key reads with no brake, and that a file without any brake has no `brake` key.
+/// It catches a brake that a restart would lose, and one that leaks into files that have none.
 #[test]
-fn a_file_holding_a_brake_key_reads_and_the_key_is_dropped() {
-    let with = GOLDEN.replacen(
+fn the_failure_brake_round_trips_and_an_older_file_reads_without_it() {
+    let mut records = Records::decode(GOLDEN).unwrap();
+    assert!(records.brake.is_empty());
+    assert!(!records.encode().unwrap().contains("\"brake\""));
+    records.brake.insert(
+        "gpu".to_owned(),
+        Brake {
+            failures: 2,
+            tripped_at: None,
+        },
+    );
+    records.brake.insert(
+        "tpu".to_owned(),
+        Brake {
+            failures: 0,
+            tripped_at: Some(at(7 * MINUTE)),
+        },
+    );
+    assert_eq!(
+        format!("{:?}", records.brake["gpu"]),
+        "Brake { failures: 2, tripped_at: None }"
+    );
+    let text = records.encode().unwrap();
+    assert!(text.contains("\"brake\""), "{text}");
+    assert_eq!(Records::decode(&text).unwrap(), records);
+    let bare = GOLDEN.replacen(
         "\"last_step\"",
-        "\"brake\": {\"gpu\": {\"failures\": 3, \"tripped_at\": 5}},\n  \"last_step\"",
+        "\"brake\": {\"gpu\": {\"failures\": 1}},\n  \"last_step\"",
         1,
     );
-    assert!(with.contains("\"brake\""), "{with}");
-    let records = Records::decode(&with).unwrap();
-    assert_eq!(records, Records::decode(GOLDEN).unwrap());
-    assert!(!records.encode().unwrap().contains("\"brake\""));
-    let odd = GOLDEN.replacen("\"last_step\"", "\"brake\": 3,\n  \"last_step\"", 1);
-    assert_eq!(
-        Records::decode(&odd).unwrap(),
-        Records::decode(GOLDEN).unwrap()
-    );
+    let read = Records::decode(&bare).unwrap();
+    assert_eq!(read.brake["gpu"].failures, 1);
+    assert_eq!(read.brake["gpu"].tripped_at, None);
 }

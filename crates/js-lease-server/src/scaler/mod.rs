@@ -156,6 +156,10 @@ struct Core {
     /// Where each alert is sent besides the log; set once, at start. Its delivery runs on a
     /// thread of its own, so a slow or refusing receiver never holds up a tick.
     sink: OnceLock<Mutex<Notifier>>,
+    /// The pools whose failure brake an operator has asked to reset and no tick has taken yet.
+    /// The next tick takes them and puts them back if its records were not written, so a
+    /// request is dropped only by a restart before the write; asking again is harmless.
+    brake_resets: Mutex<BTreeSet<String>>,
 }
 
 /// The scaler of one elastic pool. A handle: clones share one scaler.
@@ -232,6 +236,7 @@ impl Scaler {
             memory: Mutex::new(memory),
             last: Arc::new(Mutex::new(None)),
             sink: OnceLock::new(),
+            brake_resets: Mutex::new(BTreeSet::new()),
         };
         Self {
             core: Arc::new(core),
@@ -329,6 +334,25 @@ impl Scaler {
         blocking(move || core.tick()).await;
     }
 
+    /// Asks for the failure brake of `pool` to be reset at the next tick: its count, its trip
+    /// and its cooldown are cleared and the records written. Idempotent. The pool is the
+    /// server's own or one the records still hold a brake for (a pool taken out of the file
+    /// keeps its trip, and its alert, until this is asked); `false`, and nothing done, for any
+    /// other name.
+    pub fn reset_brake(&self, pool: &str) -> bool {
+        let held = self.core.memory().state.records.brake.contains_key(pool);
+        let known = held || pool == self.core.settings.pool;
+        if known {
+            let mut asked = self
+                .core
+                .brake_resets
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            asked.insert(pool.to_owned());
+        }
+        known
+    }
+
     /// The settings the scaler was built with.
     pub fn settings(&self) -> &Settings {
         &self.core.settings
@@ -367,9 +391,22 @@ impl Core {
         work.unremoved_failed = false;
         self.retry_revokes(&mut work);
         self.retry_removes(&mut work);
-        let input = self.input(&work, now);
+        let mut input = self.input(&work, now);
+        let asked = std::mem::take(
+            &mut *self
+                .brake_resets
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        input.brake_resets = asked.iter().cloned().collect();
         let (next, actions) = step(work.state.clone(), &input, now);
         let Some(answers) = self.run(&mut work, actions) else {
+            // The records were not written, so the reset is not made: ask again.
+            let mut again = self
+                .brake_resets
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            again.extend(asked);
             *self.memory() = work;
             return;
         };
@@ -530,6 +567,7 @@ impl Core {
             not_found,
             entropy: draws.map(|bytes| tail(&bytes)).collect(),
             budgets: self.budgets.clone(),
+            brake_resets: Vec::new(),
         }
     }
 

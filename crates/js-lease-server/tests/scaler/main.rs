@@ -4,6 +4,7 @@
 //! to a provider, the records file and the file of hosts the registry would not remove. Time
 //! is an injected clock; nothing sleeps and no test touches a network.
 
+mod brake;
 mod complete;
 mod disk;
 mod duties;
