@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.komira.js-agent</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/js-agent/link/current/js-agent</string>
+		<string>--server</string>
+		<string>https://leases.example:7300</string>
+		<string>--token-file</string>
+		<string>/etc/js-agent/token</string>
+		<string>--pool</string>
+		<string>mac</string>
+		<string>--state-root</string>
+		<string>/var/db/js-agent/state</string>
+		<string>--scratch-root</string>
+		<string>/var/db/js-agent/scratch</string>
+		<string>--native-helper-socket</string>
+		<string>/var/run/js-mac-session/socket</string>
+	</array>
+	<key>UserName</key>
+	<string>root</string>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>PathState</key>
+		<dict>
+			<key>/etc/js-agent/token</key>
+			<true/>
+		</dict>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>ExitTimeOut</key>
+	<integer>120</integer>
+	<key>StandardOutPath</key>
+	<string>/Library/Logs/js-agent/js-agent.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/js-agent/js-agent.err.log</string>
+</dict>
+</plist>

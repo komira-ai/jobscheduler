@@ -196,7 +196,7 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - run: cargo build --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-bundle -p js-bundle-cli
+      - run: cargo build --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-bundle -p js-bundle-cli -p js-mac-provision
       - name: Check the minimum macOS of the built binaries
         run: |
           set -euo pipefail
@@ -213,7 +213,10 @@ jobs:
             checked=$((checked + 1))
           done
           [ "$checked" -gt 0 ] || { echo "::error::no Mach-O binary found to check"; exit 1; }
-      - run: cargo test --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-bundle -p js-bundle-cli
+      - run: cargo test --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-bundle -p js-bundle-cli -p js-mac-provision
+      # The package of the agent, built with Apple's pkgbuild from stand-in files and read back.
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked -p xtask --test macos_pkg --test macos_pkg_real
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
