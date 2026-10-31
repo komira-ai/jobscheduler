@@ -14,8 +14,12 @@
 //! Every step is a stub today: it exits 1 with the reason `not_implemented`.
 
 mod args;
+mod declaration;
 mod params;
+mod plain;
+mod record;
 mod report;
+mod validate;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -23,11 +27,17 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 pub use args::{ArgsError, Invocation, Step};
+pub use declaration::{DECLARATION_PATH, Declaration, DeclarationError, Timeouts};
 pub use params::{
     CORDON_LEASE_KEY, CORDON_MAX_KEY, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY,
     PROMOTION_CEILING_KEY, Params, ParamsError, STAGED_RELEASE_KEY, TARGET_VERSION_KEY,
 };
+pub use record::{
+    Cordon, DirProblem, DirStat, Held, LOCK_FILE, RECORD_FILE, RECORD_MAX, Record, Rollback,
+    SCHEMA, StateError, TEMP_FILE, UpdateInfo, check_dir, system_stat,
+};
 pub use report::{Class, MAX_REASON_LEN, Reason, Report, is_reason_token};
+pub use validate::{EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, validate};
 
 /// The first argument that selects the verb.
 pub const VERB: &str = "update-hook";
