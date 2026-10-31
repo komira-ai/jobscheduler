@@ -37,6 +37,7 @@ thiserror.workspace = true
 # the `image-pull` verb (src/image/pull.rs). `rt-multi-thread`: the runtime the image
 # pulls run on (src/lifecycle/prefetch.rs).
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+toml.workspace = true
 tracing.workspace = true
 
 # The crun image source and the image config (src/image), and the helper modes this binary

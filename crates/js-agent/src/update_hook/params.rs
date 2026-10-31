@@ -1,0 +1,77 @@
+//! The `--params <file>` table.
+//!
+//! The declaration's `[hook.params]` table is opaque to the updater: it checks that every value
+//! is a scalar and writes the table to a file. The file is TOML, a flat table of scalars. The
+//! updater adds one reserved key, [`PROMOTION_CEILING_KEY`]. This hook needs two keys,
+//! `cordon_lease_secs` and `cordon_max_secs`, as whole numbers of seconds; any other scalar key
+//! is the declaration's own business and is ignored.
+//!
+//! The reserved key contains a dot, so in the file it is a quoted key. Written bare, TOML makes
+//! it a table `updater`, which is not a scalar and is refused.
+
+use std::io;
+use std::path::Path;
+
+/// The reserved key the updater sets from the declaration's `promotion_ceiling_secs`.
+pub const PROMOTION_CEILING_KEY: &str = "updater.promotion_ceiling_secs";
+
+/// The key of the lifetime of a cordon between renewals.
+pub const CORDON_LEASE_KEY: &str = "cordon_lease_secs";
+
+/// The key of the longest a cordon may be held from its first placement.
+pub const CORDON_MAX_KEY: &str = "cordon_max_secs";
+
+/// Why a params file was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum ParamsError {
+    /// The file could not be read.
+    #[error("cannot read the params file: {0}")]
+    Read(#[from] io::Error),
+    /// The file is not TOML.
+    #[error("the params file is not a TOML table: {0}")]
+    Syntax(String),
+    /// A value is an array, a table or a date.
+    #[error("params key {0:?} is not a scalar (a dotted key must be quoted)")]
+    NotScalar(String),
+    /// A key this hook needs is absent.
+    #[error("params key {0:?} is required")]
+    Missing(&'static str),
+    /// A key this hook reads is not a whole, non-negative number of seconds.
+    #[error("params key {0:?} must be a whole number of seconds, not negative")]
+    NotSeconds(String),
+}
+
+/// What the hook reads of its params file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Params {
+    /// How long a cordon lives between renewals.
+    pub cordon_lease_secs: u64,
+    /// The most a cordon may be held, counted from its first placement.
+    pub cordon_max_secs: u64,
+    /// The updater's ceiling on a pending promotion, when it set one.
+    pub promotion_ceiling_secs: Option<u64>,
+}
+
+impl Params {
+    /// Reads a params file.
+    ///
+    /// # Errors
+    /// [`ParamsError`]: the file cannot be read or parsed, or a value is wrong.
+    pub fn read(path: &Path) -> Result<Params, ParamsError> {
+        Params::parse(&std::fs::read_to_string(path)?)
+    }
+
+    /// Reads the text of a params file.
+    ///
+    /// # Errors
+    /// [`ParamsError`]: the text is not a flat table of scalars with the required keys.
+    pub fn parse(text: &str) -> Result<Params, ParamsError> {
+        let _ = (
+            text,
+            CORDON_LEASE_KEY,
+            CORDON_MAX_KEY,
+            PROMOTION_CEILING_KEY,
+        );
+        unimplemented!()
+    }
+}

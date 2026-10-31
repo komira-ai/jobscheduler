@@ -39,4 +39,6 @@ mod runtime_suite;
 mod server;
 mod session;
 mod support;
+#[cfg(target_os = "linux")]
+mod update_hook;
 mod usage;

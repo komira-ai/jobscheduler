@@ -1,0 +1,118 @@
+//! The command line of the hook: `js-agent update-hook <step> [<artifact>] --params <file>`.
+//!
+//! The updater runs `<executable> <hook_args> <step> [args]` (host-updates design, 3.2). This
+//! module parses what follows the verb: the step, the staged release directory (`prepare` only)
+//! and the file of the `[hook.params]` table, which this hook always needs (the cordon's lease
+//! and cap are in it). Flags only: no value comes from the environment.
+
+use std::ffi::OsString;
+use std::fmt;
+use std::path::PathBuf;
+use std::str::FromStr;
+
+/// One of the five steps, in the order a successful update runs them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// Check the host can take the update and make it ready; nothing a client sees changes.
+    Prepare,
+    /// The visible change.
+    Cutover,
+    /// Observe that the new version serves.
+    Verify,
+    /// Undo what `prepare` and `cutover` did, as far as they can be undone.
+    Rollback,
+    /// Remove what only the update needed.
+    Cleanup,
+}
+
+impl Step {
+    /// Every step, in the order of the contract's table.
+    pub const ALL: [Step; 5] = [
+        Step::Prepare,
+        Step::Cutover,
+        Step::Verify,
+        Step::Rollback,
+        Step::Cleanup,
+    ];
+
+    /// The word the updater puts on the command line.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Step::Prepare => "prepare",
+            Step::Cutover => "cutover",
+            Step::Verify => "verify",
+            Step::Rollback => "rollback",
+            Step::Cleanup => "cleanup",
+        }
+    }
+}
+
+impl fmt::Display for Step {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl FromStr for Step {
+    type Err = ArgsError;
+
+    fn from_str(word: &str) -> Result<Step, ArgsError> {
+        Step::ALL
+            .into_iter()
+            .find(|step| step.name() == word)
+            .ok_or_else(|| ArgsError::UnknownStep(word.to_owned()))
+    }
+}
+
+/// Why a command line was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ArgsError {
+    /// Nothing follows the verb.
+    #[error("no step given")]
+    MissingStep,
+    /// The first word is not one of the five steps.
+    #[error("unknown step {0:?}")]
+    UnknownStep(String),
+    /// `prepare` without the staged release directory.
+    #[error("prepare needs the staged release directory")]
+    MissingArtifact,
+    /// An argument the step does not take (an artifact for any step but `prepare`, a second
+    /// artifact, any other flag).
+    #[error("unexpected argument {0:?}")]
+    Unexpected(OsString),
+    /// `--params` is the last word.
+    #[error("--params needs a file")]
+    MissingParamsFile,
+    /// `--params` twice.
+    #[error("--params given twice")]
+    DuplicateParams,
+    /// No `--params`: the hook cannot know the cordon's lease and cap without the table.
+    #[error("--params <file> is required")]
+    MissingParams,
+}
+
+/// The step a hook was asked to run, with its arguments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Invocation {
+    /// The step.
+    pub step: Step,
+    /// The staged release directory: given to `prepare` and to no other step.
+    pub artifact: Option<PathBuf>,
+    /// The file of the `[hook.params]` table.
+    pub params: PathBuf,
+}
+
+impl Invocation {
+    /// Parses the arguments that follow the verb, the step first.
+    ///
+    /// # Errors
+    /// [`ArgsError`] for an unknown step, a missing or extra argument, or a missing
+    /// `--params`.
+    pub fn parse<I>(args: I) -> Result<Invocation, ArgsError>
+    where
+        I: IntoIterator<Item = OsString>,
+    {
+        unimplemented!("{}", args.into_iter().count())
+    }
+}
