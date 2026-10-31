@@ -283,7 +283,10 @@ const EXITED_101: &str = "Result=exit-code\nExecMainCode=1\nExecMainStatus=101\n
 
 /// A count file holding `text` (none: no file), in a scratch directory of its own.
 fn counted(name: &str, text: Option<&str>) -> std::path::PathBuf {
-    let file = scratch(name).join("u.count");
+    // Tests run in parallel: each call gets a directory of its own.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = scratch(&format!("{name}-{n}")).join("u.count");
     if let Some(text) = text {
         std::fs::write(&file, text).expect("count file");
     }
