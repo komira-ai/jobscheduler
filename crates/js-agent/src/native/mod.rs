@@ -34,6 +34,7 @@
 //! macOS agent makes one.
 
 mod logs;
+mod settings;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -43,6 +44,7 @@ use std::io;
 use std::os::fd::AsFd as _;
 use std::os::unix::fs::{PermissionsExt as _, chown};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
 use std::time::Duration;
@@ -57,8 +59,11 @@ use js_mac_session::lease::{Dotted, user_name};
 use js_types::LeaseId;
 
 use crate::lifecycle::{
-    Body, Exit, Found, NativeRefusal, RunHandle, RunSpec, Runtime, RuntimeError, Status,
+    Body, CheckFinding, CheckHook, Exit, Finished, Found, NativeRefusal, RunHandle, RunSpec,
+    Runtime, RuntimeError, Status,
 };
+
+pub use settings::{DEFAULT_HOMES, DEFAULT_TOOL_ROOTS, NativeFlags, NativeSettings};
 
 /// What a native runtime is told, from the agent's flags.
 #[derive(Debug, Clone)]
@@ -123,37 +128,6 @@ impl NativeRuntime {
         })
     }
 
-    /// The `sandbox-exec` command line of `native`, run as a user whose home is `home`.
-    fn argv(&self, native: &NativeSpec, home: &Path) -> Result<Vec<String>, RuntimeError> {
-        let run = AbsPath::new(home).map_err(|why| fail(&home.display(), &why))?;
-        let layout = SlotLayout {
-            run,
-            uid_entry: None,
-            inputs: Vec::new(),
-            read_denies: self.config.read_denies.clone(),
-        };
-        let caps = Caps {
-            net: self.config.net.clone(),
-            read_model: self.config.read_model,
-        };
-        let narrowing = Narrowing {
-            net: Some(net_of(native.network)),
-            ..Narrowing::default()
-        };
-        let policy = Policy::base(layout, caps)
-            .and_then(|policy| policy.narrowed(narrowing))
-            .map_err(|why| fail(&"the policy", &why))?;
-        let profile = Profile::for_policy(&policy).map_err(|why| fail(&"the profile", &why))?;
-        let program =
-            AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
-        let args: Vec<OsString> = native.args.iter().map(OsString::from).collect();
-        let argv = profile.argv(&program, &args);
-        Ok(argv
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect())
-    }
-
     /// Everything after the user exists: the run directory, the log files, the profile and
     /// the `run` verb.
     fn launch(
@@ -168,7 +142,7 @@ impl NativeRuntime {
             .into_iter()
             .map(|dir| make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why)))
             .collect::<Result<Vec<File>, RuntimeError>>()?;
-        let argv = self.argv(native, &home)?;
+        let argv = profile_argv(&self.config, native, &home)?;
         let mut env: Vec<(String, String)> = native
             .env
             .iter()
@@ -348,6 +322,91 @@ impl Runtime for NativeRuntime {
                 why: format!("{} lies under no tool root", native.program),
             });
         }
+        Ok(())
+    }
+}
+
+/// The `sandbox-exec` command line of `native` under the policy of `config`, run as a user
+/// whose home is `home`.
+fn profile_argv(
+    config: &NativeConfig,
+    native: &NativeSpec,
+    home: &Path,
+) -> Result<Vec<String>, RuntimeError> {
+    let run = AbsPath::new(home).map_err(|why| fail(&home.display(), &why))?;
+    let layout = SlotLayout {
+        run,
+        uid_entry: None,
+        inputs: Vec::new(),
+        read_denies: config.read_denies.clone(),
+    };
+    let caps = Caps {
+        net: config.net.clone(),
+        read_model: config.read_model,
+    };
+    let narrowing = Narrowing {
+        net: Some(net_of(native.network)),
+        ..Narrowing::default()
+    };
+    let policy = Policy::base(layout, caps)
+        .and_then(|policy| policy.narrowed(narrowing))
+        .map_err(|why| fail(&"the policy", &why))?;
+    let profile = Profile::for_policy(&policy).map_err(|why| fail(&"the profile", &why))?;
+    let program =
+        AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
+    let args: Vec<OsString> = native.args.iter().map(OsString::from).collect();
+    let argv = profile.argv(&program, &args);
+    Ok(argv
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect())
+}
+
+/// Runs `/usr/bin/true` under the profile of `config` with `sandbox_exec`, as the agent:
+/// whether the Mac has a `sandbox-exec` that accepts the profile this runtime builds. An
+/// agent that fails it must not say `exec = sandbox-exec`, or every job it takes would
+/// fail.
+///
+/// # Errors
+///
+/// What failed, for the operator: the profile cannot be built, the program cannot be run,
+/// or it refused the profile.
+pub fn self_test(config: &NativeConfig, sandbox_exec: &Path) -> Result<(), String> {
+    let probe = NativeSpec {
+        program: "/usr/bin/true".to_owned(),
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        cwd: String::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        network: NetworkLevel::Off,
+    };
+    let argv = profile_argv(config, &probe, &config.homes).map_err(|why| why.0)?;
+    let name = sandbox_exec.display();
+    let out = Command::new(sandbox_exec)
+        .args(&argv[1..])
+        .env_clear()
+        .output()
+        .map_err(|why| format!("{name}: {why}"))?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(format!(
+            "{name} refused the profile ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// The post-job check of a native agent. A Mac has no `/proc` for the container agent's
+/// checks to read; what a run leaves behind is the helper's to find, and `user-delete`
+/// refuses while any process of the user remains and sweeps what the user owns, so a run
+/// that left residue fails its removal (and taints the host) before this runs.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeChecks;
+
+impl CheckHook for NativeChecks {
+    fn run(&mut self, _: &Finished<'_>) -> Result<(), CheckFinding> {
         Ok(())
     }
 }

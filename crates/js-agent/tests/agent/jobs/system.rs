@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use js_agent::{Machine, Platform, RuntimeBuild, System};
+use js_agent::{Backend, Machine, Platform, RuntimeBuild, System};
 
 use crate::support::Scratch;
 
@@ -75,8 +75,9 @@ fn the_system_opens_a_runtime_by_its_version_text() {
     };
     let open = |script: &str| {
         let settings = settings_with(&dir, script);
+        let backend = Backend::Container(settings.clone());
         let build = RuntimeBuild {
-            settings: &settings,
+            backend: &backend,
             host_id: "h1",
             platform: &platform,
             stop_grace: Duration::from_secs(1),
