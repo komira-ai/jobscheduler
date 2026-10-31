@@ -34,7 +34,7 @@ pub use params::{
 };
 pub use record::{
     Cordon, DirProblem, DirStat, Held, LOCK_FILE, RECORD_FILE, RECORD_MAX, Record, Rollback,
-    SCHEMA, StateError, TEMP_FILE, UpdateInfo, check_dir, system_stat,
+    SCHEMA, StateError, TEMP_FILE, UpdateInfo, check_ancestor, check_dir, fd_stat,
 };
 pub use report::{Class, MAX_REASON_LEN, Reason, Report, is_reason_token};
 pub use validate::{EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, validate};
