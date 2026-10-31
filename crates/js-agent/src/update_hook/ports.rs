@@ -192,10 +192,12 @@ pub fn swap_link(link: &Path, target: &Path) -> io::Result<()> {
     }
     symlink(target, &new)?;
     fs::rename(&new, link)?;
-    match link.parent() {
-        Some(dir) => fs::File::open(dir)?.sync_all(),
-        None => Ok(()),
-    }
+    // A bare name has the empty path for a parent: its directory is the current one.
+    let dir = link
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::File::open(dir)?.sync_all()
 }
 
 /// [`Link`] on the machine's file system.
