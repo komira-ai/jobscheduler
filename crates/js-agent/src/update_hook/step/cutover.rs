@@ -18,7 +18,8 @@
 //!    it is ours), for at most the declared bound less the start wait and a margin;
 //! 4. the record gets `link_moved`, then the link is moved;
 //! 5. the record gets `start_issued`, then the unit is started and waited for. A start that
-//!    fails is the release's fault only if the unit is then `failed`.
+//!    fails is the release's fault only if the unit ran and died (`failed`, or `auto-restart`
+//!    after a crash, at any look); a unit still waiting in `start` is not.
 //!
 //! Each mark is written before its act, so a run that is killed leaves the marks of every act
 //! it may have made. A rerun does not rely on them: it asks the unit manager and the link, and
@@ -374,12 +375,25 @@ fn move_link(env: &Env<'_>, held: &Held, record: &mut Record, link: &Path) -> Re
     })
 }
 
-/// A start that failed: the release's fault only if the unit ran and failed; a unit that is
-/// anything else says nothing of the binary.
-fn start_failure(env: &Env<'_>, unit: &str, detail: String) -> Done {
-    match env.ports.units.show(unit) {
-        Ok(state) if state.active == "failed" => failure(Reason::StartFailed, detail),
-        _ => environment(Reason::StartFailed, detail),
+/// Whether the unit shows that the binary ran and died: `failed`, or waiting to restart after a
+/// crash (`auto-restart`, as under `Restart=on-failure`).
+fn crashed(state: &UnitState) -> bool {
+    state.active == "failed" || state.sub == "auto-restart"
+}
+
+/// A start that failed: the release's fault only if the unit ran and died, now or at an earlier
+/// look (`seen_crash`); a unit that is anything else says nothing of the binary.
+fn start_failure(env: &Env<'_>, unit: &str, detail: String, seen_crash: bool) -> Done {
+    let ran = seen_crash
+        || env
+            .ports
+            .units
+            .show(unit)
+            .is_ok_and(|state| crashed(&state));
+    if ran {
+        failure(Reason::StartFailed, detail)
+    } else {
+        environment(Reason::StartFailed, detail)
     }
 }
 
@@ -392,15 +406,16 @@ fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Re
     let state = show(env, &unit, Reason::StartFailed)?;
     if matches!(life(&state), Life::Down | Life::Stopping) {
         env.ports.point();
-        env.ports
-            .units
-            .start(&unit)
-            .map_err(|why| start_failure(env, &unit, format!("cannot start {unit}: {why}")))?;
+        env.ports.units.start(&unit).map_err(|why| {
+            start_failure(env, &unit, format!("cannot start {unit}: {why}"), false)
+        })?;
     }
     let bound_ms = START_WAIT_SECS * 1000;
     let began = env.ports.clock.now_ms();
+    let mut seen_crash = false;
     loop {
         let state = show(env, &unit, Reason::StartFailed)?;
+        seen_crash |= crashed(&state);
         match life(&state) {
             Life::Up => return Ok(()),
             Life::Down | Life::Stopping => {
@@ -408,6 +423,7 @@ fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Re
                     env,
                     &unit,
                     format!("{unit} is {} after it was started", state.active),
+                    seen_crash,
                 ));
             }
             Life::Starting => {}
@@ -417,6 +433,7 @@ fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Re
                 env,
                 &unit,
                 format!("{unit} is still {} after {START_WAIT_SECS} s", state.active),
+                seen_crash,
             ));
         }
         pause(env, held, record, params)?;
