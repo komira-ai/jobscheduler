@@ -144,8 +144,11 @@ impl Sudo for SudoProgram<'_> {
             return Err(Error::Failed(format!(
                 "{} -n {} failed: {}",
                 self.0.display(),
-                args.first()
-                    .map_or_else(String::new, |a| a.to_string_lossy().into_owned()),
+                args.iter()
+                    .take(2)
+                    .map(|a| a.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 out.status
             )));
         }
@@ -220,20 +223,42 @@ pub fn unit_verdict(show: &str) -> Result<(), String> {
     ))
 }
 
-/// Runs the `systemd-run` command `args` for `unit`: `Ok` when `systemd-run` exited 0.
-fn run_unit(sudo: &dyn Sudo, _unit: &str, args: &[OsString]) -> Result<(), String> {
-    match sudo.run(args) {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!("systemd-run: {status}")),
-        Err(e) => Err(e.to_string()),
+/// Runs the `systemd-run` command `args` for `unit`, then reads and resets the unit: `Ok`
+/// only when `systemd-run` exited 0 and the unit's own result is a clean exit. Every
+/// reason it is not, joined.
+fn run_unit(sudo: &dyn Sudo, unit: &str, args: &[OsString]) -> Result<(), String> {
+    let ran = sudo.run(args);
+    let shown = sudo.read(&show_args(unit));
+    // Best effort: a unit that ended cleanly may be gone already.
+    let _ = sudo.run(&reset_args(unit));
+    let mut why = Vec::new();
+    match ran {
+        Ok(status) if status.success() => {}
+        Ok(status) => why.push(format!("systemd-run: {status}")),
+        Err(e) => why.push(e.to_string()),
+    }
+    match shown {
+        Ok(text) => why.extend(unit_verdict(&text).err()),
+        Err(e) => why.push(format!("could not read the result of unit {unit}: {e}")),
+    }
+    if why.is_empty() {
+        Ok(())
+    } else {
+        Err(why.join("; "))
     }
 }
 
-/// Reads and resets `unit`, which a step started with `systemd-run --wait`.
+/// Reads and resets `unit`, which a step started with `systemd-run --wait` (without
+/// `--collect`): the line to print when it exited 0.
 ///
 /// # Errors
-/// Never yet.
-pub fn check_unit(_sudo: &dyn Sudo, unit: &str) -> Result<String, Error> {
+/// The unit's result could not be read or is not a clean exit.
+pub fn check_unit(sudo: &dyn Sudo, unit: &str) -> Result<String, Error> {
+    let shown = sudo.read(&show_args(unit));
+    let _ = sudo.run(&reset_args(unit));
+    let text = shown
+        .map_err(|e| Error::Failed(format!("could not read the result of unit {unit}: {e}")))?;
+    unit_verdict(&text).map_err(|why| Error::Failed(format!("unit {unit}: {why}")))?;
     Ok(format!("ok: unit {unit} exited 0"))
 }
 
@@ -274,7 +299,7 @@ fn joined(prefix: &str, value: &OsStr) -> OsString {
 /// The environment is the runner user's `HOME` and `PATH`, and the manifest as
 /// `JS_TEST_IMAGE`.
 pub fn systemd_run_args(u: &Unit<'_>) -> Vec<OsString> {
-    let mut args: Vec<OsString> = ["systemd-run", "--quiet", "--wait", "--collect", "--pipe"]
+    let mut args: Vec<OsString> = ["systemd-run", "--quiet", "--wait", "--pipe"]
         .map(OsString::from)
         .into();
     args.push(format!("--unit={}", u.unit).into());
@@ -316,7 +341,7 @@ pub struct RootUnit<'a> {
 /// binary's ignored tests included), with no `--uid` or `--gid`, so a system unit runs as
 /// root, and the environment the tests read: `PATH` and `JS_JOB_USER`.
 pub fn root_systemd_run_args(u: &RootUnit<'_>) -> Vec<OsString> {
-    let mut args: Vec<OsString> = ["systemd-run", "--quiet", "--wait", "--collect", "--pipe"]
+    let mut args: Vec<OsString> = ["systemd-run", "--quiet", "--wait", "--pipe"]
         .map(OsString::from)
         .into();
     args.push(format!("--unit={}", u.unit).into());
@@ -383,7 +408,7 @@ pub fn run(p: &CrunTests<'_>) -> Result<String, Error> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut failed = Vec::new();
     for (target, built) in targets.iter().zip(&built) {
-        let unit = format!("js-crun-tests-{target}");
+        let unit = unit_name(target, std::process::id());
         let args = match p.job_user {
             Some(job_user) => root_systemd_run_args(&RootUnit {
                 target,

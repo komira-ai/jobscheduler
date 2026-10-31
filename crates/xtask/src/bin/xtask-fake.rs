@@ -7,12 +7,17 @@
 //!   `cargo-messages` in its working directory, the JSON messages a test wrote for it
 //!   (every build it is asked for is `--no-run`).
 //! - Run as `sudo`, it appends `<working directory>: <arguments>` as one line to
-//!   `sudo-args` next to it, and exits 0 (the tests it was asked to run passed).
+//!   `sudo-args` next to it, and exits 0 (the tests it was asked to run passed). Asked for
+//!   `systemctl show <unit> ...`, it prints the properties of a unit whose main process
+//!   exited 0; asked for `systemctl reset-failed`, it does nothing.
 //!
 //! `XTASK_FAKE_DEFECT` asks for one failure of the real programs: `build-fails` (every build
 //! exits 101) or `fails:<a>,<b>,...` (sudo exits 101, as a failed test binary does, when one
 //! of its arguments is one of `<a>`, `<b>`, ...: an argument every unit has fails them all,
-//! a target's binary fails only its unit).
+//! a target's binary fails only its unit), `unit-fails` (the `systemd-run` exits 0 but the
+//! unit's own result is `exit-code` with status 101: the failure `systemd-run` once hid),
+//! `show-fails` (`systemctl show` exits 1) or `show-garbled` (it prints what is not
+//! `Key=Value`).
 
 use std::io::Write as _;
 use std::path::Path;
@@ -54,11 +59,30 @@ fn sudo(me: &Path, args: &[String]) -> ExitCode {
     let failing = defect
         .strip_prefix("fails:")
         .is_some_and(|list| list.split(',').any(|name| args.iter().any(|a| a == name)));
+    if args.first().is_some_and(|a| a == "systemctl") {
+        return systemctl(&args[1..], &defect);
+    }
     if failing {
         ExitCode::from(101)
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// The fake `systemctl`, behind sudo: what `show` prints for the unit, as asked.
+fn systemctl(args: &[String], defect: &str) -> ExitCode {
+    if args.first().is_none_or(|a| a != "show") {
+        return ExitCode::SUCCESS;
+    }
+    match defect {
+        "show-fails" => return ExitCode::from(1),
+        "show-garbled" => println!("not systemd output"),
+        "unit-fails" => {
+            println!("Result=exit-code\nExecMainCode=1\nExecMainStatus=101\nLoadState=loaded");
+        }
+        _ => println!("Result=success\nExecMainCode=1\nExecMainStatus=0\nLoadState=loaded"),
+    }
+    ExitCode::SUCCESS
 }
 
 fn main() -> ExitCode {
