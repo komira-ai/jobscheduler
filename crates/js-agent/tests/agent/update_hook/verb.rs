@@ -10,7 +10,11 @@ use js_agent::update_hook::{
 };
 use js_testkit::dir::TestDir;
 
-const PARAMS: &str = "cordon_lease_secs = 300\ncordon_max_secs = 17355\n";
+const PARAMS: &str = concat!(
+    "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
+    "\"updater.staged_release\" = \"/staged\"\n",
+    "\"updater.target_version\" = \"1.4.0\"\n",
+);
 
 fn status(code: u8) -> String {
     format!("{:?}", ExitCode::from(code))
@@ -140,6 +144,37 @@ fn a_refused_command_line_runs_no_step_and_still_ends_with_a_valid_line() {
 }
 
 #[test]
+fn a_prepare_artifact_that_is_not_the_staged_release_of_the_table_runs_no_step() {
+    let (_dir, params) = params_file("hook-verb-artifact", PARAMS);
+    let called = Cell::new(false);
+    let step = |_: &Invocation, _: &Params| {
+        called.set(true);
+        Done {
+            outcome: Outcome::Success,
+            report: Report::default(),
+        }
+    };
+    for artifact in ["/other", "/staged/", "/staged/sub", "staged"] {
+        let ran = run_with(
+            &["prepare", artifact, "--params", &params],
+            &Host { step: &step },
+        );
+        assert_eq!(ran.status, status(1), "{artifact}");
+        let line = last_line(&ran.out);
+        assert_eq!(line["reason"], "bad_args", "{artifact}");
+        assert!(ran.err.contains("is not the staged release"), "{}", ran.err);
+    }
+    assert!(!called.get());
+    // The same path runs the step.
+    let ran = run_with(
+        &["prepare", "/staged", "--params", &params],
+        &Host { step: &step },
+    );
+    assert_eq!(ran.status, status(0));
+    assert!(called.get());
+}
+
+#[test]
 fn an_unreadable_or_incomplete_params_file_runs_no_step() {
     let called = Cell::new(false);
     let step = |_: &Invocation, _: &Params| {
@@ -204,12 +239,10 @@ fn main_with_answers_the_verb_before_it_installs_the_signal_handlers() {
 
 #[test]
 fn the_binary_prints_one_valid_last_line_and_exits_1() {
-    let (dir, params) = params_file("hook-verb-process", PARAMS);
-    let staged = dir.path().join("release");
-    std::fs::create_dir(&staged).unwrap();
+    let (_dir, params) = params_file("hook-verb-process", PARAMS);
     let output = Command::new(env!("CARGO_BIN_EXE_js-agent"))
         .args([VERB, "prepare"])
-        .arg(&staged)
+        .arg("/staged")
         .args(["--params", &params])
         .output()
         .unwrap();
