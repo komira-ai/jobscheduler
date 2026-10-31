@@ -240,7 +240,7 @@ fn a_cap_with_nothing_left_to_ask_for_is_its_own_failure_and_no_lease_call() {
     let done = spy.prepare(&rig);
     assert_eq!(done.outcome, Outcome::Failure);
     assert_eq!(done.report.reason, Some(Reason::CordonCapReached));
-    assert_eq!(done.report.class, Class::Release);
+    assert_eq!(done.report.class, Class::Environment);
     assert_eq!(cordon_calls(&spy), Vec::<String>::new());
     assert_eq!(rig.record_bytes(), None);
     assert_eq!(rig.cordon_expiry(), None);
@@ -260,6 +260,7 @@ fn a_cap_with_nothing_left_to_ask_for_is_its_own_failure_and_no_lease_call() {
     let spy = Spy::new(&rig);
     let done = spy.prepare(&rig);
     assert_eq!(done.report.reason, Some(Reason::CordonCapReached));
+    assert_eq!(done.report.class, Class::Environment);
     assert_eq!(cordon_calls(&spy), Vec::<String>::new());
     assert_eq!(rig.record_bytes(), before);
 }
