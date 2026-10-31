@@ -44,6 +44,9 @@ pub(super) struct Record {
     /// takes no new lease until then. It outlives a session and, through the file of
     /// bindings, a restart; a lapsed value is a cordon that is over.
     pub(super) cordon: Option<Timestamp>,
+    /// When the host's current session began: the time of the hello that began it. `None`
+    /// for a host that has not said hello since a restart. A heartbeat does not move it.
+    pub(super) hello_at: Option<Timestamp>,
     /// The `runtime` capability of the host's last hello. Kept like `files`.
     pub(super) runtime: Option<String>,
     /// Where the host stands in a whole-node lease; `Free` for a host that never held one.
@@ -73,6 +76,7 @@ impl Record {
             binding: binding.map(|bound| bound.with_taint(None).with_cordon(None)),
             taint,
             cordon,
+            hello_at: None,
             runtime: None,
             epoch: 0,
             session: None,

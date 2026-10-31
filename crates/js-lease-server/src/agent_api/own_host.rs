@@ -72,6 +72,15 @@ struct Reading {
     id: String,
     /// `awaiting`, `live` or `lost`, as `GET /v1/hosts` says.
     state: &'static str,
+    /// The session's epoch: one more at each hello of the host, and 0 for a host that has
+    /// not said hello since the server started (it starts again from 1 after a restart).
+    epoch: u64,
+    /// When the current session began, in milliseconds on the server's clock: the time of
+    /// its hello. A reading of a host that went silent keeps the session it had, so a
+    /// reader waiting for a new agent looks for a later value here (or a higher epoch),
+    /// not for `live`. Absent until the host says hello after a server restart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_started_ms: Option<u64>,
     /// The leases the host holds: 0 or 1.
     leases: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,6 +111,8 @@ impl Reading {
         Self {
             id: host.id.to_string(),
             state: state_text(host.state),
+            epoch: host.epoch,
+            session_started_ms: own.session_started.map(|at| at.millis()),
             leases: usize::from(host.lease.is_some()),
             lease: host.lease.map(|lease| lease.to_string()),
             releasing: host.releasing,

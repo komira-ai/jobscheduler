@@ -575,6 +575,7 @@ impl Registry {
                 beats: 0,
                 taint: kept_taint,
                 cordon: kept_cordon,
+                hello_at: Some(now),
                 runtime: hello.capabilities.get(RUNTIME).cloned(),
                 exclusive: kept_exclusive,
                 bound: kept_bound,

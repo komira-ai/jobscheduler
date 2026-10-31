@@ -325,6 +325,8 @@ async fn the_read_of_a_host_has_what_the_update_hook_waits_on() {
         json!({
             "id": "burst-1",
             "state": "live",
+            "epoch": 1,
+            "session_started_ms": T0,
             "leases": 0,
             "releasing": false,
             "agent_version": "0.1.0",
@@ -344,6 +346,8 @@ async fn the_read_of_a_host_has_what_the_update_hook_waits_on() {
         json!({
             "id": "burst-1",
             "state": "live",
+            "epoch": 1,
+            "session_started_ms": T0,
             "leases": 1,
             "lease": "1-1",
             "releasing": false,
@@ -523,4 +527,50 @@ async fn a_lost_host_keeps_its_cordon_and_reads_lost() {
     assert_eq!(shown["state"], "live");
     assert_eq!(shown["cordon"]["expires_in_ms"], 570_000);
     assert!(no_capacity(&lease(&h).await));
+}
+
+/// Asserts that a reading tells a stopped agent from a new one: the session marker of a
+/// host that went silent is the one it had (state `lost`, same epoch and start time), and
+/// after a new hello the epoch is one higher and the start time is the time of that hello,
+/// while a heartbeat moves neither. It catches a reader that would take the old session
+/// for the new agent, and a start time that follows the heartbeats.
+#[tokio::test]
+async fn a_new_hello_moves_the_session_marker_and_a_silent_agent_does_not() {
+    let h = start_agents("cordon_session", false).await;
+    let me = enrolled(&h, "burst-1", "i-1").await;
+    live_for(&h, &me, 10).await;
+    let before = show(&h, "burst-1", &me).await;
+    assert_eq!(
+        (
+            before["epoch"].clone(),
+            before["session_started_ms"].clone()
+        ),
+        (json!(1), json!(T0))
+    );
+
+    h.clock.advance(Duration::from_secs(30));
+    let silent = show(&h, "burst-1", &me).await;
+    assert_eq!(silent["state"], "lost");
+    assert_eq!(
+        (
+            silent["epoch"].clone(),
+            silent["session_started_ms"].clone()
+        ),
+        (json!(1), json!(T0))
+    );
+
+    let back = post(
+        &h,
+        "/v1/agent/hello",
+        Some(&me.credential),
+        &asking("burst-1", "i-1"),
+    )
+    .await;
+    assert_eq!(back.status, 200, "{}", back.body);
+    let fresh = show(&h, "burst-1", &me).await;
+    assert_eq!(fresh["state"], "live");
+    assert_eq!(
+        (fresh["epoch"].clone(), fresh["session_started_ms"].clone()),
+        (json!(2), json!(T0 + 40_000))
+    );
 }

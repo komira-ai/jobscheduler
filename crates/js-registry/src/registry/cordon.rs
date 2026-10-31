@@ -34,6 +34,10 @@ pub struct OwnHost {
     pub host: HostView,
     /// When the cordon lapses, when the host is cordoned.
     pub cordon_until: Option<Timestamp>,
+    /// When the current session began (the time of its hello); `None` for a host that
+    /// has not said hello since the registry started. With [`HostView::epoch`] it tells
+    /// a session that went silent from the one a new hello began.
+    pub session_started: Option<Timestamp>,
     /// The `runtime` the host reported at its last hello, when it reported one.
     pub runtime: Option<String>,
     /// The time the registry read these at.
@@ -45,6 +49,7 @@ impl OwnHost {
         Self {
             host,
             cordon_until: record.cordon.filter(|until| *until > now),
+            session_started: record.hello_at,
             runtime: record.runtime.clone(),
             now,
         }
