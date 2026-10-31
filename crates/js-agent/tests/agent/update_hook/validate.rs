@@ -665,3 +665,24 @@ fn the_declared_cutover_timeout_must_leave_time_to_stop() {
     );
     assert!(error.to_string().contains("180"), "{error}");
 }
+
+#[test]
+fn a_first_install_may_move_the_link_without_a_stop_but_not_start_before_it() {
+    let mut record = good();
+    record.stop_begun = false;
+    record.update.previous = None;
+    record.update.previous_target = None;
+    record.cordon = Cordon::default();
+    record.link_moved = true;
+    let params = params_for(&record);
+    assert_eq!(validate(&record, &declaration(), &params), Ok(()));
+    record.link_moved = false;
+    record.start_issued = true;
+    assert_eq!(
+        validate(&record, &declaration(), &params),
+        Err(Invalid::Marks {
+            mark: "start_issued",
+            needs: "link_moved"
+        })
+    );
+}

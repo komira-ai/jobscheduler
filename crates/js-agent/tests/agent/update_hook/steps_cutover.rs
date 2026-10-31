@@ -147,7 +147,8 @@ fn sweep(label: &str, build: fn(&str) -> Rig) {
         "the marks and the three acts pass kill points: {points}"
     );
     let end = end_state(&baseline);
-    assert_eq!(marks(&baseline), [true, true, true]);
+    let baseline_marks = marks(&baseline);
+    assert_eq!(baseline_marks[1..], [true, true]);
     for k in 1..=points {
         let rig = build(&format!("{label}-{k}"));
         rig.kill.arm(k);
@@ -510,20 +511,66 @@ fn a_taint_that_appears_after_the_stop_began_does_not_halt_the_rerun() {
     assert_eq!(done.outcome, Outcome::Success, "committed: go forward");
 }
 
-#[test]
-fn a_first_install_has_no_cordon_and_no_host_to_ask_about_and_links_and_starts() {
-    let rig = Rig::first_install("hook-cutover-first");
+/// A first install after its `prepare`.
+fn first(name: &str) -> Rig {
+    let rig = Rig::first_install(name);
     let done = Spy::new(&rig).prepare(&rig);
     assert_eq!(done.outcome, Outcome::Success);
     rig.kill.disarm();
+    rig
+}
+
+#[test]
+fn a_first_install_has_no_cordon_no_host_and_no_stop_and_links_and_starts() {
+    let rig = first("hook-cutover-first");
     assert_eq!(link_target(&rig), None);
     let spy = Spy::new(&rig);
     let done = spy.cutover(&rig);
     assert_eq!(done.outcome, Outcome::Success);
-    // The unit was never running: there is nothing to stop.
+    // There is no unit to stop, and no stop is marked.
     assert_eq!(spy.act_names(), [RELINK.to_owned(), start()]);
     assert!(spy.log().iter().all(|call| !call.contains("cordon")));
     assert_eq!(link_target(&rig), Some(staged(&rig)));
     assert_eq!(unit_state(&rig), "active running");
-    assert_eq!(marks(&rig), [true, true, true]);
+    assert_eq!(marks(&rig), [false, true, true]);
+    assert_eq!(line(&done)["reversible"], json!(false));
+}
+
+#[test]
+fn a_first_install_is_reversible_until_the_link_moves_and_not_after() {
+    // A taint and an unreadable link end before the first act.
+    let rig = first("hook-cutover-first-taint");
+    rig.taint();
+    let done = Spy::new(&rig).cutover(&rig);
+    assert_eq!(done.outcome, Outcome::Halt);
+    assert_eq!(line(&done)["reversible"], json!(true));
+
+    let rig = first("hook-cutover-first-link-unreadable");
+    std::fs::create_dir_all(rig.tmp.path().join("world/link")).unwrap();
+    std::fs::write(rig.tmp.path().join("world/link/current"), b"not a link").unwrap();
+    let done = Spy::new(&rig).cutover(&rig);
+    assert_eq!(done.report.reason, Some(Reason::LinkFailed));
+    assert_eq!(line(&done)["reversible"], json!(true));
+    assert_eq!(marks(&rig), [false, false, false]);
+
+    // A failed move is the first act: irreversible from `link_moved` on.
+    let rig = first("hook-cutover-first-relink-fails");
+    let spy = Spy::new(&rig);
+    spy.fail("relink");
+    let done = spy.cutover(&rig);
+    assert_eq!(done.report.reason, Some(Reason::LinkFailed));
+    assert_eq!(line(&done)["reversible"], json!(false));
+    assert_eq!(marks(&rig), [false, true, false]);
+
+    let rig = first("hook-cutover-first-start-fails");
+    let spy = Spy::new(&rig);
+    spy.fail("start");
+    let done = spy.cutover(&rig);
+    assert_eq!(done.report.reason, Some(Reason::StartFailed));
+    assert_eq!(line(&done)["reversible"], json!(false));
+}
+
+#[test]
+fn a_first_install_killed_at_any_point_and_run_again_still_finishes() {
+    sweep("hook-cutover-sweep-first", first);
 }
