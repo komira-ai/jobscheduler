@@ -980,6 +980,13 @@ fn a_directory_above_the_scratch_root_that_a_group_can_write_is_refused() {
     // directories above the build's temporary directory are the machine's).
     mode(&grand, 0o755);
     require_trusted_ancestors(&root, euid, &grand).expect("a tree the agent owns");
+    // Over the machine's own directories the verdict is the machine's; the walk reaches
+    // directories owned by root either way.
+    let _ = require_trusted_ancestors(&root, euid, Path::new("/"));
+    // A root that is not there is an error naming it.
+    let gone = grand.join("gone");
+    let why = require_trusted_ancestors(&gone, euid, &grand).expect_err("not there");
+    assert!(why.contains("gone"), "{why}");
     // Owned by someone else than the given user (and not by root): refused, naming the
     // nearest directory above the root.
     if euid != 0 {

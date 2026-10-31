@@ -149,12 +149,13 @@ pub fn require_trusted_ancestors(root: &Path, euid: u32, floor: &Path) -> Result
     let canonical = fs::canonicalize(root).map_err(|why| format!("{}: {why}", root.display()))?;
     let above = canonical.ancestors().skip(1);
     for ancestor in above.filter(|ancestor| ancestor.starts_with(floor)) {
-        let meta =
-            fs::metadata(ancestor).map_err(|why| format!("{}: {why}", ancestor.display()))?;
-        let trusted = (meta.uid() == 0 || meta.uid() == euid) && meta.mode() & 0o022 == 0;
+        // A directory that cannot be looked at is not trusted either.
+        let trusted = fs::metadata(ancestor)
+            .is_ok_and(|meta| (meta.uid() == 0 || meta.uid() == euid) && meta.mode() & 0o022 == 0);
         if !trusted {
             return Err(format!(
-                "{}: a directory above the scratch root must be owned by root or by the user                  the agent runs as, and no group or other may write it",
+                "{}: a directory above the scratch root must be owned by root or by the user \
+                 the agent runs as, and no group or other may write it",
                 ancestor.display()
             ));
         }
