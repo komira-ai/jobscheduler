@@ -48,7 +48,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use js_elastic::{
-    BootPayload, BootPlan, BootStep, CONTAINER_BIN, SCRATCH_ROOT, STATE_ROOT, Secret, SlotName,
+    BootPayload, BootPlan, BootStep, CONTAINER_BIN, RUNTIME, SCRATCH_ROOT, STATE_ROOT, Secret,
+    SlotName,
 };
 pub use metadata::{
     DROP_RULES, METADATA_ADDRESS, METADATA_RULES_PATH, METADATA_TABLE, METADATA_UNIT, NFT_BIN,
@@ -324,7 +325,7 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
     w.line("[Service]");
     let _ = writeln!(
         w.out,
-        "ExecStart={AGENT_PATH} --server {} --token-file {TOKEN_PATH} --instance-file {INSTANCE_PATH} --pool {} --host-id {} --container-bin {CONTAINER_BIN} --container-subuid {SUBID_USER} --container-pull missing --gpu-toolkit-hook {GPU_TOOLKIT_HOOK_PATH} --state-root {STATE_ROOT} --scratch-root {SCRATCH_ROOT}",
+        "ExecStart={AGENT_PATH} --server {} --token-file {TOKEN_PATH} --instance-file {INSTANCE_PATH} --pool {} --host-id {} --runtime {RUNTIME} --container-bin {CONTAINER_BIN} --container-subuid {SUBID_USER} --container-pull missing --gpu-toolkit-hook {GPU_TOOLKIT_HOOK_PATH} --state-root {STATE_ROOT} --scratch-root {SCRATCH_ROOT}",
         unit_quoted(&plan.scheduler_url),
         unit_quoted(&plan.pool),
         unit_quoted(plan.host.as_str())

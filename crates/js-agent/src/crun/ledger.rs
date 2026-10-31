@@ -1,8 +1,9 @@
 //! The ledger of the leases a [`CrunRuntime`](super::CrunRuntime) made: one small file
 //! each, the *sidecar*, in a directory of its own beside the image store.
 //!
-//! `crun run` is a foreground child of the agent, so a container never outlives the
-//! process that started it; what a dead process leaves is files (the lease's directories
+//! `crun run` is a foreground child of the agent, and no `PR_SET_PDEATHSIG` ties it to
+//! the agent: after a crash the unit's `KillMode=mixed` ends it, for an agent run under
+//! `js-agent-crun.service`. What a dead process leaves is files (the lease's directories
 //! and its cgroup). The ledger says which of them are this agent's to remove, and what
 //! labels the run they belonged to carried. A sidecar holds the id the agent registered
 //! under (the value of [`label::AGENT`]), the run id, the lease's name and every label, so

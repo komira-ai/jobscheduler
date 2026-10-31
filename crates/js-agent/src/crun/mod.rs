@@ -33,7 +33,12 @@
 //! `crun run` is a foreground child of the agent, one thread each ([`Running`]), so the
 //! runtime keeps its containers in memory: a container exists from its creation to its
 //! [`Runtime::remove`], and [`Runtime::list_labelled`] lists those and no others. A
-//! restarted agent finds none: `crun run` died with the process that started it.
+//! restarted agent finds none. An agent that exits gracefully takes its `crun run` with it
+//! (js-contain's `KillOnDrop` and `Reaped`); nothing ties them to a crash (SIGKILL, `panic=abort`): no
+//! `PR_SET_PDEATHSIG`. What ends them then is the unit's `KillMode=mixed`
+//! (`js-agent-crun.service`): the lease cgroups sit under the unit's delegated cgroup, so
+//! systemd kills what is left when the main process dies. That holds only for an agent run
+//! under that unit.
 //!
 //! # Labels, the sweep and the lost run
 //!
