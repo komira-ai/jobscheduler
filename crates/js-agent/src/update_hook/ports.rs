@@ -16,16 +16,18 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use js_agent_wire::Taint;
-use serde::{Deserialize, Serialize};
 
 use crate::facts::CommandRunner;
 use crate::lifecycle::StateRoot;
 
+// The lease server's own-host routes are not the hook's alone: `js-agent cordon` calls them too,
+// on macOS as well, so their port lives in `crate::own_host`.
+pub use crate::own_host::{
+    CordonView, Cordoned, HostReading, Lease, LeaseError, MAX_CORDON_SECS, Uncordoned,
+};
+
 /// The unit manager's client, by the absolute path it has on a stock system.
 pub const SYSTEMCTL: &str = "/usr/bin/systemctl";
-
-/// The longest cordon the lease server grants in one request; a longer ask is cut to it.
-pub const MAX_CORDON_SECS: u64 = 3600;
 
 /// Why a port could not do what was asked of it.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -228,101 +230,6 @@ impl Link for SystemLink {
     fn relink(&self, link: &Path, target: &Path) -> Result<(), PortError> {
         Ok(swap_link(link, target)?)
     }
-}
-
-/// When a cordon lapses, on the lease server's clock.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CordonView {
-    /// Milliseconds since the epoch.
-    pub expires_at_ms: u64,
-}
-
-/// What `GET /v1/hosts/{id}` says of the hook's own host.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostReading {
-    /// The host id.
-    pub id: String,
-    /// `awaiting`, `live` or `lost`.
-    pub state: String,
-    /// One more at each hello of the host; 0 before the first since the server started.
-    pub epoch: u64,
-    /// When the current session began, on the server's clock.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_started_ms: Option<u64>,
-    /// The leases the host holds: 0 or 1.
-    pub leases: u64,
-    /// The lease, when there is one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lease: Option<String>,
-    /// The host holds no lease but has runs to finish.
-    pub releasing: bool,
-    /// The cordon in force, when there is one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cordon: Option<CordonView>,
-    /// The taint the host reported.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub taint: Option<Taint>,
-    /// The `agent_version` of the last hello.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_version: Option<String>,
-    /// The `runtime` of the last hello.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<String>,
-}
-
-/// The reply to a cordon.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Cordoned {
-    /// The host was cordoned before this call.
-    pub already_cordoned: bool,
-    /// The host after the call.
-    pub host: HostReading,
-}
-
-/// The reply to an uncordon.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Uncordoned {
-    /// A cordon was in force and this call ended it.
-    pub lifted: bool,
-    /// The host after the call.
-    pub host: HostReading,
-}
-
-/// Why the lease server did not answer as asked.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum LeaseError {
-    /// The server holds no host by this id (`unknown-host`): it has not said hello since the
-    /// server started.
-    #[error("unknown host")]
-    UnknownHost,
-    /// The server refused the request (`invalid-cordon`, ...), by its code.
-    #[error("refused: {0}")]
-    Refused(String),
-    /// The server could not be reached, or answered what is not understood.
-    #[error("{0}")]
-    Unreachable(String),
-}
-
-/// The lease server's routes for the hook's own host.
-pub trait Lease {
-    /// `POST /v1/hosts/{id}:cordon {"lease_secs"}`: cordons for `lease_secs` from now (cut to
-    /// [`MAX_CORDON_SECS`]). A repeat extends the cordon and never shortens it.
-    ///
-    /// # Errors
-    /// [`LeaseError`].
-    fn cordon(&self, lease_secs: u64) -> Result<Cordoned, LeaseError>;
-
-    /// `POST /v1/hosts/{id}:uncordon`. Succeeds when there was no cordon.
-    ///
-    /// # Errors
-    /// [`LeaseError`].
-    fn uncordon(&self) -> Result<Uncordoned, LeaseError>;
-
-    /// `GET /v1/hosts/{id}`.
-    ///
-    /// # Errors
-    /// [`LeaseError`].
-    fn host(&self) -> Result<HostReading, LeaseError>;
 }
 
 /// The agent's state root, read only: the taint marker and the records of owed checks.

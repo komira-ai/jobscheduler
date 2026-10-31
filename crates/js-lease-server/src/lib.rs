@@ -282,7 +282,7 @@
 //! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack}` (see "Runs" and "Taint"); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413 |
 //! | `POST /v1/hosts/{id}:cordon` | with a host credential, for that host only: 200 the host as `GET /v1/hosts/{id}` reads it, plus `already_cordoned`; body optional, `{"lease_secs": n}` (default 300, cut to 3600); 400 `invalid-cordon`; 403 `host-credential-required`, or the code of a credential that is not the host's (`join-token-not-admitted`, `join-token-expired`); 409 `unknown-host`; 413; 503 `cordon-unsaved` |
 //! | `POST /v1/hosts/{id}:uncordon` | as the cordon, with no body: 200 the host, plus `lifted`; 200 also when it was not cordoned |
-//! | `GET /v1/hosts/{id}` | as the cordon: 200 `{id, state, epoch, session_started_ms?, leases, lease?, releasing, cordon? {expires_at_ms, expires_in_ms}, taint?, agent_version?, runtime?}` |
+//! | `GET /v1/hosts/{id}` | as the cordon: 200 `{id, state, epoch, session_started_ms?, leases, lease?, releasing, mark?, cordon? {expires_at_ms, expires_in_ms}, taint?, agent_version?, runtime?}`; `mark` is `reserved`, `held`, `draining` or `releasing` as in the `mark` of `GET /v1/hosts`, and absent for a host that is not set aside (a host is idle when `lease` is absent, `leases` is 0, `releasing` is false and `mark` is absent) |
 //!
 //! **Cordon.** A host takes itself out of placement with `POST /v1/hosts/{id}:cordon`, so
 //! that an update of its agent can wait for the lease it holds to end without a new one

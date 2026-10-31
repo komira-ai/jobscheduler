@@ -213,6 +213,16 @@ pub(crate) fn state_text(state: HostState) -> &'static str {
     }
 }
 
+/// How a set-aside host is told in an answer: `reserved`, `held`, `draining` or `releasing`.
+pub(crate) fn mark_text(mark: HostMark) -> &'static str {
+    match mark {
+        HostMark::Reserved => "reserved",
+        HostMark::Held => "held",
+        HostMark::Draining => "draining",
+        HostMark::Releasing => "releasing",
+    }
+}
+
 impl HostEntry {
     fn listed(host: HostCapacity) -> Self {
         Self {
@@ -253,12 +263,7 @@ impl HostEntry {
             agent_version: host.agent_version,
             releasing: Some(host.releasing),
             taint: host.taint,
-            mark: host.mark.map(|mark| match mark {
-                HostMark::Reserved => "reserved",
-                HostMark::Held => "held",
-                HostMark::Draining => "draining",
-                HostMark::Releasing => "releasing",
-            }),
+            mark: host.mark.map(mark_text),
             reserved_for: host.reserved_for.map(|id| id.to_string()),
             drain_deadline_ms: host.drain_deadline.map(|at| at.millis()),
             cordon: host.cordon_until.map(|at| CordonListed {
