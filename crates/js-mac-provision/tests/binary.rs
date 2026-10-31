@@ -123,8 +123,9 @@ fn probe_exits_0_for_a_connect_and_1_for_a_refusal() {
     let out = run(&["probe", &addr]);
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(text(&out.stdout), "connected\n");
-    drop(l);
-    let out = run(&["probe", &addr]);
+    // A port nothing can take: dropping `l` would free it for any other test to bind.
+    let dead = js_testkit::port::dead_addr().to_string();
+    let out = run(&["probe", &dead]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(text(&out.stdout), "refused\n");
 }
