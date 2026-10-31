@@ -72,8 +72,8 @@ mod wire;
 pub use claim::{ClaimError, HostClaim};
 
 pub use wire::{
-    CgroupSource, ID_TOOL_PATH, IdSources, PULL_THREADS, Seams, WireError, oci_config,
-    open as open_for_plan,
+    ACTIONS_DIR, AGENT_LEAF, CgroupError, CgroupSource, ID_TOOL_PATH, IdSources, PULL_THREADS,
+    Seams, WireError, oci_config, open as open_for_plan,
 };
 
 use std::collections::BTreeMap;

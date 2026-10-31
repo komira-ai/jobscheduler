@@ -128,8 +128,7 @@ impl System {
         build: &RuntimeBuild<'_>,
     ) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
         let opened = crate::crun::open_for_plan(plan, build.host_id, &self.crun);
-        let (runtime, mapping, warnings) =
-            opened.map_err(|why| format!("--runtime crun: {why}"))?;
+        let (runtime, mapping, warnings) = opened.map_err(|why| why.to_string())?;
         build.settings.resolve(mapping);
         Ok((Box::new(runtime), warnings))
     }

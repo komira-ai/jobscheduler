@@ -540,28 +540,34 @@ fn a_claim_in_a_missing_directory_is_an_error_naming_it() {
     assert!(why.to_string().contains("not-there"), "{why}");
 }
 
-/// Asserts that the agent's cgroups are delegated when the runtime opens, on a tree of files
-/// that stands for a cgroup version 2 mount: the unit's cgroup becomes the root, the leases
-/// are made in its `actions` cgroup (which the usage is sampled from), and a file that does not
-/// name a cgroup is a refusal naming the cgroups. It catches a runtime that is given the
-/// wrong cgroup, or an agent that starts without cgroups it can lease from.
+/// Asserts how the agent's cgroups are set up when the runtime opens, on a tree of files
+/// that stands for a cgroup version 2 mount. The agent is in the leaf `<unit>/agent`: the
+/// leases go in `<unit>/actions`, beside the leaf, the unit's cgroup is the root handed to
+/// the job user, and cpu, memory and pids are enabled in the unit's cgroup and in `actions`.
+/// Each way the set-up can fail is a refusal that names the cgroups and the fix: the agent at
+/// the unit itself (no `DelegateSubgroup=`), a unit that offers too few controllers, a file
+/// that cannot be written in either cgroup, a file that does not name a cgroup, and one that
+/// is not there. It catches a runtime given the wrong cgroup, or an agent that starts without
+/// cgroups it can lease from.
 #[test]
-fn the_agents_cgroup_is_delegated_when_the_runtime_opens() {
+fn the_agents_cgroups_are_set_up_beside_its_leaf_when_the_runtime_opens() {
     let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
     let node = node();
-    let mount = node.dir.path().join("delegate-mount");
-    fs::create_dir_all(mount.join("unit")).expect("the unit's cgroup");
-    for file in ["cgroup.controllers", "unit/cgroup.controllers"] {
-        fs::write(mount.join(file), "cpu memory pids\n").expect("controllers");
-    }
-    fs::write(mount.join("unit/cgroup.procs"), "").expect("procs");
-    let own = node.dir.path().join("delegate-own");
-    fs::write(&own, "0::/unit\n").expect("own cgroup");
+    let dir = node.dir.path();
     let platform = Platform {
         os: "linux".to_owned(),
         arch: std::env::consts::ARCH.to_owned(),
     };
-    let open = |own: &Path, settings: &Settings| {
+    // A fresh tree for each case: a unit that offers `controllers`, and the agent's cgroup.
+    let tree = |name: &str, controllers: &str, own: &str| {
+        let mount = dir.join(name);
+        fs::create_dir_all(mount.join("unit/agent")).expect("the unit's cgroups");
+        fs::write(mount.join("unit/cgroup.controllers"), controllers).expect("controllers");
+        let file = dir.join(format!("{name}-own"));
+        fs::write(&file, own).expect("own cgroup");
+        (mount, file)
+    };
+    let open = |mount: &Path, own: &Path, settings: &Settings| {
         let build = RuntimeBuild {
             settings,
             host_id: "h1",
@@ -569,20 +575,95 @@ fn the_agents_cgroup_is_delegated_when_the_runtime_opens() {
             stop_grace: Duration::from_secs(1),
         };
         let cgroups = CgroupSource::Delegate {
-            mount: mount.clone(),
+            mount: mount.to_owned(),
             own: own.to_owned(),
         };
         let machine = System::new().with_crun(Seams { cgroups, ..seams() });
         machine.runtime(&build).map(|_| ())
     };
+    let refused = |mount: &Path, own: &Path| {
+        let why = open(mount, own, &crun_settings()).unwrap_err();
+        assert!(why.starts_with("the cgroups"), "{why}");
+        why
+    };
+
+    let (mount, own) = tree("cg-good", "cpu memory pids\n", "0::/unit/agent\n");
     let settings = crun_settings();
-    open(&own, &settings).expect("it opens");
+    open(&mount, &own, &settings).expect("it opens");
     assert_eq!(settings.actions_cgroup(), Some("/unit/actions"));
-    let refused = open(&node.dir.path().join("no-such-file"), &crun_settings());
-    assert!(
-        refused
-            .unwrap_err()
-            .starts_with("--runtime crun: the cgroups"),
-        "the cgroups are named"
+    for cgroup in ["unit", "unit/actions"] {
+        let enabled = fs::read_to_string(mount.join(cgroup).join("cgroup.subtree_control"));
+        assert_eq!(enabled.expect("enabled"), "+cpu +memory +pids", "{cgroup}");
+    }
+    assert!(mount.join("unit/agent").is_dir());
+
+    let (mount, own) = tree("cg-unit", "cpu memory pids\n", "0::/unit\n");
+    assert!(refused(&mount, &own).contains("DelegateSubgroup=agent"));
+    let (mount, own) = tree("cg-top", "cpu memory pids\n", "0::/agent\n");
+    assert!(refused(&mount, &own).contains("DelegateSubgroup=agent"));
+    let (mount, own) = tree("cg-few", "cpu memory\n", "0::/unit/agent\n");
+    assert!(refused(&mount, &own).contains("does not offer pids"));
+    let (mount, own) = tree("cg-closed-unit", "cpu memory pids\n", "0::/unit/agent\n");
+    fs::create_dir(mount.join("unit/cgroup.subtree_control")).expect("a directory");
+    assert!(refused(&mount, &own).contains("enable controllers in"));
+    let (mount, own) = tree("cg-closed-actions", "cpu memory pids\n", "0::/unit/agent\n");
+    fs::create_dir_all(mount.join("unit/actions/cgroup.subtree_control")).expect("a directory");
+    assert!(refused(&mount, &own).contains("enable controllers in"));
+    let (mount, own) = tree("cg-v1", "cpu memory pids\n", "1:name=x:/unit\n");
+    assert!(refused(&mount, &own).contains("no cgroup v2"));
+    let (mount, _) = tree("cg-gone", "cpu memory pids\n", "");
+    assert!(refused(&mount, &dir.join("no-such-file")).contains("read"));
+    let (mount, own) = tree("cg-nomake", "cpu memory pids\n", "0::/unit/agent\n");
+    fs::write(mount.join("unit/actions"), "a file").expect("a file where actions goes");
+    assert!(refused(&mount, &own).contains("make"));
+}
+
+/// Asserts that an agent whose cgroup is the unit itself, with no leaf of its own, ends with
+/// status 2 before it registers, naming `DelegateSubgroup=`. It catches an agent that starts
+/// on a unit whose cgroup holds a process and so cannot give controllers to its leases.
+#[test]
+fn an_agent_that_is_not_in_a_leaf_of_its_unit_exits_2() {
+    let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+    let node = node();
+    let mount = node.dir.path().join("cg-agent");
+    fs::create_dir_all(mount.join("unit")).expect("the unit");
+    let own = node.dir.path().join("cg-agent-own");
+    fs::write(&own, "0::/unit\n").expect("own cgroup");
+    let server = Server::start_pool("jobs_crun_leaf", &[], POOL_RUNS_TOML);
+    let address = Arc::new(Mutex::new(server.url()));
+    let (crun, state, scratch) = (
+        node.crun.display().to_string(),
+        node.state.display().to_string(),
+        node.scratch.display().to_string(),
     );
+    let flags = [
+        "--host-id",
+        "h-leaf",
+        "--runtime",
+        "crun",
+        "--job-user",
+        Fixture::USER,
+        "--crun-bin",
+        &crun,
+        "--state-root",
+        &state,
+        "--scratch-root",
+        &scratch,
+    ];
+    let cgroups = CgroupSource::Delegate { mount, own };
+    let machine = Arc::new(CrunMachine {
+        system: System::new().with_crun(Seams { cgroups, ..seams() }),
+        fake: FakeMachine::new(),
+    });
+    let ran = Agent::spawn_machine(
+        server.url(),
+        server.join_file(),
+        &flags,
+        host,
+        Redirect(address),
+        machine,
+    )
+    .finish();
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(ran.err.contains("DelegateSubgroup=agent"), "{}", ran.err);
 }
