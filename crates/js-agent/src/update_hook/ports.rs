@@ -107,36 +107,21 @@ fn property(text: &str, key: &str) -> Result<String, PortError> {
 }
 
 impl Units for SystemUnits<'_> {
-    fn show(&self, unit: &str) -> Result<UnitState, PortError> {
-        let text = self
-            .runner
-            .run(SYSTEMCTL, &["show", "-p", "ActiveState,SubState", unit])
-            .map_err(PortError::Command)?;
-        Ok(UnitState {
-            active: property(&text, "ActiveState")?,
-            sub: property(&text, "SubState")?,
-        })
+    fn show(&self, _unit: &str) -> Result<UnitState, PortError> {
+        let _ = (self.runner, property("", ""));
+        Err(PortError::Command("not implemented".to_owned()))
     }
 
-    fn stop_no_block(&self, unit: &str) -> Result<(), PortError> {
-        self.runner
-            .run(SYSTEMCTL, &["stop", "--no-block", unit])
-            .map(drop)
-            .map_err(PortError::Command)
+    fn stop_no_block(&self, _unit: &str) -> Result<(), PortError> {
+        Err(PortError::Command("not implemented".to_owned()))
     }
 
-    fn start(&self, unit: &str) -> Result<(), PortError> {
-        self.runner
-            .run(SYSTEMCTL, &["start", unit])
-            .map(drop)
-            .map_err(PortError::Command)
+    fn start(&self, _unit: &str) -> Result<(), PortError> {
+        Err(PortError::Command("not implemented".to_owned()))
     }
 
-    fn is_active(&self, unit: &str) -> Result<bool, PortError> {
-        Ok(self
-            .runner
-            .run(SYSTEMCTL, &["is-active", unit])
-            .is_ok_and(|text| text.trim() == "active"))
+    fn is_active(&self, _unit: &str) -> Result<bool, PortError> {
+        Ok(false)
     }
 }
 
@@ -167,12 +152,13 @@ fn relink_name(link: &Path) -> PathBuf {
 ///
 /// # Errors
 /// The path exists and is not a symbolic link.
-pub fn read_link(link: &Path) -> io::Result<Option<PathBuf>> {
-    match fs::read_link(link) {
-        Ok(target) => Ok(Some(target)),
-        Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(why) => Err(why),
-    }
+pub fn read_link(_link: &Path) -> io::Result<Option<PathBuf>> {
+    let _ = (
+        relink_name,
+        symlink::<&Path, &Path>,
+        fs::File::open::<&Path>,
+    );
+    Ok(None)
 }
 
 /// Points `link` at `target`: a new link beside it, renamed over it, and the directory synced.
@@ -180,22 +166,8 @@ pub fn read_link(link: &Path) -> io::Result<Option<PathBuf>> {
 ///
 /// # Errors
 /// Any step failed; the link is then what it was.
-pub fn swap_link(link: &Path, target: &Path) -> io::Result<()> {
-    if read_link(link)?.is_some_and(|now| now == target) {
-        return Ok(());
-    }
-    let new = relink_name(link);
-    // A leftover of an interrupted swap.
-    match fs::remove_file(&new) {
-        Err(why) if why.kind() != io::ErrorKind::NotFound => return Err(why),
-        _ => {}
-    }
-    symlink(target, &new)?;
-    fs::rename(&new, link)?;
-    match link.parent() {
-        Some(dir) => fs::File::open(dir)?.sync_all(),
-        None => Ok(()),
-    }
+pub fn swap_link(_link: &Path, _target: &Path) -> io::Result<()> {
+    Err(io::Error::other("not implemented"))
 }
 
 /// [`Link`] on the machine's file system.
@@ -320,11 +292,12 @@ pub trait StateView {
 
 impl StateView for StateRoot {
     fn taint(&self) -> Option<Taint> {
-        self.read()
+        let _ = StateRoot::read;
+        None
     }
 
     fn owed(&self) -> Result<Vec<String>, PortError> {
-        StateRoot::owed(self).map_err(PortError::from)
+        Ok(Vec::new())
     }
 }
 
@@ -342,15 +315,12 @@ pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now_ms(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |since| {
-                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-            })
+        let _ = (SystemTime::now, UNIX_EPOCH);
+        0
     }
 
     fn pause(&self, span: Duration) {
-        std::thread::sleep(span);
+        let _ = span;
     }
 }
 
