@@ -76,6 +76,7 @@ mod spec;
 mod tests;
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -335,6 +336,13 @@ impl CrunRuntime {
     ) -> Result<Self, CrunError> {
         let (uid, gid) = settings.oci.job_user.ok_or(CrunError::NoJobUser)?;
         let cgroups = settings.cgroups;
+        // The post-job checks know the leases' group by its name: a leftover job process
+        // under another name would be judged the host's, and the check silently off.
+        if Path::new(&cgroups.actions).file_name() != Some(OsStr::new("actions")) {
+            return Err(CrunError::ActionsName {
+                actions: cgroups.actions,
+            });
+        }
         // `crun`, run as the job user, moves its first process from the agent's cgroup into
         // the container's, which needs write access to the `cgroup.procs` of their nearest
         // common ancestor: the agent's own cgroup.

@@ -109,13 +109,18 @@ pub fn crun_subject(name: &str) -> CrunSubject {
     let base = PathBuf::from(format!("/tmp/js-crun-runtime-{tag}"));
     let _ = fs::remove_dir_all(&base);
     mkdir(&base, 0o711);
-    let cgroup = format!("{}/{tag}", delegation().actions);
-    fs::create_dir(cgroup_dir(&cgroup)).expect("create the test's cgroup");
-    fs::write(
-        cgroup_dir(&cgroup).join("cgroup.subtree_control"),
-        "+cpu +memory +pids",
-    )
-    .expect("enable controllers");
+    // The leases' cgroup must be named `actions` (the runtime refuses another name), so
+    // each test has a cgroup of its own with an `actions` below it.
+    let own = format!("{}/{tag}", delegation().actions);
+    let cgroup = format!("{own}/actions");
+    for dir in [&own, &cgroup] {
+        fs::create_dir(cgroup_dir(dir)).expect("create the test's cgroup");
+        fs::write(
+            cgroup_dir(dir).join("cgroup.subtree_control"),
+            "+cpu +memory +pids",
+        )
+        .expect("enable controllers");
+    }
     let reference = var("JS_TEST_IMAGE");
     let image = reference
         .strip_prefix("docker://")
@@ -253,6 +258,9 @@ impl Subject for CrunSubject {
 impl Drop for CrunSubject {
     fn drop(&mut self) {
         remove_cgroup_tree(&cgroup_dir(&self.cgroup));
+        if let Some((own, _)) = self.cgroup.rsplit_once('/') {
+            let _ = fs::remove_dir(cgroup_dir(own));
+        }
         let _ = fs::remove_dir_all(&self.base);
     }
 }

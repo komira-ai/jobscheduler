@@ -160,16 +160,16 @@ fn a_live_handle_excuses_its_own_mounts_and_not_a_longer_names() {
 /// group), and a lease that has `helpers` in it.
 #[test]
 fn a_helper_container_is_the_runners() {
-    for uid in [0, JOB_UID] {
-        let (host, mut checks) = host_and_checks();
-        host.start_process(process(
-            300,
-            1,
-            uid,
-            900,
-            "0::/system.slice/js.service/actions/helpers/helper-unpack-5-1/ctr",
-        ));
-        assert!(after(&mut checks, "r1").is_ok(), "uid {uid}");
+    for cgroup in [
+        "0::/system.slice/js.service/actions/helpers/helper-unpack-5-1/ctr",
+        // Services whose names start like a lease's group but are not one.
+        "0::/js-agent.slice/js-short-x.service/js-zzzzzzzzzzzzzzzz-r1/js-0123456789abcdef-/actions/helpers/x",
+    ] {
+        for uid in [0, JOB_UID] {
+            let (host, mut checks) = host_and_checks();
+            host.start_process(process(300, 1, uid, 900, cgroup));
+            assert!(after(&mut checks, "r1").is_ok(), "{cgroup} uid {uid}");
+        }
     }
     for cgroup in [
         "0::/system.slice/js.service/actions/helpers-x/helper-unpack-5-1",

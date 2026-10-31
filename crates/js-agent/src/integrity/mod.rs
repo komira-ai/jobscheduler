@@ -133,7 +133,8 @@
 //!   `<actions>/js-<agent tag>-<run id>/ctr` (the lease's group is named for the container,
 //!   and the run handle is that name); the agent's own group is beside `actions/`, not above
 //!   it, so a process left there would look like a system service's. A path with a group
-//!   named `actions` in it names a container and counts, whatever is below. The runner's own
+//!   named `actions` in it names a container and counts, whatever is below; the runtime
+//!   refuses to open over a leases' group of another name, so this name is the leases'. The runner's own
 //!   processes (`crun run`, `kill`, `delete`, the keeper) are children of the agent, alive
 //!   under a parent that is not `init`, in the agent's group exactly: they are not counted.
 //!   The helper containers (`actions/helpers/...`) are not counted either: a background
@@ -478,15 +479,35 @@ fn names_a_container(units: &[&str]) -> bool {
 }
 
 /// Whether the control groups `units` are those of a helper container of the runner:
-/// `actions/helpers` and below. The helpers (the image unpacker, the removal of a lease's
-/// tree) run as the job user inside a runtime call, but a background pull runs one while the
-/// lifecycle checks another job, so a helper can be alive at a check; it is the runner's,
-/// not a stray. A helper that never ends is therefore not found here: the runtime's own
-/// call ends it (a dropped call kills its process), not the post-job checks.
+/// `actions/helpers` and below, where `actions` is the real actions group, not one made
+/// inside a lease (no `ctr`, and no lease group `js-<16 hex digits>-<run id>`, before it).
+/// The helpers (the image unpacker, the removal of a lease's tree) run inside a runtime
+/// call, but a background pull runs one while the lifecycle checks another job, so a helper
+/// can be alive at a check; it is the runner's, not a stray. A helper that never ends is
+/// therefore not found here: the runtime's own call ends it, not the post-job checks.
+///
+/// The invariant behind the exemption: code a job controls never runs as the job user (the
+/// uid of the agent's helpers and of `crun`) on the host. It runs at `sub_uid + 1000`, in a
+/// user namespace, with no capabilities, so it cannot place a process in `actions/helpers`
+/// or write a cgroup there.
 fn runners_helper(units: &[&str]) -> bool {
+    let inside_a_lease = |unit: &&str| *unit == "ctr" || is_lease_group(unit);
     units
-        .windows(2)
-        .any(|pair| pair[0] == ACTIONS && pair[1] == HELPERS)
+        .iter()
+        .position(|unit| *unit == ACTIONS)
+        .is_some_and(|at| {
+            units.get(at + 1) == Some(&HELPERS) && !units[..at].iter().any(inside_a_lease)
+        })
+}
+
+/// Whether `unit` is the name of a lease's group: `js-`, the agent's tag of 16 hexadecimal
+/// digits, `-` and the run id.
+fn is_lease_group(unit: &str) -> bool {
+    unit.strip_prefix("js-")
+        .and_then(|rest| rest.split_once('-'))
+        .is_some_and(|(tag, run)| {
+            tag.len() == 16 && tag.bytes().all(|b| b.is_ascii_hexdigit()) && !run.is_empty()
+        })
 }
 
 /// Whether `process` is one of the direct runner's own: it is in the agent's own control
