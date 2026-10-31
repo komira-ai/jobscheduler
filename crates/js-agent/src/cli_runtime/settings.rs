@@ -241,9 +241,11 @@ pub struct CrunPlan {
     pub image_allow: Vec<js_oci::Allow>,
     /// The directory of the image store and the leases, set by [`Settings::placed_beside`].
     pub store: PathBuf,
-    /// The directory that holds the store and the claim of the host id, set by
+    /// The directory that holds the store and the claim files, set by
     /// [`Settings::placed_beside`].
     pub claim_dir: PathBuf,
+    /// The scratch root, set by [`Settings::placed_beside`].
+    pub scratch_root: PathBuf,
     /// The root of the runs' files, when the agent has one, set by [`Settings::placed_beside`].
     pub files: Option<FilesRoot>,
     actions: Arc<OnceLock<String>>,
@@ -375,6 +377,7 @@ impl Settings {
                 image_allow,
                 store: PathBuf::new(),
                 claim_dir: PathBuf::new(),
+                scratch_root: PathBuf::new(),
                 files: None,
                 actions: Arc::new(OnceLock::new()),
             }),
@@ -391,6 +394,7 @@ impl Settings {
         if let Some(plan) = &mut self.crun {
             let parent = scratch_root.parent().unwrap_or(scratch_root);
             plan.claim_dir = parent.to_owned();
+            plan.scratch_root = scratch_root.to_owned();
             plan.store = parent.join(CRUN_STORE_DIR);
             plan.files = files;
         }

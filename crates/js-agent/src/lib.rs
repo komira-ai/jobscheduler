@@ -537,12 +537,32 @@ fn execute(
     if let Some(why) = &local.files_warning {
         let _ = writeln!(err, "js-agent: warning: {why}");
     }
-    // One crun agent for each host id: the leases and the start-up sweep go by the id.
+    // The store and its claim files go in the directory above the scratch root, which must
+    // be on the scratch root's file system (a lease's `/work` and home are written there, and
+    // the run's disk is bounded by that file system), and one crun agent may hold each scratch
+    // root and each host id: the start-up sweep and the lease names go by them.
     #[cfg(target_os = "linux")]
-    let _claim = match local.container.as_ref().and_then(Settings::crun) {
+    let _claims = match local.container.as_ref().and_then(Settings::crun) {
         Some(plan) => {
-            let claim = crun::HostClaim::take(&plan.claim_dir, &offer.hello.host_id);
-            Some(claim.map_err(|why| Failure::Usage(why.to_string()))?)
+            crun::prepare_store(&plan.claim_dir, &plan.store).map_err(Failure::Usage)?;
+            let (dir, root) = (&plan.claim_dir, &plan.scratch_root);
+            if !crun::same_filesystem(services.files, dir, root).map_err(Failure::Usage)? {
+                return Err(Failure::Usage(format!(
+                    "--scratch-root: {} and {}, where the image store and the leases' /work and \
+                     home are kept, are on different file systems: a job could fill the file \
+                     system of the store; mount the scratch file system at the directory that \
+                     holds the scratch root",
+                    root.display(),
+                    dir.display()
+                )));
+            }
+            let host = crun::HostClaim::take(dir, &offer.hello.host_id);
+            let host = host.map_err(|why| Failure::Usage(why.to_string()))?;
+            let scratch = crun::HostClaim::scratch_root(dir, root);
+            Some((
+                host,
+                scratch.map_err(|why| Failure::Usage(why.to_string()))?,
+            ))
         }
         None => None,
     };

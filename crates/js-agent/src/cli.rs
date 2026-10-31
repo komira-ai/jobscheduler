@@ -314,8 +314,8 @@ pub struct Cli {
     /// `--egress-allow` and `--egress-dns` name and refuses everything else, the metadata
     /// range and all IPv6 first). The agent, as root in the host's network namespace, wires
     /// each container from outside and keeps the firewall; see `docs/design/agent-egress.md`.
-    /// Only the `crun` runtime reads it, and this build cannot select that runtime yet, so
-    /// anything but `none` is refused at start; the Podman network flags above are the
+    /// Only the `crun` runtime reads it, and the `crun` runtime of this build gives jobs
+    /// loopback only, so anything but `none` is refused at start, with either runtime; the Podman network flags above are the
     /// Podman runtime's own and are refused together with this one.
     #[arg(long, value_name = "none|allow-list")]
     pub egress: Option<String>,

@@ -355,10 +355,22 @@ impl Crun {
 
     /// Sends signal `signal` (a number) to the container's main process.
     pub(crate) async fn kill(&self, lease: &Path, id: &str, signal: u32) -> Result<(), String> {
+        self.kill_within(lease, id, signal, CALL_LIMIT).await
+    }
+
+    /// [`Crun::kill`], giving up when `crun` has not answered within `limit` (the future is
+    /// dropped, which kills it): a hung `crun` must not stall the caller for ever.
+    async fn kill_within(
+        &self,
+        lease: &Path,
+        id: &str,
+        signal: u32,
+        limit: Duration,
+    ) -> Result<(), String> {
         let client = self.client(lease)?;
-        client
-            .kill(id, signal, None)
-            .await
+        let killed = tokio::time::timeout(limit, client.kill(id, signal, None)).await;
+        killed
+            .map_err(|_| format!("crun kill: did not finish within {limit:?}"))?
             .map_err(|e| format!("crun kill: {e}"))
     }
 
@@ -407,6 +419,17 @@ impl Crun {
 
     /// [`Crun::blocking`], returning what `crun` printed on stdout.
     fn stdout_of(&self, state: &Path, args: &[&str], what: &str) -> Result<String, String> {
+        self.stdout_within(state, args, what, CALL_LIMIT)
+    }
+
+    /// [`Crun::stdout_of`], killing `crun` and failing when it has not ended within `limit`.
+    fn stdout_within(
+        &self,
+        state: &Path,
+        args: &[&str],
+        what: &str,
+        limit: Duration,
+    ) -> Result<String, String> {
         let mut command = std::process::Command::new(&self.program);
         self.launch().apply(&mut command);
         let output = command
@@ -414,16 +437,20 @@ impl Crun {
             .arg(state)
             .args(args)
             .stdin(std::process::Stdio::null())
-            .output();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|child| output_within(child, limit));
         match output {
-            Ok(out) if out.status.success() => {
+            Ok(Some(out)) if out.status.success() => {
                 Ok(String::from_utf8_lossy(&out.stdout).into_owned())
             }
-            Ok(out) => Err(format!(
+            Ok(Some(out)) => Err(format!(
                 "crun {what}: {}: {}",
                 out.status,
                 String::from_utf8_lossy(&out.stderr).trim()
             )),
+            Ok(None) => Err(format!("crun {what}: did not finish within {limit:?}")),
             Err(e) => Err(format!("run {}: {e}", self.program.display())),
         }
     }
@@ -448,6 +475,48 @@ impl Crun {
 /// the `crun run` that owns it. That run is removing it already; the wait ends the moment
 /// the directory is gone.
 const STATE_REMOVAL_WAIT: Duration = Duration::from_secs(3);
+
+/// How long a `crun` command that is waited for (`kill`, `delete`, `state`, the blocking
+/// helper) may take before it is killed and counts as failed.
+const CALL_LIMIT: Duration = Duration::from_secs(120);
+
+/// What `child` printed once it ended, or `None` when it had not ended within `limit` and
+/// was killed. The pipes are read on threads of their own, so a full pipe never stalls the
+/// child; on `None` they are left to end with the pipes.
+fn output_within(
+    mut child: std::process::Child,
+    limit: Duration,
+) -> std::io::Result<Option<std::process::Output>> {
+    fn drain<R: std::io::Read + Send + 'static>(
+        pipe: Option<R>,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    }
+    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            return Ok(None);
+        }
+        nap();
+    };
+    Ok(Some(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    }))
+}
 
 /// Whether `path` is gone, polling until `limit` has passed.
 fn wait_gone(path: &Path, limit: Duration) -> bool {
@@ -600,6 +669,42 @@ mod tests {
         let mut plain = std::process::Command::new("true");
         no_scrub(&mut plain);
         assert_eq!(plain.get_envs().count(), 0);
+    }
+
+    /// Catches a hung `crun` stalling its caller: a command that has not ended within the
+    /// limit (given as zero, so a `crun` that sleeps has not) is killed and fails saying so,
+    /// for the blocking calls and for `kill`; one that ends is read as before.
+    #[test]
+    fn a_crun_that_does_not_end_is_killed_and_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::unit_dir("crun-hung");
+        let lease: &Path = &dir;
+        std::fs::create_dir_all(lease).expect("lease");
+        let hung = lease.join("hung");
+        std::fs::write(&hung, "#!/bin/sh\nexec sleep 600\n").expect("script");
+        std::fs::set_permissions(&hung, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let crun = Crun::new(hung, no_scrub, None);
+        let why = crun
+            .stdout_within(lease, &["state", "c"], "state", Duration::ZERO)
+            .expect_err("killed");
+        assert!(why.contains("did not finish"), "{why}");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let why = runtime
+            .block_on(crun.kill_within(lease, "c", 15, Duration::ZERO))
+            .expect_err("dropped");
+        assert!(why.contains("did not finish"), "{why}");
+
+        let quick = lease.join("quick");
+        std::fs::write(&quick, "#!/bin/sh\necho out\necho oops >&2\nexit 3\n").expect("script");
+        std::fs::set_permissions(&quick, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let crun = Crun::new(quick, no_scrub, None);
+        let why = crun
+            .stdout_within(lease, &["state", "c"], "state", Duration::from_secs(600))
+            .expect_err("exit 3");
+        assert!(why.contains("oops") && why.contains('3'), "{why}");
     }
 
     /// Catches the privilege drop applied to a daemon that is not root, or without a job

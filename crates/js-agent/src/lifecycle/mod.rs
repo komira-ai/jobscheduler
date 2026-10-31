@@ -621,8 +621,8 @@ pub struct Local {
     /// The `--image-allow` flags, in the order given: where an image may be pulled from.
     pub image_allow: Vec<Allow>,
     /// The `--egress*` flags: how much network a `crun` container gets. Mode none unless an
-    /// allow-list was given, which this build refuses until the `crun` runtime can be
-    /// selected (see [`crate::egress`]).
+    /// allow-list was given, which this build refuses until the `crun` runtime wires it
+    /// (see [`crate::egress`]).
     pub egress: crate::egress::Config,
 }
 
@@ -864,8 +864,9 @@ fn egress_of(cli: &Cli) -> Result<crate::egress::Config, String> {
     }
     if config.mode() != Mode::None {
         return Err(format!(
-            "--egress {}: only the crun runtime enforces it, and this build cannot select \
-             that runtime yet; with --container-bin the network is --container-network",
+            "--egress {}: only the crun runtime enforces it, and the crun runtime of this \
+             build gives jobs loopback only; with --container-bin the network is \
+             --container-network",
             config.mode()
         ));
     }

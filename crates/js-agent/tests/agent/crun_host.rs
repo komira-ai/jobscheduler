@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use js_agent::Cli;
-use js_agent::crun_host::{CrunHost, Piece, Report, Request, check, flags, start};
+use js_agent::crun_host::{CrunHost, Piece, Report, Request, check, flags, ready, start};
 use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
 
@@ -527,6 +527,14 @@ fn the_crun_flags_are_checked_against_each_other() {
     assert!(with(&["--container-subuid", "x"]).starts_with("--container-subuid: "));
     assert!(with(&["--actions-cgroup", "/sys/fs/cgroup/x"]).starts_with("--actions-cgroup: "));
     assert!(with(&["--crun-bin", "crun"]).contains("not an absolute path"));
+    assert!(with(&["--scratch-quota"]).starts_with("--scratch-quota: "));
+    assert!(with(&["--egress", "allow-list"]).starts_with("--egress: "));
+    let mut none = ok.to_vec();
+    none.extend(["--egress", "none"]);
+    assert!(
+        flags(&cli(&none)).is_ok(),
+        "the loopback-only network is the one there is"
+    );
     assert!(with(&["--mount-root", "sync=/m"]).starts_with("--mount-root: "));
     assert!(with(&["--mount-root-ro", "sync=/m"]).starts_with("--mount-root-ro: "));
     let without = |drop: &str| {
@@ -580,6 +588,29 @@ fn start_refuses_an_incomplete_host_and_returns_the_warnings_of_a_complete_one()
         (ready.crun, ready.job_user, ready.job_ids),
         (fx.crun.clone(), USER.to_owned(), (990, 991))
     );
+}
+
+/// `ready` builds the runtime's inputs from what the check found, and refuses job ids that are
+/// missing or root's: every `crun` is run as them, so a missing user must never become root.
+/// It catches a report with no ids (or a zero uid or gid) that goes through as `(0, 0)`.
+#[test]
+fn ready_refuses_job_ids_that_are_missing_or_root() {
+    let request = Request {
+        crun: Path::new("/usr/bin/crun"),
+        job_user: USER,
+        state_root: Path::new("/s"),
+        scratch_root: Path::new("/r"),
+    };
+    let report = |job_ids| Report {
+        job_ids,
+        ..Report::default()
+    };
+    let good = ready(&request, report(Some((990, 991)))).expect("ids that are not root's");
+    assert_eq!(good.job_ids, (990, 991));
+    for ids in [None, Some((0, 991)), Some((990, 0)), Some((0, 0))] {
+        let why = ready(&request, report(ids)).expect_err("refused");
+        assert!(why.starts_with("--job-user: "), "{ids:?}: {why}");
+    }
 }
 
 /// Runs the agent to its first wait with `extra`; returns (status, stderr).

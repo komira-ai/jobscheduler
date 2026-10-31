@@ -77,7 +77,7 @@ mod spec;
 mod tests;
 mod wire;
 
-pub use claim::{ClaimError, HostClaim};
+pub use claim::{ClaimError, HostClaim, prepare_store, same_filesystem};
 
 pub use wire::{
     CgroupError, CgroupSource, ID_TOOL_PATH, IdSources, PULL_THREADS, Seams, WireError, oci_config,

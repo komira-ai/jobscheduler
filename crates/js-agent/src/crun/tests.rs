@@ -190,28 +190,6 @@ fn the_configs_are_kept_beside_the_store_and_the_clock_reads_the_epoch() {
     assert!(system_now_ms() > 1_700_000_000_000);
 }
 
-/// Proves the backend is configured from what the start check found: the `crun` the flag
-/// names, the job user's ids from the check's report (so the agent, which is root, runs every
-/// `crun` as that user), and the directories the id tools are found in. Catches a backend
-/// that runs `crun` as the agent's own user or finds the id tools on the agent's `PATH`.
-#[test]
-fn the_backend_is_configured_from_the_checks_findings() {
-    let report = crate::crun_host::Report {
-        job_ids: Some((990, 991)),
-        ..Default::default()
-    };
-    let ids = report.job_ids.expect("the check found the job user");
-    let config = super::oci_config(std::path::Path::new("/opt/crun"), ids);
-    assert_eq!(config.runtime, std::path::PathBuf::from("/opt/crun"));
-    assert_eq!(config.job_user, Some((990, 991)));
-    assert_eq!(
-        config.id_tool_path,
-        Some(super::ID_TOOL_PATH.into()),
-        "the id tools come from fixed directories"
-    );
-    assert!(config.check_search, "the search check stays on");
-}
-
 /// A cgroup mount of one test: `<mount>/actions/js-x-r1` is the lease's cgroup, with the
 /// kernel's files written as the test says.
 struct Fixture {
