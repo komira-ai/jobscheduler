@@ -103,7 +103,7 @@ fn the_unit_runs_the_agent_with_the_crun_runtime_and_flags_the_agent_accepts() {
     );
     assert_eq!(
         cli.scratch_root.as_deref(),
-        Some(Path::new(js_elastic::SCRATCH_ROOT))
+        Some(Path::new(&format!("{}/runs", js_elastic::SCRATCH_ROOT)))
     );
     assert_eq!(
         cli.token_file.as_deref(),
@@ -255,11 +255,16 @@ fn the_directories_have_the_modes_the_agent_and_the_jobs_ids_need() {
     let cli = agent_cli();
     let state = cli.state_root.unwrap();
     let scratch = cli.scratch_root.unwrap();
-    let parent = scratch.parent().unwrap().to_owned();
+    // The scratch root is the runs directory inside the scratch mount, so the image store the agent
+    // places beside it (`<mount>/oci`) is on the mount's disk.
+    let mount = Path::new(js_elastic::SCRATCH_ROOT);
+    assert_eq!(scratch.parent().unwrap(), mount);
+    let parent = mount.parent().unwrap().to_owned();
     assert_eq!(state.parent().unwrap(), parent);
     let dirs = directories();
     let mode_of = |path: &Path| dirs.iter().find(|(p, _)| p == path).map(|(_, m)| *m);
     assert_eq!(mode_of(&scratch), Some(DirLayout::Searchable.dir_mode()));
+    assert_eq!(mode_of(mount), Some(DirLayout::Searchable.dir_mode()));
     assert_eq!(mode_of(&parent), Some(0o711));
     assert_eq!(
         u32::from_str_radix(value("StateDirectoryMode").trim_start_matches('0'), 8).ok(),
@@ -267,7 +272,7 @@ fn the_directories_have_the_modes_the_agent_and_the_jobs_ids_need() {
     );
     assert_eq!(mode_of(&state), Some(DirLayout::Private.dir_mode()));
     assert_eq!(mode_of(Path::new("/etc/js-agent")), Some(0o700));
-    assert_eq!(dirs.len(), 4, "{dirs:?}");
+    assert_eq!(dirs.len(), 5, "{dirs:?}");
     assert_eq!(
         value("StateDirectory"),
         parent.file_name().unwrap().to_str().unwrap()

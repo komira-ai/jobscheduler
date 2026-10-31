@@ -34,6 +34,9 @@
 #   StateDirectory=       with StateDirectoryMode=0711 makes /var/lib/js-agent searchable by
 #                         others: the job's ids walk down through it to the scratch root
 #                         (0711, see the tmpfiles file); the state root below stays 0700
+#   --scratch-root       the runs directory inside the scratch mount, so the image store, which
+#                         the agent places beside the scratch root (<scratch>/oci), is on the
+#                         same disk as the leases; the mount itself is what the unit waits for
 #   KillMode=mixed        SIGTERM goes to the agent alone, which drains; only after
 #                         TimeoutStopSec would the rest be killed
 #   --drain-wait 3600 --stop-grace 120   a run in a crun container dies with the agent that
@@ -65,7 +68,7 @@ DelegateSubgroup=supervisor
 StateDirectory=js-agent
 StateDirectoryMode=0711
 ExecStartPre=+systemd-tmpfiles --create /etc/tmpfiles.d/js-agent-crun.conf
-ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --drain-wait 3600 --stop-grace 120 --runtime crun --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
+ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --drain-wait 3600 --stop-grace 120 --runtime crun --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
 KillMode=mixed
 TimeoutStopSec=3900
 Restart=always
