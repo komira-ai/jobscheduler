@@ -339,6 +339,13 @@ fn crun_settings_place_the_store_beside_the_scratch_root() {
     plan.delegated("/actions");
     plan.delegated("/other");
     assert_eq!(settings.actions_cgroup(), Some("/actions"));
+    // The farm unit's layout: the scratch file system is mounted at the directory above the
+    // scratch root `runs`, and the store and the claim files are in that directory.
+    let farm = Settings::for_crun("/usr/bin/crun".into(), "jsjob", (1, 1), Vec::new())
+        .placed_beside(Path::new("/var/lib/js-agent/scratch/runs"), None);
+    let farm = farm.crun().expect("crun settings");
+    assert_eq!(farm.store, Path::new("/var/lib/js-agent/scratch/oci"));
+    assert_eq!(farm.claim_dir, Path::new("/var/lib/js-agent/scratch"));
     // A scratch root with no parent keeps the store beside it, at the top.
     let top = Settings::for_crun("/usr/bin/crun".into(), "jsjob", (1, 1), Vec::new())
         .placed_beside(Path::new("/"), None);
@@ -747,9 +754,12 @@ fn the_store_and_the_directory_above_the_scratch_root_must_be_the_agents_own() {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("mode");
     };
 
-    let good = root.join("good");
+    // The farm unit's shape: the directory above `runs` holds the store.
+    let good = root.join("scratch");
     fs::create_dir(&good).expect("parent");
-    mode(&good, 0o755);
+    mode(&good, 0o711);
+    fs::create_dir(good.join("runs")).expect("the scratch root");
+    mode(&good.join("runs"), 0o711);
     prepare_store(&good, &good.join("oci")).expect("a good parent");
     assert!(good.join("oci").is_dir());
     prepare_store(&good, &good.join("oci")).expect("and again, with the store there");
