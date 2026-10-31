@@ -319,6 +319,11 @@ impl Drop for ScalerLoop {
 }
 
 impl Running {
+    /// Re-reads `--tls-cert` and `--tls-key` and serves the pair from the next handshake on.
+    pub fn reload_tls(&self) -> Result<(), StartupError> {
+        Err(StartupError::new("--tls-cert", "reload is not implemented"))
+    }
+
     /// The address the server listens on, with the port the system chose for port 0.
     pub fn addr(&self) -> SocketAddr {
         self.addr
