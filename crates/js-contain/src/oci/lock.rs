@@ -66,7 +66,8 @@ pub(crate) struct ScratchLock {
 /// file owned by the running user.
 ///
 /// # Errors
-/// The file cannot be opened or is not as required, in words that name `path`.
+/// The file cannot be opened or is not as required. The error does not name `path`;
+/// a caller adds it.
 pub fn open_lock_file(path: &Path) -> std::io::Result<File> {
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK;
     let file = File::from(rustix::fs::open(
