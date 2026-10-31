@@ -27,8 +27,8 @@ pub struct Refusal {
 /// the operator gave it (never read off the file system: whoever made a directory could
 /// then make themselves trusted). `owner` is not 0.
 pub fn allowed_owners(owner: u32) -> Vec<u32> {
-    let _ = owner;
-    vec![0]
+    assert!(owner != 0, "the invoking user is not root");
+    vec![0, owner]
 }
 
 /// The nearest ancestor of `root`, up to and including `top`, that is owned by a uid not
