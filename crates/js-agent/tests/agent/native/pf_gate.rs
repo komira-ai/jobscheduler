@@ -22,6 +22,7 @@ use super::lifecycle::{Native, job};
 use super::{TERM, config};
 use crate::jobs::fake::FakeMachine;
 use crate::jobs::{STEP_NEVER, plan};
+use crate::lifecycle::fake::{FakeRuntime, Log, ManualClock};
 use crate::lifecycle::reply;
 use crate::support::Scratch;
 
@@ -296,4 +297,13 @@ fn the_runtime_asks_only_when_its_cap_is_on() {
     assert!(on.check_egress().is_err());
     assert!(on.check_native_egress(&asks).is_err());
     assert_eq!(check.calls(), 2);
+}
+
+/// Asserts that a runtime with nothing to check passes a job that asks for the network. It
+/// catches a default that refuses every runtime that never learned of the check.
+#[test]
+fn a_runtime_with_nothing_to_check_passes_a_network_job() {
+    let runtime = FakeRuntime::new(&Log::default(), &ManualClock::default());
+    let asks = job_at("r1", NetworkLevel::On).native.unwrap();
+    assert!(runtime.check_native_egress(&asks).is_ok());
 }
