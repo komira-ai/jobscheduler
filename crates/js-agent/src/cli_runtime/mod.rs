@@ -268,6 +268,7 @@
 mod args;
 mod logs;
 pub use logs::LOGS_LIMIT;
+#[cfg(target_os = "linux")]
 pub(crate) use logs::text_of;
 mod seccomp;
 mod settings;

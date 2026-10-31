@@ -137,6 +137,10 @@ pub struct OciConfig {
     /// ([`Oci::container_pid`]) and adds the route last. By default `None`: nothing is
     /// waited for (a namespace with loopback only).
     pub route_wait: Option<std::time::Duration>,
+    /// Whether the backend must have the scratch directory alone ([`lock`]), as the
+    /// `image-pull` verb does: it is refused ([`OciError::Locked`]) while any other backend
+    /// uses the directory. By default `false`: agents share the directory.
+    pub exclusive_scratch: bool,
 }
 
 impl Default for OciConfig {
@@ -154,6 +158,7 @@ impl Default for OciConfig {
             logs: LogLimits::default(),
             resolv_conf: RESOLV_CONF.to_owned(),
             route_wait: None,
+            exclusive_scratch: false,
         }
     }
 }
@@ -248,8 +253,8 @@ pub enum OciError {
         /// Why not.
         why: String,
     },
-    /// Another OCI backend or `js-agent image-pull` holds the scratch directory's lock
-    /// ([`lock::LOCK_FILE`]).
+    /// A backend that needs the scratch directory alone (`js-agent image-pull`) found it in
+    /// use: another backend or pull holds the lock ([`lock::LOCK_FILE`]).
     #[error(
         "{}: {why}: is another js-agent or image-pull using this scratch directory?",
         path.display()
@@ -327,7 +332,7 @@ pub struct Oci {
     helper_root: PathBuf,
     images: image::Images,
     /// Held while the backend lives; released last.
-    _lock: lock::ScratchLock,
+    lock: lock::ScratchLock,
     helpers: AtomicU64,
     /// The cgroup helper containers are made under: the lease cgroups' parent, so what a
     /// helper uses is bounded by the node's jobs budget and `crun` makes (and kills,
@@ -387,7 +392,12 @@ impl Oci {
             search_check(scratch)?;
         }
         // Before anything below changes the directory, the sweep least of all.
-        let lock = lock::ScratchLock::take(scratch)?;
+        let how = if config.exclusive_scratch {
+            lock::Use::Exclusive
+        } else {
+            lock::Use::Shared
+        };
+        let lock = lock::ScratchLock::take(scratch, how)?;
         let helper_root = scratch.join("oci-helper");
         at(
             &helper_root,
@@ -413,7 +423,7 @@ impl Oci {
             scratch: scratch.to_owned(),
             helper_root,
             images: image::Images::new(scratch.join(image::IMAGES_DIR)),
-            _lock: lock,
+            lock,
             helpers: AtomicU64::new(0),
             cgroup_parent: cgroup_parent.to_owned(),
             logs: config.logs,
@@ -422,8 +432,18 @@ impl Oci {
                 .route_wait
                 .map_or(0, |limit| limit.as_secs().clamp(1, 3600)),
         });
-        let leftovers = oci.images.sweep(&oci);
-        leftovers.map_err(OciError::Prepare)?;
+        // The stages of an unpack under way in another agent are not leftovers: only a
+        // backend that has the directory to itself sweeps them.
+        if oci.lock.alone() {
+            let leftovers = oci.images.sweep(&oci);
+            leftovers.map_err(OciError::Prepare)?;
+        } else {
+            tracing::info!(
+                "oci: another backend uses {}; the unpacks a dead run left are not swept",
+                scratch.display()
+            );
+        }
+        oci.lock.share()?;
         Ok(oci)
     }
 

@@ -14,8 +14,8 @@
 //! The first use of an image pays for the fetch and the unpack, on the lease's prepare
 //! step or, for the images the daemon is given up front, at start; a second use
 //! (and a daemon started later on the same data directory, once the first is gone) finds
-//! the directory and fetches nothing. Two daemons do not run on one directory together
-//! ([`super::lock`]).
+//! the directory and fetches nothing. Daemons share a directory, and only one
+//! that has it to itself sweeps stages ([`super::lock`]).
 //!
 //! The unpack runs in a user namespace with the daemon user unmapped, the stage directory
 //! the only writable path and the downloaded blobs read-only, so a hostile tar can write

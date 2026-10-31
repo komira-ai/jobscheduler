@@ -40,6 +40,7 @@ fn config(dir: &Path, ok: bool) -> OciConfig {
         job_user: None,
         logs: LogLimits::default(),
         resolv_conf: RESOLV_CONF.to_owned(),
+        exclusive_scratch: false,
         route_wait: None,
     }
 }
@@ -1249,27 +1250,70 @@ fn the_seccomp_profile_resolved_for_a_job_allows_the_calls_of_a_network_client()
     }
 }
 
-/// Catches two backends on one scratch directory (the later one's start sweeps the stage
-/// of the earlier one's unpack), a refusal that has swept first, a lock that outlives its
-/// backend, and a lock file that cannot be opened being skipped. The refusal names the lock
-/// file; the stage of the live backend is still there; once it is dropped the directory
-/// can be started again.
+/// Catches two agents on one scratch directory refusing each other, and a start that
+/// sweeps the stage of an unpack another agent has under way: a lone backend sweeps the
+/// stages a dead run left, a second one opens beside it (shared) and sweeps nothing, so the
+/// first's in-flight stage survives the second's open; once both are dropped the directory
+/// can be started again and sweeps what is there.
 #[test]
-fn a_scratch_directory_is_used_by_one_backend_at_a_time() {
+fn agents_share_a_scratch_directory_and_only_a_lone_one_sweeps() {
+    let dir = scratch("shared-backends");
+    let scratch = dir.join("scratch");
+    let images = scratch.join("oci-images");
+    let leftover = images.join(".stage-aa-1-0");
+    std::fs::create_dir_all(&leftover).expect("a dead run's stage");
+    let first = start(&config(&dir, true), &scratch).expect("starts");
+    assert!(!leftover.exists(), "a lone backend left the stage it found");
+    let in_flight = images.join(".stage-bb-2-0");
+    std::fs::create_dir_all(&in_flight).expect("the first's stage");
+    let second = start(&config(&dir, true), &scratch).expect("opens beside the first");
+    assert!(in_flight.is_dir(), "the second backend swept a live stage");
+    drop(first);
+    // The second is still live: a third opens beside it and sweeps nothing either.
+    let third = start(&config(&dir, true), &scratch).expect("opens beside the second");
+    assert!(in_flight.is_dir(), "the third backend swept a live stage");
+    drop((second, third));
+    assert_eq!(started(&config(&dir, true), &scratch), "started");
+    assert!(
+        !in_flight.exists(),
+        "a lone backend left a dead run's stage"
+    );
+}
+
+/// Catches a pull that runs beside an agent (its stage would be shared with the agent's
+/// sweep and the agent's unpacks with its own), an agent that starts a second pull
+/// beside it, and a lock that outlives its holder: a backend that needs the directory alone
+/// is refused, with the lock file named and nothing swept, while an agent or another such
+/// backend is live, and is let in once they are dropped; a lock file that cannot be opened
+/// is not skipped.
+#[test]
+fn a_backend_that_needs_the_directory_alone_is_refused_while_any_other_is_live() {
     let dir = scratch("one-backend");
     let scratch = dir.join("scratch");
-    let first = start(&config(&dir, true), &scratch).expect("starts");
+    let alone = OciConfig {
+        exclusive_scratch: true,
+        ..config(&dir, true)
+    };
+    let agent = start(&config(&dir, true), &scratch).expect("starts");
     let stage = scratch.join("oci-images/.stage-aa-1-0");
     std::fs::create_dir_all(&stage).expect("stage");
-    let refused = start(&config(&dir, true), &scratch).expect_err("locked");
+    let refused = start(&alone, &scratch).expect_err("locked");
     let OciError::Locked { path, .. } = &refused else {
         panic!("not the lock: {refused}");
     };
     assert_eq!(path, &scratch.join(lock::LOCK_FILE));
     assert!(refused.to_string().contains(".js-oci.lock"), "{refused}");
     assert!(stage.is_dir(), "the live backend's stage was swept");
-    drop(first);
-    assert_eq!(started(&config(&dir, true), &scratch), "started");
+    drop(agent);
+    let pull = start(&alone, &scratch).expect("alone now");
+    assert!(!stage.exists(), "the pull left a dead run's stage");
+    // A second pull is refused beside the first.
+    assert!(matches!(
+        start(&alone, &scratch),
+        Err(OciError::Locked { .. })
+    ));
+    drop(pull);
+    assert_eq!(started(&alone, &scratch), "started");
 
     // A directory where the lock file should be: not skipped, and not a lock refusal.
     let blocked = dir.join("blocked");

@@ -26,11 +26,11 @@
 //! downloaded layers are removed).
 //!
 //! Two pulls into one scratch root do not run together (a lock file in the root, exit 1 for
-//! the second), and a pull does not run beside an agent that uses the same root: starting
-//! the backend sweeps the stages an earlier run left behind, which would include this
-//! one's, so the backend holds the scratch lock of js-contain ([`js_contain::oci::lock`])
-//! for as long as it lives, and a pull that finds it held is a usage error (exit 2) that
-//! has fetched nothing.
+//! the second), and a pull does not run beside an agent that uses the same root: the
+//! backend of a pull takes the scratch lock of js-contain ([`js_contain::oci::lock`])
+//! exclusively, agents hold it shared, and a pull that finds it held by any is a usage
+//! error (exit 2) that has fetched nothing. A pull is the only one with the root to itself,
+//! so it sweeps the stages an earlier run left.
 //!
 //! The verb runs the runtime's helpers with the system's `newuidmap` and `newgidmap`
 //! (`/usr/bin`), never with whatever its `PATH` names: it is root.
@@ -68,6 +68,7 @@ pub fn oci_config(user: (u32, u32), crun: Option<PathBuf>) -> OciConfig {
     let mut config = OciConfig {
         job_user: Some(user),
         id_tool_path: Some(OsString::from(ID_TOOLS)),
+        exclusive_scratch: true,
         ..OciConfig::default()
     };
     config.runtime = crun.unwrap_or(config.runtime);
