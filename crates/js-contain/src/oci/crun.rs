@@ -481,41 +481,30 @@ const STATE_REMOVAL_WAIT: Duration = Duration::from_secs(3);
 const CALL_LIMIT: Duration = Duration::from_secs(120);
 
 /// What `child` printed once it ended, or `None` when it had not ended within `limit` and
-/// was killed. The pipes are read on threads of their own, so a full pipe never stalls the
-/// child; on `None` they are left to end with the pipes.
+/// was killed. The child is waited for on a thread of its own (which also reads its pipes), so
+/// a full pipe never stalls it and the caller never waits longer than `limit`.
 fn output_within(
-    mut child: std::process::Child,
+    child: std::process::Child,
     limit: Duration,
 ) -> std::io::Result<Option<std::process::Output>> {
-    fn drain<R: std::io::Read + Send + 'static>(
-        pipe: Option<R>,
-    ) -> std::thread::JoinHandle<Vec<u8>> {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            pipe.into_iter().for_each(|mut pipe| {
-                let _ = pipe.read_to_end(&mut bytes);
+    // A handle on this very process: the signal below can never reach another one that took
+    // the pid after the child was reaped.
+    let pidfd = rustix::process::pidfd_open(
+        rustix::process::Pid::from_child(&child),
+        rustix::process::PidfdFlags::empty(),
+    );
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || done.send(child.wait_with_output()));
+    match ended.recv_timeout(limit) {
+        Ok(output) => output.map(Some),
+        Err(_) => {
+            // The thread ends with the child; its output is dropped.
+            let _ = pidfd.and_then(|fd| {
+                rustix::process::pidfd_send_signal(&fd, rustix::process::Signal::KILL)
             });
-            bytes
-        })
+            Ok(None)
+        }
     }
-    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
-    let deadline = Instant::now() + limit;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            child.kill()?;
-            child.wait()?;
-            return Ok(None);
-        }
-        nap();
-    };
-    Ok(Some(std::process::Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    }))
 }
 
 /// Whether `path` is gone, polling until `limit` has passed.
