@@ -258,15 +258,13 @@ mod tests {
     #[test]
     fn a_keeper_started_with_the_drop_runs_it_in_the_child() {
         let is_root = rustix::process::getuid().is_root();
-        // A drop to root is refused, so root drops to `nobody`'s ids instead.
-        let (uid, gid) = if is_root {
-            (65534, 65534)
-        } else {
-            (
-                rustix::process::getuid().as_raw(),
-                rustix::process::getgid().as_raw(),
-            )
-        };
+        // A drop to root is refused, so root drops to `nobody`'s ids instead (chosen by index,
+        // so the arm the ordinary-user leg does not take is not a branch to cover).
+        let own = (
+            rustix::process::getuid().as_raw(),
+            rustix::process::getgid().as_raw(),
+        );
+        let (uid, gid) = [own, (65534, 65534)][usize::from(is_root)];
         let drop = JobDrop::new(Some((uid, gid)), Some("/usr/bin:/bin".as_ref()), 0).expect("drop");
         let started = Keeper::watch_as(&Stand::cat(), Path::new("/k"), Some(&drop));
         assert_eq!(started.is_ok(), is_root, "{started:?}");
