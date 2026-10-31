@@ -92,6 +92,13 @@ fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
     let mut runtime = node.open();
     let _ = runtime.prepare(&node.image(), None);
     assert_eq!(runtime.wait_prepared(&node.image()), Prepared::Ready);
+    // The stand-in says it is up through a pipe named for the container, which must exist
+    // before the container does. The name is learnt by staging the same run and removing
+    // it again. The stop at the end waits for that word, so that it never reaches a script
+    // that has not yet set its handler.
+    let probe = runtime.stage(&node.spec("r1-hold")).expect("staged");
+    runtime.remove(&probe).expect("removed");
+    node.pipe(&probe.0);
     let (mut life, _) =
         Lifecycle::adopt(config, Box::new(runtime), Box::new(Pass), Box::new(Still))
             .expect("adopts");
@@ -111,6 +118,7 @@ fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
         }),
         "start: {started:?}; step: {stepped:?}"
     );
+    node.up(&probe);
     life.apply(&HeartbeatReply {
         commands: vec![Command::Stop {
             run_id: "r1-hold".to_owned(),
