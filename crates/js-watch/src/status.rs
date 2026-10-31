@@ -230,9 +230,9 @@ mod tests {
     /// states. It catches a transport failure read as "the server shows no machines".
     #[test]
     fn an_unreachable_server_and_a_cut_body_are_errors() {
-        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/", closed.local_addr().unwrap());
-        drop(closed);
+        // A held, non-listening port: a dropped listener would free the number for any
+        // other test to bind.
+        let url = format!("http://{}/", js_testkit::port::dead_addr());
         let reader = HttpStatus::new(&url, LIMIT).unwrap();
         let words = "the status page could not be read";
         assert_eq!(reader.read().unwrap_err().to_string(), words);
