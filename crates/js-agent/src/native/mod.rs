@@ -310,7 +310,7 @@ impl Runtime for NativeRuntime {
         let Body::Native(native) = &spec.body else {
             return Err(RuntimeError::new("this runtime runs native bodies only"));
         };
-        check_env(native)?;
+        let _ = check_env(native);
         self.ready()?;
         let id = LeaseId::new(self.term, self.next);
         self.next += 1;
