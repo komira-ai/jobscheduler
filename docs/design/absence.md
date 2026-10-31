@@ -29,7 +29,10 @@ Rules:
 - **Provider outage.** While a capacity provider is unreachable, its pool can neither grow nor shrink, and existing leases stay. While an
   agent's stream is down, no new leases are placed on its host and its leases keep their resources booked. This is the store-outage rule
   of `crates/kbf-sched/src/scheduler/outage.rs` applied per provider: expiry timers restart with a grace window on recovery.
-- **Cordon and drain.** Operator `Cordon` and `Drain` apply to a host and are scheduler state, lost on a server restart. A wait caused
+- **Cordon and drain.** Operator `Cordon` and `Drain` apply to a host and are scheduler state: the scheduler holds them in memory, and a
+  core over a state store writes each as the host's `cordon/` row and puts it back at its start (`crates/js-store/src/cordon.rs`). The lease
+  server's own-host cordon (`POST /v1/hosts/{id}:cordon`, called by a host for itself) is a lease that lapses by itself; it is kept in the
+  binding file (`<state file>.agents`) and survives a restart for as long as it has left. A wait caused
   only by a cordon is never refused as unservable, and a cordoned host is not released on idle. Agent-announced draining is a phase (5.3).
 - **Poison and duplicates.** A lease lost `LOSS_REQUEUES` (3) times refuses the operation (4.1); the value becomes a per-class retry policy
   value (8.1). A loss the scheduler caused on purpose, the eviction of a machine at the pool's cap (hosts.md section 11, D63), takes the

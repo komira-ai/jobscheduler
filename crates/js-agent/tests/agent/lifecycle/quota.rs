@@ -716,7 +716,7 @@ pub fn local_with(name: &str, extra: &[&str]) -> Local {
         "--scratch-quota",
     ];
     argv.extend(extra.iter().copied());
-    Local::from_cli(&Cli::try_parse_from(argv).unwrap()).unwrap()
+    Local::from_cli(&Cli::try_parse_from(argv).unwrap(), 0).unwrap()
 }
 
 /// Asserts that the flags reach the quota: `--scratch-default-gib` is what a run without

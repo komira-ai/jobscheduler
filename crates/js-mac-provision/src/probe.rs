@@ -64,8 +64,9 @@ mod tests {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = v4(&l);
         assert_eq!(probe(addr, Duration::from_secs(5)), Probe::Connected);
-        drop(l);
-        assert_eq!(probe(addr, Duration::from_secs(5)), Probe::Refused);
+        // Not `l` dropped: that frees the number for any other test to bind.
+        let dead = js_testkit::port::dead_addr().to_string().parse().unwrap();
+        assert_eq!(probe(dead, Duration::from_secs(5)), Probe::Refused);
     }
 
     #[test]

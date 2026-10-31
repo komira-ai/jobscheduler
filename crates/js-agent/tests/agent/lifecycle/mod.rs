@@ -5,6 +5,7 @@
 //! waits, no process starts, so there is no hang to guard.
 
 mod adopt;
+mod blind_cgroup;
 mod cleanup;
 mod disk;
 mod exclusive;
@@ -15,6 +16,7 @@ mod layout;
 mod logs;
 mod mounts;
 mod owed;
+mod prepare;
 pub mod quota;
 mod quota_health;
 mod reach;

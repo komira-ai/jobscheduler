@@ -1,0 +1,91 @@
+# The runtime conformance suite (crates/js-agent/tests/runtime_suite) over CrunRuntime and a
+# real `crun`, as the agent runs on a node: a root process that starts every container as a
+# dedicated non-root job user, in a `Delegate=yes` system unit. The tests are
+# crates/js-agent/tests/crun_runtime (every one `#[ignore]`, so no other job runs them).
+#
+# The job stands alone, so a failure here blocks no other job. A hosted runner's kernel and
+# AppArmor policy are not a node's: the node canary stays the gate. The AppArmor restriction
+# on unprivileged user namespaces stays at the runner's default (on): the distribution's
+# /usr/bin/crun profile lets the job user's crun make one.
+name: js-agent-crun-runtime
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/js-agent-crun-runtime.yml'
+      - 'crates/js-agent/**'
+      - 'crates/js-agent-usage/**'
+      - 'crates/js-agent-wire/**'
+      - 'crates/js-client/**'
+      - 'crates/js-treestore/**'
+      - 'crates/js-caps/**'
+      - 'crates/js-bundle/**'
+      - 'crates/js-testkit/**'
+      - 'crates/js-contain/**'
+      - 'crates/js-oci/**'
+      - 'crates/js-types/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The busybox 1.37.0 manifests of linux/amd64 and linux/arm64, as `cargo xtask crun-tests`
+  # pins them.
+  BUSYBOX_AMD64: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4
+  BUSYBOX_ARM64: sha256:d82c2ab94640ded77cf76514ce6a84870761105058a4a9e51b05a8a79be97a6c
+
+jobs:
+  crun-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y --no-install-recommends crun uidmap apparmor jq
+      - name: Make the job user
+        run: |
+          set -euo pipefail
+          sudo useradd --create-home --shell /usr/sbin/nologin js-job
+          grep -q '^js-job:' /etc/subuid || echo 'js-job:300000:65536' | sudo tee -a /etc/subuid
+          grep -q '^js-job:' /etc/subgid || echo 'js-job:300000:65536' | sudo tee -a /etc/subgid
+          crun --version | head -1
+      - name: Build the tests as the runner user
+        run: |
+          set -euo pipefail
+          cargo test -p js-agent --test crun_runtime --locked --no-run --message-format json > "$RUNNER_TEMP/build.json"
+          exe=$(jq -r 'select(.executable != null and .target.name == "crun_runtime") | .executable' "$RUNNER_TEMP/build.json" | tail -n 1)
+          test -x "$exe"
+          echo "EXE=$exe" >> "$GITHUB_ENV"
+      - name: Run the conformance suite over CrunRuntime in a Delegate=yes unit, as root
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) manifest=$BUSYBOX_AMD64 ;;
+            aarch64) manifest=$BUSYBOX_ARM64 ;;
+            *) echo "no busybox for $(uname -m)"; exit 1 ;;
+          esac
+          rc=0
+          sudo -n systemd-run --quiet --wait --pipe \
+            --unit=js-crun-runtime --slice=js-agent.slice \
+            -p Delegate=yes -p OOMScoreAdjust=-900 \
+            --working-directory="$GITHUB_WORKSPACE/crates/js-agent" \
+            -E "PATH=$PATH" -E JS_JOB_USER=js-job \
+            -E "JS_TEST_IMAGE=docker://docker.io/library/busybox@$manifest" \
+            "$EXE" --include-ignored --test-threads=2 || rc=$?
+          # systemd-run's exit status is not trusted (it exited 0 after a unit's binary
+          # failed): the unit's own result is read whatever it said, and the unit is reset.
+          cargo xtask unit-result --unit js-crun-runtime
+          exit "$rc"

@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome};
-use js_caps::{FLAG_SET, HostContract, RUN_FILES, SCRATCH_QUOTA};
+use js_caps::{BUNDLE_ROOT, EXEC, FLAG_SET, HostContract, RUN_FILES, RUNTIME, SCRATCH_QUOTA};
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
 use js_provider::Observed;
 use js_types::sched::usage::NodeLoad;
-use js_types::{HostId, LeaseId, MemoryHeadroom, ProviderId, RequestId, Shape};
+use js_types::{ExecMode, HostId, LeaseId, MemoryHeadroom, ProviderId, RequestId, Shape};
 use js_usage::ProfileKey;
 
 use crate::config::PoolConfig;
@@ -26,6 +26,7 @@ use crate::whole::requests::{
 };
 use crate::whole::reserve::{Marks, Reservation};
 
+mod cordon;
 mod demand;
 mod marks;
 mod provider_side;
@@ -34,6 +35,7 @@ mod start;
 
 use record::Record;
 
+pub use cordon::{Cordoned, NotHeld, OwnHost, Uncordoned};
 use demand::waiting_rows;
 pub use demand::{Launchable, Waiting};
 pub use marks::Busy;
@@ -100,6 +102,9 @@ pub struct HostView {
     /// When a reservation that drains a busy host is given up if the host is still not
     /// quiet; `None` unless the host is reserved and was busy when it was set aside.
     pub drain_deadline: Option<Timestamp>,
+    /// When the host's cordon lapses, when it is cordoned ([`Registry::cordon`]): it
+    /// takes no new lease until then.
+    pub cordon_until: Option<Timestamp>,
     /// The latest load the host reported (in the units of [`NodeLoad`]). Only the latest accepted beat's load is kept: minutes
     /// it carries that a consumer has not read before the next beat are lost to it, and a beat
     /// whose reply was lost is sent again, so a consumer that sums minutes must dedupe them by
@@ -483,6 +488,7 @@ impl Registry {
         let known = state.records.get(&host);
         let kept_binding = known.and_then(|record| record.binding.clone());
         let kept_taint = known.and_then(|record| record.taint.clone());
+        let kept_cordon = known.and_then(|record| record.cordon);
         let kept_exclusive =
             known.map_or(Exclusive::Free, |record| record.exclusive.after_hello(now));
         let kept_bound = known.and_then(|record| record.bound);
@@ -564,10 +570,16 @@ impl Registry {
                 agent_version: Some(hello.agent_version.clone()),
                 labels: hello.labels.clone(),
                 files: hello.capabilities.get(RUN_FILES).map(String::as_str) == Some(FLAG_SET),
+                native: hello.capabilities.get(EXEC).map(String::as_str)
+                    == Some(ExecMode::SandboxExec.name()),
+                bundles: hello.capabilities.contains_key(BUNDLE_ROOT),
                 quota_default: default,
                 held,
                 beats: 0,
                 taint: kept_taint,
+                cordon: kept_cordon,
+                hello_at: Some(now),
+                runtime: hello.capabilities.get(RUNTIME).cloned(),
                 exclusive: kept_exclusive,
                 bound: kept_bound,
                 leaving: kept_leaving,
@@ -754,7 +766,9 @@ impl Registry {
     /// host whose hello did not report the `run-files` capability
     /// ([`RunRefusal::FilesUnsupported`]); a job with `limits.disk_bytes` for a host whose
     /// hello did not report `scratch-quota` with a default ([`RunRefusal::DiskUnsupported`]);
-    /// [`RunRefusal::HostLost`]
+    /// a native job for a host whose hello did not report `exec` as `sandbox-exec`
+    /// ([`RunRefusal::NativeUnsupported`]); a job that pins a bundle for a host whose hello
+    /// reported no `bundle-root` ([`RunRefusal::BundleUnsupported`]); [`RunRefusal::HostLost`]
     /// for a host not heard within the grace period; [`RunRefusal::NotHeld`] when the
     /// registry's booking of `host` is not `lease`; [`RunRefusal::HostTainted`] for a
     /// host that reported a taint; [`RunRefusal::NoCapacity`] when the host is marked
@@ -802,6 +816,12 @@ impl Registry {
         }
         if spec.limits.disk_bytes.is_some() && record.quota_default.is_none() {
             return Err(RunRefusal::DiskUnsupported);
+        }
+        if spec.native.is_some() & !record.native {
+            return Err(RunRefusal::NativeUnsupported);
+        }
+        if spec.bundle.is_some() & !record.bundles {
+            return Err(RunRefusal::BundleUnsupported);
         }
         if record.state(now, self.grace_ms()) != HostState::Live {
             return Err(RunRefusal::HostLost);
@@ -872,30 +892,44 @@ impl Registry {
     }
 
     /// What every known host id is bound to, in id order, with the taint the host
-    /// reported when it has. A caller that persists bindings writes this, so that a restart
-    /// can hand the bindings to [`crate::RegisteredProvider::seat`] and the tainted hosts
-    /// to [`Registry::restore_tainted`].
+    /// reported when it has and the cordon that has not lapsed when it is cordoned. A
+    /// caller that persists bindings writes this, so that a restart can hand the bindings
+    /// to [`crate::RegisteredProvider::seat`] and the tainted or cordoned hosts to
+    /// [`Registry::restore_tainted`].
     pub fn bindings(&self) -> BTreeMap<HostId, Binding> {
-        let state = self.lock();
+        let now = self.shared.clock.now();
+        let state = self.lock_at(now);
         let bound = state.records.iter();
         let bound = bound.filter_map(|(id, record)| {
             let binding = record.binding.clone()?;
-            Some((id.clone(), binding.with_taint(record.taint.clone())))
+            let cordon = record.cordon.filter(|until| *until > now);
+            let binding = binding.with_taint(record.taint.clone());
+            Some((
+                id.clone(),
+                binding.with_cordon(cordon.map(|until| until.millis())),
+            ))
         });
         bound.collect()
     }
 
-    /// Puts back a host that reported a taint before a restart, whether or not it holds a
-    /// lease: an awaiting host, bound as it was and tainted, that counts toward the pool's
-    /// limit and is not forgotten for being silent. A host the registry already knows is
-    /// left as it is. `binding` is what [`Registry::bindings`] returned for it; one that
-    /// carries no taint is ignored, since a host that was never tainted is put back by
+    /// Puts back a host that reported a taint, or was cordoned, before a restart, whether
+    /// or not it holds a lease: an awaiting host, bound as it was, tainted or cordoned
+    /// as it was, that counts toward the pool's limit and is not forgotten for being
+    /// silent. A host the registry already knows is left as it is. `binding` is what
+    /// [`Registry::bindings`] returned for it; one that carries no taint and no cordon
+    /// that is still in force is ignored, since a host that was neither is put back by
     /// [`crate::RegisteredProvider::seat`] when it holds a lease and by nothing else.
     pub fn restore_tainted(&self, host: &HostId, binding: Binding) {
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
         let State { book, records, .. } = &mut *guard;
-        if binding.taint().is_none() || records.contains_key(host) {
+        let cordoned = binding
+            .cordon_until_ms()
+            .is_some_and(|until| until > now.millis());
+        let kept = [binding.taint().is_some(), cordoned]
+            .into_iter()
+            .any(|kept| kept);
+        if !kept || records.contains_key(host) {
             return;
         }
         self.shared.config.list_in(book, host.clone());
@@ -919,42 +953,59 @@ impl Registry {
     }
 
     fn host_views(&self, state: &State, now: Timestamp) -> Vec<HostView> {
-        let booked = state.book.booked();
+        let view = self.viewer((&state.book, &state.runs, &state.marks), now);
+        state
+            .records
+            .iter()
+            .map(|(id, record)| view(id, record))
+            .collect()
+    }
+
+    /// The listing's view of one host, given the parts of the state that it reads. The
+    /// reads that are the same for every host are made once, here.
+    fn viewer<'a>(
+        &'a self,
+        (book, runs, marks): (&'a HostBook, &'a Runs, &'a Marks),
+        now: Timestamp,
+    ) -> impl Fn(&HostId, &Record) -> HostView + 'a {
+        let booked = book.booked();
         let shape = self.shared.config.booked();
         let memory = self.shared.config.memory_headroom();
-        let marks = state.marks.reservations();
-        let set_aside = |id: &HostId| marks.iter().find(|mark| mark.host == *id);
-        let views = state.records.iter().map(|(id, record)| HostView {
-            id: id.clone(),
-            state: record.state(now, self.grace_ms()),
-            load: record
-                .load
-                .latest
-                .clone()
-                .filter(|_| record.state(now, self.grace_ms()) != HostState::Lost),
-            phase: record.phase,
-            lease: booked.get(id).copied(),
-            shape: shape.clone(),
-            memory,
-            claim: record.claim.clone(),
-            labels: record.labels.clone(),
-            agent_version: record.agent_version.clone(),
-            epoch: record.epoch,
-            heard_since_hello: record.session.is_none() | (record.beats > 0),
-            releasing: !booked.contains_key(id)
-                & !(record.quiet(&state.runs, id) & record.exclusive.is_free()),
-            taint: record.taint.clone(),
-            mark: match (record.leaving, set_aside(id), record.exclusive.held_since()) {
-                (Some(leaving), _, _) => Some(leaving.mark()),
-                (None, Some(_), _) => Some(HostMark::Reserved),
-                (None, None, Some(_)) => Some(HostMark::Held),
-                (None, None, None) => None,
-            },
-            reserved_for: set_aside(id).map(|mark| mark.request.clone()),
-            drain_deadline: set_aside(id)
-                .filter(|mark| !mark.assigned)
-                .map(|mark| mark.deadline),
-        });
-        views.collect()
+        let marks = marks.reservations();
+        move |id, record| {
+            let set_aside = |id: &HostId| marks.iter().find(|mark| mark.host == *id);
+            HostView {
+                id: id.clone(),
+                state: record.state(now, self.grace_ms()),
+                load: record
+                    .load
+                    .latest
+                    .clone()
+                    .filter(|_| record.state(now, self.grace_ms()) != HostState::Lost),
+                phase: record.phase,
+                lease: booked.get(id).copied(),
+                shape: shape.clone(),
+                memory,
+                claim: record.claim.clone(),
+                labels: record.labels.clone(),
+                agent_version: record.agent_version.clone(),
+                epoch: record.epoch,
+                heard_since_hello: record.session.is_none() | (record.beats > 0),
+                releasing: !booked.contains_key(id)
+                    & !(record.quiet(runs, id) & record.exclusive.is_free()),
+                taint: record.taint.clone(),
+                mark: match (record.leaving, set_aside(id), record.exclusive.held_since()) {
+                    (Some(leaving), _, _) => Some(leaving.mark()),
+                    (None, Some(_), _) => Some(HostMark::Reserved),
+                    (None, None, Some(_)) => Some(HostMark::Held),
+                    (None, None, None) => None,
+                },
+                reserved_for: set_aside(id).map(|mark| mark.request.clone()),
+                drain_deadline: set_aside(id)
+                    .filter(|mark| !mark.assigned)
+                    .map(|mark| mark.deadline),
+                cordon_until: record.cordon.filter(|until| *until > now),
+            }
+        }
     }
 }

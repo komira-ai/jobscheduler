@@ -437,9 +437,9 @@ mod tests {
         let (r, text) = run(&cli(dir.path(), &["probe", &addr]), &pf);
         assert!(r.unwrap());
         assert_eq!(text, "connected\n");
-        drop(l);
+        let dead = js_testkit::port::dead_addr().to_string();
         let (r, text) = run(
-            &cli(dir.path(), &["probe", &addr, "--timeout-ms", "5000"]),
+            &cli(dir.path(), &["probe", &dead, "--timeout-ms", "5000"]),
             &pf,
         );
         assert!(!r.unwrap());

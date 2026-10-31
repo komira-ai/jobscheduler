@@ -11,13 +11,13 @@ use super::image::{FetchError, ImageCheckError, ImageSource, PinnedImage};
 use super::*;
 use crate::subids::IdFiles;
 
-fn scratch(name: &str) -> crate::test_dir::TestDir {
+pub(super) fn scratch(name: &str) -> crate::test_dir::TestDir {
     crate::unit_dir(&format!("oci-{name}"))
 }
 
 /// A configuration whose runtime exits `ok` (0 or 1) whatever it is asked, with ids in
 /// files under `dir`.
-fn config(dir: &Path, ok: bool) -> OciConfig {
+pub(super) fn config(dir: &Path, ok: bool) -> OciConfig {
     let files = IdFiles::in_dir(&dir.join("ids"));
     std::fs::create_dir_all(dir.join("ids")).expect("ids");
     std::fs::write(&files.passwd, "root:x:0:0::/:/bin/sh\n").expect("passwd");
@@ -39,6 +39,9 @@ fn config(dir: &Path, ok: bool) -> OciConfig {
         scrub_env: crun::no_scrub,
         job_user: None,
         logs: LogLimits::default(),
+        resolv_conf: RESOLV_CONF.to_owned(),
+        exclusive_scratch: false,
+        route_wait: None,
     }
 }
 
@@ -586,6 +589,29 @@ async fn an_image_is_fetched_once_and_leaves_only_the_finished_directory() {
     assert_eq!(source.calls(), 1, "an unpacked image was fetched again");
 }
 
+/// Catches the root a caller looks for (`image::published_root`, which `js-agent image-pull`
+/// reports and checks) drifting from where the store keeps an image: both name the same
+/// directory, which is absent until the image is unpacked and then is the one `has` finds.
+#[test]
+fn the_published_root_is_where_the_store_keeps_an_unpacked_image() {
+    let dir = scratch("published-root");
+    let scratch = dir.join("scratch");
+    let oci = start(&config(&dir, true), &scratch).expect("started");
+    let image = pinned();
+    let root = image::published_root(&scratch, &image.digest);
+    assert_eq!(root, oci.images.rootfs_of(&image.digest));
+    assert_eq!(
+        root,
+        scratch
+            .join("oci-images")
+            .join("a".repeat(64))
+            .join("rootfs")
+    );
+    assert!(!oci.images.has(&image));
+    std::fs::create_dir_all(&root).expect("rootfs");
+    assert!(oci.images.has(&image));
+}
+
 /// Catches a source's failure lost or reworded (a registry's words are the operator's
 /// only clue), an index digest taken for a failure (the caller's message is different),
 /// and a failed fetch leaving its stage or blobs in the store.
@@ -616,15 +642,247 @@ async fn a_failed_fetch_is_reported_as_it_was_and_leaves_nothing() {
     assert!(shown.contains(&image.reference), "{shown}");
 }
 
+/// A runtime that is a script: for every `crun run` it appends to `log` the helper's id,
+/// and, for an unpack, the mode and owner of each stage directory in `images` at that
+/// moment (what the helper finds when it starts). `fail` is a `case` pattern of helper ids
+/// that exit 1.
+fn scripted_runtime(dir: &Path, images: &Path, fail: &str) -> PathBuf {
+    let path = dir.join("runtime.sh");
+    let log = dir.join("runs.log");
+    let script = format!(
+        "#!/bin/sh\nfor a in \"$@\"; do [ \"$prev\" = --bundle ] && bundle=$a; prev=$a; last=$a; done\n\
+         stat -c 'dir %a %u' \"$(dirname \"$bundle\")\" >> {log} 2>/dev/null\necho \"$last\" >> {log}\n\
+         case \"$last\" in\n  helper-unpack-*) stat -c 'stage %a %u' {images}/.stage-*[0-9] >> {log} \
+         2>/dev/null;;\nesac\ncase \"$last\" in\n  {fail}) exit 1;;\nesac\nexit 0\n",
+        log = log.display(),
+        images = images.display(),
+    );
+    std::fs::write(&path, script).expect("runtime");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
+}
+
+/// The lines a [`scripted_runtime`] logged.
+fn runs(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("runs.log"))
+        .expect("the runtime ran")
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Catches an unpack stage that anyone but the helper's user can write: when the helper
+/// container starts its unpack, the stage directory it was given is not writable by group
+/// or others (a local account could then rename the `rootfs` the helper makes and put its
+/// own tree in the image's place, or pre-create it).
+#[tokio::test]
+async fn the_unpack_stage_is_not_group_or_other_writable_when_the_helper_starts() {
+    let dir = scratch("image-stage-mode");
+    let scratch = dir.join("scratch");
+    let runtime = scripted_runtime(&dir, &scratch.join("oci-images"), "never");
+    let config = OciConfig {
+        runtime,
+        ..config(&dir, true)
+    };
+    let oci = Oci::on(
+        &config,
+        Scripted::new(Ok(vec!["0.tar".to_owned()])),
+        &scratch,
+        "/actions",
+        "x86_64",
+    )
+    .expect("started");
+    oci.check_pinned(&pinned()).await.expect("unpacked");
+    let stages: Vec<String> = runs(&dir)
+        .into_iter()
+        .filter(|l| l.starts_with("stage "))
+        .collect();
+    assert_eq!(
+        stages.len(),
+        1,
+        "the unpack helper saw one stage: {stages:?}"
+    );
+    let mode = u32::from_str_radix(stages[0].split(' ').nth(1).expect("mode"), 8).expect("octal");
+    assert_eq!(mode & 0o022, 0, "the stage is writable by others: {mode:o}");
+    assert_ne!(mode & 0o200, 0, "its owner can write it: {mode:o}");
+}
+
+/// Catches a stage given to the unpack helper by the wrong means for the daemon's user: a
+/// rootless daemon cannot `chown` to a subordinate id, so a setup helper container gives
+/// it the stage, before the unpack helper starts; a root daemon gives it itself and runs
+/// no extra container.
+#[tokio::test]
+async fn the_stage_is_given_to_the_helper_before_it_unpacks_unless_the_daemon_is_root() {
+    let dir = scratch("image-stage-give");
+    let scratch = dir.join("scratch");
+    let runtime = scripted_runtime(&dir, &scratch.join("oci-images"), "never");
+    let config = OciConfig {
+        runtime,
+        ..config(&dir, true)
+    };
+    let oci = Oci::on(
+        &config,
+        Scripted::new(Ok(vec!["0.tar".to_owned()])),
+        &scratch,
+        "/actions",
+        "x86_64",
+    )
+    .expect("started");
+    oci.check_pinned(&pinned()).await.expect("unpacked");
+    let helpers: Vec<String> = runs(&dir)
+        .iter()
+        .filter(|l| l.starts_with("helper-"))
+        .map(|l| l.split('-').nth(1).expect("kind").to_owned())
+        .collect();
+    let want: &[&str] = if rustix::process::geteuid().is_root() {
+        &["unpack"]
+    } else {
+        &["give", "unpack"]
+    };
+    assert_eq!(helpers, want);
+}
+
+/// Catches the owner string drifting from the id the unpack helper writes as: the stage is
+/// given to `HELPER_OWNER` in a setup helper's namespace, and the unpack helper's id 0 is
+/// the same host id (the first subordinate id).
+#[test]
+fn the_helper_owner_is_the_host_id_of_the_unpack_helpers_root() {
+    let ids = crate::subids::DaemonIds {
+        uid: 1000,
+        gid: 1001,
+        sub_uid: 100_000,
+        sub_gid: 200_000,
+    };
+    let host = |maps: Mappings, id: u32, group: bool| {
+        let list = if group { maps.1 } else { maps.0 };
+        list.iter()
+            .find(|m| id >= m.container_id() && id - m.container_id() < m.size())
+            .map(|m| m.host_id() + (id - m.container_id()))
+    };
+    let (uid, gid) = image::HELPER_OWNER.split_once(':').expect("uid:gid");
+    let (uid, gid): (u32, u32) = (uid.parse().expect("uid"), gid.parse().expect("gid"));
+    for group in [false, true] {
+        let setup = host(ids.setup_mappings(), if group { gid } else { uid }, group);
+        let action = host(ids.action_mappings(), 0, group);
+        assert_eq!(setup, action, "group: {group}");
+        assert_eq!(action, Some(if group { 200_000 } else { 100_000 }));
+    }
+}
+
+/// Catches a stage made by name instead of by descriptor, or left writable: it is made
+/// only if the name is free (a symlink in its place is refused and what it points at is not
+/// touched), is `0755` whatever the mode of a directory the daemon makes, and is given
+/// through `chown` the directory that was made, to exactly the owner asked, and to nobody
+/// when none is.
+#[test]
+fn a_stage_is_made_by_descriptor_with_the_helpers_owner_and_no_write_for_others() {
+    use std::os::fd::AsFd as _;
+    let dir = scratch("stage-fd");
+    let stage = dir.join("stage");
+    let owner = (
+        rustix::fs::Uid::from_raw(1234),
+        rustix::fs::Gid::from_raw(4321),
+    );
+    let mut given = Vec::new();
+    image::make_stage(&stage, Some(owner), &mut |fd, uid, gid| {
+        given.push((
+            crate::walk::identity(&fd.as_fd()).expect("identity"),
+            uid,
+            gid,
+        ));
+        Ok(())
+    })
+    .expect("made");
+    let meta = std::fs::metadata(&stage).expect("stage");
+    assert_eq!(meta.permissions().mode() & 0o7777, 0o755);
+    use std::os::unix::fs::MetadataExt as _;
+    assert_eq!(given, [((meta.dev(), meta.ino()), owner.0, owner.1)]);
+
+    // The real change of owner, to the ids this process has.
+    let mine = (
+        rustix::fs::Uid::from_raw(rustix::process::getuid().as_raw()),
+        rustix::fs::Gid::from_raw(rustix::process::getgid().as_raw()),
+    );
+    let own = dir.join("own");
+    image::make_stage(&own, Some(mine), &mut image::fchown_fd).expect("made");
+    assert_eq!(std::fs::metadata(&own).expect("own").uid(), mine.0.as_raw());
+
+    // No owner, no change of owner.
+    let rootless = dir.join("rootless");
+    image::make_stage(&rootless, None, &mut |_, _, _| panic!("chown")).expect("made");
+    assert!(rootless.is_dir());
+
+    // The name is taken (by a symlink to a directory elsewhere): refused, target untouched.
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir(&elsewhere).expect("elsewhere");
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&elsewhere, &link).expect("link");
+    let refused = image::make_stage(&link, Some(owner), &mut |_, _, _| panic!("chown"));
+    assert!(refused.is_err());
+    let mode = std::fs::metadata(&elsewhere)
+        .expect("meta")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
+
+/// Catches a helper run that skips the preparation of its state directory (the start-up
+/// sweep builds its own, apart from the unpack and give helpers): every helper's
+/// directory, whether run by the sweep or by an unpack, is `0700` and the running user's
+/// when `crun` starts (a root daemon's is the job user's, which `crun` runs as; here it is
+/// this user's), so no other account can use it.
+#[tokio::test]
+async fn every_helpers_state_directory_is_private_to_the_ids_crun_runs_as() {
+    let dir = scratch("helper-state-dir");
+    let scratch = dir.join("scratch");
+    let images = scratch.join("oci-images");
+    let runtime = scripted_runtime(&dir, &images, "never");
+    let config = OciConfig {
+        runtime,
+        ..config(&dir, true)
+    };
+    // A stage a killed daemon left: the next start's sweep runs a helper to remove it.
+    std::fs::create_dir_all(images.join(".stage-aa-1-0")).expect("stage");
+    let oci = Oci::on(
+        &config,
+        Scripted::new(Ok(vec!["0.tar".to_owned()])),
+        &scratch,
+        "/actions",
+        "x86_64",
+    )
+    .expect("started");
+    oci.check_pinned(&pinned()).await.expect("unpacked");
+    let me = rustix::process::getuid().as_raw().to_string();
+    let seen = runs(&dir);
+    let dirs: Vec<&String> = seen.iter().filter(|l| l.starts_with("dir ")).collect();
+    // The sweep's helper, the give helper (a rootless daemon) or none, the unpack's.
+    assert!(dirs.len() >= 2, "{seen:?}");
+    for line in dirs {
+        let words: Vec<&str> = line.split(' ').collect();
+        assert_eq!(words[1], "700", "{line}");
+        assert_eq!(words[2], me, "{line}");
+    }
+}
+
 /// Catches a failed unpack reported as success, a fetch's blobs kept after it, and the
-/// failure reported without the helper's words. The runtime that exits 1 fails the unpack
-/// and the removal of its stage alike; the removal's failure does not hide the unpack's.
+/// failure reported without the helper's words. The runtime fails the unpack and the
+/// removal of its stage alike (and lets the hand-over of the stage through); the removal's
+/// failure does not hide the unpack's.
 #[tokio::test]
 async fn a_failed_unpack_is_reported_and_leaves_no_blobs() {
     let dir = scratch("image-unpack-fails");
     let scratch = dir.join("scratch");
+    let runtime = scripted_runtime(
+        &dir,
+        &scratch.join("oci-images"),
+        "helper-unpack-*|helper-rm-*",
+    );
     let oci = Oci::on(
-        &config(&dir, false),
+        &OciConfig {
+            runtime,
+            ..config(&dir, true)
+        },
         Scripted::new(Ok(vec!["0.tar".to_owned()])),
         &scratch,
         "/actions",
@@ -791,4 +1049,358 @@ fn a_root_daemon_or_a_root_job_user_is_refused() {
         matches!(ids, Err(SubidError::Missing { .. })),
         "a non-root user with no entry is refused for that, not as root: {ids:?}"
     );
+}
+
+/// Catches a lease whose directories, owners or ids are not what a root daemon needs to
+/// make them: the lease directory and the writable directory the job user's, everything
+/// the job writes the job's id in the container (the first id of the subordinate range
+/// plus the job's), parents before children, all under the lease's own name.
+#[test]
+fn a_lease_names_its_directories_and_who_owns_them() {
+    let dir = scratch("lease-dirs");
+    let oci = start(&config(&dir, true), &dir.join("s")).expect("starts");
+    let lease = oci.lease_dirs("js-x-r1");
+    let base = dir.join("s/js-x-r1");
+    assert_eq!(
+        lease.to_make(),
+        [
+            (base.clone(), Owner::Job),
+            (base.join("root"), Owner::Container),
+            (base.join("upper"), Owner::Container),
+            (base.join("work"), Owner::Container),
+            (base.join("rw"), Owner::Job),
+            (base.join("rw/home"), Owner::Container),
+        ]
+    );
+    assert_eq!(lease.dir, base);
+    let (uid, gid) = (
+        rustix::process::getuid().as_raw(),
+        rustix::process::getgid().as_raw(),
+    );
+    assert_eq!(oci.job_ids(), (uid, gid));
+    assert_eq!(oci.container_ids(), (101_000, 201_000));
+    // No job user is configured, so nothing is dropped to for the keeper either.
+    assert!(oci.job_drop().is_none());
+}
+
+/// Catches a helper's directory given by a path that was replaced by a link (the link, not
+/// the directory, would be followed) and a directory not given to the account crun runs as:
+/// a directory is given (to the daemon's own ids here, which changes nothing), and a link to
+/// one is refused with its path in the words.
+#[test]
+fn a_helpers_directory_is_given_by_descriptor_and_never_through_a_link() {
+    let dir = scratch("give-job");
+    let oci = start(&config(&dir, true), &dir.join("s")).expect("starts");
+    let real = dir.join("real");
+    std::fs::create_dir(&real).expect("dir");
+    oci.give_to_job_user(&real).expect("given");
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    let why = oci.give_to_job_user(&link).expect_err("a link").to_string();
+    assert!(why.contains("link"), "{why}");
+    let image = PinnedImage {
+        reference: format!("r/x@sha256:{}", "ab".repeat(32)),
+        digest: format!("sha256:{}", "ab".repeat(32)),
+    };
+    assert_eq!(
+        oci.image_dir(&image),
+        dir.join("s/oci-images").join("ab".repeat(32))
+    );
+}
+
+/// A source that counts its fetches and publishes nothing.
+#[derive(Debug, Default)]
+struct Counting(std::sync::atomic::AtomicUsize);
+
+#[async_trait::async_trait]
+impl ImageSource for Counting {
+    async fn fetch(&self, _: &PinnedImage, _: &Path) -> Result<Vec<String>, FetchError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+}
+
+/// Catches an image that is removed and then never fetched again by the daemon that fetched
+/// it once (the memory of the fetch outliving the files), and one fetched twice when it was
+/// not removed: a second use fetches nothing, a removal makes the next use fetch again, a
+/// removal of what is gone is no error, and the image is there after.
+#[tokio::test]
+async fn a_removed_image_is_fetched_again_and_a_present_one_is_not() {
+    let dir = scratch("image-removed");
+    let source = Arc::new(Counting::default());
+    let oci = Oci::on(
+        &config(&dir, true),
+        source.clone(),
+        &dir.join("s"),
+        "/actions",
+        "x86_64",
+    )
+    .expect("starts");
+    let image = PinnedImage {
+        reference: format!("r/x@sha256:{}", "ab".repeat(32)),
+        digest: format!("sha256:{}", "ab".repeat(32)),
+    };
+    let fetched = || source.0.load(std::sync::atomic::Ordering::SeqCst);
+    oci.check_pinned(&image).await.expect("fetched");
+    oci.check_pinned(&image).await.expect("not again");
+    assert_eq!(fetched(), 1);
+    assert!(oci.image_dir(&image).is_dir());
+    // A removal that fails says so and keeps the image.
+    let store = dir.join("s/oci-images");
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o555)).expect("mode");
+    assert!(oci.remove_image(&image).await.is_err());
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    assert!(oci.image_dir(&image).is_dir());
+    oci.remove_image(&image).await.expect("removed");
+    assert!(!oci.image_dir(&image).exists());
+    oci.remove_image(&image).await.expect("already gone");
+    oci.check_pinned(&image).await.expect("fetched again");
+    assert_eq!(fetched(), 2);
+    assert!(oci.image_dir(&image).is_dir());
+}
+
+/// Catches the egress settings of the backend not reaching a job's bundle: a configured
+/// `resolv.conf` (the resolvers an allow-listed network names, and only those) replaces the
+/// loopback one, and a route wait puts `--wait-route <seconds>` between the init and the
+/// job in the container's arguments, while the defaults leave both as they were.
+#[tokio::test]
+async fn the_resolvers_and_the_route_wait_reach_the_bundle() {
+    let dir = scratch("egress-bundle");
+    let mut configured = config(&dir, true);
+    configured.resolv_conf = "nameserver 192.0.2.53\noptions timeout:1 attempts:1\n".to_owned();
+    configured.route_wait = Some(std::time::Duration::from_secs(7));
+    let oci = start(&configured, &dir.join("scratch")).expect("started");
+    let mut spec = crate::container::tests::spec();
+    spec.dir = dir.join("lease");
+    oci.create(&spec).await.expect("bundle");
+    let resolv = std::fs::read_to_string(spec.dir.join("etc/resolv.conf")).expect("resolv.conf");
+    assert_eq!(
+        resolv,
+        "nameserver 192.0.2.53\noptions timeout:1 attempts:1\n"
+    );
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(spec.dir.join("bundle/config.json")).expect("read"))
+            .expect("json");
+    assert_eq!(
+        config["process"]["args"],
+        json!([
+            "/dev/js-init",
+            "--wait-route",
+            "7",
+            "--",
+            "tool",
+            "--flag",
+            "a b"
+        ])
+    );
+
+    let plain = start(&config_default(&dir), &dir.join("scratch2")).expect("started");
+    let mut spec = crate::container::tests::spec();
+    spec.dir = dir.join("lease2");
+    plain.create(&spec).await.expect("bundle");
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(spec.dir.join("bundle/config.json")).expect("read"))
+            .expect("json");
+    assert_eq!(
+        config["process"]["args"],
+        json!(["/dev/js-init", "--", "tool", "--flag", "a b"])
+    );
+}
+
+/// The default configuration of the tests, with the defaults of the egress settings.
+fn config_default(dir: &Path) -> OciConfig {
+    let config = config(dir, true);
+    assert_eq!(config.resolv_conf, RESOLV_CONF);
+    assert_eq!(config.route_wait, None);
+    config
+}
+
+/// Catches the pinned seccomp profile, resolved for the capability set a job really gets
+/// (none), refusing a system call a job's network path needs: the calls an allow-listed job
+/// makes to open a socket, connect, send, receive and ask the socket about itself are all
+/// in an allow entry. (What stops a job from reconfiguring the network is the kernel and the
+/// empty capability set, not this filter: see `a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace` in the
+/// agent's egress tests.)
+#[test]
+fn the_seccomp_profile_resolved_for_a_job_allows_the_calls_of_a_network_client() {
+    let section = seccomp_section("amd64", &[]).expect("amd64 has a filter");
+    let allowed: std::collections::BTreeSet<&str> = section["syscalls"]
+        .as_array()
+        .expect("syscalls")
+        .iter()
+        .filter(|entry| entry["action"] == "SCMP_ACT_ALLOW")
+        .flat_map(|entry| entry["names"].as_array().expect("names"))
+        .filter_map(|name| name.as_str())
+        .collect();
+    for call in [
+        "socket",
+        "connect",
+        "bind",
+        "sendto",
+        "recvfrom",
+        "sendmsg",
+        "recvmsg",
+        "getsockopt",
+        "setsockopt",
+        "getsockname",
+        "getpeername",
+        "shutdown",
+        "poll",
+        "epoll_wait",
+    ] {
+        assert!(allowed.contains(call), "{call} is not allowed: {allowed:?}");
+    }
+}
+
+/// Catches two agents on one scratch directory refusing each other, and a start that
+/// sweeps the stage of an unpack another agent has under way: a lone backend sweeps the
+/// stages a dead run left, a second one opens beside it (shared) and sweeps nothing, so the
+/// first's in-flight stage survives the second's open; once both are dropped the directory
+/// can be started again and sweeps what is there.
+#[test]
+fn agents_share_a_scratch_directory_and_only_a_lone_one_sweeps() {
+    let dir = scratch("shared-backends");
+    let scratch = dir.join("scratch");
+    let images = scratch.join("oci-images");
+    let leftover = images.join(".stage-aa-1-0");
+    std::fs::create_dir_all(&leftover).expect("a dead run's stage");
+    let first = start(&config(&dir, true), &scratch).expect("starts");
+    assert!(!leftover.exists(), "a lone backend left the stage it found");
+    let in_flight = images.join(".stage-bb-2-0");
+    std::fs::create_dir_all(&in_flight).expect("the first's stage");
+    let second = start(&config(&dir, true), &scratch).expect("opens beside the first");
+    assert!(in_flight.is_dir(), "the second backend swept a live stage");
+    drop(first);
+    // The second is still live: a third opens beside it and sweeps nothing either.
+    let third = start(&config(&dir, true), &scratch).expect("opens beside the second");
+    assert!(in_flight.is_dir(), "the third backend swept a live stage");
+    drop((second, third));
+    assert_eq!(started(&config(&dir, true), &scratch), "started");
+    assert!(
+        !in_flight.exists(),
+        "a lone backend left a dead run's stage"
+    );
+}
+
+/// Catches a pull that runs beside an agent (its stage would be shared with the agent's
+/// sweep and the agent's unpacks with its own), an agent that starts a second pull
+/// beside it, and a lock that outlives its holder: a backend that needs the directory alone
+/// is refused, with the lock file named and nothing swept, while an agent or another such
+/// backend is live, and is let in once they are dropped; a lock file that cannot be opened
+/// is not skipped.
+#[test]
+fn a_backend_that_needs_the_directory_alone_is_refused_while_any_other_is_live() {
+    let dir = scratch("one-backend");
+    let scratch = dir.join("scratch");
+    let alone = OciConfig {
+        exclusive_scratch: true,
+        ..config(&dir, true)
+    };
+    let agent = start(&config(&dir, true), &scratch).expect("starts");
+    let stage = scratch.join("oci-images/.stage-aa-1-0");
+    std::fs::create_dir_all(&stage).expect("stage");
+    let refused = start(&alone, &scratch).expect_err("locked");
+    let OciError::Locked { path, .. } = &refused else {
+        panic!("not the lock: {refused}");
+    };
+    assert_eq!(path, &scratch.join(lock::LOCK_FILE));
+    assert!(refused.to_string().contains(".js-oci.lock"), "{refused}");
+    assert!(stage.is_dir(), "the live backend's stage was swept");
+    drop(agent);
+    let pull = start(&alone, &scratch).expect("alone now");
+    assert!(!stage.exists(), "the pull left a dead run's stage");
+    // A second pull is refused beside the first.
+    assert!(matches!(
+        start(&alone, &scratch),
+        Err(OciError::Locked { .. })
+    ));
+    drop(pull);
+    assert_eq!(started(&alone, &scratch), "started");
+
+    // A directory where the lock file should be: not skipped, and not a lock refusal.
+    let blocked = dir.join("blocked");
+    std::fs::create_dir_all(blocked.join(lock::LOCK_FILE)).expect("directory");
+    let said = started(&config(&dir, true), &blocked);
+    assert!(said.contains(lock::LOCK_FILE), "{said}");
+    assert!(said.contains("Is a directory"), "{said}");
+}
+
+/// Catches an unpacked image that is only in the page cache when it is published (a power
+/// loss would leave a published directory without its data) by pinning what the flush
+/// steps do: each succeeds on a directory and reports a path that is gone, so a flush that
+/// swallows its error shows. A flush that is skipped altogether, and the order (flush,
+/// rename, flush) of `Images::acquire`, cannot be seen from a running process: a power
+/// loss is not a test.
+#[test]
+fn the_flush_steps_of_a_publish_succeed_on_a_directory_and_fail_on_a_missing_one() {
+    let dir = scratch("flush");
+    image::flush_fs(&dir).expect("syncfs");
+    image::flush_dir(&dir).expect("fsync");
+    let gone = dir.join("gone");
+    assert_eq!(
+        image::flush_fs(&gone).expect_err("missing").kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        image::flush_dir(&gone).expect_err("missing").kind(),
+        std::io::ErrorKind::NotFound
+    );
+}
+
+/// Catches the ownership change that follows a link (a job user's link in place of the
+/// work directory would give root's target away) and one that is lost: a directory is
+/// changed by its descriptor (to its own ids here, which any user may do), a link to it is
+/// refused, and so is a path that is not there.
+#[test]
+fn a_work_directory_is_given_by_descriptor_and_never_through_a_link() {
+    let dir = scratch("chown-dir");
+    let real = dir.join("real");
+    std::fs::create_dir(&real).expect("dir");
+    let (uid, gid) = (
+        rustix::process::getuid().as_raw(),
+        rustix::process::getgid().as_raw(),
+    );
+    chown_dir(&real, uid, gid).expect("own directory");
+    assert_eq!(
+        real.metadata().expect("meta").permissions().mode() & 0o777,
+        0o700
+    );
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    assert!(chown_dir(&link, uid, gid).is_err(), "followed a link");
+    assert!(chown_dir(&dir.join("absent"), uid, gid).is_err());
+}
+
+/// Catches a backend whose `job_drop` is empty or built from other ids than the job user it
+/// was configured with: a daemon that is root (told so, as a test cannot be root) with a job
+/// user returns the drop for exactly that user and the configured tool path, and a daemon that
+/// is not root returns none.
+#[test]
+fn a_root_daemon_with_a_job_user_hands_out_the_drop_for_that_user() {
+    let dir = scratch("job-drop");
+    let mut config = config(&dir, true);
+    let job = rustix::process::getuid().as_raw() + 1;
+    let ids = IdFiles::in_dir(&dir.join("ids"));
+    std::fs::write(&ids.passwd, format!("job:x:{job}:{job}::/:/bin/sh\n")).expect("passwd");
+    std::fs::write(&ids.subuid, "job:300000:65536\n").expect("subuid");
+    std::fs::write(&ids.subgid, "job:400000:65536\n").expect("subgid");
+    config.job_user = Some((job, job + 5));
+    let on = |daemon: (u32, u32)| {
+        Oci::on_as(
+            &config,
+            Arc::new(NoImages),
+            &dir.join(format!("s{}", daemon.0)),
+            "/actions",
+            "x86_64",
+            daemon,
+        )
+    };
+    let root = on((0, 0)).expect("starts as root");
+    assert_eq!(
+        root.job_drop(),
+        crate::oci::JobDrop::new(Some((job, job + 5)), config.id_tool_path.as_deref(), 0).as_ref()
+    );
+    assert!(root.job_drop().is_some());
+    let user = on((job, job)).expect("starts as the job user");
+    assert!(user.job_drop().is_none());
 }

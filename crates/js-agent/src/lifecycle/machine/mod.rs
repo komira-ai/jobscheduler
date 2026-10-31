@@ -8,6 +8,7 @@ mod adopt;
 mod cleanup;
 mod exclusive;
 mod job;
+mod prepare;
 mod slots;
 mod tails;
 
@@ -20,10 +21,10 @@ use js_agent_wire::{
 };
 
 pub use self::exclusive::{Quiet, Restored};
-use self::job::{Job, Retired, Stage, Stuck, blind_taint, container_spec, host_taint};
+use self::job::{Job, Retired, Stage, Stuck, Waiting, blind_taint, host_taint, run_spec};
 pub use self::slots::Slots;
 use super::quota::QuotaHealth;
-use super::runtime::{ResolvedMount, Runtime};
+use super::runtime::{Prepared, ResolvedMount, RunHandle, Runtime, RuntimeError};
 use super::taint::TaintState;
 use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, code, detail};
 use crate::quota::QuotaError;
@@ -63,6 +64,20 @@ const MAX_SLOT_ATTEMPTS: usize = 8;
 
 /// A refusal: the wire code and a local explanation.
 type Refusal = (&'static str, String);
+
+/// A start that failed after the slot was taken: the detail for the wire, the finding's
+/// code, its text, and whether the agent cannot see the host (see `RuntimeError::blind`).
+type Failure = (&'static str, &'static str, String, bool);
+
+/// The failure of a runtime call that was to create the container.
+fn runtime_failure(why: &RuntimeError) -> Failure {
+    (
+        detail::RUNTIME_FAILED,
+        code::START_FAILED,
+        why.to_string(),
+        why.is_blind(),
+    )
+}
 
 /// The jobs of one agent. See the [module](super) for what it guarantees.
 pub struct Lifecycle {
@@ -161,6 +176,7 @@ impl Lifecycle {
         // happened, and the agent refuses starts and frees no slot until it is written.
         let _ = self.taint.persist();
         for index in 0..self.jobs.len() {
+            self.advance(index, &mut events);
             self.supervise(index, &mut events);
             self.clean(index, &mut events);
         }
@@ -181,6 +197,7 @@ impl Lifecycle {
             .map(|job| HeldRun {
                 run_id: job.run_id.clone(),
                 state: match job.stage {
+                    Stage::Preparing(_) => HeldState::Starting,
                     Stage::Running(_) => HeldState::Running,
                     _ => HeldState::ExitedUnacked,
                 },
@@ -333,7 +350,7 @@ impl Lifecycle {
         }
         // A bundle is judged before the native body it belongs to, so a host without the
         // capability says so (`bundle-unsupported`) and a host with it applies the bundle's
-        // rules, and only then reaches the refusal that nothing can run a bundle yet.
+        // rules before the native body is checked.
         if spec.bundle.is_some() {
             match &self.config.bundle {
                 None => {
@@ -345,12 +362,16 @@ impl Lifecycle {
                 Some(bundle) => bundle.admit(spec)?,
             }
         }
-        if spec.native.is_some() {
-            let why = match spec.bundle.is_some() {
-                true => "the bundle is admitted, but this agent cannot run a bundle yet",
-                false => "this agent runs no native jobs",
-            };
-            return Err(no(refusal::NATIVE_UNSUPPORTED, why));
+        if let Some(native) = &spec.native {
+            self.runtime
+                .check_native(native)
+                .map_err(|refused| (refused.code, refused.why))?;
+            if !spec.files.is_empty() {
+                return Err(no(
+                    detail::FILES_NEED_CONTAINER,
+                    "run files are delivered to containers only",
+                ));
+            }
         }
         if let Some(why) = self.quota_health.why() {
             return Err(no(
@@ -623,6 +644,58 @@ impl Lifecycle {
                 return;
             }
         };
+        // The image is asked for after the slot is taken and before anything is made: a run
+        // whose image is still being fetched waits as `starting`, holding its booking, and
+        // costs the worker nothing until the image is here (see `Runtime::prepare`).
+        // A host-isolation run uses no image store (the runtime pulls for it inside the
+        // create, as it always did): it is never asked about one. (A start with no image
+        // is refused as `invalid-image`, and a native one as `native-unsupported`, before
+        // this point.)
+        let prepared = match spec.isolation {
+            Isolation::Host => Prepared::Ready,
+            Isolation::Contained => self.runtime.prepare(&spec.image, None),
+        };
+        match prepared {
+            Prepared::Pending(ticket) => {
+                // The lease the start names ends `valid_for_ms` after the reply came; a run
+                // that waits for its image is held to that end when it starts.
+                let lease_end_ms = match spec.valid_for_ms {
+                    0 => u64::MAX,
+                    valid => received.saturating_add(valid),
+                };
+                let waiting = Waiting {
+                    spec: spec.clone(),
+                    mounts,
+                    slot,
+                    booked,
+                    ticket,
+                    lease_end_ms,
+                };
+                let stage = Stage::Preparing(Box::new(waiting));
+                self.jobs.push(Job::of(spec, stage, 0, Some(slot), booked));
+            }
+            Prepared::Ready => {
+                let started = self.begin(spec, mounts, slot, booked, events);
+                self.settle(spec, started, (slot, booked), (None, u64::MAX), events);
+            }
+            Prepared::Failed(why) => {
+                let failure = runtime_failure(&why);
+                self.settle(spec, Err(failure), (slot, booked), (None, u64::MAX), events);
+            }
+        }
+    }
+
+    /// Makes the run's scratch directory (with its quota) and files and creates and starts
+    /// its container.
+    fn begin(
+        &mut self,
+        spec: &JobSpec,
+        mounts: Vec<ResolvedMount>,
+        slot: u32,
+        booked: u64,
+        events: &mut Vec<Event>,
+    ) -> Result<RunHandle, Failure> {
+        let run_id = &spec.run_id;
         let failed = |why: std::io::Error| {
             (
                 detail::SCRATCH_FAILED,
@@ -650,29 +723,39 @@ impl Lifecycle {
             };
             written.map(|files| (scratch, files)).map_err(failed)
         });
-        let started = started.and_then(|(scratch, files)| {
-            let container = container_spec(spec, mounts, scratch, files, slot, booked);
-            self.runtime.create_and_start(&container).map_err(|why| {
-                (
-                    detail::RUNTIME_FAILED,
-                    code::START_FAILED,
-                    why.to_string(),
-                    why.is_blind(),
-                )
-            })
-        });
-        match started {
+        started.and_then(|(scratch, files)| {
+            let run = run_spec(spec, mounts, scratch, files, slot, booked);
+            self.runtime
+                .create_and_start(&run)
+                .map_err(|why| runtime_failure(&why))
+        })
+    }
+
+    /// Records how a start went: a running job (its wall-time limit begins now, after any
+    /// wait for the image, and ends no later than `cap`, the end of its lease), or a
+    /// `failed_to_start` result whose cleanup is owed. It takes the place of the job at
+    /// `replace` (a start that waited), or is added.
+    fn settle(
+        &mut self,
+        spec: &JobSpec,
+        started: Result<RunHandle, Failure>,
+        (slot, booked): (u32, u64),
+        (replace, cap): (Option<usize>, u64),
+        events: &mut Vec<Event>,
+    ) {
+        let run_id = &spec.run_id;
+        let job = match started {
             Ok(id) => {
                 let now = self.clock.now_ms();
-                let deadline = now.saturating_add(spec.limits.wall_ms);
+                let deadline = now.saturating_add(spec.limits.wall_ms).min(cap);
                 let cgroup = self.runtime.cgroup(&id);
                 let mut job = Job::of(spec, Stage::Running(id), deadline, Some(slot), booked);
                 job.started_at(now);
                 job.cgroup = cgroup;
-                self.jobs.push(job);
                 events.push(Event::Started {
                     run_id: run_id.clone(),
                 });
+                job
             }
             Err((why, finding, message, blind)) => {
                 let mut job = Job::of(spec, Stage::Scratch, 0, Some(slot), booked);
@@ -686,8 +769,12 @@ impl Lifecycle {
                 events.push(Event::ResultReady {
                     run_id: run_id.clone(),
                 });
-                self.jobs.push(job);
+                job
             }
+        };
+        match replace {
+            Some(index) => self.jobs[index] = job,
+            None => self.jobs.push(job),
         }
     }
 }

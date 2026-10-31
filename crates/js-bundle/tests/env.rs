@@ -5,7 +5,7 @@ mod common;
 
 use common::{edited, set};
 use js_bundle::{ConfigError, Defect, EnvNameError, check_env_name};
-use js_types::env::{MAX_ENV_NAME_LEN, OWNED_ENV_NAMES, RESERVED_ENV_PREFIXES};
+use js_types::env::{MAX_ENV_NAME_LEN, OWNED_ENV_NAMES, RESERVED_ENV_PREFIXES, SHELL_ENV_NAMES};
 use serde_json::json;
 
 /// `check_env_name` reads the shared list: `MallocStackLogging`, `OBJC_DEBUG`, `__XPC_X`
@@ -34,6 +34,9 @@ fn names_are_refused_by_the_shared_reserved_list() {
         );
     }
     for name in OWNED_ENV_NAMES {
+        assert_eq!(check_env_name(name), Err(EnvNameError::Forbidden), "{name}");
+    }
+    for name in SHELL_ENV_NAMES {
         assert_eq!(check_env_name(name), Err(EnvNameError::Forbidden), "{name}");
     }
     for name in ["PATH", "LDX", "JS", "OBJC", "_A9"] {

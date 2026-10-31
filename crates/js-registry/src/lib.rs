@@ -73,6 +73,13 @@
 //!   is sent no start, takes no new run and no new lease (a lease already on it is left
 //!   alone until it ends), and is never forgotten for being silent; its
 //!   live runs finish and are acknowledged. The registry never clears a taint.
+//! - **Cordon.** A host can cordon itself for a while ([`Registry::cordon`]): it takes no
+//!   new lease, no whole-node commit and no reservation's start until the cordon lapses
+//!   or [`Registry::uncordon`] ends it, and the lease it holds is untouched. The requester
+//!   sets the length, a repeat renews and never shortens, and nothing ticks: the lapse is
+//!   read when a host is placed. The cordon is kept with the binding
+//!   ([`Binding::with_cordon`]) and put back by [`Registry::restore_tainted`], so a
+//!   restart keeps it; a host that is cordoned is not forgotten for being silent.
 //! - **Whole-node commit.** A lease of a `Whole` class is committed, not granted
 //!   (design `whole-node.md` sections 5 and 8): the registry books it only on a
 //!   host that is live, serving, clean, quiet and clear of another whole-node lease or a
@@ -141,7 +148,8 @@ pub use load::{BadLease, node_load};
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
 pub use registry::{
-    Busy, HostMark, HostState, HostView, Launchable, Registry, Waiting, WholeCounts,
+    Busy, Cordoned, HostMark, HostState, HostView, Launchable, NotHeld, OwnHost, Registry,
+    Uncordoned, Waiting, WholeCounts,
 };
 pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};
