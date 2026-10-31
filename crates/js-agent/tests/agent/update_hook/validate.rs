@@ -252,7 +252,8 @@ fn a_first_install_has_no_previous_version_or_release() {
 fn the_record_must_say_what_the_params_table_says() {
     let record = good();
     assert_eq!(validate(&record, &declaration(), &params()), Ok(()));
-    let cases: [(&str, fn(&mut Params)); 4] = [
+    type Change = fn(&mut Params);
+    let cases: [(&str, Change); 4] = [
         ("target", |p| p.target_version = "1.4.1".to_owned()),
         ("previous", |p| {
             p.previous_version = Some("1.3.1".to_owned())
