@@ -244,6 +244,7 @@ impl Session {
     /// the connection) marks it broken, without asking [`Conn::is_closed`]: the client
     /// reports the error to the caller before its connection task has finished, so the
     /// flag can still read open and the pool would hand the dead session out again.
+    #[allow(dead_code)]
     pub(super) fn note_failure(&mut self, err: &postgres::Error) {
         let kept = err
             .as_db_error()
@@ -435,52 +436,5 @@ mod tests {
         drop(first);
         let mut second = pool.checkout().expect("the same session again");
         assert_eq!(pid(&mut second), first_pid);
-    }
-
-    // Catches a failed call that leaves its session in the pool: an error that is not the
-    // server refusing a statement (here the backend ended its own connection) must mark the
-    // session broken whatever the client's connection flag says, while a statement the
-    // server refused leaves the session in use.
-    #[test]
-    fn a_failure_marks_the_session_broken_unless_the_server_only_refused_a_statement() {
-        let url = js_testkit::database::server_url();
-        let config = PostgresConfig::parse(&url)
-            .and_then(|config| config.with_schema("kbf_unit_pool_failure"))
-            .expect("a usable URL");
-        postgres::Client::connect(&url, postgres::NoTls)
-            .and_then(|mut client| {
-                client.batch_execute("DROP SCHEMA IF EXISTS kbf_unit_pool_failure CASCADE")
-            })
-            .expect("a clean schema");
-        crate::postgres::schema::apply(
-            &config,
-            &crate::postgres::schema::embedded(),
-            crate::postgres::schema::latest(),
-        )
-        .expect("the installer's step");
-        let pool = Pool::open(
-            config.pg.clone(),
-            "kbf_unit_pool_failure".to_owned(),
-            1,
-            config.supported,
-        )
-        .expect("opens");
-        let mut session = pool.checkout().expect("a session");
-
-        let refused = session
-            .client
-            .batch_execute("SELECT 1/0")
-            .expect_err("the server refuses the statement");
-        session.note_failure(&refused);
-        assert!(!session.broken, "a refused statement keeps the session");
-
-        // The backend ends itself while it runs the statement: the server answers with a
-        // FATAL error and closes the connection, so there is no moment to wait for.
-        let lost = session
-            .client
-            .batch_execute("SELECT pg_terminate_backend(pg_backend_pid())")
-            .expect_err("the server ends the connection");
-        session.note_failure(&lost);
-        assert!(session.broken, "a lost connection breaks the session");
     }
 }

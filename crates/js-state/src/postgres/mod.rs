@@ -481,10 +481,7 @@ impl PostgresStore {
         f: impl FnOnce(&mut Session) -> Result<T, postgres::Error>,
     ) -> Result<T, StoreError> {
         let mut session = self.pool.checkout().map_err(Fail::into_store)?;
-        f(&mut session).map_err(|err| {
-            session.note_failure(&err);
-            failed(err)
-        })
+        f(&mut session).map_err(failed)
     }
 
     /// Runs `attempt` until it is not rolled back for a serialization failure.

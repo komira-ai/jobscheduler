@@ -397,3 +397,86 @@ fn the_feed_maps_each_kind_pages_and_skips_a_kind_it_does_not_know() {
     assert_eq!(resumed.rows, [after]);
     assert_eq!(resumed.cursor, Revision(7));
 }
+
+/// The backend of the session a read of `store` runs on.
+fn backend_pid(store: &PostgresStore) -> i32 {
+    store
+        .read(|s| Ok(s.client.query_one("SELECT pg_backend_pid()", &[])?.get(0)))
+        .expect("reads the backend")
+}
+
+/// A store on a schema of its own, installed fresh.
+fn store_on(schema: &str) -> (PostgresConfig, PostgresStore) {
+    let config = PostgresConfig::parse(&url())
+        .and_then(|config| config.with_schema(schema))
+        .expect("a usable URL and schema");
+    installed(&config);
+    let store = PostgresStore::open(&config).expect("opens");
+    (config, store)
+}
+
+// Catches a read that fails on its session and still pools it: the next read must run on
+// another connection. A statement the server refuses keeps the session (the same backend
+// answers the next read); a parameter the client cannot encode leaves the connection in a
+// state the pool does not judge, so the session is dropped; and a backend that ends itself
+// in the statement (the server's FATAL) is never handed out again, over many rounds
+// because the client's own closed flag lags the error it reports.
+#[test]
+fn a_read_that_fails_keeps_its_session_only_when_the_server_refused_a_statement() {
+    let (_config, store) = store_on("kbf_unit_read_failure");
+    let first = backend_pid(&store);
+
+    store
+        .read(|s| s.client.batch_execute("SELECT 1/0"))
+        .expect_err("the server refuses the statement");
+    assert_eq!(backend_pid(&store), first, "a refused statement keeps it");
+
+    store
+        .read(|s| s.client.query("SELECT $1::int8", &[&"not a number"]))
+        .expect_err("the client cannot encode the parameter");
+    let second = backend_pid(&store);
+    assert_ne!(second, first, "a failure the server did not answer drops it");
+
+    let mut before = second;
+    for _ in 0..50 {
+        store
+            .read(|s| {
+                s.client
+                    .batch_execute("SELECT pg_terminate_backend(pg_backend_pid())")
+            })
+            .expect_err("the backend ends itself");
+        let after = backend_pid(&store);
+        assert_ne!(after, before, "the dead session was handed out again");
+        before = after;
+    }
+}
+
+// Catches a commit that loses its backend and still pools the session. A deferred trigger
+// ends the backend inside COMMIT, so the server's answer to COMMIT is the FATAL (a
+// database error, which is not a statement the server merely refused): the next call must
+// run on another connection.
+#[test]
+fn a_commit_the_server_ends_the_backend_in_does_not_return_its_session() {
+    let (config, store) = store_on("kbf_unit_commit_failure");
+    let schema = config.schema();
+    postgres::Client::connect(&url(), postgres::NoTls)
+        .and_then(|mut client| {
+            client.batch_execute(&format!(
+                "CREATE FUNCTION {schema}.end_backend() RETURNS trigger LANGUAGE plpgsql AS \
+                 $$ BEGIN PERFORM pg_terminate_backend(pg_backend_pid()); RETURN NULL; END $$; \
+                 CREATE CONSTRAINT TRIGGER end_at_commit AFTER INSERT OR UPDATE ON {schema}.kv \
+                 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION {schema}.end_backend()"
+            ))
+        })
+        .expect("the trigger");
+    let mut before = backend_pid(&store);
+    for _ in 0..50 {
+        let pending = store
+            .begin(Txn::new().put("k", "v", Cond::Any))
+            .expect("runs to the commit");
+        pending.commit().expect_err("the backend ends in the commit");
+        let after = backend_pid(&store);
+        assert_ne!(after, before, "the dead session was handed out again");
+        before = after;
+    }
+}
