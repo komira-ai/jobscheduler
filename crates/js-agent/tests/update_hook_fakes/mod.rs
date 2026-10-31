@@ -22,12 +22,33 @@ use js_agent::update_hook::{
     Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,
     Params, PortError, Uncordoned, UnitState, Units, read_link, swap_link,
 };
+use js_agent_wire::Taint;
+use serde::{Deserialize, Serialize};
 
 /// Where the fake clock starts, in milliseconds.
 pub const START_MS: u64 = 1_000_000;
 
 /// The runtime a fake hello reports.
 pub const RUNTIME: &str = "crun";
+
+/// What the server saved of a host with its binding, and a restart keeps.
+#[derive(Default, Serialize, Deserialize)]
+struct Saved {
+    cordon: Option<CordonView>,
+    taint: Option<Taint>,
+}
+
+trait Restored {
+    fn restored(self, saved: Saved, now_ms: u64) -> Self;
+}
+
+impl Restored for HostReading {
+    fn restored(mut self, saved: Saved, now_ms: u64) -> Self {
+        self.cordon = saved.cordon.filter(|cordon| cordon.expires_at_ms > now_ms);
+        self.taint = saved.taint;
+        self
+    }
+}
 
 /// The fakes' world.
 pub struct World {
@@ -155,12 +176,34 @@ impl World {
         fs::write(self.control.join("releases"), text).unwrap();
     }
 
-    /// The server forgets the host, as it does when it restarts: the next hello makes it again.
+    /// The server restarts: it forgets the host, and the next hello makes it again. The cordon
+    /// and the taint were saved with the host's binding and come back with the hello, a cordon
+    /// only while it has not lapsed.
     ///
     /// # Panics
-    /// The file cannot be removed.
+    /// A file cannot be read, written or removed.
     pub fn forget_host(&self) {
+        let host = self.stored().unwrap();
+        let saved = Saved {
+            cordon: host.cordon,
+            taint: host.taint,
+        };
+        fs::write(self.saved_file(), serde_json::to_vec(&saved).unwrap()).unwrap();
         fs::remove_file(self.lease_file()).unwrap();
+    }
+
+    fn saved_file(&self) -> PathBuf {
+        self.world.join("lease-saved.json")
+    }
+
+    /// What a restart kept of the host, taken back; nothing when the state file was lost.
+    fn take_saved(&self) -> Saved {
+        let saved = fs::read(self.saved_file())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let _ = fs::remove_file(self.saved_file());
+        saved
     }
 
     /// The server loses its state file as well: nothing saved is restored by the next hello.
@@ -169,7 +212,7 @@ impl World {
     /// A file cannot be removed.
     pub fn lose_state_file(&self) {
         self.forget_host();
-        let _ = fs::remove_file(self.world.join("lease-saved.json"));
+        let _ = fs::remove_file(self.saved_file());
     }
 
     /// Changes the server's stored view of the host, as the server would on its own.
@@ -226,7 +269,8 @@ impl World {
                 taint: None,
                 agent_version: None,
                 runtime: None,
-            },
+            }
+            .restored(self.take_saved(), self.now_ms()),
             other => other?,
         };
         host.epoch += 1;
@@ -246,20 +290,31 @@ impl World {
     /// The version a starting agent reports: the one the params give for the release the first
     /// release link points at (see [`World::register_release`]); none when the link or the
     /// release is not known.
-    fn linked_version(&self) -> Option<String> {
+    fn linked_version(&self) -> Result<Option<String>, PortError> {
         let mut names: Vec<PathBuf> = fs::read_dir(self.world.join("link"))
-            .ok()?
+            .map_err(|why| io_err(&why))?
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .collect();
         names.sort();
-        let target = read_link(names.first()?).ok()??;
-        fs::read_to_string(self.control.join("releases"))
-            .ok()?
+        let Some(link) = names.first() else {
+            return Ok(None);
+        };
+        let Some(target) = read_link(link).map_err(|why| io_err(&why))? else {
+            return Ok(None);
+        };
+        let table = fs::read_to_string(self.control.join("releases")).unwrap_or_default();
+        table
             .lines()
             .filter_map(|line| line.split_once('\t'))
             .rev()
             .find(|(path, _)| Path::new(path) == target)
-            .map(|(_, version)| version.to_owned())
+            .map(|(_, version)| Some(version.to_owned()))
+            .ok_or_else(|| {
+                PortError::Io(format!(
+                    "the release {} is in no params: the fake knows no version for it",
+                    target.display()
+                ))
+            })
     }
 
     fn link_file(&self, link: &Path) -> Result<PathBuf, PortError> {
@@ -299,9 +354,11 @@ impl Units for World {
         if self.show(unit)?.active == "active" {
             return Ok(());
         }
+        // The agent that starts says hello with the version of the release the link names; a
+        // release the params never named is an error, before anything changes.
+        let version = self.linked_version()?;
         self.put_unit(unit, "active", "running")?;
-        // The agent that starts says hello with the version of the release the link names.
-        match self.linked_version() {
+        match version {
             Some(version) => self
                 .hello(&version)
                 .map_err(|why| PortError::Io(why.to_string())),

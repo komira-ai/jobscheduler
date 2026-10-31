@@ -99,20 +99,20 @@ fn whole_workspace(words: &[String]) -> bool {
         .any(|word| matches!(word.as_str(), "--workspace" | "--all"))
 }
 
-/// The release builds in `text`, and those of them that break the rule: the first reading of
-/// the rule, a package named with `-p` and no `--bin`, kept for the red run.
+/// The release builds in `text`, and those of them that break the rule.
 fn release_builds(text: &str) -> (Vec<String>, Vec<String>) {
-    let _ = (names_a_bin, packages, whole_workspace);
-    let all: Vec<String> = cargo_builds(commands(text))
+    let (mut all, mut broken) = (Vec::new(), Vec::new());
+    for words in cargo_builds(commands(text))
         .into_iter()
-        .filter(|words| is_release(words))
-        .map(|words| words.join(" "))
-        .collect();
-    let broken = all
-        .iter()
-        .filter(|b| b.contains("-p ") && !b.contains("-p xtask") && !b.contains("--bin "))
-        .cloned()
-        .collect();
+        .filter(|w| is_release(w))
+    {
+        let line = words.join(" ");
+        let only_xtask = packages(&words) == ["xtask"] && !whole_workspace(&words);
+        if !names_a_bin(&words) && !only_xtask {
+            broken.push(line.clone());
+        }
+        all.push(line);
+    }
     (all, broken)
 }
 
