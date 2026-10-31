@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::Error;
+use crate::{Error, test_build};
 
 /// The `passed` count of one line of a test binary's output: `Some(n)` for
 /// `test result: ok. n passed; ...` (or `FAILED.`), `None` for any other line.
@@ -51,6 +51,11 @@ pub fn read_count(file: &Path) -> Result<u64, String> {
     Ok(count)
 }
 
+/// A failure of this verb with the reason `why`.
+fn failed(why: String) -> Error {
+    Error::CrunTests(test_build::Error::Failed(why))
+}
+
 /// Runs `command`, passes its stdout through, and writes the count of tests it reported to
 /// `count_file`.
 ///
@@ -65,7 +70,7 @@ pub fn run(count_file: &Path, command: &[OsString]) -> Result<String, Error> {
         .args(args)
         .stdout(Stdio::piped())
         .spawn()
-        .map_err(|e| Error::Failed(format!("{}: {e}", program.to_string_lossy())))?;
+        .map_err(|e| failed(format!("{}: {e}", program.to_string_lossy())))?;
     let mut reader = BufReader::new(child.stdout.take().expect("piped stdout"));
     let mut stdout = std::io::stdout().lock();
     let (mut count, mut line) = (0u64, Vec::new());
@@ -73,18 +78,18 @@ pub fn run(count_file: &Path, command: &[OsString]) -> Result<String, Error> {
         line.clear();
         let n = reader
             .read_until(b'\n', &mut line)
-            .map_err(|e| Error::Failed(format!("reading the output of the tests: {e}")))?;
+            .map_err(|e| failed(format!("reading the output of the tests: {e}")))?;
         if n == 0 {
             break;
         }
-        count += passed_in(&String::from_utf8_lossy(&line)).unwrap_or(0);
+        count += passed_in(String::from_utf8_lossy(&line).trim_end()).unwrap_or(0);
         let _ = stdout.write_all(&line).and_then(|()| stdout.flush());
     }
     let status = child
         .wait()
-        .map_err(|e| Error::Failed(format!("waiting for the tests: {e}")))?;
+        .map_err(|e| failed(format!("waiting for the tests: {e}")))?;
     std::fs::write(count_file, format!("{count}\n"))
-        .map_err(|e| Error::Failed(format!("could not write {}: {e}", count_file.display())))?;
+        .map_err(|e| failed(format!("could not write {}: {e}", count_file.display())))?;
     if status.success() {
         return Ok(format!("{count} tests ran"));
     }
