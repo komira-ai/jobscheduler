@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use js_agent::lifecycle::Event;
+use js_agent::lifecycle::{Event, Runtime};
 use js_agent::native::{
     Enforcer, NativeFlags, NativeRuntime, NativeSettings, PfFlags, ProvisionError,
 };
@@ -273,4 +273,27 @@ fn the_worker_does_not_start_while_the_anchor_is_not_enforced() {
             (other, _) => panic!("case {n}: {:?}", other.err()),
         }
     }
+}
+
+/// Asserts that a runtime whose cap is below `on` passes both of its checks without asking,
+/// even for a job that asks for the network and with a check that would fail; and that with
+/// a cap of `on` the same two checks ask. It catches a check that is made where the limit is
+/// not the agent's to keep.
+#[test]
+fn the_runtime_asks_only_when_its_cap_is_on() {
+    let dir = Scratch::new("native-pf-cap");
+    let fake = FakeHelper::start(&dir);
+    let check = Fake::new(Verdict::PfDisabled);
+    let asks = job_at("r1", NetworkLevel::On).native.unwrap();
+    let mut cfg = config(&fake);
+    cfg.egress = Some(check.clone());
+    let below = NativeRuntime::open(fake.client(), cfg.clone(), TERM).unwrap();
+    assert!(below.check_egress().is_ok());
+    assert!(below.check_native_egress(&asks).is_ok());
+    assert_eq!(check.calls(), 0);
+    cfg.net = Net::On;
+    let on = NativeRuntime::open(fake.client(), cfg, TERM).unwrap();
+    assert!(on.check_egress().is_err());
+    assert!(on.check_native_egress(&asks).is_err());
+    assert_eq!(check.calls(), 2);
 }

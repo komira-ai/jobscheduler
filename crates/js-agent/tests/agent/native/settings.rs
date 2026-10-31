@@ -357,6 +357,22 @@ fn a_cap_of_on_needs_the_pool_and_a_policy_that_is_valid() {
         ..pool()
     };
     assert!(bad(metadata).starts_with("--native-pf-endpoint: "));
+    let relative = PfFlags {
+        pfctl: Some(Path::new("pfctl")),
+        ..pool()
+    };
+    assert_eq!(
+        bad(relative),
+        "--native-pfctl: pfctl is not an absolute path"
+    );
+    let relative = PfFlags {
+        state_dir: Some(Path::new("state")),
+        ..pool()
+    };
+    assert_eq!(
+        bad(relative),
+        "--native-pf-state-dir: state is not an absolute path"
+    );
     let endpoints = ["192.0.2.10:443".to_owned()];
     let all = PfFlags {
         pfctl: Some(Path::new("/sbin/pfctl")),

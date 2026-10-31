@@ -229,10 +229,12 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub native_homes: Option<PathBuf>,
     /// The most network a native run gets: `off` (the default), `loopback` or `on`. A start
-    /// that asks for more is held to this. `on` has no egress control: a run can reach the
-    /// scheduler, the cloud metadata address and the rest of the network, until a packet
-    /// filter keyed on the lease users exists; keep `off` (or `loopback`, which every run
-    /// of the Mac shares). Needs `--native-helper-socket`.
+    /// that asks for more is held to this. `on` is limited by the pf anchor of
+    /// `js-mac-provision` (see `--native-pf-uid-start`): without it a run could reach the
+    /// scheduler, the cloud metadata address and the rest of the network, so the agent does
+    /// not start with `on` unless the anchor is in force, and refuses each job that asks for
+    /// the network (`egress-unchecked`) while it is not. `loopback` is shared by every run
+    /// of the Mac. Needs `--native-helper-socket`.
     #[arg(long, value_name = "off|loopback|on")]
     pub native_network: Option<String>,
     /// A path no native run may read, in addition to the agent's own roots, its token,
