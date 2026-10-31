@@ -736,7 +736,7 @@ pub fn flags(cli: &Cli) -> Result<Request<'_>, String> {
     if cli.runtime != Some(RuntimeKind::Crun) {
         return Err("--runtime crun: not given".to_owned());
     }
-    let engine_flags = [
+    let mut engine_flags = vec![
         ("--container-bin", cli.container_bin.is_some()),
         ("--container-network", cli.container_network.is_some()),
         ("--container-user", cli.container_user.is_some()),
@@ -762,9 +762,11 @@ pub fn flags(cli: &Cli) -> Result<Request<'_>, String> {
         ("--mount-root", !cli.mount_roots.is_empty()),
         ("--mount-root-ro", !cli.mount_roots_ro.is_empty()),
     ];
+    // Native jobs are a Mac runtime; a crun agent would start and ignore them.
+    engine_flags.extend(cli.native_flags());
     if let Some((flag, _)) = engine_flags.into_iter().find(|(_, given)| *given) {
         return Err(format!(
-            "{flag}: not accepted with --runtime crun (a flag of the container engine; a mount root, which the crun runtime does not read back after it binds; or an --egress allow-list, which this build does not wire)"
+            "{flag}: not accepted with --runtime crun (a flag of the container engine or of native jobs; a mount root, which the crun runtime does not read back after it binds; or an --egress allow-list, which this build does not wire)"
         ));
     }
     let crun = cli.crun_bin.as_deref().unwrap_or(Path::new(DISTRO_CRUN));

@@ -85,7 +85,7 @@ fn bad_artifact(why: impl ToString) -> Done {
 
 /// A taint or an owed check halts: no version can repair it, and the old agent would refuse
 /// its next start.
-fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
+pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
     if let Some(taint) = env.ports.state.taint() {
         return Err(Done {
             outcome: Outcome::Halt,
@@ -154,7 +154,7 @@ fn check_agent(env: &Env<'_>, params: &Params) -> Result<(), Done> {
 
 /// The seconds a cordon may be asked for at `now`: the lease, and no more than is left of the
 /// cap counted from the first placement (from now, for a cordon not placed yet).
-fn ask_secs(cordon: &Cordon, params: &Params, now_ms: u64) -> u64 {
+pub(super) fn ask_secs(cordon: &Cordon, params: &Params, now_ms: u64) -> u64 {
     let first = if cordon.placed {
         cordon.first_ms
     } else {
@@ -180,7 +180,7 @@ fn expiry_of(host: &HostReading) -> u64 {
 /// confirmed and has not lapsed: after a kill before the confirmation, or after the expiry,
 /// the cordon found may be anyone's, and it is left alone (ours, if it was, lapses within one
 /// lease).
-fn place(
+pub(super) fn place(
     env: &Env<'_>,
     held: &Held,
     record: &mut Record,
@@ -238,7 +238,12 @@ fn place(
 
 /// Extends the cordon we placed when less than half a lease is left of it, if the cap leaves
 /// anything to ask for. The record follows when the expiry moves.
-fn renew(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Result<(), Done> {
+pub(super) fn renew(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    params: &Params,
+) -> Result<(), Done> {
     let now = env.ports.clock.now_ms();
     let half_lease_ms = params.cordon_lease_secs.saturating_mul(500);
     if record.cordon.expires_ms.saturating_sub(now) >= half_lease_ms {
@@ -319,4 +324,21 @@ fn defer(
             ..Report::default()
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::REQUIRED_RUNTIME;
+
+    /// The hook refuses a staged agent that names its runtimes without the unit's; the agent
+    /// of the same build must therefore name it. The step's own tests are in `tests/agent`.
+    #[test]
+    fn the_runtime_the_hook_requires_is_one_this_builds_version_line_lists() {
+        let line = crate::cli::LONG_VERSION.lines().nth(1).unwrap();
+        let runtimes = line.strip_prefix("runtimes:").unwrap();
+        assert!(
+            runtimes.split_whitespace().any(|r| r == REQUIRED_RUNTIME),
+            "{line}"
+        );
+    }
 }
