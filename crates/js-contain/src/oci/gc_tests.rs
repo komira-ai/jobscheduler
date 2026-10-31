@@ -437,7 +437,10 @@ async fn a_removal_that_fails_midway_leaves_no_image_and_the_next_use_fetches() 
     let mode = |m| std::fs::Permissions::from_mode(m);
     std::fs::set_permissions(&locked, mode(0o500)).expect("chmod");
     let report = fx.oci.collect_images(&[], &[]).expect("collected");
-    std::fs::set_permissions(&locked, mode(0o755)).expect("chmod back");
+    // The tree was set aside before the removal failed: it is the one `.stage-gc-` entry.
+    let left: Vec<String> = names(&fx.images);
+    let aside = fx.images.join(left.first().expect("the leftover"));
+    std::fs::set_permissions(aside.join("rootfs/usr/bin"), mode(0o755)).expect("chmod back");
     assert!(
         report.removed.is_empty() && report.removed_bytes == 0,
         "{report:?}"
@@ -450,7 +453,6 @@ async fn a_removal_that_fails_midway_leaves_no_image_and_the_next_use_fetches() 
         !fx.oci.images.has(&wanted),
         "a half-removed image answers as present"
     );
-    let left: Vec<String> = names(&fx.images);
     assert!(
         left.len() == 1 && left[0].starts_with(&format!(".stage-gc-{}-", hexn('a'))),
         "{left:?}"
@@ -496,7 +498,9 @@ async fn remove_image_sets_the_directory_aside_before_removing_it() {
     let mode = |m| std::fs::Permissions::from_mode(m);
     std::fs::set_permissions(&locked, mode(0o500)).expect("chmod");
     let failed = fx.oci.remove_image(&wanted).await;
-    std::fs::set_permissions(&locked, mode(0o755)).expect("chmod back");
+    let left = names(&fx.images);
+    let aside = fx.images.join(left.first().expect("the leftover"));
+    std::fs::set_permissions(aside.join("rootfs/usr/bin"), mode(0o755)).expect("chmod back");
     assert!(failed.is_err(), "the removal could not finish");
     assert!(
         !fx.oci.images.has(&wanted),
