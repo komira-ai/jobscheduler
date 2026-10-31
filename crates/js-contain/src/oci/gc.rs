@@ -55,7 +55,7 @@ use std::path::Path;
 use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode};
 
 use super::image::{Images, ROOTFS};
-use super::{JobError, Oci};
+use super::Oci;
 use crate::walk::{DIRECTORY, Identity, back_to_parent, identity};
 
 /// What one collection did.
@@ -208,10 +208,7 @@ impl Oci {
         }
         // The files are the container's ids' unless the daemon user may remove them: a
         // helper container removes what it cannot.
-        crate::remove::remove_tree(path).or_else(|_| {
-            self.remove_dir_blocking(path)
-                .map_err(|e: JobError| e.to_string())
-        })
+        crate::remove::remove_tree(path).map_err(|e| e.to_string())
     }
 }
 
