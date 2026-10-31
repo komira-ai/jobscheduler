@@ -114,10 +114,40 @@ fn the_walk_includes_the_top_and_stops_there() {
 }
 
 #[test]
-fn the_allowed_owners_are_root_and_the_owner_of_the_roots_parent() {
-    let scratch = Scratch::new("anc-allowed");
+fn the_allowed_owners_are_root_and_the_uid_the_operator_gave() {
+    assert_eq!(allowed_owners(501), vec![0, 501]);
+}
+
+#[test]
+#[should_panic(expected = "not root")]
+fn the_operators_uid_cannot_be_root() {
+    let _ = allowed_owners(0);
+}
+
+#[test]
+fn a_parent_owned_by_a_third_user_is_refused_even_though_it_is_the_parent() {
+    let scratch = Scratch::new("anc-third");
     let (root, middle, _) = chain(&scratch);
-    assert_eq!(allowed_owners(&root), vec![0, me(&middle)]);
+    let third = me(&middle);
+    // The operator's uid is someone else's: the directory's own owner earns no trust.
+    let refused = untrusted_ancestor(&root, &scratch.root, &allowed_owners(third + 1));
+    assert_eq!(
+        refused,
+        Some(Refusal {
+            path: middle,
+            reason: Reason::Owner(third)
+        })
+    );
+}
+
+#[test]
+fn the_uid_the_operator_gave_is_trusted_as_an_owner() {
+    let scratch = Scratch::new("anc-given");
+    let (root, _, _) = chain(&scratch);
+    assert_eq!(
+        untrusted_ancestor(&root, &scratch.root, &allowed_owners(me(&root))),
+        None
+    );
 }
 
 /// Needs root to give a directory to someone else; run as root with
@@ -129,7 +159,7 @@ fn an_ancestor_given_to_another_user_is_refused_as_root() {
     let (root, _, above) = chain(&scratch);
     std::os::unix::fs::chown(&above, Some(65534), None).expect("chown");
     assert_eq!(
-        untrusted_ancestor(&root, &scratch.root, &allowed_owners(&root)),
+        untrusted_ancestor(&root, &scratch.root, &allowed_owners(65533)),
         Some(Refusal {
             path: above,
             reason: Reason::Owner(65534)

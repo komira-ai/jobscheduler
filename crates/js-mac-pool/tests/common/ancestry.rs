@@ -23,14 +23,12 @@ pub struct Refusal {
     pub reason: Reason,
 }
 
-/// The uids whose ancestors are acceptable: root, and the owner of `root`'s own parent
-/// (the invoking user, when the work root sits in the directory that user made).
-pub fn allowed_owners(root: &Path) -> Vec<u32> {
-    let parent = root.parent().unwrap_or(root);
-    let owner = std::fs::symlink_metadata(parent)
-        .expect("the work root's parent")
-        .uid();
-    vec![0, owner]
+/// The uids whose ancestors are acceptable: root, and `owner`, the invoking user's uid as
+/// the operator gave it (never read off the file system: whoever made a directory could
+/// then make themselves trusted). `owner` is not 0.
+pub fn allowed_owners(owner: u32) -> Vec<u32> {
+    let _ = owner;
+    vec![0]
 }
 
 /// The nearest ancestor of `root`, up to and including `top`, that is owned by a uid not
