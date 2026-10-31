@@ -189,8 +189,12 @@ fn the_system_machine_opens_the_native_runtime() {
             network: None,
             tool_roots: &[],
             deny_read: &[],
+            max_file_mib: None,
+            max_processes: None,
         };
-        let settings = NativeSettings::from_flags(&flags, &[]).unwrap().unwrap();
+        let settings = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
+            .unwrap()
+            .unwrap();
         let backend = Backend::Native(settings.with_sandbox_exec(Path::new(sandbox)));
         let build = RuntimeBuild {
             backend: &backend,
@@ -291,8 +295,12 @@ fn the_sandbox_self_test_fails_closed() {
         network: None,
         tool_roots: &[],
         deny_read: &[],
+        max_file_mib: None,
+        max_processes: None,
     };
-    let settings = NativeSettings::from_flags(&flags, &[]).unwrap().unwrap();
+    let settings = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
+        .unwrap()
+        .unwrap();
     let config = settings.config();
     assert_eq!(
         native::self_test(config, Path::new("/usr/bin/true")),

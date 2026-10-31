@@ -13,7 +13,9 @@
 //!    gives it to the user. It makes the job's three standard streams as files in the
 //!    lifecycle's scratch directory, which only the agent can enter: an empty one for
 //!    standard input and one each for standard output and error.
-//! 3. `run` starts `sandbox-exec -D ... -p <profile> <program> <args>` as the user, with
+//! 3. `run` starts `sandbox-exec -D ... -p <profile> /bin/sh -c <limits> js-native <file
+//!    blocks> <processes> <program> <args>` as the user: the shell sets the run's limits
+//!    inside the profile and becomes the program. The helper starts it with
 //!    the empty file as standard input, the log files as standard output and error, and
 //!    `exec/` as the working directory. The profile is built by
 //!    [`js_mac_pool::seatbelt`] from a policy that grants writes to the home and nothing
@@ -23,16 +25,25 @@
 //! 4. `kill-uid` ends every process of the user, not only the one started (a job may
 //!    detach children), and `user-delete` removes the user and sweeps its home.
 //!
+//! A lease is written to the [`Journal`] (in the state root, synced) before `user-create` is
+//! sent and marked done once its user is deleted or a failed start was undone. A process
+//! that ends with runs going leaves them in the journal; [`Runtime::reclaim`] ends them
+//! (kill, then delete) when the next worker starts and when the rescue of a dead worker
+//! runs. A helper that restarted under the runtime refuses every verb until its boot reset
+//! has run again; the next start, stop or removal asks for it. Each run is started by a
+//! shell that sets the largest file and the most processes its user may have, so a run
+//! cannot fill the disk through its output or the process table with a fork bomb.
+//!
 //! What this runtime does not do yet: stage inputs or collect outputs (a start that names
-//! either is refused `native-unsupported`), bound the size of the log files, adopt a run
-//! after the agent restarts (the helper's boot reset, asked for when the runtime is made,
-//! ends the runs a previous agent left when the helper has just started), or grant the
-//! user's `/var/folders` entry (toolchains that need it get their temporary files from
-//! `TMPDIR`, which is inside the home).
+//! either is refused `native-unsupported`), adopt a run after the agent restarts (the
+//! journal ends it), stop a run softly (the helper only kills), or grant the user's
+//! `/var/folders` entry (toolchains that need it get their temporary files from `TMPDIR`,
+//! which is inside the home).
 //!
 //! The runtime builds on every platform so that its rules are tested on Linux; only a
 //! macOS agent makes one.
 
+mod journal;
 mod logs;
 mod settings;
 
@@ -54,16 +65,21 @@ use js_mac_pool::seatbelt::{
     AbsPath, Caps, Narrowing, Net, Policy, Profile, ReadModel, SlotLayout,
 };
 use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
-use js_mac_session::helper::RESET_ALREADY;
+use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
 use js_mac_session::lease::{Dotted, user_name};
 use js_types::LeaseId;
+use js_types::env::env_name_reserved;
 
 use crate::lifecycle::{
     Body, CheckFinding, CheckHook, Exit, Finished, Found, NativeRefusal, RunHandle, RunSpec,
     Runtime, RuntimeError, Status,
 };
 
-pub use settings::{DEFAULT_HOMES, DEFAULT_TOOL_ROOTS, NativeFlags, NativeSettings};
+pub use journal::Journal;
+pub use settings::{
+    DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS, NativeFlags,
+    NativeSettings,
+};
 
 /// What a native runtime is told, from the agent's flags.
 #[derive(Debug, Clone)]
@@ -80,6 +96,14 @@ pub struct NativeConfig {
     /// Which reads the profile permits. The runtime builds no grants, so only
     /// [`ReadModel::Open`] gives a profile; with the other every start fails.
     pub read_model: ReadModel,
+    /// The file the lease journal is kept in (in the state root).
+    pub journal: PathBuf,
+    /// The most bytes any one file a run writes may reach (its output included): the
+    /// run's `RLIMIT_FSIZE`. A run that writes more is ended by `SIGXFSZ`.
+    pub max_file_bytes: u64,
+    /// The most processes the run's user may have: the run's `RLIMIT_NPROC`. A fork bomb
+    /// stops at it, and the helper's kill (which forks as root) is not held by it.
+    pub max_processes: u32,
 }
 
 /// A run that started: its scratch directory (where its log files are) and what the thread
@@ -99,6 +123,9 @@ pub struct NativeRuntime {
     term: u64,
     next: u64,
     runs: BTreeMap<String, Run>,
+    journal: Journal,
+    /// The helper said it needs its boot reset again (it restarted under this agent).
+    reset_needed: bool,
 }
 
 impl NativeRuntime {
@@ -114,18 +141,42 @@ impl NativeRuntime {
     ///
     /// The helper cannot be reached or its boot reset failed.
     pub fn open(helper: Client, config: NativeConfig, term: u64) -> Result<Self, RuntimeError> {
-        match helper.boot_reset(&[]) {
-            Ok(_) => {}
-            Err(ClientError::Refused(why)) if why == RESET_ALREADY => {}
-            Err(why) => return Err(fail(&"the boot reset", &why)),
-        }
+        reset(&helper)?;
+        let journal = Journal::new(&config.journal);
         Ok(Self {
             helper,
             config,
             term,
             next: 0,
             runs: BTreeMap::new(),
+            journal,
+            reset_needed: false,
         })
+    }
+
+    /// Notes that the helper restarted under this runtime: it refuses every verb until its
+    /// boot reset has run again, so the next start, stop or removal asks for it first.
+    fn learn(&mut self, why: &ClientError) {
+        if matches!(why, ClientError::Refused(reason) if reason == RESET_NEEDED) {
+            self.reset_needed = true;
+        }
+    }
+
+    /// Asks for the boot reset again when the helper said it needs it.
+    fn ready(&mut self) -> Result<(), RuntimeError> {
+        if self.reset_needed {
+            reset(&self.helper)?;
+            self.reset_needed = false;
+        }
+        Ok(())
+    }
+
+    /// Marks `lease` done in the journal when nothing is left of it. A mark that cannot be
+    /// written costs nothing but a repeated kill and delete at the next start.
+    fn settle(&self, lease: &str, problems: &[String]) {
+        if problems.is_empty() {
+            let _ = self.journal.done(lease);
+        }
     }
 
     /// Everything after the user exists: the run directory, the log files, the profile and
@@ -177,6 +228,18 @@ impl NativeRuntime {
         })
     }
 
+    /// `result` of the helper verb `verb` as a runtime result: a refusal that the lease has
+    /// no user, or that its user was deleted, is the end that was wanted.
+    fn ended(&mut self, result: Result<(), ClientError>, verb: &str) -> Result<(), RuntimeError> {
+        match result {
+            Err(why) if !gone(&why) => {
+                self.learn(&why);
+                Err(fail(&verb, &why))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Ends the user of `lease` after a start that failed, so none is left behind, and says
     /// what could not be done: the start's own error is the first thing the operator needs,
     /// but a user that is left is a uid held in the helper's range.
@@ -195,12 +258,41 @@ impl NativeRuntime {
     }
 }
 
+/// Asks the helper for its boot reset; one that ran already is as good as one that ran now.
+fn reset(helper: &Client) -> Result<(), RuntimeError> {
+    match helper.boot_reset(&[]) {
+        Ok(_) => Ok(()),
+        Err(ClientError::Refused(why)) if why == RESET_ALREADY => Ok(()),
+        Err(why) => Err(fail(&"the boot reset", &why)),
+    }
+}
+
+/// Refuses a body whose environment names a variable a job may not set
+/// ([`js_types::env::env_name_reserved`]: the names that steer the shell that sets the
+/// limits, the agent's own names, and the prefixes of the loader, the sandbox and imported
+/// shell functions). The wire checks these too; this is the last check before a user is
+/// made, for a body that did not pass through it.
+fn check_env(native: &NativeSpec) -> Result<(), RuntimeError> {
+    match native.env.keys().find(|name| env_name_reserved(name)) {
+        Some(name) => Err(RuntimeError::new(format!(
+            "native.env: {name} is a reserved name"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Whether the helper refused because the lease has no user or its user was deleted.
+fn gone(why: &ClientError) -> bool {
+    matches!(why, ClientError::Refused(reason)
+        if reason.contains("has no user") || reason.contains("user was deleted"))
+}
+
 /// `error`, and what could not be undone after it.
 fn with_problems(error: RuntimeError, problems: &[String]) -> RuntimeError {
     match problems.is_empty() {
         true => error,
         false => RuntimeError::new(format!(
-            "{}; and the lease user could not be removed ({}): the helper's next boot reset ends it",
+            "{}; and the lease user could not be removed ({}): the lease journal ends it at the next start",
             error.0,
             problems.join("; ")
         )),
@@ -218,16 +310,27 @@ impl Runtime for NativeRuntime {
         let Body::Native(native) = &spec.body else {
             return Err(RuntimeError::new("this runtime runs native bodies only"));
         };
+        check_env(native)?;
+        self.ready()?;
         let id = LeaseId::new(self.term, self.next);
         self.next += 1;
         let lease = Dotted(id).to_string();
+        // Written and synced before the helper hears of the lease, so a process that dies
+        // between the two leaves a lease to end and not a user nobody knows of.
+        self.journal
+            .add(&lease)
+            .map_err(|why| fail(&"the lease journal", &why))?;
         // The helper records the lease, and the uid it holds, before it makes the home and
         // the account, so a refusal may leave a live lease: it is removed again.
         let uid = match self.helper.user_create(&lease, None) {
             Ok(uid) => uid,
-            Err(why) if used_before(&why) => return Err(fail(&"user-create", &why)),
             Err(why) => {
-                let problems = self.discard(&lease);
+                self.learn(&why);
+                let problems = match used_before(&why) {
+                    true => Vec::new(),
+                    false => self.discard(&lease),
+                };
+                self.settle(&lease, &problems);
                 return Err(with_problems(fail(&"user-create", &why), &problems));
             }
         };
@@ -238,6 +341,7 @@ impl Runtime for NativeRuntime {
             }
             Err(why) => {
                 let problems = self.discard(&lease);
+                self.settle(&lease, &problems);
                 Err(with_problems(why, &problems))
             }
         }
@@ -262,20 +366,51 @@ impl Runtime for NativeRuntime {
     /// Kills at once: the helper's only way to end a user's processes is `SIGKILL`, so
     /// `grace` is not used.
     fn stop(&mut self, id: &RunHandle, _grace: Duration) -> Result<(), RuntimeError> {
-        self.helper
-            .kill_uid(&id.0)
-            .map_err(|why| fail(&"kill-uid", &why))
+        self.ready()?;
+        let killed = self.helper.kill_uid(&id.0);
+        self.ended(killed, "kill-uid")
     }
 
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
-        self.helper
-            .kill_uid(&id.0)
-            .map_err(|why| fail(&"kill-uid", &why))?;
-        self.helper
-            .user_delete(&id.0)
-            .map_err(|why| fail(&"user-delete", &why))?;
+        self.ready()?;
+        let killed = self.helper.kill_uid(&id.0);
+        self.ended(killed, "kill-uid")?;
+        let deleted = self.helper.user_delete(&id.0).map(|_| ());
+        self.ended(deleted, "user-delete")?;
         self.runs.remove(&id.0);
+        let _ = self.journal.done(&id.0);
         Ok(())
+    }
+
+    fn reclaim(&mut self) -> Vec<String> {
+        let live = match self.journal.live() {
+            Ok(live) => live,
+            Err(why) => return vec![format!("native: cannot read the lease journal: {why}")],
+        };
+        let mut lines = Vec::new();
+        let mut retired = Vec::new();
+        for lease in live {
+            let killed = self.helper.kill_uid(&lease);
+            let ended = self.ended(killed, "kill-uid").and_then(|()| {
+                let deleted = self.helper.user_delete(&lease).map(|_| ());
+                self.ended(deleted, "user-delete")
+            });
+            match ended {
+                Ok(()) => {
+                    lines.push(format!(
+                        "ended the lease user {lease} an earlier process left"
+                    ));
+                    retired.push(lease);
+                }
+                Err(why) => {
+                    lines.push(format!("cannot end the lease user {lease}: {}", why.0));
+                }
+            }
+        }
+        if let Err(why) = self.journal.retire(&retired) {
+            lines.push(format!("native: cannot rewrite the lease journal: {why}"));
+        }
+        lines
     }
 
     /// Lists nothing: a run is not adopted by a later process of the agent.
@@ -326,9 +461,30 @@ impl Runtime for NativeRuntime {
     }
 }
 
+/// The shell that sets a run's limits, and the script it runs.
+const LIMITER: &str = "/bin/sh";
+
+/// Sets the largest file and the most processes the user may have (both soft and hard, so
+/// the run cannot raise them) and then becomes the program. `ulimit -f` counts blocks of
+/// 1024 bytes, or of 512 when the shell is in POSIX mode, so the limit is at most
+/// `max_file_bytes`.
+const LIMIT_SCRIPT: &str = "ulimit -f \"$1\" && ulimit -u \"$2\" && shift 2 && exec \"$@\"";
+
 /// The `sandbox-exec` command line of `native` under the policy of `config`, run as a user
 /// whose home is `home`.
-fn profile_argv(
+///
+/// The limits are set by a shell that `sandbox-exec` starts, so it runs inside the profile
+/// (and `sandbox-exec` is the first program of the command): a shell in front of
+/// `sandbox-exec` would run as the lease user, outside the sandbox, with the job's
+/// environment, and `SHELLOPTS`, `PS4` or an imported function would run a command of the
+/// job's choosing there. The environment names that steer a shell are reserved as well
+/// (`js_types::env::SHELL_ENV_NAMES`), so the job cannot change the limits either.
+///
+/// # Errors
+///
+/// The policy or the profile cannot be built, or `native.program` is not an absolute path.
+/// The environment is not read here: [`NativeRuntime`] checks it before it makes a user.
+pub fn profile_argv(
     config: &NativeConfig,
     native: &NativeSpec,
     home: &Path,
@@ -354,8 +510,17 @@ fn profile_argv(
     let profile = Profile::for_policy(&policy).map_err(|why| fail(&"the profile", &why))?;
     let program =
         AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
-    let args: Vec<OsString> = native.args.iter().map(OsString::from).collect();
-    let argv = profile.argv(&program, &args);
+    let blocks = (config.max_file_bytes / 1024).max(1);
+    let mut args: Vec<OsString> = vec![
+        "-c".into(),
+        LIMIT_SCRIPT.into(),
+        "js-native".into(),
+        blocks.to_string().into(),
+        config.max_processes.to_string().into(),
+        program.as_ref().into(),
+    ];
+    args.extend(native.args.iter().map(OsString::from));
+    let argv = profile.argv(LIMITER, &args);
     Ok(argv
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())

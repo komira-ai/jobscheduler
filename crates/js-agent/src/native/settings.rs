@@ -14,6 +14,13 @@ pub const DEFAULT_HOMES: &str = "/Users";
 /// the system's own.
 pub const DEFAULT_TOOL_ROOTS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
+/// The largest file a native run may write unless `--native-max-file-mib` says otherwise.
+pub const DEFAULT_MAX_FILE_MIB: u64 = 4096;
+
+/// The most processes a native run's user may have unless `--native-max-processes` says
+/// otherwise.
+pub const DEFAULT_MAX_PROCESSES: u32 = 512;
+
 /// Where the system keeps the Mac's auto-login password: no run may read it, whatever the
 /// helper's own flags say. Spelled as the kernel resolves it (`/etc` is `/private/etc`).
 const KCPASSWORD: &str = "/private/etc/kcpassword";
@@ -31,6 +38,10 @@ pub struct NativeFlags<'a> {
     pub tool_roots: &'a [PathBuf],
     /// `--native-deny-read`, each.
     pub deny_read: &'a [PathBuf],
+    /// `--native-max-file-mib`.
+    pub max_file_mib: Option<u64>,
+    /// `--native-max-processes`.
+    pub max_processes: Option<u32>,
 }
 
 /// The checked native-job flags: the helper's socket and the runtime's configuration.
@@ -53,12 +64,19 @@ impl NativeSettings {
     /// The text names the flag at fault: a native flag without the socket, a path that is
     /// not absolute, a home directory that cannot be opened, a network level that is none of
     /// `off`, `loopback` and `on`, or a root a profile cannot name.
-    pub fn from_flags(flags: &NativeFlags<'_>, denied: &[&Path]) -> Result<Option<Self>, String> {
+    pub fn from_flags(
+        flags: &NativeFlags<'_>,
+        denied: &[&Path],
+        journal: &Path,
+    ) -> Result<Option<Self>, String> {
         let Some(socket) = flags.socket else {
             let given = [
                 ("--native-homes", flags.homes.is_some()),
                 ("--native-network", flags.network.is_some()),
                 ("--native-tool-root", !flags.tool_roots.is_empty()),
+                ("--native-deny-read", !flags.deny_read.is_empty()),
+                ("--native-max-file-mib", flags.max_file_mib.is_some()),
+                ("--native-max-processes", flags.max_processes.is_some()),
             ];
             return match given.iter().find(|(_, given)| *given) {
                 Some((flag, _)) => Err(format!("{flag}: needs --native-helper-socket")),
@@ -110,6 +128,14 @@ impl NativeSettings {
             );
         }
         denies.push(PathBuf::from(KCPASSWORD));
+        let mib = flags.max_file_mib.unwrap_or(DEFAULT_MAX_FILE_MIB);
+        let max_processes = flags.max_processes.unwrap_or(DEFAULT_MAX_PROCESSES);
+        if mib == 0 || max_processes == 0 {
+            return Err("--native-max-file-mib and --native-max-processes: above 0".to_owned());
+        }
+        let max_file_bytes = mib
+            .checked_mul(1 << 20)
+            .ok_or_else(|| format!("--native-max-file-mib: {mib} is too large"))?;
         let read_denies = denies
             .iter()
             .map(|path| AbsPath::new(path).map_err(|why| format!("{}: {why}", path.display())))
@@ -122,6 +148,9 @@ impl NativeSettings {
                 tool_roots,
                 read_denies,
                 read_model: ReadModel::Open,
+                journal: journal.to_path_buf(),
+                max_file_bytes,
+                max_processes,
             },
             sandbox_exec: PathBuf::from(SANDBOX_EXEC),
         }))
