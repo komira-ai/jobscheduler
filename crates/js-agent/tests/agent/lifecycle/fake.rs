@@ -89,6 +89,8 @@ struct State {
     /// The directory the runtime keeps each container's own directory in (see
     /// [`FakeRuntime::keep_lease_dirs_in`]).
     lease_root: Option<PathBuf>,
+    /// Whether the directory it names has no name to make it by.
+    lease_unnamable: bool,
 }
 
 /// Where a scripted pull stands.
@@ -218,6 +220,12 @@ impl FakeRuntime {
     /// lifecycle makes it, bounds it with the run and removes it.
     pub fn keep_lease_dirs_in(&self, root: &Path) {
         self.state.borrow_mut().lease_root = Some(root.to_owned());
+    }
+
+    /// From now the directory the runtime names for a container is one that has no name (the
+    /// parent of the scratch root's own), so that it cannot be made.
+    pub fn keep_unnamable_lease_dirs(&self) {
+        self.state.borrow_mut().lease_unnamable = true;
     }
 
     /// The note for the log: nothing when no marker is watched.
@@ -373,7 +381,11 @@ impl FakeRuntime {
 
 impl Runtime for FakeRuntime {
     fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {
-        let root = self.state.borrow().lease_root.clone();
+        let state = self.state.borrow();
+        if state.lease_unnamable {
+            return Some(PathBuf::from("/.."));
+        }
+        let root = state.lease_root.clone();
         root.map(|root| root.join(format!(".lease-fake-{run_id}")))
     }
 

@@ -240,3 +240,36 @@ fn sweep_keeps_the_scratch_lock_of_the_oci_backend() {
     assert!(root.join("r1").is_dir());
     assert!(!root.join("stray").exists());
 }
+
+/// Asserts the lease directory calls: one is made empty beside the run's with the root's
+/// mode, a stale one (with a file in it) is replaced, `remove_lease` takes it away with what
+/// the job left in it, and a path with no name (the root itself) is refused by both. It
+/// catches a stale lease directory carried into a new run, and a path that would address the
+/// scratch root itself.
+#[test]
+fn a_lease_directory_is_made_empty_replaced_when_stale_and_removed() {
+    let h = Harness::new("lease-calls");
+    let root = h.config.scratch.path().to_owned();
+    let lease = root.join(".lease-x-r1");
+    fs::create_dir(&lease).unwrap();
+    fs::write(lease.join("stale"), "left").unwrap();
+    let made = h.config.scratch.create_lease(&lease).unwrap();
+    assert_eq!(made, lease);
+    assert_eq!(
+        fs::read_dir(&lease).unwrap().count(),
+        0,
+        "the stale file went"
+    );
+    assert_eq!(mode_of(&lease), h.config.scratch.layout().dir_mode());
+    fs::create_dir_all(lease.join("upper/deep")).unwrap();
+    h.config.scratch.remove_lease(&lease).unwrap();
+    assert!(!lease.exists());
+    h.config.scratch.remove_lease(&lease).unwrap();
+    for refused in [
+        h.config.scratch.create_lease(Path::new("/")).unwrap_err(),
+        h.config.scratch.remove_lease(Path::new("/")).unwrap_err(),
+    ] {
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+    }
+    assert!(root.is_dir());
+}

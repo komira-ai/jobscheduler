@@ -7,6 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use js_agent::quota::Call;
+use js_agent_wire::Outcome;
 
 use super::quota::{DEFAULT_BYTES, INODES, applies, clears, project, with_quota};
 use super::{Harness, cleanup, job, names};
@@ -89,6 +90,7 @@ fn the_lease_directory_is_removed_with_the_run_before_the_project_is_cleared() {
     let (mut h, spy) = with_quota("lease-remove");
     keep_lease_dirs(&h);
     h.start(job("r1"));
+    assert!(lease_of(&h, "r1").is_dir(), "the lease directory was made");
     h.fake.exit("r1", 0);
     let events = names(&h.life.step());
     assert_eq!(
@@ -138,4 +140,22 @@ fn the_sweep_removes_a_leftover_lease_directory_and_keeps_an_adopted_runs() {
         lease_of(&h, "r1").is_dir(),
         "and so does its lease directory"
     );
+}
+
+/// Asserts that a runtime directory that cannot be made refuses the run and creates nothing:
+/// the run ends `failed_to_start` with `scratch-failed`, no container exists and nothing was
+/// bound. It catches a run that starts without its lease directory bound.
+#[test]
+fn a_lease_directory_that_cannot_be_made_refuses_the_run() {
+    let (mut h, spy) = with_quota("lease-unnamable");
+    h.fake.keep_unnamable_lease_dirs();
+    assert_eq!(
+        names(&h.start(job("r1"))),
+        ["finding r1 scratch-failed", "result r1"]
+    );
+    assert!(h.fake.created().is_empty(), "no container");
+    assert!(spy.seen().is_empty(), "nothing was bound");
+    let result = &h.life.results()[0];
+    assert_eq!(result.outcome, Outcome::FailedToStart);
+    assert_eq!(result.detail.as_deref(), Some("scratch-failed"));
 }

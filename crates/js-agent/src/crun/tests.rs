@@ -432,3 +432,43 @@ fn a_container_that_did_not_run_gives_its_words_in_the_standard_error() {
     let tail = log_tail_of(&lined, Some("exited 1"));
     assert_eq!(tail.stderr, "partial\ncrun: exited 1\n");
 }
+
+/// A directory of one test, below the system's temporary directory.
+fn scratch_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("js-crun-dir-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("make the test's directory");
+    dir
+}
+
+/// Catches a lease directory that is refused when the lifecycle made it first, and one that
+/// is accepted when it is not what the lifecycle makes: a directory that is there already is
+/// taken when it is empty (and set to `0755`), and refused when it holds something, is a file
+/// or is a link (which would put the lease where the link points).
+#[test]
+fn a_directory_made_already_is_taken_only_when_it_is_empty() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    let base = scratch_dir("make-dir");
+    let fresh = base.join("fresh");
+    super::make_dir(&fresh).expect("made new");
+    let early = base.join("early");
+    fs::create_dir(&early).expect("made by the lifecycle");
+    fs::set_permissions(&early, fs::Permissions::from_mode(0o711)).expect("mode");
+    super::make_dir(&early).expect("an empty directory is taken");
+    for dir in [&fresh, &early] {
+        let mode = fs::metadata(dir).expect("metadata").permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+    }
+    let full = base.join("full");
+    fs::create_dir(&full).expect("full");
+    fs::write(full.join("file"), b"x").expect("a file in it");
+    let file = base.join("file");
+    fs::write(&file, b"x").expect("a file");
+    let link = base.join("link");
+    symlink(&early, &link).expect("a link");
+    for refused in [&full, &file, &link] {
+        let why = super::make_dir(refused).expect_err("refused");
+        assert_eq!(why.kind(), std::io::ErrorKind::AlreadyExists, "{refused:?}");
+    }
+    let _ = fs::remove_dir_all(&base);
+}

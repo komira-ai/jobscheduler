@@ -493,8 +493,10 @@ impl Oci {
 
     /// The scratch directory of the lease `name`.
     fn lease(&self, name: &str) -> PathBuf {
-        let _ = &self.leases_in;
-        self.scratch.join(name)
+        match &self.leases_in {
+            Some(root) => root.join(format!("{LEASE_PREFIX}{name}")),
+            None => self.scratch.join(name),
+        }
     }
 
     /// Writes the helper bundle for `job`, to run as the container `id`, under `dir` and

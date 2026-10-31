@@ -18,8 +18,6 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
-use crate::facts::FileReader;
-
 /// Why a claim could not be taken.
 #[derive(Debug, thiserror::Error)]
 pub enum ClaimError {
@@ -127,14 +125,6 @@ impl HostClaim {
             .map_err(io)?;
         Ok(Self { _held: file })
     }
-}
-
-/// Whether `a` and `b` are on one file system, as `files` reads their devices.
-///
-/// # Errors
-/// A device cannot be read; the text says which.
-pub fn same_filesystem(files: &dyn FileReader, a: &Path, b: &Path) -> Result<bool, String> {
-    Ok(files.device(a)? == files.device(b)?)
 }
 
 /// Checks that every directory above the scratch root `root`, up to `/`, is owned by root or

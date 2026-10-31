@@ -628,10 +628,11 @@ fn execute(
     if let Some(why) = &local.files_warning {
         let _ = writeln!(err, "js-agent: warning: {why}");
     }
-    // The store and its claim files go in the directory above the scratch root, which must
-    // be on the scratch root's file system (a lease's `/work` and home are written there, and
-    // the run's disk is bounded by that file system), and one crun agent may hold each scratch
-    // root and each host id: the start-up sweep and the lease names go by them.
+    // The store and its claim files go in the directory above the scratch root, and one crun
+    // agent may hold each scratch root and each host id: the start-up sweep and the lease names
+    // go by them. The store may be on another file system: a lease's directories (its `/work`
+    // and home) are made in the scratch root, beside the run's own directory, and the store
+    // holds only the images and the helpers' state, which no job writes.
     #[cfg(target_os = "linux")]
     let _claims = match local.container.as_ref().and_then(Settings::crun) {
         Some(plan) => {
@@ -639,16 +640,6 @@ fn execute(
             let (dir, root) = (&plan.claim_dir, &plan.scratch_root);
             crun::require_trusted_ancestors(root, services.euid, services.ancestors_floor)
                 .map_err(|why| Failure::Usage(format!("--scratch-root: {why}")))?;
-            if !crun::same_filesystem(services.files, &plan.store, root).map_err(Failure::Usage)? {
-                return Err(Failure::Usage(format!(
-                    "--scratch-root: {} and {}, where the image store and the leases' /work and \
-                     home are kept, are on different file systems: a job could fill the file \
-                     system of the store; mount the scratch file system at the directory that \
-                     holds the scratch root",
-                    root.display(),
-                    plan.store.display()
-                )));
-            }
             let host = crun::HostClaim::take(dir, &offer.hello.host_id);
             let host = host.map_err(|why| Failure::Usage(why.to_string()))?;
             let scratch = crun::HostClaim::scratch_root(dir, root);
