@@ -7,8 +7,6 @@
 //! the reason `state_invalid` and changes nothing. Where the record and the system disagree
 //! about what was done, the system is believed; that is a step's decision and not a rule here.
 
-#![allow(unused)] // stub rules: the next commit writes them
-
 use std::path::{Component, Path, PathBuf};
 
 use super::declaration::Declaration;
@@ -100,7 +98,7 @@ fn is_plain(path: &Path) -> bool {
 
 /// A release path: plain, not the root, and not in the state directory.
 fn release_path(field: &'static str, path: &Path, state_dir: &Path) -> Result<(), Invalid> {
-    let usable = is_plain(path);
+    let usable = is_plain(path) && path.parent().is_some() && !path.starts_with(state_dir);
     usable.then_some(()).ok_or(Invalid::Path { field })
 }
 
@@ -172,6 +170,27 @@ pub fn validate(
     if let Some(previous) = &update.previous_target {
         release_path("previous_target", previous, state_dir)?;
     }
+    // The updater's table is the order; the record must say what the order said.
+    agrees(
+        "target",
+        Some(update.target.as_str()),
+        Some(params.target_version.as_str()),
+    )?;
+    agrees(
+        "previous",
+        update.previous.as_deref(),
+        params.previous_version.as_deref(),
+    )?;
+    agrees(
+        "staged",
+        Some(update.staged.as_path()),
+        Some(params.staged_release.as_path()),
+    )?;
+    agrees(
+        "previous_target",
+        update.previous_target.as_deref(),
+        params.previous_release.as_deref(),
+    )?;
     cordon(record, params)?;
     marks(record)
 }
