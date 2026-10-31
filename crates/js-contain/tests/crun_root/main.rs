@@ -37,5 +37,4 @@ mod cell;
 mod inside;
 mod isolation;
 mod limits;
-mod planted;
 mod pull;
