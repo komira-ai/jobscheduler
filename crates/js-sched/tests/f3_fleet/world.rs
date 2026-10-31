@@ -53,8 +53,19 @@ pub const XCODE_OLD: usize = 6;
 pub const OLD_XCODE: &str = "16C5032a";
 pub const NEW_XCODE: &str = "16E140";
 
-/// Request sizes: one core, two cores, and six (larger than the Mac).
-pub const SIZES: [(u64, u64); 3] = [(1_000, GIB), (2_000, 2 * GIB), (6_000, 4 * GIB)];
+/// Request sizes: one core, two cores, and six (larger than the Mac); then two that ask for
+/// less than a core (half a core, a quarter), which only a scripted scenario submits (the
+/// swarm draws the first three).
+pub const SIZES: [(u64, u64); 5] = [
+    (1_000, GIB),
+    (2_000, 2 * GIB),
+    (6_000, 4 * GIB),
+    (500, GIB / 2),
+    (250, GIB / 4),
+];
+/// The size indexes of the requests under a core.
+pub const HALF_CORE: usize = 3;
+pub const QUARTER_CORE: usize = 4;
 
 /// The fleet, in name order: `arm` and `mac` are each the only one of their class.
 pub const WORKERS: [&str; 4] = ["arm", "mac", "x86-a", "x86-b"];
