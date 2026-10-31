@@ -368,10 +368,10 @@ impl Crun {
         limit: Duration,
     ) -> Result<(), String> {
         let client = self.client(lease)?;
-        let killed = tokio::time::timeout(limit, client.kill(id, signal, None)).await;
-        killed
-            .map_err(|_| format!("crun kill: did not finish within {limit:?}"))?
-            .map_err(|e| format!("crun kill: {e}"))
+        kill_outcome(
+            tokio::time::timeout(limit, client.kill(id, signal, None)).await,
+            limit,
+        )
     }
 
     /// Deletes the container `id`, killing it first if it runs (`delete --force`); one
@@ -479,6 +479,17 @@ const STATE_REMOVAL_WAIT: Duration = Duration::from_secs(3);
 /// How long a `crun` command that is waited for (`kill`, `delete`, `state`, the blocking
 /// helper) may take before it is killed and counts as failed.
 const CALL_LIMIT: Duration = Duration::from_secs(120);
+
+/// The result of a `crun kill` that was given `limit` to answer.
+fn kill_outcome(
+    killed: Result<Result<(), Error>, tokio::time::error::Elapsed>,
+    limit: Duration,
+) -> Result<(), String> {
+    match killed {
+        Ok(answer) => answer.map_err(|e| format!("crun kill: {e}")),
+        Err(_) => Err(format!("crun kill: did not finish within {limit:?}")),
+    }
+}
 
 /// What `child` printed once it ended, or `None` when it had not ended within `limit` and
 /// was killed. The child is waited for on a thread of its own (which also reads its pipes), so
