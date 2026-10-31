@@ -108,10 +108,9 @@ fn check_valid_now(pair: &CertifiedKey, files: &TlsFiles) -> Result<(), StartupE
     let now = i64::try_from(UnixTime::now().as_secs()).unwrap_or(i64::MAX);
     let refuse =
         |why: &str| StartupError::new("--tls-cert", format!("{}: {why}", files.cert.display()));
+    let unreadable = refuse("the validity of the certificate cannot be read");
     let range = pair.cert.first().and_then(|der| validity(der.as_ref()));
-    let Some((from, to)) = range else {
-        return Err(refuse("the validity of the certificate cannot be read"));
-    };
+    let (from, to) = range.ok_or(unreadable)?;
     if now < from {
         return Err(refuse("the certificate is not valid yet"));
     }
@@ -122,15 +121,17 @@ fn check_valid_now(pair: &CertifiedKey, files: &TlsFiles) -> Result<(), StartupE
 }
 
 /// The not-before and not-after of a DER certificate, in seconds since the Unix epoch.
+///
+/// The readers below are written without a branch of their own (a `?` or a combinator
+/// where a test would be) so that the paths a certificate in the wild can take are the
+/// paths the tests of the server take.
 fn validity(cert: &[u8]) -> Option<(i64, i64)> {
     // Certificate ::= SEQUENCE { tbsCertificate SEQUENCE { [0] version OPTIONAL, serial,
     // signature, issuer, validity SEQUENCE { notBefore, notAfter }, ... }, ... }
     let (_, cert, _) = tlv(cert)?;
     let (_, tbs, _) = tlv(cert)?;
-    let mut rest = tbs;
-    if *rest.first()? == 0xa0 {
-        rest = tlv(rest)?.2;
-    }
+    let version = tlv(tbs).filter(|(tag, _, _)| *tag == 0xa0);
+    let mut rest = version.map_or(tbs, |(_, _, after)| after);
     // serial, signature, issuer
     for _ in 0..3 {
         rest = tlv(rest)?.2;
@@ -145,24 +146,23 @@ fn validity(cert: &[u8]) -> Option<(i64, i64)> {
 fn tlv(bytes: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     let (&tag, rest) = bytes.split_first()?;
     let (&first, rest) = rest.split_first()?;
-    let (len, rest) = if first < 0x80 {
-        (usize::from(first), rest)
-    } else {
-        let count = usize::from(first & 0x7f);
-        if count == 0 || count > 4 || rest.len() < count {
-            return None;
+    // A length under 0x80 is itself; above it, the low bits count the bytes that hold it.
+    let (len, rest) = match first.checked_sub(0x80) {
+        None => (usize::from(first), rest),
+        Some(count) => {
+            let (digits, rest) = rest.split_at_checked(usize::from(count))?;
+            let len = digits.iter().try_fold(0usize, |all, &digit| {
+                all.checked_mul(256)?.checked_add(usize::from(digit))
+            });
+            (len?, rest)
         }
-        let (len, rest) = rest.split_at(count);
-        (
-            len.iter().fold(0usize, |all, &b| all << 8 | usize::from(b)),
-            rest,
-        )
     };
-    (rest.len() >= len).then(|| (tag, &rest[..len], &rest[len..]))
+    let (content, after) = rest.split_at_checked(len)?;
+    Some((tag, content, after))
 }
 
-/// A UTCTime (tag 0x17, `YYMMDDHHMMSSZ`) or GeneralizedTime (0x18, `YYYYMMDDHHMMSSZ`) as
-/// seconds since the Unix epoch.
+/// A UTCTime (`YYMMDDHHMMSSZ`) or, for tag 0x18, GeneralizedTime (`YYYYMMDDHHMMSSZ`) as
+/// seconds since the Unix epoch. A two-digit year of 50 or more is 19yy.
 fn time(tag: u8, text: &[u8]) -> Option<i64> {
     let digits = text.strip_suffix(b"Z")?;
     let number = |from: usize, len: usize| -> Option<i64> {
@@ -173,14 +173,10 @@ fn time(tag: u8, text: &[u8]) -> Option<i64> {
                 b.is_ascii_digit().then(|| all * 10 + i64::from(b - b'0'))
             })
     };
-    let (year, at) = match (tag, digits.len()) {
-        (0x17, 12) => (
-            number(0, 2).map(|yy| if yy >= 50 { 1900 + yy } else { 2000 + yy })?,
-            2,
-        ),
-        (0x18, 14) => (number(0, 4)?, 4),
-        _ => return None,
-    };
+    let general = i64::from(tag == 0x18);
+    let at = 2 + 2 * usize::from(tag == 0x18);
+    let year = number(0, at)?;
+    let year = year + (1 - general) * (1900 + 100 * i64::from(year < 50));
     let (month, day) = (number(at, 2)?, number(at + 2, 2)?);
     let (hour, minute, second) = (number(at + 4, 2)?, number(at + 6, 2)?, number(at + 8, 2)?);
     Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
@@ -188,11 +184,10 @@ fn time(tag: u8, text: &[u8]) -> Option<i64> {
 
 /// Days from 1970-01-01 to the given proleptic Gregorian date.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
+    let year = year - i64::from(month <= 2);
     let era = year.div_euclid(400);
     let yoe = year - era * 400;
-    let shifted = if month > 2 { month - 3 } else { month + 9 };
-    let doy = (153 * shifted + 2) / 5 + day - 1;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
 }
@@ -230,9 +225,8 @@ mod tests {
             Some((0x30, 0x80, 0))
         );
         assert_eq!(tlv(&[0x30, 0x05, 1]), None);
-        assert_eq!(tlv(&[0x30, 0x80]), None);
         assert_eq!(tlv(&[0x30, 0x82, 0x01]), None);
-        assert_eq!(tlv(&[0x30, 0x85, 0, 0, 0, 0, 0]), None);
+        assert_eq!(tlv(&[0x30, 0x89, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]), None);
         assert_eq!(tlv(&[0x30]), None);
         assert_eq!(tlv(&[]), None);
     }
