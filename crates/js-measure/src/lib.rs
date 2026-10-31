@@ -4,7 +4,8 @@
 //!
 //! # The pieces
 //!
-//! - [`Plan`]: the setting, its arms (one may be the control), runs per arm, warm-ups and
+//! - [`Plan`]: the parameter, the settings it takes, the arms compared at each setting (one
+//!   may be the control), runs per cell, warm-ups and
 //!   a seed. [`Plan::schedule`] draws the order from the seed alone.
 //! - [`Workload`]: a job mix as data.
 //! - [`Farm`]: the calls made to the lease server; [`HttpFarm`] is the live one,
@@ -34,7 +35,7 @@
 //! `--live --server URL --token-file F [--ca-cert F]` runs against a lease server; without
 //! `--live` the run is against a [`FakeFarm`] of `--fake-hosts` hosts on a fake clock, which
 //! shows a plan end to end and writes no real measurement. `--apply-command PROG` runs
-//! `PROG <setting> <arm> control|treatment` before each run to put the arm's setting in
+//! `PROG <parameter> <setting> <arm> control|treatment` before each run to put the arm's setting in
 //! place; without it the operator owns the setting.
 
 pub mod clock;

@@ -10,7 +10,7 @@ use js_measure::{
     NoSetter, PlanError, RunOutput, SetError, Setter, run_plan,
 };
 
-use crate::support::{GIB, T0, job, plan};
+use crate::support::{GIB, T0, job, plan, plan_over};
 
 fn farm(clock: &FakeClock) -> FakeFarm<'_> {
     let shape = HostShape {
@@ -21,13 +21,16 @@ fn farm(clock: &FakeClock) -> FakeFarm<'_> {
 }
 
 /// Records the arms it was asked to put in place.
-struct Recording(RefCell<Vec<(String, String, bool)>>);
+struct Recording(RefCell<Vec<(String, String, String, bool)>>);
 
 impl Setter for Recording {
-    fn apply(&self, setting: &str, arm: &Arm) -> Result<(), SetError> {
-        self.0
-            .borrow_mut()
-            .push((setting.to_owned(), arm.label.clone(), arm.control));
+    fn apply(&self, parameter: &str, setting: &str, arm: &Arm) -> Result<(), SetError> {
+        self.0.borrow_mut().push((
+            parameter.to_owned(),
+            setting.to_owned(),
+            arm.label.clone(),
+            arm.control,
+        ));
         Ok(())
     }
 }
@@ -48,7 +51,7 @@ fn run_all(experiment: &Experiment<'_>) -> (Result<usize, ExperimentError>, Vec<
 /// order and a record that names the wrong arm.
 #[test]
 fn a_plan_runs_in_its_order_and_labels_each_run() {
-    let mut p = plan(&["0.8", "booked"], 2, 1, 5);
+    let mut p = plan_over(&["0.8", "1.0"], &["whole", "booked"], 1, 1, 5);
     p.arms[1].control = true;
     let slots = p.schedule().unwrap();
     let clock = FakeClock::at(T0);
@@ -66,26 +69,25 @@ fn a_plan_runs_in_its_order_and_labels_each_run() {
         deadline_ms: 3_600_000,
     };
     let (result, outputs) = run_all(&experiment);
-    assert_eq!(result.unwrap(), 6);
-    assert_eq!(outputs.len(), 6);
+    assert_eq!(result.unwrap(), 8);
+    assert_eq!(outputs.len(), 8);
     for (slot, output) in slots.iter().zip(&outputs) {
         let record = &output.record;
         let arm = &p.arms[slot.arm];
         assert_eq!(record.arm, arm.label);
+        assert_eq!(record.setting, p.settings[slot.setting]);
         assert_eq!(record.run_index, slot.order);
-        assert_eq!(
-            (record.setting.as_str(), record.seed, record.commit.as_str()),
-            ("fill", 5, "deadbeef")
-        );
+        assert_eq!((record.seed, record.commit.as_str()), (5, "deadbeef"));
         assert_eq!(record.label == "warmup", slot.warmup);
         assert_eq!(output.jobs.len(), 1);
     }
     let applied = setter.0.borrow();
-    let expected: Vec<(String, String, bool)> = slots
+    let expected: Vec<(String, String, String, bool)> = slots
         .iter()
         .map(|slot| {
             (
                 "fill".to_owned(),
+                p.settings[slot.setting].clone(),
                 p.arms[slot.arm].label.clone(),
                 slot.arm == 1,
             )
@@ -94,6 +96,11 @@ fn a_plan_runs_in_its_order_and_labels_each_run() {
     assert_eq!(*applied, expected);
     let measured = outputs.iter().filter(|o| o.record.label.is_empty()).count();
     assert_eq!(measured, 4);
+    let warmups = outputs
+        .iter()
+        .filter(|o| o.record.label == "warmup")
+        .count();
+    assert_eq!(warmups, 4);
 }
 
 /// Asserts the numbers of a run on the simulated farm for one job of 60 s on one host:
@@ -198,7 +205,7 @@ fn memory_kills_are_counted() {
 struct Failing;
 
 impl Setter for Failing {
-    fn apply(&self, _setting: &str, _arm: &Arm) -> Result<(), SetError> {
+    fn apply(&self, _parameter: &str, _setting: &str, _arm: &Arm) -> Result<(), SetError> {
         Err(SetError::Failed("x".to_owned(), "no".to_owned()))
     }
 }
@@ -262,20 +269,62 @@ fn the_command_setter_runs_a_program() {
         label: "x".to_owned(),
         control,
     };
-    assert_eq!(ok.apply("fill", &arm(false)), Ok(()));
-    assert_eq!(ok.apply("fill", &arm(true)), Ok(()));
+    assert_eq!(ok.apply("fill", "0.8", &arm(false)), Ok(()));
+    assert_eq!(ok.apply("fill", "0.8", &arm(true)), Ok(()));
     let failing = CommandSetter {
         program: "false".to_owned(),
     };
     assert!(
-        matches!(failing.apply("fill", &arm(false)), Err(SetError::Failed(program, _)) if program == "false")
+        matches!(failing.apply("fill", "0.8", &arm(false)), Err(SetError::Failed(program, _)) if program == "false")
     );
     let missing = CommandSetter {
         program: "/nonexistent/js-measure-setter".to_owned(),
     };
     assert!(matches!(
-        missing.apply("fill", &arm(false)),
+        missing.apply("fill", "0.8", &arm(false)),
         Err(SetError::Spawn(..))
     ));
-    assert_eq!(NoSetter.apply("fill", &arm(false)), Ok(()));
+    assert_eq!(NoSetter.apply("fill", "0.8", &arm(false)), Ok(()));
+}
+
+/// Asserts that every line a plan emits is read by a struct identical to the analysis
+/// crate's `RunRecord` (unknown fields refused), field for field, and written back as the
+/// same line: setting and arm as the cell's texts, `run_index` the executed order, the
+/// label `warmup` or empty, a number or `null` for each metric. It catches a field added
+/// to or dropped from the emitted line, and a value the reader would take for another.
+#[test]
+fn every_emitted_line_is_what_the_analysis_reads() {
+    use crate::support::AnalysisRunRecord;
+    let p = plan_over(&["0.8", "1.0"], &["whole", "booked"], 1, 1, 3);
+    let clock = FakeClock::at(T0);
+    let farm = farm(&clock);
+    let jobs = [job("a", 60_000, Some("unknown"))];
+    let experiment = Experiment {
+        plan: &p,
+        jobs: &jobs,
+        farm: &farm,
+        clock: &clock,
+        setter: &NoSetter,
+        commit: "abc1234",
+        poll_ms: 10_000,
+        deadline_ms: 3_600_000,
+    };
+    let (_, outputs) = run_all(&experiment);
+    assert_eq!(outputs.len(), 8);
+    for (index, output) in outputs.iter().enumerate() {
+        let line = serde_json::to_string(&output.record).unwrap();
+        let read: AnalysisRunRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(serde_json::to_string(&read).unwrap(), line);
+        assert_eq!(usize::try_from(read.run_index).unwrap(), index);
+        assert!(["0.8", "1.0"].contains(&read.setting.as_str()));
+        assert!(["whole", "booked"].contains(&read.arm.as_str()));
+        assert_eq!((read.seed, read.commit.as_str()), (3, "abc1234"));
+        assert_eq!(read.label, if index < 4 { "warmup" } else { "" });
+        assert_eq!(read.metrics["makespan_ms"], Some(60_000.0));
+        assert_eq!(read.metrics["runtime_actual_over_predicted_mean"], None);
+        assert!(
+            line.contains(r#""runtime_actual_over_predicted_mean":null"#),
+            "{line}"
+        );
+    }
 }

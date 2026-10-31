@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use js_measure::{Plan, PlanError, Slot};
 
-use crate::support::plan;
+use crate::support::{plan, plan_over};
 
 fn arms_of(slots: &[Slot]) -> Vec<usize> {
     slots.iter().map(|slot| slot.arm).collect()
@@ -79,6 +79,14 @@ fn a_bad_plan_is_refused() {
         plan(&["a", "b", "a"], 1, 0, 1).validate(),
         Err(PlanError::DuplicateArm("a".to_owned()))
     );
+    assert_eq!(
+        plan_over(&[], &["a"], 1, 0, 1).validate(),
+        Err(PlanError::NoSettings)
+    );
+    assert_eq!(
+        plan_over(&["1", "2", "1"], &["a"], 1, 0, 1).validate(),
+        Err(PlanError::DuplicateSetting("1".to_owned()))
+    );
     assert_eq!(plan(&["a", "b"], 1, 0, 1).validate(), Ok(()));
 }
 
@@ -86,11 +94,41 @@ fn a_bad_plan_is_refused() {
 /// a key the plan does not know is refused (a misspelt `runs_per_arm` must not run once).
 #[test]
 fn a_plan_file_is_read_strictly() {
-    let text = r#"{"setting":"fill","arms":[{"label":"0.8"},{"label":"booked","control":true}],"runs_per_arm":3,"seed":5}"#;
+    let text = r#"{"parameter":"fill","settings":["0.8","0.9"],"arms":[{"label":"whole"},{"label":"booked","control":true}],"runs_per_arm":3,"seed":5}"#;
     let read: Plan = serde_json::from_str(text).unwrap();
     assert!(!read.arms[0].control);
     assert!(read.arms[1].control);
     assert_eq!(read.warmups_per_arm, 0);
-    let bad = r#"{"setting":"fill","arms":[],"runs_per_arm":3,"seed":5,"runs":3}"#;
+    let bad = r#"{"parameter":"fill","settings":[],"arms":[],"runs_per_arm":3,"seed":5,"runs":3}"#;
     assert!(serde_json::from_str::<Plan>(bad).is_err());
+}
+
+/// Asserts the cells: the plan runs every setting with every arm, each cell the asked
+/// number of times, in an order pinned for a seed (so it is the same on every machine),
+/// and the slot names the setting and the arm of its cell.
+#[test]
+fn every_setting_and_arm_pair_is_a_cell_run_n_times() {
+    let slots = plan_over(&["s0", "s1"], &["a", "b"], 2, 0, 7)
+        .schedule()
+        .unwrap();
+    let cells: Vec<(usize, usize)> = slots.iter().map(|slot| (slot.setting, slot.arm)).collect();
+    assert_eq!(
+        cells,
+        vec![
+            (0, 0),
+            (1, 0),
+            (1, 0),
+            (0, 1),
+            (1, 1),
+            (0, 0),
+            (0, 1),
+            (1, 1)
+        ]
+    );
+    let mut counts: BTreeMap<(usize, usize), u32> = BTreeMap::new();
+    for cell in cells {
+        *counts.entry(cell).or_default() += 1;
+    }
+    assert_eq!(counts.len(), 4);
+    assert!(counts.values().all(|n| *n == 2));
 }

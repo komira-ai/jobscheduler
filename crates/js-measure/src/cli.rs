@@ -60,7 +60,7 @@ pub enum Command {
         /// Seconds after which a run's open jobs are given up.
         #[arg(long, default_value_t = 3600)]
         deadline_secs: u64,
-        /// A program run as `<program> <setting> <arm> control|treatment` before each run.
+        /// A program run as `<program> <parameter> <setting> <arm> control|treatment` before each run.
         #[arg(long)]
         apply_command: Option<String>,
         /// Run against a lease server (needs `--server` and `--token-file`); without it
@@ -207,7 +207,8 @@ fn schedule(plan: &Path, out: &mut dyn Write) -> Result<(), CliError> {
     let plan: Plan = read_json(plan)?;
     for slot in plan.schedule()? {
         let kind = if slot.warmup { "warmup" } else { "run" };
-        writeln!(out, "{} {kind} {}", slot.order, plan.arms[slot.arm].label)?;
+        let (setting, arm) = (&plan.settings[slot.setting], &plan.arms[slot.arm].label);
+        writeln!(out, "{} {kind} {setting} {arm}", slot.order)?;
     }
     Ok(())
 }

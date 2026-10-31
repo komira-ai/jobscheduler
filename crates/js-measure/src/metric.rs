@@ -64,11 +64,14 @@ pub fn finite(reading: Option<f64>) -> Option<f64> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
-    /// The setting under test (for example `fill`).
+    /// The value of the varied parameter, as text (for example `0.8` for a fill of 0.8):
+    /// records with the same text are the same setting.
     pub setting: String,
-    /// The arm: the value of the setting this run used, or the control's label.
+    /// The arm: what was run at that setting (for example a placement rule), or the
+    /// control's label.
     pub arm: String,
-    /// The place of the run in the executed order of the whole plan, from 0.
+    /// The place of the run in the executed order of the whole plan, from 0 (so unique
+    /// within its setting and arm, and the order effects stay visible).
     pub run_index: u32,
     /// The seed the order was drawn from.
     pub seed: u64,

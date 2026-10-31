@@ -8,7 +8,7 @@ use clap::Parser;
 use js_measure::{Cli, CliError, ExperimentError, SetError, execute, read_records};
 use js_testkit::dir::TestDir;
 
-const PLAN: &str = r#"{"setting":"fill","arms":[{"label":"0.8"},{"label":"booked","control":true}],"runs_per_arm":2,"warmups_per_arm":1,"seed":11}"#;
+const PLAN: &str = r#"{"parameter":"fill","settings":["0.8","1.0"],"arms":[{"label":"whole"},{"label":"booked","control":true}],"runs_per_arm":1,"warmups_per_arm":1,"seed":11}"#;
 
 const WORKLOAD: &str = r#"{"jobs":[{"name":"build","count":2,"image":"img","cpu_millis":4000,"memory_bytes":8589934592,"wall_ms":60000}]}"#;
 
@@ -87,11 +87,14 @@ fn schedule_prints_the_order() {
         .iter()
         .map(|slot| {
             let kind = if slot.warmup { "warmup" } else { "run" };
-            format!("{} {kind} {}\n", slot.order, plan.arms[slot.arm].label)
+            format!(
+                "{} {kind} {} {}\n",
+                slot.order, plan.settings[slot.setting], plan.arms[slot.arm].label
+            )
         })
         .collect();
     assert_eq!(out, expected);
-    assert_eq!(out.lines().count(), 6);
+    assert_eq!(out.lines().count(), 8);
 }
 
 /// Asserts the dry run end to end: three files in the output directory, one record per
@@ -102,25 +105,25 @@ fn run_writes_the_three_files_and_appends() {
     let files = Files::new("cli-run", PLAN, WORKLOAD);
     let (result, out) = files.run(&["--fake-hosts", "1", "--poll-ms", "10000"]);
     result.unwrap();
-    assert!(out.starts_with("6 runs recorded in "), "{out}");
+    assert!(out.starts_with("8 runs recorded in "), "{out}");
     let records = read_records(&files.lines("records.jsonl").join("\n")).unwrap();
-    assert_eq!(records.len(), 6);
+    assert_eq!(records.len(), 8);
     assert!(
         records
             .iter()
-            .all(|r| r.commit == "abc123" && r.seed == 11 && r.setting == "fill")
+            .all(|r| r.commit == "abc123" && r.seed == 11 && r.setting.parse::<f64>().is_ok())
     );
-    assert_eq!(records.iter().filter(|r| r.label == "warmup").count(), 2);
+    assert_eq!(records.iter().filter(|r| r.label == "warmup").count(), 4);
     let order: Vec<u32> = records.iter().map(|r| r.run_index).collect();
-    assert_eq!(order, (0..6).collect::<Vec<u32>>());
+    assert_eq!(order, (0..8).collect::<Vec<u32>>());
     assert!(records.iter().all(|r| r.metrics["jobs"] == Some(2.0)));
-    assert_eq!(files.lines("jobs.jsonl").len(), 12);
+    assert_eq!(files.lines("jobs.jsonl").len(), 16);
     assert!(!files.lines("minutes.jsonl").is_empty());
     files.run(&["--fake-hosts", "1"]).0.unwrap();
-    assert_eq!(files.lines("records.jsonl").len(), 12);
+    assert_eq!(files.lines("records.jsonl").len(), 16);
 }
 
-/// Asserts that `summary` groups a records file by arm and lists the runs, and that the
+/// Asserts that `summary` groups a records file by setting and arm and lists the runs, and that the
 /// file of a dry run can be summarised.
 #[test]
 fn summary_lists_the_groups() {
@@ -128,13 +131,13 @@ fn summary_lists_the_groups() {
     files.run(&["--fake-hosts", "2"]).0.unwrap();
     let (result, out) = go(&["summary", "--records", &files.path("out/records.jsonl")]);
     result.unwrap();
-    assert_eq!(out.lines().count(), 2);
+    assert_eq!(out.lines().count(), 4);
     assert!(
-        out.starts_with("fill 0.8: 3 runs (1 warm-up); run_index "),
+        out.starts_with("0.8 booked: 2 runs (1 warm-up); run_index "),
         "{out}"
     );
     assert!(
-        out.contains("fill booked: 3 runs (1 warm-up); run_index "),
+        out.contains("\n1.0 whole: 2 runs (1 warm-up); run_index "),
         "{out}"
     );
 }
@@ -145,7 +148,7 @@ fn summary_lists_the_groups() {
 fn apply_command_runs_before_each_run() {
     let files = Files::new("cli-apply", PLAN, WORKLOAD);
     files.run(&["--apply-command", "true"]).0.unwrap();
-    assert_eq!(files.lines("records.jsonl").len(), 6);
+    assert_eq!(files.lines("records.jsonl").len(), 8);
     let again = Files::new("cli-apply-fails", PLAN, WORKLOAD);
     let (result, _) = again.run(&["--apply-command", "false"]);
     assert!(matches!(
@@ -174,7 +177,7 @@ fn live_mode_records_failures_when_the_server_is_down() {
     let (result, _) = files.run(&["--live", "--server", &closed, "--token-file", &token]);
     result.unwrap();
     let records = read_records(&files.lines("records.jsonl").join("\n")).unwrap();
-    assert_eq!(records.len(), 6);
+    assert_eq!(records.len(), 8);
     assert!(
         records
             .iter()
@@ -245,7 +248,7 @@ fn bad_files_are_named() {
 
     let empty = Files::new(
         "cli-bad-plan",
-        r#"{"setting":"s","arms":[],"runs_per_arm":1,"seed":1}"#,
+        r#"{"parameter":"p","settings":["1"],"arms":[],"runs_per_arm":1,"seed":1}"#,
         WORKLOAD,
     );
     assert_eq!(error_of(empty.run(&[]).0), "the plan has no arms");

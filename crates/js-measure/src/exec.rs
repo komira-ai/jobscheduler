@@ -41,11 +41,11 @@ pub enum ExperimentError {
 /// Puts the setting of an arm in place before its run. Between a setter's success and the
 /// run, nothing else changes the setting.
 pub trait Setter {
-    /// Applies `arm` of `setting`.
+    /// Puts `arm` in place at `setting` of `parameter`.
     ///
     /// # Errors
     /// [`SetError`] when it cannot.
-    fn apply(&self, setting: &str, arm: &Arm) -> Result<(), SetError>;
+    fn apply(&self, parameter: &str, setting: &str, arm: &Arm) -> Result<(), SetError>;
 }
 
 /// Leaves the setting alone: the operator or the dry run owns it.
@@ -53,12 +53,12 @@ pub trait Setter {
 pub struct NoSetter;
 
 impl Setter for NoSetter {
-    fn apply(&self, _setting: &str, _arm: &Arm) -> Result<(), SetError> {
+    fn apply(&self, _parameter: &str, _setting: &str, _arm: &Arm) -> Result<(), SetError> {
         Ok(())
     }
 }
 
-/// Runs a program as `<program> <setting> <arm label> control|treatment`, stdin closed,
+/// Runs a program as `<program> <parameter> <setting> <arm label> control|treatment`, stdin closed,
 /// and counts a nonzero exit as a failure.
 #[derive(Debug, Clone)]
 pub struct CommandSetter {
@@ -67,10 +67,10 @@ pub struct CommandSetter {
 }
 
 impl Setter for CommandSetter {
-    fn apply(&self, setting: &str, arm: &Arm) -> Result<(), SetError> {
+    fn apply(&self, parameter: &str, setting: &str, arm: &Arm) -> Result<(), SetError> {
         let kind = if arm.control { "control" } else { "treatment" };
         let status = Command::new(&self.program)
-            .args([setting, arm.label.as_str(), kind])
+            .args([parameter, setting, arm.label.as_str(), kind])
             .stdin(Stdio::null())
             .status()
             .map_err(|err| SetError::Spawn(self.program.clone(), err.to_string()))?;
@@ -153,9 +153,10 @@ pub fn run_plan(
     let slots = exp.plan.schedule()?;
     for slot in &slots {
         let arm = &exp.plan.arms[slot.arm];
-        exp.setter.apply(&exp.plan.setting, arm)?;
+        let setting = &exp.plan.settings[slot.setting];
+        exp.setter.apply(&exp.plan.parameter, setting, arm)?;
         let who = Identity {
-            setting: exp.plan.setting.clone(),
+            setting: setting.clone(),
             arm: arm.label.clone(),
             run_index: slot.order,
             seed: exp.plan.seed,
