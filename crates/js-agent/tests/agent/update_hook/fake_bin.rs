@@ -8,6 +8,8 @@ use js_testkit::dir::TestDir;
 const BIN: &str = env!("CARGO_BIN_EXE_js-update-hook-fake");
 const PARAMS: &str = concat!(
     "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
+    "drain_wait_secs = 3600\ndefer_retry_secs = 300\n",
+    "\"updater.artifact_digest\" = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
     "\"updater.staged_release\" = \"/staged\"\n",
     "\"updater.target_version\" = \"1.4.0\"\n",
 );

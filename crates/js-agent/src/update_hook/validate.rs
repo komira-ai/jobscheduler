@@ -24,9 +24,23 @@ pub const MAX_VERSION_LEN: usize = 128;
 /// one second.
 pub const EXPIRY_SLACK_MS: u64 = 1_000;
 
+/// How much longer than the drain wait the declared `prepare` timeout must be, in seconds: the
+/// version check, the cordon calls and the record writes happen around the wait.
+pub const PREPARE_MARGIN_SECS: u64 = 60;
+
 /// The rule a record broke.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Invalid {
+    /// The declared `prepare` timeout would end the step in the middle of the drain wait.
+    #[error(
+        "the declared prepare timeout {prepare} s is shorter than drain_wait_secs {wait} s plus {PREPARE_MARGIN_SECS} s"
+    )]
+    PrepareTimeout {
+        /// `[hook.timeout_secs] prepare`.
+        prepare: u64,
+        /// `drain_wait_secs`.
+        wait: u64,
+    },
     /// The record's schema is not the one this hook writes.
     #[error("schema {found} is not {SCHEMA}")]
     Schema {
@@ -129,7 +143,7 @@ fn is_version(text: &str) -> bool {
 }
 
 /// A digest as the registry writes it.
-fn is_digest(text: &str) -> bool {
+pub(super) fn is_digest(text: &str) -> bool {
     text.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     })
@@ -145,6 +159,14 @@ pub fn validate(
     params: &Params,
 ) -> Result<(), Invalid> {
     let update = &record.update;
+    // The updater kills a step at its declared bound: `prepare` must outlast the wait.
+    let needed = params.drain_wait_secs.saturating_add(PREPARE_MARGIN_SECS);
+    if declaration.timeouts.prepare < needed {
+        return Err(Invalid::PrepareTimeout {
+            prepare: declaration.timeouts.prepare,
+            wait: params.drain_wait_secs,
+        });
+    }
     if record.schema != SCHEMA {
         return Err(Invalid::Schema {
             found: record.schema,
@@ -196,6 +218,11 @@ pub fn validate(
         params.previous_version.as_deref().map(OsStr::new),
     )?;
     agrees(
+        "artifact_digest",
+        Some(OsStr::new(&update.artifact_digest)),
+        Some(OsStr::new(&params.artifact_digest)),
+    )?;
+    agrees(
         "staged",
         Some(update.staged.as_os_str()),
         Some(params.staged_release.as_os_str()),
@@ -214,7 +241,7 @@ pub fn validate(
 fn cordon(record: &Record, params: &Params) -> Result<(), Invalid> {
     let cordon = &record.cordon;
     if !cordon.placed {
-        return if (cordon.first_ms, cordon.expires_ms) == (0, 0) {
+        return if (cordon.first_ms, cordon.expires_ms) == (0, 0) && !cordon.provisional {
             Ok(())
         } else {
             Err(Invalid::CordonStamps)

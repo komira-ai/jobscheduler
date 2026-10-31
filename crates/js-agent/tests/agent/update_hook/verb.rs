@@ -12,6 +12,8 @@ use js_testkit::dir::TestDir;
 
 const PARAMS: &str = concat!(
     "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
+    "drain_wait_secs = 3600\ndefer_retry_secs = 300\n",
+    "\"updater.artifact_digest\" = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
     "\"updater.staged_release\" = \"/staged\"\n",
     "\"updater.target_version\" = \"1.4.0\"\n",
 );
@@ -265,4 +267,39 @@ fn the_binary_refuses_a_missing_params_flag_with_a_valid_line() {
     let line = last_line(&String::from_utf8(output.stdout).unwrap());
     assert_eq!(line["reason"], "bad_args");
     assert!(String::from_utf8_lossy(&output.stderr).contains("--params"));
+}
+
+#[test]
+fn a_params_file_without_a_good_artifact_digest_runs_no_step_on_any_step() {
+    let called = Cell::new(false);
+    let step = |_: &Invocation, _: &Params| {
+        called.set(true);
+        Done {
+            outcome: Outcome::Success,
+            report: Report::default(),
+        }
+    };
+    let digest_line = format!(
+        "\"updater.artifact_digest\" = \"sha256:{}\"\n",
+        "a".repeat(64)
+    );
+    let text = PARAMS;
+    assert!(text.contains(&digest_line), "{text}");
+    let missing = text.replace(&digest_line, "");
+    let malformed = text.replace(&"a".repeat(64), "xyz");
+    let (_dir, missing_file) = params_file("hook-verb-nodigest", &missing);
+    let (_dir2, malformed_file) = params_file("hook-verb-baddigest", &malformed);
+    for step_name in ["prepare", "cutover", "verify", "rollback", "cleanup"] {
+        for file in [&missing_file, &malformed_file] {
+            let mut args = vec![step_name];
+            if step_name == "prepare" {
+                args.push("/staged");
+            }
+            args.extend(["--params", file.as_str()]);
+            let ran = run_with(&args, &Host { step: &step });
+            assert_eq!(ran.status, status(1), "{step_name}");
+            assert_eq!(last_line(&ran.out)["reason"], "bad_params", "{step_name}");
+        }
+    }
+    assert!(!called.get());
 }

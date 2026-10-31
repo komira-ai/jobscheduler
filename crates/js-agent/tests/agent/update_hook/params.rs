@@ -3,11 +3,16 @@
 
 use std::path::PathBuf;
 
-use js_agent::update_hook::{Params, ParamsError};
+use js_agent::update_hook::{MIN_CORDON_LEASE_SECS, POLL_SECS, Params, ParamsError};
 use js_testkit::dir::TestDir;
 
-const CORDON: &str = "cordon_lease_secs = 300\ncordon_max_secs = 17355\n";
+const CORDON: &str = concat!(
+    "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
+    "drain_wait_secs = 3600\ndefer_retry_secs = 300\n",
+);
+const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const RELEASES: &str = concat!(
+    "\"updater.artifact_digest\" = \"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
     "\"updater.staged_release\" = \"/opt/js-agent/releases/new\"\n",
     "\"updater.previous_release\" = \"/opt/js-agent/releases/old\"\n",
     "\"updater.target_version\" = \"1.4.0\"\n",
@@ -15,6 +20,7 @@ const RELEASES: &str = concat!(
 );
 /// A first install: the updater sets no previous release or version.
 const FIRST_INSTALL: &str = concat!(
+    "\"updater.artifact_digest\" = \"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
     "\"updater.staged_release\" = \"/opt/js-agent/releases/new\"\n",
     "\"updater.target_version\" = \"1.4.0\"\n",
 );
@@ -26,7 +32,9 @@ fn good() -> String {
 /// The cordon keys and the two required release keys, but for `key`, which is set to `value`
 /// (a TOML value) as the one under test.
 fn with(key: &str, value: &str) -> String {
+    let digest = format!("\"{DIGEST}\"");
     let required = [
+        ("updater.artifact_digest", digest.as_str()),
         ("updater.staged_release", "\"/opt/js-agent/releases/new\""),
         ("updater.target_version", "\"1.4.0\""),
     ];
@@ -49,6 +57,9 @@ fn the_cordon_keys_and_the_reserved_release_keys_are_read() {
         Params {
             cordon_lease_secs: 300,
             cordon_max_secs: 17355,
+            drain_wait_secs: 3600,
+            defer_retry_secs: 300,
+            artifact_digest: DIGEST.to_owned(),
             promotion_ceiling_secs: None,
             staged_release: PathBuf::from("/opt/js-agent/releases/new"),
             previous_release: Some(PathBuf::from("/opt/js-agent/releases/old")),
@@ -98,6 +109,9 @@ fn a_missing_required_key_is_named() {
     for key in [
         "cordon_lease_secs",
         "cordon_max_secs",
+        "drain_wait_secs",
+        "defer_retry_secs",
+        "updater.artifact_digest",
         "updater.staged_release",
         "updater.target_version",
     ] {
@@ -218,4 +232,121 @@ fn a_file_is_read_and_a_missing_one_is_refused() {
     let error = Params::read(&dir.path().join("absent.toml")).unwrap_err();
     assert!(matches!(error, ParamsError::Read(_)));
     assert!(error.to_string().starts_with("cannot read the params file"));
+}
+
+#[test]
+fn the_artifact_digest_must_be_sha256_and_64_lowercase_hex_digits_in_a_string() {
+    for bad in [
+        "\"\"",
+        "\"sha256:\"",
+        "\"sha256:ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"",
+        "\"sha512:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+        "\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+        "\"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\"",
+    ] {
+        match refused(&with("updater.artifact_digest", bad)) {
+            ParamsError::NotDigest(key) => assert_eq!(key, "updater.artifact_digest"),
+            other => panic!("{bad}: {other}"),
+        }
+    }
+    match refused(&with("updater.artifact_digest", "7")) {
+        ParamsError::NotText(key) => assert_eq!(key, "updater.artifact_digest"),
+        other => panic!("{other}"),
+    }
+}
+
+#[test]
+fn the_wait_and_the_retry_are_whole_seconds_and_the_wait_and_cordon_keys_are_positive() {
+    let releases = RELEASES;
+    let text = |lease: &str, max: &str, wait: &str, retry: &str| {
+        format!(
+            "cordon_lease_secs = {lease}\ncordon_max_secs = {max}\ndrain_wait_secs = {wait}\ndefer_retry_secs = {retry}\n{releases}"
+        )
+    };
+    assert!(Params::parse(&text("300", "17355", "3600", "300")).is_ok());
+    assert!(
+        Params::parse(&text("300", "17355", "3600", "0")).is_ok(),
+        "a retry of 0 asks for none"
+    );
+    for (lease, max, wait, retry, zero) in [
+        ("0", "17355", "3600", "300", "cordon_lease_secs"),
+        ("300", "0", "3600", "300", "cordon_max_secs"),
+        ("300", "17355", "0", "300", "drain_wait_secs"),
+    ] {
+        match refused(&text(lease, max, wait, retry)) {
+            ParamsError::Zero(key) => assert_eq!(key, zero),
+            other => panic!("{zero}: {other}"),
+        }
+    }
+    for (wait, retry, key) in [
+        ("\"3600\"", "300", "drain_wait_secs"),
+        ("-1", "300", "drain_wait_secs"),
+        ("3600", "1.5", "defer_retry_secs"),
+        ("3600", "\"300\"", "defer_retry_secs"),
+    ] {
+        match refused(&text("300", "17355", wait, retry)) {
+            ParamsError::NotSeconds(got) => assert_eq!(got, key),
+            other => panic!("{key}: {other}"),
+        }
+    }
+}
+
+#[test]
+fn the_cap_must_cover_the_drain_wait() {
+    let text = |max: u64, wait: u64| {
+        format!(
+            "cordon_lease_secs = 300\ncordon_max_secs = {max}\ndrain_wait_secs = {wait}\ndefer_retry_secs = 300\n{RELEASES}"
+        )
+    };
+    assert!(Params::parse(&text(3600, 3600)).is_ok());
+    let error = refused(&text(3599, 3600));
+    assert!(matches!(
+        error,
+        ParamsError::CapBelowWait {
+            cap: 3599,
+            wait: 3600
+        }
+    ));
+    assert_eq!(
+        error.to_string(),
+        "cordon_max_secs 3599 is shorter than drain_wait_secs 3600"
+    );
+    assert_eq!(
+        ParamsError::Zero("k".to_owned()).to_string(),
+        "params key \"k\" must not be zero"
+    );
+    assert_eq!(
+        ParamsError::NotDigest("k".to_owned()).to_string(),
+        "params key \"k\" must be sha256: and 64 lowercase hex digits"
+    );
+}
+
+#[test]
+fn the_cordon_lease_must_be_at_least_three_polls() {
+    let text = |lease: u64| {
+        format!(
+            "cordon_lease_secs = {lease}\ncordon_max_secs = 17355\ndrain_wait_secs = 3600\ndefer_retry_secs = 0\n{RELEASES}"
+        )
+    };
+    assert_eq!(MIN_CORDON_LEASE_SECS, 3 * POLL_SECS);
+    assert!(Params::parse(&text(MIN_CORDON_LEASE_SECS)).is_ok());
+    let error = refused(&text(MIN_CORDON_LEASE_SECS - 1));
+    assert!(matches!(
+        error,
+        ParamsError::LeaseTooShort { lease: 29, min: 30 }
+    ));
+    assert_eq!(
+        error.to_string(),
+        "cordon_lease_secs 29 is shorter than 30 s, three polls"
+    );
+    // A zero lease is still named as zero.
+    assert!(matches!(refused(&text(0)), ParamsError::Zero(_)));
+}
+
+#[test]
+fn a_retry_of_zero_seconds_means_try_again_at_once() {
+    let text = format!(
+        "cordon_lease_secs = 300\ncordon_max_secs = 17355\ndrain_wait_secs = 3600\ndefer_retry_secs = 0\n{RELEASES}"
+    );
+    assert_eq!(Params::parse(&text).unwrap().defer_retry_secs, 0);
 }

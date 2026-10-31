@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{
     AtFlags, FileType, FlockOperation, Mode, OFlags, flock, fsync, openat, renameat, statat,
+    unlinkat,
 };
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
@@ -74,6 +75,11 @@ pub struct UpdateInfo {
 pub struct Cordon {
     /// Whether this update placed it. A cordon that was there before is not the hook's to lift.
     pub placed: bool,
+    /// The mark was written before the cordon was asked of the lease server and no reply has
+    /// confirmed it: a cordon found in force is then not known to be ours. Cleared by a reply
+    /// that says the host was not cordoned.
+    #[serde(default)]
+    pub provisional: bool,
     /// When it was first placed, in milliseconds on the wall clock; 0 when not placed.
     pub first_ms: u64,
     /// When it now expires, in whole seconds' worth of milliseconds: never later than
@@ -563,6 +569,27 @@ impl Held {
         renameat(&self.fd, TEMP_FILE, &self.fd, RECORD_FILE)
             .map_err(io::Error::from)
             .map_err(at(&record))?;
+        fsync(&self.fd)
+            .map_err(io::Error::from)
+            .map_err(at(&self.dir))
+    }
+
+    /// Deletes the record, and a temporary file a killed save left, and syncs the directory.
+    /// Does nothing to a directory with no record. Refuses to delete a record [`Held::load`]
+    /// refuses, as a save does.
+    ///
+    /// # Errors
+    /// What [`Held::load`] says of the record that is there, or [`StateError::Io`].
+    pub fn delete(&self) -> Result<(), StateError> {
+        self.load()?;
+        // The temporary file first: a delete killed between the two leaves the record, which
+        // the next step deletes again.
+        for name in [TEMP_FILE, RECORD_FILE] {
+            match unlinkat(&self.fd, name, AtFlags::empty()) {
+                Ok(()) | Err(Errno::NOENT) => {}
+                Err(errno) => return Err(at(&self.dir.join(name))(errno.into())),
+            }
+        }
         fsync(&self.fd)
             .map_err(io::Error::from)
             .map_err(at(&self.dir))
