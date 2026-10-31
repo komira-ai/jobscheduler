@@ -57,7 +57,24 @@ pub enum Program {
         /// Whether the kill is at the booking of the run.
         own_limit: bool,
     },
+    /// Writes [`OUT_LINE`] to standard output and [`ERR_LINE`] to standard error, then
+    /// exits 0 (`hold` false), or, with `hold`, is up and runs until it is killed (it
+    /// ignores SIGTERM).
+    Say {
+        /// Whether the program stays up after it wrote.
+        hold: bool,
+    },
+    /// Writes far more to standard output than any tail holds, the last line being
+    /// [`FLOOD_END`], then exits 0.
+    Flood,
 }
+
+/// What [`Program::Say`] writes to standard output.
+pub const OUT_LINE: &str = "to-stdout\n";
+/// What [`Program::Say`] writes to standard error.
+pub const ERR_LINE: &str = "to-stderr\n";
+/// The last line of [`Program::Flood`].
+pub const FLOOD_END: &str = "flood-end\n";
 
 impl Program {
     /// The words after the image. `ready` is the path of the pipe a program opens when it
@@ -73,6 +90,14 @@ impl Program {
             Self::IgnoreTerm => shell(format!(
                 "trap '' TERM; echo up > {ready}; exec sleep 100000"
             )),
+            Self::Say { hold: false } => {
+                shell("echo to-stdout; echo to-stderr >&2; exit 0".to_owned())
+            }
+            Self::Say { hold: true } => shell(format!(
+                "trap '' TERM; echo to-stdout; echo to-stderr >&2; echo up > {ready}; \
+                 exec sleep 100000"
+            )),
+            Self::Flood => shell("yes 0123456789 | head -n 20000; echo flood-end".to_owned()),
             // One line that never ends, held in memory by `tail`.
             Self::Hog { .. } => vec!["/bin/tail".to_owned(), "/dev/zero".to_owned()],
         }
@@ -82,7 +107,10 @@ impl Program {
     /// subject; the fake needs no wait).
     #[allow(dead_code)]
     pub fn opens_ready(self) -> bool {
-        !matches!(self, Self::Exit(_) | Self::Hog { .. })
+        !matches!(
+            self,
+            Self::Exit(_) | Self::Hog { .. } | Self::Say { hold: false } | Self::Flood
+        )
     }
 
     /// The memory the run books: a hog's booking is small, so that it reaches it, and a
@@ -239,6 +267,10 @@ macro_rules! conformance {
             a_start_that_fails_leaves_no_container,
             a_run_id_in_use_is_refused,
             a_running_container_names_its_cgroup,
+            the_tail_of_a_run_that_ends_normally_reaches_the_result,
+            the_tail_of_a_run_that_is_killed_reaches_the_result,
+            a_run_never_started_has_an_empty_tail,
+            a_tail_is_bounded_and_says_it_dropped_bytes,
             a_runtime_without_gpus_says_so_and_refuses_one,
             the_wall_time_ends_a_job_with_sigterm,
             the_wall_time_kills_a_job_that_ignores_sigterm,
