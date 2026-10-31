@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use js_contain::OciConfig;
 use js_contain::container::ACTION_ID;
-use js_contain::delegate::PROC_SELF_CGROUP;
+use js_contain::delegate::{self, PROC_SELF_CGROUP};
 use js_contain::subids::IdFiles;
 use js_oci::{Client, Policy};
 
@@ -39,7 +39,7 @@ pub fn oci_config(crun: &Path, job_ids: (u32, u32)) -> OciConfig {
 /// Where the agent's cgroups come from.
 #[derive(Debug, Clone)]
 pub enum CgroupSource {
-    /// The agent runs in the leaf `<unit>/agent` of a delegated unit: `mount` is the cgroup
+    /// The agent runs in a delegated unit: `mount` is the cgroup
     /// version 2 mount and `own` the file that names the agent's cgroup.
     Delegate {
         /// The cgroup version 2 mount.
@@ -69,105 +69,37 @@ impl CgroupSource {
     }
 }
 
-/// The name of the agent's own leaf cgroup in its unit (`DelegateSubgroup=` in the unit).
-pub const AGENT_LEAF: &str = "agent";
-
-/// The name of the cgroup beside the agent's leaf, in the unit's cgroup, that every
-/// lease's cgroup is made in.
-pub const ACTIONS_DIR: &str = "actions";
-
-/// The controllers the leases' cgroups need.
-const CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
-
 /// Why the agent's cgroups cannot be used. Each text names the fix.
 #[derive(Debug, thiserror::Error)]
 pub enum CgroupError {
-    /// The file that names the agent's cgroup has no cgroup version 2 line.
-    #[error("{}: no cgroup v2 (\"0::\") line: the agent needs cgroup v2 alone", .0.display())]
-    NoUnified(PathBuf),
-    /// The agent is not in a leaf of its unit.
-    #[error(
-        "the agent runs in the cgroup {own}, not in a leaf named {AGENT_LEAF} of its unit: the \
-         unit needs Delegate=yes and DelegateSubgroup={AGENT_LEAF} (systemd 254 or newer), so \
-         that the unit's cgroup holds no process and can give its controllers to the leases"
-    )]
-    NotLeaf {
-        /// The agent's cgroup.
-        own: String,
-    },
-    /// The unit's cgroup does not offer the controllers.
-    #[error("the unit's cgroup {unit} does not offer {missing}: the unit needs Delegate=yes")]
-    Controllers {
-        /// The unit's cgroup.
-        unit: String,
-        /// The controllers that are missing.
-        missing: String,
-    },
-    /// A cgroup file or directory could not be read, made or written.
-    #[error("{what} {}: {why}", path.display())]
-    Io {
-        /// What was being done.
-        what: &'static str,
-        /// The file or directory.
+    /// The file that names the agent's cgroup cannot be read.
+    #[error("read {}: {why}", path.display())]
+    Read {
+        /// The file.
         path: PathBuf,
         /// The reason.
         why: io::Error,
     },
+    /// The unit's cgroup cannot be set up.
+    #[error(transparent)]
+    Delegate(#[from] delegate::DelegateError),
 }
 
-/// The error of a failed `what` on `path`.
-fn io_error(what: &'static str, path: &Path) -> impl FnOnce(io::Error) -> CgroupError {
-    let path = path.to_owned();
-    move |why| CgroupError::Io { what, path, why }
-}
-
-/// Enables the leases' controllers for the children of the cgroup directory `dir`.
-fn enable(dir: &Path) -> Result<(), CgroupError> {
-    let file = dir.join("cgroup.subtree_control");
-    fs::write(&file, "+cpu +memory +pids").map_err(io_error("enable controllers in", &file))
-}
-
-/// Sets up the cgroups of an agent that runs in the leaf `<unit>/agent` of a delegated unit
-/// (`own` names its cgroup in the form of `/proc/self/cgroup`, below the mount `mount`):
-/// the controllers are enabled in the unit's cgroup, which holds no process of its own, and
-/// the cgroup `<unit>/actions` is made beside the leaf with the same three enabled. The
-/// unit is the root the lease runtime hands to the job user; `actions` is where leases go.
+/// Sets up the agent's cgroups with [`delegate::delegate`] from the cgroup `own_file` names
+/// (in the form of `/proc/self/cgroup`), below the mount `mount`. An agent in the leaf
+/// `<unit>/supervisor` (`DelegateSubgroup=supervisor` in the unit) has the unit as its root;
+/// an agent in the unit's own cgroup is moved into that leaf. Cpu, memory and pids are
+/// enabled in the root and in `<root>/actions`, where the leases go.
 fn delegate_unit(mount: &Path, own_file: &Path) -> Result<CgroupSettings, CgroupError> {
-    let text = fs::read_to_string(own_file).map_err(io_error("read", own_file))?;
-    let own = text
-        .lines()
-        .find_map(|line| line.strip_prefix("0::"))
-        .map(str::trim)
-        .ok_or_else(|| CgroupError::NoUnified(own_file.to_owned()))?;
-    let unit = match own.rsplit_once('/') {
-        Some((unit, AGENT_LEAF)) if !unit.is_empty() => unit,
-        _ => {
-            return Err(CgroupError::NotLeaf {
-                own: own.to_owned(),
-            });
-        }
-    };
-    let dir = |name: &str| mount.join(name.trim_start_matches('/'));
-    let offered = dir(unit).join("cgroup.controllers");
-    let offered = fs::read_to_string(&offered).map_err(io_error("read", &offered))?;
-    let lacking: Vec<&str> = CONTROLLERS
-        .into_iter()
-        .filter(|wanted| !offered.split_whitespace().any(|have| have == *wanted))
-        .collect();
-    if !lacking.is_empty() {
-        return Err(CgroupError::Controllers {
-            unit: unit.to_owned(),
-            missing: lacking.join(" "),
-        });
-    }
-    enable(&dir(unit))?;
-    let actions = format!("{unit}/{ACTIONS_DIR}");
-    fs::create_dir_all(dir(&actions)).map_err(io_error("make", &dir(&actions)))?;
-    enable(&dir(&actions))?;
+    let own = fs::read_to_string(own_file).map_err(|why| CgroupError::Read {
+        path: own_file.to_owned(),
+        why,
+    })?;
+    let done = delegate::delegate(mount, &own, 0, None)?;
     Ok(CgroupSettings {
         mount: mount.to_owned(),
-        root: unit.to_owned(),
-        actions,
+        root: done.root,
+        actions: done.actions,
     })
 }
 
