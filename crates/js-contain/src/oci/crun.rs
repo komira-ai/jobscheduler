@@ -666,35 +666,40 @@ mod tests {
     /// for the blocking calls; one that ends is read as before.
     #[test]
     fn a_crun_that_does_not_end_is_killed_and_fails() {
-        use std::os::unix::fs::PermissionsExt as _;
+        // A script is written by a process of its own that has ended, so that no descriptor
+        // open for writing is inherited by a child another test forks meanwhile (which would
+        // make the file busy for `exec`).
+        fn script(path: &Path, body: &str) {
+            let made = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"",
+                    "sh",
+                ])
+                .arg(body)
+                .arg(path)
+                .status();
+            assert!(made.expect("sh").success());
+        }
         let dir = crate::unit_dir("crun-hung");
         let lease: &Path = &dir;
-        std::fs::create_dir_all(lease).expect("lease");
-        let hung = lease.join("hung");
-        std::fs::write(&hung, "#!/bin/sh\nexec sleep 600\n").expect("script");
-        std::fs::set_permissions(&hung, std::fs::Permissions::from_mode(0o755)).expect("mode");
-        let crun = Crun::new(hung, no_scrub, None);
-        let why = crun
-            .stdout_within(lease, &["state", "c"], "state", Duration::ZERO)
-            .expect_err("killed");
+        let run = |name: &str, body: &str, limit: Duration| {
+            let program = lease.join(name);
+            script(&program, body);
+            let crun = Crun::new(program, no_scrub, None);
+            crun.stdout_within(lease, &["state", "c"], "state", limit)
+        };
+        let why = run("hung", "#!/bin/sh\nexec sleep 600\n", Duration::ZERO).expect_err("killed");
         assert!(why.contains("did not finish"), "{why}");
-        // One that takes a moment is waited for, not killed: the wait polls at least once.
-        let slow = lease.join("slow");
-        std::fs::write(&slow, "#!/bin/sh\nsleep 0.3\necho done\n").expect("script");
-        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).expect("mode");
-        let crun = Crun::new(slow, no_scrub, None);
-        let said = crun
-            .stdout_within(lease, &["state", "c"], "state", Duration::from_secs(600))
-            .expect("it ends in time");
-        assert_eq!(said, "done\n");
-
-        let quick = lease.join("quick");
-        std::fs::write(&quick, "#!/bin/sh\necho out\necho oops >&2\nexit 3\n").expect("script");
-        std::fs::set_permissions(&quick, std::fs::Permissions::from_mode(0o755)).expect("mode");
-        let crun = Crun::new(quick, no_scrub, None);
-        let why = crun
-            .stdout_within(lease, &["state", "c"], "state", Duration::from_secs(600))
-            .expect_err("exit 3");
+        // One that takes a moment is waited for, not killed.
+        let said = run(
+            "slow",
+            "#!/bin/sh\nsleep 0.3\necho done\n",
+            Duration::from_secs(600),
+        );
+        assert_eq!(said.expect("it ends in time"), "done\n");
+        let body = "#!/bin/sh\necho out\necho oops >&2\nexit 3\n";
+        let why = run("quick", body, Duration::from_secs(600)).expect_err("exit 3");
         assert!(why.contains("oops"), "{why}");
         assert!(why.contains('3'), "{why}");
     }
