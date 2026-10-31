@@ -16,7 +16,26 @@
 #[path = "../runtime_suite/mod.rs"]
 mod runtime_suite;
 mod subject;
+mod sweep;
 
-use runtime_suite::conformance;
+use runtime_suite::{Program, Subject, begin, clean_up, conformance};
 
 conformance!(subject::crun_subject, all());
+
+/// Proves, over a real `crun`, that a running container's cgroup is `ctr` directly below
+/// the lease's cgroup, and that both are real cgroups (the lease's carries the limits the
+/// agent set, the container's holds the job). This is the layout the usage sampler and the
+/// integrity check accept for a direct runner. Catches a `crun` whose `cgroupsPath` lands
+/// the container elsewhere, which usage would then sample as nothing.
+#[test]
+#[ignore = "real crun: run through cargo xtask crun-tests"]
+fn the_cgroup_of_a_running_container_is_ctr_below_its_lease() {
+    let mut s = subject::crun_subject("the_cgroup_is_ctr_below_lease");
+    let id = begin(&mut s, "r1", Program::Hold);
+    let cgroup = s.runtime().borrow_mut().cgroup(&id).expect("a cgroup");
+    assert_eq!(cgroup.file_name().and_then(|n| n.to_str()), Some("ctr"));
+    let lease = cgroup.parent().expect("the lease's cgroup");
+    assert!(lease.join("memory.max").is_file());
+    assert!(cgroup.join("cgroup.procs").is_file());
+    clean_up(&s);
+}

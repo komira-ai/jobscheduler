@@ -618,15 +618,247 @@ async fn a_failed_fetch_is_reported_as_it_was_and_leaves_nothing() {
     assert!(shown.contains(&image.reference), "{shown}");
 }
 
+/// A runtime that is a script: for every `crun run` it appends to `log` the helper's id,
+/// and, for an unpack, the mode and owner of each stage directory in `images` at that
+/// moment (what the helper finds when it starts). `fail` is a `case` pattern of helper ids
+/// that exit 1.
+fn scripted_runtime(dir: &Path, images: &Path, fail: &str) -> PathBuf {
+    let path = dir.join("runtime.sh");
+    let log = dir.join("runs.log");
+    let script = format!(
+        "#!/bin/sh\nfor a in \"$@\"; do [ \"$prev\" = --bundle ] && bundle=$a; prev=$a; last=$a; done\n\
+         stat -c 'dir %a %u' \"$(dirname \"$bundle\")\" >> {log} 2>/dev/null\necho \"$last\" >> {log}\n\
+         case \"$last\" in\n  helper-unpack-*) stat -c 'stage %a %u' {images}/.stage-*[0-9] >> {log} \
+         2>/dev/null;;\nesac\ncase \"$last\" in\n  {fail}) exit 1;;\nesac\nexit 0\n",
+        log = log.display(),
+        images = images.display(),
+    );
+    std::fs::write(&path, script).expect("runtime");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
+}
+
+/// The lines a [`scripted_runtime`] logged.
+fn runs(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("runs.log"))
+        .expect("the runtime ran")
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Catches an unpack stage that anyone but the helper's user can write: when the helper
+/// container starts its unpack, the stage directory it was given is not writable by group
+/// or others (a local account could then rename the `rootfs` the helper makes and put its
+/// own tree in the image's place, or pre-create it).
+#[tokio::test]
+async fn the_unpack_stage_is_not_group_or_other_writable_when_the_helper_starts() {
+    let dir = scratch("image-stage-mode");
+    let scratch = dir.join("scratch");
+    let runtime = scripted_runtime(&dir, &scratch.join("oci-images"), "never");
+    let config = OciConfig {
+        runtime,
+        ..config(&dir, true)
+    };
+    let oci = Oci::on(
+        &config,
+        Scripted::new(Ok(vec!["0.tar".to_owned()])),
+        &scratch,
+        "/actions",
+        "x86_64",
+    )
+    .expect("started");
+    oci.check_pinned(&pinned()).await.expect("unpacked");
+    let stages: Vec<String> = runs(&dir)
+        .into_iter()
+        .filter(|l| l.starts_with("stage "))
+        .collect();
+    assert_eq!(
+        stages.len(),
+        1,
+        "the unpack helper saw one stage: {stages:?}"
+    );
+    let mode = u32::from_str_radix(stages[0].split(' ').nth(1).expect("mode"), 8).expect("octal");
+    assert_eq!(mode & 0o022, 0, "the stage is writable by others: {mode:o}");
+    assert_ne!(mode & 0o200, 0, "its owner can write it: {mode:o}");
+}
+
+/// Catches a stage given to the unpack helper by the wrong means for the daemon's user: a
+/// rootless daemon cannot `chown` to a subordinate id, so a setup helper container gives
+/// it the stage, before the unpack helper starts; a root daemon gives it itself and runs
+/// no extra container.
+#[tokio::test]
+async fn the_stage_is_given_to_the_helper_before_it_unpacks_unless_the_daemon_is_root() {
+    let dir = scratch("image-stage-give");
+    let scratch = dir.join("scratch");
+    let runtime = scripted_runtime(&dir, &scratch.join("oci-images"), "never");
+    let config = OciConfig {
+        runtime,
+        ..config(&dir, true)
+    };
+    let oci = Oci::on(
+        &config,
+        Scripted::new(Ok(vec!["0.tar".to_owned()])),
+        &scratch,
+        "/actions",
+        "x86_64",
+    )
+    .expect("started");
+    oci.check_pinned(&pinned()).await.expect("unpacked");
+    let helpers: Vec<String> = runs(&dir)
+        .iter()
+        .filter(|l| l.starts_with("helper-"))
+        .map(|l| l.split('-').nth(1).expect("kind").to_owned())
+        .collect();
+    let want: &[&str] = if rustix::process::geteuid().is_root() {
+        &["unpack"]
+    } else {
+        &["give", "unpack"]
+    };
+    assert_eq!(helpers, want);
+}
+
+/// Catches the owner string drifting from the id the unpack helper writes as: the stage is
+/// given to `HELPER_OWNER` in a setup helper's namespace, and the unpack helper's id 0 is
+/// the same host id (the first subordinate id).
+#[test]
+fn the_helper_owner_is_the_host_id_of_the_unpack_helpers_root() {
+    let ids = crate::subids::DaemonIds {
+        uid: 1000,
+        gid: 1001,
+        sub_uid: 100_000,
+        sub_gid: 200_000,
+    };
+    let host = |maps: Mappings, id: u32, group: bool| {
+        let list = if group { maps.1 } else { maps.0 };
+        list.iter()
+            .find(|m| id >= m.container_id() && id - m.container_id() < m.size())
+            .map(|m| m.host_id() + (id - m.container_id()))
+    };
+    let (uid, gid) = image::HELPER_OWNER.split_once(':').expect("uid:gid");
+    let (uid, gid): (u32, u32) = (uid.parse().expect("uid"), gid.parse().expect("gid"));
+    for group in [false, true] {
+        let setup = host(ids.setup_mappings(), if group { gid } else { uid }, group);
+        let action = host(ids.action_mappings(), 0, group);
+        assert_eq!(setup, action, "group: {group}");
+        assert_eq!(action, Some(if group { 200_000 } else { 100_000 }));
+    }
+}
+
+/// Catches a stage made by name instead of by descriptor, or left writable: it is made
+/// only if the name is free (a symlink in its place is refused and what it points at is not
+/// touched), is `0755` whatever the mode of a directory the daemon makes, and is given
+/// through `chown` the directory that was made, to exactly the owner asked, and to nobody
+/// when none is.
+#[test]
+fn a_stage_is_made_by_descriptor_with_the_helpers_owner_and_no_write_for_others() {
+    use std::os::fd::AsFd as _;
+    let dir = scratch("stage-fd");
+    let stage = dir.join("stage");
+    let owner = (
+        rustix::fs::Uid::from_raw(1234),
+        rustix::fs::Gid::from_raw(4321),
+    );
+    let mut given = Vec::new();
+    image::make_stage(&stage, Some(owner), &mut |fd, uid, gid| {
+        given.push((
+            crate::walk::identity(&fd.as_fd()).expect("identity"),
+            uid,
+            gid,
+        ));
+        Ok(())
+    })
+    .expect("made");
+    let meta = std::fs::metadata(&stage).expect("stage");
+    assert_eq!(meta.permissions().mode() & 0o7777, 0o755);
+    use std::os::unix::fs::MetadataExt as _;
+    assert_eq!(given, [((meta.dev(), meta.ino()), owner.0, owner.1)]);
+
+    // The real change of owner, to the ids this process has.
+    let mine = (
+        rustix::fs::Uid::from_raw(rustix::process::getuid().as_raw()),
+        rustix::fs::Gid::from_raw(rustix::process::getgid().as_raw()),
+    );
+    let own = dir.join("own");
+    image::make_stage(&own, Some(mine), &mut image::fchown_fd).expect("made");
+    assert_eq!(std::fs::metadata(&own).expect("own").uid(), mine.0.as_raw());
+
+    // No owner, no change of owner.
+    let rootless = dir.join("rootless");
+    image::make_stage(&rootless, None, &mut |_, _, _| panic!("chown")).expect("made");
+    assert!(rootless.is_dir());
+
+    // The name is taken (by a symlink to a directory elsewhere): refused, target untouched.
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir(&elsewhere).expect("elsewhere");
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&elsewhere, &link).expect("link");
+    let refused = image::make_stage(&link, Some(owner), &mut |_, _, _| panic!("chown"));
+    assert!(refused.is_err());
+    let mode = std::fs::metadata(&elsewhere)
+        .expect("meta")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
+
+/// Catches a helper run that skips the preparation of its state directory (the start-up
+/// sweep builds its own, apart from the unpack and give helpers): every helper's
+/// directory, whether run by the sweep or by an unpack, is `0700` and the running user's
+/// when `crun` starts (a root daemon's is the job user's, which `crun` runs as; here it is
+/// this user's), so no other account can use it.
+#[tokio::test]
+async fn every_helpers_state_directory_is_private_to_the_ids_crun_runs_as() {
+    let dir = scratch("helper-state-dir");
+    let scratch = dir.join("scratch");
+    let images = scratch.join("oci-images");
+    let runtime = scripted_runtime(&dir, &images, "never");
+    let config = OciConfig {
+        runtime,
+        ..config(&dir, true)
+    };
+    // A stage a killed daemon left: the next start's sweep runs a helper to remove it.
+    std::fs::create_dir_all(images.join(".stage-aa-1-0")).expect("stage");
+    let oci = Oci::on(
+        &config,
+        Scripted::new(Ok(vec!["0.tar".to_owned()])),
+        &scratch,
+        "/actions",
+        "x86_64",
+    )
+    .expect("started");
+    oci.check_pinned(&pinned()).await.expect("unpacked");
+    let me = rustix::process::getuid().as_raw().to_string();
+    let seen = runs(&dir);
+    let dirs: Vec<&String> = seen.iter().filter(|l| l.starts_with("dir ")).collect();
+    // The sweep's helper, the give helper (a rootless daemon) or none, the unpack's.
+    assert!(dirs.len() >= 2, "{seen:?}");
+    for line in dirs {
+        let words: Vec<&str> = line.split(' ').collect();
+        assert_eq!(words[1], "700", "{line}");
+        assert_eq!(words[2], me, "{line}");
+    }
+}
+
 /// Catches a failed unpack reported as success, a fetch's blobs kept after it, and the
-/// failure reported without the helper's words. The runtime that exits 1 fails the unpack
-/// and the removal of its stage alike; the removal's failure does not hide the unpack's.
+/// failure reported without the helper's words. The runtime fails the unpack and the
+/// removal of its stage alike (and lets the hand-over of the stage through); the removal's
+/// failure does not hide the unpack's.
 #[tokio::test]
 async fn a_failed_unpack_is_reported_and_leaves_no_blobs() {
     let dir = scratch("image-unpack-fails");
     let scratch = dir.join("scratch");
+    let runtime = scripted_runtime(
+        &dir,
+        &scratch.join("oci-images"),
+        "helper-unpack-*|helper-rm-*",
+    );
     let oci = Oci::on(
-        &config(&dir, false),
+        &OciConfig {
+            runtime,
+            ..config(&dir, true)
+        },
         Scripted::new(Ok(vec!["0.tar".to_owned()])),
         &scratch,
         "/actions",

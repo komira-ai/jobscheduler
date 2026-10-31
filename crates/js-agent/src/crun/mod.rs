@@ -32,8 +32,30 @@
 //!
 //! `crun run` is a foreground child of the agent, one thread each ([`Running`]), so the
 //! runtime keeps its containers in memory: a container exists from its creation to its
-//! [`Runtime::remove`]. A restarted agent finds none (labels in a file, a sweep and the
-//! lost-run path are P12b's).
+//! [`Runtime::remove`], and [`Runtime::list_labelled`] lists those and no others. A
+//! restarted agent finds none: `crun run` died with the process that started it.
+//!
+//! # Labels, the sweep and the lost run
+//!
+//! What a dead process leaves is files, and the runtime keeps a ledger of them: before a
+//! lease's first directory is made, a sidecar file in `<scratch>/oci-labels` records the
+//! agent's id, the run id, the lease's name and the container's labels (see
+//! [`SweepReport`] and the module `ledger`), and it is removed after the last of the lease
+//! is. [`CrunRuntime::open`] sweeps: it removes every lease whose sidecar names this
+//! agent (the container's state, the cgroup, the directories, then the sidecar) and keeps
+//! a [`SweepReport`] of what it did ([`CrunRuntime::swept`]). A sidecar of another agent,
+//! or one that is not well formed, is left alone and reported, so two agents on one host
+//! never remove each other's leases. A lease with no sidecar is not this runtime's.
+//!
+//! A sweep that cannot remove a lease keeps its sidecar, and the next start tries again.
+//! A single leftover is removed by its run id with [`CrunRuntime::remove_orphan`] (and
+//! [`Runtime::remove`] of a handle the runtime does not hold does the same).
+//!
+//! The run of a swept lease is lost, not adopted: the restarted agent lists no container,
+//! so [`Lifecycle::adopt`](crate::lifecycle::Lifecycle::adopt) holds nothing, the agent's
+//! first beat lists no run, and the lease server gives up the lease the dead process held
+//! (at once when the new process names its predecessor stopped, after the handover grace
+//! otherwise) and runs the work again from the farm's rerun budget.
 //!
 //! # Images
 //!
@@ -54,15 +76,26 @@
 //! [`Exit::oom_killed`](crate::lifecycle::Exit::oom_killed) set.
 //!
 //! A container that did not run to an exit (`crun` or the init reported an error) polls as
-//! exited with code 126; the words are in the lease's `crun.log` and init report until the
-//! log tail (P12c) carries them.
+//! exited with code 126, and the words they gave end its standard error tail.
+//!
+//! # Logs
+//!
+//! `crun run`'s output is captured by js-contain: two capped files in the lease and a ring
+//! of the last bytes of each stream, whatever the job prints and however slowly anything
+//! reads it. [`Runtime::log_tail`] gives the ring of an ended container as text (each
+//! stream at most the wire's limit, `truncated` when the job wrote more than that), and
+//! keeps it with the end, so it can be read again. A container never started has an empty
+//! tail; one still running has what it wrote so far.
 //!
 //! # Not here
 //!
 //! No network (a job has loopback only; `check_egress` has nothing to check), no GPUs
-//! (`supports_gpus` is false and a start naming one is refused), no host jobs, no
-//! read-back of the container's mounts, and no log tail.
+//! (`supports_gpus` is false and a start naming one is refused), no host jobs and no
+//! read-back of the container's mounts.
 
+mod ledger;
+#[cfg(test)]
+mod ledger_tests;
 mod spec;
 #[cfg(test)]
 mod tests;
@@ -73,6 +106,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use js_agent_wire::LogTail;
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
@@ -87,7 +121,9 @@ use crate::lifecycle::{
     Body, Exit, FilesRoot, Found, Prefetcher, Prepared, PullFuture, RunHandle, RunSpec, Runtime,
     RuntimeError, Status, Ticket, label,
 };
-use spec::{container_spec, exit_of, pinned};
+use ledger::{Entry, Ledger, Read};
+pub use ledger::{Failed, LedgerError, Left, Removed, SweepReport};
+use spec::{container_spec, ctr_of, end_of, log_tail_of, not_run_words, pinned};
 
 /// How long a pull and unpack of one image may take before it counts as failed.
 pub const PULL_LIMIT: Duration = Duration::from_secs(30 * 60);
@@ -216,6 +252,9 @@ pub enum CrunError {
     /// thread, or no descriptor, or no pull thread asked for).
     #[error("the threads of the crun runtime: {0}")]
     Threads(#[from] io::Error),
+    /// The directory of the leases' labels could not be made or listed.
+    #[error("the directory of the leases' labels {0}")]
+    Ledger(#[from] LedgerError),
 }
 
 /// Why a run could not be made into a container.
@@ -258,8 +297,8 @@ enum State {
     Created,
     /// `crun run` runs (or has ended and not been read).
     Running { run: Running, since_ms: u64 },
-    /// Ended, as read once.
-    Ended(Exit),
+    /// Ended, as read once: the exit, and the tail of what the run wrote.
+    Ended(Exit, LogTail),
 }
 
 /// One container.
@@ -286,6 +325,8 @@ pub struct CrunRuntime {
     files: Option<FilesRoot>,
     hooks: Hooks,
     runs: BTreeMap<String, Run>,
+    ledger: Ledger,
+    swept: SweepReport,
 }
 
 impl std::fmt::Debug for CrunRuntime {
@@ -346,12 +387,13 @@ impl CrunRuntime {
             path: configs.clone(),
             why,
         })?;
+        let ledger = Ledger::open(&settings.scratch, &settings.host_id)?;
         let pulling = Arc::clone(&oci);
         let limit = hooks.pull_limit;
         let pulls = Prefetcher::new(settings.pull_threads, move |image| {
             pull(Arc::clone(&pulling), image, limit)
         })?;
-        Ok(Self {
+        let mut runtime = Self {
             oci,
             pulls,
             rt,
@@ -361,7 +403,83 @@ impl CrunRuntime {
             files: settings.files,
             hooks,
             runs: BTreeMap::new(),
-        })
+            ledger,
+            swept: SweepReport::default(),
+        };
+        // No container of this process exists yet, and one of an earlier process of this
+        // agent cannot run: its leases are leftovers.
+        runtime.swept = runtime.sweep()?;
+        Ok(runtime)
+    }
+
+    /// What the sweep at [`CrunRuntime::open`] did.
+    #[must_use]
+    pub fn swept(&self) -> &SweepReport {
+        &self.swept
+    }
+
+    /// Removes what an earlier process of this agent left for the run `run_id` (the
+    /// lease's container state, cgroup and directories, and its sidecar). Returns whether
+    /// there was a lease to remove. A run this process holds is not an orphan: use
+    /// [`Runtime::remove`].
+    ///
+    /// # Errors
+    /// The run is held by this process, its sidecar is another agent's or is not well
+    /// formed (it is left alone), or the removal failed (the sidecar stays, and the call
+    /// can be made again).
+    pub fn remove_orphan(&mut self, run_id: &str) -> Result<bool, RuntimeError> {
+        let name = container_name(&self.host_id, run_id)
+            .map_err(|_| RuntimeError::new(Fault::Name(run_id.to_owned()).to_string()))?;
+        if self.runs.contains_key(&name) {
+            return Err(RuntimeError::new(format!("run {run_id} is not an orphan")));
+        }
+        self.remove_leftover(&name)
+            .map_err(|why| RuntimeError::new(format!("remove the leftovers of {name}: {why}")))
+    }
+
+    /// [`CrunRuntime::swept`]'s sweep: every lease of this agent in the ledger.
+    fn sweep(&self) -> Result<SweepReport, CrunError> {
+        Ok(self.ledger.sweep(|entry| self.tear_down(&entry.name))?)
+    }
+
+    /// Removes the lease `name` of an earlier process, if the ledger holds it as this
+    /// agent's. Returns whether it did.
+    fn remove_leftover(&self, name: &str) -> Result<bool, String> {
+        match self.ledger.read(name) {
+            None => Ok(false),
+            Some(Read::Mine(entry)) => {
+                self.ledger
+                    .discard(&entry, |entry| self.tear_down(&entry.name))?;
+                Ok(true)
+            }
+            Some(Read::Foreign(entry)) => Err(format!("it belongs to agent {:?}", entry.agent)),
+            Some(Read::Malformed(why)) => Err(format!("its sidecar is not well formed: {why}")),
+        }
+    }
+
+    /// Removes everything the lease `name` made: what still runs in its cgroup, the
+    /// container's state, the cgroup and the directories. What is not there is skipped.
+    fn tear_down(&self, name: &str) -> Result<(), String> {
+        let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
+        let lease = self.oci.lease_dirs(name);
+        let (has_cgroup, has_dir) = (cgroup.dir().exists(), lease.dir.exists());
+        if has_cgroup {
+            // A process the dead agent's keeper did not reach; the removals below retry.
+            let _ = cgroup.kill();
+        }
+        if has_dir {
+            step("delete the container", self.oci.remove(name))?;
+        }
+        if has_cgroup {
+            step("remove the lease's cgroup", cgroup.remove())?;
+        }
+        if has_dir {
+            step(
+                "remove the lease directory",
+                js_contain::remove::remove_tree(&lease.dir),
+            )?;
+        }
+        Ok(())
     }
 
     /// [`Runtime::prepare`], waiting for the fetch to end: `Ready` or `Failed`. For a
@@ -447,16 +565,23 @@ impl CrunRuntime {
         let lease = self.oci.lease_dirs(&name);
         let mut container = container_spec(&name, spec, &image, &lease, cgroup.name());
         config.apply(args, &mut container)?;
-        if let Err(fault) = self.make_resources(spec, &container, &lease, &cgroup) {
-            // What the failed step left; none of it is a container.
-            let _ = cgroup.remove();
-            let _ = js_contain::remove::remove_tree(&lease.dir);
-            return Err(fault);
-        }
         let now = (self.hooks.now_ms)();
         let mut labels = spec.labels.clone();
         labels.insert(label::AGENT.to_owned(), self.host_id.clone());
         labels.insert(label::CREATED_MS.to_owned(), now.to_string());
+        // Before the first thing the sidecar names is made (see the module `ledger`).
+        let entry = Entry::new(&self.host_id, &spec.run_id, &name, &labels);
+        self.ledger
+            .record(&entry)
+            .map_err(|why| Fault::step("record the lease's labels", &why))?;
+        if let Err(fault) = self.make_resources(spec, &container, &lease, &cgroup) {
+            // What the failed step left; none of it is a container. The sidecar goes with
+            // it, or stays for the next sweep when some of it cannot be removed.
+            let _ = self
+                .ledger
+                .discard(&entry, |entry| self.tear_down(&entry.name));
+            return Err(fault);
+        }
         self.runs.insert(
             name.clone(),
             Run {
@@ -546,17 +671,28 @@ impl CrunRuntime {
         };
         let ended = match &run.state {
             State::Created => return Status::Running,
-            State::Ended(exit) => return Status::Exited(*exit),
+            State::Ended(exit, _) => return Status::Exited(*exit),
             State::Running { run: running, .. } if running.try_end().is_none() => {
                 return Status::Running;
             }
-            State::Running { run: running, .. } => rt.block_on(oci.ended(&run.spec, running)),
+            State::Running { run: running, .. } => {
+                // The drain of the streams is over once `ended` returns: what it kept is
+                // all the run wrote.
+                let ended = rt.block_on(oci.ended(&run.spec, running));
+                (ended, running.tail())
+            }
         };
-        let oom = run.cgroup.oom_outcome(run.cap, run.backstop).ok().flatten();
-        let exit = exit_of(ended, oom.as_ref());
-        run.state = State::Ended(exit);
+        let (ended, captured) = ended;
+        let tail = log_tail_of(&captured, not_run_words(&ended));
+        let exit = end_of(ended, &run.cgroup, run.cap, run.backstop);
+        run.state = State::Ended(exit, tail);
         Status::Exited(exit)
     }
+}
+
+/// `result`, with the step that failed named.
+fn step<T>(what: &str, result: Result<T, impl std::fmt::Display>) -> Result<T, String> {
+    result.map_err(|why| format!("{what}: {why}"))
 }
 
 /// Makes the new directory `dir` with the mode `0755` whatever the umask is, setting the mode
@@ -665,10 +801,18 @@ impl Runtime for CrunRuntime {
             .map_err(|_| RuntimeError::new(format!("{} still runs after its kill", spec.name)))
     }
 
+    /// Removes the container and everything its lease made. A handle this process does not
+    /// hold is a leftover of an earlier process: it is removed if the ledger holds it as
+    /// this agent's, nothing happens if the ledger does not know it, and the call fails
+    /// (and changes nothing) if its sidecar is another agent's or is not well formed.
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         let (rt, oci, kill_wait) = (&self.rt, &self.oci, self.hooks.kill_wait);
         let Some(run) = self.runs.get_mut(&id.0) else {
-            return Ok(());
+            // Not held by this process: the leftover of an earlier one, if the ledger has
+            // it, and nothing otherwise.
+            return self.remove_leftover(&id.0).map(|_| ()).map_err(|why| {
+                RuntimeError::new(format!("remove the leftovers of {}: {why}", id.0))
+            });
         };
         let failed =
             |what: &str, why: &dyn std::fmt::Display| RuntimeError::new(format!("{what}: {why}"));
@@ -693,6 +837,9 @@ impl Runtime for CrunRuntime {
         {
             return Err(failed("remove the lease directory", &why));
         }
+        self.ledger
+            .forget(&id.0)
+            .map_err(|why| failed("remove the lease's sidecar", &why))?;
         self.runs.remove(&id.0);
         Ok(())
     }
@@ -707,7 +854,7 @@ impl Runtime for CrunRuntime {
                 labels: run.labels.clone(),
                 running_ms: match &run.state {
                     State::Running { since_ms, .. } => now.saturating_sub(*since_ms),
-                    State::Created | State::Ended(_) => 0,
+                    State::Created | State::Ended(..) => 0,
                 },
                 never_started: matches!(run.state, State::Created),
             })
@@ -718,9 +865,18 @@ impl Runtime for CrunRuntime {
         false
     }
 
+    fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
+        Ok(self.runs.get(&id.0).map(|run| match &run.state {
+            State::Created => LogTail::default(),
+            // Read before the end was read: what the run has written so far.
+            State::Running { run, .. } => log_tail_of(&run.tail(), None),
+            State::Ended(_, tail) => tail.clone(),
+        }))
+    }
+
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         let run = self.runs.get(&id.0)?;
-        let ctr = run.cgroup.dir().join("ctr");
+        let ctr = ctr_of(run.cgroup.dir());
         matches!(run.state, State::Running { .. })
             .then_some(ctr)
             .filter(|ctr| ctr.is_dir())
