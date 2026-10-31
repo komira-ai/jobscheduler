@@ -1,0 +1,83 @@
+<h1>Install</h1>
+<p class="lede">The lease server, the <code>js</code> client and the agent are Rust binaries built by the repository's release workflow. There is no package repository, no container image and no installer. The Linux binaries are static (musl, x86_64); the macOS ones are for Apple silicon and are not codesigned or notarized. There is no lease server for macOS.</p>
+
+<div class="notice notice-warn"><p><strong>The agent's Debian package is not published.</strong> The repository builds it with nfpm, checks what it contains and attests it, as a workflow artifact kept for seven days. That workflow publishes no release, no package repository and no registry. A host gets the agent from the release archive and the unit in <code>packaging/js-agent</code>, as the steps below say.</p></div>
+
+<ol class="steps">
+  <li>
+    <h3>Take the archives <span class="tag tag-ok">works today</span></h3>
+    <p>Every push to <code>main</code> that changes code that ships is released as the next version, after the checks of <code>ci</code> other than the macOS job have passed. A <a href="https://github.com/komira-ai/jobscheduler/releases">release</a> for version <code>X.Y.Z</code> carries:</p>
+    <div class="table-wrap"><table>
+    <thead><tr><th>Archive</th><th>Holds</th></tr></thead>
+    <tbody>
+    <tr><td><code>js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code></td><td>the lease server</td></tr>
+    <tr><td><code>js-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the <code>js</code> client</td></tr>
+    <tr><td><code>js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the agent</td></tr>
+    <tr><td><code>js-bundle-X.Y.Z-...</code> for both targets</td><td>the tool that packs, prints and verifies darwin bundles</td></tr>
+    <tr><td><code>js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz</code>, <code>js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the root helper and the pf anchor installer a Mac node installs</td></tr>
+    <tr><td><code>SHA256SUMS</code></td><td>the SHA-256 of the nine archives</td></tr>
+    </tbody></table></div>
+    <p>Each archive unpacks to a directory named like the archive without <code>.tar.gz</code>, and holds the binary and <code>LICENSE</code>.</p>
+  </li>
+  <li>
+    <h3>Verify them <span class="tag tag-ok">works today</span></h3>
+    <p>This needs the GitHub CLI (<code>gh</code>), signed in. The checksum proves the download is intact; the attestation proves the file was built from this repository by the <code>release</code> workflow, from <code>main</code>, at the commit the tag names.</p>
+    <div class="code"><pre><span class="p">$</span> gh release download vX.Y.Z -R komira-ai/jobscheduler -p 'js-lease-server-*-x86_64-unknown-linux-musl.tar.gz' -p SHA256SUMS
+<span class="p">$</span> sha256sum -c --ignore-missing SHA256SUMS
+<span class="p">$</span> gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R komira-ai/jobscheduler \
+    --signer-workflow komira-ai/jobscheduler/.github/workflows/release.yml \
+    --source-ref refs/heads/main \
+    --source-digest "$(git rev-parse vX.Y.Z^{commit})"</pre></div>
+    <p>For the client use <code>-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz'</code>, and for the agent <code>-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'</code>.</p>
+    <p class="source-note">From <code>docs/release.md</code>, "Downloading and verifying". <code>git rev-parse</code> needs a clone with the tags.</p>
+  </li>
+  <li>
+    <h3>Start the lease server <span class="tag tag-ok">works today</span></h3>
+    <p>The server needs a token for clients (a regular file owned by the server's user, mode 0600 or 0400, one token of printable ASCII, at least 32 bytes), a state file, and a pool file for the agents that will join. The paths below are examples. The first start says <code>--boot initialise</code>, which may create the state file; every later start says <code>--boot resume</code>, which refuses a missing one.</p>
+    <div class="code"><pre><span class="c"># agent-pool.toml: the pool the agents join</span>
+name = "hosts"
+class = "whole-node"
+max_machines = 4
+[shape]
+cpu_millis = 8000
+memory_bytes = 17179869184</pre></div>
+    <div class="code"><pre><span class="p">$</span> js-lease-server --listen 127.0.0.1:7300 --state-file /var/lib/jobscheduler/leases.toml --boot initialise \
+    --token-file /etc/jobscheduler/client-token \
+    --agent-pool-config /etc/jobscheduler/agent-pool.toml \
+    --agent-token-file /etc/jobscheduler/join-tokens</pre></div>
+    <p>The pool's join tokens are in the file after <code>--agent-token-file</code>, one per line, each as strong as the client token, in an owner-only file. The default listen address is <code>127.0.0.1:7300</code>; off the loopback the server needs both <code>--tls-cert</code> and <code>--tls-key</code> and refuses to start without them. A start the server refuses prints the flag at fault and exits with status 2.</p>
+    <p>There is one client token and so one trust domain: share it only with parties that trust each other with every host of the pool.</p>
+    <p class="source-note">From the module documentation of <code>crates/js-lease-server/src/lib.rs</code> (the flags table and "Who may do what") and <code>crates/js-lease-server/src/agent_pool.rs</code> (the keys of the pool file). The server's flag reference is that documentation; the repository has no page that renders it.</p>
+  </li>
+  <li>
+    <h3>Install the agent on a Linux host <span class="tag tag-ok">works today</span></h3>
+    <p>The agent runs as root, with a rootful Docker or Podman beside it, and refuses to start under <code>ProtectSystem=</code>, <code>PrivateMounts=</code> or <code>PrivatePIDs=</code>. The unit runs <code>/usr/bin/js-agent</code> and reads <code>/usr/lib/tmpfiles.d/js-agent.conf</code>. Put the binary at the first path, <code>js-agent.service</code> in <code>/usr/lib/systemd/system</code> and <code>tmpfiles.conf</code> from <code>packaging/js-agent</code> at the second, where the Debian package puts them. Then, as root:</p>
+    <ol>
+      <li>make the directories: <code>systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf</code>;</li>
+      <li>write the pool's join token to <code>/etc/js-agent/token</code>, mode 0600;</li>
+      <li>mount a disk of its own at <code>/var/lib/js-agent/scratch</code> (the agent refuses a state root on the same disk as the scratch root);</li>
+      <li><code>systemctl edit js-agent</code>: clear <code>ExecStart=</code> and set the whole line again with this host's <code>--server</code> and <code>--pool</code> (the shipped <code>--server</code> is a placeholder the agent refuses);</li>
+      <li><code>systemctl enable --now js-agent</code>.</li>
+    </ol>
+    <div class="notice notice-warn"><p><strong>A missing mount fails silently.</strong> With the mount of step 3 absent, step 5 exits 0 and starts nothing; <code>systemctl status js-agent</code> shows the unmet <code>ConditionPathIsMountPoint</code>.</p></div>
+    <p>The agent reads no environment variable and no configuration file: its flags are the <code>ExecStart</code> line. It exits 2 for a wrong flag or file, a job engine it cannot use, or a server that refuses the host for good, and the unit restarts it every 30 seconds, so a refusal is read from the journal. <code>--server</code> is <code>https://host:port</code>; <code>http://</code> is accepted only for <code>localhost</code>, <code>127.0.0.0/8</code> and <code>::1</code>. The unit's <code>--runtime docker</code> runs jobs through the engine at <code>--container-bin</code>. A second unit, <code>js-agent-crun.service</code>, runs jobs with <code>crun</code> on a farm node; its header names a host setup script that this repository does not contain.</p>
+    <p class="source-note">From <code>packaging/js-agent/js-agent.service</code> (its header), <code>packaging/js-agent/nfpm.yaml</code>, <code>.github/workflows/js-agent-deb.yml</code> (its header) and the flags table of <code>crates/js-agent/src/lib.rs</code>.</p>
+  </li>
+  <li>
+    <h3>Lease a host <span class="tag tag-ok">works today</span></h3>
+    <p>With the agent heard by the server, a client leases the host:</p>
+    <div class="code"><pre><span class="p">$</span> js --server http://127.0.0.1:7300 --token-file ~/.js-token lease acquire --class whole-node --max-wall 2h
+<span class="p">$</span> js --server http://127.0.0.1:7300 --token-file ~/.js-token lease list</pre></div>
+    <p><code>acquire</code> prints <code>lease &lt;id&gt; host &lt;host&gt; expires &lt;ms&gt;</code>. A whole-node lease is answered <code>pending</code> until the host's agent reports it ready, and the client looks at the list every two seconds for at most <code>--wait-pending</code>, 60 seconds by default, then releases a lease that is still pending. The token file is a regular file owned by you, mode 0600 or 0400.</p>
+    <p class="source-note">From the module documentation of <code>crates/js-cli/src/lib.rs</code>.</p>
+  </li>
+</ol>
+
+<h2 id="not-shipped">What is not shipped</h2>
+<ul>
+  <li><span class="tag tag-planned">none</span> A published package or container image of the agent, the lease server or the client.</li>
+  <li><span class="tag tag-planned">none</span> A lease server for macOS.</li>
+  <li><span class="tag tag-planned">not proven</span> That the macOS archives come out byte-identical when a partly published release is re-run.</li>
+  <li><span class="tag tag-planned">not available yet</span> The agent flag <code>--allow-host-jobs</code>: it is refused at start.</li>
+</ul>
+<p class="source-note">Sources: <code>docs/release.md</code> ("What is released" and the note on the macOS archives) and the flags table of <code>crates/js-agent/src/lib.rs</code>.</p>
