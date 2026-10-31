@@ -12,8 +12,6 @@
 //! either. A record whose schema is newer than [`SCHEMA`] is read-only: it is not loaded, and
 //! it is not overwritten.
 
-#![allow(unused)] // stub bodies: the next commit writes them
-
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -147,7 +145,14 @@ pub struct DirStat {
 /// # Errors
 /// The path cannot be looked at.
 pub fn system_stat(path: &Path) -> io::Result<DirStat> {
-    unimplemented!()
+    let meta = fs::symlink_metadata(path)?;
+    Ok(DirStat {
+        is_symlink: meta.file_type().is_symlink(),
+        is_dir: meta.is_dir(),
+        uid: meta.uid(),
+        gid: meta.gid(),
+        mode: meta.mode() & 0o7777,
+    })
 }
 
 /// Why the state directory is refused.
@@ -180,7 +185,20 @@ pub enum DirProblem {
 /// # Errors
 /// The first [`DirProblem`] it shows.
 pub fn check_dir(stat: &DirStat) -> Result<(), DirProblem> {
-    unimplemented!()
+    if stat.is_symlink {
+        Err(DirProblem::Symlink)
+    } else if !stat.is_dir {
+        Err(DirProblem::NotDirectory)
+    } else if (stat.uid, stat.gid) != (0, 0) {
+        Err(DirProblem::Owner {
+            uid: stat.uid,
+            gid: stat.gid,
+        })
+    } else if stat.mode != 0o700 {
+        Err(DirProblem::Mode { mode: stat.mode })
+    } else {
+        Ok(())
+    }
 }
 
 /// Why the state could not be used.
@@ -271,7 +289,23 @@ impl Held {
         dir: &Path,
         stat: &dyn Fn(&Path) -> io::Result<DirStat>,
     ) -> Result<Held, StateError> {
-        unimplemented!()
+        let seen = stat(dir).map_err(at(dir))?;
+        check_dir(&seen).map_err(|problem| StateError::Dir {
+            path: dir.to_owned(),
+            problem,
+        })?;
+        let path = dir.join(LOCK_FILE);
+        let lock = open_lock_file(&path).map_err(at(&path))?;
+        flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|errno| {
+            StateError::Lock {
+                path,
+                source: errno.into(),
+            }
+        })?;
+        Ok(Held {
+            dir: dir.to_owned(),
+            lock,
+        })
     }
 
     /// The record's path.
@@ -286,7 +320,33 @@ impl Held {
     /// [`StateError::Newer`] for a newer schema, [`StateError::Corrupt`] for anything that is
     /// not a record of this one, [`StateError::Io`] if the file cannot be read.
     pub fn load(&self) -> Result<Option<Record>, StateError> {
-        unimplemented!()
+        let path = self.record_path();
+        let mut bytes = Vec::new();
+        match File::open(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(at(&path)(source)),
+            Ok(file) => file
+                .take(RECORD_MAX + 1)
+                .read_to_end(&mut bytes)
+                .map_err(at(&path))?,
+        };
+        if bytes.len() as u64 > RECORD_MAX {
+            return Err(StateError::Corrupt(format!("more than {RECORD_MAX} bytes")));
+        }
+        let header: Header =
+            serde_json::from_slice(&bytes).map_err(|e| StateError::Corrupt(e.to_string()))?;
+        match header.schema.cmp(&SCHEMA) {
+            std::cmp::Ordering::Greater => Err(StateError::Newer {
+                found: header.schema,
+            }),
+            std::cmp::Ordering::Less => Err(StateError::Corrupt(format!(
+                "schema {} is not one this hook wrote",
+                header.schema
+            ))),
+            std::cmp::Ordering::Equal => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| StateError::Corrupt(e.to_string())),
+        }
     }
 
     /// Makes `record` the record: written, synced, renamed over the old one, the directory
@@ -306,7 +366,21 @@ impl Held {
     /// # Errors
     /// [`StateError::Io`].
     pub fn write_temp(&self, record: &Record) -> Result<(), StateError> {
-        unimplemented!()
+        let temp = self.dir.join(TEMP_FILE);
+        let mut body = serde_json::to_vec_pretty(record)
+            .map_err(io::Error::other)
+            .map_err(at(&temp))?;
+        body.push(b'\n');
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temp)
+            .map_err(at(&temp))?;
+        file.write_all(&body)
+            .and_then(|()| file.sync_all())
+            .map_err(at(&temp))
     }
 
     /// The second half of a save: the temporary file renamed over the record, the directory
@@ -315,7 +389,11 @@ impl Held {
     /// # Errors
     /// [`StateError::Io`], for instance when there is no temporary file.
     pub fn commit(&self) -> Result<(), StateError> {
-        unimplemented!()
+        let record = self.record_path();
+        fs::rename(self.dir.join(TEMP_FILE), &record).map_err(at(&record))?;
+        File::open(&self.dir)
+            .and_then(|dir| dir.sync_all())
+            .map_err(at(&self.dir))
     }
 }
 

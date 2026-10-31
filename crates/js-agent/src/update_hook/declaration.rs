@@ -19,8 +19,6 @@
 //! both written by the hook and the state directory is the one write path that is not a
 //! release.
 
-#![allow(unused)] // stub bodies: the next commit writes them
-
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -105,7 +103,24 @@ impl Declaration {
     /// # Errors
     /// [`DeclarationError`]: see [`Declaration::read`].
     pub fn parse(text: &str) -> Result<Declaration, DeclarationError> {
-        unimplemented!()
+        let wire: Wire = toml::from_str(text)?;
+        let declaration = Declaration {
+            state_dir: wire.state_dir,
+            units: wire.hook.units,
+            write_paths: wire.hook.write_paths,
+            timeouts: wire.hook.timeout_secs,
+        };
+        let mut paths = std::iter::once(&declaration.state_dir).chain(&declaration.write_paths);
+        if paths.any(|path| !path.is_absolute()) {
+            return Err(DeclarationError::Relative);
+        }
+        if declaration.units.is_empty() {
+            return Err(DeclarationError::NoUnits);
+        }
+        if declaration.release_dirs().next().is_none() {
+            return Err(DeclarationError::NoReleaseDir);
+        }
+        Ok(declaration)
     }
 
     /// The directories a release may lie under: the write paths other than the state

@@ -7,8 +7,6 @@
 //! the reason `state_invalid` and changes nothing. Where the record and the system disagree
 //! about what was done, the system is believed; that is a step's decision and not a rule here.
 
-#![allow(unused)] // stub bodies: the next commit writes them
-
 use std::path::{Component, Path, PathBuf};
 
 use super::declaration::Declaration;
@@ -83,7 +81,12 @@ pub enum Invalid {
 /// Whether `path` is spelt the way it would be after canonicalising it lexically: absolute,
 /// no `.` or `..`, no doubled or trailing slash.
 fn is_plain(path: &Path) -> bool {
-    unimplemented!()
+    let rebuilt: PathBuf = path.components().collect();
+    path.is_absolute()
+        && path
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+        && rebuilt.as_os_str() == path.as_os_str()
 }
 
 /// A release path: plain, and strictly below one of the declared release directories.
@@ -92,17 +95,29 @@ fn release_path(
     path: &Path,
     declaration: &Declaration,
 ) -> Result<(), Invalid> {
-    unimplemented!()
+    let below = declaration
+        .release_dirs()
+        .any(|dir| path.starts_with(dir) && path != dir);
+    if is_plain(path) && below {
+        Ok(())
+    } else {
+        Err(Invalid::Path { field })
+    }
 }
 
 /// A version string.
 fn is_version(text: &str) -> bool {
-    unimplemented!()
+    (1..=MAX_VERSION_LEN).contains(&text.len())
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'~' | b'-'))
 }
 
 /// A digest as the registry writes it.
 fn is_digest(text: &str) -> bool {
-    unimplemented!()
+    text.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 /// Runs every rule on `record`.
@@ -144,11 +159,76 @@ pub fn validate(
 
 /// The cordon's stamps against its mark and the declared cap.
 fn cordon(record: &Record, params: &Params) -> Result<(), Invalid> {
-    unimplemented!()
+    let cordon = &record.cordon;
+    if !cordon.placed {
+        return if (cordon.first_ms, cordon.expires_ms) == (0, 0) {
+            Ok(())
+        } else {
+            Err(Invalid::CordonStamps)
+        };
+    }
+    if cordon.first_ms == 0 || cordon.expires_ms < cordon.first_ms {
+        return Err(Invalid::CordonStamps);
+    }
+    let limit_ms = cordon
+        .first_ms
+        .saturating_add(params.cordon_max_secs.saturating_mul(1000))
+        .saturating_add(EXPIRY_SLACK_MS);
+    if cordon.expires_ms > limit_ms {
+        return Err(Invalid::CordonExpiry {
+            expires_ms: cordon.expires_ms,
+            limit_ms,
+        });
+    }
+    Ok(())
 }
 
 /// Each mark is written after the act it names, and an act follows the one before it: a mark
 /// set without the one it follows from cannot have been written by this hook.
 fn marks(record: &Record) -> Result<(), Invalid> {
-    unimplemented!()
+    let rb = &record.rb;
+    let rules = [
+        (
+            "link_moved",
+            record.link_moved,
+            "stop_begun",
+            record.stop_begun,
+        ),
+        (
+            "start_issued",
+            record.start_issued,
+            "link_moved",
+            record.link_moved,
+        ),
+        (
+            "verify_ok",
+            record.verify_ok,
+            "start_issued",
+            record.start_issued,
+        ),
+        ("rb.drained", rb.drained, "stop_begun", record.stop_begun),
+        ("rb.stop_begun", rb.stop_begun, "rb.drained", rb.drained),
+        (
+            "rb.link_restored",
+            rb.link_restored,
+            "stop_begun",
+            record.stop_begun,
+        ),
+        (
+            "rb.start_issued",
+            rb.start_issued,
+            "rb.link_restored",
+            rb.link_restored,
+        ),
+        (
+            "rb.hello_ok",
+            rb.hello_ok,
+            "rb.start_issued",
+            rb.start_issued,
+        ),
+    ];
+    match rules.iter().find(|(_, set, _, needed)| *set && !*needed) {
+        Some(&(mark, _, needs, _)) => Err(Invalid::Marks { mark, needs }),
+        None => Ok(()),
+    }
 }
