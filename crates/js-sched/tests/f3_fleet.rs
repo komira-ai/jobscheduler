@@ -17,7 +17,8 @@
 //! silent, and silent then back cordoned), F3.3 (a worker dies while draining; the
 //! scheduler's side), F3.4 (a paused drain whose leases end later), F3.7 (a node
 //! reboots while cordoned), F3.8 (capabilities change while cordoned), and a swarm that
-//! turns every kind of act on or off per seed. F3.5, F3.6 and F3.9 needed the rollout
+//! turns every kind of act on or off per seed, and F3.10 (asks under a core, which a
+//! worker that never measured charges a core each). F3.5, F3.6 and F3.9 needed the rollout
 //! driver, which is gone.
 //!
 //! Every test runs twice, under the booked rule (`<test>::booked_rule`) and under
@@ -52,8 +53,8 @@ use js_sim::{Chance, SimRng};
 use js_types::sched::{OperationId, WorkerId};
 
 use world::{
-    ANY, ARM, Act, DARWIN, GRACE, LINUX, NEVER, NEW_XCODE, OLD_XCODE, Swarm, WAIT, World,
-    XCODE_NEW, XCODE_OLD,
+    ANY, ARM, Act, DARWIN, GRACE, HALF_CORE, LINUX, NEVER, NEW_XCODE, OLD_XCODE, QUARTER_CORE,
+    Swarm, WAIT, World, XCODE_NEW, XCODE_OLD,
 };
 
 const SEEDS: u64 = 32;
@@ -449,6 +450,44 @@ fn caps_change_while_cordoned(seed: u64) -> World {
     w
 }
 
+/// F3.10: eight actions for the Mac that each ask for less than a core (half a core in
+/// even seeds, a quarter in odd ones), submitted a second apart and running 100 s. Under
+/// the booked rule the Mac (four cores) books all eight at once. Under placement by load a
+/// worker that never measured charges each lease at least a core, so the Mac, planned to
+/// 4,400 millicores, takes four and the other four wait for room, though the booked sizes
+/// would fit. The checker's reference holds the scheduler to that at every grant (its
+/// `load_reference` floors the charge); this scenario also states the count it reaches, so
+/// the floor is not only a property of the reference.
+fn small_asks(seed: u64) -> World {
+    let mut d = draws(seed);
+    let t = d.between(20, 60);
+    let size = if seed.is_multiple_of(2) {
+        HALF_CORE
+    } else {
+        QUARTER_CORE
+    };
+    let script = (0..8)
+        .map(|i| (t + i, Act::Submit(DARWIN, size, 100)))
+        .collect();
+    let w = World::new("f3_10", seed, script, Swarm::default()).run(t + 600, &mut |_| {});
+    // Before any of the eight finishes (they run 100 s), the grants so far.
+    let granted = ops_of(&w, DARWIN, t, t + 8)
+        .iter()
+        .filter(|id| {
+            let first = w.check.seen.grants.get(id).and_then(|g| g.first());
+            first.is_some_and(|(at, _, _)| *at < (t + 60) * MS)
+        })
+        .count();
+    let want = if booked::is_booked() { 8 } else { 4 };
+    if granted != want {
+        w.check.fail(
+            "F3.10",
+            &format!("{granted} of the eight asks under a core were granted at once, want {want}"),
+        );
+    }
+    w
+}
+
 /// Every kind of act, each on or off and at a rate the seed draws.
 fn swarm(seed: u64) -> World {
     let mut d = draws(seed);
@@ -488,6 +527,10 @@ const SCENARIOS: [(&str, Scenario); 7] = [
     ("f3_8", caps_change_while_cordoned),
     ("swarm", swarm),
 ];
+
+/// Scenarios that are not in the golden file: its hashes are the booked rule's traces and
+/// were written before they existed.
+const UNGOLDEN: [(&str, Scenario); 1] = [("f3_10", small_asks)];
 
 /// Runs `scenario` over `seeds`; each run checks itself as it goes.
 fn sweep(scenario: fn(u64) -> World, seeds: std::ops::Range<u64>) -> Vec<World> {
@@ -585,6 +628,15 @@ fn f3_swarm() {
         .any(|(_, _, via)| *via);
     assert!(by_uncordon, "no uncordon ever placed work");
 }
+
+/// Catches: the floor of a core a worker that never measured charges each lease missing
+/// from the scheduler (asks under a core packed past the Mac's planned cores: the
+/// reference refuses them at the grant and this count says four), or applied under the
+/// booked rule (which books the sizes as asked: eight).
+fn f3_10_asks_under_a_core() {
+    let worlds = sweep(small_asks, 0..SEEDS);
+    assert_eq!(worlds.len(), usize::try_from(SEEDS).expect("small"));
+}
 }
 
 #[test]
@@ -625,8 +677,9 @@ fn replay() {
         .expect("a number");
     let (_, scenario) = SCENARIOS
         .iter()
+        .chain(UNGOLDEN.iter())
         .find(|(n, _)| *n == name)
-        .expect("a scenario name: f3_1, f3_2, f3_3, f3_4, f3_7, f3_8 or swarm");
+        .expect("a scenario name: f3_1, f3_2, f3_3, f3_4, f3_7, f3_8, f3_10 or swarm");
     let w = booked::under(rule(), || scenario(seed));
     println!("{name} seed {seed}: trace hash {}", w.trace_hash());
 }
