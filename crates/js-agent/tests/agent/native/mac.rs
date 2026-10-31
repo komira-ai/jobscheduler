@@ -257,8 +257,7 @@ fn the_job_environment_steers_no_shell_because_there_is_none() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     // The job must have run first: a command line that never started would leave no marker
-    // either, and that is not the sandbox holding. The imported `ulimit` function returns
-    // success (its write is denied by the profile), so the shell goes on to exec the job.
+    // either, and that is not the sandbox holding.
     assert!(
         out.status.success() && stdout.contains("done"),
         "the job did not run: {:?}\nstdout: {stdout}\nstderr: {stderr}",
