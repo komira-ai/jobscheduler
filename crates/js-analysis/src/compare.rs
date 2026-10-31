@@ -193,9 +193,16 @@ fn binomial(n: usize, k: usize) -> u128 {
 #[must_use]
 pub fn permutation_test(base: &[f64], arm: &[f64]) -> Permutation {
     let (n0, n1) = (base.len(), arm.len());
-    let values: Vec<f64> = base.iter().chain(arm).copied().collect();
-    let observed = mean(arm) - mean(base);
-    let scale = values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    // Values are shifted to start at zero (a difference of means does not change) so the
+    // tie tolerance below is relative to the spread of the data, not to its offset.
+    let low = base
+        .iter()
+        .chain(arm)
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let values: Vec<f64> = base.iter().chain(arm).map(|v| v - low).collect();
+    let observed = mean(&values[n0..]) - mean(&values[..n0]);
+    let scale = values.iter().fold(0.0_f64, |m, v| m.max(*v));
     let pool = Pool {
         total: values.iter().sum(),
         values,

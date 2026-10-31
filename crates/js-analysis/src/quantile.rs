@@ -1,6 +1,6 @@
 //! Quantiles of Student's t and chi-square, computed from the regularised incomplete beta
-//! and gamma functions and inverted by bisection. No tables: the results agree with the
-//! published ones to far more digits than a report prints.
+//! and gamma functions and inverted by bisection. No tables: the results agree with closed
+//! forms and published values to at least eight significant digits (pinned in the tests).
 
 use std::f64::consts::PI;
 

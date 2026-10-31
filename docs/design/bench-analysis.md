@@ -46,7 +46,8 @@ With the measured, available values x1..xn: `n`, `n_missing`, mean, median, stan
 - **95% interval of the mean** (needs n >= 2): `mean +- t * std / sqrt(n)` with
   `t = t(0.975, n-1)`. The quantile is computed (regularised incomplete beta, inverted by
   bisection), not looked up; it matches the tables: df 2 gives 4.303, 4 gives 2.776, 10 gives
-  2.228, 30 gives 2.042.
+  2.228, 30 gives 2.042, and closed forms and published values to at least eight significant
+  digits (pinned in the tests).
 - **95% interval of std/mean** (needs n >= 2 and a positive mean): the modified McKay
   approximation, a closed form, no resampling. With v = std/mean, df = n-1 and
   `u_hi`, `u_lo` the 0.975 and 0.025 quantiles of chi-square(df):
@@ -93,8 +94,11 @@ worked example below overlaps and differs.
   interval of the difference.
 - **Permutation cross-check**: the exact two-sided permutation test of the difference of means.
   All C(n0+n1, n0) splits of the pooled values are enumerated, up to 1,000,000 splits;
-  `p` = share of splits whose |difference| is at least the observed (a relative 1e-9 tolerance
-  absorbs summation order). Above the limit, 100,000 random splits are drawn from a fixed seed
+  `p` = share of splits whose |difference| is at least the observed (ties are taken up to 1e-9 of the
+  range of the pooled values: the values are first shifted to start at zero, which leaves every
+  difference of means unchanged, so the tolerance does not grow with the offset of the data. Two
+  distinct splits closer than 1e-9 of the range would be counted as tied; benchmark values do not
+  carry nine significant digits of difference, and the rounding of a sum is about 1e-16 of the range). Above the limit, 100,000 random splits are drawn from a fixed seed
   and `p = (hits+1)/(draws+1)`; the report says `exact` or `monte-carlo` and the split count.
 - **At n = 3 per arm the permutation test cannot reach 0.05**: there are C(6,3) = 20 splits, and
   the most extreme result has itself and its mirror image as extreme, so the smallest attainable p
