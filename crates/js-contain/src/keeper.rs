@@ -39,7 +39,9 @@ pub trait KeeperLauncher {
     /// is closed, writes `1` to the file `kill` up to `tries` times a second apart. It must
     /// ignore SIGHUP, SIGINT and SIGTERM and write [`KeeperLauncher::ready`] to its stdout
     /// once it does. The handle sets its stdin and stdout to pipes, its stderr to null
-    /// and its process group; the launcher sets the rest.
+    /// and its process group; the launcher sets the rest, except that a launcher used with
+    /// [`Keeper::watch_as`] passes only the arguments and the descriptors: the drop erases
+    /// the environment and the working directory the launcher set.
     fn command(&self, kill: &Path, tries: u32) -> Command;
 
     /// What the keeper writes to its stdout when it runs as a keeper.
@@ -75,6 +77,9 @@ impl Keeper {
     /// out on purpose). The agent's `CrunRuntime` starts no keeper: the agent writes the
     /// lease's `cgroup.kill` itself.
     ///
+    /// Start-up does not check that the job user can write the `kill` file: a keeper that
+    /// cannot write it starts, says it is ready and kills nothing.
+    ///
     /// # Errors
     /// As [`Keeper::watch`], and the drop failing in the child.
     pub fn watch_as(
@@ -108,8 +113,8 @@ impl Keeper {
     }
 }
 
-/// Sets up the keeper's command line after the launcher has: the drop to the job user
-/// (which clears the environment, so it comes before nothing that sets any), the pipes and
+/// Sets up the keeper's command line after the launcher has: the drop to the job user (which
+/// clears the environment and the working directory the launcher set), then the pipes and
 /// the process group.
 fn prepare(command: &mut Command, job: Option<&JobDrop>) {
     job.into_iter().for_each(|job| job.apply(command));
@@ -247,14 +252,21 @@ mod tests {
     /// Catches a drop that is built into the keeper's command line but never run in the
     /// child: the drop's `setgroups` needs privilege, so as an ordinary user the keeper fails
     /// to start with the kernel's refusal, and as root it starts (the same expression says
-    /// which, from whether this process is root).
+    /// which, from whether this process is root). Each CI leg proves a different half: the
+    /// ordinary-user leg that the drop runs in the child (it is refused), the root leg that
+    /// a drop to `nobody` succeeds.
     #[test]
     fn a_keeper_started_with_the_drop_runs_it_in_the_child() {
         let is_root = rustix::process::getuid().is_root();
-        let (uid, gid) = (
-            rustix::process::getuid().as_raw(),
-            rustix::process::getgid().as_raw(),
-        );
+        // A drop to root is refused, so root drops to `nobody`'s ids instead.
+        let (uid, gid) = if is_root {
+            (65534, 65534)
+        } else {
+            (
+                rustix::process::getuid().as_raw(),
+                rustix::process::getgid().as_raw(),
+            )
+        };
         let drop = JobDrop::new(Some((uid, gid)), Some("/usr/bin:/bin".as_ref()), 0).expect("drop");
         let started = Keeper::watch_as(&Stand::cat(), Path::new("/k"), Some(&drop));
         assert_eq!(started.is_ok(), is_root, "{started:?}");

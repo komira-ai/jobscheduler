@@ -355,8 +355,24 @@ impl Oci {
         cgroup_parent: &str,
         rust_arch: &str,
     ) -> Result<Arc<Self>, OciError> {
-        let daemon_uid = rustix::process::getuid().as_raw();
-        let ids = run_ids(config, daemon_uid, rustix::process::getgid().as_raw())?;
+        let daemon = (
+            rustix::process::getuid().as_raw(),
+            rustix::process::getgid().as_raw(),
+        );
+        Self::on_as(config, source, scratch, cgroup_parent, rust_arch, daemon)
+    }
+
+    /// [`Oci::on`] for a daemon whose uid and gid are `(daemon_uid, daemon_gid)` (the
+    /// process's own, except in a test, which cannot be root).
+    fn on_as(
+        config: &OciConfig,
+        source: Arc<dyn image::ImageSource>,
+        scratch: &Path,
+        cgroup_parent: &str,
+        rust_arch: &str,
+        (daemon_uid, daemon_gid): (u32, u32),
+    ) -> Result<Arc<Self>, OciError> {
+        let ids = run_ids(config, daemon_uid, daemon_gid)?;
         let job = crun::JobDrop::new(config.job_user, config.id_tool_path.as_deref(), daemon_uid);
         for program in [&config.runtime, &config.daemon] {
             if !program.is_file() {

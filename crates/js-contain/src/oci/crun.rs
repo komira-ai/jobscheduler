@@ -47,7 +47,7 @@ pub fn no_scrub(_: &mut std::process::Command) {}
 /// daemon's credentials is inherited). The drop is part of the backend: it does not
 /// depend on the caller's [`EnvScrub`]. The lease's keeper is started with the same drop
 /// ([`crate::keeper::Keeper::watch_as`]).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobDrop {
     uid: u32,
     gid: u32,
@@ -57,14 +57,18 @@ pub struct JobDrop {
 
 impl JobDrop {
     /// The drop for job user `(uid, gid)`, or `None` when this process is not root (a
-    /// user that is not root cannot change its ids, and runs `crun` as itself).
+    /// user that is not root cannot change its ids, and runs `crun` as itself) or the job
+    /// user is root by its uid or its gid: a drop to root would look like one and change
+    /// nothing, so it is refused here as `Oci::new` refuses it ([`SubidError::Root`]).
+    ///
+    /// [`SubidError::Root`]: crate::subids::SubidError::Root
     #[must_use]
     pub fn new(
         job: Option<(u32, u32)>,
         path: Option<&std::ffi::OsStr>,
         daemon_uid: u32,
     ) -> Option<Self> {
-        let (uid, gid) = job?;
+        let (uid, gid) = job.filter(|&(uid, gid)| uid != 0 && gid != 0)?;
         (daemon_uid == 0).then(|| Self {
             uid,
             gid,
@@ -617,6 +621,9 @@ mod tests {
         let path = std::ffi::OsStr::new("/id/tools");
         assert!(JobDrop::new(None, Some(path), 0).is_none());
         assert!(JobDrop::new(Some((900, 900)), Some(path), 1000).is_none());
+        assert!(JobDrop::new(Some((0, 0)), Some(path), 0).is_none());
+        assert!(JobDrop::new(Some((0, 900)), Some(path), 0).is_none());
+        assert!(JobDrop::new(Some((900, 0)), Some(path), 0).is_none());
         let drop = JobDrop::new(Some((900, 901)), Some(path), 0).expect("root with a job user");
         assert_eq!((drop.uid, drop.gid), (900, 901));
 
