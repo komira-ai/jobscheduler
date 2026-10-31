@@ -350,7 +350,7 @@ impl Lifecycle {
         }
         // A bundle is judged before the native body it belongs to, so a host without the
         // capability says so (`bundle-unsupported`) and a host with it applies the bundle's
-        // rules, and only then reaches the refusal that nothing can run a bundle yet.
+        // rules before the native body is checked.
         if spec.bundle.is_some() {
             match &self.config.bundle {
                 None => {
@@ -363,12 +363,6 @@ impl Lifecycle {
             }
         }
         if let Some(native) = &spec.native {
-            if spec.bundle.is_some() {
-                return Err(no(
-                    refusal::NATIVE_UNSUPPORTED,
-                    "the bundle is admitted, but this agent cannot run a bundle yet",
-                ));
-            }
             self.runtime
                 .check_native(native)
                 .map_err(|refused| (refused.code, refused.why))?;

@@ -5,6 +5,7 @@
 //! `sandbox-exec` command line for real, as the user running the tests (`mac`).
 
 mod agent;
+mod bundle;
 mod fake_helper;
 mod journal;
 mod lifecycle;
@@ -100,6 +101,7 @@ impl Rig {
             slot: 0,
             isolation: Isolation::Contained,
             labels: BTreeMap::new(),
+            bundle: None,
         }
     }
 

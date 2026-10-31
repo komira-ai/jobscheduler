@@ -574,3 +574,18 @@ fn the_configured_limits_are_set_by_the_shell_that_starts_the_run() {
     big.start("r1", "/bin/true", &[]);
     assert_eq!(parse(&big.fake.run_of("7.0").argv).limits.0, "3072");
 }
+
+/// Asserts that a job environment that names `TMPDIR`, which the agent sets, is refused before
+/// anything is made, as it is for a run that pins a bundle. It catches a plain run that takes
+/// the job's `TMPDIR` beside the agent's and leaves the choice to the program.
+#[test]
+fn a_job_that_sets_tmpdir_is_refused_before_a_user_is_made() {
+    let mut rig = Rig::new("tmpdir");
+    let mut body = native("/usr/bin/id", &[]);
+    body.env
+        .insert("TMPDIR".to_owned(), "/private/tmp".to_owned());
+    let spec = rig.spec("r1", body);
+    let why = rig.rt.create_and_start(&spec).unwrap_err();
+    assert!(why.0.contains("TMPDIR"), "{}", why.0);
+    assert_eq!(rig.fake.verbs(), ["boot-reset"]);
+}

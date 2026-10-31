@@ -35,7 +35,7 @@ sha2.workspace = true
 thiserror.workspace = true
 # `fs`: the layer files of the image source (src/image). `rt-multi-thread`: the runtime the
 # image pulls run on (src/lifecycle/prefetch.rs).
-tokio = { workspace = true, features = ["fs", "rt", "rt-multi-thread", "signal", "time"] }
+tokio = { workspace = true, features = ["fs", "macros", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 
 # The crun image source and the image config (src/image), and the helper modes this binary

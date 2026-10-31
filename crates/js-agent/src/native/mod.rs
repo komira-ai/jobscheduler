@@ -25,6 +25,13 @@
 //! 4. `kill-uid` ends every process of the user, not only the one started (a job may
 //!    detach children), and `user-delete` removes the user and sweeps its home.
 //!
+//! A start that pins a bundle (`RunSpec::bundle`) also has its bundle's trees pinned for
+//! the run before anything is made, the trees the bundle writes to cloned into the run's
+//! own `trees` directory, and `@bundle/<entrypoint>` resolved to the file in the store (or
+//! the clone) that the bundle's config names; the environment and arguments are the
+//! bundle's rules applied to the job's own (see `native/bundle.rs`). The pins end with
+//! the run.
+//!
 //! A lease is written to the [`Journal`] (in the state root, synced) before `user-create` is
 //! sent and marked done once its user is deleted or a failed start was undone. A process
 //! that ends with runs going leaves them in the journal; [`Runtime::reclaim`] ends them
@@ -43,6 +50,7 @@
 //! The runtime builds on every platform so that its rules are tested on Linux; only a
 //! macOS agent makes one.
 
+mod bundle;
 mod journal;
 mod logs;
 mod settings;
@@ -56,11 +64,12 @@ use std::os::fd::AsFd as _;
 use std::os::unix::fs::{PermissionsExt as _, chown};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
 use std::time::Duration;
 
-use js_agent_wire::{LogTail, NativeSpec, NetworkLevel, refusal};
+use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, LogTail, NativeSpec, NetworkLevel, refusal};
 use js_mac_pool::seatbelt::{
     AbsPath, Caps, Narrowing, Net, Policy, Profile, ReadModel, SlotLayout,
 };
@@ -70,6 +79,7 @@ use js_mac_session::lease::{Dotted, user_name};
 use js_types::LeaseId;
 use js_types::env::env_name_reserved;
 
+use crate::bundle::{Pinned, Placer};
 use crate::lifecycle::{
     Body, CheckFinding, CheckHook, Exit, Finished, Found, NativeRefusal, RunHandle, RunSpec,
     Runtime, RuntimeError, Status,
@@ -114,6 +124,8 @@ struct Run {
     ended: Option<Status>,
     /// The exit, or `None` when the helper's connection ended without one.
     waiter: Receiver<Option<Exit>>,
+    /// The trees of the run's bundle, pinned until the run is removed.
+    _pinned: Option<Pinned>,
 }
 
 /// Runs native jobs as users of the root helper.
@@ -123,6 +135,8 @@ pub struct NativeRuntime {
     term: u64,
     next: u64,
     runs: BTreeMap<String, Run>,
+    /// The bundle store, on an agent that has one.
+    bundles: Option<Arc<Placer>>,
     journal: Journal,
     /// The helper said it needs its boot reset again (it restarted under this agent).
     reset_needed: bool,
@@ -149,9 +163,26 @@ impl NativeRuntime {
             term,
             next: 0,
             runs: BTreeMap::new(),
+            bundles: None,
             journal,
             reset_needed: false,
         })
+    }
+
+    /// The same runtime, with `placer` as its bundle store: a start that names a bundle
+    /// pins the bundle's trees through it for the run.
+    #[must_use]
+    pub fn with_bundles(self, placer: Arc<Placer>) -> Self {
+        Self {
+            bundles: Some(placer),
+            ..self
+        }
+    }
+
+    /// The bundle store, if the runtime has one.
+    #[must_use]
+    pub fn bundles(&self) -> Option<&Arc<Placer>> {
+        self.bundles.as_ref()
     }
 
     /// Notes that the helper restarted under this runtime: it refuses every verb until its
@@ -186,6 +217,7 @@ impl NativeRuntime {
         spec: &RunSpec,
         native: &NativeSpec,
         (id, lease, uid): (LeaseId, &str, u32),
+        pinned: Option<Pinned>,
     ) -> Result<Run, RuntimeError> {
         let home = self.config.homes.join(user_name(id));
         let (exec, tmp) = (home.join("exec"), home.join("tmp"));
@@ -193,13 +225,21 @@ impl NativeRuntime {
             .into_iter()
             .map(|dir| make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why)))
             .collect::<Result<Vec<File>, RuntimeError>>()?;
-        let argv = profile_argv(&self.config, native, &home)?;
-        let mut env: Vec<(String, String)> = native
-            .env
-            .iter()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
-        env.push(("TMPDIR".to_owned(), tmp.display().to_string()));
+        let (native, env) = match &pinned {
+            Some(pinned) => {
+                let prepared = bundle::prepare(pinned, native, &home, (uid, &tmp))
+                    .map_err(|why| fail(&"the bundle", &why))?;
+                let body = NativeSpec {
+                    program: prepared.program,
+                    args: prepared.args,
+                    network: prepared.network,
+                    ..native.clone()
+                };
+                (body, prepared.env)
+            }
+            None => (native.clone(), plain_env(native, &tmp)),
+        };
+        let argv = profile_argv(&self.config, &native, &home)?;
         let logs = [logs::STDIN, logs::STDOUT, logs::STDERR]
             .into_iter()
             .map(|name| {
@@ -225,7 +265,31 @@ impl NativeRuntime {
             scratch: spec.scratch.clone(),
             ended: None,
             waiter,
+            _pinned: pinned,
         })
+    }
+
+    /// Pins the bundle `spec` names, if it names one, before anything of the run is made:
+    /// a start whose bundle cannot be pinned, or whose program is one the bundle lacks, makes
+    /// no user. The program of a start that pins no bundle may not name one.
+    fn pin_bundle(
+        &self,
+        spec: &RunSpec,
+        native: &NativeSpec,
+        lease: &str,
+    ) -> Result<Option<Pinned>, RuntimeError> {
+        let entrypoint = native.program.strip_prefix(BUNDLE_PROGRAM_PREFIX);
+        match (&spec.bundle, &self.bundles) {
+            (None, _) if entrypoint.is_some() => Err(fail(
+                &"the program",
+                &"names an entrypoint of a bundle and the start pins none",
+            )),
+            (None, _) => Ok(None),
+            (Some(_), None) => Err(fail(&"the bundle", &"this runtime holds no bundle store")),
+            (Some(pin), Some(placer)) => bundle::pin(placer, pin, lease, entrypoint)
+                .map(Some)
+                .map_err(|why| fail(&"the bundle", &why)),
+        }
     }
 
     /// `result` of the helper verb `verb` as a runtime result: a refusal that the lease has
@@ -256,6 +320,17 @@ impl NativeRuntime {
             .map(|why| format!("user-delete: {why}"));
         killed.into_iter().chain(deleted).collect()
     }
+}
+
+/// The environment of a run that pins no bundle: the job's own, then `TMPDIR`.
+fn plain_env(native: &NativeSpec, tmp: &Path) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = native
+        .env
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    env.push(("TMPDIR".to_owned(), tmp.display().to_string()));
+    env
 }
 
 /// Asks the helper for its boot reset; one that ran already is as good as one that ran now.
@@ -315,6 +390,8 @@ impl Runtime for NativeRuntime {
         let id = LeaseId::new(self.term, self.next);
         self.next += 1;
         let lease = Dotted(id).to_string();
+        // A start that cannot have its bundle makes no user at all.
+        let pinned = self.pin_bundle(spec, native, &lease)?;
         // Written and synced before the helper hears of the lease, so a process that dies
         // between the two leaves a lease to end and not a user nobody knows of.
         self.journal
@@ -334,7 +411,7 @@ impl Runtime for NativeRuntime {
                 return Err(with_problems(fail(&"user-create", &why), &problems));
             }
         };
-        match self.launch(spec, native, (id, &lease, uid)) {
+        match self.launch(spec, native, (id, &lease, uid), pinned) {
             Ok(run) => {
                 self.runs.insert(lease.clone(), run);
                 Ok(RunHandle(lease))
@@ -444,6 +521,15 @@ impl Runtime for NativeRuntime {
                       subdirectory yet"
                     .to_owned(),
             });
+        }
+        if native.program.starts_with(BUNDLE_PROGRAM_PREFIX) {
+            return match self.bundles {
+                Some(_) => Ok(()),
+                None => Err(NativeRefusal {
+                    code: refusal::BUNDLE_UNSUPPORTED,
+                    why: "this agent holds no bundle store".to_owned(),
+                }),
+            };
         }
         let program = Path::new(&native.program);
         if !self

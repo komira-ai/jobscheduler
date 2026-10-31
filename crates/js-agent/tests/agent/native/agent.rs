@@ -13,10 +13,12 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 use super::fake_helper::FakeHelper;
+use crate::bundle::fake::{FakeHost, digest};
+use crate::bundle::fixture::{no_registry, placer};
 use crate::jobs::fake::FakeMachine;
 use crate::support::{
     CountingSleeper, Host, Jobs, Lowest, Ran, Scratch, Script, ScriptConnector, code, flags,
-    linux_host, mac_host, reply, run_on, welcome,
+    linux_host, mac_host, reply, run_on, run_with_store, welcome,
 };
 
 /// A private directory `name` under `dir`.
@@ -320,4 +322,192 @@ fn the_sandbox_self_test_fails_closed() {
     allow.read_model = js_mac_pool::seatbelt::ReadModel::Allow;
     let unbuilt = native::self_test(&allow, Path::new("/usr/bin/true")).unwrap_err();
     assert!(unbuilt.starts_with("the profile: "), "{unbuilt}");
+}
+
+/// The flags of a Mac agent that runs native jobs over `fake` and keeps a store of bundles.
+fn store_flags(dir: &Scratch, fake: &FakeHelper, extra: &[&str]) -> Vec<String> {
+    let mut flags = native_flags(dir, fake);
+    let own = [
+        "--bundle-store",
+        "/Volumes/work/bundles",
+        "--bundle-budget-gib",
+        "10",
+        "--bundle-trust",
+        "digest",
+    ];
+    flags.extend(own.iter().chain(extra).map(|flag| (*flag).to_owned()));
+    flags
+}
+
+/// Runs the whole agent on a Mac with `extra` flags and the bundle host `store`, until the
+/// server's first answer.
+fn agent_with_store(
+    dir: &Scratch,
+    extra: &[String],
+    store: Arc<FakeHost>,
+    machine: &Arc<FakeMachine>,
+) -> (Ran, Value) {
+    let mut host = mac_host();
+    let row =
+        "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk3 9 9 99999999 1% /\n";
+    let scratch = dir.path("scratch");
+    host.commands = host
+        .commands
+        .with(&format!("/bin/df -P -k {}", scratch.display()), Ok(row));
+    let refs: Vec<&str> = extra.iter().map(String::as_str).collect();
+    let (script, sent) = Script::new(vec![welcome(1)]);
+    let connector = ScriptConnector::of(script);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let jobs: Jobs<'_> = (machine.clone(), None);
+    let args = flags(&refs);
+    let ran = run_with_store(
+        &args,
+        &host,
+        &connector,
+        &mut sleeper,
+        &mut Lowest,
+        jobs,
+        store,
+    );
+    let hello = sent
+        .borrow()
+        .first()
+        .map_or(Value::Null, |sent| sent.1.clone());
+    (ran, hello)
+}
+
+/// Asserts that a Mac agent that runs native jobs and keeps a store opens the store before
+/// it says hello, hands it to the runtime it makes, and reports the bundle it holds; and that
+/// an agent with a store and no native jobs opens nothing, because it could never run a
+/// bundle. It catches a runtime that has no store while the hello says it has one, and a
+/// store opened by an agent that cannot use it.
+#[test]
+fn a_native_agent_opens_its_store_and_gives_it_to_the_runtime() {
+    let dir = Scratch::new("native-agent-store");
+    let fake = FakeHelper::start(&dir);
+    let bundles = Scratch::new("native-agent-store-placer");
+    let store = FakeHost::new();
+    store.set(|s| {
+        s.open = Ok(Some(placer(&bundles, no_registry())));
+        s.held = Ok(vec![digest('a')]);
+    });
+    let machine = Arc::new(FakeMachine::new());
+    let extra = store_flags(&dir, &fake, &[]);
+    let (ran, hello) = agent_with_store(&dir, &extra, store.clone(), &machine);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(store.get(|s| s.opens), 1);
+    assert_eq!(machine.bundles_seen(), [true]);
+    assert_eq!(hello["capabilities"]["bundle"], digest('a'));
+    assert_eq!(
+        hello["capabilities"]["bundle-root"],
+        "/Volumes/work/bundles"
+    );
+
+    let other = Scratch::new("native-agent-store-none");
+    let helper = FakeHelper::start(&other);
+    let store = FakeHost::new();
+    let machine = Arc::new(FakeMachine::new());
+    let mut flags = store_flags(&other, &helper, &[]);
+    flags.drain(
+        ..flags
+            .iter()
+            .position(|flag| flag == "--bundle-store")
+            .unwrap(),
+    );
+    // The native flags are gone, and the scratch root they named is still there.
+    flags.extend([
+        "--scratch-root".to_owned(),
+        other.path("scratch").display().to_string(),
+    ]);
+    let (ran, _) = agent_with_store(&other, &flags, store.clone(), &machine);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(store.get(|s| s.opens), 0, "no native jobs, no store");
+    assert!(machine.bundles_seen().is_empty());
+}
+
+/// Asserts that a store that cannot be opened ends the agent with status 2 before the hello,
+/// naming the flag, and that a store in a directory no native run may read (here one the
+/// operator names with `--native-deny-read`) does too: every bundle job would fail at its
+/// first read. It catches an agent that registers and then fails every bundle job.
+#[test]
+fn a_store_that_cannot_be_used_ends_the_agent_before_the_hello() {
+    let dir = Scratch::new("native-agent-badstore");
+    let fake = FakeHelper::start(&dir);
+    let bundles = Scratch::new("native-agent-badstore-placer");
+    let store = FakeHost::new();
+    store.set(|s| s.open = Err("cannot open it".to_owned()));
+    let machine = Arc::new(FakeMachine::new());
+    let extra = store_flags(&dir, &fake, &[]);
+    let (ran, hello) = agent_with_store(&dir, &extra, store, &machine);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        ran.err.contains("--bundle-store: cannot open it"),
+        "{}",
+        ran.err
+    );
+    assert_eq!(hello, Value::Null);
+
+    let opened = placer(&bundles, no_registry());
+    let denied = opened.root().display().to_string();
+    let store = FakeHost::new();
+    store.set(|s| s.open = Ok(Some(opened)));
+    let machine = Arc::new(FakeMachine::new());
+    let mut extra = extra;
+    extra.extend(["--native-deny-read".to_owned(), denied]);
+    let (ran, hello) = agent_with_store(&dir, &extra, store, &machine);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(ran.err.contains("--bundle-store"), "{}", ran.err);
+    assert!(ran.err.contains("may read"), "{}", ran.err);
+    assert_eq!(hello, Value::Null);
+}
+
+/// Asserts that the system machine hands the store of the native settings to the runtime it
+/// makes: the runtime accepts a program of a bundle with a store and refuses it
+/// (`bundle-unsupported`) without. It catches a store that is opened and never used.
+#[test]
+fn the_system_machine_gives_the_store_to_the_native_runtime() {
+    let dir = Scratch::new("native-agent-system-store");
+    let fake = FakeHelper::start(&dir);
+    let bundles = Scratch::new("native-agent-system-store-placer");
+    let platform = js_agent::Platform {
+        os: "macos".to_owned(),
+        arch: "aarch64".to_owned(),
+    };
+    let flags = NativeFlags {
+        socket: Some(fake.socket()),
+        homes: Some(fake.homes()),
+        network: None,
+        tool_roots: &[],
+        deny_read: &[],
+        max_file_mib: None,
+        max_processes: None,
+    };
+    let plain = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
+        .unwrap()
+        .unwrap();
+    let plain = plain.with_sandbox_exec(Path::new("/usr/bin/true"));
+    let stored = plain
+        .clone()
+        .with_bundles(placer(&bundles, no_registry()))
+        .unwrap();
+    assert!(stored.bundles().is_some() && plain.bundles().is_none());
+    let program = super::native("@bundle/tool", &[]);
+    let codes: Vec<Option<&str>> = [plain, stored]
+        .into_iter()
+        .map(|settings| {
+            let backend = Backend::Native(settings);
+            let build = RuntimeBuild {
+                backend: &backend,
+                host_id: "h1",
+                platform: &platform,
+                stop_grace: std::time::Duration::from_secs(1),
+            };
+            let (runtime, _) = System::new().runtime(&build).unwrap();
+            runtime
+                .check_native(&program)
+                .err()
+                .map(|refused| refused.code)
+        })
+        .collect();
+    assert_eq!(codes, [Some("bundle-unsupported"), None]);
 }

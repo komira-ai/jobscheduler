@@ -450,7 +450,9 @@ pub struct Cli {
     /// offers (`disk-gib`) is reduced by the part of the budget the store has not used yet.
     /// The hello reports `bundle-root` (this path) and `bundle` (the manifest digests the
     /// store holds, that the deny and allow lists let through) only when the agent can run a
-    /// bundle, which this build cannot, so for now it reports neither. Until a server says it
+    /// bundle: it runs native jobs (`--native-helper-socket`) and the store opened; without
+    /// the helper it reports neither. A job that pins a bundle runs `@bundle/<entrypoint>`
+    /// from the store's trees, under the same profile as any native job. Until a server says it
     /// takes a longer value, `bundle` holds one digest. Roll out servers first, then agents,
     /// then this flag, then placement by `bundle`.
     #[arg(long, value_name = "PATH")]
@@ -466,8 +468,10 @@ pub struct Cli {
     /// Whether a bundle that is not in the store is fetched: `never` (the default: the
     /// operator, or the updater, puts it there first, and a job that names another is
     /// refused `bundle-not-held`) or `missing` (only with `--bundle-trust list`, and at
-    /// least one registry flag). This build has no fetcher, so a fetch ends
-    /// `bundle-fetch-failed`. Needs `--bundle-store`.
+    /// least one registry flag): the first start that names one begins a fetch in the
+    /// background (`bundle-pending` until the bundle is held; every byte is checked against
+    /// its digest, and a fetch that fails is reported once as `bundle-fetch-failed`). Needs
+    /// `--bundle-store`.
     #[arg(long, value_name = "never|missing")]
     pub bundle_pull: Option<String>,
     /// A registry and namespace a bundle may be fetched from, `HOST[:PORT]/PREFIX`

@@ -408,6 +408,8 @@ pub struct FakeMachine {
     pub files: SharedFiles,
     /// The scratch quota of the machine: one that works, unless a test replaces it.
     pub quota: Arc<FakeQuota>,
+    /// For each native runtime made: whether its settings carried a bundle store.
+    pub bundles_seen: Arc<Mutex<Vec<bool>>>,
 }
 
 /// Cgroup files the test writes and the worker thread reads, and the threads that read.
@@ -468,7 +470,13 @@ impl FakeMachine {
             build: Build::Fine,
             files: SharedFiles::default(),
             quota: Arc::new(FakeQuota::new()),
+            bundles_seen: Arc::default(),
         }
+    }
+
+    /// For each native runtime made: whether its settings carried a bundle store.
+    pub fn bundles_seen(&self) -> Vec<bool> {
+        self.bundles_seen.lock().unwrap().clone()
     }
 
     /// The same machine with `quota` as its scratch quota.
@@ -507,6 +515,14 @@ impl Machine for FakeMachine {
                         let helper = Client::new(native.socket());
                         let opened = NativeRuntime::open(helper, native.config().clone(), 1);
                         let runtime = opened.map_err(|why| why.to_string())?;
+                        self.bundles_seen
+                            .lock()
+                            .unwrap()
+                            .push(native.bundles().is_some());
+                        let runtime = match native.bundles() {
+                            Some(store) => runtime.with_bundles(Arc::clone(store)),
+                            None => runtime,
+                        };
                         return Ok((Box::new(runtime), Vec::new()));
                     }
                 };

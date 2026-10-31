@@ -165,6 +165,7 @@ pub fn spec(run_id: &str) -> RunSpec {
         slot: 0,
         isolation: Isolation::Contained,
         labels,
+        bundle: None,
     }
 }
 

@@ -5,8 +5,10 @@
 
 mod admit;
 pub mod fake;
+pub mod fixture;
 mod hello;
 mod lifecycle;
+mod place;
 mod registry;
 mod settings;
 mod start;
