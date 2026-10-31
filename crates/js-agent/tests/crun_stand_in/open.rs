@@ -184,3 +184,27 @@ fn opening_removes_the_unpacks_a_killed_pull_left() {
     assert!(!stage.exists() && !blobs.exists());
     assert!(store.join(&hex).is_dir());
 }
+
+/// Proves the cgroup the leases are made in must be named `actions`: the post-job checks
+/// know the leases' group by that name, so a runtime over another name is refused when it
+/// opens, whatever the rest of the path is, and one over `actions` opens. Catches a runtime
+/// whose leases the integrity checks would judge the host's.
+#[test]
+fn the_leases_cgroup_must_be_named_actions() {
+    let node = Node::new("open-actions-name");
+    let open =
+        |settings| CrunRuntime::open_with(settings, Arc::new(NoImages), Node::hooks(LONG, LONG));
+    for name in [
+        "/leases",
+        "/js.slice/leases",
+        "/actions-old",
+        "/leases/actions/x",
+        "/",
+    ] {
+        let mut settings = node.settings("/root");
+        settings.cgroups.actions = name.to_owned();
+        let said = why(open(settings));
+        assert!(said.contains("must be named `actions`"), "{name}: {said}");
+    }
+    open(node.settings("/root")).expect("actions opens");
+}

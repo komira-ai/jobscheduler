@@ -153,27 +153,36 @@ fn a_live_handle_excuses_its_own_mounts_and_not_a_longer_names() {
 }
 
 /// Asserts that a helper container's processes (unpack and removal helpers, in
-/// `actions/helpers/<name>`) are the runner's, not a stray: a background pull can have one
-/// running when another job's check runs. A group that only starts like `helpers`, and the
-/// helpers group of another `actions`, are not.
+/// `actions/helpers/<name>`) are the runner's, not a stray, whatever their user (the job
+/// user's included): a background pull can have one running when another job's check runs.
+/// Not the runner's: a group that only starts like `helpers`, an `actions/helpers` pair
+/// that is not the real actions group (one below a lease's `ctr`, or below a lease's
+/// group), and a lease that has `helpers` in it.
 #[test]
 fn a_helper_container_is_the_runners() {
-    let (host, mut checks) = host_and_checks();
-    host.start_process(process(
-        300,
-        1,
-        0,
-        900,
-        "0::/system.slice/js.service/actions/helpers/helper-unpack-5-1/ctr",
-    ));
-    assert!(after(&mut checks, "r1").is_ok());
+    for uid in [0, JOB_UID] {
+        let (host, mut checks) = host_and_checks();
+        host.start_process(process(
+            300,
+            1,
+            uid,
+            900,
+            "0::/system.slice/js.service/actions/helpers/helper-unpack-5-1/ctr",
+        ));
+        assert!(after(&mut checks, "r1").is_ok(), "uid {uid}");
+    }
     for cgroup in [
         "0::/system.slice/js.service/actions/helpers-x/helper-unpack-5-1",
         "0::/system.slice/js.service/actions/js-0123456789abcdef-r1/helpers/x",
+        "0::/system.slice/js.service/actions/js-0123456789abcdef-r1/ctr/actions/helpers/x",
+        "0::/system.slice/js.service/ctr/actions/helpers/x",
+        "0::/system.slice/js.service/actions/js-0123456789abcdef-r1/actions/helpers/x",
     ] {
-        let (host, mut checks) = host_and_checks();
-        host.start_process(process(301, 1, 0, 901, cgroup));
-        assert!(after(&mut checks, "r1").is_err(), "{cgroup}");
+        for uid in [0, JOB_UID] {
+            let (host, mut checks) = host_and_checks();
+            host.start_process(process(301, 1, uid, 901, cgroup));
+            assert!(after(&mut checks, "r1").is_err(), "{cgroup} uid {uid}");
+        }
     }
 }
 

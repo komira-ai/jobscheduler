@@ -268,6 +268,7 @@
 mod args;
 mod logs;
 pub use logs::LOGS_LIMIT;
+pub(crate) use logs::text_of;
 mod seccomp;
 mod settings;
 mod subid;
