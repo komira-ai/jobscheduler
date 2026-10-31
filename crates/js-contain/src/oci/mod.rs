@@ -49,6 +49,7 @@
 //! CPU limits stay on the lease cgroup.
 
 pub(crate) mod crun;
+mod gc;
 pub(crate) mod hardening;
 pub mod helper;
 pub mod image;
@@ -59,6 +60,8 @@ pub mod mounts;
 pub(crate) mod spec;
 pub mod words;
 
+#[cfg(test)]
+mod gc_tests;
 #[cfg(test)]
 mod parity_tests;
 #[cfg(test)]
@@ -71,6 +74,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
 pub use crun::{EnvScrub, JobDrop, RunEnd};
+pub use gc::GcReport;
 pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 

@@ -149,3 +149,41 @@ async fn a_layer_that_fails_leaves_no_published_image_and_a_retry_succeeds() {
     cell.oci.check_pinned(&image).await.expect("the retry");
     assert_eq!(cell.store(), [image.digest.trim_start_matches("sha256:")]);
 }
+
+/// Catches a collection that cannot remove what the helper owns, or that removes what is
+/// named: the unpacked files belong to the first subordinate id, so the unprivileged
+/// daemon cannot empty the directories itself and the removal has to go through a helper
+/// container. Collecting with the digest named keeps the image and its files; collecting
+/// with nothing named removes it (`removed` names it, `failed` is empty) and the store is
+/// empty.
+#[tokio::test]
+#[ignore = "real crun: run through cargo xtask crun-tests"]
+async fn a_collection_removes_an_image_the_daemon_cannot_empty_itself() {
+    let layers = Arc::new(Layers::of(vec![layer(
+        "0.tar",
+        &[
+            Item::Dir {
+                path: "bin",
+                mode: 0o755,
+            },
+            file("bin/tool", b"tool", 0o755),
+            file("etc/passwd", b"root:x:0:0\n", 0o644),
+        ],
+    )]));
+    let cell = Cell::new("gc", layers);
+    let image = pinned();
+    cell.oci.check_pinned(&image).await.expect("unpacked");
+    let tool = cell.image_dir(&image.digest).join(ROOTFS).join("bin/tool");
+    assert_eq!(std::fs::metadata(&tool).expect("tool").uid(), ids().sub_uid);
+
+    let named = std::slice::from_ref(&image.digest);
+    let kept = cell.oci.collect_images(named, &[]).expect("collected");
+    assert!(kept.removed.is_empty() && kept.failed.is_empty(), "{kept}");
+    assert_eq!(kept.kept, 1, "{kept}");
+    assert_eq!(std::fs::read(&tool).expect("kept"), b"tool");
+
+    let all = cell.oci.collect_images(&[], &[]).expect("collected");
+    assert_eq!(all.removed, named, "{all}");
+    assert!(all.failed.is_empty(), "{all}");
+    assert_eq!(cell.store(), Vec::<String>::new());
+}
