@@ -14,6 +14,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -142,14 +143,15 @@ pub struct DirStat {
     pub mode: u32,
 }
 
-/// `path` as the check sees it, without following a link.
+/// The open directory `fd` as the check sees it. The directory was opened without following
+/// a link, so a link is never what is looked at.
 ///
 /// # Errors
-/// The path cannot be looked at.
-pub fn system_stat(path: &Path) -> io::Result<DirStat> {
-    let meta = fs::symlink_metadata(path)?;
+/// The descriptor cannot be looked at.
+pub fn fd_stat(fd: BorrowedFd<'_>) -> io::Result<DirStat> {
+    let meta = File::from(fd.try_clone_to_owned()?).metadata()?;
     Ok(DirStat {
-        is_symlink: meta.file_type().is_symlink(),
+        is_symlink: false,
         is_dir: meta.is_dir(),
         uid: meta.uid(),
         gid: meta.gid(),
@@ -180,6 +182,40 @@ pub enum DirProblem {
         /// The permission bits.
         mode: u32,
     },
+    /// The path is not absolute and plain.
+    #[error("is not an absolute path of plain components")]
+    NotPlain,
+    /// An ancestor is not owned by root.
+    #[error("is owned by {uid}, not by root")]
+    NotRootOwned {
+        /// The owner.
+        uid: u32,
+    },
+    /// An ancestor can be written by its group or by others.
+    #[error("has mode {mode:04o}, writable by its group or by others")]
+    Writable {
+        /// The permission bits.
+        mode: u32,
+    },
+}
+
+/// Holds an ancestor of the state directory to: a directory, not a link, owned by root, not
+/// writable by its group or by others.
+///
+/// # Errors
+/// The first [`DirProblem`] it shows.
+pub fn check_ancestor(stat: &DirStat) -> Result<(), DirProblem> {
+    if stat.is_symlink {
+        Err(DirProblem::Symlink)
+    } else if !stat.is_dir {
+        Err(DirProblem::NotDirectory)
+    } else if stat.uid != 0 {
+        Err(DirProblem::NotRootOwned { uid: stat.uid })
+    } else if stat.mode & 0o022 != 0 {
+        Err(DirProblem::Writable { mode: stat.mode })
+    } else {
+        Ok(())
+    }
 }
 
 /// Holds `stat` to `root:root`, mode 0700, a directory, not a link.
@@ -210,6 +246,14 @@ pub enum StateError {
     #[error("state directory {}: {problem}", path.display())]
     Dir {
         /// The directory.
+        path: PathBuf,
+        /// What is wrong.
+        problem: DirProblem,
+    },
+    /// A directory above the state directory is not as it must be.
+    #[error("above the state directory, {}: {problem}", path.display())]
+    Ancestor {
+        /// The ancestor.
         path: PathBuf,
         /// What is wrong.
         problem: DirProblem,
@@ -282,16 +326,25 @@ pub struct Held {
 }
 
 impl Held {
-    /// Checks `dir` with `stat` (see [`system_stat`]) and takes the lock, without waiting.
+    /// Checks `dir` with `stat` (see [`fd_stat`]) and takes the lock, without waiting.
     ///
     /// # Errors
     /// [`StateError::Dir`] if the directory is not `root:root` 0700 and not a link,
     /// [`StateError::Lock`] if another step holds the lock, [`StateError::Io`] otherwise.
     pub fn open(
         dir: &Path,
-        stat: &dyn Fn(&Path) -> io::Result<DirStat>,
+        stat: &dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
     ) -> Result<Held, StateError> {
-        let seen = stat(dir).map_err(at(dir))?;
+        let fd = rustix::fs::open(
+            dir,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|e| at(dir)(e.into()))?;
+        let seen = stat(dir, fd.as_fd()).map_err(at(dir))?;
         check_dir(&seen).map_err(|problem| StateError::Dir {
             path: dir.to_owned(),
             problem,
