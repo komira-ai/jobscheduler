@@ -71,7 +71,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
 pub use crun::{EnvScrub, RunEnd};
-pub use lease::{RESOLV_CONF, Reports};
+pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 
 /// The resolved seccomp section for `arch` (Go's name) and a job holding `caps`, as JSON.
@@ -437,6 +437,26 @@ impl Oci {
         Ok(bundle)
     }
 
+    /// Makes `dir` `0700` and gives it to the account `crun` runs as (the job user of a root daemon; the daemon
+    /// itself otherwise, for which this changes nothing): a helper's state and log are made
+    /// in it by that account. The directory is opened without following a link and given by
+    /// its descriptor, so a path replaced by a link is refused, and what is given is what
+    /// was opened.
+    fn give_to_job_user(&self, dir: &Path) -> Result<(), JobError> {
+        use rustix::fs::{Mode, OFlags, fchown};
+        use rustix::process::{Gid, Uid};
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let given = rustix::fs::open(dir, flags, Mode::empty())
+            .and_then(|fd| {
+                // The mode first, so the directory is never open to others.
+                rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o700))?;
+                let owner = (Uid::from_raw(self.ids.uid), Gid::from_raw(self.ids.gid));
+                fchown(&fd, Some(owner.0), Some(owner.1))
+            })
+            .map_err(std::io::Error::from);
+        at(dir, given)
+    }
+
     /// A number unique to this node's run of the daemon.
     fn next(&self) -> u64 {
         self.helpers.fetch_add(1, Ordering::Relaxed)
@@ -473,11 +493,10 @@ impl Oci {
     }
 
     /// Makes the directory `dir` for one helper's bundle, state and log: `0700` and the
-    /// ids' `crun` runs as (the job user's under a root daemon), by descriptor. Every
-    /// helper run starts here.
+    /// ids' `crun` runs as ([`Oci::give_to_job_user`]). Every helper run starts here.
     fn state_dir(&self, dir: &Path) -> Result<(), JobError> {
         at(dir, std::fs::create_dir_all(dir))?;
-        at(dir, private_dir(dir, self.ids.uid, self.ids.gid))
+        self.give_to_job_user(dir)
     }
 
     /// [`Oci::run_job`] in a directory of its own, removed after.
@@ -532,18 +551,6 @@ impl Oci {
         self.run_jobs("rm", Mapping::Setup, &jobs).await?;
         at(dir, tokio::fs::remove_dir(dir).await)
     }
-}
-
-/// Makes the directory `dir` `0700` and gives it to `uid` and `gid`, by a descriptor
-/// opened without following a symlink (the mode first, so it is never open to others).
-fn private_dir(dir: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
-    let fd = rustix::fs::open(dir, crate::walk::DIRECTORY, rustix::fs::Mode::empty())?;
-    rustix::fs::fchmod(&fd, rustix::fs::Mode::from_raw_mode(0o700))?;
-    image::fchown_fd(
-        &fd,
-        rustix::fs::Uid::from_raw(uid),
-        rustix::fs::Gid::from_raw(gid),
-    )
 }
 
 fn prepare(error: JobError) -> OciError {

@@ -149,7 +149,24 @@ impl FilesRoot {
     /// The root is not a [`DirLayout::Searchable`] one, the run id is not one ordinary path
     /// component, the directory is missing, or a change of owner or mode failed.
     pub fn hand_over(&self, run_id: &str, uid: u32, gid: u32) -> io::Result<()> {
-        use std::os::unix::fs::lchown;
+        self.hand_over_with(run_id, uid, gid, &|path, uid, gid| {
+            std::os::unix::fs::lchown(path, Some(uid), Some(gid))
+        })
+    }
+
+    /// [`FilesRoot::hand_over`] giving each path away with `lchown` (which does not follow
+    /// a link in the last component): a caller that is not root passes its own.
+    ///
+    /// # Errors
+    ///
+    /// As [`FilesRoot::hand_over`].
+    pub fn hand_over_with(
+        &self,
+        run_id: &str,
+        uid: u32,
+        gid: u32,
+        lchown: &dyn Fn(&Path, u32, u32) -> io::Result<()>,
+    ) -> io::Result<()> {
         if self.layout != DirLayout::Searchable {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -162,10 +179,10 @@ impl FilesRoot {
         }
         let dir = self.of(run_id);
         for entry in fs::read_dir(&dir)? {
-            lchown(entry?.path(), Some(uid), Some(gid))?;
+            lchown(&entry?.path(), uid, gid)?;
         }
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o500))?;
-        lchown(&dir, Some(uid), Some(gid))
+        lchown(&dir, uid, gid)
     }
 
     /// Removes the run's directory and its files, whatever their mode; one that is not
