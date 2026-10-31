@@ -19,6 +19,7 @@
 //!   image names, so an image cannot choose to run as root or as another job's id.
 
 mod config;
+pub mod pull;
 mod source;
 
 pub use config::{CONFIG_LIMIT_BYTES, ConfigError, DEFAULT_PATH, ImageConfig, config_path};
