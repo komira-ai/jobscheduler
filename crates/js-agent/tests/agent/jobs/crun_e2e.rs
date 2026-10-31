@@ -17,6 +17,7 @@ use clap::Parser as _;
 use js_agent::cli_runtime::Settings;
 use js_agent::crun::{
     CgroupSettings, CgroupSource, Hooks, HostClaim, IdSources, Seams, oci_config, prepare_store,
+    require_trusted_ancestors,
 };
 use js_agent::crun_host::{CrunHost, start};
 use js_agent::integrity::HostView;
@@ -195,7 +196,7 @@ fn seams() -> Seams {
 /// The host the agent runs on: a Linux host whose `crun --version` answers. Where a path is
 /// on a file system is the first of `devices` that holds it (the state root is on a disk of
 /// its own, and so is the scratch root when `scratch_apart`), else the node's.
-fn host_on(scratch_apart: bool) -> Host {
+fn host_on(scratch_apart: bool, store_apart: bool) -> Host {
     let node = node();
     let mut host = linux_host();
     let line = format!("{} --version", node.crun.display());
@@ -206,19 +207,30 @@ fn host_on(scratch_apart: bool) -> Host {
     if scratch_apart {
         host.files = host.files.with_device_under(&node.scratch, 9);
     }
+    if store_apart {
+        host.files = host
+            .files
+            .with_device_under(&node.dir.path().join("oci"), 10);
+    }
     host.files = host.files.with_device_under(node.dir.path(), 7);
     host
 }
 
 /// The node's host: everything but the state root on one file system.
 fn host() -> Host {
-    host_on(false)
+    host_on(false, false)
 }
 
 /// The node's host with the scratch root a mount of its own: the directory above it, where
 /// the image store would be, is on another file system.
 fn host_with_scratch_mounted() -> Host {
-    host_on(true)
+    host_on(true, false)
+}
+
+/// The node's host with the image store a mount of its own, and the scratch root on the
+/// same file system as the directory that holds the store.
+fn host_with_store_mounted() -> Host {
+    host_on(false, true)
 }
 
 /// The real [`System`] for the clock, the runtime and the start check, over the node; the
@@ -708,7 +720,8 @@ fn the_stop_grace_reaches_the_crun_runtime() {
 
 /// Asserts the layout the store needs: with the scratch root on one file system and the
 /// directory above it, where the image store and the leases' `/work` and home are kept, on
-/// another, the agent exits 2 naming both paths; and `--scratch-quota`, which would bound
+/// another, or the store itself on another file system than the scratch root, the agent
+/// exits 2 naming the scratch root and the store; and `--scratch-quota`, which would bound
 /// only `/scratch`, exits 2 naming the flag. It catches an agent that lets a job fill the
 /// root file system, or a quota that is believed to cover a lease's `/work`.
 #[test]
@@ -738,6 +751,17 @@ fn a_store_on_another_file_system_and_a_scratch_quota_are_refused() {
             && apart.err.contains(&node.dir.path().display().to_string()),
         "{}",
         apart.err
+    );
+    // The store itself on another file system, the directory above the scratch root not.
+    let store_apart = run(host_with_store_mounted, &[]);
+    assert_eq!(store_apart.status(), code(2), "{}", store_apart.err);
+    assert!(
+        store_apart.err.contains("different file systems")
+            && store_apart
+                .err
+                .contains(&node.dir.path().join("oci").display().to_string()),
+        "{}",
+        store_apart.err
     );
     let quota = run(host, &["--scratch-quota"]);
     assert_eq!(quota.status(), code(2), "{}", quota.err);
@@ -834,6 +858,103 @@ fn a_host_id_is_held_by_one_agent_at_a_time() {
     drop(first);
     HostClaim::take(dir.path(), "host-a").expect("free once dropped");
     drop(other);
+}
+
+/// Asserts the claim of a scratch root is the directory's, not a path's: the same directory
+/// reached through a link in another place takes the same claim, which the first agent holds, so the second
+/// is refused; a different directory is free, and the claim is free again when dropped. (A
+/// bind mount is the same directory by device and inode; making one needs privilege, so a
+/// link in the path stands for it.) It catches a claim keyed on the path, which lets two agents
+/// sweep one scratch root.
+#[test]
+fn a_scratch_root_reached_by_another_path_takes_the_same_claim() {
+    use std::os::unix::fs::symlink;
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "crun-claim-root");
+    let real = dir.path().join("real");
+    fs::create_dir_all(real.join("runs")).expect("the scratch root");
+    fs::create_dir(dir.path().join("elsewhere")).expect("another directory");
+    let alias = dir.path().join("alias");
+    symlink(&real, &alias).expect("a second path to the parent");
+    let by_real = real.join("runs");
+    let by_alias = alias.join("runs");
+    assert_ne!(by_real, by_alias);
+    let first = HostClaim::scratch_root(&real, &by_real).expect("the first claim");
+    let why = HostClaim::scratch_root(&real, &by_alias).expect_err("held by the other path");
+    assert!(why.to_string().contains("--scratch-root"), "{why}");
+    assert!(
+        why.to_string().contains(&std::process::id().to_string()),
+        "{why}"
+    );
+    let apart = dir.path().join("elsewhere");
+    HostClaim::scratch_root(&real, &apart).expect("another directory is free");
+    drop(first);
+    HostClaim::scratch_root(&real, &by_alias).expect("free once dropped");
+    // The root itself must be a directory, not a link to one.
+    let link = real.join("link");
+    symlink(&apart, &link).expect("a link");
+    let why = HostClaim::scratch_root(&real, &link).expect_err("a link");
+    assert!(why.to_string().contains("link"), "{why}");
+}
+
+/// Asserts that a holder that has the claim and has not written its process id yet is said so:
+/// the lock is held and the file is empty, and the refusal says `not yet written`, not an
+/// empty name. It catches a refusal that prints `holder ""`.
+#[test]
+fn a_claim_whose_holder_has_not_written_yet_says_so() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "crun-claim-unwritten");
+    let _held = HostClaim::take(dir.path(), "host-a").expect("the claim");
+    // The holder's file, emptied while it holds the lock: what a reader sees between the
+    // holder's lock and its write.
+    let mut files = fs::read_dir(dir.path()).expect("the directory");
+    let file = files.next().expect("the claim file").expect("entry").path();
+    fs::write(&file, "").expect("emptied");
+    let why = HostClaim::take(dir.path(), "host-a").expect_err("held");
+    assert!(why.to_string().contains("not yet written"), "{why}");
+}
+
+/// Asserts that every directory above the scratch root must be the agent's own or root's and
+/// writable by neither group nor others: a tree with a group-writable grandparent is refused
+/// naming it, and a grandparent that is not writable is accepted as far as that directory
+/// goes; a parent owned by another user than the one given is refused naming it. The tree is
+/// made in the build's temporary directory, the user is a parameter, and the path is the
+/// same one the production check resolves. It catches a check that stops at the parent, so
+/// that whoever can write a higher directory can swap what lies below it.
+#[test]
+fn a_directory_above_the_scratch_root_that_a_group_can_write_is_refused() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "crun-ancestors");
+    let mode = |path: &Path, mode| {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("mode");
+    };
+    let grand = dir.path().join("grand");
+    let parent = grand.join("parent");
+    let root = parent.join("runs");
+    fs::create_dir_all(&root).expect("the tree");
+    mode(&parent, 0o711);
+    mode(&grand, 0o775);
+    let euid = rustix::process::geteuid().as_raw();
+    let why = require_trusted_ancestors(&root, euid).expect_err("group-writable grandparent");
+    assert!(why.contains(&grand.display().to_string()), "{why}");
+    mode(&grand, 0o722);
+    let why = require_trusted_ancestors(&root, euid).expect_err("other-writable grandparent");
+    assert!(why.contains(&grand.display().to_string()), "{why}");
+    // Without the write bits, the tree's own directories pass; the directories above the
+    // build's temporary directory are the machine's, so the check stops at the first of them
+    // and the error, if any, names none of this tree's.
+    mode(&grand, 0o755);
+    let seen = require_trusted_ancestors(&root, euid);
+    let ours = [&grand, &parent];
+    assert!(
+        seen.as_ref().err().is_none_or(|why| ours
+            .iter()
+            .all(|path| !why.contains(&path.display().to_string()))),
+        "{seen:?}"
+    );
+    // Owned by someone else than the given user (and not by root): refused, naming the
+    // nearest directory above the root.
+    if euid != 0 {
+        let why = require_trusted_ancestors(&root, euid + 1).expect_err("not owned");
+        assert!(why.contains(&parent.display().to_string()), "{why}");
+    }
 }
 
 /// Asserts the claim of a host id cannot be taken in a directory that is not there, and says

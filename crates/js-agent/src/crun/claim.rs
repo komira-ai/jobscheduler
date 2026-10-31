@@ -143,3 +143,11 @@ pub fn prepare_store(parent: &Path, store: &Path) -> Result<(), String> {
     let _ = fs::DirBuilder::new().mode(0o755).create(store);
     verify(store)
 }
+
+/// Not yet implemented.
+///
+/// # Errors
+/// Never.
+pub fn require_trusted_ancestors(_root: &Path, _euid: u32) -> Result<(), String> {
+    Ok(())
+}

@@ -439,12 +439,12 @@ fn a_low_water_mark_without_a_scratch_root_is_refused() {
 /// Asserts the egress flags. The default is no network and is accepted with and without
 /// `--egress none`; every flag of an allow-list names the mode it needs; a mode that is not
 /// one of the two is refused; and an allow-list is refused at start, whatever else it says
-/// (only the `crun` runtime enforces it and this build cannot select that runtime), as is
+/// (only the `crun` runtime enforces it, and these flags select a container engine), as is
 /// the Podman network flag beside it, so an operator who asks for a network never gets a
 /// different one. It catches an allow-list that starts and runs with no network at all, and
 /// one that is accepted together with `--container-network`.
 #[test]
-fn egress_flags_default_to_none_and_an_allow_list_is_refused_until_crun_is_selectable() {
+fn egress_flags_default_to_none_and_an_allow_list_is_refused_without_the_crun_runtime() {
     let host = linux_host();
     let hello = hello_of(&["--egress", "none"], &host);
     assert_eq!(hello["phase"], "serving");

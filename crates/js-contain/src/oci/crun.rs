@@ -487,6 +487,14 @@ fn output_within(child: Child, limit: Duration) -> std::io::Result<Option<Output
         rustix::process::Pid::from_child(&child),
         rustix::process::PidfdFlags::empty(),
     );
+    output_within_by(child, limit, pidfd)
+}
+
+fn output_within_by(
+    child: Child,
+    limit: Duration,
+    pidfd: rustix::io::Result<std::os::fd::OwnedFd>,
+) -> std::io::Result<Option<Output>> {
     let (done, ended) = std::sync::mpsc::channel();
     std::thread::spawn(move || done.send(child.wait_with_output()));
     match ended.recv_timeout(limit) {
