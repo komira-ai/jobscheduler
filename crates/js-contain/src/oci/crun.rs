@@ -480,6 +480,11 @@ const CALL_LIMIT: Duration = Duration::from_secs(120);
 /// What `child` printed once it ended, or `None` when it had not ended within `limit` and
 /// was killed. The child is waited for on a thread of its own (which also reads its pipes), so
 /// a full pipe never stalls it and the caller never waits longer than `limit`.
+///
+/// # Errors
+/// The child could not be waited for, or no handle on it could be had (`pidfd_open` failed):
+/// then it is killed and reaped here, before any thread has it, and the error names the
+/// failure. No signal is ever sent by pid.
 fn output_within(child: Child, limit: Duration) -> std::io::Result<Option<Output>> {
     // A handle on this very process: the signal below can never reach another one that took
     // the pid after the child was reaped.
@@ -493,37 +498,35 @@ fn output_within(child: Child, limit: Duration) -> std::io::Result<Option<Output
 /// [`output_within`] with the handle on the child given, so a test drives the case where the
 /// kernel refused one.
 fn output_within_by(
-    child: Child,
+    mut child: Child,
     limit: Duration,
     pidfd: rustix::io::Result<std::os::fd::OwnedFd>,
 ) -> std::io::Result<Option<Output>> {
-    let pid = rustix::process::Pid::from_child(&child);
+    let pidfd = match pidfd {
+        Ok(fd) => fd,
+        Err(why) => {
+            // Still the owner of the child: end it through the handle, and reap it.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::other(format!(
+                "pidfd_open failed ({why}); the process was killed"
+            )));
+        }
+    };
     let (done, ended) = std::sync::mpsc::channel();
     std::thread::spawn(move || done.send(child.wait_with_output()));
     match ended.recv_timeout(limit) {
         Ok(output) => output.map(Some),
-        Err(_) => Ok(give_up(pidfd, pid)),
+        Err(_) => Ok(give_up(&pidfd)),
     }
 }
 
-/// Ends the child that did not end in time; its thread ends with it and its output is
-/// dropped. There is no output to give.
-///
-/// With a handle (`pidfd`) the signal goes to that very process. Without one (`pidfd_open`
-/// failed, for descriptors or an old kernel) it goes to `pid`: the child is waited for only
-/// by the thread that is still waiting, so the pid has not been reused, and a hung `crun`
-/// is killed and reaped all the same. The `Child` itself is not used because the waiting
-/// thread owns it. SIGKILL reaches `crun` alone, not the processes `crun` started: it is the
-/// kill of the lease's cgroup on the stop path that ends those.
-fn give_up(
-    pidfd: rustix::io::Result<std::os::fd::OwnedFd>,
-    pid: rustix::process::Pid,
-) -> Option<Output> {
-    let signal = rustix::process::Signal::KILL;
-    let _ = match pidfd {
-        Ok(fd) => rustix::process::pidfd_send_signal(&fd, signal),
-        Err(_) => rustix::process::kill_process(pid, signal),
-    };
+/// Ends the child that `pidfd` stands for, which did not end in time; its thread ends with
+/// it and its output is dropped. There is no output to give. SIGKILL reaches `crun` alone,
+/// not the processes `crun` started: it is the kill of the lease's cgroup on the stop path
+/// that ends those.
+fn give_up(pidfd: &std::os::fd::OwnedFd) -> Option<Output> {
+    let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
     None
 }
 
@@ -739,12 +742,12 @@ mod tests {
     }
 
     /// Catches a hung `crun` left running when the kernel refuses a handle on it
-    /// (`pidfd_open` failed): with the limit at zero and no handle, the call gives up and the
-    /// child is killed. The child holds the write end of a pipe the test keeps the read end
-    /// of, so the read ends only when the child is gone; a child that is not killed leaves
-    /// the read waiting.
+    /// (`pidfd_open` failed): the child is killed and reaped at once, and the call returns an
+    /// error naming the failure, whatever the limit. The child holds the write end of a pipe
+    /// the test keeps the read end of, so the read ends only when the child is gone; and it
+    /// is gone before the call returns.
     #[test]
-    fn a_hung_crun_is_killed_when_there_is_no_pidfd() {
+    fn a_crun_is_killed_and_the_call_fails_when_there_is_no_pidfd() {
         use std::io::Read as _;
         let (mut reader, writer) = std::io::pipe().expect("pipe");
         let child = {
@@ -753,8 +756,8 @@ mod tests {
             command.spawn().expect("sleep")
         };
         let refused = Err(rustix::io::Errno::MFILE);
-        let out = output_within_by(child, Duration::ZERO, refused).expect("gave up");
-        assert!(out.is_none());
+        let why = output_within_by(child, Duration::from_secs(600), refused).expect_err("failed");
+        assert!(why.to_string().contains("pidfd_open failed"), "{why}");
         let mut rest = Vec::new();
         reader
             .read_to_end(&mut rest)
