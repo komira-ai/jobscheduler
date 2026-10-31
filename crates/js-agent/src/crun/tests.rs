@@ -470,5 +470,9 @@ fn a_directory_made_already_is_taken_only_when_it_is_empty() {
         let why = super::make_dir(refused).expect_err("refused");
         assert_eq!(why.kind(), std::io::ErrorKind::AlreadyExists, "{refused:?}");
     }
+    // A directory that cannot be made for another reason is refused with that reason.
+    let orphan = base.join("no/such/parent");
+    let why = super::make_dir(&orphan).expect_err("no parent");
+    assert_eq!(why.kind(), std::io::ErrorKind::NotFound);
     let _ = fs::remove_dir_all(&base);
 }
