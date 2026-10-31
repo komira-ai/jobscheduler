@@ -39,8 +39,10 @@
 #                         same disk as the leases; the mount itself is what the unit waits for
 #   KillMode=mixed        SIGTERM goes to the agent alone, which drains; only after
 #                         TimeoutStopSec would the rest be killed
-#   --drain-wait 3600 --stop-grace 120   a run in a crun container dies with the agent that
-#                         holds it, so a stop lets the running jobs finish for up to an hour
+#   --drain-wait 3600 --stop-grace 120   a run in a crun container ends with the agent that
+#                         holds it (a graceful exit kills it; after a crash this unit's
+#                         KillMode=mixed does, as its lease cgroups are inside the unit's),
+#                         so a stop lets the running jobs finish for up to an hour
 #                         (the most --drain-wait allows) and then stops them within 120 s
 #   TimeoutStopSec=3900   the longest drain (3600 + 120 s) plus the 30 s the server gets to
 #                         acknowledge the results and a margin; finite, so a hung agent is
