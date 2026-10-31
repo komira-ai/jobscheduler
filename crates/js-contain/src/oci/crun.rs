@@ -697,6 +697,16 @@ mod tests {
             .expect_err("dropped");
         assert!(why.contains("did not finish"), "{why}");
 
+        // One that takes a moment is waited for, not killed: the wait polls at least once.
+        let slow = lease.join("slow");
+        std::fs::write(&slow, "#!/bin/sh\nsleep 0.3\necho done\n").expect("script");
+        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let crun = Crun::new(slow, no_scrub, None);
+        let said = crun
+            .stdout_within(lease, &["state", "c"], "state", Duration::from_secs(600))
+            .expect("it ends in time");
+        assert_eq!(said, "done\n");
+
         let quick = lease.join("quick");
         std::fs::write(&quick, "#!/bin/sh\necho out\necho oops >&2\nexit 3\n").expect("script");
         std::fs::set_permissions(&quick, std::fs::Permissions::from_mode(0o755)).expect("mode");
