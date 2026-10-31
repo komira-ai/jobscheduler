@@ -3,8 +3,6 @@
 //! output is read, and the loop that runs every workload with each line removed in turn.
 //! Nothing here touches the host; the runner is a closure the caller passes.
 
-#![allow(unused_variables, unused_imports)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 
@@ -274,7 +272,36 @@ fn joined(lines: &[&Line]) -> String {
 /// [`TraceError::LineNotFound`] when the profile has no such rule, so a change of the
 /// generator's format cannot pass for an ablation that removed nothing.
 pub fn without(profile: &str, base: &BaseSet, line: &Line) -> Result<String, TraceError> {
-    unimplemented!("without")
+    let all = lines(base);
+    let (verb, same): (&str, Vec<&Line>) = match line.kind {
+        Kind::Name => (
+            "file-read-metadata",
+            all.iter().filter(|l| l.kind == Kind::Name).collect(),
+        ),
+        _ => (
+            "file-read*",
+            all.iter().filter(|l| l.kind == Kind::Read).collect(),
+        ),
+    };
+    let whole = format!("(allow {verb} {})", joined(&same));
+    let kept: Vec<&Line> = same.iter().copied().filter(|l| *l != line).collect();
+    let rest = if kept.is_empty() {
+        String::new()
+    } else {
+        format!("(allow {verb} {})", joined(&kept))
+    };
+    let at = profile
+        .lines()
+        .position(|text| text == whole)
+        .ok_or_else(|| TraceError::LineNotFound(whole.clone()))?;
+    let mut out: Vec<&str> = profile.lines().collect();
+    out[at] = &rest;
+    if rest.is_empty() {
+        out.remove(at);
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    Ok(text)
 }
 
 /// The index of the profile text in a `sandbox-exec ... -p <profile> program args` argv.
@@ -336,7 +363,33 @@ pub fn ablate(
     workloads: &[Workload],
     run: &mut dyn FnMut(&Workload, &[OsString]) -> Outcome,
 ) -> Result<Vec<Row>, TraceError> {
-    unimplemented!("ablate")
+    let mut rows = Vec::new();
+    let mut whole = Vec::new();
+    for work in workloads {
+        let outcome = run(work, &work.argv);
+        whole.push(outcome);
+        rows.push(Row::baseline(&work.name, outcome));
+    }
+    for line in lines(base) {
+        let mut row = Row::new(line.kind, &line.label());
+        row.needed = Mark::No;
+        for (work, was) in workloads.iter().zip(&whole) {
+            let text =
+                profile_of(&work.argv).ok_or_else(|| TraceError::NoProfile(work.name.clone()))?;
+            let argv = with_profile(&work.argv, &without(&text, base, &line)?)
+                .ok_or_else(|| TraceError::NoProfile(work.name.clone()))?;
+            let now = run(work, &argv);
+            if work.allowed && *was == Outcome::Success && now != Outcome::Success {
+                row.needed = Mark::Yes;
+                row.workloads.push(work.name.clone());
+            }
+            if !work.allowed && now != *was {
+                row.denial_changed.push(work.name.clone());
+            }
+        }
+        rows.push(row);
+    }
+    Ok(rows)
 }
 
 /// One path an `fs_usage` line names, and the process that used it.
@@ -352,7 +405,35 @@ pub struct Touch {
 /// last column, the process (`name.tid`). Lines with no path are skipped.
 #[must_use]
 pub fn parse_fs_usage(text: &str) -> Vec<Touch> {
-    unimplemented!("parse_fs_usage")
+    let mut touches = Vec::new();
+    for line in text.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let (Some(last), Some(first)) = (
+            words.last(),
+            words.iter().position(|word| word.starts_with('/')),
+        ) else {
+            continue;
+        };
+        let mut end = words.len() - 1;
+        if end > first && words[end - 1] == "W" {
+            end -= 1;
+        }
+        if end > first && words[end - 1].parse::<f64>().is_ok() {
+            end -= 1;
+        }
+        if end <= first {
+            continue;
+        }
+        let process = match last.rsplit_once('.') {
+            Some((name, tid)) if tid.bytes().all(|b| b.is_ascii_digit()) => name,
+            _ => last,
+        };
+        touches.push(Touch {
+            path: words[first..end].join(" "),
+            process: process.to_owned(),
+        });
+    }
+    touches
 }
 
 /// The path the tracer stats (and that does not exist) before a workload.
@@ -372,7 +453,22 @@ pub fn end_marker(name: &str) -> String {
 /// again adds to its window.
 #[must_use]
 pub fn windows(touches: &[Touch]) -> BTreeMap<String, Vec<Touch>> {
-    unimplemented!("windows")
+    let mut done: BTreeMap<String, Vec<Touch>> = BTreeMap::new();
+    let mut open: Option<(String, Vec<Touch>)> = None;
+    for touch in touches {
+        if let Some(name) = touch.path.strip_prefix("/js-trace-begin-") {
+            open = Some((name.to_owned(), Vec::new()));
+        } else if let Some(name) = touch.path.strip_prefix("/js-trace-end-") {
+            if let Some((current, inside)) = open.take() {
+                if current == name {
+                    done.entry(current).or_default().extend(inside);
+                }
+            }
+        } else if let Some((_, inside)) = open.as_mut() {
+            inside.push(touch.clone());
+        }
+    }
+    done
 }
 
 fn private(path: &str) -> String {
@@ -397,7 +493,12 @@ fn below(path: &str, dir: &str) -> bool {
 /// `/private/var/x` are the same place.
 #[must_use]
 pub fn covers(line: &Line, path: &str) -> bool {
-    unimplemented!("covers")
+    let real = private(path);
+    match (line.kind, line.how) {
+        (Kind::Name, _) => below(path, &line.path),
+        (_, Match::Literal) => line.path == "/" || path == line.path || real == line.path,
+        (_, Match::Subpath) => below(path, &line.path) || below(&real, &line.path),
+    }
 }
 
 /// Fills `touched` and `touched_by` of the name and read rows from `windows`. When a
@@ -408,12 +509,43 @@ pub fn mark_touched(
     windows: &BTreeMap<String, Vec<Touch>>,
     expected: &[String],
 ) {
-    unimplemented!("mark_touched")
+    let complete = expected.iter().all(|name| windows.contains_key(name));
+    let by_label: BTreeMap<(&str, String), Line> = lines(base)
+        .into_iter()
+        .map(|line| ((line.kind.as_str(), line.label()), line))
+        .collect();
+    for row in rows.iter_mut() {
+        let Some(line) = by_label.get(&(row.kind.as_str(), row.line.clone())) else {
+            continue;
+        };
+        let mut by = BTreeSet::new();
+        for (name, inside) in windows {
+            for touch in inside.iter().filter(|touch| covers(line, &touch.path)) {
+                by.insert(format!("{name}/{}", touch.process));
+            }
+        }
+        row.touched = match (by.is_empty(), complete) {
+            (false, _) => Mark::Yes,
+            (true, true) => Mark::No,
+            (true, false) => Mark::Unknown,
+        };
+        row.touched_by = by.into_iter().collect();
+    }
 }
 
 /// One row per setuid or setgid file found: [`Kind::Setuid`] when `listed` has it,
 /// [`Kind::SetuidNew`] when not.
 #[must_use]
 pub fn setuid_rows(found: &[String], listed: &[&str]) -> Vec<Row> {
-    unimplemented!("setuid_rows")
+    found
+        .iter()
+        .map(|path| {
+            let kind = if listed.contains(&path.as_str()) {
+                Kind::Setuid
+            } else {
+                Kind::SetuidNew
+            };
+            Row::new(kind, path)
+        })
+        .collect()
 }
