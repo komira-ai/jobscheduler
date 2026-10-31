@@ -295,19 +295,19 @@ fn a_lease_server_that_fails_during_the_wait_ends_the_step_there() {
     assert_eq!(rig.world.ticks(), 16);
 }
 
-/// The prepare that ended at the drain bound with the final uncordon failing, and the rig.
-fn blipped(name: &str) -> (Rig, Done, Vec<String>) {
-    let rig = Rig::new(name);
+/// Runs the prepare that ends at the drain bound with the final uncordon failing.
+fn blipped(rig: &Rig) -> (Done, Vec<String>) {
     rig.set_leases(1);
-    let spy = Spy::new(&rig);
+    let spy = Spy::new(rig);
     spy.fail("uncordon");
-    let done = spy.prepare(&rig);
-    (rig, done, spy.log())
+    let done = spy.prepare(rig);
+    (done, spy.log())
 }
 
 #[test]
 fn a_blip_on_the_final_uncordon_still_defers_with_the_failure_in_the_detail() {
-    let (rig, done, _) = blipped("hook-prepare-blip-uncordon");
+    let rig = Rig::new("hook-prepare-blip-uncordon");
+    let (done, _) = blipped(&rig);
     assert_eq!(done.outcome, Outcome::Deferred);
     assert_eq!(done.report.reason, Some(Reason::DrainBound));
     assert_eq!(done.report.class, Class::Environment);
@@ -321,7 +321,8 @@ fn a_blip_on_the_final_uncordon_still_defers_with_the_failure_in_the_detail() {
 
 #[test]
 fn a_blip_on_the_final_uncordon_leaves_the_recorded_cordon_with_its_expiry() {
-    let (rig, _, _) = blipped("hook-prepare-blip-record");
+    let rig = Rig::new("hook-prepare-blip-record");
+    blipped(&rig);
     let record = rig.record().unwrap();
     assert!(record.cordon.placed && !record.cordon.provisional);
     assert_eq!(record.cordon.first_ms, START);
@@ -331,7 +332,8 @@ fn a_blip_on_the_final_uncordon_leaves_the_recorded_cordon_with_its_expiry() {
 
 #[test]
 fn a_blip_on_the_final_uncordon_stops_no_unit_and_moves_no_link() {
-    let (_, _, log) = blipped("hook-prepare-blip-no-acts");
+    let rig = Rig::new("hook-prepare-blip-no-acts");
+    let (_, log) = blipped(&rig);
     assert!(
         log.iter()
             .all(|call| call.starts_with("cordon(") || call == "uncordon"),
@@ -341,7 +343,8 @@ fn a_blip_on_the_final_uncordon_stops_no_unit_and_moves_no_link() {
 
 #[test]
 fn a_rerun_after_a_blip_on_the_final_uncordon_adopts_its_own_cordon() {
-    let (rig, _, _) = blipped("hook-prepare-blip-rerun");
+    let rig = Rig::new("hook-prepare-blip-rerun");
+    blipped(&rig);
     let first = rig.record().unwrap().cordon;
     rig.set_leases(0);
     let spy = Spy::new(&rig);
@@ -354,7 +357,8 @@ fn a_rerun_after_a_blip_on_the_final_uncordon_adopts_its_own_cordon() {
 
 #[test]
 fn a_rerun_after_a_blip_on_the_final_uncordon_places_again_once_the_cordon_lapsed() {
-    let (rig, _, _) = blipped("hook-prepare-blip-lapsed");
+    let rig = Rig::new("hook-prepare-blip-lapsed");
+    blipped(&rig);
     let first = rig.record().unwrap().cordon;
     rig.world
         .pause(std::time::Duration::from_secs(2 * LEASE_SECS));
