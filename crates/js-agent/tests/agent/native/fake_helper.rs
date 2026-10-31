@@ -20,7 +20,7 @@ use std::thread;
 
 use js_mac_session::client::Client;
 use js_mac_session::lease::{parse_lease, user_name};
-use js_mac_session::proto::{self, Call, RUN_FDS, Reply, Request};
+use js_mac_session::proto::{self, Call, Limits, RUN_FDS, Reply, Request};
 
 use crate::support::Scratch;
 
@@ -44,6 +44,8 @@ pub struct Seen {
     pub argv: Vec<String>,
     /// For `run`: the environment.
     pub env: Vec<(String, String)>,
+    /// For `run`: the limits the request carried, if any.
+    pub limits: Option<Limits>,
     /// For `run`: whether the fourth descriptor (the working directory) is a directory.
     pub cwd_is_dir: bool,
     /// For `run`: how many bytes the first descriptor (standard input) holds.
@@ -245,8 +247,8 @@ fn refused(stream: &UnixStream, reason: String) {
     reply(stream, &Reply::Refused { reason });
 }
 
-/// What a `run` asks: the lease, the argument vector and the environment.
-type RunAsk = (String, Vec<String>, Vec<(String, String)>);
+/// What a `run` asks: the lease, the argument vector, the environment and the limits.
+type RunAsk = (String, Vec<String>, Vec<(String, String)>, Option<Limits>);
 
 /// One connection: the helper's hello, one request, its answer.
 fn serve(stream: &UnixStream, shared: &Shared) {
@@ -289,8 +291,12 @@ fn serve(stream: &UnixStream, shared: &Shared) {
             }
         },
         Request::Run {
-            lease, argv, env, ..
-        } => run(stream, shared, (lease, argv, env), fds),
+            lease,
+            argv,
+            env,
+            limits,
+            ..
+        } => run(stream, shared, (lease, argv, env, limits), fds),
         Request::KillUid { lease } => match shared.take(seen("kill-uid", &lease)) {
             Some(reason) => refused(stream, reason),
             None => {
@@ -314,7 +320,7 @@ fn serve(stream: &UnixStream, shared: &Shared) {
 /// A `run`: the descriptors are looked at, the scripted output is written, and the process
 /// runs until a test ends it (or, for a real run, until it exits).
 fn run(stream: &UnixStream, shared: &Shared, ask: RunAsk, fds: Vec<OwnedFd>) {
-    let (lease, argv, env) = ask;
+    let (lease, argv, env, limits) = ask;
     let [stdin, stdout, stderr, cwd]: [OwnedFd; 4] = fds.try_into().expect("four descriptors");
     let mut held = Vec::new();
     let mut input = File::from(stdin.try_clone().unwrap());
@@ -328,6 +334,7 @@ fn run(stream: &UnixStream, shared: &Shared, ask: RunAsk, fds: Vec<OwnedFd>) {
         lease: lease.clone(),
         argv: argv.clone(),
         env: env.clone(),
+        limits,
         cwd_is_dir,
         stdin_bytes: held.len(),
         ..Seen::default()
@@ -340,7 +347,11 @@ fn run(stream: &UnixStream, shared: &Shared, ask: RunAsk, fds: Vec<OwnedFd>) {
         (state.real, state.prints.clone())
     };
     if real {
-        return real_run(stream, (lease, argv, env), [stdin, stdout, stderr, cwd]);
+        return real_run(
+            stream,
+            (lease, argv, env, limits),
+            [stdin, stdout, stderr, cwd],
+        );
     }
     File::from(stdout).write_all(&out).unwrap();
     File::from(stderr).write_all(&err).unwrap();
@@ -374,7 +385,7 @@ fn real_run(stream: &UnixStream, ask: RunAsk, [stdin, stdout, stderr, cwd]: [Own
     use js_mac_session::proto::Session;
     use js_mac_session::spawn::{self, Spawn};
 
-    let (lease, argv, env) = ask;
+    let (lease, argv, env, limits) = ask;
     let name = user_name(parse_lease(&lease).unwrap());
     let child = spawn::spawn(Spawn {
         uid: rustix::process::getuid().as_raw(),
@@ -388,6 +399,7 @@ fn real_run(stream: &UnixStream, ask: RunAsk, [stdin, stdout, stderr, cwd]: [Own
         stderr,
         cwd,
         session: Session::Background,
+        limits,
     });
     let mut child = match child {
         Ok(child) => child,

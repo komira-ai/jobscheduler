@@ -266,6 +266,17 @@ fn the_resource_limits_are_checked_and_handed_on() {
     given.max_processes = None;
     let why = NativeSettings::from_flags(&given, &[], journal).unwrap_err();
     assert!(why.starts_with("--native-max-file-mib: "), "{why}");
+    // Above the helper's caps (1 TiB, and 2^20 processes): refused at start-up, since the
+    // helper would refuse every run.
+    for (mib, procs) in [((1 << 20) + 1, 64), (8, (1 << 20) + 1)] {
+        given.max_file_mib = Some(mib);
+        given.max_processes = Some(procs);
+        let why = NativeSettings::from_flags(&given, &[], journal).unwrap_err();
+        assert!(why.contains("not in 1..="), "{mib} {procs}: {why}");
+    }
+    given.max_file_mib = Some(1 << 20);
+    given.max_processes = Some(1 << 20);
+    NativeSettings::from_flags(&given, &[], journal).unwrap();
     let mut alone = flags(None, None, None, &[]);
     alone.max_file_mib = Some(8);
     let why = NativeSettings::from_flags(&alone, &[], journal).unwrap_err();
