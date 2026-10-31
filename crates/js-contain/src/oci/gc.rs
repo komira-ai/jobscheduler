@@ -27,6 +27,12 @@
 //! gate can see is a use that already returned (`has` answered true) and runs a container:
 //! that is the `leased` list's job, and the collection belongs before the first prepare.
 //!
+//! **A removal that fails midway.** The digest directory is first renamed to
+//! `.stage-gc-<hex>-<id>` in the store, under the digest's gate: the image is gone at once
+//! (`has` is false, the next use fetches again) and a removal that stops halfway leaves a
+//! `.stage-` leftover, which the start sweep removes, not a half-emptied `rootfs` that
+//! still answers as an image.
+//!
 //! **Safety against a hostile tree.** An image's files are the container's, not the
 //! daemon user's: a directory is removed with [`crate::remove::remove_tree`] (no
 //! recursion, `O_NOFOLLOW` at every level, no symlink followed) and, if the daemon user
@@ -133,10 +139,16 @@ impl Images {
                 report.kept_bytes += bytes;
                 continue;
             };
-            let result = remove(&path);
-            if result.is_ok() {
-                *fetched = false;
-            }
+            // Set aside first: the image is gone at once, and a removal that fails
+            // midway leaves a `.stage-` leftover (the start sweep takes it), not an image
+            // that still looks complete.
+            let result = match self.set_aside(&hex) {
+                Ok(aside) => {
+                    *fetched = false;
+                    remove(&aside)
+                }
+                Err(e) => Err(format!("setting it aside: {e}")),
+            };
             drop(fetched);
             match result {
                 Ok(()) => {
@@ -160,7 +172,9 @@ impl Oci {
     /// anything else in a slice names nothing. Call it at start, before the disk
     /// offered is read; a lease running without its digest in `leased` loses its image.
     ///
-    /// The caller logs the report (its `Display` says what went and what stays).
+    /// The caller logs the report (its `Display` says what went and what stays) and treats
+    /// [`GcReport::failed`] as a warning: a digest that could not be removed was set aside
+    /// first, so it no longer answers as an image, and the start sweep takes what is left.
     ///
     /// A digest being fetched or unpacked is kept; the second call after a collection
     /// removes nothing.

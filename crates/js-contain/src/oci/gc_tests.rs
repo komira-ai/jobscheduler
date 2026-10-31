@@ -419,13 +419,19 @@ fn the_report_counts_the_disk_of_what_went_and_what_stays() {
     );
 }
 
-/// Catches a removal that cannot finish being reported as done, or hidden: a directory
-/// the daemon user may not write is left, named in the report, counted as still held,
-/// and goes at the next collection once it can.
-#[test]
-fn a_digest_that_cannot_be_removed_is_reported_and_stays_counted() {
+/// Catches a removal that cannot finish being reported as done, or hidden, and one that
+/// leaves an image that still looks complete: a directory the daemon user may not write
+/// makes the removal fail midway; the report names the digest and counts its disk as held,
+/// the digest is no longer an image (`has` is false, the leftover is a `.stage-gc-` name
+/// the start sweep takes) and the next use fetches it again. Assumes a non-root user
+/// (root ignores the mode).
+#[tokio::test]
+async fn a_removal_that_fails_midway_leaves_no_image_and_the_next_use_fetches() {
     use std::os::unix::fs::PermissionsExt as _;
-    let fx = fixture("gc-stuck");
+    let source = Arc::new(Counting::default());
+    let fx = fixture_with("gc-stuck", source.clone());
+    let wanted = pinned('a');
+    fx.oci.check_pinned(&wanted).await.expect("first use");
     image(&fx.images, 'a', 100);
     let locked = fx.images.join(hexn('a')).join("rootfs/usr/bin");
     let mode = |m| std::fs::Permissions::from_mode(m);
@@ -440,8 +446,64 @@ fn a_digest_that_cannot_be_removed_is_reported_and_stays_counted() {
     assert!(report.failed[0].starts_with(&digest('a')), "{report:?}");
     assert!(report.kept_bytes > 0, "{report:?}");
     assert!(report.to_string().contains("could not remove"), "{report}");
-    let again = fx.oci.collect_images(&[], &[]).expect("collected");
-    assert_eq!(again.removed, [digest('a')]);
+    assert!(
+        !fx.oci.images.has(&wanted),
+        "a half-removed image answers as present"
+    );
+    let left: Vec<String> = names(&fx.images);
+    assert!(
+        left.len() == 1 && left[0].starts_with(&format!(".stage-gc-{}-", hexn('a'))),
+        "{left:?}"
+    );
+    fx.oci.check_pinned(&wanted).await.expect("fetched again");
+    assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    assert!(fx.images.join(hexn('a')).is_dir());
+}
+
+/// Catches a digest that cannot even be set aside (its store is read-only) being reported
+/// as removed, or lost: it stays whole, is named in the report and counted as held.
+/// Assumes a non-root user.
+#[test]
+fn a_digest_that_cannot_be_set_aside_is_kept_whole_and_reported() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fx = fixture("gc-aside");
+    image(&fx.images, 'a', 100);
+    let mode = |m| std::fs::Permissions::from_mode(m);
+    std::fs::set_permissions(&fx.images, mode(0o555)).expect("chmod");
+    let report = fx.oci.collect_images(&[], &[]).expect("collected");
+    std::fs::set_permissions(&fx.images, mode(0o755)).expect("chmod back");
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert!(report.failed[0].contains("setting it aside"), "{report:?}");
+    assert!(
+        report.removed.is_empty() && report.kept_bytes > 0,
+        "{report:?}"
+    );
+    assert_eq!(names(&fx.images), [hexn('a')]);
+    assert!(fx.images.join(hexn('a')).join(ROOTFS).is_dir());
+}
+
+/// The same for `Images::remove` (`Oci::remove_image`): a removal that fails midway leaves
+/// no image, and an image that cannot be set aside is kept. Assumes a non-root user.
+#[tokio::test]
+async fn remove_image_sets_the_directory_aside_before_removing_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let source = Arc::new(Counting::default());
+    let fx = fixture_with("gc-remove-image", source.clone());
+    let wanted = pinned('a');
+    fx.oci.check_pinned(&wanted).await.expect("first use");
+    image(&fx.images, 'a', 100);
+    let locked = fx.images.join(hexn('a')).join("rootfs/usr/bin");
+    let mode = |m| std::fs::Permissions::from_mode(m);
+    std::fs::set_permissions(&locked, mode(0o500)).expect("chmod");
+    let failed = fx.oci.remove_image(&wanted).await;
+    std::fs::set_permissions(&locked, mode(0o755)).expect("chmod back");
+    assert!(failed.is_err(), "the removal could not finish");
+    assert!(
+        !fx.oci.images.has(&wanted),
+        "a half-removed image answers as present"
+    );
+    fx.oci.check_pinned(&wanted).await.expect("fetched again");
+    assert_eq!(source.calls.load(Ordering::SeqCst), 2);
 }
 
 /// Catches a collection that fails on a node with no store yet (the first start).
@@ -465,7 +527,7 @@ fn a_node_with_no_store_collects_nothing() {
 
 /// Catches a directory the daemon user may not open being fatal to the measure or
 /// counted for nothing: it counts for its own entry, and the rest of the tree is still
-/// counted.
+/// counted. Assumes a non-root user (root opens any directory).
 #[test]
 fn a_directory_that_cannot_be_opened_counts_for_its_own_entry() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -485,7 +547,8 @@ fn a_directory_that_cannot_be_opened_counts_for_its_own_entry() {
 }
 
 /// Catches a digest that vanishes under a removal being an error, and a failure to look
-/// at a path being taken for a removal.
+/// at a path being taken for a removal. Assumes a non-root user (the unlink case uses a
+/// read-only directory).
 #[test]
 fn removing_an_entry_that_is_gone_is_done_and_one_that_cannot_be_seen_fails() {
     let fx = fixture("gc-entry");

@@ -202,21 +202,40 @@ impl Images {
         &self.dir
     }
 
+    /// Moves the directory of the digest `hex` to a name of its own in the store
+    /// (`.stage-gc-<hex>-<id>`) and returns it: a rename within the store, so the image is
+    /// gone at once (`has` is false) and what is left to remove is a leftover the start
+    /// sweep takes if the removal fails midway. The caller holds the digest's gate.
+    ///
+    /// # Errors
+    /// There is no such directory, or the rename failed.
+    pub(super) fn set_aside(&self, hex: &str) -> std::io::Result<PathBuf> {
+        let aside = self
+            .dir
+            .join(format!("{STAGE_PREFIX}gc-{hex}-{}", unique()));
+        std::fs::rename(self.dir.join(hex), &aside)?;
+        Ok(aside)
+    }
+
     /// Removes the image's directory (an image already gone is not an error) and forgets
     /// that it was fetched, so that the next use fetches it again. It waits for a fetch of
     /// the same image under way, and a fetch started meanwhile waits for it, so the two
-    /// never work in the directory together. The caller must see to it that no container
-    /// still runs on the image (its root is the lower layer of a container's mounts).
+    /// never work in the directory together. The directory is first set aside by a rename
+    /// ([`Images::set_aside`]), so a removal that fails midway leaves no image that still
+    /// looks complete. The caller must see to it that no container still runs on the image
+    /// (its root is the lower layer of a container's mounts).
     ///
     /// # Errors
-    /// The directory could not be removed.
+    /// The directory could not be set aside (the image is kept), or what was set aside
+    /// could not be removed (the image is gone; the start sweep takes the rest).
     pub(crate) async fn remove(&self, image: &PinnedImage) -> std::io::Result<()> {
         let flight = self.gate(image);
         let mut fetched = flight.lock().await;
         *fetched = false;
-        match crate::remove::remove_tree(&self.dir_of(&image.digest)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
+        match self.set_aside(&hex_of(image)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+            Ok(aside) => crate::remove::remove_tree(&aside),
         }
     }
 
