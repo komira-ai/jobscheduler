@@ -310,7 +310,6 @@ impl Runtime for NativeRuntime {
         let Body::Native(native) = &spec.body else {
             return Err(RuntimeError::new("this runtime runs native bodies only"));
         };
-        check_env(native)?;
         self.ready()?;
         let id = LeaseId::new(self.term, self.next);
         self.next += 1;
@@ -320,6 +319,7 @@ impl Runtime for NativeRuntime {
         self.journal
             .add(&lease)
             .map_err(|why| fail(&"the lease journal", &why))?;
+        check_env(native)?;
         // The helper records the lease, and the uid it holds, before it makes the home and
         // the account, so a refusal may leave a live lease: it is removed again.
         let uid = match self.helper.user_create(&lease, None) {
