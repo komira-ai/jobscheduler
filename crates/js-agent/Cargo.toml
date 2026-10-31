@@ -17,6 +17,8 @@ js-agent-wire = { path = "../js-agent-wire" }
 js-bundle = { path = "../js-bundle" }
 js-caps = { path = "../js-caps" }
 js-client = { path = "../js-client" }
+js-mac-pool = { path = "../js-mac-pool" }
+js-mac-session = { path = "../js-mac-session" }
 js-oci = { path = "../js-oci" }
 js-treestore = { path = "../js-treestore" }
 js-types = { path = "../js-types" }

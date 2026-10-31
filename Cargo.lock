@@ -945,6 +945,8 @@ dependencies = [
  "js-contain",
  "js-lease",
  "js-lease-server",
+ "js-mac-pool",
+ "js-mac-session",
  "js-oci",
  "js-pool-static",
  "js-provider",

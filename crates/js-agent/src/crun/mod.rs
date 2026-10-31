@@ -269,6 +269,8 @@ enum Fault {
     NotContained,
     #[error("containers on this runtime cannot use a GPU")]
     Gpu,
+    #[error("this runtime runs container jobs only")]
+    Native,
     #[error("{0}")]
     Image(String),
     #[error("run id {0:?} cannot name a container")]
@@ -544,7 +546,9 @@ impl CrunRuntime {
         if !spec.gpu_indices.is_empty() {
             return Err(Fault::Gpu);
         }
-        let Body::Container { image: given, args } = &spec.body;
+        let Body::Container { image: given, args } = &spec.body else {
+            return Err(Fault::Native);
+        };
         let image = pinned(given).map_err(Fault::Image)?;
         let name = container_name(&self.host_id, &spec.run_id)
             .map_err(|_| Fault::Name(spec.run_id.clone()))?;

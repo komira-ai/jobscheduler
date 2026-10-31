@@ -21,7 +21,7 @@ use js_agent_wire::{
 };
 
 pub use self::exclusive::{Quiet, Restored};
-use self::job::{Job, Retired, Stage, Stuck, Waiting, blind_taint, container_spec, host_taint};
+use self::job::{Job, Retired, Stage, Stuck, Waiting, blind_taint, host_taint, run_spec};
 pub use self::slots::Slots;
 use super::quota::QuotaHealth;
 use super::runtime::{Prepared, ResolvedMount, RunHandle, Runtime, RuntimeError};
@@ -362,12 +362,22 @@ impl Lifecycle {
                 Some(bundle) => bundle.admit(spec)?,
             }
         }
-        if spec.native.is_some() {
-            let why = match spec.bundle.is_some() {
-                true => "the bundle is admitted, but this agent cannot run a bundle yet",
-                false => "this agent runs no native jobs",
-            };
-            return Err(no(refusal::NATIVE_UNSUPPORTED, why));
+        if let Some(native) = &spec.native {
+            if spec.bundle.is_some() {
+                return Err(no(
+                    refusal::NATIVE_UNSUPPORTED,
+                    "the bundle is admitted, but this agent cannot run a bundle yet",
+                ));
+            }
+            self.runtime
+                .check_native(native)
+                .map_err(|refused| (refused.code, refused.why))?;
+            if !spec.files.is_empty() {
+                return Err(no(
+                    detail::FILES_NEED_CONTAINER,
+                    "run files are delivered to containers only",
+                ));
+            }
         }
         if let Some(why) = self.quota_health.why() {
             return Err(no(
@@ -720,9 +730,9 @@ impl Lifecycle {
             written.map(|files| (scratch, files)).map_err(failed)
         });
         started.and_then(|(scratch, files)| {
-            let container = container_spec(spec, mounts, scratch, files, slot, booked);
+            let run = run_spec(spec, mounts, scratch, files, slot, booked);
             self.runtime
-                .create_and_start(&container)
+                .create_and_start(&run)
                 .map_err(|why| runtime_failure(&why))
         })
     }
