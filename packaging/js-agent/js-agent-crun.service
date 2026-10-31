@@ -1,0 +1,80 @@
+# js-agent on a Linux farm node that runs jobs with crun, not a container engine. It replaces
+# js-agent.service (the unit of the deb, which runs jobs through Docker or Podman) on a node,
+# and `Conflicts=js-agent.service` keeps the two from running together. Installed by the held
+# host setup script (crun_host_setup.sh), with its tmpfiles file, as
+#   /etc/systemd/system/js-agent-crun.service
+#   /etc/tmpfiles.d/js-agent-crun.conf          (from tmpfiles-crun.conf here)
+# crates/xtask/tests/js_agent_farm_unit.rs pins the settings described here. The setup script
+# does not start or enable the unit: the switch from the engine unit is a step of its own.
+#
+# `--runtime crun` is named here and nowhere else: the packaged Docker unit and the elastic
+# boot payload name `--runtime docker`, and an agent given no `--runtime` keeps the engine of
+# `--container-bin`, as it always did.
+#
+# The agent stays root and runs every `crun` as the job user (`--job-user`), a system account
+# with a subuid and subgid range of 65536 ids or more that the setup script makes. At start the
+# agent checks the host (crun and its version, newuidmap and newgidmap, the job user's ranges,
+# the roots' modes, the cgroup controllers, the AppArmor profile for /usr/bin/crun) and exits 2
+# naming each piece that is missing; `journalctl -u js-agent-crun` shows the list. The program
+# must be the distribution's /usr/bin/crun: its AppArmor profile, which lets it make a user
+# namespace where kernel.apparmor_restrict_unprivileged_userns is 1, attaches to that path.
+#
+# Settings that differ from js-agent.service, and why:
+#   Delegate=yes          the agent makes a cgroup per run below its own and gives it to the job
+#                         user, which needs the cpu, memory and pids controllers delegated
+#   DelegateSubgroup=supervisor
+#                         systemd starts the agent in the leaf <unit>/supervisor, so the unit's own
+#                         cgroup holds no process (cgroup v2's no-internal-process rule) and can
+#                         enable cpu, memory and pids in its subtree_control for the sibling
+#                         <unit>/actions that holds every lease cgroup. Needs systemd 254 or newer
+#                         (Ubuntu 24.04 ships 255); the setup script refuses an older one. The name
+#                         is the one js-contain's delegate step already treats as the agent's leaf,
+#                         so it derives the unit cgroup, and <unit>/actions below it, from it
+#   Slice=                the node's job load is one slice, which an operator can cap
+#   StateDirectory=       with StateDirectoryMode=0711 makes /var/lib/js-agent searchable by
+#                         others: the job's ids walk down through it to the scratch root
+#                         (0711, see the tmpfiles file); the state root below stays 0700
+#   --scratch-root       the runs directory inside the scratch mount, so the image store, which
+#                         the agent places beside the scratch root (<scratch>/oci), is on the
+#                         same disk as the leases; the mount itself is what the unit waits for
+#   KillMode=mixed        SIGTERM goes to the agent alone, which drains; only after
+#                         TimeoutStopSec would the rest be killed
+#   --drain-wait 3600 --stop-grace 120   a run in a crun container ends with the agent that
+#                         holds it (a graceful exit kills it; after a crash this unit's
+#                         KillMode=mixed does, as its lease cgroups are inside the unit's),
+#                         so a stop lets the running jobs finish for up to an hour
+#                         (the most --drain-wait allows) and then stops them within 120 s
+#   TimeoutStopSec=3900   the longest drain (3600 + 120 s) plus the 30 s the server gets to
+#                         acknowledge the results and a margin; finite, so a hung agent is
+#                         killed and Restart=always brings it back. Raise it with either flag.
+# No container engine is in After= and none is pulled in.
+#
+# Like js-agent.service, the unit runs as root with no sandboxing (the agent reads /proc/1/ns and
+# owns the state and scratch roots); add none of the Protect*, Private*, Restrict* or
+# Capability* settings. Set this host's --server and --pool with `systemctl edit`, clearing
+# ExecStart= first, or give them to the setup script, which writes them in.
+[Unit]
+Description=jobscheduler agent (crun runtime)
+Documentation=https://github.com/komira-ai/jobscheduler
+After=network-online.target
+Wants=network-online.target
+Conflicts=js-agent.service
+RequiresMountsFor=/var/lib/js-agent/scratch
+ConditionPathIsMountPoint=/var/lib/js-agent/scratch
+
+[Service]
+Type=simple
+Slice=jobscheduler.slice
+Delegate=yes
+DelegateSubgroup=supervisor
+StateDirectory=js-agent
+StateDirectoryMode=0711
+ExecStartPre=+systemd-tmpfiles --create /etc/tmpfiles.d/js-agent-crun.conf
+ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --drain-wait 3600 --stop-grace 120 --runtime crun --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
+KillMode=mixed
+TimeoutStopSec=3900
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

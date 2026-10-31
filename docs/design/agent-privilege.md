@@ -276,8 +276,27 @@ and the rest of the daemon's environment are not inherited. The caller's `scrub_
 and a non-root daemon never drops. `every_crun_command_of_a_root_daemon_runs_as_the_job_user_with_a_clean_environment`
 runs a stand-in `crun` as a root daemon and reads, from the stand-in itself (`/proc/self/status`), the
 ids, groups and environment each of `kill`, `delete` and the helper run had: the job user's three ids
-each, no supplementary group, `HOME` and `PATH` only. The keeper and the unpack helper
-still need the same drop (P12a): they are not started through `Crun`.
+each, no supplementary group, `HOME` and `PATH` only; the unpack helper is one more of those helper
+runs (the test also calls `Oci::unpack_layers`). The lease's keeper is not started through `Crun`, so
+`Keeper::watch_as` applies the same `JobDrop` (`Oci::job_drop`) to the keeper's command line:
+`the_keeper_of_a_root_daemon_runs_as_the_job_user_with_a_clean_environment` starts a recording keeper as root
+with and without it and reads the ids, groups, working directory and environment the program had.
+
+**The runtime is the configured path, never a copy.** js-contain execs exactly `OciConfig::runtime`
+(default `/usr/bin/crun`) and makes no copy of it: AppArmor attaches the profile that grants the job user a
+user namespace to the path, and a copy is refused it (the control below). Refusing a path that no loaded
+profile covers is the agent's start check (`--crun-bin`), not js-contain's. Unit test:
+`crun::tests::the_configured_runtime_path_is_what_runs_and_no_copy_is_made`.
+
+**One cgroup hand-over: the agent runtime's.** The cgroups are handed to the job user in one place,
+`CrunRuntime` (`crates/js-agent/src/crun/mod.rs`; its module docs are the authority), by descriptor
+(`hand_over_no_follow`: no-follow open, `fchown`, `fchmod`; an empty file name is the directory itself). The
+job user owns exactly: the agent root's `cgroup.procs`, the `helpers` cgroup the helper containers are made in
+(`JOB_OWNED_FILES`), and each lease's own cgroup (`JOB_OWNED_FILES`: the directory, `cgroup.procs`,
+`cgroup.threads`, `cgroup.subtree_control`). It owns nothing of `actions`. `cgroup.kill` is given to nobody:
+the root agent writes the lease's `cgroup.kill` itself, and `crun` owns `ctr/cgroup.kill`. js-contain has no
+second hand-over (`delegate()` chowns nothing, there is no `delegate_for_job`); the root test
+(`root_daemon`) hands the same files over by hand, as its stand-in for the runtime.
 
 **Every site of js-contain that assumes a non-root daemon:**
 
@@ -288,9 +307,9 @@ still need the same drop (P12a): they are not started through `Crun`.
 | `Oci::new` `search_check` | every ancestor of scratch is searchable by others (the container's ids are not the daemon's) | holds with a `0711` root; `0700` is refused | proven; the layout rule (`DirLayout::Searchable`) is the minimal change |
 | `newuidmap`/`newgidmap` (`id_tool`) | `crun`, running as an unprivileged user, maps its ids through the setuid tools | `crun` runs as the job user, so it does exactly that | proven (the test runs them) |
 | Lease directory ownership; the "give" helper container (`helper::give_job`, `Mapping::Setup`) | files the daemon user owns are given to the job's ids from a user namespace that maps both | root `chown`s the lease directories to the job user and the job-written directories to subordinate id 1000 directly; no helper container is needed. The give/clean helpers stay usable | proven for the give (the test does it); the clean (`remove_dir`) is root `unlinkat`, unchanged |
-| Cgroup delegation (`delegate::delegate`, `cgroup`) | the daemon owns its delegated subtree and `crun` (the same user) moves the container into `<lease>/ctr`; the kernel needs write on the common ancestor's `cgroup.procs` | the subtree and its control files must be `chown`ed to the job user (a unit's `Delegate=yes` does this only for the unit's `User=`, which is root here) and the root daemon sits in a leaf of it. `delegate()` makes the cgroups as root but chowns nothing | proven by hand in the test (`chown` of the directory and `cgroup.procs`/`threads`/`subtree_control`); `delegate()` must do it (P12a/P14) |
-| Keeper (`keeper.rs`) | a process of the daemon's own binary, run as the daemon user, writes `cgroup.kill` of the lease when the daemon dies | root can write `cgroup.kill`; it would run as the job user if started through the same hook, and needs write on the file | UNVERIFIED; the test does not start a keeper; it needs the same drop (P12a) |
-| Unpack and helper containers (`helper::unpack_job`, `Mapping::Setup`) | id 0 of the helper namespace is the daemon user | id 0 is the job user, because they are started through the same hook; the stage directory is opened `0777` | UNVERIFIED (the unpack mode, `__unpack-layers` in js-contain, is in place, but no test unpacks through the job-user hook: the image is pre-unpacked in the test); it needs the same drop (P12a) |
+| Cgroup delegation (`delegate::delegate`, `cgroup`) | the daemon owns its delegated subtree and `crun` (the same user) moves the container into `<lease>/ctr`; the kernel needs write on the common ancestor's `cgroup.procs` | the job user needs the agent root's `cgroup.procs`, the helpers' cgroup and each lease's cgroup (`JOB_OWNED_FILES`), not `cgroup.kill`, and a root daemon sits in a leaf. A unit's `Delegate=yes` gives the subtree to the unit's `User=`, root here; `delegate()` chowns nothing, `CrunRuntime` does the hand-over (above) | proven by the stand-in tests of the agent (`opening_gives_the_job_user_only_the_cgroup_file_crun_moves_processes_with` and the lease's file set in `runs`); the container test here chowns by hand |
+| Keeper (`keeper.rs`) | a process of the daemon's own binary, run as the daemon user, writes `cgroup.kill` of the lease when the daemon dies | started with `Keeper::watch_as(.., Oci::job_drop())` it runs as the job user, and then can write only a `kill` file the caller gave it; nothing in js-contain or the agent gives `cgroup.kill`, and `CrunRuntime` starts no keeper | the drop is proven (`the_keeper_of_a_root_daemon_...`); a keeper that kills a lease the agent no longer lives to kill needs its caller to hand over that one file, an open item of whoever wires it |
+| Unpack and helper containers (`helper::unpack_job`, `Mapping::Setup`) | id 0 of the helper namespace is the daemon user | id 0 is the job user, because they are started through the same hook; the helpers' working directory is given to the job user by descriptor (`give_to_job_user`); the root daemon makes the stage `0700`, sets `0755` and gives it by descriptor to the helper's id (the first id of the job user's subordinate range), in a `0711` store directory, so no other account can write it | the pull is proven (`crun_root` `pull`: the published directory belongs to that id and a stranger can neither list the store nor change the image directory); the drop is proven for the helper run (`every_crun_command_of_a_root_daemon_...` calls `unpack_layers`) and for the keeper (`the_keeper_of_a_root_daemon_...`) |
 | `AppArmor` user-namespace restriction | an unconfined unprivileged `crun` may not create a user namespace on newer kernels | **applies**: under B-as-built `crun` runs as the non-root job user, so the restriction hits it. See below | CI control with the restriction ON; the farm's policy is UNVERIFIED |
 
 **AppArmor: the restriction applies to B.** On kernels with `kernel.apparmor_restrict_unprivileged_userns=1`
@@ -381,9 +400,9 @@ The owner chose B: take the right-hand column. The left one is the hardening pat
    init-namespace and state-directory duties need nothing new.
 4. **B makes the give and the clean simpler**: root `chown`s and `unlinkat`s directly.
 
-Open items for B (section 4, duty 7): the same drop for the keeper and the unpack helper,
-`delegate()` chowning the delegated subtree, the keeper and the unpack helper as the job user, the
-pull as the job user, and the farm's AppArmor policy (a `crun` profile or a sysctl decision before P12a).
+Open items for B (section 4, duty 7): the pull as the job user, and the farm's AppArmor policy (a `crun`
+profile or a sysctl decision before P12a). The keeper and the unpack helper as the job user are done (duty 7); the cgroup hand-over is
+`CrunRuntime`'s; the `crun` path check is the agent's start check.
 
 **Hardening path (A).** What A would still give is that an agent compromise (it handles the lease
 server's commands) does not become root. Buy it later by moving the five duties behind helper
@@ -407,13 +426,14 @@ Proven in CI (the `agent-privilege` job and the `test` job):
 - Duty 5: the state directory ownership in both directions.
 - Duty 6 (read side): `CAP_NET_ADMIN` is the cost of reading the firewall.
 
+- The keeper as the job user (`root_daemon`, under sudo).
 - Option B end to end with a real `crun`, with the AppArmor restriction on: the namespace maps onto the
   job user's subordinate range, the job is unprivileged, `Oci::new`'s search check against a `0711`
   root, and the control that a copy of `crun` is refused (duty 7). The privilege drop of every `crun`
   command, and the explicit refusal of a root job user.
 
 **The tests, by what they do.** The `privilege` target has 28 tests plus the `child` harness entry
-(not a test of its own); `root_daemon` has 3. Those that **discriminate the feature** (they fail if the
+(not a test of its own); `root_daemon` has 6. Those that **discriminate the feature** (they fail if the
 change is wrong): `layout::below_a_searchable_root_the_job_ids_reach_their_directory_and_nothing_else`,
 `layout::run_files_are_unreadable_until_handed_over_and_then_readable_by_the_job_alone`,
 `layout::links_planted_by_the_job_in_its_run_files_are_removed_and_never_followed`, all three of
@@ -422,8 +442,8 @@ environment, the lifecycle layout tests). Those that **characterize the kernel o
 (they show what each shape needs and would pass whatever this change does): `layout::below_a_private_root_...`,
 every test of `init_ns`, `watch`, `quota`, `egress` and `state_dir`.
 
-UNVERIFIED (left to the later PRs, P5/P10 and the canary host): the keeper and the unpack helper
-as the job user; `delegate()` doing the cgroup `chown` itself; the farm's AppArmor policy (CI shows only that the distribution's profile admits `/usr/bin/crun` on the runner); the
+UNVERIFIED (left to the later PRs, P5/P10 and the canary host): an unpack of a real image under the
+root daemon; the farm's AppArmor policy (CI shows only that the distribution's profile admits `/usr/bin/crun` on the runner); the
 unit's `Delegate=` and `AmbientCapabilities=` (A); a `hidepid` process
 table; the egress set-up; the `--scratch-quota` flag on the farm's unit (whether the farm sets it is
 not known from this repository); the farm's kernel and AppArmor policy against any of the above

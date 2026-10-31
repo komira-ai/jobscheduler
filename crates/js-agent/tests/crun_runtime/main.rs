@@ -16,6 +16,7 @@
 #[path = "../runtime_suite/mod.rs"]
 mod runtime_suite;
 mod subject;
+mod sweep;
 
 use runtime_suite::{Program, Subject, begin, clean_up, conformance};
 
