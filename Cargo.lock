@@ -994,6 +994,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-analysis"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "js-bundle"
 version = "0.1.0"
 dependencies = [

@@ -12,7 +12,7 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use js_agent::Cli;
 use js_agent::crun_host::{CrunHost, Piece, Report, Request, check, flags, ready, start};
 use js_contain::subids::IdFiles;
@@ -666,6 +666,113 @@ fn the_agent_refuses_runtime_flags_that_cannot_work() {
         assert_eq!(status, code(2), "{args:?}: {err}");
         assert!(err.contains(why), "{args:?}: {err}");
     }
+}
+
+/// A value that parses for the `--native-*` flag `name`: the two numbers and the level are
+/// given their own, every other flag takes a path. A new flag of another type fails the parse
+/// here, so whoever adds it says what it takes.
+fn native_value(name: &str) -> &'static str {
+    match name {
+        "native-network" => "off",
+        "native-max-file-mib" | "native-max-processes" => "1",
+        _ => "/native",
+    }
+}
+
+/// The `--native-*` flags clap knows, read from the definition of `Cli`.
+fn native_flag_names() -> Vec<String> {
+    let names: Vec<String> = Cli::command()
+        .get_arguments()
+        .filter_map(|arg| arg.get_long())
+        .filter(|long| long.starts_with("native-"))
+        .map(str::to_owned)
+        .collect();
+    assert!(names.len() >= 7, "{names:?}");
+    names
+}
+
+/// `--runtime crun` refuses every `--native-*` flag, each by name, on the command line of an
+/// otherwise complete crun agent. The flags are walked from the definition of `Cli`, so a new
+/// native flag that `flags` does not refuse fails here. It catches a refusal list that misses
+/// a native flag, which would start a crun agent that ignores it.
+#[test]
+fn the_crun_runtime_refuses_every_native_flag_by_name() {
+    for name in native_flag_names() {
+        let flag = format!("--{name}");
+        let cli = cli(&[
+            "--runtime",
+            "crun",
+            "--job-user",
+            USER,
+            "--state-root",
+            "/s",
+            "--scratch-root",
+            "/r",
+            &flag,
+            native_value(&name),
+        ]);
+        let why = flags(&cli).map(|_| ()).unwrap_err();
+        assert!(
+            why.starts_with(&format!("{flag}: not accepted with --runtime crun")),
+            "{flag}: {why}"
+        );
+    }
+}
+
+/// The whole program, given `--runtime crun` with the native socket, ends with status 2 and the
+/// socket named, before it registers and before any host file is read.
+#[test]
+fn the_agent_refuses_the_crun_runtime_with_the_native_socket() {
+    let (status, err) = run_agent(&[
+        "--runtime",
+        "crun",
+        "--job-user",
+        USER,
+        "--state-root",
+        "/s",
+        "--scratch-root",
+        "/r",
+        "--native-helper-socket",
+        "/native/helper.sock",
+    ]);
+    assert_eq!(status, code(2), "{err}");
+    assert!(
+        err.contains("--native-helper-socket: not accepted with --runtime crun"),
+        "{err}"
+    );
+}
+
+/// The whole program, given `--runtime docker` with an engine program and the native socket,
+/// ends with status 2 and the socket named, before it registers: containers run on Linux only
+/// and native jobs on a Mac only, so no host takes both, and a Linux host says whose flag it
+/// is.
+#[test]
+fn the_agent_refuses_the_docker_runtime_with_the_native_socket() {
+    let (ran, sent, _) = run_scripted(
+        &[
+            "--runtime",
+            "docker",
+            "--container-bin",
+            "/usr/bin/docker",
+            "--native-helper-socket",
+            "/native/helper.sock",
+            "--state-root",
+            "/s",
+            "--scratch-root",
+            "/r",
+        ],
+        &linux_host(),
+        vec![welcome(1)],
+        1,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(sent.borrow().is_empty());
+    assert!(
+        ran.err
+            .contains("--native-helper-socket: native jobs run on macOS only"),
+        "{}",
+        ran.err
+    );
 }
 
 /// `--runtime crun` ends the agent with status 2 and the check's refusal when `crun` is not

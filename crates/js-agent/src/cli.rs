@@ -6,12 +6,17 @@ use clap::{Parser, ValueEnum};
 
 /// What `--version` prints after the version: the runtimes this build can run jobs with, on a
 /// line a script can read (`js-agent --version | grep -x 'runtimes: docker crun'`). A build
-/// where `--runtime crun` is wired says `docker crun`; others say `docker`.
+/// where `--runtime crun` is wired says `docker crun`; a Mac build says `docker native` (it
+/// runs native jobs through the root helper, and has no crun); others say `docker`.
 #[cfg(target_os = "linux")]
 pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker crun");
 
 /// See the Linux form.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker native");
+
+/// See the Linux form.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker");
 
 /// The flags of `js-agent`.
@@ -534,6 +539,30 @@ pub struct Cli {
     /// available yet: the agent refuses it at start.
     #[arg(long, value_name = "open|allow")]
     pub read_model: Option<String>,
+}
+
+impl Cli {
+    /// Every `--native-*` flag with whether it was given, kept beside the fields so that a
+    /// runtime that takes none of them refuses them all; a test walks the flags clap knows
+    /// and fails when one is missing here.
+    #[must_use]
+    pub fn native_flags(&self) -> [(&'static str, bool); 7] {
+        [
+            (
+                "--native-helper-socket",
+                self.native_helper_socket.is_some(),
+            ),
+            ("--native-homes", self.native_homes.is_some()),
+            ("--native-network", self.native_network.is_some()),
+            ("--native-deny-read", !self.native_deny_read.is_empty()),
+            ("--native-max-file-mib", self.native_max_file_mib.is_some()),
+            (
+                "--native-max-processes",
+                self.native_max_processes.is_some(),
+            ),
+            ("--native-tool-root", !self.native_tool_roots.is_empty()),
+        ]
+    }
 }
 
 /// `name=path` split at the first `=`.
