@@ -10,25 +10,33 @@
 
 #![allow(dead_code)]
 
+#[cfg(target_os = "linux")]
 use std::ffi::OsString;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::process::ExitCode;
 
+#[cfg(target_os = "linux")]
 use js_agent::update_hook::{Gate, Host, run};
 
+#[cfg(target_os = "linux")]
 #[path = "../update_hook_fakes/mod.rs"]
 mod fakes;
 
 /// The kill points of the conformance harness.
 // TODO(slice 9): map this to `update_hook::conformance::gate::point()` once the kbf
 // `update-hook` crate is a dev-dependency; until then a point is not counted.
+#[cfg(target_os = "linux")]
 struct HarnessGate;
 
+#[cfg(target_os = "linux")]
 impl Gate for HarnessGate {
     fn point(&self) {}
 }
 
 /// The directory a flag or its variable names.
+#[cfg(target_os = "linux")]
 fn dir_of(flag: &str, var: &str, args: &mut Vec<OsString>) -> Option<PathBuf> {
     match args.iter().position(|arg| arg == flag) {
         Some(at) if at + 1 < args.len() => {
@@ -40,6 +48,7 @@ fn dir_of(flag: &str, var: &str, args: &mut Vec<OsString>) -> Option<PathBuf> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn main() -> ExitCode {
     let mut args: Vec<OsString> = std::env::args_os().collect();
     let world = dir_of("--world", "UPDATE_HOOK_FAKE_WORLD", &mut args);
@@ -52,4 +61,12 @@ fn main() -> ExitCode {
     // TODO(slice 5): build `Ports` over `_world` and run the steps with it.
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     run(&args, &mut out, &mut err, &Host::system())
+}
+
+/// The hook is Linux code (`js_agent::update_hook`); on any other target this test binary
+/// only says so.
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("js-update-hook-fake: linux only");
+    std::process::exit(2);
 }
