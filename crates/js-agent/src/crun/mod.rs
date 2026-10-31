@@ -107,9 +107,7 @@ mod spec;
 mod tests;
 mod wire;
 
-pub use claim::{
-    ClaimError, HostClaim, prepare_store, require_trusted_ancestors, same_filesystem,
-};
+pub use claim::{ClaimError, HostClaim, prepare_store, require_trusted_ancestors, same_filesystem};
 
 pub use wire::{
     CgroupError, CgroupSource, ID_TOOL_PATH, IdSources, PULL_THREADS, Seams, WireError, oci_config,

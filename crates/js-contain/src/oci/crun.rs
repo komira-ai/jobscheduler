@@ -490,24 +490,40 @@ fn output_within(child: Child, limit: Duration) -> std::io::Result<Option<Output
     output_within_by(child, limit, pidfd)
 }
 
+/// [`output_within`] with the handle on the child given, so a test drives the case where the
+/// kernel refused one.
 fn output_within_by(
     child: Child,
     limit: Duration,
     pidfd: rustix::io::Result<std::os::fd::OwnedFd>,
 ) -> std::io::Result<Option<Output>> {
+    let pid = rustix::process::Pid::from_child(&child);
     let (done, ended) = std::sync::mpsc::channel();
     std::thread::spawn(move || done.send(child.wait_with_output()));
     match ended.recv_timeout(limit) {
         Ok(output) => output.map(Some),
-        Err(_) => Ok(give_up(pidfd)),
+        Err(_) => Ok(give_up(pidfd, pid)),
     }
 }
 
-/// Ends the child that `pidfd` stands for, which did not end in time; its thread ends with
-/// it and its output is dropped. There is no output to give.
-fn give_up(pidfd: rustix::io::Result<std::os::fd::OwnedFd>) -> Option<Output> {
+/// Ends the child that did not end in time; its thread ends with it and its output is
+/// dropped. There is no output to give.
+///
+/// With a handle (`pidfd`) the signal goes to that very process. Without one (`pidfd_open`
+/// failed, for descriptors or an old kernel) it goes to `pid`: the child is waited for only
+/// by the thread that is still waiting, so the pid has not been reused, and a hung `crun`
+/// is killed and reaped all the same. The `Child` itself is not used because the waiting
+/// thread owns it. SIGKILL reaches `crun` alone, not the processes `crun` started: it is the
+/// kill of the lease's cgroup on the stop path that ends those.
+fn give_up(
+    pidfd: rustix::io::Result<std::os::fd::OwnedFd>,
+    pid: rustix::process::Pid,
+) -> Option<Output> {
     let signal = rustix::process::Signal::KILL;
-    let _ = pidfd.and_then(|fd| rustix::process::pidfd_send_signal(&fd, signal));
+    let _ = match pidfd {
+        Ok(fd) => rustix::process::pidfd_send_signal(&fd, signal),
+        Err(_) => rustix::process::kill_process(pid, signal),
+    };
     None
 }
 
@@ -699,7 +715,7 @@ mod tests {
         };
         let why = run("hung", "#!/bin/sh\nexec sleep 600\n", Duration::ZERO).expect_err("killed");
         assert!(why.contains("did not finish"), "{why}");
-        // One that takes a moment is waited for, not killed.
+        // With a generous limit, a command that takes a moment still returns its output.
         let said = run(
             "slow",
             "#!/bin/sh\nsleep 0.3\necho done\n",
@@ -710,6 +726,39 @@ mod tests {
         let why = run("quick", body, Duration::from_secs(600)).expect_err("exit 3");
         assert!(why.contains("oops"), "{why}");
         assert!(why.contains('3'), "{why}");
+        // A program that is not there never starts: the call fails naming it.
+        let absent = lease.join("absent");
+        let crun = Crun::new(absent.clone(), no_scrub, None);
+        let why = crun
+            .stdout_within(lease, &["state", "c"], "state", Duration::from_secs(600))
+            .expect_err("no such program");
+        assert!(
+            why.starts_with(&format!("run {}: ", absent.display())),
+            "{why}"
+        );
+    }
+
+    /// Catches a hung `crun` left running when the kernel refuses a handle on it
+    /// (`pidfd_open` failed): with the limit at zero and no handle, the call gives up and the
+    /// child is killed. The child holds the write end of a pipe the test keeps the read end
+    /// of, so the read ends only when the child is gone; a child that is not killed leaves
+    /// the read waiting.
+    #[test]
+    fn a_hung_crun_is_killed_when_there_is_no_pidfd() {
+        use std::io::Read as _;
+        let (mut reader, writer) = std::io::pipe().expect("pipe");
+        let child = {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("600").stdout(writer);
+            command.spawn().expect("sleep")
+        };
+        let refused = Err(rustix::io::Errno::MFILE);
+        let out = output_within_by(child, Duration::ZERO, refused).expect("gave up");
+        assert!(out.is_none());
+        let mut rest = Vec::new();
+        reader
+            .read_to_end(&mut rest)
+            .expect("the pipe ends with the child");
     }
 
     /// Catches the privilege drop applied to a daemon that is not root, or without a job

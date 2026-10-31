@@ -6,6 +6,10 @@
 //! the machine, so two agents of one machine share it), or a scratch root and the store beside
 //! it, would remove each other's leases and run directories. The agent takes both claims
 //! before it registers (and so before the sweep) and holds them for as long as it runs.
+//!
+//! Both claim files live in one directory, the one above the scratch root, so agents that
+//! share a host id must share that directory too: two agents whose scratch roots have
+//! different parents do not see each other's host-id claim.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Seek as _, Write as _};
@@ -21,14 +25,14 @@ use crate::facts::FileReader;
 pub enum ClaimError {
     /// Another agent holds the claim, or it cannot be locked.
     #[error(
-        "{what}: another crun agent of this host holds it, or it cannot be locked (the holder \
-         wrote {holder:?}): two agents that share it would remove each other's leases; give \
+        "{what}: another crun agent of this host holds it, or it cannot be locked (holder: {holder}): two agents that share it would remove each other's leases; give \
          each agent its own"
     )]
     Held {
         /// What is claimed, in words that name the flag.
         what: String,
-        /// What the holder wrote in the file: its process id.
+        /// What the holder wrote in the file: its process id, or `not yet written` when the
+        /// holder has the lock and has not written yet.
         holder: String,
     },
     /// The claim file could not be made, locked or written.
@@ -69,14 +73,28 @@ impl HostClaim {
         )
     }
 
-    /// Takes the claim of the scratch root `root` (its canonical path) in `dir`, which is the
-    /// directory above it: one agent for each scratch root and the store beside it.
+    /// Takes the claim of the scratch root `root` in `dir`, which is the directory above it:
+    /// one agent for each scratch root and the store beside it. The claim is keyed on the
+    /// device and inode of the directory (read from a descriptor opened without following a
+    /// link), not on its path, so every path to the directory, a link or a bind mount
+    /// included, names the same claim.
     ///
     /// # Errors
-    /// As [`HostClaim::take`].
+    /// As [`HostClaim::take`]; [`ClaimError::Io`] also when `root` cannot be opened as a
+    /// directory.
     pub fn scratch_root(dir: &Path, root: &Path) -> Result<Self, ClaimError> {
         let what = format!("--scratch-root {}", root.display());
-        Self::keyed(dir, "scratch", root.as_os_str().as_encoded_bytes(), what)
+        let opened = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(root)
+            .and_then(|handle| handle.metadata());
+        let meta = opened.map_err(|why| ClaimError::Io {
+            path: root.to_owned(),
+            why,
+        })?;
+        let key = format!("{}:{}", meta.dev(), meta.ino());
+        Self::keyed(dir, "scratch", key.as_bytes(), what)
     }
 
     fn keyed(dir: &Path, kind: &str, key: &[u8], what: String) -> Result<Self, ClaimError> {
@@ -97,10 +115,11 @@ impl HostClaim {
         if file.try_lock().is_err() {
             let mut said = String::new();
             let _ = file.read_to_string(&mut said);
-            return Err(ClaimError::Held {
-                what,
-                holder: said.trim().to_owned(),
-            });
+            let holder = match said.trim() {
+                "" => "not yet written".to_owned(),
+                written => written.to_owned(),
+            };
+            return Err(ClaimError::Held { what, holder });
         }
         file.set_len(0).map_err(io)?;
         file.rewind().map_err(io)?;
@@ -116,6 +135,29 @@ impl HostClaim {
 /// A device cannot be read; the text says which.
 pub fn same_filesystem(files: &dyn FileReader, a: &Path, b: &Path) -> Result<bool, String> {
     Ok(files.device(a)? == files.device(b)?)
+}
+
+/// Checks that every directory above the scratch root `root`, up to `/`, is owned by root or
+/// by `euid` (the agent's user) and that no group or other can write it: whoever can write
+/// an ancestor can swap the scratch root, the store or a claim file for a link. The path is
+/// resolved first, so the directories checked are the ones the kernel walks.
+///
+/// # Errors
+/// The text names the ancestor at fault.
+pub fn require_trusted_ancestors(root: &Path, euid: u32) -> Result<(), String> {
+    let canonical = fs::canonicalize(root).map_err(|why| format!("{}: {why}", root.display()))?;
+    for ancestor in canonical.ancestors().skip(1) {
+        let meta =
+            fs::metadata(ancestor).map_err(|why| format!("{}: {why}", ancestor.display()))?;
+        let trusted = (meta.uid() == 0 || meta.uid() == euid) && meta.mode() & 0o022 == 0;
+        if !trusted {
+            return Err(format!(
+                "{}: a directory above the scratch root must be owned by root or by the user                  the agent runs as, and no group or other may write it",
+                ancestor.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Checks the directory `parent` (above the scratch root) and makes and checks the store
@@ -142,12 +184,4 @@ pub fn prepare_store(parent: &Path, store: &Path) -> Result<(), String> {
     // A store that is there already (or a link, which `verify` refuses) is left as it is.
     let _ = fs::DirBuilder::new().mode(0o755).create(store);
     verify(store)
-}
-
-/// Not yet implemented.
-///
-/// # Errors
-/// Never.
-pub fn require_trusted_ancestors(_root: &Path, _euid: u32) -> Result<(), String> {
-    Ok(())
 }

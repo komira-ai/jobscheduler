@@ -56,7 +56,10 @@ pub struct Cli {
     #[arg(long, value_name = "NAME")]
     pub pool: String,
     /// The id this host registers under. By default a salted hash of the machine id
-    /// (`/etc/machine-id`, or the platform UUID on a Mac), never the machine id itself.
+    /// (`/etc/machine-id`, or the platform UUID on a Mac), never the machine id itself. With
+    /// `--runtime crun` one agent may hold a host id: the claim is a lock file in the
+    /// directory above `--scratch-root`, so agents that share a host id must share that
+    /// directory to be refused.
     #[arg(long, value_name = "ID")]
     pub host_id: Option<String>,
     /// A label to put on the host, as `key=value`. May be given more than once; a key
@@ -150,7 +153,9 @@ pub struct Cli {
     pub scratch_low_water_gib: Option<u64>,
     /// The directory under which every run gets a private scratch directory (`0700`). It
     /// must be owned by the user running the agent, with no permission for group or
-    /// others.
+    /// others. With `--runtime crun` the image store and the claim files are kept in the
+    /// directory above it, which must be on the same file system, and every directory above
+    /// the root must be owned by root or by the agent's user with no group or other write.
     #[arg(long, value_name = "PATH")]
     pub scratch_root: Option<PathBuf>,
     /// The directory under which each run's files (`files` of a start: URLs and tokens) are

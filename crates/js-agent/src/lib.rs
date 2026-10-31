@@ -589,14 +589,16 @@ fn execute(
         Some(plan) => {
             crun::prepare_store(&plan.claim_dir, &plan.store).map_err(Failure::Usage)?;
             let (dir, root) = (&plan.claim_dir, &plan.scratch_root);
-            if !crun::same_filesystem(services.files, dir, root).map_err(Failure::Usage)? {
+            crun::require_trusted_ancestors(root, services.euid)
+                .map_err(|why| Failure::Usage(format!("--scratch-root: {why}")))?;
+            if !crun::same_filesystem(services.files, &plan.store, root).map_err(Failure::Usage)? {
                 return Err(Failure::Usage(format!(
                     "--scratch-root: {} and {}, where the image store and the leases' /work and \
                      home are kept, are on different file systems: a job could fill the file \
                      system of the store; mount the scratch file system at the directory that \
                      holds the scratch root",
                     root.display(),
-                    dir.display()
+                    plan.store.display()
                 )));
             }
             let host = crun::HostClaim::take(dir, &offer.hello.host_id);
