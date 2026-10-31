@@ -203,6 +203,20 @@ fn host_on(scratch_apart: bool, store_apart: bool) -> Host {
     host.commands = host
         .commands
         .with(&line, Ok("crun version 1.14.1\ncommit: abc\n"));
+    // The free disk of the scratch root, which the offer is made from (10 GiB).
+    let df = format!(
+        "/bin/df -P -k {}",
+        fs::canonicalize(&node.scratch)
+            .expect("the scratch root")
+            .display()
+    );
+    host.commands = host.commands.with(
+        &df,
+        Ok(
+            "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
+            /dev/sda1 99999999 100 10485760 11% /\n",
+        ),
+    );
     host.files = host.files.with_device_under(&node.state, 8);
     if scratch_apart {
         host.files = host.files.with_device_under(&node.scratch, 9);
@@ -732,7 +746,7 @@ fn a_store_on_another_file_system_than_the_scratch_root_is_accepted() {
     let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
     let server = Server::start_pool("jobs_crun_fs", &[], POOL_RUNS_TOML);
     let address = Arc::new(Mutex::new(server.url()));
-    let flags = crun_flags("h-fs", &[]);
+    let flags = crun_flags("h1", &[]);
     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     for apart in [host_with_scratch_mounted, host_with_store_mounted] {
         let agent = Agent::spawn_machine(
