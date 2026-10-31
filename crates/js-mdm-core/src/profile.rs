@@ -58,23 +58,17 @@ pub struct PayloadUuids {
 /// identifier always gives the same UUIDs, so a re-render is the same profile, and two
 /// sites with different identifiers share none.
 pub fn payload_uuids(profile_id: &str) -> PayloadUuids {
-    let _ = (profile_id, UUID_NAMESPACE);
+    let uuid = |role: &str| uuid_v5(&UUID_NAMESPACE, format!("{profile_id}/{role}").as_bytes());
     PayloadUuids {
-        profile: "5F652B4C-C5C9-4D69-B44E-493CB00C698E".to_owned(),
-        scep: "071DB849-C11F-4A24-B1E8-69113460B678".to_owned(),
-        mdm: "25B0DB54-2EDA-4965-B430-24DB8BFC06DD".to_owned(),
+        profile: uuid("profile"),
+        scep: uuid("scep"),
+        mdm: uuid("mdm"),
     }
 }
 
 /// The version 5 UUID (RFC 4122: SHA-1 of the namespace and the name) as 36 upper-case
 /// characters.
 pub fn uuid_v5(namespace: &[u8; 16], name: &[u8]) -> String {
-    let _ = (namespace, name, sha1(&[]));
-    todo!("red run: not implemented yet")
-}
-
-#[cfg(any())]
-fn uuid_v5_final(namespace: &[u8; 16], name: &[u8]) -> String {
     let mut input = namespace.to_vec();
     input.extend_from_slice(name);
     let mut b = [0u8; 16];
@@ -100,7 +94,13 @@ pub struct Challenge(String);
 impl Challenge {
     /// `text` as a challenge, or why it is not one.
     pub fn new(text: &str) -> Result<Challenge, ProfileError> {
-        let _ = ProfileError::Challenge;
+        let ok = !text.is_empty()
+            && text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !ok {
+            return Err(ProfileError::Challenge);
+        }
         Ok(Challenge(text.to_owned()))
     }
 
@@ -126,8 +126,13 @@ impl Topic {
     pub fn new(text: &str) -> Result<Topic, ProfileError> {
         let uuid = text.strip_prefix("com.apple.mgmt.External.");
         // 8-4-4-4-12 hexadecimal digits.
-        let ok = uuid
-            .is_some_and(|u| u.len() == 36 && u.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+        let ok = uuid.is_some_and(|u| {
+            let groups: Vec<&str> = u.split('-').collect();
+            groups.iter().map(|g| g.len()).eq([8, 4, 4, 4, 12])
+                && groups
+                    .iter()
+                    .all(|g| g.chars().all(|c| c.is_ascii_hexdigit()))
+        });
         if !ok {
             return Err(ProfileError::Topic(text.to_owned()));
         }
@@ -256,8 +261,8 @@ pub fn enrollment_to<W: Write>(
         ("PayloadUUID", text(&uuids.profile)),
         ("PayloadVersion", Value::Integer(1.into())),
     ]);
-    let _ = profile.to_writer_xml(&mut *out);
-    let _ = out.write_all(b"\n");
+    profile.to_writer_xml(&mut *out)?;
+    out.write_all(b"\n")?;
     Ok(())
 }
 

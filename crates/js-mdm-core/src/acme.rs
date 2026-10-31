@@ -110,6 +110,7 @@ impl Acme {
         for w in text.split_whitespace() {
             // A scope id (`fe80::1%2`) prints a `%`, which systemd reads as a specifier.
             let addr = w.parse::<SocketAddr>().ok().filter(|a| a.port() != 0);
+            let addr = addr.filter(|a| !a.to_string().contains('%'));
             resolvers.push(addr.ok_or(bad(
                 "ACME_RESOLVERS",
                 &text,

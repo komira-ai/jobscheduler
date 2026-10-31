@@ -188,7 +188,8 @@ impl Cidr {
     /// Whether `a` is inside the network.
     pub fn contains(self, a: Ipv4Addr) -> bool {
         // `bits` 0 shifts by 32, which `checked_shl` refuses: the mask is then empty.
-        let mask = u32::MAX << (32 - u32::from(self.bits));
+        let shift = 32u32.saturating_sub(u32::from(self.bits));
+        let mask = u32::MAX.checked_shl(shift).unwrap_or(0);
         u32::from(a) & mask == u32::from(self.addr) & mask
     }
 }
@@ -516,8 +517,7 @@ fn cidr(text: &str) -> Option<Cidr> {
 
 /// Whether `a` and `b` are the same directory or one is inside the other.
 fn nested(a: &str, b: &str) -> bool {
-    let _ = (a, b);
-    false
+    a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
 }
 
 /// A lower-case DNS name with at least one dot; no label starts or ends with `-`.
@@ -561,6 +561,8 @@ fn is_unit_stem(name: &str) -> bool {
     let mut chars = name.chars();
     // systemd reads `-` in a slice name as a nesting step and refuses an empty one.
     name.len() <= 40
+        && !name.ends_with('-')
+        && !name.contains("--")
         && chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
