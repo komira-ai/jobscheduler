@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use js_agent::native::{NativeFlags, NativeSettings};
+use js_agent::native::{NativeFlags, NativeSettings, PfFlags, ProvisionError};
 use js_mac_pool::seatbelt::{Net, ReadModel};
 
 use crate::support::Scratch;
@@ -23,6 +23,16 @@ fn flags<'a>(
         deny_read: &[],
         max_file_mib: None,
         max_processes: None,
+        pf: PfFlags::default(),
+    }
+}
+
+/// The pf flags of a pool of ten uids from 600.
+fn pool() -> PfFlags<'static> {
+    PfFlags {
+        uid_start: Some(600),
+        uid_count: Some(10),
+        ..PfFlags::default()
     }
 }
 
@@ -47,6 +57,16 @@ fn native_jobs_need_the_helper_socket() {
         (flags(None, Some(&homes), None, &[]), "--native-homes"),
         (flags(None, None, Some("on"), &[]), "--native-network"),
         (flags(None, None, None, &roots), "--native-tool-root"),
+        (
+            NativeFlags {
+                pf: PfFlags {
+                    uid_start: Some(600),
+                    ..PfFlags::default()
+                },
+                ..flags(None, None, None, &[])
+            },
+            "--native-pf-uid-start",
+        ),
     ];
     for (given, flag) in cases {
         let why = NativeSettings::from_flags(&given, &[], Path::new("/srv/journal")).unwrap_err();
@@ -101,11 +121,17 @@ fn good_flags_configure_the_runtime() {
         .unwrap();
     assert_eq!(settings.config().net, Net::Loopback);
     assert_eq!(settings.config().tool_roots, tools);
-    let given = flags(Some(socket), Some(&homes), Some("on"), &[]);
+    assert!(settings.config().egress.is_none(), "no check below on");
+    let mut given = flags(Some(socket), Some(&homes), Some("on"), &[]);
+    given.pf = pool();
     let settings = NativeSettings::from_flags(&given, &[], Path::new("/srv/journal"))
         .unwrap()
         .unwrap();
     assert_eq!(settings.config().net, Net::On);
+    assert!(
+        settings.config().egress.is_some(),
+        "a cap of on has its check"
+    );
 }
 
 /// Asserts that without `--native-homes` the home directory is `/Users`: the flags are
@@ -285,4 +311,165 @@ fn the_resource_limits_are_checked_and_handed_on() {
     alone.max_processes = Some(8);
     let why = NativeSettings::from_flags(&alone, &[], journal).unwrap_err();
     assert_eq!(why, "--native-max-processes: needs --native-helper-socket");
+}
+
+/// Asserts that a cap of `on` needs the pool's uids, each flag named when it is missing, and
+/// that a uid range, an anchor name or an endpoint the provisioner would refuse is refused
+/// here by flag. It catches an agent that starts with a cap of `on` and nothing to check, and
+/// a policy that is only found wrong when the first job asks for the network.
+#[test]
+fn a_cap_of_on_needs_the_pool_and_a_policy_that_is_valid() {
+    let socket = Path::new("/run/js/helper");
+    let dir = Scratch::new("native-set-pf");
+    let homes = dir.path("homes");
+    fs::create_dir(&homes).unwrap();
+    let on = |pf: PfFlags<'_>| {
+        let mut given = flags(Some(socket), Some(&homes), Some("on"), &[]);
+        given.pf = pf;
+        NativeSettings::from_flags(&given, &[], Path::new("/srv/journal")).map(|_| ())
+    };
+    let bad = |pf: PfFlags<'_>| on(pf).unwrap_err();
+    assert!(
+        bad(PfFlags::default())
+            .starts_with("--native-pf-uid-start: required with --native-network on"),
+    );
+    let only_start = PfFlags {
+        uid_start: Some(600),
+        ..PfFlags::default()
+    };
+    assert!(
+        bad(only_start).starts_with("--native-pf-uid-count: required with --native-network on")
+    );
+    let system = PfFlags {
+        uid_start: Some(100),
+        uid_count: Some(10),
+        ..PfFlags::default()
+    };
+    assert!(bad(system).starts_with("--native-pf-uid-start and --native-pf-uid-count: "));
+    let anchor = PfFlags {
+        anchor: Some("com.apple/with space"),
+        ..pool()
+    };
+    assert!(bad(anchor).starts_with("--native-pf-anchor: "));
+    let endpoints = ["169.254.169.254:80".to_owned()];
+    let metadata = PfFlags {
+        endpoints: &endpoints,
+        ..pool()
+    };
+    assert!(bad(metadata).starts_with("--native-pf-endpoint: "));
+    let endpoints = ["192.0.2.10:443".to_owned()];
+    let all = PfFlags {
+        pfctl: Some(Path::new("/sbin/pfctl")),
+        anchor: Some("com.apple/pool"),
+        state_dir: Some(Path::new("/var/db/pool")),
+        endpoints: &endpoints,
+        ..pool()
+    };
+    assert_eq!(on(all), Ok(()));
+}
+
+/// Asserts that a pf flag with a cap below `on` is refused, named, for each of the six, and
+/// that the same flags with `on` are accepted. It catches a flag that is ignored because the
+/// cap makes it moot, where the operator believes a limit is in force.
+#[test]
+fn a_pf_flag_needs_a_cap_of_on() {
+    let socket = Path::new("/run/js/helper");
+    let dir = Scratch::new("native-set-pf-off");
+    let homes = dir.path("homes");
+    fs::create_dir(&homes).unwrap();
+    let endpoints = ["192.0.2.10:443".to_owned()];
+    let each = [
+        (
+            "--native-pfctl",
+            PfFlags {
+                pfctl: Some(Path::new("/sbin/pfctl")),
+                ..PfFlags::default()
+            },
+        ),
+        (
+            "--native-pf-anchor",
+            PfFlags {
+                anchor: Some("com.apple/pool"),
+                ..PfFlags::default()
+            },
+        ),
+        (
+            "--native-pf-state-dir",
+            PfFlags {
+                state_dir: Some(Path::new("/var/db/pool")),
+                ..PfFlags::default()
+            },
+        ),
+        (
+            "--native-pf-uid-start",
+            PfFlags {
+                uid_start: Some(600),
+                ..PfFlags::default()
+            },
+        ),
+        (
+            "--native-pf-uid-count",
+            PfFlags {
+                uid_count: Some(10),
+                ..PfFlags::default()
+            },
+        ),
+        (
+            "--native-pf-endpoint",
+            PfFlags {
+                endpoints: &endpoints,
+                ..PfFlags::default()
+            },
+        ),
+    ];
+    for network in [None, Some("off"), Some("loopback")] {
+        for (flag, pf) in each {
+            let mut given = flags(Some(socket), Some(&homes), network, &[]);
+            given.pf = pf;
+            let why =
+                NativeSettings::from_flags(&given, &[], Path::new("/srv/journal")).unwrap_err();
+            assert_eq!(
+                why,
+                format!("{flag}: needs --native-network on"),
+                "{network:?}"
+            );
+        }
+    }
+}
+
+/// Asserts that the check the flags make runs the `pfctl` they name, with the verdicts of the
+/// provisioner: a `pfctl` that prints nothing says pf is not enabled, one that exits non-zero
+/// is a failed call, and one that is not there is a call that could not be made. It catches a
+/// check that ignores `--native-pfctl`, or one that reads any of these as enforced.
+#[test]
+fn the_check_the_flags_make_asks_the_pfctl_they_name() {
+    let socket = Path::new("/run/js/helper");
+    let dir = Scratch::new("native-set-pf-real");
+    let homes = dir.path("homes");
+    let state = dir.path("pf-state");
+    fs::create_dir(&homes).unwrap();
+    let verdict = |pfctl: &str| {
+        let mut given = flags(Some(socket), Some(&homes), Some("on"), &[]);
+        given.pf = PfFlags {
+            pfctl: Some(Path::new(pfctl)),
+            state_dir: Some(&state),
+            ..pool()
+        };
+        let settings = NativeSettings::from_flags(&given, &[], Path::new("/srv/journal"))
+            .unwrap()
+            .unwrap();
+        settings.config().egress.as_ref().unwrap().enforced()
+    };
+    assert!(matches!(
+        verdict("/usr/bin/true"),
+        Err(ProvisionError::PfDisabled)
+    ));
+    assert!(matches!(
+        verdict("/usr/bin/false"),
+        Err(ProvisionError::Failed { .. })
+    ));
+    assert!(matches!(
+        verdict("/nonexistent/pfctl"),
+        Err(ProvisionError::Run { .. })
+    ));
 }

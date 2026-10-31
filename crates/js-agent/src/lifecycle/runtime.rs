@@ -360,6 +360,17 @@ pub trait Runtime {
         Ok(())
     }
 
+    /// Whether the network a native job would get is limited as the agent was told. Called
+    /// before every native start; a start whose check fails is refused (`egress-unchecked`)
+    /// and creates nothing. A runtime with nothing to check passes.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong with the limit; the text stays on the host.
+    fn check_native_egress(&self, _native: &NativeSpec) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
     /// The control group directory (an absolute path of the cgroup version 2 file system)
     /// of a container that runs, or `None` when the runtime cannot say: the container is
     /// not in the agent's `/proc`, its control group is not the unified one, or it lies

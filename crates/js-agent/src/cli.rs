@@ -254,6 +254,34 @@ pub struct Cli {
     /// `/bin`, `/usr/sbin` and `/sbin`. Needs `--native-helper-socket`.
     #[arg(long = "native-tool-root", value_name = "PATH")]
     pub native_tool_roots: Vec<PathBuf>,
+    /// The first uid of the pool whose egress the pf anchor limits: the helper's
+    /// `--uid-range` start. With `--native-network on` the agent refuses to start, and
+    /// refuses every job that asks for the network (`egress-unchecked`), unless the anchor
+    /// `js-mac-provision` installed is in force (pf enabled, the main ruleset reaches the
+    /// anchor, the loaded rules are the ones these flags render); required then, and
+    /// refused otherwise. Needs `--native-network on`.
+    #[arg(long, value_name = "UID")]
+    pub native_pf_uid_start: Option<u32>,
+    /// How many uids the pool holds: the helper's `--uid-range` count. Required with
+    /// `--native-network on`; see `--native-pf-uid-start`.
+    #[arg(long, value_name = "N")]
+    pub native_pf_uid_count: Option<u32>,
+    /// An endpoint the pool may reach over TCP, as `192.0.2.10:443`; repeatable. These must
+    /// be the `--endpoint` flags `js-mac-provision install` was given, or the anchor reads
+    /// back as different and every job is refused. Needs `--native-network on`.
+    #[arg(long = "native-pf-endpoint", value_name = "IPV4:PORT")]
+    pub native_pf_endpoints: Vec<String>,
+    /// The pf anchor the rules are loaded under (the `--anchor` of `js-mac-provision`); by
+    /// default `com.apple/com.komira.js.pool`. Needs `--native-network on`.
+    #[arg(long, value_name = "NAME")]
+    pub native_pf_anchor: Option<String>,
+    /// The state directory of `js-mac-provision` (its `--state-dir`); by default
+    /// `/var/db/com.komira.js-pf`. Needs `--native-network on`.
+    #[arg(long, value_name = "PATH")]
+    pub native_pf_state_dir: Option<PathBuf>,
+    /// The `pfctl` program to ask (by default `/sbin/pfctl`). Needs `--native-network on`.
+    #[arg(long, value_name = "PATH")]
+    pub native_pfctl: Option<PathBuf>,
     /// The absolute path of the `docker` or `podman` program that runs container jobs.
     /// It is started by exactly this path, never looked up on the `PATH`, with an
     /// environment of its own (a fixed `PATH` and `--container-host`, nothing the agent
