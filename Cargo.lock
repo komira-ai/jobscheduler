@@ -960,6 +960,8 @@ dependencies = [
  "tar",
  "thiserror",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

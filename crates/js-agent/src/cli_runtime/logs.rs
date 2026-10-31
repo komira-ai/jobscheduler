@@ -69,7 +69,7 @@ pub fn tail_of(streams: &Streams) -> LogTail {
 
 /// `bytes` as text of at most [`MAX_LOG_STREAM_LEN`] bytes, keeping the end, and whether
 /// the end was cut again to fit.
-fn text_of(bytes: &[u8], started_inside: bool) -> (String, bool) {
+pub(crate) fn text_of(bytes: &[u8], started_inside: bool) -> (String, bool) {
     let mut start = 0;
     if started_inside {
         // A character is at most 4 bytes: at most 3 continuation bytes are its rest.
