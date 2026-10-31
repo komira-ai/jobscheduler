@@ -24,9 +24,9 @@ use js_agent::update_hook::{Gate, Host, run};
 #[path = "../update_hook_fakes/mod.rs"]
 mod fakes;
 
+/// The kill points of the conformance harness.
 // TODO(slice 9): map this to `update_hook::conformance::gate::point()` once the kbf
 // `update-hook` crate is a dev-dependency; until then a point is not counted.
-/// The kill points of the conformance harness.
 #[cfg(target_os = "linux")]
 struct HarnessGate;
 
