@@ -6,7 +6,11 @@ use std::process::{Command, Stdio};
 use js_testkit::dir::TestDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_js-update-hook-fake");
-const PARAMS: &str = "cordon_lease_secs = 300\ncordon_max_secs = 17355\n";
+const PARAMS: &str = concat!(
+    "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
+    "\"updater.staged_release\" = \"/staged\"\n",
+    "\"updater.target_version\" = \"1.4.0\"\n",
+);
 
 fn run(args: &[&str], envs: &[(&str, &str)]) -> (Option<i32>, String, String) {
     let out = Command::new(BIN)
