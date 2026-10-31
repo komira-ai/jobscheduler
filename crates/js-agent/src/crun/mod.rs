@@ -6,9 +6,13 @@
 //! A run is one *lease*, named `js-<agent tag>-<run id>` (the name the other runtime gives
 //! a container, so the two never name one alike). Its pieces:
 //!
-//! - the lease directory `<scratch>/<name>` and its `root`, `upper`, `work` and `rw/home`
-//!   directories, made `0755` by the agent and given to the job user (the account `crun`
-//!   keeps its state and log as) or to the job's own host id (what the job writes);
+//! - the lease directory and its `root`, `upper`, `work` and `rw/home` directories, made
+//!   `0755` by the agent and given to the job user (the account `crun` keeps its state and
+//!   log as) or to the job's own host id (what the job writes). The agent's lease directory
+//!   is `.lease-<name>` in the scratch root, beside the run's own directory
+//!   ([`Runtime::lease_dir`]), and the lifecycle puts it under the run's project quota, so one
+//!   bound covers `/scratch`, `/work` and `/root`; a runtime opened without
+//!   `OciConfig::leases_in` keeps it as `<store>/<name>`;
 //! - the cgroup `<actions>/<name>`, made by the agent with the booking as the limit
 //!   (memory the booking with no swap, CPU the booked cores: the arithmetic the lease
 //!   server's booking assumes) and given to the job user, who makes the container's cgroup
@@ -355,6 +359,9 @@ pub struct CrunRuntime {
     host_id: String,
     configs: PathBuf,
     files: Option<FilesRoot>,
+    /// Whether the leases' directories are made beside the runs' own
+    /// ([`OciConfig::leases_in`]), where [`Runtime::lease_dir`] names them.
+    leases_beside: bool,
     hooks: Hooks,
     runs: BTreeMap<String, Run>,
     ledger: Ledger,
@@ -419,6 +426,7 @@ impl CrunRuntime {
                 why,
             }
         })?;
+        let leases_beside = settings.oci.leases_in.is_some();
         let oci = Oci::new(&settings.oci, source, &settings.scratch, &helpers)?;
         let rt = Builder::new_current_thread().enable_all().build()?;
         let configs = config_dir(&settings.scratch);
@@ -440,6 +448,7 @@ impl CrunRuntime {
             host_id: settings.host_id,
             configs,
             files: settings.files,
+            leases_beside,
             hooks,
             runs: BTreeMap::new(),
             ledger,
@@ -763,15 +772,27 @@ fn step<T>(what: &str, result: Result<T, impl std::fmt::Display>) -> Result<T, S
     result.map_err(|why| format!("{what}: {why}"))
 }
 
-/// Makes the new directory `dir` with the mode `0755` whatever the umask is, setting the mode
-/// by the descriptor of what was made.
+/// Makes the directory `dir` with the mode `0755` whatever the umask is, setting the mode
+/// by the descriptor of what was made. A directory that is there already is accepted when it
+/// is empty and not a link: the agent makes a lease's directory itself, to put it under the
+/// run's disk quota before anything is made in it ([`Runtime::lease_dir`]).
 fn make_dir(dir: &Path) -> io::Result<()> {
     use rustix::fs::{Mode, OFlags, fchmod};
-    std::fs::create_dir(dir)?;
+    match std::fs::create_dir(dir) {
+        Ok(()) => {}
+        Err(why) if why.kind() == io::ErrorKind::AlreadyExists && is_empty_dir(dir) => {}
+        Err(why) => return Err(why),
+    }
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     rustix::fs::open(dir, flags, Mode::empty())
         .and_then(|fd| fchmod(&fd, Mode::from_raw_mode(0o755)))
         .map_err(io::Error::from)
+}
+
+/// Whether `dir` is a directory (not a link) with nothing in it.
+fn is_empty_dir(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir())
+        && std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
 }
 
 /// The path of `file` of the cgroup `dir` in [`JOB_OWNED_FILES`], where the empty name is the
@@ -935,6 +956,14 @@ impl Runtime for CrunRuntime {
 
     fn supports_gpus(&self) -> bool {
         false
+    }
+
+    fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {
+        if !self.leases_beside {
+            return None;
+        }
+        let name = container_name(&self.host_id, run_id).ok()?;
+        Some(self.oci.lease_dirs(&name).dir)
     }
 
     fn places_in_cgroup(&self) -> bool {

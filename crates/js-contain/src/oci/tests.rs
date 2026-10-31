@@ -41,6 +41,7 @@ pub(super) fn config(dir: &Path, ok: bool) -> OciConfig {
         logs: LogLimits::default(),
         resolv_conf: RESOLV_CONF.to_owned(),
         exclusive_scratch: false,
+        leases_in: None,
         route_wait: None,
     }
 }
@@ -1403,4 +1404,28 @@ fn a_root_daemon_with_a_job_user_hands_out_the_drop_for_that_user() {
     assert!(root.job_drop().is_some());
     let user = on((job, job)).expect("starts as the job user");
     assert!(user.job_drop().is_none());
+}
+
+/// Catches a lease made beside other directories (`leases_in`) that is still made in the
+/// scratch directory, or whose name could be a run's own directory: its directories are all
+/// below one sibling of the root, named with the lease prefix (no run id starts with a dot),
+/// while the image store stays in the scratch directory.
+#[test]
+fn a_lease_beside_other_directories_is_one_prefixed_sibling_of_the_root() {
+    let dir = scratch("lease-sibling");
+    let runs = dir.join("runs");
+    std::fs::create_dir_all(&runs).expect("runs");
+    let config = OciConfig {
+        leases_in: Some(runs.clone()),
+        ..config(&dir, true)
+    };
+    let oci = start(&config, &dir.join("s")).expect("starts");
+    let lease = oci.lease_dirs("js-x-r1");
+    let base = runs.join(".lease-js-x-r1");
+    assert_eq!(lease.dir, base);
+    assert_eq!(lease.upper, base.join("upper"));
+    assert_eq!(lease.work, base.join("work"));
+    assert_eq!(lease.home, base.join("rw/home"));
+    assert!(!dir.join("s/js-x-r1").exists());
+    assert_eq!(LEASE_PREFIX, ".lease-");
 }

@@ -145,6 +145,13 @@ pub struct OciConfig {
     /// `image-pull` verb does: it is refused ([`OciError::Locked`]) while any other backend
     /// uses the directory. By default `false`: agents share the directory.
     pub exclusive_scratch: bool,
+    /// The directory the leases' directories are made in, when it is not the scratch
+    /// directory: a lease `name` is then [`LEASE_PREFIX`] and `name` in it, a sibling of
+    /// whatever else the directory holds (an agent that keeps a run's scratch directories
+    /// there, and bounds a lease by the same project quota as the run's directory). The
+    /// image store, the helpers' state and the lock stay in the scratch directory. By
+    /// default `None`: a lease is a directory named `name` in the scratch directory.
+    pub leases_in: Option<PathBuf>,
 }
 
 impl Default for OciConfig {
@@ -163,9 +170,15 @@ impl Default for OciConfig {
             resolv_conf: RESOLV_CONF.to_owned(),
             route_wait: None,
             exclusive_scratch: false,
+            leases_in: None,
         }
     }
 }
+
+/// The start of the name of a lease's directory when it is made beside other directories
+/// ([`OciConfig::leases_in`]). A run id is `[A-Za-z0-9._-]` with a leading alphanumeric, so
+/// no run's own directory is named like a lease's.
+pub const LEASE_PREFIX: &str = ".lease-";
 
 /// Which user namespace a container is made in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,6 +346,8 @@ pub struct Oci {
     ids: DaemonIds,
     arch: &'static str,
     scratch: PathBuf,
+    /// Where lease directories are made, when that is not `scratch`.
+    leases_in: Option<PathBuf>,
     helper_root: PathBuf,
     images: image::Images,
     /// Held while the backend lives; released last.
@@ -438,6 +453,7 @@ impl Oci {
             ids,
             arch,
             scratch: scratch.to_owned(),
+            leases_in: config.leases_in.clone(),
             helper_root,
             images: image::Images::new(scratch.join(image::IMAGES_DIR)),
             lock,
@@ -477,6 +493,7 @@ impl Oci {
 
     /// The scratch directory of the lease `name`.
     fn lease(&self, name: &str) -> PathBuf {
+        let _ = &self.leases_in;
         self.scratch.join(name)
     }
 

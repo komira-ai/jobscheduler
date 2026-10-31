@@ -527,7 +527,14 @@ fn the_crun_flags_are_checked_against_each_other() {
     assert!(with(&["--container-subuid", "x"]).starts_with("--container-subuid: "));
     assert!(with(&["--actions-cgroup", "/sys/fs/cgroup/x"]).starts_with("--actions-cgroup: "));
     assert!(with(&["--crun-bin", "crun"]).contains("not an absolute path"));
-    assert!(with(&["--scratch-quota"]).starts_with("--scratch-quota: "));
+    // A lease's directories are under the run's project quota, so the flag is the same as for
+    // any other runtime.
+    let mut quota = ok.to_vec();
+    quota.push("--scratch-quota");
+    assert!(
+        flags(&cli(&quota)).is_ok(),
+        "--scratch-quota bounds /scratch, /work and /root alike"
+    );
     assert!(with(&["--egress", "allow-list"]).starts_with("--egress: "));
     let mut none = ok.to_vec();
     none.extend(["--egress", "none"]);

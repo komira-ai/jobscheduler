@@ -24,7 +24,7 @@ use js_agent::integrity::HostView;
 use js_agent::lifecycle::{
     DirLayout, Found, Local, Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket,
 };
-use js_agent::quota::ScratchQuota;
+use js_agent::quota::{Call, ProjectId, ScratchQuota};
 use js_agent::{
     Backend, Cli, FileReader, Handle, Machine, Platform, RuntimeBuild, SharedClock, System,
 };
@@ -722,60 +722,82 @@ fn the_stop_grace_reaches_the_crun_runtime() {
     assert!(calls.lines().any(|line| line.contains(" kill ")), "{calls}");
 }
 
-/// Asserts the layout the store needs: with the scratch root on one file system and the
-/// directory above it, where the image store and the leases' `/work` and home are kept, on
-/// another, or the store itself on another file system than the scratch root, the agent
-/// exits 2 naming the scratch root and the store; and `--scratch-quota`, which would bound
-/// only `/scratch`, exits 2 naming the flag. It catches an agent that lets a job fill the
-/// root file system, or a quota that is believed to cover a lease's `/work`.
+/// Asserts that the image store and the scratch root may be on different file systems (the
+/// directory above the scratch root, or the store in it, a mount of its own): the agent starts
+/// and stops as it does on one. A lease's `/work` and home are made in the scratch root, so
+/// the store holds only images and helper state that no job writes. It catches a start check
+/// that still refuses the layout the farm's scratch volume gives.
 #[test]
-fn a_store_on_another_file_system_and_a_scratch_quota_are_refused() {
+fn a_store_on_another_file_system_than_the_scratch_root_is_accepted() {
     let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
-    let node = node();
     let server = Server::start_pool("jobs_crun_fs", &[], POOL_RUNS_TOML);
     let address = Arc::new(Mutex::new(server.url()));
-    let run = |host: fn() -> Host, extra: &[&str]| {
-        let flags = crun_flags("h-fs", extra);
-        let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
-        Agent::spawn_machine(
+    let flags = crun_flags("h-fs", &[]);
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    for apart in [host_with_scratch_mounted, host_with_store_mounted] {
+        let agent = Agent::spawn_machine(
             server.url(),
             server.join_file(),
             &flags,
-            host,
+            apart,
             Redirect(address.clone()),
             CrunMachine::new(),
-        )
-        .finish()
+        );
+        if agent.try_worker().is_err() {
+            panic!("the agent refused the layout: {}", agent.finish().err);
+        }
+        assert_eq!(agent.next_wait(), Duration::from_secs(5), "the hello");
+        let ran = agent.stop();
+        assert_eq!(ran.status(), code(0), "{}", ran.err);
+    }
+}
+
+/// Asserts that a crun agent started with `--scratch-quota` is accepted and bounds a run's
+/// lease directory (its `/work` overlay and home) with the run's own project: the agent makes
+/// the lease directory beside the run's, empty, and both get the same project id and the same
+/// limits, before the container is created. It catches a quota that bounds `/scratch` alone,
+/// and a lease directory that is outside the scratch root.
+#[test]
+fn a_scratch_quota_bounds_a_crun_runs_lease_directory_with_the_run() {
+    let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+    let node = node();
+    let rig = Rig::new("jobs_crun_quota", &["--scratch-quota"]);
+    let run = rig.queued();
+    rig.until_up(&run);
+    let applied: Vec<(String, ProjectId, u64, u64)> = rig
+        .machine
+        .fake
+        .quota
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            Call::Apply {
+                dir,
+                project,
+                block_limit_bytes,
+                inode_limit,
+            } => {
+                let leaf = dir.file_name()?.to_string_lossy().into_owned();
+                Some((leaf, project, block_limit_bytes, inode_limit))
+            }
+            _ => None,
+        })
+        .collect();
+    let of_run = applied.iter().find(|(leaf, ..)| *leaf == run);
+    let of_lease = applied
+        .iter()
+        .find(|(leaf, ..)| leaf.starts_with(".lease-") && leaf.ends_with(&run));
+    let (Some(of_run), Some(of_lease)) = (of_run, of_lease) else {
+        panic!("the run and its lease directory were not both bounded: {applied:?}");
     };
-    let apart = run(host_with_scratch_mounted, &[]);
-    assert_eq!(apart.status(), code(2), "{}", apart.err);
+    assert_eq!(of_run.1, of_lease.1, "one project");
+    assert_eq!((of_run.2, of_run.3), (of_lease.2, of_lease.3), "one limit");
     assert!(
-        apart.err.contains("different file systems")
-            && apart.err.contains(&node.scratch.display().to_string())
-            && apart.err.contains(&node.dir.path().display().to_string()),
-        "{}",
-        apart.err
+        node.scratch.join(&of_lease.0).is_dir(),
+        "the lease directory is in the scratch root"
     );
-    // The store itself on another file system, the directory above the scratch root not.
-    let store_apart = run(host_with_store_mounted, &[]);
-    assert_eq!(store_apart.status(), code(2), "{}", store_apart.err);
-    assert!(
-        store_apart.err.contains("different file systems")
-            && store_apart
-                .err
-                .contains(&node.dir.path().join("oci").display().to_string()),
-        "{}",
-        store_apart.err
-    );
-    let quota = run(host, &["--scratch-quota"]);
-    assert_eq!(quota.status(), code(2), "{}", quota.err);
-    assert!(
-        quota
-            .err
-            .contains("--scratch-quota: not accepted with --runtime crun"),
-        "{}",
-        quota.err
-    );
+    let ran = rig.agent.stop();
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
 }
 
 /// Asserts that the directory above the scratch root and the store in it are checked before

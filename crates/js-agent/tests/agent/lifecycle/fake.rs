@@ -86,6 +86,9 @@ struct State {
     /// The exit code of a container that handles SIGTERM, by run id: a stop ends it with
     /// that code instead of the kill's 137.
     term_exits: BTreeMap<String, i32>,
+    /// The directory the runtime keeps each container's own directory in (see
+    /// [`FakeRuntime::keep_lease_dirs_in`]).
+    lease_root: Option<PathBuf>,
 }
 
 /// Where a scripted pull stands.
@@ -208,6 +211,13 @@ impl FakeRuntime {
     /// slot's user in the create, so a quota set later would come after the chown.
     pub fn watch_quota(&self, applied: impl Fn(&Path) -> bool + 'static) {
         self.state.borrow_mut().quota_applied = Some(Box::new(applied));
+    }
+
+    /// From now the runtime keeps a directory of its own for each container in `root`
+    /// (`.lease-fake-<run id>`), as the crun runtime does beside the runs' directories: the
+    /// lifecycle makes it, bounds it with the run and removes it.
+    pub fn keep_lease_dirs_in(&self, root: &Path) {
+        self.state.borrow_mut().lease_root = Some(root.to_owned());
     }
 
     /// The note for the log: nothing when no marker is watched.
@@ -362,6 +372,11 @@ impl FakeRuntime {
 }
 
 impl Runtime for FakeRuntime {
+    fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {
+        let root = self.state.borrow().lease_root.clone();
+        root.map(|root| root.join(format!(".lease-fake-{run_id}")))
+    }
+
     fn prepare(&mut self, image: &str, waited: Option<Ticket>) -> Prepared {
         let mut state = self.state.borrow_mut();
         let answer = match state.pulls.get(image) {

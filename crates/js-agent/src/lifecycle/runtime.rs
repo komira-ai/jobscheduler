@@ -371,6 +371,17 @@ pub trait Runtime {
         None
     }
 
+    /// The directory, directly below the scratch root, where this runtime keeps the writable
+    /// state of the container of `run_id` that is not in the run's own scratch directory (a
+    /// container's `/work` overlay and home), or `None` when it keeps none there. The
+    /// lifecycle makes the directory empty beside the run's, puts it under the run's scratch
+    /// quota, and removes it with the run's, so that one bound covers what the job writes
+    /// everywhere. The runtime makes what goes in it and removes the directory with the
+    /// container.
+    fn lease_dir(&self, _run_id: &str) -> Option<PathBuf> {
+        None
+    }
+
     /// Whether every container this runtime starts is in a control group the agent can
     /// read ([`Runtime::cgroup`]). A runtime that says so and then cannot name a run's
     /// control group is blind to that run: the lifecycle taints the host as unchecked
