@@ -4,11 +4,22 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
+/// What `--version` prints after the version: the runtimes this build can run jobs with, on a
+/// line a script can read (`js-agent --version | grep -x 'runtimes: docker crun'`). A build
+/// where `--runtime crun` is wired says `docker crun`; others say `docker`.
+#[cfg(target_os = "linux")]
+pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker crun");
+
+/// See the Linux form.
+#[cfg(not(target_os = "linux"))]
+pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker");
+
 /// The flags of `js-agent`.
 #[derive(Debug, Parser)]
 #[command(
     name = "js-agent",
     version,
+    long_version = LONG_VERSION,
     about = "Registers this machine with a lease server and keeps it registered"
 )]
 pub struct Cli {
@@ -45,7 +56,10 @@ pub struct Cli {
     #[arg(long, value_name = "NAME")]
     pub pool: String,
     /// The id this host registers under. By default a salted hash of the machine id
-    /// (`/etc/machine-id`, or the platform UUID on a Mac), never the machine id itself.
+    /// (`/etc/machine-id`, or the platform UUID on a Mac), never the machine id itself. With
+    /// `--runtime crun` one agent may hold a host id: the claim is a lock file in the
+    /// directory above `--scratch-root`, so agents that share a host id must share that
+    /// directory to be refused.
     #[arg(long, value_name = "ID")]
     pub host_id: Option<String>,
     /// A label to put on the host, as `key=value`. May be given more than once; a key
@@ -139,7 +153,9 @@ pub struct Cli {
     pub scratch_low_water_gib: Option<u64>,
     /// The directory under which every run gets a private scratch directory (`0700`). It
     /// must be owned by the user running the agent, with no permission for group or
-    /// others.
+    /// others. With `--runtime crun` the image store and the claim files are kept in the
+    /// directory above it, which must be on the same file system, and every directory above
+    /// the root must be owned by root or by the agent's user with no group or other write.
     #[arg(long, value_name = "PATH")]
     pub scratch_root: Option<PathBuf>,
     /// The directory under which each run's files (`files` of a start: URLs and tokens) are
@@ -351,8 +367,8 @@ pub struct Cli {
     /// `--egress-allow` and `--egress-dns` name and refuses everything else, the metadata
     /// range and all IPv6 first). The agent, as root in the host's network namespace, wires
     /// each container from outside and keeps the firewall; see `docs/design/agent-egress.md`.
-    /// Only the `crun` runtime reads it, and this build cannot select that runtime yet, so
-    /// anything but `none` is refused at start; the Podman network flags above are the
+    /// Only the `crun` runtime reads it, and the `crun` runtime of this build gives jobs
+    /// loopback only, so anything but `none` is refused at start, with either runtime; the Podman network flags above are the
     /// Podman runtime's own and are refused together with this one.
     #[arg(long, value_name = "none|allow-list")]
     pub egress: Option<String>,

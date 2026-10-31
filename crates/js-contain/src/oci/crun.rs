@@ -25,7 +25,7 @@
 use std::os::fd::OwnedFd;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
+use std::process::{Child, ExitStatus, Output};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -418,6 +418,17 @@ impl Crun {
 
     /// [`Crun::blocking`], returning what `crun` printed on stdout.
     fn stdout_of(&self, state: &Path, args: &[&str], what: &str) -> Result<String, String> {
+        self.stdout_within(state, args, what, CALL_LIMIT)
+    }
+
+    /// [`Crun::stdout_of`], killing `crun` and failing when it has not ended within `limit`.
+    fn stdout_within(
+        &self,
+        state: &Path,
+        args: &[&str],
+        what: &str,
+        limit: Duration,
+    ) -> Result<String, String> {
         let mut command = std::process::Command::new(&self.program);
         self.launch().apply(&mut command);
         let output = command
@@ -425,16 +436,18 @@ impl Crun {
             .arg(state)
             .args(args)
             .stdin(std::process::Stdio::null())
-            .output();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|child| output_within(child, limit));
         match output {
-            Ok(out) if out.status.success() => {
-                Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-            }
-            Ok(out) => Err(format!(
+            Ok(Some(out)) if out.status.success() => Ok(text(&out.stdout)),
+            Ok(Some(out)) => Err(format!(
                 "crun {what}: {}: {}",
                 out.status,
                 String::from_utf8_lossy(&out.stderr).trim()
             )),
+            Ok(None) => Err(format!("crun {what}: did not finish within {limit:?}")),
             Err(e) => Err(format!("run {}: {e}", self.program.display())),
         }
     }
@@ -459,6 +472,68 @@ impl Crun {
 /// the `crun run` that owns it. That run is removing it already; the wait ends the moment
 /// the directory is gone.
 const STATE_REMOVAL_WAIT: Duration = Duration::from_secs(3);
+
+/// How long a `crun` command that is waited for (`kill`, `delete`, `state`, the blocking
+/// helper) may take before it is killed and counts as failed.
+const CALL_LIMIT: Duration = Duration::from_secs(120);
+
+/// What `child` printed once it ended, or `None` when it had not ended within `limit` and
+/// was killed. The child is waited for on a thread of its own (which also reads its pipes), so
+/// a full pipe never stalls it and the caller never waits longer than `limit`.
+///
+/// # Errors
+/// The child could not be waited for, or no handle on it could be had (`pidfd_open` failed):
+/// then it is killed and reaped here, before any thread has it, and the error names the
+/// failure. No signal is ever sent by pid.
+fn output_within(child: Child, limit: Duration) -> std::io::Result<Option<Output>> {
+    // A handle on this very process: the signal below can never reach another one that took
+    // the pid after the child was reaped.
+    let pidfd = rustix::process::pidfd_open(
+        rustix::process::Pid::from_child(&child),
+        rustix::process::PidfdFlags::empty(),
+    );
+    output_within_by(child, limit, pidfd)
+}
+
+/// [`output_within`] with the handle on the child given, so a test drives the case where the
+/// kernel refused one.
+fn output_within_by(
+    mut child: Child,
+    limit: Duration,
+    pidfd: rustix::io::Result<std::os::fd::OwnedFd>,
+) -> std::io::Result<Option<Output>> {
+    let pidfd = match pidfd {
+        Ok(fd) => fd,
+        Err(why) => {
+            // Still the owner of the child: end it through the handle, and reap it.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::other(format!(
+                "pidfd_open failed ({why}); the process was killed"
+            )));
+        }
+    };
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || done.send(child.wait_with_output()));
+    match ended.recv_timeout(limit) {
+        Ok(output) => output.map(Some),
+        Err(_) => Ok(give_up(&pidfd)),
+    }
+}
+
+/// Ends the child that `pidfd` stands for, which did not end in time; its thread ends with
+/// it and its output is dropped. There is no output to give. SIGKILL reaches `crun` alone,
+/// not the processes `crun` started: it is the kill of the lease's cgroup on the stop path
+/// that ends those.
+fn give_up(pidfd: &std::os::fd::OwnedFd) -> Option<Output> {
+    let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+    None
+}
+
+/// What a program printed, as text.
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
 
 /// Whether `path` is gone, polling until `limit` has passed.
 fn wait_gone(path: &Path, limit: Duration) -> bool {
@@ -611,6 +686,82 @@ mod tests {
         let mut plain = std::process::Command::new("true");
         no_scrub(&mut plain);
         assert_eq!(plain.get_envs().count(), 0);
+    }
+
+    /// Catches a hung `crun` stalling its caller: a command that has not ended within the
+    /// limit (given as zero, so a `crun` that sleeps has not) is killed and fails saying so,
+    /// for the blocking calls; one that ends is read as before.
+    #[test]
+    fn a_crun_that_does_not_end_is_killed_and_fails() {
+        // A script is written by a process of its own that has ended, so that no descriptor
+        // open for writing is inherited by a child another test forks meanwhile (which would
+        // make the file busy for `exec`).
+        fn script(path: &Path, body: &str) {
+            let made = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"",
+                    "sh",
+                ])
+                .arg(body)
+                .arg(path)
+                .status();
+            assert!(made.expect("sh").success());
+        }
+        let dir = crate::unit_dir("crun-hung");
+        let lease: &Path = &dir;
+        let run = |name: &str, body: &str, limit: Duration| {
+            let program = lease.join(name);
+            script(&program, body);
+            let crun = Crun::new(program, no_scrub, None);
+            crun.stdout_within(lease, &["state", "c"], "state", limit)
+        };
+        let why = run("hung", "#!/bin/sh\nexec sleep 600\n", Duration::ZERO).expect_err("killed");
+        assert!(why.contains("did not finish"), "{why}");
+        // With a generous limit, a command that takes a moment still returns its output.
+        let said = run(
+            "slow",
+            "#!/bin/sh\nsleep 0.3\necho done\n",
+            Duration::from_secs(600),
+        );
+        assert_eq!(said.expect("it ends in time"), "done\n");
+        let body = "#!/bin/sh\necho out\necho oops >&2\nexit 3\n";
+        let why = run("quick", body, Duration::from_secs(600)).expect_err("exit 3");
+        assert!(why.contains("oops"), "{why}");
+        assert!(why.contains('3'), "{why}");
+        // A program that is not there never starts: the call fails naming it.
+        let absent = lease.join("absent");
+        let crun = Crun::new(absent.clone(), no_scrub, None);
+        let why = crun
+            .stdout_within(lease, &["state", "c"], "state", Duration::from_secs(600))
+            .expect_err("no such program");
+        assert!(
+            why.starts_with(&format!("run {}: ", absent.display())),
+            "{why}"
+        );
+    }
+
+    /// Catches a hung `crun` left running when the kernel refuses a handle on it
+    /// (`pidfd_open` failed): the child is killed and reaped at once, and the call returns an
+    /// error naming the failure, whatever the limit. The child holds the write end of a pipe
+    /// the test keeps the read end of, so the read ends only when the child is gone; and it
+    /// is gone before the call returns.
+    #[test]
+    fn a_crun_is_killed_and_the_call_fails_when_there_is_no_pidfd() {
+        use std::io::Read as _;
+        let (mut reader, writer) = std::io::pipe().expect("pipe");
+        let child = {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("600").stdout(writer);
+            command.spawn().expect("sleep")
+        };
+        let refused = Err(rustix::io::Errno::MFILE);
+        let why = output_within_by(child, Duration::from_secs(600), refused).expect_err("failed");
+        assert!(why.to_string().contains("pidfd_open failed"), "{why}");
+        let mut rest = Vec::new();
+        reader
+            .read_to_end(&mut rest)
+            .expect("the pipe ends with the child");
     }
 
     /// Catches the privilege drop applied to a daemon that is not root, or without a job

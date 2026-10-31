@@ -39,11 +39,11 @@ pub struct Seams<'a> {
     pub quota: Option<Arc<dyn ScratchQuota>>,
 }
 
-/// Starts the worker when `--container-bin` or `--native-helper-socket` is given, and
-/// `None` when neither is: an agent without them registers and heartbeats and runs no job.
-/// The worker has built the lifecycle and adopted the containers an earlier process left
-/// when this returns, and the lines it has to say (the engine's warnings, what it adopted)
-/// are written to `err`.
+/// Starts the worker when `--container-bin`, `--runtime crun` or `--native-helper-socket` is
+/// given, and `None` when none is: an agent without them registers and heartbeats and runs
+/// no job. The worker has built the lifecycle and adopted the containers an earlier process
+/// left when this returns, and the lines it has to say (the engine's warnings, what it
+/// adopted) are written to `err`.
 /// The hook of `seams` is handed a [`Handle`] to the worker. The outbox returned is where
 /// the worker publishes the usage of the leases (nothing, without `--actions-cgroup`) and
 /// the session takes it from.
@@ -92,7 +92,9 @@ pub fn start(
         _ => return Ok(None),
     };
     let flag = match &backend {
-        Backend::Container(_) => "--container-bin",
+        Backend::Container(settings) => settings
+            .crun()
+            .map_or("--container-bin", |_| "--runtime crun"),
         Backend::Native(_) => "--native-helper-socket",
     };
     let config = Config {

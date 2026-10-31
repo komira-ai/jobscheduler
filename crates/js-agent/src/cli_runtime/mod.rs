@@ -293,8 +293,8 @@ pub use egress::{
 };
 pub use seccomp::{PROFILE, PROFILE_FILE, install_profile};
 pub use settings::{
-    ADD_HOST_MAX, CGROUP_ROOT, DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull,
-    Settings, SettingsError,
+    ADD_HOST_MAX, CGROUP_ROOT, CRUN_STORE_DIR, CrunPlan, DEFAULT_NETWORK, DEFAULT_TMP_SIZE,
+    DEFAULT_USER, Flags, Pull, Settings, SettingsError,
 };
 pub use subid::{
     CLAIM_DIR, IdFiles, IdRange, JobUsers, Mapping, RANGE_LEN, RangeClaim, SubidError,

@@ -1,6 +1,6 @@
 //! What the job half of the agent takes from the machine: a clock, a container runtime
 //! and a view of the host. [`Machine`] is the seam; [`System`] is the machine itself
-//! (Docker or Podman by their command line, the host through `/proc`), and a test gives
+//! (Docker or Podman by their command line, or crun, the host through `/proc`), and a test gives
 //! the worker a machine of its own.
 //!
 //! The runtime and the view are made on the worker thread (see [`crate::worker`]), by the
@@ -101,6 +101,13 @@ pub trait Machine: Send + Sync {
         Box::new(Milliseconds(self.clock()))
     }
 
+    /// The files and programs the start check of `--runtime crun` reads. Called on the
+    /// thread that starts the agent. By default the machine's own.
+    #[cfg(target_os = "linux")]
+    fn crun_host(&self) -> crate::crun_host::CrunHost {
+        crate::crun_host::CrunHost::system()
+    }
+
     /// The project quota of the scratch root `root` (its canonical path): what the agent
     /// probes at start and, under `--scratch-quota`, bounds each run with. Called on the
     /// thread that starts the agent. By default the machine's own ([`quota::system`]).
@@ -125,9 +132,11 @@ impl UsageClock for Milliseconds {
 }
 
 /// The machine the agent runs on.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct System {
     origin: Instant,
+    #[cfg(target_os = "linux")]
+    crun: crate::crun::Seams,
 }
 
 impl System {
@@ -135,7 +144,31 @@ impl System {
     pub fn new() -> Self {
         Self {
             origin: Instant::now(),
+            #[cfg(target_os = "linux")]
+            crun: crate::crun::Seams::default(),
         }
+    }
+
+    /// This machine with the cgroup set-up and hooks of the crun runtime given: for a
+    /// test that runs the crun runtime on a node made of directories.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn with_crun(self, crun: crate::crun::Seams) -> Self {
+        Self { crun, ..self }
+    }
+
+    /// The crun runtime of `plan`, and the warnings the operator should read.
+    #[cfg(target_os = "linux")]
+    fn crun_runtime(
+        &self,
+        plan: &crate::cli_runtime::CrunPlan,
+        settings: &crate::cli_runtime::Settings,
+        build: &RuntimeBuild<'_>,
+    ) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
+        let opened = crate::crun::open_for_plan(plan, build.host_id, &self.crun);
+        let (runtime, mapping, warnings) = opened.map_err(|why| why.to_string())?;
+        settings.resolve(mapping);
+        Ok((Box::new(runtime), warnings))
     }
 }
 
@@ -170,6 +203,10 @@ impl Machine for System {
             Backend::Container(settings) => settings,
             Backend::Native(native) => return native_runtime(native),
         };
+        #[cfg(target_os = "linux")]
+        if let Some(plan) = settings.crun() {
+            return self.crun_runtime(plan, settings, build);
+        }
         let runner = Box::new(system_runner(build.stop_grace));
         let opened = CliRuntime::open(
             settings.clone(),
@@ -185,6 +222,11 @@ impl Machine for System {
 
     fn view(&self) -> Box<dyn HostView> {
         Box::new(ProcHost::system())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn crun_host(&self) -> crate::crun_host::CrunHost {
+        (self.crun.host)()
     }
 
     fn usage_clock(&self) -> Box<dyn UsageClock> {

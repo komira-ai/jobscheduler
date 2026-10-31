@@ -2,11 +2,11 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use super::subid::{JobUsers, Mapping, RANGE_LEN};
-use crate::lifecycle::SLOTS;
+use crate::lifecycle::{FilesRoot, SLOTS};
 
 use super::egress::{ALLOW_MAX as EGRESS_MAX, Allow, DEFAULT_NFT, Egress};
 
@@ -27,6 +27,9 @@ pub const DEFAULT_TMP_SIZE: &str = "64m";
 
 /// Where the cgroup version 2 file system is mounted. `--actions-cgroup` lies below it.
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// The name of the crun runtime's image store, a directory beside the scratch root.
+pub const CRUN_STORE_DIR: &str = "oci";
 
 /// The longest `--actions-cgroup` accepted.
 const CGROUP_MAX: usize = 256;
@@ -220,6 +223,39 @@ pub struct Settings {
     /// The mapping the runtime resolved when it opened; shared by the clones.
     resolved: Arc<OnceLock<Mapping>>,
     chown: Option<(u32, u32)>,
+    /// Set for the crun runtime: what it is opened from.
+    crun: Option<Box<CrunPlan>>,
+}
+
+/// What the crun runtime is opened from, besides the settings every runtime has: the
+/// `crun` program, the job user's ids and the registries images may be pulled from. The
+/// agent's delegated actions cgroup is recorded when the runtime opens (the cgroup is set
+/// up then), and shared by the clones of the settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrunPlan {
+    /// The `crun` program (`--crun-bin`).
+    pub crun: PathBuf,
+    /// The job user's `(uid, gid)`.
+    pub job_ids: (u32, u32),
+    /// The registries and namespaces images may be pulled from (`--image-allow`).
+    pub image_allow: Vec<js_oci::Allow>,
+    /// The directory of the image store and the leases, set by [`Settings::placed_beside`].
+    pub store: PathBuf,
+    /// The directory that holds the store and the claim files, set by
+    /// [`Settings::placed_beside`].
+    pub claim_dir: PathBuf,
+    /// The scratch root, set by [`Settings::placed_beside`].
+    pub scratch_root: PathBuf,
+    /// The root of the runs' files, when the agent has one, set by [`Settings::placed_beside`].
+    pub files: Option<FilesRoot>,
+    actions: Arc<OnceLock<String>>,
+}
+
+impl CrunPlan {
+    /// Records the actions cgroup the runtime made; the first one recorded stays.
+    pub fn delegated(&self, actions: &str) {
+        let _ = self.actions.set(actions.to_owned());
+    }
 }
 
 /// The checked `--actions-cgroup`: the directory, and the `--cgroup-parent` that puts a
@@ -307,7 +343,67 @@ impl Settings {
             subuid: None,
             resolved: Arc::new(OnceLock::new()),
             chown: None,
+            crun: None,
         })
+    }
+
+    /// The settings of the crun runtime for the job user `job_user` with ids `job_ids`
+    /// (the user's subordinate ranges map the jobs' ids, as `--container-subuid` does for
+    /// the engines).
+    /// The mapping is recorded when the runtime opens ([`Settings::resolve`]).
+    pub fn for_crun(
+        crun: PathBuf,
+        job_user: &str,
+        job_ids: (u32, u32),
+        image_allow: Vec<js_oci::Allow>,
+    ) -> Self {
+        Self {
+            bin: crun.to_string_lossy().into_owned(),
+            network: DEFAULT_NETWORK.to_owned(),
+            user: DEFAULT_USER.to_owned(),
+            ids: DEFAULT_IDS,
+            host: None,
+            pull: Pull::Never,
+            tmp_size: DEFAULT_TMP_SIZE.to_owned(),
+            add_hosts: Vec::new(),
+            egress: None,
+            actions: None,
+            subuid: Some(job_user.to_owned()),
+            resolved: Arc::new(OnceLock::new()),
+            chown: None,
+            crun: Some(Box::new(CrunPlan {
+                crun,
+                job_ids,
+                image_allow,
+                store: PathBuf::new(),
+                claim_dir: PathBuf::new(),
+                scratch_root: PathBuf::new(),
+                files: None,
+                actions: Arc::new(OnceLock::new()),
+            })),
+        }
+    }
+
+    /// These crun settings with the image store and leases placed beside `scratch_root`
+    /// (in [`CRUN_STORE_DIR`] of its parent directory, which also holds the host id's
+    /// claim) and the root of the runs' files given. Settings of another runtime are
+    /// returned as they are. The store is not inside the scratch root because the agent
+    /// removes every entry of the scratch root that is not a run's at start.
+    #[must_use]
+    pub fn placed_beside(mut self, scratch_root: &Path, files: Option<FilesRoot>) -> Self {
+        if let Some(plan) = &mut self.crun {
+            let parent = scratch_root.parent().unwrap_or(scratch_root);
+            plan.claim_dir = parent.to_owned();
+            plan.scratch_root = scratch_root.to_owned();
+            plan.store = parent.join(CRUN_STORE_DIR);
+            plan.files = files;
+        }
+        self
+    }
+
+    /// What the crun runtime is opened from, when these are its settings.
+    pub fn crun(&self) -> Option<&CrunPlan> {
+        self.crun.as_deref()
     }
 
     /// The engine host the runtime is told to use, when one is given.
@@ -554,7 +650,11 @@ impl Settings {
     /// The control group directory that holds the containers (`--actions-cgroup`), when one
     /// is given.
     pub fn actions_cgroup(&self) -> Option<&str> {
-        self.actions.as_ref().map(|actions| actions.dir.as_str())
+        let delegated = || self.crun.as_ref()?.actions.get().map(String::as_str);
+        self.actions
+            .as_ref()
+            .map(|actions| actions.dir.as_str())
+            .or_else(delegated)
     }
 
     /// The value of `--cgroup-parent` that puts a container in the actions control group:

@@ -710,8 +710,13 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     runtime.check_egress().map_err(|why| why.to_string())?;
     let (checks, actions): (Box<dyn CheckHook>, Result<String, &str>) = match &backend {
         Backend::Container(settings) => {
-            let integrity = Integrity::start(machine.view(), settings.uid(), watch)?
-                .with_slots(settings.slot_ids(0).0);
+            let integrity = Integrity::start(machine.view(), settings.uid(), watch)?;
+            // The engines give each slot a user of its own; every crun job runs as the one id
+            // of the job user's range, so there are no slots to tell apart.
+            let integrity = match settings.crun() {
+                Some(_) => integrity,
+                None => integrity.with_slots(settings.slot_ids(0).0),
+            };
             let actions = settings.actions_cgroup().map(str::to_owned);
             (Box::new(integrity), actions.ok_or(NO_ACTIONS_CGROUP))
         }
