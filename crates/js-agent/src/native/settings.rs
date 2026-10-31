@@ -84,6 +84,12 @@ impl NativeSettings {
                 ("--native-deny-read", !flags.deny_read.is_empty()),
                 ("--native-max-file-mib", flags.max_file_mib.is_some()),
                 ("--native-max-processes", flags.max_processes.is_some()),
+                ("--native-pfctl", flags.pf.pfctl.is_some()),
+                ("--native-pf-anchor", flags.pf.anchor.is_some()),
+                ("--native-pf-state-dir", flags.pf.state_dir.is_some()),
+                ("--native-pf-uid-start", flags.pf.uid_start.is_some()),
+                ("--native-pf-uid-count", flags.pf.uid_count.is_some()),
+                ("--native-pf-endpoint", !flags.pf.endpoints.is_empty()),
             ];
             return match given.iter().find(|(_, given)| *given) {
                 Some((flag, _)) => Err(format!("{flag}: needs --native-helper-socket")),
