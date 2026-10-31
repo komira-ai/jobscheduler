@@ -28,6 +28,8 @@ fn staged(name: &str, placed: bool) -> Rig {
     let rig = Rig::new(name);
     rig.put_record(&verified(&rig, placed));
     rig.world.cordon(LEASE_SECS).unwrap();
+    // The cordon above passed a kill point; the count is of the step's.
+    rig.kill.disarm();
     rig
 }
 

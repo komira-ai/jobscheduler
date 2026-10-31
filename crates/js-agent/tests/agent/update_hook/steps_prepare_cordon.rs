@@ -381,6 +381,8 @@ fn end_state(rig: &Rig, done: &Done) -> Value {
     let mut record: Value = serde_json::to_value(rig.record().unwrap()).unwrap();
     record["cordon"]["first_ms"] = json!(0);
     record["cordon"]["expires_ms"] = json!(0);
+    // The directories differ from one rig to the next.
+    record["update"] = json!(null);
     json!({
         "exit": done.outcome.code(),
         "report": line(done),
@@ -408,6 +410,8 @@ fn setup(name: &str, operator: bool) -> Rig {
     if operator {
         rig.operator_cordons();
     }
+    // The operator's cordon passed a kill point; the count is of the step's.
+    rig.kill.disarm();
     rig
 }
 
