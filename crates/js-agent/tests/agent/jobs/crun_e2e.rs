@@ -842,10 +842,18 @@ fn a_scratch_quota_bounds_a_crun_runs_lease_directory_with_the_run() {
     };
     assert_eq!(of_run.1, of_lease.1, "one project");
     assert_eq!((of_run.2, of_run.3), (of_lease.2, of_lease.3), "one limit");
-    assert!(
-        node.scratch.join(&of_lease.0).is_dir(),
-        "the lease directory is in the scratch root"
-    );
+    let lease = node.scratch.join(&of_lease.0);
+    assert!(lease.is_dir(), "the lease directory is in the scratch root");
+    // It goes with the run: once the job has ended and been cleaned up, nothing is left.
+    fs::write(node.dir.path().join("go"), "go").expect("let the container end");
+    rig.until(&run, |seen| seen.1.is_some());
+    for _ in 0..100 {
+        if !lease.exists() {
+            break;
+        }
+        rig.beat();
+    }
+    assert!(!lease.exists(), "the lease directory outlived its run");
     let ran = rig.agent.stop();
     assert_eq!(ran.status(), code(0), "{}", ran.err);
 }
