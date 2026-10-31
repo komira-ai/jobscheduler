@@ -523,9 +523,10 @@ fn nothing_but_sandbox_exec_runs_before_the_profile_applies() {
 /// Asserts that a start refuses, by name, each environment name that steers the limiting
 /// shell (`SHELLOPTS`, `BASHOPTS`, `BASH_ENV`, `ENV`, `PS4`, `PROMPT_COMMAND`, `IFS`,
 /// `CDPATH`), any name starting `BASH_FUNC_`, and each name the agent owns, before the
-/// helper hears of the run: no verb is sent (not even the boot reset) and the lease journal
-/// is not made. It catches a body that skipped the wire's validation and reaches the shell,
-/// which runs inside the profile with the job's environment before `ulimit`.
+/// helper hears of the run: no verb is sent after the reset that opening asked for, and the
+/// lease journal is not made. It catches a body that skipped the wire's validation and
+/// reaches the shell, which runs inside the profile with the job's environment before
+/// `ulimit`.
 #[test]
 fn a_start_refuses_names_that_steer_the_shell_before_a_user_is_made() {
     use js_types::env::{OWNED_ENV_NAMES, SHELL_ENV_NAMES};
