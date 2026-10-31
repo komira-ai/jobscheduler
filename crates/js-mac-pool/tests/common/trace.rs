@@ -459,10 +459,10 @@ pub fn windows(touches: &[Touch]) -> BTreeMap<String, Vec<Touch>> {
         if let Some(name) = touch.path.strip_prefix("/js-trace-begin-") {
             open = Some((name.to_owned(), Vec::new()));
         } else if let Some(name) = touch.path.strip_prefix("/js-trace-end-") {
-            if let Some((current, inside)) = open.take() {
-                if current == name {
-                    done.entry(current).or_default().extend(inside);
-                }
+            if let Some((current, inside)) = open.take()
+                && current == name
+            {
+                done.entry(current).or_default().extend(inside);
             }
         } else if let Some((_, inside)) = open.as_mut() {
             inside.push(touch.clone());
