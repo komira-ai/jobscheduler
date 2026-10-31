@@ -20,7 +20,7 @@ use std::time::Duration;
 use js_agent::lifecycle::StateRoot;
 use js_agent::update_hook::{
     Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,
-    PortError, Uncordoned, UnitState, Units, read_link, swap_link,
+    Params, PortError, Uncordoned, UnitState, Units, read_link, swap_link,
 };
 
 /// Where the fake clock starts, in milliseconds.
@@ -120,6 +120,22 @@ impl World {
             runtime: Some(RUNTIME.to_owned()),
         };
         fs::write(self.lease_file(), serde_json::to_vec(&host).unwrap()).unwrap();
+    }
+
+    /// The world before an update that `params` describes. The release that runs is linked at
+    /// `link` exactly as the params spell it, and the host is known to the server with the
+    /// version that runs. A first install (neither previous key) has no link and the server
+    /// knows no host.
+    ///
+    /// # Panics
+    /// A file cannot be written.
+    pub fn seed_update(&self, link: &Path, host: &str, params: &Params) {
+        if let Some(release) = &params.previous_release {
+            self.relink(link, release).unwrap();
+        }
+        if let Some(version) = &params.previous_version {
+            self.seed_host(host, version);
+        }
     }
 
     /// Changes the server's stored view of the host, as the server would on its own.

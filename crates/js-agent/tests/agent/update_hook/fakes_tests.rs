@@ -7,7 +7,9 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
-use js_agent::update_hook::{Clock, Gate, Lease, LeaseError, Link, NoGate, StateView, Units};
+use js_agent::update_hook::{
+    Clock, Gate, Lease, LeaseError, Link, NoGate, Params, StateView, Units,
+};
 use js_agent_wire::Taint;
 use js_testkit::dir::TestDir;
 
@@ -302,4 +304,46 @@ fn the_state_root_view_reads_the_taint_and_the_owed_records() {
         Ok(vec!["run-1".to_owned(), "run-2".to_owned()])
     );
     assert!(rig.tmp.path().join("world/state").is_dir());
+}
+
+fn params(previous: bool) -> Params {
+    let previous = match previous {
+        true => concat!(
+            "\"updater.previous_release\" = \"/opt/js-agent/releases/1.3.0\"\n",
+            "\"updater.previous_version\" = \"1.3.0\"\n",
+        ),
+        false => "",
+    };
+    Params::parse(&format!(
+        "{}{previous}",
+        concat!(
+            "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
+            "\"updater.staged_release\" = \"/opt/js-agent/releases/1.4.0\"\n",
+            "\"updater.target_version\" = \"1.4.0\"\n",
+        )
+    ))
+    .unwrap()
+}
+
+#[test]
+fn an_update_starts_from_the_previous_release_exactly_as_the_params_spell_it() {
+    let rig = Rig::new("hook-fake-seed-update");
+    let link = Path::new("/opt/js-agent/current");
+    rig.world.seed_update(link, HOST, &params(true));
+    assert_eq!(
+        rig.world.target(link),
+        Ok(Some("/opt/js-agent/releases/1.3.0".into()))
+    );
+    let host = rig.world.host().unwrap();
+    assert_eq!(host.agent_version.as_deref(), Some("1.3.0"));
+}
+
+#[test]
+fn a_first_install_has_no_link_and_the_server_knows_no_host() {
+    let rig = Rig::new("hook-fake-seed-first");
+    let link = Path::new("/opt/js-agent/current");
+    rig.world.seed_update(link, HOST, &params(false));
+    assert_eq!(rig.world.target(link), Ok(None));
+    assert_eq!(rig.world.host().unwrap_err(), LeaseError::UnknownHost);
+    assert_eq!(rig.points(), 0);
 }
