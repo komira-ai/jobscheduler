@@ -462,6 +462,7 @@ impl Runtime for NativeRuntime {
 }
 
 /// The shell that sets a run's limits, and the script it runs.
+// target_os = "macos" (throwaway: makes the macos job run)
 const LIMITER: &str = "/bin/sh";
 
 /// Sets the largest file and the most processes the user may have (both soft and hard, so
