@@ -6,6 +6,7 @@
 use std::fs;
 use std::time::Duration;
 
+use js_lease_server::BODY_LIMIT;
 use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, Session, hello_body, post, restarted, session, start_agents};
@@ -474,4 +475,52 @@ async fn a_cordon_that_cannot_be_written_is_not_acknowledged() {
             .unwrap()
             .contains("cordon_until_ms")
     );
+}
+
+/// Asserts that a body over the limit is 413 `body-too-large` and cordons nothing. It
+/// catches a route that reads its body without the limit of the others.
+#[tokio::test]
+async fn an_oversized_body_is_refused_and_cordons_nothing() {
+    let h = start_agents("cordon_oversized", false).await;
+    let me = enrolled(&h, "burst-1", "i-1").await;
+    let big = vec![b' '; BODY_LIMIT + 1];
+    let over = request(
+        h.addr(),
+        "POST",
+        &path("burst-1", Some("cordon")),
+        Some(&me.credential),
+        Some(&big),
+    )
+    .await;
+    assert_eq!(over.status, 413, "{}", over.body);
+    assert_eq!(code(&over), "body-too-large");
+    assert!(show(&h, "burst-1", &me).await.get("cordon").is_none());
+}
+
+/// Asserts that a host that has been silent for longer than the grace period reads as
+/// `lost` and keeps its cordon, as the host of an update does while its agent is stopped;
+/// its next hello makes it `live` with the cordon still in force. It catches a read that
+/// refuses a lost host, and a loss that lifts the cordon.
+#[tokio::test]
+async fn a_lost_host_keeps_its_cordon_and_reads_lost() {
+    let h = start_agents("cordon_lost", false).await;
+    let me = enrolled(&h, "burst-1", "i-1").await;
+    assert_eq!(cordon(&h, "burst-1", &me, 600).await.status, 200);
+    h.clock.advance(Duration::from_secs(30));
+    let lost = show(&h, "burst-1", &me).await;
+    assert_eq!(lost["state"], "lost");
+    assert_eq!(lost["cordon"]["expires_in_ms"], 570_000);
+
+    let back = post(
+        &h,
+        "/v1/agent/hello",
+        Some(&me.credential),
+        &asking("burst-1", "i-1"),
+    )
+    .await;
+    assert_eq!(back.status, 200, "{}", back.body);
+    let shown = show(&h, "burst-1", &me).await;
+    assert_eq!(shown["state"], "live");
+    assert_eq!(shown["cordon"]["expires_in_ms"], 570_000);
+    assert!(no_capacity(&lease(&h).await));
 }
