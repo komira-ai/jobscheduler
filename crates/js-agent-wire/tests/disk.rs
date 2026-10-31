@@ -153,3 +153,43 @@ fn a_shape_disk_above_the_maximum_is_refused() {
         assert_eq!(h.validate(), Ok(()));
     }
 }
+
+/// Asserts that a heartbeat's `disk_gib` is additive: unset it is not in the body at all
+/// (so every older golden and an older server see the bytes they always did), a body from
+/// before the field decodes with it unset, and a set value survives a round trip under that
+/// name. It catches a field that is always written (an older strict reader would refuse the
+/// body) and one that is required (an older agent's heartbeat would not decode).
+#[test]
+fn a_heartbeat_disk_gib_is_additive() {
+    let beat = common::heartbeat();
+    let mut body = serde_json::to_value(&beat).unwrap();
+    assert!(body.get("disk_gib").is_none(), "{body}");
+    let old: js_agent_wire::Heartbeat = serde_json::from_value(body.clone()).unwrap();
+    assert_eq!(old.disk_gib, None);
+    body["disk_gib"] = json!(37);
+    let new: js_agent_wire::Heartbeat = serde_json::from_value(body).unwrap();
+    assert_eq!(new.disk_gib, Some(37));
+    let with = js_agent_wire::Heartbeat {
+        disk_gib: Some(0),
+        ..beat
+    };
+    assert_eq!(serde_json::to_value(&with).unwrap()["disk_gib"], json!(0));
+    round_trip(&with);
+}
+
+/// Asserts the bounds of a heartbeat's `disk_gib`: zero and the whole-GiB part of the
+/// shape's maximum pass, one more is refused as out of range under `invalid-heartbeat`.
+/// It catches a heartbeat that can say more disk than a hello is allowed to.
+#[test]
+fn a_heartbeat_disk_gib_is_bounded_like_the_shape() {
+    use js_agent_wire::Heartbeat;
+    use js_agent_wire::limits::MAX_DISK_GIB;
+    assert_eq!(MAX_DISK_GIB, MAX_DISK_BYTES >> 30);
+    for ok in [0, 1, MAX_DISK_GIB] {
+        let mut beat = common::heartbeat();
+        beat.disk_gib = Some(ok);
+        assert_eq!(beat.validate(), Ok(()), "{ok}");
+    }
+    let err = broken(&common::heartbeat(), |b| b.disk_gib = Some(MAX_DISK_GIB + 1), Heartbeat::validate);
+    expect(err, "disk_gib", Rule::OutOfRange, refusal::INVALID_HEARTBEAT);
+}
