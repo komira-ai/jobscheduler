@@ -438,10 +438,8 @@ impl Oci {
             let leftovers = oci.images.sweep(&oci);
             leftovers.map_err(OciError::Prepare)?;
         } else {
-            tracing::info!(
-                "oci: another backend uses {}; the unpacks a dead run left are not swept",
-                scratch.display()
-            );
+            let shown = scratch.display();
+            tracing::info!(%shown, "another backend is live: no stage sweep");
         }
         oci.lock.share()?;
         Ok(oci)

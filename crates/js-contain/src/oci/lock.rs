@@ -23,7 +23,7 @@
 use std::fs::File;
 use std::path::Path;
 
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{FlockOperation as Op, Mode, OFlags, flock};
 
 use super::{OciError, at, prepare};
 
@@ -60,7 +60,6 @@ impl ScratchLock {
     /// The lock file cannot be opened, or an exclusive lock is wanted and another holder
     /// has the lock.
     pub(crate) fn take(scratch: &Path, how: Use) -> Result<Self, OciError> {
-        use rustix::fs::{FlockOperation as Op, flock};
         let path = scratch.join(LOCK_FILE);
         // Never through a link.
         let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -94,8 +93,7 @@ impl ScratchLock {
     /// The conversion failed (the lock is then still held as it was).
     pub(crate) fn share(&self) -> Result<(), OciError> {
         if self.converts {
-            rustix::fs::flock(&self.file, rustix::fs::FlockOperation::LockShared)
-                .map_err(|e| locked(Path::new(LOCK_FILE), e))?;
+            flock(&self.file, Op::LockShared).map_err(|e| locked(Path::new(LOCK_FILE), e))?;
         }
         Ok(())
     }
@@ -111,6 +109,6 @@ fn locked(path: &Path, why: rustix::io::Errno) -> OciError {
 
 impl Drop for ScratchLock {
     fn drop(&mut self) {
-        let _ = rustix::fs::flock(&self.file, rustix::fs::FlockOperation::Unlock);
+        let _ = flock(&self.file, Op::Unlock);
     }
 }
