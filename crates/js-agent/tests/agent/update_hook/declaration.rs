@@ -1,6 +1,6 @@
 //! The declaration the hook reads: the keys it needs, the ones it ignores, the paths it refuses.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use js_agent::update_hook::{DECLARATION_PATH, Declaration, DeclarationError, Timeouts};
 use js_testkit::dir::TestDir;
@@ -57,16 +57,6 @@ fn the_keys_the_hook_needs_are_read() {
             rollback: 8220,
             cleanup: 120,
         }
-    );
-}
-
-#[test]
-fn the_release_directories_are_the_write_paths_but_the_state_directory() {
-    let declaration = Declaration::parse(GOOD).unwrap();
-    let dirs: Vec<&Path> = declaration.release_dirs().collect();
-    assert_eq!(
-        dirs,
-        vec![Path::new("/opt/js-agent"), Path::new("/opt/js-agent-link")]
     );
 }
 
@@ -137,20 +127,6 @@ fn a_relative_state_directory_or_write_path_is_refused() {
 fn no_unit_is_refused() {
     let text = GOOD.replace(r#"units = ["js-agent-crun.service"]"#, "units = []");
     assert!(matches!(refused(&text), DeclarationError::NoUnits));
-}
-
-#[test]
-fn a_declaration_with_no_directory_for_releases_is_refused() {
-    let text = GOOD.replace(
-        r#"write_paths = ["/opt/js-agent", "/opt/js-agent-link", "/var/lib/js-agent-update"]"#,
-        r#"write_paths = ["/var/lib/js-agent-update"]"#,
-    );
-    assert!(matches!(refused(&text), DeclarationError::NoReleaseDir));
-    let none = GOOD.replace(
-        r#"write_paths = ["/opt/js-agent", "/opt/js-agent-link", "/var/lib/js-agent-update"]"#,
-        "write_paths = []",
-    );
-    assert!(matches!(refused(&none), DeclarationError::NoReleaseDir));
 }
 
 #[test]

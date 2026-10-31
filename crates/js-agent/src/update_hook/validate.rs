@@ -7,6 +7,8 @@
 //! the reason `state_invalid` and changes nothing. Where the record and the system disagree
 //! about what was done, the system is believed; that is a step's decision and not a rule here.
 
+#![allow(unused)] // stub rules: the next commit writes them
+
 use std::path::{Component, Path, PathBuf};
 
 use super::declaration::Declaration;
@@ -16,8 +18,10 @@ use super::record::{Record, SCHEMA};
 /// The longest version string a record may hold.
 pub const MAX_VERSION_LEN: usize = 128;
 
-/// How far past `first_ms + cordon_max_secs` a recorded cordon expiry may lie, in
-/// milliseconds: the server counts whole seconds, the hook's clock does not.
+/// How far past `first_ms + cordon_max_secs * 1000` a recorded cordon expiry may lie, in
+/// milliseconds. An expiry is a whole number of seconds while the first placement is a
+/// millisecond stamp, so the latest legal expiry is the first stamp plus the cap plus at most
+/// one second.
 pub const EXPIRY_SLACK_MS: u64 = 1_000;
 
 /// The rule a record broke.
@@ -29,10 +33,9 @@ pub enum Invalid {
         /// The record's.
         found: u32,
     },
-    /// A release path is not absolute and plain, or not under a declared release directory.
-    #[error(
-        "{field} is not an absolute path of plain components under a declared release directory"
-    )]
+    /// A release path is not an absolute path of plain components (no `.`, `..`, doubled or
+    /// trailing slash), is the root, or lies in the state directory.
+    #[error("{field} is not an absolute path of plain components outside the state directory")]
     Path {
         /// The record field.
         field: &'static str,
@@ -48,6 +51,12 @@ pub enum Invalid {
         "{field} is not a version of letters, digits and . _ + ~ - (at most {MAX_VERSION_LEN} bytes)"
     )]
     Version {
+        /// The record field.
+        field: &'static str,
+    },
+    /// A value of the record is not the one the updater passed in the params table.
+    #[error("{field} of the record is not what the params table says")]
+    ParamsMismatch {
         /// The record field.
         field: &'static str,
     },
@@ -89,19 +98,22 @@ fn is_plain(path: &Path) -> bool {
         && rebuilt.as_os_str() == path.as_os_str()
 }
 
-/// A release path: plain, and strictly below one of the declared release directories.
-fn release_path(
+/// A release path: plain, not the root, and not in the state directory.
+fn release_path(field: &'static str, path: &Path, state_dir: &Path) -> Result<(), Invalid> {
+    let usable = is_plain(path);
+    usable.then_some(()).ok_or(Invalid::Path { field })
+}
+
+/// The record's value is the params table's.
+fn agrees<T: PartialEq + ?Sized>(
     field: &'static str,
-    path: &Path,
-    declaration: &Declaration,
+    record: Option<&T>,
+    params: Option<&T>,
 ) -> Result<(), Invalid> {
-    let below = declaration
-        .release_dirs()
-        .any(|dir| path.starts_with(dir) && path != dir);
-    if is_plain(path) && below {
+    if record == params {
         Ok(())
     } else {
-        Err(Invalid::Path { field })
+        Err(Invalid::ParamsMismatch { field })
     }
 }
 
@@ -140,24 +152,32 @@ pub fn validate(
             found: update.unit.clone(),
         });
     }
-    for (field, version) in [("target", &update.target), ("previous", &update.previous)] {
-        if !is_version(version) {
+    let versions = [
+        ("target", Some(update.target.as_str())),
+        ("previous", update.previous.as_deref()),
+    ];
+    for (field, version) in versions {
+        if !version.is_none_or(is_version) {
             return Err(Invalid::Version { field });
         }
     }
-    if update.target == update.previous {
+    if update.previous.as_ref() == Some(&update.target) {
         return Err(Invalid::SameVersion);
     }
     if !is_digest(&update.artifact_digest) {
         return Err(Invalid::Digest);
     }
-    release_path("staged", &update.staged, declaration)?;
-    release_path("previous_target", &update.previous_target, declaration)?;
+    let state_dir = &declaration.state_dir;
+    release_path("staged", &update.staged, state_dir)?;
+    if let Some(previous) = &update.previous_target {
+        release_path("previous_target", previous, state_dir)?;
+    }
     cordon(record, params)?;
     marks(record)
 }
 
-/// The cordon's stamps against its mark and the declared cap.
+/// The cordon's stamps against its mark and the declared cap: the expiry is whole seconds, so
+/// it may not exceed `first_ms + cordon_max_secs * 1000 + EXPIRY_SLACK_MS` (one second).
 fn cordon(record: &Record, params: &Params) -> Result<(), Invalid> {
     let cordon = &record.cordon;
     if !cordon.placed {

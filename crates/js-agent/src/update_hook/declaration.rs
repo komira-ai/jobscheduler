@@ -14,10 +14,9 @@
 //! ```
 //!
 //! Keys the hook does not read are ignored: the file is the updater's, and it adds keys.
-//! The release directories are the `write_paths` that are not the `state_dir`: the declaration
-//! has no key of its own for them, because a staged release and the link it is moved to are
-//! both written by the hook and the state directory is the one write path that is not a
-//! release.
+//! The release directories are not read from the declaration: the updater passes the staged
+//! and the previous release in the params table (`updater.staged_release` and
+//! `updater.previous_release`), and the record is checked against those.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -42,9 +41,6 @@ pub enum DeclarationError {
     /// `hook.units` is empty: no unit could ever match the record's.
     #[error("hook.units is empty")]
     NoUnits,
-    /// Every write path is the state directory: no release could lie under any.
-    #[error("hook.write_paths names no directory but state_dir for a release")]
-    NoReleaseDir,
 }
 
 /// The `[hook.timeout_secs]` table: the updater's bound on each step, in seconds.
@@ -117,18 +113,6 @@ impl Declaration {
         if declaration.units.is_empty() {
             return Err(DeclarationError::NoUnits);
         }
-        if declaration.release_dirs().next().is_none() {
-            return Err(DeclarationError::NoReleaseDir);
-        }
         Ok(declaration)
-    }
-
-    /// The directories a release may lie under: the write paths other than the state
-    /// directory.
-    pub fn release_dirs(&self) -> impl Iterator<Item = &Path> {
-        self.write_paths
-            .iter()
-            .map(PathBuf::as_path)
-            .filter(|path| *path != self.state_dir)
     }
 }
