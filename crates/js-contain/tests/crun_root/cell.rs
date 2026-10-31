@@ -237,6 +237,21 @@ pub struct Cell {
 impl Cell {
     /// A cell named `label`, with the busybox image in its store.
     pub fn new(label: &str) -> Self {
+        Self::build(label, Arc::new(NoImages), true)
+    }
+
+    /// A cell named `label` whose store is empty: the image is pulled from `source` by the
+    /// real helper container.
+    pub fn pulling(label: &str, source: Arc<dyn ImageSource>) -> Self {
+        Self::build(label, source, false)
+    }
+
+    /// The image store of the cell.
+    pub fn store(&self) -> PathBuf {
+        self.scratch.join("oci-images")
+    }
+
+    fn build(label: &str, source: Arc<dyn ImageSource>, seeded: bool) -> Self {
         let (uid, gid) = job_user();
         let ids = user_ids(&IdFiles::system(), uid, gid)
             .unwrap_or_else(|e| panic!("the job user needs a subordinate id range: {e}"));
@@ -250,13 +265,15 @@ impl Cell {
         fs::write(dir.join("cgroup.subtree_control"), "+cpu +memory +pids")
             .expect("enable controllers");
         give_cgroup(&dir, &OWNED_FILES, uid, gid);
-        let oci = Oci::new(&config((uid, gid)), Arc::new(NoImages), &scratch, &cgroup)
+        let oci = Oci::new(&config((uid, gid)), source, &scratch, &cgroup)
             .unwrap_or_else(|e| panic!("a root daemon starts the backend: {e}"));
-        let hex = "c".repeat(64);
-        let store = scratch.join("oci-images");
-        mkdir(&store, 0o755);
-        mkdir(&store.join(&hex), 0o755);
-        busybox_rootfs(&store.join(&hex).join("rootfs"));
+        let hex = if seeded { "c" } else { "d" }.repeat(64);
+        if seeded {
+            let store = scratch.join("oci-images");
+            mkdir(&store, 0o755);
+            mkdir(&store.join(&hex), 0o755);
+            busybox_rootfs(&store.join(&hex).join("rootfs"));
+        }
         Self {
             oci,
             scratch,

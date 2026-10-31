@@ -34,8 +34,9 @@ fn claiming_40_gib() -> Vec<u8> {
 /// Catches an unpack whose ownership does not land in the job's user namespace: the
 /// files of a layer are owned, on the host, by the first subordinate id plus the id the
 /// tar names (0 and 1000 here), a setuid bit is cleared and the other mode bits stay, a device node
-/// is skipped, and the published directory is the daemon user's, closed to writes by
-/// anyone else, with a root that no other id can write.
+/// is skipped, and the published directory is the helper's id's (the first subordinate
+/// id: the unpack stage was given to it), closed to writes by anyone else, with a root
+/// that no other id can write.
 #[tokio::test]
 #[ignore = "real crun: run through cargo xtask crun-tests"]
 async fn the_unpacked_image_is_owned_by_the_containers_ids() {
@@ -70,9 +71,9 @@ async fn the_unpacked_image_is_owned_by_the_containers_ids() {
     assert_eq!(mode & 0o7777, 0o755, "the setuid bit was kept");
     assert!(std::fs::symlink_metadata(root.join("dev-null")).is_err());
 
-    // Published by the daemon user, and writable by nobody else.
+    // Published as the helper's id wrote it, and writable by nobody else.
     let published = std::fs::metadata(&dir).expect("image directory");
-    assert_eq!(published.uid(), rustix::process::getuid().as_raw());
+    assert_eq!(published.uid(), sub);
     assert_eq!(published.permissions().mode() & 0o022, 0);
     assert_eq!(std::fs::metadata(&root).expect("root").mode() & 0o022, 0);
 }

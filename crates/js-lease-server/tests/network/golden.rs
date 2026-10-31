@@ -109,6 +109,7 @@ fn the_agent_unit_names_its_roots_and_requires_the_scratch_mount() {
         .find(|line| line.starts_with("ExecStart="))
         .unwrap();
     for (flag, value) in [
+        ("--runtime", js_elastic::RUNTIME),
         ("--container-bin", js_elastic::CONTAINER_BIN),
         ("--state-root", js_elastic::STATE_ROOT),
         ("--scratch-root", js_elastic::SCRATCH_ROOT),
