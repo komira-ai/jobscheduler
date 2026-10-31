@@ -492,7 +492,7 @@ fn output_within(
     ) -> std::thread::JoinHandle<Vec<u8>> {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            if let Some(mut pipe) = pipe {
+            for mut pipe in pipe {
                 let _ = pipe.read_to_end(&mut bytes);
             }
             bytes
@@ -704,7 +704,8 @@ mod tests {
         let why = crun
             .stdout_within(lease, &["state", "c"], "state", Duration::from_secs(600))
             .expect_err("exit 3");
-        assert!(why.contains("oops") && why.contains('3'), "{why}");
+        assert!(why.contains("oops"), "{why}");
+        assert!(why.contains('3'), "{why}");
     }
 
     /// Catches the privilege drop applied to a daemon that is not root, or without a job
