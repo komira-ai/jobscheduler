@@ -115,7 +115,6 @@ enum Refusal {
     #[error(
         "the artifact {given:?} is not the staged release {STAGED_RELEASE_KEY} names ({staged:?})"
     )]
-    #[allow(dead_code)] // the next commit constructs it
     Artifact { given: PathBuf, staged: PathBuf },
 }
 
@@ -137,6 +136,17 @@ impl Refusal {
 fn step_of(args: &[OsString], host: &Host<'_>) -> Result<Done, Refusal> {
     let invocation = Invocation::parse(args.iter().skip(2).cloned()).map_err(Refusal::Args)?;
     let params = Params::read(&invocation.params).map_err(Refusal::Params)?;
+    // `prepare` is given the staged tree twice, by argument and by the table; they must agree.
+    if let Some(given) = invocation
+        .artifact
+        .as_ref()
+        .filter(|given| given.as_os_str() != params.staged_release.as_os_str())
+    {
+        return Err(Refusal::Artifact {
+            given: given.clone(),
+            staged: params.staged_release,
+        });
+    }
     Ok((host.step)(&invocation, &params))
 }
 

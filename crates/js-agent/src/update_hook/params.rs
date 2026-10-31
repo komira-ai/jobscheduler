@@ -105,10 +105,12 @@ impl Params {
             cordon_max_secs: seconds(&table, CORDON_MAX_KEY)?
                 .ok_or(ParamsError::Missing(CORDON_MAX_KEY))?,
             promotion_ceiling_secs: seconds(&table, PROMOTION_CEILING_KEY)?,
-            staged_release: PathBuf::new(),
-            previous_release: None,
-            target_version: String::new(),
-            previous_version: None,
+            staged_release: path(&table, STAGED_RELEASE_KEY)?
+                .ok_or(ParamsError::Missing(STAGED_RELEASE_KEY))?,
+            previous_release: path(&table, PREVIOUS_RELEASE_KEY)?,
+            target_version: text(&table, TARGET_VERSION_KEY)?
+                .ok_or(ParamsError::Missing(TARGET_VERSION_KEY))?,
+            previous_version: text(&table, PREVIOUS_VERSION_KEY)?,
         })
     }
 }
@@ -137,12 +139,29 @@ fn seconds(table: &toml::Table, key: &str) -> Result<Option<u64>, ParamsError> {
         .transpose()
 }
 
-#[allow(dead_code)] // the next commit reads the text keys
-fn text(_: &toml::Table, _: &str) -> Result<Option<String>, ParamsError> {
-    Ok(None)
+/// `key` as a string; `None` when it is absent.
+fn text(table: &toml::Table, key: &str) -> Result<Option<String>, ParamsError> {
+    table
+        .get(key)
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| ParamsError::NotText(key.to_owned()))
+        })
+        .transpose()
 }
 
-#[allow(dead_code)] // the next commit reads the path keys
-fn path(_: &toml::Table, _: &str) -> Result<Option<PathBuf>, ParamsError> {
-    Ok(None)
+/// `key` as an absolute path; `None` when it is absent.
+fn path(table: &toml::Table, key: &str) -> Result<Option<PathBuf>, ParamsError> {
+    text(table, key)?
+        .map(|text| {
+            let path = PathBuf::from(text);
+            if path.is_absolute() {
+                Ok(path)
+            } else {
+                Err(ParamsError::Relative(key.to_owned()))
+            }
+        })
+        .transpose()
 }
