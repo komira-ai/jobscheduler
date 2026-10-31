@@ -101,8 +101,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         assert_eq!(run(&Child::Connect { addr }), ExitCode::SUCCESS);
+        // Not `listener` dropped: that frees the number for any other test to bind.
+        let dead = js_testkit::port::dead_addr();
+        assert_eq!(run(&Child::Connect { addr: dead }), ExitCode::FAILURE);
         drop(listener);
-        assert_eq!(run(&Child::Connect { addr }), ExitCode::FAILURE);
     }
 
     #[test]
