@@ -280,7 +280,7 @@
 //! |---|---|
 //! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted`, `host-contract` and `execution-mismatch` (with `"field"`, the capability at fault; only a pool that declares an execution mode sends them), `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable` |
 //! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack}` (see "Runs" and "Taint"); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413 |
-//! | `POST /v1/hosts/{id}:cordon` | with a host credential, for that host only: 200 the host as `GET /v1/hosts/{id}` reads it, plus `already_cordoned`; body optional, `{"lease_secs": n}` (default 300, cut to 3600); 400 `invalid-cordon`; 403 `host-credential-required`, or the code of a credential that is not the host's (`join-token-not-admitted`, `join-token-expired`); 404 `unknown-host`; 413; 503 `cordon-unsaved` |
+//! | `POST /v1/hosts/{id}:cordon` | with a host credential, for that host only: 200 the host as `GET /v1/hosts/{id}` reads it, plus `already_cordoned`; body optional, `{"lease_secs": n}` (default 300, cut to 3600); 400 `invalid-cordon`; 403 `host-credential-required`, or the code of a credential that is not the host's (`join-token-not-admitted`, `join-token-expired`); 409 `unknown-host`; 413; 503 `cordon-unsaved` |
 //! | `POST /v1/hosts/{id}:uncordon` | as the cordon, with no body: 200 the host, plus `lifted`; 200 also when it was not cordoned |
 //! | `GET /v1/hosts/{id}` | as the cordon: 200 `{id, state, epoch, session_started_ms?, leases, lease?, releasing, cordon? {expires_at_ms, expires_in_ms}, taint?, agent_version?, runtime?}` |
 //!
@@ -294,7 +294,10 @@
 //! cordoned host takes no new lease; the lease it holds, and its runs, go on, and it
 //! reads `leases: 0` and `releasing: false` when they have ended. `already_cordoned` says
 //! whether the host was cordoned before the call, so that a requester lifts only a cordon
-//! it placed (the server does not tell who placed one). A cordon is written to the agent
+//! it placed (the server does not tell who placed one, and an uncordon lifts any cordon, so a
+//! requester uncordons only after a cordon whose reply said `already_cordoned: false`). There is no
+//! total cap on a cordon that is renewed; a requester that dies leaves it to lapse within its last
+//! `lease_secs`, at most an hour. A cordon is written to the agent
 //! state file before it is acknowledged and survives a restart; an uncordon is written the
 //! same way. The routes are served by the agent routes' listener (`agent_listen`, when
 //! there is one).

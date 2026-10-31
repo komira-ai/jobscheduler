@@ -419,7 +419,7 @@ async fn a_cordon_survives_a_restart() {
 
 /// Asserts that a lifted cordon is not brought back by a restart, and that a host the
 /// registry does not hold (its server restarted, it holds no lease, is not tainted and
-/// is not cordoned) is 404 `unknown-host` on all three routes until its agent says hello
+/// is not cordoned) is 409 `unknown-host` on all three routes until its agent says hello
 /// again. It catches an uncordon that leaves the row, and a route that makes up a host.
 #[tokio::test]
 async fn a_lifted_cordon_stays_lifted_and_an_unknown_host_is_not_found() {
@@ -433,7 +433,7 @@ async fn a_lifted_cordon_stays_lifted_and_an_unknown_host_is_not_found() {
         cordon(&h, "burst-1", &me, 60).await,
         uncordon(&h, "burst-1", &me).await,
     ] {
-        assert_eq!(reply.status, 404, "{}", reply.body);
+        assert_eq!(reply.status, 409, "{}", reply.body);
         assert_eq!(code(&reply), "unknown-host");
     }
 }

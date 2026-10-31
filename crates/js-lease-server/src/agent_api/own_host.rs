@@ -12,7 +12,13 @@
 //! same 403 as a credential that never was the host's, so the answer tells nothing of
 //! which hosts exist. A host id that passes and that the registry does not hold (it has
 //! not said hello since the server started and holds nothing a restart puts back) is
-//! 404 `unknown-host`.
+//! 409 `unknown-host`, as for a heartbeat: the agent says hello again.
+//!
+//! The server keeps no record of who placed a cordon, and an uncordon lifts any cordon.
+//! A caller therefore uncordons only a cordon it placed, and takes `already_cordoned:
+//! false` in the reply of its cordon as the proof that it placed it. There is no
+//! server-side total cap: a caller that dies leaves its cordon to lapse within its last
+//! `lease_secs`, at most [`MAX_CORDON`].
 //!
 //! A cordon is written to the agent state file before it is acknowledged: when that fails
 //! the answer is 503 `cordon-unsaved`, the cordon holds on this server all the same, and
@@ -134,7 +140,7 @@ fn not_found() -> Refused {
 }
 
 fn unknown(_: NotHeld) -> Refused {
-    Refused::new(StatusCode::NOT_FOUND, UNKNOWN_HOST)
+    Refused::new(StatusCode::CONFLICT, UNKNOWN_HOST)
 }
 
 /// The host id and the verb of the last path segment: `burst-1:cordon` is `burst-1` and
