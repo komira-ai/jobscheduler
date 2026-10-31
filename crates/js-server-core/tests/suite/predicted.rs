@@ -323,3 +323,48 @@ fn a_finished_operations_prediction_is_gone_after_retire() {
     block_on(core.tick(at(retired)));
     assert!(!core.with(|view, _| view.sched().has_cost(admitted.operation)));
 }
+
+/// Asserts that an operation read back from the store at a start is charged the prediction
+/// the adapter keeps for the parcel the operation was queued with, when the adapter has none
+/// for the request alone. Catches: `predicted` asked before the adapter can see the
+/// operation's parcel, so an adapter keyed by the parcel's subject answers nothing.
+#[test]
+fn an_operation_read_back_at_the_start_is_predicted_from_its_parcel() {
+    let setup = Setup::new();
+    let first = setup.core(1);
+    submit_request(&first, 1, request(1)).expect("queued");
+    submit_request(&first, 2, request(2)).expect("queued");
+
+    let mut rig = Rig::default();
+    rig.parcel_predictions
+        .insert(1_u64.to_be_bytes().to_vec(), WARM);
+    let second = setup.core_with(&Config::new(2), rig, 3);
+    up(&second, 4, "node-a", "d1");
+
+    let costs: Vec<_> = started(&second)
+        .iter()
+        .map(|l| charged(&second, *l))
+        .collect();
+    assert_eq!(costs.len(), 2);
+    assert!(costs.contains(&as_charged(WARM)));
+    assert!(costs.contains(&BOOKED));
+}
+
+/// Asserts the same for an operation another frontend queued, taken in by an intake poll.
+/// Catches: a poll that asks for the prediction before the adapter has the parcel.
+#[test]
+fn an_operation_taken_in_by_the_intake_poll_is_predicted_from_its_parcel() {
+    let setup = Setup::new();
+    let mut rig = Rig::default();
+    rig.parcel_predictions
+        .insert(1_u64.to_be_bytes().to_vec(), WARM);
+    let core = setup.core_with(&Config::new(1), rig, 0);
+    let other = setup.core(7);
+    submit_request(&other, 1, request(1)).expect("queued");
+
+    core.intake(at(2));
+    core.intake(at(3));
+    up(&core, 4, "node-a", "d1");
+
+    assert_eq!(charged(&core, last_started(&core)), as_charged(WARM));
+}
