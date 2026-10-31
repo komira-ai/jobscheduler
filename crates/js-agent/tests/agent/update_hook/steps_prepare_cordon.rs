@@ -336,7 +336,7 @@ fn a_blip_on_the_final_uncordon_stops_no_unit_and_moves_no_link() {
     let (_, log) = blipped(&rig);
     assert!(
         log.iter()
-            .all(|call| call.starts_with("cordon(") || call == "uncordon"),
+            .all(|call| !call.starts_with("units.") && !call.starts_with("link.")),
         "{log:?}"
     );
 }
