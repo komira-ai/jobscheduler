@@ -108,9 +108,9 @@ impl Params {
             staged_release: path(&table, STAGED_RELEASE_KEY)?
                 .ok_or(ParamsError::Missing(STAGED_RELEASE_KEY))?,
             previous_release: path(&table, PREVIOUS_RELEASE_KEY)?,
-            target_version: text(&table, TARGET_VERSION_KEY)?
+            target_version: string_of(&table, TARGET_VERSION_KEY)?
                 .ok_or(ParamsError::Missing(TARGET_VERSION_KEY))?,
-            previous_version: text(&table, PREVIOUS_VERSION_KEY)?,
+            previous_version: string_of(&table, PREVIOUS_VERSION_KEY)?,
         })
     }
 }
@@ -140,7 +140,7 @@ fn seconds(table: &toml::Table, key: &str) -> Result<Option<u64>, ParamsError> {
 }
 
 /// `key` as a string; `None` when it is absent.
-fn text(table: &toml::Table, key: &str) -> Result<Option<String>, ParamsError> {
+fn string_of(table: &toml::Table, key: &str) -> Result<Option<String>, ParamsError> {
     table
         .get(key)
         .map(|value| {
@@ -154,7 +154,7 @@ fn text(table: &toml::Table, key: &str) -> Result<Option<String>, ParamsError> {
 
 /// `key` as an absolute path; `None` when it is absent.
 fn path(table: &toml::Table, key: &str) -> Result<Option<PathBuf>, ParamsError> {
-    text(table, key)?
+    string_of(table, key)?
         .map(|text| {
             let path = PathBuf::from(text);
             if path.is_absolute() {
