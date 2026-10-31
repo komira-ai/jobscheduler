@@ -444,12 +444,12 @@ POST /v1/workers
 GET /v1/hosts/gpu-01
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
-  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 401 [type -; headers connection,content-length,date]
+  valid token, again: 401 [type -; headers connection,content-length,date]
 POST /v1/hosts/gpu-01
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 401 [type -; headers connection,content-length,date]
 GET /v1/agent
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
