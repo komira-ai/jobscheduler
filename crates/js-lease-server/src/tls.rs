@@ -6,12 +6,11 @@
 //! connection that is already open keeps what it negotiated.
 
 use std::sync::{Arc, PoisonError, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustls::ServerConfig;
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use tokio_rustls::TlsAcceptor;
@@ -106,15 +105,11 @@ fn load(files: &TlsFiles) -> Result<CertifiedKey, StartupError> {
 
 /// Refuses a pair whose leaf certificate is not valid at this moment.
 fn check_valid_now(pair: &CertifiedKey, files: &TlsFiles) -> Result<(), StartupError> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
-        });
+    let now = i64::try_from(UnixTime::now().as_secs()).unwrap_or(i64::MAX);
     let refuse =
         |why: &str| StartupError::new("--tls-cert", format!("{}: {why}", files.cert.display()));
-    let Some((from, to)) = validity(pair.end_entity_cert().map_or(&[][..], |der| der.as_ref()))
-    else {
+    let range = pair.cert.first().and_then(|der| validity(der.as_ref()));
+    let Some((from, to)) = range else {
         return Err(refuse("the validity of the certificate cannot be read"));
     };
     if now < from {
@@ -236,6 +231,7 @@ mod tests {
         );
         assert_eq!(tlv(&[0x30, 0x05, 1]), None);
         assert_eq!(tlv(&[0x30, 0x80]), None);
+        assert_eq!(tlv(&[0x30, 0x82, 0x01]), None);
         assert_eq!(tlv(&[0x30, 0x85, 0, 0, 0, 0, 0]), None);
         assert_eq!(tlv(&[0x30]), None);
         assert_eq!(tlv(&[]), None);
@@ -246,5 +242,23 @@ mod tests {
         assert_eq!(validity(&[]), None);
         assert_eq!(validity(&[0x30, 0x03, 0x30, 0x01, 0x00]), None);
         assert_eq!(validity(b"not a certificate"), None);
+    }
+
+    #[test]
+    fn a_pair_whose_certificate_cannot_be_read_is_refused() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let der = PrivateKeyDer::try_from(key.serialize_der()).unwrap();
+        let signer = default_provider()
+            .key_provider
+            .load_private_key(der)
+            .unwrap();
+        let pair = CertifiedKey::new(vec![CertificateDer::from(vec![0x30, 0x00])], signer);
+        let files = TlsFiles {
+            cert: "cert.pem".into(),
+            key: "key.pem".into(),
+        };
+        let err = check_valid_now(&pair, &files).unwrap_err();
+        assert_eq!(err.flag(), "--tls-cert");
+        assert!(err.to_string().contains("cannot be read"), "{err}");
     }
 }

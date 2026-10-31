@@ -3,9 +3,11 @@
 //! Every test makes its certificates fresh, tells them apart by serial number, and writes
 //! them under the target directory; nothing here is a real secret.
 
+use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use rcgen::{CertificateParams, KeyPair, SerialNumber, date_time_ymd};
 use rustix::process::{Pid, Signal, kill_process};
@@ -316,8 +318,8 @@ async fn leases_survive_a_reload() {
 
 /// Asserts that SIGHUP to the real program reloads: it serves the renewed certificate
 /// afterwards, the lease made before is still there, and the program is still running.
-/// The signal is handled asynchronously, so the test asks until the new certificate is
-/// served, within a bound.
+/// The signal is handled asynchronously, so the test waits for the program's log line
+/// that says it reloaded.
 #[tokio::test]
 async fn sighup_reloads_the_program() {
     let scratch = Scratch::new("tls_reload_sighup");
@@ -337,7 +339,7 @@ async fn sighup_reloads_the_program() {
         ]
         .map(Into::into),
     );
-    let (mut child, addr) = launch(&args, Stdio::null());
+    let (mut child, addr) = launch(&args, Stdio::piped());
     let body = lease_body().to_string().into_bytes();
     let made = tls_request(
         addr,
@@ -353,18 +355,15 @@ async fn sighup_reloads_the_program() {
     let second = current(2);
     files.put(&scratch, &second);
     kill_process(Pid::from_child(&child.0), Signal::HUP).unwrap();
-    let mut served = false;
-    for _ in 0..400 {
-        if presented(addr, &second.0).await.is_some() {
-            served = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    assert!(
-        served,
-        "the renewed certificate was never served after SIGHUP"
-    );
+    // The program logs the reload to its standard error: wait for that line.
+    let stderr = child.0.stderr.take().unwrap();
+    let (found, line) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut lines = BufReader::new(stderr).lines().map_while(Result::ok);
+        let _ = found.send(lines.any(|text| text.contains("tls reloaded")));
+    });
+    assert!(line.recv_timeout(Duration::from_secs(60)).unwrap());
+    assert!(presented(addr, &second.0).await.is_some());
     assert!(
         child.0.try_wait().unwrap().is_none(),
         "the program stopped on SIGHUP"
@@ -379,4 +378,8 @@ async fn sighup_reloads_the_program() {
     )
     .await;
     assert_eq!(listed.json()["leases"].as_array().unwrap().len(), 1);
+
+    // An orderly stop, so the program flushes what it recorded.
+    kill_process(Pid::from_child(&child.0), Signal::TERM).unwrap();
+    assert!(child.0.wait().unwrap().success());
 }
