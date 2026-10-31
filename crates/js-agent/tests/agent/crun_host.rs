@@ -187,6 +187,25 @@ fn only_a_crun_that_is_not_the_distributions_draws_a_warning() {
     );
 }
 
+/// A name that resolves to the distribution's file draws no warning: the AppArmor profile
+/// attaches to the resolved path. Where the machine has no `/usr/bin/crun` there is nothing to
+/// resolve to, and the case is skipped (the CI job that runs this has the distribution's crun).
+#[test]
+fn a_link_to_the_distributions_crun_draws_no_warning() {
+    if !Path::new("/usr/bin/crun").exists() {
+        return;
+    }
+    let fx = Fixture::new("crun-host-link");
+    let link = fx.path("crun-link");
+    symlink("/usr/bin/crun", &link).unwrap();
+    let report = check(&fx.request(&link), &fx.host, &fx.commands);
+    assert!(
+        !report.warnings.iter().any(|w| w.contains("distribution")),
+        "{:?}",
+        report.warnings
+    );
+}
+
 /// No crun at the path, a directory there, or a file that cannot be run: each names `crun`.
 #[test]
 fn a_missing_or_unrunnable_crun_is_named() {

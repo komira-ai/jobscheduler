@@ -22,6 +22,14 @@
 # Settings that differ from js-agent.service, and why:
 #   Delegate=yes          the agent makes a cgroup per run below its own and gives it to the job
 #                         user, which needs the cpu, memory and pids controllers delegated
+#   DelegateSubgroup=supervisor
+#                         systemd starts the agent in the leaf <unit>/supervisor, so the unit's own
+#                         cgroup holds no process (cgroup v2's no-internal-process rule) and can
+#                         enable cpu, memory and pids in its subtree_control for the sibling
+#                         <unit>/actions that holds every lease cgroup. Needs systemd 254 or newer
+#                         (Ubuntu 24.04 ships 255); the setup script refuses an older one. The name
+#                         is the one js-contain's delegate step already treats as the agent's leaf,
+#                         so it derives the unit cgroup, and <unit>/actions below it, from it
 #   Slice=                the node's job load is one slice, which an operator can cap
 #   StateDirectory=       with StateDirectoryMode=0711 makes /var/lib/js-agent searchable by
 #                         others: the job's ids walk down through it to the scratch root
@@ -53,6 +61,7 @@ ConditionPathIsMountPoint=/var/lib/js-agent/scratch
 Type=simple
 Slice=jobscheduler.slice
 Delegate=yes
+DelegateSubgroup=supervisor
 StateDirectory=js-agent
 StateDirectoryMode=0711
 ExecStartPre=+systemd-tmpfiles --create /etc/tmpfiles.d/js-agent-crun.conf
