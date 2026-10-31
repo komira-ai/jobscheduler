@@ -338,6 +338,10 @@ async fn what_a_crash_left_is_removed_and_the_image_can_unpack_again() {
     std::fs::create_dir_all(fx.images.join(format!("{stage}-blobs"))).expect("blobs");
     std::fs::create_dir_all(fx.images.join(hexn('a'))).expect("partial digest");
     std::fs::write(fx.images.join(hexn('a')).join("partial"), b"x").expect("partial");
+    // A crash ends the old backend, and with it its share of `.js-oci.lock`: the restart is
+    // alone in the directory, which is when a start sweeps (a start beside a live backend
+    // must not sweep its in-flight stages; `oci::tests` pins that).
+    drop(fx.oci);
     let source = Arc::new(Counting::default());
     let restarted = Oci::on(
         &config(&fx.dir, true),
