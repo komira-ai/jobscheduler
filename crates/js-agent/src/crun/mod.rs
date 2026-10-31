@@ -115,7 +115,7 @@ use js_agent_wire::LogTail;
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
-use js_contain::oci::{LeaseDirs, Oci, OciConfig, OciError, Owner};
+use js_contain::oci::{GcReport, LeaseDirs, Oci, OciConfig, OciError, Owner};
 use js_contain::running::Running;
 use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
@@ -501,6 +501,33 @@ impl CrunRuntime {
     /// answered `Ready` after it is gone. The next [`Runtime::prepare`] pulls it again.
     pub fn forget(&self, image: &str) {
         self.pulls.forget(image);
+    }
+
+    /// Removes the image digests the store holds that nothing names: not one of
+    /// `configured` (the digests the executor is set up with: its base and tool images,
+    /// `sha256:<hex>`) and not the image of a container this runtime holds, staged,
+    /// running or ended and not yet removed. The digests it removes are forgotten by the
+    /// prefetcher, so none is answered `Ready` after it is gone. For the start, after the
+    /// leases a dead agent left have been swept and before the disk to offer is read; see
+    /// [`Oci::collect_images`] for what is kept and why it is safe beside a pull.
+    ///
+    /// The kept image configs of removed digests stay (a pull of the digest writes it
+    /// again).
+    ///
+    /// # Errors
+    /// The image store cannot be read; a digest that could not be removed is in the
+    /// report.
+    pub fn collect_images(&self, configured: &[String]) -> Result<GcReport, String> {
+        let leased: Vec<String> = self
+            .runs
+            .values()
+            .map(|run| run.spec.image_digest.clone())
+            .collect();
+        let report = self.oci.collect_images(configured, &leased)?;
+        for digest in &report.removed {
+            self.pulls.forget_digest(digest);
+        }
+        Ok(report)
     }
 
     /// Waits until the container `id` has exited (one that is gone, never started or ended
