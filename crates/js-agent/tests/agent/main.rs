@@ -18,6 +18,8 @@ mod cli_runtime;
 mod container;
 mod credential;
 mod credential_e2e;
+#[cfg(target_os = "linux")]
+mod crun_host;
 mod drive;
 mod e2e;
 mod exclusive;
