@@ -2,9 +2,17 @@
 //!
 //! The declaration's `[hook.params]` table is opaque to the updater: it checks that every value
 //! is a scalar and writes the table to a file. The file is TOML, a flat table of scalars. The
-//! updater adds one reserved key, [`PROMOTION_CEILING_KEY`]. This hook needs two keys,
-//! `cordon_lease_secs` and `cordon_max_secs`, as whole numbers of seconds; any other scalar key
-//! is the declaration's own business and is ignored.
+//! updater adds reserved keys ([`PROMOTION_CEILING_KEY`], the staged and previous release, the
+//! versions and [`ARTIFACT_DIGEST_KEY`]). This hook needs four keys as whole numbers of
+//! seconds; any other scalar key is the declaration's own business and is ignored:
+//!
+//! - `cordon_lease_secs`: how long a cordon lives between renewals; at least
+//!   [`MIN_CORDON_LEASE_SECS`] (three polls) and not zero;
+//! - `cordon_max_secs`: the longest a cordon is held from its first placement; not zero and
+//!   not shorter than `drain_wait_secs`;
+//! - `drain_wait_secs`: the longest `prepare` waits for the host to hold no lease; not zero;
+//! - `defer_retry_secs`: what a deferred `prepare` asks the coordinator to wait before
+//!   ordering the host again. Zero is allowed and means "retry now".
 //!
 //! The reserved key contains a dot, so in the file it is a quoted key. Written bare, TOML makes
 //! it a table `updater`, which is not a scalar and is refused.
@@ -109,7 +117,8 @@ pub struct Params {
     pub cordon_max_secs: u64,
     /// The longest the hook waits for the host to hold no lease.
     pub drain_wait_secs: u64,
-    /// What a deferred `prepare` asks the coordinator to wait before ordering the host again.
+    /// What a deferred `prepare` asks the coordinator to wait before ordering the host again;
+    /// zero means "retry now".
     pub defer_retry_secs: u64,
     /// The digest of the verified artifact (`updater.artifact_digest`).
     pub artifact_digest: String,
@@ -151,6 +160,12 @@ impl Params {
         let drain_wait_secs = positive(&table, DRAIN_WAIT_KEY)?;
         let defer_retry_secs =
             seconds(&table, DEFER_RETRY_KEY)?.ok_or(ParamsError::Missing(DEFER_RETRY_KEY))?;
+        if cordon_lease_secs < MIN_CORDON_LEASE_SECS {
+            return Err(ParamsError::LeaseTooShort {
+                lease: cordon_lease_secs,
+                min: MIN_CORDON_LEASE_SECS,
+            });
+        }
         if cordon_max_secs < drain_wait_secs {
             return Err(ParamsError::CapBelowWait {
                 cap: cordon_max_secs,

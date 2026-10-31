@@ -159,6 +159,14 @@ pub fn validate(
     params: &Params,
 ) -> Result<(), Invalid> {
     let update = &record.update;
+    // The updater kills a step at its declared bound: `prepare` must outlast the wait.
+    let needed = params.drain_wait_secs.saturating_add(PREPARE_MARGIN_SECS);
+    if declaration.timeouts.prepare < needed {
+        return Err(Invalid::PrepareTimeout {
+            prepare: declaration.timeouts.prepare,
+            wait: params.drain_wait_secs,
+        });
+    }
     if record.schema != SCHEMA {
         return Err(Invalid::Schema {
             found: record.schema,

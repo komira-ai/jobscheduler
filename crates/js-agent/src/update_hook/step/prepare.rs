@@ -190,6 +190,12 @@ fn place(
     let now = env.ports.clock.now_ms();
     let ours_before = record.cordon.placed;
     let ask = ask_secs(&record.cordon, params, now);
+    if ask == 0 {
+        return Err(failure(
+            Reason::CordonCapReached,
+            "the cordon's cap leaves no time to ask a cordon for",
+        ));
+    }
     let mark = !ours_before && looked.cordon.is_none();
     if mark {
         record.cordon = Cordon {
