@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use js_agent::native::{self, NativeFlags, NativeSettings};
+use js_agent::native::{self, NativeFlags, NativeSettings, PfFlags};
 
 use super::fake_helper::FakeHelper;
 use crate::support::Scratch;
@@ -23,6 +23,7 @@ fn the_real_sandbox_exec_passes_the_self_test() {
         deny_read: &[],
         max_file_mib: None,
         max_processes: None,
+        pf: PfFlags::default(),
     };
     let settings =
         NativeSettings::from_flags(&flags, &[dir.path("").as_path()], Path::new("/srv/journal"))

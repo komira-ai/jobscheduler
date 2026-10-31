@@ -8,6 +8,7 @@ use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel, SANDBOX_EXEC};
 use js_mac_session::proto::Limits;
 
 use super::NativeConfig;
+use super::pf::{Enforcer, PfFlags, PfPolicy};
 use crate::bundle::Placer;
 
 /// Where the helper makes lease users' homes unless `--native-homes` says otherwise.
@@ -45,6 +46,8 @@ pub struct NativeFlags<'a> {
     pub max_file_mib: Option<u64>,
     /// `--native-max-processes`.
     pub max_processes: Option<u32>,
+    /// `--native-pfctl` and the `--native-pf-*` flags.
+    pub pf: PfFlags<'a>,
 }
 
 /// The checked native-job flags: the helper's socket and the runtime's configuration.
@@ -93,6 +96,8 @@ impl NativeSettings {
         let canonical = fs::canonicalize(homes);
         let homes =
             canonical.map_err(|why| format!("--native-homes: {}: {why}", homes.display()))?;
+        let network_on = flags.network == Some("on");
+        let egress = PfPolicy::from_flags(&flags.pf, network_on)?;
         let net = match flags.network.unwrap_or("off") {
             "off" => Net::Off,
             "loopback" => Net::Loopback,
@@ -158,6 +163,7 @@ impl NativeSettings {
                 journal: journal.to_path_buf(),
                 max_file_bytes,
                 max_processes,
+                egress: egress.map(|policy| Arc::new(policy) as Arc<dyn Enforcer>),
             },
             sandbox_exec: PathBuf::from(SANDBOX_EXEC),
             bundles: None,
@@ -195,6 +201,13 @@ impl NativeSettings {
     #[must_use]
     pub fn bundles(&self) -> Option<&Arc<Placer>> {
         self.bundles.as_ref()
+    }
+
+    /// The same settings with `enforcer` as the check of the pf anchor: a seam for tests.
+    #[must_use]
+    pub fn with_enforcer(mut self, enforcer: Arc<dyn Enforcer>) -> Self {
+        self.config.egress = Some(enforcer);
+        self
     }
 
     /// The same settings with `program` as the `sandbox-exec` the start-up self-test runs:

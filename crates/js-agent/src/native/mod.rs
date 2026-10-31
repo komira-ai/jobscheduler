@@ -54,6 +54,7 @@
 mod bundle;
 mod journal;
 mod logs;
+mod pf;
 mod settings;
 
 use std::collections::BTreeMap;
@@ -88,6 +89,7 @@ use crate::lifecycle::{
 };
 
 pub use journal::Journal;
+pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
 pub use settings::{
     DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS, NativeFlags,
     NativeSettings,
@@ -116,6 +118,9 @@ pub struct NativeConfig {
     /// The most processes the run's user may have: the run's `RLIMIT_NPROC`. A fork bomb
     /// stops at it, and the helper's kill (which forks as root) is not held by it.
     pub max_processes: u32,
+    /// The check that the pf anchor of the pool is in force. Required when `net` is
+    /// [`Net::On`]: the runtime does not open without it.
+    pub egress: Option<Arc<dyn Enforcer>>,
 }
 
 /// A run that started: its scratch directory (where its log files are) and what the thread
