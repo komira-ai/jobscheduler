@@ -67,7 +67,11 @@ jobs:
       - name: Stamp the version
         run: cargo xtask release stamp --to "$VERSION"
       - name: Build the programs
-        run: cargo build --locked --release -p js-agent -p js-mac-session -p js-mac-provision
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p js-agent --bin js-agent
+          cargo build --locked --release -p js-mac-session --bin js-mac-session
+          cargo build --locked --release -p js-mac-provision --bin js-mac-provision
       - name: The programs print the version
         run: |
           set -euo pipefail

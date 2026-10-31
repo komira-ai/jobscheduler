@@ -366,7 +366,10 @@ fn inspect(pkg: &Path) -> Result<Inspected, Error> {
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    let dir = std::env::temp_dir().join(format!("xtask-macpkg-{}", std::process::id()));
+    // One directory per call: tests of one process read packages side by side.
+    static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("xtask-macpkg-{}-{call}", std::process::id()));
     tool("pkgutil", &[Path::new("--expand-full"), pkg, &dir])?;
     let read = || -> Result<Inspected, Error> {
         // A product archive holds the component in a directory of its own.
