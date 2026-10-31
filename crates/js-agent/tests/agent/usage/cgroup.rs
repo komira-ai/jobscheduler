@@ -1,8 +1,10 @@
 //! The readers of cgroup file text.
 
+use std::path::Path;
+
 use js_agent::usage::{
-    cpu_limited, parse_active_file, parse_inactive_file, parse_single_u64, parse_stat_key,
-    parse_usage_usec, working_set,
+    Layout, cpu_limited, layout_of, parse_active_file, parse_inactive_file, parse_single_u64,
+    parse_stat_key, parse_usage_usec, working_set,
 };
 
 const CPU_STAT: &str = "usage_usec 123456\nuser_usec 100000\nsystem_usec 23456\nnr_periods 0\n";
@@ -87,4 +89,62 @@ fn cpu_limited_table() {
     assert_eq!(cpu_limited("max"), Some(false));
     assert_eq!(cpu_limited(""), None);
     assert_eq!(cpu_limited("abc 1"), None);
+}
+
+const ACTIONS: &str = "/sys/fs/cgroup/js.slice/actions";
+
+/// Asserts the layouts a lease's group may have below the actions group: the direct
+/// runner's `<lease>/ctr` is `Crun`; a container engine's group at any depth is `Engine`;
+/// and everything else is not a lease's group: another tree, a name that only starts like
+/// the actions group, the actions group itself, a parent that is not below it, a relative
+/// path, and a path with a `..` that would leave the tree after the prefix matched. It
+/// catches a prefix test on text (`actions-old` passes), a `..` that is not refused, and a
+/// `<lease>/ctr` that is read as foreign.
+#[test]
+fn layout_table() {
+    let cases: [(&str, Option<Layout>); 13] = [
+        (
+            "/sys/fs/cgroup/js.slice/actions/lease-1/ctr",
+            Some(Layout::Crun),
+        ),
+        (
+            "/sys/fs/cgroup/js.slice/actions/lease-1-2/ctr",
+            Some(Layout::Crun),
+        ),
+        (
+            "/sys/fs/cgroup/js.slice/actions/lease-1",
+            Some(Layout::Engine),
+        ),
+        (
+            "/sys/fs/cgroup/js.slice/actions/libpod-ab.scope",
+            Some(Layout::Engine),
+        ),
+        (
+            "/sys/fs/cgroup/js.slice/actions/libpod-ab.scope/container",
+            Some(Layout::Engine),
+        ),
+        (
+            "/sys/fs/cgroup/js.slice/actions/lease-1/ctr/sub",
+            Some(Layout::Engine),
+        ),
+        ("/sys/fs/cgroup/js.slice/actions", None),
+        ("/sys/fs/cgroup/js.slice/actions-old/lease-1/ctr", None),
+        ("/sys/fs/cgroup/js.slice/other/lease-1/ctr", None),
+        ("/sys/fs/cgroup/js.slice", None),
+        ("/sys/fs/cgroup/js.slice/actions/../other/ctr", None),
+        ("/sys/fs/cgroup/js.slice/actions/lease-1/../../x", None),
+        ("js.slice/actions/lease-1/ctr", None),
+    ];
+    for (dir, expected) in cases {
+        assert_eq!(
+            layout_of(Path::new(dir), Path::new(ACTIONS)),
+            expected,
+            "{dir}"
+        );
+    }
+    assert_eq!(
+        layout_of(Path::new(ACTIONS), Path::new("js.slice/actions")),
+        None,
+        "a relative actions group"
+    );
 }

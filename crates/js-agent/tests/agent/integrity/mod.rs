@@ -3,6 +3,7 @@
 //! reader over recorded `/proc` text. Nothing here reads the machine's own `/proc`.
 
 mod checks;
+mod crun;
 mod lifecycle;
 mod mapped;
 mod noise;

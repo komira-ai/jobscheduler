@@ -14,5 +14,8 @@ thiserror.workspace = true
 tracing.workspace = true
 ureq.workspace = true
 
+[dev-dependencies]
+js-testkit = { path = "../js-testkit" }
+
 [lints]
 workspace = true
