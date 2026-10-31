@@ -291,6 +291,7 @@ impl Agent {
     }
 
     /// [`Agent::spawn_on`] over any machine.
+    #[cfg(target_os = "linux")]
     pub fn spawn_machine(
         url: String,
         token: PathBuf,
@@ -364,6 +365,7 @@ impl Agent {
     }
 
     /// The handle to the agent's job worker, or `Err` when the agent ended without one.
+    #[cfg(target_os = "linux")]
     pub fn try_worker(&self) -> Result<Handle, ()> {
         self.worker.recv_timeout(HANG_GUARD).map_err(|_| ())
     }
