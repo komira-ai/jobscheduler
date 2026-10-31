@@ -192,6 +192,15 @@ fn lease_text(lease: Option<LeaseId>) -> Option<String> {
     lease.map(|lease| lease.to_string())
 }
 
+/// How a session is told in an answer: `awaiting`, `live` or `lost`.
+pub(crate) fn state_text(state: HostState) -> &'static str {
+    match state {
+        HostState::Awaiting => "awaiting",
+        HostState::Live => "live",
+        HostState::Lost => "lost",
+    }
+}
+
 impl HostEntry {
     fn listed(host: HostCapacity) -> Self {
         Self {
@@ -216,11 +225,7 @@ impl HostEntry {
     }
 
     fn registered(host: HostView) -> Self {
-        let state = match host.state {
-            HostState::Awaiting => "awaiting",
-            HostState::Live => "live",
-            HostState::Lost => "lost",
-        };
+        let state = state_text(host.state);
         Self {
             id: host.id.to_string(),
             source: "registered",
