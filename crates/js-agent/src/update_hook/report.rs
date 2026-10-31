@@ -130,8 +130,7 @@ impl Reason {
             Reason::StopFailed => "stop_failed",
             Reason::LinkFailed => "link_failed",
             Reason::StartFailed => "start_failed",
-            // Red stub: the token is not given yet.
-            Reason::CordonUnconfirmed => "not_implemented",
+            Reason::CordonUnconfirmed => "cordon_unconfirmed",
         }
     }
 }

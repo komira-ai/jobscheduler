@@ -182,6 +182,12 @@ pub fn validate(
             wait: params.drain_wait_secs,
         });
     }
+    // The wait for the stop ends before the declared bound by the start wait and a margin.
+    if declaration.timeouts.cutover <= START_WAIT_SECS + CUTOVER_MARGIN_SECS {
+        return Err(Invalid::CutoverTimeout {
+            cutover: declaration.timeouts.cutover,
+        });
+    }
     if record.schema != SCHEMA {
         return Err(Invalid::Schema {
             found: record.schema,

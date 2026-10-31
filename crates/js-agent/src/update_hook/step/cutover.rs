@@ -4,18 +4,21 @@
 //!
 //! In this order:
 //! 1. the lock, the record and the params agree; there must be a record, and the release link
-//!    the updater names must lie inside a declared directory (`bad_params` otherwise, nothing
-//!    done);
+//!    the declaration names (`release_link`) must lie inside a declared directory, never be one,
+//!    and be in neither release (`bad_params` otherwise, nothing done);
 //! 2. unless the stop is begun already: a taint or an `owed-*` record halts (76), and the host
 //!    must be cordoned and hold no lease. `prepare` can end with no cordon held (it was killed
 //!    between the placing and the confirming), so a cordon of ours that is gone is put back
 //!    within the cap, and a cap that is spent or a lease that came in defers (75, class
-//!    environment) with nothing stopped. A cordon that is not ours (an operator's, or a mark
-//!    that was never confirmed) is neither renewed nor lifted;
-//! 3. the record gets `stop_begun`, then the unit is stopped and waited for (renewing the
-//!    cordon if it is ours);
+//!    environment) with nothing stopped. A cordon that is not ours (an operator's) is neither
+//!    renewed nor lifted. A cordon in force under a mark that was never confirmed may be ours or
+//!    not, and nothing would renew it through the stop: that defers too, the mark left as it is;
+//! 3. the unit and the link are read, so that a read that fails leaves nothing begun; then the
+//!    record gets `stop_begun`, and the unit is stopped and waited for (renewing the cordon if
+//!    it is ours), for at most the declared bound less the start wait and a margin;
 //! 4. the record gets `link_moved`, then the link is moved;
-//! 5. the record gets `start_issued`, then the unit is started and waited for.
+//! 5. the record gets `start_issued`, then the unit is started and waited for. A start that
+//!    fails is the release's fault only if the unit is then `failed`.
 //!
 //! Each mark is written before its act, so a run that is killed leaves the marks of every act
 //! it may have made. A rerun does not rely on them: it asks the unit manager and the link, and
@@ -31,8 +34,8 @@ use std::time::Duration;
 
 use crate::update_hook::plain::is_plain;
 use crate::update_hook::{
-    Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params, Reason, Record, Report,
-    START_WAIT_SECS, UnitState,
+    CUTOVER_MARGIN_SECS, Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params,
+    Reason, Record, Report, START_WAIT_SECS, UnitState,
 };
 
 use super::prepare::{ask_secs, place, refuse_host, renew};
@@ -71,9 +74,16 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
     if !entered_begun {
         refuse_host(env)?;
         hold(env, held, record, params)?;
+    }
+    // What the machine shows is read before the stop is marked: a read that fails then leaves
+    // nothing begun.
+    let unit = record.update.unit.clone();
+    let state = show(env, &unit, Reason::StopFailed)?;
+    let on_staged = linked(env, &link, &record.update.staged)?;
+    if !entered_begun {
         mark(env, held, record, |record| record.stop_begun = true)?;
     }
-    stop(env, held, record, params, &link, entered_begun)?;
+    stop(env, held, record, params, (state, on_staged), entered_begun)?;
     move_link(env, held, record, &link)?;
     start(env, held, record, params)?;
     Ok(success())
@@ -100,22 +110,28 @@ fn deferred(params: &Params, reason: Reason, detail: impl Into<String>) -> Done 
     }
 }
 
-/// The release link the updater names, held to the rules the record's paths are held to: plain,
-/// and inside a declared directory other than the state directory (the directory itself is not
-/// a link inside it).
+/// The release link the declaration names, held to the rules the record's paths are held to:
+/// plain, inside a declared directory other than the state directory (never one of them
+/// itself: the swap writes the link's parent), and in neither release.
 fn release_link(env: &Env<'_>, params: &Params) -> Result<std::path::PathBuf, Done> {
     let declaration = env.declaration;
     let link = params.release_link.clone().ok_or_else(|| {
         failure(
             Reason::BadParams,
-            "the params table names no release link (updater.release_link)",
+            "the hook params name no release link (release_link)",
         )
     })?;
     let declared = declaration
         .write_paths
         .iter()
         .any(|dir| *dir != declaration.state_dir && link != *dir && link.starts_with(dir));
-    if is_plain(&link) && declared {
+    // A link inside a release would be replaced with the release, or hide in it.
+    let inside_a_release = link.starts_with(&params.staged_release)
+        || params
+            .previous_release
+            .as_ref()
+            .is_some_and(|previous| link.starts_with(previous));
+    if is_plain(&link) && declared && !inside_a_release {
         Ok(link)
     } else {
         Err(failure(
@@ -151,6 +167,15 @@ fn hold(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Res
     let looked = env.ports.lease.host().map_err(lease_failure)?;
     let now = env.ports.clock.now_ms();
     let host = if looked.cordon.is_some() {
+        if record.cordon.placed && record.cordon.provisional {
+            // Placed by a `prepare` that was killed before it confirmed the mark: it may be
+            // ours or an operator's. Nothing renews it, and it could lapse during the stop.
+            return Err(deferred(
+                params,
+                Reason::CordonUnconfirmed,
+                "a cordon is in force but the record never confirmed it as ours",
+            ));
+        }
         if ours(record, now) {
             renew(env, held, record, params)?;
         }
@@ -267,13 +292,10 @@ fn stop(
     held: &Held,
     record: &mut Record,
     params: &Params,
-    link: &Path,
+    (state, on_staged): (UnitState, bool),
     entered_begun: bool,
 ) -> Result<(), Done> {
     let unit = record.update.unit.clone();
-    let staged = record.update.staged.clone();
-    let state = show(env, &unit, Reason::StopFailed)?;
-    let on_staged = linked(env, link, &staged)?;
     match life(&state) {
         Life::Down => return Ok(()),
         Life::Stopping => {}
@@ -292,7 +314,7 @@ fn stop(
         .declaration
         .timeouts
         .cutover
-        .saturating_sub(START_WAIT_SECS)
+        .saturating_sub(START_WAIT_SECS + CUTOVER_MARGIN_SECS)
         .saturating_mul(1000);
     let began = env.ports.clock.now_ms();
     loop {
@@ -336,6 +358,15 @@ fn move_link(env: &Env<'_>, held: &Held, record: &mut Record, link: &Path) -> Re
     })
 }
 
+/// A start that failed: the release's fault only if the unit ran and failed; a unit that is
+/// anything else says nothing of the binary.
+fn start_failure(env: &Env<'_>, unit: &str, detail: String) -> Done {
+    match env.ports.units.show(unit) {
+        Ok(state) if state.active == "failed" => failure(Reason::StartFailed, detail),
+        _ => environment(Reason::StartFailed, detail),
+    }
+}
+
 /// Starts the unit and waits for it to be active.
 fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Result<(), Done> {
     let unit = record.update.unit.clone();
@@ -348,7 +379,7 @@ fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Re
         env.ports
             .units
             .start(&unit)
-            .map_err(|why| failure(Reason::StartFailed, format!("cannot start {unit}: {why}")))?;
+            .map_err(|why| start_failure(env, &unit, format!("cannot start {unit}: {why}")))?;
     }
     let bound_ms = START_WAIT_SECS * 1000;
     let began = env.ports.clock.now_ms();
@@ -357,16 +388,18 @@ fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Re
         match life(&state) {
             Life::Up => return Ok(()),
             Life::Down | Life::Stopping => {
-                return Err(failure(
-                    Reason::StartFailed,
+                return Err(start_failure(
+                    env,
+                    &unit,
                     format!("{unit} is {} after it was started", state.active),
                 ));
             }
             Life::Starting => {}
         }
         if env.ports.clock.now_ms().saturating_sub(began) >= bound_ms {
-            return Err(failure(
-                Reason::StartFailed,
+            return Err(start_failure(
+                env,
+                &unit,
                 format!("{unit} is still {} after {START_WAIT_SECS} s", state.active),
             ));
         }

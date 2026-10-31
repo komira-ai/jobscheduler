@@ -54,9 +54,11 @@ pub const STAGED_RELEASE_KEY: &str = "updater.staged_release";
 /// The reserved key: the release directory that runs now. Absent on a first install.
 pub const PREVIOUS_RELEASE_KEY: &str = "updater.previous_release";
 
-/// The reserved key: the release link, the symbolic link to the release directory that runs.
-/// `cutover` moves it from the previous release to the staged one.
-pub const RELEASE_LINK_KEY: &str = "updater.release_link";
+/// The key of the release link, the symbolic link to the release directory that runs, in the
+/// declaration's `[hook.params]` (not a reserved key): an absolute path inside a declared write
+/// path, which the updater's loader checks. `cutover` moves it from the previous release to the
+/// staged one.
+pub const RELEASE_LINK_KEY: &str = "release_link";
 
 /// The reserved key: the version being installed.
 pub const TARGET_VERSION_KEY: &str = "updater.target_version";
@@ -133,7 +135,7 @@ pub struct Params {
     /// The release directory that runs now (`updater.previous_release`); `None` on a first
     /// install.
     pub previous_release: Option<PathBuf>,
-    /// The release link (`updater.release_link`), when the updater named it.
+    /// The release link (`release_link`), when the declaration names it.
     pub release_link: Option<PathBuf>,
     /// The version being installed (`updater.target_version`).
     pub target_version: String,
