@@ -135,6 +135,7 @@ impl World {
             leases: 0,
             lease: None,
             releasing: false,
+            mark: None,
             cordon: None,
             taint: None,
             agent_version: Some(agent_version.to_owned()),
@@ -265,6 +266,7 @@ impl World {
                 leases: 0,
                 lease: None,
                 releasing: false,
+                mark: None,
                 cordon: None,
                 taint: None,
                 agent_version: None,
@@ -397,7 +399,10 @@ impl Lease for World {
         let expires_at_ms = host
             .cordon
             .map_or(asked, |cordon| cordon.expires_at_ms.max(asked));
-        host.cordon = Some(CordonView { expires_at_ms });
+        host.cordon = Some(CordonView {
+            expires_at_ms,
+            expires_in_ms: None,
+        });
         self.save(&host)?;
         Ok(Cordoned {
             already_cordoned,

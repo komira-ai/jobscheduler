@@ -224,6 +224,7 @@ mod cli;
 pub mod cli_runtime;
 mod container;
 mod contract;
+pub mod cordon;
 mod credential;
 #[cfg(target_os = "linux")]
 pub mod crun;
@@ -239,6 +240,7 @@ pub mod integrity;
 mod jobs;
 pub mod lifecycle;
 pub mod native;
+pub mod own_host;
 pub mod quota;
 mod readiness;
 mod run;
