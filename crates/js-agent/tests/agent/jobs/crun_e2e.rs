@@ -42,6 +42,23 @@ use crate::support::{Host, code, linux_host};
 /// its helper directories in the node's store, which two openings at once would fight over.
 static NODE_IN_USE: Mutex<()> = Mutex::new(());
 
+/// The pool of an agent that bounds its runs' disk: it names the quota capability, so a host
+/// joins it only by reporting one, and books 4 GiB for each host.
+const POOL_QUOTA_TOML: &str = r#"
+name = "macs"
+class = "mac"
+max_machines = 4
+
+[shape]
+cpu_millis = 4000
+memory_bytes = 4294967296
+disk_bytes = 4294967296
+
+[capabilities]
+os = "linux"
+scratch-quota = "project"
+"#;
+
 /// The first host uid and gid of the subordinate ranges of the node's job user.
 const SUB: u32 = 100_000;
 
@@ -515,11 +532,16 @@ impl Rig {
     /// Starts the server and the agent, waits until the agent has said hello, and takes a
     /// lease on its host.
     fn new(name: &str, extra: &[&str]) -> Self {
+        Self::on_pool(name, extra, POOL_RUNS_TOML)
+    }
+
+    /// [`Rig::new`] over the pool `pool` describes.
+    fn on_pool(name: &str, extra: &[&str], pool: &'static str) -> Self {
         let node = node();
         for signal in ["ready", "go", "calls"] {
             let _ = fs::remove_file(node.dir.path().join(signal));
         }
-        let server = Server::start_pool(name, &[], POOL_RUNS_TOML);
+        let server = Server::start_pool(name, &[], pool);
         let address = Arc::new(Mutex::new(server.url()));
         let flags = crun_flags("h1", extra);
         let machine = CrunMachine::new();
@@ -744,24 +766,34 @@ fn the_stop_grace_reaches_the_crun_runtime() {
 #[test]
 fn a_store_on_another_file_system_than_the_scratch_root_is_accepted() {
     let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
-    let server = Server::start_pool("jobs_crun_fs", &[], POOL_RUNS_TOML);
-    let address = Arc::new(Mutex::new(server.url()));
     let flags = crun_flags("h1", &[]);
     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
-    for apart in [host_with_scratch_mounted, host_with_store_mounted] {
+    for (name, apart) in [
+        (
+            "jobs_crun_fs_scratch",
+            host_with_scratch_mounted as fn() -> Host,
+        ),
+        (
+            "jobs_crun_fs_store",
+            host_with_store_mounted as fn() -> Host,
+        ),
+    ] {
+        let server = Server::start_pool(name, &[], POOL_RUNS_TOML);
+        let address = Arc::new(Mutex::new(server.url()));
         let agent = Agent::spawn_machine(
             server.url(),
             server.join_file(),
             &flags,
             apart,
-            Redirect(address.clone()),
+            Redirect(address),
             CrunMachine::new(),
         );
         if agent.try_worker().is_err() {
             panic!("the agent refused the layout: {}", agent.finish().err);
         }
-        assert_eq!(agent.next_wait(), Duration::from_secs(5), "the hello");
+        let wait = agent.next_wait();
         let ran = agent.stop();
+        assert_eq!(wait, Duration::from_secs(5), "the hello: {}", ran.err);
         assert_eq!(ran.status(), code(0), "{}", ran.err);
     }
 }
@@ -775,7 +807,7 @@ fn a_store_on_another_file_system_than_the_scratch_root_is_accepted() {
 fn a_scratch_quota_bounds_a_crun_runs_lease_directory_with_the_run() {
     let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
     let node = node();
-    let rig = Rig::new("jobs_crun_quota", &["--scratch-quota"]);
+    let rig = Rig::on_pool("jobs_crun_quota", &["--scratch-quota"], POOL_QUOTA_TOML);
     let run = rig.queued();
     rig.until_up(&run);
     let applied: Vec<(String, ProjectId, u64, u64)> = rig
