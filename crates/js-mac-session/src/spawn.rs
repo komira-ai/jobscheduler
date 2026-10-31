@@ -219,10 +219,8 @@ impl ChildOs for Os {
             rlim_max: value,
         };
         // SAFETY: `limit` is a readable rlimit for the call to copy.
-        match unsafe { libc::setrlimit(which, &raw const limit) } {
-            0 => Ok(()),
-            _ => Err(io::Error::last_os_error()),
-        }
+        let done = unsafe { libc::setrlimit(which, &raw const limit) } == 0;
+        done.then_some(()).ok_or_else(io::Error::last_os_error)
     }
 }
 
@@ -597,6 +595,37 @@ mod tests {
         let (status, len) = run(2);
         assert!(status.success(), "a write under the limit failed: {status}");
         assert_eq!(len, 2048);
+    }
+
+    /// The operating system's `setrlimit`, run in the test process (the child's own run
+    /// leaves no coverage record), with the value the process already has as its hard limit,
+    /// so that nothing in the test process changes but the soft limit rising to it: the
+    /// limit is set soft and hard to the value given, for each of the two resources. It
+    /// catches a limit set only soft (which the program could raise) or not set at all.
+    #[test]
+    fn the_operating_system_sets_both_limits_to_the_value_given() {
+        let read = |which| {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: `limit` is a writable rlimit for the call to fill.
+            assert_eq!(unsafe { libc::getrlimit(which, &raw mut limit) }, 0);
+            limit
+        };
+        for (resource, which) in [
+            (Resource::FileSize, libc::RLIMIT_FSIZE),
+            (Resource::Processes, libc::RLIMIT_NPROC),
+        ] {
+            let hard = read(which).rlim_max;
+            Os.set_limit(resource, hard).unwrap();
+            let after = read(which);
+            assert_eq!(
+                (after.rlim_cur, after.rlim_max),
+                (hard, hard),
+                "{resource:?}"
+            );
+        }
     }
 
     /// The child's steps run in the test process (the child's own run leaves no coverage
