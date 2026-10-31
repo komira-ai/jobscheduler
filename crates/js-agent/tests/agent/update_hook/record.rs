@@ -525,6 +525,7 @@ fn a_record_is_saved_and_loaded_and_the_next_save_replaces_it() {
     let mut first = record("1.4.0");
     first.cordon = Cordon {
         placed: true,
+        provisional: false,
         first_ms: 1_000,
         expires_ms: 301_000,
     };

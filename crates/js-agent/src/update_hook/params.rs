@@ -21,6 +21,16 @@ pub const CORDON_LEASE_KEY: &str = "cordon_lease_secs";
 /// The key of the longest a cordon may be held from its first placement.
 pub const CORDON_MAX_KEY: &str = "cordon_max_secs";
 
+/// The reserved key: the digest of the verified artifact, `sha256:` and 64 lowercase hex
+/// digits. The updater sets it for every step.
+pub const ARTIFACT_DIGEST_KEY: &str = "updater.artifact_digest";
+
+/// The key of the longest `prepare` and `rollback` wait for the host to hold no lease.
+pub const DRAIN_WAIT_KEY: &str = "drain_wait_secs";
+
+/// The key of the time a deferred `prepare` asks the coordinator to wait.
+pub const DEFER_RETRY_KEY: &str = "defer_retry_secs";
+
 /// The reserved key: the verified staged release directory, an absolute path.
 pub const STAGED_RELEASE_KEY: &str = "updater.staged_release";
 
@@ -54,6 +64,20 @@ pub enum ParamsError {
     /// A key that names a directory is not an absolute path.
     #[error("params key {0:?} must be an absolute path")]
     Relative(String),
+    /// The artifact digest is not `sha256:` and 64 lowercase hex digits.
+    #[error("params key {0:?} must be sha256: and 64 lowercase hex digits")]
+    NotDigest(String),
+    /// A key that must be positive is zero.
+    #[error("params key {0:?} must not be zero")]
+    Zero(String),
+    /// The cordon's cap is shorter than the drain wait it has to cover.
+    #[error("cordon_max_secs {cap} is shorter than drain_wait_secs {wait}")]
+    CapBelowWait {
+        /// `cordon_max_secs`.
+        cap: u64,
+        /// `drain_wait_secs`.
+        wait: u64,
+    },
     /// A key this hook reads is not a whole, non-negative number of seconds.
     #[error("params key {0:?} must be a whole number of seconds, not negative")]
     NotSeconds(String),
@@ -66,6 +90,12 @@ pub struct Params {
     pub cordon_lease_secs: u64,
     /// The most a cordon may be held, counted from its first placement.
     pub cordon_max_secs: u64,
+    /// The longest the hook waits for the host to hold no lease.
+    pub drain_wait_secs: u64,
+    /// What a deferred `prepare` asks the coordinator to wait before ordering the host again.
+    pub defer_retry_secs: u64,
+    /// The digest of the verified artifact (`updater.artifact_digest`).
+    pub artifact_digest: String,
     /// The updater's ceiling on a pending promotion, when it set one.
     pub promotion_ceiling_secs: Option<u64>,
     /// The verified staged release directory (`updater.staged_release`).
@@ -104,6 +134,10 @@ impl Params {
                 .ok_or(ParamsError::Missing(CORDON_LEASE_KEY))?,
             cordon_max_secs: seconds(&table, CORDON_MAX_KEY)?
                 .ok_or(ParamsError::Missing(CORDON_MAX_KEY))?,
+            // TODO(red): the three new keys are not read yet.
+            drain_wait_secs: 3600,
+            defer_retry_secs: 300,
+            artifact_digest: String::new(),
             promotion_ceiling_secs: seconds(&table, PROMOTION_CEILING_KEY)?,
             staged_release: path(&table, STAGED_RELEASE_KEY)?
                 .ok_or(ParamsError::Missing(STAGED_RELEASE_KEY))?,

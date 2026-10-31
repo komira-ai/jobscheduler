@@ -77,7 +77,8 @@ fn a_cordon_the_operator_places_while_we_do_is_not_ours() {
 
 #[test]
 fn a_renewal_never_runs_past_the_cap_and_stops_when_the_cap_is_reached() {
-    let rig = Rig::with_cordon("hook-prepare-cap", 300, 25);
+    let mut rig = Rig::with_cordon("hook-prepare-cap", 300, 25);
+    rig.params.drain_wait_secs = 3600;
     rig.set_leases(1);
     let spy = Spy::new(&rig);
     spy.on_pause(|spy, ticks| {
@@ -97,6 +98,7 @@ fn a_renewal_never_runs_past_the_cap_and_stops_when_the_cap_is_reached() {
         record.cordon,
         Cordon {
             placed: true,
+            provisional: false,
             first_ms: START,
             expires_ms: START + 25_000
         }
@@ -110,6 +112,7 @@ fn a_rerun_places_a_cordon_that_lapsed_again_and_keeps_the_first_placement() {
     let mut record = rig.fresh_record();
     record.cordon = Cordon {
         placed: true,
+        provisional: false,
         first_ms: START - 60_000,
         expires_ms: START - 1_000,
     };
@@ -121,6 +124,7 @@ fn a_rerun_places_a_cordon_that_lapsed_again_and_keeps_the_first_placement() {
         end.cordon,
         Cordon {
             placed: true,
+            provisional: false,
             first_ms: START - 60_000,
             expires_ms: START + LEASE_SECS * 1000
         }
@@ -135,6 +139,7 @@ fn a_rerun_that_finds_its_own_cordon_still_in_force_keeps_it_ours() {
     let mut record = rig.fresh_record();
     record.cordon = Cordon {
         placed: true,
+        provisional: false,
         first_ms: START,
         expires_ms: START + LEASE_SECS * 1000,
     };
@@ -150,6 +155,7 @@ fn a_recorded_expiry_never_goes_down() {
     let mut record = rig.fresh_record();
     record.cordon = Cordon {
         placed: true,
+        provisional: false,
         first_ms: START,
         expires_ms: START + 500_000,
     };
@@ -224,7 +230,8 @@ fn a_lease_server_that_fails_is_an_environment_failure_and_a_server_that_forgot_
     lease_unreachable(&spy.prepare(&rig));
     assert_eq!(rig.cordon_expiry(), None);
 
-    let rig = Rig::with_cordon("hook-prepare-cordon-refused", 0, 100);
+    let mut rig = Rig::with_cordon("hook-prepare-cordon-refused", 300, 100);
+    rig.params.cordon_lease_secs = 0;
     let spy = Spy::new(&rig);
     let done = spy.prepare(&rig);
     lease_unreachable(&done);
@@ -302,6 +309,7 @@ fn a_record_that_is_not_this_updates_or_breaks_a_rule_is_refused_as_state_invali
             let mut record = rig.fresh_record();
             record.cordon = Cordon {
                 placed: true,
+                provisional: false,
                 first_ms: START,
                 expires_ms: START + 20_000_000,
             };
@@ -460,4 +468,101 @@ fn a_deferred_prepare_killed_near_either_end_and_run_again_ends_deferred_with_no
     resumed_ends_as_uninterrupted("hook-prepare-kill-deferred", None, false, |n| {
         (1..=6).chain(n - 4..=n).collect()
     });
+}
+
+/// Marks the record as one `verify` passed, as `cleanup` finds it.
+fn verified(rig: &Rig) {
+    let mut record = rig.record().unwrap();
+    record.stop_begun = true;
+    record.link_moved = true;
+    record.start_issued = true;
+    record.verify_ok = true;
+    rig.put_record(&record);
+}
+
+#[test]
+fn a_prepare_killed_before_its_cordon_reached_the_server_never_adopts_the_operators() {
+    // Points: 1 the first record, 2 before the call, 3 before the server writes.
+    for k in 1..=3 {
+        for lease_runs in [false, true] {
+            let rig = Rig::new(&format!("hook-prepare-adopt-{k}-{lease_runs}"));
+            rig.kill.arm(k);
+            assert!(killable(|| Spy::new(&rig).prepare(&rig)).is_none());
+            rig.kill.disarm();
+            if k >= 2 {
+                let marked = rig.record().unwrap().cordon;
+                assert!(marked.placed && marked.provisional, "{marked:?}");
+            }
+            // Someone else cordons the host, then the step is run again.
+            let operator = rig.operator_cordons();
+            rig.kill.disarm();
+            rig.set_leases(u64::from(lease_runs));
+            let spy = Spy::new(&rig);
+            let done = spy.prepare(&rig);
+            assert_eq!(
+                done.outcome,
+                if lease_runs {
+                    Outcome::Deferred
+                } else {
+                    Outcome::Success
+                },
+                "{k}"
+            );
+            assert_eq!(rig.record().unwrap().cordon, Cordon::default(), "{k}");
+            assert!(!spy.log().contains(&"uncordon".to_owned()), "{k}");
+            if !lease_runs {
+                assert_eq!(rig.cordon_expiry(), Some(operator), "not shortened, {k}");
+                // And what `verify` passes, `cleanup` leaves alone.
+                verified(&rig);
+                let cleanup = Spy::new(&rig);
+                assert_eq!(cleanup.cleanup(&rig).outcome, Outcome::Success);
+                assert!(!cleanup.log().contains(&"uncordon".to_owned()), "{k}");
+                assert_eq!(rig.cordon_expiry(), Some(operator), "{k}");
+                assert_eq!(rig.record_bytes(), None);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_cordon_that_lapsed_and_was_replaced_by_an_operators_is_not_adopted_on_a_rerun() {
+    let rig = Rig::new("hook-prepare-adopt-lapsed");
+    let mut record = rig.fresh_record();
+    record.cordon = Cordon {
+        placed: true,
+        provisional: false,
+        first_ms: START - 60_000,
+        expires_ms: START - 1_000,
+    };
+    rig.put_record(&record);
+    let operator = rig.operator_cordons();
+    let spy = Spy::new(&rig);
+    assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
+    assert_eq!(rig.record().unwrap().cordon, Cordon::default());
+    assert_eq!(rig.cordon_expiry(), Some(operator));
+    verified(&rig);
+    let cleanup = Spy::new(&rig);
+    assert_eq!(cleanup.cleanup(&rig).outcome, Outcome::Success);
+    assert!(!cleanup.log().contains(&"uncordon".to_owned()));
+    assert_eq!(rig.cordon_expiry(), Some(operator));
+}
+
+#[test]
+fn a_cordon_a_killed_run_placed_and_never_confirmed_is_left_to_lapse_not_lifted() {
+    let rig = Rig::new("hook-prepare-confirmed");
+    rig.kill.arm(4);
+    // Points 1-3 as above; 4 is the record that confirms the cordon.
+    assert!(killable(|| Spy::new(&rig).prepare(&rig)).is_none());
+    rig.kill.disarm();
+    assert!(rig.cordon_expiry().is_some(), "the server has our cordon");
+    assert!(
+        rig.record().unwrap().cordon.provisional,
+        "the record does not know yet"
+    );
+    // The rerun is told the host is cordoned and cannot tell whose it is: it is not lifted by
+    // this update, and it lapses within one lease.
+    let spy = Spy::new(&rig);
+    assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
+    let cordon = rig.record().unwrap().cordon;
+    assert!(!cordon.placed && !cordon.provisional, "{cordon:?}");
 }

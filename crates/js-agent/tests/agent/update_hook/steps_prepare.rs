@@ -5,11 +5,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use js_agent::update_hook::{Cordon, Done, Outcome, Reason, SCHEMA, Units};
+use js_agent::update_hook::{Class, Cordon, Done, Outcome, Reason, SCHEMA, Units};
 use serde_json::Value;
 
 use super::step_rig::{
-    DRAIN_WAIT_SECS, LEASE_SECS, POLL_SECS, RETRY_AFTER_SECS, Rig, START, Spy, UNIT, digest, line,
+    DRAIN_WAIT_SECS, MAX_SECS, POLL_SECS, RETRY_AFTER_SECS, Rig, START, Spy, UNIT, digest, line,
 };
 
 fn reason(done: &Done) -> Value {
@@ -31,7 +31,8 @@ fn nothing_changed(rig: &Rig, spy: &Spy<'_>) {
 
 #[test]
 fn a_clean_prepare_records_then_cordons_waits_for_the_drain_and_succeeds() {
-    let rig = Rig::new("hook-prepare-clean");
+    // A lease of 30 s, renewed when less than half of it is left: after the 20 s and 40 s polls.
+    let rig = Rig::with_cordon("hook-prepare-clean", 30, MAX_SECS);
     rig.set_leases(1);
     let spy = Spy::new(&rig);
     let seen = Rc::new(RefCell::new(Vec::new()));
@@ -40,7 +41,7 @@ fn a_clean_prepare_records_then_cordons_waits_for_the_drain_and_succeeds() {
     spy.on_pause(move |spy, ticks| {
         sink.borrow_mut()
             .push((ticks, rig_ref.record(), rig_ref.cordon_expiry()));
-        if ticks == 3 {
+        if ticks == 5 {
             spy.world.alter_host(|host| {
                 host.leases = 0;
                 host.lease = None;
@@ -53,35 +54,36 @@ fn a_clean_prepare_records_then_cordons_waits_for_the_drain_and_succeeds() {
     assert_eq!(done.outcome, Outcome::Success);
     assert_eq!(done.report.reason, None);
     assert!(done.report.reversible);
-    assert_eq!(rig.world.ticks(), 3, "one pause per poll that saw a lease");
+    assert_eq!(rig.world.ticks(), 5, "one pause per poll that saw a lease");
     // The version check was made through the runner, on the staged agent.
     let staged = rig.params.staged_release.join("js-agent");
     assert_eq!(spy.log()[0], format!("run({} --version)", staged.display()));
-    // The record was durable before the first pause, with the cordon placed.
+    // The record was durable before the first pause, with the cordon placed and confirmed.
     let seen = seen.borrow();
-    let (ticks, before_wait, expiry) = &seen[0];
+    let (ticks, before_wait, _) = &seen[0];
     assert_eq!(*ticks, 1);
     let record = before_wait.as_ref().expect("the record exists at the wait");
     assert_eq!(
         record.cordon,
         Cordon {
             placed: true,
+            provisional: false,
             first_ms: START,
-            expires_ms: START + LEASE_SECS * 1000
+            expires_ms: START + 30_000
         }
     );
-    assert_eq!(*expiry, Some(START + LEASE_SECS * 1000));
-    // Each poll renews: the cordon moves on with the clock, and the record follows.
+    // The cordon moves on only when less than half the lease is left.
     let expiries: Vec<_> = seen.iter().map(|(_, _, expiry)| expiry.unwrap()).collect();
-    let step = POLL_SECS * 1000;
-    let first = START + LEASE_SECS * 1000;
-    assert_eq!(expiries, [first, first + step, first + 2 * step]);
+    assert_eq!(
+        expiries,
+        [30_000, 30_000, 50_000, 50_000, 70_000].map(|ms| START + ms)
+    );
     let end = rig.record().unwrap();
     assert!(end.cordon.placed);
     assert_eq!(end.cordon.first_ms, START);
-    assert_eq!(end.cordon.expires_ms, first + 3 * step);
+    assert_eq!(end.cordon.expires_ms, START + 70_000);
     assert_eq!(rig.cordon_expiry(), Some(end.cordon.expires_ms));
-    // What the record says of the update.
+    // What the record says of the update: the digest is the updater's.
     assert_eq!(end.schema, SCHEMA);
     assert_eq!(end.update, rig.fresh_record().update);
     assert_eq!(end.update.artifact_digest, digest());
@@ -97,7 +99,7 @@ fn a_clean_prepare_records_then_cordons_waits_for_the_drain_and_succeeds() {
     );
     // The cordon calls, and nothing else done to the machine.
     let acts: Vec<_> = spy.log().into_iter().skip(1).collect();
-    assert_eq!(acts, vec![format!("cordon({LEASE_SECS})"); 4]);
+    assert_eq!(acts, vec!["cordon(30)"; 3]);
     assert!(rig.host().cordon.is_some(), "left for cutover");
 }
 
@@ -210,16 +212,6 @@ fn an_agent_that_does_not_run_or_a_release_without_one_is_refused_and_nothing_ch
         (Outcome::Failure, Some(Reason::BadArtifact))
     );
     nothing_changed(&rig, &spy);
-
-    let rig = Rig::new("hook-prepare-no-binary");
-    std::fs::remove_file(rig.params.staged_release.join("js-agent")).unwrap();
-    let spy = Spy::new(&rig);
-    let done = spy.prepare(&rig);
-    assert_eq!(
-        (done.outcome, done.report.reason),
-        (Outcome::Failure, Some(Reason::BadArtifact))
-    );
-    nothing_changed(&rig, &spy);
 }
 
 #[test]
@@ -257,6 +249,7 @@ fn a_bound_that_passes_with_a_lease_defers_lifts_the_cordon_and_stops_nothing() 
     assert_eq!(done.report.reason, Some(Reason::DrainBound));
     assert_eq!(done.report.retry_after_secs, Some(RETRY_AFTER_SECS));
     assert!(done.report.reversible);
+    assert_eq!(done.report.class, Class::Environment);
     assert!(done.report.detail.unwrap().contains("lease"));
     assert_eq!(rig.world.ticks() as u64, DRAIN_WAIT_SECS / POLL_SECS);
     // The cordon we placed is lifted, and the record no longer says there is one to lift.
@@ -276,4 +269,49 @@ fn a_bound_that_passes_with_a_lease_defers_lifts_the_cordon_and_stops_nothing() 
         (unit.active.as_str(), unit.sub.as_str()),
         ("active", "running")
     );
+}
+
+#[test]
+fn the_drain_wait_and_the_retry_are_the_params_not_constants() {
+    let mut rig = Rig::new("hook-prepare-short-wait");
+    rig.params.drain_wait_secs = 120;
+    rig.params.defer_retry_secs = 45;
+    rig.set_leases(1);
+    let spy = Spy::new(&rig);
+    let done = spy.prepare(&rig);
+    assert_eq!(done.outcome, Outcome::Deferred);
+    assert_eq!(done.report.retry_after_secs, Some(45));
+    assert_eq!(rig.world.ticks() as u64, 120 / POLL_SECS);
+    assert_eq!(rig.cordon_expiry(), None);
+    assert!(done.report.detail.unwrap().contains("120 s"));
+}
+
+#[test]
+fn a_rerun_with_another_artifact_digest_is_refused_and_changes_nothing() {
+    let mut rig = Rig::new("hook-prepare-other-digest");
+    rig.put_record(&rig.fresh_record());
+    rig.params.artifact_digest = format!("sha256:{}", "f".repeat(64));
+    let before = rig.record_bytes();
+    let spy = Spy::new(&rig);
+    let done = spy.prepare(&rig);
+    assert_eq!(done.outcome, Outcome::Failure);
+    assert_eq!(done.report.reason, Some(Reason::StateInvalid));
+    assert_eq!(rig.record_bytes(), before);
+    assert_eq!(spy.log(), Vec::<String>::new());
+}
+
+#[test]
+fn a_fresh_record_comes_after_the_taint_check_and_never_hashes_the_release() {
+    // A taint halts before the record is built, whatever the order would break.
+    let mut rig = Rig::new("hook-prepare-taint-before-record");
+    rig.taint();
+    rig.params.previous_release = Some(rig.params.staged_release.clone());
+    let spy = Spy::new(&rig);
+    assert_eq!(spy.prepare(&rig).outcome, Outcome::Halt);
+    // The record's digest is the updater's, though the staged tree has no agent file at all.
+    let rig = Rig::new("hook-prepare-no-rehash");
+    std::fs::remove_file(rig.params.staged_release.join("js-agent")).unwrap();
+    let spy = Spy::new(&rig);
+    assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
+    assert_eq!(rig.record().unwrap().update.artifact_digest, digest());
 }

@@ -145,11 +145,16 @@ impl Rig {
         let params = Params::parse(&format!(
             concat!(
                 "cordon_lease_secs = {lease}\ncordon_max_secs = {max}\n",
+                "drain_wait_secs = {wait}\ndefer_retry_secs = {retry}\n",
+                "\"updater.artifact_digest\" = \"{digest}\"\n",
                 "\"updater.staged_release\" = \"{staged}\"\n",
                 "\"updater.target_version\" = \"1.4.0\"\n{previous}"
             ),
             lease = lease_secs,
             max = max_secs,
+            wait = DRAIN_WAIT_SECS.min(max_secs),
+            retry = RETRY_AFTER_SECS,
+            digest = digest(),
             staged = staged.display(),
             previous = previous,
         ))
@@ -207,7 +212,7 @@ impl Rig {
             staged: self.params.staged_release.clone(),
             previous_target: self.params.previous_release.clone(),
             unit: UNIT.to_owned(),
-            artifact_digest: digest(),
+            artifact_digest: self.params.artifact_digest.clone(),
         })
     }
 

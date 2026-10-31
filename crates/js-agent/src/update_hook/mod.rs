@@ -33,8 +33,9 @@ use std::process::ExitCode;
 pub use args::{ArgsError, Invocation, Step};
 pub use declaration::{DECLARATION_PATH, Declaration, DeclarationError, Timeouts};
 pub use params::{
-    CORDON_LEASE_KEY, CORDON_MAX_KEY, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY,
-    PROMOTION_CEILING_KEY, Params, ParamsError, STAGED_RELEASE_KEY, TARGET_VERSION_KEY,
+    ARTIFACT_DIGEST_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY, DEFER_RETRY_KEY, DRAIN_WAIT_KEY,
+    PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, Params, ParamsError,
+    STAGED_RELEASE_KEY, TARGET_VERSION_KEY,
 };
 pub use ports::{
     Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,

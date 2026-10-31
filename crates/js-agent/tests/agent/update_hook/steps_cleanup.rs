@@ -1,7 +1,9 @@
 //! `cleanup` (host-updates design, 4.2): it finishes an update that `verify` passed, lifts the
 //! cordon only if this update placed it, and deletes the record. It is idempotent on resume.
 
-use js_agent::update_hook::{Class, Cordon, Done, Held, Lease, Outcome, Reason, Record};
+use std::time::Duration;
+
+use js_agent::update_hook::{Class, Clock, Cordon, Done, Held, Lease, Outcome, Reason, Record};
 use serde_json::json;
 
 use super::step_rig::{LEASE_SECS, Rig, START, Spy, as_root, killable, line};
@@ -16,6 +18,7 @@ fn verified(rig: &Rig, placed: bool) -> Record {
     if placed {
         record.cordon = Cordon {
             placed: true,
+            provisional: false,
             first_ms: START,
             expires_ms: START + LEASE_SECS * 1000,
         };
@@ -184,4 +187,19 @@ fn cleanup_with_no_record_is_a_finished_cleanup() {
     assert_eq!(done.outcome, Outcome::Success);
     assert_eq!(line(&done)["reversible"], json!(true));
     assert_eq!(spy.log(), Vec::<String>::new());
+}
+
+#[test]
+fn a_cordon_that_lapsed_is_gone_and_one_found_in_its_place_is_not_lifted() {
+    let rig = staged("hook-cleanup-lapsed-then-operator", true);
+    // Our cordon (300 s) lapses; an operator cordons afterwards.
+    Clock::pause(&rig.world, Duration::from_secs(400));
+    let operator = rig.operator_cordons();
+    rig.kill.disarm();
+    let spy = Spy::new(&rig);
+    let done = spy.cleanup(&rig);
+    assert_eq!(done.outcome, Outcome::Success);
+    assert_eq!(spy.log(), Vec::<String>::new(), "no uncordon");
+    assert_eq!(rig.cordon_expiry(), Some(operator));
+    assert_eq!(rig.record_bytes(), None);
 }

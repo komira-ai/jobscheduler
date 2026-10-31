@@ -34,6 +34,9 @@ fn params_for(record: &Record) -> Params {
     Params {
         cordon_lease_secs: 300,
         cordon_max_secs: 17355,
+        drain_wait_secs: 3600,
+        defer_retry_secs: 300,
+        artifact_digest: record.update.artifact_digest.clone(),
         promotion_ceiling_secs: None,
         staged_release: record.update.staged.clone(),
         previous_release: record.update.previous_target.clone(),
@@ -58,6 +61,7 @@ fn good() -> Record {
     });
     record.cordon = Cordon {
         placed: true,
+        provisional: false,
         first_ms: 1_000_000,
         expires_ms: 1_300_000,
     };
@@ -295,11 +299,13 @@ fn a_cordon_that_was_not_placed_has_no_stamps() {
     for cordon in [
         Cordon {
             placed: false,
+            provisional: false,
             first_ms: 1,
             expires_ms: 0,
         },
         Cordon {
             placed: false,
+            provisional: false,
             first_ms: 0,
             expires_ms: 1,
         },
@@ -313,16 +319,19 @@ fn a_placed_cordon_has_a_first_stamp_and_expires_no_earlier() {
     for cordon in [
         Cordon {
             placed: true,
+            provisional: false,
             first_ms: 0,
             expires_ms: 5_000,
         },
         Cordon {
             placed: true,
+            provisional: false,
             first_ms: 0,
             expires_ms: 0,
         },
         Cordon {
             placed: true,
+            provisional: false,
             first_ms: 5_000,
             expires_ms: 4_999,
         },
@@ -332,6 +341,7 @@ fn a_placed_cordon_has_a_first_stamp_and_expires_no_earlier() {
     passes(|r| {
         r.cordon = Cordon {
             placed: true,
+            provisional: false,
             first_ms: 5_000,
             expires_ms: 5_000,
         }
@@ -371,6 +381,7 @@ fn a_cap_too_large_to_add_saturates_and_never_wraps() {
     };
     record.cordon = Cordon {
         placed: true,
+        provisional: false,
         first_ms: 1,
         expires_ms: u64::MAX,
     };
@@ -379,6 +390,7 @@ fn a_cap_too_large_to_add_saturates_and_never_wraps() {
     // near the end of time.
     record.cordon = Cordon {
         placed: true,
+        provisional: false,
         first_ms: u64::MAX - 10,
         expires_ms: u64::MAX,
     };
@@ -582,5 +594,32 @@ fn the_new_rules_have_words_for_the_log() {
     assert_eq!(
         Invalid::SameRelease.to_string(),
         "the staged release and the previous release are the same"
+    );
+}
+
+#[test]
+fn the_recorded_digest_must_be_the_one_the_updater_passes() {
+    let record = good();
+    let other = Params {
+        artifact_digest: format!("sha256:{}", "f".repeat(64)),
+        ..params_for(&record)
+    };
+    assert_eq!(
+        validate(&record, &declaration(), &other),
+        Err(Invalid::ParamsMismatch {
+            field: "artifact_digest"
+        })
+    );
+}
+
+#[test]
+fn a_provisional_cordon_is_a_placed_one() {
+    passes(|r| r.cordon.provisional = true);
+    assert_eq!(
+        broken(|r| r.cordon = Cordon {
+            provisional: true,
+            ..Cordon::default()
+        }),
+        Invalid::CordonStamps
     );
 }

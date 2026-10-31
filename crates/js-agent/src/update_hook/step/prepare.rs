@@ -209,6 +209,7 @@ fn place(
     if provisional {
         record.cordon = Cordon {
             placed: true,
+            provisional: false,
             first_ms: now,
             expires_ms: now.saturating_add(ask.saturating_mul(1000)),
         };

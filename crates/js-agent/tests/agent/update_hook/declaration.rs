@@ -130,6 +130,15 @@ fn no_unit_is_refused() {
 }
 
 #[test]
+fn more_than_one_unit_is_refused() {
+    let text = GOOD.replace(
+        r#"units = ["js-agent-crun.service"]"#,
+        r#"units = ["js-agent-crun.service", "js-agent-docker.service"]"#,
+    );
+    assert!(matches!(refused(&text), DeclarationError::ManyUnits));
+}
+
+#[test]
 fn a_declaration_is_read_from_a_path_and_a_missing_one_is_refused() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "hook-declaration");
     let file = dir.path().join("js-agent.toml");

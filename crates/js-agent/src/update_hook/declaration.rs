@@ -51,6 +51,9 @@ pub enum DeclarationError {
     /// `hook.units` is empty: no unit could ever match the record's.
     #[error("hook.units is empty")]
     NoUnits,
+    /// `hook.units` names more than one unit: the hook manages one agent.
+    #[error("hook.units names more than one unit")]
+    ManyUnits,
 }
 
 /// The `[hook.timeout_secs]` table: the updater's bound on each step, in seconds.

@@ -75,6 +75,11 @@ pub struct UpdateInfo {
 pub struct Cordon {
     /// Whether this update placed it. A cordon that was there before is not the hook's to lift.
     pub placed: bool,
+    /// The mark was written before the cordon was asked of the lease server and no reply has
+    /// confirmed it: a cordon found in force is then not known to be ours. Cleared by a reply
+    /// that says the host was not cordoned.
+    #[serde(default)]
+    pub provisional: bool,
     /// When it was first placed, in milliseconds on the wall clock; 0 when not placed.
     pub first_ms: u64,
     /// When it now expires, in whole seconds' worth of milliseconds: never later than
