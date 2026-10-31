@@ -124,7 +124,9 @@ fn prepare_pulls_in_the_background_and_reports_how_it_ended() {
     assert!(failed(&runtime, &missing).contains("no registry in this test"));
 
     let hooks = Node::hooks(LONG, Duration::ZERO);
-    let endless = node.open_with(hooks, Arc::new(Endless));
+    // A node of its own: one backend holds a node's scratch directory (its lock) at a time.
+    let other = Node::new("prepare-endless");
+    let endless = other.open_with(hooks, Arc::new(Endless));
     assert!(failed(&endless, &missing).contains("took longer"));
 }
 
