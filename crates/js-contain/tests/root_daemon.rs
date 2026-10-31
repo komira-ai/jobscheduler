@@ -23,10 +23,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use js_contain::cgroup::JOB_OWNED_FILES;
 use js_contain::container::{ACTION_ID, ContainerLimits, ContainerSpec, Ended};
+use js_contain::keeper::{Keeper, KeeperLauncher};
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
 use js_contain::oci::{Oci, OciConfig, OciError, stderr_path, stdout_path};
 use js_contain::subids::{IdFiles, SubidError, user_ids};
+
+/// Where the cgroup v2 filesystem is mounted.
+const CGROUP_MOUNT: &str = "/sys/fs/cgroup";
 
 #[derive(Debug)]
 struct NoImages;
@@ -91,18 +96,23 @@ fn config(job: (u32, u32), runtime: &Path) -> OciConfig {
     }
 }
 
-/// Lets the job user manage the cgroup subtree `dir` (as a unit's `Delegate=` does): the
-/// directory and its control files belong to the job user, and the controllers a lease
-/// needs are enabled for its children.
-fn delegate(dir: &Path, uid: u32, gid: u32) {
-    for name in [
-        "",
-        "cgroup.procs",
-        "cgroup.threads",
-        "cgroup.subtree_control",
+/// Lets the job user manage the cgroup `parent` (the daemon's delegated cgroup and the one
+/// the leases are made in, here the same) and its lease cgroup `lease`, as the agent's
+/// runtime does: the files of [`JOB_OWNED_FILES`] and nothing else, so not `cgroup.kill`. The
+/// hand-over is done directly here, as a root test can; `CrunRuntime` does it by descriptor.
+fn give_cgroups(parent: &str, lease: &str, job: (u32, u32)) {
+    for dir in [
+        format!("{CGROUP_MOUNT}{parent}"),
+        format!("{CGROUP_MOUNT}{parent}/{lease}"),
     ] {
-        let path = dir.join(name);
-        lchown(&path, Some(uid), Some(gid)).unwrap();
+        for file in JOB_OWNED_FILES {
+            let path = if file.is_empty() {
+                PathBuf::from(&dir)
+            } else {
+                Path::new(&dir).join(file)
+            };
+            lchown(&path, Some(job.0), Some(job.1)).unwrap();
+        }
     }
 }
 
@@ -171,7 +181,7 @@ async fn run_container(label: &str, runtime: &Path) -> Run {
     busybox_rootfs(&scratch.join("oci-images").join(&hex).join("rootfs"));
 
     // After: 0711 is accepted.
-    let cgroup = PathBuf::from(format!("/sys/fs/cgroup{cgroup_parent}"));
+    let cgroup = PathBuf::from(format!("{CGROUP_MOUNT}{cgroup_parent}"));
     let _ = fs::remove_dir(cgroup.join("lease1"));
     mkdir(&cgroup.join("supervisor"), 0o755);
     let oci = Oci::new(
@@ -192,8 +202,7 @@ async fn run_container(label: &str, runtime: &Path) -> Run {
         "+memory +pids",
     )
     .unwrap();
-    delegate(&cgroup, uid, gid);
-    delegate(&cgroup.join("lease1"), uid, gid);
+    give_cgroups(&cgroup_parent, "lease1", (uid, gid));
     fs::write(
         cgroup.join("supervisor/cgroup.procs"),
         std::process::id().to_string(),
@@ -458,6 +467,14 @@ async fn every_crun_command_of_a_root_daemon_runs_as_the_job_user_with_a_clean_e
     let helper_dir = scratch.join("to-remove");
     mkdir(&helper_dir, 0o755);
     oci.remove_dir_async(&helper_dir).await.unwrap();
+    // The unpack helper, which runs the daemon's binary in a container of a job's user
+    // namespace, is one more `crun run` of the same driver.
+    let (stage, blobs) = (scratch.join("stage"), scratch.join("blobs"));
+    mkdir(&stage, 0o755);
+    mkdir(&blobs, 0o755);
+    oci.unpack_layers(&stage, &blobs, &["layer.tar".to_owned()])
+        .await
+        .unwrap();
 
     let who = fs::read_to_string(crun.with_extension("who")).unwrap();
     let calls = fs::read_to_string(crun.with_extension("calls")).unwrap();
@@ -479,4 +496,78 @@ async fn every_crun_command_of_a_root_daemon_runs_as_the_job_user_with_a_clean_e
     for line in lines {
         assert_eq!(line, expected, "{who}");
     }
+}
+
+/// A keeper whose program is a shell that records, before it says it is ready, who it runs as
+/// (`Uid:`, `Gid:` and `Groups:` of `/proc/self/status`), its working directory, and what the
+/// daemon's environment left it.
+struct Recording {
+    out: PathBuf,
+}
+
+impl KeeperLauncher for Recording {
+    fn command(&self, kill: &Path, _tries: u32) -> std::process::Command {
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(
+                r#"while read key rest; do
+                     case "$key" in Uid:|Gid:|Groups:) echo $key $rest;; esac
+                   done < /proc/self/status > "$1"
+                   echo "cwd $(pwd)" >> "$1"
+                   echo "home $HOME" >> "$1"
+                   echo "sentinel ${JS_SENTINEL-unset}" >> "$1"
+                   echo "kill $2" >> "$1"
+                   echo ready
+                   cat"#,
+            )
+            .arg("keeper")
+            .arg(&self.out)
+            .arg(kill)
+            .env("JS_SENTINEL", "the daemon's environment");
+        command
+    }
+
+    fn ready(&self) -> &[u8] {
+        b"ready\n"
+    }
+}
+
+/// A lease's keeper started with the backend's drop runs as the job user and no other:
+/// real, effective, saved and file-system ids, no supplementary group (root's group list is
+/// not inherited), from `/`, with `HOME=/` and none of the daemon's environment. Without the
+/// drop the same program runs as root, so the ids read are the drop's doing.
+#[test]
+#[ignore = "needs root and a job user: see the module docs"]
+fn the_keeper_of_a_root_daemon_runs_as_the_job_user_with_a_clean_environment() {
+    let (uid, gid) = job_user();
+    let dir = world_dir("js-b-keeper");
+    mkdir(&dir, 0o777);
+    let job_drop =
+        js_contain::oci::JobDrop::new(Some((uid, gid)), Some("/usr/bin:/bin".as_ref()), 0)
+            .expect("a root daemon with a job user");
+    let kill = dir.join("cgroup.kill");
+
+    let dropped = Recording {
+        out: dir.join("dropped"),
+    };
+    let keeper =
+        Keeper::watch_as(&dropped, &kill, Some(&job_drop)).expect("keeper as the job user");
+    std::mem::drop(keeper);
+    assert_eq!(
+        fs::read_to_string(&dropped.out).unwrap(),
+        format!(
+            "Uid: {uid} {uid} {uid} {uid}\nGid: {gid} {gid} {gid} {gid}\nGroups:\ncwd /\n\
+             home /\nsentinel unset\nkill {}\n",
+            kill.display()
+        )
+    );
+
+    let plain = Recording {
+        out: dir.join("plain"),
+    };
+    std::mem::drop(Keeper::watch(&plain, &kill).expect("keeper as root"));
+    let said = fs::read_to_string(&plain.out).unwrap();
+    assert!(said.starts_with("Uid: 0 0 0 0\n"), "{said}");
+    assert!(said.contains("sentinel the daemon's environment"), "{said}");
 }

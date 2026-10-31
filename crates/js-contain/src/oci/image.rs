@@ -20,20 +20,34 @@
 //! the only writable path and the downloaded blobs read-only, so a hostile tar can write
 //! nothing the daemon user owns.
 //!
+//! **The stage belongs to the helper's id and to nobody else may write it**: the daemon
+//! makes it `0700`, opens it by descriptor (`O_NOFOLLOW`), sets `0755` and gives it to the
+//! first id of the subordinate range (the id the helper's root has; see [`make_stage`]),
+//! in a store directory (`0711`) in which a local account can neither list nor write. The
+//! mode is `0755`, not `0700`, because the stage becomes the image directory by a rename
+//! and a job's `crun` (not the helper's id) must search it; a rootless daemon cannot change
+//! the mode of a directory it gave away, so it is final from the start. Others can read
+//! the stage and cannot write it, move the root filesystem the helper makes in it, or
+//! add to it.
+//!
 //! Single flight per digest: concurrent first uses of one image wait on one fetch and
 //! unpack; a use cancelled midway leaves another to retry (a stage directory with a
 //! different random name each time; the leftovers are removed by the sweep at the next
 //! start).
 
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex as AsyncMutex;
 
-use super::{JobError, Oci, at};
+use rustix::fs::{Gid, Mode, Uid};
+
+use super::{JobError, Mapping, Oci, at, helper};
+use crate::walk::DIRECTORY;
 
 /// The directory of the rootfs under an image's directory.
 pub const ROOTFS: &str = "rootfs";
@@ -85,6 +99,18 @@ pub trait ImageSource: Send + Sync + std::fmt::Debug {
     /// be reached or refuses, or something does not hash to its digest.
     async fn fetch(&self, image: &PinnedImage, blobs: &Path) -> Result<Vec<String>, FetchError>;
 }
+
+/// The owner, in a setup helper's namespace ([`Mapping::Setup`]), of the id the unpack
+/// helper runs as: the unpack helper's id 0 ([`Mapping::Action`]) is the first subordinate
+/// id, which is id 1 there.
+pub(super) const HELPER_OWNER: &str = "1:1";
+
+/// The mode of a stage: the helper's id writes it; everyone else may search and read.
+const STAGE_MODE: u32 = 0o755;
+
+/// The mode of the store directory: others search it (a job's `crun` reaches an image's
+/// root through it) but cannot list it, so a stage's name is not for the finding.
+const STORE_MODE: u32 = 0o711;
 
 /// The prefix of an unpack in progress.
 pub const STAGE_PREFIX: &str = ".stage-";
@@ -193,9 +219,9 @@ impl Images {
         let stage = self.dir.join(format!("{STAGE_PREFIX}{hex}-{id}"));
         let blobs = self.dir.join(format!("{STAGE_PREFIX}{hex}-{id}-blobs"));
         at(&self.dir, tokio::fs::create_dir_all(&self.dir).await).map_err(failed)?;
-        // Searched by the container's ids on the way to an image's root, whatever umask
-        // the daemon runs under.
-        let open = std::fs::Permissions::from_mode(0o755);
+        // Searched, not listed, by the container's ids on the way to an image's root,
+        // whatever umask the daemon runs under.
+        let open = std::fs::Permissions::from_mode(STORE_MODE);
         at(&self.dir, tokio::fs::set_permissions(&self.dir, open).await).map_err(failed)?;
         let made = self.fetch_and_unpack(oci, image, &stage, &blobs).await;
         // The blobs are the daemon's own files.
@@ -205,15 +231,12 @@ impl Images {
             let _ = oci.remove_dir_async(&stage).await;
         }
         made?;
-        // The stage was open to the container's root; the image directory is not.
-        let closed = std::fs::Permissions::from_mode(0o755);
-        at(&stage, tokio::fs::set_permissions(&stage, closed).await).map_err(failed)?;
         let finished = self.dir.join(&hex);
         at(&finished, tokio::fs::rename(&stage, &finished).await).map_err(failed)
     }
 
     /// Downloads the image's layers into `blobs` (a directory the container's ids can
-    /// read), makes `stage` (open to the container's root, which is not the daemon user:
+    /// read), makes `stage` (given to the container's root, which is not the daemon user:
     /// it makes the image's root inside, owned by itself) and unpacks the layers into it.
     async fn fetch_and_unpack(
         &self,
@@ -238,9 +261,7 @@ impl Images {
             let path = blobs.join(name);
             at(&path, tokio::fs::set_permissions(&path, readable).await).map_err(failed)?;
         }
-        at(stage, tokio::fs::create_dir(stage).await).map_err(failed)?;
-        let open = std::fs::Permissions::from_mode(0o777);
-        at(stage, tokio::fs::set_permissions(stage, open).await).map_err(failed)?;
+        oci.make_stage(stage).await.map_err(failed)?;
         oci.unpack_layers(stage, blobs, &names)
             .await
             .map_err(failed)
@@ -281,6 +302,52 @@ impl Images {
             ))
         }
     }
+}
+
+impl Oci {
+    /// Makes the stage directory `stage` and gives it to the unpack helper's id: by
+    /// [`make_stage`] when the daemon is root (which can give any id a directory), else
+    /// by a setup helper container, which holds the daemon user and the subordinate range
+    /// both.
+    async fn make_stage(&self, stage: &Path) -> Result<(), JobError> {
+        let helper_ids = (
+            Uid::from_raw(self.ids.sub_uid),
+            Gid::from_raw(self.ids.sub_gid),
+        );
+        let owner = rustix::process::geteuid().is_root().then_some(helper_ids);
+        at(stage, make_stage(stage, owner, &mut fchown_fd))?;
+        // A daemon that could not give the stage itself has it given.
+        let given_by_helper = owner
+            .is_none()
+            .then(|| helper::give_job(&self.modes, &self.daemon, HELPER_OWNER, None, &[stage]));
+        let jobs: Vec<helper::Job> = given_by_helper.into_iter().collect();
+        self.run_jobs("give", Mapping::Setup, &jobs).await
+    }
+}
+
+/// Gives the directory `fd` to `uid` and `gid`.
+pub(super) fn fchown_fd(fd: &OwnedFd, uid: Uid, gid: Gid) -> std::io::Result<()> {
+    Ok(rustix::fs::fchown(fd, Some(uid), Some(gid))?)
+}
+
+/// Makes the directory `stage` (not following a symlink at its name, and failing if the
+/// name exists), `0700` while it is the daemon's alone, then, by its descriptor, `0755`
+/// ([`STAGE_MODE`]) and, if `owner` is given, owned by it through `chown`.
+///
+/// # Errors
+/// The directory exists or could not be made, opened, changed or given.
+pub(super) fn make_stage(
+    stage: &Path,
+    owner: Option<(Uid, Gid)>,
+    chown: &mut dyn FnMut(&OwnedFd, Uid, Gid) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    std::fs::DirBuilder::new().mode(0o700).create(stage)?;
+    let fd = rustix::fs::open(stage, DIRECTORY, Mode::empty())?;
+    rustix::fs::fchmod(&fd, Mode::from_raw_mode(STAGE_MODE))?;
+    if let Some((uid, gid)) = owner {
+        chown(&fd, uid, gid)?;
+    }
+    Ok(())
 }
 
 /// A step of the fetch or the unpack that failed, as the check of an image reports it.
