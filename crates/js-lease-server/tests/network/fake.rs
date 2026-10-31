@@ -261,8 +261,6 @@ fn exchange(stream: &mut TcpStream, shared: &Shared) -> bool {
 
 /// The base URL of a port nothing listens on.
 pub fn closed_port_url() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    format!("http://{addr}")
+    // Held for the test binary's life: a dropped listener would free the number.
+    format!("http://{}", js_testkit::port::dead_addr())
 }

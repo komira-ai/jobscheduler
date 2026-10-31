@@ -163,7 +163,8 @@ reclaim is a plain loss (below).
 effect):
 
 1. **Taint and cordon the host.** The host takes no new lease and no new run, and no request is queued toward it. A cordon alone is
-   scheduler state that a restart forgets (absence.md); the notice must survive a restart, so the host is recorded as **tainted** with the
+   not the record of a notice (an operator's cordon is a scheduler row, a host's own cordon is a lease that lapses: absence.md); the notice must
+   survive a restart and must not lapse, so the host is recorded as **tainted** with the
    reason `reclaim`, by the scheduler itself, as it records a host-job taint at grant (5.12). A tainted host is not capable (D41), is not
    released for idleness, and is never the target of a reservation; a reservation it held is dropped, without counting a give-up and without
    excluding another host (whole-node.md). A reclaim taint is the one taint that needs no operator: the instance is going and its id is

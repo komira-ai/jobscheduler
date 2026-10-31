@@ -267,7 +267,9 @@
 
 mod args;
 mod logs;
-pub use logs::LOGS_LIMIT;
+#[cfg(target_os = "linux")]
+pub(crate) use logs::text_of;
+pub use logs::{LOGS_LIMIT, tail_of};
 mod seccomp;
 mod settings;
 mod subid;
@@ -291,8 +293,8 @@ pub use egress::{
 };
 pub use seccomp::{PROFILE, PROFILE_FILE, install_profile};
 pub use settings::{
-    ADD_HOST_MAX, CGROUP_ROOT, DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull,
-    Settings, SettingsError,
+    ADD_HOST_MAX, CGROUP_ROOT, CRUN_STORE_DIR, CrunPlan, DEFAULT_NETWORK, DEFAULT_TMP_SIZE,
+    DEFAULT_USER, Flags, Pull, Settings, SettingsError,
 };
 pub use subid::{
     CLAIM_DIR, IdFiles, IdRange, JobUsers, Mapping, RANGE_LEN, RangeClaim, SubidError,
@@ -302,6 +304,7 @@ use crate::facts::{CommandRunner, FileReader, Platform, SystemCommands, SystemFi
 use crate::lifecycle::{
     Body, Exit, Found, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
 };
+use crate::usage::layout_of;
 
 /// How long one call of the runtime may take, besides the stop grace it is given: long
 /// enough for an image to be pulled by `create`.
@@ -318,7 +321,7 @@ const ID_LEN: usize = 64;
 const ENGINE_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// What a container's name starts with; the run id follows.
-const NAME_PREFIX: &str = "js-";
+pub(crate) const NAME_PREFIX: &str = "js-";
 
 /// The digits of the agent tag in a container's name.
 const TAG_LEN: usize = 16;
@@ -378,6 +381,9 @@ pub enum CliError {
     /// A host job reached the container runtime.
     #[error("only a contained job runs in a container")]
     NotContained,
+    /// A native body reached the container runtime.
+    #[error("a native job does not run in a container")]
+    NativeBody,
     /// A job named a GPU on a host whose containers cannot reach one.
     #[error("containers on this host cannot use a GPU")]
     GpuUnsupported,
@@ -820,7 +826,10 @@ impl CliRuntime {
         let Body::Container {
             image,
             args: command,
-        } = &spec.body;
+        } = &spec.body
+        else {
+            return Err(CliError::NativeBody);
+        };
         args.extend(["--".to_owned(), image.clone()]);
         args.extend(command.iter().cloned());
         Ok(args)
@@ -937,7 +946,7 @@ impl CliRuntime {
             .0;
         let table = (self.proc_read)(&format!("/proc/{pid}/cgroup"))?;
         let dir = Path::new(CGROUP_ROOT).join(unified_path(&table)?);
-        (dir.starts_with(actions) && dir != actions).then_some(dir)
+        layout_of(&dir, actions).map(|_| dir)
     }
 
     /// Gives the run's scratch directory to the container's user, when the agent is root:
@@ -1191,7 +1200,7 @@ fn major_of(text: &str) -> Option<u32> {
 
 /// `js-<agent tag>-<run id>`, when that is a name the engines take. The tag is the host
 /// id's hash ([`agent_tag`]), so two agents on one runtime never name a container alike.
-fn container_name(host_id: &str, run_id: &str) -> Result<String, CliError> {
+pub(crate) fn container_name(host_id: &str, run_id: &str) -> Result<String, CliError> {
     let word = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-');
     let fits = !run_id.is_empty()
         && NAME_PREFIX.len() + TAG_LEN + 1 + run_id.len() <= NAME_MAX
@@ -1203,7 +1212,7 @@ fn container_name(host_id: &str, run_id: &str) -> Result<String, CliError> {
 /// A host id as [`TAG_LEN`] hexadecimal digits (FNV-1a over its bytes): a short stable
 /// stand-in that is in the grammar of container names whatever the id holds. The labels
 /// still say whose a container is; the tag only keeps the names apart.
-fn agent_tag(host_id: &str) -> String {
+pub(crate) fn agent_tag(host_id: &str) -> String {
     let hash = host_id
         .bytes()
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {

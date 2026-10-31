@@ -25,6 +25,16 @@
 //! - **A job is confined to its limits.** Its wall time is counted on the agent's clock
 //!   from the moment its container started, and a job past it is stopped and reported
 //!   `timed_out`.
+//! - **A start waits for its image without holding the worker.** When the runtime says
+//!   the image is being fetched ([`Runtime::prepare`]) the run is held as `starting` with
+//!   its booking and slot and nothing else: no scratch directory, files or container. Each
+//!   [`Lifecycle::step`] asks again, and the container is made when the image is here. The
+//!   wall time then counts from that moment, but never past the end of the lease the
+//!   start's `valid_for_ms` named. A stop or cancel while it waits ends it without a
+//!   container, and a fetch that failed ends every run that waited on it
+//!   `failed_to_start`. Nothing bounds the wait but those and the runtime's own limit on
+//!   a fetch, and an agent that restarts while a run waits has nothing on the host to
+//!   adopt: the run is lost like any run the agent no longer holds.
 //! - **A result says what happened.** It is sent as soon as the container has exited,
 //!   before any cleanup, and it stays in the heartbeat until the server acknowledges it. An
 //!   acknowledgement of a kind this version does not know keeps it. A container that
@@ -165,6 +175,7 @@
 
 mod machine;
 mod mounts;
+mod prefetch;
 mod quota;
 mod quota_flags;
 mod run_files;
@@ -185,10 +196,12 @@ use crate::FileReader;
 use crate::bundle::Admission;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
+use crate::native::{NativeFlags, NativeSettings};
 use crate::quota::ScratchQuota;
 
 pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, RunningLease, SLOTS, Slots};
 pub use mounts::{MountError, MountRoots};
+pub use prefetch::{Prefetcher, PullFuture};
 pub use quota::RunQuota;
 use quota_flags::scratch_quota_limits;
 pub use quota_flags::{
@@ -198,7 +211,8 @@ pub use quota_flags::{
 };
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
-    Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
+    Body, Exit, Found, NativeRefusal, Prepared, ResolvedMount, RunHandle, RunSpec, Runtime,
+    RuntimeError, Status, Ticket, label,
 };
 pub use scratch::{DirLayout, ScratchRoot};
 pub use taint::{MARKER_FILE, StateRoot};
@@ -597,7 +611,10 @@ pub struct Local {
     /// `--container-bin`, `--container-network` and `--container-user`, when containers
     /// are enabled by `--container-bin`.
     pub container: Option<Settings>,
-    /// `--state-root`, when given; always given when containers are enabled.
+    /// `--native-helper-socket` and the flags beside it, when native jobs are enabled; never
+    /// together with [`Local::container`].
+    pub native: Option<NativeSettings>,
+    /// `--state-root`, when given; always given when jobs are enabled.
     pub state: Option<StateRoot>,
     /// The `--watch-dir` flags, canonicalised, sorted, each once.
     pub watch: Vec<PathBuf>,
@@ -607,7 +624,14 @@ pub struct Local {
     pub drain_wait: Duration,
     /// The `--image-allow` flags, in the order given: where an image may be pulled from.
     pub image_allow: Vec<Allow>,
+    /// The `--egress*` flags: how much network a `crun` container gets. Mode none unless an
+    /// allow-list was given, which this build refuses until the `crun` runtime wires it
+    /// (see [`crate::egress`]).
+    pub egress: crate::egress::Config,
 }
+
+/// The file in the state root that holds the native agent's lease journal.
+pub const NATIVE_JOURNAL: &str = "native-leases";
 
 /// How long a container gets to stop on its own when `--stop-grace` is not given.
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
@@ -633,11 +657,13 @@ impl Local {
     /// path to an existing directory that no mount root, scratch root or state root lies in
     /// or holds (those change with every job).
     ///
+    /// `euid` is the effective user id of the agent: a native agent must be root.
+    ///
     /// # Errors
     ///
     /// The text names the flag at fault.
-    pub fn from_cli(cli: &Cli) -> Result<Self, String> {
-        Self::from_cli_with_default_files_root(cli, Path::new(DEFAULT_RUN_FILES_ROOT))
+    pub fn from_cli(cli: &Cli, euid: u32) -> Result<Self, String> {
+        Self::from_cli_with_default_files_root(cli, Path::new(DEFAULT_RUN_FILES_ROOT), euid)
     }
 
     /// [`Local::from_cli`] with `default_files_root` where the run files go when
@@ -650,7 +676,33 @@ impl Local {
     pub fn from_cli_with_default_files_root(
         cli: &Cli,
         default_files_root: &Path,
+        euid: u32,
     ) -> Result<Self, String> {
+        Self::from_parts(cli, default_files_root, euid, None)
+    }
+
+    /// [`Local::from_cli`] for `--runtime crun`, whose settings (`crun`) stand where the
+    /// container flags make them for an engine. The scratch root and the run files root are
+    /// [`DirLayout::Searchable`] (the job's ids walk down to them); the image store is the
+    /// directory beside the scratch root, and the settings are told where it is.
+    ///
+    /// # Errors
+    ///
+    /// As [`Local::from_cli`], and the scratch root has no parent for the image store.
+    pub fn from_cli_crun(cli: &Cli, euid: u32, crun: Settings) -> Result<Self, String> {
+        Self::from_parts(cli, Path::new(DEFAULT_RUN_FILES_ROOT), euid, Some(crun))
+    }
+
+    fn from_parts(
+        cli: &Cli,
+        default_files_root: &Path,
+        euid: u32,
+        crun: Option<Settings>,
+    ) -> Result<Self, String> {
+        let layout = match crun {
+            Some(_) => DirLayout::Searchable,
+            None => DirLayout::Private,
+        };
         if cli.allow_host_jobs {
             return Err(
                 "--allow-host-jobs: host jobs are not available yet: the scheduler \
@@ -658,13 +710,14 @@ impl Local {
                     .to_owned(),
             );
         }
+        let egress = egress_of(cli)?;
         let mounts = MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;
         let scratch = cli
             .scratch_root
             .as_deref()
-            .map(ScratchRoot::open)
+            .map(|path| ScratchRoot::open_with(path, layout))
             .transpose()?;
-        let container = Settings::from_flags(
+        let from_flags = Settings::from_flags(
             &Flags {
                 bin: cli.container_bin.as_deref(),
                 network: cli.container_network.as_deref(),
@@ -684,7 +737,67 @@ impl Local {
             ),
         )
         .map_err(|why| why.to_string())?;
+        let is_crun = crun.is_some();
+        let needs = if is_crun {
+            "--runtime crun"
+        } else {
+            "--container-bin"
+        };
+        let container = crun.or(from_flags);
         let state = cli.state_root.as_deref().map(StateRoot::open).transpose()?;
+        // What no run may read: the agent's own roots and the files it keeps secrets in.
+        let denied: Vec<&Path> = state
+            .iter()
+            .map(StateRoot::path)
+            .chain(scratch.iter().map(ScratchRoot::path))
+            .chain(cli.token_file.as_deref())
+            .chain(cli.instance_file.as_deref())
+            .chain(cli.ca_cert.as_deref())
+            .collect();
+        let journal = state
+            .as_ref()
+            .map_or_else(PathBuf::new, |state| state.path().join(NATIVE_JOURNAL));
+        let native = NativeSettings::from_flags(
+            &NativeFlags {
+                socket: cli.native_helper_socket.as_deref(),
+                homes: cli.native_homes.as_deref(),
+                network: cli.native_network.as_deref(),
+                tool_roots: &cli.native_tool_roots,
+                deny_read: &cli.native_deny_read,
+                max_file_mib: cli.native_max_file_mib,
+                max_processes: cli.native_max_processes,
+            },
+            &denied,
+            &journal,
+        )?;
+        if native.is_some() && euid != 0 {
+            return Err(
+                "--native-helper-socket: the agent must run as root: it gives each run's \
+                 directory to the run's user"
+                    .to_owned(),
+            );
+        }
+        if container.is_some() && native.is_some() {
+            return Err(
+                "--native-helper-socket: not with --container-bin: an agent runs \
+                        containers or native programs, not both"
+                    .to_owned(),
+            );
+        }
+        if native.is_some() && state.is_none() {
+            return Err(
+                "--state-root: required with --native-helper-socket: the taint \
+                        marker is kept there"
+                    .to_owned(),
+            );
+        }
+        if native.is_some() && scratch.is_none() {
+            return Err(
+                "--scratch-root: required with --native-helper-socket: each run's \
+                        private directory is made there"
+                    .to_owned(),
+            );
+        }
         if container.is_none() && !cli.watch_dirs.is_empty() {
             return Err("--watch-dir: needs --container-bin".to_owned());
         }
@@ -692,14 +805,12 @@ impl Local {
             return Err("--run-files-root: needs --container-bin".to_owned());
         }
         if container.is_some() && state.is_none() {
-            return Err(
-                "--state-root: required with --container-bin: the taint marker is \
-                        kept there"
-                    .to_owned(),
-            );
+            return Err(format!(
+                "--state-root: required with {needs}: the taint marker is kept there"
+            ));
         }
         let graces = [cli.stop_grace, cli.drain_wait];
-        if container.is_none() && graces.iter().any(Option::is_some) {
+        if container.is_none() && native.is_none() && graces.iter().any(Option::is_some) {
             return Err("--stop-grace and --drain-wait: need --container-bin".to_owned());
         }
         let stop_grace = seconds("--stop-grace", cli.stop_grace, DEFAULT_STOP_GRACE)?;
@@ -716,8 +827,8 @@ impl Local {
         }
         let (files, files_warning) = match (&cli.run_files_root, container.is_some()) {
             (_, false) => (None, None),
-            (Some(path), true) => (Some(FilesRoot::open(path)?), None),
-            (None, true) => match FilesRoot::open(default_files_root) {
+            (Some(path), true) => (Some(FilesRoot::open_with(path, layout)?), None),
+            (None, true) => match FilesRoot::open_with(default_files_root, layout) {
                 Ok(root) => (Some(root), None),
                 Err(why) => (None, Some(format!("run files unavailable: {why}"))),
             },
@@ -759,12 +870,16 @@ impl Local {
             .collect();
         let watch = watch_dirs(&cli.watch_dirs, &busy)?;
         if container.is_some() && scratch.is_none() {
-            return Err(
-                "--scratch-root: required with --container-bin: each run's private \
-                 directory is made there"
-                    .to_owned(),
-            );
+            return Err(format!(
+                "--scratch-root: required with {needs}: each run's private directory is made there"
+            ));
         }
+        let container = match (is_crun, &scratch) {
+            (true, Some(root)) => {
+                container.map(|settings| settings.placed_beside(root.path(), files.clone()))
+            }
+            _ => container,
+        };
         let (default_gib, max_inodes, failures, usage_wait, abandon) = scratch_quota_limits(cli)?;
         Ok(Self {
             watch,
@@ -779,16 +894,52 @@ impl Local {
             files,
             files_warning,
             container,
+            native,
             state,
             stop_grace,
             drain_wait,
             image_allow: image_allow(&cli.image_allow)?,
+            egress,
         })
     }
 }
 
+/// The `--egress*` flags, checked. There is one network mode: the Podman runtime's own
+/// network flags (`--container-network`) cannot be given with this one, and only the `crun`
+/// runtime enforces an allow-list, which cannot be selected yet, so an allow-list is
+/// refused here rather than silently run with no network at all or with the wrong one.
+fn egress_of(cli: &Cli) -> Result<crate::egress::Config, String> {
+    use crate::egress::{Config, Flags, Mode};
+    let config = Config::from_flags(&Flags {
+        mode: cli.egress.as_deref(),
+        allow: &cli.egress_allow,
+        dns: &cli.egress_dns,
+        pool: cli.egress_pool.as_deref(),
+        ip: cli.egress_ip.as_deref(),
+        nft: cli.egress_nft.as_deref(),
+        nsenter: cli.egress_nsenter.as_deref(),
+    })
+    .map_err(|why| why.to_string())?;
+    if config.mode() != Mode::None && cli.container_network.is_some() {
+        return Err(
+            "--egress and --container-network: --egress is the crun runtime's network and \
+             --container-network the Podman runtime's; give only one"
+                .to_owned(),
+        );
+    }
+    if config.mode() != Mode::None {
+        return Err(format!(
+            "--egress {}: only the crun runtime enforces it, and the crun runtime of this \
+             build gives jobs loopback only; with --container-bin the network is \
+             --container-network",
+            config.mode()
+        ));
+    }
+    Ok(config)
+}
+
 /// The `--image-allow` entries, each checked.
-fn image_allow(entries: &[String]) -> Result<Vec<Allow>, String> {
+pub(crate) fn image_allow(entries: &[String]) -> Result<Vec<Allow>, String> {
     entries
         .iter()
         .map(|entry| Allow::parse(entry).map_err(|why| format!("--image-allow: {why}")))

@@ -945,6 +945,8 @@ dependencies = [
  "js-contain",
  "js-lease",
  "js-lease-server",
+ "js-mac-pool",
+ "js-mac-session",
  "js-oci",
  "js-pool-static",
  "js-provider",
@@ -957,8 +959,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "tar",
  "thiserror",
  "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -979,6 +985,7 @@ dependencies = [
 name = "js-alert"
 version = "0.1.0"
 dependencies = [
+ "js-testkit",
  "rustls",
  "serde_json",
  "thiserror",
@@ -992,8 +999,8 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "js-types",
- "ruzstd",
  "rustix",
+ "ruzstd",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -1083,7 +1090,9 @@ name = "js-contain"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "flate2",
  "hex",
+ "js-oci",
  "js-types",
  "libc",
  "oci-spec",
@@ -1091,6 +1100,7 @@ dependencies = [
  "rustix",
  "serde_json",
  "sha2 0.11.1",
+ "tar",
  "thiserror",
  "tokio",
  "tracing",
@@ -1219,6 +1229,7 @@ name = "js-mac-probe"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "js-testkit",
  "libc",
  "serde",
  "serde_json",
@@ -1525,6 +1536,7 @@ dependencies = [
  "js-alert",
  "js-elastic",
  "js-provider-lambdalabs",
+ "js-testkit",
  "serde",
  "serde_json",
  "thiserror",
@@ -3235,6 +3247,7 @@ dependencies = [
  "js-client",
  "js-elastic",
  "rcgen",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "serde",

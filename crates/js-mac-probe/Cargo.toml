@@ -20,5 +20,8 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+js-testkit = { path = "../js-testkit" }
+
 [lints]
 workspace = true

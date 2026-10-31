@@ -80,8 +80,6 @@ impl AlertSink for WebhookSink {
 
 #[cfg(test)]
 mod tests {
-    use std::net::TcpListener;
-
     use super::*;
     use crate::receiver::Receiver;
 
@@ -145,9 +143,9 @@ mod tests {
         let refused = sink(&url, Some("SECRET-token")).send(&alert()).unwrap_err();
         assert_eq!(refused.to_string(), "the webhook answered 500");
 
-        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/SECRET-path", closed.local_addr().unwrap());
-        drop(closed);
+        // A held, non-listening port: a dropped listener would free the number for any
+        // other test to bind.
+        let url = format!("http://{}/SECRET-path", js_testkit::port::dead_addr());
         let down = sink(&url, Some("SECRET-token")).send(&alert()).unwrap_err();
         assert_eq!(down.to_string(), "the webhook could not be reached");
         let shown = format!("{:?}", sink(&url, Some("SECRET-token")));

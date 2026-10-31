@@ -112,7 +112,7 @@ Wants=network-online.target
 RequiresMountsFor=/var/lib/js-agent/scratch
 
 [Service]
-ExecStart=/usr/local/bin/js-agent --server "https://sched.example.org:7301" --token-file /etc/jobscheduler/token --instance-file /etc/jobscheduler/instance --pool "gpu" --host-id "<HOST>" --container-bin /usr/bin/docker --container-subuid js-jobs --container-pull missing --gpu-toolkit-hook /usr/local/lib/js-agent/gpu-toolkit-hook --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
+ExecStart=/usr/local/bin/js-agent --server "https://sched.example.org:7301" --token-file /etc/jobscheduler/token --instance-file /etc/jobscheduler/instance --pool "gpu" --host-id "<HOST>" --runtime docker --container-bin /usr/bin/docker --container-subuid js-jobs --container-pull missing --gpu-toolkit-hook /usr/local/lib/js-agent/gpu-toolkit-hook --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
 Restart=always
 RestartSec=5
 

@@ -44,7 +44,7 @@ impl DirLayout {
     }
 
     /// Whether `mode` (the permission bits of an existing root) is acceptable.
-    const fn allows(self, mode: u32) -> bool {
+    pub(crate) const fn allows(self, mode: u32) -> bool {
         match self {
             Self::Private => mode & 0o077 == 0,
             Self::Searchable => mode & 0o066 == 0 && mode & 0o001 != 0 && mode & 0o700 == 0o700,
@@ -52,7 +52,7 @@ impl DirLayout {
     }
 
     /// Why a root whose mode `allows` refuses is refused.
-    const fn refusal(self) -> &'static str {
+    pub(crate) const fn refusal(self) -> &'static str {
         match self {
             Self::Private => "group and others must have no permission",
             Self::Searchable => {
@@ -133,6 +133,11 @@ pub struct ScratchRoot {
 }
 
 impl ScratchRoot {
+    /// The lock file the OCI backend holds in the root while it lives
+    /// (`js_contain::oci::lock::LOCK_FILE`, which Linux builds check this against). No
+    /// run id starts with a dot, and a sweep keeps it.
+    pub const LOCK_FILE: &'static str = ".js-oci.lock";
+
     /// Opens the root at `path`.
     ///
     /// # Errors
@@ -233,8 +238,10 @@ impl ScratchRoot {
 
     /// [`ScratchRoot::sweep`], or the error that the root could not be listed.
     fn sweep_except(&self, kept: &[&str]) -> io::Result<usize> {
+        // The lock of the OCI backend on this directory is not a run's, but must stay: it
+        // is the lock the agent itself holds, and a new file would lock nothing.
         sweep_entries(&self.path, &|name| {
-            kept.iter().any(|run| run.as_bytes() == name)
+            name == Self::LOCK_FILE.as_bytes() || kept.iter().any(|run| run.as_bytes() == name)
         })
     }
 }

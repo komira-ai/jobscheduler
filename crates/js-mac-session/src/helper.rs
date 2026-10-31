@@ -59,7 +59,7 @@ use crate::autologin::{CommandOutput, Intent, SessionPaths, read_intent};
 use crate::grant::{self, Expect, GrantKeys};
 use crate::lease::{Dotted, UidRange, VmUser, parse_lease, user_name};
 use crate::ledger::{Entry, Ledger};
-use crate::proto::{Reply, Request, Session};
+use crate::proto::{Limits, Reply, Request, Session};
 use crate::scan::ScanSettings;
 use crate::spawn::{self, Spawn};
 use crate::sweep::{SweepPlan, sweep};
@@ -81,6 +81,10 @@ pub const KILL_ROUNDS: usize = 10;
 /// [`Host::pause`] apart, before it refuses: about five seconds on macOS, for a job
 /// that started after `kill-uid` to exit.
 pub const EXIT_LOOKS: usize = 50;
+
+/// What every verb but `boot-reset` is refused with until the boot reset has run since the
+/// helper started: a caller that finds it after the helper restarted under it asks again.
+pub const RESET_NEEDED: &str = "the boot reset has not run since the helper started";
 
 /// The refusal of a second `boot-reset` since the helper started: a daemon that
 /// restarted on its own (the helper did not) finds the reset done.
@@ -337,7 +341,7 @@ impl Helper {
     pub fn handle(&self, request: Request, fds: Vec<OwnedFd>) -> Outcome {
         let refused = |reason: String| Outcome::Reply(Reply::Refused { reason });
         if !self.reset_done() && !matches!(request, Request::BootReset { .. }) {
-            return refused("the boot reset has not run since the helper started".to_owned());
+            return refused(RESET_NEEDED.to_owned());
         }
         let result = match request {
             Request::Run {
@@ -345,9 +349,10 @@ impl Helper {
                 argv,
                 env,
                 session,
+                limits,
             } => {
                 return self
-                    .run_in(&lease, argv, env, fds, session)
+                    .run_limited(&lease, argv, env, fds, session, limits)
                     .map_or_else(refused, Outcome::Running);
             }
             Request::RoleRun { argv, env } => {
@@ -519,8 +524,27 @@ impl Helper {
         fds: Vec<OwnedFd>,
         session: Session,
     ) -> Result<Child, String> {
+        self.run_limited(lease, argv, env, fds, session, None)
+    }
+
+    /// [`Self::run_in`] with `limits` set on the process (`setrlimit`, in the child before
+    /// it executes), when there are any. Limits are refused in the GUI session.
+    ///
+    /// # Errors
+    /// As [`Self::run_in`]; also a limit that is zero or above its cap
+    /// ([`crate::limits::Limits::check`]), or limits asked for a GUI run.
+    pub fn run_limited(
+        &self,
+        lease: &str,
+        argv: Vec<String>,
+        env: Vec<(String, String)>,
+        fds: Vec<OwnedFd>,
+        session: Session,
+        limits: Option<Limits>,
+    ) -> Result<Child, String> {
         let lease = parse_lease(lease)?;
         spawn::check(&argv, &env)?;
+        spawn::check_limits(session, limits.as_ref())?;
         let count = fds.len();
         let [stdin, stdout, stderr, cwd]: [OwnedFd; 4] = fds.try_into().map_err(|_| {
             format!(
@@ -549,6 +573,7 @@ impl Helper {
             stderr,
             cwd,
             session,
+            limits,
         })
         .map_err(|why| format!("starting {program}: {why}"))?;
         drop(ledger);

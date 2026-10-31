@@ -91,7 +91,7 @@ args: ["--listen", "<pod-address>:7300", "--boot", "resume",
 
 Today the whole state of the service is two files on local disk, beside each other: the **lease file** (`--state-file`, one TOML document
 holding the term, the next sequence and every lease) and the **binding file** (`<state file>.agents`, which credential and instance each
-registered host id was admitted with), plus a lock file. The crash-safety rules of `js-lease` are merged and must hold unchanged:
+registered host id was admitted with, and the taint and the cordon it holds), plus a lock file. The crash-safety rules of `js-lease` are merged and must hold unchanged:
 
 1. **Atomic replace.** A change is written to a temporary file next to the target, fsynced, renamed over it, and the directory is
    fsynced, so a reader sees the old file or the new one and a crash loses neither.

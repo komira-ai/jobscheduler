@@ -9,9 +9,11 @@
 //! drains again with a new deadline, or uncordons. An uncordon ends either.
 //!
 //! A cordon names a worker, not a session: it holds across the worker's streams, so
-//! a node that reboots during its update comes back cordoned. It is scheduler state
-//! fed as an input, not a control-log record yet: like the rest of the scheduler's
-//! state it is gone after a server restart.
+//! a node that reboots during its update comes back cordoned. The scheduler holds it
+//! in memory and has no log of its own; a server that must keep it across a restart
+//! writes it where it keeps its other rows (`js-store` has a `cordon/` row for a
+//! node, which `js-server-core` writes before it applies an action and feeds back at
+//! its start) and feeds it in again.
 
 use std::collections::BTreeMap;
 

@@ -232,6 +232,7 @@ mod macos {
                     stderr: dup(std::io::stderr().as_fd())?,
                     cwd: fd(open(dir)?),
                     session,
+                    limits: None,
                 };
                 let status = js_mac_session::spawn::spawn(spawn)
                     .and_then(|mut child| child.wait())

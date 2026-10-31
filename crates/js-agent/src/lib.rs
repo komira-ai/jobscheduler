@@ -10,6 +10,12 @@
 //! runtime's own timestamps, time passes only in the sleeper. The one clock of the jobs is
 //! the monotonic one the [`Machine`] gives, which the worker and the session share.
 //!
+//! # Verbs
+//!
+//! `js-agent image-pull <repository>@sha256:<hex>` (Linux, run as root) pulls an image into
+//! the store the crun runtime reads, without starting the agent and without a container
+//! engine; see `image::pull`.
+//!
 //! # Flags
 //!
 //! Configuration is flags only: `js-agent` reads no environment variable.
@@ -40,6 +46,13 @@
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required with `--container-bin` |
 //! | `--run-files-root <path>` | where each run's files (the `files` of a start: a URL or a token the task reads) are written, in a directory of their own per run, `0555` with `0444` files, mounted read-only at `/run/js-files`. Made `0700` when missing; it must be on a `tmpfs` (the secrets never reach a disk) and the agent refuses to start when it is not. A reboot clears it, which is fine: a run does not survive one. Default `/run/js-agent/files` when that can be made; otherwise the agent runs without run files and does not report the `run-files` capability. tmpfs pages can be swapped to disk when the host has swap: run hosts that handle these secrets with swap off or encrypted. Needs `--container-bin` |
 //! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); every job runs in a user namespace mapped onto the `--container-subuid` range (Podman is given the maps for each container; a Docker daemon must run with `userns-remap` set to that user, or the agent does not start); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
+//! | `--native-helper-socket <path>` | the Unix socket of the root helper `js-mac-session`: with it a Mac agent runs native jobs, each as a user the helper makes for the run, under a Seatbelt profile, and reports `runtime` and `exec` as `sandbox-exec` (see [`native`]); macOS only; the agent must run as root and checks at start that `sandbox-exec` applies a profile; needs `--scratch-root` and `--state-root`; not with `--container-bin`; the helper must be dedicated to this agent on a Mac used for native jobs only, started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes` (never the defaults of another helper), because the agent asks it for its boot reset, which ends the lease users of whoever used it before and clears the Mac's auto-login; native runs are NOT stopped when the agent stops, restarts or dies: the lease journal in the state root ends them when the agent next starts, or when the rescue of an agent whose worker died runs; until then they run on, and their wall limit is enforced only while an agent runs; the profile does not deny System V or POSIX shared memory, semaphores or message queues, and the helper reuses uids, so what a run leaves in them can be read by a later run that gets the same uid: an open channel between runs on one Mac |
+//! | `--native-homes <path>` | the directory the helper makes its lease users' homes in (its `--homes`); by default `/Users`; it must exist; needs `--native-helper-socket` |
+//! | `--native-network <level>` | the most network a native run gets: `off` (the default), `loopback` or `on`; a start that asks for more is held to it; `on` has no egress control (a run can reach the scheduler, the cloud metadata address and the rest of the network) until a packet filter keyed on the lease users exists, so keep `off`; `loopback` is shared by every run of the Mac; needs `--native-helper-socket` |
+//! | `--native-tool-root <path>` | a directory a native start's program must lie under; repeatable; by default `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`; needs `--native-helper-socket` |
+//! | `--native-deny-read <path>` | a path no native run may read, beside the agent's roots, token, instance and CA files, the helper's socket directory and `/etc/kcpassword`; repeatable; name the helper's `--state-dir`; must exist; needs `--native-helper-socket` |
+//! | `--native-max-file-mib <n>` | the most MiB any one file a native run writes may reach, its output included (the run's `RLIMIT_FSIZE`); by default 4096; a run that writes more is ended by `SIGXFSZ`; needs `--native-helper-socket` |
+//! | `--native-max-processes <n>` | the most processes a native run's user may have (the run's `RLIMIT_NPROC`); by default 512; the helper's kill is not held by it; needs `--native-helper-socket` |
 //! | `--container-network <name>` | the user-defined network containers join; by default none at all; `host` is refused; a named network needs at least one `--container-egress-allow` (the agent does not start without it), and before every contained job is created the agent checks that the network is a bridge with DNS and IPv6 off and that the host's nftables table `inet js_egress` limits it to those endpoints, or refuses the job (`egress-unchecked`); Podman only; docs/egress.md sets the network up; needs `--container-bin` |
 //! | `--container-user <uid:gid>` | the base of the users containers run as, container ids both above zero; by default `1000:1000`. Every run holds a slot, numbered from 0, and runs as the base plus its slot number, uid and gid (`1000:1000`, `1001:1001`, ...), so two runs held at once never share a host uid; the slot is given again only after its last run's cleanup passed (container and scratch gone, no process left), and never if a check found something. Each of the 4096 slots needs an id, so both numbers of the base are at most 61440 (the agent refuses to start otherwise). The agent gives each run's scratch directory to the host ids of its slot's user (the start of the `--container-subuid` range plus each id); needs `--container-bin` |
 //! | `--container-subuid <user>` | required with `--container-bin`: the user whose range in `/etc/subuid` and `/etc/subgid` every job's user namespace (container ids 0 to 65535) is mapped onto, so no container id is a host id. The agent refuses to start unless both files give the user at least 65536 ids, not from 0, holding no id of `/etc/passwd` or `/etc/group`; Podman gets `--uidmap` and `--gidmap` for every container, a Docker daemon must run with `userns-remap` set to the user and onto that range; a second agent on the host with an overlapping range is refused (a lock under `/run/js-agent/subid`); the agent must run as root |
@@ -49,15 +62,23 @@
 //! | `--container-add-host <name>:<ip>` | a static host entry for every container, passed at create as `--add-host`; repeatable, at most 16; the name is a DNS name, the address IPv4 or IPv6 (`host-gateway` and anything else is refused, a name twice too); a network made without DNS resolves nothing, and a presigned URL names its host (its signature covers the Host header), so every endpoint a job may reach is given this way; needs `--container-bin` |
 //! | `--container-egress-allow <ip:port>` | an endpoint a named network may reach, `IPV4:PORT` or `CIDR:PORT` (prefix 24 to 32, outside 169.254.0.0/16 and the network's own subnet); repeatable, at most 16; required with a named `--container-network` (the agent does not start without it); before every job is created the agent reads back the network (a bridge, DNS off, no IPv6, one IPv4 subnet), `br_netfilter` and the nftables table `inet js_egress`, and refuses the job (`egress-unchecked`) unless the table holds exactly the rules for these endpoints; Podman only; see docs/egress.md; needs `--container-bin` |
 //! | `--container-nft <path>` | the absolute path of `nft` for that check; by default `/usr/sbin/nft`; needs `--container-egress-allow` |
+//! | `--egress <none\|allow-list>` | the network a job's `crun` container gets: `none` (the default) loopback only, no route; `allow-list` one interface to the host, which forwards only what `--egress-allow` and `--egress-dns` name; the agent, as root, wires each container from outside and keeps the firewall (docs/design/agent-egress.md); only the `crun` runtime reads it and this build cannot select that runtime yet, so `allow-list` is refused at start, as is `--container-network` beside it |
+//! | `--egress-allow <ip:port>` | an endpoint an allow-list may reach, `IPV4:PORT` or `CIDR:PORT` (TCP; prefix 24 to 32, outside 169.254.0.0/16 and the pool); repeatable, at most 16; at least one is required; needs `--egress allow-list` |
+//! | `--egress-dns <ip>` | a resolver an allow-list may ask (UDP and TCP port 53) and the only nameserver of a job's `resolv.conf`; repeatable, at most 4; without one a job resolves no name; needs `--egress allow-list` |
+//! | `--egress-pool <cidr>` | the IPv4 network the jobs' addresses come from, one /30 each, `/16` to `/24`; by default `198.18.0.0/16`; needs `--egress allow-list` |
+//! | `--egress-ip <path>`, `--egress-nft <path>`, `--egress-nsenter <path>` | the absolute paths of the `ip`, `nft` and `nsenter` programs the egress setup runs, by default `/usr/sbin/ip`, `/usr/sbin/nft` and `/usr/bin/nsenter`; need `--egress allow-list` |
 //! | `--actions-cgroup <path>` | the cgroup version 2 directory below `/sys/fs/cgroup` that holds every container (made and delegated by the operator): each container is created with `--cgroup-parent` naming it (the slice name for one `.slice` directly below `/sys/fs/cgroup`, the systemd driver; the path with a leading `/` otherwise, the cgroupfs driver), and the heartbeat carries the usage of the directory and of each lease's cgroup (see [`usage`]); without it the heartbeat carries no load, and the agent says so at start; needs `--container-bin` |
 //! | `--gpu-toolkit-hook <path>` | the absolute path of a program that checks the GPU container toolkit, run once at start when the host offers a GPU; exit 0 makes the hello report `gpu-toolkit`, anything else leaves it out and warns; needs `--container-bin` |
+//! | `--runtime <docker\|crun>` | what runs a job: `docker` (the engine program of `--container-bin`, Docker or Podman, which is also what no flag means) or `crun` (js-contain over the distribution's `crun`, each command run as `--job-user`; Linux only). The packaged unit of the Docker cloud hosts names `--runtime docker`; the unit for the Linux farm (`packaging/js-agent/js-agent-crun.service`) names `--runtime crun`. With `crun` the agent checks the host before it registers and exits 2 naming every piece that is missing: `crun` at `--crun-bin` and its version (1.14 or newer), `newuidmap` and `newgidmap`, the job user and its subuid and subgid ranges (65536 ids or more each), the state root (`0700`, owned by root) and the scratch root (`0711`, owned by root, every directory above it searchable by the job user), `crun`, `newuidmap` and `newgidmap` executable by the job user, the cgroup version 2 controllers `cpu`, `memory` and `pids` in the agent's own cgroup (`Delegate=yes`), and, where `kernel.apparmor_restrict_unprivileged_userns` is 1, a loaded AppArmor profile for `crun`. Then the worker runs jobs through `CrunRuntime`: images are pulled by the agent's registry client from the `--image-allow` entries into a store beside the scratch root (`oci`), and the agent takes no `--mount-root` or `--mount-root-ro` with it, because the runtime does not read a job's binds back yet |
+//! | `--crun-bin <path>` | the `crun` of `--runtime crun`; by default `/usr/bin/crun`, the path the distribution's AppArmor profile attaches to; any other path starts the agent with a warning (and is refused by the kernel where user namespaces are restricted) |
+//! | `--job-user <name>` | the non-root user every `crun` command runs as, whose subuid and subgid ranges every job's user namespace is mapped onto; required with `--runtime crun`, and needs it |
 //! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci; the Docker and Podman runtimes pull as `--container-pull` says and do not read it |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; needs `--container-bin` |
 //! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; needs `--container-bin` |
-//! | `--bundle-store <path>` | the store of unpacked toolchain bundles (a Mac only): absolute, on the volume of `--scratch-root`, which must be APFS, mounted with ownership honoured and not noexec, with the kernel's securelevel at most 0, or the agent does not start; needs `--scratch-root` and `--bundle-budget-gib`. The hello then carries `bundle-root` (this path) and `bundle` (the held manifest digests, comma-separated, at most 16 of them), and the disk offered is reduced by the part of the budget the store has not used (see [`bundle`]). The hello carries `bundle` and `bundle-root` only when the agent can run a bundle, which this build cannot, so for now it carries neither; and, until a server says it takes a longer value, `bundle` holds one digest (two are 143 bytes, over the 128 an older server accepts and then refuses the hello). Roll out in this order: servers first (they accept the long value and the new codes), then agents, then `--bundle-store`, then placement by `bundle`; no job that names a bundle may be placed on a host that did not report `bundle` |
+//! | `--bundle-store <path>` | the store of unpacked toolchain bundles (a Mac only): absolute, on the volume of `--scratch-root`, which must be APFS, mounted with ownership honoured and not noexec, with the kernel's securelevel at most 0, or the agent does not start; needs `--scratch-root` and `--bundle-budget-gib`. The hello then carries `bundle-root` (this path) and `bundle` (the held manifest digests, comma-separated, at most 16 of them), and the disk offered is reduced by the part of the budget the store has not used (see [`bundle`]). The hello carries `bundle` and `bundle-root` only when the agent can run a bundle: it runs native jobs (`--native-helper-socket`) and the store opened; without the helper it carries neither. A job that pins a bundle runs `@bundle/<entrypoint>` from the store's trees, its writable trees cloned for the run, under the profile of any native job; and, until a server says it takes a longer value, `bundle` holds one digest (two are 143 bytes, over the 128 an older server accepts and then refuses the hello). Roll out in this order: servers first (they accept the long value and the new codes), then agents, then `--bundle-store`, then placement by `bundle`; no job that names a bundle may be placed on a host that did not report `bundle` |
 //! | `--bundle-budget-gib <n>` | the most GiB the store's trees and trash may take; required with a store, above 0 |
 //! | `--bundle-low-water-gib <n>` | fetches are refused while the volume has less than this free; default 0 |
-//! | `--bundle-pull <never\|missing>` | whether a bundle the store lacks is fetched; default `never` (a job that names one is refused `bundle-not-held`); `missing` needs trust `list` and a registry flag, and this build has no fetcher (`bundle-fetch-failed`) |
+//! | `--bundle-pull <never\|missing>` | whether a bundle the store lacks is fetched; default `never` (a job that names one is refused `bundle-not-held`); `missing` needs trust `list` and a registry flag: the first start that names a bundle begins a fetch in the background (`bundle-pending` until it is held; every byte is checked against its digest; a fetch that fails is reported once as `bundle-fetch-failed`) |
 //! | `--bundle-registry-allow`, `--bundle-registry-allow-private <host[:port]/prefix>` | the registries and namespaces a bundle's name may point to; repeatable; a bare host is refused; when any is given, a name outside them is refused `bundle-registry-not-allowed` |
 //! | `--bundle-min-age-min <n>` | minutes a bundle's trees stay after their last use; default 30 |
 //! | `--bundle-keep-file`, `--bundle-prefetch-file <path>` | files of manifest digests (`sha256:<hex>` a line, `#` comments), checked at start; the eviction and the fetcher that read them arrive later |
@@ -204,6 +225,11 @@ pub mod cli_runtime;
 mod container;
 mod contract;
 mod credential;
+#[cfg(target_os = "linux")]
+pub mod crun;
+#[cfg(target_os = "linux")]
+pub mod crun_host;
+pub mod egress;
 mod exclusive;
 mod facts;
 mod host;
@@ -212,6 +238,7 @@ pub mod image;
 pub mod integrity;
 mod jobs;
 pub mod lifecycle;
+pub mod native;
 pub mod quota;
 mod readiness;
 mod run;
@@ -219,13 +246,15 @@ mod session;
 mod signals;
 mod system;
 mod transport;
+#[cfg(target_os = "linux")]
+pub mod update_hook;
 pub mod usage;
 mod worker;
 
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -234,7 +263,8 @@ use clap::Parser;
 
 pub use backoff::{BASE, Backoff, CAP, Jitter, RETRY_AFTER_CAP, SystemJitter};
 use bundle::{Admission, BundleHost, Settings as BundleSettings, SystemHost};
-pub use cli::Cli;
+pub use cli::{Cli, RuntimeKind};
+use cli_runtime::Settings;
 use contract::ToolkitHook;
 pub use credential::{CREDENTIAL_FILE, CREDENTIAL_TEMP_FILE, CredentialFile, CredentialStore};
 pub use exclusive::{PREPARE_TIMEOUT, Quiesce};
@@ -255,7 +285,7 @@ pub use session::{
     CredentialState, Drain, Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step,
 };
 pub use signals::SystemSleeper;
-pub use system::{Machine, RuntimeBuild, SharedClock, System};
+pub use system::{Backend, Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
 pub use worker::{
     Delivery, Handle, LINES_CAP, LeaseAnswers, Plan, QUEUE, RESCUE_BOUND, RESCUE_MAX, Rescue,
@@ -312,6 +342,11 @@ pub struct Services<'a> {
     pub worker_hook: Option<&'a dyn Fn(Handle)>,
     /// The bound of the rescue of the jobs in place of [`RESCUE_BOUND`]: for a test.
     pub rescue_bound: Option<Duration>,
+    /// The effective user id of the agent: a native agent must be root.
+    pub euid: u32,
+    /// The directories above a crun scratch root are checked from here down (`/` outside a
+    /// test): a test that cannot make `/tmp` root-owned names the tree it made.
+    pub ancestors_floor: &'a Path,
 }
 
 /// Why the program ends without a stop request.
@@ -326,8 +361,67 @@ enum Failure {
     Worker(String),
 }
 
+/// Checks `--runtime` and the flags that belong to it, and for `crun` the host: a wrong
+/// flag or a missing piece of the host ends the agent with status 2 before it registers.
+/// For `crun` it returns the settings of the crun runtime, which stand where
+/// `--container-bin` stands for the engines.
+fn runtime_flags(
+    cli: &Cli,
+    platform: &Platform,
+    services: &Services<'_>,
+    err: &mut dyn Write,
+) -> Result<Option<Settings>, Failure> {
+    let usage = |text: &str| Err(Failure::Usage(text.to_owned()));
+    match cli.runtime {
+        Some(RuntimeKind::Crun) => {
+            if platform.is_macos() {
+                return usage("--runtime crun: Linux only: the post-job checks read /proc");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let host = services.machine.crun_host();
+                let ready = crun_host::start(cli, &host, services.commands);
+                let ready = ready.map_err(Failure::Usage)?;
+                for warning in &ready.warnings {
+                    let _ = writeln!(err, "js-agent: warning: {warning}");
+                }
+                let allow = lifecycle::image_allow(&cli.image_allow).map_err(Failure::Usage)?;
+                Ok(Some(Settings::for_crun(
+                    ready.crun,
+                    &ready.job_user,
+                    ready.job_ids,
+                    allow,
+                )))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (services, err);
+                usage("--runtime crun: this build has no crun runtime")
+            }
+        }
+        Some(RuntimeKind::Docker) if cli.container_bin.is_none() => {
+            usage("--runtime docker: needs --container-bin")
+        }
+        _ if cli.crun_bin.is_some() => usage("--crun-bin: needs --runtime crun"),
+        _ if cli.job_user.is_some() => usage("--job-user: needs --runtime crun"),
+        _ => Ok(None),
+    }
+}
+
 /// The program, with the machine's own services.
+///
+/// A helper container of the OCI runner runs this binary as `<binary> <mode> <arguments>`
+/// (descriptor-relative ownership changes, and the unpack of an image's layers). Such a
+/// start is answered before anything else, so the flags are never parsed and no signal
+/// handler is installed: the mode words are the runner's default
+/// `HelperModes`, the value the runner is configured with (`js_contain::oci::helper`). Only Linux runs containers.
 pub fn main() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    if let Some(code) =
+        js_contain::modes::dispatch(&js_contain::oci::helper::HelperModes::default())
+    {
+        return ExitCode::from(code);
+    }
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     main_with(
         &SystemSleeper::install,
@@ -345,6 +439,31 @@ pub fn main_with(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(image::pull::VERB))
+    {
+        return image::pull::run(&args, out, err, &image::pull::Host::system());
+    }
+    // The updater's hook is answered here too, before `install()`: it is a short-lived
+    // step of another program, and installs no signal handler.
+    #[cfg(target_os = "linux")]
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(update_hook::VERB))
+    {
+        return update_hook::run(&args, out, err, &update_hook::Host::system());
+    }
+    // The verb's name is spelt out: its module is Linux code.
+    #[cfg(not(target_os = "linux"))]
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some("update-hook"))
+    {
+        let _ = writeln!(err, "update-hook: linux only");
+        return ExitCode::from(exit::FAILED);
+    }
     match install() {
         Err(why) => fail(err, &why, exit::FAILED),
         Ok(mut sleeper) => {
@@ -356,10 +475,12 @@ pub fn main_with(
                 jitter: &mut SystemJitter,
                 sleeper: &mut sleeper,
                 machine: Arc::new(System::new()),
-                bundle: Arc::new(SystemHost::new(SystemCommands::default())),
+                bundle: Arc::new(SystemHost::system()),
                 long_bundle_values: false,
                 worker_hook: None,
                 rescue_bound: None,
+                euid: rustix::process::geteuid().as_raw(),
+                ancestors_floor: Path::new("/"),
             };
             run_with(args, out, err, services)
         }
@@ -422,6 +543,15 @@ fn execute(
     // stops the agent now and not at the first job.
     let host = &services.bundle;
     let bundle = BundleSettings::from_cli(&cli, platform, &**host).map_err(Failure::Usage)?;
+    // An agent that runs native jobs opens its store now, before the hello: the hello says
+    // it holds bundles only when the store is open, and the runtime is made over the same
+    // store. An agent that runs no native job could never run a bundle, so it opens none.
+    let opened = match (&bundle, cli.native_helper_socket.is_some()) {
+        (Some(settings), true) => host
+            .open(settings)
+            .map_err(|why| Failure::Usage(format!("--bundle-store: {why}")))?,
+        _ => None,
+    };
     let store = bundle.as_ref().map(|settings| StoreView {
         settings,
         host: &**host,
@@ -453,12 +583,58 @@ fn execute(
                 .to_owned(),
         ));
     }
+    let crun = runtime_flags(&cli, platform, services, err)?;
+    // Native jobs need the Seatbelt and the helper of a Mac.
+    if cli.native_helper_socket.is_some() && !platform.is_macos() {
+        return Err(Failure::Usage(
+            "--native-helper-socket: native jobs run on macOS only".to_owned(),
+        ));
+    }
     // The job flags are checked now so a wrong one stops the agent before it registers;
     // the worker is built from them below, before the first hello.
-    let local = Local::from_cli(&cli).map_err(Failure::Usage)?;
+    let mut local = match crun {
+        Some(settings) => Local::from_cli_crun(&cli, services.euid, settings),
+        None => Local::from_cli(&cli, services.euid),
+    }
+    .map_err(Failure::Usage)?;
+    local.native = match (local.native.take(), opened) {
+        (Some(native), Some(store)) => Some(native.with_bundles(store).map_err(Failure::Usage)?),
+        (native, _) => native,
+    };
     if let Some(why) = &local.files_warning {
         let _ = writeln!(err, "js-agent: warning: {why}");
     }
+    // The store and its claim files go in the directory above the scratch root, which must
+    // be on the scratch root's file system (a lease's `/work` and home are written there, and
+    // the run's disk is bounded by that file system), and one crun agent may hold each scratch
+    // root and each host id: the start-up sweep and the lease names go by them.
+    #[cfg(target_os = "linux")]
+    let _claims = match local.container.as_ref().and_then(Settings::crun) {
+        Some(plan) => {
+            crun::prepare_store(&plan.claim_dir, &plan.store).map_err(Failure::Usage)?;
+            let (dir, root) = (&plan.claim_dir, &plan.scratch_root);
+            crun::require_trusted_ancestors(root, services.euid, services.ancestors_floor)
+                .map_err(|why| Failure::Usage(format!("--scratch-root: {why}")))?;
+            if !crun::same_filesystem(services.files, &plan.store, root).map_err(Failure::Usage)? {
+                return Err(Failure::Usage(format!(
+                    "--scratch-root: {} and {}, where the image store and the leases' /work and \
+                     home are kept, are on different file systems: a job could fill the file \
+                     system of the store; mount the scratch file system at the directory that \
+                     holds the scratch root",
+                    root.display(),
+                    plan.store.display()
+                )));
+            }
+            let host = crun::HostClaim::take(dir, &offer.hello.host_id);
+            let host = host.map_err(|why| Failure::Usage(why.to_string()))?;
+            let scratch = crun::HostClaim::scratch_root(dir, root);
+            Some((
+                host,
+                scratch.map_err(|why| Failure::Usage(why.to_string()))?,
+            ))
+        }
+        None => None,
+    };
     local
         .check_filesystems(services.files)
         .map_err(Failure::Usage)?;
@@ -503,17 +679,22 @@ fn execute(
         integrity::require_host_namespaces(&link, &read)
             .map_err(|why| Failure::Usage(format!("--container-bin: {why}")))?;
     }
-    // An agent that runs containers says so in its hello. The hello is sent only after the
-    // job half below has started, and that ends the agent first if the program does not
-    // run, so no hello that names a runtime is sent for one that was not found.
-    if local.container.is_some() {
-        let found = contract::report(
+    // An agent that runs containers, or native jobs, says so in its hello. The hello is sent
+    // only after the job half below has started, and that ends the agent first if the program
+    // (or the helper) does not run, so no hello that names a runtime is sent for one that was
+    // not found.
+    let reported = match (local.container.is_some(), local.native.is_some()) {
+        (true, _) => Some(contract::report(
             &mut offer.hello,
             toolkit.as_ref(),
             commands,
             local.files.is_some(),
             default_gib,
-        );
+        )),
+        (false, true) => Some(contract::report_native(&mut offer.hello)),
+        (false, false) => None,
+    };
+    if let Some(found) = reported {
         found.iter().for_each(|warning| {
             let _ = writeln!(err, "js-agent: warning: {warning}");
         });
