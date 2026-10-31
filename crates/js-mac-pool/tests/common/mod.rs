@@ -242,3 +242,5 @@ pub fn run(
 pub mod ancestry;
 pub mod canary;
 pub mod mac;
+pub mod priv_root;
+pub mod trace;
