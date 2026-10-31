@@ -119,7 +119,14 @@ fn the_unit_must_be_a_declared_unit() {
 #[test]
 fn versions_are_short_plain_words_and_differ() {
     let longest = "9".repeat(MAX_VERSION_LEN);
-    for good_version in ["1", "1.4.0", "1.4.0-rc.1+build_5~x", longest.as_str()] {
+    for good_version in [
+        "1",
+        "1.4.0",
+        "1.4.0-rc.1+build_5~x",
+        "1.-0",
+        "1.0.",
+        longest.as_str(),
+    ] {
         passes(|r| {
             r.update.target = good_version.to_owned();
             r.update.previous = Some("0.0.1".to_owned());
@@ -139,6 +146,11 @@ fn versions_are_short_plain_words_and_differ() {
         "1.4.0\n",
         "v\u{e9}",
         "1;rm",
+        "..",
+        "1..0",
+        "1.0..",
+        "-1.0",
+        "-",
     ] {
         assert_eq!(
             broken(|r| r.update.target = bad.to_owned()),
@@ -500,5 +512,81 @@ fn every_rule_has_words_for_the_log() {
         Invalid::Version { field: "target" }
             .to_string()
             .starts_with("target is not")
+    );
+}
+
+#[test]
+fn the_comparison_with_the_table_is_exact_not_by_path_components() {
+    // The record's path is plain; the table spells the same directory another way.
+    for spelling in [
+        "/opt/js-agent/releases/1.4.0/",
+        "/opt/js-agent/./releases/1.4.0",
+        "/opt/js-agent//releases/1.4.0",
+        "/opt/js-agent/releases/x/../1.4.0",
+    ] {
+        let mut table = params();
+        table.staged_release = PathBuf::from(spelling);
+        assert_eq!(
+            validate(&good(), &declaration(), &table),
+            Err(Invalid::ParamsMismatch { field: "staged" }),
+            "{spelling}"
+        );
+        let mut table = params();
+        table.previous_release = Some(PathBuf::from(spelling));
+        assert_eq!(
+            validate(&good(), &declaration(), &table),
+            Err(Invalid::ParamsMismatch {
+                field: "previous_target"
+            }),
+            "{spelling}"
+        );
+    }
+}
+
+#[test]
+fn the_previous_version_and_the_previous_release_come_together_or_not_at_all() {
+    // The record with one but not the other.
+    for change in [
+        (|r: &mut Record| r.update.previous = None) as fn(&mut Record),
+        |r| r.update.previous_target = None,
+    ] {
+        let mut record = good();
+        change(&mut record);
+        assert_eq!(
+            validate(&record, &declaration(), &params_for(&record)),
+            Err(Invalid::Unpaired { side: "record" })
+        );
+    }
+    // The table with one but not the other: refused before the two are compared.
+    for change in [
+        (|p: &mut Params| p.previous_version = None) as fn(&mut Params),
+        |p| p.previous_release = None,
+    ] {
+        let mut table = params();
+        change(&mut table);
+        assert_eq!(
+            validate(&good(), &declaration(), &table),
+            Err(Invalid::Unpaired { side: "params" })
+        );
+    }
+}
+
+#[test]
+fn the_staged_and_the_previous_release_differ() {
+    assert_eq!(
+        broken(|r| r.update.previous_target = Some(r.update.staged.clone())),
+        Invalid::SameRelease
+    );
+}
+
+#[test]
+fn the_new_rules_have_words_for_the_log() {
+    assert_eq!(
+        Invalid::Unpaired { side: "params" }.to_string(),
+        "the previous version and the previous release must both be present or both absent in the params"
+    );
+    assert_eq!(
+        Invalid::SameRelease.to_string(),
+        "the staged release and the previous release are the same"
     );
 }

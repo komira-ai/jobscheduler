@@ -35,9 +35,17 @@ pub enum DeclarationError {
     /// The file is not TOML, or lacks a key the hook needs, or has one of the wrong type.
     #[error("the declaration is not usable: {0}")]
     Parse(#[from] toml::de::Error),
-    /// `state_dir` or a write path is relative.
-    #[error("state_dir and every write path must be absolute")]
-    Relative,
+    /// `state_dir` or a write path is not absolute and plain (no `.`, `..`, doubled or
+    /// trailing slash).
+    #[error("state_dir and every write path must be absolute paths of plain components")]
+    NotPlain,
+    /// `state_dir` is not one of `write_paths`: the hook could not write its own record.
+    #[error("state_dir is not listed in hook.write_paths")]
+    StateDirNotListed,
+    /// `state_dir` lies inside another write path, or another lies inside it: a release or
+    /// the agent could then reach the record.
+    #[error("state_dir and the other write paths must not lie inside one another")]
+    StateDirNested,
     /// `hook.units` is empty: no unit could ever match the record's.
     #[error("hook.units is empty")]
     NoUnits,
@@ -108,7 +116,7 @@ impl Declaration {
         };
         let mut paths = std::iter::once(&declaration.state_dir).chain(&declaration.write_paths);
         if paths.any(|path| !path.is_absolute()) {
-            return Err(DeclarationError::Relative);
+            return Err(DeclarationError::NotPlain);
         }
         if declaration.units.is_empty() {
             return Err(DeclarationError::NoUnits);

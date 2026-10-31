@@ -7,10 +7,11 @@
 //! the reason `state_invalid` and changes nothing. Where the record and the system disagree
 //! about what was done, the system is believed; that is a step's decision and not a rule here.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use super::declaration::Declaration;
 use super::params::Params;
+use super::plain::is_plain;
 use super::record::{Record, SCHEMA};
 
 /// The longest version string a record may hold.
@@ -58,6 +59,17 @@ pub enum Invalid {
         /// The record field.
         field: &'static str,
     },
+    /// Exactly one of the previous version and the previous release is present.
+    #[error(
+        "the previous version and the previous release must both be present or both absent in the {side}"
+    )]
+    Unpaired {
+        /// `record` or `params`.
+        side: &'static str,
+    },
+    /// The staged release and the previous release are the same directory.
+    #[error("the staged release and the previous release are the same")]
+    SameRelease,
     /// The target and the previous version are the same: there is nothing to update.
     #[error("target and previous version are the same")]
     SameVersion,
@@ -83,17 +95,6 @@ pub enum Invalid {
         /// The mark it needs.
         needs: &'static str,
     },
-}
-
-/// Whether `path` is spelt the way it would be after canonicalising it lexically: absolute,
-/// no `.` or `..`, no doubled or trailing slash.
-fn is_plain(path: &Path) -> bool {
-    let rebuilt: PathBuf = path.components().collect();
-    path.is_absolute()
-        && path
-            .components()
-            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
-        && rebuilt.as_os_str() == path.as_os_str()
 }
 
 /// A release path: plain, not the root, and not in the state directory.

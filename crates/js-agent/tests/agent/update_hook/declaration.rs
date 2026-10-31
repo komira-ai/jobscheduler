@@ -110,16 +110,16 @@ fn a_relative_state_directory_or_write_path_is_refused() {
     );
     assert!(matches!(
         refused(&relative_state),
-        DeclarationError::Relative
+        DeclarationError::NotPlain
     ));
     let relative_write = GOOD.replace("\"/opt/js-agent-link\"", "\"opt/js-agent-link\"");
     assert!(matches!(
         refused(&relative_write),
-        DeclarationError::Relative
+        DeclarationError::NotPlain
     ));
     assert_eq!(
-        DeclarationError::Relative.to_string(),
-        "state_dir and every write path must be absolute"
+        DeclarationError::NotPlain.to_string(),
+        "state_dir and every write path must be absolute paths of plain components"
     );
 }
 
@@ -142,4 +142,75 @@ fn a_declaration_is_read_from_a_path_and_a_missing_one_is_refused() {
     assert!(matches!(error, DeclarationError::Read(_)));
     assert!(error.to_string().starts_with("cannot read the declaration"));
     assert_eq!(DECLARATION_PATH, "/etc/updater.d/js-agent.toml");
+}
+
+const WRITE: &str =
+    r#"write_paths = ["/opt/js-agent", "/opt/js-agent-link", "/var/lib/js-agent-update"]"#;
+
+#[test]
+fn paths_that_are_not_plain_are_refused() {
+    for state in [
+        "/var/lib/../lib/js-agent-update",
+        "/var/lib/js-agent-update/",
+        "/var/lib/./js-agent-update",
+        "/var//lib/js-agent-update",
+    ] {
+        let text = GOOD
+            .replace(
+                "state_dir = \"/var/lib/js-agent-update\"",
+                &format!("state_dir = \"{state}\""),
+            )
+            .replace(
+                WRITE,
+                &WRITE.replace("\"/var/lib/js-agent-update\"", &format!("\"{state}\"")),
+            );
+        assert!(
+            matches!(refused(&text), DeclarationError::NotPlain),
+            "{state}"
+        );
+    }
+    let text = GOOD.replace("\"/opt/js-agent-link\"", "\"/opt/js-agent-link/../x\"");
+    assert!(matches!(refused(&text), DeclarationError::NotPlain));
+}
+
+#[test]
+fn the_state_directory_must_be_a_write_path() {
+    let text = GOOD.replace(
+        WRITE,
+        r#"write_paths = ["/opt/js-agent", "/opt/js-agent-link"]"#,
+    );
+    assert!(matches!(
+        refused(&text),
+        DeclarationError::StateDirNotListed
+    ));
+    // Listed by another spelling of the same directory is not listed.
+    let text = GOOD.replace(
+        WRITE,
+        r#"write_paths = ["/opt/js-agent", "/var/lib/js-agent-update2"]"#,
+    );
+    assert!(matches!(
+        refused(&text),
+        DeclarationError::StateDirNotListed
+    ));
+}
+
+#[test]
+fn the_state_directory_and_the_other_write_paths_do_not_nest() {
+    for other in ["/var/lib", "/var", "/", "/var/lib/js-agent-update/releases"] {
+        let text = GOOD.replace(
+            WRITE,
+            &format!(r#"write_paths = ["/opt/js-agent", "{other}", "/var/lib/js-agent-update"]"#),
+        );
+        assert!(
+            matches!(refused(&text), DeclarationError::StateDirNested),
+            "{other}"
+        );
+    }
+    // Siblings that share a prefix are not nested, and the state directory listed twice is
+    // still one directory.
+    let text = GOOD.replace(
+        WRITE,
+        r#"write_paths = ["/var/lib/js-agent-update2", "/var/lib/js-agent-update", "/var/lib/js-agent-update"]"#,
+    );
+    assert!(Declaration::parse(&text).is_ok());
 }
