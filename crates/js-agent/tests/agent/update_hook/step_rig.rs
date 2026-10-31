@@ -143,7 +143,7 @@ impl Rig {
             String::new()
         };
         let link = root.join("link/current");
-        let release_link = format!("\"updater.release_link\" = \"{}\"\n", link.display());
+        let release_link = format!("\"release_link\" = \"{}\"\n", link.display());
         let params = Params::parse(&format!(
             concat!(
                 "cordon_lease_secs = {lease}\ncordon_max_secs = {max}\n{release_link}",
@@ -435,12 +435,13 @@ impl Units for Spy<'_> {
 
     fn start(&self, unit: &str) -> Result<(), PortError> {
         self.act(format!("units.start({unit})"));
+        let leaves = *self.start_leaves.borrow();
+        if let Some((active, sub)) = leaves {
+            self.world.seed_unit(unit, active, sub);
+        }
         self.port_check("start")?;
-        match *self.start_leaves.borrow() {
-            Some((active, sub)) => {
-                self.world.seed_unit(unit, active, sub);
-                Ok(())
-            }
+        match leaves {
+            Some(_) => Ok(()),
             None => self.world.start(unit),
         }
     }

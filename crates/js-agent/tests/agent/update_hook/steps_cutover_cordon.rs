@@ -149,16 +149,10 @@ fn a_cutover_killed_at_any_point_with_a_lost_cordon_ends_as_an_uninterrupted_one
     sweep("hook-cutover-sweep-never", never_cordoned);
 }
 
-/// The end of a cutover, but for whether its cordon mark was confirmed: a run killed after the
-/// cordon was placed and before the mark was confirmed finds a cordon it cannot attribute, and
-/// leaves the mark as it is.
-fn lenient(rig: &Rig) -> serde_json::Value {
-    let mut end = end_state(rig);
-    end["record"]["cordon"]["provisional"] = json!(false);
-    end
-}
-
-/// As the sweep of steps_cutover.rs, for the hosts of this file.
+/// A cutover run to its end, then again from a fresh host once for each kill point it passes,
+/// killed there and run again. The rerun ends where an uninterrupted run does, except after a
+/// kill between the placing of a cordon and the confirming of its mark: it finds a cordon it
+/// cannot attribute and defers, with nothing stopped and the mark as it was.
 fn sweep(label: &str, build: fn(&str) -> Rig) {
     let baseline = build(&format!("{label}-base"));
     assert_eq!(
@@ -166,7 +160,8 @@ fn sweep(label: &str, build: fn(&str) -> Rig) {
         Outcome::Success
     );
     let points = baseline.kill.points();
-    let end = lenient(&baseline);
+    let end = end_state(&baseline);
+    let mut deferred = 0_u32;
     for k in 1..=points {
         let rig = build(&format!("{label}-{k}"));
         rig.kill.arm(k);
@@ -175,11 +170,20 @@ fn sweep(label: &str, build: fn(&str) -> Rig) {
             "kill point {k} of {points} is reached"
         );
         rig.kill.disarm();
-        let done = Spy::new(&rig).cutover(&rig);
+        let unconfirmed =
+            rig.record().is_some_and(|r| r.cordon.provisional) && rig.cordon_expiry().is_some();
+        let spy = Spy::new(&rig);
+        let done = spy.cutover(&rig);
+        if unconfirmed {
+            deferred += 1;
+            deferred_untouched(&done, &spy, &rig, Reason::CordonUnconfirmed);
+            continue;
+        }
         assert_eq!(done.outcome, Outcome::Success, "killed at point {k}");
-        assert_eq!(lenient(&rig), end, "killed at point {k}");
+        assert_eq!(end_state(&rig), end, "killed at point {k}");
         assert_eq!(marks(&rig), [true, true, true], "killed at point {k}");
     }
+    assert_eq!(deferred, u32::from(label.ends_with("never")), "{label}");
 }
 
 #[test]
@@ -330,34 +334,57 @@ fn a_cordon_found_after_ours_lapsed_is_someone_elses_and_is_left_alone() {
 }
 
 #[test]
-fn a_provisional_mark_is_unattributable_and_its_cordon_is_never_renewed_or_lifted() {
+fn a_provisional_mark_with_a_cordon_in_force_defers_and_leaves_both_alone() {
     let (rig, mark, expiry) = provisional("hook-cutover-provisional");
     let spy = Spy::new(&rig);
     let done = spy.cutover(&rig);
-    assert_eq!(done.outcome, Outcome::Success);
+    deferred_untouched(&done, &spy, &rig, Reason::CordonUnconfirmed);
     assert!(
         spy.log()
             .iter()
             .all(|call| call != "uncordon" && !call.starts_with("cordon("))
     );
-    assert_eq!(rig.cordon_expiry(), Some(expiry));
+    assert_eq!(
+        rig.cordon_expiry(),
+        Some(expiry),
+        "neither renewed nor lifted"
+    );
     assert_eq!(
         rig.record().unwrap().cordon,
         mark,
         "the mark is left as it was"
     );
 
+    // With a lease on the host as well it is the same answer: the cordon is not ours to lift.
     let (rig, mark, expiry) = provisional("hook-cutover-provisional-busy");
     rig.set_leases(1);
     let spy = Spy::new(&rig);
     let done = spy.cutover(&rig);
-    deferred_untouched(&done, &spy, &rig, Reason::DrainBound);
+    deferred_untouched(&done, &spy, &rig, Reason::CordonUnconfirmed);
     assert!(
         spy.log()
             .iter()
             .all(|call| call != "uncordon" && !call.starts_with("cordon("))
     );
     assert_eq!(rig.cordon_expiry(), Some(expiry));
+    assert_eq!(rig.record().unwrap().cordon, mark);
+}
+
+#[test]
+fn a_cordon_nobody_renews_is_not_carried_into_a_stop_that_outlasts_it() {
+    // The cordon may lapse during a stop of up to about 4200 s and nobody renews it; the
+    // lease server could then hand the host a job. The cutover stops nothing.
+    let (rig, mark, _) = provisional("hook-cutover-provisional-long-stop");
+    let spy = Spy::new(&rig);
+    *spy.stop_leaves.borrow_mut() = Some(("deactivating", "stop-sigterm"));
+    spy.on_pause(|spy, ticks| {
+        if ticks == 100 {
+            spy.world.seed_unit(UNIT, "inactive", "dead");
+        }
+    });
+    let done = spy.cutover(&rig);
+    deferred_untouched(&done, &spy, &rig, Reason::CordonUnconfirmed);
+    assert_eq!(rig.world.ticks(), 0, "no wait for a stop that never began");
     assert_eq!(rig.record().unwrap().cordon, mark);
 }
 

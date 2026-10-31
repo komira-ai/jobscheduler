@@ -83,11 +83,14 @@ pub enum Reason {
     LinkFailed,
     /// The unit could not be started, or did not become active in time.
     StartFailed,
+    /// A cordon is in force but the record's mark of it was never confirmed: it may lapse
+    /// during the stop, and nothing renews it.
+    CordonUnconfirmed,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 16] = [
+    pub const ALL: [Reason; 17] = [
         Reason::NotImplemented,
         Reason::BadArgs,
         Reason::BadParams,
@@ -104,6 +107,7 @@ impl Reason {
         Reason::StopFailed,
         Reason::LinkFailed,
         Reason::StartFailed,
+        Reason::CordonUnconfirmed,
     ];
 
     /// The token in the JSON.
@@ -126,6 +130,8 @@ impl Reason {
             Reason::StopFailed => "stop_failed",
             Reason::LinkFailed => "link_failed",
             Reason::StartFailed => "start_failed",
+            // Red stub: the token is not given yet.
+            Reason::CordonUnconfirmed => "not_implemented",
         }
     }
 }

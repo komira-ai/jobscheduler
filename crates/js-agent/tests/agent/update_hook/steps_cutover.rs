@@ -237,8 +237,9 @@ fn a_unit_that_does_not_stop_in_time_fails_the_cutover_as_an_environment_matter_
     assert_eq!(done.report.reason, Some(Reason::StopFailed));
     assert_eq!(done.report.class, Class::Environment);
     assert!(!done.report.reversible);
-    // The declared bound of cutover (4320 s) less the 120 s the start is allowed.
-    assert_eq!(rig.world.ticks(), 420);
+    // The declared bound of cutover (4320 s) less the 120 s the start is allowed and a margin
+    // of 60 s.
+    assert_eq!(rig.world.ticks(), 414);
     assert_eq!(marks(&rig), [true, false, false]);
     assert_eq!(link_target(&rig), Some(previous(&rig)));
     assert_eq!(spy.act_names(), [stop()]);
@@ -264,7 +265,7 @@ fn a_failed_stop_is_an_environment_failure_that_is_irreversible_and_a_rerun_goes
 }
 
 #[test]
-fn a_unit_manager_that_cannot_be_read_fails_the_cutover_as_an_environment_matter() {
+fn a_unit_manager_that_cannot_be_read_fails_the_cutover_before_anything_is_marked() {
     let rig = running(Rig::new("hook-cutover-show-fails"));
     let spy = Spy::new(&rig);
     spy.fail("show");
@@ -272,8 +273,9 @@ fn a_unit_manager_that_cannot_be_read_fails_the_cutover_as_an_environment_matter
     assert_eq!(done.outcome, Outcome::Failure);
     assert_eq!(done.report.reason, Some(Reason::StopFailed));
     assert_eq!(done.report.class, Class::Environment);
-    assert!(!done.report.reversible);
+    assert_eq!(line(&done)["reversible"], json!(true), "nothing was begun");
     assert_eq!(spy.act_names(), Vec::<String>::new());
+    assert_eq!(marks(&rig), [false, false, false]);
     assert_eq!(unit_state(&rig), "active running");
 }
 
@@ -299,7 +301,7 @@ fn a_failed_link_move_is_an_environment_failure_with_the_unit_stopped_and_a_reru
 }
 
 #[test]
-fn a_link_that_cannot_be_read_fails_the_cutover_as_a_link_matter() {
+fn a_link_that_cannot_be_read_fails_the_cutover_before_anything_is_marked() {
     let rig = running(Rig::new("hook-cutover-link-unreadable"));
     // A file where the link should be: the port cannot read it as a link.
     std::fs::remove_file(rig.tmp.path().join("world/link/current")).unwrap();
@@ -309,11 +311,13 @@ fn a_link_that_cannot_be_read_fails_the_cutover_as_a_link_matter() {
     assert_eq!(done.outcome, Outcome::Failure);
     assert_eq!(done.report.reason, Some(Reason::LinkFailed));
     assert_eq!(done.report.class, Class::Environment);
-    assert!(!done.report.reversible);
+    assert_eq!(line(&done)["reversible"], json!(true), "nothing was begun");
+    assert_eq!(spy.act_names(), Vec::<String>::new());
+    assert_eq!(marks(&rig), [false, false, false]);
 }
 
 #[test]
-fn a_failed_start_is_a_release_failure_with_every_mark_set_and_a_rerun_starts_only() {
+fn a_start_that_fails_with_the_unit_never_run_is_an_environment_failure_and_a_rerun_starts_only() {
     let rig = running(Rig::new("hook-cutover-start-fails"));
     let spy = Spy::new(&rig);
     spy.fail("start");
@@ -337,6 +341,32 @@ fn a_failed_start_is_a_release_failure_with_every_mark_set_and_a_rerun_starts_on
 }
 
 #[test]
+fn a_start_that_errors_with_the_unit_failed_is_a_release_failure() {
+    let rig = running(Rig::new("hook-cutover-start-errors-failed"));
+    let spy = Spy::new(&rig);
+    spy.fail("start");
+    *spy.start_leaves.borrow_mut() = Some(("failed", "failed"));
+    let done = spy.cutover(&rig);
+    assert_eq!(done.report.reason, Some(Reason::StartFailed));
+    assert_eq!(
+        done.report.class,
+        Class::Release,
+        "the binary ran and failed"
+    );
+    assert!(!done.report.reversible);
+}
+
+#[test]
+fn a_unit_that_starts_and_goes_inactive_is_an_environment_failure() {
+    let rig = running(Rig::new("hook-cutover-start-inactive"));
+    let spy = Spy::new(&rig);
+    *spy.start_leaves.borrow_mut() = Some(("inactive", "dead"));
+    let done = spy.cutover(&rig);
+    assert_eq!(done.report.reason, Some(Reason::StartFailed));
+    assert_eq!(done.report.class, Class::Environment);
+}
+
+#[test]
 fn a_unit_that_starts_and_fails_is_a_release_failure() {
     let rig = running(Rig::new("hook-cutover-start-then-fails"));
     let spy = Spy::new(&rig);
@@ -350,14 +380,18 @@ fn a_unit_that_starts_and_fails_is_a_release_failure() {
 }
 
 #[test]
-fn a_unit_that_stays_activating_is_given_120_s_and_then_fails_the_cutover() {
+fn a_unit_that_stays_activating_is_given_120_s_and_then_fails_the_cutover_as_environment() {
     let rig = running(Rig::new("hook-cutover-start-stuck"));
     let spy = Spy::new(&rig);
     *spy.start_leaves.borrow_mut() = Some(("activating", "start"));
     let done = spy.cutover(&rig);
     assert_eq!(done.outcome, Outcome::Failure);
     assert_eq!(done.report.reason, Some(Reason::StartFailed));
-    assert_eq!(done.report.class, Class::Release);
+    assert_eq!(
+        done.report.class,
+        Class::Environment,
+        "still activating is not a failure of the binary"
+    );
     assert_eq!(rig.world.ticks(), 12);
     // A rerun does not start it a second time: it waits on the start that is under way.
     let rerun = Spy::new(&rig);
@@ -377,9 +411,18 @@ fn a_link_outside_the_declared_directories_is_refused_and_nothing_is_done() {
         ("absent", None),
         ("elsewhere", Some("/etc/elsewhere/current")),
         ("in the state directory", Some("{root}/state/current")),
+        ("the state directory itself", Some("{root}/state")),
         ("the declared directory itself", Some("{root}/link")),
         ("not plain", Some("{root}/link/../elsewhere")),
         ("relative", Some("current")),
+        (
+            "inside the staged release",
+            Some("{root}/releases/1.4.0/current"),
+        ),
+        (
+            "inside the previous release",
+            Some("{root}/releases/1.3.0/current"),
+        ),
     ];
     for (n, (what, link)) in cases.into_iter().enumerate() {
         let mut rig = running(Rig::new(&format!("hook-cutover-link-refused-{n}")));

@@ -129,3 +129,8 @@ fn the_reasons_of_cutover_are_these_exact_tokens() {
     assert_eq!(Reason::LinkFailed.as_str(), "link_failed");
     assert_eq!(Reason::StartFailed.as_str(), "start_failed");
 }
+
+#[test]
+fn the_reason_of_an_unconfirmed_cordon_is_this_exact_token() {
+    assert_eq!(Reason::CordonUnconfirmed.as_str(), "cordon_unconfirmed");
+}

@@ -28,6 +28,13 @@ pub const EXPIRY_SLACK_MS: u64 = 1_000;
 /// version check, the cordon calls and the record writes happen around the wait.
 pub const PREPARE_MARGIN_SECS: u64 = 60;
 
+/// How long a started unit has to become active, in seconds.
+pub const START_WAIT_SECS: u64 = 120;
+
+/// The margin `cutover` keeps between the end of its wait for the stop and the declared
+/// timeout, besides the start wait, in seconds.
+pub const CUTOVER_MARGIN_SECS: u64 = 60;
+
 /// The rule a record broke.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Invalid {
@@ -40,6 +47,14 @@ pub enum Invalid {
         prepare: u64,
         /// `drain_wait_secs`.
         wait: u64,
+    },
+    /// The declared `cutover` timeout leaves no time to wait for the stop.
+    #[error(
+        "the declared cutover timeout {cutover} s leaves no time to stop: it must exceed {START_WAIT_SECS} s plus {CUTOVER_MARGIN_SECS} s"
+    )]
+    CutoverTimeout {
+        /// `[hook.timeout_secs] cutover`.
+        cutover: u64,
     },
     /// The record's schema is not the one this hook writes.
     #[error("schema {found} is not {SCHEMA}")]

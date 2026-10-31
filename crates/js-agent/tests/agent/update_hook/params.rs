@@ -73,11 +73,11 @@ fn the_cordon_keys_and_the_reserved_release_keys_are_read() {
 }
 
 #[test]
-fn the_release_link_is_read_when_the_updater_names_it_and_absent_otherwise() {
-    assert_eq!(RELEASE_LINK_KEY, "updater.release_link");
+fn the_release_link_is_read_when_the_declaration_names_it_and_absent_otherwise() {
+    assert_eq!(RELEASE_LINK_KEY, "release_link");
     assert_eq!(Params::parse(&good()).unwrap().release_link, None);
     let named = format!(
-        "{}\"updater.release_link\" = \"/opt/js-agent-link/current\"\n",
+        "{}\"release_link\" = \"/opt/js-agent-link/current\"\n",
         good()
     );
     assert_eq!(
@@ -88,9 +88,9 @@ fn the_release_link_is_read_when_the_updater_names_it_and_absent_otherwise() {
 
 #[test]
 fn a_relative_or_non_text_release_link_is_refused() {
-    let relative = format!("{}\"updater.release_link\" = \"current\"\n", good());
+    let relative = format!("{}\"release_link\" = \"current\"\n", good());
     assert!(matches!(refused(&relative), ParamsError::Relative(key) if key == RELEASE_LINK_KEY));
-    let number = format!("{}\"updater.release_link\" = 7\n", good());
+    let number = format!("{}\"release_link\" = 7\n", good());
     assert!(matches!(refused(&number), ParamsError::NotText(key) if key == RELEASE_LINK_KEY));
 }
 

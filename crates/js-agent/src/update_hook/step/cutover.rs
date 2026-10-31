@@ -32,15 +32,11 @@ use std::time::Duration;
 use crate::update_hook::plain::is_plain;
 use crate::update_hook::{
     Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params, Reason, Record, Report,
-    UnitState,
+    START_WAIT_SECS, UnitState,
 };
 
 use super::prepare::{ask_secs, place, refuse_host, renew};
 use super::{Env, failure, lease_failure, open_state, save, success};
-
-/// How long a started unit has to become active, in seconds (the design's bound on `cutover`
-/// is the unit's own stop limit plus this plus a margin).
-const START_WAIT_SECS: u64 = 120;
 
 /// Runs `cutover`.
 pub fn cutover(env: &Env<'_>, params: &Params) -> Done {
