@@ -33,7 +33,10 @@ Two limits come from there being one cordon per host and no record of who placed
   `--lease-secs`, its cordon lapses. The next renewal then says again whose the cordon is: one that
   was there already is another holder's, and the verb prints `kept host=<id>
   reason=taken_after_lapse`, lifts nothing and exits 3; one that the renewal placed is the verb's
-  again, said with a new `cordoned` line, and held and lifted as before.
+  again, said with a new `cordoned` line, and held and lifted as before. The verb counts its cordon from when its request left and the server from when it arrived, so
+  a renewal stalled only just past `--lease-secs` can find the verb's own cordon still in force and
+  call it `taken_after_lapse`: an exit 3 after a stall may leave the verb's own cordon, which lapses
+  by itself within `--lease-secs`.
 
 ## What it prints
 
