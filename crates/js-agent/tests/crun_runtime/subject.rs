@@ -20,6 +20,9 @@ use js_oci::{Allow, Client, Policy};
 
 use crate::runtime_suite::{self, Program, Shared, Subject};
 
+/// The id the subject's runtime registers under.
+pub const HOST: &str = "crun-suite";
+
 /// The cgroup v2 mount.
 const MOUNT: &str = "/sys/fs/cgroup";
 
@@ -100,6 +103,7 @@ pub struct CrunSubject {
     cgroup: String,
     image: String,
     crun: Rc<RefCell<CrunRuntime>>,
+    settings: CrunSettings,
 }
 
 /// A subject for the test `name`.
@@ -141,21 +145,52 @@ pub fn crun_subject(name: &str) -> CrunSubject {
             root: delegation().root.clone(),
             actions: cgroup.clone(),
         },
-        host_id: "crun-suite".to_owned(),
+        host_id: HOST.to_owned(),
         pull_threads: 1,
         files: None,
     };
-    let crun =
-        CrunRuntime::open(settings, registry(&scratch)).unwrap_or_else(|e| panic!("open: {e}"));
+    let crun = CrunRuntime::open(settings.clone(), registry(&scratch))
+        .unwrap_or_else(|e| panic!("open: {e}"));
     CrunSubject {
         base,
         cgroup,
         image,
         crun: Rc::new(RefCell::new(crun)),
+        settings,
     }
 }
 
 impl CrunSubject {
+    /// Another runtime over the same store and cgroup, registered as `host_id`: what an
+    /// agent that starts after another process of its own, or beside another agent, opens.
+    /// It sweeps as it opens.
+    pub fn open_as(&self, host_id: &str) -> CrunRuntime {
+        let mut settings = self.settings.clone();
+        settings.host_id = host_id.to_owned();
+        CrunRuntime::open(settings, registry(&self.settings.scratch))
+            .unwrap_or_else(|e| panic!("open as {host_id}: {e}"))
+    }
+
+    /// The directory of the lease `name`.
+    pub fn lease_dir(&self, name: &str) -> PathBuf {
+        self.settings.scratch.join(name)
+    }
+
+    /// The cgroup of the lease `name`.
+    pub fn lease_cgroup(&self, name: &str) -> PathBuf {
+        cgroup_dir(&self.cgroup).join(name)
+    }
+
+    /// The directory of the sidecars.
+    pub fn ledger(&self) -> PathBuf {
+        self.settings.scratch.join("oci-labels")
+    }
+
+    /// The sidecar of the lease `name`.
+    pub fn sidecar(&self, name: &str) -> PathBuf {
+        self.ledger().join(format!("{name}.json"))
+    }
+
     /// A directory below the subject's, searchable by the job's ids.
     fn made(&self, parts: &[&str], mode: u32) -> PathBuf {
         let path = parts.iter().fold(self.base.clone(), |p, part| p.join(part));
