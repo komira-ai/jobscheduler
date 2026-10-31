@@ -15,6 +15,12 @@
 //! reaches the user's Aqua services (the window server, Launch Services), as a process
 //! the user started at the login window does.
 //!
+//! A `run` may carry limits (`crate::limits::Limits`): the child sets the largest file
+//! (`RLIMIT_FSIZE`) and the most processes (`RLIMIT_NPROC`), soft and hard, with
+//! `setrlimit`, after the fork and before the `exec`, so they bind the program however it
+//! is started and no shell is needed to set them. They are not set in the GUI session,
+//! where the child that executes is the root helper itself, and are refused there.
+//!
 //! Every other descriptor is closed across `exec`: the helper serves several leases at
 //! once, and macOS cannot receive a descriptor already close-on-exec, so a lease
 //! directory just received for one lease could otherwise leak into another lease's
@@ -27,6 +33,7 @@ use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
+use crate::limits::Limits;
 use crate::proto::Session;
 
 /// The highest descriptor number the child's close-on-exec pass reaches when the
@@ -61,6 +68,25 @@ pub struct Spawn {
     pub cwd: OwnedFd,
     /// Where it runs.
     pub session: Session,
+    /// The limits the child sets on itself before it executes; none for no limits.
+    /// Refused in the GUI session ([`check_limits`]).
+    pub limits: Option<Limits>,
+}
+
+/// Checks the limits of a start before anything starts.
+///
+/// # Errors
+/// A value is out of range ([`Limits::check`]), or the session is the GUI session, where
+/// the helper cannot set them on the process that runs as the lease user.
+pub fn check_limits(session: Session, limits: Option<&Limits>) -> Result<(), String> {
+    let Some(limits) = limits else {
+        return Ok(());
+    };
+    limits.check()?;
+    if session == Session::Gui {
+        return Err("limits are not set in the GUI session".to_owned());
+    }
+    Ok(())
 }
 
 /// Checks an argument vector and environment before anything starts.
@@ -86,9 +112,11 @@ pub fn check(argv: &[String], env: &[(String, String)]) -> Result<(), String> {
 /// Starts `spawn`'s process. The caller has run [`check`].
 ///
 /// # Errors
-/// The process could not be started (the program is missing, the uid change or
-/// `fchdir` failed).
+/// The process could not be started (the program is missing, the uid change, `fchdir` or
+/// a `setrlimit` failed, or the limits are refused by [`check_limits`]).
 pub fn spawn(spawn: Spawn) -> io::Result<Child> {
+    check_limits(spawn.session, spawn.limits.as_ref())
+        .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
     let (program, args) = spawn
         .argv
         .split_first()
@@ -118,11 +146,11 @@ pub fn spawn(spawn: Spawn) -> io::Result<Child> {
         .stdout(Stdio::from(spawn.stdout))
         .stderr(Stdio::from(spawn.stderr));
     let cwd = spawn.cwd.as_raw_fd();
-    // SAFETY: the closure runs in the child between fork and exec; `in_child` calls
+    // SAFETY: the closure runs in the child between fork and exec; `run_steps` calls
     // only async-signal-safe functions and allocates nothing. `cwd` stays open in the
     // parent until `spawn` returns, so the child's copy is the lease directory.
     unsafe {
-        command.pre_exec(child_steps(cwd));
+        command.pre_exec(child_steps(cwd, spawn.limits));
     }
     let child = command.spawn();
     drop(spawn.cwd);
@@ -145,20 +173,81 @@ fn gui(_: u32, _: u32, _: &str, _: &[String]) -> io::Result<Command> {
     ))
 }
 
-/// The closure `pre_exec` runs in the child: [`in_child`] with the lease directory.
-fn child_steps(cwd: libc::c_int) -> impl FnMut() -> io::Result<()> + Send + Sync + 'static {
-    move || in_child(cwd)
+/// The limits the child can set, as the kernel names them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Resource {
+    /// `RLIMIT_FSIZE`, in bytes.
+    FileSize,
+    /// `RLIMIT_NPROC`, a count.
+    Processes,
 }
 
-/// The child's last steps before `exec`, after the uid change: enter the lease
-/// directory and mark every descriptor above the standard streams close-on-exec.
-/// Async-signal-safe (fchdir, getrlimit, fcntl).
-fn in_child(cwd: libc::c_int) -> io::Result<()> {
-    // SAFETY: fchdir takes any number; one that is not a directory fails.
-    if unsafe { libc::fchdir(cwd) } != 0 {
-        return Err(io::Error::last_os_error());
+/// What the child asks of the operating system between fork and exec: the seam through
+/// which [`run_steps`]'s order is tested. Every method is async-signal-safe in [`Os`].
+trait ChildOs {
+    /// Makes the directory `fd` the working directory.
+    fn fchdir(&mut self, fd: libc::c_int) -> io::Result<()>;
+    /// Marks every descriptor from `first` close-on-exec.
+    fn close_on_exec_from(&mut self, first: libc::c_int);
+    /// Sets `resource` to `value`, soft and hard.
+    fn set_limit(&mut self, resource: Resource, value: libc::rlim_t) -> io::Result<()>;
+}
+
+/// The operating system itself.
+struct Os;
+
+impl ChildOs for Os {
+    fn fchdir(&mut self, fd: libc::c_int) -> io::Result<()> {
+        // SAFETY: fchdir takes any number; one that is not a directory fails.
+        match unsafe { libc::fchdir(fd) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
     }
-    close_on_exec_from(3);
+
+    fn close_on_exec_from(&mut self, first: libc::c_int) {
+        close_on_exec_from(first);
+    }
+
+    fn set_limit(&mut self, resource: Resource, value: libc::rlim_t) -> io::Result<()> {
+        let which = match resource {
+            Resource::FileSize => libc::RLIMIT_FSIZE,
+            Resource::Processes => libc::RLIMIT_NPROC,
+        };
+        let limit = libc::rlimit {
+            rlim_cur: value,
+            rlim_max: value,
+        };
+        // SAFETY: `limit` is a readable rlimit for the call to copy.
+        match unsafe { libc::setrlimit(which, &raw const limit) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+}
+
+/// The closure `pre_exec` runs in the child: [`run_steps`] on the operating system, with
+/// the lease directory and the limits.
+fn child_steps(
+    cwd: libc::c_int,
+    limits: Option<Limits>,
+) -> impl FnMut() -> io::Result<()> + Send + Sync + 'static {
+    move || run_steps(&mut Os, cwd, limits)
+}
+
+/// The child's last steps before `exec`, after the uid change, in this order: enter the
+/// lease directory, mark every descriptor above the standard streams close-on-exec, then
+/// set the largest file and the most processes. A step that fails ends the rest, so the
+/// program is never executed with a limit missing. The process limit is last: from then
+/// on the lease user may be unable to start another process. Async-signal-safe (with
+/// [`Os`]): it allocates nothing.
+fn run_steps(os: &mut impl ChildOs, cwd: libc::c_int, limits: Option<Limits>) -> io::Result<()> {
+    os.fchdir(cwd)?;
+    os.close_on_exec_from(3);
+    if let Some(limits) = limits {
+        os.set_limit(Resource::FileSize, limits.file_bytes)?;
+        os.set_limit(Resource::Processes, libc::rlim_t::from(limits.processes))?;
+    }
     Ok(())
 }
 
@@ -222,6 +311,7 @@ mod tests {
             stderr: null(),
             cwd: std::fs::File::open(cwd).unwrap().into(),
             session: Session::Background,
+            limits: None,
         };
         (spawn, out)
     }
@@ -363,16 +453,165 @@ mod tests {
         }
     }
 
-    /// The child's steps, run in the test process (the child's own run leaves no
-    /// coverage record: it ends in `exec`). Entering the current directory leaves the
-    /// process where it was; a descriptor that is not a directory is an error.
+    /// What the child asked of the operating system, in order.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Asked {
+        Chdir(libc::c_int),
+        CloseOnExec(libc::c_int),
+        Limit(Resource, libc::rlim_t),
+    }
+
+    /// A stand-in for the operating system that records what the child asks and fails
+    /// the `fail_at`th request (counting from 0) with `EPERM`.
+    #[derive(Default)]
+    struct Recorder {
+        asked: Vec<Asked>,
+        fail_at: Option<usize>,
+    }
+
+    impl Recorder {
+        fn ask(&mut self, what: Asked) -> io::Result<()> {
+            let at = self.asked.len();
+            self.asked.push(what);
+            match self.fail_at == Some(at) {
+                true => Err(io::Error::from_raw_os_error(libc::EPERM)),
+                false => Ok(()),
+            }
+        }
+    }
+
+    impl ChildOs for Recorder {
+        fn fchdir(&mut self, fd: libc::c_int) -> io::Result<()> {
+            self.ask(Asked::Chdir(fd))
+        }
+
+        fn close_on_exec_from(&mut self, first: libc::c_int) {
+            let _ = self.ask(Asked::CloseOnExec(first));
+        }
+
+        fn set_limit(&mut self, resource: Resource, value: libc::rlim_t) -> io::Result<()> {
+            self.ask(Asked::Limit(resource, value))
+        }
+    }
+
+    /// Catches: a limit set before the directory and the descriptors are dealt with (the
+    /// lease directory could then not be entered under the process limit), the limits
+    /// swapped, their units changed (bytes, and a count), or a limit set when the start
+    /// has none.
+    #[test]
+    fn the_child_enters_the_directory_then_sets_the_limits() {
+        let mut os = Recorder::default();
+        run_steps(&mut os, 9, Some(Limits::new(4096, 8).unwrap())).unwrap();
+        assert_eq!(
+            os.asked,
+            [
+                Asked::Chdir(9),
+                Asked::CloseOnExec(3),
+                Asked::Limit(Resource::FileSize, 4096),
+                Asked::Limit(Resource::Processes, 8),
+            ]
+        );
+        let mut unlimited = Recorder::default();
+        run_steps(&mut unlimited, 9, None).unwrap();
+        assert_eq!(
+            unlimited.asked,
+            [Asked::Chdir(9), Asked::CloseOnExec(3)],
+            "no limits asked for, none set"
+        );
+    }
+
+    /// Catches: a step that fails not ending the child's steps (the program would execute
+    /// with a limit missing, or in the wrong directory), or the failure's cause lost.
+    #[test]
+    fn a_step_that_fails_ends_the_steps_with_its_error() {
+        let limits = Some(Limits::new(4096, 8).unwrap());
+        // The requests are numbered from 0: the directory, the descriptors, the file size,
+        // the process count.
+        for (fail_at, ran) in [(0, 1), (2, 3), (3, 4)] {
+            let mut os = Recorder {
+                fail_at: Some(fail_at),
+                ..Recorder::default()
+            };
+            let error = run_steps(&mut os, 9, limits).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EPERM), "{fail_at}");
+            assert_eq!(os.asked.len(), ran, "{fail_at}: {:?}", os.asked);
+        }
+    }
+
+    /// Catches: limits refused in no case, or accepted in the GUI session, where the
+    /// child that executes is the root helper itself and the limits would bind the wrong
+    /// process, or a bad value that reaches `setrlimit`.
+    #[test]
+    fn limits_are_checked_before_anything_starts() {
+        let good = Limits::new(4096, 8).unwrap();
+        assert_eq!(check_limits(Session::Background, Some(&good)), Ok(()));
+        assert_eq!(check_limits(Session::Gui, None), Ok(()));
+        assert!(
+            check_limits(Session::Gui, Some(&good))
+                .unwrap_err()
+                .contains("GUI")
+        );
+        let zero = Limits {
+            file_bytes: 0,
+            processes: 8,
+        };
+        assert!(check_limits(Session::Background, Some(&zero)).is_err());
+        let (mut spawn, _out) = base(&["/usr/bin/true"], &std::env::temp_dir());
+        spawn.limits = Some(zero);
+        assert_eq!(
+            super::spawn(spawn).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput,
+            "a bad limit reached the start"
+        );
+    }
+
+    /// The limit is really set, in a real child: a write past the file limit is stopped
+    /// (`SIGXFSZ`, or `EFBIG` where it is ignored), the file stops at the limit, and a
+    /// program that writes less than the limit runs to the end. Catches: limits taken from
+    /// the request and not applied to the child, set in blocks instead of bytes, or set
+    /// after the program is executed.
+    #[test]
+    fn the_file_size_limit_stops_a_write_past_it() {
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "kbf-mac-session-fsize");
+        let run = |blocks: u32| {
+            let target = format!("of={}/file{blocks}", dir.display());
+            let count = format!("count={blocks}");
+            let argv = [
+                "/bin/dd",
+                "if=/dev/zero",
+                "bs=1024",
+                target.as_str(),
+                count.as_str(),
+            ];
+            let (mut spawn, _out) = base(&argv, &dir);
+            spawn.limits = Some(Limits::new(4096, 4096).unwrap());
+            let status = super::spawn(spawn).unwrap().wait().unwrap();
+            let len = std::fs::metadata(dir.join(format!("file{blocks}")))
+                .unwrap()
+                .len();
+            (status, len)
+        };
+        let (status, len) = run(64);
+        assert!(!status.success(), "the write past the limit succeeded");
+        assert_eq!(len, 4096, "the file did not stop at the limit: {status}");
+        let (status, len) = run(2);
+        assert!(status.success(), "a write under the limit failed: {status}");
+        assert_eq!(len, 2048);
+    }
+
+    /// The child's steps run in the test process (the child's own run leaves no coverage
+    /// record: it ends in `exec`), on the real operating system, with no limits asked for.
+    /// Entering the current directory leaves the process where it was; a descriptor that is
+    /// not a directory is an error.
     #[test]
     fn the_child_steps_enter_the_directory_or_fail() {
         let here = std::fs::File::open(".").unwrap();
-        child_steps(here.as_raw_fd())().unwrap();
+        child_steps(here.as_raw_fd(), None)().unwrap();
         let file = std::fs::File::open("/dev/null").unwrap();
         assert_eq!(
-            in_child(file.as_raw_fd()).unwrap_err().raw_os_error(),
+            run_steps(&mut Os, file.as_raw_fd(), None)
+                .unwrap_err()
+                .raw_os_error(),
             Some(libc::ENOTDIR)
         );
     }

@@ -12,7 +12,7 @@ use std::os::unix::net::UnixStream;
 
 use js_mac_session::lease::{Dotted, parse_lease, user_name};
 use js_mac_session::ledger::Ledger;
-use js_mac_session::proto::{self, Call, Reply, Request, Session};
+use js_mac_session::proto::{self, Call, Limits, Reply, Request, Session};
 use js_testkit::dir::TestDir;
 use js_types::LeaseId;
 
@@ -40,6 +40,7 @@ fn requests() -> Vec<(Request, &'static str)> {
                 argv: vec![s("/bin/true")],
                 env: vec![(s("A"), s("b"))],
                 session: Session::Background,
+                limits: None,
             },
             r#"{"verb":"run","lease":"3.7","argv":["/bin/true"],"env":[["A","b"]]}"#,
         ),
@@ -49,8 +50,22 @@ fn requests() -> Vec<(Request, &'static str)> {
                 argv: vec![s("/bin/true")],
                 env: Vec::new(),
                 session: Session::Gui,
+                limits: None,
             },
             r#"{"verb":"run","lease":"3.7","argv":["/bin/true"],"env":[],"session":"gui"}"#,
+        ),
+        (
+            Request::Run {
+                lease: s("3.7"),
+                argv: vec![s("/bin/true")],
+                env: Vec::new(),
+                session: Session::Background,
+                limits: Some(Limits {
+                    file_bytes: 1_048_576,
+                    processes: 512,
+                }),
+            },
+            r#"{"verb":"run","lease":"3.7","argv":["/bin/true"],"env":[],"limits":{"file_bytes":1048576,"processes":512}}"#,
         ),
         (
             Request::SessionReady { lease: s("3.7") },

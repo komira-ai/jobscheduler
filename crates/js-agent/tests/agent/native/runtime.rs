@@ -14,9 +14,11 @@ use js_agent_wire::{NetworkLevel, refusal};
 use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
 use js_mac_session::client::Client;
 use js_mac_session::helper::RESET_ALREADY;
+use js_mac_session::proto::Limits;
 
-use super::fake_helper::End;
+use super::fake_helper::{End, FakeHelper};
 use super::{Rig, TERM, config, native, parse};
+use crate::support::Scratch;
 
 fn handle(lease: &str) -> RunHandle {
     RunHandle(lease.to_owned())
@@ -63,6 +65,14 @@ fn a_start_makes_a_user_and_a_run_directory_and_runs_the_program_under_the_profi
     );
     let parsed = parse(&run.argv);
     assert_eq!(parsed.tail, ["/usr/bin/id", "-u"]);
+    assert_eq!(
+        run.limits,
+        Some(Limits {
+            file_bytes: 1 << 30,
+            processes: 512
+        }),
+        "1 GiB in bytes, and 512 processes"
+    );
     assert_eq!(
         parsed.params[0],
         ("RUN".to_owned(), home.display().to_string())
@@ -558,6 +568,43 @@ fn a_start_refuses_names_that_steer_the_shell_before_a_user_is_made() {
         !rig.dir.path("native-leases").exists(),
         "the journal was touched"
     );
+}
+
+/// Asserts that the limits of the configuration reach the helper as fields of the `run`
+/// request, in bytes and as a count, exactly as configured (a file limit of 10 bytes is 10
+/// bytes), and that a configuration the helper would refuse is refused when the runtime opens,
+/// before the helper is asked anything. It catches a run that starts without the limits an operator set, limits sent in
+/// blocks, and a runtime that opens on limits the helper would refuse for every run.
+#[test]
+fn the_configured_limits_travel_to_the_helper_as_fields() {
+    let mut rig = Rig::with("limits", |config| {
+        config.max_file_bytes = 10;
+        config.max_processes = 7;
+    });
+    rig.start("r1", "/bin/true", &[]);
+    assert_eq!(
+        rig.fake.run_of("7.0").limits,
+        Some(Limits {
+            file_bytes: 10,
+            processes: 7
+        })
+    );
+    let mut big = Rig::with("limits-big", |config| config.max_file_bytes = 3 << 20);
+    big.start("r1", "/bin/true", &[]);
+    assert_eq!(big.fake.run_of("7.0").limits.unwrap().file_bytes, 3 << 20);
+
+    for (bytes, procs) in [(0, 7), (u64::MAX, 7), (10, 0), (10, u32::MAX)] {
+        let dir = Scratch::new("native-limits-bad");
+        let fake = FakeHelper::start(&dir);
+        let mut bad = config(&fake);
+        bad.max_file_bytes = bytes;
+        bad.max_processes = procs;
+        let why = NativeRuntime::open(fake.client(), bad, TERM)
+            .err()
+            .expect("a limit the helper would refuse was taken");
+        assert!(why.0.contains("limit"), "{bytes} {procs}: {}", why.0);
+        assert_eq!(fake.verbs(), Vec::<String>::new(), "the helper was asked");
+    }
 }
 
 /// Asserts that a job environment that names `TMPDIR`, which the agent sets, is refused before

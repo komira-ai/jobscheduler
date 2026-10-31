@@ -148,9 +148,12 @@ fn a_loopback_connect_follows_the_lower_of_request_and_cap() {
     drop(listener);
 }
 
-/// Asserts the file size limit for real: a program that writes four MiB to its standard
-/// output under a limit of one MiB is ended, and the log never grows past the limit. It
-/// catches a run that can fill the agent's disk through its output.
+/// Asserts the file size limit for real, as the helper sets it with `setrlimit` in the child
+/// before `sandbox-exec` executes: a program that writes four MiB to its standard output
+/// under a limit of one MiB is ended by `SIGXFSZ` (status 128 and the signal) or, where the
+/// signal is ignored, fails with `EFBIG` ("File too large"), and the log never grows past
+/// the limit. It catches a run that can fill the agent's disk through its output, and a
+/// limit the helper's child did not set or that was lost on the way to the program.
 #[test]
 fn a_run_that_writes_past_the_file_limit_is_ended_at_it() {
     let mut rig = Rig::with("mac-fsize", |config| config.max_file_bytes = 1 << 20);
@@ -161,7 +164,13 @@ fn a_run_that_writes_past_the_file_limit_is_ended_at_it() {
     );
     let id = rig.rt.create_and_start(&spec).unwrap();
     let status = rig.settle(&id);
-    assert_ne!(status, exited(0), "the program was not stopped");
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    let by_signal = status == exited(128 + libc::SIGXFSZ);
+    let by_efbig = status == exited(1) && tail.stderr.contains("File too large");
+    assert!(
+        by_signal || by_efbig,
+        "not stopped by SIGXFSZ or EFBIG: {status:?} {tail:?}"
+    );
     let written = fs::metadata(spec.scratch.join("stdout")).unwrap().len();
     assert!(written <= 1 << 20, "{written} bytes under a limit of 1 MiB");
 }
@@ -184,17 +193,34 @@ fn a_run_cannot_fork_past_the_process_limit() {
     );
 }
 
-/// Asserts that the command line the runtime builds keeps the shell that sets the limits
-/// inside the profile: it is run for real with an environment that asks the shell to trace
-/// with a `PS4` that touches a file in a directory every user may write, and to run an
-/// imported `ulimit` function that does the same. The file must not exist afterwards, and
-/// the run still ends well. The runtime refuses these names itself (see
+/// Asserts that a limit the helper set cannot be raised by the program: a shell started as
+/// the job raises its file size limit to unlimited, which the hard limit refuses, so it
+/// never prints. It catches limits set soft only, which the run could lift itself.
+#[test]
+fn a_run_cannot_raise_the_limits_it_was_given() {
+    let mut rig = Rig::with("mac-raise", |config| config.max_file_bytes = 1 << 20);
+    rig.fake.real_runs();
+    let id = rig.start(
+        "r1",
+        "/bin/sh",
+        &["-c", "ulimit -f unlimited && echo raised"],
+    );
+    let status = rig.settle(&id);
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    assert_ne!(status, exited(0), "{tail:?}");
+    assert_eq!(tail.stdout, "", "the limit was raised: {tail:?}");
+}
+
+/// Asserts that the command line the runtime builds starts no shell in front of the program:
+/// it is run for real with an environment that would make a shell trace with a `PS4` that
+/// touches a file in a directory every user may write, and run an imported `ulimit`
+/// function that does the same. The file must not exist afterwards, and the run still ends
+/// well. The runtime refuses these names itself (see
 /// `a_start_refuses_names_that_steer_the_shell_before_a_user_is_made`), so this applies the
 /// command line without the runtime's checks, as a second line behind them. It catches a
-/// limiting shell that runs before the profile is applied, as the lease user, with the
-/// job's environment.
+/// shell put back in the command line, which would run with the job's environment.
 #[test]
-fn the_job_environment_cannot_steer_the_shell_that_sets_the_limits() {
+fn the_job_environment_steers_no_shell_because_there_is_none() {
     static UNIQUE: AtomicU32 = AtomicU32::new(0);
     let rig = Rig::new("mac-shell-env");
     let marker = std::path::PathBuf::from(format!(

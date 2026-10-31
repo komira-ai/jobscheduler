@@ -7,6 +7,7 @@
 //! - [`lease`]: lease ids, user names (`kbf-lease-<term>-<seq>`) and the uid range.
 //! - [`grant`]: the MDM gate's signed admin grant.
 //! - [`ledger`]: lease ids used, kept across reboots, so names and grants are used once.
+//! - [`limits`]: the file-size and process limits a `run` asks the helper to set.
 //! - [`helper`]: the verbs' rules, over a [`helper::Host`] that does the OS's part.
 //! - [`autologin`]: the session switch's intent record, `/etc/kcpassword`, the login
 //!   window's preference and the restart.
@@ -39,6 +40,7 @@ pub mod grant;
 pub mod helper;
 pub mod lease;
 pub mod ledger;
+pub mod limits;
 pub mod node_admin;
 pub mod proto;
 pub mod scan;

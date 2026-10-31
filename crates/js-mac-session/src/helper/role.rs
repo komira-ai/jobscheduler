@@ -152,6 +152,7 @@ impl Helper {
             stderr,
             cwd,
             session: Session::Gui,
+            limits: None,
         })
         .map_err(|why| format!("starting {program}: {why}"))?;
         drop(ledger);
