@@ -189,29 +189,33 @@ fn seams() -> Seams {
     }
 }
 
-/// The host the agent runs on: a Linux host whose `crun --version` answers.
-fn host() -> Host {
+/// The host the agent runs on: a Linux host whose `crun --version` answers. Where a path is
+/// on a file system is the first of `devices` that holds it (the state root is on a disk of
+/// its own, and so is the scratch root when `scratch_apart`), else the node's.
+fn host_on(scratch_apart: bool) -> Host {
     let node = node();
     let mut host = linux_host();
     let line = format!("{} --version", node.crun.display());
     host.commands = host
         .commands
         .with(&line, Ok("crun version 1.14.1\ncommit: abc\n"));
-    // The state root is on a disk of its own; everything else of the node is on one.
-    host.files = host
-        .files
-        .with_device_under(&node.state, 8)
-        .with_device_under(node.dir.path(), 7);
+    host.files = host.files.with_device_under(&node.state, 8);
+    if scratch_apart {
+        host.files = host.files.with_device_under(&node.scratch, 9);
+    }
+    host.files = host.files.with_device_under(node.dir.path(), 7);
     host
 }
 
-/// [`host`], but the scratch root is a mount of its own: the directory above it, where the
-/// image store would be, is on another file system.
+/// The node's host: everything but the state root on one file system.
+fn host() -> Host {
+    host_on(false)
+}
+
+/// The node's host with the scratch root a mount of its own: the directory above it, where
+/// the image store would be, is on another file system.
 fn host_with_scratch_mounted() -> Host {
-    let node = node();
-    let mut host = host();
-    host.files = host.files.with_device_under(&node.scratch, 9);
-    host
+    host_on(true)
 }
 
 /// The real [`System`] for the clock, the runtime and the start check, over the node; the
