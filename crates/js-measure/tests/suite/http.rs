@@ -79,9 +79,13 @@ fn answer(mut stream: TcpStream, routes: &[Route], log: &Mutex<Vec<String>>) {
         .map_or((404, r#"{"error":"not-found"}"#), |(_, status, text)| {
             (*status, *text)
         });
+    // Status 999 stands for a 200 whose body stops short of its Content-Length.
+    let (status, declared) = match status {
+        999 => (200, text.len() + 50),
+        other => (other, text.len()),
+    };
     let reply = format!(
-        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
-        text.len()
+        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n{text}"
     );
     let _ = stream.write_all(reply.as_bytes());
 }
@@ -349,4 +353,32 @@ fn connect_refuses_unusable_flags() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(HttpFarm::connect("http://127.0.0.1:1", &path, None).is_err());
     drop(dir);
+}
+
+/// Asserts that a server that refuses the token (401, 403) is a refusal with its status
+/// and code, for a read and for a write, and that a body that stops short of its declared
+/// length is a transport error and not a half-read answer.
+#[test]
+fn refused_tokens_and_truncated_bodies() {
+    let server = Canned::serve(vec![
+        ("GET /v1/hosts", 401, r#"{"error":"unauthorized"}"#),
+        ("POST /v1/leases", 403, r#"{"error":"forbidden"}"#),
+        ("GET /v1/leases", 999, r#"{"leases":["#),
+    ]);
+    let (_dir, farm) = farm_at(&server.url);
+    assert_eq!(
+        farm.host("h1").unwrap_err(),
+        FarmError::Refused {
+            status: 401,
+            code: "unauthorized".to_owned()
+        }
+    );
+    assert_eq!(
+        farm.acquire(&lease_ask()).unwrap_err(),
+        FarmError::Refused {
+            status: 403,
+            code: "forbidden".to_owned()
+        }
+    );
+    assert!(matches!(farm.lease("1-1"), Err(FarmError::Transport(_))));
 }

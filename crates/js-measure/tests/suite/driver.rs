@@ -216,3 +216,49 @@ fn a_finished_job_is_not_marked_at_the_deadline() {
     assert_eq!(obs.jobs[1].failure.as_deref(), Some("deadline"));
     assert_eq!(obs.jobs[1].finished_ms, None);
 }
+
+/// Asserts that a release the server refuses is noted on the job, whichever way the job
+/// ended (over, failed, given up at the deadline), and that the outcome stands. Without
+/// the note a host that is still leased makes the next run's minutes shared, and null,
+/// with no word of why.
+#[test]
+fn a_failed_release_is_noted_on_the_job() {
+    let clock = FakeClock::at(T0);
+    let over = Stub {
+        run: Ok(RunStanding {
+            state: "exited".to_owned(),
+            outcome: Some("succeeded".to_owned()),
+        }),
+        release_fails: true,
+        ..Stub::held()
+    };
+    let obs = drive(&over, &clock, &[job("a", 1, None)], 10, 1_000);
+    assert_eq!(obs.jobs[0].outcome.as_deref(), Some("succeeded"));
+    assert_eq!(
+        obs.jobs[0].failure.as_deref(),
+        Some("release of l1 failed: the server answered 409 no-capacity")
+    );
+
+    let no_start = Stub {
+        start: Err(FarmError::Transport("down".to_owned())),
+        release_fails: true,
+        ..Stub::held()
+    };
+    let obs = drive(&no_start, &clock, &[job("a", 1, None)], 10, 1_000);
+    assert_eq!(
+        obs.jobs[0].failure.as_deref(),
+        Some(
+            "cannot reach the server: down; release of l1 failed: the server answered 409 no-capacity"
+        )
+    );
+
+    let forever = Stub {
+        release_fails: true,
+        ..Stub::held()
+    };
+    let obs = drive(&forever, &clock, &[job("a", 1, None)], 10_000, 20_000);
+    assert_eq!(
+        obs.jobs[0].failure.as_deref(),
+        Some("deadline; release of l1 failed: the server answered 409 no-capacity")
+    );
+}

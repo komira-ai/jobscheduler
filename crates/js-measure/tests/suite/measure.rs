@@ -81,6 +81,14 @@ fn a_window_counts_only_minutes_the_lease_had_alone() {
     assert_eq!(two.peak_ws_bytes, 7 * GIB);
     let whole = window_usage(&rows, T0, T0 + 60_000).unwrap();
     assert_eq!(whole.cpu_milli_ms, 60_000_000);
+    // A window that ends on a minute boundary does not touch the next minute: its peak is
+    // minute 10's, not minute 11's.
+    assert_eq!(whole.peak_ws_bytes, 3 * GIB);
+    let alone = [row(10, 1_000, GIB, 1)];
+    assert_eq!(
+        window_usage(&alone, T0, T0 + 60_000).map(|u| u.cpu_milli_ms),
+        Some(60_000_000)
+    );
     assert_eq!(
         window_usage(&rows, T0 + 60_000, T0 + 130_000),
         None,
@@ -372,4 +380,18 @@ fn a_run_in_which_nothing_finished_has_no_makespan() {
     assert_eq!(value(&out.record.metrics, name::JOBS_FAILED), 1.0);
     assert_eq!(value(&out.record.metrics, name::MEMORY_KILLS), 0.0);
     assert_eq!(out.jobs[0].failure.as_deref(), Some("deadline"));
+}
+
+/// Asserts that the makespan is not available when any job has no finish: a job that failed
+/// or was given up would otherwise shorten it to the jobs that happened to finish.
+#[test]
+fn a_makespan_needs_every_job_to_have_finished() {
+    let (mut obs, jobs) = two_jobs();
+    let whole = assemble(&who(), &obs, &jobs, &BTreeMap::new(), &host_h1());
+    assert_eq!(value(&whole.record.metrics, name::MAKESPAN_MS), 120_000.0);
+    obs.jobs[1].finished_ms = None;
+    obs.jobs[1].failure = Some("deadline".to_owned());
+    let cut = assemble(&who(), &obs, &jobs, &BTreeMap::new(), &host_h1());
+    assert_eq!(cut.record.metrics[name::MAKESPAN_MS], None);
+    assert_eq!(value(&cut.record.metrics, name::JOBS_FAILED), 1.0);
 }

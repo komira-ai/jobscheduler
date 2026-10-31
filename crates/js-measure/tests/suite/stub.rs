@@ -15,6 +15,7 @@ pub struct Stub {
     pub start: Result<String, FarmError>,
     pub run: Result<RunStanding, FarmError>,
     pub released: RefCell<Vec<String>>,
+    pub release_fails: bool,
 }
 
 pub fn refused() -> FarmError {
@@ -43,6 +44,7 @@ impl Stub {
             start: Ok("r1".to_owned()),
             run: Ok(running("running")),
             released: RefCell::new(Vec::new()),
+            release_fails: false,
         }
     }
 
@@ -77,7 +79,10 @@ impl Farm for Stub {
 
     fn release(&self, lease: &str) -> Result<(), FarmError> {
         self.released.borrow_mut().push(lease.to_owned());
-        Ok(())
+        match self.release_fails {
+            true => Err(refused()),
+            false => Ok(()),
+        }
     }
 
     fn host(&self, _id: &str) -> Result<HostShape, FarmError> {

@@ -99,9 +99,9 @@ fn schedule_prints_the_order() {
 
 /// Asserts the dry run end to end: three files in the output directory, one record per
 /// run with the commit and the seed, a row per job and a row per host-minute, a line saying
-/// how many runs were recorded, and that a second run appends and does not overwrite.
+/// how many runs were recorded, and that a second run into the same directory is refused and leaves the files as they were.
 #[test]
-fn run_writes_the_three_files_and_appends() {
+fn run_writes_the_three_files_and_refuses_a_second_run() {
     let files = Files::new("cli-run", PLAN, WORKLOAD);
     let (result, out) = files.run(&["--fake-hosts", "1", "--poll-ms", "10000"]);
     result.unwrap();
@@ -119,8 +119,23 @@ fn run_writes_the_three_files_and_appends() {
     assert!(records.iter().all(|r| r.metrics["jobs"] == Some(2.0)));
     assert_eq!(files.lines("jobs.jsonl").len(), 16);
     assert!(!files.lines("minutes.jsonl").is_empty());
-    files.run(&["--fake-hosts", "1"]).0.unwrap();
-    assert_eq!(files.lines("records.jsonl").len(), 16);
+    let (again, _) = files.run(&["--fake-hosts", "1"]);
+    let refused = error_of(again);
+    assert!(refused.contains("records.jsonl"), "{refused}");
+    assert!(refused.contains("--out"), "{refused}");
+    assert_eq!(files.lines("records.jsonl").len(), 8);
+    assert_eq!(files.lines("jobs.jsonl").len(), 16);
+}
+
+/// Asserts that a deadline too large to count in milliseconds is refused naming the flag,
+/// before any file is read or written, and not wrapped or panicked on.
+#[test]
+fn a_deadline_that_overflows_is_refused() {
+    let files = Files::new("cli-deadline", PLAN, WORKLOAD);
+    let (result, _) = files.run(&["--deadline-secs", "18446744073709551615"]);
+    let refused = error_of(result);
+    assert!(refused.contains("--deadline-secs"), "{refused}");
+    assert!(!files.dir.path().join("out").exists());
 }
 
 /// Asserts that `summary` groups a records file by setting and arm and lists the runs, and that the
@@ -279,9 +294,9 @@ fn bad_files_are_named() {
     assert!(error_of(result).starts_with(&blocked));
 
     let unwritable = Files::new("cli-bad-out", PLAN, WORKLOAD);
-    fs::create_dir_all(unwritable.dir.path().join("out/records.jsonl")).unwrap();
+    fs::create_dir_all(unwritable.dir.path().join("out/jobs.jsonl")).unwrap();
     let (result, _) = unwritable.run(&[]);
-    assert!(error_of(result).contains("records.jsonl"));
+    assert!(error_of(result).contains("jobs.jsonl"));
 }
 
 /// Asserts that a record that cannot be written stops the plan with an error naming the
