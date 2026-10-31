@@ -303,28 +303,3 @@ fn a_params_file_without_a_good_artifact_digest_runs_no_step_on_any_step() {
     }
     assert!(!called.get());
 }
-
-/// The machine's hook answers every step `not_implemented` until the lease client and, on a Mac,
-/// the launchd unit port are in; on a Mac the words say which of the two is missing.
-#[cfg(target_os = "macos")]
-#[test]
-fn on_a_mac_every_step_is_inert_and_says_launchd_is_the_missing_part() {
-    let (_dir, params) = params_file("hook-verb-mac-inert", PARAMS);
-    for step in Step::ALL {
-        let mut args = vec![step.name()];
-        if step == Step::Prepare {
-            args.push("/staged");
-        }
-        args.extend(["--params", &params]);
-        let ran = run_with(&args, &Host::system());
-        assert_eq!(ran.status, status(1), "{step}");
-        let line = last_line(&ran.out);
-        assert_eq!(line["reason"], "not_implemented", "{step}");
-        let detail = line["detail"].as_str().unwrap();
-        assert!(
-            detail.starts_with(&format!("{step} is not implemented on macOS")),
-            "{detail}"
-        );
-        assert!(detail.contains("launchctl"), "{detail}");
-    }
-}
