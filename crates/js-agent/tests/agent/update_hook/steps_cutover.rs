@@ -327,8 +327,8 @@ fn a_start_that_fails_with_the_unit_never_run_is_an_environment_failure_and_a_re
     assert_eq!(done.report.reason, Some(Reason::StartFailed));
     assert_eq!(
         done.report.class,
-        Class::Release,
-        "the new version may be at fault"
+        Class::Environment,
+        "the unit never ran: it is not the release that failed"
     );
     assert_eq!(line(&done)["reversible"], json!(false));
     assert_eq!(marks(&rig), [true, true, true]);

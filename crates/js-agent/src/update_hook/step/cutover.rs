@@ -26,8 +26,8 @@
 //! state of the unit is read with `show` and not `is-active`, which cannot tell a failed run of
 //! `systemctl` from an inactive unit.
 //!
-//! A first install has no agent to drain and no host the lease server knows: it skips step 2
-//! and has nothing to stop.
+//! A first install has no agent to drain, no host the lease server knows and no unit to stop:
+//! it skips steps 2 and 3, writes no `stop_begun`, and is irreversible from `link_moved` on.
 
 use std::path::Path;
 use std::time::Duration;
@@ -55,12 +55,23 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
         ));
     };
     let done = go(env, params, &held, &mut record).unwrap_or_else(|done| done);
-    // The stop is the commit, on success and on failure.
-    Ok(if record.stop_begun {
+    // The stop is the commit, on success and on failure; a first install has no stop, and its
+    // first act is the move of the link.
+    Ok(if begun(&record) {
         irreversible(done)
     } else {
         done
     })
+}
+
+/// Whether the first irreversible act is begun: the stop, or for a first install (nothing to
+/// stop) the move of the link.
+fn begun(record: &Record) -> bool {
+    if record.update.previous.is_none() {
+        record.link_moved
+    } else {
+        record.stop_begun
+    }
 }
 
 fn irreversible(mut done: Done) -> Done {
@@ -70,20 +81,23 @@ fn irreversible(mut done: Done) -> Done {
 
 fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Result<Done, Done> {
     let link = release_link(env, params)?;
-    let entered_begun = record.stop_begun;
+    let entered_begun = begun(record);
     if !entered_begun {
         refuse_host(env)?;
         hold(env, held, record, params)?;
     }
-    // What the machine shows is read before the stop is marked: a read that fails then leaves
-    // nothing begun.
-    let unit = record.update.unit.clone();
-    let state = show(env, &unit, Reason::StopFailed)?;
-    let on_staged = linked(env, &link, &record.update.staged)?;
-    if !entered_begun {
-        mark(env, held, record, |record| record.stop_begun = true)?;
+    // A first install has no unit to stop.
+    if record.update.previous.is_some() {
+        // What the machine shows is read before the stop is marked: a read that fails then
+        // leaves nothing begun.
+        let unit = record.update.unit.clone();
+        let state = show(env, &unit, Reason::StopFailed)?;
+        let on_staged = linked(env, &link, &record.update.staged)?;
+        if !entered_begun {
+            mark(env, held, record, |record| record.stop_begun = true)?;
+        }
+        stop(env, held, record, params, (state, on_staged), entered_begun)?;
     }
-    stop(env, held, record, params, (state, on_staged), entered_begun)?;
     move_link(env, held, record, &link)?;
     start(env, held, record, params)?;
     Ok(success())
@@ -339,10 +353,12 @@ fn stop(
 /// Points the link at the staged release.
 fn move_link(env: &Env<'_>, held: &Held, record: &mut Record, link: &Path) -> Result<(), Done> {
     let staged = record.update.staged.clone();
+    // Read before the mark: on a first install the mark is the commit.
+    let on_staged = linked(env, link, &staged)?;
     if !record.link_moved {
         mark(env, held, record, |record| record.link_moved = true)?;
     }
-    if linked(env, link, &staged)? {
+    if on_staged {
         return Ok(());
     }
     env.ports.point();

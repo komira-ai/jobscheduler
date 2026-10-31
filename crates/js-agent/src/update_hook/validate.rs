@@ -293,7 +293,8 @@ fn marks(record: &Record) -> Result<(), Invalid> {
             "link_moved",
             record.link_moved,
             "stop_begun",
-            record.stop_begun,
+            // A first install has no unit to stop: the link move is its first act.
+            record.stop_begun || record.update.previous.is_none(),
         ),
         (
             "start_issued",
