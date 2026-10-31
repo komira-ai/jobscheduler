@@ -210,6 +210,7 @@ fn the_backend_is_configured_from_the_checks_findings() {
         "the id tools come from fixed directories"
     );
     assert!(config.check_search, "the search check stays on");
+}
 
 /// A cgroup mount of one test: `<mount>/actions/js-x-r1` is the lease's cgroup, with the
 /// kernel's files written as the test says.
