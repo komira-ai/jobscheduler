@@ -35,7 +35,8 @@ pub use declaration::{DECLARATION_PATH, Declaration, DeclarationError, Timeouts}
 pub use params::{
     ARTIFACT_DIGEST_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY, DEFER_RETRY_KEY, DRAIN_WAIT_KEY,
     MIN_CORDON_LEASE_SECS, POLL_SECS, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY,
-    PROMOTION_CEILING_KEY, Params, ParamsError, STAGED_RELEASE_KEY, TARGET_VERSION_KEY,
+    PROMOTION_CEILING_KEY, Params, ParamsError, RELEASE_LINK_KEY, STAGED_RELEASE_KEY,
+    TARGET_VERSION_KEY,
 };
 pub use ports::{
     Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,

@@ -40,6 +40,7 @@ fn params_for(record: &Record) -> Params {
         promotion_ceiling_secs: None,
         staged_release: record.update.staged.clone(),
         previous_release: record.update.previous_target.clone(),
+        release_link: None,
         target_version: record.update.target.clone(),
         previous_version: record.update.previous.clone(),
     }

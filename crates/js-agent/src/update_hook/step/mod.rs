@@ -7,6 +7,7 @@
 //! the conformance harness, can end the step at any of them and run it again.
 
 mod cleanup;
+mod cutover;
 mod prepare;
 
 use std::io;
@@ -21,6 +22,7 @@ use super::{
 };
 
 pub use cleanup::cleanup;
+pub use cutover::cutover;
 pub use prepare::prepare;
 
 /// Everything a step touches.

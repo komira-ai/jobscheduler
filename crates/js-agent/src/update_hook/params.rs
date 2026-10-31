@@ -54,6 +54,9 @@ pub const STAGED_RELEASE_KEY: &str = "updater.staged_release";
 /// The reserved key: the release directory that runs now. Absent on a first install.
 pub const PREVIOUS_RELEASE_KEY: &str = "updater.previous_release";
 
+/// The reserved key: the release link, the symbolic link to the release directory that runs.
+pub const RELEASE_LINK_KEY: &str = "updater.release_link";
+
 /// The reserved key: the version being installed.
 pub const TARGET_VERSION_KEY: &str = "updater.target_version";
 
@@ -129,6 +132,8 @@ pub struct Params {
     /// The release directory that runs now (`updater.previous_release`); `None` on a first
     /// install.
     pub previous_release: Option<PathBuf>,
+    /// The release link (`updater.release_link`), when the updater named it.
+    pub release_link: Option<PathBuf>,
     /// The version being installed (`updater.target_version`).
     pub target_version: String,
     /// The version that runs now (`updater.previous_version`); `None` on a first install.
@@ -187,6 +192,8 @@ impl Params {
             staged_release: path(&table, STAGED_RELEASE_KEY)?
                 .ok_or(ParamsError::Missing(STAGED_RELEASE_KEY))?,
             previous_release: path(&table, PREVIOUS_RELEASE_KEY)?,
+            // Red stub: the key is not read yet.
+            release_link: None,
             target_version: string_of(&table, TARGET_VERSION_KEY)?
                 .ok_or(ParamsError::Missing(TARGET_VERSION_KEY))?,
             previous_version: string_of(&table, PREVIOUS_VERSION_KEY)?,

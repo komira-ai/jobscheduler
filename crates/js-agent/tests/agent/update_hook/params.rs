@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use js_agent::update_hook::{MIN_CORDON_LEASE_SECS, POLL_SECS, Params, ParamsError};
+use js_agent::update_hook::{
+    MIN_CORDON_LEASE_SECS, POLL_SECS, Params, ParamsError, RELEASE_LINK_KEY,
+};
 use js_testkit::dir::TestDir;
 
 const CORDON: &str = concat!(
@@ -63,10 +65,33 @@ fn the_cordon_keys_and_the_reserved_release_keys_are_read() {
             promotion_ceiling_secs: None,
             staged_release: PathBuf::from("/opt/js-agent/releases/new"),
             previous_release: Some(PathBuf::from("/opt/js-agent/releases/old")),
+            release_link: None,
             target_version: "1.4.0".to_owned(),
             previous_version: Some("1.3.2".to_owned()),
         }
     );
+}
+
+#[test]
+fn the_release_link_is_read_when_the_updater_names_it_and_absent_otherwise() {
+    assert_eq!(RELEASE_LINK_KEY, "updater.release_link");
+    assert_eq!(Params::parse(&good()).unwrap().release_link, None);
+    let named = format!(
+        "{}\"updater.release_link\" = \"/opt/js-agent-link/current\"\n",
+        good()
+    );
+    assert_eq!(
+        Params::parse(&named).unwrap().release_link,
+        Some(PathBuf::from("/opt/js-agent-link/current"))
+    );
+}
+
+#[test]
+fn a_relative_or_non_text_release_link_is_refused() {
+    let relative = format!("{}\"updater.release_link\" = \"current\"\n", good());
+    assert!(matches!(refused(&relative), ParamsError::Relative(key) if key == RELEASE_LINK_KEY));
+    let number = format!("{}\"updater.release_link\" = 7\n", good());
+    assert!(matches!(refused(&number), ParamsError::NotText(key) if key == RELEASE_LINK_KEY));
 }
 
 #[test]
