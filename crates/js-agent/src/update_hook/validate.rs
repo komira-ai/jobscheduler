@@ -263,7 +263,7 @@ fn cordon(record: &Record, params: &Params) -> Result<(), Invalid> {
     Ok(())
 }
 
-/// Each mark is written after the act it names, and an act follows the one before it: a mark
+/// Each mark is written before the act it names, and an act follows the one before it: a mark
 /// set without the one it follows from cannot have been written by this hook.
 fn marks(record: &Record) -> Result<(), Invalid> {
     let rb = &record.rb;

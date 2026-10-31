@@ -55,6 +55,7 @@ pub const STAGED_RELEASE_KEY: &str = "updater.staged_release";
 pub const PREVIOUS_RELEASE_KEY: &str = "updater.previous_release";
 
 /// The reserved key: the release link, the symbolic link to the release directory that runs.
+/// `cutover` moves it from the previous release to the staged one.
 pub const RELEASE_LINK_KEY: &str = "updater.release_link";
 
 /// The reserved key: the version being installed.
@@ -192,8 +193,7 @@ impl Params {
             staged_release: path(&table, STAGED_RELEASE_KEY)?
                 .ok_or(ParamsError::Missing(STAGED_RELEASE_KEY))?,
             previous_release: path(&table, PREVIOUS_RELEASE_KEY)?,
-            // Red stub: the key is not read yet.
-            release_link: None,
+            release_link: path(&table, RELEASE_LINK_KEY)?,
             target_version: string_of(&table, TARGET_VERSION_KEY)?
                 .ok_or(ParamsError::Missing(TARGET_VERSION_KEY))?,
             previous_version: string_of(&table, PREVIOUS_VERSION_KEY)?,

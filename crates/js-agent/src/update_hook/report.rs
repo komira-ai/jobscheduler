@@ -123,8 +123,9 @@ impl Reason {
             Reason::LeaseUnreachable => "lease_unreachable",
             Reason::NotVerified => "not_verified",
             Reason::CordonCapReached => "cordon_cap_reached",
-            // Red stub: the tokens are not given yet.
-            Reason::StopFailed | Reason::LinkFailed | Reason::StartFailed => "not_implemented",
+            Reason::StopFailed => "stop_failed",
+            Reason::LinkFailed => "link_failed",
+            Reason::StartFailed => "start_failed",
         }
     }
 }
