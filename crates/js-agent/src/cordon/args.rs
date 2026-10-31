@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use clap::Parser;
 
+use crate::CredentialFile;
 use crate::own_host::MAX_CORDON_SECS;
 
 /// What `--help` says after the flags.
@@ -79,8 +80,32 @@ pub struct Args {
 ///
 /// Text that is not one or more terms of digits and a unit (`s`, `m`, `h`, `d`), whose
 /// total is zero or too large to count in seconds.
-pub fn parse_window(_text: &str) -> Result<Duration, String> {
-    Err("not implemented".to_owned())
+pub fn parse_window(text: &str) -> Result<Duration, String> {
+    let bad = || format!("{text:?} is not a duration such as 90m, 2h or 1h30m (units s, m, h, d)");
+    let mut total = Some(0_u64);
+    let mut number = String::new();
+    for c in text.chars() {
+        let unit = match c {
+            '0'..='9' => {
+                number.push(c);
+                continue;
+            }
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            'd' => 86400,
+            _ => return Err(bad()),
+        };
+        let seconds = number.parse::<u64>().ok().and_then(|n| n.checked_mul(unit));
+        total = total
+            .zip(seconds)
+            .and_then(|(sum, term)| sum.checked_add(term));
+        number.clear();
+    }
+    match (total, number.is_empty()) {
+        (Some(secs @ 1..), true) => Ok(Duration::from_secs(secs)),
+        _ => Err(bad()),
+    }
 }
 
 /// The file the bearer is read from: the host credential of `--state-root` when it holds
@@ -90,6 +115,15 @@ pub fn parse_window(_text: &str) -> Result<Duration, String> {
 ///
 /// The credential file is there and cannot be used (the text names the file and never holds
 /// a byte of its content), or there is neither a credential nor a token file.
-pub fn credential_file(_args: &Args) -> Result<PathBuf, String> {
-    Err("not implemented".to_owned())
+pub fn credential_file(args: &Args) -> Result<PathBuf, String> {
+    let kept = match &args.state_root {
+        Some(root) => {
+            let file = CredentialFile::in_dir(root);
+            file.load()?.map(|_| file.path())
+        }
+        None => None,
+    };
+    kept.or_else(|| args.token_file.clone()).ok_or_else(|| {
+        "--token-file: required unless --state-root holds a host credential".to_owned()
+    })
 }

@@ -11,8 +11,9 @@
 use std::path::Path;
 
 use js_agent_wire::Taint;
-use js_client::{Client, ClientError};
+use js_client::{Client, ClientError, Reply};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::transport::REQUEST_LIMIT;
 
@@ -163,20 +164,44 @@ impl HttpLease {
     }
 }
 
+/// The code of an error body, `{"error": "<code>"}`.
+fn code(body: &Value) -> Option<&str> {
+    body.get("error").and_then(Value::as_str)
+}
+
+/// The body of a 200 answer, and the error of any other: `unknown-host` for the 409 of that
+/// code, else the server's code, else `http-<status>` (a 401 has no body).
+fn answer(reply: Result<Reply, ClientError>) -> Result<Value, LeaseError> {
+    let reply = reply.map_err(|err| LeaseError::Unreachable(err.to_string()))?;
+    match (reply.status, code(&reply.body)) {
+        (200, _) => Ok(reply.body),
+        (409, Some("unknown-host")) => Err(LeaseError::UnknownHost),
+        (status, found) => Err(LeaseError::Refused(
+            found.map_or_else(|| format!("http-{status}"), str::to_owned),
+        )),
+    }
+}
+
+/// A 200 body as the type the route answers; a body that is not one is the server not being
+/// understood.
+fn read<T: serde::de::DeserializeOwned>(body: Value) -> Result<T, LeaseError> {
+    serde_json::from_value(body)
+        .map_err(|err| LeaseError::Unreachable(format!("the answer is not understood: {err}")))
+}
+
 impl Lease for HttpLease {
-    fn cordon(&self, _lease_secs: u64) -> Result<Cordoned, LeaseError> {
-        let _ = &self.client;
-        let path = self.path(Some("cordon"));
-        Err(LeaseError::Unreachable(format!("not implemented: {path}")))
+    fn cordon(&self, lease_secs: u64) -> Result<Cordoned, LeaseError> {
+        let body = json!({ "lease_secs": lease_secs });
+        let sent = self.client.post(&self.path(Some("cordon")), &body);
+        answer(sent).and_then(read)
     }
 
     fn uncordon(&self) -> Result<Uncordoned, LeaseError> {
-        let path = self.path(Some("uncordon"));
-        Err(LeaseError::Unreachable(format!("not implemented: {path}")))
+        let sent = self.client.post(&self.path(Some("uncordon")), &json!({}));
+        answer(sent).and_then(read)
     }
 
     fn host(&self) -> Result<HostReading, LeaseError> {
-        let path = self.path(None);
-        Err(LeaseError::Unreachable(format!("not implemented: {path}")))
+        answer(self.client.get(&self.path(None))).and_then(read)
     }
 }

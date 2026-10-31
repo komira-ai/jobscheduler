@@ -16,6 +16,20 @@
 //! the store the crun runtime reads, without starting the agent and without a container
 //! engine; see `image::pull`.
 //!
+//! `js-agent cordon --server <url> --state-root <dir> --for <duration>` (Linux and macOS, run as
+//! the user who can read the host's credential) keeps the lease server from placing a lease on
+//! this host for a window, and lifts the cordon at the end or on SIGTERM or SIGINT; see
+//! [`cordon`] and docs/runbooks/cordon-a-node.md. It is for an operator's measurement script,
+//! which needs one node to itself for an hour or two:
+//!
+//! ```text
+//! js-agent cordon --server https://leases.example:7300 --state-root /var/lib/js-agent \
+//!     --for 2h > /run/measure/cordon.log &
+//! until grep -q '^idle ' /run/measure/cordon.log; do sleep 5; done   # no lease, not releasing
+//! ... measure ...
+//! kill -TERM %1; wait %1                                             # prints `lifted`
+//! ```
+//!
 //! # Flags
 //!
 //! Configuration is flags only: `js-agent` reads no environment variable.
@@ -465,6 +479,14 @@ pub fn main_with(
     {
         let _ = writeln!(err, "update-hook: linux only");
         return ExitCode::from(exit::FAILED);
+    }
+    // The cordon verb is an operator's, on any host: it installs its own signal handling, to
+    // lift its cordon on a stop, and runs no agent.
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(cordon::VERB))
+    {
+        return cordon::run_system(install, &args, out, err);
     }
     match install() {
         Err(why) => fail(err, &why, exit::FAILED),
