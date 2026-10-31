@@ -24,6 +24,17 @@ someone else holds a cordon, the verb prints `kept`, renews nothing, lifts nothi
 first call extended the other holder's cordon to at least `--lease-secs` from now; it never
 shortens one.) It also lifts nothing when a reply names a host other than the one it cordoned.
 
+Two limits come from there being one cordon per host and no record of who placed it:
+
+- A cordon that someone else places during the window (an admin's request, or a tool that does
+  not look at `already_cordoned`) merges with the verb's, and the verb lifts it at the end of its
+  window. Only its first reply can tell it that the host was cordoned before it.
+- If the process is stopped (a suspended process, a frozen machine) for longer than
+  `--lease-secs`, its cordon lapses. The next renewal then says again whose the cordon is: one that
+  was there already is another holder's, and the verb prints `kept host=<id>
+  reason=taken_after_lapse`, lifts nothing and exits 3; one that the renewal placed is the verb's
+  again, said with a new `cordoned` line, and held and lifted as before.
+
 ## What it prints
 
 One line per state change on standard output, to be read by a script:
@@ -35,6 +46,7 @@ One line per state change on standard output, to be read by a script:
 | `lifted host=<id>` | the cordon was lifted |
 | `lapsed host=<id>` | the cordon had lapsed already at the end, nothing was left to lift |
 | `kept host=<id> reason=already_cordoned` | another holder's cordon was found |
+| `kept host=<id> reason=taken_after_lapse` | the verb's cordon lapsed and another holder's took its place |
 
 `idle` means what a script's drain gate checks on `GET /v1/hosts`: `lease` null, `releasing` false
 and `mark` null. Until it is printed the verb reads the host every 5 seconds, so a script that waits
