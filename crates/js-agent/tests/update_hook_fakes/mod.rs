@@ -229,6 +229,7 @@ impl World {
             leases: 0,
             lease: None,
             releasing: false,
+            mark: None,
             cordon: saved.cordon,
             taint: saved.taint,
             agent_version: None,
