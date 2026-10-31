@@ -686,3 +686,18 @@ fn a_first_install_may_move_the_link_without_a_stop_but_not_start_before_it() {
         })
     );
 }
+
+#[test]
+fn an_update_with_a_previous_release_may_not_move_the_link_without_a_stop() {
+    let mut record = good();
+    record.stop_begun = false;
+    record.link_moved = true;
+    assert!(record.update.previous.is_some());
+    assert_eq!(
+        validate(&record, &declaration(), &params_for(&record)),
+        Err(Invalid::Marks {
+            mark: "link_moved",
+            needs: "stop_begun"
+        })
+    );
+}

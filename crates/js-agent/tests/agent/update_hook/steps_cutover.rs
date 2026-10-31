@@ -381,7 +381,7 @@ fn a_unit_that_starts_and_fails_is_a_release_failure() {
 }
 
 #[test]
-fn a_unit_that_stays_activating_is_given_120_s_and_then_fails_the_cutover_as_environment() {
+fn a_unit_that_waits_in_activating_start_is_given_120_s_and_then_fails_as_environment() {
     let rig = running(Rig::new("hook-cutover-start-stuck"));
     let spy = Spy::new(&rig);
     *spy.start_leaves.borrow_mut() = Some(("activating", "start"));
@@ -391,7 +391,7 @@ fn a_unit_that_stays_activating_is_given_120_s_and_then_fails_the_cutover_as_env
     assert_eq!(
         done.report.class,
         Class::Environment,
-        "still activating is not a failure of the binary"
+        "waiting on a dependency is not a failure of the binary"
     );
     assert_eq!(rig.world.ticks(), 12);
     // A rerun does not start it a second time: it waits on the start that is under way.
@@ -404,6 +404,34 @@ fn a_unit_that_stays_activating_is_given_120_s_and_then_fails_the_cutover_as_env
     });
     assert_eq!(rerun.cutover(&rig).outcome, Outcome::Success);
     assert_eq!(rerun.act_names(), Vec::<String>::new());
+}
+
+#[test]
+fn a_unit_that_crash_loops_in_auto_restart_is_a_release_failure_after_120_s() {
+    let rig = running(Rig::new("hook-cutover-start-crash-loop"));
+    let spy = Spy::new(&rig);
+    *spy.start_leaves.borrow_mut() = Some(("activating", "auto-restart"));
+    let done = spy.cutover(&rig);
+    assert_eq!(done.outcome, Outcome::Failure);
+    assert_eq!(done.report.reason, Some(Reason::StartFailed));
+    assert_eq!(done.report.class, Class::Release, "the binary ran and died");
+    assert!(!done.report.reversible);
+    assert_eq!(rig.world.ticks(), 12);
+}
+
+#[test]
+fn a_unit_seen_in_auto_restart_is_a_release_failure_even_if_it_ends_in_start() {
+    let rig = running(Rig::new("hook-cutover-start-crash-seen"));
+    let spy = Spy::new(&rig);
+    *spy.start_leaves.borrow_mut() = Some(("activating", "start"));
+    spy.on_pause(|spy, ticks| match ticks {
+        2 => spy.world.seed_unit(UNIT, "activating", "auto-restart"),
+        3 => spy.world.seed_unit(UNIT, "activating", "start"),
+        _ => {}
+    });
+    let done = spy.cutover(&rig);
+    assert_eq!(done.report.reason, Some(Reason::StartFailed));
+    assert_eq!(done.report.class, Class::Release);
 }
 
 #[test]
