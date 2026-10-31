@@ -68,6 +68,7 @@ use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
 use js_mac_session::lease::{Dotted, user_name};
 use js_types::LeaseId;
+use js_types::env::env_name_reserved;
 
 use crate::lifecycle::{
     Body, CheckFinding, CheckHook, Exit, Finished, Found, NativeRefusal, RunHandle, RunSpec,
@@ -266,6 +267,20 @@ fn reset(helper: &Client) -> Result<(), RuntimeError> {
     }
 }
 
+/// Refuses a body whose environment names a variable a job may not set
+/// ([`js_types::env::env_name_reserved`]: the names that steer the shell that sets the
+/// limits, the agent's own names, and the prefixes of the loader, the sandbox and imported
+/// shell functions). The wire checks these too; this is the last check before a user is
+/// made, for a body that did not pass through it.
+fn check_env(native: &NativeSpec) -> Result<(), RuntimeError> {
+    match native.env.keys().find(|name| env_name_reserved(name)) {
+        Some(name) => Err(RuntimeError::new(format!(
+            "native.env: {name} is a reserved name"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// Whether the helper refused because the lease has no user or its user was deleted.
 fn gone(why: &ClientError) -> bool {
     matches!(why, ClientError::Refused(reason)
@@ -295,6 +310,7 @@ impl Runtime for NativeRuntime {
         let Body::Native(native) = &spec.body else {
             return Err(RuntimeError::new("this runtime runs native bodies only"));
         };
+        check_env(native)?;
         self.ready()?;
         let id = LeaseId::new(self.term, self.next);
         self.next += 1;
