@@ -297,7 +297,7 @@ impl Reader<'_> {
     }
 
     /// A name of letters, digits and `extra`, `default` when the file does not set it.
-    fn word(
+    fn name(
         &self,
         key: &'static str,
         default: &str,
@@ -305,7 +305,7 @@ impl Reader<'_> {
         why: &'static str,
     ) -> Result<String, ConfigError> {
         let text = self.get_or(key, default)?;
-        check(key, &text, is_word(&text, extra), why)?;
+        check(key, &text, is_name(&text, extra), why)?;
         Ok(text)
     }
 
@@ -344,7 +344,7 @@ impl MdmConfig {
         let lan = cidr(&text).ok_or(bad(
             "LAN_CIDR",
             &text,
-            "not a private IPv4 network (an RFC 1918 range) in CIDR form with 8 to 30 bits",
+            "not a private IPv4 network in CIDR form inside one RFC 1918 block (at least 8 bits in 10/8, 12 in 172.16/12, 16 in 192.168/16; at most 30)",
         ))?;
         check(
             "BIND",
@@ -358,6 +358,13 @@ impl MdmConfig {
             &user,
             is_user_name(&user),
             "not a user name ([a-z_][a-z0-9_-]{0,30})",
+        )?;
+        // The units' sandboxing assumes an account without privilege.
+        check(
+            "USER",
+            &user,
+            !["root", "toor"].contains(&user.as_str()),
+            "a superuser account: the services run unprivileged",
         )?;
         let (state, etc, bin) = (r.path("STATE")?, r.path("ETC")?, r.path("BIN")?);
         // The state is the service user's to write: no other directory may be inside it,
@@ -393,12 +400,27 @@ impl MdmConfig {
             is_unit_stem(stem),
             "not a slice name: lower-case letters, digits and - from a letter, then .slice",
         )?;
+        // systemd's own slices (`system`, `user`, `machine`, `init`, and what nests in
+        // them) are not the kit's to cap; the kit's slice is its prefix or below it.
+        let top = stem.split('-').next().unwrap_or_default();
+        check(
+            "SLICE",
+            &slice,
+            !["system", "user", "machine", "init"].contains(&top),
+            "a slice of systemd's own",
+        )?;
+        check(
+            "SLICE",
+            &slice,
+            stem == unit_prefix || stem.starts_with(&format!("{unit_prefix}-")),
+            "not MDM_UNIT_PREFIX or a slice below it (MDM_UNIT_PREFIX-...)",
+        )?;
         let dep_name = r.get("DEP_NAME")?;
         check(
             "DEP_NAME",
             &dep_name,
-            is_word(&dep_name, "._-"),
-            "not a name of letters, digits, . _ -",
+            is_name(&dep_name, "._-"),
+            "not a name of letters, digits, . _ - that starts with a letter or digit",
         )?;
         let org = r.get("ORG")?;
         check(
@@ -417,11 +439,11 @@ impl MdmConfig {
         let profile_display_name = r.text("PROFILE_DISPLAY_NAME", &format!("{org} MDM"))?;
         let ade = AdeSettings {
             profile_name: r.text("ADE_PROFILE_NAME", &format!("{org} MDM"))?,
-            org_magic: r.word(
+            org_magic: r.name(
                 "ADE_ORG_MAGIC",
                 &unit_prefix,
                 "._-",
-                "not a name of letters, digits, . _ -",
+                "not a name of letters, digits, . _ - that starts with a letter or digit",
             )?,
             language: r.get_or("LANGUAGE", "en")?,
             region: r.get_or("REGION", "US")?,
@@ -445,19 +467,19 @@ impl MdmConfig {
             years: r.number("SCEP_CA_YEARS", 10, 30)?,
         };
         let dep_cert = DepCert {
-            common_name: r.word(
+            common_name: r.name(
                 "DEP_CERT_CN",
                 &unit_prefix,
                 "._-",
-                "not a name of letters, digits, . _ -",
+                "not a name of letters, digits, . _ - that starts with a letter or digit",
             )?,
             days: r.number("DEP_CERT_DAYS", 7, 365)?,
         };
-        let signature_namespace = r.word(
+        let signature_namespace = r.name(
             "SIGNATURE_NAMESPACE",
             &format!("{unit_prefix}-erase"),
             "._-",
-            "not a name of letters, digits, . _ -",
+            "not a name of letters, digits, . _ - that starts with a letter or digit",
         )?;
         Ok(MdmConfig {
             dns_name,
@@ -508,11 +530,19 @@ pub fn lan_address(text: &str) -> Option<Ipv4Addr> {
 
 fn cidr(text: &str) -> Option<Cidr> {
     let (addr, bits) = text.split_once('/')?;
-    let bits: u8 = bits.parse().ok().filter(|b| (8..=30).contains(b))?;
-    Some(Cidr {
-        addr: lan_address(addr)?,
-        bits,
-    })
+    let addr = lan_address(addr)?;
+    // The network must stay inside the private block the address is in: a /8 of
+    // 192.168.0.0 would be read by systemd as 192.0.0.0/8, which is public space.
+    let block_bits = match addr.octets()[0] {
+        10 => 8,
+        172 => 12,
+        _ => 16,
+    };
+    let bits: u8 = bits
+        .parse()
+        .ok()
+        .filter(|b| (block_bits..=30).contains(b))?;
+    Some(Cidr { addr, bits })
 }
 
 /// Whether `a` and `b` are the same directory or one is inside the other.
@@ -565,6 +595,12 @@ fn is_unit_stem(name: &str) -> bool {
         && !name.contains("--")
         && chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// A word that does not start with `-` (a flag to the program that takes it) or `.` (a
+/// path step in the URL that carries it).
+pub(crate) fn is_name(text: &str, extra: &str) -> bool {
+    is_word(text, extra) && !text.starts_with(['-', '.'])
 }
 
 /// Only letters, digits and the characters of `extra` (the callers hold values that

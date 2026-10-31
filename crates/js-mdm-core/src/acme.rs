@@ -88,6 +88,7 @@ impl Acme {
         let email = r.get("ACME_EMAIL")?;
         let at = email.split_once('@');
         let ok = word(&email, "@+")
+            && !email.starts_with('-')
             && at.is_some_and(|(user, domain)| {
                 !user.is_empty() && !domain.contains('@') && domain.contains('.')
             });
