@@ -181,13 +181,23 @@ pub enum Comments {
 
 /// `text` without the lines whose first non-blank character is `#`.
 pub fn strip_comments(text: &str) -> String {
-    let _ = text;
-    todo!("red run: not implemented yet")
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .map(|l| format!("{l}\n"))
+        .collect()
 }
 
 /// One line per file, `<sha256 hex>  <name>`, in the order given: what `sha256sum`
 /// prints for the same bytes, so an installed host can be compared with a render.
 pub fn manifest(files: &[Unit], comments: Comments) -> String {
-    let _ = (files, comments);
-    todo!("red run: not implemented yet")
+    let mut out = String::new();
+    for file in files {
+        let text = match comments {
+            Comments::Keep => file.text.clone(),
+            Comments::Strip => strip_comments(&file.text),
+        };
+        let sum = hex::encode(Sha256::digest(text.as_bytes()));
+        out.push_str(&format!("{sum}  {}\n", file.name));
+    }
+    out
 }

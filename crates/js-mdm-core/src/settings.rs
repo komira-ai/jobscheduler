@@ -49,8 +49,37 @@ pub enum SettingsError {
 impl Settings {
     /// Parse `text`, accepting only the keys in `keys`.
     pub fn parse(text: &str, keys: &[&str]) -> Result<Settings, SettingsError> {
-        let _ = (text, keys);
-        todo!("red run: not implemented yet")
+        let mut values = BTreeMap::new();
+        let mut first_line = BTreeMap::new();
+        for (i, raw) in text.lines().enumerate() {
+            let line = i + 1;
+            if raw.is_empty() || raw.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = raw.split_once('=').filter(|(k, _)| is_key(k)) else {
+                return Err(SettingsError::Malformed { line });
+            };
+            if !keys.contains(&key) {
+                return Err(SettingsError::Unknown {
+                    line,
+                    key: key.to_owned(),
+                });
+            }
+            if let Some(&first) = first_line.get(key) {
+                return Err(SettingsError::Repeated {
+                    line,
+                    key: key.to_owned(),
+                    first,
+                });
+            }
+            first_line.insert(key, line);
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(value);
+            values.insert(key.to_owned(), value.to_owned());
+        }
+        Ok(Settings { values })
     }
 
     /// The value of `key`, if the file set it (possibly empty).

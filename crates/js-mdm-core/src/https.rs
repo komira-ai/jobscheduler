@@ -28,8 +28,36 @@ pub enum HttpsUrlError {
 impl HttpsUrl {
     /// `url` as an [`HttpsUrl`], or why it is not one.
     pub fn new(url: &str) -> Result<HttpsUrl, HttpsUrlError> {
-        let _ = url;
-        todo!("red run: not implemented yet")
+        let Some(rest) = url.strip_prefix("https://") else {
+            return Err(HttpsUrlError::Scheme(url.to_owned()));
+        };
+        let (authority, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, "/"),
+        };
+        // No user part (`https://user:key@host/`): it would be printed with the URL.
+        if authority.contains(['@', '[', ']']) {
+            return Err(HttpsUrlError::Host(url.to_owned()));
+        }
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => {
+                let port = port.parse::<u16>().ok().filter(|p| *p != 0);
+                let Some(port) = port else {
+                    return Err(HttpsUrlError::Port(url.to_owned()));
+                };
+                (host, port)
+            }
+            None => (authority, 443),
+        };
+        if host.is_empty() {
+            return Err(HttpsUrlError::Host(url.to_owned()));
+        }
+        Ok(HttpsUrl {
+            url: url.to_owned(),
+            host: host.to_owned(),
+            port,
+            path: path.to_owned(),
+        })
     }
 
     /// The host.

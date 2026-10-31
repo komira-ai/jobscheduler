@@ -46,8 +46,13 @@ pub struct Topic(String);
 impl Topic {
     /// `text` as a topic, or why it is not one.
     pub fn new(text: &str) -> Result<Topic, ProfileError> {
-        let _ = text;
-        todo!("red run: not implemented yet")
+        let uuid = text.strip_prefix("com.apple.mgmt.External.");
+        let ok = uuid
+            .is_some_and(|u| u.len() == 36 && u.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+        if !ok {
+            return Err(ProfileError::Topic(text.to_owned()));
+        }
+        Ok(Topic(text.to_owned()))
     }
 
     /// The topic as text.
@@ -99,8 +104,50 @@ pub enum ProfileError {
 /// The enrollment profile for the MDM at `MDM_DNS_NAME`, named `MDM_PROFILE_ID` and
 /// `MDM_PROFILE_DISPLAY_NAME`, as the bytes of an XML property list ending in a newline.
 pub fn enrollment(c: &MdmConfig, topic: &Topic, challenge: &Secret) -> Vec<u8> {
-    let _ = (c, topic, challenge);
-    todo!("red run: not implemented yet")
+    let (dns_name, id, org) = (&c.dns_name, &c.profile_id, &c.org);
+    let scep = dict([
+        ("Key Type", text("RSA")),
+        ("Challenge", text(challenge.expose())),
+        ("Key Usage", Value::Integer(KEY_USAGE.into())),
+        ("Keysize", Value::Integer(KEY_SIZE.into())),
+        ("URL", text(&format!("https://{dns_name}/scep"))),
+    ]);
+    let scep = dict([
+        ("PayloadContent", scep),
+        ("PayloadIdentifier", text(&format!("{id}.scep"))),
+        ("PayloadType", text("com.apple.security.scep")),
+        ("PayloadUUID", text(SCEP_UUID)),
+        ("PayloadVersion", Value::Integer(1.into())),
+    ]);
+    let capabilities = CAPABILITIES.iter().map(|c| text(c)).collect();
+    let mdm = dict([
+        ("AccessRights", Value::Integer(ACCESS_RIGHTS.into())),
+        ("CheckOutWhenRemoved", Value::Boolean(true)),
+        ("IdentityCertificateUUID", text(SCEP_UUID)),
+        ("PayloadIdentifier", text(&format!("{id}.mdm"))),
+        ("PayloadType", text("com.apple.mdm")),
+        ("PayloadUUID", text(MDM_UUID)),
+        ("PayloadVersion", Value::Integer(1.into())),
+        ("ServerCapabilities", Value::Array(capabilities)),
+        ("ServerURL", text(&format!("https://{dns_name}/mdm"))),
+        ("SignMessage", Value::Boolean(true)),
+        ("Topic", text(topic.as_str())),
+    ]);
+    let profile = dict([
+        ("PayloadContent", Value::Array(vec![scep, mdm])),
+        ("PayloadDisplayName", text(&c.profile_display_name)),
+        ("PayloadIdentifier", text(id)),
+        ("PayloadOrganization", text(org)),
+        ("PayloadType", text("Configuration")),
+        ("PayloadUUID", text(PROFILE_UUID)),
+        ("PayloadVersion", Value::Integer(1.into())),
+    ]);
+    let mut out = Vec::new();
+    profile
+        .to_writer_xml(&mut out)
+        .expect("a property list of strings, numbers and booleans writes to memory");
+    out.push(b'\n');
+    out
 }
 
 fn text(s: &str) -> Value {
@@ -150,16 +197,42 @@ impl AdeProfile {
     /// The profile for the settings `c`: supervised, mandatory, not removable, sending
     /// devices to `https://<MDM_DNS_NAME>/enroll`.
     pub fn from_config(c: &MdmConfig) -> AdeProfile {
-        let _ = c;
-        todo!("red run: not implemented yet")
+        AdeProfile {
+            profile_name: c.ade.profile_name.clone(),
+            url: format!("https://{}/enroll", c.dns_name),
+            is_supervised: true,
+            is_mandatory: true,
+            is_mdm_removable: false,
+            await_device_configured: false,
+            auto_advance_setup: false,
+            org_magic: c.ade.org_magic.clone(),
+            language: c.ade.language.clone(),
+            region: c.ade.region.clone(),
+            anchor_certs: Vec::new(),
+            skip_setup_items: c.ade.skip_items.clone(),
+        }
     }
 
     /// `text` read as a profile for the MDM at `dns_name`, refused unless a device it
     /// enrolls is supervised, cannot skip it, cannot remove the MDM, and is sent to
     /// this MDM.
     pub fn parse(text: &str, dns_name: &str) -> Result<AdeProfile, ProfileError> {
-        let _ = (text, dns_name);
-        todo!("red run: not implemented yet")
+        let p: AdeProfile =
+            serde_json::from_str(text).map_err(|e| ProfileError::Json(e.to_string()))?;
+        let want = format!("https://{dns_name}/enroll");
+        if p.url != want {
+            return Err(ProfileError::Url { got: p.url, want });
+        }
+        if !p.is_supervised {
+            return Err(ProfileError::NotSupervised);
+        }
+        if !p.is_mandatory {
+            return Err(ProfileError::NotMandatory);
+        }
+        if p.is_mdm_removable {
+            return Err(ProfileError::Removable);
+        }
+        Ok(p)
     }
 
     /// The bytes sent to Apple: pretty JSON in field order, ending in a newline.

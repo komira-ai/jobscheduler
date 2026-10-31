@@ -23,11 +23,10 @@ fn an_absolute_path_has_clean_components() {
     for (text, want) in cases {
         assert_eq!(AbsPath::new(text), Err(want), "{text:?}");
     }
-    assert!(
-        PathError::Empty("/".to_owned())
-            .to_string()
-            .contains("names no file")
-    );
+    let said = |text: &str| AbsPath::new(text).expect_err(text).to_string();
+    assert_eq!(said("a"), "\"a\" is not absolute");
+    assert!(said("/").contains("names no file"));
+    assert!(said("/a/../b").contains("component"));
 }
 
 /// Catches a URL parser that takes another scheme, a user part (it would be printed
@@ -68,9 +67,8 @@ fn an_https_url_is_parsed_into_host_port_and_path() {
         };
         assert_eq!(got, want, "{text}");
     }
-    assert!(
-        HttpsUrlError::Port("x".to_owned())
-            .to_string()
-            .contains("port")
-    );
+    let said = |text: &str| HttpsUrl::new(text).expect_err(text).to_string();
+    assert!(said("http://a/").contains("is not an https:// URL"));
+    assert!(said("https://a@b/").contains("names no host"));
+    assert!(said("https://a:0/").contains("port"));
 }

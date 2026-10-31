@@ -138,8 +138,8 @@ impl Acme {
 
     /// The nameservers as lego's `--dns.resolvers` takes several: comma-separated.
     pub fn resolvers_arg(&self) -> String {
-        let _ = self;
-        todo!("red run: not implemented yet")
+        let words: Vec<String> = self.resolvers.iter().map(SocketAddr::to_string).collect();
+        words.join(",")
     }
 
     /// The wait as lego's `--dns.propagation.wait` takes it: whole seconds, `300s`.

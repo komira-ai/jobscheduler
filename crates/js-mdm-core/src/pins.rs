@@ -164,8 +164,27 @@ impl Pins {
 
     /// The pins in `text`, one per tool, or why the text is refused.
     pub fn parse(text: &str) -> Result<Pins, PinsError> {
-        let _ = text;
-        todo!("red run: not implemented yet")
+        let mut pins: Vec<(Pin, usize)> = Vec::new();
+        for (i, raw) in text.lines().enumerate() {
+            let line = i + 1;
+            if raw.trim().is_empty() || raw.starts_with('#') {
+                continue;
+            }
+            let pin = pin(raw).map_err(|why| PinsError::Line { line, why })?;
+            if let Some((_, first)) = pins.iter().find(|(p, _)| p.tool == pin.tool) {
+                let why = format!("{} is already pinned on line {first}", pin.tool);
+                return Err(PinsError::Line { line, why });
+            }
+            pins.push((pin, line));
+        }
+        let mut ordered = Vec::new();
+        for tool in Tool::ALL {
+            let Some(i) = pins.iter().position(|(p, _)| p.tool == tool) else {
+                return Err(PinsError::Missing(tool));
+            };
+            ordered.push(pins.swap_remove(i).0);
+        }
+        Ok(Pins(ordered))
     }
 
     /// Every pin, in [`Tool::ALL`] order.

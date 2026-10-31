@@ -40,8 +40,33 @@ pub enum TemplateError {
 /// `text`, the template called `name` (for errors), with every placeholder replaced
 /// from `values`. Every line of the output ends in a newline.
 pub fn render(name: &str, text: &str, values: &Values) -> Result<String, TemplateError> {
-    let _ = (name, text, values);
-    todo!("red run: not implemented yet")
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.lines().enumerate() {
+        let mut rest = line;
+        while let Some(open) = rest.find('@') {
+            out.push_str(&rest[..open]);
+            let after = &rest[open + 1..];
+            let key = after.split_once('@').map(|(k, _)| k).filter(|k| is_key(k));
+            let Some(key) = key else {
+                return Err(TemplateError::Stray {
+                    template: name.to_owned(),
+                    line: i + 1,
+                });
+            };
+            let Some(value) = values.get(key) else {
+                return Err(TemplateError::Unknown {
+                    template: name.to_owned(),
+                    line: i + 1,
+                    key: key.to_owned(),
+                });
+            };
+            out.push_str(value);
+            rest = &after[key.len() + 1..];
+        }
+        out.push_str(rest);
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 fn is_key(k: &str) -> bool {

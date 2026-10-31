@@ -40,8 +40,6 @@
 //! that test passing.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
-// Removed with the implementation: the stubs leave helpers unused.
-#![allow(dead_code, unused_imports)]
 
 pub mod acme;
 pub mod commands;

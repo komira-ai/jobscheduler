@@ -185,8 +185,8 @@ pub struct Cidr {
 impl Cidr {
     /// Whether `a` is inside the network.
     pub fn contains(self, a: Ipv4Addr) -> bool {
-        let _ = a;
-        todo!("red run: not implemented yet")
+        let mask = u32::MAX << (32 - u32::from(self.bits));
+        u32::from(a) & mask == u32::from(self.addr) & mask
     }
 }
 

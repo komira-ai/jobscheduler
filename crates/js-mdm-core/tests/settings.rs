@@ -40,9 +40,12 @@ fn unknown_repeated_and_malformed_lines_are_refused() {
         let line = text.lines().position(|l| !l.is_empty()).expect("a line") + 1;
         assert_eq!(refusal(text), SettingsError::Malformed { line }, "{text:?}");
     }
+    let said = |text: &str| refusal(text).to_string();
+    assert_eq!(said("MDM_A 64\n"), "line 1: not KEY=VALUE");
+    assert_eq!(said("MDM_AA=a\n"), "line 1: unknown key MDM_AA");
     assert_eq!(
-        refusal("MDM_A 64\n").to_string(),
-        "line 1: not KEY=VALUE".to_owned()
+        said("MDM_A=1\n# c\nMDM_A=2\n"),
+        "line 3: MDM_A is already set on line 1"
     );
 }
 

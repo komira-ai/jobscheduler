@@ -26,8 +26,17 @@ pub enum PathError {
 impl AbsPath {
     /// `path` as an [`AbsPath`], or why it is not one.
     pub fn new(path: &str) -> Result<AbsPath, PathError> {
-        let _ = path;
-        todo!("red run: not implemented yet")
+        let Some(rest) = path.strip_prefix('/') else {
+            return Err(PathError::NotAbsolute(path.to_owned()));
+        };
+        if rest.is_empty() {
+            return Err(PathError::Empty(path.to_owned()));
+        }
+        let bad = |c: &str| c.is_empty() || c == "." || c == ".." || c.contains('\0');
+        if rest.split('/').any(bad) {
+            return Err(PathError::Component(path.to_owned()));
+        }
+        Ok(AbsPath(path.to_owned()))
     }
 
     /// The path as text.

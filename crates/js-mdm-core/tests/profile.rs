@@ -167,10 +167,35 @@ fn an_ade_profile_a_device_could_leave_is_refused() {
         let got = AdeProfile::parse(&edited(from, to), dns);
         assert!(matches!(got, Err(ProfileError::Json(_))), "{from}: {got:?}");
     }
-    assert!(
-        ProfileError::Removable
+    let said = |text: &str| {
+        AdeProfile::parse(text, dns)
+            .expect_err("refused")
             .to_string()
-            .contains("is_mdm_removable")
+    };
+    assert!(said(&edited("{", "[")).contains("not the JSON this kit reads"));
+    assert!(
+        said(&edited(
+            "\"is_mdm_removable\": false",
+            "\"is_mdm_removable\": true"
+        ))
+        .contains("is_mdm_removable")
+    );
+    assert!(
+        said(&edited(
+            "\"is_supervised\": true",
+            "\"is_supervised\": false"
+        ))
+        .contains("is_supervised")
+    );
+    assert!(
+        said(&edited("\"is_mandatory\": true", "\"is_mandatory\": false")).contains("is_mandatory")
+    );
+    assert!(
+        said(&edited(
+            "https://mdm.example.com/enroll",
+            "https://x/enroll"
+        ))
+        .contains("sends devices to")
     );
 }
 
