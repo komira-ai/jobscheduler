@@ -25,7 +25,7 @@
 use std::os::fd::OwnedFd;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
+use std::process::{Child, ExitStatus, Output};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -441,9 +441,7 @@ impl Crun {
             .spawn()
             .and_then(|child| output_within(child, limit));
         match output {
-            Ok(Some(out)) if out.status.success() => {
-                Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-            }
+            Ok(Some(out)) if out.status.success() => Ok(text(&out.stdout)),
             Ok(Some(out)) => Err(format!(
                 "crun {what}: {}: {}",
                 out.status,
@@ -482,10 +480,7 @@ const CALL_LIMIT: Duration = Duration::from_secs(120);
 /// What `child` printed once it ended, or `None` when it had not ended within `limit` and
 /// was killed. The child is waited for on a thread of its own (which also reads its pipes), so
 /// a full pipe never stalls it and the caller never waits longer than `limit`.
-fn output_within(
-    child: std::process::Child,
-    limit: Duration,
-) -> std::io::Result<Option<std::process::Output>> {
+fn output_within(child: Child, limit: Duration) -> std::io::Result<Option<Output>> {
     // A handle on this very process: the signal below can never reach another one that took
     // the pid after the child was reaped.
     let pidfd = rustix::process::pidfd_open(
@@ -496,14 +491,21 @@ fn output_within(
     std::thread::spawn(move || done.send(child.wait_with_output()));
     match ended.recv_timeout(limit) {
         Ok(output) => output.map(Some),
-        Err(_) => {
-            // The thread ends with the child; its output is dropped.
-            let _ = pidfd.and_then(|fd| {
-                rustix::process::pidfd_send_signal(&fd, rustix::process::Signal::KILL)
-            });
-            Ok(None)
-        }
+        Err(_) => Ok(give_up(pidfd)),
     }
+}
+
+/// Ends the child that `pidfd` stands for, which did not end in time; its thread ends with
+/// it and its output is dropped. There is no output to give.
+fn give_up(pidfd: rustix::io::Result<std::os::fd::OwnedFd>) -> Option<Output> {
+    let signal = rustix::process::Signal::KILL;
+    let _ = pidfd.and_then(|fd| rustix::process::pidfd_send_signal(&fd, signal));
+    None
+}
+
+/// What a program printed, as text.
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// Whether `path` is gone, polling until `limit` has passed.
