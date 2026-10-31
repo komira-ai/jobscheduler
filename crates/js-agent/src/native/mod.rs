@@ -273,7 +273,7 @@ fn reset(helper: &Client) -> Result<(), RuntimeError> {
 /// shell functions). The wire checks these too; this is the last check before a user is
 /// made, for a body that did not pass through it.
 fn check_env(native: &NativeSpec) -> Result<(), RuntimeError> {
-    match native.env.keys().find(|name| env_name_reserved(name)) {
+    match native.env.keys().find(|name| env_name_reserved(name) && !js_types::env::SHELL_ENV_NAMES.contains(&name.as_str())) {
         Some(name) => Err(RuntimeError::new(format!(
             "native.env: {name} is a reserved name"
         ))),
