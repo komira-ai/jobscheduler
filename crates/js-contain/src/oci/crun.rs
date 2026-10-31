@@ -492,9 +492,9 @@ fn output_within(
     ) -> std::thread::JoinHandle<Vec<u8>> {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            for mut pipe in pipe {
+            pipe.into_iter().for_each(|mut pipe| {
                 let _ = pipe.read_to_end(&mut bytes);
-            }
+            });
             bytes
         })
     }
