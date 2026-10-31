@@ -54,6 +54,9 @@ struct Trouble {
     /// A reply named another host: nothing is lifted. Any other trouble is a server that did
     /// not answer as asked, and the cordon is lifted if it can be.
     identity: bool,
+    /// The verb's cordon lapsed and another holder's took its place: nothing is lifted, and
+    /// the window ends as another holder's cordon.
+    other_holder: bool,
 }
 
 /// Whether the host reads as one that nothing runs on and nothing is about to: no lease, not
@@ -88,6 +91,7 @@ fn trouble(what: &str, why: &LeaseError) -> Trouble {
     Trouble {
         text: explain(what, why),
         identity: false,
+        other_holder: false,
     }
 }
 
@@ -97,6 +101,9 @@ struct Window<'a> {
     plan: &'a Plan<'a>,
     out: &'a mut dyn Write,
     said_idle: bool,
+    /// Until when, on the verb's clock, its own cordon surely holds: the time its last cordon
+    /// request was sent plus `lease_secs`. A renewal sent later may find another holder's.
+    held_until: Duration,
 }
 
 impl Window<'_> {
@@ -115,6 +122,7 @@ impl Window<'_> {
                     reading.id, self.plan.host
                 ),
                 identity: true,
+                other_holder: false,
             }),
         }
     }
@@ -130,10 +138,40 @@ impl Window<'_> {
         Ok(())
     }
 
-    /// Renews the cordon.
-    fn renew(&mut self) -> Result<(), Trouble> {
+    /// Says the cordon this verb holds, from a reply that placed or renewed it.
+    fn say_cordoned(&mut self, host: &HostReading) {
+        let left = host.cordon.as_ref().and_then(|cordon| cordon.expires_in_ms);
+        self.say(&format!(
+            "cordoned host={} expires_in_ms={} leases={}",
+            self.plan.host,
+            left.unwrap_or(0),
+            host.leases
+        ));
+    }
+
+    /// Renews the cordon, with the request sent at `asked` on the verb's clock. If the verb's
+    /// cordon has lapsed by then (the process was stopped for longer than `lease_secs`), the
+    /// reply says again whose the cordon is: one that was there already is another holder's,
+    /// and is kept; one the renewal placed is the verb's again.
+    fn renew(&mut self, asked: Duration) -> Result<(), Trouble> {
+        let lapsed = asked >= self.held_until;
         let renewed = self.lease.cordon(self.plan.lease_secs);
         let renewed = renewed.map_err(|why| trouble("cannot renew the cordon", &why))?;
+        self.named(&renewed.host)?;
+        if lapsed {
+            if renewed.already_cordoned {
+                return Err(Trouble {
+                    text: format!(
+                        "the cordon of host {:?} lapsed and another holder cordoned it; nothing is lifted",
+                        self.plan.host
+                    ),
+                    identity: true,
+                    other_holder: true,
+                });
+            }
+            self.say_cordoned(&renewed.host);
+        }
+        self.held_until = asked + Duration::from_secs(self.plan.lease_secs);
         self.observe(&renewed.host)
     }
 
@@ -155,7 +193,7 @@ impl Window<'_> {
                 return Ok(());
             }
             if now >= renew_at {
-                self.renew()?;
+                self.renew(now)?;
                 renew_at = now + every;
                 continue;
             }
@@ -201,11 +239,13 @@ pub fn hold(
     plan: &Plan<'_>,
     out: &mut dyn Write,
 ) -> Outcome {
+    let asked = pace.now();
     let mut window = Window {
         lease,
         plan,
         out,
         said_idle: false,
+        held_until: asked + Duration::from_secs(plan.lease_secs),
     };
     let first = match lease.cordon(plan.lease_secs) {
         Ok(first) => first,
@@ -218,13 +258,7 @@ pub fn hold(
         window.say(&format!("kept host={} reason=already_cordoned", plan.host));
         return Outcome::OtherHolder;
     }
-    let left = first.host.cordon.and_then(|cordon| cordon.expires_in_ms);
-    window.say(&format!(
-        "cordoned host={} expires_in_ms={} leases={}",
-        plan.host,
-        left.unwrap_or(0),
-        first.host.leases
-    ));
+    window.say_cordoned(&first.host);
     let begun = pace.now();
     let held = window
         .observe(&first.host)
@@ -235,6 +269,10 @@ pub fn hold(
     };
     match held.and(lifted) {
         Ok(()) => Outcome::Done,
+        Err(trouble) if trouble.other_holder => {
+            window.say(&format!("kept host={} reason=taken_after_lapse", plan.host));
+            Outcome::OtherHolder
+        }
         Err(trouble) => Outcome::Failed(trouble.text),
     }
 }

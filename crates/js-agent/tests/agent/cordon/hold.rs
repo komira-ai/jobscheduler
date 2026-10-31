@@ -341,3 +341,57 @@ fn the_window_is_counted_on_the_clock_and_not_in_waits() {
     let elapsed = pace.elapsed().as_secs();
     assert!((3700..3750).contains(&elapsed), "{elapsed}");
 }
+
+/// Asserts that a cordon this verb lets lapse (the process was stopped for longer than
+/// `lease_secs`, so it renewed nothing) and that another holder then placed is not lifted: the
+/// renewal after the lapse finds the host cordoned, which cannot be the verb's own cordon any
+/// more, so the verb says `kept` with the reason, makes no uncordon and ends as another holder's
+/// cordon. It catches a verb that takes every renewal as its own and lifts another holder's
+/// cordon at the end of its window.
+#[test]
+fn a_cordon_taken_by_another_holder_after_ours_lapsed_is_kept() {
+    let (lease, lines) = (FakeLease::new(), Lines::default());
+    let pace = FakePace::new();
+    let clock = pace.clock();
+    // During the first wait the process is stopped for 400 s more: the cordon of 300 s lapses
+    // and another holder cordons the host (the server reads it cordoned).
+    let mut pace = pace.on_wait(move |waits, _| {
+        if waits == 1 {
+            clock.set(clock.get() + secs(400));
+        }
+    });
+    let outcome = run(&lease, &mut pace, &plan(300, 3600), &lines);
+    assert_eq!(outcome, Outcome::OtherHolder);
+    assert_eq!(lease.calls(), [Call::Cordon(300), Call::Cordon(300)]);
+    assert_eq!(
+        lines.all(),
+        [CORDONED, IDLE, "kept host=h-1 reason=taken_after_lapse"]
+    );
+    assert!(lease.cordoned());
+}
+
+/// Asserts that a cordon this verb let lapse and that nobody took is placed again by the next
+/// renewal (the reply says the host was not cordoned), said again with a `cordoned` line, held
+/// for the rest of the window and lifted at its end. It catches a verb that gives up its window
+/// after a lapse, or one that lifts nothing at the end because it no longer counts the cordon
+/// as its own.
+#[test]
+fn a_cordon_that_lapsed_and_was_not_taken_is_placed_again_and_lifted() {
+    let (lease, lines) = (FakeLease::new(), Lines::default());
+    let pace = FakePace::new();
+    let clock = pace.clock();
+    let mut pace = pace.on_wait({
+        let lease = lease.clone();
+        move |waits, _| {
+            if waits == 1 {
+                clock.set(clock.get() + secs(400));
+                lease.set(|state| state.cordoned = false);
+            }
+        }
+    });
+    let outcome = run(&lease, &mut pace, &plan(300, 3600), &lines);
+    assert_eq!(outcome, Outcome::Done);
+    assert_eq!(lease.calls().last(), Some(&Call::Uncordon));
+    assert_eq!(lines.all(), [CORDONED, IDLE, CORDONED, LIFTED]);
+    assert!(!lease.cordoned());
+}

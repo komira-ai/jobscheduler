@@ -22,6 +22,8 @@ per state change on standard output:
   lifted host=<id>                                  the cordon was lifted at the end or on a stop
   lapsed host=<id>                                  the cordon had lapsed already, nothing to lift
   kept host=<id> reason=already_cordoned            another holder's cordon was found; not lifted
+  kept host=<id> reason=taken_after_lapse          ours lapsed (a stalled process) and another
+                                                    holder's took its place; not lifted
 
 SIGTERM and SIGINT end the window early and lift the cordon. A process that is killed with \
 SIGKILL (or loses the machine) lifts nothing: the cordon is a lease that is renewed, and it \
