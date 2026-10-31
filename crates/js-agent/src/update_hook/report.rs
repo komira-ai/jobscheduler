@@ -20,8 +20,10 @@ pub const MAX_REASON_LEN: usize = 64;
 /// [`MAX_REASON_LEN`] bytes.
 #[must_use]
 pub fn is_reason_token(reason: &str) -> bool {
-    let _ = reason;
-    unimplemented!()
+    (1..=MAX_REASON_LEN).contains(&reason.len())
+        && reason
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// Whom a failure is blamed on (it decides whether the fleet rolls back).
@@ -119,8 +121,22 @@ impl Report {
     /// `promotion_pending` are always there; the others when set.
     #[must_use]
     pub fn to_line(&self) -> String {
-        let _ = (&self.class, Map::new(), Value::Null);
-        unimplemented!()
+        let mut object = Map::new();
+        object.insert("class".to_owned(), Value::from(self.class.as_str()));
+        object.insert("reversible".to_owned(), Value::from(self.reversible));
+        object.insert(
+            "promotion_pending".to_owned(),
+            Value::from(self.promotion_pending),
+        );
+        let optional = [
+            ("reason", self.reason.map(|r| Value::from(r.as_str()))),
+            ("retry_after_secs", self.retry_after_secs.map(Value::from)),
+            ("detail", self.detail.clone().map(Value::from)),
+        ];
+        for (key, value) in optional {
+            object.extend(value.map(|value| (key.to_owned(), value)));
+        }
+        Value::Object(object).to_string()
     }
 
     /// Writes the line and a newline: what a step does last, to its standard output.

@@ -66,12 +66,42 @@ impl Params {
     /// # Errors
     /// [`ParamsError`]: the text is not a flat table of scalars with the required keys.
     pub fn parse(text: &str) -> Result<Params, ParamsError> {
-        let _ = (
-            text,
-            CORDON_LEASE_KEY,
-            CORDON_MAX_KEY,
-            PROMOTION_CEILING_KEY,
-        );
-        unimplemented!()
+        let table: toml::Table = text
+            .parse()
+            .map_err(|e: toml::de::Error| ParamsError::Syntax(e.message().to_owned()))?;
+        if let Some((key, _)) = table.iter().find(|(_, value)| !is_scalar(value)) {
+            return Err(ParamsError::NotScalar(key.clone()));
+        }
+        Ok(Params {
+            cordon_lease_secs: seconds(&table, CORDON_LEASE_KEY)?
+                .ok_or(ParamsError::Missing(CORDON_LEASE_KEY))?,
+            cordon_max_secs: seconds(&table, CORDON_MAX_KEY)?
+                .ok_or(ParamsError::Missing(CORDON_MAX_KEY))?,
+            promotion_ceiling_secs: seconds(&table, PROMOTION_CEILING_KEY)?,
+        })
     }
+}
+
+/// Whether the updater would have let the value through: a boolean, a number or a string.
+fn is_scalar(value: &toml::Value) -> bool {
+    matches!(
+        value,
+        toml::Value::Boolean(_)
+            | toml::Value::Integer(_)
+            | toml::Value::Float(_)
+            | toml::Value::String(_)
+    )
+}
+
+/// `key` as a whole, non-negative number of seconds; `None` when it is absent.
+fn seconds(table: &toml::Table, key: &str) -> Result<Option<u64>, ParamsError> {
+    table
+        .get(key)
+        .map(|value| {
+            value
+                .as_integer()
+                .and_then(|n| u64::try_from(n).ok())
+                .ok_or_else(|| ParamsError::NotSeconds(key.to_owned()))
+        })
+        .transpose()
 }

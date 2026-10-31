@@ -101,6 +101,36 @@ impl Host<'static> {
     }
 }
 
+/// Why no step ran.
+#[derive(Debug, thiserror::Error)]
+enum Refusal {
+    #[error("{0}")]
+    Args(ArgsError),
+    #[error("{0}")]
+    Params(ParamsError),
+}
+
+impl Refusal {
+    /// The failure the updater is told of: nothing was done, so nothing is irreversible.
+    fn done(&self) -> Done {
+        let reason = match self {
+            Refusal::Args(_) => Reason::BadArgs,
+            Refusal::Params(_) => Reason::BadParams,
+        };
+        Done {
+            outcome: Outcome::Failure,
+            report: Report::failure(reason, self.to_string()),
+        }
+    }
+}
+
+/// Reads the command line and the params file and runs the step they name.
+fn step_of(args: &[OsString], host: &Host<'_>) -> Result<Done, Refusal> {
+    let invocation = Invocation::parse(args.iter().skip(2).cloned()).map_err(Refusal::Args)?;
+    let params = Params::read(&invocation.params).map_err(Refusal::Params)?;
+    Ok((host.step)(&invocation, &params))
+}
+
 /// Runs the verb on `args` (the program name and the verb first): the last line goes to
 /// `out`, the words for a person to `err`.
 pub fn run(
@@ -109,6 +139,11 @@ pub fn run(
     err: &mut dyn Write,
     host: &Host<'_>,
 ) -> ExitCode {
-    let _ = (args, out, err, host);
-    unimplemented!()
+    let done = step_of(args, host).unwrap_or_else(|refusal| {
+        let _ = writeln!(err, "js-agent update-hook: {refusal}");
+        refusal.done()
+    });
+    // A closed standard output cannot be reported anywhere; the status still is.
+    let _ = done.report.write_to(out);
+    done.outcome.into()
 }

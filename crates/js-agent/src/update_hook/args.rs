@@ -113,6 +113,30 @@ impl Invocation {
     where
         I: IntoIterator<Item = OsString>,
     {
-        unimplemented!("{}", args.into_iter().count())
+        let mut args = args.into_iter();
+        let first = args.next().ok_or(ArgsError::MissingStep)?;
+        let step: Step = first.to_string_lossy().parse()?;
+        let (mut artifact, mut params) = (None, None);
+        while let Some(arg) = args.next() {
+            if arg == "--params" {
+                let file = args.next().ok_or(ArgsError::MissingParamsFile)?;
+                if params.replace(PathBuf::from(file)).is_some() {
+                    return Err(ArgsError::DuplicateParams);
+                }
+            } else if step == Step::Prepare && artifact.is_none() {
+                artifact = Some(PathBuf::from(arg));
+            } else {
+                return Err(ArgsError::Unexpected(arg));
+            }
+        }
+        if step == Step::Prepare && artifact.is_none() {
+            return Err(ArgsError::MissingArtifact);
+        }
+        let params = params.ok_or(ArgsError::MissingParams)?;
+        Ok(Invocation {
+            step,
+            artifact,
+            params,
+        })
     }
 }
