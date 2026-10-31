@@ -6,12 +6,17 @@ use clap::{Parser, ValueEnum};
 
 /// What `--version` prints after the version: the runtimes this build can run jobs with, on a
 /// line a script can read (`js-agent --version | grep -x 'runtimes: docker crun'`). A build
-/// where `--runtime crun` is wired says `docker crun`; others say `docker`.
+/// where `--runtime crun` is wired says `docker crun`; a Mac build says `docker native` (it
+/// runs native jobs through the root helper, and has no crun); others say `docker`.
 #[cfg(target_os = "linux")]
 pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker crun");
 
 /// See the Linux form.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker native");
+
+/// See the Linux form.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker");
 
 /// The flags of `js-agent`.
