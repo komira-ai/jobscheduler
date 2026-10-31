@@ -69,9 +69,8 @@ fn sudo(me: &Path, args: &[String]) -> ExitCode {
     if args.get(1).is_some_and(|program| program == "systemctl") {
         return systemctl(&args[2..], &defect);
     }
-    if args.get(1).is_some_and(|program| program == "systemd-run") {
-        write_count(args, &defect);
-    }
+    // Past `systemctl`, the only command is `systemd-run`, whose unit runs `count-run`.
+    write_count(args, &defect);
     if failing {
         ExitCode::from(101)
     } else {
@@ -81,9 +80,10 @@ fn sudo(me: &Path, args: &[String]) -> ExitCode {
 
 /// What the wrapper in a `systemd-run` command would have written to its count file.
 fn write_count(args: &[String], defect: &str) {
-    let Some(at) = args.iter().position(|a| a == "--count-file") else {
-        return;
-    };
+    let at = args
+        .iter()
+        .position(|a| a == "--count-file")
+        .expect("a systemd-run of count-run");
     let text = match defect {
         "no-count" => return,
         "zero-tests" => "0\n",

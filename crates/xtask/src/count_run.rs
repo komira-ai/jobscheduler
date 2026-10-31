@@ -51,9 +51,9 @@ pub fn read_count(file: &Path) -> Result<u64, String> {
     Ok(count)
 }
 
-/// A failure of this verb with the reason `why`.
-fn failed(why: String) -> Error {
-    Error::CrunTests(test_build::Error::Failed(why))
+/// The error for an I/O failure while `what` (a phrase for the log).
+fn io_failed(what: String) -> impl FnOnce(std::io::Error) -> Error {
+    move |e| Error::CrunTests(test_build::Error::Failed(format!("{what}: {e}")))
 }
 
 /// Runs `command`, passes its stdout through, and writes the count of tests it reported to
@@ -62,6 +62,7 @@ fn failed(why: String) -> Error {
 /// # Errors
 /// The command is empty or cannot be started, or the file cannot be written. A command that
 /// ends with a failure status is [`Error::Child`] with that status, after the count is written.
+/// A read of the command's output that fails ends the reading: the count is of what was read.
 pub fn run(count_file: &Path, command: &[OsString]) -> Result<String, Error> {
     let (program, args) = command
         .split_first()
@@ -70,16 +71,16 @@ pub fn run(count_file: &Path, command: &[OsString]) -> Result<String, Error> {
         .args(args)
         .stdout(Stdio::piped())
         .spawn()
-        .map_err(|e| failed(format!("{}: {e}", program.to_string_lossy())))?;
+        .map_err(io_failed(format!(
+            "cannot start {}",
+            program.to_string_lossy()
+        )))?;
     let mut reader = BufReader::new(child.stdout.take().expect("piped stdout"));
     let mut stdout = std::io::stdout().lock();
     let (mut count, mut line) = (0u64, Vec::new());
     loop {
         line.clear();
-        let n = reader
-            .read_until(b'\n', &mut line)
-            .map_err(|e| failed(format!("reading the output of the tests: {e}")))?;
-        if n == 0 {
+        if !matches!(reader.read_until(b'\n', &mut line), Ok(n) if n > 0) {
             break;
         }
         count += passed_in(String::from_utf8_lossy(&line).trim_end()).unwrap_or(0);
@@ -87,9 +88,9 @@ pub fn run(count_file: &Path, command: &[OsString]) -> Result<String, Error> {
     }
     let status = child
         .wait()
-        .map_err(|e| failed(format!("waiting for the tests: {e}")))?;
+        .map_err(io_failed("cannot wait for the tests".to_owned()))?;
     std::fs::write(count_file, format!("{count}\n"))
-        .map_err(|e| failed(format!("could not write {}: {e}", count_file.display())))?;
+        .map_err(io_failed(format!("cannot write {}", count_file.display())))?;
     if status.success() {
         return Ok(format!("{count} tests ran"));
     }
@@ -99,11 +100,11 @@ pub fn run(count_file: &Path, command: &[OsString]) -> Result<String, Error> {
 /// The exit code a failed child maps to: its own, or 128 plus the signal that ended it.
 fn exit_code(status: &std::process::ExitStatus) -> u8 {
     use std::os::unix::process::ExitStatusExt;
-    match (status.code(), status.signal()) {
-        (Some(code), _) => u8::try_from(code).unwrap_or(1).max(1),
-        (None, Some(signal)) => u8::try_from(128 + signal).unwrap_or(1),
-        (None, None) => 1,
-    }
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .and_then(|code| u8::try_from(code).ok())
+        .unwrap_or(1)
 }
 
 #[cfg(test)]

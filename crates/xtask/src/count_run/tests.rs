@@ -33,3 +33,32 @@ fn a_failed_child_keeps_its_exit_code() {
     assert_eq!(code(101 << 8), 101);
     assert_eq!(code(9), 137);
 }
+
+/// The wrapper's own failures: an empty command is a usage error, a program that does not
+/// exist and a count file that cannot be written are failures naming what failed (the test
+/// binary itself, asked to list its tests, is the program that runs).
+#[test]
+fn the_wrapper_reports_what_it_could_not_do() {
+    let dir = std::env::temp_dir().join(format!("xtask-count-run-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let file = dir.join("n.count");
+    assert!(matches!(run(&file, &[]), Err(Error::Usage(_))));
+    let missing = run(&file, &[dir.join("no-such-program").into_os_string()]);
+    assert!(
+        matches!(&missing, Err(e) if e.to_string().contains("cannot start")),
+        "{missing:?}"
+    );
+    assert!(!file.exists());
+    let me = std::env::current_exe()
+        .expect("test binary")
+        .into_os_string();
+    let list = vec![me, OsString::from("--list")];
+    let unwritable = run(&dir.join("no-such-dir/n.count"), &list);
+    assert!(
+        matches!(&unwritable, Err(e) if e.to_string().contains("cannot write")),
+        "{unwritable:?}"
+    );
+    assert_eq!(run(&file, &list), Ok("0 tests ran".to_owned()));
+    assert_eq!(std::fs::read_to_string(&file).expect("count"), "0\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
