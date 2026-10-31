@@ -23,7 +23,10 @@
 //! two are merged.
 
 mod farm;
+mod model;
 mod round;
+
+use model::{Lease, Op, Wait, Worker};
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -31,10 +34,10 @@ use std::fmt::Display;
 
 use super::reference::{Verdict, add, blame, by_load, exclusive, fits, room, sub, verdict, within};
 use js_caps::NodeCaps;
-use js_sched::fence::{HANDOVER_GRACE, LEASE_GRACE, START_GRACE};
+use js_sched::fence::{HANDOVER_GRACE, START_GRACE};
 use js_sched::{
-    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, NOT_STARTED_RERUNS, OpState,
-    PLACEMENT_ROUND, Request, Scheduler,
+    Cordon, Event, FARM_RERUNS, Input, NOT_STARTED_RERUNS, OpState, PLACEMENT_ROUND, Request,
+    Scheduler,
 };
 
 use js_types::sched::{
@@ -48,77 +51,6 @@ pub const TERM: u64 = 1;
 
 fn ms(d: std::time::Duration) -> u64 {
     u64::try_from(d.as_millis()).expect("durations fit")
-}
-
-#[derive(Clone, Debug)]
-struct Worker {
-    capacity: Resources,
-    caps: NodeCaps,
-    booked: Resources,
-    /// A lease holds the node alone: an action at its whole memory.
-    whole: bool,
-    last_heard: u64,
-    session: u64,
-    /// The daemon process of the current session, how many times it changed, and until
-    /// when the leases of an earlier one are kept.
-    instance: DaemonInstance,
-    process: u64,
-    handover_ends: u64,
-    leases: BTreeSet<LeaseId>,
-    /// Each lease it holds, with the action key and the cores it was charged when placed
-    /// (the load rule's ledger).
-    charged: BTreeMap<LeaseId, (WorkKey, u64)>,
-}
-
-impl Worker {
-    fn alive(&self, now: u64) -> bool {
-        now < self.last_heard + ms(LEASE_GRACE)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct Lease {
-    op: OperationId,
-    worker: WorkerId,
-    committed: bool,
-    running: bool,
-    /// When its `Start` was emitted, and to which session and daemon process.
-    sent: Option<(u64, u64, u64)>,
-}
-
-/// A queued operation's unbroken wait with no worker able to run it.
-#[derive(Clone, Copy, Debug)]
-struct Wait {
-    since: u64,
-    verdict: Verdict,
-}
-
-#[derive(Clone, Debug)]
-struct Op {
-    request: Request,
-    needs: usize,
-    waiters: Vec<WaiterId>,
-    /// `None` while queued (or waiting for its refusal to commit).
-    holding: Option<LeaseId>,
-    done: Option<OpState>,
-    newest: Option<LeaseId>,
-    proposed: bool,
-    /// Its result was proposed by a give-up past the farm budget, not by a worker.
-    silenced: bool,
-    /// Its sent leases given up for silence or replacement: the farm runs it was
-    /// charged (the workers placement avoids while another fits).
-    farm_runs: Vec<FarmRun>,
-    /// Its leases given up as not started (the node heartbeats but never listed them):
-    /// their own budget, charged nothing to the farm's.
-    not_started: u32,
-    /// The workers placement avoids while another fits: those of its farm runs and of
-    /// its not-started give-ups.
-    avoid: BTreeSet<WorkerId>,
-    wait: Option<Wait>,
-    /// The last reason its callers were told, while it waits.
-    told: Option<String>,
-    /// Finished, and dropped once the finished retention was up (I16).
-    dropped: bool,
 }
 
 /// How often each situation the family means to reach was reached.
