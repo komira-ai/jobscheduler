@@ -10,7 +10,7 @@ use js_provider::Provider;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::adapt::{BoxedProvider, SharedClock};
 use crate::agents::assemble;
@@ -41,6 +41,7 @@ pub struct Running {
     ticking: Ticking,
     _checking: Checking,
     scaler: Option<Scaler>,
+    tls: Option<tls::Tls>,
 }
 
 /// The listener that serves the agent routes alone (`server.agent_listen`).
@@ -130,7 +131,8 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         scaler.set_sink(sink, config.alert_repeat);
     }
     let Seated { provider, unseated } = source.provider(&bookings)?;
-    let acceptor = config.tls.as_ref().map(tls::acceptor).transpose()?;
+    let tls = config.tls.as_ref().map(tls::Tls::open).transpose()?;
+    let acceptor = tls.as_ref().map(tls::Tls::acceptor);
     let (listener, addr) = bind(config.listen, config.listen_flag, config.bound.take()).await?;
     let agent_listener = match config.agent_listen {
         Some(agent) => Some(bind(agent, "server.agent_listen", None).await?),
@@ -221,6 +223,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         ticking,
         _checking: checking,
         scaler,
+        tls,
     })
 }
 
@@ -320,8 +323,27 @@ impl Drop for ScalerLoop {
 
 impl Running {
     /// Re-reads `--tls-cert` and `--tls-key` and serves the pair from the next handshake on.
+    ///
+    /// The pair is checked whole first: the key file owner-only, the key the certificate's,
+    /// the certificate valid now. A pair that fails is refused with one logged line and
+    /// the pair being served stays. Connections already open keep their session.
     pub fn reload_tls(&self) -> Result<(), StartupError> {
-        Err(StartupError::new("--tls-cert", "reload is not implemented"))
+        let Some(tls) = &self.tls else {
+            return Err(StartupError::new(
+                "--tls-cert",
+                "the server was started without TLS, so there is nothing to reload",
+            ));
+        };
+        match tls.reload() {
+            Ok(()) => {
+                info!("tls reloaded: the renewed certificate is served from the next handshake");
+                Ok(())
+            }
+            Err(err) => {
+                error!(%err, "tls reload refused: the previous certificate and key stay in use");
+                Err(err)
+            }
+        }
     }
 
     /// The address the server listens on, with the port the system chose for port 0.

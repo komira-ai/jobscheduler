@@ -172,7 +172,8 @@ async fn a_bad_pair_is_refused_and_the_old_certificate_is_still_served() {
     let expired = identity(4, (2020, 1, 1), (2021, 1, 1));
     let not_yet = identity(5, (3000, 1, 1), (3001, 1, 1));
     let s = &h.scratch;
-    let cases: Vec<(&str, &str, Box<dyn Fn()>)> = vec![
+    type Plant<'a> = Box<dyn Fn() + 'a>;
+    let cases: Vec<(&str, &str, Plant)> = vec![
         (
             "--tls-cert",
             "absent certificate",
