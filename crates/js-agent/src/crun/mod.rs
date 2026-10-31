@@ -115,6 +115,7 @@ pub use wire::{
 };
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -242,6 +243,14 @@ pub enum CrunError {
     /// The settings name no job user: the agent is root and a container runs as another.
     #[error("the crun runtime needs the job user the containers run as")]
     NoJobUser,
+    /// The cgroup the leases are made in is not named `actions`, the name the post-job checks
+    /// know the leases' group by: a job's leftover process under another name would be
+    /// judged the host's.
+    #[error("the cgroup of the leases must be named `actions`, not {actions}")]
+    ActionsName {
+        /// The cgroup given.
+        actions: String,
+    },
     /// The backend cannot start on this node.
     #[error(transparent)]
     Oci(#[from] OciError),
@@ -382,6 +391,13 @@ impl CrunRuntime {
     ) -> Result<Self, CrunError> {
         let (uid, gid) = settings.oci.job_user.ok_or(CrunError::NoJobUser)?;
         let cgroups = settings.cgroups;
+        // The post-job checks know the leases' group by its name: a leftover job process
+        // under another name would be judged the host's, and the check silently off.
+        if Path::new(&cgroups.actions).file_name() != Some(OsStr::new("actions")) {
+            return Err(CrunError::ActionsName {
+                actions: cgroups.actions,
+            });
+        }
         // `crun`, run as the job user, moves its first process from the agent's cgroup into
         // the container's, which needs write access to the `cgroup.procs` of their nearest
         // common ancestor: the agent's own cgroup.
@@ -919,6 +935,10 @@ impl Runtime for CrunRuntime {
 
     fn supports_gpus(&self) -> bool {
         false
+    }
+
+    fn places_in_cgroup(&self) -> bool {
+        true
     }
 
     fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {

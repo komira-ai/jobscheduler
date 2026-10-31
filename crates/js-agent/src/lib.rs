@@ -10,6 +10,12 @@
 //! runtime's own timestamps, time passes only in the sleeper. The one clock of the jobs is
 //! the monotonic one the [`Machine`] gives, which the worker and the session share.
 //!
+//! # Verbs
+//!
+//! `js-agent image-pull <repository>@sha256:<hex>` (Linux, run as root) pulls an image into
+//! the store the crun runtime reads, without starting the agent and without a container
+//! engine; see `image::pull`.
+//!
 //! # Flags
 //!
 //! Configuration is flags only: `js-agent` reads no environment variable.
@@ -428,6 +434,13 @@ pub fn main_with(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(image::pull::VERB))
+    {
+        return image::pull::run(&args, out, err, &image::pull::Host::system());
+    }
     match install() {
         Err(why) => fail(err, &why, exit::FAILED),
         Ok(mut sleeper) => {

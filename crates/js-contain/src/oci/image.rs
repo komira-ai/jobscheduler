@@ -13,12 +13,17 @@
 //!
 //! The first use of an image pays for the fetch and the unpack, on the lease's prepare
 //! step or, for the images the daemon is given up front, at start; a second use
-//! (and a second daemon on the same data directory) finds the directory and fetches
-//! nothing.
+//! (and a daemon started later on the same data directory, once the first is gone) finds
+//! the directory and fetches nothing. Daemons share a directory, and only one
+//! that has it to itself sweeps stages ([`super::lock`]).
 //!
 //! The unpack runs in a user namespace with the daemon user unmapped, the stage directory
 //! the only writable path and the downloaded blobs read-only, so a hostile tar can write
 //! nothing the daemon user owns.
+//!
+//! The rename publishes the image, so the unpacked tree is flushed to disk (`syncfs`)
+//! before it and the images directory (`fsync`) after it: a power loss leaves a published
+//! image whole, or none.
 //!
 //! **The stage belongs to the helper's id and to nobody else may write it**: the daemon
 //! makes it `0700`, opens it by descriptor (`O_NOFOLLOW`), sets `0755` and gives it to the
@@ -51,6 +56,20 @@ use crate::walk::DIRECTORY;
 
 /// The directory of the rootfs under an image's directory.
 pub const ROOTFS: &str = "rootfs";
+
+/// The directory of the image store under a backend's scratch directory.
+pub const IMAGES_DIR: &str = "oci-images";
+
+/// Where a backend whose scratch directory is `scratch` publishes the root filesystem of
+/// the image whose digest is `digest` (`sha256:<hex>`): `<scratch>/oci-images/<hex>/rootfs`.
+/// A directory there means the image is complete (the stage is renamed into place last).
+#[must_use]
+pub fn published_root(scratch: &Path, digest: &str) -> PathBuf {
+    scratch
+        .join(IMAGES_DIR)
+        .join(digest.strip_prefix("sha256:").unwrap_or(digest))
+        .join(ROOTFS)
+}
 
 /// An image named by the digest of its per-architecture manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,8 +279,14 @@ impl Images {
             let _ = oci.remove_dir_async(&stage).await;
         }
         made?;
+        // The stage is already the mode an image directory has (0755), made by make_stage.
+        // The rename is what says the image is complete, so everything it makes visible is
+        // on disk first: after a power loss a published directory is whole or absent.
+        at(&stage, blocking(&stage, flush_fs).await).map_err(failed)?;
         let finished = self.dir.join(&hex);
-        at(&finished, tokio::fs::rename(&stage, &finished).await).map_err(failed)
+        at(&finished, tokio::fs::rename(&stage, &finished).await).map_err(failed)?;
+        // And the name itself, so that "pulled" is not said of one a crash can take back.
+        at(&self.dir, blocking(&self.dir, flush_dir).await).map_err(failed)
     }
 
     /// Downloads the image's layers into `blobs` (a directory the container's ids can
@@ -331,6 +356,26 @@ impl Images {
             ))
         }
     }
+}
+
+/// Writes everything on the file system `path` is on to disk (`syncfs`): the files and
+/// directories of an unpack, made by ids this process does not own, in one call.
+pub(crate) fn flush_fs(path: &Path) -> std::io::Result<()> {
+    Ok(rustix::fs::syncfs(std::fs::File::open(path)?)?)
+}
+
+/// Writes the entries of the directory `path` to disk (`fsync` of the directory).
+pub(crate) fn flush_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+/// Runs `work` on `path` on a thread that may block.
+async fn blocking(path: &Path, work: fn(&Path) -> std::io::Result<()>) -> std::io::Result<()> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || work(&path))
+        .await
+        .map_err(std::io::Error::from)
+        .and_then(|done| done)
 }
 
 impl Oci {
