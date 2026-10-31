@@ -147,3 +147,100 @@ fn a_loopback_connect_follows_the_lower_of_request_and_cap() {
     }
     drop(listener);
 }
+
+/// Asserts the file size limit for real: a program that writes four MiB to its standard
+/// output under a limit of one MiB is ended, and the log never grows past the limit. It
+/// catches a run that can fill the agent's disk through its output.
+#[test]
+fn a_run_that_writes_past_the_file_limit_is_ended_at_it() {
+    let mut rig = Rig::with("mac-fsize", |config| config.max_file_bytes = 1 << 20);
+    rig.fake.real_runs();
+    let spec = rig.spec(
+        "r1",
+        super::native("/bin/dd", &["if=/dev/zero", "bs=1048576", "count=4"]),
+    );
+    let id = rig.rt.create_and_start(&spec).unwrap();
+    let status = rig.settle(&id);
+    assert_ne!(status, exited(0), "the program was not stopped");
+    let written = fs::metadata(spec.scratch.join("stdout")).unwrap().len();
+    assert!(written <= 1 << 20, "{written} bytes under a limit of 1 MiB");
+}
+
+/// Asserts the process limit for real: under a limit of one process the shell of a run
+/// cannot start another program, so a fork bomb has no fork to make. It catches a run whose
+/// user can fill the process table.
+#[test]
+fn a_run_cannot_fork_past_the_process_limit() {
+    let mut rig = Rig::with("mac-nproc", |config| config.max_processes = 1);
+    rig.fake.real_runs();
+    let id = rig.start("r1", "/bin/sh", &["-c", "/bin/echo forked; :"]);
+    rig.settle(&id);
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    assert_eq!(tail.stdout, "", "the run forked");
+    assert!(
+        tail.stderr.contains("Resource temporarily unavailable"),
+        "{}",
+        tail.stderr
+    );
+}
+
+/// Asserts that the command line the runtime builds keeps the shell that sets the limits
+/// inside the profile: it is run for real with an environment that asks the shell to trace
+/// with a `PS4` that touches a file in a directory every user may write, and to run an
+/// imported `ulimit` function that does the same. The file must not exist afterwards, and
+/// the run still ends well. The runtime refuses these names itself (see
+/// `a_start_refuses_names_that_steer_the_shell_before_a_user_is_made`), so this applies the
+/// command line without the runtime's checks, as a second line behind them. It catches a
+/// limiting shell that runs before the profile is applied, as the lease user, with the
+/// job's environment.
+#[test]
+fn the_job_environment_cannot_steer_the_shell_that_sets_the_limits() {
+    static UNIQUE: AtomicU32 = AtomicU32::new(0);
+    let rig = Rig::new("mac-shell-env");
+    let marker = std::path::PathBuf::from(format!(
+        "/private/tmp/js-native-escape-{}-{}",
+        std::process::id(),
+        UNIQUE.fetch_add(1, Ordering::SeqCst)
+    ));
+    let touch = format!("/usr/bin/touch {}", marker.display());
+    let mut body = super::native("/bin/echo", &["done"]);
+    body.env = std::collections::BTreeMap::from([
+        ("SHELLOPTS".to_owned(), "xtrace".to_owned()),
+        ("PS4".to_owned(), format!("$({touch}) ")),
+        (
+            "BASH_FUNC_ulimit%%".to_owned(),
+            format!("() {{ {touch}; return 0; }}"),
+        ),
+    ]);
+    let home = rig.fake.home_of("7.0");
+    let exec = home.join("exec");
+    fs::create_dir_all(&exec).unwrap();
+    fs::create_dir_all(home.join("tmp")).unwrap();
+    let config = super::config(&rig.fake);
+    let argv = js_agent::native::profile_argv(&config, &body, &home).unwrap();
+    let out = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .envs(&body.env)
+        .current_dir(&exec)
+        .output()
+        .unwrap();
+    let escaped = marker.exists();
+    // Removed before anything is asserted, so a failure leaves nothing behind.
+    let _ = fs::remove_file(&marker);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The job must have run first: a command line that never started would leave no marker
+    // either, and that is not the sandbox holding. The imported `ulimit` function returns
+    // success (its write is denied by the profile), so the shell goes on to exec the job.
+    assert!(
+        out.status.success() && stdout.contains("done"),
+        "the job did not run: {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        out.status
+    );
+    assert!(
+        !escaped,
+        "a command ran outside the profile: {}\nstderr: {stderr}",
+        marker.display()
+    );
+}

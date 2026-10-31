@@ -19,11 +19,19 @@
 //! every container as the non-root job user `<name>` (an account with a subordinate id
 //! range, which the caller made).
 //!
+//! A unit's result is read from the unit, never taken from `systemd-run`: on a hosted runner
+//! `systemd-run --wait --collect --pipe` exited 0 after the unit's test binary exited 101.
+//! After each run the verb reads the unit's own `Result`, `ExecMainCode` and `ExecMainStatus`
+//! with `systemctl show` ([`unit_verdict`]), and a target passes only if `systemd-run` and
+//! that read both say so. Units are not collected on exit ([`unit_name`] makes each run's
+//! name unique), so a failed one stays loaded to be read; the verb resets it afterwards.
+//!
 //! Every target runs even when one before it failed; the verb fails if any did.
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 
 use crate::test_build::{self, Built, Error};
 
@@ -98,19 +106,168 @@ pub fn host_report(root: &Path) -> String {
     )
 }
 
-/// `sudo -n <args>`: its exit status. Its output is this process's.
-fn sudo(program: &Path, args: &[OsString]) -> Result<ExitStatus, Error> {
-    Command::new(program)
-        .arg("-n")
-        .args(args)
-        .status()
-        .map_err(Error::spawn(program.display().to_string()))
+/// What the verb asks of `sudo -n`: the seam the tests put a fake behind.
+pub trait Sudo {
+    /// Runs `args` as root: its exit status. Its output is this process's.
+    ///
+    /// # Errors
+    /// The program could not be started.
+    fn run(&self, args: &[OsString]) -> Result<ExitStatus, Error>;
+
+    /// Runs `args` as root and returns what it printed on stdout.
+    ///
+    /// # Errors
+    /// The program could not be started, or exited with a failure status.
+    fn read(&self, args: &[OsString]) -> Result<String, Error>;
+}
+
+/// The real `sudo` program, run with `-n` so it never prompts.
+pub struct SudoProgram<'a>(pub &'a Path);
+
+impl Sudo for SudoProgram<'_> {
+    fn run(&self, args: &[OsString]) -> Result<ExitStatus, Error> {
+        Command::new(self.0)
+            .arg("-n")
+            .args(args)
+            .status()
+            .map_err(Error::spawn(self.0.display().to_string()))
+    }
+
+    fn read(&self, args: &[OsString]) -> Result<String, Error> {
+        let out = Command::new(self.0)
+            .arg("-n")
+            .args(args)
+            .stderr(Stdio::inherit())
+            .output()
+            .map_err(Error::spawn(self.0.display().to_string()))?;
+        if !out.status.success() {
+            return Err(Error::Failed(format!(
+                "{} -n {} failed: {}",
+                self.0.display(),
+                args.iter()
+                    .take(2)
+                    .map(|a| a.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                out.status
+            )));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+/// The name of the unit that runs `target` in the run of the process `run_id`: unique per
+/// run, so a read of the unit's result is about this run's unit and no other.
+pub fn unit_name(target: &str, run_id: u32) -> String {
+    format!("js-crun-tests-{target}-{run_id}")
+}
+
+/// The properties of a unit that say how its main process ended.
+const UNIT_PROPERTIES: [&str; 4] = ["Result", "ExecMainCode", "ExecMainStatus", "LoadState"];
+
+/// The arguments for `sudo -n` that read how `unit` ended.
+pub fn show_args(unit: &str) -> Vec<OsString> {
+    let mut args: Vec<OsString> = ["systemctl", "show"].map(OsString::from).into();
+    args.push(unit.into());
+    for property in UNIT_PROPERTIES {
+        args.push("-p".into());
+        args.push(property.into());
+    }
+    args
+}
+
+/// The arguments for `sudo -n` that clear `unit`'s failed state, so it does not linger.
+pub fn reset_args(unit: &str) -> Vec<OsString> {
+    ["systemctl", "reset-failed", unit]
+        .map(OsString::from)
+        .into()
+}
+
+/// Whether `show`, the output of `systemctl show <unit> -p Result -p ExecMainCode
+/// -p ExecMainStatus -p LoadState`, says the unit's main process exited with status 0.
+///
+/// A unit that ended cleanly may already be unloaded (a unit is collected when inactive
+/// unless it failed), and then systemd reports `LoadState=not-found` with its defaults,
+/// which is accepted; a failed unit is never collected, so it is always read as it ended.
+///
+/// # Errors
+/// A line that is not `Key=Value`, a property missing, or a unit that did not end with
+/// `Result=success` and `ExecMainStatus=0` (exited, `ExecMainCode=1`, unless unloaded): the
+/// reason, with what was read.
+pub fn unit_verdict(show: &str) -> Result<(), String> {
+    let mut props = HashMap::new();
+    for line in show.lines().filter(|l| !l.is_empty()) {
+        let (key, value) = line.split_once('=').ok_or_else(|| {
+            format!("systemctl show printed a line that is not Key=Value: {line:?}")
+        })?;
+        props.insert(key, value);
+    }
+    let get = |key: &str| {
+        props
+            .get(key)
+            .copied()
+            .ok_or_else(|| format!("systemctl show printed no {key}: {show:?}"))
+    };
+    let (result, code, status, load) = (
+        get("Result")?,
+        get("ExecMainCode")?,
+        get("ExecMainStatus")?,
+        get("LoadState")?,
+    );
+    if result == "success" && status == "0" && (code == "1" || load == "not-found") {
+        return Ok(());
+    }
+    Err(format!(
+        "the unit did not exit 0: Result={result}, ExecMainCode={code}, \
+         ExecMainStatus={status}, LoadState={load}"
+    ))
+}
+
+/// Runs the `systemd-run` command `args` for `unit`, then reads and resets the unit: `Ok`
+/// only when `systemd-run` exited 0 and the unit's own result is a clean exit. Every
+/// reason it is not, joined.
+fn run_unit(sudo: &dyn Sudo, unit: &str, args: &[OsString]) -> Result<(), String> {
+    let ran = sudo.run(args);
+    let shown = sudo.read(&show_args(unit));
+    // Best effort: a unit that ended cleanly may be gone already.
+    let _ = sudo.run(&reset_args(unit));
+    let mut why = Vec::new();
+    match ran {
+        Ok(status) if status.success() => {}
+        Ok(status) => why.push(format!("systemd-run: {status}")),
+        Err(e) => why.push(e.to_string()),
+    }
+    match shown {
+        Ok(text) => why.extend(unit_verdict(&text).err()),
+        Err(e) => why.push(format!("could not read the result of unit {unit}: {e}")),
+    }
+    if why.is_empty() {
+        Ok(())
+    } else {
+        Err(why.join("; "))
+    }
+}
+
+/// Reads and resets `unit`, which a step started with `systemd-run --wait` (without
+/// `--collect`): the line to print when it exited 0.
+///
+/// # Errors
+/// The unit's result could not be read or is not a clean exit.
+pub fn check_unit(sudo: &dyn Sudo, unit: &str) -> Result<String, Error> {
+    let shown = sudo.read(&show_args(unit));
+    let _ = sudo.run(&reset_args(unit));
+    let text = shown
+        .map_err(|e| Error::Failed(format!("could not read the result of unit {unit}: {e}")))?;
+    unit_verdict(&text).map_err(|why| Error::Failed(format!("unit {unit}: {why}")))?;
+    Ok(format!("ok: unit {unit} exited 0"))
 }
 
 /// What one target's unit is given.
 pub struct Unit<'a> {
     /// The target's name.
     pub target: &'a str,
+    /// The unit's name ([`unit_name`]).
+    pub unit: &'a str,
     /// Its test binary and package directory.
     pub built: &'a Built,
     /// The runner user's uid, which the unit runs as.
@@ -133,7 +290,8 @@ fn joined(prefix: &str, value: &OsStr) -> OsString {
 }
 
 /// The arguments for `sudo -n` that run one target's binary in its own system unit:
-/// `systemd-run`, waiting for it and passing its output and exit status through, in
+/// `systemd-run`, waiting for it and passing its output through (and not collecting it, so a
+/// failed unit stays to be read), in
 /// [`SLICE`] with `Delegate=yes` and `OOMScoreAdjust=-900`, as the runner user, from the
 /// package's directory (where `cargo test` runs a binary), with the binary's ignored
 /// tests included.
@@ -141,10 +299,10 @@ fn joined(prefix: &str, value: &OsStr) -> OsString {
 /// The environment is the runner user's `HOME` and `PATH`, and the manifest as
 /// `JS_TEST_IMAGE`.
 pub fn systemd_run_args(u: &Unit<'_>) -> Vec<OsString> {
-    let mut args: Vec<OsString> = ["systemd-run", "--quiet", "--wait", "--collect", "--pipe"]
+    let mut args: Vec<OsString> = ["systemd-run", "--quiet", "--wait", "--pipe"]
         .map(OsString::from)
         .into();
-    args.push(format!("--unit=js-crun-tests-{}", u.target).into());
+    args.push(format!("--unit={}", u.unit).into());
     args.push(format!("--slice={SLICE}").into());
     args.extend(["-p", "Delegate=yes", "-p", "OOMScoreAdjust=-900"].map(OsString::from));
     args.push(format!("--uid={}", u.uid).into());
@@ -168,6 +326,8 @@ pub fn systemd_run_args(u: &Unit<'_>) -> Vec<OsString> {
 pub struct RootUnit<'a> {
     /// The target's name.
     pub target: &'a str,
+    /// The unit's name ([`unit_name`]).
+    pub unit: &'a str,
     /// Its test binary and package directory.
     pub built: &'a Built,
     /// The job user's account name: the tests start every container as this user.
@@ -181,10 +341,10 @@ pub struct RootUnit<'a> {
 /// binary's ignored tests included), with no `--uid` or `--gid`, so a system unit runs as
 /// root, and the environment the tests read: `PATH` and `JS_JOB_USER`.
 pub fn root_systemd_run_args(u: &RootUnit<'_>) -> Vec<OsString> {
-    let mut args: Vec<OsString> = ["systemd-run", "--quiet", "--wait", "--collect", "--pipe"]
+    let mut args: Vec<OsString> = ["systemd-run", "--quiet", "--wait", "--pipe"]
         .map(OsString::from)
         .into();
-    args.push(format!("--unit=js-crun-tests-{}", u.target).into());
+    args.push(format!("--unit={}", u.unit).into());
     args.push(format!("--slice={SLICE}").into());
     args.extend(["-p", "Delegate=yes", "-p", "OOMScoreAdjust=-900"].map(OsString::from));
     args.push(joined("--working-directory=", u.built.dir.as_os_str()));
@@ -206,7 +366,7 @@ pub struct CrunTests<'a> {
     /// The cargo program (on `cargo xtask`, the `CARGO` cargo sets).
     pub cargo: &'a OsStr,
     /// The sudo program; it is run with `-n`, so it never prompts.
-    pub sudo: &'a Path,
+    pub sudo: &'a dyn Sudo,
     /// The repository root, where cargo runs.
     pub root: &'a Path,
     /// With a job user, [`ROOT_TARGETS`] run as root for that user; without, [`TARGETS`]
@@ -248,15 +408,18 @@ pub fn run(p: &CrunTests<'_>) -> Result<String, Error> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut failed = Vec::new();
     for (target, built) in targets.iter().zip(&built) {
+        let unit = unit_name(target, std::process::id());
         let args = match p.job_user {
             Some(job_user) => root_systemd_run_args(&RootUnit {
                 target,
+                unit: &unit,
                 built,
                 job_user,
                 path: &path,
             }),
             None => systemd_run_args(&Unit {
                 target,
+                unit: &unit,
                 built,
                 uid,
                 gid,
@@ -265,10 +428,9 @@ pub fn run(p: &CrunTests<'_>) -> Result<String, Error> {
                 manifest,
             }),
         };
-        let status = sudo(p.sudo, &args)?;
-        if !status.success() {
+        if let Err(why) = run_unit(p.sudo, &unit, &args) {
             failed.push(format!(
-                "the tests of -p {PACKAGE} --test {target} failed in their unit ({}): {status}",
+                "the tests of -p {PACKAGE} --test {target} failed in their unit ({}): {why}",
                 built.executable.display()
             ));
         }

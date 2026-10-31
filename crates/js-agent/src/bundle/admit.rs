@@ -3,7 +3,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use js_agent_wire::{JobSpec, refusal};
+use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, JobSpec, refusal};
 use js_bundle::DottedVersion;
 use js_types::BundleRef;
 
@@ -71,7 +71,8 @@ impl Admission {
         if !held.iter().any(|have| have == digest) {
             return self.missing(pin.name(), digest);
         }
-        self.fits_host(digest)
+        let needs = self.fits_host(digest)?;
+        entrypoint(spec, &needs)
     }
 
     /// Reads the list file `path`; one that cannot be read or parsed refuses with `code`.
@@ -154,15 +155,16 @@ impl Admission {
         }
     }
 
-    /// The held bundle runs on this host: its macOS floor and its Xcode need are met.
-    fn fits_host(&self, digest: &str) -> Result<(), Refusal> {
+    /// The held bundle runs on this host: its macOS floor and its Xcode need are met. Gives
+    /// what it needs.
+    fn fits_host(&self, digest: &str) -> Result<Needs, Refusal> {
         let unread = |why: String| {
             no(
                 refusal::BUNDLE_NOT_HELD,
                 format!("the bundle's config cannot be read: {why}"),
             )
         };
-        let Needs { os_version, xcode } = self
+        let needs = self
             .host
             .needs(&self.settings.store, digest)
             .map_err(unread)?;
@@ -172,14 +174,14 @@ impl Admission {
                 format!("the host's macOS is unknown: {why}"),
             )
         })?;
-        if host_os < os_version {
+        if host_os < needs.os_version {
             return Err(no(
                 refusal::BUNDLE_OS_TOO_OLD,
                 "the bundle needs a newer macOS",
             ));
         }
-        let Some(need) = xcode else {
-            return Ok(());
+        let Some(need) = &needs.xcode else {
+            return Ok(needs);
         };
         let met = self
             .host
@@ -187,11 +189,25 @@ impl Admission {
             .iter()
             .any(|have| need.satisfied_by(&have.version, &have.components));
         match met {
-            true => Ok(()),
+            true => Ok(needs),
             false => Err(no(
                 refusal::BUNDLE_XCODE_MISMATCH,
                 "no Xcode on the host meets the bundle's need",
             )),
         }
+    }
+}
+
+/// A program of the bundle, `@bundle/<name>`, names an entrypoint the bundle has: asked
+/// of the config before anything is created, so a job that names a program the bundle lacks
+/// is refused as a request that can never succeed (`invalid-program`) and costs no user.
+fn entrypoint(spec: &JobSpec, needs: &Needs) -> Result<(), Refusal> {
+    let program = spec.native.as_ref().map(|native| native.program.as_str());
+    match program.and_then(|program| program.strip_prefix(BUNDLE_PROGRAM_PREFIX)) {
+        Some(name) if !needs.entrypoints.contains(name) => Err(no(
+            refusal::INVALID_PROGRAM,
+            format!("the bundle has no entrypoint {name}"),
+        )),
+        _ => Ok(()),
     }
 }

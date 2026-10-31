@@ -2,10 +2,13 @@
 //! (printing the JSON messages each test writes for it) and as sudo (recording the
 //! `systemd-run` it was asked to run).
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use xtask::crun_tests::{BUSYBOX_AMD64, BUSYBOX_ARM64, ROOT_TARGETS, TARGETS, arch_for};
+use xtask::crun_tests::{
+    BUSYBOX_AMD64, BUSYBOX_ARM64, ROOT_TARGETS, TARGETS, arch_for, reset_args, show_args, unit_name,
+};
 
 const XTASK: &str = env!("CARGO_BIN_EXE_xtask");
 const FAKE: &str = env!("CARGO_BIN_EXE_xtask-fake");
@@ -28,6 +31,8 @@ fn this_manifest() -> &'static str {
 struct Run {
     root: PathBuf,
     bin: PathBuf,
+    /// The process id of the last `xtask` run: its units are named after it.
+    pid: Cell<u32>,
 }
 
 impl Run {
@@ -57,7 +62,11 @@ impl Run {
             messages.push('\n');
         }
         std::fs::write(root.join("cargo-messages"), messages).expect("messages");
-        Run { root, bin }
+        Run {
+            root,
+            bin,
+            pid: Cell::new(0),
+        }
     }
 
     /// `crun-tests` with the fakes, the cargo `cargo`, and the sudo `program` (`None`:
@@ -89,7 +98,13 @@ impl Run {
             Some(d) => cmd.env("XTASK_FAKE_DEFECT", d),
             None => cmd.env_remove("XTASK_FAKE_DEFECT"),
         };
-        let out = cmd.output().expect("run xtask");
+        let child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run xtask");
+        self.pid.set(child.id());
+        let out = child.wait_with_output().expect("wait for xtask");
         (
             out.status.code(),
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -111,18 +126,20 @@ impl Run {
         self.log(self.bin.join("sudo-args"))
     }
 
-    /// The `sudo-args` line of the unit that runs `target`'s binary.
+    /// The `sudo-args` lines of the unit that runs `target`'s binary: the `systemd-run`, the
+    /// read of the unit's result and the reset of the unit.
     fn unit(&self, target: &str) -> String {
         let uid = rustix::process::getuid().as_raw();
         let gid = rustix::process::getgid().as_raw();
         let package = self.root.join("crates/js-contain");
+        let name = unit_name(target, self.pid.get());
         format!(
-            "{cwd}: -n systemd-run --quiet --wait --collect --pipe \
-             --unit=js-crun-tests-{target} --slice=js-agent.slice -p Delegate=yes \
+            "{cwd}: -n systemd-run --quiet --wait --pipe \
+             --unit={name} --slice=js-agent.slice -p Delegate=yes \
              -p OOMScoreAdjust=-900 --uid={uid} --gid={gid} --working-directory={package} \
              -E HOME={HOME} -E PATH={PATH} \
              -E JS_TEST_IMAGE=docker://docker.io/library/busybox@{manifest} {exe} \
-             --include-ignored\n",
+             --include-ignored\n{after}",
             cwd = std::env::current_dir().expect("cwd").display(),
             package = package.display(),
             manifest = this_manifest(),
@@ -130,10 +147,24 @@ impl Run {
                 .root
                 .join(format!("target/debug/deps/{target}-0f1e"))
                 .display(),
+            after = self.after(&name),
         )
     }
 
-    /// Every unit's line, in the order the targets run.
+    /// The `sudo-args` lines after a unit's `systemd-run`: the read of its result, then its reset.
+    fn after(&self, name: &str) -> String {
+        let cwd = std::env::current_dir().expect("cwd");
+        let line = |args: Vec<std::ffi::OsString>| {
+            let words: Vec<String> = args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            format!("{}: -n {}\n", cwd.display(), words.join(" "))
+        };
+        line(show_args(name)) + &line(reset_args(name))
+    }
+
+    /// Every unit's lines, in the order the targets run.
     fn units(&self) -> String {
         TARGETS.iter().map(|t| self.unit(t)).collect()
     }
@@ -190,7 +221,7 @@ fn a_failed_target_fails_the_verb_after_it_ran() {
     let failed = |target: &str| {
         format!(
             "the tests of -p js-contain --test {target} failed in their unit ({}): \
-             exit status: 101\n",
+             systemd-run: exit status: 101\n",
             run.root
                 .join(format!("target/debug/deps/{target}-0f1e"))
                 .display()
@@ -247,7 +278,7 @@ fn a_sudo_that_cannot_start_fails_the_verb() {
     let (code, _, err) = run.xtask(Path::new(FAKE), Some(&missing), None);
     assert_eq!(code, Some(1));
     assert!(
-        err.starts_with(&format!("xtask: {}: ", missing.display())),
+        err.contains("in their unit") && err.contains(&format!("{}: ", missing.display())),
         "{err}"
     );
 }
@@ -274,10 +305,12 @@ fn a_job_user_runs_the_root_daemon_targets_as_root() {
         .iter()
         .map(|target| {
             format!(
-                "{cwd}: -n systemd-run --quiet --wait --collect --pipe \
-                 --unit=js-crun-tests-{target} --slice=js-agent.slice -p Delegate=yes \
+                "{cwd}: -n systemd-run --quiet --wait --pipe \
+                 --unit={name} --slice=js-agent.slice -p Delegate=yes \
                  -p OOMScoreAdjust=-900 --working-directory={package} -E PATH={PATH} \
-                 -E JS_JOB_USER=js-job {exe} --include-ignored\n",
+                 -E JS_JOB_USER=js-job {exe} --include-ignored\n{after}",
+                name = unit_name(target, run.pid.get()),
+                after = run.after(&unit_name(target, run.pid.get())),
                 cwd = std::env::current_dir().expect("cwd").display(),
                 package = package.display(),
                 exe = run
@@ -314,7 +347,7 @@ fn a_failed_root_target_fails_the_verb_after_it_ran() {
         .map(|target| {
             format!(
                 "the tests of -p js-contain --test {target} failed in their unit ({}): \
-                 exit status: 101\n",
+                 systemd-run: exit status: 101\n",
                 run.root
                     .join(format!("target/debug/deps/{target}-0f1e"))
                     .display()
@@ -322,4 +355,99 @@ fn a_failed_root_target_fails_the_verb_after_it_ran() {
         })
         .collect();
     assert!(err.ends_with(&format!("xtask: {want}")), "{err}");
+}
+
+/// The bug itself, through the real binary: `systemd-run` exits 0 while the unit's test
+/// binary exited 101. Catches a verb that takes `systemd-run`'s exit status for the unit's
+/// result: it must fail, naming the target and what the unit did, for the rootless and the
+/// root targets, and must still reset the unit.
+#[test]
+fn a_unit_that_failed_under_a_systemd_run_that_exited_0_fails_the_verb() {
+    for flags in [&[][..], &["--job-user", "js-job"][..]] {
+        let run = Run::new("hole");
+        let (code, _, err) = run.xtask_with(flags, Path::new(FAKE), None, Some("unit-fails"));
+        assert_eq!(code, Some(1), "{err}");
+        let sudo = run.sudo_args();
+        assert!(
+            sudo.contains("systemctl reset-failed js-crun-tests-"),
+            "{sudo}"
+        );
+        let targets = if flags.is_empty() {
+            TARGETS
+        } else {
+            ROOT_TARGETS
+        };
+        for target in targets {
+            assert!(
+                err.contains(&format!(
+                    "the tests of -p js-contain --test {target} failed in their unit"
+                )),
+                "{err}"
+            );
+        }
+        assert!(
+            err.contains("Result=exit-code, ExecMainCode=1, ExecMainStatus=101"),
+            "{err}"
+        );
+    }
+}
+
+/// Catches a result that cannot be read (the command fails, or prints what is not
+/// systemd's properties) counted as a pass.
+#[test]
+fn a_unit_result_that_cannot_be_read_fails_the_verb() {
+    for (defect, reason) in [
+        (
+            "show-fails",
+            "could not read the result of unit js-crun-tests-crun-",
+        ),
+        ("show-garbled", "that is not Key=Value"),
+    ] {
+        let run = Run::new(defect);
+        let (code, _, err) = run.xtask(Path::new(FAKE), None, Some(defect));
+        assert_eq!(code, Some(1), "{err}");
+        assert!(err.contains(reason), "{defect}: {err}");
+    }
+}
+
+/// `unit-result` as a workflow step runs it: passes on a unit that exited 0, fails on one
+/// that did not, and resets the unit either way.
+#[test]
+fn unit_result_reads_the_unit_a_step_started() {
+    let run = Run::new("unitresult");
+    let fake = run.bin.join("sudo");
+    let check = |defect: Option<&str>| {
+        let mut cmd = Command::new(XTASK);
+        cmd.args(["unit-result", "--unit", "js-crun-runtime", "--sudo"])
+            .arg(&fake);
+        match defect {
+            Some(d) => cmd.env("XTASK_FAKE_DEFECT", d),
+            None => cmd.env_remove("XTASK_FAKE_DEFECT"),
+        };
+        let out = cmd.output().expect("run xtask");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (code, out, err) = check(None);
+    assert_eq!(
+        (code, out.as_str()),
+        (Some(0), "ok: unit js-crun-runtime exited 0\n"),
+        "{err}"
+    );
+    let (code, _, err) = check(Some("unit-fails"));
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("unit js-crun-runtime: the unit did not exit 0"),
+        "{err}"
+    );
+    let sudo = run.sudo_args();
+    assert_eq!(
+        sudo.matches("systemctl reset-failed js-crun-runtime")
+            .count(),
+        2,
+        "{sudo}"
+    );
 }

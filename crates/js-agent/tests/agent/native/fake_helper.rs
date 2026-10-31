@@ -48,6 +48,9 @@ pub struct Seen {
     pub cwd_is_dir: bool,
     /// For `run`: how many bytes the first descriptor (standard input) holds.
     pub stdin_bytes: usize,
+    /// For `user-create`: whether the watched journal named the lease when the request
+    /// arrived.
+    pub journaled: bool,
 }
 
 #[derive(Default)]
@@ -63,6 +66,8 @@ struct State {
     skip_homes: bool,
     /// Whether a `run` starts its program for real.
     real: bool,
+    /// The journal to look in when a `user-create` arrives.
+    journal: Option<PathBuf>,
 }
 
 struct Shared {
@@ -74,6 +79,13 @@ struct Shared {
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether the watched journal holds `+ lease`.
+    fn journal_names(&self, lease: &str) -> bool {
+        let path = self.lock().journal.clone();
+        let text = path.and_then(|path| fs::read_to_string(path).ok());
+        text.is_some_and(|text| text.lines().any(|line| line == format!("+ {lease}")))
     }
 
     /// Notes a request and returns the reason it is refused, when it is.
@@ -99,13 +111,18 @@ impl FakeHelper {
     pub fn start(dir: &Scratch) -> Self {
         let homes = dir.path("homes");
         fs::create_dir(&homes).unwrap();
-        // Short and outside the test's directory: a socket path is limited to about a
-        // hundred bytes, which a checkout's path may already use up.
-        let socket = std::env::temp_dir().join(format!(
-            "jsn-{}-{}",
-            std::process::id(),
-            SOCKETS.fetch_add(1, Ordering::SeqCst)
-        ));
+        // A short path of its own: a socket path is limited to about a hundred bytes, which
+        // a checkout's path and a test's directory may use up. It is below the target
+        // directory, never `/tmp`, which a profile cannot name (it is `/private/tmp`).
+        let folder = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join("js-agent")
+            .join(format!(
+                "s{}-{}",
+                std::process::id(),
+                SOCKETS.fetch_add(1, Ordering::SeqCst)
+            ));
+        fs::create_dir_all(&folder).unwrap();
+        let socket = folder.join("k");
         let listener = UnixListener::bind(&socket).unwrap();
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
@@ -127,6 +144,11 @@ impl FakeHelper {
         Client::new(&self.socket)
     }
 
+    /// The socket this helper serves on.
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
     /// Where the lease users' homes are, canonical.
     pub fn homes(&self) -> &Path {
         &self.shared.homes
@@ -136,6 +158,11 @@ impl FakeHelper {
     pub fn home_of(&self, lease: &str) -> PathBuf {
         let id = parse_lease(lease).unwrap();
         self.shared.homes.join(user_name(id))
+    }
+
+    /// From now on a `user-create` notes whether the journal at `path` names its lease.
+    pub fn watch_journal(&self, path: &Path) {
+        self.shared.lock().journal = Some(path.to_path_buf());
     }
 
     /// Every request seen, in order.
@@ -204,6 +231,9 @@ impl FakeHelper {
 impl Drop for FakeHelper {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.socket);
+        if let Some(folder) = self.socket.parent() {
+            let _ = fs::remove_dir(folder);
+        }
     }
 }
 
@@ -244,7 +274,10 @@ fn serve(stream: &UnixStream, shared: &Shared) {
                 },
             ),
         },
-        Request::UserCreate { lease, .. } => match shared.take(seen("user-create", &lease)) {
+        Request::UserCreate { lease, .. } => match shared.take(Seen {
+            journaled: shared.journal_names(&lease),
+            ..seen("user-create", &lease)
+        }) {
             Some(reason) => refused(stream, reason),
             None => {
                 if !shared.lock().skip_homes {
@@ -297,6 +330,7 @@ fn run(stream: &UnixStream, shared: &Shared, ask: RunAsk, fds: Vec<OwnedFd>) {
         env: env.clone(),
         cwd_is_dir,
         stdin_bytes: held.len(),
+        ..Seen::default()
     };
     if let Some(reason) = shared.take(one) {
         return refused(stream, reason);

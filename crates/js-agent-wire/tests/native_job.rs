@@ -380,6 +380,10 @@ fn env_names_are_refused_by_the_shared_reserved_list() {
     for name in js_types::env::OWNED_ENV_NAMES {
         expect(one(name), field, Rule::Reserved, code);
     }
+    for name in js_types::env::SHELL_ENV_NAMES {
+        expect(one(name), field, Rule::Reserved, code);
+    }
+    expect(one("BASH_FUNC_ulimit"), field, Rule::Reserved, code);
     assert_eq!(MAX_ENV_KEY_LEN, js_types::env::MAX_ENV_NAME_LEN);
 }
 

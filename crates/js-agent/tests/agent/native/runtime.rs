@@ -2,6 +2,7 @@
 //! disk, the command line it builds, how an end is told, the logs, the kill and the removal,
 //! and every way a start fails.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
@@ -15,7 +16,7 @@ use js_mac_session::client::Client;
 use js_mac_session::helper::RESET_ALREADY;
 
 use super::fake_helper::End;
-use super::{Rig, TERM, config, native, parse};
+use super::{LIMITER, Rig, TERM, config, native, parse};
 
 fn handle(lease: &str) -> RunHandle {
     RunHandle(lease.to_owned())
@@ -62,6 +63,11 @@ fn a_start_makes_a_user_and_a_run_directory_and_runs_the_program_under_the_profi
     );
     let parsed = parse(&run.argv);
     assert_eq!(parsed.tail, ["/usr/bin/id", "-u"]);
+    assert_eq!(
+        parsed.limits,
+        ("1048576".to_owned(), "512".to_owned()),
+        "1 GiB in blocks of 1024 bytes, and 512 processes"
+    );
     assert_eq!(
         parsed.params[0],
         ("RUN".to_owned(), home.display().to_string())
@@ -472,4 +478,114 @@ fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
         let refused = rig.rt.check_native(&body).unwrap_err();
         assert_eq!(refused.code, refusal::NATIVE_UNSUPPORTED);
     }
+}
+
+/// Asserts that the first program of the command is `sandbox-exec` and that the limiting
+/// shell comes after the profile: a shell that ran before the profile would run with the
+/// job's environment as the lease user, outside the sandbox. The command line does not
+/// depend on the environment, so a job's names cannot move the shell in front of the
+/// profile. It catches a command that starts any other program first.
+#[test]
+fn nothing_but_sandbox_exec_runs_before_the_profile_applies() {
+    let mut rig = Rig::new("first-program");
+    let mut body = native("/usr/bin/id", &["-u"]);
+    body.env = BTreeMap::from([("A".to_owned(), "b".to_owned())]);
+    let spec = rig.spec("r1", body);
+    rig.rt.create_and_start(&spec).unwrap();
+    let argv = rig.fake.run_of("7.0").argv;
+    assert_eq!(argv[0], "/usr/bin/sandbox-exec");
+    let shells = argv.iter().filter(|word| *word == LIMITER).count();
+    assert_eq!(shells, 1, "one limiting shell: {argv:?}");
+    let profile_at = argv.iter().position(|word| word == "-p").unwrap();
+    let shell_at = argv.iter().position(|word| word == LIMITER).unwrap();
+    assert!(profile_at < shell_at, "the profile comes before the shell");
+    assert_eq!(parse(&argv).tail, ["/usr/bin/id", "-u"]);
+
+    let hostile = BTreeMap::from([
+        ("SHELLOPTS".to_owned(), "xtrace".to_owned()),
+        (
+            "PS4".to_owned(),
+            "$(touch /private/tmp/js-escape)".to_owned(),
+        ),
+    ]);
+    let mut other = native("/usr/bin/id", &["-u"]);
+    other.env = hostile;
+    let home = rig.fake.home_of("7.0");
+    let plain = native("/usr/bin/id", &["-u"]);
+    let config = config(&rig.fake);
+    assert_eq!(
+        js_agent::native::profile_argv(&config, &other, &home).unwrap(),
+        js_agent::native::profile_argv(&config, &plain, &home).unwrap(),
+        "the command line does not read the environment"
+    );
+}
+
+/// Asserts that a start refuses, by name, each environment name that steers the limiting
+/// shell (`SHELLOPTS`, `BASHOPTS`, `BASH_ENV`, `ENV`, `PS4`, `PROMPT_COMMAND`, `IFS`,
+/// `CDPATH`), any name starting `BASH_FUNC_`, and each name the agent owns, before the
+/// helper hears of the run: no verb is sent after the reset that opening asked for, and the
+/// lease journal is not made. It catches a body that skipped the wire's validation and
+/// reaches the shell, which runs inside the profile with the job's environment before
+/// `ulimit`.
+#[test]
+fn a_start_refuses_names_that_steer_the_shell_before_a_user_is_made() {
+    use js_types::env::{OWNED_ENV_NAMES, SHELL_ENV_NAMES};
+
+    let mut rig = Rig::new("shell-names");
+    let names = SHELL_ENV_NAMES
+        .iter()
+        .chain(OWNED_ENV_NAMES.iter())
+        .copied()
+        .chain(["BASH_FUNC_ulimit%%", "BASH_FUNC_x"]);
+    for (at, name) in names.enumerate() {
+        let mut body = native("/usr/bin/true", &[]);
+        body.env = BTreeMap::from([
+            ("OK".to_owned(), "1".to_owned()),
+            (name.to_owned(), "x".to_owned()),
+        ]);
+        let spec = rig.spec(&format!("r{at}"), body);
+        let refused = rig.rt.create_and_start(&spec).err();
+        let text = refused.map(|why| why.0).unwrap_or_default();
+        assert!(
+            text.contains(name),
+            "{name} was not refused by name: {text:?}"
+        );
+    }
+    assert_eq!(rig.fake.verbs(), ["boot-reset"], "only the reset of open");
+    assert!(
+        !rig.dir.path("native-leases").exists(),
+        "the journal was touched"
+    );
+}
+
+/// Asserts that the limits of the configuration reach the shell that starts the run: the
+/// file size in blocks of 1024 bytes (at least one) and the process count. It catches a run
+/// that starts without the limits an operator set.
+#[test]
+fn the_configured_limits_are_set_by_the_shell_that_starts_the_run() {
+    let mut rig = Rig::with("limits", |config| {
+        config.max_file_bytes = 10;
+        config.max_processes = 7;
+    });
+    rig.start("r1", "/bin/true", &[]);
+    let parsed = parse(&rig.fake.run_of("7.0").argv);
+    assert_eq!(parsed.limits, ("1".to_owned(), "7".to_owned()));
+    let mut big = Rig::with("limits-big", |config| config.max_file_bytes = 3 << 20);
+    big.start("r1", "/bin/true", &[]);
+    assert_eq!(parse(&big.fake.run_of("7.0").argv).limits.0, "3072");
+}
+
+/// Asserts that a job environment that names `TMPDIR`, which the agent sets, is refused before
+/// anything is made, as it is for a run that pins a bundle. It catches a plain run that takes
+/// the job's `TMPDIR` beside the agent's and leaves the choice to the program.
+#[test]
+fn a_job_that_sets_tmpdir_is_refused_before_a_user_is_made() {
+    let mut rig = Rig::new("tmpdir");
+    let mut body = native("/usr/bin/id", &[]);
+    body.env
+        .insert("TMPDIR".to_owned(), "/private/tmp".to_owned());
+    let spec = rig.spec("r1", body);
+    let why = rig.rt.create_and_start(&spec).unwrap_err();
+    assert!(why.0.contains("TMPDIR"), "{}", why.0);
+    assert_eq!(rig.fake.verbs(), ["boot-reset"]);
 }

@@ -4,11 +4,18 @@
 //! to a machine runs as in the agent. On a Mac, one test module applies the runtime's
 //! `sandbox-exec` command line for real, as the user running the tests (`mac`).
 
+mod agent;
+mod bundle;
 mod fake_helper;
+mod journal;
 mod lifecycle;
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(target_os = "macos")]
+mod mac_agent;
 mod runtime;
+mod settings;
+mod worker;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,7 +35,7 @@ pub const TERM: u64 = 7;
 /// The most polls a test makes for a run to end. The helper's answer comes from a thread,
 /// so a poll right after it was sent may still say the run goes on; this bounds the loop
 /// instead of a clock.
-const POLLS: u32 = 50_000_000;
+pub const POLLS: u32 = 50_000_000;
 
 /// A native runtime over a fake helper, with the directory they work in.
 pub struct Rig {
@@ -46,6 +53,13 @@ pub fn config(fake: &FakeHelper) -> NativeConfig {
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![AbsPath::parse("/srv/js-state").unwrap()],
         read_model: ReadModel::Open,
+        journal: fake
+            .homes()
+            .parent()
+            .expect("the homes are below the test's directory")
+            .join("native-leases"),
+        max_file_bytes: 1 << 30,
+        max_processes: 512,
     }
 }
 
@@ -87,6 +101,7 @@ impl Rig {
             slot: 0,
             isolation: Isolation::Contained,
             labels: BTreeMap::new(),
+            bundle: None,
         }
     }
 
@@ -122,16 +137,31 @@ pub fn native(program: &str, args: &[&str]) -> NativeSpec {
     }
 }
 
+/// The script of the shell that sets a run's limits and becomes its command.
+pub const WRAPPER: &str = "ulimit -f \"$1\" && ulimit -u \"$2\" && shift 2 && exec \"$@\"";
+
 /// The command line the runtime sent the helper, taken apart: `sandbox-exec`, the `-D`
-/// parameters, `-p` and the profile, then the program and its arguments.
+/// parameters, `-p` and the profile, then the shell that sets the run's limits inside the
+/// profile, then the program and its arguments.
 pub struct Parsed {
+    /// The limits the shell wrapper sets: the file size in 1024-byte blocks and the most
+    /// processes.
+    pub limits: (String, String),
     pub params: Vec<(String, String)>,
     pub profile: String,
     pub tail: Vec<String>,
 }
 
+/// The shell that sets the limits: it is the profile's first program, so nothing the job's
+/// environment steers (a shell reads `SHELLOPTS`, `PS4`, `ENV` and imported functions
+/// before its first command) runs outside the profile.
+pub const LIMITER: &str = "/bin/sh";
+
 pub fn parse(argv: &[String]) -> Parsed {
-    assert_eq!(argv[0], "/usr/bin/sandbox-exec");
+    assert_eq!(
+        argv[0], "/usr/bin/sandbox-exec",
+        "nothing runs before the profile"
+    );
     let mut params = Vec::new();
     let mut at = 1;
     while argv[at] == "-D" {
@@ -140,9 +170,13 @@ pub fn parse(argv: &[String]) -> Parsed {
         at += 2;
     }
     assert_eq!(argv[at], "-p");
+    let profile = argv[at + 1].clone();
+    let rest = &argv[at + 2..];
+    assert_eq!(&rest[..4], [LIMITER, "-c", WRAPPER, "js-native"]);
     Parsed {
+        limits: (rest[4].clone(), rest[5].clone()),
         params,
-        profile: argv[at + 1].clone(),
-        tail: argv[at + 2..].to_vec(),
+        profile,
+        tail: rest[6..].to_vec(),
     }
 }

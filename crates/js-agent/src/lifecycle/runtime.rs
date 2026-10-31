@@ -120,6 +120,12 @@ pub struct RunSpec {
     pub isolation: Isolation,
     /// The job's labels and the agent's own ([`label`]); the agent's win.
     pub labels: BTreeMap<String, String>,
+    /// The darwin bundle a native run pins, `name[:tag]@sha256:<manifest digest>`: the
+    /// runtime pins its trees for the run, may resolve `@bundle/<entrypoint>` through
+    /// it, and unpins them when the run is removed. The agent has judged it already
+    /// ([`Admission`](crate::bundle::Admission)); a runtime that holds no bundle store
+    /// fails a start that has one.
+    pub bundle: Option<String>,
 }
 
 /// How a container ended.
@@ -326,6 +332,15 @@ pub trait Runtime {
             code: refusal::NATIVE_UNSUPPORTED,
             why: "this agent runs no native jobs".to_owned(),
         })
+    }
+
+    /// Ends and removes whatever an earlier process left, which no list of the runtime's
+    /// can say: the leases a native runtime journalled and never saw deleted. Called when a
+    /// worker starts and by the rescue, before anything else; returns one line for each
+    /// thing done or not done. A runtime whose leftovers are listed (the container one)
+    /// has nothing to do.
+    fn reclaim(&mut self) -> Vec<String> {
+        Vec::new()
     }
 
     /// Whether a container made here can use a GPU. A start that names a GPU where this
