@@ -57,11 +57,21 @@ pub enum Reason {
     BadArgs,
     /// The `--params` file was unreadable or wrong.
     BadParams,
+    /// Another step holds the lock of the state directory.
+    Locked,
+    /// The state directory, the record or the declaration is not as the hook requires.
+    StateInvalid,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 3] = [Reason::NotImplemented, Reason::BadArgs, Reason::BadParams];
+    pub const ALL: [Reason; 5] = [
+        Reason::NotImplemented,
+        Reason::BadArgs,
+        Reason::BadParams,
+        Reason::Locked,
+        Reason::StateInvalid,
+    ];
 
     /// The token in the JSON.
     #[must_use]
@@ -70,6 +80,8 @@ impl Reason {
             Reason::NotImplemented => "not_implemented",
             Reason::BadArgs => "bad_args",
             Reason::BadParams => "bad_params",
+            Reason::Locked => "locked",
+            Reason::StateInvalid => "state_invalid",
         }
     }
 }
