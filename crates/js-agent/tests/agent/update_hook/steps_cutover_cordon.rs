@@ -389,6 +389,30 @@ fn a_cordon_nobody_renews_is_not_carried_into_a_stop_that_outlasts_it() {
 }
 
 #[test]
+fn a_provisional_mark_is_not_renewed_by_a_rerun_that_is_past_the_point_of_deferring() {
+    let (rig, mark, expiry) = provisional("hook-cutover-provisional-committed");
+    let mut record = rig.record().unwrap();
+    record.stop_begun = true;
+    rig.put_record(&record);
+    let spy = Spy::new(&rig);
+    *spy.stop_leaves.borrow_mut() = Some(("deactivating", "stop-sigterm"));
+    spy.on_pause(|spy, ticks| {
+        if ticks == 20 {
+            spy.world.seed_unit(UNIT, "inactive", "dead");
+        }
+    });
+    let done = spy.cutover(&rig);
+    assert_eq!(done.outcome, Outcome::Success);
+    assert!(
+        spy.log()
+            .iter()
+            .all(|call| call != "uncordon" && !call.starts_with("cordon("))
+    );
+    assert_eq!(rig.cordon_expiry(), Some(expiry));
+    assert_eq!(rig.record().unwrap().cordon, mark);
+}
+
+#[test]
 fn our_cordon_is_renewed_while_the_unit_takes_its_time_to_stop() {
     let rig = running(Rig::with_cordon("hook-cutover-renew", 30, MAX_SECS));
     let spy = Spy::new(&rig);
