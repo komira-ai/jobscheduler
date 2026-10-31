@@ -238,6 +238,7 @@ fn a_full_beat_with_noisy_tails_fits_the_body_limit() {
         exclusive_ready: None,
         exclusive_refused: None,
         load: Some(full_load()),
+        disk_gib: None,
     };
     assert_eq!((beat.held.len(), beat.results.len()), (MAX_LOAD_LEASES, 8));
     assert_eq!(beat.validate(), Ok(()));

@@ -190,6 +190,15 @@ fn a_heartbeat_disk_gib_is_bounded_like_the_shape() {
         beat.disk_gib = Some(ok);
         assert_eq!(beat.validate(), Ok(()), "{ok}");
     }
-    let err = broken(&common::heartbeat(), |b| b.disk_gib = Some(MAX_DISK_GIB + 1), Heartbeat::validate);
-    expect(err, "disk_gib", Rule::OutOfRange, refusal::INVALID_HEARTBEAT);
+    let err = broken(
+        &common::heartbeat(),
+        |b| b.disk_gib = Some(MAX_DISK_GIB + 1),
+        Heartbeat::validate,
+    );
+    expect(
+        err,
+        "disk_gib",
+        Rule::OutOfRange,
+        refusal::INVALID_HEARTBEAT,
+    );
 }

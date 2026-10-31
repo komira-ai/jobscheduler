@@ -94,6 +94,14 @@
 //! Without a worker the session carries nothing and counts the commands it ignores
 //! ([`Note::Ignored`]).
 //!
+//! # Free disk
+//!
+//! A session given a [`DiskGauge`] ([`Session::with_disk`]) asks it before each heartbeat and puts the
+//! answer in `disk_gib` when it differs from what the server last took: the hello's `disk-gib`
+//! to begin with, and after that the last heartbeat that carried one and was answered with a
+//! success. A beat that failed, or was refused, is followed by a beat that says it again; a new
+//! session starts again from the hello's value. A gauge with no answer adds no field.
+//!
 //! # Usage
 //!
 //! A session given an [`Outbox`] ([`Session::with_usage`]) tells it the heartbeat interval
@@ -116,10 +124,12 @@ use js_agent_wire::{
     Heartbeat, HeartbeatReply, Hello, HostCredential, NodeLoad, Phase, ProtocolRange,
     RefusalReason, Refused, ValidationError, Welcome,
 };
+use js_caps::DISK_GIB;
 use serde_json::Value;
 
 use crate::backoff::{Backoff, Jitter};
 use crate::credential::CredentialStore;
+use crate::disk::DiskGauge;
 use crate::exclusive::{Fields, Hold, PREPARE_TIMEOUT, Quiesce};
 use crate::lifecycle::Clock;
 use crate::transport::{Answer, Transport};
@@ -474,6 +484,13 @@ pub struct Session<'a> {
     carried: bool,
     /// The worker's queue had no reader when a reply was handed to it.
     worker_gone: bool,
+    /// Where the free scratch disk is read from, when the agent has a volume to read.
+    disk: Option<&'a dyn DiskGauge>,
+    /// The free disk, in GiB, the server last took: the hello's, or the last heartbeat
+    /// that carried one and was answered.
+    told: Option<u64>,
+    /// The free disk the heartbeat in flight carries.
+    saying: Option<u64>,
 }
 
 impl<'a> Session<'a> {
@@ -497,6 +514,9 @@ impl<'a> Session<'a> {
             store: None,
             carried: false,
             worker_gone: false,
+            disk: None,
+            told: None,
+            saying: None,
         }
     }
 
@@ -516,6 +536,17 @@ impl<'a> Session<'a> {
     pub fn with_usage(self, usage: Arc<Outbox>) -> Self {
         Self {
             usage: Some(usage),
+            ..self
+        }
+    }
+
+    /// The same session asking `gauge` for the free scratch disk before each heartbeat and
+    /// sending it when it differs from what the server last took (see the module
+    /// documentation).
+    #[must_use]
+    pub fn with_disk(self, gauge: &'a dyn DiskGauge) -> Self {
+        Self {
+            disk: Some(gauge),
             ..self
         }
     }
@@ -661,6 +692,10 @@ impl<'a> Session<'a> {
     /// Sends a heartbeat carrying the outbox's load, and tells the outbox how it went.
     fn send_beat(&mut self, live: &Live, lease: Fields, jobs: Snapshot) -> Result<Answer, Reason> {
         let load = self.usage.as_ref().and_then(|outbox| outbox.take());
+        self.saying = self
+            .disk
+            .and_then(|gauge| gauge.gib())
+            .filter(|gib| Some(*gib) != self.told);
         let message = self.heartbeat_message(live, lease, jobs, load);
         let sent = self.post(HEARTBEAT_PATH, message);
         if let Some(outbox) = &self.usage {
@@ -692,6 +727,7 @@ impl<'a> Session<'a> {
             exclusive_ready: lease.ready,
             exclusive_refused: lease.refused,
             load,
+            disk_gib: self.saying,
         };
         beat.validate()
             .map(|()| serde_json::to_value(&beat).unwrap_or_default())
@@ -754,6 +790,11 @@ impl<'a> Session<'a> {
             interval,
         });
         self.proven = false;
+        self.told = self
+            .hello
+            .capabilities
+            .get(DISK_GIB)
+            .and_then(|gib| gib.parse().ok());
         self.usage
             .iter()
             .for_each(|outbox| outbox.set_window(interval));
@@ -789,7 +830,10 @@ impl<'a> Session<'a> {
         let kept = !matches!(verdict, Verdict::Conflict);
         self.live = kept.then_some(live);
         match verdict {
-            Verdict::Done => self.beat_done(&answer.body, interval),
+            Verdict::Done => {
+                self.told = self.saying.or(self.told);
+                self.beat_done(&answer.body, interval)
+            }
             Verdict::Conflict => self.rehello(code),
             other => self.refused("heartbeat", other, answer, code),
         }

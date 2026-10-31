@@ -720,6 +720,7 @@ mod tests {
             exclusive_ready: None,
             exclusive_refused: None,
             load: None,
+            disk_gib: None,
         }
     }
 

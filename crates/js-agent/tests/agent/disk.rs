@@ -4,6 +4,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,8 +16,8 @@ use js_agent::{Cli, CommandRunner, HEARTBEAT_PATH, Session};
 use crate::bundle::fake::FakeHost;
 use crate::jobs::fake::{FakeMachine, TestClock};
 use crate::support::{
-    Lowest, Reply, Script, ScriptConnector, Sent, beat_ok, code, flags, hello,
-    mac_host, platform, refused, run_with_store, welcome,
+    Lowest, Reply, Scratch, Script, ScriptConnector, Sent, beat_ok, code, flags, hello, mac_host,
+    platform, refused, run_with_store, welcome,
 };
 
 const GIB: u64 = 1 << 30;
@@ -57,7 +58,8 @@ fn run(hello_gib: Option<&str>, gauge: &dyn DiskGauge, replies: Vec<Reply>, tick
     if let Some(gib) = hello_gib {
         first.capabilities.insert("disk-gib".into(), gib.into());
     }
-    let mut session = Session::new(first, &mut transport, crate::support::lowest()).with_disk(gauge);
+    let mut session =
+        Session::new(first, &mut transport, crate::support::lowest()).with_disk(gauge);
     for _ in 0..ticks {
         let _ = session.tick();
     }
@@ -146,7 +148,10 @@ impl Df {
 impl CommandRunner for Df {
     fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
         self.runs.set(self.runs.get() + 1);
-        assert_eq!((program, args), ("/bin/df", ["-P", "-k", "/scratch"].as_slice()));
+        assert_eq!(
+            (program, args),
+            ("/bin/df", ["-P", "-k", "/scratch"].as_slice())
+        );
         match self.free_kib.get() {
             Some(kib) => Ok(format!(
                 "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/x 9 9 {kib} 11% /\n"
@@ -155,12 +160,22 @@ impl CommandRunner for Df {
         }
     }
 
-    fn run_in(&self, program: &str, args: &[&str], _env: &[(&str, &str)]) -> Result<String, String> {
+    fn run_in(
+        &self,
+        program: &str,
+        args: &[&str],
+        _env: &[(&str, &str)],
+    ) -> Result<String, String> {
         self.run(program, args)
     }
 }
 
-fn gauge<'a>(df: &'a Df, clock: &Arc<TestClock>, low: Option<u64>, store: Option<Reserve>) -> ScratchDisk<'a> {
+fn gauge<'a>(
+    df: &'a Df,
+    clock: &Arc<TestClock>,
+    low: Option<u64>,
+    store: Option<Reserve>,
+) -> ScratchDisk<'a> {
     ScratchDisk::new(PathBuf::from("/scratch"), low, df, store, clock.clone())
 }
 
@@ -186,12 +201,28 @@ fn the_gauge_leaves_out_the_unused_budget_of_the_store() {
     let host = FakeHost::new();
     host.set(|s| s.used = Ok(5 * GIB));
     let cli = Cli::try_parse_from([
-        "js-agent", "--server", "http://127.0.0.1:1", "--pool", "macs", "--scratch-root", "/scratch",
-        "--bundle-store", "/Volumes/work/bundles", "--bundle-budget-gib", "20", "--bundle-trust", "digest",
+        "js-agent",
+        "--server",
+        "http://127.0.0.1:1",
+        "--pool",
+        "macs",
+        "--scratch-root",
+        "/scratch",
+        "--bundle-store",
+        "/Volumes/work/bundles",
+        "--bundle-budget-gib",
+        "20",
+        "--bundle-trust",
+        "digest",
     ])
     .unwrap();
-    let settings = Settings::from_cli(&cli, &platform("macos", "aarch64"), &*host).unwrap().unwrap();
-    let reserve = Reserve { settings, host: host.clone() };
+    let settings = Settings::from_cli(&cli, &platform("macos", "aarch64"), &*host)
+        .unwrap()
+        .unwrap();
+    let reserve = Reserve {
+        settings,
+        host: host.clone(),
+    };
     let disk = gauge(&df, &clock, None, Some(reserve));
     assert_eq!(disk.gib(), Some(85));
     host.set(|s| s.used = Ok(20 * GIB));
@@ -260,24 +291,48 @@ impl js_agent::Sleeper for Fills {
 /// hello's, and one the session is never given.
 #[test]
 fn the_program_tells_the_server_the_disk_its_store_gave_back() {
-    let scratch = PathBuf::from("/scratch");
+    let dir = Scratch::new("disk-gauge");
+    let scratch = dir.path("scratch");
+    std::fs::create_dir(&scratch).unwrap();
+    std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut host = mac_host();
     let row = format!(
         "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk3 9 9 {} 11% /\n",
         100 * GIB / 1024
     );
-    host.commands = host.commands.with(&format!("/bin/df -P -k {}", scratch.display()), Ok(&row));
+    host.commands = host
+        .commands
+        .with(&format!("/bin/df -P -k {}", scratch.display()), Ok(&row));
     let store = FakeHost::new();
     let machine = FakeMachine::new();
-    let mut sleeper = Fills { clock: machine.clock.clone(), store: store.clone(), waits: 0 };
+    let mut sleeper = Fills {
+        clock: machine.clock.clone(),
+        store: store.clone(),
+        waits: 0,
+    };
     let (script, sent) = Script::new(vec![welcome(1), beat_ok()]);
     let connector = ScriptConnector::of(script);
+    let scratch_flag = scratch.display().to_string();
     let all = flags(&[
-        "--scratch-root", "/scratch", "--bundle-store", "/Volumes/work/bundles",
-        "--bundle-budget-gib", "40", "--bundle-trust", "digest",
+        "--scratch-root",
+        scratch_flag.as_str(),
+        "--bundle-store",
+        "/Volumes/work/bundles",
+        "--bundle-budget-gib",
+        "40",
+        "--bundle-trust",
+        "digest",
     ]);
     let jobs: crate::support::Jobs<'_> = (Arc::new(machine), None);
-    let ran = run_with_store(&all, &host, &connector, &mut sleeper, &mut Lowest, jobs, store);
+    let ran = run_with_store(
+        &all,
+        &host,
+        &connector,
+        &mut sleeper,
+        &mut Lowest,
+        jobs,
+        store,
+    );
     assert_eq!(ran.status(), code(0), "{}", ran.err);
     let hello = sent.borrow()[0].1.clone();
     assert_eq!(hello["capabilities"]["disk-gib"], "60");

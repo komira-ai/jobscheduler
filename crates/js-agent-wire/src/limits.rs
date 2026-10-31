@@ -27,7 +27,7 @@
 //! | GPUs | [`MAX_GPUS`] devices or indices; uuid and model [`MAX_GPU_TEXT_LEN`] bytes |
 //! | lists in a heartbeat or reply | [`MAX_HELD`] held runs, [`MAX_RESULTS`] results or acks, [`MAX_COMMANDS`] commands |
 //! | node load in a heartbeat | [`MAX_LOAD_LEASES`] ids in each of `covered` and `clocks`, [`MAX_LOAD_MINUTES`] minute records, minute index 0 to [`TAIL_MINUTE`], lease ids [`MAX_LEASE_REF_LEN`] bytes |
-//! | shape and limits | [`MAX_CPU_MILLIS`], [`MAX_MEMORY_BYTES`], [`MAX_DISK_BYTES`], [`MAX_PIDS`], [`MAX_WALL_MS`], [`MAX_LEASE_CAP`] |
+//! | shape and limits | [`MAX_CPU_MILLIS`], [`MAX_MEMORY_BYTES`], [`MAX_DISK_BYTES`], [`MAX_DISK_GIB`], [`MAX_PIDS`], [`MAX_WALL_MS`], [`MAX_LEASE_CAP`] |
 //! | session timing | [`MIN_HEARTBEAT_INTERVAL_MS`], [`MAX_HEARTBEAT_INTERVAL_MS`], [`MAX_GRACE_MS`] |
 
 /// Longest id, in bytes: run, lease, host, pool, instance and provider ids.
@@ -145,6 +145,9 @@ pub const MAX_MEMORY_BYTES: u64 = 1 << 45;
 /// [`MAX_CPU_MILLIS`] and [`MAX_MEMORY_BYTES`] keep) stays below `u64::MAX`: 2^18 values
 /// of 2^46 would sum to exactly 2^64.
 pub const MAX_DISK_BYTES: u64 = (1 << 46) - 1;
+/// Most whole GiB of free scratch disk a heartbeat may say (the part of [`MAX_DISK_BYTES`]
+/// a GiB can count).
+pub const MAX_DISK_GIB: u64 = MAX_DISK_BYTES >> 30;
 
 const _: () = assert!(
     MAX_DISK_BYTES.checked_mul(1 << 18).is_some(),
