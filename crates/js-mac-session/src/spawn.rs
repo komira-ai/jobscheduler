@@ -214,10 +214,10 @@ impl ChildOs for Os {
             Resource::FileSize => libc::RLIMIT_FSIZE,
             Resource::Processes => libc::RLIMIT_NPROC,
         };
-        let limit = libc::rlimit {
-            rlim_cur: value,
-            rlim_max: value,
-        };
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: writable rlimit.
+        unsafe { libc::getrlimit(which, &raw mut limit) };
+        limit.rlim_cur = value;
         // SAFETY: `limit` is a readable rlimit for the call to copy.
         let done = unsafe { libc::setrlimit(which, &raw const limit) } == 0;
         done.then_some(()).ok_or_else(io::Error::last_os_error)
