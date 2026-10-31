@@ -336,4 +336,11 @@ mod tests {
             "{line}"
         );
     }
+
+    /// A Mac agent runs native jobs through the root helper and has no crun to name.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_a_mac_the_required_runtime_is_native() {
+        assert_eq!(REQUIRED_RUNTIME, "native");
+    }
 }
