@@ -743,8 +743,9 @@ fn the_agent_refuses_the_crun_runtime_with_the_native_socket() {
 }
 
 /// The whole program, given `--runtime docker` with an engine program and the native socket,
-/// ends with status 2 and the socket named: an agent runs containers or native programs, not
-/// both. A Mac is used so that the platform check does not answer first.
+/// ends with status 2 and the socket named, before it registers: containers run on Linux only
+/// and native jobs on a Mac only, so no host takes both, and a Linux host says whose flag it
+/// is.
 #[test]
 fn the_agent_refuses_the_docker_runtime_with_the_native_socket() {
     let (ran, sent, _) = run_scripted(
@@ -760,7 +761,7 @@ fn the_agent_refuses_the_docker_runtime_with_the_native_socket() {
             "--scratch-root",
             "/r",
         ],
-        &mac_host(),
+        &linux_host(),
         vec![welcome(1)],
         1,
     );
@@ -768,7 +769,7 @@ fn the_agent_refuses_the_docker_runtime_with_the_native_socket() {
     assert!(sent.borrow().is_empty());
     assert!(
         ran.err
-            .contains("--native-helper-socket: not with --container-bin"),
+            .contains("--native-helper-socket: native jobs run on macOS only"),
         "{}",
         ran.err
     );
