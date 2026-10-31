@@ -536,6 +536,30 @@ pub struct Cli {
     pub read_model: Option<String>,
 }
 
+impl Cli {
+    /// Every `--native-*` flag with whether it was given, kept beside the fields so that a
+    /// runtime that takes none of them refuses them all; a test walks the flags clap knows
+    /// and fails when one is missing here.
+    #[must_use]
+    pub fn native_flags(&self) -> [(&'static str, bool); 7] {
+        [
+            (
+                "--native-helper-socket",
+                self.native_helper_socket.is_some(),
+            ),
+            ("--native-homes", self.native_homes.is_some()),
+            ("--native-network", self.native_network.is_some()),
+            ("--native-deny-read", !self.native_deny_read.is_empty()),
+            ("--native-max-file-mib", self.native_max_file_mib.is_some()),
+            (
+                "--native-max-processes",
+                self.native_max_processes.is_some(),
+            ),
+            ("--native-tool-root", !self.native_tool_roots.is_empty()),
+        ]
+    }
+}
+
 /// `name=path` split at the first `=`.
 fn named_path(text: &str) -> Result<(String, PathBuf), String> {
     key_value(text).map(|(name, path)| (name, PathBuf::from(path)))
