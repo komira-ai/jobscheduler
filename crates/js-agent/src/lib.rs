@@ -252,7 +252,7 @@ mod worker;
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -342,6 +342,9 @@ pub struct Services<'a> {
     pub rescue_bound: Option<Duration>,
     /// The effective user id of the agent: a native agent must be root.
     pub euid: u32,
+    /// The directories above a crun scratch root are checked from here down (`/` outside a
+    /// test): a test that cannot make `/tmp` root-owned names the tree it made.
+    pub ancestors_floor: &'a Path,
 }
 
 /// Why the program ends without a stop request.
@@ -457,6 +460,7 @@ pub fn main_with(
                 worker_hook: None,
                 rescue_bound: None,
                 euid: rustix::process::geteuid().as_raw(),
+                ancestors_floor: Path::new("/"),
             };
             run_with(args, out, err, services)
         }
@@ -589,7 +593,7 @@ fn execute(
         Some(plan) => {
             crun::prepare_store(&plan.claim_dir, &plan.store).map_err(Failure::Usage)?;
             let (dir, root) = (&plan.claim_dir, &plan.scratch_root);
-            crun::require_trusted_ancestors(root, services.euid)
+            crun::require_trusted_ancestors(root, services.euid, services.ancestors_floor)
                 .map_err(|why| Failure::Usage(format!("--scratch-root: {why}")))?;
             if !crun::same_filesystem(services.files, &plan.store, root).map_err(Failure::Usage)? {
                 return Err(Failure::Usage(format!(

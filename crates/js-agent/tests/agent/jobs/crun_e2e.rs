@@ -213,6 +213,10 @@ fn host_on(scratch_apart: bool, store_apart: bool) -> Host {
             .with_device_under(&node.dir.path().join("oci"), 10);
     }
     host.files = host.files.with_device_under(node.dir.path(), 7);
+    // The node is a tree of the test's own, in a directory anyone can write: the check of
+    // the directories above the scratch root begins at the node.
+    host.euid = rustix::process::geteuid().as_raw();
+    host.ancestors_floor = node.dir.path().to_owned();
     host
 }
 
@@ -850,14 +854,47 @@ fn a_host_id_is_held_by_one_agent_at_a_time() {
     let first = HostClaim::take(dir.path(), "host-a").expect("the first claim");
     let why = HostClaim::take(dir.path(), "host-a").expect_err("held");
     assert!(
-        why.to_string()
-            .contains(&format!("{:?}", std::process::id().to_string())),
+        why.to_string().contains(&std::process::id().to_string()),
         "{why}"
     );
     let other = HostClaim::take(dir.path(), "host-b").expect("another id is free");
     drop(first);
     HostClaim::take(dir.path(), "host-a").expect("free once dropped");
     drop(other);
+}
+
+/// Asserts that an agent whose scratch root lies below a directory anyone can write (the
+/// build's temporary directory, or whose user owns nothing above it) exits 2 saying so. It catches an agent that starts below a
+/// directory whose writers could swap what lies under it.
+#[test]
+fn an_agent_below_a_directory_others_can_write_is_refused() {
+    let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::start_pool("jobs_crun_anc", &[], POOL_RUNS_TOML);
+    let address = Arc::new(Mutex::new(server.url()));
+    let flags = crun_flags("h-anc", &[]);
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    fn from_root() -> Host {
+        // Not root, and every directory above the node is looked at.
+        let mut host = host();
+        host.euid = rustix::process::geteuid().as_raw() + 1;
+        host.ancestors_floor = PathBuf::from("/");
+        host
+    }
+    let ran = Agent::spawn_machine(
+        server.url(),
+        server.join_file(),
+        &flags,
+        from_root,
+        Redirect(address),
+        CrunMachine::new(),
+    )
+    .finish();
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        ran.err.contains("a directory above the scratch root"),
+        "{}",
+        ran.err
+    );
 }
 
 /// Asserts the claim of a scratch root is the directory's, not a path's: the same directory
@@ -932,27 +969,21 @@ fn a_directory_above_the_scratch_root_that_a_group_can_write_is_refused() {
     mode(&parent, 0o711);
     mode(&grand, 0o775);
     let euid = rustix::process::geteuid().as_raw();
-    let why = require_trusted_ancestors(&root, euid).expect_err("group-writable grandparent");
+    let why =
+        require_trusted_ancestors(&root, euid, &grand).expect_err("group-writable grandparent");
     assert!(why.contains(&grand.display().to_string()), "{why}");
     mode(&grand, 0o722);
-    let why = require_trusted_ancestors(&root, euid).expect_err("other-writable grandparent");
+    let why =
+        require_trusted_ancestors(&root, euid, &grand).expect_err("other-writable grandparent");
     assert!(why.contains(&grand.display().to_string()), "{why}");
-    // Without the write bits, the tree's own directories pass; the directories above the
-    // build's temporary directory are the machine's, so the check stops at the first of them
-    // and the error, if any, names none of this tree's.
+    // Without the write bits the tree passes (the check begins at the grandparent, as the
+    // directories above the build's temporary directory are the machine's).
     mode(&grand, 0o755);
-    let seen = require_trusted_ancestors(&root, euid);
-    let ours = [&grand, &parent];
-    assert!(
-        seen.as_ref().err().is_none_or(|why| ours
-            .iter()
-            .all(|path| !why.contains(&path.display().to_string()))),
-        "{seen:?}"
-    );
+    require_trusted_ancestors(&root, euid, &grand).expect("a tree the agent owns");
     // Owned by someone else than the given user (and not by root): refused, naming the
     // nearest directory above the root.
     if euid != 0 {
-        let why = require_trusted_ancestors(&root, euid + 1).expect_err("not owned");
+        let why = require_trusted_ancestors(&root, euid + 1, &grand).expect_err("not owned");
         assert!(why.contains(&parent.display().to_string()), "{why}");
     }
 }

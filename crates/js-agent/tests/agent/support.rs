@@ -314,6 +314,10 @@ pub struct Host {
     pub platform: Platform,
     pub commands: FakeCommands,
     pub files: FakeFiles,
+    /// The agent's effective user id.
+    pub euid: u32,
+    /// Where the check of the directories above a scratch root begins (`/` as in production).
+    pub ancestors_floor: PathBuf,
 }
 
 pub fn platform(os: &str, arch: &str) -> Platform {
@@ -339,6 +343,8 @@ pub fn linux_host() -> Host {
             .with_link("/proc/1/ns/pid", "pid:[4026531836]")
             .with_link("/proc/self/ns/mnt", "mnt:[4026531841]")
             .with_link("/proc/1/ns/mnt", "mnt:[4026531841]"),
+        euid: 0,
+        ancestors_floor: PathBuf::from("/"),
     }
 }
 
@@ -352,6 +358,8 @@ pub fn mac_host() -> Host {
             .with(PROFILER_CMD, Ok(APPLE_M2))
             .with(IOREG_CMD, Ok(&ioreg())),
         files: FakeFiles::default(),
+        euid: 0,
+        ancestors_floor: PathBuf::from("/"),
     }
 }
 
@@ -674,7 +682,8 @@ pub fn run_with_store(
         bundle: store,
         worker_hook: jobs.1,
         rescue_bound: Some(RESCUE_TEST_BOUND),
-        euid: 0,
+        euid: host.euid,
+        ancestors_floor: &host.ancestors_floor,
     };
     let argv = std::iter::once("js-agent").chain(args.iter().copied());
     let argv = argv.map(Into::into).collect();

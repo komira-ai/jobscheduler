@@ -140,13 +140,15 @@ pub fn same_filesystem(files: &dyn FileReader, a: &Path, b: &Path) -> Result<boo
 /// Checks that every directory above the scratch root `root`, up to `/`, is owned by root or
 /// by `euid` (the agent's user) and that no group or other can write it: whoever can write
 /// an ancestor can swap the scratch root, the store or a claim file for a link. The path is
-/// resolved first, so the directories checked are the ones the kernel walks.
+/// resolved first, so the directories checked are the ones the kernel walks. Only the ones
+/// at or below `floor` are looked at; the agent passes `/`.
 ///
 /// # Errors
 /// The text names the ancestor at fault.
-pub fn require_trusted_ancestors(root: &Path, euid: u32) -> Result<(), String> {
+pub fn require_trusted_ancestors(root: &Path, euid: u32, floor: &Path) -> Result<(), String> {
     let canonical = fs::canonicalize(root).map_err(|why| format!("{}: {why}", root.display()))?;
-    for ancestor in canonical.ancestors().skip(1) {
+    let above = canonical.ancestors().skip(1);
+    for ancestor in above.filter(|ancestor| ancestor.starts_with(floor)) {
         let meta =
             fs::metadata(ancestor).map_err(|why| format!("{}: {why}", ancestor.display()))?;
         let trusted = (meta.uid() == 0 || meta.uid() == euid) && meta.mode() & 0o022 == 0;
