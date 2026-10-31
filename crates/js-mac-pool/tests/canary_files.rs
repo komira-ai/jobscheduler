@@ -90,3 +90,83 @@ fn a_file_this_guard_did_not_make_is_not_removed() {
     }
     assert!(foreign.exists());
 }
+
+fn panic_text(outcome: std::thread::Result<std::path::PathBuf>) -> String {
+    let payload = outcome.expect_err("the call panics");
+    match payload.downcast::<String>() {
+        Ok(text) => *text,
+        Err(other) => (*other.downcast::<&str>().expect("a text panic")).to_owned(),
+    }
+}
+
+fn names_in(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
+    std::fs::read_dir(dir)
+        .expect("directory")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect()
+}
+
+#[test]
+fn a_write_failure_after_the_file_was_made_leaves_no_file_and_fails_with_that_error() {
+    let scratch = Scratch::new("canary-write-fails");
+    let mut guard = Cleanup::default();
+    let mut writes = 0;
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        guard.create_unique_with(&scratch.root, "js-mac-pool-w", unpredictable, |_| {
+            writes += 1;
+            Err(std::io::Error::other("the disk is full"))
+        })
+    }));
+    let text = panic_text(outcome);
+    assert!(text.contains("the disk is full"), "{text}");
+    assert_eq!(writes, 1, "a write failure is not retried under a new name");
+    assert_eq!(names_in(&scratch.root), Vec::<std::ffi::OsString>::new());
+}
+
+#[test]
+fn an_open_error_other_than_a_taken_name_fails_at_once_with_that_error() {
+    let scratch = Scratch::new("canary-open-fails");
+    let missing = scratch.root.join("not-there");
+    let mut guard = Cleanup::default();
+    let mut names = 0;
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        guard.create_unique_with(
+            &missing,
+            "js-mac-pool-o",
+            || {
+                names += 1;
+                unpredictable()
+            },
+            |_| Ok(()),
+        )
+    }));
+    let text = panic_text(outcome);
+    assert!(text.contains("No such file or directory"), "{text}");
+    assert_eq!(names, 1, "no retry for an error that a new name cannot fix");
+}
+
+#[test]
+fn running_out_of_names_panics_with_the_last_error() {
+    let scratch = Scratch::new("canary-names-out");
+    scratch.file("js-mac-pool-n-same", "taken");
+    let mut guard = Cleanup::default();
+    let mut names = 0;
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        guard.create_unique_with(
+            &scratch.root,
+            "js-mac-pool-n",
+            || {
+                names += 1;
+                "same".to_owned()
+            },
+            |_| Ok(()),
+        )
+    }));
+    let text = panic_text(outcome);
+    assert!(text.contains("File exists"), "{text}");
+    assert_eq!(names, 16);
+    assert_eq!(
+        std::fs::read_to_string(scratch.root.join("js-mac-pool-n-same")).expect("kept"),
+        "taken"
+    );
+}
