@@ -16,6 +16,13 @@ name = "xtask-fake"
 path = "src/bin/xtask-fake.rs"
 test = false
 
+# `host-shim`, the program the tests of `packaging/js-agent/crun_host_setup.sh` run in place of the
+# host's `systemctl`, `mount`, `useradd` and the rest (see its docs). Never run by CI itself.
+[[bin]]
+name = "host-shim"
+path = "src/bin/host-shim.rs"
+test = false
+
 [dependencies]
 clap.workspace = true
 flate2.workspace = true
