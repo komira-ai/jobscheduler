@@ -23,15 +23,19 @@ mod validate;
 
 use std::ffi::OsString;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 pub use args::{ArgsError, Invocation, Step};
 pub use declaration::{DECLARATION_PATH, Declaration, DeclarationError, Timeouts};
-pub use params::{CORDON_LEASE_KEY, CORDON_MAX_KEY, PROMOTION_CEILING_KEY, Params, ParamsError};
+pub use params::{
+    CORDON_LEASE_KEY, CORDON_MAX_KEY, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY,
+    PROMOTION_CEILING_KEY, Params, ParamsError, STAGED_RELEASE_KEY, TARGET_VERSION_KEY,
+};
 pub use ports::{
-    Clock, Cordoned, CordonView, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS, NoGate,
-    PortError, Ports, SYSTEMCTL, StateView, SystemClock, SystemLink, SystemUnits, Uncordoned,
-    UnitState, Units, read_link, swap_link,
+    Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,
+    NoGate, PortError, Ports, SYSTEMCTL, StateView, SystemClock, SystemLink, SystemUnits,
+    Uncordoned, UnitState, Units, read_link, swap_link,
 };
 pub use record::{
     Cordon, DirProblem, DirStat, Held, LOCK_FILE, RECORD_FILE, RECORD_MAX, Record, Rollback,
@@ -123,13 +127,17 @@ enum Refusal {
     Args(ArgsError),
     #[error("{0}")]
     Params(ParamsError),
+    #[error(
+        "the artifact {given:?} is not the staged release {STAGED_RELEASE_KEY} names ({staged:?})"
+    )]
+    Artifact { given: PathBuf, staged: PathBuf },
 }
 
 impl Refusal {
     /// The failure the updater is told of: nothing was done, so nothing is irreversible.
     fn done(&self) -> Done {
         let reason = match self {
-            Refusal::Args(_) => Reason::BadArgs,
+            Refusal::Args(_) | Refusal::Artifact { .. } => Reason::BadArgs,
             Refusal::Params(_) => Reason::BadParams,
         };
         Done {
@@ -143,6 +151,17 @@ impl Refusal {
 fn step_of(args: &[OsString], host: &Host<'_>) -> Result<Done, Refusal> {
     let invocation = Invocation::parse(args.iter().skip(2).cloned()).map_err(Refusal::Args)?;
     let params = Params::read(&invocation.params).map_err(Refusal::Params)?;
+    // `prepare` is given the staged tree twice, by argument and by the table; they must agree.
+    if let Some(given) = invocation
+        .artifact
+        .as_ref()
+        .filter(|given| given.as_os_str() != params.staged_release.as_os_str())
+    {
+        return Err(Refusal::Artifact {
+            given: given.clone(),
+            staged: params.staged_release,
+        });
+    }
     Ok((host.step)(&invocation, &params))
 }
 

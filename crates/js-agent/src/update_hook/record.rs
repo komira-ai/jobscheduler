@@ -45,12 +45,12 @@ pub const RECORD_MAX: u64 = 64 * 1024;
 pub struct UpdateInfo {
     /// The version being installed.
     pub target: String,
-    /// The version that runs now.
-    pub previous: String,
-    /// The staged release directory of `target`.
+    /// The version that runs now; `None` on a first install.
+    pub previous: Option<String>,
+    /// The staged release directory of `target`; the table's `updater.staged_release`.
     pub staged: PathBuf,
-    /// The release directory the link pointed to before the update.
-    pub previous_target: PathBuf,
+    /// The release directory the link pointed to before the update; `None` on a first install.
+    pub previous_target: Option<PathBuf>,
     /// The unit that runs the agent.
     pub unit: String,
     /// The digest of the artifact the staged release was made from, `sha256:<hex>`.
@@ -65,7 +65,9 @@ pub struct Cordon {
     pub placed: bool,
     /// When it was first placed, in milliseconds on the wall clock; 0 when not placed.
     pub first_ms: u64,
-    /// When it now expires; 0 when not placed.
+    /// When it now expires, in whole seconds' worth of milliseconds: never later than
+    /// `first_ms + cordon_max_secs * 1000` plus the one second the validator allows
+    /// ([`EXPIRY_SLACK_MS`](super::validate::EXPIRY_SLACK_MS)). 0 when not placed.
     pub expires_ms: u64,
 }
 

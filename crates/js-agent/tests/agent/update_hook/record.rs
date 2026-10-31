@@ -33,9 +33,9 @@ fn cell(name: &str) -> TestDir {
 fn update(target: &str) -> UpdateInfo {
     UpdateInfo {
         target: target.to_owned(),
-        previous: "1.3.2".to_owned(),
+        previous: Some("1.3.2".to_owned()),
         staged: PathBuf::from("/opt/js-agent/releases/new"),
-        previous_target: PathBuf::from("/opt/js-agent/releases/old"),
+        previous_target: Some(PathBuf::from("/opt/js-agent/releases/old")),
         unit: "js-agent-crun.service".to_owned(),
         artifact_digest: format!("sha256:{}", "a".repeat(64)),
     }
