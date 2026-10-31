@@ -17,7 +17,7 @@ fn dataset() -> Vec<RunRecord> {
         r.push(rec("0.5", "gap", i, "", &[("q", None)]));
     }
     let big: Vec<f64> = (0..12).map(|i| 100.0 + f64::from(i)).collect();
-    let shifted: Vec<f64> = big.iter().map(|v| v + 0.5).collect();
+    let shifted: Vec<f64> = big.iter().map(|v| v + 20.0).collect();
     r.extend(arm_runs("1.0", "base", &big));
     r.extend(arm_runs("1.0", "x", &shifted));
     r

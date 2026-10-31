@@ -152,6 +152,7 @@ fn an_unknown_arm_is_refused() {
     };
     let error = analyze(records.clone(), &baseline).unwrap_err();
     assert!(matches!(&error, Error::UnknownArm(name) if name == "zzz"));
+    assert!(error.to_string().contains("zzz"));
     let pair = Options {
         cv_pairs: vec![("a".to_string(), "yyy".to_string())],
         ..Options::default()

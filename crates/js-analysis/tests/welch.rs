@@ -22,7 +22,7 @@ fn ci(c: &Comparison) -> Interval {
     c.diff_ci.unwrap()
 }
 
-/// Asserts Welch's test on Student's 1908 sleep data (R's `sleep` data set, group 1 against
+/// Asserts Welch's test on Student's sleep data (R's `sleep` data set, group 1 against
 /// group 2). R's `t.test(extra ~ group, data = sleep)` documents: t = -1.8608, df = 17.776,
 /// p = 0.07939, 95% interval -3.3654832 to 0.2054832 for mean(group 1) - mean(group 2);
 /// here the arm is group 2, so the difference and the interval change sign.

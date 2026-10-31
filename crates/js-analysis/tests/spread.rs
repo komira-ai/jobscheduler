@@ -50,6 +50,7 @@ fn a_smaller_spread_differs_below_one_and_few_runs_are_flagged() {
     assert_eq!(c.verdict, Verdict::Differs);
     let few = run(&[9.0, 10.0, 11.0], &[18.0, 20.0, 22.0]);
     assert!(few.underpowered);
+    assert!(run(&around_100(1.0), &[9.0, 10.0, 11.0]).underpowered);
     assert_eq!(few.verdict, Verdict::NotDistinguished);
 }
 

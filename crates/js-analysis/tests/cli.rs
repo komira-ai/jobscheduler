@@ -91,8 +91,8 @@ fn a_missing_input_is_reported() {
     assert!(error.to_string().contains("cli_no_such.jsonl"));
 }
 
-/// Asserts a bad line, an unknown base arm, an output that cannot be created and an output
-/// that cannot be written are each an error.
+/// Asserts a bad line, an unknown base arm, an output that cannot be created, a JSON file
+/// that cannot be written and standard output that cannot be written are each an error.
 #[test]
 fn failures_are_errors() {
     let bad = scratch("cli_bad.jsonl");
@@ -105,10 +105,9 @@ fn failures_are_errors() {
 
     let input = write_runs("cli_fail.jsonl");
     let cli = parse(&[input.to_str().unwrap(), "--baseline", "zzz"]).unwrap();
-    assert!(matches!(
-        run(&cli, &mut Vec::new()),
-        Err(Error::UnknownArm(_))
-    ));
+    let error = run(&cli, &mut Vec::new()).unwrap_err();
+    assert!(matches!(error, Error::UnknownArm(_)));
+    assert_eq!(error.to_string(), "no run of arm \"zzz\"");
 
     let directory = scratch("");
     let cli = parse(&[
@@ -117,7 +116,13 @@ fn failures_are_errors() {
         directory.to_str().unwrap(),
     ])
     .unwrap();
-    assert!(matches!(run(&cli, &mut Vec::new()), Err(Error::Io(_))));
+    let error = run(&cli, &mut Vec::new()).unwrap_err();
+    assert!(matches!(error, Error::Io(_)));
+    assert!(error.to_string().starts_with("cannot write the output: "));
+
+    // /dev/full accepts the open and refuses every write.
+    let cli = parse(&[input.to_str().unwrap(), "--json", "/dev/full"]).unwrap();
+    assert!(matches!(run(&cli, &mut Vec::new()), Err(Error::Json(_))));
 
     struct Closed;
     impl std::io::Write for Closed {
