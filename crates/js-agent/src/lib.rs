@@ -63,6 +63,9 @@
 //! | `--egress-ip <path>`, `--egress-nft <path>`, `--egress-nsenter <path>` | the absolute paths of the `ip`, `nft` and `nsenter` programs the egress setup runs, by default `/usr/sbin/ip`, `/usr/sbin/nft` and `/usr/bin/nsenter`; need `--egress allow-list` |
 //! | `--actions-cgroup <path>` | the cgroup version 2 directory below `/sys/fs/cgroup` that holds every container (made and delegated by the operator): each container is created with `--cgroup-parent` naming it (the slice name for one `.slice` directly below `/sys/fs/cgroup`, the systemd driver; the path with a leading `/` otherwise, the cgroupfs driver), and the heartbeat carries the usage of the directory and of each lease's cgroup (see [`usage`]); without it the heartbeat carries no load, and the agent says so at start; needs `--container-bin` |
 //! | `--gpu-toolkit-hook <path>` | the absolute path of a program that checks the GPU container toolkit, run once at start when the host offers a GPU; exit 0 makes the hello report `gpu-toolkit`, anything else leaves it out and warns; needs `--container-bin` |
+//! | `--runtime <docker\|crun>` | what runs a job: `docker` (the engine program of `--container-bin`, Docker or Podman, which is also what no flag means) or `crun` (js-contain over the distribution's `crun`, each command run as `--job-user`; Linux only). The packaged unit of the Docker cloud hosts names `--runtime docker`; the unit for the Linux farm (`packaging/js-agent/js-agent-crun.service`) names `--runtime crun`. With `crun` the agent checks the host before it registers and exits 2 naming every piece that is missing: `crun` at `--crun-bin` and its version (1.14 or newer), `newuidmap` and `newgidmap`, the job user and its subuid and subgid ranges (65536 ids or more each), the state root (`0700`, owned by root) and the scratch root (`0711`, owned by root, every directory above it searchable by the job user), `crun`, `newuidmap` and `newgidmap` executable by the job user, the cgroup version 2 controllers `cpu`, `memory` and `pids` in the agent's own cgroup (`Delegate=yes`), and, where `kernel.apparmor_restrict_unprivileged_userns` is 1, a loaded AppArmor profile for `crun`. This build stops there: it starts no job with `crun` yet (the runtime is not wired into the worker) |
+//! | `--crun-bin <path>` | the `crun` of `--runtime crun`; by default `/usr/bin/crun`, the path the distribution's AppArmor profile attaches to; any other path starts the agent with a warning (and is refused by the kernel where user namespaces are restricted) |
+//! | `--job-user <name>` | the non-root user every `crun` command runs as, whose subuid and subgid ranges every job's user namespace is mapped onto; required with `--runtime crun`, and needs it |
 //! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci; the Docker and Podman runtimes pull as `--container-pull` says and do not read it |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; needs `--container-bin` |
 //! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; needs `--container-bin` |
@@ -218,6 +221,8 @@ mod contract;
 mod credential;
 #[cfg(target_os = "linux")]
 pub mod crun;
+#[cfg(target_os = "linux")]
+pub mod crun_host;
 pub mod egress;
 mod exclusive;
 mod facts;
@@ -250,7 +255,7 @@ use clap::Parser;
 
 pub use backoff::{BASE, Backoff, CAP, Jitter, RETRY_AFTER_CAP, SystemJitter};
 use bundle::{Admission, BundleHost, Settings as BundleSettings, SystemHost};
-pub use cli::Cli;
+pub use cli::{Cli, RuntimeKind};
 use contract::ToolkitHook;
 pub use credential::{CREDENTIAL_FILE, CREDENTIAL_TEMP_FILE, CredentialFile, CredentialStore};
 pub use exclusive::{PREPARE_TIMEOUT, Quiesce};
@@ -342,6 +347,40 @@ enum Failure {
     Fatal(Fatal),
     /// The job worker is gone.
     Worker(String),
+}
+
+/// Checks `--runtime` and the flags that belong to it, and for `crun` the host: a wrong
+/// flag or a missing piece of the host ends the agent with status 2 before it registers.
+fn runtime_flags(
+    cli: &Cli,
+    platform: &Platform,
+    commands: &dyn CommandRunner,
+    err: &mut dyn Write,
+) -> Result<(), Failure> {
+    let usage = |text: &str| Err(Failure::Usage(text.to_owned()));
+    match cli.runtime {
+        Some(RuntimeKind::Crun) => {
+            if platform.is_macos() {
+                return usage("--runtime crun: Linux only: the post-job checks read /proc");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let host = crun_host::CrunHost::system();
+                usage(&crun_host::gate(cli, &host, commands, err))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (commands, err);
+                usage("--runtime crun: this build has no crun runtime")
+            }
+        }
+        Some(RuntimeKind::Docker) if cli.container_bin.is_none() => {
+            usage("--runtime docker: needs --container-bin")
+        }
+        _ if cli.crun_bin.is_some() => usage("--crun-bin: needs --runtime crun"),
+        _ if cli.job_user.is_some() => usage("--job-user: needs --runtime crun"),
+        _ => Ok(()),
+    }
 }
 
 /// The program, with the machine's own services.
@@ -484,6 +523,7 @@ fn execute(
                 .to_owned(),
         ));
     }
+    runtime_flags(&cli, platform, commands, err)?;
     // Native jobs need the Seatbelt and the helper of a Mac.
     if cli.native_helper_socket.is_some() && !platform.is_macos() {
         return Err(Failure::Usage(

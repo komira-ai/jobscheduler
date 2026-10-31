@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 /// The flags of `js-agent`.
 #[derive(Debug, Parser)]
@@ -255,6 +255,29 @@ pub struct Cli {
     /// `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start.
     #[arg(long, value_name = "PATH")]
     pub container_bin: Option<PathBuf>,
+    /// The runtime that runs jobs: `docker` (the engine program at `--container-bin`, which
+    /// may be Docker or Podman, exactly as before) or `crun` (`js-contain` drives the
+    /// distribution's `crun`, run as the `--job-user`; Linux only, and the agent must be
+    /// root). Without the flag the runtime is the engine of `--container-bin`, as before. The
+    /// packaged unit of the Docker cloud hosts names `--runtime docker`; the unit for the
+    /// Linux farm names `--runtime crun`. With `crun` the agent checks the host before it
+    /// registers and exits 2 naming every piece that is missing (see `--crun-bin`).
+    #[arg(long, value_enum, value_name = "docker|crun")]
+    pub runtime: Option<RuntimeKind>,
+    /// The `crun` program of `--runtime crun`, by absolute path; by default
+    /// `/usr/bin/crun`. It must be the distribution's own file at that path: the
+    /// distribution's AppArmor profile for `crun` (the one that allows it a user
+    /// namespace where `kernel.apparmor_restrict_unprivileged_userns` is 1) attaches to
+    /// that path, so a copy elsewhere is refused by the kernel. Any other path starts the
+    /// agent with a loud warning. Needs `--runtime crun`.
+    #[arg(long, value_name = "PATH")]
+    pub crun_bin: Option<PathBuf>,
+    /// The dedicated non-root user every `crun` command of `--runtime crun` runs as, such as
+    /// `jsjob`: the account whose ranges in `/etc/subuid` and `/etc/subgid` (at least 65536
+    /// ids each) every job's user namespace is mapped onto. It must exist, with a uid and a
+    /// gid above 0. The agent stays root. Required with `--runtime crun`, and needs it.
+    #[arg(long, value_name = "USER")]
+    pub job_user: Option<String>,
     /// The network containers join: the name of a user-defined network. By default
     /// `none`, no network at all. `host` is refused. Any named network gives the job
     /// egress to whatever that network reaches, the host's metadata endpoint included;
@@ -503,4 +526,13 @@ fn key_value(text: &str) -> Result<(String, String), String> {
     text.split_once('=')
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .ok_or_else(|| format!("{text:?} is not key=value"))
+}
+
+/// What runs a job: the value of `--runtime`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RuntimeKind {
+    /// The engine program of `--container-bin` (Docker or Podman).
+    Docker,
+    /// `js-contain`'s `crun` backend, over the distribution's `crun`.
+    Crun,
 }
