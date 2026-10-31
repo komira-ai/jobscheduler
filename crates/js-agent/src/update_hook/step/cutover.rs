@@ -179,10 +179,9 @@ fn replace(
     now_ms: u64,
 ) -> Result<(), Done> {
     if ask_secs(&record.cordon, params, now_ms) == 0 {
-        if record.cordon != Cordon::default() {
-            record.cordon = Cordon::default();
-            save(env, held, record)?;
-        }
+        // Only a cordon placed before can have used the cap up: forget it.
+        record.cordon = Cordon::default();
+        save(env, held, record)?;
         return Err(deferred(
             params,
             Reason::CordonCapReached,
