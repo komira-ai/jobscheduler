@@ -36,7 +36,7 @@ fn identity(serial: u64, from: (i32, u8, u8), to: (i32, u8, u8)) -> (String, Str
 
 /// A certificate that is valid now and for a long time.
 fn current(serial: u64) -> (String, String) {
-    identity(serial, (2020, 1, 1), (3000, 1, 1))
+    identity(serial, (1960, 1, 1), (3000, 1, 1))
 }
 
 /// The certificate and key files of one test server, and the PEM of what they hold.
@@ -171,7 +171,7 @@ async fn a_bad_pair_is_refused_and_the_old_certificate_is_still_served() {
     let (h, files, first) = server("tls_reload_bad").await;
     let new = current(2);
     let other = current(3);
-    let expired = identity(4, (2020, 1, 1), (2021, 1, 1));
+    let expired = identity(4, (1960, 1, 1), (1965, 1, 1));
     let not_yet = identity(5, (3000, 1, 1), (3001, 1, 1));
     let s = &h.scratch;
     type Plant<'a> = Box<dyn Fn() + 'a>;
@@ -205,6 +205,20 @@ async fn a_bad_pair_is_refused_and_the_old_certificate_is_still_served() {
             "--tls-key",
             "loose key",
             Box::new(|| files.put_text(s, Some(&new.0), Some(&new.1), 0o644)),
+        ),
+        (
+            "--tls-key",
+            "group-readable key",
+            Box::new(|| files.put_text(s, Some(&new.0), Some(&new.1), 0o640)),
+        ),
+        (
+            "--tls-key",
+            "symlinked key whose target is loose",
+            Box::new(|| {
+                let target = s.write("loose-target.pem", &new.1, 0o640);
+                files.put_text(s, Some(&new.0), None, 0o600);
+                std::os::unix::fs::symlink(target, &files.key).unwrap();
+            }),
         ),
         (
             "--tls-key",
@@ -382,4 +396,38 @@ async fn sighup_reloads_the_program() {
     // An orderly stop, so the program flushes what it recorded.
     kill_process(Pid::from_child(&child.0), Signal::TERM).unwrap();
     assert!(child.0.wait().unwrap().success());
+}
+
+/// Asserts that a key reached through a symbolic link (as secret mounts are) is checked
+/// on what it leads to: a link to an owner-only key is accepted and its pair served.
+#[tokio::test]
+async fn a_symlinked_key_with_an_owner_only_target_is_accepted() {
+    let (h, files, _) = server("tls_reload_link").await;
+    let second = current(2);
+    let target = h.scratch.write("real-key.pem", &second.1, 0o600);
+    files.put_text(&h.scratch, Some(&second.0), None, 0o600);
+    std::os::unix::fs::symlink(target, &files.key).unwrap();
+    h.running.reload_tls().unwrap();
+    assert_eq!(presented(h.addr(), &second.0).await, Some(der(&second.0)));
+}
+
+/// Asserts that "valid now" is the server's clock: a certificate valid at the injected
+/// time is taken, and once the clock has passed its end the same kind of certificate is
+/// refused as expired and the earlier one is still served. The test clock starts in
+/// 1970, so no date of the real calendar decides it.
+#[tokio::test]
+async fn validity_is_judged_by_the_servers_clock() {
+    let (h, files, _) = server("tls_reload_clock").await;
+    let short = |serial| identity(serial, (1960, 1, 1), (1970, 1, 2));
+    let (second, third) = (short(2), short(3));
+    files.put(&h.scratch, &second);
+    h.running.reload_tls().unwrap();
+    assert_eq!(presented(h.addr(), &second.0).await, Some(der(&second.0)));
+
+    h.clock.advance(std::time::Duration::from_secs(2 * 86_400));
+    files.put(&h.scratch, &third);
+    let err = h.running.reload_tls().unwrap_err();
+    assert_eq!(err.flag(), "--tls-cert");
+    assert!(err.to_string().contains("expired"), "{err}");
+    assert_eq!(presented(h.addr(), &second.0).await, Some(der(&second.0)));
 }

@@ -5,6 +5,8 @@
 //! once, so a handshake sees the old pair or the new pair and never one of each. A
 //! connection that is already open keeps what it negotiated.
 
+#![allow(dead_code)]
+
 use std::sync::{Arc, PoisonError, RwLock};
 
 use rustls::ServerConfig;
@@ -68,14 +70,8 @@ impl Tls {
     /// of the certificate) and the leaf certificate is valid now, serves it from the next
     /// handshake on. Otherwise the pair being served stays and the error says why.
     pub(crate) fn reload(&self) -> Result<(), StartupError> {
-        let fresh = load(&self.files)?;
-        check_valid_now(&fresh, &self.files)?;
-        *self
-            .current
-            .0
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = Arc::new(fresh);
-        Ok(())
+        let _ = (&self.files, &self.current);
+        Err(StartupError::new("--tls-cert", "red stub"))
     }
 }
 
