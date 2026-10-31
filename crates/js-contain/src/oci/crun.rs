@@ -45,9 +45,10 @@ pub fn no_scrub(_: &mut std::process::Command) {}
 /// program runs as the dedicated job user, with no supplementary group, from `/`, with
 /// an environment of `PATH` and `HOME` only (so no `XDG_RUNTIME_DIR` and nothing of the
 /// daemon's credentials is inherited). The drop is part of the backend: it does not
-/// depend on the caller's [`EnvScrub`].
-#[derive(Clone, Debug)]
-pub(crate) struct JobDrop {
+/// depend on the caller's [`EnvScrub`]. The lease's keeper is started with the same drop
+/// ([`crate::keeper::Keeper::watch_as`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobDrop {
     uid: u32,
     gid: u32,
     /// The `PATH` the program gets: where it finds `newuidmap` and `newgidmap`.
@@ -56,13 +57,18 @@ pub(crate) struct JobDrop {
 
 impl JobDrop {
     /// The drop for job user `(uid, gid)`, or `None` when this process is not root (a
-    /// user that is not root cannot change its ids, and runs `crun` as itself).
-    pub(crate) fn new(
+    /// user that is not root cannot change its ids, and runs `crun` as itself) or the job
+    /// user is root by its uid or its gid: a drop to root would look like one and change
+    /// nothing, so it is refused here as `Oci::new` refuses it ([`SubidError::Root`]).
+    ///
+    /// [`SubidError::Root`]: crate::subids::SubidError::Root
+    #[must_use]
+    pub fn new(
         job: Option<(u32, u32)>,
         path: Option<&std::ffi::OsStr>,
         daemon_uid: u32,
     ) -> Option<Self> {
-        let (uid, gid) = job?;
+        let (uid, gid) = job.filter(|&(uid, gid)| uid != 0 && gid != 0)?;
         (daemon_uid == 0).then(|| Self {
             uid,
             gid,
@@ -72,7 +78,7 @@ impl JobDrop {
 
     /// Makes `command` start as the job user: `setgroups([])`, then the gid, then the uid
     /// (the order in which each call is still allowed), all three real, effective and saved.
-    fn apply(&self, command: &mut std::process::Command) {
+    pub(crate) fn apply(&self, command: &mut std::process::Command) {
         use std::os::unix::process::CommandExt as _;
         command
             .env_clear()
@@ -264,6 +270,11 @@ impl Crun {
             scrub,
             job,
         }
+    }
+
+    /// The drop to the job user every command of this driver gets, if any.
+    pub(crate) fn job(&self) -> Option<&JobDrop> {
+        self.job.as_ref()
     }
 
     /// How every command of this driver is prepared.
@@ -694,6 +705,9 @@ mod tests {
         let path = std::ffi::OsStr::new("/id/tools");
         assert!(JobDrop::new(None, Some(path), 0).is_none());
         assert!(JobDrop::new(Some((900, 900)), Some(path), 1000).is_none());
+        assert!(JobDrop::new(Some((0, 0)), Some(path), 0).is_none());
+        assert!(JobDrop::new(Some((0, 900)), Some(path), 0).is_none());
+        assert!(JobDrop::new(Some((900, 0)), Some(path), 0).is_none());
         let drop = JobDrop::new(Some((900, 901)), Some(path), 0).expect("root with a job user");
         assert_eq!((drop.uid, drop.gid), (900, 901));
 
@@ -722,6 +736,42 @@ mod tests {
             "the caller's scrub runs first and env_clear leaves exactly the allowlist"
         );
         assert_eq!(command.get_current_dir(), Some(Path::new("/")));
+    }
+
+    /// Catches a backend that runs anything but the configured runtime path, or makes a
+    /// copy of it: a stand-in at a path of the test is run by `delete` and by the helper
+    /// run under exactly that path (`$0`), and no other file named `crun` is made beside
+    /// the lease or its state.
+    #[test]
+    fn the_configured_runtime_path_is_what_runs_and_no_copy_is_made() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::unit_dir("crun-path");
+        let program = dir.join("my-runtime");
+        let seen = dir.join("seen");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\necho \"$0\" >> {}\n", seen.display()),
+        )
+        .expect("stand-in");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let crun = Crun::new(program.clone(), no_scrub, None);
+        let lease = dir.join("lease");
+        crun.delete_blocking(&lease, "c").expect("runs");
+        crun.run_helper_blocking(&lease.join("state"), "h", &lease.join("bundle"))
+            .expect("runs");
+        let said = std::fs::read_to_string(&seen).expect("recorded");
+        let path = program.display().to_string();
+        assert_eq!(said, format!("{path}\n{path}\n"));
+        let mut names: Vec<String> = std::fs::read_dir(&*dir)
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["my-runtime", "seen"],
+            "a copy or other file was made"
+        );
     }
 
     /// Catches the drop's order and its stop at the first failure, with the real calls as an

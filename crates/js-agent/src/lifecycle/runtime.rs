@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::{Isolation, LogTail};
+use js_agent_wire::{Isolation, LogTail, NativeSpec, refusal};
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -85,6 +85,9 @@ pub enum Body {
         /// The command line after the image.
         args: Vec<String>,
     },
+    /// A program run on the host as a user of its own, under a sandbox profile (macOS only):
+    /// the body of a native start as the wire carries it.
+    Native(NativeSpec),
 }
 
 /// Everything a runtime needs to create and start one run.
@@ -117,6 +120,12 @@ pub struct RunSpec {
     pub isolation: Isolation,
     /// The job's labels and the agent's own ([`label`]); the agent's win.
     pub labels: BTreeMap<String, String>,
+    /// The darwin bundle a native run pins, `name[:tag]@sha256:<manifest digest>`: the
+    /// runtime pins its trees for the run, may resolve `@bundle/<entrypoint>` through
+    /// it, and unpins them when the run is removed. The agent has judged it already
+    /// ([`Admission`](crate::bundle::Admission)); a runtime that holds no bundle store
+    /// fails a start that has one.
+    pub bundle: Option<String>,
 }
 
 /// How a container ended.
@@ -184,6 +193,16 @@ impl RuntimeError {
     pub fn is_blind(&self) -> bool {
         self.1
     }
+}
+
+/// Why a runtime will not run a native body: the wire code the start is answered with and
+/// the text that stays on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRefusal {
+    /// A refusal code of the wire ([`refusal`]).
+    pub code: &'static str,
+    /// What is wrong, for the log.
+    pub why: String,
 }
 
 /// Names one fetch of an image, so that every run that waited on it hears how it ended
@@ -299,6 +318,29 @@ pub trait Runtime {
     /// The runtime cannot read the log.
     fn log_tail(&mut self, _id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
         Ok(None)
+    }
+
+    /// Whether this runtime runs the native body `native`, asked before a native start
+    /// creates anything. The default runs none, which is every runtime but the one a Mac
+    /// agent has: a native start on a Linux host is refused `native-unsupported`.
+    ///
+    /// # Errors
+    ///
+    /// The code the start is refused with, and why.
+    fn check_native(&self, _native: &NativeSpec) -> Result<(), NativeRefusal> {
+        Err(NativeRefusal {
+            code: refusal::NATIVE_UNSUPPORTED,
+            why: "this agent runs no native jobs".to_owned(),
+        })
+    }
+
+    /// Ends and removes whatever an earlier process left, which no list of the runtime's
+    /// can say: the leases a native runtime journalled and never saw deleted. Called when a
+    /// worker starts and by the rescue, before anything else; returns one line for each
+    /// thing done or not done. A runtime whose leftovers are listed (the container one)
+    /// has nothing to do.
+    fn reclaim(&mut self) -> Vec<String> {
+        Vec::new()
     }
 
     /// Whether a container made here can use a GPU. A start that names a GPU where this

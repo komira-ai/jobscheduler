@@ -235,7 +235,8 @@ fn the_unit_sets_only_the_settings_listed_here() {
 }
 
 /// The unit makes its directories from the file the setup script installs, before every start, and
-/// waits for the scratch disk by the path of the `--scratch-root` flag.
+/// waits for the scratch disk by its mount, `/var/lib/js-agent/scratch`, the parent of the
+/// `--scratch-root` flag's path (`.../scratch/runs`).
 #[test]
 fn the_unit_makes_its_directories_and_waits_for_the_scratch_disk() {
     assert_eq!(

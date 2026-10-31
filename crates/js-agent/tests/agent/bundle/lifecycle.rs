@@ -1,7 +1,7 @@
 //! A start that names a bundle, through the lifecycle: refused with a class on an agent
 //! without a store, judged by the bundle's rules on one with a store, and, when every rule
-//! passes, ending at the refusal that nothing can run a bundle yet. Each test says the defect
-//! it catches.
+//! passes, left to the runtime (the runs themselves are in `native::bundle`). Each test says
+//! the defect it catches.
 
 use clap::Parser;
 use js_agent::bundle::{Admission, Needs, Settings};
@@ -48,6 +48,7 @@ fn admission(listed: bool) -> Admission {
             Needs {
                 os_version: DottedVersion::parse("14.0").unwrap(),
                 xcode: None,
+                entrypoints: ["clang".to_owned()].into(),
             },
         );
     });
@@ -119,13 +120,12 @@ fn an_agent_with_a_store_applies_the_bundle_rules() {
     assert_refused_cleanly(&h, "r1", refusal::BUNDLE_NOT_ALLOWED);
 }
 
-/// A start that passes every rule of the bundle reaches the refusal that this agent cannot
-/// run a bundle yet (`native-unsupported`), says in its explanation that the bundle was
-/// admitted, and creates nothing; the agent that has no store and a native job with no
-/// bundle keep the plain explanation. It catches a job started as something it is not, and a
-/// refusal that hides which check the start passed.
+/// A start that passes every rule of the bundle reaches the runtime's own check, and a
+/// runtime that runs no native job (the lifecycle's fake here) refuses it
+/// `native-unsupported` and creates nothing, as it refuses a native job with no bundle. It
+/// catches a job started as something it is not.
 #[test]
-fn an_admitted_bundle_ends_at_the_point_where_nothing_can_run_it() {
+fn an_admitted_bundle_is_refused_by_a_runtime_that_runs_no_native_job() {
     let mut h = harness("bundle-admitted", Some(admission(true)));
     let events = h.start(bundled("r1"));
     assert_eq!(names(&events), ["refused r1 native-unsupported"]);
@@ -133,10 +133,7 @@ fn an_admitted_bundle_ends_at_the_point_where_nothing_can_run_it() {
     let js_agent::lifecycle::Event::Refused { why, .. } = &events[0] else {
         panic!("{events:?}");
     };
-    assert_eq!(
-        why,
-        "the bundle is admitted, but this agent cannot run a bundle yet"
-    );
+    assert_eq!(why, "this agent runs no native jobs");
     let mut plain = harness("native-plain", Some(admission(true)));
     let mut spec = bundled("r2");
     spec.bundle = None;

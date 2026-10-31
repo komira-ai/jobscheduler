@@ -17,6 +17,8 @@
 //!   each test target built as this user and run in a `Delegate=yes` system unit of its own;
 //!   with `--job-user`, the targets of a root daemon, run as root, which start every
 //!   container as that user.
+//! - `unit-result --unit <name> [--sudo <path>]` ([`crun_tests::check_unit`]): fails unless a
+//!   system unit a step ran with `systemd-run --wait` exited 0, by the unit's own result.
 //! - `pkg check-deb --deb F --version X.Y.Z --binary B --packaging DIR --license F` ([`pkg`]):
 //!   refuses a js-agent deb that is not exactly the package `packaging/js-agent` describes, or
 //!   whose binary is not a static x86-64 Linux executable.
@@ -109,6 +111,17 @@ enum Verb {
         #[arg(long)]
         job_user: Option<String>,
     },
+    /// Fail unless the system unit a step ran with `systemd-run --wait` (without
+    /// `--collect`) exited 0, reading the unit's own result rather than `systemd-run`'s
+    /// exit status, and clear the unit's failed state.
+    UnitResult {
+        /// The sudo program; it is run with `-n`, so it never prompts.
+        #[arg(long, default_value = "sudo")]
+        sudo: PathBuf,
+        /// The unit's name (`--unit` of the `systemd-run`).
+        #[arg(long)]
+        unit: String,
+    },
     /// The js-agent Linux package.
     Pkg {
         /// Which step.
@@ -163,11 +176,15 @@ fn run(cli: Cli) -> Result<String, Error> {
             let cargo = std::env::var_os("CARGO").unwrap_or_default();
             Ok(crun_tests::run(&crun_tests::CrunTests {
                 cargo: &cargo,
-                sudo: &sudo,
+                sudo: &crun_tests::SudoProgram(&sudo),
                 root: &root,
                 job_user: job_user.as_deref(),
             })?)
         }
+        Verb::UnitResult { sudo, unit } => Ok(crun_tests::check_unit(
+            &crun_tests::SudoProgram(&sudo),
+            &unit,
+        )?),
         Verb::Pkg { verb } => Ok(match verb {
             PkgVerb::CheckDeb(args) => pkg::check(&args)?,
         }),

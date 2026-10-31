@@ -672,7 +672,9 @@ fn a_container_body_runs_to_its_result_through_the_runtime_seam() {
     h.start(job("r1"));
     let created = h.fake.created();
     assert_eq!(created.len(), 1);
-    let Body::Container { image, args } = &created[0].body;
+    let Body::Container { image, args } = &created[0].body else {
+        panic!("a container job has a container body");
+    };
     assert!(image.starts_with("registry.example/job:1@sha256:"));
     assert_eq!(args, &["--go".to_owned()]);
 

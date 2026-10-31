@@ -24,7 +24,9 @@ use js_agent::lifecycle::{
     DirLayout, Found, Local, Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket,
 };
 use js_agent::quota::ScratchQuota;
-use js_agent::{Cli, FileReader, Handle, Machine, Platform, RuntimeBuild, SharedClock, System};
+use js_agent::{
+    Backend, Cli, FileReader, Handle, Machine, Platform, RuntimeBuild, SharedClock, System,
+};
 use js_agent_wire::LogTail;
 use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
@@ -361,6 +363,11 @@ fn crun_settings_place_the_store_beside_the_scratch_root() {
     assert_eq!(placed, engine);
 }
 
+/// The effective user id of the test, as the agent reads its own.
+fn euid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
 /// The command line of a crun agent on the node, less `without`.
 fn crun_cli(without: &str) -> Cli {
     let node = node();
@@ -386,7 +393,8 @@ fn crun_cli(without: &str) -> Cli {
 /// an agent that reads the flags of a crun agent with the rules of the engines.
 #[test]
 fn the_job_flags_of_a_crun_agent_are_read_with_the_searchable_layout() {
-    let local = Local::from_cli_crun(&crun_cli(""), crun_settings()).expect("the flags pass");
+    let local =
+        Local::from_cli_crun(&crun_cli(""), euid(), crun_settings()).expect("the flags pass");
     let settings = local.container.as_ref().expect("containers are enabled");
     assert_eq!(
         settings.crun().map(|plan| plan.store.clone()),
@@ -395,10 +403,10 @@ fn the_job_flags_of_a_crun_agent_are_read_with_the_searchable_layout() {
     let scratch = local.scratch.as_ref().expect("a scratch root");
     assert_eq!(scratch.layout(), DirLayout::Searchable);
 
-    let engine = Local::from_cli(&crun_cli("")).expect_err("0711 is not private");
+    let engine = Local::from_cli(&crun_cli(""), euid()).expect_err("0711 is not private");
     assert!(engine.starts_with("--scratch-root: "), "{engine}");
 
-    let why = Local::from_cli_crun(&crun_cli("--state-root"), crun_settings())
+    let why = Local::from_cli_crun(&crun_cli("--state-root"), euid(), crun_settings())
         .expect_err("no state root");
     assert!(
         why.starts_with("--state-root: required with --runtime crun"),
@@ -420,8 +428,9 @@ fn the_system_opens_the_crun_runtime_for_crun_settings() {
         os: "linux".to_owned(),
         arch: std::env::consts::ARCH.to_owned(),
     };
+    let backend = Backend::Container(settings.clone());
     let build = RuntimeBuild {
-        settings: &settings,
+        backend: &backend,
         host_id: "h1",
         platform: &platform,
         stop_grace: Duration::from_secs(1),
@@ -868,8 +877,9 @@ fn the_agents_cgroups_are_set_up_when_the_runtime_opens() {
         (mount, file)
     };
     let open = |mount: &Path, own: &Path, settings: &Settings| {
+        let backend = Backend::Container(settings.clone());
         let build = RuntimeBuild {
-            settings,
+            backend: &backend,
             host_id: "h1",
             platform: &platform,
             stop_grace: Duration::from_secs(1),

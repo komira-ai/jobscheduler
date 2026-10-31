@@ -30,6 +30,7 @@ mod helper_modes;
 mod integrity;
 mod jobs;
 mod lifecycle;
+mod native;
 mod quota;
 mod readiness;
 mod runtime_conformance;

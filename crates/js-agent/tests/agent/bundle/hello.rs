@@ -356,7 +356,7 @@ fn a_host_that_cannot_run_a_bundle_advertises_nothing() {
     assert_eq!(ran.status(), code(0), "{}", ran.err);
     assert!(hello["capabilities"].get("bundle").is_none());
     assert!(hello["capabilities"].get("bundle-root").is_none());
-    assert!(ran.err.contains("cannot run a bundle yet"), "{}", ran.err);
+    assert!(ran.err.contains("cannot run a bundle"), "{}", ran.err);
     let reported = report(&settings(&store), &*store, true);
     assert_eq!(reported.caps, js_agent_wire::Caps::default());
 }

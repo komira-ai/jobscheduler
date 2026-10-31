@@ -196,6 +196,7 @@ use crate::FileReader;
 use crate::bundle::Admission;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
+use crate::native::{NativeFlags, NativeSettings};
 use crate::quota::ScratchQuota;
 
 pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, RunningLease, SLOTS, Slots};
@@ -210,8 +211,8 @@ pub use quota_flags::{
 };
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
-    Body, Exit, Found, Prepared, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status,
-    Ticket, label,
+    Body, Exit, Found, NativeRefusal, Prepared, ResolvedMount, RunHandle, RunSpec, Runtime,
+    RuntimeError, Status, Ticket, label,
 };
 pub use scratch::{DirLayout, ScratchRoot};
 pub use taint::{MARKER_FILE, StateRoot};
@@ -610,7 +611,10 @@ pub struct Local {
     /// `--container-bin`, `--container-network` and `--container-user`, when containers
     /// are enabled by `--container-bin`.
     pub container: Option<Settings>,
-    /// `--state-root`, when given; always given when containers are enabled.
+    /// `--native-helper-socket` and the flags beside it, when native jobs are enabled; never
+    /// together with [`Local::container`].
+    pub native: Option<NativeSettings>,
+    /// `--state-root`, when given; always given when jobs are enabled.
     pub state: Option<StateRoot>,
     /// The `--watch-dir` flags, canonicalised, sorted, each once.
     pub watch: Vec<PathBuf>,
@@ -625,6 +629,9 @@ pub struct Local {
     /// (see [`crate::egress`]).
     pub egress: crate::egress::Config,
 }
+
+/// The file in the state root that holds the native agent's lease journal.
+pub const NATIVE_JOURNAL: &str = "native-leases";
 
 /// How long a container gets to stop on its own when `--stop-grace` is not given.
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
@@ -650,11 +657,13 @@ impl Local {
     /// path to an existing directory that no mount root, scratch root or state root lies in
     /// or holds (those change with every job).
     ///
+    /// `euid` is the effective user id of the agent: a native agent must be root.
+    ///
     /// # Errors
     ///
     /// The text names the flag at fault.
-    pub fn from_cli(cli: &Cli) -> Result<Self, String> {
-        Self::from_cli_with_default_files_root(cli, Path::new(DEFAULT_RUN_FILES_ROOT))
+    pub fn from_cli(cli: &Cli, euid: u32) -> Result<Self, String> {
+        Self::from_cli_with_default_files_root(cli, Path::new(DEFAULT_RUN_FILES_ROOT), euid)
     }
 
     /// [`Local::from_cli`] with `default_files_root` where the run files go when
@@ -667,8 +676,9 @@ impl Local {
     pub fn from_cli_with_default_files_root(
         cli: &Cli,
         default_files_root: &Path,
+        euid: u32,
     ) -> Result<Self, String> {
-        Self::from_parts(cli, default_files_root, None)
+        Self::from_parts(cli, default_files_root, euid, None)
     }
 
     /// [`Local::from_cli`] for `--runtime crun`, whose settings (`crun`) stand where the
@@ -679,13 +689,14 @@ impl Local {
     /// # Errors
     ///
     /// As [`Local::from_cli`], and the scratch root has no parent for the image store.
-    pub fn from_cli_crun(cli: &Cli, crun: Settings) -> Result<Self, String> {
-        Self::from_parts(cli, Path::new(DEFAULT_RUN_FILES_ROOT), Some(crun))
+    pub fn from_cli_crun(cli: &Cli, euid: u32, crun: Settings) -> Result<Self, String> {
+        Self::from_parts(cli, Path::new(DEFAULT_RUN_FILES_ROOT), euid, Some(crun))
     }
 
     fn from_parts(
         cli: &Cli,
         default_files_root: &Path,
+        euid: u32,
         crun: Option<Settings>,
     ) -> Result<Self, String> {
         let layout = match crun {
@@ -734,6 +745,59 @@ impl Local {
         };
         let container = crun.or(from_flags);
         let state = cli.state_root.as_deref().map(StateRoot::open).transpose()?;
+        // What no run may read: the agent's own roots and the files it keeps secrets in.
+        let denied: Vec<&Path> = state
+            .iter()
+            .map(StateRoot::path)
+            .chain(scratch.iter().map(ScratchRoot::path))
+            .chain(cli.token_file.as_deref())
+            .chain(cli.instance_file.as_deref())
+            .chain(cli.ca_cert.as_deref())
+            .collect();
+        let journal = state
+            .as_ref()
+            .map_or_else(PathBuf::new, |state| state.path().join(NATIVE_JOURNAL));
+        let native = NativeSettings::from_flags(
+            &NativeFlags {
+                socket: cli.native_helper_socket.as_deref(),
+                homes: cli.native_homes.as_deref(),
+                network: cli.native_network.as_deref(),
+                tool_roots: &cli.native_tool_roots,
+                deny_read: &cli.native_deny_read,
+                max_file_mib: cli.native_max_file_mib,
+                max_processes: cli.native_max_processes,
+            },
+            &denied,
+            &journal,
+        )?;
+        if native.is_some() && euid != 0 {
+            return Err(
+                "--native-helper-socket: the agent must run as root: it gives each run's \
+                 directory to the run's user"
+                    .to_owned(),
+            );
+        }
+        if container.is_some() && native.is_some() {
+            return Err(
+                "--native-helper-socket: not with --container-bin: an agent runs \
+                        containers or native programs, not both"
+                    .to_owned(),
+            );
+        }
+        if native.is_some() && state.is_none() {
+            return Err(
+                "--state-root: required with --native-helper-socket: the taint \
+                        marker is kept there"
+                    .to_owned(),
+            );
+        }
+        if native.is_some() && scratch.is_none() {
+            return Err(
+                "--scratch-root: required with --native-helper-socket: each run's \
+                        private directory is made there"
+                    .to_owned(),
+            );
+        }
         if container.is_none() && !cli.watch_dirs.is_empty() {
             return Err("--watch-dir: needs --container-bin".to_owned());
         }
@@ -746,7 +810,7 @@ impl Local {
             ));
         }
         let graces = [cli.stop_grace, cli.drain_wait];
-        if container.is_none() && graces.iter().any(Option::is_some) {
+        if container.is_none() && native.is_none() && graces.iter().any(Option::is_some) {
             return Err("--stop-grace and --drain-wait: need --container-bin".to_owned());
         }
         let stop_grace = seconds("--stop-grace", cli.stop_grace, DEFAULT_STOP_GRACE)?;
@@ -830,6 +894,7 @@ impl Local {
             files,
             files_warning,
             container,
+            native,
             state,
             stop_grace,
             drain_wait,

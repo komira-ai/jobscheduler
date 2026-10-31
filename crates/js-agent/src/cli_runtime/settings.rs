@@ -224,7 +224,7 @@ pub struct Settings {
     resolved: Arc<OnceLock<Mapping>>,
     chown: Option<(u32, u32)>,
     /// Set for the crun runtime: what it is opened from.
-    crun: Option<CrunPlan>,
+    crun: Option<Box<CrunPlan>>,
 }
 
 /// What the crun runtime is opened from, besides the settings every runtime has: the
@@ -371,7 +371,7 @@ impl Settings {
             subuid: Some(job_user.to_owned()),
             resolved: Arc::new(OnceLock::new()),
             chown: None,
-            crun: Some(CrunPlan {
+            crun: Some(Box::new(CrunPlan {
                 crun,
                 job_ids,
                 image_allow,
@@ -380,7 +380,7 @@ impl Settings {
                 scratch_root: PathBuf::new(),
                 files: None,
                 actions: Arc::new(OnceLock::new()),
-            }),
+            })),
         }
     }
 
@@ -403,7 +403,7 @@ impl Settings {
 
     /// What the crun runtime is opened from, when these are its settings.
     pub fn crun(&self) -> Option<&CrunPlan> {
-        self.crun.as_ref()
+        self.crun.as_deref()
     }
 
     /// The engine host the runtime is told to use, when one is given.

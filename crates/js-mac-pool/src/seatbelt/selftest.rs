@@ -406,7 +406,8 @@ impl SelfTest {
             ReadGrant::Xcode(xcode) => Some(xcode.clone()),
             _ => None,
         });
-        let mut granted = vec![layout.run.clone(), layout.uid_entry.clone()];
+        let mut granted = vec![layout.run.clone()];
+        granted.extend(layout.uid_entry.clone());
         for grant in &grants {
             match grant {
                 ReadGrant::Tree(tree) => granted.push(tree.path().clone()),

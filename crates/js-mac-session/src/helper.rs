@@ -82,6 +82,10 @@ pub const KILL_ROUNDS: usize = 10;
 /// that started after `kill-uid` to exit.
 pub const EXIT_LOOKS: usize = 50;
 
+/// What every verb but `boot-reset` is refused with until the boot reset has run since the
+/// helper started: a caller that finds it after the helper restarted under it asks again.
+pub const RESET_NEEDED: &str = "the boot reset has not run since the helper started";
+
 /// The refusal of a second `boot-reset` since the helper started: a daemon that
 /// restarted on its own (the helper did not) finds the reset done.
 pub const RESET_ALREADY: &str = "the boot reset ran already; it runs once per start";
@@ -337,7 +341,7 @@ impl Helper {
     pub fn handle(&self, request: Request, fds: Vec<OwnedFd>) -> Outcome {
         let refused = |reason: String| Outcome::Reply(Reply::Refused { reason });
         if !self.reset_done() && !matches!(request, Request::BootReset { .. }) {
-            return refused("the boot reset has not run since the helper started".to_owned());
+            return refused(RESET_NEEDED.to_owned());
         }
         let result = match request {
             Request::Run {
