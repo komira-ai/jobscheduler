@@ -75,11 +75,13 @@ pub enum Reason {
     LeaseUnreachable,
     /// `cleanup` before a `verify` succeeded.
     NotVerified,
+    /// The cordon's cap leaves nothing to ask for.
+    CordonCapReached,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 12] = [
+    pub const ALL: [Reason; 13] = [
         Reason::NotImplemented,
         Reason::BadArgs,
         Reason::BadParams,
@@ -92,6 +94,7 @@ impl Reason {
         Reason::DrainBound,
         Reason::LeaseUnreachable,
         Reason::NotVerified,
+        Reason::CordonCapReached,
     ];
 
     /// The token in the JSON.
@@ -110,6 +113,7 @@ impl Reason {
             Reason::DrainBound => "drain_bound",
             Reason::LeaseUnreachable => "lease_unreachable",
             Reason::NotVerified => "not_verified",
+            Reason::CordonCapReached => "cordon_cap_reached",
         }
     }
 }

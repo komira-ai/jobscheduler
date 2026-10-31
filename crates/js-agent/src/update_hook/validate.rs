@@ -24,9 +24,23 @@ pub const MAX_VERSION_LEN: usize = 128;
 /// one second.
 pub const EXPIRY_SLACK_MS: u64 = 1_000;
 
+/// How much longer than the drain wait the declared `prepare` timeout must be, in seconds: the
+/// version check, the cordon calls and the record writes happen around the wait.
+pub const PREPARE_MARGIN_SECS: u64 = 60;
+
 /// The rule a record broke.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Invalid {
+    /// The declared `prepare` timeout would end the step in the middle of the drain wait.
+    #[error(
+        "the declared prepare timeout {prepare} s is shorter than drain_wait_secs {wait} s plus {PREPARE_MARGIN_SECS} s"
+    )]
+    PrepareTimeout {
+        /// `[hook.timeout_secs] prepare`.
+        prepare: u64,
+        /// `drain_wait_secs`.
+        wait: u64,
+    },
     /// The record's schema is not the one this hook writes.
     #[error("schema {found} is not {SCHEMA}")]
     Schema {

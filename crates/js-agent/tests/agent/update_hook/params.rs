@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use js_agent::update_hook::{Params, ParamsError};
+use js_agent::update_hook::{MIN_CORDON_LEASE_SECS, POLL_SECS, Params, ParamsError};
 use js_testkit::dir::TestDir;
 
 const CORDON: &str = concat!(
@@ -319,4 +319,34 @@ fn the_cap_must_cover_the_drain_wait() {
         ParamsError::NotDigest("k".to_owned()).to_string(),
         "params key \"k\" must be sha256: and 64 lowercase hex digits"
     );
+}
+
+#[test]
+fn the_cordon_lease_must_be_at_least_three_polls() {
+    let text = |lease: u64| {
+        format!(
+            "cordon_lease_secs = {lease}\ncordon_max_secs = 17355\ndrain_wait_secs = 3600\ndefer_retry_secs = 0\n{RELEASES}"
+        )
+    };
+    assert_eq!(MIN_CORDON_LEASE_SECS, 3 * POLL_SECS);
+    assert!(Params::parse(&text(MIN_CORDON_LEASE_SECS)).is_ok());
+    let error = refused(&text(MIN_CORDON_LEASE_SECS - 1));
+    assert!(matches!(
+        error,
+        ParamsError::LeaseTooShort { lease: 29, min: 30 }
+    ));
+    assert_eq!(
+        error.to_string(),
+        "cordon_lease_secs 29 is shorter than 30 s, three polls"
+    );
+    // A zero lease is still named as zero.
+    assert!(matches!(refused(&text(0)), ParamsError::Zero(_)));
+}
+
+#[test]
+fn a_retry_of_zero_seconds_means_try_again_at_once() {
+    let text = format!(
+        "cordon_lease_secs = 300\ncordon_max_secs = 17355\ndrain_wait_secs = 3600\ndefer_retry_secs = 0\n{RELEASES}"
+    );
+    assert_eq!(Params::parse(&text).unwrap().defer_retry_secs, 0);
 }

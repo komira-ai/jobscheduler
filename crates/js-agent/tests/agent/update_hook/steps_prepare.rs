@@ -315,3 +315,41 @@ fn a_fresh_record_comes_after_the_taint_check_and_never_hashes_the_release() {
     assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
     assert_eq!(rig.record().unwrap().update.artifact_digest, digest());
 }
+
+#[test]
+fn a_declared_prepare_timeout_shorter_than_the_wait_plus_the_margin_is_state_invalid() {
+    let mut rig = Rig::new("hook-prepare-timeout");
+    rig.declaration.timeouts.prepare = 3659;
+    let spy = Spy::new(&rig);
+    let done = spy.prepare(&rig);
+    assert_eq!(done.outcome, Outcome::Failure);
+    assert_eq!(done.report.reason, Some(Reason::StateInvalid));
+    let detail = done.report.detail.unwrap();
+    assert!(
+        detail.contains("3659") && detail.contains("3600"),
+        "{detail}"
+    );
+    nothing_changed(&rig, &spy);
+
+    // A record that is there is refused the same way, by any step.
+    let mut rig = Rig::new("hook-prepare-timeout-cleanup");
+    rig.put_record(&rig.fresh_record());
+    rig.declaration.timeouts.prepare = 3659;
+    let spy = Spy::new(&rig);
+    let done = spy.cleanup(&rig);
+    assert_eq!(done.report.reason, Some(Reason::StateInvalid));
+    assert_eq!(spy.log(), Vec::<String>::new());
+}
+
+#[test]
+fn a_retry_of_zero_defers_with_retry_after_zero() {
+    let mut rig = Rig::new("hook-prepare-retry-zero");
+    rig.params.drain_wait_secs = 20;
+    rig.params.defer_retry_secs = 0;
+    rig.set_leases(1);
+    let spy = Spy::new(&rig);
+    let done = spy.prepare(&rig);
+    assert_eq!(done.outcome, Outcome::Deferred);
+    assert_eq!(done.report.retry_after_secs, Some(0));
+    assert_eq!(line(&done)["retry_after_secs"], 0);
+}

@@ -23,6 +23,13 @@ pub const CORDON_LEASE_KEY: &str = "cordon_lease_secs";
 /// The key of the longest a cordon may be held from its first placement.
 pub const CORDON_MAX_KEY: &str = "cordon_max_secs";
 
+/// The time between two looks at the host while a step waits for it to hold no lease.
+pub const POLL_SECS: u64 = 10;
+
+/// The shortest cordon lease: three polls, so that a renewal (due when less than half of it is
+/// left) always has polls to be made in.
+pub const MIN_CORDON_LEASE_SECS: u64 = 3 * POLL_SECS;
+
 /// The reserved key: the digest of the verified artifact, `sha256:` and 64 lowercase hex
 /// digits. The updater sets it for every step.
 pub const ARTIFACT_DIGEST_KEY: &str = "updater.artifact_digest";
@@ -72,6 +79,14 @@ pub enum ParamsError {
     /// A key that must be positive is zero.
     #[error("params key {0:?} must not be zero")]
     Zero(String),
+    /// The cordon's lease is shorter than three polls.
+    #[error("cordon_lease_secs {lease} is shorter than {min} s, three polls")]
+    LeaseTooShort {
+        /// `cordon_lease_secs`.
+        lease: u64,
+        /// [`MIN_CORDON_LEASE_SECS`].
+        min: u64,
+    },
     /// The cordon's cap is shorter than the drain wait it has to cover.
     #[error("cordon_max_secs {cap} is shorter than drain_wait_secs {wait}")]
     CapBelowWait {

@@ -23,13 +23,11 @@
 use std::time::Duration;
 
 use crate::update_hook::{
-    Class, Cordon, Done, Held, HostReading, Outcome, Params, Reason, Record, Report, UpdateInfo,
+    Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params, Reason, Record, Report,
+    UpdateInfo,
 };
 
 use super::{Env, check, failure, lease_failure, open_state, save, success};
-
-/// The time between two looks at the host, and two renewals of the cordon.
-const POLL_SECS: u64 = 10;
 
 /// The agent's file in a release directory.
 const AGENT_BINARY: &str = "js-agent";

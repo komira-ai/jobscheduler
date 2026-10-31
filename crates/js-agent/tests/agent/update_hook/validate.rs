@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 
 use js_agent::update_hook::{
-    Cordon, Declaration, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, Params, Record, Rollback,
-    SCHEMA, Timeouts, UpdateInfo, validate,
+    Cordon, Declaration, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, PREPARE_MARGIN_SECS, Params,
+    Record, Rollback, SCHEMA, Timeouts, UpdateInfo, validate,
 };
 
 const UNIT: &str = "js-agent-crun.service";
@@ -622,4 +622,25 @@ fn a_provisional_cordon_is_a_placed_one() {
         }),
         Invalid::CordonStamps
     );
+}
+
+#[test]
+fn the_declared_prepare_timeout_must_outlast_the_drain_wait_by_the_margin() {
+    let record = good();
+    let mut declaration = declaration();
+    let params = params_for(&record);
+    let needed = params.drain_wait_secs + PREPARE_MARGIN_SECS;
+    declaration.timeouts.prepare = needed;
+    assert_eq!(validate(&record, &declaration, &params), Ok(()));
+    declaration.timeouts.prepare = needed - 1;
+    let error = validate(&record, &declaration, &params).unwrap_err();
+    assert_eq!(
+        error,
+        Invalid::PrepareTimeout {
+            prepare: needed - 1,
+            wait: params.drain_wait_secs
+        }
+    );
+    let words = error.to_string();
+    assert!(words.contains("3659") && words.contains("3600"), "{words}");
 }

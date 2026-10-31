@@ -34,8 +34,8 @@ pub use args::{ArgsError, Invocation, Step};
 pub use declaration::{DECLARATION_PATH, Declaration, DeclarationError, Timeouts};
 pub use params::{
     ARTIFACT_DIGEST_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY, DEFER_RETRY_KEY, DRAIN_WAIT_KEY,
-    PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, Params, ParamsError,
-    STAGED_RELEASE_KEY, TARGET_VERSION_KEY,
+    MIN_CORDON_LEASE_SECS, POLL_SECS, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY,
+    PROMOTION_CEILING_KEY, Params, ParamsError, STAGED_RELEASE_KEY, TARGET_VERSION_KEY,
 };
 pub use ports::{
     Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,
@@ -47,7 +47,7 @@ pub use record::{
     SCHEMA, StateError, TEMP_FILE, UpdateInfo, check_ancestor, check_dir, fd_stat,
 };
 pub use report::{Class, MAX_REASON_LEN, Reason, Report, is_reason_token};
-pub use validate::{EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, validate};
+pub use validate::{EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, PREPARE_MARGIN_SECS, validate};
 
 /// The first argument that selects the verb.
 pub const VERB: &str = "update-hook";

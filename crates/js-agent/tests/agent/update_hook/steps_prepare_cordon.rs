@@ -229,13 +229,39 @@ fn a_lease_server_that_fails_is_an_environment_failure_and_a_server_that_forgot_
     spy.fail("cordon");
     lease_unreachable(&spy.prepare(&rig));
     assert_eq!(rig.cordon_expiry(), None);
+}
 
-    let mut rig = Rig::with_cordon("hook-prepare-cordon-refused", 300, 100);
+#[test]
+fn a_cap_with_nothing_left_to_ask_for_is_its_own_failure_and_no_lease_call() {
+    // Nothing to ask for at the start.
+    let mut rig = Rig::with_cordon("hook-prepare-cap-none", 300, 100);
     rig.params.cordon_lease_secs = 0;
     let spy = Spy::new(&rig);
     let done = spy.prepare(&rig);
-    lease_unreachable(&done);
-    assert!(done.report.detail.unwrap().contains("invalid-cordon"));
+    assert_eq!(done.outcome, Outcome::Failure);
+    assert_eq!(done.report.reason, Some(Reason::CordonCapReached));
+    assert_eq!(done.report.class, Class::Release);
+    assert_eq!(cordon_calls(&spy), Vec::<String>::new());
+    assert_eq!(rig.record_bytes(), None);
+    assert_eq!(rig.cordon_expiry(), None);
+
+    // A rerun after the cap was used up.
+    let mut rig = Rig::with_cordon("hook-prepare-cap-used", 300, 100);
+    rig.params.cordon_max_secs = 20;
+    let mut record = rig.fresh_record();
+    record.cordon = Cordon {
+        placed: true,
+        provisional: false,
+        first_ms: START - 20_000,
+        expires_ms: START - 1,
+    };
+    rig.put_record(&record);
+    let before = rig.record_bytes();
+    let spy = Spy::new(&rig);
+    let done = spy.prepare(&rig);
+    assert_eq!(done.report.reason, Some(Reason::CordonCapReached));
+    assert_eq!(cordon_calls(&spy), Vec::<String>::new());
+    assert_eq!(rig.record_bytes(), before);
 }
 
 #[test]
