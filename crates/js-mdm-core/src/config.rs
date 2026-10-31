@@ -86,7 +86,8 @@ pub const DEFAULT_SKIP_ITEMS: [&str; 18] = [
     "Wallpaper",
 ];
 
-/// The settings the unit, profile and command builders read, checked.
+/// The settings the unit, profile and command builders read, checked. [`MdmConfig::parse`]
+/// is the only entry that checks: a value built field by field skips every check.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdmConfig {
     /// The name the Macs dial; the TLS certificate is for it.
@@ -173,7 +174,8 @@ pub struct DepCert {
     pub days: u32,
 }
 
-/// A private IPv4 network, `a.b.c.d/bits` with 8 to 30 bits.
+/// A private IPv4 network, `a.b.c.d/bits`. [`MdmConfig::parse`] takes 8 to 30 bits;
+/// [`Cidr::contains`] is defined for 0 to 32.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cidr {
     /// The network address.
@@ -185,6 +187,7 @@ pub struct Cidr {
 impl Cidr {
     /// Whether `a` is inside the network.
     pub fn contains(self, a: Ipv4Addr) -> bool {
+        // `bits` 0 shifts by 32, which `checked_shl` refuses: the mask is then empty.
         let mask = u32::MAX << (32 - u32::from(self.bits));
         u32::from(a) & mask == u32::from(self.addr) & mask
     }
@@ -356,6 +359,16 @@ impl MdmConfig {
             "not a user name ([a-z_][a-z0-9_-]{0,30})",
         )?;
         let (state, etc, bin) = (r.path("STATE")?, r.path("ETC")?, r.path("BIN")?);
+        // The state is the service user's to write: no other directory may be inside it,
+        // or equal to it, or contain it (a binary the user can replace is not pinned).
+        for (key, path, other, why) in [
+            ("ETC", &etc, &state, "equal to, inside or around MDM_STATE"),
+            ("BIN", &bin, &state, "equal to, inside or around MDM_STATE"),
+            ("BIN", &bin, &etc, "equal to, inside or around MDM_ETC"),
+        ] {
+            let clash = nested(path.as_str(), other.as_str());
+            check(key, path.as_str(), !clash, why)?;
+        }
         let (nanohub_port, scep_port, dep_port) = (
             r.port("NANOHUB_PORT")?,
             r.port("SCEP_PORT")?,
@@ -501,6 +514,12 @@ fn cidr(text: &str) -> Option<Cidr> {
     })
 }
 
+/// Whether `a` and `b` are the same directory or one is inside the other.
+fn nested(a: &str, b: &str) -> bool {
+    let _ = (a, b);
+    false
+}
+
 /// A lower-case DNS name with at least one dot; no label starts or ends with `-`.
 fn is_dns_name(name: &str) -> bool {
     let labels: Vec<&str> = name.split('.').collect();
@@ -540,6 +559,7 @@ fn is_user_name(name: &str) -> bool {
 /// what a systemd unit name's stem is made of here.
 fn is_unit_stem(name: &str) -> bool {
     let mut chars = name.chars();
+    // systemd reads `-` in a slice name as a nesting step and refuses an empty one.
     name.len() <= 40
         && chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')

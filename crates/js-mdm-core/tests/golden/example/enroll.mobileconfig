@@ -23,7 +23,7 @@
 			<key>PayloadType</key>
 			<string>com.apple.security.scep</string>
 			<key>PayloadUUID</key>
-			<string>071DB849-C11F-4A24-B1E8-69113460B678</string>
+			<string>6B16C231-042A-5BEF-A128-3C0EF8217615</string>
 			<key>PayloadVersion</key>
 			<integer>1</integer>
 		</dict>
@@ -33,13 +33,13 @@
 			<key>CheckOutWhenRemoved</key>
 			<true/>
 			<key>IdentityCertificateUUID</key>
-			<string>071DB849-C11F-4A24-B1E8-69113460B678</string>
+			<string>6B16C231-042A-5BEF-A128-3C0EF8217615</string>
 			<key>PayloadIdentifier</key>
 			<string>com.example.mdm.mdm</string>
 			<key>PayloadType</key>
 			<string>com.apple.mdm</string>
 			<key>PayloadUUID</key>
-			<string>25B0DB54-2EDA-4965-B430-24DB8BFC06DD</string>
+			<string>0163031F-C163-594F-9610-567832E15734</string>
 			<key>PayloadVersion</key>
 			<integer>1</integer>
 			<key>ServerCapabilities</key>
@@ -65,7 +65,7 @@
 	<key>PayloadType</key>
 	<string>Configuration</string>
 	<key>PayloadUUID</key>
-	<string>5F652B4C-C5C9-4D69-B44E-493CB00C698E</string>
+	<string>E4B877DF-1340-5821-9BA6-1D6F56C71FA3</string>
 	<key>PayloadVersion</key>
 	<integer>1</integer>
 </dict>

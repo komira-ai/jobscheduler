@@ -76,6 +76,8 @@ fn a_bad_acme_setting_is_refused_naming_its_key() {
         ("MDM_ACME_RESOLVERS", "resolver.example.com"),
         ("MDM_ACME_RESOLVERS", "192.0.2.53:53 192.0.2.54"),
         ("MDM_ACME_RESOLVERS", "192.0.2.53:0"),
+        ("MDM_ACME_RESOLVERS", "[fe80::1%2]:53"),
+        ("MDM_ACME_RESOLVERS", "192.0.2.53:53 [fe80::1%2]:53"),
         ("MDM_ACME_RESOLVERS", "\"  \""),
         ("MDM_ACME_PROPAGATION_WAIT", "300"),
         ("MDM_ACME_PROPAGATION_WAIT", "s"),

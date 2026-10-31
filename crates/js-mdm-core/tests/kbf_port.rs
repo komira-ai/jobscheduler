@@ -21,9 +21,8 @@ use js_mdm_core::acme::Acme;
 use js_mdm_core::commands::{dep_cert_request_path, scep_ca_init_args};
 use js_mdm_core::config::{KEYS, MdmConfig};
 use js_mdm_core::pins::{BUILT_IN, Pins};
-use js_mdm_core::profile::{AdeProfile, Topic, enrollment};
+use js_mdm_core::profile::{AdeProfile, Challenge, Topic, enrollment, payload_uuids};
 use js_mdm_core::render::{Comments, Unit, manifest, render, render_tls, strip_comments};
-use js_mdm_core::secret::Secret;
 use plist::Value;
 
 fn kbf(path: &str) -> String {
@@ -193,15 +192,34 @@ fn the_manifest_equals_the_committed_hashes_of_kbfs_installed_files() {
 }
 
 /// Catches an enrollment profile that differs from the one kbf-deploy's tests hold as
-/// the shell kit's profile: the same keys, values and types, and the same bytes.
+/// the shell kit's profile: the same keys, values and types, and the same bytes. One
+/// difference is deliberate and handled here: this crate derives the three payload UUIDs
+/// from the profile identifier, where kbf-deploy had three fixed ones, so kbf's three are
+/// put back in place of the derived ones before the comparison.
 #[test]
 fn the_enrollment_profile_is_kbfs_profile() {
     let (c, _) = site();
     let theirs = read_bytes("kbf_f89ed5c/enroll.mobileconfig");
     let topic = Topic::new("com.apple.mgmt.External.0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d")
         .expect("a topic");
-    let challenge = Secret::new("0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0");
-    let ours = enrollment(&c, &topic, &challenge);
+    let challenge =
+        Challenge::new("0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0")
+            .expect("a challenge");
+    let mut ours =
+        String::from_utf8(enrollment(&c, &topic, &challenge).expect("writes")).expect("utf-8");
+    let theirs_text = String::from_utf8(theirs.clone()).expect("utf-8");
+    let derived = payload_uuids(&c.profile_id);
+    for (ours_uuid, kbf_uuid) in [
+        (&derived.scep, "071DB849-C11F-4A24-B1E8-69113460B678"),
+        (&derived.mdm, "25B0DB54-2EDA-4965-B430-24DB8BFC06DD"),
+        (&derived.profile, "5F652B4C-C5C9-4D69-B44E-493CB00C698E"),
+    ] {
+        assert!(ours.contains(ours_uuid.as_str()), "{ours_uuid}");
+        assert!(theirs_text.contains(kbf_uuid), "{kbf_uuid}");
+        assert!(!theirs_text.contains(ours_uuid.as_str()), "{ours_uuid}");
+        ours = ours.replace(ours_uuid.as_str(), kbf_uuid);
+    }
+    let ours = ours.into_bytes();
     let a = Value::from_reader_xml(ours.as_slice()).expect("ours parses");
     let b = Value::from_reader_xml(theirs.as_slice()).expect("theirs parses");
     assert_eq!(a, b);

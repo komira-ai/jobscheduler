@@ -7,8 +7,9 @@
 //! challenge, and the MDM payload, which names that certificate (its
 //! `IdentityCertificateUUID` is the SCEP payload's `PayloadUUID`), the server
 //! `https://<MDM_DNS_NAME>/mdm` and the push topic. Its identifiers are
-//! `MDM_PROFILE_ID` (`.scep` and `.mdm` for the payloads) and its payload UUIDs are
-//! fixed, so a render with the same settings is the same profile, not a second one.
+//! `MDM_PROFILE_ID` (`.scep` and `.mdm` for the payloads). Its three payload UUIDs are
+//! derived from `MDM_PROFILE_ID` ([`payload_uuids`]), so a render with the same settings
+//! is the same profile, not a second one, and two sites never share a payload UUID.
 //!
 //! The ADE profile is built from the settings, and [`AdeProfile::parse`] reads one back
 //! and refuses an unknown key and a profile a device could leave: one that is not
@@ -16,17 +17,19 @@
 //! `https://<MDM_DNS_NAME>/enroll`.
 
 use std::fmt;
+use std::io::Write;
 
 use plist::{Dictionary, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::config::MdmConfig;
-use crate::secret::Secret;
+use crate::sha1::sha1;
 
-/// The SCEP payload's UUID, which the MDM payload names as its identity.
-const SCEP_UUID: &str = "071DB849-C11F-4A24-B1E8-69113460B678";
-const MDM_UUID: &str = "25B0DB54-2EDA-4965-B430-24DB8BFC06DD";
-const PROFILE_UUID: &str = "5F652B4C-C5C9-4D69-B44E-493CB00C698E";
+/// The namespace of the payload UUIDs: a fixed UUID of this kit, the first input of the
+/// version 5 (SHA-1, RFC 4122) derivation in [`payload_uuids`].
+const UUID_NAMESPACE: [u8; 16] = [
+    0x6f, 0x1d, 0x2a, 0x4e, 0x8c, 0x3b, 0x4e, 0x57, 0x9a, 0x10, 0x5d, 0x2b, 0x7c, 0x9e, 0x4f, 0x13,
+];
 /// Every MDM right (`AccessRights`, bits 1 to 4096).
 const ACCESS_RIGHTS: i64 = 8191;
 /// The SCEP key: RSA 2048, for signing and encryption (`Key Usage` 1 | 4).
@@ -38,6 +41,81 @@ const CAPABILITIES: [&str; 3] = [
     "com.apple.mdm.token",
 ];
 
+/// The three payload UUIDs of the enrollment profile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PayloadUuids {
+    /// The profile itself.
+    pub profile: String,
+    /// The SCEP payload, which the MDM payload names as its identity.
+    pub scep: String,
+    /// The MDM payload.
+    pub mdm: String,
+}
+
+/// The payload UUIDs for the profile identifier `profile_id`: for each role (`profile`,
+/// `scep`, `mdm`) the version 5 UUID (RFC 4122, SHA-1) of the name
+/// `<profile_id>/<role>` in this kit's namespace, written in upper case. The same
+/// identifier always gives the same UUIDs, so a re-render is the same profile, and two
+/// sites with different identifiers share none.
+pub fn payload_uuids(profile_id: &str) -> PayloadUuids {
+    let _ = (profile_id, UUID_NAMESPACE);
+    PayloadUuids {
+        profile: "5F652B4C-C5C9-4D69-B44E-493CB00C698E".to_owned(),
+        scep: "071DB849-C11F-4A24-B1E8-69113460B678".to_owned(),
+        mdm: "25B0DB54-2EDA-4965-B430-24DB8BFC06DD".to_owned(),
+    }
+}
+
+/// The version 5 UUID (RFC 4122: SHA-1 of the namespace and the name) as 36 upper-case
+/// characters.
+pub fn uuid_v5(namespace: &[u8; 16], name: &[u8]) -> String {
+    let _ = (namespace, name, sha1(&[]));
+    todo!("red run: not implemented yet")
+}
+
+#[cfg(any())]
+fn uuid_v5_final(namespace: &[u8; 16], name: &[u8]) -> String {
+    let mut input = namespace.to_vec();
+    input.extend_from_slice(name);
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&sha1(&input)[..16]);
+    b[6] = (b[6] & 0x0f) | 0x50;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = hex::encode_upper(b);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
+}
+
+/// The SCEP challenge the enrollment profile carries: letters, digits, `_` and `-`,
+/// at least one. Its `Debug` hides it and it has no `Display`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Challenge(String);
+
+impl Challenge {
+    /// `text` as a challenge, or why it is not one.
+    pub fn new(text: &str) -> Result<Challenge, ProfileError> {
+        let _ = ProfileError::Challenge;
+        Ok(Challenge(text.to_owned()))
+    }
+
+    /// The value, for the one place it goes (the profile).
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Challenge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Challenge(..)")
+    }
+}
+
 /// An MDM push topic, `com.apple.mgmt.External.<uuid>`: the subject UID of an APNs MDM
 /// push certificate.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +125,7 @@ impl Topic {
     /// `text` as a topic, or why it is not one.
     pub fn new(text: &str) -> Result<Topic, ProfileError> {
         let uuid = text.strip_prefix("com.apple.mgmt.External.");
+        // 8-4-4-4-12 hexadecimal digits.
         let ok = uuid
             .is_some_and(|u| u.len() == 36 && u.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
         if !ok {
@@ -70,6 +149,12 @@ impl fmt::Display for Topic {
 /// Why a profile, or a part of one, was refused.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ProfileError {
+    /// Not a SCEP challenge.
+    #[error("the SCEP challenge is empty or holds a character other than letters, digits, _ and -")]
+    Challenge,
+    /// The property list could not be written.
+    #[error("cannot write the enrollment profile: {0}")]
+    Write(String),
     /// Not a push topic.
     #[error("topic {0:?} is not com.apple.mgmt.External.<uuid>")]
     Topic(String),
@@ -103,7 +188,36 @@ pub enum ProfileError {
 
 /// The enrollment profile for the MDM at `MDM_DNS_NAME`, named `MDM_PROFILE_ID` and
 /// `MDM_PROFILE_DISPLAY_NAME`, as the bytes of an XML property list ending in a newline.
-pub fn enrollment(c: &MdmConfig, topic: &Topic, challenge: &Secret) -> Vec<u8> {
+pub fn enrollment(
+    c: &MdmConfig,
+    topic: &Topic,
+    challenge: &Challenge,
+) -> Result<Vec<u8>, ProfileError> {
+    let mut out = Vec::new();
+    enrollment_to(c, topic, challenge, &mut out)?;
+    Ok(out)
+}
+
+impl From<plist::Error> for ProfileError {
+    fn from(e: plist::Error) -> ProfileError {
+        ProfileError::Write(e.to_string())
+    }
+}
+
+impl From<std::io::Error> for ProfileError {
+    fn from(e: std::io::Error) -> ProfileError {
+        ProfileError::Write(e.to_string())
+    }
+}
+
+/// [`enrollment`], written to `out`.
+pub fn enrollment_to<W: Write>(
+    c: &MdmConfig,
+    topic: &Topic,
+    challenge: &Challenge,
+    out: &mut W,
+) -> Result<(), ProfileError> {
+    let uuids = payload_uuids(&c.profile_id);
     let (dns_name, id, org) = (&c.dns_name, &c.profile_id, &c.org);
     let scep = dict([
         ("Key Type", text("RSA")),
@@ -116,17 +230,17 @@ pub fn enrollment(c: &MdmConfig, topic: &Topic, challenge: &Secret) -> Vec<u8> {
         ("PayloadContent", scep),
         ("PayloadIdentifier", text(&format!("{id}.scep"))),
         ("PayloadType", text("com.apple.security.scep")),
-        ("PayloadUUID", text(SCEP_UUID)),
+        ("PayloadUUID", text(&uuids.scep)),
         ("PayloadVersion", Value::Integer(1.into())),
     ]);
     let capabilities = CAPABILITIES.iter().map(|c| text(c)).collect();
     let mdm = dict([
         ("AccessRights", Value::Integer(ACCESS_RIGHTS.into())),
         ("CheckOutWhenRemoved", Value::Boolean(true)),
-        ("IdentityCertificateUUID", text(SCEP_UUID)),
+        ("IdentityCertificateUUID", text(&uuids.scep)),
         ("PayloadIdentifier", text(&format!("{id}.mdm"))),
         ("PayloadType", text("com.apple.mdm")),
-        ("PayloadUUID", text(MDM_UUID)),
+        ("PayloadUUID", text(&uuids.mdm)),
         ("PayloadVersion", Value::Integer(1.into())),
         ("ServerCapabilities", Value::Array(capabilities)),
         ("ServerURL", text(&format!("https://{dns_name}/mdm"))),
@@ -139,15 +253,12 @@ pub fn enrollment(c: &MdmConfig, topic: &Topic, challenge: &Secret) -> Vec<u8> {
         ("PayloadIdentifier", text(id)),
         ("PayloadOrganization", text(org)),
         ("PayloadType", text("Configuration")),
-        ("PayloadUUID", text(PROFILE_UUID)),
+        ("PayloadUUID", text(&uuids.profile)),
         ("PayloadVersion", Value::Integer(1.into())),
     ]);
-    let mut out = Vec::new();
-    profile
-        .to_writer_xml(&mut out)
-        .expect("a property list of strings, numbers and booleans writes to memory");
-    out.push(b'\n');
-    out
+    let _ = profile.to_writer_xml(&mut *out);
+    let _ = out.write_all(b"\n");
+    Ok(())
 }
 
 fn text(s: &str) -> Value {

@@ -40,6 +40,8 @@
 //! that test passing.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+// Removed with the implementation: the red run leaves helpers unused.
+#![allow(dead_code, unused_imports, unused_variables)]
 
 pub mod acme;
 pub mod commands;
@@ -49,6 +51,6 @@ pub mod path;
 pub mod pins;
 pub mod profile;
 pub mod render;
-pub mod secret;
 pub mod settings;
+mod sha1;
 pub mod template;

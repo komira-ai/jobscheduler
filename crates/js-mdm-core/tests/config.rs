@@ -181,6 +181,10 @@ fn a_bad_setting_is_refused_naming_its_key() {
         ("MDM_UNIT_PREFIX", "Js-mdm"),
         ("MDM_UNIT_PREFIX", "1js"),
         ("MDM_UNIT_PREFIX", "js_mdm"),
+        ("MDM_UNIT_PREFIX", "js-"),
+        ("MDM_UNIT_PREFIX", "js--mdm"),
+        ("MDM_SLICE", "a--b.slice"),
+        ("MDM_SLICE", "a-.slice"),
         ("MDM_UNIT_PREFIX", long.as_str()),
         ("MDM_SLICE", "js-mdm"),
         ("MDM_SLICE", ".slice"),
@@ -358,4 +362,51 @@ fn names_with_hyphens_digits_and_underscores_are_taken() {
         (c.dns_name.as_str(), c.user.as_str(), c.slice.as_str()),
         ("mdm-1.example2.com", "_js_mdm-2", "js-mdm-2.slice")
     );
+}
+
+/// Catches directories that overlap: the state is the service user's to write, so a
+/// binary directory inside it (or equal to it, or around it) would let the user replace
+/// pinned binaries, and the same for the unit inputs. Each row sets one path; the
+/// refusal names the key that clashes. A name that only shares a prefix is not nested.
+#[test]
+fn directories_that_equal_nest_or_surround_each_other_are_refused() {
+    let cases = [
+        ("MDM_ETC", "/var/lib/js-mdm", "MDM_ETC"),
+        ("MDM_ETC", "/var/lib/js-mdm/etc", "MDM_ETC"),
+        ("MDM_ETC", "/var", "MDM_ETC"),
+        ("MDM_BIN", "/var/lib/js-mdm", "MDM_BIN"),
+        ("MDM_BIN", "/var/lib/js-mdm/bin", "MDM_BIN"),
+        ("MDM_BIN", "/etc/js-mdm", "MDM_BIN"),
+        ("MDM_BIN", "/etc/js-mdm/bin", "MDM_BIN"),
+        ("MDM_STATE", "/opt", "MDM_BIN"),
+        ("MDM_STATE", "/etc/js-mdm/state", "MDM_ETC"),
+    ];
+    for (key, value, clash) in cases {
+        let got = refusal(&with(key, value));
+        assert!(
+            got.starts_with(&format!("{clash}=")),
+            "{key}={value}: {got}"
+        );
+        assert!(got.contains("equal to, inside or around MDM_"), "{got}");
+    }
+    let text = with("MDM_ETC", "/var/lib/js-mdm-etc");
+    let c = MdmConfig::parse(&text).expect("a shared prefix is not nesting");
+    assert_eq!(c.etc.as_str(), "/var/lib/js-mdm-etc");
+}
+
+/// Catches a network check that overflows or answers wrongly at the ends of the prefix
+/// range: a /0 holds every address (a shift by 32 bits panics), a /32 only itself.
+#[test]
+fn a_network_of_zero_or_thirty_two_bits_does_not_overflow() {
+    let any = Cidr {
+        addr: Ipv4Addr::new(10, 0, 0, 0),
+        bits: 0,
+    };
+    assert!(any.contains(Ipv4Addr::new(8, 8, 8, 8)));
+    let one = Cidr {
+        addr: Ipv4Addr::new(10, 0, 0, 7),
+        bits: 32,
+    };
+    assert!(one.contains(Ipv4Addr::new(10, 0, 0, 7)));
+    assert!(!one.contains(Ipv4Addr::new(10, 0, 0, 8)));
 }

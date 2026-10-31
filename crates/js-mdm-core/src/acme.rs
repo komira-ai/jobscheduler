@@ -108,6 +108,7 @@ impl Acme {
         let text = r.get("ACME_RESOLVERS")?;
         let mut resolvers = Vec::new();
         for w in text.split_whitespace() {
+            // A scope id (`fe80::1%2`) prints a `%`, which systemd reads as a specifier.
             let addr = w.parse::<SocketAddr>().ok().filter(|a| a.port() != 0);
             resolvers.push(addr.ok_or(bad(
                 "ACME_RESOLVERS",
