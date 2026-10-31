@@ -130,8 +130,13 @@ impl World {
     /// # Panics
     /// A file cannot be written.
     pub fn seed_update(&self, link: &Path, host: &str, params: &Params) {
+        self.register_release(&params.staged_release, &params.target_version);
+        if let (Some(release), Some(version)) = (&params.previous_release, &params.previous_version)
+        {
+            self.register_release(release, version);
+        }
         if let Some(release) = &params.previous_release {
-            self.relink(link, release).unwrap();
+            swap_link(&self.link_file(link).unwrap(), release).unwrap();
         }
         if let Some(version) = &params.previous_version {
             self.seed_host(host, version);
@@ -191,12 +196,29 @@ impl World {
             .and_then(|bytes| fs::write(self.lease_file(), bytes).map_err(|why| unreachable(&why)))
     }
 
-    /// The agent says hello: one more epoch, a new session, the version and the runtime.
+    /// The agent says hello: the server makes the host if it knows none (epoch 1), else one more
+    /// epoch; a new session, the version and the runtime either way.
     ///
     /// # Errors
-    /// No host is seeded.
+    /// The server's file cannot be read or written.
     pub fn hello(&self, agent_version: &str) -> Result<(), LeaseError> {
-        let mut host = self.live()?;
+        let mut host = match self.live() {
+            Err(LeaseError::UnknownHost) => HostReading {
+                id: fs::read_to_string(self.control.join("host-id"))
+                    .unwrap_or_else(|_| "host-1".to_owned()),
+                state: "live".to_owned(),
+                epoch: 0,
+                session_started_ms: None,
+                leases: 0,
+                lease: None,
+                releasing: false,
+                cordon: None,
+                taint: None,
+                agent_version: None,
+                runtime: None,
+            },
+            other => other?,
+        };
         host.epoch += 1;
         host.state = "live".to_owned();
         host.session_started_ms = Some(self.now_ms());
@@ -211,8 +233,9 @@ impl World {
         fs::read_to_string(self.control.join("ticks")).map_or(0, |text| text.len())
     }
 
-    /// The version a starting agent reports: the name of the directory the first release link
-    /// points into, or none.
+    /// The version a starting agent reports: the one the params give for the release the first
+    /// release link points at (see [`World::register_release`]); none when the link or the
+    /// release is not known.
     fn linked_version(&self) -> Option<String> {
         let mut names: Vec<PathBuf> = fs::read_dir(self.world.join("link"))
             .ok()?
@@ -220,7 +243,13 @@ impl World {
             .collect();
         names.sort();
         let target = read_link(names.first()?).ok()??;
-        Some(target.file_name()?.to_string_lossy().into_owned())
+        fs::read_to_string(self.control.join("releases"))
+            .ok()?
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .rev()
+            .find(|(path, _)| Path::new(path) == target)
+            .map(|(_, version)| version.to_owned())
     }
 
     fn link_file(&self, link: &Path) -> Result<PathBuf, PortError> {

@@ -85,7 +85,8 @@ pub trait Units {
     fn is_active(&self, unit: &str) -> Result<bool, PortError>;
 }
 
-/// [`Units`] over `systemctl`.
+/// [`Units`] over `systemctl`. The unit comes after `--`, so a name that begins with a hyphen is
+/// not read as an option.
 pub struct SystemUnits<'a> {
     runner: &'a dyn CommandRunner,
 }
@@ -99,18 +100,34 @@ impl<'a> SystemUnits<'a> {
 }
 
 /// The value of `key` in `systemctl show` output (`Key=value` lines, in the manager's order).
+/// A property printed twice, or with an empty value, is refused: the manager prints each of
+/// these once and always with a state, so either is not its output.
 fn property(text: &str, key: &str) -> Result<String, PortError> {
-    text.lines()
-        .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
-        .map(str::to_owned)
-        .ok_or_else(|| PortError::Parse(format!("systemctl show printed no {key}")))
+    let mut values = text
+        .lines()
+        .filter_map(|line| line.strip_prefix(key)?.strip_prefix('='));
+    let first = values
+        .next()
+        .ok_or_else(|| PortError::Parse(format!("systemctl show printed no {key}")))?;
+    match (first.is_empty(), values.next()) {
+        (_, Some(_)) => Err(PortError::Parse(format!(
+            "systemctl show printed {key} twice"
+        ))),
+        (true, None) => Err(PortError::Parse(format!(
+            "systemctl show printed an empty {key}"
+        ))),
+        (false, None) => Ok(first.to_owned()),
+    }
 }
 
 impl Units for SystemUnits<'_> {
     fn show(&self, unit: &str) -> Result<UnitState, PortError> {
         let text = self
             .runner
-            .run(SYSTEMCTL, &["show", "-p", "ActiveState,SubState", unit])
+            .run(
+                SYSTEMCTL,
+                &["show", "-p", "ActiveState,SubState", "--", unit],
+            )
             .map_err(PortError::Command)?;
         Ok(UnitState {
             active: property(&text, "ActiveState")?,
@@ -120,14 +137,14 @@ impl Units for SystemUnits<'_> {
 
     fn stop_no_block(&self, unit: &str) -> Result<(), PortError> {
         self.runner
-            .run(SYSTEMCTL, &["stop", "--no-block", unit])
+            .run(SYSTEMCTL, &["stop", "--no-block", "--", unit])
             .map(drop)
             .map_err(PortError::Command)
     }
 
     fn start(&self, unit: &str) -> Result<(), PortError> {
         self.runner
-            .run(SYSTEMCTL, &["start", unit])
+            .run(SYSTEMCTL, &["start", "--", unit])
             .map(drop)
             .map_err(PortError::Command)
     }
@@ -135,7 +152,7 @@ impl Units for SystemUnits<'_> {
     fn is_active(&self, unit: &str) -> Result<bool, PortError> {
         Ok(self
             .runner
-            .run(SYSTEMCTL, &["is-active", unit])
+            .run(SYSTEMCTL, &["is-active", "--", unit])
             .is_ok_and(|text| text.trim() == "active"))
     }
 }
@@ -309,6 +326,8 @@ pub trait Lease {
 }
 
 /// The agent's state root, read only: the taint marker and the records of owed checks.
+///
+/// The agent runs as root on the crun unit, so the root hook can open its state root.
 pub trait StateView {
     /// The taint on record (an unreadable marker counts as a taint).
     fn taint(&self) -> Option<Taint>;
