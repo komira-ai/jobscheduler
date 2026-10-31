@@ -42,13 +42,35 @@ pub trait Summarise {
 ///
 /// [`ReadError`] naming the first line that is not a record.
 pub fn read_records(text: &str) -> Result<Vec<Record>, ReadError> {
-    todo!("red: not implemented")
+    let mut records = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record = serde_json::from_str(line).map_err(|err| ReadError {
+            line: index + 1,
+            why: err.to_string(),
+        })?;
+        records.push(record);
+    }
+    Ok(records)
 }
 
 /// Groups records by setting and arm (sorted by both), each group by `run_index`.
 #[must_use]
 pub fn group(records: Vec<Record>) -> Vec<Group> {
-    todo!("red: not implemented")
+    let mut by_key: BTreeMap<(String, String), Vec<Record>> = BTreeMap::new();
+    for record in records {
+        let key = (record.setting.clone(), record.arm.clone());
+        by_key.entry(key).or_default().push(record);
+    }
+    by_key
+        .into_iter()
+        .map(|((setting, arm), mut runs)| {
+            runs.sort_by_key(|run| run.run_index);
+            Group { setting, arm, runs }
+        })
+        .collect()
 }
 
 /// Lists each group: how many runs (and warm-ups), their indexes, and how many runs are

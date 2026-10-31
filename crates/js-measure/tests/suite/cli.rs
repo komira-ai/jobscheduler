@@ -180,7 +180,7 @@ fn live_mode_records_failures_when_the_server_is_down() {
             .iter()
             .all(|r| r.metrics["jobs_failed"] == Some(2.0))
     );
-    assert!(records.iter().all(|r| r.metrics["makespan_ms"] == None));
+    assert!(records.iter().all(|r| r.metrics["makespan_ms"].is_none()));
     let (result, _) = files.run(&[
         "--live",
         "--server",

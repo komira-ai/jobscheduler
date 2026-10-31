@@ -336,7 +336,7 @@ fn a_run_without_readings_has_the_drive_and_nothing_invented() {
     hosts.get_mut("h1").unwrap().shape = None;
     let out = assemble(&who(), &obs, &jobs, &BTreeMap::new(), &hosts);
     assert_eq!(out.minutes.len(), 2);
-    assert!(out.minutes.iter().all(|r| r.cpu_share == None));
+    assert!(out.minutes.iter().all(|r| r.cpu_share.is_none()));
     assert_eq!(out.record.metrics[name::HOST_CPU_SHARE_MEAN], None);
     assert_eq!(
         value(&out.record.metrics, name::CPU_USED_OVER_BOOKED),

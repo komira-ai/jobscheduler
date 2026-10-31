@@ -55,14 +55,19 @@ impl Prediction {
     /// The prediction a curve holds, `None` for a curve with no minute.
     #[must_use]
     pub fn of(curve: &Curve) -> Option<Self> {
-        todo!("red: not implemented")
+        let peak_ws_bytes = curve.ws_bytes.iter().copied().max()?;
+        let minutes = u64::try_from(curve.ws_bytes.len()).ok()?;
+        Some(Self {
+            life_ms: minutes * MINUTE_MS,
+            peak_ws_bytes,
+        })
     }
 }
 
 /// `part` over `whole`, `None` when `whole` is zero.
 #[must_use]
 pub fn share(part: u64, whole: u64) -> Option<f64> {
-    todo!("red: not implemented")
+    (whole > 0).then_some(part as f64 / whole as f64)
 }
 
 /// `numerator` over `denominator`, `None` when either is missing or the divisor is not
@@ -94,7 +99,22 @@ fn gap(later: Option<u64>, earlier: Option<u64>) -> Option<f64> {
 /// row that more than one lease shared.
 #[must_use]
 pub fn window_usage(rows: &[UsageRow], from_ms: u64, to_ms: u64) -> Option<WindowUsage> {
-    todo!("red: not implemented")
+    if to_ms <= from_ms {
+        return None;
+    }
+    let mut usage = WindowUsage {
+        cpu_milli_ms: 0,
+        peak_ws_bytes: 0,
+    };
+    for minute in from_ms / MINUTE_MS..=(to_ms - 1) / MINUTE_MS {
+        let row = rows
+            .iter()
+            .find(|row| row.minute == minute && row.leases == 1)?;
+        let overlap = to_ms.min((minute + 1) * MINUTE_MS) - from_ms.max(minute * MINUTE_MS);
+        usage.cpu_milli_ms += row.cpu_millis * overlap;
+        usage.peak_ws_bytes = usage.peak_ws_bytes.max(row.ws_bytes);
+    }
+    Some(usage)
 }
 
 /// Everything known of one job, each a number or missing.
@@ -274,7 +294,49 @@ pub fn assemble(
     predictions: &BTreeMap<String, Prediction>,
     hosts: &BTreeMap<String, HostReading>,
 ) -> RunOutput {
-    todo!("red: not implemented")
+    let facts: Vec<JobFacts> = obs
+        .jobs
+        .iter()
+        .zip(jobs)
+        .map(|(timing, job)| {
+            let prediction = job.run.profile.as_ref().and_then(|p| predictions.get(p));
+            let usage = timing.host.as_ref().and_then(|host| {
+                let rows = hosts.get(host)?.rows.as_ref()?;
+                window_usage(rows, timing.granted_ms?, timing.finished_ms?)
+            });
+            JobFacts::of(timing, job, prediction, usage.as_ref())
+        })
+        .collect();
+    let job_rows = obs
+        .jobs
+        .iter()
+        .zip(&facts)
+        .map(|(timing, facts)| JobRow {
+            setting: who.setting.clone(),
+            arm: who.arm.clone(),
+            run_index: who.run_index,
+            job: timing.name.clone(),
+            host: timing.host.clone(),
+            outcome: timing.outcome.clone(),
+            failure: timing.failure.clone(),
+            metrics: facts.metrics(),
+        })
+        .collect();
+    let minutes = minute_rows(who, hosts);
+    let record = Record {
+        setting: who.setting.clone(),
+        arm: who.arm.clone(),
+        run_index: who.run_index,
+        seed: who.seed,
+        commit: who.commit.clone(),
+        label: who.label.clone(),
+        metrics: run_metrics(obs, &facts, &minutes),
+    };
+    RunOutput {
+        record,
+        jobs: job_rows,
+        minutes,
+    }
 }
 
 fn minute_rows(who: &Identity, hosts: &BTreeMap<String, HostReading>) -> Vec<MinuteRow> {

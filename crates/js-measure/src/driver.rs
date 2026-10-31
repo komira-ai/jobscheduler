@@ -157,5 +157,42 @@ pub fn drive(
     poll_ms: u64,
     deadline_ms: u64,
 ) -> Observation {
-    todo!("red: not implemented")
+    let driver = Driver { farm, clock };
+    let t0_ms = clock.now_ms();
+    let mut live: Vec<Live> = jobs
+        .iter()
+        .map(|job| Live {
+            stage: Stage::Waiting,
+            timing: JobTiming {
+                name: job.name.clone(),
+                submit_at_ms: t0_ms + job.submit_at_ms,
+                requested_ms: None,
+                granted_ms: None,
+                started_ms: None,
+                finished_ms: None,
+                host: None,
+                outcome: None,
+                failure: None,
+            },
+        })
+        .collect();
+    loop {
+        let now = clock.now_ms();
+        for (job, one) in jobs.iter().zip(live.iter_mut()) {
+            driver.step(job, one, now);
+        }
+        if live.iter().all(|one| matches!(one.stage, Stage::Done)) {
+            break;
+        }
+        if now.saturating_sub(t0_ms) >= deadline_ms {
+            live.iter_mut().for_each(|one| driver.abandon(one));
+            break;
+        }
+        clock.sleep_ms(poll_ms);
+    }
+    Observation {
+        t0_ms,
+        end_ms: clock.now_ms(),
+        jobs: live.into_iter().map(|one| one.timing).collect(),
+    }
 }

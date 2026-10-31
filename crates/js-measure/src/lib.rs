@@ -37,8 +37,6 @@
 //! `PROG <setting> <arm> control|treatment` before each run to put the arm's setting in
 //! place; without it the operator owns the setting.
 
-#![allow(unused, dead_code)]
-
 pub mod clock;
 pub mod driver;
 pub mod exec;

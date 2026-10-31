@@ -54,7 +54,7 @@ pub const WARMUP: &str = "warmup";
 /// infinity) becomes `None`, which is written as `null`.
 #[must_use]
 pub fn finite(reading: Option<f64>) -> Option<f64> {
-    todo!("red: not implemented")
+    reading.filter(|value| value.is_finite())
 }
 
 /// One run of a plan: one line of `records.jsonl`.

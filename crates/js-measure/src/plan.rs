@@ -111,6 +111,23 @@ impl Plan {
     ///
     /// [`PlanError`] from [`Plan::validate`].
     pub fn schedule(&self) -> Result<Vec<Slot>, PlanError> {
-        todo!("red: not implemented")
+        self.validate()?;
+        let mut rng = Rng(self.seed);
+        let mut slots = Vec::new();
+        for (count, warmup) in [(self.warmups_per_arm, true), (self.runs_per_arm, false)] {
+            let mut arms: Vec<usize> = (0..self.arms.len())
+                .flat_map(|arm| (0..count).map(move |_| arm))
+                .collect();
+            rng.shuffle(&mut arms);
+            slots.extend(arms.into_iter().map(|arm| Slot {
+                order: 0,
+                arm,
+                warmup,
+            }));
+        }
+        for (order, slot) in (0..).zip(slots.iter_mut()) {
+            slot.order = order;
+        }
+        Ok(slots)
     }
 }
