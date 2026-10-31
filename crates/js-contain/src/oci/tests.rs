@@ -823,6 +823,8 @@ fn a_lease_names_its_directories_and_who_owns_them() {
     );
     assert_eq!(oci.job_ids(), (uid, gid));
     assert_eq!(oci.container_ids(), (101_000, 201_000));
+    // No job user is configured, so nothing is dropped to for the keeper either.
+    assert!(oci.job_drop().is_none());
 }
 
 /// Catches a helper's directory given by a path that was replaced by a link (the link, not
