@@ -463,7 +463,12 @@ const LIMIT_SCRIPT: &str = "ulimit -f \"$1\" && ulimit -u \"$2\" && shift 2 && e
 /// environment, and `SHELLOPTS`, `PS4` or an imported function would run a command of the
 /// job's choosing there. The environment names that steer a shell are reserved as well
 /// (`js_types::env::SHELL_ENV_NAMES`), so the job cannot change the limits either.
-fn profile_argv(
+///
+/// # Errors
+///
+/// The policy or the profile cannot be built, or `native.program` is not an absolute path.
+/// The environment is not read here: [`NativeRuntime`] checks it before it makes a user.
+pub fn profile_argv(
     config: &NativeConfig,
     native: &NativeSpec,
     home: &Path,

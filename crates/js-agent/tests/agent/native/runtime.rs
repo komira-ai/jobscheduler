@@ -482,20 +482,14 @@ fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
 
 /// Asserts that the first program of the command is `sandbox-exec` and that the limiting
 /// shell comes after the profile: a shell that ran before the profile would run with the
-/// job's environment (`SHELLOPTS` with a `PS4` command, an imported `ulimit` function) as
-/// the lease user, outside the sandbox. It catches a command that starts any other program
-/// first.
+/// job's environment as the lease user, outside the sandbox. The command line does not
+/// depend on the environment, so a job's names cannot move the shell in front of the
+/// profile. It catches a command that starts any other program first.
 #[test]
 fn nothing_but_sandbox_exec_runs_before_the_profile_applies() {
     let mut rig = Rig::new("first-program");
     let mut body = native("/usr/bin/id", &["-u"]);
-    body.env = BTreeMap::from([
-        ("SHELLOPTS".to_owned(), "xtrace".to_owned()),
-        (
-            "PS4".to_owned(),
-            "$(touch /private/tmp/js-escape)".to_owned(),
-        ),
-    ]);
+    body.env = BTreeMap::from([("A".to_owned(), "b".to_owned())]);
     let spec = rig.spec("r1", body);
     rig.rt.create_and_start(&spec).unwrap();
     let argv = rig.fake.run_of("7.0").argv;
@@ -506,6 +500,61 @@ fn nothing_but_sandbox_exec_runs_before_the_profile_applies() {
     let shell_at = argv.iter().position(|word| word == LIMITER).unwrap();
     assert!(profile_at < shell_at, "the profile comes before the shell");
     assert_eq!(parse(&argv).tail, ["/usr/bin/id", "-u"]);
+
+    let hostile = BTreeMap::from([
+        ("SHELLOPTS".to_owned(), "xtrace".to_owned()),
+        (
+            "PS4".to_owned(),
+            "$(touch /private/tmp/js-escape)".to_owned(),
+        ),
+    ]);
+    let mut other = native("/usr/bin/id", &["-u"]);
+    other.env = hostile;
+    let home = rig.fake.home_of("7.0");
+    let plain = native("/usr/bin/id", &["-u"]);
+    let config = config(&rig.fake);
+    assert_eq!(
+        js_agent::native::profile_argv(&config, &other, &home).unwrap(),
+        js_agent::native::profile_argv(&config, &plain, &home).unwrap(),
+        "the command line does not read the environment"
+    );
+}
+
+/// Asserts that a start refuses, by name, each environment name that steers the limiting
+/// shell (`SHELLOPTS`, `BASHOPTS`, `BASH_ENV`, `ENV`, `PS4`, `PROMPT_COMMAND`, `IFS`,
+/// `CDPATH`), any name starting `BASH_FUNC_`, and each name the agent owns, before the
+/// helper hears of the run: no verb is sent (not even the boot reset) and the lease journal
+/// is not made. It catches a body that skipped the wire's validation and reaches the shell,
+/// which runs inside the profile with the job's environment before `ulimit`.
+#[test]
+fn a_start_refuses_names_that_steer_the_shell_before_a_user_is_made() {
+    use js_types::env::{OWNED_ENV_NAMES, SHELL_ENV_NAMES};
+
+    let mut rig = Rig::new("shell-names");
+    let names = SHELL_ENV_NAMES
+        .iter()
+        .chain(OWNED_ENV_NAMES.iter())
+        .copied()
+        .chain(["BASH_FUNC_ulimit%%", "BASH_FUNC_x"]);
+    for (at, name) in names.enumerate() {
+        let mut body = native("/usr/bin/true", &[]);
+        body.env = BTreeMap::from([
+            ("OK".to_owned(), "1".to_owned()),
+            (name.to_owned(), "x".to_owned()),
+        ]);
+        let spec = rig.spec(&format!("r{at}"), body);
+        let refused = rig.rt.create_and_start(&spec).err();
+        let text = refused.map(|why| why.0).unwrap_or_default();
+        assert!(
+            text.contains(name),
+            "{name} was not refused by name: {text:?}"
+        );
+    }
+    assert_eq!(rig.fake.verbs(), Vec::<String>::new());
+    assert!(
+        !rig.dir.path("native-leases").exists(),
+        "the journal was touched"
+    );
 }
 
 /// Asserts that the limits of the configuration reach the shell that starts the run: the
