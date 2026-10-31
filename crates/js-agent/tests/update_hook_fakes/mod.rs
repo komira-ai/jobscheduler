@@ -38,18 +38,6 @@ struct Saved {
     taint: Option<Taint>,
 }
 
-trait Restored {
-    fn restored(self, saved: Saved, now_ms: u64) -> Self;
-}
-
-impl Restored for HostReading {
-    fn restored(mut self, saved: Saved, now_ms: u64) -> Self {
-        self.cordon = saved.cordon.filter(|cordon| cordon.expires_at_ms > now_ms);
-        self.taint = saved.taint;
-        self
-    }
-}
-
 /// The fakes' world.
 pub struct World {
     world: PathBuf,
@@ -177,9 +165,10 @@ impl World {
         fs::write(self.control.join("releases"), text).unwrap();
     }
 
-    /// The server restarts: it forgets the host, and the next hello makes it again. The cordon
-    /// and the taint were saved with the host's binding and come back with the hello, a cordon
-    /// only while it has not lapsed.
+    /// The server restarts: it forgets the host's session, and the next hello makes it live
+    /// again. Until then the host is `awaiting` (epoch 0, no session) and a cordon, an uncordon
+    /// and a reading work on it. The cordon and the taint were saved with the host's binding and
+    /// are what the awaiting host holds, a cordon only while it has not lapsed.
     ///
     /// # Panics
     /// A file cannot be read, written or removed.
@@ -190,21 +179,12 @@ impl World {
             taint: host.taint,
         };
         fs::write(self.saved_file(), serde_json::to_vec(&saved).unwrap()).unwrap();
-        fs::remove_file(self.lease_file()).unwrap();
+        // An awaiting host has no file of its own.
+        let _ = fs::remove_file(self.lease_file());
     }
 
     fn saved_file(&self) -> PathBuf {
         self.world.join("lease-saved.json")
-    }
-
-    /// What a restart kept of the host, taken back; nothing when the state file was lost.
-    fn take_saved(&self) -> Saved {
-        let saved = fs::read(self.saved_file())
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-        let _ = fs::remove_file(self.saved_file());
-        saved
     }
 
     /// The server loses its state file as well: nothing saved is restored by the next hello.
@@ -226,13 +206,38 @@ impl World {
         fs::write(self.lease_file(), serde_json::to_vec(&host).unwrap()).unwrap();
     }
 
-    /// The host as stored, expiry not applied; `None` when the server knows no host.
+    /// The host as stored, expiry not applied. After a restart that kept the host's binding
+    /// (see [`World::forget_host`]) the host is `awaiting`, as js-registry's `Record::awaiting`
+    /// has it: epoch 0, no session, the saved cordon and taint, until its next hello. The
+    /// server knows no host before a hello, or after the state file was lost.
     fn stored(&self) -> Result<HostReading, LeaseError> {
         match fs::read(self.lease_file()) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|why| unreachable(&why)),
-            Err(why) if why.kind() == io::ErrorKind::NotFound => Err(LeaseError::UnknownHost),
+            Err(why) if why.kind() == io::ErrorKind::NotFound => self.awaiting(),
             Err(why) => Err(unreachable(&why)),
         }
+    }
+
+    fn awaiting(&self) -> Result<HostReading, LeaseError> {
+        let bytes = fs::read(self.saved_file()).map_err(|_| LeaseError::UnknownHost)?;
+        let saved: Saved = serde_json::from_slice(&bytes).map_err(|why| unreachable(&why))?;
+        Ok(HostReading {
+            id: self.host_id(),
+            state: "awaiting".to_owned(),
+            epoch: 0,
+            session_started_ms: None,
+            leases: 0,
+            lease: None,
+            releasing: false,
+            cordon: saved.cordon,
+            taint: saved.taint,
+            agent_version: None,
+            runtime: None,
+        })
+    }
+
+    fn host_id(&self) -> String {
+        fs::read_to_string(self.control.join("host-id")).unwrap_or_else(|_| "host-1".to_owned())
     }
 
     /// The host as the server reads it now: a cordon past its expiry is gone.
@@ -258,8 +263,7 @@ impl World {
     pub fn hello(&self, agent_version: &str) -> Result<(), LeaseError> {
         let mut host = match self.live() {
             Err(LeaseError::UnknownHost) => HostReading {
-                id: fs::read_to_string(self.control.join("host-id"))
-                    .unwrap_or_else(|_| "host-1".to_owned()),
+                id: self.host_id(),
                 state: "live".to_owned(),
                 epoch: 0,
                 session_started_ms: None,
@@ -271,8 +275,7 @@ impl World {
                 taint: None,
                 agent_version: None,
                 runtime: None,
-            }
-            .restored(self.take_saved(), self.now_ms()),
+            },
             other => other?,
         };
         host.epoch += 1;

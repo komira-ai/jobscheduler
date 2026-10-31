@@ -272,7 +272,7 @@ fn a_first_install_starts_cleanly_and_the_hello_makes_the_host() {
 }
 
 #[test]
-fn a_server_that_restarted_forgets_the_host_and_the_next_hello_makes_it_again_from_epoch_1() {
+fn a_server_that_restarted_holds_an_awaiting_host_and_the_next_hello_makes_it_live_from_epoch_1() {
     let rig = Rig::new("hook-fake-server-restart");
     let w = &rig.world;
     let link = Path::new("/opt/js-agent/current");
@@ -282,8 +282,21 @@ fn a_server_that_restarted_forgets_the_host_and_the_next_hello_makes_it_again_fr
     w.cordon(60).unwrap();
     w.pause(Duration::from_secs(5));
     w.forget_host();
-    assert_eq!(w.host().unwrap_err(), LeaseError::UnknownHost);
-    assert_eq!(w.cordon(60).unwrap_err(), LeaseError::UnknownHost);
+    // The binding was saved: until its hello the host is awaiting, as js-registry's
+    // `Record::awaiting` has it, with the saved cordon.
+    let awaiting = w.host().unwrap();
+    assert_eq!(
+        (
+            awaiting.state.as_str(),
+            awaiting.epoch,
+            awaiting.session_started_ms,
+            awaiting.leases,
+            awaiting.id.as_str()
+        ),
+        ("awaiting", 0, None, 0, HOST)
+    );
+    assert_eq!(awaiting.cordon.unwrap().expires_at_ms, START_MS + 60_000);
+    assert_eq!((awaiting.agent_version, awaiting.runtime), (None, None));
     w.relink(link, &update.staged_release).unwrap();
     w.start(UNIT).unwrap();
     let host = w.host().unwrap();
@@ -297,6 +310,53 @@ fn a_server_that_restarted_forgets_the_host_and_the_next_hello_makes_it_again_fr
     assert_eq!(host.cordon.unwrap().expires_at_ms, START_MS + 60_000);
     w.pause(Duration::from_secs(55));
     assert_eq!(w.host().unwrap().cordon, None, "it lapses when it was to");
+}
+
+#[test]
+fn cordon_and_uncordon_work_on_an_awaiting_host_and_survive_its_hello() {
+    let rig = Rig::new("hook-fake-awaiting-cordon");
+    let w = &rig.world;
+    w.seed_host(HOST, "1.0");
+    w.alter_host(|host| {
+        host.taint = Some(Taint {
+            reason: "residue".to_owned(),
+            run_id: None,
+            check: None,
+        });
+    });
+    w.forget_host();
+    let placed = w.cordon(60).unwrap();
+    assert!(!placed.already_cordoned);
+    assert_eq!(placed.host.state, "awaiting");
+    assert_eq!(placed.host.taint.unwrap().reason, "residue");
+    assert!(rig.again().cordon(30).unwrap().already_cordoned);
+    assert_eq!(
+        w.host().unwrap().cordon.unwrap().expires_at_ms,
+        START_MS + 60_000,
+        "a repeat never shortens"
+    );
+    w.hello("1.1").unwrap();
+    let live = w.host().unwrap();
+    assert_eq!((live.state.as_str(), live.epoch), ("live", 1));
+    assert_eq!(live.cordon.unwrap().expires_at_ms, START_MS + 60_000);
+    w.forget_host();
+    let lifted = w.uncordon().unwrap();
+    assert!(lifted.lifted);
+    assert_eq!(lifted.host.state, "awaiting");
+    assert_eq!(rig.again().host().unwrap().cordon, None);
+    assert!(!w.uncordon().unwrap().lifted);
+}
+
+#[test]
+fn the_server_knows_no_host_once_the_state_file_is_lost() {
+    let rig = Rig::new("hook-fake-unknown-after-loss");
+    let w = &rig.world;
+    w.seed_host(HOST, "1.0");
+    w.cordon(60).unwrap();
+    w.lose_state_file();
+    assert_eq!(w.host().unwrap_err(), LeaseError::UnknownHost);
+    assert_eq!(w.cordon(60).unwrap_err(), LeaseError::UnknownHost);
+    assert_eq!(w.uncordon().unwrap_err(), LeaseError::UnknownHost);
 }
 
 #[test]
@@ -370,6 +430,8 @@ fn params(previous: bool) -> Params {
         "{}{previous}",
         concat!(
             "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
+    "drain_wait_secs = 3600\ndefer_retry_secs = 300\n",
+    "\"updater.artifact_digest\" = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
             "\"updater.staged_release\" = \"/opt/js-agent/releases/1.4.0\"\n",
             "\"updater.target_version\" = \"1.4.0\"\n",
         )
