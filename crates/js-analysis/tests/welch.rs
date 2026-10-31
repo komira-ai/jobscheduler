@@ -184,3 +184,35 @@ fn no_relative_change_for_a_mean_that_is_not_positive() {
     let zero_arm = run(&[3.0, 4.0, 5.0], &[-1.0, 0.0, 1.0]);
     assert!(zero_arm.diff_ci.is_some() && zero_arm.rel_change.is_none());
 }
+
+/// Asserts the boundary at 5 values per arm: 4 against 5 and 5 against 4 are flagged
+/// although the arms differ far beyond the half-width, so only the count flags them.
+#[test]
+fn four_against_five_is_underpowered_in_either_order() {
+    let four = [10.0, 11.0, 12.0, 13.0];
+    let five = [20.0, 21.0, 22.0, 23.0, 24.0];
+    for c in [run(&four, &five), run(&five, &four)] {
+        assert_eq!(c.verdict, Verdict::Differs);
+        assert!(c.underpowered);
+    }
+}
+
+/// Asserts a half-width equal to the difference is not "above" it: 5 against 5 identical
+/// values have difference 0 and half-width 0, and are not flagged. (A nonzero equality
+/// cannot be built exactly in floating point, because the t quantile is irrational.)
+#[test]
+fn a_half_width_equal_to_the_difference_is_not_underpowered() {
+    let c = run(&[3.0; 5], &[3.0; 5]);
+    assert_eq!(c.diff, Some(0.0));
+    assert_eq!(c.verdict, Verdict::NotDistinguished);
+    assert!(!c.underpowered);
+}
+
+/// Asserts an interval with an end exactly at zero does not distinguish the arms: the test
+/// for "excludes zero" is strict.
+#[test]
+fn an_interval_ending_exactly_at_zero_does_not_distinguish() {
+    let c = run(&[3.0; 3], &[3.0; 3]);
+    assert_eq!(ci(&c), Interval { lo: 0.0, hi: 0.0 });
+    assert_eq!(c.verdict, Verdict::NotDistinguished);
+}

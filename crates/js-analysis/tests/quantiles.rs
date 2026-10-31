@@ -58,3 +58,28 @@ fn chi_square_quantiles_match_the_table() {
         close(chi_square_quantile(p, df), want, 2e-3);
     }
 }
+
+/// Asserts ten-digit reference values. df 1 is tan(pi * 0.475), df 2 is 0.95 / sqrt(2 * 0.975
+/// * 0.025), chi-square with 2 df is -2 ln(1 - p), and the others are the published values.
+#[test]
+fn quantiles_agree_with_reference_values_to_eight_digits() {
+    let t = [
+        (1.0, 12.706_204_736_2),
+        (2.0, 4.302_652_729_7),
+        (4.0, 2.776_445_105_2),
+        (10.0, 2.228_138_852_0),
+        (30.0, 2.042_272_456_3),
+    ];
+    for (df, want) in t {
+        close(t_critical(df), want, 1e-8);
+    }
+    let chi = [
+        (1.0, 0.975, 5.023_886_187_3),
+        (2.0, 0.975, 7.377_758_908_2),
+        (2.0, 0.025, 0.050_635_616_0),
+        (9.0, 0.975, 19.022_767_798_6),
+    ];
+    for (df, p, want) in chi {
+        close(chi_square_quantile(p, df), want, 1e-8);
+    }
+}

@@ -91,3 +91,25 @@ fn sampling_is_repeatable() {
     assert_eq!(first.method, PermMethod::MonteCarlo);
     assert!(first.p > 0.5, "{}", first.p);
 }
+
+/// Asserts the sampled p of one case to its exact value, so that any change of the generator,
+/// the seed, the draw count or the shuffle shows: 0..11 against 3..14 has 6321 of the 100,000
+/// draws at least as extreme as the observed difference, so p = 6322 / 100001.
+#[test]
+fn the_sampled_p_is_pinned() {
+    let base: Vec<f64> = (0..12).map(f64::from).collect();
+    let arm: Vec<f64> = (3..15).map(f64::from).collect();
+    let t = permutation_test(&base, &arm);
+    assert_eq!(t.method, PermMethod::MonteCarlo);
+    close(t.p, 6322.0 / 100_001.0);
+}
+
+/// Asserts the tie tolerance does not depend on the offset of the data: the same 3 against 3
+/// shifted by a billion still has p = 0.1, where a tolerance of 1e-9 of the largest value
+/// would count splits a whole unit apart as tied.
+#[test]
+fn a_large_offset_does_not_blur_ties() {
+    let shifted = |v: [f64; 3]| v.map(|x| x + 1e9);
+    let t = permutation_test(&shifted([1.0, 2.0, 3.0]), &shifted([4.0, 5.0, 6.0]));
+    close(t.p, 0.1);
+}
