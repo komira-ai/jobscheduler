@@ -21,15 +21,12 @@
 //! taint_reason = "residue"       # when the host reported a taint
 //! taint_run_id = "run-3-1"       # optional, with taint_reason
 //! taint_check = "tmp-files"      # optional, with taint_reason
-//! cordon_until_ms = 1760000000000 # when the host is cordoned: when the cordon lapses
 //! ```
 //!
 //! A taint is kept here so that a restart does not make a host that reported one clean. A
 //! host with a taint stays in the file, and the server keeps it, until an operator stops
 //! the server and removes the three `taint_` keys of its entry: nothing in the server
-//! clears a taint. A cordon is kept so that a restart does not lift it; it is written only
-//! while it is in force, so the key leaves the file at the first save after it lapses or
-//! is lifted. A file from before the key is read as no cordon.
+//! clears a taint.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -73,8 +70,6 @@ struct Entry {
     taint_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     taint_check: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    cordon_until_ms: Option<u64>,
 }
 
 impl Entry {
@@ -89,7 +84,6 @@ impl Entry {
             taint_reason: taint.map(|taint| taint.reason.clone()),
             taint_run_id: taint.and_then(|taint| taint.run_id.clone()),
             taint_check: taint.and_then(|taint| taint.check.clone()),
-            cordon_until_ms: binding.cordon_until_ms(),
         }
     }
 
@@ -114,8 +108,7 @@ impl Entry {
             }),
             _ => return Err("a taint has a run or a check but no reason".to_string()),
         };
-        let binding = Binding::new(credential, instance).with_taint(taint);
-        Ok((id, binding.with_cordon(self.cordon_until_ms)))
+        Ok((id, Binding::new(credential, instance).with_taint(taint)))
     }
 }
 

@@ -40,15 +40,6 @@ pub(super) struct Record {
     /// The first taint the host reported. It outlives a session and, through the file of
     /// bindings, a restart.
     pub(super) taint: Option<Taint>,
-    /// When the host's cordon lapses, once it has been cordoned ([`Registry::cordon`]): it
-    /// takes no new lease until then. It outlives a session and, through the file of
-    /// bindings, a restart; a lapsed value is a cordon that is over.
-    pub(super) cordon: Option<Timestamp>,
-    /// When the host's current session began: the time of the hello that began it. `None`
-    /// for a host that has not said hello since a restart. A heartbeat does not move it.
-    pub(super) hello_at: Option<Timestamp>,
-    /// The `runtime` capability of the host's last hello. Kept like `files`.
-    pub(super) runtime: Option<String>,
     /// Where the host stands in a whole-node lease; `Free` for a host that never held one.
     pub(super) exclusive: Exclusive,
     /// The last lease started on the host and the latest it can end: its start plus its
@@ -64,20 +55,13 @@ pub(super) struct Record {
 }
 
 impl Record {
-    /// A host put back after a restart. The taint and the cordon a binding carries are the
-    /// host's own, and the binding kept is the bare one, so each has a single home.
+    /// A host put back after a restart. The taint a binding carries is the host's own, and
+    /// the binding kept is the bare one, so the taint has a single home.
     pub(super) fn awaiting(binding: Option<Binding>, seated: Timestamp) -> Self {
         let taint = binding.as_ref().and_then(|bound| bound.taint().cloned());
-        let cordon = binding
-            .as_ref()
-            .and_then(Binding::cordon_until_ms)
-            .map(Timestamp::from_millis);
         Self {
-            binding: binding.map(|bound| bound.with_taint(None).with_cordon(None)),
+            binding: binding.map(|bound| bound.with_taint(None)),
             taint,
-            cordon,
-            hello_at: None,
-            runtime: None,
             epoch: 0,
             session: None,
             phase: Phase::Quarantined,
@@ -107,11 +91,6 @@ impl Record {
             .all(|ok| ok)
     }
 
-    /// Whether the host is cordoned at `now`: its cordon has not lapsed.
-    pub(super) fn cordoned(&self, now: Timestamp) -> bool {
-        self.cordon.is_some_and(|until| until > now)
-    }
-
     pub(super) fn state(&self, now: Timestamp, grace_ms: u64) -> HostState {
         match self.heard {
             None => HostState::Awaiting,
@@ -123,17 +102,16 @@ impl Record {
     }
 
     /// Whether a new lease may be placed here: heard from within the grace period,
-    /// serving, `quiet` (no run left over from the last lease), not tainted, not cordoned,
-    /// clear of a whole-node lease (not held, not restoring) and not being scaled away. Every
+    /// serving, `quiet` (no run left over from the last lease), not tainted, clear of
+    /// a whole-node lease (not held, not restoring) and not being scaled away. Every
     /// other phase takes no new lease. A lease already on a tainted host is untouched.
     pub(super) fn bookable(&self, now: Timestamp, grace_ms: u64, quiet: bool) -> bool {
         let live = self.state(now, grace_ms) == HostState::Live;
         let serving = self.phase == Phase::Serving;
         let clean = self.taint.is_none();
-        let open = !self.cordoned(now);
         let clear = self.exclusive.is_free();
         let staying = self.leaving.is_none();
-        [live, serving, quiet, clean, open, clear, staying]
+        [live, serving, quiet, clean, clear, staying]
             .into_iter()
             .all(|ok| ok)
     }
@@ -141,8 +119,7 @@ impl Record {
     /// Whether the host has been silent for longer than the grace period and the
     /// retention together, counted from when it was last heard or, for a host never heard
     /// (awaiting), from when it was seated. A tainted host is never out of retention: it
-    /// keeps its place, and its taint, until an operator deals with it. A cordoned host is
-    /// not either, until its cordon lapses.
+    /// keeps its place, and its taint, until an operator deals with it.
     pub(super) fn out_of_retention(
         &self,
         now: Timestamp,
@@ -154,8 +131,6 @@ impl Record {
             .heard
             .or(self.seated)
             .is_some_and(|since| now.millis().saturating_sub(since.millis()) > kept_for);
-        [silent, self.taint.is_none(), !self.cordoned(now)]
-            .into_iter()
-            .all(|ok| ok)
+        [silent, self.taint.is_none()].into_iter().all(|ok| ok)
     }
 }

@@ -68,43 +68,24 @@ impl fmt::Debug for Credential {
 /// can say hello for such an id once the host is lost. Per-host tokens or client
 /// certificates close that later (design D18).
 ///
-/// A binding also carries the taint the host reported, when it has, and the time its
-/// cordon lapses, when it is cordoned, so that what a caller persists for a host id holds
-/// them too ([`Binding::with_taint`], [`Binding::with_cordon`]). Neither plays a part in
-/// who may say hello.
+/// A binding also carries the taint the host reported, when it has, so that what a caller
+/// persists for a host id holds it too ([`Binding::with_taint`]). The taint plays no part
+/// in who may say hello.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
     credential: Credential,
     instance: Option<InstanceIdentity>,
     taint: Option<Taint>,
-    cordon_until_ms: Option<u64>,
 }
 
 impl Binding {
-    /// A binding to `credential`, and to `instance` when there is one, with no taint and
-    /// no cordon.
+    /// A binding to `credential`, and to `instance` when there is one, with no taint.
     pub fn new(credential: Credential, instance: Option<InstanceIdentity>) -> Self {
         Self {
             credential,
             instance,
             taint: None,
-            cordon_until_ms: None,
         }
-    }
-
-    /// This binding with the cordon that lapses at `until_ms` (milliseconds on the
-    /// registry's clock), or with none.
-    pub fn with_cordon(self, until_ms: Option<u64>) -> Self {
-        Self {
-            cordon_until_ms: until_ms,
-            ..self
-        }
-    }
-
-    /// When the host's cordon lapses, in milliseconds on the registry's clock, when the
-    /// host is cordoned.
-    pub fn cordon_until_ms(&self) -> Option<u64> {
-        self.cordon_until_ms
     }
 
     /// This binding with `taint` as the host's reported taint.
