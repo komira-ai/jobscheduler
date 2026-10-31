@@ -12,6 +12,7 @@
 //!   forking (the limit is the lease cgroup's `pids.max` or the job's `RLIMIT_NPROC`, and
 //!   both jobs run as the same ids).
 //! - `isolation`: a lease cannot see a sibling lease's directory.
+//! - `gc`: collecting the image store removes what the helper owns and keeps what is named.
 //! - `pull`: an image pulled through the real unpack helper is published owned by the
 //!   helper's id, in a store other accounts cannot list or write.
 //!
@@ -34,6 +35,7 @@
 mod support;
 
 mod cell;
+mod gc;
 mod inside;
 mod isolation;
 mod limits;

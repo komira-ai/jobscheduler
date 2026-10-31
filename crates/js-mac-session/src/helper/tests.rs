@@ -400,6 +400,60 @@ fn run_refuses_a_bad_request() {
     assert!(error.starts_with("starting /no/such/program"), "{error}");
 }
 
+/// Catches: a limit that is zero or past its cap reaching the start (zero would forbid
+/// every write, and a huge value is `RLIM_INFINITY`), limits accepted for a GUI run, where
+/// they would bind the wrong process, and a limited run that does not start.
+#[test]
+fn run_refuses_bad_limits_and_starts_a_limited_run() {
+    let rig = rig("run-limits", 2);
+    rig.helper.user_create("8.2", None).unwrap();
+    let true_ = || vec!["/usr/bin/true".to_owned()];
+    let run = |limits: Limits, session: Session| {
+        rig.helper.run_limited(
+            "8.2",
+            true_(),
+            Vec::new(),
+            fds(rig.dir.path()),
+            session,
+            Some(limits),
+        )
+    };
+    let good = Limits {
+        file_bytes: 4096,
+        processes: 8,
+    };
+    for bad in [
+        Limits {
+            file_bytes: 0,
+            ..good
+        },
+        Limits {
+            processes: 0,
+            ..good
+        },
+        Limits {
+            file_bytes: u64::MAX,
+            ..good
+        },
+        Limits {
+            processes: u32::MAX,
+            ..good
+        },
+    ] {
+        let error = run(bad, Session::Background).unwrap_err();
+        assert!(error.contains("limit"), "{bad:?}: {error}");
+    }
+    let error = run(good, Session::Gui).unwrap_err();
+    assert!(error.contains("GUI"), "{error}");
+    assert!(
+        run(good, Session::Background)
+            .unwrap()
+            .wait()
+            .unwrap()
+            .success()
+    );
+}
+
 /// Catches: deleting a user whose processes still run (S4.2: refused while kill-uid
 /// still finds a process), a deletion recorded before the sweep finished, or a
 /// failed sweep or deletion reported as done.
@@ -587,6 +641,7 @@ fn requests_are_routed_and_stray_descriptors_refused() {
         argv: vec!["/usr/bin/true".to_owned()],
         env: Vec::new(),
         session: crate::proto::Session::Background,
+        limits: None,
     };
     let Outcome::Running(mut child) = rig.helper.handle(run.clone(), fds(rig.dir.path())) else {
         panic!("run did not start");

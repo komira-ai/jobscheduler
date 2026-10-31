@@ -351,6 +351,7 @@ fn nothing_but_the_boot_reset_is_served_before_it() {
         argv: vec!["/usr/bin/true".to_owned()],
         env: Vec::new(),
         session: crate::proto::Session::Background,
+        limits: None,
     };
     assert!(matches!(
         booted.helper.handle(run, fds(&booted.dir)),

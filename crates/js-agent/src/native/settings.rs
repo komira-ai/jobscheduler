@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel, SANDBOX_EXEC};
+use js_mac_session::proto::Limits;
 
 use super::NativeConfig;
 use crate::bundle::Placer;
@@ -139,6 +140,9 @@ impl NativeSettings {
         let max_file_bytes = mib
             .checked_mul(1 << 20)
             .ok_or_else(|| format!("--native-max-file-mib: {mib} is too large"))?;
+        // The helper refuses limits above its caps; say so at start-up, not at the first run.
+        Limits::new(max_file_bytes, max_processes)
+            .map_err(|why| format!("--native-max-file-mib and --native-max-processes: {why}"))?;
         let read_denies = denies
             .iter()
             .map(|path| AbsPath::new(path).map_err(|why| format!("{}: {why}", path.display())))

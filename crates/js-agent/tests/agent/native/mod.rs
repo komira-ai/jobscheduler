@@ -137,25 +137,14 @@ pub fn native(program: &str, args: &[&str]) -> NativeSpec {
     }
 }
 
-/// The script of the shell that sets a run's limits and becomes its command.
-pub const WRAPPER: &str = "ulimit -f \"$1\" && ulimit -u \"$2\" && shift 2 && exec \"$@\"";
-
 /// The command line the runtime sent the helper, taken apart: `sandbox-exec`, the `-D`
-/// parameters, `-p` and the profile, then the shell that sets the run's limits inside the
-/// profile, then the program and its arguments.
+/// parameters, `-p` and the profile, then the program and its arguments. No shell stands
+/// between the profile and the program: the helper sets the run's limits.
 pub struct Parsed {
-    /// The limits the shell wrapper sets: the file size in 1024-byte blocks and the most
-    /// processes.
-    pub limits: (String, String),
     pub params: Vec<(String, String)>,
     pub profile: String,
     pub tail: Vec<String>,
 }
-
-/// The shell that sets the limits: it is the profile's first program, so nothing the job's
-/// environment steers (a shell reads `SHELLOPTS`, `PS4`, `ENV` and imported functions
-/// before its first command) runs outside the profile.
-pub const LIMITER: &str = "/bin/sh";
 
 pub fn parse(argv: &[String]) -> Parsed {
     assert_eq!(
@@ -171,12 +160,9 @@ pub fn parse(argv: &[String]) -> Parsed {
     }
     assert_eq!(argv[at], "-p");
     let profile = argv[at + 1].clone();
-    let rest = &argv[at + 2..];
-    assert_eq!(&rest[..4], [LIMITER, "-c", WRAPPER, "js-native"]);
     Parsed {
-        limits: (rest[4].clone(), rest[5].clone()),
         params,
         profile,
-        tail: rest[6..].to_vec(),
+        tail: argv[at + 2..].to_vec(),
     }
 }

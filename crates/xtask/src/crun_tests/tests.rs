@@ -361,6 +361,23 @@ fn a_cleanly_ended_unit_that_is_already_unloaded_passes() {
     assert!(judged(&FakeSudo::new(0, Ok(failed_gone))).is_err());
 }
 
+/// Catches a `reset-failed` on a unit that was collected (not loaded), which prints
+/// "not loaded" on every pass: no reset call when the unit reads `LoadState=not-found`, in
+/// both entry points; a loaded unit is still reset.
+#[test]
+fn a_collected_unit_is_not_reset() {
+    let gone = "Result=success\nExecMainCode=0\nExecMainStatus=0\nLoadState=not-found\n";
+    let sudo = FakeSudo::new(0, Ok(gone));
+    assert_eq!(judged(&sudo), Ok(()));
+    assert_eq!(
+        *sudo.calls.borrow(),
+        ["systemd-run", "systemctl show js-crun-tests-crun-7"]
+    );
+    let sudo = FakeSudo::new(0, Ok(gone));
+    assert!(check_unit(&sudo, "js-crun-runtime").is_ok());
+    assert_eq!(*sudo.calls.borrow(), ["systemctl show js-crun-runtime"]);
+}
+
 /// Catches `unit-result` (for a step that ran its own `systemd-run`) passing on anything
 /// but the unit's own clean exit, or not clearing the unit.
 #[test]

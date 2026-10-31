@@ -14,9 +14,11 @@ use js_agent_wire::{NetworkLevel, refusal};
 use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
 use js_mac_session::client::Client;
 use js_mac_session::helper::RESET_ALREADY;
+use js_mac_session::proto::Limits;
 
-use super::fake_helper::End;
-use super::{LIMITER, Rig, TERM, config, native, parse};
+use super::fake_helper::{End, FakeHelper};
+use super::{Rig, TERM, config, native, parse};
+use crate::support::Scratch;
 
 fn handle(lease: &str) -> RunHandle {
     RunHandle(lease.to_owned())
@@ -64,9 +66,12 @@ fn a_start_makes_a_user_and_a_run_directory_and_runs_the_program_under_the_profi
     let parsed = parse(&run.argv);
     assert_eq!(parsed.tail, ["/usr/bin/id", "-u"]);
     assert_eq!(
-        parsed.limits,
-        ("1048576".to_owned(), "512".to_owned()),
-        "1 GiB in blocks of 1024 bytes, and 512 processes"
+        run.limits,
+        Some(Limits {
+            file_bytes: 1 << 30,
+            processes: 512
+        }),
+        "1 GiB in bytes, and 512 processes"
     );
     assert_eq!(
         parsed.params[0],
@@ -480,11 +485,11 @@ fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
     }
 }
 
-/// Asserts that the first program of the command is `sandbox-exec` and that the limiting
-/// shell comes after the profile: a shell that ran before the profile would run with the
-/// job's environment as the lease user, outside the sandbox. The command line does not
-/// depend on the environment, so a job's names cannot move the shell in front of the
-/// profile. It catches a command that starts any other program first.
+/// Asserts that the first program of the command is `sandbox-exec`, that the program of the
+/// run follows the profile directly and that no shell is anywhere in the command line: the
+/// helper sets the limits, so nothing the job's environment steers runs before the profile
+/// applies. The command line does not depend on the environment. It catches a command that
+/// starts any other program first, or puts a shell back between the profile and the program.
 #[test]
 fn nothing_but_sandbox_exec_runs_before_the_profile_applies() {
     let mut rig = Rig::new("first-program");
@@ -494,11 +499,18 @@ fn nothing_but_sandbox_exec_runs_before_the_profile_applies() {
     rig.rt.create_and_start(&spec).unwrap();
     let argv = rig.fake.run_of("7.0").argv;
     assert_eq!(argv[0], "/usr/bin/sandbox-exec");
-    let shells = argv.iter().filter(|word| *word == LIMITER).count();
-    assert_eq!(shells, 1, "one limiting shell: {argv:?}");
+    for shell in ["/bin/sh", "/bin/bash", "/bin/zsh", "sh", "-c"] {
+        assert!(
+            !argv.iter().any(|word| word == shell),
+            "{shell} is in the command line: {argv:?}"
+        );
+    }
     let profile_at = argv.iter().position(|word| word == "-p").unwrap();
-    let shell_at = argv.iter().position(|word| word == LIMITER).unwrap();
-    assert!(profile_at < shell_at, "the profile comes before the shell");
+    assert_eq!(
+        &argv[profile_at + 2..],
+        ["/usr/bin/id", "-u"],
+        "the program follows the profile"
+    );
     assert_eq!(parse(&argv).tail, ["/usr/bin/id", "-u"]);
 
     let hostile = BTreeMap::from([
@@ -558,21 +570,41 @@ fn a_start_refuses_names_that_steer_the_shell_before_a_user_is_made() {
     );
 }
 
-/// Asserts that the limits of the configuration reach the shell that starts the run: the
-/// file size in blocks of 1024 bytes (at least one) and the process count. It catches a run
-/// that starts without the limits an operator set.
+/// Asserts that the limits of the configuration reach the helper as fields of the `run`
+/// request, in bytes and as a count, exactly as configured (a file limit of 10 bytes is 10
+/// bytes), and that a configuration the helper would refuse is refused when the runtime opens,
+/// before the helper is asked anything. It catches a run that starts without the limits an operator set, limits sent in
+/// blocks, and a runtime that opens on limits the helper would refuse for every run.
 #[test]
-fn the_configured_limits_are_set_by_the_shell_that_starts_the_run() {
+fn the_configured_limits_travel_to_the_helper_as_fields() {
     let mut rig = Rig::with("limits", |config| {
         config.max_file_bytes = 10;
         config.max_processes = 7;
     });
     rig.start("r1", "/bin/true", &[]);
-    let parsed = parse(&rig.fake.run_of("7.0").argv);
-    assert_eq!(parsed.limits, ("1".to_owned(), "7".to_owned()));
+    assert_eq!(
+        rig.fake.run_of("7.0").limits,
+        Some(Limits {
+            file_bytes: 10,
+            processes: 7
+        })
+    );
     let mut big = Rig::with("limits-big", |config| config.max_file_bytes = 3 << 20);
     big.start("r1", "/bin/true", &[]);
-    assert_eq!(parse(&big.fake.run_of("7.0").argv).limits.0, "3072");
+    assert_eq!(big.fake.run_of("7.0").limits.unwrap().file_bytes, 3 << 20);
+
+    for (bytes, procs) in [(0, 7), (u64::MAX, 7), (10, 0), (10, u32::MAX)] {
+        let dir = Scratch::new("native-limits-bad");
+        let fake = FakeHelper::start(&dir);
+        let mut bad = config(&fake);
+        bad.max_file_bytes = bytes;
+        bad.max_processes = procs;
+        let why = NativeRuntime::open(fake.client(), bad, TERM)
+            .err()
+            .expect("a limit the helper would refuse was taken");
+        assert!(why.0.contains("limit"), "{bytes} {procs}: {}", why.0);
+        assert_eq!(fake.verbs(), Vec::<String>::new(), "the helper was asked");
+    }
 }
 
 /// Asserts that a job environment that names `TMPDIR`, which the agent sets, is refused before

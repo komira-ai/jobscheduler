@@ -10,6 +10,7 @@
 //! the grace and the waits after a kill are given as zero when a test needs them spent.
 #![cfg(target_os = "linux")]
 
+mod images;
 mod node;
 mod open;
 mod runs;
