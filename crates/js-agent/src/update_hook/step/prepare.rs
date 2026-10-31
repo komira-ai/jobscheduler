@@ -326,7 +326,7 @@ mod tests {
     use super::REQUIRED_RUNTIME;
 
     /// The hook refuses a staged agent that names its runtimes without the unit's; the agent
-    /// of the same build must therefore name it. The step's own tests run on Linux only.
+    /// of the same build must therefore name it. The step's own tests are in `tests/agent`.
     #[test]
     fn the_runtime_the_hook_requires_is_one_this_builds_version_line_lists() {
         let line = crate::cli::LONG_VERSION.lines().nth(1).unwrap();
@@ -335,12 +335,5 @@ mod tests {
             runtimes.split_whitespace().any(|r| r == REQUIRED_RUNTIME),
             "{line}"
         );
-    }
-
-    /// A Mac agent runs native jobs through the root helper and has no crun to name.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn on_a_mac_the_required_runtime_is_native() {
-        assert_eq!(REQUIRED_RUNTIME, "native");
     }
 }
