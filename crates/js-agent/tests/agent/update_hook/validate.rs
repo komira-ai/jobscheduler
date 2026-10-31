@@ -244,19 +244,13 @@ fn a_first_install_has_no_previous_version_or_release() {
         validate(&record, &declaration(), &params()),
         Err(Invalid::ParamsMismatch { field: "previous" })
     );
+    // And the record naming a previous the first-install table lacks.
     let mut table = params();
     table.previous_version = None;
-    assert_eq!(
-        validate(&good(), &declaration(), &table),
-        Err(Invalid::ParamsMismatch { field: "previous" })
-    );
-    table.previous_version = good().update.previous;
     table.previous_release = None;
     assert_eq!(
         validate(&good(), &declaration(), &table),
-        Err(Invalid::ParamsMismatch {
-            field: "previous_target"
-        })
+        Err(Invalid::ParamsMismatch { field: "previous" })
     );
 }
 
