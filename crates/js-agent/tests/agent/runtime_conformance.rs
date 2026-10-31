@@ -11,6 +11,7 @@ use std::rc::Rc;
 use js_agent::lifecycle::{
     Capacity, Config, DirLayout, MountRoots, RunHandle, RunSpec, ScratchRoot, StateRoot,
 };
+use js_agent_wire::LogTail;
 use js_testkit::dir::TestDir;
 
 use crate::lifecycle::fake::{FakeRuntime, Log, ManualClock};
@@ -75,6 +76,29 @@ impl Subject for FakeSubject {
             Program::OnTerm(code) => self.fake.on_term(run_id, code),
             Program::Hog { own_limit: true } => self.fake.exit_oom(run_id),
             Program::Hog { own_limit: false } => self.fake.exit(run_id, 137),
+            Program::Say { hold } => {
+                let tail = LogTail {
+                    stdout: runtime_suite::OUT_LINE.to_owned(),
+                    stderr: runtime_suite::ERR_LINE.to_owned(),
+                    truncated: false,
+                };
+                self.fake.print(run_id, tail);
+                if !hold {
+                    self.fake.exit(run_id, 0);
+                }
+            }
+            Program::Flood => {
+                let end = runtime_suite::FLOOD_END;
+                self.fake.print(
+                    run_id,
+                    LogTail {
+                        stdout: format!("{}{end}", "0123456789\n".repeat(700)),
+                        stderr: String::new(),
+                        truncated: true,
+                    },
+                );
+                self.fake.exit(run_id, 0);
+            }
             Program::Hold | Program::IgnoreTerm => {}
         }
     }
