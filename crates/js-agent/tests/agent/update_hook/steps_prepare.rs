@@ -186,14 +186,21 @@ fn the_staged_agent_must_report_the_target_version_and_the_crun_runtime_if_it_na
         assert_eq!(done.report.reason, Some(expected), "{printed:?}");
         nothing_changed(&rig, &spy);
     }
-    for (n, printed) in [
-        "js-agent 1.4.0\n",
-        "js-agent 1.4.0\nruntimes: docker crun\n",
-        "js-agent 1.4.0\nruntimes: crun\n",
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    // The unit's runtime is `crun` on Linux and `native` on a Mac, where the agent has no crun.
+    let ok = if cfg!(target_os = "macos") {
+        [
+            "js-agent 1.4.0\n",
+            "js-agent 1.4.0\nruntimes: docker native\n",
+            "js-agent 1.4.0\nruntimes: native\n",
+        ]
+    } else {
+        [
+            "js-agent 1.4.0\n",
+            "js-agent 1.4.0\nruntimes: docker crun\n",
+            "js-agent 1.4.0\nruntimes: crun\n",
+        ]
+    };
+    for (n, printed) in ok.into_iter().enumerate() {
         let rig = Rig::new(&format!("hook-prepare-version-ok-{n}"));
         let spy = Spy::new(&rig);
         *spy.version.borrow_mut() = Ok(printed.to_owned());
@@ -352,4 +359,16 @@ fn a_retry_of_zero_defers_with_retry_after_zero() {
     assert_eq!(done.outcome, Outcome::Deferred);
     assert_eq!(done.report.retry_after_secs, Some(0));
     assert_eq!(line(&done)["retry_after_secs"], 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_staged_agent_that_lists_crun_but_not_native_is_refused_on_a_mac() {
+    let rig = Rig::new("hook-prepare-version-mac-crun");
+    let spy = Spy::new(&rig);
+    *spy.version.borrow_mut() = Ok("js-agent 1.4.0\nruntimes: docker crun\n".to_owned());
+    let done = spy.prepare(&rig);
+    assert_eq!(done.outcome, Outcome::Failure);
+    assert_eq!(done.report.reason, Some(Reason::VersionMismatch));
+    nothing_changed(&rig, &spy);
 }
