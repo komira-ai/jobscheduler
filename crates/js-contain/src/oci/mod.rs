@@ -49,16 +49,20 @@
 //! CPU limits stay on the lease cgroup.
 
 pub(crate) mod crun;
+mod gc;
 pub(crate) mod hardening;
 pub mod helper;
 pub mod image;
 pub mod init;
 mod lease;
+pub mod lock;
 pub(crate) mod logs;
 pub mod mounts;
 pub(crate) mod spec;
 pub mod words;
 
+#[cfg(test)]
+mod gc_tests;
 #[cfg(test)]
 mod parity_tests;
 #[cfg(test)]
@@ -71,6 +75,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
 pub use crun::{EnvScrub, JobDrop, RunEnd};
+pub use gc::GcReport;
 pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 
@@ -136,6 +141,10 @@ pub struct OciConfig {
     /// ([`Oci::container_pid`]) and adds the route last. By default `None`: nothing is
     /// waited for (a namespace with loopback only).
     pub route_wait: Option<std::time::Duration>,
+    /// Whether the backend must have the scratch directory alone ([`lock`]), as the
+    /// `image-pull` verb does: it is refused ([`OciError::Locked`]) while any other backend
+    /// uses the directory. By default `false`: agents share the directory.
+    pub exclusive_scratch: bool,
 }
 
 impl Default for OciConfig {
@@ -153,6 +162,7 @@ impl Default for OciConfig {
             logs: LogLimits::default(),
             resolv_conf: RESOLV_CONF.to_owned(),
             route_wait: None,
+            exclusive_scratch: false,
         }
     }
 }
@@ -247,6 +257,18 @@ pub enum OciError {
         /// Why not.
         why: String,
     },
+    /// A backend that needs the scratch directory alone (`js-agent image-pull`) found it in
+    /// use: another backend or pull holds the lock ([`lock::LOCK_FILE`]).
+    #[error(
+        "{}: {why}: is another js-agent or image-pull using this scratch directory?",
+        path.display()
+    )]
+    Locked {
+        /// The lock file.
+        path: PathBuf,
+        /// What the operating system said.
+        why: String,
+    },
     /// A directory or file of the backend's own state could not be prepared.
     #[error("{0}")]
     Prepare(String),
@@ -313,6 +335,8 @@ pub struct Oci {
     scratch: PathBuf,
     helper_root: PathBuf,
     images: image::Images,
+    /// Held while the backend lives; released last.
+    lock: lock::ScratchLock,
     helpers: AtomicU64,
     /// The cgroup helper containers are made under: the lease cgroups' parent, so what a
     /// helper uses is bounded by the node's jobs budget and `crun` makes (and kills,
@@ -388,6 +412,13 @@ impl Oci {
         if config.check_search {
             search_check(scratch)?;
         }
+        // Before anything below changes the directory, the sweep least of all.
+        let how = if config.exclusive_scratch {
+            lock::Use::Exclusive
+        } else {
+            lock::Use::Shared
+        };
+        let lock = lock::ScratchLock::take(scratch, how)?;
         let helper_root = scratch.join("oci-helper");
         at(
             &helper_root,
@@ -408,7 +439,8 @@ impl Oci {
             arch,
             scratch: scratch.to_owned(),
             helper_root,
-            images: image::Images::new(scratch.join("oci-images")),
+            images: image::Images::new(scratch.join(image::IMAGES_DIR)),
+            lock,
             helpers: AtomicU64::new(0),
             cgroup_parent: cgroup_parent.to_owned(),
             logs: config.logs,
@@ -417,8 +449,16 @@ impl Oci {
                 .route_wait
                 .map_or(0, |limit| limit.as_secs().clamp(1, 3600)),
         });
-        let leftovers = oci.images.sweep(&oci);
-        leftovers.map_err(OciError::Prepare)?;
+        // The stages of an unpack under way in another agent are not leftovers: only a
+        // backend that has the directory to itself sweeps them.
+        if oci.lock.alone() {
+            let leftovers = oci.images.sweep(&oci);
+            leftovers.map_err(OciError::Prepare)?;
+        } else {
+            let shown = scratch.display();
+            tracing::info!(%shown, "another backend is live: no stage sweep");
+        }
+        oci.lock.share()?;
         Ok(oci)
     }
 
@@ -458,24 +498,13 @@ impl Oci {
         Ok(bundle)
     }
 
-    /// Makes `dir` `0700` and gives it to the account `crun` runs as (the job user of a root daemon; the daemon
-    /// itself otherwise, for which this changes nothing): a helper's state and log are made
-    /// in it by that account. The directory is opened without following a link and given by
-    /// its descriptor, so a path replaced by a link is refused, and what is given is what
-    /// was opened.
+    /// Makes `dir` `0700` and gives it to the account `crun` runs as (the job user of a root
+    /// daemon; the daemon itself otherwise, for which this changes nothing): a helper's
+    /// state and log are made in it by that account. The directory is opened without
+    /// following a link and changed by its descriptor, so a path replaced by a link is
+    /// refused, and what is given is what was opened.
     fn give_to_job_user(&self, dir: &Path) -> Result<(), JobError> {
-        use rustix::fs::{Mode, OFlags, fchown};
-        use rustix::process::{Gid, Uid};
-        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let given = rustix::fs::open(dir, flags, Mode::empty())
-            .and_then(|fd| {
-                // The mode first, so the directory is never open to others.
-                rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o700))?;
-                let owner = (Uid::from_raw(self.ids.uid), Gid::from_raw(self.ids.gid));
-                fchown(&fd, Some(owner.0), Some(owner.1))
-            })
-            .map_err(std::io::Error::from);
-        at(dir, given)
+        at(dir, chown_dir(dir, self.ids.uid, self.ids.gid))
     }
 
     /// A number unique to this node's run of the daemon.
@@ -486,6 +515,29 @@ impl Oci {
     /// The OCI id of a helper: unique per node and call.
     fn helper_id(&self, what: &str) -> String {
         format!("helper-{what}-{}-{}", std::process::id(), self.next())
+    }
+
+    /// Makes `dir`, where a helper's bundle, `crun` state and log go: `0700`, and the
+    /// daemon's own until the bundle is written (a root daemon writes into no directory the
+    /// job user owns: a job user's process could swap an entry for a link while root
+    /// writes). [`Oci::give_work_dir`] hands it over afterwards. The directory above it is
+    /// made searchable by others, whatever the umask. Every helper run starts here.
+    fn state_dir(&self, dir: &Path) -> Result<(), JobError> {
+        use std::os::unix::fs::PermissionsExt as _;
+        at(dir, std::fs::create_dir_all(dir))?;
+        let above = dir.parent().unwrap_or(dir);
+        let search = std::fs::Permissions::from_mode(0o711);
+        at(above, std::fs::set_permissions(above, search))?;
+        // A directory of an earlier job of the same run is the job user's still: taken back.
+        let (uid, gid) = (rustix::process::getuid(), rustix::process::getgid());
+        at(dir, chown_dir(dir, uid.as_raw(), gid.as_raw()))
+    }
+
+    /// Gives `dir`, with its bundle written, to the user `crun` runs as: the job user when
+    /// the daemon is root (which cannot otherwise write its state there), the daemon itself
+    /// otherwise. Last, and by descriptor, `0700` ([`Oci::give_to_job_user`]).
+    fn give_work_dir(&self, dir: &Path) -> Result<(), JobError> {
+        self.give_to_job_user(dir)
     }
 
     /// A directory under the node's helper state for one job.
@@ -507,17 +559,11 @@ impl Oci {
         self.state_dir(dir)?;
         let id = self.helper_id(what);
         let bundle = self.helper_bundle(dir, mapping, &id, job)?;
+        self.give_work_dir(dir)?;
         let state = dir.join("helper-state");
         let result = self.crun.run_helper(&state, &id, &bundle).await;
         let _ = std::fs::remove_dir_all(&bundle);
         Ok(result?)
-    }
-
-    /// Makes the directory `dir` for one helper's bundle, state and log: `0700` and the
-    /// ids' `crun` runs as ([`Oci::give_to_job_user`]). Every helper run starts here.
-    fn state_dir(&self, dir: &Path) -> Result<(), JobError> {
-        at(dir, std::fs::create_dir_all(dir))?;
-        self.give_to_job_user(dir)
     }
 
     /// [`Oci::run_job`] in a directory of its own, removed after.
@@ -559,6 +605,7 @@ impl Oci {
         let id = self.helper_id("rm");
         let job = helper::remove_job(dir);
         let bundle = self.helper_bundle(&work, Mapping::Setup, &id, &job)?;
+        self.give_work_dir(&work)?;
         let state = work.join("state");
         let ran = self.crun.run_helper_blocking(&state, &id, &bundle);
         let _ = std::fs::remove_dir_all(&work);
@@ -572,6 +619,20 @@ impl Oci {
         self.run_jobs("rm", Mapping::Setup, &jobs).await?;
         at(dir, tokio::fs::remove_dir(dir).await)
     }
+}
+
+/// Makes the directory `dir` `0700` (first, so it is never open to others) and changes its
+/// owner to `uid:gid`, through a descriptor opened without following a link, so the path is
+/// resolved once.
+pub(crate) fn chown_dir(dir: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    use rustix::fs::{Gid, Mode, Uid};
+    let fd = rustix::fs::open(dir, crate::walk::DIRECTORY, Mode::empty())?;
+    rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o700))?;
+    Ok(rustix::fs::fchown(
+        &fd,
+        Some(Uid::from_raw(uid)),
+        Some(Gid::from_raw(gid)),
+    )?)
 }
 
 fn prepare(error: JobError) -> OciError {

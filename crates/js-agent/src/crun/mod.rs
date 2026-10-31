@@ -106,6 +106,7 @@ mod spec;
 mod tests;
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -115,7 +116,7 @@ use js_agent_wire::LogTail;
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
-use js_contain::oci::{LeaseDirs, Oci, OciConfig, OciError, Owner};
+use js_contain::oci::{GcReport, LeaseDirs, Oci, OciConfig, OciError, Owner};
 use js_contain::running::Running;
 use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
@@ -226,6 +227,14 @@ pub enum CrunError {
     /// The settings name no job user: the agent is root and a container runs as another.
     #[error("the crun runtime needs the job user the containers run as")]
     NoJobUser,
+    /// The cgroup the leases are made in is not named `actions`, the name the post-job checks
+    /// know the leases' group by: a job's leftover process under another name would be
+    /// judged the host's.
+    #[error("the cgroup of the leases must be named `actions`, not {actions}")]
+    ActionsName {
+        /// The cgroup given.
+        actions: String,
+    },
     /// The backend cannot start on this node.
     #[error(transparent)]
     Oci(#[from] OciError),
@@ -366,6 +375,13 @@ impl CrunRuntime {
     ) -> Result<Self, CrunError> {
         let (uid, gid) = settings.oci.job_user.ok_or(CrunError::NoJobUser)?;
         let cgroups = settings.cgroups;
+        // The post-job checks know the leases' group by its name: a leftover job process
+        // under another name would be judged the host's, and the check silently off.
+        if Path::new(&cgroups.actions).file_name() != Some(OsStr::new("actions")) {
+            return Err(CrunError::ActionsName {
+                actions: cgroups.actions,
+            });
+        }
         // `crun`, run as the job user, moves its first process from the agent's cgroup into
         // the container's, which needs write access to the `cgroup.procs` of their nearest
         // common ancestor: the agent's own cgroup.
@@ -501,6 +517,33 @@ impl CrunRuntime {
     /// answered `Ready` after it is gone. The next [`Runtime::prepare`] pulls it again.
     pub fn forget(&self, image: &str) {
         self.pulls.forget(image);
+    }
+
+    /// Removes the image digests the store holds that nothing names: not one of
+    /// `configured` (the digests the executor is set up with: its base and tool images,
+    /// `sha256:<hex>`) and not the image of a container this runtime holds, staged,
+    /// running or ended and not yet removed. The digests it removes are forgotten by the
+    /// prefetcher, so none is answered `Ready` after it is gone. For the start, after the
+    /// leases a dead agent left have been swept and before the disk to offer is read; see
+    /// [`Oci::collect_images`] for what is kept and why it is safe beside a pull.
+    ///
+    /// The kept image configs of removed digests stay (a pull of the digest writes it
+    /// again).
+    ///
+    /// # Errors
+    /// The image store cannot be read; a digest that could not be removed is in the
+    /// report.
+    pub fn collect_images(&self, configured: &[String]) -> Result<GcReport, String> {
+        let leased: Vec<String> = self
+            .runs
+            .values()
+            .map(|run| run.spec.image_digest.clone())
+            .collect();
+        let report = self.oci.collect_images(configured, &leased)?;
+        for digest in &report.removed {
+            self.pulls.forget_digest(digest);
+        }
+        Ok(report)
     }
 
     /// Waits until the container `id` has exited (one that is gone, never started or ended
@@ -872,6 +915,10 @@ impl Runtime for CrunRuntime {
 
     fn supports_gpus(&self) -> bool {
         false
+    }
+
+    fn places_in_cgroup(&self) -> bool {
+        true
     }
 
     fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use rustix::fs::{CWD, Mode, OFlags, mkdirat, openat};
 
-use js_agent::lifecycle::label;
+use js_agent::lifecycle::{ScratchRoot, label};
 
 use super::{Harness, job, names};
 
@@ -222,4 +222,21 @@ fn sweep_of_a_missing_root_does_nothing() {
     fs::remove_dir(&root).unwrap();
     assert_eq!(h.config.scratch.sweep(["r1"]), 0);
     assert!(!root.exists());
+}
+
+/// Asserts that a sweep removes an entry no run owns but keeps the OCI backend's lock file
+/// and the directory of a kept run. It catches a sweep that unlinks the lock the agent
+/// holds (a pull started after it would lock a new file and run beside the agent), and one
+/// that keeps strays.
+#[test]
+fn sweep_keeps_the_scratch_lock_of_the_oci_backend() {
+    let h = Harness::new("sweep-lock");
+    let root = h.config.scratch.path().to_owned();
+    fs::write(root.join(ScratchRoot::LOCK_FILE), "").unwrap();
+    fs::create_dir(root.join("r1")).unwrap();
+    fs::create_dir(root.join("stray")).unwrap();
+    assert_eq!(h.config.scratch.sweep(["r1"]), 1);
+    assert!(root.join(ScratchRoot::LOCK_FILE).is_file());
+    assert!(root.join("r1").is_dir());
+    assert!(!root.join("stray").exists());
 }

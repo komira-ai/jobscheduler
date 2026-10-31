@@ -20,7 +20,7 @@ const STRANGER: u32 = 65_534;
 
 /// A source that serves one layer: a directory and a file in it.
 #[derive(Debug)]
-struct OneLayer;
+pub(crate) struct OneLayer;
 
 #[async_trait]
 impl ImageSource for OneLayer {

@@ -111,3 +111,31 @@ fn create_passes_the_cgroup_parent() {
         .unwrap();
     assert_eq!(args[at + 1], "jobs.slice");
 }
+
+/// Asserts that the direct runner's placement, `<lease>/ctr` below the actions group, is
+/// reported as it is (it is a group below the actions group), while a container whose
+/// control group only looks like a lease's, with a `..` in it or in a sibling of the actions
+/// group, is not. It pins the runtime's rule to the shared one, so a runtime that places its
+/// containers as the direct runner does is sampled and a foreign group is still refused.
+#[test]
+fn a_lease_ctr_group_is_reported_and_a_lookalike_is_not() {
+    let found = cgroup_with(in_jobs_slice(), |_| {
+        Some("0::/jobs.slice/lease-1-2/ctr\n".to_owned())
+    });
+    let expected = Path::new(CGROUP_ROOT).join("jobs.slice/lease-1-2/ctr");
+    assert_eq!(found, Some(expected));
+    let lookalikes: [(&str, ProcRead); 3] = [
+        ("sibling name", |_| {
+            Some("0::/jobs.slice-old/lease-1-2/ctr\n".to_owned())
+        }),
+        ("another tree", |_| {
+            Some("0::/other.slice/jobs.slice/lease-1-2/ctr\n".to_owned())
+        }),
+        ("dotdot", |_| {
+            Some("0::/jobs.slice/lease-1-2/../../ctr\n".to_owned())
+        }),
+    ];
+    for (name, read) in lookalikes {
+        assert_eq!(cgroup_with(in_jobs_slice(), read), None, "{name}");
+    }
+}

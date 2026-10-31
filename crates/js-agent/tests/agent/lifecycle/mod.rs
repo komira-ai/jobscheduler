@@ -5,6 +5,7 @@
 //! waits, no process starts, so there is no hang to guard.
 
 mod adopt;
+mod blind_cgroup;
 mod cleanup;
 mod disk;
 mod exclusive;

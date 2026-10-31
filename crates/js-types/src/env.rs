@@ -9,7 +9,7 @@
 /// switches (`MALLOC` covers `MALLOC_*`, `Malloc` covers `MallocStackLogging` and
 /// `MallocLogFile`, which make the allocator write files) and the Objective-C runtime's
 /// (`OBJC_`), and a shell's imported functions (`BASH_FUNC_`, as in `BASH_FUNC_ulimit%%`,
-/// which would replace the `ulimit` of the shell that sets a run's limits).
+/// which a shell started by a job would run).
 pub const RESERVED_ENV_PREFIXES: [&str; 9] = [
     "DYLD_",
     "LD_",
@@ -25,7 +25,8 @@ pub const RESERVED_ENV_PREFIXES: [&str; 9] = [
 /// Names a shell reads before its first command: its options (`SHELLOPTS`, `BASHOPTS`),
 /// the file it sources (`BASH_ENV`, `ENV`), a prompt it evaluates (`PS4` under `xtrace`,
 /// `PROMPT_COMMAND`) and what steers its word splitting and `cd` (`IFS`, `CDPATH`). The
-/// agent starts a run through a shell that sets its limits, so a job may not set one.
+/// agent no longer starts a shell of its own in front of a run, but the program a job
+/// names may be one, so a job may not set them.
 pub const SHELL_ENV_NAMES: [&str; 8] = [
     "SHELLOPTS",
     "BASHOPTS",

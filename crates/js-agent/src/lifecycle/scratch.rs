@@ -133,6 +133,11 @@ pub struct ScratchRoot {
 }
 
 impl ScratchRoot {
+    /// The lock file the OCI backend holds in the root while it lives
+    /// (`js_contain::oci::lock::LOCK_FILE`, which Linux builds check this against). No
+    /// run id starts with a dot, and a sweep keeps it.
+    pub const LOCK_FILE: &'static str = ".js-oci.lock";
+
     /// Opens the root at `path`.
     ///
     /// # Errors
@@ -233,8 +238,10 @@ impl ScratchRoot {
 
     /// [`ScratchRoot::sweep`], or the error that the root could not be listed.
     fn sweep_except(&self, kept: &[&str]) -> io::Result<usize> {
+        // The lock of the OCI backend on this directory is not a run's, but must stay: it
+        // is the lock the agent itself holds, and a new file would lock nothing.
         sweep_entries(&self.path, &|name| {
-            kept.iter().any(|run| run.as_bytes() == name)
+            name == Self::LOCK_FILE.as_bytes() || kept.iter().any(|run| run.as_bytes() == name)
         })
     }
 }

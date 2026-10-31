@@ -13,12 +13,17 @@
 //!
 //! The first use of an image pays for the fetch and the unpack, on the lease's prepare
 //! step or, for the images the daemon is given up front, at start; a second use
-//! (and a second daemon on the same data directory) finds the directory and fetches
-//! nothing.
+//! (and a daemon started later on the same data directory, once the first is gone) finds
+//! the directory and fetches nothing. Daemons share a directory, and only one
+//! that has it to itself sweeps stages ([`super::lock`]).
 //!
 //! The unpack runs in a user namespace with the daemon user unmapped, the stage directory
 //! the only writable path and the downloaded blobs read-only, so a hostile tar can write
 //! nothing the daemon user owns.
+//!
+//! The rename publishes the image, so the unpacked tree is flushed to disk (`syncfs`)
+//! before it and the images directory (`fsync`) after it: a power loss leaves a published
+//! image whole, or none.
 //!
 //! **The stage belongs to the helper's id and to nobody else may write it**: the daemon
 //! makes it `0700`, opens it by descriptor (`O_NOFOLLOW`), sets `0755` and gives it to the
@@ -51,6 +56,20 @@ use crate::walk::DIRECTORY;
 
 /// The directory of the rootfs under an image's directory.
 pub const ROOTFS: &str = "rootfs";
+
+/// The directory of the image store under a backend's scratch directory.
+pub const IMAGES_DIR: &str = "oci-images";
+
+/// Where a backend whose scratch directory is `scratch` publishes the root filesystem of
+/// the image whose digest is `digest` (`sha256:<hex>`): `<scratch>/oci-images/<hex>/rootfs`.
+/// A directory there means the image is complete (the stage is renamed into place last).
+#[must_use]
+pub fn published_root(scratch: &Path, digest: &str) -> PathBuf {
+    scratch
+        .join(IMAGES_DIR)
+        .join(digest.strip_prefix("sha256:").unwrap_or(digest))
+        .join(ROOTFS)
+}
 
 /// An image named by the digest of its per-architecture manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,25 +207,54 @@ impl Images {
 
     /// The gate of `image`.
     fn gate(&self, image: &PinnedImage) -> Arc<AsyncMutex<bool>> {
+        self.gate_of(&hex_of(image))
+    }
+
+    /// The gate of the digest whose hex is `hex`.
+    pub(super) fn gate_of(&self, hex: &str) -> Arc<AsyncMutex<bool>> {
         let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(flights.entry(hex_of(image)).or_default())
+        Arc::clone(flights.entry(hex.to_owned()).or_default())
+    }
+
+    /// The directory of the store.
+    pub(super) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Moves the directory of the digest `hex` to a name of its own in the store
+    /// (`.stage-gc-<hex>-<id>`) and returns it: a rename within the store, so the image is
+    /// gone at once (`has` is false) and what is left to remove is a leftover the start
+    /// sweep takes if the removal fails midway. The caller holds the digest's gate.
+    ///
+    /// # Errors
+    /// There is no such directory, or the rename failed.
+    pub(super) fn set_aside(&self, hex: &str) -> std::io::Result<PathBuf> {
+        let aside = self
+            .dir
+            .join(format!("{STAGE_PREFIX}gc-{hex}-{}", unique()));
+        std::fs::rename(self.dir.join(hex), &aside)?;
+        Ok(aside)
     }
 
     /// Removes the image's directory (an image already gone is not an error) and forgets
     /// that it was fetched, so that the next use fetches it again. It waits for a fetch of
     /// the same image under way, and a fetch started meanwhile waits for it, so the two
-    /// never work in the directory together. The caller must see to it that no container
-    /// still runs on the image (its root is the lower layer of a container's mounts).
+    /// never work in the directory together. The directory is first set aside by a rename
+    /// ([`Images::set_aside`]), so a removal that fails midway leaves no image that still
+    /// looks complete. The caller must see to it that no container still runs on the image
+    /// (its root is the lower layer of a container's mounts).
     ///
     /// # Errors
-    /// The directory could not be removed.
+    /// The directory could not be set aside (the image is kept), or what was set aside
+    /// could not be removed (the image is gone; the start sweep takes the rest).
     pub(crate) async fn remove(&self, image: &PinnedImage) -> std::io::Result<()> {
         let flight = self.gate(image);
         let mut fetched = flight.lock().await;
         *fetched = false;
-        match crate::remove::remove_tree(&self.dir_of(&image.digest)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
+        match self.set_aside(&hex_of(image)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+            Ok(aside) => crate::remove::remove_tree(&aside),
         }
     }
 
@@ -231,8 +279,14 @@ impl Images {
             let _ = oci.remove_dir_async(&stage).await;
         }
         made?;
+        // The stage is already the mode an image directory has (0755), made by make_stage.
+        // The rename is what says the image is complete, so everything it makes visible is
+        // on disk first: after a power loss a published directory is whole or absent.
+        at(&stage, blocking(&stage, flush_fs).await).map_err(failed)?;
         let finished = self.dir.join(&hex);
-        at(&finished, tokio::fs::rename(&stage, &finished).await).map_err(failed)
+        at(&finished, tokio::fs::rename(&stage, &finished).await).map_err(failed)?;
+        // And the name itself, so that "pulled" is not said of one a crash can take back.
+        at(&self.dir, blocking(&self.dir, flush_dir).await).map_err(failed)
     }
 
     /// Downloads the image's layers into `blobs` (a directory the container's ids can
@@ -302,6 +356,26 @@ impl Images {
             ))
         }
     }
+}
+
+/// Writes everything on the file system `path` is on to disk (`syncfs`): the files and
+/// directories of an unpack, made by ids this process does not own, in one call.
+pub(crate) fn flush_fs(path: &Path) -> std::io::Result<()> {
+    Ok(rustix::fs::syncfs(std::fs::File::open(path)?)?)
+}
+
+/// Writes the entries of the directory `path` to disk (`fsync` of the directory).
+pub(crate) fn flush_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+/// Runs `work` on `path` on a thread that may block.
+async fn blocking(path: &Path, work: fn(&Path) -> std::io::Result<()>) -> std::io::Result<()> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || work(&path))
+        .await
+        .map_err(std::io::Error::from)
+        .and_then(|done| done)
 }
 
 impl Oci {

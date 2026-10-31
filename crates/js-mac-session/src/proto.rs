@@ -23,6 +23,8 @@ use rustix::net::{
 };
 use serde::{Deserialize, Serialize};
 
+pub use crate::limits::Limits;
+
 /// The largest frame either side accepts.
 pub const MAX_FRAME: usize = 64 * 1024;
 /// The number of descriptors a `run` request carries.
@@ -83,6 +85,10 @@ pub enum Request {
         /// Where the process starts.
         #[serde(default, skip_serializing_if = "Session::is_background")]
         session: Session,
+        /// The file-size and process limits the helper sets on the process before it
+        /// starts it; none for no limits. Refused in the GUI session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limits: Option<Limits>,
     },
     /// Whether the lease user's GUI session (`gui/<uid>`) is up, after `session-login`.
     SessionReady {
@@ -519,6 +525,7 @@ mod tests {
             argv: vec!["/usr/bin/true".to_owned()],
             env: vec![("A".to_owned(), "b".to_owned())],
             session: Session::Background,
+            limits: None,
         }
     }
 
@@ -913,6 +920,7 @@ mod tests {
             argv: vec!["/usr/bin/true".to_owned()],
             env: vec![("A".to_owned(), "b".to_owned())],
             session: Session::Gui,
+            limits: None,
         };
         let text = serde_json::to_string(&gui).unwrap();
         assert!(text.ends_with(r#","session":"gui"}"#), "{text}");

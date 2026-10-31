@@ -274,3 +274,39 @@ fn usage_sources_use_no_wall_clock() {
         }
     }
 }
+
+/// Asserts that a lease's usage is read only from a group below the actions group, and that
+/// the direct runner's `<lease>/ctr` is one: the lease at `<lease>/ctr` and the one at an
+/// engine's scope are sampled; a lease whose directory is in another tree, only looks like
+/// the actions group by name, is the actions group itself or has a `..` is counted as
+/// unreadable, though its files are there and would parse. It catches a sampler that reads
+/// whatever directory it is given: a lease then reports another tree's (or the whole
+/// node's) usage as its own.
+#[test]
+fn only_groups_below_the_actions_group_are_sampled() {
+    let lease = |id: &str, dir: String| LeaseCgroup {
+        lease_id: id.to_owned(),
+        dir,
+        started_usec: 5,
+    };
+    let sampled = [
+        format!("{ACTIONS}/lease-1/ctr"),
+        format!("{ACTIONS}/libpod-ab.scope/container"),
+    ];
+    let refused = [
+        "/sys/fs/cgroup/actions-old/lease-2/ctr".to_owned(),
+        "/sys/fs/cgroup/other/lease-3/ctr".to_owned(),
+        ACTIONS.to_owned(),
+        format!("{ACTIONS}/../other/ctr"),
+    ];
+    let mut files = node(1000, 5000, 700, 300, "max 100000\n");
+    let mut leases = Vec::new();
+    for (at, dir) in sampled.iter().chain(&refused).enumerate() {
+        files = with_lease(files, dir, 40, 900, 50);
+        leases.push(lease(&format!("l{at}"), dir.clone()));
+    }
+    let got = sample(files, &leases).unwrap();
+    let ids: Vec<&str> = got.leases.iter().map(|l| l.lease_id.as_str()).collect();
+    assert_eq!(ids, ["l0", "l1"]);
+    assert_eq!(got.unreadable_leases, 4);
+}

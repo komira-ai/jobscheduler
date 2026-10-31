@@ -11,13 +11,13 @@ use super::image::{FetchError, ImageCheckError, ImageSource, PinnedImage};
 use super::*;
 use crate::subids::IdFiles;
 
-fn scratch(name: &str) -> crate::test_dir::TestDir {
+pub(super) fn scratch(name: &str) -> crate::test_dir::TestDir {
     crate::unit_dir(&format!("oci-{name}"))
 }
 
 /// A configuration whose runtime exits `ok` (0 or 1) whatever it is asked, with ids in
 /// files under `dir`.
-fn config(dir: &Path, ok: bool) -> OciConfig {
+pub(super) fn config(dir: &Path, ok: bool) -> OciConfig {
     let files = IdFiles::in_dir(&dir.join("ids"));
     std::fs::create_dir_all(dir.join("ids")).expect("ids");
     std::fs::write(&files.passwd, "root:x:0:0::/:/bin/sh\n").expect("passwd");
@@ -40,6 +40,7 @@ fn config(dir: &Path, ok: bool) -> OciConfig {
         job_user: None,
         logs: LogLimits::default(),
         resolv_conf: RESOLV_CONF.to_owned(),
+        exclusive_scratch: false,
         route_wait: None,
     }
 }
@@ -586,6 +587,29 @@ async fn an_image_is_fetched_once_and_leaves_only_the_finished_directory() {
     std::fs::create_dir_all(images.join(&hex).join(image::ROOTFS)).expect("rootfs");
     oci.check_pinned(&image).await.expect("unpacked already");
     assert_eq!(source.calls(), 1, "an unpacked image was fetched again");
+}
+
+/// Catches the root a caller looks for (`image::published_root`, which `js-agent image-pull`
+/// reports and checks) drifting from where the store keeps an image: both name the same
+/// directory, which is absent until the image is unpacked and then is the one `has` finds.
+#[test]
+fn the_published_root_is_where_the_store_keeps_an_unpacked_image() {
+    let dir = scratch("published-root");
+    let scratch = dir.join("scratch");
+    let oci = start(&config(&dir, true), &scratch).expect("started");
+    let image = pinned();
+    let root = image::published_root(&scratch, &image.digest);
+    assert_eq!(root, oci.images.rootfs_of(&image.digest));
+    assert_eq!(
+        root,
+        scratch
+            .join("oci-images")
+            .join("a".repeat(64))
+            .join("rootfs")
+    );
+    assert!(!oci.images.has(&image));
+    std::fs::create_dir_all(&root).expect("rootfs");
+    assert!(oci.images.has(&image));
 }
 
 /// Catches a source's failure lost or reworded (a registry's words are the operator's
@@ -1226,6 +1250,125 @@ fn the_seccomp_profile_resolved_for_a_job_allows_the_calls_of_a_network_client()
     ] {
         assert!(allowed.contains(call), "{call} is not allowed: {allowed:?}");
     }
+}
+
+/// Catches two agents on one scratch directory refusing each other, and a start that
+/// sweeps the stage of an unpack another agent has under way: a lone backend sweeps the
+/// stages a dead run left, a second one opens beside it (shared) and sweeps nothing, so the
+/// first's in-flight stage survives the second's open; once both are dropped the directory
+/// can be started again and sweeps what is there.
+#[test]
+fn agents_share_a_scratch_directory_and_only_a_lone_one_sweeps() {
+    let dir = scratch("shared-backends");
+    let scratch = dir.join("scratch");
+    let images = scratch.join("oci-images");
+    let leftover = images.join(".stage-aa-1-0");
+    std::fs::create_dir_all(&leftover).expect("a dead run's stage");
+    let first = start(&config(&dir, true), &scratch).expect("starts");
+    assert!(!leftover.exists(), "a lone backend left the stage it found");
+    let in_flight = images.join(".stage-bb-2-0");
+    std::fs::create_dir_all(&in_flight).expect("the first's stage");
+    let second = start(&config(&dir, true), &scratch).expect("opens beside the first");
+    assert!(in_flight.is_dir(), "the second backend swept a live stage");
+    drop(first);
+    // The second is still live: a third opens beside it and sweeps nothing either.
+    let third = start(&config(&dir, true), &scratch).expect("opens beside the second");
+    assert!(in_flight.is_dir(), "the third backend swept a live stage");
+    drop((second, third));
+    assert_eq!(started(&config(&dir, true), &scratch), "started");
+    assert!(
+        !in_flight.exists(),
+        "a lone backend left a dead run's stage"
+    );
+}
+
+/// Catches a pull that runs beside an agent (its stage would be shared with the agent's
+/// sweep and the agent's unpacks with its own), an agent that starts a second pull
+/// beside it, and a lock that outlives its holder: a backend that needs the directory alone
+/// is refused, with the lock file named and nothing swept, while an agent or another such
+/// backend is live, and is let in once they are dropped; a lock file that cannot be opened
+/// is not skipped.
+#[test]
+fn a_backend_that_needs_the_directory_alone_is_refused_while_any_other_is_live() {
+    let dir = scratch("one-backend");
+    let scratch = dir.join("scratch");
+    let alone = OciConfig {
+        exclusive_scratch: true,
+        ..config(&dir, true)
+    };
+    let agent = start(&config(&dir, true), &scratch).expect("starts");
+    let stage = scratch.join("oci-images/.stage-aa-1-0");
+    std::fs::create_dir_all(&stage).expect("stage");
+    let refused = start(&alone, &scratch).expect_err("locked");
+    let OciError::Locked { path, .. } = &refused else {
+        panic!("not the lock: {refused}");
+    };
+    assert_eq!(path, &scratch.join(lock::LOCK_FILE));
+    assert!(refused.to_string().contains(".js-oci.lock"), "{refused}");
+    assert!(stage.is_dir(), "the live backend's stage was swept");
+    drop(agent);
+    let pull = start(&alone, &scratch).expect("alone now");
+    assert!(!stage.exists(), "the pull left a dead run's stage");
+    // A second pull is refused beside the first.
+    assert!(matches!(
+        start(&alone, &scratch),
+        Err(OciError::Locked { .. })
+    ));
+    drop(pull);
+    assert_eq!(started(&alone, &scratch), "started");
+
+    // A directory where the lock file should be: not skipped, and not a lock refusal.
+    let blocked = dir.join("blocked");
+    std::fs::create_dir_all(blocked.join(lock::LOCK_FILE)).expect("directory");
+    let said = started(&config(&dir, true), &blocked);
+    assert!(said.contains(lock::LOCK_FILE), "{said}");
+    assert!(said.contains("Is a directory"), "{said}");
+}
+
+/// Catches an unpacked image that is only in the page cache when it is published (a power
+/// loss would leave a published directory without its data) by pinning what the flush
+/// steps do: each succeeds on a directory and reports a path that is gone, so a flush that
+/// swallows its error shows. A flush that is skipped altogether, and the order (flush,
+/// rename, flush) of `Images::acquire`, cannot be seen from a running process: a power
+/// loss is not a test.
+#[test]
+fn the_flush_steps_of_a_publish_succeed_on_a_directory_and_fail_on_a_missing_one() {
+    let dir = scratch("flush");
+    image::flush_fs(&dir).expect("syncfs");
+    image::flush_dir(&dir).expect("fsync");
+    let gone = dir.join("gone");
+    assert_eq!(
+        image::flush_fs(&gone).expect_err("missing").kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        image::flush_dir(&gone).expect_err("missing").kind(),
+        std::io::ErrorKind::NotFound
+    );
+}
+
+/// Catches the ownership change that follows a link (a job user's link in place of the
+/// work directory would give root's target away) and one that is lost: a directory is
+/// changed by its descriptor (to its own ids here, which any user may do), a link to it is
+/// refused, and so is a path that is not there.
+#[test]
+fn a_work_directory_is_given_by_descriptor_and_never_through_a_link() {
+    let dir = scratch("chown-dir");
+    let real = dir.join("real");
+    std::fs::create_dir(&real).expect("dir");
+    let (uid, gid) = (
+        rustix::process::getuid().as_raw(),
+        rustix::process::getgid().as_raw(),
+    );
+    chown_dir(&real, uid, gid).expect("own directory");
+    assert_eq!(
+        real.metadata().expect("meta").permissions().mode() & 0o777,
+        0o700
+    );
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    assert!(chown_dir(&link, uid, gid).is_err(), "followed a link");
+    assert!(chown_dir(&dir.join("absent"), uid, gid).is_err());
 }
 
 /// Catches a backend whose `job_drop` is empty or built from other ids than the job user it

@@ -213,6 +213,17 @@ impl Prefetcher {
         self.shared.changed.notify_all();
     }
 
+    /// [`Prefetcher::forget`] for every image named by `digest` (`sha256:<hex>`): those
+    /// whose name ends `@<digest>`, whatever repository or tag they carry.
+    pub fn forget_digest(&self, digest: &str) {
+        let suffix = format!("@{digest}");
+        self.shared
+            .lock()
+            .images
+            .retain(|image, _| !image.ends_with(&suffix));
+        self.shared.changed.notify_all();
+    }
+
     /// [`Prefetcher::prepare`], then, while the image is being fetched, waits for the
     /// fetch to end and asks again naming its ticket: the answer is `Ready` or `Failed`,
     /// never `Pending`. For a caller with nothing else to do, such as a command that pulls

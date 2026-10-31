@@ -13,9 +13,10 @@
 //!    gives it to the user. It makes the job's three standard streams as files in the
 //!    lifecycle's scratch directory, which only the agent can enter: an empty one for
 //!    standard input and one each for standard output and error.
-//! 3. `run` starts `sandbox-exec -D ... -p <profile> /bin/sh -c <limits> js-native <file
-//!    blocks> <processes> <program> <args>` as the user: the shell sets the run's limits
-//!    inside the profile and becomes the program. The helper starts it with
+//! 3. `run` starts `sandbox-exec -D ... -p <profile> <program> <args>` as the user, with
+//!    the run's file-size and process limits as fields of the request: the helper sets
+//!    them with `setrlimit` in the child, before it executes `sandbox-exec`, so no shell
+//!    stands between the profile and the program. The helper starts it with
 //!    the empty file as standard input, the log files as standard output and error, and
 //!    `exec/` as the working directory. The profile is built by
 //!    [`js_mac_pool::seatbelt`] from a policy that grants writes to the home and nothing
@@ -37,9 +38,9 @@
 //! that ends with runs going leaves them in the journal; [`Runtime::reclaim`] ends them
 //! (kill, then delete) when the next worker starts and when the rescue of a dead worker
 //! runs. A helper that restarted under the runtime refuses every verb until its boot reset
-//! has run again; the next start, stop or removal asks for it. Each run is started by a
-//! shell that sets the largest file and the most processes its user may have, so a run
-//! cannot fill the disk through its output or the process table with a fork bomb.
+//! has run again; the next start, stop or removal asks for it. The helper sets the largest
+//! file and the most processes the user may have on each run, so a run cannot fill the disk
+//! through its output or the process table with a fork bomb.
 //!
 //! What this runtime does not do yet: stage inputs or collect outputs (a start that names
 //! either is refused `native-unsupported`), adopt a run after the agent restarts (the
@@ -76,6 +77,7 @@ use js_mac_pool::seatbelt::{
 use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
 use js_mac_session::lease::{Dotted, user_name};
+use js_mac_session::proto::{Limits, Session};
 use js_types::LeaseId;
 use js_types::env::env_name_reserved;
 
@@ -132,6 +134,8 @@ struct Run {
 pub struct NativeRuntime {
     helper: Client,
     config: NativeConfig,
+    /// The limits of every run, checked when the runtime opens.
+    limits: Limits,
     term: u64,
     next: u64,
     runs: BTreeMap<String, Run>,
@@ -153,13 +157,16 @@ impl NativeRuntime {
     ///
     /// # Errors
     ///
-    /// The helper cannot be reached or its boot reset failed.
+    /// A configured limit is zero or above the helper's cap (nothing is sent to the helper),
+    /// the helper cannot be reached or its boot reset failed.
     pub fn open(helper: Client, config: NativeConfig, term: u64) -> Result<Self, RuntimeError> {
+        let limits = limits_of(&config)?;
         reset(&helper)?;
         let journal = Journal::new(&config.journal);
         Ok(Self {
             helper,
             config,
+            limits,
             term,
             next: 0,
             runs: BTreeMap::new(),
@@ -255,7 +262,14 @@ impl NativeRuntime {
         ];
         let running = self
             .helper
-            .run(lease, &argv, &env, fds)
+            .run_limited(
+                lease,
+                &argv,
+                &env,
+                fds,
+                Session::Background,
+                Some(self.limits),
+            )
             .map_err(|why| fail(&"run", &why))?;
         let (sender, waiter) = channel();
         thread::spawn(move || {
@@ -343,10 +357,11 @@ fn reset(helper: &Client) -> Result<(), RuntimeError> {
 }
 
 /// Refuses a body whose environment names a variable a job may not set
-/// ([`js_types::env::env_name_reserved`]: the names that steer the shell that sets the
-/// limits, the agent's own names, and the prefixes of the loader, the sandbox and imported
-/// shell functions). The wire checks these too; this is the last check before a user is
-/// made, for a body that did not pass through it.
+/// ([`js_types::env::env_name_reserved`]: the names that steer a shell, the agent's own
+/// names, and the prefixes of the loader, the sandbox and imported shell functions). No
+/// shell of the agent's reads the environment any more, but the program a job names may be
+/// one. The wire checks these too; this is the last check before a user is made, for a
+/// body that did not pass through it.
 fn check_env(native: &NativeSpec) -> Result<(), RuntimeError> {
     match native.env.keys().find(|name| env_name_reserved(name)) {
         Some(name) => Err(RuntimeError::new(format!(
@@ -547,24 +562,22 @@ impl Runtime for NativeRuntime {
     }
 }
 
-/// The shell that sets a run's limits, and the script it runs.
-const LIMITER: &str = "/bin/sh";
-
-/// Sets the largest file and the most processes the user may have (both soft and hard, so
-/// the run cannot raise them) and then becomes the program. `ulimit -f` counts blocks of
-/// 1024 bytes, or of 512 when the shell is in POSIX mode, so the limit is at most
-/// `max_file_bytes`.
-const LIMIT_SCRIPT: &str = "ulimit -f \"$1\" && ulimit -u \"$2\" && shift 2 && exec \"$@\"";
+/// The limits of a run under `config`, as the helper's request carries them: the largest
+/// file in bytes and the most processes, both soft and hard in the helper's child, so the
+/// run cannot raise them. A configured limit that is zero or above the helper's cap
+/// ([`Limits::check`]) is an error.
+fn limits_of(config: &NativeConfig) -> Result<Limits, RuntimeError> {
+    Limits::new(config.max_file_bytes, config.max_processes)
+        .map_err(|why| fail(&"the limits", &why))
+}
 
 /// The `sandbox-exec` command line of `native` under the policy of `config`, run as a user
-/// whose home is `home`.
+/// whose home is `home`: `sandbox-exec`, the profile, the program and its arguments.
 ///
-/// The limits are set by a shell that `sandbox-exec` starts, so it runs inside the profile
-/// (and `sandbox-exec` is the first program of the command): a shell in front of
-/// `sandbox-exec` would run as the lease user, outside the sandbox, with the job's
-/// environment, and `SHELLOPTS`, `PS4` or an imported function would run a command of the
-/// job's choosing there. The environment names that steer a shell are reserved as well
-/// (`js_types::env::SHELL_ENV_NAMES`), so the job cannot change the limits either.
+/// No shell is in the command line. The helper sets the run's limits in the
+/// child before it executes `sandbox-exec`, and `sandbox-exec` is the first program of the
+/// command, so nothing the job's environment steers runs outside the profile and the
+/// environment does not enter the command line at all.
 ///
 /// # Errors
 ///
@@ -596,17 +609,8 @@ pub fn profile_argv(
     let profile = Profile::for_policy(&policy).map_err(|why| fail(&"the profile", &why))?;
     let program =
         AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
-    let blocks = (config.max_file_bytes / 1024).max(1);
-    let mut args: Vec<OsString> = vec![
-        "-c".into(),
-        LIMIT_SCRIPT.into(),
-        "js-native".into(),
-        blocks.to_string().into(),
-        config.max_processes.to_string().into(),
-        program.as_ref().into(),
-    ];
-    args.extend(native.args.iter().map(OsString::from));
-    let argv = profile.argv(LIMITER, &args);
+    let args: Vec<OsString> = native.args.iter().map(OsString::from).collect();
+    let argv = profile.argv(&program, &args);
     Ok(argv
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
