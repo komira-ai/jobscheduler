@@ -181,8 +181,21 @@ fn a_container_that_did_not_run_exits_126() {
     runtime.remove(&id).expect("removed");
 }
 
+/// A native body: the crun runtime has no use for one.
+fn native() -> js_agent_wire::NativeSpec {
+    js_agent_wire::NativeSpec {
+        program: "/usr/bin/true".to_owned(),
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        cwd: String::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        network: js_agent_wire::NetworkLevel::Off,
+    }
+}
+
 /// Proves each start the runtime cannot make is refused with its reason and creates nothing:
-/// a host job, a GPU, an image that is not pinned, a run id that cannot name a container,
+/// a host job, a native body, a GPU, an image that is not pinned, a run id that cannot name a container,
 /// one that has a container, run files where there is no files directory, an image the
 /// store lacks and cannot fetch, an image with no kept config that cannot be fetched again, and a hand-over that fails
 /// (the scratch directory), which also removes the lease directory it made. Catches a
@@ -208,6 +221,7 @@ fn a_start_the_runtime_cannot_make_is_refused_and_leaves_nothing() {
     };
     assert!(refused("h1", &|s| s.isolation = Isolation::Host).contains("contained jobs only"));
     assert!(refused("g1", &|s| s.gpu_indices = vec![0]).contains("cannot use a GPU"));
+    assert!(refused("n1", &|s| s.body = Body::Native(native())).contains("container jobs only"));
     assert!(refused("u1", &named("registry.example/job:1")).contains("not pinned"));
     assert!(refused("a/b", &|_| {}).contains("cannot name a container"));
     assert!(refused("f1", &|s| s.files = Some(s.scratch.clone())).contains("no run files"));

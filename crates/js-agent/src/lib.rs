@@ -40,6 +40,13 @@
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required with `--container-bin` |
 //! | `--run-files-root <path>` | where each run's files (the `files` of a start: a URL or a token the task reads) are written, in a directory of their own per run, `0555` with `0444` files, mounted read-only at `/run/js-files`. Made `0700` when missing; it must be on a `tmpfs` (the secrets never reach a disk) and the agent refuses to start when it is not. A reboot clears it, which is fine: a run does not survive one. Default `/run/js-agent/files` when that can be made; otherwise the agent runs without run files and does not report the `run-files` capability. tmpfs pages can be swapped to disk when the host has swap: run hosts that handle these secrets with swap off or encrypted. Needs `--container-bin` |
 //! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); every job runs in a user namespace mapped onto the `--container-subuid` range (Podman is given the maps for each container; a Docker daemon must run with `userns-remap` set to that user, or the agent does not start); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
+//! | `--native-helper-socket <path>` | the Unix socket of the root helper `js-mac-session`: with it a Mac agent runs native jobs, each as a user the helper makes for the run, under a Seatbelt profile, and reports `runtime` and `exec` as `sandbox-exec` (see [`native`]); macOS only; the agent must run as root and checks at start that `sandbox-exec` applies a profile; needs `--scratch-root` and `--state-root`; not with `--container-bin`; the helper must be dedicated to this agent on a Mac used for native jobs only, started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes` (never the defaults of another helper), because the agent asks it for its boot reset, which ends the lease users of whoever used it before and clears the Mac's auto-login; native runs are NOT stopped when the agent stops, restarts or dies: the lease journal in the state root ends them when the agent next starts, or when the rescue of an agent whose worker died runs; until then they run on, and their wall limit is enforced only while an agent runs; the profile does not deny System V or POSIX shared memory, semaphores or message queues, and the helper reuses uids, so what a run leaves in them can be read by a later run that gets the same uid: an open channel between runs on one Mac |
+//! | `--native-homes <path>` | the directory the helper makes its lease users' homes in (its `--homes`); by default `/Users`; it must exist; needs `--native-helper-socket` |
+//! | `--native-network <level>` | the most network a native run gets: `off` (the default), `loopback` or `on`; a start that asks for more is held to it; `on` has no egress control (a run can reach the scheduler, the cloud metadata address and the rest of the network) until a packet filter keyed on the lease users exists, so keep `off`; `loopback` is shared by every run of the Mac; needs `--native-helper-socket` |
+//! | `--native-tool-root <path>` | a directory a native start's program must lie under; repeatable; by default `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`; needs `--native-helper-socket` |
+//! | `--native-deny-read <path>` | a path no native run may read, beside the agent's roots, token, instance and CA files, the helper's socket directory and `/etc/kcpassword`; repeatable; name the helper's `--state-dir`; must exist; needs `--native-helper-socket` |
+//! | `--native-max-file-mib <n>` | the most MiB any one file a native run writes may reach, its output included (the run's `RLIMIT_FSIZE`); by default 4096; a run that writes more is ended by `SIGXFSZ`; needs `--native-helper-socket` |
+//! | `--native-max-processes <n>` | the most processes a native run's user may have (the run's `RLIMIT_NPROC`); by default 512; the helper's kill is not held by it; needs `--native-helper-socket` |
 //! | `--container-network <name>` | the user-defined network containers join; by default none at all; `host` is refused; a named network needs at least one `--container-egress-allow` (the agent does not start without it), and before every contained job is created the agent checks that the network is a bridge with DNS and IPv6 off and that the host's nftables table `inet js_egress` limits it to those endpoints, or refuses the job (`egress-unchecked`); Podman only; docs/egress.md sets the network up; needs `--container-bin` |
 //! | `--container-user <uid:gid>` | the base of the users containers run as, container ids both above zero; by default `1000:1000`. Every run holds a slot, numbered from 0, and runs as the base plus its slot number, uid and gid (`1000:1000`, `1001:1001`, ...), so two runs held at once never share a host uid; the slot is given again only after its last run's cleanup passed (container and scratch gone, no process left), and never if a check found something. Each of the 4096 slots needs an id, so both numbers of the base are at most 61440 (the agent refuses to start otherwise). The agent gives each run's scratch directory to the host ids of its slot's user (the start of the `--container-subuid` range plus each id); needs `--container-bin` |
 //! | `--container-subuid <user>` | required with `--container-bin`: the user whose range in `/etc/subuid` and `/etc/subgid` every job's user namespace (container ids 0 to 65535) is mapped onto, so no container id is a host id. The agent refuses to start unless both files give the user at least 65536 ids, not from 0, holding no id of `/etc/passwd` or `/etc/group`; Podman gets `--uidmap` and `--gidmap` for every container, a Docker daemon must run with `userns-remap` set to the user and onto that range; a second agent on the host with an overlapping range is refused (a lock under `/run/js-agent/subid`); the agent must run as root |
@@ -62,10 +69,10 @@
 //! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci; the Docker and Podman runtimes pull as `--container-pull` says and do not read it |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; needs `--container-bin` |
 //! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; needs `--container-bin` |
-//! | `--bundle-store <path>` | the store of unpacked toolchain bundles (a Mac only): absolute, on the volume of `--scratch-root`, which must be APFS, mounted with ownership honoured and not noexec, with the kernel's securelevel at most 0, or the agent does not start; needs `--scratch-root` and `--bundle-budget-gib`. The hello then carries `bundle-root` (this path) and `bundle` (the held manifest digests, comma-separated, at most 16 of them), and the disk offered is reduced by the part of the budget the store has not used (see [`bundle`]). The hello carries `bundle` and `bundle-root` only when the agent can run a bundle, which this build cannot, so for now it carries neither; and, until a server says it takes a longer value, `bundle` holds one digest (two are 143 bytes, over the 128 an older server accepts and then refuses the hello). Roll out in this order: servers first (they accept the long value and the new codes), then agents, then `--bundle-store`, then placement by `bundle`; no job that names a bundle may be placed on a host that did not report `bundle` |
+//! | `--bundle-store <path>` | the store of unpacked toolchain bundles (a Mac only): absolute, on the volume of `--scratch-root`, which must be APFS, mounted with ownership honoured and not noexec, with the kernel's securelevel at most 0, or the agent does not start; needs `--scratch-root` and `--bundle-budget-gib`. The hello then carries `bundle-root` (this path) and `bundle` (the held manifest digests, comma-separated, at most 16 of them), and the disk offered is reduced by the part of the budget the store has not used (see [`bundle`]). The hello carries `bundle` and `bundle-root` only when the agent can run a bundle: it runs native jobs (`--native-helper-socket`) and the store opened; without the helper it carries neither. A job that pins a bundle runs `@bundle/<entrypoint>` from the store's trees, its writable trees cloned for the run, under the profile of any native job; and, until a server says it takes a longer value, `bundle` holds one digest (two are 143 bytes, over the 128 an older server accepts and then refuses the hello). Roll out in this order: servers first (they accept the long value and the new codes), then agents, then `--bundle-store`, then placement by `bundle`; no job that names a bundle may be placed on a host that did not report `bundle` |
 //! | `--bundle-budget-gib <n>` | the most GiB the store's trees and trash may take; required with a store, above 0 |
 //! | `--bundle-low-water-gib <n>` | fetches are refused while the volume has less than this free; default 0 |
-//! | `--bundle-pull <never\|missing>` | whether a bundle the store lacks is fetched; default `never` (a job that names one is refused `bundle-not-held`); `missing` needs trust `list` and a registry flag, and this build has no fetcher (`bundle-fetch-failed`) |
+//! | `--bundle-pull <never\|missing>` | whether a bundle the store lacks is fetched; default `never` (a job that names one is refused `bundle-not-held`); `missing` needs trust `list` and a registry flag: the first start that names a bundle begins a fetch in the background (`bundle-pending` until it is held; every byte is checked against its digest; a fetch that fails is reported once as `bundle-fetch-failed`) |
 //! | `--bundle-registry-allow`, `--bundle-registry-allow-private <host[:port]/prefix>` | the registries and namespaces a bundle's name may point to; repeatable; a bare host is refused; when any is given, a name outside them is refused `bundle-registry-not-allowed` |
 //! | `--bundle-min-age-min <n>` | minutes a bundle's trees stay after their last use; default 30 |
 //! | `--bundle-keep-file`, `--bundle-prefetch-file <path>` | files of manifest digests (`sha256:<hex>` a line, `#` comments), checked at start; the eviction and the fetcher that read them arrive later |
@@ -225,6 +232,7 @@ pub mod image;
 pub mod integrity;
 mod jobs;
 pub mod lifecycle;
+pub mod native;
 pub mod quota;
 mod readiness;
 mod run;
@@ -268,7 +276,7 @@ pub use session::{
     CredentialState, Drain, Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step,
 };
 pub use signals::SystemSleeper;
-pub use system::{Machine, RuntimeBuild, SharedClock, System};
+pub use system::{Backend, Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
 pub use worker::{
     Delivery, Handle, LINES_CAP, LeaseAnswers, Plan, QUEUE, RESCUE_BOUND, RESCUE_MAX, Rescue,
@@ -325,6 +333,8 @@ pub struct Services<'a> {
     pub worker_hook: Option<&'a dyn Fn(Handle)>,
     /// The bound of the rescue of the jobs in place of [`RESCUE_BOUND`]: for a test.
     pub rescue_bound: Option<Duration>,
+    /// The effective user id of the agent: a native agent must be root.
+    pub euid: u32,
 }
 
 /// Why the program ends without a stop request.
@@ -415,10 +425,11 @@ pub fn main_with(
                 jitter: &mut SystemJitter,
                 sleeper: &mut sleeper,
                 machine: Arc::new(System::new()),
-                bundle: Arc::new(SystemHost::new(SystemCommands::default())),
+                bundle: Arc::new(SystemHost::system()),
                 long_bundle_values: false,
                 worker_hook: None,
                 rescue_bound: None,
+                euid: rustix::process::geteuid().as_raw(),
             };
             run_with(args, out, err, services)
         }
@@ -481,6 +492,15 @@ fn execute(
     // stops the agent now and not at the first job.
     let host = &services.bundle;
     let bundle = BundleSettings::from_cli(&cli, platform, &**host).map_err(Failure::Usage)?;
+    // An agent that runs native jobs opens its store now, before the hello: the hello says
+    // it holds bundles only when the store is open, and the runtime is made over the same
+    // store. An agent that runs no native job could never run a bundle, so it opens none.
+    let opened = match (&bundle, cli.native_helper_socket.is_some()) {
+        (Some(settings), true) => host
+            .open(settings)
+            .map_err(|why| Failure::Usage(format!("--bundle-store: {why}")))?,
+        _ => None,
+    };
     let store = bundle.as_ref().map(|settings| StoreView {
         settings,
         host: &**host,
@@ -513,9 +533,19 @@ fn execute(
         ));
     }
     runtime_flags(&cli, platform, commands, err)?;
+    // Native jobs need the Seatbelt and the helper of a Mac.
+    if cli.native_helper_socket.is_some() && !platform.is_macos() {
+        return Err(Failure::Usage(
+            "--native-helper-socket: native jobs run on macOS only".to_owned(),
+        ));
+    }
     // The job flags are checked now so a wrong one stops the agent before it registers;
     // the worker is built from them below, before the first hello.
-    let local = Local::from_cli(&cli).map_err(Failure::Usage)?;
+    let mut local = Local::from_cli(&cli, services.euid).map_err(Failure::Usage)?;
+    local.native = match (local.native.take(), opened) {
+        (Some(native), Some(store)) => Some(native.with_bundles(store).map_err(Failure::Usage)?),
+        (native, _) => native,
+    };
     if let Some(why) = &local.files_warning {
         let _ = writeln!(err, "js-agent: warning: {why}");
     }
@@ -563,17 +593,22 @@ fn execute(
         integrity::require_host_namespaces(&link, &read)
             .map_err(|why| Failure::Usage(format!("--container-bin: {why}")))?;
     }
-    // An agent that runs containers says so in its hello. The hello is sent only after the
-    // job half below has started, and that ends the agent first if the program does not
-    // run, so no hello that names a runtime is sent for one that was not found.
-    if local.container.is_some() {
-        let found = contract::report(
+    // An agent that runs containers, or native jobs, says so in its hello. The hello is sent
+    // only after the job half below has started, and that ends the agent first if the program
+    // (or the helper) does not run, so no hello that names a runtime is sent for one that was
+    // not found.
+    let reported = match (local.container.is_some(), local.native.is_some()) {
+        (true, _) => Some(contract::report(
             &mut offer.hello,
             toolkit.as_ref(),
             commands,
             local.files.is_some(),
             default_gib,
-        );
+        )),
+        (false, true) => Some(contract::report_native(&mut offer.hello)),
+        (false, false) => None,
+    };
+    if let Some(found) = reported {
         found.iter().for_each(|warning| {
             let _ = writeln!(err, "js-agent: warning: {warning}");
         });

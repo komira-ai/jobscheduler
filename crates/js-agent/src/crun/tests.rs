@@ -91,6 +91,7 @@ fn run(pids: Option<u64>, files: Option<PathBuf>) -> RunSpec {
         files,
         slot: 3,
         isolation: js_agent_wire::Isolation::Contained,
+        bundle: None,
         labels: BTreeMap::new(),
     }
 }

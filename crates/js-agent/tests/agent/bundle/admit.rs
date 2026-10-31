@@ -52,6 +52,7 @@ fn host() -> Arc<FakeHost> {
             Needs {
                 os_version: version("14.0"),
                 xcode: None,
+                entrypoints: ["clang".to_owned()].into(),
             },
         );
     });
@@ -313,6 +314,7 @@ fn a_bundle_for_a_newer_macos_is_refused() {
                 Needs {
                     os_version: version(floor),
                     xcode: None,
+                    entrypoints: ["clang".to_owned()].into(),
                 },
             );
         });
@@ -438,4 +440,21 @@ fn the_admission_prints_its_settings() {
     );
     assert!(shown.contains("budget_bytes: 10737418240"), "{shown}");
     assert!(!shown.contains("FakeHost"), "{shown}");
+}
+
+/// A program of the bundle that the bundle does not have is refused `invalid-program` with
+/// the name in the explanation, before anything is made; a program that is not the bundle's
+/// is not this module's business. It catches a start that is admitted and then fails in the
+/// runtime, with a user made for it, and a check against the wrong list.
+#[test]
+fn a_program_the_bundle_lacks_is_refused_and_a_program_outside_it_is_not_judged() {
+    let host = host();
+    let admission = listed(&host, &[]);
+    let mut spec = pinned();
+    spec.native.as_mut().unwrap().program = "@bundle/gcc".to_owned();
+    let (code, why) = admission.admit(&spec).unwrap_err();
+    assert_eq!(code, refusal::INVALID_PROGRAM);
+    assert!(why.contains("gcc"), "{why}");
+    spec.native.as_mut().unwrap().program = "/usr/bin/true".to_owned();
+    assert_eq!(admission.admit(&spec), Ok(()));
 }

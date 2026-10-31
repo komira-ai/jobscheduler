@@ -12,12 +12,40 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use js_mac_session::client::Client;
+
 use crate::cli_runtime::{CliRuntime, Settings, system_runner, unix_ms};
 use crate::facts::{FileReader, Platform, SystemFiles};
 use crate::integrity::{HostView, ProcHost};
 use crate::lifecycle::{Clock, Runtime};
+use crate::native::{self, NativeRuntime, NativeSettings};
 use crate::quota::{self, ScratchQuota};
 use crate::usage::UsageClock;
+
+/// The bits of a native runtime's term that are random. A lease user is named
+/// `kbf-lease-<term>-<sequence>` and a user name is at most 31 bytes, so the term has at
+/// most 13 digits (40 bits is below 10^13) and leaves room for a sequence of seven.
+const TERM_BITS: u32 = 40;
+
+/// The native runtime over the helper `native` names. Its term is random, so a second
+/// process of the agent never asks the helper for a lease user the first one had.
+fn native_runtime(native: &NativeSettings) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
+    let mut bytes = [0u8; 8];
+    // A source of randomness that fails leaves a term of zero, which the helper's ledger
+    // refuses the second time: the start fails, loudly, and never runs as a used user.
+    let _ = getrandom::getrandom(&mut bytes);
+    let term = u64::from_le_bytes(bytes) >> (u64::BITS - TERM_BITS);
+    native::self_test(native.config(), native.sandbox_exec())
+        .map_err(|why| format!("--native-helper-socket: the sandbox self-test failed: {why}"))?;
+    let helper = Client::new(native.socket());
+    let opened = NativeRuntime::open(helper, native.config().clone(), term);
+    let runtime = opened.map_err(|why| format!("--native-helper-socket: {why}"))?;
+    let runtime = match native.bundles() {
+        Some(store) => runtime.with_bundles(Arc::clone(store)),
+        None => runtime,
+    };
+    Ok((Box::new(runtime), Vec::new()))
+}
 
 /// A monotonic clock both threads of the agent may read.
 pub type SharedClock = Arc<dyn Clock + Send + Sync>;
@@ -28,11 +56,20 @@ impl Clock for SharedClock {
     }
 }
 
+/// What the agent runs jobs with.
+#[derive(Debug, Clone)]
+pub enum Backend {
+    /// Containers, through Docker or Podman (Linux).
+    Container(Settings),
+    /// Programs run as users of the root helper, under a Seatbelt profile (macOS).
+    Native(NativeSettings),
+}
+
 /// What a runtime is made from.
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeBuild<'a> {
-    /// The checked container flags.
-    pub settings: &'a Settings,
+    /// What the jobs run with, checked.
+    pub backend: &'a Backend,
     /// The id the agent registered under.
     pub host_id: &'a str,
     /// The platform the agent runs on.
@@ -129,10 +166,19 @@ impl Machine for System {
     }
 
     fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
+        let settings = match build.backend {
+            Backend::Container(settings) => settings,
+            Backend::Native(native) => return native_runtime(native),
+        };
         let runner = Box::new(system_runner(build.stop_grace));
-        let (settings, host_id) = (build.settings.clone(), build.host_id);
-        let opened = CliRuntime::open(settings, host_id, build.platform, unix_ms, runner);
-        let runtime = opened.map_err(|why| format!("{}: {why}", build.settings.bin()))?;
+        let opened = CliRuntime::open(
+            settings.clone(),
+            build.host_id,
+            build.platform,
+            unix_ms,
+            runner,
+        );
+        let runtime = opened.map_err(|why| format!("{}: {why}", settings.bin()))?;
         let warnings = runtime.warnings().to_vec();
         Ok((Box::new(runtime), warnings))
     }
