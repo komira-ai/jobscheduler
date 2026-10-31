@@ -120,6 +120,7 @@ impl World {
             runtime: Some(RUNTIME.to_owned()),
         };
         fs::write(self.lease_file(), serde_json::to_vec(&host).unwrap()).unwrap();
+        fs::write(self.control.join("host-id"), id).unwrap();
     }
 
     /// The world before an update that `params` describes. The release that runs is linked at

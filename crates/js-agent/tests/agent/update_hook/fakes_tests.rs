@@ -242,9 +242,11 @@ fn starting_the_unit_makes_the_agent_of_the_linked_release_say_hello() {
     let rig = Rig::new("hook-fake-start-hello");
     let w = &rig.world;
     w.seed_host(HOST, "1.0");
+    // The version is the params', not the name of the directory.
+    w.register_release(Path::new("/opt/js-agent/releases/build-77"), "1.2");
     w.relink(
         Path::new("/opt/js-agent/current"),
-        Path::new("/opt/js-agent/releases/1.2"),
+        Path::new("/opt/js-agent/releases/build-77"),
     )
     .unwrap();
     w.start(UNIT).unwrap();
