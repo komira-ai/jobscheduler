@@ -117,9 +117,12 @@ pub struct Record {
     /// The stop is begun: written and synced before `cutover` signals the unit, so a
     /// `cutover` killed at any later point leaves it set.
     pub stop_begun: bool,
-    /// The link now points at the staged release.
+    /// The move of the link to the staged release is begun: written before the move, so a
+    /// `cutover` killed at any later point leaves it set. The link itself says whether it
+    /// happened.
     pub link_moved: bool,
-    /// The unit was started on the staged release.
+    /// The start of the unit on the staged release is begun: written before the start. The
+    /// unit manager says whether it happened.
     pub start_issued: bool,
     /// A `verify` succeeded.
     pub verify_ok: bool,

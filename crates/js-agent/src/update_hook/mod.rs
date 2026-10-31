@@ -11,9 +11,9 @@
 //! this). The verb is answered before the agent's flags are parsed and before any signal
 //! handler is installed: a hook is a short-lived root process of the updater, not an agent.
 //!
-//! `prepare` and `cleanup` have their bodies in [`step`], over the ports. The machine has no
-//! lease client yet, so [`Host::system`] still answers every step with the reason
-//! `not_implemented` (exit 1), and the other three steps have no body.
+//! `prepare`, `cutover` and `cleanup` have their bodies in [`step`], over the ports. The machine
+//! has no lease client yet, so [`Host::system`] still answers every step with the reason
+//! `not_implemented` (exit 1), and `verify` and `rollback` have no body.
 
 mod args;
 mod declaration;
@@ -35,7 +35,8 @@ pub use declaration::{DECLARATION_PATH, Declaration, DeclarationError, Timeouts}
 pub use params::{
     ARTIFACT_DIGEST_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY, DEFER_RETRY_KEY, DRAIN_WAIT_KEY,
     MIN_CORDON_LEASE_SECS, POLL_SECS, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY,
-    PROMOTION_CEILING_KEY, Params, ParamsError, STAGED_RELEASE_KEY, TARGET_VERSION_KEY,
+    PROMOTION_CEILING_KEY, Params, ParamsError, RELEASE_LINK_KEY, STAGED_RELEASE_KEY,
+    TARGET_VERSION_KEY,
 };
 pub use ports::{
     Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,
@@ -47,7 +48,10 @@ pub use record::{
     SCHEMA, StateError, TEMP_FILE, UpdateInfo, check_ancestor, check_dir, fd_stat,
 };
 pub use report::{Class, MAX_REASON_LEN, Reason, Report, is_reason_token};
-pub use validate::{EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, PREPARE_MARGIN_SECS, validate};
+pub use validate::{
+    CUTOVER_MARGIN_SECS, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, PREPARE_MARGIN_SECS,
+    START_WAIT_SECS, validate,
+};
 
 /// The first argument that selects the verb.
 pub const VERB: &str = "update-hook";

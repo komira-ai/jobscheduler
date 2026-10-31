@@ -4,8 +4,9 @@
 use std::path::PathBuf;
 
 use js_agent::update_hook::{
-    Cordon, Declaration, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, PREPARE_MARGIN_SECS, Params,
-    Record, Rollback, SCHEMA, Timeouts, UpdateInfo, validate,
+    CUTOVER_MARGIN_SECS, Cordon, Declaration, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN,
+    PREPARE_MARGIN_SECS, Params, Record, Rollback, SCHEMA, START_WAIT_SECS, Timeouts, UpdateInfo,
+    validate,
 };
 
 const UNIT: &str = "js-agent-crun.service";
@@ -40,6 +41,7 @@ fn params_for(record: &Record) -> Params {
         promotion_ceiling_secs: None,
         staged_release: record.update.staged.clone(),
         previous_release: record.update.previous_target.clone(),
+        release_link: None,
         target_version: record.update.target.clone(),
         previous_version: record.update.previous.clone(),
     }
@@ -643,4 +645,44 @@ fn the_declared_prepare_timeout_must_outlast_the_drain_wait_by_the_margin() {
     );
     let words = error.to_string();
     assert!(words.contains("3659") && words.contains("3600"), "{words}");
+}
+
+#[test]
+fn the_declared_cutover_timeout_must_leave_time_to_stop() {
+    let record = good();
+    let mut declaration = declaration();
+    let params = params_for(&record);
+    let needed = START_WAIT_SECS + CUTOVER_MARGIN_SECS + 1;
+    declaration.timeouts.cutover = needed;
+    assert_eq!(validate(&record, &declaration, &params), Ok(()));
+    declaration.timeouts.cutover = needed - 1;
+    let error = validate(&record, &declaration, &params).unwrap_err();
+    assert_eq!(
+        error,
+        Invalid::CutoverTimeout {
+            cutover: needed - 1
+        }
+    );
+    assert!(error.to_string().contains("180"), "{error}");
+}
+
+#[test]
+fn a_first_install_may_move_the_link_without_a_stop_but_not_start_before_it() {
+    let mut record = good();
+    record.stop_begun = false;
+    record.update.previous = None;
+    record.update.previous_target = None;
+    record.cordon = Cordon::default();
+    record.link_moved = true;
+    let params = params_for(&record);
+    assert_eq!(validate(&record, &declaration(), &params), Ok(()));
+    record.link_moved = false;
+    record.start_issued = true;
+    assert_eq!(
+        validate(&record, &declaration(), &params),
+        Err(Invalid::Marks {
+            mark: "start_issued",
+            needs: "link_moved"
+        })
+    );
 }
