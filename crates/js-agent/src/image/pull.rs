@@ -37,13 +37,13 @@
 
 use std::ffi::OsString;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
 use js_contain::oci::image::{PinnedImage, published_root};
+use js_contain::oci::lock;
 use js_contain::oci::{Oci, OciConfig, OciError};
 use js_oci::{Allow, Client, Location, Policy};
 
@@ -326,20 +326,17 @@ impl Drop for Held {
 /// Takes the lock of the store, held until the returned guard is dropped.
 fn lock(root: &Path) -> Result<Held, Failure> {
     let path = root.join(LOCK);
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|e| failed(format!("{}: {e}", path.display())))?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
-        |e| {
-            failed(format!(
-                "{}: {e}: is another image-pull running on this root?",
-                path.display()
-            ))
-        },
-    )?;
+    let file =
+        lock::open_lock_file(&path).map_err(|e| failed(format!("{}: {e}", path.display())))?;
+    let busy = rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive);
+    busy.map_err(|e| {
+        let hint = (e == rustix::io::Errno::WOULDBLOCK)
+            .then_some(": is another image-pull running on this root?");
+        failed(format!(
+            "{}: {e}{}",
+            path.display(),
+            hint.unwrap_or_default()
+        ))
+    })?;
     Ok(Held(file))
 }

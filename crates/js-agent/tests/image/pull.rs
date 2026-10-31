@@ -593,7 +593,7 @@ fn the_agents_entry_point_refuses_a_registry_outside_the_allow_list() {
 /// and asks the registry for nothing. Catches a pull that checks the store only before it
 /// takes the lock and so reports work it did not do.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_pull_whose_image_appears_while_it_waits_for_the_lock_reports_already_published() {
+async fn a_pull_whose_image_appears_while_it_sets_up_reports_already_published() {
     let fx = Fixture::start().await;
     let artifact = image();
     fx.publish(&artifact);
