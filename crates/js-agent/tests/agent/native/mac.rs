@@ -209,7 +209,7 @@ fn the_job_environment_cannot_steer_the_shell_that_sets_the_limits() {
         ("PS4".to_owned(), format!("$({touch}) ")),
         (
             "BASH_FUNC_ulimit%%".to_owned(),
-            format!("() {{ {touch}; }}"),
+            format!("() {{ {touch}; return 0; }}"),
         ),
     ]);
     let home = rig.fake.home_of("7.0");
@@ -228,11 +228,19 @@ fn the_job_environment_cannot_steer_the_shell_that_sets_the_limits() {
     let escaped = marker.exists();
     // Removed before anything is asserted, so a failure leaves nothing behind.
     let _ = fs::remove_file(&marker);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The job must have run first: a command line that never started would leave no marker
+    // either, and that is not the sandbox holding. The imported `ulimit` function returns
+    // success (its write is denied by the profile), so the shell goes on to exec the job.
+    assert!(
+        out.status.success() && stdout.contains("done"),
+        "the job did not run: {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        out.status
+    );
     assert!(
         !escaped,
-        "a command ran outside the profile: {}",
+        "a command ran outside the profile: {}\nstderr: {stderr}",
         marker.display()
     );
-    assert!(out.status.success(), "{:?}", out.status);
-    assert!(String::from_utf8_lossy(&out.stdout).contains("done"));
 }
