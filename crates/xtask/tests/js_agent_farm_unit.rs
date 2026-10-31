@@ -120,6 +120,10 @@ fn the_unit_runs_the_agent_with_the_crun_runtime_and_flags_the_agent_accepts() {
 #[test]
 fn the_unit_delegates_the_cgroup_and_leaves_the_stop_to_the_agent() {
     assert_eq!(value("Delegate"), "yes");
+    // The agent runs in a leaf, so the unit's cgroup holds no process and can enable the
+    // controllers for `<unit>/actions`; `supervisor` is the leaf name js-contain's delegate step
+    // recognizes, which makes the unit's cgroup (not the leaf) its root.
+    assert_eq!(value("DelegateSubgroup"), "supervisor");
     assert!(value("Slice").ends_with(".slice"));
     assert_eq!(value("StateDirectoryMode"), "0711");
     assert_eq!(value("KillMode"), "mixed");
@@ -210,6 +214,7 @@ fn the_unit_sets_only_the_settings_listed_here() {
         ("Unit", "RequiresMountsFor"),
         ("Unit", "Wants"),
         ("Service", "Delegate"),
+        ("Service", "DelegateSubgroup"),
         ("Service", "ExecStart"),
         ("Service", "ExecStartPre"),
         ("Service", "KillMode"),

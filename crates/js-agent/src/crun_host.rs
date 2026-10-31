@@ -222,7 +222,9 @@ pub fn check(request: &Request<'_>, host: &CrunHost, commands: &dyn CommandRunne
 /// Whether the user `ids` (uid, gid; `None` when the account is unknown, so only the bits for
 /// others count) holds `bit` (4, 2 or 1) on a file of owner `uid`, group `gid` and `mode`:
 /// the owner's bits when the user owns it, else the group's when the user's group is the
-/// file's, else the others'.
+/// file's, else the others'. Only the user's primary gid is compared, not its supplementary
+/// groups, so a directory the user reaches only through a supplementary group is reported as
+/// not searchable: a false refusal, which is safe (the job user has no other groups).
 fn holds(meta: &std::fs::Metadata, ids: Option<(u32, u32)>, bit: u32) -> bool {
     let (uid, gid) = ids.unwrap_or((u32::MAX, u32::MAX));
     let mode = meta.mode();
@@ -254,7 +256,10 @@ fn crun(path: &Path, ids: Option<(u32, u32)>, commands: &dyn CommandRunner, repo
         "install crun {}.{} or newer (package `crun`)",
         MIN_CRUN.0, MIN_CRUN.1
     );
-    if path != Path::new(DISTRO_CRUN) {
+    // The profile attaches to the resolved path, so a name that resolves to the distribution's
+    // file (`/bin/crun` on a merged-usr host) is the distribution's.
+    let resolved = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_owned());
+    if resolved(path) != resolved(Path::new(DISTRO_CRUN)) {
         report.warnings.push(format!(
             "--crun-bin {at} is not the distribution's {DISTRO_CRUN}: the distribution's AppArmor \
              profile attaches to that path, so where the kernel restricts unprivileged user \
@@ -566,6 +571,11 @@ fn scratch_root(path: &Path, owner: u32, ids: Option<(u32, u32)>, report: &mut R
 /// holds the agent cannot enable controllers for children (the no-internal-process rule), so
 /// the cgroup `<actions>` the wiring names must be one the operator or the unit has set up;
 /// that is the wiring's to check, where `<actions>` is known.
+///
+/// The packaged unit (`packaging/js-agent/js-agent-crun.service`) sets `DelegateSubgroup=supervisor`,
+/// so the agent starts in `<unit>/supervisor` and the unit's own cgroup holds no process: it is
+/// the cgroup `<actions>` and its `subtree_control` belong to (`<unit>/actions`). This check
+/// reads the leaf's `cgroup.controllers`, which holds what the unit enabled for its children.
 fn cgroups(host: &CrunHost, report: &mut Report) {
     let fix = "run the agent from a systemd unit with Delegate=yes on a host with cgroup version 2 (unified hierarchy)";
     let own = match std::fs::read_to_string(&host.self_cgroup) {
