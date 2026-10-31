@@ -72,7 +72,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
 pub use crun::{EnvScrub, RunEnd};
-pub use lease::{RESOLV_CONF, Reports};
+pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 
 /// The resolved seccomp section for `arch` (Go's name) and a job holding `caps`, as JSON.
@@ -455,6 +455,15 @@ impl Oci {
         Ok(bundle)
     }
 
+    /// Makes `dir` `0700` and gives it to the account `crun` runs as (the job user of a root
+    /// daemon; the daemon itself otherwise, for which this changes nothing): a helper's
+    /// state and log are made in it by that account. The directory is opened without
+    /// following a link and changed by its descriptor, so a path replaced by a link is
+    /// refused, and what is given is what was opened.
+    fn give_to_job_user(&self, dir: &Path) -> Result<(), JobError> {
+        at(dir, chown_dir(dir, self.ids.uid, self.ids.gid))
+    }
+
     /// A number unique to this node's run of the daemon.
     fn next(&self) -> u64 {
         self.helpers.fetch_add(1, Ordering::Relaxed)
@@ -465,12 +474,12 @@ impl Oci {
         format!("helper-{what}-{}-{}", std::process::id(), self.next())
     }
 
-    /// Makes `dir`, where a helper's bundle, `crun` state and log go, and keeps it the
-    /// daemon's own until the bundle is written: a root daemon writes into no directory the
-    /// job user owns (a job user's process could swap an entry for a link while root
+    /// Makes `dir`, where a helper's bundle, `crun` state and log go: `0700`, and the
+    /// daemon's own until the bundle is written (a root daemon writes into no directory the
+    /// job user owns: a job user's process could swap an entry for a link while root
     /// writes). [`Oci::give_work_dir`] hands it over afterwards. The directory above it is
-    /// made searchable by others, whatever the umask.
-    fn work_dir(&self, dir: &Path) -> Result<(), JobError> {
+    /// made searchable by others, whatever the umask. Every helper run starts here.
+    fn state_dir(&self, dir: &Path) -> Result<(), JobError> {
         use std::os::unix::fs::PermissionsExt as _;
         at(dir, std::fs::create_dir_all(dir))?;
         let above = dir.parent().unwrap_or(dir);
@@ -483,9 +492,9 @@ impl Oci {
 
     /// Gives `dir`, with its bundle written, to the user `crun` runs as: the job user when
     /// the daemon is root (which cannot otherwise write its state there), the daemon itself
-    /// otherwise. Last, and by descriptor.
+    /// otherwise. Last, and by descriptor, `0700` ([`Oci::give_to_job_user`]).
     fn give_work_dir(&self, dir: &Path) -> Result<(), JobError> {
-        at(dir, chown_dir(dir, self.ids.uid, self.ids.gid))
+        self.give_to_job_user(dir)
     }
 
     /// A directory under the node's helper state for one job.
@@ -504,7 +513,7 @@ impl Oci {
         mapping: Mapping,
         job: &helper::Job,
     ) -> Result<(), JobError> {
-        self.work_dir(dir)?;
+        self.state_dir(dir)?;
         let id = self.helper_id(what);
         let bundle = self.helper_bundle(dir, mapping, &id, job)?;
         self.give_work_dir(dir)?;
@@ -549,7 +558,7 @@ impl Oci {
     /// container, then the (daemon-owned) directory. Blocking.
     pub fn remove_dir_blocking(&self, dir: &Path) -> Result<(), JobError> {
         let work = self.job_dir("rm");
-        self.work_dir(&work)?;
+        self.state_dir(&work)?;
         let id = self.helper_id("rm");
         let job = helper::remove_job(dir);
         let bundle = self.helper_bundle(&work, Mapping::Setup, &id, &job)?;
@@ -569,11 +578,13 @@ impl Oci {
     }
 }
 
-/// Changes the owner of the directory `dir` to `uid:gid` through a descriptor opened
-/// without following a link, so the path is resolved once.
+/// Makes the directory `dir` `0700` (first, so it is never open to others) and changes its
+/// owner to `uid:gid`, through a descriptor opened without following a link, so the path is
+/// resolved once.
 pub(crate) fn chown_dir(dir: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
     use rustix::fs::{Gid, Mode, Uid};
     let fd = rustix::fs::open(dir, crate::walk::DIRECTORY, Mode::empty())?;
+    rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o700))?;
     Ok(rustix::fs::fchown(
         &fd,
         Some(Uid::from_raw(uid)),

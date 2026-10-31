@@ -25,20 +25,34 @@
 //! before it and the images directory (`fsync`) after it: a power loss leaves a published
 //! image whole, or none.
 //!
+//! **The stage belongs to the helper's id and to nobody else may write it**: the daemon
+//! makes it `0700`, opens it by descriptor (`O_NOFOLLOW`), sets `0755` and gives it to the
+//! first id of the subordinate range (the id the helper's root has; see [`make_stage`]),
+//! in a store directory (`0711`) in which a local account can neither list nor write. The
+//! mode is `0755`, not `0700`, because the stage becomes the image directory by a rename
+//! and a job's `crun` (not the helper's id) must search it; a rootless daemon cannot change
+//! the mode of a directory it gave away, so it is final from the start. Others can read
+//! the stage and cannot write it, move the root filesystem the helper makes in it, or
+//! add to it.
+//!
 //! Single flight per digest: concurrent first uses of one image wait on one fetch and
 //! unpack; a use cancelled midway leaves another to retry (a stage directory with a
 //! different random name each time; the leftovers are removed by the sweep at the next
 //! start).
 
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex as AsyncMutex;
 
-use super::{JobError, Oci, at};
+use rustix::fs::{Gid, Mode, Uid};
+
+use super::{JobError, Mapping, Oci, at, helper};
+use crate::walk::DIRECTORY;
 
 /// The directory of the rootfs under an image's directory.
 pub const ROOTFS: &str = "rootfs";
@@ -105,6 +119,18 @@ pub trait ImageSource: Send + Sync + std::fmt::Debug {
     async fn fetch(&self, image: &PinnedImage, blobs: &Path) -> Result<Vec<String>, FetchError>;
 }
 
+/// The owner, in a setup helper's namespace ([`Mapping::Setup`]), of the id the unpack
+/// helper runs as: the unpack helper's id 0 ([`Mapping::Action`]) is the first subordinate
+/// id, which is id 1 there.
+pub(super) const HELPER_OWNER: &str = "1:1";
+
+/// The mode of a stage: the helper's id writes it; everyone else may search and read.
+const STAGE_MODE: u32 = 0o755;
+
+/// The mode of the store directory: others search it (a job's `crun` reaches an image's
+/// root through it) but cannot list it, so a stage's name is not for the finding.
+const STORE_MODE: u32 = 0o711;
+
 /// The prefix of an unpack in progress.
 pub const STAGE_PREFIX: &str = ".stage-";
 
@@ -112,7 +138,9 @@ pub const STAGE_PREFIX: &str = ".stage-";
 #[derive(Debug)]
 pub(crate) struct Images {
     dir: PathBuf,
-    flights: Mutex<HashMap<String, Arc<OnceCell<()>>>>,
+    /// One gate for each digest: whether the image was fetched and unpacked by this
+    /// daemon (`true`), held while it is being fetched or removed, so the two never overlap.
+    flights: Mutex<HashMap<String, Arc<AsyncMutex<bool>>>>,
 }
 
 /// The hex of an image's `sha256:<hex>` digest, the name of its directory.
@@ -130,6 +158,13 @@ impl Images {
             dir,
             flights: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The directory of the image whose digest is `digest` (`sha256:<hex>`), which holds its
+    /// root filesystem.
+    pub(crate) fn dir_of(&self, digest: &str) -> PathBuf {
+        self.dir
+            .join(digest.strip_prefix("sha256:").unwrap_or(digest))
     }
 
     /// The root filesystem of the image whose digest is `digest` (`sha256:<hex>`).
@@ -158,12 +193,40 @@ impl Images {
         if self.has(image) {
             return Ok(());
         }
-        let flight = {
-            let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
-            Arc::clone(flights.entry(hex_of(image)).or_default())
-        };
-        flight.get_or_try_init(|| self.acquire(oci, image)).await?;
+        let flight = self.gate(image);
+        // Concurrent first uses wait here for one fetch and unpack; a use that finds it
+        // done is done. A fetch that failed or was cancelled leaves the gate open for the
+        // next use to try again.
+        let mut fetched = flight.lock().await;
+        if !*fetched {
+            self.acquire(oci, image).await?;
+            *fetched = true;
+        }
         Ok(())
+    }
+
+    /// The gate of `image`.
+    fn gate(&self, image: &PinnedImage) -> Arc<AsyncMutex<bool>> {
+        let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(flights.entry(hex_of(image)).or_default())
+    }
+
+    /// Removes the image's directory (an image already gone is not an error) and forgets
+    /// that it was fetched, so that the next use fetches it again. It waits for a fetch of
+    /// the same image under way, and a fetch started meanwhile waits for it, so the two
+    /// never work in the directory together. The caller must see to it that no container
+    /// still runs on the image (its root is the lower layer of a container's mounts).
+    ///
+    /// # Errors
+    /// The directory could not be removed.
+    pub(crate) async fn remove(&self, image: &PinnedImage) -> std::io::Result<()> {
+        let flight = self.gate(image);
+        let mut fetched = flight.lock().await;
+        *fetched = false;
+        match crate::remove::remove_tree(&self.dir_of(&image.digest)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
     }
 
     /// Fetches the layers into a directory of blobs, unpacks them into a stage directory,
@@ -175,9 +238,9 @@ impl Images {
         let stage = self.dir.join(format!("{STAGE_PREFIX}{hex}-{id}"));
         let blobs = self.dir.join(format!("{STAGE_PREFIX}{hex}-{id}-blobs"));
         at(&self.dir, tokio::fs::create_dir_all(&self.dir).await).map_err(failed)?;
-        // Searched by the container's ids on the way to an image's root, whatever umask
-        // the daemon runs under.
-        let open = std::fs::Permissions::from_mode(0o755);
+        // Searched, not listed, by the container's ids on the way to an image's root,
+        // whatever umask the daemon runs under.
+        let open = std::fs::Permissions::from_mode(STORE_MODE);
         at(&self.dir, tokio::fs::set_permissions(&self.dir, open).await).map_err(failed)?;
         let made = self.fetch_and_unpack(oci, image, &stage, &blobs).await;
         // The blobs are the daemon's own files.
@@ -187,9 +250,7 @@ impl Images {
             let _ = oci.remove_dir_async(&stage).await;
         }
         made?;
-        // The stage was open to the container's root; the image directory is not.
-        let closed = std::fs::Permissions::from_mode(0o755);
-        at(&stage, tokio::fs::set_permissions(&stage, closed).await).map_err(failed)?;
+        // The stage is already the mode an image directory has (0755), made by make_stage.
         // The rename is what says the image is complete, so everything it makes visible is
         // on disk first: after a power loss a published directory is whole or absent.
         at(&stage, blocking(&stage, flush_fs).await).map_err(failed)?;
@@ -200,7 +261,7 @@ impl Images {
     }
 
     /// Downloads the image's layers into `blobs` (a directory the container's ids can
-    /// read), makes `stage` (open to the container's root, which is not the daemon user:
+    /// read), makes `stage` (given to the container's root, which is not the daemon user:
     /// it makes the image's root inside, owned by itself) and unpacks the layers into it.
     async fn fetch_and_unpack(
         &self,
@@ -225,9 +286,7 @@ impl Images {
             let path = blobs.join(name);
             at(&path, tokio::fs::set_permissions(&path, readable).await).map_err(failed)?;
         }
-        at(stage, tokio::fs::create_dir(stage).await).map_err(failed)?;
-        let open = std::fs::Permissions::from_mode(0o777);
-        at(stage, tokio::fs::set_permissions(stage, open).await).map_err(failed)?;
+        oci.make_stage(stage).await.map_err(failed)?;
         oci.unpack_layers(stage, blobs, &names)
             .await
             .map_err(failed)
@@ -288,6 +347,52 @@ async fn blocking(path: &Path, work: fn(&Path) -> std::io::Result<()>) -> std::i
         .await
         .map_err(std::io::Error::from)
         .and_then(|done| done)
+}
+
+impl Oci {
+    /// Makes the stage directory `stage` and gives it to the unpack helper's id: by
+    /// [`make_stage`] when the daemon is root (which can give any id a directory), else
+    /// by a setup helper container, which holds the daemon user and the subordinate range
+    /// both.
+    async fn make_stage(&self, stage: &Path) -> Result<(), JobError> {
+        let helper_ids = (
+            Uid::from_raw(self.ids.sub_uid),
+            Gid::from_raw(self.ids.sub_gid),
+        );
+        let owner = rustix::process::geteuid().is_root().then_some(helper_ids);
+        at(stage, make_stage(stage, owner, &mut fchown_fd))?;
+        // A daemon that could not give the stage itself has it given.
+        let given_by_helper = owner
+            .is_none()
+            .then(|| helper::give_job(&self.modes, &self.daemon, HELPER_OWNER, None, &[stage]));
+        let jobs: Vec<helper::Job> = given_by_helper.into_iter().collect();
+        self.run_jobs("give", Mapping::Setup, &jobs).await
+    }
+}
+
+/// Gives the directory `fd` to `uid` and `gid`.
+pub(super) fn fchown_fd(fd: &OwnedFd, uid: Uid, gid: Gid) -> std::io::Result<()> {
+    Ok(rustix::fs::fchown(fd, Some(uid), Some(gid))?)
+}
+
+/// Makes the directory `stage` (not following a symlink at its name, and failing if the
+/// name exists), `0700` while it is the daemon's alone, then, by its descriptor, `0755`
+/// ([`STAGE_MODE`]) and, if `owner` is given, owned by it through `chown`.
+///
+/// # Errors
+/// The directory exists or could not be made, opened, changed or given.
+pub(super) fn make_stage(
+    stage: &Path,
+    owner: Option<(Uid, Gid)>,
+    chown: &mut dyn FnMut(&OwnedFd, Uid, Gid) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    std::fs::DirBuilder::new().mode(0o700).create(stage)?;
+    let fd = rustix::fs::open(stage, DIRECTORY, Mode::empty())?;
+    rustix::fs::fchmod(&fd, Mode::from_raw_mode(STAGE_MODE))?;
+    if let Some((uid, gid)) = owner {
+        chown(&fd, uid, gid)?;
+    }
+    Ok(())
 }
 
 /// A step of the fetch or the unpack that failed, as the check of an image reports it.

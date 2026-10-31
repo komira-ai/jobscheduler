@@ -97,12 +97,15 @@ impl Running {
         self.wait().await;
     }
 
+    /// How the run ended, or `None` while it has not (without waiting).
+    pub fn try_end(&self) -> Option<RunEnd> {
+        self.ended.borrow().clone()
+    }
+
     /// How the run ended, once [`Running::wait`] returned. A run that did not say (its
     /// thread panicked) is a failure.
     pub fn run_end(&self) -> RunEnd {
-        self.ended
-            .borrow()
-            .clone()
+        self.try_end()
             .unwrap_or_else(|| RunEnd::Failed("crun run did not say how it ended".to_owned()))
     }
 
@@ -220,6 +223,23 @@ mod tests {
             Running::start(build("done"), one_thread_runtime, Box::pin(done)).expect("started");
         run.wait().await;
         assert_eq!(run.run_end(), RunEnd::Exited(3));
+        run.reap(SOON, PAUSE).expect("gone");
+    }
+
+    /// Catches a run reported as ended before it is, and its end hidden after: no answer
+    /// while the work is pending, the end once it is done.
+    #[tokio::test]
+    async fn a_run_has_no_end_until_it_has_one() {
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let work = async move {
+            let _ = finished.await;
+            RunEnd::Exited(4)
+        };
+        let mut run = Running::spawn("pending".to_owned(), work).expect("run");
+        assert_eq!(run.try_end(), None);
+        finish.send(()).expect("finish");
+        run.wait().await;
+        assert_eq!(run.try_end(), Some(RunEnd::Exited(4)));
         run.reap(SOON, PAUSE).expect("gone");
     }
 

@@ -166,7 +166,7 @@ jobs:
     # !cancelled(): a push to main, or a failed changes job, still runs the macOS job, while a
     # run cancelled by a newer push to the same pull request does not.
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}
-    runs-on: macos-14
+    runs-on: macos-15
     # Pushes to main share one group with cancel-in-progress false: one run executes, one
     # waits, and a newer waiting run replaces an older one, so the hosted macOS pool never
     # holds a backlog of main runs (the newest main commit's result covers the older ones;
@@ -176,6 +176,10 @@ jobs:
       group: ${{ github.event_name == 'pull_request' && format('ci-macos-{0}', github.run_id) || 'ci-macos-main' }}
       cancel-in-progress: false
     timeout-minutes: 45
+    env:
+      # The oldest macOS the binaries must run on; a newer image must not raise it
+      # (the step after the build reads each binary's minos and fails above this).
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     permissions:
       contents: read
     steps:
@@ -193,6 +197,22 @@ jobs:
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
       - run: cargo build --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-bundle -p js-bundle-cli
+      - name: Check the minimum macOS of the built binaries
+        run: |
+          set -euo pipefail
+          checked=0
+          for f in target/debug/*; do
+            [ -f "$f" ] && [ -x "$f" ] || continue
+            file "$f" | grep -q 'Mach-O 64-bit executable arm64' || continue
+            minos="$(otool -l "$f" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')"
+            echo "$f minos $minos"
+            if [ "$(printf '%s\n%s\n' "$minos" "$MACOSX_DEPLOYMENT_TARGET" | sort -V | tail -n 1)" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+              echo "::error::$f needs macOS $minos, above the pinned $MACOSX_DEPLOYMENT_TARGET"
+              exit 1
+            fi
+            checked=$((checked + 1))
+          done
+          [ "$checked" -gt 0 ] || { echo "::error::no Mach-O binary found to check"; exit 1; }
       - run: cargo test --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-bundle -p js-bundle-cli
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
