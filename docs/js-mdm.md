@@ -29,6 +29,17 @@ stderr).
   0600 root files (never printed, never on a command line), makes the SCEP CA unless `ca.pem`
   is there, writes the slice, the units and the Caddyfile as `js-mdm-core` renders them, and
   starts the services. The proxy waits for the TLS certificate.
+
+  Operator paths must not cross a symlinked directory: `--config`, `--bin-dir` and the
+  archives in it, and `MDM_STATE`, `MDM_ETC`, `MDM_BIN` and everything below them. The host
+  layer opens every directory on the way without following links, because the service user
+  owns directories under `MDM_STATE` and could otherwise point root at any directory of the
+  host (to chmod, chown, write or read there). A refusal names the component, for example
+  `refused: /etc/js-mdm/x: js-mdm is a symbolic link; give the real path`; give the real path
+  instead. A directory on the way owned by a user other than root, the effective user or the
+  owner the step asks for is refused too, naming the directory and the uid. `fetch --dir` is
+  the one path that is resolved through links first (it is your own path, and the git work tree
+  check needs the real one).
 * `js-mdm install --config FILE --uninstall [--apply]`: root. Stops and disables the units and
   moves their files to `MDM_STATE/removed/<unix seconds>/`. The state, the TLS certificate, the
   SCEP CA, the secrets, the binaries and the user stay.
@@ -57,7 +68,8 @@ stderr).
   is refused), and every line left out is printed under its file as `ignored`. A host
   installed by another tool that words one line differently is compared with one `--ignore` for
   its wording and one for the render's. A file this user may not read is `unreadable`;
-  world-readable files need no root, the checks of root-only files do.
+  world-readable files need no root, the checks of root-only files do. A unit an admin has
+  masked (a link to `/dev/null`) is reported as `wrong`, a link, not as `same` or `missing`.
 
 ## Not in this slice
 

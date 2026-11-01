@@ -65,8 +65,9 @@ impl RealHost {
         let name = names.pop().ok_or_else(|| refused(path, "names no file"))?;
         let flags = OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let anchor = openat(rustix::fs::CWD, &self.root, flags, FileMode::empty());
-        let mut dir = File::from(anchor.map_err(|e| walk_error(path, e))?);
-        self.vet(&dir, owner, path)?;
+        let mut dir =
+            File::from(anchor.map_err(|e| walk_error(path, &self.root.display().to_string(), e))?);
+        self.vet(&dir, owner, path, &self.root.display().to_string())?;
         for component in names {
             let opened = match openat(&dir, component, flags, FileMode::empty()) {
                 Err(Errno::NOENT) if create => {
@@ -75,19 +76,22 @@ impl RealHost {
                 }
                 other => other,
             };
-            let next = File::from(opened.map_err(|e| walk_error(path, e))?);
-            self.vet(&next, owner, path)?;
+            let next = File::from(opened.map_err(|e| walk_error(path, component, e))?);
+            self.vet(&next, owner, path, component)?;
             dir = next;
         }
         Ok((dir, name.to_owned()))
     }
 
     /// Refuses a directory owned by a user that is neither trusted nor `owner`.
-    fn vet(&self, dir: &File, owner: u32, path: &str) -> io::Result<()> {
+    fn vet(&self, dir: &File, owner: u32, path: &str, label: &str) -> io::Result<()> {
         let uid = dir.metadata()?.uid();
         match self.trusted.contains(&uid) || uid == owner {
             true => Ok(()),
-            false => Err(refused(path, "has a directory owned by another user")),
+            false => Err(refused_at(
+                path,
+                &format!("{label} is owned by uid {uid}, which is not trusted for this path"),
+            )),
         }
     }
 
@@ -131,14 +135,21 @@ fn components(path: &str) -> io::Result<Vec<&str>> {
     }
 }
 
-/// The error for a directory that could not be opened on the way to `path`.
-fn walk_error(path: &str, e: Errno) -> io::Error {
+/// The error for the directory `component` that could not be opened on the way to `path`.
+fn walk_error(path: &str, component: &str, e: Errno) -> io::Error {
     match e {
-        Errno::LOOP | Errno::NOTDIR => {
-            refused(path, "has a symbolic link or a file as a directory")
-        }
+        Errno::LOOP => refused_at(
+            path,
+            &format!("{component} is a symbolic link; give the real path"),
+        ),
+        Errno::NOTDIR => refused_at(path, &format!("{component} is not a directory")),
         other => io::Error::from(other),
     }
+}
+
+/// A refusal that names the path and then what is wrong, as `refused: PATH: WHAT`.
+fn refused_at(path: &str, what: &str) -> io::Error {
+    io::Error::other(format!("refused: {path}: {what}"))
 }
 
 fn refused(path: &str, why: &str) -> io::Error {
@@ -220,7 +231,10 @@ impl Host for RealHost {
         };
         let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let opened = openat(&dir, &name, flags, FileMode::empty()).map_err(|e| match e {
-            Errno::LOOP => refused(path, "is a symbolic link"),
+            Errno::LOOP => refused_at(
+                path,
+                &format!("{name} is a symbolic link; give the real path"),
+            ),
             other => io::Error::from(other),
         });
         let Some(fd) = found(opened)? else {
@@ -254,8 +268,12 @@ impl Host for RealHost {
             Err(e) => return Err(e.into()),
         }
         let flags = OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let opened = openat(&dir, &name, flags, FileMode::empty())
-            .map_err(|_| refused(path, "is a symbolic link or not a directory"))?;
+        let opened = openat(&dir, &name, flags, FileMode::empty()).map_err(|_| {
+            refused_at(
+                path,
+                &format!("{name} is a symbolic link or not a directory; give the real path"),
+            )
+        })?;
         let made = File::from(opened);
         made.set_permissions(Permissions::from_mode(mode))?;
         fchown(&made, Some(owner.0), Some(owner.1))?;
