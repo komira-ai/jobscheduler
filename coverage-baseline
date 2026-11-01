@@ -28,12 +28,14 @@ js-elastic                  0      0
 js-elastic-fake             0      0
 js-guest                    0      0
 js-guest-wire               0      0
+js-host-step                0      0
 js-lease                    0      0
 js-lease-server             0      0
 js-mac-pool                 0      0
 js-mac-probe                0      0
 js-mac-provision            0      0
 js-mac-session              0      0
+js-mdm                      0      0
 js-mdm-core                 0      0
 js-oci                      0      0
 js-pool-static              0      0

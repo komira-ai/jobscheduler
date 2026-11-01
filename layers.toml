@@ -28,7 +28,7 @@ planned = ["js-sim", "js-sched"]
 # Code that keeps state, reads a clock or does I/O, and is used by servers and nodes.
 [[layer]]
 name = "runtime"
-crates = ["js-alert", "js-client", "js-contain", "js-elastic-fake", "js-lease", "js-oci", "js-provider-lambdalabs", "js-registry", "js-state", "js-testkit", "js-treestore", "js-usage"]
+crates = ["js-alert", "js-client", "js-contain", "js-elastic-fake", "js-host-step", "js-lease", "js-oci", "js-provider-lambdalabs", "js-registry", "js-state", "js-testkit", "js-treestore", "js-usage"]
 planned = ["js-store"]
 
 # Servers: what answers hosts and clients.
@@ -40,5 +40,5 @@ planned = ["js-coordinator", "js-server-core"]
 # Programs, their libraries and the repository's tools.
 [[layer]]
 name = "app"
-crates = ["js-agent", "js-analysis", "js-bundle-cli", "js-cli", "js-conformance", "js-coverage", "js-guest", "js-mac-probe", "js-mac-provision", "js-mac-session", "js-vmm", "js-watch", "xtask"]
+crates = ["js-agent", "js-analysis", "js-bundle-cli", "js-cli", "js-conformance", "js-coverage", "js-guest", "js-mac-probe", "js-mac-provision", "js-mac-session", "js-mdm", "js-vmm", "js-watch", "xtask"]
 planned = ["js-host", "js-host-install", "js-installer", "js-node", "js-node-bin", "js-updater"]
