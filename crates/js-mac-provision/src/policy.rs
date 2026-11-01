@@ -251,11 +251,31 @@ mod tests {
     fn a_range_runs_count_uids_from_start() {
         let r = UidRange::new(600, 100).unwrap();
         assert_eq!((r.first(), r.last()), (600, 699));
-        assert_eq!(r.pf_user(), "600:699");
+        assert!(r.pf_user().starts_with("{ 600, 601, 602, "));
+        assert!(r.pf_user().ends_with(", 698, 699 }"));
         assert!(r.contains(600));
         assert!(r.contains(699));
         assert!(!r.contains(599));
         assert!(!r.contains(700));
+    }
+
+    #[test]
+    fn pf_user_lists_each_uid_of_a_range_and_never_uses_a_colon() {
+        assert_eq!(UidRange::new(4100, 1).unwrap().pf_user(), "4100");
+        assert_eq!(UidRange::new(4100, 2).unwrap().pf_user(), "{ 4100, 4101 }");
+        assert_eq!(
+            UidRange::new(4100, 10).unwrap().pf_user(),
+            "{ 4100, 4101, 4102, 4103, 4104, 4105, 4106, 4107, 4108, 4109 }"
+        );
+        for count in [1, 2, 10, 100] {
+            assert!(!UidRange::new(4100, count).unwrap().pf_user().contains(':'));
+        }
+    }
+
+    #[test]
+    fn a_pool_is_bounded_so_the_rule_list_stays_small() {
+        assert!(UidRange::new(600, 128).is_ok());
+        assert!(UidRange::new(600, 129).is_err());
     }
 
     #[test]

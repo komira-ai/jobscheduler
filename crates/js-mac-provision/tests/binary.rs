@@ -25,7 +25,7 @@ fn render_prints_the_anchor_for_a_policy() {
         "--uid-start",
         "600",
         "--uid-count",
-        "100",
+        "3",
         "--endpoint",
         "198.51.100.7:8443",
         "--endpoint",
@@ -33,13 +33,13 @@ fn render_prints_the_anchor_for_a_policy() {
     ]);
     assert_eq!(out.status.code(), Some(0));
     let golden = "\
-# js-mac-provision: egress of pool uids 600-699 (anchor com.apple/com.komira.js.pool). Generated; do not edit.
-block return out quick inet proto { tcp, udp } from any to 169.254.0.0/16 user 600:699
-pass out quick on lo0 inet proto { tcp, udp } from 127.0.0.0/8 to 127.0.0.0/8 user 600:699 keep state
-pass out quick inet proto tcp from any to 192.0.2.10 port 443 user 600:699 keep state
-pass out quick inet proto tcp from any to 198.51.100.7 port 8443 user 600:699 keep state
-block return out quick inet6 proto { tcp, udp } from any to any user 600:699
-block return out quick proto { tcp, udp } from any to any user 600:699
+# js-mac-provision: egress of pool uids 600-602 (anchor com.apple/com.komira.js.pool). Generated; do not edit.
+block return out quick inet proto { tcp, udp } from any to 169.254.0.0/16 user { 600, 601, 602 }
+pass out quick on lo0 inet proto { tcp, udp } from 127.0.0.0/8 to 127.0.0.0/8 user { 600, 601, 602 } keep state
+pass out quick inet proto tcp from any to 192.0.2.10 port 443 user { 600, 601, 602 } keep state
+pass out quick inet proto tcp from any to 198.51.100.7 port 8443 user { 600, 601, 602 } keep state
+block return out quick inet6 proto { tcp, udp } from any to any user { 600, 601, 602 }
+block return out quick proto { tcp, udp } from any to any user { 600, 601, 602 }
 ";
     assert_eq!(text(&out.stdout), golden);
     assert!(out.stderr.is_empty());
