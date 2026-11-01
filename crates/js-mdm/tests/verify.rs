@@ -507,3 +507,24 @@ fn compare_handles_odd_bytes_and_the_check_display_covers_each_form() {
     };
     assert_eq!(c.to_string(), "ok    n: seen");
 }
+
+/// Catches a masked unit read as fine: an admin masks a unit by making it a link to
+/// /dev/null, which is neither `same` nor `missing` but `wrong` (a link), and fails the run.
+#[test]
+fn a_masked_unit_is_reported_as_a_link() {
+    let host = installed();
+    let path = format!("{UNITS}/js-mdm-scep.service");
+    host.put_symlink(&path, "/dev/null");
+    let (ok, shown) = go(&host, true, &[]);
+    assert!(!ok);
+    assert!(
+        shown.contains(&format!(
+            "wrong      {path}: is Other 0777 owner 0:0, not File 0644 owner root:root\n"
+        )),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains(&format!("same       {path}"))
+            && !shown.contains(&format!("missing    {path}"))
+    );
+}

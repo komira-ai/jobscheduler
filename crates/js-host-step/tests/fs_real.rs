@@ -124,7 +124,10 @@ fn mkdir_refuses_a_link_at_a_planned_subdirectory_and_changes_nothing_behind_it(
     symlink(&victim, dir.path().join("state/nanohub")).unwrap();
 
     let err = host.mkdir("/state/nanohub", 0o700, owner).unwrap_err();
-    assert!(err.to_string().contains("refused"), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "refused: /state/nanohub: nanohub is a symbolic link or not a directory; give the real path"
+    );
     // A directory to be made below the link is not made behind it.
     let err = host
         .mkdir("/state/nanohub/inner", 0o700, owner)
@@ -183,7 +186,13 @@ fn a_directory_of_another_user_on_the_way_is_refused() {
     let err = nobody_trusted
         .mkdir("/a/b", 0o700, (mine.0 + 1, mine.1))
         .unwrap_err();
-    assert!(err.to_string().contains("owned by another user"), "{err}");
+    let said = err.to_string();
+    assert!(said.starts_with("refused: /a/b: "), "{said}");
+    assert!(
+        said.contains(&format!("is owned by uid {}", mine.0)),
+        "{said}"
+    );
+    assert!(said.contains("not trusted"), "{said}");
     // The owner the step asks for is trusted, and so is a user in the list.
     nobody_trusted.mkdir("/c/d", 0o700, mine).unwrap();
     RealHost::trusting(dir.path(), &[mine.0])
@@ -262,7 +271,11 @@ fn stat_and_read_refuse_a_link_on_the_way() {
 
     for path in ["/state/sub/f", "/state/sub/missing", "/state/sub/deeper/f"] {
         let err = host.stat(path).unwrap_err();
-        assert!(err.to_string().contains("refused"), "{path}: {err}");
+        // The message names the path and the component that is the link.
+        assert_eq!(
+            err.to_string(),
+            format!("refused: {path}: sub is a symbolic link; give the real path")
+        );
         assert!(
             host.read(path).unwrap_err().to_string().contains("refused"),
             "{path}"
