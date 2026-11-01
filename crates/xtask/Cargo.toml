@@ -38,6 +38,10 @@ ureq.workspace = true
 js-agent = { path = "../js-agent" }
 js-client = { path = "../js-client" }
 js-elastic = { path = "../js-elastic" }
+# The plists the package carries must be flags the programs accept (tests/macos_pkg.rs).
+js-mac-provision = { path = "../js-mac-provision" }
+js-mac-session = { path = "../js-mac-session" }
+js-testkit = { path = "../js-testkit" }
 rcgen.workspace = true
 
 [lints]

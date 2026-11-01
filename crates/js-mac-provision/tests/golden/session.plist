@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.komira.js-mac-session</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/js-agent/link/current/js-mac-session</string>
+		<string>--socket</string>
+		<string>/var/run/js-mac-session/socket</string>
+		<string>--socket-group</string>
+		<string>_jsagent</string>
+		<string>--state-dir</string>
+		<string>/var/db/js-mac-session</string>
+		<string>--uid-range</string>
+		<string>600-699</string>
+		<string>--homes</string>
+		<string>/Users</string>
+		<string>--daemon-requirement</string>
+		<string>cdhash H"abc" &amp; x</string>
+	</array>
+	<key>UserName</key>
+	<string>root</string>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>PathState</key>
+		<dict>
+			<key>/etc/js-agent/token</key>
+			<true/>
+		</dict>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>ExitTimeOut</key>
+	<integer>20</integer>
+	<key>StandardOutPath</key>
+	<string>/Library/Logs/js-agent/js-mac-session.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/js-agent/js-mac-session.err.log</string>
+</dict>
+</plist>
