@@ -28,17 +28,25 @@
 //! the others.
 //!
 //! What it shows, with the control as the half that would pass without pf:
-//! - a pool uid reaches the listed endpoint and is refused at once at every address that
-//!   is not this Mac's own (a `block return` rule answers with a reset, so "refused" is
-//!   pf's answer: a connect that goes nowhere would time out instead);
-//! - at this Mac's own address, on a port that is not listed, "refused" or "timed out" is
-//!   accepted and "connected" is not: macOS pf does not send the reset for a SYN that
-//!   leaves through `lo0` (see `Want::RefusedOrDropped`);
+//! - a pool uid reaches the listed endpoint;
+//! - a pool uid does not reach anything else: this Mac's own address on a port that is not
+//!   listed, the metadata address and a documentation address. A block is proven by pf's
+//!   own counter, not by the error the client sees: the packet counter of the blocking rule
+//!   (`pfctl -a <anchor> -s rules -vv`, read before and after the probe) must rise, and the
+//!   outcome must be "refused" or "timed out", never "connected" and never another error
+//!   (a route error such as "host unreachable" means routing refused it, not pf). macOS pf
+//!   builds the reset of a `block return` only for a packet whose checksum it can verify,
+//!   and an outbound SYN does not have one yet on an interface with checksum assist (xnu
+//!   `pf_test_rule` calling `pf_check_proto_cksum`), so a blocked TCP connect is dropped
+//!   silently and times out; "refused" is accepted when a host does answer. A probe whose
+//!   counters could not be read is "unproven", and that fails;
 //! - the same uid reaches IPv4 loopback;
 //! - a uid outside the pool is refused by nothing;
 //! - after `remove` the pool uid is no longer refused.
 //!
-//! Every probe is recorded as a row, `(uid, target, outcome, expected)`; the table is
+//! Every probe is recorded as a row: uid, target, outcome, the control uid's outcome to the
+//! same target (a blocked target the control cannot reach either proves nothing by itself,
+//! which is why the counter decides), the counter rise and what was expected. The table is
 //! printed after the last probe and only then does the test fail, so one run on a Mac shows
 //! every outcome and not just the first that differs.
 //!
@@ -53,6 +61,7 @@ use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use js_mac_provision::counters::{self, Which};
 use js_mac_provision::pfctl::SystemPfctl;
 use js_mac_provision::provision::Provisioner;
 use js_mac_provision::{AnchorName, Endpoint, UidRange};
@@ -117,40 +126,37 @@ fn probe_as(program: &Path, uid: u32, addr: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
-/// What a probe may print.
+/// What a probe is expected to show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Want {
     /// The connection is made.
     Connected,
-    /// pf's `block return` answered with a reset: exactly "refused".
-    Refused,
-    /// "refused" or "timed out", for a destination that is this Mac's own address only.
-    ///
-    /// A connect to an address of this Mac leaves through `lo0`. `lo0` is set up with TCP and
-    /// UDP checksum assist (`ifnet_set_offload` in xnu `bsd/net/if_loop.c`), which
-    /// `pf_inet_hook` reads to decide whether to complete the checksum before pf runs, so
-    /// the SYN reaches pf with its TCP checksum still to be computed. (The checksum-valid
-    /// flags `lo0` sets on its own loop path come after pf's output hook and do not help.)
-    /// pf builds the reset of a `block return` only after it has checked the checksum of
-    /// the packet it answers (`pf_test_rule` calling `pf_check_proto_cksum`, xnu
-    /// `bsd/net/pf.c`), and that check fails for such a SYN: the SYN is dropped and no reset
-    /// is sent. The packet is still blocked, so "timed out" is the safe outcome there; what
-    /// must never happen is "connected". Every destination that is not this Mac's own is
-    /// `Refused`, with no such allowance.
-    RefusedOrDropped,
+    /// pf blocked it: the blocking rule's counter rose, and the client saw "refused" or
+    /// "timed out" (see the module docs for why a reset is not required).
+    Blocked(Which),
     /// Anything but "refused" (a control uid: no rule matches it).
     NotRefused,
 }
 
-impl Want {
-    fn accepts(self, got: &str) -> bool {
-        match self {
-            Want::Connected => got == "connected",
-            Want::Refused => got == "refused",
-            Want::RefusedOrDropped => got == "refused" || got == "timed out",
-            Want::NotRefused => got != "refused",
-        }
-    }
+/// The block rule's packet counter around a probe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Counter {
+    /// Not measured: the row is not a blocked one.
+    NotMeasured,
+    /// The counters could not be read, before or after.
+    Unread(String),
+    /// How many more packets the blocking rule matched after the probe.
+    Rose(u64),
+}
+
+/// What a row amounts to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    Ok,
+    Fail,
+    /// A block that cannot be told from a host that is absent, because the counter was not
+    /// read. Not a pass.
+    Unproven,
 }
 
 /// One probe: who connected where, what came of it, and what was expected.
@@ -160,18 +166,45 @@ struct Row {
     what: &'static str,
     got: String,
     want: Want,
+    /// The control uid's outcome to the same target, for a blocked row.
+    control: Option<String>,
+    counter: Counter,
 }
 
 impl Row {
-    fn ok(&self) -> bool {
-        self.want.accepts(&self.got)
+    fn verdict(&self) -> Verdict {
+        let got = self.got.as_str();
+        match self.want {
+            Want::Connected => verdict_of(got == "connected"),
+            Want::NotRefused => verdict_of(got != "refused"),
+            Want::Blocked(_) => {
+                if got != "refused" && got != "timed out" {
+                    return Verdict::Fail;
+                }
+                match self.counter {
+                    Counter::Rose(n) => verdict_of(n >= 1),
+                    Counter::NotMeasured | Counter::Unread(_) => Verdict::Unproven,
+                }
+            }
+        }
     }
+}
+
+fn verdict_of(ok: bool) -> Verdict {
+    if ok { Verdict::Ok } else { Verdict::Fail }
+}
+
+/// What the test needs to probe and to read the counters.
+struct Ctx<'a> {
+    program: &'a Path,
+    pf: &'a SystemPfctl,
+    anchor: &'a AnchorName,
 }
 
 /// Runs the probe as `uid` and records it.
 fn record(
     rows: &mut Vec<Row>,
-    program: &Path,
+    ctx: &Ctx<'_>,
     uid: u32,
     what: &'static str,
     target: &str,
@@ -181,25 +214,66 @@ fn record(
         uid,
         target: target.to_owned(),
         what,
-        got: probe_as(program, uid, target),
+        got: probe_as(ctx.program, uid, target),
         want,
+        control: None,
+        counter: Counter::NotMeasured,
     });
 }
 
-/// The rows that did not show what was expected.
-fn failed(rows: &[Row]) -> Vec<&Row> {
-    rows.iter().filter(|r| !r.ok()).collect()
+/// Runs a probe expected to be blocked: the block rule's counters are read before and after,
+/// and the control uid then probes the same target.
+fn record_blocked(
+    rows: &mut Vec<Row>,
+    ctx: &Ctx<'_>,
+    uid: u32,
+    what: &'static str,
+    target: &str,
+    which: Which,
+) {
+    let before = counters::read(ctx.pf, ctx.anchor);
+    let got = probe_as(ctx.program, uid, target);
+    let after = counters::read(ctx.pf, ctx.anchor);
+    let counter = match (before, after) {
+        (Ok(b), Ok(a)) => Counter::Rose(counters::rise(&b, &a, uid, which)),
+        (Err(e), _) | (_, Err(e)) => Counter::Unread(e.to_string()),
+    };
+    rows.push(Row {
+        uid,
+        target: target.to_owned(),
+        what,
+        got,
+        want: Want::Blocked(which),
+        control: Some(probe_as(ctx.program, CONTROL_UID, target)),
+        counter,
+    });
 }
 
-/// Every row, one line each, the ones that differ from what was expected marked `FAIL`.
+/// The rows that did not show what was expected, unproven ones included.
+fn failed(rows: &[Row]) -> Vec<&Row> {
+    rows.iter().filter(|r| r.verdict() != Verdict::Ok).collect()
+}
+
+/// Every row, one line each, the ones that differ from what was expected marked `FAIL` and
+/// the ones that could not be proven `UNPROVEN`.
 fn table(rows: &[Row]) -> String {
     let mut text = String::new();
     for r in rows {
-        let mark = if r.ok() { "ok  " } else { "FAIL" };
+        let mark = match r.verdict() {
+            Verdict::Ok => "ok",
+            Verdict::Fail => "FAIL",
+            Verdict::Unproven => "UNPROVEN",
+        };
+        let control = r.control.as_deref().unwrap_or("-");
+        let counter = match &r.counter {
+            Counter::NotMeasured => "-".to_owned(),
+            Counter::Rose(n) => format!("+{n}"),
+            Counter::Unread(why) => format!("unread ({why})"),
+        };
         // Writing to a String cannot fail.
         let _ = writeln!(
             text,
-            "{mark} uid {:<5} {:<22} {:<28} got {:<12} expected {:?}",
+            "{mark:<8} uid {:<5} {:<22} {:<24} got {:<12} control {control:<12} counter {counter:<6} expected {:?}",
             r.uid, r.target, r.what, r.got, r.want
         );
     }
@@ -253,46 +327,44 @@ fn pool_uids_reach_only_the_listed_endpoint_and_other_uids_are_not_affected() {
         .check(uids, &endpoints)
         .expect("the loaded rules are the rendered ones");
 
+    let ctx = Ctx {
+        program: &program,
+        pf: &pf,
+        anchor: &anchor,
+    };
     let mut rows = Vec::new();
 
     // The pool: the first and the last uid of the range.
     for uid in [POOL_FIRST, POOL_FIRST + POOL_COUNT - 1] {
-        record(
+        record(&mut rows, &ctx, uid, "listed", &allowed_at, Want::Connected);
+        // Reachable by construction (the control connects): the counter has a real case.
+        record_blocked(
             &mut rows,
-            &program,
-            uid,
-            "listed",
-            &allowed_at,
-            Want::Connected,
-        );
-        // This Mac's own address leaves through lo0, where pf sends no reset.
-        record(
-            &mut rows,
-            &program,
+            &ctx,
             uid,
             "own host, other port",
             &unlisted_at,
-            Want::RefusedOrDropped,
+            Which::CatchAll,
         );
-        record(
+        record_blocked(
             &mut rows,
-            &program,
+            &ctx,
             uid,
             "metadata address",
             METADATA,
-            Want::Refused,
+            Which::LinkLocal,
         );
-        record(
+        record_blocked(
             &mut rows,
-            &program,
+            &ctx,
             uid,
             "unlisted address",
             DOCUMENTATION,
-            Want::Refused,
+            Which::CatchAll,
         );
         record(
             &mut rows,
-            &program,
+            &ctx,
             uid,
             "loopback",
             &loopback_at,
@@ -303,7 +375,7 @@ fn pool_uids_reach_only_the_listed_endpoint_and_other_uids_are_not_affected() {
     for uid in [POOL_FIRST - 1, POOL_FIRST + POOL_COUNT] {
         record(
             &mut rows,
-            &program,
+            &ctx,
             uid,
             "outside the range",
             &unlisted_at,
@@ -313,11 +385,11 @@ fn pool_uids_reach_only_the_listed_endpoint_and_other_uids_are_not_affected() {
 
     // The control: a uid outside the pool is not affected. These would also hold with no
     // anchor at all, which is the point: pf changed nothing for them. The metadata and
-    // documentation addresses may time out (the Mac has no such host), but no rule
-    // answers them.
+    // documentation addresses may time out or be unreachable (the Mac has no such host),
+    // but no rule answers them.
     record(
         &mut rows,
-        &program,
+        &ctx,
         CONTROL_UID,
         "control, listed",
         &allowed_at,
@@ -325,7 +397,7 @@ fn pool_uids_reach_only_the_listed_endpoint_and_other_uids_are_not_affected() {
     );
     record(
         &mut rows,
-        &program,
+        &ctx,
         CONTROL_UID,
         "control, own host",
         &unlisted_at,
@@ -333,7 +405,7 @@ fn pool_uids_reach_only_the_listed_endpoint_and_other_uids_are_not_affected() {
     );
     record(
         &mut rows,
-        &program,
+        &ctx,
         CONTROL_UID,
         "control, metadata",
         METADATA,
@@ -341,7 +413,7 @@ fn pool_uids_reach_only_the_listed_endpoint_and_other_uids_are_not_affected() {
     );
     record(
         &mut rows,
-        &program,
+        &ctx,
         CONTROL_UID,
         "control, documentation",
         DOCUMENTATION,
@@ -352,7 +424,7 @@ fn pool_uids_reach_only_the_listed_endpoint_and_other_uids_are_not_affected() {
     provisioner.remove().expect("remove the anchor");
     record(
         &mut rows,
-        &program,
+        &ctx,
         POOL_FIRST,
         "after remove",
         &unlisted_at,
@@ -374,67 +446,115 @@ fn pool_uids_reach_only_the_listed_endpoint_and_other_uids_are_not_affected() {
 mod tests {
     use super::*;
 
-    fn row(want: Want, got: &str) -> Row {
+    fn row(want: Want, got: &str, counter: Counter) -> Row {
         Row {
             uid: 4100,
             target: "192.0.2.1:80".to_owned(),
             what: "a probe",
             got: got.to_owned(),
             want,
+            control: Some("host unreachable".to_owned()),
+            counter,
+        }
+    }
+
+    const BLOCKED: Want = Want::Blocked(Which::CatchAll);
+
+    #[test]
+    fn a_block_needs_the_counter_to_rise() {
+        assert_eq!(
+            row(BLOCKED, "timed out", Counter::Rose(1)).verdict(),
+            Verdict::Ok
+        );
+        assert_eq!(
+            row(BLOCKED, "refused", Counter::Rose(3)).verdict(),
+            Verdict::Ok
+        );
+        // The error alone proves nothing: pf matched no packet.
+        assert_eq!(
+            row(BLOCKED, "timed out", Counter::Rose(0)).verdict(),
+            Verdict::Fail
+        );
+        assert_eq!(
+            row(BLOCKED, "refused", Counter::Rose(0)).verdict(),
+            Verdict::Fail
+        );
+    }
+
+    #[test]
+    fn a_block_is_never_a_connection_or_another_error() {
+        for got in ["connected", "failed: host unreachable", "failed: other"] {
+            assert_eq!(
+                row(BLOCKED, got, Counter::Rose(5)).verdict(),
+                Verdict::Fail,
+                "{got}"
+            );
         }
     }
 
     #[test]
-    fn refused_is_exactly_refused() {
-        assert!(Want::Refused.accepts("refused"));
-        assert!(!Want::Refused.accepts("timed out"));
-        assert!(!Want::Refused.accepts("connected"));
-        assert!(!Want::Refused.accepts("failed: host unreachable"));
-    }
-
-    #[test]
-    fn the_own_host_allowance_is_a_drop_and_never_a_connection() {
-        assert!(Want::RefusedOrDropped.accepts("refused"));
-        assert!(Want::RefusedOrDropped.accepts("timed out"));
-        assert!(!Want::RefusedOrDropped.accepts("connected"));
-        assert!(!Want::RefusedOrDropped.accepts("failed: host unreachable"));
+    fn a_block_whose_counter_was_not_read_is_unproven_not_passed() {
+        let unread = Counter::Unread("pfctl failed".to_owned());
+        assert_eq!(
+            row(BLOCKED, "timed out", unread.clone()).verdict(),
+            Verdict::Unproven
+        );
+        assert_eq!(
+            row(BLOCKED, "timed out", Counter::NotMeasured).verdict(),
+            Verdict::Unproven
+        );
+        // A wrong outcome is a failure whether or not the counter was read.
+        assert_eq!(row(BLOCKED, "connected", unread).verdict(), Verdict::Fail);
     }
 
     #[test]
     fn connected_and_not_refused_mean_what_they_say() {
-        assert!(Want::Connected.accepts("connected"));
-        assert!(!Want::Connected.accepts("refused"));
-        assert!(!Want::Connected.accepts("timed out"));
-        assert!(Want::NotRefused.accepts("timed out"));
-        assert!(Want::NotRefused.accepts("connected"));
-        assert!(!Want::NotRefused.accepts("refused"));
+        let n = Counter::NotMeasured;
+        assert_eq!(
+            row(Want::Connected, "connected", n.clone()).verdict(),
+            Verdict::Ok
+        );
+        assert_eq!(
+            row(Want::Connected, "timed out", n.clone()).verdict(),
+            Verdict::Fail
+        );
+        assert_eq!(
+            row(Want::NotRefused, "timed out", n.clone()).verdict(),
+            Verdict::Ok
+        );
+        assert_eq!(row(Want::NotRefused, "refused", n).verdict(), Verdict::Fail);
     }
 
     #[test]
-    fn the_table_lists_every_row_and_marks_the_ones_that_differ() {
+    fn the_table_lists_every_row_with_its_control_and_counter() {
         let rows = vec![
-            row(Want::Refused, "refused"),
-            row(Want::Refused, "timed out"),
-            row(Want::Connected, "connected"),
+            row(BLOCKED, "timed out", Counter::Rose(2)),
+            row(BLOCKED, "timed out", Counter::Rose(0)),
+            row(BLOCKED, "timed out", Counter::Unread("no pfctl".to_owned())),
+            row(Want::Connected, "connected", Counter::NotMeasured),
         ];
         let text = table(&rows);
-        assert_eq!(text.lines().count(), 3);
-        assert_eq!(text.matches("FAIL").count(), 1);
-        assert!(text.lines().nth(1).unwrap().starts_with("FAIL"));
-        assert!(!text.contains("expected RefusedOrDropped"));
-        assert!(text.contains("192.0.2.1:80"));
+        assert_eq!(text.lines().count(), 4);
+        let mut lines = text.lines();
+        let first = lines.next().unwrap();
+        assert!(first.starts_with("ok "));
+        assert!(first.contains("control host unreachable"));
+        assert!(first.contains("counter +2"));
+        assert!(lines.next().unwrap().starts_with("FAIL"));
+        let third = lines.next().unwrap();
+        assert!(third.starts_with("UNPROVEN"));
+        assert!(third.contains("unread (no pfctl)"));
+        assert!(lines.next().unwrap().contains("counter -"));
     }
 
     #[test]
-    fn failed_keeps_only_the_rows_that_differ() {
+    fn failed_keeps_every_row_that_is_not_ok() {
         let rows = vec![
-            row(Want::Refused, "refused"),
-            row(Want::Refused, "timed out"),
-            row(Want::RefusedOrDropped, "connected"),
+            row(BLOCKED, "timed out", Counter::Rose(1)),
+            row(BLOCKED, "timed out", Counter::Rose(0)),
+            row(BLOCKED, "timed out", Counter::NotMeasured),
+            row(Want::Connected, "refused", Counter::NotMeasured),
         ];
-        let bad = failed(&rows);
-        assert_eq!(bad.len(), 2);
-        assert_eq!(bad[0].got, "timed out");
-        assert_eq!(bad[1].got, "connected");
+        assert_eq!(failed(&rows).len(), 3);
     }
 }

@@ -1,0 +1,54 @@
+@0 block return out quick inet proto tcp from any to 169.254.0.0/16 user = 4100
+  [ Evaluations: 4         Packets: 3         Bytes: 180         States: 0     ]
+  [ Inserted: uid 0 pid 51 State Creations: 0 ]
+@1 block return out quick inet proto tcp from any to 169.254.0.0/16 user = 4101
+  [ Evaluations: 2         Packets: 0         Bytes: 0           States: 0     ]
+  [ Inserted: uid 0 pid 51 State Creations: 0 ]
+@2 block return out quick inet proto udp from any to 169.254.0.0/16 user = 4100
+  [ Evaluations: 2         Packets: 0         Bytes: 0           States: 0     ]
+  [ Inserted: uid 0 pid 51 State Creations: 0 ]
+@3 block return out quick inet proto udp from any to 169.254.0.0/16 user = 4101
+  [ Evaluations: 2         Packets: 0         Bytes: 0           States: 0     ]
+  [ Inserted: uid 0 pid 51 State Creations: 0 ]
+@4 pass out quick on lo0 inet proto tcp from 127.0.0.0/8 to 127.0.0.0/8 user = 4100 flags S/SA keep state
+  [ Evaluations: 5         Packets: 5         Bytes: 300         States: 2     ]
+  [ Inserted: uid 0 pid 51 State Creations: 2 ]
+@5 pass out quick on lo0 inet proto tcp from 127.0.0.0/8 to 127.0.0.0/8 user = 4101 flags S/SA keep state
+  [ Evaluations: 5         Packets: 5         Bytes: 300         States: 2     ]
+  [ Inserted: uid 0 pid 51 State Creations: 2 ]
+@6 pass out quick on lo0 inet proto udp from 127.0.0.0/8 to 127.0.0.0/8 user = 4100 flags S/SA keep state
+  [ Evaluations: 5         Packets: 5         Bytes: 300         States: 2     ]
+  [ Inserted: uid 0 pid 51 State Creations: 2 ]
+@7 pass out quick on lo0 inet proto udp from 127.0.0.0/8 to 127.0.0.0/8 user = 4101 flags S/SA keep state
+  [ Evaluations: 5         Packets: 5         Bytes: 300         States: 2     ]
+  [ Inserted: uid 0 pid 51 State Creations: 2 ]
+@8 pass out quick inet proto tcp from any to 192.0.2.10 port = 443 user = 4100 flags S/SA keep state
+  [ Evaluations: 4         Packets: 4         Bytes: 240         States: 1     ]
+  [ Inserted: uid 0 pid 51 State Creations: 1 ]
+@9 pass out quick inet proto tcp from any to 192.0.2.10 port = 443 user = 4101 flags S/SA keep state
+  [ Evaluations: 4         Packets: 4         Bytes: 240         States: 1     ]
+  [ Inserted: uid 0 pid 51 State Creations: 1 ]
+@10 block return out quick inet6 proto tcp all user = 4100
+  [ Evaluations: 0         Packets: 0         Bytes: 0           States: 0     ]
+  [ Inserted: uid 0 pid 51 State Creations: 0 ]
+@11 block return out quick inet6 proto tcp all user = 4101
+  [ Evaluations: 0         Packets: 0         Bytes: 0           States: 0     ]
+  [ Inserted: uid 0 pid 51 State Creations: 0 ]
+@12 block return out quick inet6 proto udp all user = 4100
+  [ Evaluations: 0         Packets: 0         Bytes: 0           States: 0     ]
+  [ Inserted: uid 0 pid 51 State Creations: 0 ]
+@13 block return out quick inet6 proto udp all user = 4101
+  [ Evaluations: 0         Packets: 0         Bytes: 0           States: 0     ]
+  [ Inserted: uid 0 pid 51 State Creations: 0 ]
+@14 block return out quick proto tcp all user = 4100
+  [ Evaluations: 1         Packets: 0         Bytes: 0           States: 0     ]
+  [ Inserted: uid 0 pid 51 State Creations: 0 ]
+@15 block return out quick proto tcp all user = 4101
+  [ Evaluations: 3         Packets: 2         Bytes: 120         States: 0     ]
+  [ Inserted: uid 0 pid 51 State Creations: 0 ]
+@16 block return out quick proto udp all user = 4100
+  [ Evaluations: 1         Packets: 0         Bytes: 0           States: 0     ]
+  [ Inserted: uid 0 pid 51 State Creations: 0 ]
+@17 block return out quick proto udp all user = 4101
+  [ Evaluations: 1         Packets: 0         Bytes: 0           States: 0     ]
+  [ Inserted: uid 0 pid 51 State Creations: 0 ]

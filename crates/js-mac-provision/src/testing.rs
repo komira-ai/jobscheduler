@@ -17,6 +17,8 @@ pub(crate) struct Fake {
     pub main: RefCell<String>,
     /// What the anchor prints; `None` echoes the rules file it was loaded from.
     pub loaded: RefCell<Option<String>>,
+    /// What `-a <anchor> -s rules -vv` prints.
+    pub counters: RefCell<String>,
     /// Fails the call with this index, by not starting (`true`) or by exit code 1.
     pub fail: Option<(usize, bool)>,
     /// Fails every `-X`.
@@ -40,6 +42,7 @@ impl Fake {
                     .to_owned(),
             ),
             loaded: RefCell::default(),
+            counters: RefCell::default(),
             fail: None,
             fail_release: false,
             no_token: false,
@@ -108,6 +111,7 @@ impl Pfctl for Fake {
             ["-s", "info"] if self.enabled.get() => ok("Status: Enabled for 0 days 00:01:02\n", ""),
             ["-s", "info"] => ok("Status: Disabled\n", ""),
             ["-sr"] => ok(&self.main.borrow(), ""),
+            ["-a", _, "-s", "rules", "-vv"] => ok(&self.counters.borrow(), ""),
             ["-a", _, "-sr"] => ok(
                 &self
                     .loaded
