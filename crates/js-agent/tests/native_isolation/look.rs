@@ -24,9 +24,12 @@
 //! when the product profile refused the seed with a SANDBOX denial (the job could not create
 //! the state, so nothing can carry over). The denial must carry the SANDBOX's own signature:
 //! the kernel's `Sandbox: <proc>(<pid>) deny(` line in the failure, or a bare `EPERM`/`EACCES` that
-//! the unified log (read from the start of run A) confirms as that seed's by such a line with
-//! its token, or with its operation from a process the job ran, bound by PID only (the pids the
-//! runs print: the test process, each tool as a direct child, the process left running). A bare `EPERM` or `EACCES` alone is an ordinary permission failure (a
+//! the unified log (read from the start of run A) confirms as that seed's by such a line whose
+//! pid is the process that tried the seed (the tool that failed, its pid in the failure, or else
+//! a pid the runs print: the test process, each tool as a direct child, the process left
+//! running), and which carries the seed's token or the kind's operation. Neither a token nor an
+//! operation counts from any other pid, and a tool's operation (a `launchd` line, say) never
+//! counts when the job's own write failed and no tool ran. A bare `EPERM` or `EACCES` alone is an ordinary permission failure (a
 //! home with the wrong owner, a tool that is not executable) and proves nothing, like any
 //! other failure (`ENOSPC`, a missing tool, a crash). The denied row is recorded as refused by
 //! the profile. The minimum set (a file, a process, a keychain item, a launchd agent, shared
@@ -291,9 +294,15 @@ pub fn failed_tool_pid(text: &str) -> Option<u32> {
 }
 
 /// Whether the unified log (`log show` lines of the sandbox) holds a denial that is this
-/// seed's: a sandbox `deny(` line with the token in it (tokens are unique), or one for the
-/// operation of the kind from a process the job ran (`job`). The operation alone is not
-/// enough: other sandboxed processes log such lines all the time. `text` is the seed's failure.
+/// seed's. EVERY confirming line is a sandbox `deny(` line whose pid is the process that tried
+/// the seed: the tool named in the failure `text` when a tool failed, or else a process the
+/// job ran (`job`). Bound so, the line confirms by the token in it (tokens are unique), or by
+/// the operation of the kind. A token or an operation alone is never enough: another run, a
+/// retry or a bystander logs such lines too.
+///
+/// The operation of a keychain item, a defaults key and a launch agent is a tool's (`security`,
+/// `defaults`, `launchctl`): when no tool is named, the job's own file write failed (the
+/// agent's plist, say), and only a line with the token, from a pid of the job, is that seed's.
 pub fn log_confirms_denial(
     kind: Kind,
     token: &Token,
@@ -313,13 +322,21 @@ pub fn log_confirms_denial(
         Kind::PosixSem => &["ipc-posix-sem"],
         _ => &[],
     };
-    let _ = text;
+    let tool = failed_tool_pid(text);
+    let tool_operation = matches!(
+        kind,
+        Kind::Keychain | Kind::Defaults | Kind::LaunchAgent | Kind::GuiLaunchAgent
+    );
+    let markers = match tool.is_none() && tool_operation {
+        true => &[][..],
+        false => markers,
+    };
+    let tried = |pid: u32| job.owns(pid) && tool.is_none_or(|tool| pid == tool);
     log.lines()
         .filter(|line| line.contains("Sandbox") && line.contains("deny("))
         .any(|line| {
-            line.contains(token.as_str())
-                || (markers.iter().any(|m| line.contains(m))
-                    && parse_sandbox_line(line).is_some_and(|(_, pid)| job.owns(pid)))
+            parse_sandbox_line(line).is_some_and(|(_, pid)| tried(pid))
+                && (line.contains(token.as_str()) || markers.iter().any(|m| line.contains(m)))
         })
 }
 
