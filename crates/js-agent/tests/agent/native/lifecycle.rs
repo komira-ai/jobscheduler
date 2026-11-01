@@ -18,7 +18,7 @@ use super::{TERM, native};
 use crate::lifecycle::fake::ManualClock;
 use crate::lifecycle::{cleanup, config_in, names, reply, reply_json};
 use crate::support::Scratch;
-use js_agent::native::NativeRuntime;
+use js_agent::native::{NativeConfig, NativeRuntime};
 
 /// A lifecycle over a native runtime over a fake helper.
 pub(super) struct Native {
@@ -43,12 +43,41 @@ impl Native {
     /// A lifecycle whose runtime holds the bundle store `bundles` names, and which judges
     /// starts that pin a bundle by the admission it names.
     pub(super) fn with(name: &str, bundles: Option<(Arc<Placer>, Admission)>) -> Self {
+        Self::built(name, bundles, |_| {})
+    }
+
+    /// As [`Native::with`], with the runtime's configuration changed by `adjust`.
+    pub(super) fn built(
+        name: &str,
+        bundles: Option<(Arc<Placer>, Admission)>,
+        adjust: impl FnOnce(&mut NativeConfig),
+    ) -> Self {
+        Self::assembled(name, bundles, adjust, true)
+    }
+
+    /// As [`Native::built`], over a runtime opened without the refusal of a cap of `on` that
+    /// has no check.
+    pub(super) fn ungated(name: &str, adjust: impl FnOnce(&mut NativeConfig)) -> Self {
+        Self::assembled(name, None, adjust, false)
+    }
+
+    fn assembled(
+        name: &str,
+        bundles: Option<(Arc<Placer>, Admission)>,
+        adjust: impl FnOnce(&mut NativeConfig),
+        gated: bool,
+    ) -> Self {
         let dir = Scratch::new(&format!("native-life-{name}"));
         let mut config = config_in(&dir, false);
         let fake = FakeHelper::start(&dir);
         let mut runtime_config = super::config(&fake);
         runtime_config.read_denies = vec![canonical(&dir, "state"), canonical(&dir, "scratch")];
-        let mut runtime = NativeRuntime::open(fake.client(), runtime_config, TERM).unwrap();
+        adjust(&mut runtime_config);
+        let opened = match gated {
+            true => NativeRuntime::open(fake.client(), runtime_config, TERM),
+            false => NativeRuntime::open_ungated(fake.client(), runtime_config, TERM),
+        };
+        let mut runtime = opened.unwrap();
         if let Some((store, admission)) = bundles {
             config.bundle = Some(admission);
             runtime = runtime.with_bundles(store);

@@ -668,13 +668,14 @@ fn the_agent_refuses_runtime_flags_that_cannot_work() {
     }
 }
 
-/// A value that parses for the `--native-*` flag `name`: the two numbers and the level are
+/// A value that parses for the `--native-*` flag `name`: the numbers and the level are
 /// given their own, every other flag takes a path. A new flag of another type fails the parse
 /// here, so whoever adds it says what it takes.
 fn native_value(name: &str) -> &'static str {
     match name {
         "native-network" => "off",
         "native-max-file-mib" | "native-max-processes" => "1",
+        "native-pf-uid-start" | "native-pf-uid-count" => "600",
         _ => "/native",
     }
 }

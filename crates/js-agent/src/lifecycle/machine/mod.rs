@@ -442,12 +442,14 @@ impl Lifecycle {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|why| (refusal::INVALID_MOUNT, why.to_string()))?;
         // Last, so that a job refused for another reason costs no call. Before every
-        // contained create: the firewall can change between two jobs.
-        if spec.isolation == Isolation::Contained {
-            self.runtime
-                .check_egress()
-                .map_err(|why| (detail::EGRESS_UNCHECKED, why.to_string()))?;
-        }
+        // contained create: the firewall can change between two jobs. A native job has its
+        // own check (a Mac pool is limited by a packet filter, not a container network).
+        let egress = match &spec.native {
+            Some(native) => self.runtime.check_native_egress(native),
+            None if spec.isolation == Isolation::Contained => self.runtime.check_egress(),
+            None => Ok(()),
+        };
+        egress.map_err(|why| (detail::EGRESS_UNCHECKED, why.to_string()))?;
         Ok(mounts)
     }
 

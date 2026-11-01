@@ -13,6 +13,9 @@ mod lifecycle;
 mod mac;
 #[cfg(target_os = "macos")]
 mod mac_agent;
+#[cfg(target_os = "macos")]
+mod mac_pf;
+mod pf_gate;
 mod runtime;
 mod settings;
 mod worker;
@@ -60,6 +63,7 @@ pub fn config(fake: &FakeHelper) -> NativeConfig {
             .join("native-leases"),
         max_file_bytes: 1 << 30,
         max_processes: 512,
+        egress: None,
     }
 }
 

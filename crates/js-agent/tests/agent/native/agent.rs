@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use clap::Parser as _;
 use js_agent::lifecycle::Local;
-use js_agent::native::{self, NativeFlags, NativeSettings};
+use js_agent::native::{self, NativeFlags, NativeSettings, PfFlags};
 use js_agent::{Backend, Cli, Machine, RuntimeBuild, System};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -193,6 +193,7 @@ fn the_system_machine_opens_the_native_runtime() {
             deny_read: &[],
             max_file_mib: None,
             max_processes: None,
+            pf: PfFlags::default(),
         };
         let settings = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
             .unwrap()
@@ -299,6 +300,7 @@ fn the_sandbox_self_test_fails_closed() {
         deny_read: &[],
         max_file_mib: None,
         max_processes: None,
+        pf: PfFlags::default(),
     };
     let settings = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
         .unwrap()
@@ -481,6 +483,7 @@ fn the_system_machine_gives_the_store_to_the_native_runtime() {
         deny_read: &[],
         max_file_mib: None,
         max_processes: None,
+        pf: PfFlags::default(),
     };
     let plain = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
         .unwrap()
@@ -510,4 +513,42 @@ fn the_system_machine_gives_the_store_to_the_native_runtime() {
         })
         .collect();
     assert_eq!(codes, [Some("bundle-unsupported"), None]);
+}
+
+/// Asserts that an agent whose cap is `on` ends with status 2 before the hello when it is
+/// given no pool uids (the flag named), and when the anchor is not enforced (here the
+/// `pfctl` it is told is not there), naming `--native-network` and the failed call; and that
+/// the pf flags are accepted by the command line of an agent that is told them. It catches
+/// an agent that says hello with the network on and nothing limiting it.
+#[test]
+fn an_agent_whose_cap_is_on_does_not_start_while_the_anchor_is_not_enforced() {
+    let dir = Scratch::new("native-agent-pf");
+    let fake = FakeHelper::start(&dir);
+    let mut extra = native_flags(&dir, &fake);
+    extra.extend(["--native-network".to_owned(), "on".to_owned()]);
+    let (ran, hello) = hello_on(&mac_host(), &extra, welcome(1));
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(ran.err.contains("--native-pf-uid-start"), "{}", ran.err);
+    assert_eq!(hello, Value::Null);
+
+    let pool = [
+        "--native-pf-uid-start",
+        "600",
+        "--native-pf-uid-count",
+        "10",
+        "--native-pf-endpoint",
+        "192.0.2.10:443",
+        "--native-pf-anchor",
+        "com.apple/pool",
+        "--native-pf-state-dir",
+        "/nonexistent/pf-state",
+        "--native-pfctl",
+        "/nonexistent/pfctl",
+    ];
+    extra.extend(pool.iter().map(|flag| (*flag).to_owned()));
+    let (ran, hello) = hello_on(&mac_host(), &extra, welcome(1));
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(ran.err.contains("--native-network"), "{}", ran.err);
+    assert!(ran.err.contains("could not run pfctl"), "{}", ran.err);
+    assert_eq!(hello, Value::Null);
 }
