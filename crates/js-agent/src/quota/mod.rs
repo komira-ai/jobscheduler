@@ -279,8 +279,16 @@ pub fn project_of(dir: &std::fs::File) -> io::Result<Option<u32>> {
 fn projid_of(read: io::Result<sys::Fsx>) -> io::Result<Option<u32>> {
     match read {
         Ok(attr) => Ok(Some(attr.projid)),
-        // FOR_A_RED_RUN: the old, fail-open reading.
-        Err(_) => Ok(Some(0)),
+        // The kernel does not know the call: this file system keeps no project ids.
+        Err(why)
+            if matches!(
+                why.raw_os_error(),
+                Some(libc::ENOTTY | libc::EOPNOTSUPP | libc::ENOSYS)
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(why) => Err(why),
     }
 }
 
