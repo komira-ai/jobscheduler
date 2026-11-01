@@ -578,10 +578,12 @@ impl Runs {
             Some(run) if run.host != *host => Ack::Mismatch,
             Some(run) => run.take(result, book),
             None => {
-                let booked = book.booked();
-                let holder = booked
-                    .iter()
-                    .find(|(_, lease)| lease.to_string() == result.lease_id);
+                let booked = book.leases();
+                let holder = booked.iter().find(|(_, leases)| {
+                    leases
+                        .iter()
+                        .any(|lease| lease.to_string() == result.lease_id)
+                });
                 match holder {
                     Some((holder, _)) if holder == host => Ack::Stale,
                     Some(_) => Ack::Mismatch,
