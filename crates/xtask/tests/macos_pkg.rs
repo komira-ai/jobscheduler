@@ -646,6 +646,14 @@ fn the_declaration_is_one_the_hook_takes_for_the_unit_the_plist_labels() {
     assert!(declaration.timeouts.prepare >= parsed.drain_wait_secs + PREPARE_MARGIN_SECS);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn the_declaration_names_the_native_runtime_for_the_unit_the_plist_labels() {
+    use js_agent::update_hook::Declaration;
+    let declaration = Declaration::parse(&read(&format!("{DIR}/updater.toml"))).unwrap();
+    assert_eq!(declaration.runtime, "native");
+}
+
 // The hook is built on Linux only, and so is the test of what it takes.
 #[cfg(target_os = "linux")]
 #[test]

@@ -98,6 +98,8 @@ pub struct Declaration {
     pub write_paths: Vec<PathBuf>,
     /// The bound on each step.
     pub timeouts: Timeouts,
+    /// The runtime the unit's agent must have.
+    pub runtime: String,
 }
 
 impl Declaration {
@@ -121,6 +123,7 @@ impl Declaration {
             units: wire.hook.units,
             write_paths: wire.hook.write_paths,
             timeouts: wire.hook.timeout_secs,
+            runtime: "crun".to_owned(),
         };
         let state_dir = &declaration.state_dir;
         let paths = &declaration.write_paths;
