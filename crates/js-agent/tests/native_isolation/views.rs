@@ -116,6 +116,7 @@ m  131073 0x00000000 --rw-rw-rw-    alice    staff
 Semaphores:
 T     ID     KEY        MODE       OWNER    GROUP
 s  196608 0x01234567 --ra-------      700      700
+s  196609 0x0000beef --ra-ra-ra-     root    wheel
 ";
 
     /// Asserts that the three tables of `ipcs -a` are read with their kinds, ids, keys and
@@ -146,7 +147,7 @@ s  196608 0x01234567 --ra-------      700      700
                 IpcKind::Semaphore
             ]
         );
-        assert_eq!(objects[5].id, 196_608);
+        assert_eq!(objects[5].id, 196_609);
         assert!(parse_ipcs("").is_empty());
         assert!(parse_ipcs("Message Queues:\nT ID KEY MODE OWNER GROUP\n").is_empty());
     }
