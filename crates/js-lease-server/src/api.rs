@@ -25,6 +25,7 @@ use crate::agents::Agents;
 use crate::config::{Token, is_private_address};
 use crate::hosts::HostList;
 use crate::join_api;
+use crate::reservations::{self, Handed};
 use crate::run_api;
 use crate::scaler::Scaler;
 use crate::status::{self, Status};
@@ -61,10 +62,16 @@ pub(crate) struct Shared {
     ticking: AtomicBool,
     /// The whole-node counts the last tick logged.
     counted: std::sync::Mutex<WholeCounts>,
+    /// The reservation ledger the last tick handed the table.
+    handed: Handed,
 }
 
 impl Shared {
     pub(crate) fn new(table: Table, token: Token, agents: Option<Arc<Agents>>) -> Self {
+        if let Some(agents) = &agents {
+            reservations::restore(&agents.registry, &table);
+        }
+        let handed = Handed::opened_with(&table);
         Self {
             timings: table.timings(),
             table: Mutex::new(table),
@@ -75,6 +82,7 @@ impl Shared {
             save_errors: AtomicU64::new(0),
             ticking: AtomicBool::new(true),
             counted: std::sync::Mutex::new(WholeCounts::default()),
+            handed,
         }
     }
 
@@ -154,11 +162,19 @@ impl Shared {
         self.save_errors.load(Ordering::SeqCst)
     }
 
-    /// Ticks the table, then advances the agent registry (when the server has one) so its
-    /// reservations and prepare deadlines act on this tick, logs what changed and counts
-    /// a failed write. The lock is held for the table call alone.
+    /// Hands the table the registry's reservation ledger when it changed, ticks the table
+    /// (which writes both), then advances the agent registry (when the server has one) so
+    /// its reservations and prepare deadlines act on this tick, logs what changed and
+    /// counts a failed write. The table's lock is held for those two steps alone.
     pub(crate) async fn tick(&self) -> TickReport {
-        let report = self.table.lock().await.tick();
+        let report = {
+            let mut table = self.table.lock().await;
+            if let Some(agents) = &self.agents {
+                // The registry's reservations are written with the leases of this tick.
+                self.handed.hand_over(&agents.registry, &mut table);
+            }
+            table.tick()
+        };
         let counts = match &self.agents {
             Some(agents) => {
                 // The marks are brought up to this tick, so the counts and the next
@@ -431,6 +447,8 @@ async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
 
 #[cfg(test)]
 mod status_gate_tests;
+#[cfg(test)]
+mod whole_restart_tests;
 #[cfg(test)]
 mod whole_view_tests;
 

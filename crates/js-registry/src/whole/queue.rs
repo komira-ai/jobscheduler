@@ -2,10 +2,21 @@
 //! and kept in the order they were first seen (design `whole-node.md` sections 2 and 3).
 //!
 //! It is the smallest queue the registry needs until a scheduler owns queue order, and
-//! it keeps nothing but the order and two instants per request. It is in memory only: a
-//! consumer presents the same request id again after a restart, as it presents it on
-//! every poll. A poll is how the list knows the consumer is alive, so an entry that is
-//! not presented again within `regain_grace` is dropped, and a cancel removes it at once.
+//! it keeps nothing but the order and two instants per request. A poll is how the list
+//! knows the consumer is alive, so an entry that is not presented again within
+//! `regain_grace` is dropped, and a cancel removes it at once.
+//!
+//! # Across a restart
+//!
+//! The order and the first-seen instant are kept in the lease file (the registry's
+//! reservation ledger) and put back at a start by [`WaitList::restore`], in order. A
+//! restored entry has its place and its instant but not what the request asks for, which
+//! the file does not hold: it waits, counted in the order and the length, until the
+//! consumer presents the same request id again, as it presents it on every poll, and the
+//! presentation fills the request in without moving the entry. Until then the pass skips
+//! it (it has nothing to size a reservation by) and its mark stands. One not presented
+//! within `regain_grace` of the start is dropped like any other, and
+//! [`WaitList::expire`] counts it.
 //!
 //! # The order is advisory
 //!
@@ -34,8 +45,9 @@ pub const MAX_WAITING_REQUESTS: usize = 1024;
 struct Entry {
     id: RequestId,
     /// What the request asks for, as first presented: the reservation reads its fit and
-    /// its wall time from here.
-    request: Request,
+    /// its wall time from here. `None` for an entry restored from the ledger that the
+    /// consumer has not presented since.
+    request: Option<Request>,
     /// The first presentation: how long the request has waited counts from here.
     since: Timestamp,
     /// The last time the consumer presented the request.
@@ -66,10 +78,31 @@ pub(crate) struct WaitList {
 }
 
 impl WaitList {
-    /// Drops every entry not presented for `grace_ms` or more at `now`.
-    pub(crate) fn expire(&mut self, now: Timestamp, grace_ms: u64) {
-        self.entries
-            .retain(|entry| now.millis().saturating_sub(entry.seen.millis()) < grace_ms);
+    /// Drops every entry not presented for `grace_ms` or more at `now`; how many of them
+    /// were restored entries the consumer never presented again.
+    pub(crate) fn expire(&mut self, now: Timestamp, grace_ms: u64) -> u64 {
+        let mut unclaimed = 0;
+        self.entries.retain(|entry| {
+            let kept = now.millis().saturating_sub(entry.seen.millis()) < grace_ms;
+            let never_presented = [!kept, entry.request.is_none()].into_iter().all(|ok| ok);
+            unclaimed += u64::from(never_presented);
+            kept
+        });
+        unclaimed
+    }
+
+    /// Puts back, at the back, the entry of request `id` first presented at `since`, as
+    /// if it had been seen at `now`; its request is filled in by its next presentation.
+    /// Called in the order the entries are to wait in, once per id, at a start. The size
+    /// cap is not applied: the ledger was written from a list that held it.
+    pub(crate) fn restore(&mut self, id: RequestId, since: Timestamp, now: Timestamp) {
+        self.entries.push(Entry {
+            id,
+            request: None,
+            since,
+            seen: now,
+            unservable_since: None,
+        });
     }
 
     /// The consumer presents request `id` at `now`. `capable` says whether some host
@@ -97,7 +130,7 @@ impl WaitList {
                 (true, true) => {
                     self.entries.push(Entry {
                         id: id.clone(),
-                        request: request.clone(),
+                        request: Some(request.clone()),
                         since: now,
                         seen: now,
                         unservable_since: None,
@@ -109,6 +142,7 @@ impl WaitList {
         };
         let entry = &mut self.entries[at];
         entry.seen = now;
+        entry.request.get_or_insert_with(|| request.clone());
         entry.unservable_since = match capable {
             true => None,
             false => Some(entry.unservable_since.unwrap_or(now)),
@@ -132,11 +166,23 @@ impl WaitList {
         self.entries.len() < before
     }
 
-    /// The waiting requests, front first: the id, what it asks for and when it was first
-    /// presented.
+    /// The waiting requests the consumer has presented, front first: the id, what it asks
+    /// for and when it was first presented. A restored entry not presented since is not
+    /// among them.
     pub(crate) fn waiting(&self) -> impl Iterator<Item = (&RequestId, &Request, Timestamp)> {
         let waiting = self.entries.iter();
-        waiting.map(|entry| (&entry.id, &entry.request, entry.since))
+        waiting.filter_map(|entry| Some((&entry.id, entry.request.as_ref()?, entry.since)))
+    }
+
+    /// Every entry, front first, restored or presented: the id and when it was first
+    /// presented. The place of an entry is its index here.
+    pub(crate) fn queue(&self) -> impl Iterator<Item = (&RequestId, Timestamp)> {
+        self.entries.iter().map(|entry| (&entry.id, entry.since))
+    }
+
+    /// How many requests wait, restored ones included.
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
     }
 
     /// Whether no request is waiting.

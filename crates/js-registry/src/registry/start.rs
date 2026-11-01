@@ -65,6 +65,7 @@ impl Registry {
             marks,
             waiting,
             requests,
+            dropped,
             ..
         } = state;
         let pass = Pass {
@@ -72,7 +73,7 @@ impl Registry {
             settings,
             hosts,
         };
-        reserve::advance(marks, waiting, requests, pass);
+        *dropped += reserve::advance(marks, waiting, requests, pass);
     }
 
     /// Books `spec`'s lease as [`js_pool_static::HostBook`] does. A `Whole` class is

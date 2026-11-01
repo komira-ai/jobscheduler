@@ -357,3 +357,64 @@ async fn a_gpu_host_lease_on_a_registered_host_is_held_at_once() {
     let reply = beat_preparing(&h, &me).await;
     assert_eq!(reply.json().get("exclusive"), None, "{}", reply.body);
 }
+
+/// Asserts the whole path of a resumed reservation over HTTP: a lease file whose ledger
+/// holds a reservation of `r9` on `burst-1`, due thirty seconds after the boot's clock
+/// reading, is resumed with `--boot resume`, and once the agent says hello the host
+/// lists as reserved for `r9`, with its deadline raised to the boot plus
+/// `RESERVATION_BOOT_GRACE` (not the stored deadline, which is earlier, and not the
+/// stored plus the grace). It catches a server that opens the table and never gives the
+/// ledger to the registry, and a restart grace that never reaches the table's settings.
+#[tokio::test]
+async fn a_resumed_lease_file_marks_the_host_with_the_deadline_floored() {
+    let scratch = Scratch::new("whole_resume_rows");
+    let args = replace(args(&scratch), "--boot", "resume");
+    let text = format!(
+        "version = 1\nterm = 3\nnext_sequence = 1\nlease_count = 0\nreservation_count = 1\n\n\
+         [[reservation]]\nrequest_id = \"r9\"\nhost = \"burst-1\"\nreserved_at_ms = {T0}\n\
+         deadline_ms = {}\nqueue_place = 0\nqueued_since_ms = {T0}\ngive_ups = 1\n",
+        T0 + 30_000
+    );
+    std::fs::write(scratch.state(), text).unwrap();
+    let h = Harness::with(scratch, args, None).await;
+    join(&h, "burst-1").await;
+
+    let listing = crate::agents_support::hosts(&h).await;
+    let host = crate::agents_support::entry(&listing, "burst-1");
+    assert_eq!(host["mark"], "reserved", "{host}");
+    assert_eq!(host["reserved_for"], "r9", "{host}");
+    let floor = T0 + js_lease_server::RESERVATION_BOOT_GRACE.as_secs() * 1000;
+    assert_eq!(host["drain_deadline_ms"], floor, "{host}");
+}
+
+/// Asserts what the reservation ledger leaves out. A request that came over HTTP carries
+/// no request id, so the registry keeps its failed prepare under its content, and a
+/// record under content is not written to the lease file: after the silent agent has
+/// failed the prepare, the registry holds the record and the ledger is empty. It catches
+/// a ledger that tries to name a request with no id.
+#[tokio::test]
+async fn a_failed_prepare_of_a_request_without_an_id_is_not_in_the_ledger() {
+    let h = start_with(
+        "whole_ledger_content",
+        "prepare_timeout = \"60s\"\ngrace = \"2h\"",
+    )
+    .await;
+    let me = join(&h, "burst-1").await;
+    let id = ask(&h).await;
+    assert_eq!(beat(&h, &me).await.json()["exclusive"], json!(id));
+    h.clock.advance(secs(60));
+    h.ticks.step().await;
+    assert_eq!(
+        record(&h)
+            .expect("the failure is recorded")
+            .prepare_failures,
+        1
+    );
+    assert!(
+        h.running
+            .registry()
+            .unwrap()
+            .reservation_ledger()
+            .is_empty()
+    );
+}

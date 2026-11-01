@@ -5,7 +5,9 @@
 use std::fs;
 use std::time::Duration;
 
-use js_lease::{Boot, Exclusion, ExclusionEnd, Held, LeaseTable, OpenError, ReservationRecord};
+use js_lease::{
+    Boot, Exclusion, ExclusionEnd, Held, LeaseTable, OpenError, Queued, ReservationRecord,
+};
 
 use crate::support::{
     Scratch, T0, Table, at, clock, fake, fresh, host, open, open_err, request, secs, settings,
@@ -16,6 +18,7 @@ fn held(name: &str, reserved: u64, deadline: u64) -> Held {
         host: host(name),
         reserved_at: at(reserved),
         deadline: at(deadline),
+        assigned: false,
     }
 }
 
@@ -23,6 +26,7 @@ fn record(id: &str) -> ReservationRecord {
     ReservationRecord {
         request_id: id.to_string(),
         held: None,
+        queued: None,
         give_ups: 0,
         prepare_failures: 0,
         exclusions: Vec::new(),
@@ -105,7 +109,9 @@ fn leases_and_reservations_are_one_write() {
 
 /// Asserts that a file that counts two reservations but holds one is refused as corrupt
 /// naming the path, and so are the rows that are not valid: a held part cut short, a
-/// bad host, an exclusion with neither or both ends, a request twice.
+/// bad host, an exclusion with neither or both ends, a request twice, a queue place
+/// without the instant it was first presented (and the reverse), and `assigned` on a
+/// row that holds no host.
 #[test]
 fn corrupt_reservation_rows_are_refused() {
     let scratch = Scratch::new("res_corrupt");
@@ -128,6 +134,9 @@ fn corrupt_reservation_rows_are_refused() {
         head(1) + row + excl + "until_ms = 1\nforever = true\n",
         head(1) + row + &excl.replace("h2", "BAD HOST") + "forever = true\n",
         head(2) + row + row,
+        head(1) + row + "queue_place = 0\n",
+        head(1) + row + "queued_since_ms = 5\n",
+        head(1) + row + "assigned = true\n",
     ];
     for text in cases {
         fs::write(&path, &text).unwrap();
@@ -276,4 +285,77 @@ fn set_reservations_is_written_by_the_next_tick() {
 
     let table = reopen(table, &clock, &scratch);
     assert!(table.reservations().is_empty());
+}
+
+/// A request that waits in third place and holds a quiet host: the two fields a record
+/// needs to be put back in its wait-list place and as an assigned mark.
+fn waiting_ledger() -> Vec<ReservationRecord> {
+    let third = ReservationRecord {
+        held: Some(Held {
+            assigned: true,
+            ..held("h1", T0 + 5, T0 + 600_000)
+        }),
+        queued: Some(Queued {
+            place: 2,
+            since: at(T0 - 7),
+        }),
+        give_ups: 1,
+        ..record("req-c")
+    };
+    let first = ReservationRecord {
+        queued: Some(Queued {
+            place: 0,
+            since: at(T0 - 90),
+        }),
+        ..record("req-a")
+    };
+    vec![third, first]
+}
+
+/// Asserts that the wait-list place, the instant the request was first presented and the
+/// assigned flag are in the file and come back field for field: a record with a place
+/// and an assigned host, one with a place alone, and the file carries the three keys. It
+/// catches a ledger that cannot put a request back in its place after a restart, and an
+/// assigned mark that returns as a draining one.
+#[test]
+fn the_wait_place_and_the_assigned_flag_survive_a_reopen() {
+    let (mut table, clock, scratch) = fresh("res_queue");
+    table.set_reservations(waiting_ledger());
+    assert!(table.tick().save_error.is_none());
+    let text = fs::read_to_string(scratch.file()).unwrap();
+    for key in [
+        "queue_place = 2",
+        "queued_since_ms = 999993",
+        "assigned = true",
+    ] {
+        assert!(text.contains(key), "{key}\n{text}");
+    }
+
+    let table = reopen(table, &clock, &scratch);
+    let mut expected = waiting_ledger();
+    expected.sort_by(|a, b| a.request_id.cmp(&b.request_id));
+    assert_eq!(unclaimed(table.reservations()), expected);
+}
+
+/// Asserts that a row without the new keys, as every file written before them has, loads
+/// as a record that is not queued and holds its host unassigned, and that rewriting it
+/// does not add the keys. It is the fixture of a file an older build wrote.
+#[test]
+fn a_row_from_before_the_queue_fields_loads_unqueued_and_unassigned() {
+    let scratch = Scratch::new("res_old_row");
+    let text = "version = 1\nterm = 1\nnext_sequence = 1\nlease_count = 0\nreservation_count = 1\n\n\
+        [[reservation]]\nrequest_id = \"old\"\nhost = \"h1\"\nreserved_at_ms = 1\ndeadline_ms = 2\ngive_ups = 3\n";
+    fs::write(scratch.file(), text).unwrap();
+    let clock = clock();
+    let mut table = open(fake(), &clock, &scratch);
+    let restored = table.reservations();
+    assert_eq!(restored[0].queued, None);
+    assert_eq!(restored[0].held.as_ref().map(|h| h.assigned), Some(false));
+    assert_eq!(restored[0].give_ups, 3);
+    table.set_reservations(restored);
+    assert!(table.tick().save_error.is_none());
+    let rewritten = fs::read_to_string(scratch.file()).unwrap();
+    for key in ["queue_place", "queued_since_ms", "assigned"] {
+        assert!(!rewritten.contains(key), "{key}\n{rewritten}");
+    }
 }

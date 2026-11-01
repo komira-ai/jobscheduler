@@ -84,3 +84,62 @@ fn a_failed_rename_keeps_old_leases_with_old_reservations() {
     assert_eq!((document.term, document.lease[0].term), (1, 1));
     assert_eq!(document.reservation[0].give_ups, 1);
 }
+
+/// What a build that predates the wait-list place and the assigned flag reads a
+/// reservation row as: the old fields, and everything else kept apart. It is the
+/// reader of a lease file as it was before those fields, copied here as it was.
+#[derive(serde::Deserialize)]
+struct OlderRow {
+    request_id: String,
+    host: Option<String>,
+    deadline_ms: Option<u64>,
+    #[serde(default)]
+    give_ups: u32,
+    #[serde(flatten)]
+    extra: toml::Table,
+}
+
+#[derive(serde::Deserialize)]
+struct OlderDocument {
+    term: u64,
+    lease_count: u64,
+    #[serde(default)]
+    reservation: Vec<OlderRow>,
+    #[serde(flatten)]
+    extra: toml::Table,
+}
+
+/// Asserts that a file with the new row keys is read by an older reader (a struct that
+/// names only the old fields and keeps the rest, as every reader of this file does):
+/// it parses, the old fields read as written, and the three new keys land in the
+/// kept-apart table to be written back. It is the skip rule the format relies on: a
+/// build that does not know a key reads past it and does not refuse the file.
+#[test]
+fn an_older_reader_skips_the_wait_place_and_the_assigned_flag() {
+    let text = "version = 1\nterm = 4\nnext_sequence = 1\nlease_count = 0\nreservation_count = 1\n\n\
+        [[reservation]]\nrequest_id = \"r\"\nhost = \"h1\"\nreserved_at_ms = 1\ndeadline_ms = 2\n\
+        assigned = true\nqueue_place = 3\nqueued_since_ms = 9\ngive_ups = 1\n";
+    let older: OlderDocument = toml::from_str(text).unwrap();
+    assert_eq!((older.term, older.lease_count), (4, 0));
+    assert!(older.extra.contains_key("reservation_count"));
+    let row = &older.reservation[0];
+    assert_eq!(
+        (
+            row.request_id.as_str(),
+            row.host.as_deref(),
+            row.deadline_ms,
+            row.give_ups
+        ),
+        ("r", Some("h1"), Some(2), 1)
+    );
+    for key in ["assigned", "queue_place", "queued_since_ms"] {
+        assert!(row.extra.contains_key(key), "{key}");
+    }
+    // The current build reads the same text whole.
+    let current: super::Document = toml::from_str(text).unwrap();
+    let new = &current.reservation[0];
+    assert_eq!(
+        (new.assigned, new.queue_place, new.queued_since_ms),
+        (true, Some(3), Some(9))
+    );
+}

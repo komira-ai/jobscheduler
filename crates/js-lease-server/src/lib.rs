@@ -496,6 +496,25 @@
 //! written (the failure is logged and counted) a lease granted meanwhile survives a
 //! restart without its binding until a later tick writes it.
 //!
+//! The whole-node reservations of the registry (the host set aside for a waiting request,
+//! the wait list's order, the give-up and failed-prepare counts, the hosts a request is
+//! kept off and until when) are kept in the lease file, as the table's reservation
+//! ledger: each tick hands the table the registry's ledger when it changed and the table
+//! writes it in the same replace as the leases, so the file is at most one tick behind and
+//! the final tick of a shutdown brings it level. With `--boot resume` the registry is
+//! given the ledger before any agent says hello. A restored mark stands while its host has
+//! not yet said hello, a restored request waits in its place until its consumer presents
+//! the same request id again (the file does not hold what the request asks for), and a
+//! reservation whose deadline had passed, or would pass sooner, gets the boot plus
+//! [`RESERVATION_BOOT_GRACE`] (two minutes) to drain instead of being given up at once.
+//! What is not presented again, or not heard from again, within the pool's `regain_grace`
+//! is dropped and counted ([`js_registry::Registry::dropped_reservations`]); the count
+//! of failed prepares and give-ups is kept, so a restart does not reset
+//! `max_reserve_attempts` or `max_replace`. Estimates are not kept. The format is
+//! additive: the rows and their keys are read past by a build that does not know them.
+//! Nothing in this server sends a request id on a lease request yet, so no reservation is
+//! made through the HTTP routes, and the ledger of a running server is empty until one is.
+//!
 //! # Usage
 //!
 //! With agents on (and no `--usage-off`) a heartbeat may carry the node's load. After the
@@ -572,6 +591,7 @@ mod listener;
 pub mod network;
 mod pool;
 mod rate;
+mod reservations;
 mod run_api;
 mod scaler;
 mod sched;
@@ -612,6 +632,7 @@ pub use kinds::{
 #[doc(hidden)]
 pub use layered::LayeredProvider;
 pub use pool::LaunchInputs;
+pub use reservations::RESERVATION_BOOT_GRACE;
 pub use scaler::{
     Call, Effects, KEY_VALID_FOR, Launcher, REGISTRY_FLOOR, REGISTRY_QUIET, RETRY_AFTER,
     RecordsFile, Scaler, UnremovedFile,

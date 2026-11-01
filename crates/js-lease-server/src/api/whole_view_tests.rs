@@ -13,7 +13,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
-use js_lease::{Boot, LeaseTable, ManualClock, Settings, Timestamp};
+use js_lease::{Boot, LeaseTable, ManualClock, Settings, Timestamp, read_bookings};
 use js_provider::{Provider, StartSpec};
 use js_registry::{
     Credential, PoolConfig, Registry, SequentialSessions, WholeCounts, WholeNodeConfig,
@@ -29,7 +29,7 @@ use crate::adapt::BoxedProvider;
 use crate::agents::Agents;
 use crate::config::parse_token;
 
-const T0: u64 = 1_000_000;
+pub(super) const T0: u64 = 1_000_000;
 
 fn share_class() -> ResourceClass {
     ResourceClass::new(ClassId::new("share").unwrap(), Admission::BookAll, 0)
@@ -55,28 +55,75 @@ fn request(class: &str, wall_s: u64) -> Request {
 /// minutes, so only the drain deadline ends a reservation here.
 pub(super) struct Rig {
     pub(super) shared: Arc<Shared>,
+    name: String,
     clock: ManualClock,
     asker: js_registry::RegisteredProvider,
     pub(super) registry: Registry,
 }
 
+/// How a rig starts: over an empty directory, or over the directory of an earlier rig, on
+/// its clock, with `--boot resume` as the program does after a restart.
+enum Start {
+    Fresh,
+    Again {
+        clock: ManualClock,
+        /// Whether the host `a` says hello again, holding the lease it held.
+        host_back: bool,
+    },
+}
+
 impl Rig {
     pub(super) async fn new(name: &str) -> Self {
-        Self::build(name, false).await
+        Self::build(name, false, Start::Fresh).await
     }
 
     /// A rig whose server serves the status routes (to private peers).
     pub(super) async fn serving_status(name: &str) -> Self {
-        Self::build(name, true).await
+        Self::build(name, true, Start::Fresh).await
     }
 
-    async fn build(name: &str, status: bool) -> Self {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/whole_view_unit")
-            .join(name);
+    /// The server started again over the files of this one, on the same clock, with
+    /// `--boot resume`: a new registry and a new table, nothing carried over but the lease
+    /// file. With `host_back` the host `a` says hello again holding the lease it held;
+    /// without it the host never returns.
+    pub(super) async fn restart(self, host_back: bool) -> Self {
+        let (name, clock) = (self.name.clone(), self.clock.clone());
+        drop(self);
+        Self::build(&name, false, Start::Again { clock, host_back }).await
+    }
+
+    /// A server resumed over a lease file whose text is `text`, on a fresh clock, with
+    /// the host `a` back.
+    pub(super) async fn over_file(name: &str, text: &str) -> Self {
+        let dir = Self::dir(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("leases.toml"), text).unwrap();
         let clock = ManualClock::new(Timestamp::from_millis(T0));
+        let start = Start::Again {
+            clock,
+            host_back: true,
+        };
+        Self::build(name, false, start).await
+    }
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/whole_view_unit")
+            .join(name)
+    }
+
+    async fn build(name: &str, status: bool, start: Start) -> Self {
+        let dir = Self::dir(name);
+        let (clock, boot, host_back) = match start {
+            Start::Fresh => {
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir).unwrap();
+                let clock = ManualClock::new(Timestamp::from_millis(T0));
+                (clock, Boot::Initialise, true)
+            }
+            Start::Again { clock, host_back } => (clock, Boot::Resume, host_back),
+        };
         let shared_clock = SharedClock::new(clock.clone());
         let resources = Resources::new(4000, 8 << 30, 0, None).unwrap();
         let shape = Shape::new(resources, caps());
@@ -92,7 +139,7 @@ impl Rig {
             regain_grace_ms: 600_000,
             ..WholeNodeConfig::dedicated(1)
         };
-        let pool = pool.with_whole_node(whole).unwrap();
+        let pool = pool.with_whole_node(whole.clone()).unwrap();
         let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
         let hello = Hello {
             protocol: ProtocolRange { min: 1, max: 1 },
@@ -115,22 +162,39 @@ impl Rig {
             held: Vec::new(),
             accepts_host_credential: false,
         };
-        registry.hello(&hello, &Credential::of_token("t")).unwrap();
         let classes = vec![share_class(), ResourceClass::whole_node()];
-        let asker = registry.provider().with_classes(classes.clone());
-        let provider = registry.provider().with_classes(classes);
+        let mut asker = registry.provider().with_classes(classes.clone());
+        let provider = registry.provider().with_classes(classes.clone());
+        let file = dir.join("leases.toml");
+        // After a restart the host that held a lease says hello before the table is
+        // opened, and the lease it held is booked on it again, as an ordinary one (a
+        // `seat` would book it as a committed whole-node lease, the class of the pool,
+        // which with a reservation on the same host is over the pool's ceiling).
+        let early = host_back && boot == Boot::Resume;
+        if early {
+            registry.hello(&hello, &Credential::of_token("t")).unwrap();
+            for booking in read_bookings(&file).unwrap() {
+                let spec = StartSpec::new(booking.lease, request("share", 600), &classes);
+                asker.start(spec.unwrap());
+            }
+        }
         let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
+        let settings = crate::reservations::with_restart_grace(settings, Some(&whole));
         let table = LeaseTable::open(
             BoxedProvider(Box::new(provider)),
             shared_clock.clone(),
             settings,
-            dir.join("leases.toml"),
-            Boot::Initialise,
+            file,
+            boot,
         )
         .unwrap();
         let agents = Agents::over(registry.clone(), &shared_clock, &dir);
         let token = parse_token(&[b'c'; 40]).unwrap();
         let shared = Shared::new(table, token, Some(Arc::new(agents)));
+        // The agent's hello comes after the server is up, as it does in the program.
+        if host_back && !early {
+            registry.hello(&hello, &Credential::of_token("t")).unwrap();
+        }
         let served = status.then(|| {
             Arc::new(Status::new(
                 None,
@@ -143,13 +207,14 @@ impl Rig {
         let shared = Arc::new(shared.with_status(served));
         Self {
             shared,
+            name: name.to_string(),
             clock,
             asker,
             registry,
         }
     }
 
-    fn advance(&self, seconds: u64) {
+    pub(super) fn advance(&self, seconds: u64) {
         self.clock.advance(Duration::from_secs(seconds));
     }
 
