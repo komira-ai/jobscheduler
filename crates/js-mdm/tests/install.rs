@@ -609,7 +609,7 @@ fn an_archive_above_the_size_cap_is_refused() {
     );
     assert!(
         err.to_string()
-            .contains("more than the 10 an archive may be")
+            .contains("is larger than the 10 bytes an archive may be")
     );
     assert_eq!(err.exit_code(), 2);
     assert!(host.node(&format!("{ETC}/nanohub.env")).is_none());
