@@ -272,7 +272,12 @@ fn a_blip_on_the_uncordon_of_the_busy_path_still_defers_with_the_failure_in_the_
     let (done, spy) = blipped(&rig);
     deferred_untouched(&done, &spy, &rig, Reason::DrainBound);
     let detail = done.report.detail.unwrap();
-    assert!(detail.contains("uncordon is down"), "{detail}");
+    assert!(
+        detail.contains(
+            "the cordon could not be lifted and is left as recorded; it lapses within one lease if nothing lifts it: uncordon is down"
+        ),
+        "{detail}"
+    );
 }
 
 #[test]
