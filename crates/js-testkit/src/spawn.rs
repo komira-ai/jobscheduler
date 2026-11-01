@@ -9,9 +9,13 @@
 //! it; the start has only to wait for the child to go.
 //!
 //! [`spawn_retrying`] starts the command again while it fails that way, a bounded
-//! number of times, so a test can start a program it has just copied.
+//! number of times, so a test can start a program it has just copied. When the start is made
+//! by code the test cannot wrap (a library that spawns the program), [`install_copy`] and
+//! [`install_script`] make the program without the test process ever holding it open.
 
+use std::ffi::OsStr;
 use std::io::{self, ErrorKind};
+use std::path::Path;
 use std::process::{Child, Command};
 use std::time::Duration;
 
@@ -58,4 +62,46 @@ pub fn retry_busy(
             done => return done,
         }
     }
+}
+
+/// Makes `dest` a copy of the file `source` with mode `mode` (as `chmod` reads it: `755`,
+/// `4755`), so that a program started from `dest` by code the test does not control (a
+/// library that spawns it) is never busy.
+///
+/// Such a start cannot be retried, and closing the test's own descriptor is not enough: a
+/// process another thread forks while the file is open keeps a copy until it execs (see the
+/// module docs), and a rename does not change that, since the copy is of the open file, not
+/// of its name. So the file is written by a process of its own, `cp` run by `sh`, that has
+/// ended when this returns: the test process never has the file open, no child it forks can
+/// hold it, and nothing has it open for writing afterwards.
+///
+/// # Panics
+/// When `sh` cannot be run, or the copy fails.
+pub fn install_copy(source: &Path, dest: &Path, mode: &str) {
+    run_sh(
+        r#"cp "$1" "$2" && chmod "$3" "$2""#,
+        &[source.as_os_str(), dest.as_os_str(), OsStr::new(mode)],
+    );
+}
+
+/// Makes `dest` a file holding `body` with mode `mode`, written the way [`install_copy`]
+/// writes a copy.
+///
+/// # Panics
+/// When `sh` cannot be run, or the write fails.
+pub fn install_script(dest: &Path, body: &str, mode: &str) {
+    run_sh(
+        r#"printf '%s' "$1" > "$2" && chmod "$3" "$2""#,
+        &[OsStr::new(body), dest.as_os_str(), OsStr::new(mode)],
+    );
+}
+
+/// Runs `script` under `sh -c` with `args` as `$1`, `$2`, ...
+fn run_sh(script: &str, args: &[&OsStr]) {
+    let status = Command::new("sh")
+        .args(["-c", script, "sh"])
+        .args(args)
+        .status()
+        .expect("sh runs");
+    assert!(status.success(), "installing a program: {status}");
 }

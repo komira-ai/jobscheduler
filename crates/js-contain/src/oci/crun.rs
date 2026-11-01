@@ -693,26 +693,11 @@ mod tests {
     /// for the blocking calls; one that ends is read as before.
     #[test]
     fn a_crun_that_does_not_end_is_killed_and_fails() {
-        // A script is written by a process of its own that has ended, so that no descriptor
-        // open for writing is inherited by a child another test forks meanwhile (which would
-        // make the file busy for `exec`).
-        fn script(path: &Path, body: &str) {
-            let made = std::process::Command::new("sh")
-                .args([
-                    "-c",
-                    "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"",
-                    "sh",
-                ])
-                .arg(body)
-                .arg(path)
-                .status();
-            assert!(made.expect("sh").success());
-        }
         let dir = crate::unit_dir("crun-hung");
         let lease: &Path = &dir;
         let run = |name: &str, body: &str, limit: Duration| {
             let program = lease.join(name);
-            script(&program, body);
+            js_testkit::spawn::install_script(&program, body, "755");
             let crun = Crun::new(program, no_scrub, None);
             crun.stdout_within(lease, &["state", "c"], "state", limit)
         };
@@ -811,16 +796,14 @@ mod tests {
     /// the lease or its state.
     #[test]
     fn the_configured_runtime_path_is_what_runs_and_no_copy_is_made() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = crate::unit_dir("crun-path");
         let program = dir.join("my-runtime");
         let seen = dir.join("seen");
-        std::fs::write(
+        js_testkit::spawn::install_script(
             &program,
-            format!("#!/bin/sh\necho \"$0\" >> {}\n", seen.display()),
-        )
-        .expect("stand-in");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            &format!("#!/bin/sh\necho \"$0\" >> {}\n", seen.display()),
+            "755",
+        );
         let crun = Crun::new(program.clone(), no_scrub, None);
         let lease = dir.join("lease");
         crun.delete_blocking(&lease, "c").expect("runs");

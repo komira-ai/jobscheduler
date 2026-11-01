@@ -36,6 +36,8 @@ tracing.workspace = true
 [dev-dependencies]
 # The registry client the real-crun tests pull busybox with (tests/crun/source.rs).
 js-oci = { path = "../js-oci" }
+# Programs the tests make for the backend to start (`install_copy`, `install_script`).
+js-testkit = { path = "../js-testkit" }
 hex.workspace = true
 # The egress spike tests (tests/egress_spike): unshare, ioctl and open for the probe that runs
 # inside the container.

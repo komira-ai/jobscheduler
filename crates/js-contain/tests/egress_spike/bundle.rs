@@ -16,6 +16,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+use js_testkit::spawn::install_copy;
 use serde_json::{Value, json};
 
 use crate::host;
@@ -205,16 +206,11 @@ impl Bundle {
         std::fs::set_permissions(dir.join("state"), std::fs::Permissions::from_mode(0o700))
             .expect("chmod");
         mkdir(&dir.join("gate"));
-        std::fs::copy(
-            std::env::current_exe().expect("own path"),
-            dir.join("probe-bin"),
-        )
-        .expect("copy the probe");
-        std::fs::set_permissions(
-            dir.join("probe-bin"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .expect("chmod");
+        install_copy(
+            &std::env::current_exe().expect("own path"),
+            &dir.join("probe-bin"),
+            "755",
+        );
         let bundle = Self {
             dir,
             id,
@@ -488,8 +484,10 @@ impl Drop for Created {
 pub fn crun_copy() -> PathBuf {
     let path = base_dir().join("crun-copy");
     if !path.exists() {
-        std::fs::copy(host::bin("crun"), &path).expect("copy crun");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // Made under another name and renamed, so that no test finds it half written.
+        let staged = path.with_extension(std::process::id().to_string());
+        install_copy(Path::new(&host::bin("crun")), &staged, "755");
+        std::fs::rename(&staged, &path).expect("publish the copy");
     }
     path
 }

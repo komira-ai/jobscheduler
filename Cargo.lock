@@ -1107,6 +1107,7 @@ dependencies = [
  "flate2",
  "hex",
  "js-oci",
+ "js-testkit",
  "js-types",
  "libc",
  "oci-spec",
