@@ -17,9 +17,9 @@
 //!    directories under `/var/folders`, whose exact paths run A reports), a file in
 //!    `/Users/Shared`, and a launchd agent in the `gui/<uid>` domain. What the profile or the
 //!    machine refuses is printed as refused, with the reason. A kind is covered when it was
-//!    seeded or the profile denied the seed with the sandbox's own signature (`deny(1)`,
-//!    `Sandbox:`, or a bare permission error the unified log confirms as that seed's, see
-//!    `look.rs`): the job could not create the state, so nothing can carry over. Any other
+//!    seeded or the profile denied the seed with the sandbox's own signature (the kernel's
+//!    `Sandbox: <proc>(<pid>) deny(` line, or a bare permission error the unified log confirms
+//!    as that seed's by the job's own pid, see `look.rs`): the job could not create the state, so nothing can carry over. Any other
 //!    seed failure, a bare EPERM/EACCES included, proves nothing. A run that did not cover at
 //!    least a file, a process, a keychain item, a launchd agent and shared memory, or seeded
 //!    nothing itself, fails. A launch agent that root loaded is labelled "loaded by root" and
@@ -72,7 +72,6 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status};
 use js_agent::native::{NativeConfig, NativeRuntime};
@@ -402,7 +401,10 @@ impl Trial {
         let exe = self.exe.clone();
 
         // Run A.
-        let started = Instant::now();
+        // The local time just before run A, for `log show --start`.
+        let started = view("/bin/date", &["+%Y-%m-%d %H:%M:%S"])?
+            .trim()
+            .to_owned();
         let ran_a = child_run(
             &mut self.rt,
             &self.fixture,
@@ -424,7 +426,7 @@ impl Trial {
         let job = look::JobProcs {
             pids: ran_a.pids.clone(),
         };
-        self.confirm_denials_by_log(started, &job);
+        self.confirm_denials_by_log(&started, &job);
         self.bootstrap_agents_as_root(uid);
         println!("{}", self.seeded_table());
         let missing = look::missing_minimum(&self.seeded);
@@ -519,29 +521,19 @@ impl Trial {
     }
 
     /// A seed that failed with a bare permission error is the profile's only if the unified
-    /// log, read for run A's window, holds a sandbox denial that is that seed's; the log is
+    /// log, read from the start of run A, holds a sandbox denial that is that seed's; the log is
     /// not read when nothing failed that way. A log that cannot be read leaves them refused.
-    fn confirm_denials_by_log(&mut self, since: Instant, job: &look::JobProcs) {
+    fn confirm_denials_by_log(&mut self, since: &str, job: &look::JobProcs) {
         let candidates = self.seeded.iter().any(|line| {
             line.verdict == Verdict::Refused && look::is_permission_failure(&line.text)
         });
         if !candidates {
             return;
         }
-        let secs = since.elapsed().as_secs() + 60;
         let predicate = "eventMessage CONTAINS \"Sandbox\" AND eventMessage CONTAINS \"deny(\"";
-        let shown = view(
-            "/usr/bin/log",
-            &[
-                "show",
-                "--last",
-                &format!("{secs}s"),
-                "--style",
-                "compact",
-                "--predicate",
-                predicate,
-            ],
-        );
+        let args = look::log_show_args(since, predicate);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let shown = view("/usr/bin/log", &args);
         let log = match shown {
             Ok(text) => Some(text),
             Err(why) => {
@@ -720,7 +712,7 @@ impl Trial {
 
         for root in FIND_ROOTS {
             // No depth limit: a limit would hide a file below it. '-x' stays on the volume.
-            let found = view(
+            let found = view_bytes(
                 "/usr/bin/find",
                 &[
                     "-x",
@@ -732,9 +724,10 @@ impl Trial {
                     "-print0",
                 ],
             );
-            note_other_volumes(root);
+            rows.extend(other_volume_rows(root));
             match found {
-                Ok(text) => {
+                Ok(listing) => {
+                    let text = String::from_utf8_lossy(&listing);
                     let (with, notes, cut) = look::split_found_files(&text, &tokens, FIND_LIMIT);
                     for path in with {
                         rows.push(row(
@@ -753,7 +746,7 @@ impl Trial {
                             "PROBE note more than {FIND_LIMIT} other files of uid {uid} under {root}; the rest are not listed (all were examined for tokens)"
                         );
                     }
-                    rows.extend(scan_content(uid, root, &text, &tokens));
+                    rows.extend(scan_content(uid, root, &listing, &tokens));
                 }
                 Err(why) => rows.push(row(Kind::SharedFile, "COULD NOT LOOK", why)),
             }
@@ -796,35 +789,44 @@ const FIND_LIMIT: usize = 500;
 const CONTENT_FILES: usize = 2000;
 const CONTENT_BYTES: u64 = 1 << 20;
 
-/// `find -x` does not enter a volume mounted below a root: say which children are on another
-/// device, so that a leak there is not a silent pass.
-fn note_other_volumes(root: &str) {
-    let Ok(root_meta) = fs::metadata(root) else {
-        return;
+/// `find -x` does not enter a volume mounted directly below a root: each such child is a
+/// COULD NOT LOOK row (it fails the test), and so is a root that cannot be listed. A mount
+/// deeper down is not detected here.
+fn other_volume_rows(root: &str) -> Vec<Row> {
+    let unlooked = |why: String| vec![row(Kind::SharedFile, "COULD NOT LOOK", why)];
+    let root_dev = match fs::metadata(root) {
+        Ok(meta) => meta.dev(),
+        Err(why) => return unlooked(format!("{root}: {why}")),
     };
-    let children: Vec<(String, u64)> = fs::read_dir(root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let meta = fs::symlink_metadata(entry.path()).ok()?;
-            Some((entry.path().display().to_string(), meta.dev()))
-        })
-        .collect();
-    for path in look::other_volume_children(root_meta.dev(), &children) {
-        println!("PROBE note {path} is on another volume than {root}: find -x did not look in it");
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(why) => return unlooked(format!("{root}: {why}")),
+    };
+    let mut children = Vec::new();
+    let mut rows = Vec::new();
+    for entry in entries {
+        match entry.and_then(|entry| Ok((entry.path(), fs::symlink_metadata(entry.path())?))) {
+            Ok((path, meta)) => children.push((path.display().to_string(), meta.dev())),
+            Err(why) => rows.extend(unlooked(format!(
+                "{root}: a child could not be read: {why}"
+            ))),
+        }
     }
+    for path in look::other_volume_children(root_dev, &children) {
+        rows.extend(unlooked(format!(
+            "{path} is on another volume than {root}: find -x did not look in it"
+        )));
+    }
+    rows
 }
 
 /// The files `find` listed, read for the tokens (a file whose name lacks the token, a cfprefs
 /// plist or a keychain database, can still hold it). At most `CONTENT_FILES` files and
 /// `CONTENT_BYTES` of each: what is beyond is a COULD NOT LOOK row, never a pass.
-fn scan_content(uid: u32, root: &str, listing: &str, tokens: &[Token]) -> Vec<Row> {
+fn scan_content(uid: u32, root: &str, listing: &[u8], tokens: &[Token]) -> Vec<Row> {
+    use std::os::unix::ffi::OsStrExt as _;
     let mut rows = Vec::new();
-    let paths: Vec<&str> = listing
-        .split('\0')
-        .filter(|path| !path.is_empty())
-        .collect();
+    let paths = look::nul_paths(listing);
     if paths.len() > CONTENT_FILES {
         rows.push(row(
             Kind::SharedFile,
@@ -836,12 +838,14 @@ fn scan_content(uid: u32, root: &str, listing: &str, tokens: &[Token]) -> Vec<Ro
             ),
         ));
     }
-    for path in paths.into_iter().take(CONTENT_FILES) {
-        let read = fs::File::open(path).and_then(|file| look::read_bounded(file, CONTENT_BYTES));
+    for raw in paths.into_iter().take(CONTENT_FILES) {
+        let path = String::from_utf8_lossy(raw).into_owned();
+        let read = fs::File::open(std::ffi::OsStr::from_bytes(raw))
+            .and_then(|file| look::read_bounded(file, CONTENT_BYTES));
         match read {
             Ok((bytes, _)) if look::content_with_token(&bytes, tokens) => rows.push(row(
                 Kind::SharedFile,
-                path,
+                path.clone(),
                 format!("find -uid {uid} under {root}: a token is in the content of the file"),
             )),
             Ok((_, true)) => rows.push(row(
@@ -864,31 +868,68 @@ fn scan_content(uid: u32, root: &str, listing: &str, tokens: &[Token]) -> Vec<Ro
 
 /// Root's `launchctl print` of `target` (`user/<uid>` or `gui/<uid>`), as the three answers.
 fn print_domain(target: &str) -> Outcome {
-    match Command::new("/bin/launchctl")
-        .args(["print", target])
-        .output()
-    {
-        Ok(out) => look::classify_launchctl_print(
-            out.status.code(),
-            &String::from_utf8_lossy(&out.stdout),
-            &String::from_utf8_lossy(&out.stderr),
-        ),
+    match run_bounded("/bin/launchctl", &["print", target]) {
+        Ok((code, stdout, stderr)) => {
+            look::classify_launchctl_print(code, &String::from_utf8_lossy(&stdout), &stderr)
+        }
         Err(why) => Outcome::CouldNotLook(format!("launchctl: {why}")),
     }
 }
 
 /// A tool run as root whose exit status matters: its output, or why the look failed.
 fn view(program: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(program)
+    let (code, stdout, stderr) = run_bounded(program, args)?;
+    look::view_output(program, code, &String::from_utf8_lossy(&stdout), &stderr)
+}
+
+/// Like [`view`], with the output as raw bytes (a path need not be UTF-8).
+fn view_bytes(program: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+    let (code, stdout, stderr) = run_bounded(program, args)?;
+    look::view_output(program, code, "", &stderr)?;
+    Ok(stdout)
+}
+
+/// The most bytes of a view's output that are read; more is a failed look (and the tool is
+/// stopped), never a truncated view.
+const OUTPUT_CAP: u64 = 64 << 20;
+
+/// A tool run to the end with its output read up to [`OUTPUT_CAP`]: exit status, standard
+/// output, standard error (cut at 1 MiB).
+fn run_bounded(program: &str, args: &[&str]) -> Result<(Option<i32>, Vec<u8>, String), String> {
+    use std::process::Stdio;
+    let mut child = Command::new(program)
         .args(args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|why| format!("{program}: {why}"))?;
-    look::view_output(
-        program,
-        out.status.code(),
-        &String::from_utf8_lossy(&out.stdout),
-        &String::from_utf8_lossy(&out.stderr),
-    )
+    let stderr = child.stderr.take();
+    let errors = std::thread::spawn(move || {
+        let mut text = Vec::new();
+        if let Some(mut stream) = stderr {
+            if let Ok((bytes, _)) = look::read_bounded(&mut stream, 1 << 20) {
+                text = bytes;
+            }
+            // Keep reading so the tool never blocks on a full pipe.
+            let _ = std::io::copy(&mut stream, &mut std::io::sink());
+        }
+        String::from_utf8_lossy(&text).into_owned()
+    });
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{program}: no output pipe"))?;
+    let (bytes, more) =
+        look::read_bounded(stdout, OUTPUT_CAP).map_err(|why| format!("{program}: {why}"))?;
+    if more {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("{program}: more than {OUTPUT_CAP} bytes of output"));
+    }
+    let status = child.wait().map_err(|why| format!("{program}: {why}"))?;
+    let errors = errors.join().unwrap_or_default();
+    Ok((status.code(), bytes, errors))
 }
 
 /// Asserts that run B, on the uid run A had, finds nothing A left behind, and that the

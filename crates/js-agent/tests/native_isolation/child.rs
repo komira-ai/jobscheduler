@@ -49,10 +49,19 @@ fn tool_raw(
     args: &[&str],
     home: &Path,
 ) -> Result<(Option<i32>, String, String), String> {
-    let out = Command::new(program)
+    let child = Command::new(program)
         .args(args)
         .env("HOME", home)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|why| format!("{program}: {why}"))?;
+    // The tool is a direct child, so this pid is exactly its own: the test binds a sandbox line
+    // in the log to the job by pid and by nothing else.
+    println!("ISOPID {}", child.id());
+    let out = child
+        .wait_with_output()
         .map_err(|why| format!("{program}: {why}"))?;
     Ok((
         out.status.code(),

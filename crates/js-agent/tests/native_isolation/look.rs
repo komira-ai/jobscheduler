@@ -23,9 +23,10 @@
 //! The same care applies to run A's seeds. A kind counts as COVERED when it was seeded, or
 //! when the product profile refused the seed with a SANDBOX denial (the job could not create
 //! the state, so nothing can carry over). The denial must carry the SANDBOX's own signature:
-//! `deny(1)` or `Sandbox:` in the failure, or a bare `EPERM`/`EACCES` that the unified log
-//! (read for run A's window) confirms as that seed's by a sandbox `deny(` line with its token
-//! or its operation. A bare `EPERM` or `EACCES` alone is an ordinary permission failure (a
+//! the kernel's `Sandbox: <proc>(<pid>) deny(` line in the failure, or a bare `EPERM`/`EACCES` that
+//! the unified log (read from the start of run A) confirms as that seed's by such a line with
+//! its token, or with its operation from a process the job ran, bound by PID only (the pids the
+//! runs print: the test process, each tool as a direct child, the process left running). A bare `EPERM` or `EACCES` alone is an ordinary permission failure (a
 //! home with the wrong owner, a tool that is not executable) and proves nothing, like any
 //! other failure (`ENOSPC`, a missing tool, a crash). The denied row is recorded as refused by
 //! the profile. The minimum set (a file, a process, a keychain item, a launchd agent, shared
@@ -212,32 +213,36 @@ pub struct JobProcs {
 }
 
 impl JobProcs {
-    /// Whether the process `name` (pid `pid`) is one the job ran for `kind`: a pid a run printed,
-    /// or the name of an executable the job used for that kind. The kernel cuts a name to 16
-    /// characters.
-    fn owns(&self, kind: Kind, name: &str, pid: u32) -> bool {
-        let tool = match kind {
-            Kind::Keychain => "security",
-            Kind::Defaults => "defaults",
-            Kind::LaunchAgent | Kind::GuiLaunchAgent => "launchctl",
-            Kind::Process => "sleep",
-            _ => "",
-        };
-        self.pids.contains(&pid) || (!tool.is_empty() && tool == name)
+    /// Whether `pid` is a process the job ran: one a run printed (its own, a tool it ran as a direct
+    /// child, the process it left running). Never by name: another `security`, a retry or a
+    /// concurrent job on the same Mac has the same names.
+    fn owns(&self, pid: u32) -> bool {
+        self.pids.contains(&pid)
     }
 }
 
 /// The arguments of `log show` for the sandbox lines since `start` (a local time, `YYYY-MM-DD
 /// HH:MM:SS`, read just before run A began).
 pub fn log_show_args(start: &str, predicate: &str) -> Vec<String> {
-    let _ = (start, predicate);
-    ["show", "--last", "60s"].map(str::to_owned).to_vec()
+    [
+        "show",
+        "--start",
+        start,
+        "--style",
+        "compact",
+        "--predicate",
+        predicate,
+    ]
+    .map(str::to_owned)
+    .to_vec()
 }
 
 /// A `find -print0` listing split on NUL into raw paths (a name need not be UTF-8).
 pub fn nul_paths(bytes: &[u8]) -> Vec<&[u8]> {
-    let _ = bytes;
-    Vec::new()
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .collect()
 }
 
 /// The pids a run printed with `ISOPID <n>` lines.
@@ -280,8 +285,7 @@ pub fn log_confirms_denial(kind: Kind, token: &Token, log: &str, job: &JobProcs)
         .any(|line| {
             line.contains(token.as_str())
                 || (markers.iter().any(|m| line.contains(m))
-                    && parse_sandbox_line(line)
-                        .is_some_and(|(name, pid)| job.owns(kind, &name, pid)))
+                    && parse_sandbox_line(line).is_some_and(|(_, pid)| job.owns(pid)))
         })
 }
 
@@ -336,18 +340,32 @@ pub enum SeedFailure {
 }
 
 /// Tells the two apart from the failure text of a seed: only the SANDBOX's own signature
-/// (`deny(1)`, `Sandbox:`) is the profile's. A bare `EPERM` or `EACCES` is an ordinary
+/// (the kernel's `Sandbox: <proc>(<pid>) deny(` line) is the profile's. A bare `EPERM` or `EACCES` is an ordinary
 /// permission failure (a home with the wrong owner, a tool that is not executable) and proves
 /// nothing, unless the unified log confirms it ([`resolve_seed`]).
 pub fn classify_seed_failure(text: &str) -> SeedFailure {
-    let text = text.to_lowercase();
-    match ["deny(1)", "sandbox:"]
-        .iter()
-        .any(|words| text.contains(words))
-    {
+    match has_sandbox_signature(text) {
         true => SeedFailure::ProfileRefused,
         false => SeedFailure::Other,
     }
+}
+
+/// Whether `text` holds the kernel's sandbox line, `Sandbox: <proc>(<pid>) deny(`. A bare
+/// word or `deny(1)` alone does not count.
+fn has_sandbox_signature(text: &str) -> bool {
+    text.match_indices("Sandbox: ").any(|(at, word)| {
+        let rest = &text[at + word.len()..];
+        let Some((name, after)) = rest.split_once('(') else {
+            return false;
+        };
+        let Some((pid, after)) = after.split_once(')') else {
+            return false;
+        };
+        !name.is_empty()
+            && !name.contains(char::is_whitespace)
+            && pid.parse::<u32>().is_ok()
+            && after.starts_with(" deny(")
+    })
 }
 
 /// The kinds a run A must have covered for the result to mean anything: a file, a process,
@@ -886,8 +904,8 @@ mod tests {
     }
 
     /// Asserts that an operation-only sandbox line confirms a seed only when the process in
-    /// the line is the job's: by pid when the runs printed it, else by the name of an
-    /// executable the job used for that kind. A line from any other process (a spotlight
+    /// the line is the job's, by a pid the runs printed and never by name (another `security`, a
+    /// retry or a parallel runner has the same name). A line from any other process (a spotlight
     /// worker, say) never upgrades a seed, and a line with a token still does. It catches a
     /// log match that lets a bystander's denial cover the job's kind.
     #[test]
