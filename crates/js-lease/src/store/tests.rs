@@ -143,3 +143,19 @@ fn an_older_reader_skips_the_wait_place_and_the_assigned_flag() {
         (true, Some(3), Some(9))
     );
 }
+
+/// Asserts that a row with `tail_end_ms` is read by the older reader above, which keeps
+/// the key apart and refuses nothing, and by the current build whole: the skip rule for
+/// the end of the tail a mark was made with.
+#[test]
+fn an_older_reader_skips_the_tail_end() {
+    let text = "version = 1\nterm = 4\nnext_sequence = 1\nlease_count = 0\nreservation_count = 1\n\n\
+        [[reservation]]\nrequest_id = \"r\"\nhost = \"h1\"\nreserved_at_ms = 1\ndeadline_ms = 2\n\
+        tail_end_ms = 77\ngive_ups = 1\n";
+    let older: OlderDocument = toml::from_str(text).unwrap();
+    let row = &older.reservation[0];
+    assert_eq!((row.request_id.as_str(), row.deadline_ms), ("r", Some(2)));
+    assert!(row.extra.contains_key("tail_end_ms"));
+    let current: super::Document = toml::from_str(text).unwrap();
+    assert_eq!(current.reservation[0].tail_end_ms, Some(77));
+}

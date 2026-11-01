@@ -266,6 +266,10 @@ pub struct Held {
     /// Whether the host was quiet when it was set aside: it drains nothing and waits for
     /// the request's next start, and does not count toward the draining limit.
     pub assigned: bool,
+    /// The end of the host's tail when it was set aside, in milliseconds on the caller's
+    /// clock, or `None` when the caller had none (an unknown tail, or an assigned host).
+    /// Kept for the evaluation of the reservation; the table decides nothing by it.
+    pub tail_end: Option<u64>,
 }
 
 /// A request's place on the wait list when the ledger was written.

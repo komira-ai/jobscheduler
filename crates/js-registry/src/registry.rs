@@ -169,6 +169,8 @@ struct State {
     /// Hosts that are being given back and are to be marked releasing from their first
     /// hello, whether or not the registry holds them yet ([`Registry::mark_ending`]).
     ending: BTreeSet<HostId>,
+    /// What the tail rule is measured by ([`Registry::tail_counters`]).
+    tail: crate::TailCounters,
 }
 
 impl State {
@@ -256,6 +258,7 @@ impl Registry {
             dropped: 0,
             launchable: None,
             ending: BTreeSet::new(),
+            tail: crate::TailCounters::default(),
         };
         Self {
             shared: Arc::new(Shared {
@@ -272,8 +275,9 @@ impl Registry {
     /// Gives the registry the source of how long the runs of a profile take. From then on
     /// the drain cost of a host reads the estimated end of its lease, from the start of the
     /// lease and the largest P90 among the profile names of its keyed runs
-    /// ([`Registry::queue_keyed_run`]). Only the first call takes effect; a registry with no
-    /// source costs a lease by its max-wall bound alone.
+    /// ([`Registry::queue_keyed_run`]). The source is set once (a `OnceLock`): only the
+    /// first call takes effect and a second is ignored, which is right with one usage store
+    /// per pool. A registry with no source costs a lease by its max-wall bound alone.
     pub fn set_lives(&self, lives: Arc<dyn crate::ProfileLives>) {
         let _ = self.shared.lives.set(lives);
     }
@@ -425,6 +429,13 @@ impl Registry {
             Observed::Present { host } => Some(host),
             Observed::Absent | Observed::Unknown => None,
         }
+    }
+
+    /// What the tail rule is measured by since the registry started: leases started on
+    /// marked hosts, the share of them that were backfill, and the error of the end
+    /// estimated for each lease that ended. In memory only.
+    pub fn tail_counters(&self) -> crate::TailCounters {
+        self.lock().tail
     }
 
     /// The hosts reserved and held, and the requests waiting, now.

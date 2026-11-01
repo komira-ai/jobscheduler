@@ -70,6 +70,7 @@ fn held(name: &str, reserved: u64, deadline: u64) -> Held {
         reserved_at: at(reserved),
         deadline: at(deadline),
         assigned: false,
+        tail_end: None,
     }
 }
 
@@ -111,7 +112,11 @@ fn the_ledger_holds_marks_places_counters_and_exclusions() {
         ..record("r1")
     };
     let second = ReservationRecord {
-        held: Some(held("a", T0 + 30_000, T0 + 60_000)),
+        // The host's one lease ends at its bound, an hour after its start at T0.
+        held: Some(Held {
+            tail_end: Some(T0 + 3_600_000),
+            ..held("a", T0 + 30_000, T0 + 60_000)
+        }),
         queued: queued(1),
         ..record("r2")
     };

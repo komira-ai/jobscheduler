@@ -235,3 +235,18 @@ fn stopping_the_earlier_lease_leaves_the_later_end_counted() {
     w.ask(4, "q");
     assert_eq!(w.reserved_host("q"), Some("b".to_string()));
 }
+
+/// Catches: the stop of a lease other than the one started last counting nothing. Two
+/// leases share `a`; the first stops: its end is counted (it has no estimate, as no source
+/// of lives is set), and so is the second's after it.
+#[test]
+fn stopping_an_earlier_lease_on_a_shared_host_is_counted() {
+    let mut p = pool(&["a"]);
+    p.fx.registry.set_placer(Arc::new(Last::default()));
+    p.provider.start(sharing_spec(1, 600));
+    p.provider.start(sharing_spec(2, 600));
+    p.provider.stop(&lease(1));
+    assert_eq!(p.fx.registry.tail_counters().ended_unestimated, 1);
+    p.provider.stop(&lease(2));
+    assert_eq!(p.fx.registry.tail_counters().ended_unestimated, 2);
+}

@@ -555,6 +555,7 @@ fn this_repositorys_shipped_crates() {
         "js-bundle-cli",
         "js-mac-session",
         "js-mac-provision",
+        "js-mdm",
     ]);
     let shipped = Metadata::parse(&json)
         .expect("metadata")
@@ -570,6 +571,9 @@ fn this_repositorys_shipped_crates() {
         "js-client",
         "js-lease",
         "js-lease-server",
+        "js-mdm",
+        "js-mdm-core",
+        "js-host-step",
         "js-oci",
         "js-pool-static",
         "js-provider",
@@ -627,7 +631,8 @@ fn the_default_ship_roots_are_the_released_binaries_crates() {
             "js-agent",
             "js-bundle-cli",
             "js-mac-session",
-            "js-mac-provision"
+            "js-mac-provision",
+            "js-mdm"
         ]
     );
 }

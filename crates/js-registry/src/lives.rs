@@ -1,4 +1,8 @@
 //! The expected life of a lease, the feed of [`js_whole::cost::HostLoad::est_ends`].
+//!
+//! The feed reads the raw P90 of the wall minutes (`Fit.wall_minutes_p90` of the usage
+//! store), not the life admission charges a lease to (`Profile.life`, which is that P90
+//! plus `expected_life_delta_minutes`).
 
 use js_types::LeaseId;
 use js_usage::{ProfileCurves, ProfileKey};

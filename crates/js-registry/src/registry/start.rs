@@ -192,6 +192,7 @@ impl Registry {
             requests,
             waiting,
             marks,
+            tail,
             ..
         } = state;
         let eligible = |id: &HostId, _: &Shape| {
@@ -221,6 +222,7 @@ impl Registry {
         }
         if let (StartAck::Started { host }, true) = (&ack, fresh) {
             let end = now.plus(wanted.max_wall);
+            tail.started(marks.holder(host), spec.request_id());
             let here = book.leases().remove(host).unwrap_or_default();
             let record = records.get_mut(host);
             record.into_iter().for_each(|record| {

@@ -9,6 +9,7 @@ use js_types::{Admission, HostId, LeaseId, Resources};
 
 use super::{HostState, Record, Registry, State};
 use crate::credential::Binding;
+use crate::lives;
 use crate::whole::exclusive::Exclusive;
 
 impl Registry {
@@ -18,12 +19,15 @@ impl Registry {
     /// stop (the first may have crossed it) and the last one shows it serving with
     /// nothing held (design `whole-node.md` section 8).
     pub(crate) fn stop(&self, lease: &LeaseId) -> Observed {
+        let ended_at = self.shared.clock.now().millis();
+        let source = self.shared.lives.get().map(|lives| &**lives);
         let mut guard = self.lock();
         let State {
             book,
             records,
             runs,
             requests,
+            tail,
             ..
         } = &mut *guard;
         runs.stop_lease(lease);
@@ -31,6 +35,21 @@ impl Registry {
         if let Observed::Present { host } = book.read(lease) {
             let record = records.get_mut(&host);
             record.into_iter().for_each(|record| {
+                // The lease the host started last ends: the error of its estimate, at the
+                // time of this call on the registry's clock. `bound` holds only that
+                // lease, so the stop of an earlier lease on the host counts nothing (not
+                // reachable with one lease per host; sharing classes need a bound per
+                // lease). A lease put back after a restart has no bound and no
+                // `started_at`, so its stop counts nothing.
+                let last = record.bounds.last().filter(|bound| bound.lease == *lease);
+                let started: Vec<(LeaseId, u64)> = last
+                    .map(|bound| (bound.lease, bound.started_at))
+                    .into_iter()
+                    .collect();
+                let estimates = lives::est_ends(source, runs, &started);
+                estimates
+                    .into_iter()
+                    .for_each(|estimate| tail.ended(ended_at, estimate));
                 record.exclusive = record.exclusive.stopped();
             });
         }
