@@ -232,10 +232,10 @@ fn a_platform_miss_is_explained_among_the_workers_that_serve_the_kind() {
 }
 
 both_rules! {
-/// Catches: two waiting whole-machine leases holding the same worker (the second then
-/// holds nothing back and is passed by every younger action), and a hold on a worker
-/// too small to ever run the lease. A third, with no worker left to hold, holds none.
-fn waiting_whole_machine_leases_hold_different_workers() {
+/// Catches: two waiting whole-machine leases holding the same worker, a second lease
+/// holding another worker in the same pool the same round (one hold per pool), and a
+/// hold on a worker too small to ever run the lease.
+fn waiting_whole_machine_leases_in_one_pool_hold_one_worker() {
     let mut h = Harness::new();
     let both = ["container", "native-whole-machine"];
     h.worker_of("a", &both, Resources::new(500, GIB));
@@ -264,7 +264,9 @@ fn waiting_whole_machine_leases_hold_different_workers() {
     assert!(h.grants().is_empty());
     let queued: Vec<_> = h.0.queued().collect();
     let held: Vec<_> = queued.iter().map(|op| h.0.reservation(*op)).collect();
-    assert_eq!(held, [Some(&w(emptier)), Some(&w(fuller)), None]);
+    // One hold per pool without whole-node settings: the first holds the emptier worker,
+    // never the same worker twice, and the others wait their turn.
+    assert_eq!(held, [Some(&w(emptier)), None, None]);
 }
 }
 
