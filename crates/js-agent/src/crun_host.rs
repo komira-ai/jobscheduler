@@ -603,9 +603,7 @@ fn cgroups(host: &CrunHost, report: &mut Report) {
     // The leaf `supervisor` of a unit with `DelegateSubgroup=` shows what the unit has
     // enabled for its children, which is nothing before the delegate step: ask the unit.
     let own = match own.rsplit_once('/') {
-        Some((unit, leaf)) if leaf == js_contain::delegate::SUPERVISOR && !unit.is_empty() => {
-            unit.to_owned()
-        }
+        Some((unit, js_contain::delegate::SUPERVISOR)) => unit.to_owned(),
         _ => own,
     };
     let dir = host.cgroup_mount.join(own.trim_start_matches('/'));
