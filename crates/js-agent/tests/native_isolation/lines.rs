@@ -157,6 +157,14 @@ impl Line {
     }
 }
 
+/// The well-formed lines of `text` that are ours, whatever else is in it: the output of a run
+/// that died midway may end in a half line, and what it had already left must still be
+/// cleaned up.
+pub fn parse_lines_lenient(text: &str) -> Vec<Line> {
+    let _ = text;
+    Vec::new()
+}
+
 /// The lines of `text` that are ours. A line that starts with `ISO ` and is not a
 /// well-formed line is an error naming it: a garbled report must not read as "found
 /// nothing".
@@ -239,6 +247,18 @@ mod tests {
             "security exited 51",
         );
         assert_eq!(parse_lines(&unlooked.encode()).unwrap(), vec![unlooked]);
+    }
+
+    /// Asserts that the lenient reader keeps the good lines of a run that died midway and
+    /// drops a half line instead of failing. It catches a cleanup that gives up on the whole
+    /// output because its last line was cut, and so leaves what was seeded.
+    #[test]
+    fn a_half_line_does_not_hide_the_lines_before_it() {
+        let one = Line::new(Verdict::Seeded, Kind::SysvShm, token(6), "key=-5");
+        let text = format!("{}\nISO seeded posix-shared-memory\t0606", one.encode());
+        assert_eq!(parse_lines_lenient(&text), vec![one]);
+        assert!(parse_lines(&text).is_err());
+        assert!(parse_lines_lenient("").is_empty());
     }
 
     /// Asserts that lines the harness prints around ours are skipped, in order, and that

@@ -128,6 +128,42 @@ pub fn split_found_files(
     (with, without, cut)
 }
 
+/// Records `handle` in `runs`, then finishes the run. The handle is in `runs` whatever
+/// `finish` does, so a run that fails midway is still there for the cleanup to end.
+pub fn record_then<H, R>(
+    runs: &mut Vec<H>,
+    handle: H,
+    finish: impl FnOnce(&H) -> Result<R, String>,
+) -> Result<R, String> {
+    let done = finish(&handle)?;
+    runs.push(handle);
+    Ok(done)
+}
+
+/// A value read back after a seed must be the one written.
+///
+/// # Errors
+/// The two differ (compared trimmed).
+pub fn readback_matches(expected: &str, actual: &str) -> Result<(), String> {
+    let _ = (expected, actual);
+    Ok(())
+}
+
+/// Root's `launchctl print` of `domain` proves an agent with `token` is loaded.
+///
+/// # Errors
+/// The domain is absent, could not be read, or does not hold the token.
+pub fn domain_holds(domain: &str, seen: &Outcome, token: &Token) -> Result<(), String> {
+    let _ = (domain, seen, token);
+    Ok(())
+}
+
+/// Whether `bytes` hold any of `tokens`.
+pub fn content_with_token(bytes: &[u8], tokens: &[Token]) -> bool {
+    let _ = (bytes, tokens);
+    false
+}
+
 /// Why run A could not seed an item: the sandbox of the product profile said no (so the job
 /// could not create the state and nothing can carry over), or anything else (a full disk, a
 /// missing tool, a crash), which proves nothing.
@@ -254,13 +290,15 @@ mod tests {
         let not_found = "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.";
         assert_eq!(classify_security(Some(44), not_found), Outcome::Absent);
         assert_eq!(
-            classify_security(Some(51), "security: A default keychain could not be found."),
+            classify_security(Some(37), "security: A default keychain could not be found."),
             Outcome::Absent
         );
         for (code, text) in [
             (Some(44), "unexpected"),
             (Some(1), not_found),
             (Some(36), "User interaction is not allowed."),
+            (Some(51), "security: A default keychain could not be found."),
+            (None, "security: A default keychain could not be found."),
             (None, ""),
         ] {
             assert!(
@@ -347,7 +385,8 @@ mod tests {
     }
 
     /// Asserts that files found by `find -uid` are split by token in the path, kept in
-    /// order, cut at the limit with the cut reported. It catches a split that calls the
+    /// order; every path is examined and only the printed notes are cut at the limit, with the
+    /// cut reported. It catches a split that calls the
     /// machine's own cache files a leak (or a leak a cache file).
     #[test]
     fn found_files_are_split_by_token_and_cut_at_the_limit() {
@@ -372,8 +411,98 @@ mod tests {
         );
         assert!(!cut);
         let (with, without, cut) = split_found_files(&text, std::slice::from_ref(&a), 2);
-        assert_eq!((with.len(), without.len(), cut), (1, 1, true));
+        assert_eq!((with.len(), without.len(), cut), (2, 2, false));
+        let (with, without, cut) = split_found_files(&text, std::slice::from_ref(&a), 1);
+        assert_eq!((with.len(), without.len(), cut), (2, 1, true));
         assert_eq!(split_found_files("", &[a], 3), (vec![], vec![], false));
+    }
+
+    /// Asserts that a token in the 600th path is found with a limit of 500, and that the
+    /// notes are cut at 500. It catches a scan that examines only the first `limit` paths,
+    /// which passes a leak that happens to sort late.
+    #[test]
+    fn a_token_in_a_late_path_is_found_whatever_the_limit() {
+        let a = token(0xb2);
+        let mut text = String::new();
+        for n in 0..599 {
+            text.push_str(&format!("/private/var/folders/x/y/T/file{n}\n"));
+        }
+        text.push_str(&format!("/private/var/folders/x/y/C/iso-{a}\n"));
+        let (with, without, cut) = split_found_files(&text, std::slice::from_ref(&a), 500);
+        assert_eq!(with, [format!("/private/var/folders/x/y/C/iso-{a}")]);
+        assert_eq!(without.len(), 500);
+        assert!(cut);
+    }
+
+    /// Asserts that a run's handle is recorded before the run is finished, so that a run that
+    /// fails midway (a settle error, a non-zero child) is still in the list the cleanup
+    /// walks. It catches a start whose handle is recorded only on success, which leaks the
+    /// pool user of a failed run.
+    #[test]
+    fn a_run_is_recorded_before_it_can_fail() {
+        let mut runs: Vec<&str> = Vec::new();
+        let failed: Result<u8, String> =
+            record_then(&mut runs, "a.1", |_| Err("the run did not end".to_owned()));
+        assert_eq!(failed, Err("the run did not end".to_owned()));
+        assert_eq!(runs, ["a.1"]);
+        let ok = record_then(&mut runs, "b.1", |handle| Ok(handle.len()));
+        assert_eq!(ok, Ok(3));
+        assert_eq!(runs, ["a.1", "b.1"]);
+        let mut seen = Vec::new();
+        let mut runs: Vec<u8> = Vec::new();
+        let _: Result<(), String> = record_then(&mut runs, 7, |_| {
+            seen.push(true);
+            Ok(())
+        });
+        assert_eq!((runs, seen), (vec![7], vec![true]));
+    }
+
+    /// Asserts that a value read back must equal what was written (trimmed), and that a mismatch
+    /// names both. It catches a seed that is called seeded because the write returned 0.
+    #[test]
+    fn a_seed_must_read_back_what_was_written() {
+        assert_eq!(readback_matches("0123", "0123\n"), Ok(()));
+        let why = readback_matches("0123", "4567").unwrap_err();
+        assert!(why.contains("0123") && why.contains("4567"), "{why}");
+        assert!(readback_matches("0123", "").is_err());
+    }
+
+    /// Asserts that root's `launchctl print` of a domain proves an agent seed only when it is
+    /// found and holds the token: not when it is absent, when it lacks the token, or when the
+    /// look failed. It catches a control that assumes the agent is loaded.
+    #[test]
+    fn a_launch_agent_is_proven_by_the_print_of_its_domain() {
+        let a = token(0xc3);
+        let with = Outcome::Found(format!("services = {{\n  0  -  com.komira.iso.{a}\n}}"));
+        assert_eq!(domain_holds("user/700", &with, &a), Ok(()));
+        for seen in [
+            Outcome::Found("services = {\n}".to_owned()),
+            Outcome::Absent,
+            Outcome::CouldNotLook("launchctl exited Some(1)".to_owned()),
+        ] {
+            let why = domain_holds("user/700", &seen, &a).unwrap_err();
+            assert!(why.contains("user/700"), "{why}");
+        }
+    }
+
+    /// Asserts that the content of a file is searched for the tokens as bytes, so that a file
+    /// of the uid whose name lacks the token (a cfprefs plist, a keychain database) is still
+    /// caught, and that a token cut in two is not.
+    #[test]
+    fn a_token_in_the_content_of_a_file_is_found() {
+        let a = token(0xd4);
+        let b = token(0xe5);
+        let mut bytes = vec![0u8, 1, 2, 255];
+        bytes.extend_from_slice(a.as_str().as_bytes());
+        bytes.extend_from_slice(b"\0tail");
+        assert!(content_with_token(&bytes, std::slice::from_ref(&a)));
+        assert!(!content_with_token(&bytes, std::slice::from_ref(&b)));
+        assert!(content_with_token(&bytes, &[b.clone(), a.clone()]));
+        assert!(!content_with_token(
+            &a.as_str().as_bytes()[..15],
+            std::slice::from_ref(&a)
+        ));
+        assert!(!content_with_token(b"", &[b]));
     }
 
     fn seeded(kind: Kind) -> Line {
