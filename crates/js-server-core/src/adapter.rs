@@ -317,8 +317,11 @@ pub trait Adapter: Send {
     /// The cost prediction for the queued `operation`, which the core takes up from the state
     /// store: at the start, from another frontend's queue at an intake poll, or when a
     /// request joins it. The scheduler charges it the prediction at its next placement round.
-    /// `None` is the booked cost: the request's cores, no memory. `request` and `size_key`
-    /// are as for [`Adapter::adopted`].
+    /// `None` is the booked cost: the request's cores, no memory. `parcel`, `request` and
+    /// `size_key` are as for [`Adapter::adopted`]: `parcel` is what the operation was queued
+    /// with, so an adapter whose estimate is keyed by what the parcel names can answer for an
+    /// operation it has not seen before. It is read from the stored rows already, so no stored
+    /// format changes.
     ///
     /// Runs under the core lock, after `adopted`: every other submit, report and tick waits
     /// for it. It must not read the store, do I/O, block, or take any other lock: the server
@@ -333,6 +336,7 @@ pub trait Adapter: Send {
     fn predicted(
         &mut self,
         _operation: OperationId,
+        _parcel: Option<&[u8]>,
         _request: &Request,
         _size_key: Option<u64>,
     ) -> Option<Prediction> {

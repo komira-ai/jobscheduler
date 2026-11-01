@@ -367,14 +367,11 @@ impl Adapter for Rig {
     fn predicted(
         &mut self,
         operation: OperationId,
+        parcel: Option<&[u8]>,
         request: &Request,
         _: Option<u64>,
     ) -> Option<Prediction> {
         self.predicted_for.push(operation);
-        let parcel = self.calls.iter().find_map(|call| match call {
-            Call::Adopted(adopted, _, Some(parcel)) if *adopted == operation => Some(parcel),
-            _ => None,
-        });
         let by_parcel = parcel.and_then(|parcel| self.parcel_predictions.get(parcel));
         by_parcel
             .or_else(|| self.predictions.get(&request.key))
