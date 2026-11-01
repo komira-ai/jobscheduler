@@ -335,3 +335,21 @@ fn a_taint_during_verify_halts() {
     assert!(!rig.record().unwrap().verify_ok);
     only_looked(&spy);
 }
+
+#[test]
+fn a_unit_still_starting_is_no_proof_even_when_the_server_shows_a_hello() {
+    let rig = cut_over("hook-verify-starting", true);
+    rig.world.seed_unit(UNIT, "activating", "start");
+    let spy = Spy::new(&rig);
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 2 {
+            spy.world.seed_unit(UNIT, "active", "running");
+        }
+    });
+    let done = spy.verify(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(rig.world.ticks() - base, 2, "it waited for the unit, not the hello");
+    assert!(rig.record().unwrap().verify_ok);
+    only_looked(&spy);
+}
