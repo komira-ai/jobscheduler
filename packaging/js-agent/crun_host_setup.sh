@@ -81,6 +81,7 @@ PLANNED=0
 REFUSALS=0
 FAILED=0
 FILES_CHANGED=0
+LAST_ACT=""
 ABORT=0             # set when a step fails in a way that makes the steps after it unsafe
 
 say() { printf '%s\n' "$*"; }
@@ -265,7 +266,6 @@ manifest_line() {
 
 # sha256_str TEXT: sha256 of TEXT exactly (no newline added).
 sha256_str() { local o; o=$(printf '%s' "$1" | sha256sum) || return 1; printf '%s\n' "${o%% *}"; }
-sha256_file() { local o; o=$(sha256sum -- "$1") || return 1; printf '%s\n' "${o%% *}"; }
 
 # slurp VAR FILE: the exact bytes of FILE (a trailing newline kept) in VAR.
 slurp() {
@@ -312,6 +312,7 @@ act() {
       ;;
     apply)
       say "  doing: $what"
+      LAST_ACT=$what
       "$@" || { say "  FAILED: $what"; FAILED=1; return 1; }
       ;;
   esac
@@ -359,14 +360,26 @@ pkg_installed() {
 
 # passwd_field NAME N: field N (3 = uid, 4 = gid) of NAME's line of the user database; fails when there is none.
 passwd_field() {
-  local all line name f3 f4
+  local all line
+  local -a f
   all=$(getent passwd 2>/dev/null) || all=""
   while IFS= read -r line; do
-    IFS=: read -r name _ f3 f4 _ <<<"$line"
-    if [ "$name" = "$1" ]; then
-      if [ "$2" = 3 ]; then printf '%s\n' "$f3"; else printf '%s\n' "$f4"; fi
+    IFS=: read -r -a f <<<"$line"
+    if [ "${f[0]:-}" = "$1" ]; then
+      printf '%s\n' "${f[$(($2 - 1))]:-}"
       return 0
     fi
+  done <<<"$all"
+  return 1
+}
+
+# group_exists NAME: 0 when the group database has a group of that name.
+group_exists() {
+  local all line name
+  all=$(getent group 2>/dev/null) || all=""
+  while IFS= read -r line; do
+    IFS=: read -r name _ <<<"$line"
+    [ "$name" = "$1" ] && return 0
   done <<<"$all"
   return 1
 }
@@ -422,6 +435,16 @@ step_preflight() {
       *) refuse "$unit is '${state:-unknown}', not inactive or failed (active, activating, deactivating and reloading all count, and Restart= brings a failed unit back): drain and stop it first (the setup changes the modes of its directories and mounts the scratch filesystem again)" ;;
     esac
   done
+  local have
+  if [ -L "$STATE_DIR" ] || [ -e "$STATE_DIR" ]; then
+    have=$(stat -c '%a %u' "$STATE_DIR" 2>/dev/null) || have=""
+    if [ -L "$STATE_DIR" ] || [ ! -d "$STATE_DIR" ] || [ "$have" != "700 $EXPECT_UID" ]; then
+      refuse "the state directory $STATE_DIR is a link, not a directory, not root's or not mode 0700 ('$have'): the record in it is trusted"
+    fi
+  fi
+  if [ -L "$MANIFEST" ] || { [ -e "$MANIFEST" ] && [ ! -f "$MANIFEST" ]; }; then
+    refuse "$MANIFEST is a link or not a regular file"
+  fi
   if ! is_root; then
     if [ "$APPLY" = 1 ]; then refuse "not root"; else say "  NOTE: not root: a root-only read (a directory the agent owns) is shown as unknown"; fi
   fi
@@ -466,14 +489,24 @@ step_packages() {
 
 step_user() {
   say "job user $JOB_USER"
-  local uid gid
+  local uid gid shell
   if uid=$(passwd_field "$JOB_USER" 3) && [ -n "$uid" ]; then
     gid=$(passwd_field "$JOB_USER" 4) || gid=""
-    if valid_number "$uid" && valid_number "$gid" && [ "$uid" -gt 0 ] && [ "$gid" -gt 0 ]; then
-      say "  exists (uid $uid, gid $gid): left as it is, not recorded"
-    else
+    shell=$(passwd_field "$JOB_USER" 7) || shell=""
+    if ! { valid_number "$uid" && valid_number "$gid" && [ "$uid" -gt 0 ] && [ "$gid" -gt 0 ]; }; then
       refuse "$JOB_USER exists with uid '$uid' and gid '$gid': a job never runs as root"
+    elif [ "$uid" -gt 999 ]; then
+      refuse "$JOB_USER exists with uid $uid, above 999: it is a person's account, not a system account for jobs"
+    else
+      case $shell in
+        */nologin | /bin/false | /usr/bin/false) say "  exists (uid $uid, gid $gid): left as it is, not recorded" ;;
+        *) refuse "$JOB_USER exists with the login shell '$shell': the job user cannot log in" ;;
+      esac
     fi
+    return 0
+  fi
+  if group_exists "$JOB_USER"; then
+    refuse "a group $JOB_USER exists and the user does not: useradd --user-group would fail; name another --job-user"
     return 0
   fi
   if act "useradd a system account $JOB_USER (no login, no home)" \
@@ -517,13 +550,14 @@ step_subids() {
 # value) and MU_TYPE (the Type= of the section, empty when there is none).
 mount_unit_options() {
   local line section=""
-  MU_COUNT=0 MU_OPTIONS="" MU_TYPE=""
+  MU_COUNT=0 MU_OPTIONS="" MU_TYPE="" MU_CONTINUED=0
   while IFS= read -r line || [ -n "$line" ]; do
     case $line in "["*"]") section=$line ;; esac
     [ "$section" = "[Mount]" ] || continue
     if [[ "$line" =~ ^Options[[:space:]]*=[[:space:]]*(.*[^[:space:]])?[[:space:]]*$ ]]; then
       MU_COUNT=$((MU_COUNT + 1))
       MU_OPTIONS=${BASH_REMATCH[1]}
+      case $line in *\\) MU_CONTINUED=1 ;; esac
     elif [[ "$line" =~ ^Type[[:space:]]*=[[:space:]]*([^[:space:]]*) ]]; then
       MU_TYPE=${BASH_REMATCH[1]}
     fi
@@ -544,6 +578,53 @@ with_quota_option() {
   printf -v "$1" '%s' "$out"
 }
 
+# quota_remount_checks: refuses (and fails) unless unmounting the scratch filesystem and mounting it again is safe:
+# nothing holds it (a clean answer of fuser, not an error), no other mount of the same filesystem keeps it alive, none
+# is mounted below it, and no other active unit depends on its mount unit.
+quota_remount_checks() {
+  local out rc=0 src targets children dep line state
+  if ! command -v fuser >/dev/null 2>&1; then
+    refuse "no fuser (package psmisc): cannot tell whether anything holds $SCRATCH open"
+    return 1
+  fi
+  out=$(fuser -m -- "$SCRATCH" 2>&1) || rc=$?
+  if [ "$rc" = 0 ]; then
+    refuse "something holds $SCRATCH open (fuser -vm $SCRATCH lists it): the filesystem is unmounted to turn $QUOTA_OPTION on, so stop it first"
+    return 1
+  elif [ "$rc" != 1 ] || [ -n "$out" ]; then
+    refuse "cannot tell whether anything holds $SCRATCH open (fuser exited $rc: ${out:-no output})"
+    return 1
+  fi
+  src=$(findmnt -n -o SOURCE --mountpoint "$SCRATCH" 2>/dev/null) || src=""
+  if [ -z "$src" ]; then
+    refuse "cannot read the source of the mount at $SCRATCH"
+    return 1
+  fi
+  targets=$(findmnt -n -o TARGET -S "$src" 2>/dev/null) || targets=""
+  if [ "$targets" != "$SCRATCH" ]; then
+    refuse "$src is mounted somewhere besides $SCRATCH (${targets//$'\n'/ }): a bind mount keeps the filesystem alive, so $QUOTA_OPTION would not take"
+    return 1
+  fi
+  children=$(findmnt -n -R -o TARGET "$SCRATCH" 2>/dev/null) || children=""
+  if [ "$children" != "$SCRATCH" ]; then
+    refuse "mounts below $SCRATCH (${children//$'\n'/ }) would be unmounted with it and not mounted again"
+    return 1
+  fi
+  if ! dep=$(systemctl list-dependencies --reverse --plain --no-pager "$MOUNT_UNIT" 2>/dev/null); then
+    refuse "cannot list the units that depend on $MOUNT_UNIT"
+    return 1
+  fi
+  while IFS= read -r line; do
+    line=${line#"${line%%[![:space:]]*}"}
+    case $line in "" | "$MOUNT_UNIT" | *.target) continue ;; esac
+    state=$(systemctl show -p ActiveState --value -- "$line" 2>/dev/null) || state=""
+    case $state in
+      inactive | failed) ;;
+      *) refuse "$line is '${state:-unknown}' and depends on $MOUNT_UNIT: stopping the mount stops it and nothing starts it again"; return 1 ;;
+    esac
+  done <<<"$dep"
+}
+
 step_scratch_quota() {
   say "scratch filesystem quota ($QUOTA_OPTION on $SCRATCH)"
   if [ "$SKIP_QUOTA" = 1 ]; then
@@ -554,11 +635,19 @@ step_scratch_quota() {
     refuse "$MOUNT_UNIT_FILE is not a file: name the scratch mount unit with --scratch-mount-unit, or leave the quota out with --skip-scratch-quota"
     return 0
   fi
+  if [ -e "$MOUNT_UNIT_FILE.d" ] || [ -L "$MOUNT_UNIT_FILE.d" ]; then
+    refuse "$MOUNT_UNIT_FILE.d exists: a drop-in there can override Options=, and the edit would not reach it"
+    return 0
+  fi
   local text mounted edit=0 remount=0
   slurp text "$MOUNT_UNIT_FILE"
   mount_unit_options "$text"
   if [ "$MU_COUNT" != 1 ]; then
     refuse "$MOUNT_UNIT_FILE has $MU_COUNT Options= lines in its [Mount] section, not exactly one: the options to keep cannot be told"
+    return 0
+  fi
+  if [ "$MU_CONTINUED" = 1 ]; then
+    refuse "the Options= line of $MOUNT_UNIT_FILE is continued with a backslash: it cannot be extended safely"
     return 0
   fi
   if [ -n "$MU_TYPE" ] && [ "$MU_TYPE" != xfs ]; then
@@ -580,14 +669,7 @@ step_scratch_quota() {
   fi
   [ "$edit" = 1 ] || [ "$remount" = 1 ] || return 0
   if [ "$remount" = 1 ]; then
-    if ! command -v fuser >/dev/null 2>&1; then
-      refuse "no fuser (package psmisc): cannot tell whether anything holds $SCRATCH open"
-      return 0
-    fi
-    if fuser -m -- "$SCRATCH" >/dev/null 2>&1; then
-      refuse "something holds $SCRATCH open (fuser -vm $SCRATCH lists it): the filesystem is unmounted to turn $QUOTA_OPTION on, so stop it first"
-      return 0
-    fi
+    quota_remount_checks || return 0
   fi
   if [ "$edit" = 1 ]; then
     local new
@@ -598,6 +680,16 @@ step_scratch_quota() {
       || { ABORT=1; return 0; }
   fi
   act "systemctl daemon-reload" systemctl daemon-reload || { ABORT=1; return 0; }
+  if [ "$RUN_MODE" = apply ]; then
+    local effective
+    effective=$(systemctl show -p Options --value -- "$MOUNT_UNIT" 2>/dev/null) || effective=""
+    if ! options_has "$effective" "$QUOTA_OPTION"; then
+      say "  FAILED: the effective Options= of $MOUNT_UNIT is '$effective', without $QUOTA_OPTION (a file the edit missed): nothing was unmounted"
+      FAILED=1
+      ABORT=1
+      return 0
+    fi
+  fi
   [ "$remount" = 1 ] || return 0
   act "unmount $SCRATCH (systemctl stop $MOUNT_UNIT)" systemctl stop "$MOUNT_UNIT" || { ABORT=1; return 0; }
   if ! act "mount it again with $QUOTA_OPTION (systemctl start $MOUNT_UNIT)" systemctl start "$MOUNT_UNIT"; then
@@ -684,14 +776,15 @@ step_apparmor() {
 
 # install_one LABEL SRC SHA DST CONTENT: checks the pin, compares with what is there, installs.
 install_one() {
-  local label=$1 src=$2 sha=$3 dst=$4 content=$5 have
+  local label=$1 src=$2 sha=$3 dst=$4 raw=$5 content=$6 have
   if [ -z "$src" ]; then
     if [ "$APPLY" = 1 ]; then refuse "$label: --$label FILE and --$label-sha256 are needed"; else say "  $label: no file given (apply needs it); would install $dst"; fi
     return 0
   fi
   [ -f "$src" ] || { refuse "$label: no file $src"; return 0; }
   valid_sha "$sha" || { refuse "$label: --$label-sha256 must be 64 lowercase hex digits"; return 0; }
-  [ "$(sha256_file "$src")" = "$sha" ] || { refuse "$label: $src does not have sha256 $sha"; return 0; }
+  # The pin is of the bytes that were read once and are installed (rendered), not of a second read of the file.
+  [ "$(sha256_str "$raw")" = "$sha" ] || { refuse "$label: $src does not have sha256 $sha"; return 0; }
   if [ -e "$dst" ] || [ -L "$dst" ]; then
     if [ -f "$dst" ] && [ ! -L "$dst" ] && slurp have "$dst" && [ "$have" = "$content" ]; then
       say "  $dst: already installed with this content: ok"
@@ -708,18 +801,19 @@ install_one() {
 
 step_files() {
   say "unit and tmpfiles"
-  local unit="" tmpf=""
+  local unit="" tmpf="" unit_raw=""
   if [ -n "$UNIT_FILE" ] && [ -f "$UNIT_FILE" ]; then
-    slurp unit "$UNIT_FILE"
-    render_unit unit "$unit" "$SERVER" "$POOL" "$JOB_USER" \
+    slurp unit_raw "$UNIT_FILE"
+    unit=$unit_raw
+    render_unit unit "$unit_raw" "$SERVER" "$POOL" "$JOB_USER" \
       || { refuse "unit: $UNIT_FILE is not the unit this script renders (a placeholder is missing, or the server, pool or user is not valid)"; return 0; }
   fi
   if [ -n "$TMPF_FILE" ] && [ -f "$TMPF_FILE" ]; then slurp tmpf "$TMPF_FILE"; fi
   if [ "$APPLY" = 1 ] && { [ -z "$SERVER" ] || [ -z "$POOL" ]; }; then
     refuse "unit: --server and --pool are needed to write the unit"
   fi
-  install_one unit "$UNIT_FILE" "$UNIT_SHA" "$UNIT_DST" "$unit"
-  install_one tmpfiles "$TMPF_FILE" "$TMPF_SHA" "$TMPF_DST" "$tmpf"
+  install_one unit "$UNIT_FILE" "$UNIT_SHA" "$UNIT_DST" "$unit_raw" "$unit"
+  install_one tmpfiles "$TMPF_FILE" "$TMPF_SHA" "$TMPF_DST" "$tmpf" "$tmpf"
 }
 
 step_reload() {
@@ -748,6 +842,16 @@ setup_pass() {
 # ---------------------------------------------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------------------------------------------
+
+# on_exit: an apply that ends in a failure or a signal writes that, and the step it was in, to the manifest.
+on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [ "$rc" != 0 ] && [ "$rc" != 3 ] && [ -f "$MANIFEST" ]; then
+    manifest_line incomplete "$rc" "${LAST_ACT:-}" >>"$MANIFEST" || true
+  fi
+  exit "$rc"
+}
 
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
@@ -791,6 +895,11 @@ main() {
     [ -d "$ROOT" ] || die "--root $ROOT is not a directory"
     EXPECT_UID=$(stat -c %u "$ROOT")
   fi
+  # A tree is for tests. The commands (systemctl, useradd, ...) still act on this host, so a root process must not
+  # be given one to apply to. (`id -ur` is the real user; the root check below asks `id -u`.)
+  if [ -n "$ROOT" ] && [ "$APPLY" = 1 ] && [ "$(id -ur)" = 0 ]; then
+    die "--root with --apply must not run as root: its commands would act on this host, not on $ROOT"
+  fi
   set_paths
 
   if [ "$APPLY" = 1 ]; then say "crun host setup: APPLY"; else say "crun host setup: DRY RUN (nothing is changed)"; fi
@@ -816,6 +925,9 @@ main() {
   fi
   RUN_MODE=apply
   FILES_CHANGED=0
+  trap on_exit EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
   setup_pass
   [ "$REFUSALS" = 0 ] || FAILED=1
   if [ "$FAILED" = 1 ]; then

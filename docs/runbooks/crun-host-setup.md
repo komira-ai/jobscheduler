@@ -52,7 +52,7 @@ crun_host_setup.sh --apply --server https://scheduler.example.org:7300 --pool fa
 | `--server URL`, `--pool NAME` | written into the unit in place of its placeholders; an apply needs both |
 | `--scratch-mount-unit NAME` | the mount unit of `/var/lib/js-agent/scratch`, a file in `/etc/systemd/system` (default `var-lib-js\x2dagent-scratch.mount`) |
 | `--skip-scratch-quota` | leave the scratch mount as it is, for a host whose scratch is not a mount unit |
-| `--root DIR` | run against the tree `DIR` instead of `/` (for tests) |
+| `--root DIR` | run against the tree `DIR` instead of `/` (for tests; the programs it runs still act on the host, so an apply with it refuses to run as root) |
 
 The script reads no environment variable. Exit codes: 0 done, or a plan; 1 a step failed; 2 refused or
 bad usage, with nothing changed; 3 nothing to do.
@@ -79,6 +79,20 @@ It refuses, before changing anything, when
 - the unit file is missing (name it with `--scratch-mount-unit`, or leave the quota out with
   `--skip-scratch-quota`).
 
+Before the unmount it also refuses when
+
+- `fuser` fails or complains (only a clean "nothing holds it" counts);
+- the filesystem is mounted anywhere else (a bind mount keeps it alive, so prjquota would not
+  take) or something is mounted below the scratch directory;
+- another active unit depends on the mount unit (`systemctl list-dependencies --reverse`);
+- `<unit>.d` exists (a drop-in can override `Options=`), or the `Options=` line is continued with a
+  backslash.
+
+After the edit and the reload it checks `systemctl show -p Options` for prjquota before it
+unmounts anything. If the mount does not start again after it was stopped, the run stops there,
+leaves the host drained and prints `systemctl start <mount unit>`; no later step runs, so nothing is
+made on the root filesystem under the mount point.
+
 Where the scratch filesystem is not mounted at the moment, only the unit is edited and the option
 applies at its next mount.
 
@@ -87,7 +101,9 @@ applies at its next mount.
 `/var/lib/js-crun-host-setup/manifest` (root, 0600) has one tab-separated line for each thing an
 apply created or changed: `pkg`, `user`, `subuid`, `subgid`, `mount-options` (the file, the
 `Options=` it had, the sha256 of what the script wrote), `dir-created`, `dir-mode` (the old mode),
-`apparmor-loaded`, `file` and `reload`. The script has no rollback verb; each line says what to undo
+`apparmor-loaded`, `file` and `reload`; a run that ends in a failure or a signal adds
+`incomplete`, the exit status and the step it was in. The state directory must be 0700 and the
+caller's, or the run is refused. The script has no rollback verb; each line says what to undo
 by hand. Undoing `mount-options` means putting the old `Options=` back and mounting the filesystem
 again.
 
