@@ -117,6 +117,14 @@ pub struct Record {
     /// The stop is begun: written and synced before `cutover` signals the unit, so a
     /// `cutover` killed at any later point leaves it set.
     pub stop_begun: bool,
+    /// The `session_started_ms` the lease server showed for the host in the reading `cutover`
+    /// took last before it marked the stop, on the server's clock; `None` on a first install
+    /// and when the server showed no session. Written in the same save as `stop_begun`, never
+    /// overwritten by a rerun, and the only thing `verify` compares a new session with: two
+    /// stamps of the one clock, never one clock with another. Left out of the file when
+    /// `None`, so such a record reads as it did before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_stop_session_ms: Option<u64>,
     /// The move of the link to the staged release is begun: written before the move, so a
     /// `cutover` killed at any later point leaves it set. The link itself says whether it
     /// happened.
@@ -139,6 +147,7 @@ impl Record {
             update,
             cordon: Cordon::default(),
             stop_begun: false,
+            pre_stop_session_ms: None,
             link_moved: false,
             start_issued: false,
             verify_ok: false,

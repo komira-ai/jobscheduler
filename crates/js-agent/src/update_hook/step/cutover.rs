@@ -14,7 +14,10 @@
 //!    renewed nor lifted. A cordon in force under a mark that was never confirmed may be ours or
 //!    not, and nothing would renew it through the stop: that defers too, the mark left as it is;
 //! 3. the unit and the link are read, so that a read that fails leaves nothing begun; then the
-//!    record gets `stop_begun`, and the unit is stopped and waited for (renewing the cordon if
+//!    record gets `stop_begun` together with `pre_stop_session_ms`, the session the lease server
+//!    showed for the host in the reading of step 2 (one save, so that the stop is never marked
+//!    without it and it is never written without the stop; a rerun that finds the stop begun
+//!    reads no host and keeps it), and the unit is stopped and waited for (renewing the cordon if
 //!    it is ours), for at most the declared bound less the start wait and a margin;
 //! 4. the record gets `link_moved`, then the link is moved;
 //! 5. the record gets `start_issued`, then the unit is started and waited for. A start that
@@ -83,9 +86,12 @@ fn irreversible(mut done: Done) -> Done {
 fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Result<Done, Done> {
     let link = release_link(env, params)?;
     let entered_begun = begun(record);
+    // The session the server showed in the last reading before the stop (see `hold`). A rerun
+    // that finds the stop begun reads nothing and keeps what the record holds.
+    let mut session = None;
     if !entered_begun {
         refuse_host(env)?;
-        hold(env, held, record, params)?;
+        session = hold(env, held, record, params)?;
     }
     // A first install has no unit to stop.
     if record.update.previous.is_some() {
@@ -95,6 +101,9 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         let state = show(env, &unit, Reason::StopFailed)?;
         let on_staged = linked(env, &link, &record.update.staged)?;
         if !entered_begun {
+            // One save: the stop is never marked without the session it is to be judged against
+            // (`mark` saves a copy of the record as it stands, with the session in it).
+            record.pre_stop_session_ms = session;
             mark(env, held, record, |record| record.stop_begun = true)?;
         }
         stop(env, held, record, params, (state, on_staged), entered_begun)?;
@@ -174,10 +183,17 @@ fn mark(env: &Env<'_>, held: &Held, record: &mut Record, set: fn(&mut Record)) -
 }
 
 /// The host is cordoned and holds no lease, or this ends deferred (or failed) with nothing
-/// stopped.
-fn hold(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Result<(), Done> {
+/// stopped. Returns the `session_started_ms` of the reading that showed it (`None` on a first
+/// install, which reads nothing, and when the server showed no session): the last reading of
+/// the host before the stop.
+fn hold(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    params: &Params,
+) -> Result<Option<u64>, Done> {
     if record.update.previous.is_none() {
-        return Ok(());
+        return Ok(None);
     }
     let looked = env.ports.lease.host().map_err(lease_failure)?;
     let now = env.ports.clock.now_ms();
@@ -200,7 +216,7 @@ fn hold(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Res
         env.ports.lease.host().map_err(lease_failure)?
     };
     if host.leases == 0 && !host.releasing {
-        return Ok(());
+        return Ok(host.session_started_ms);
     }
     Err(busy(env, held, record, params, &host).unwrap_or_else(|done| done))
 }

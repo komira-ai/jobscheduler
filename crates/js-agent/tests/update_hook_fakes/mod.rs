@@ -6,7 +6,7 @@
 //!   compares between runs: `units/<unit>` (the unit manager), `link/<name>` (release links),
 //!   `lease.json` (the lease server's view of the host) and `state/` (the agent's state root).
 //! - `control/`, what the harness must not compare: the clock (`clock`, milliseconds) and the
-//!   count of pauses (`ticks`).
+//!   count of pauses (`ticks`), and the skew of the lease server's clock (`server-skew-ms`).
 //!
 //! Every change to `world/` passes the [`Gate`] first; a read, and a call that changes nothing,
 //! does not. Nothing here sleeps: [`Clock::pause`] moves the fake clock on and counts.
@@ -119,7 +119,7 @@ impl World {
             id: id.to_owned(),
             state: "live".to_owned(),
             epoch: 1,
-            session_started_ms: Some(self.now_ms()),
+            session_started_ms: Some(self.server_now_ms()),
             leases: 0,
             lease: None,
             releasing: false,
@@ -281,10 +281,29 @@ impl World {
         };
         host.epoch += 1;
         host.state = "live".to_owned();
-        host.session_started_ms = Some(self.now_ms());
+        host.session_started_ms = Some(self.server_now_ms());
         host.agent_version = Some(agent_version.to_owned());
         host.runtime = Some(RUNTIME.to_owned());
         self.save(&host)
+    }
+
+    /// The lease server's clock runs `skew_ms` ahead of the host's (negative: behind). Only the
+    /// session stamps the server makes are on its clock; cordon expiries stay on the host's, so
+    /// a test of the clock difference changes nothing else.
+    ///
+    /// # Panics
+    /// The file cannot be written.
+    pub fn set_server_skew_ms(&self, skew_ms: i64) {
+        fs::write(self.control.join("server-skew-ms"), skew_ms.to_string()).unwrap();
+    }
+
+    /// The server's clock: the host's plus the skew (see [`World::set_server_skew_ms`]).
+    fn server_now_ms(&self) -> u64 {
+        let skew: i64 = fs::read_to_string(self.control.join("server-skew-ms"))
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(0);
+        self.now_ms().saturating_add_signed(skew)
     }
 
     /// The number of pauses taken.

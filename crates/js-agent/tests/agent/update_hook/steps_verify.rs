@@ -9,12 +9,18 @@ use js_agent::update_hook::{
 };
 use serde_json::Value;
 
-use super::step_rig::{Rig, Spy, UNIT, end_state, killable, running};
+use super::step_rig::{Rig, Spy, UNIT, end_state, killable, pre_stop, running};
 
 /// A host `cutover` has finished on. With `hello` the new agent has said hello on its start;
 /// without, the unit is active and the server has heard nothing since.
 fn cut_over(name: &str, hello: bool) -> Rig {
+    cut_over_after(name, hello, |_| {})
+}
+
+/// The same, with `before` run on the host after `prepare` and before `cutover`.
+fn cut_over_after(name: &str, hello: bool, before: impl FnOnce(&Rig)) -> Rig {
     let rig = running(Rig::new(name));
+    before(&rig);
     // Time passes between the placing of the cordon and the start of the new agent.
     rig.world.pause(Duration::from_secs(5));
     let done = {
@@ -369,5 +375,126 @@ fn a_rerun_after_verify_ok_on_a_tainted_agent_halts() {
     assert_eq!(done.outcome, Outcome::Halt, "{done:?}");
     assert_eq!(done.report.reason, Some(Reason::Tainted));
     assert_eq!(rig.record_bytes(), record);
+    only_looked(&spy);
+}
+
+#[test]
+fn a_host_clock_far_ahead_of_the_servers_does_not_fail_a_healthy_verify() {
+    // The host's clock is ten minutes ahead of the server's: the new session's stamp, on the
+    // server's clock, is earlier than the instant the cordon was placed, on the host's.
+    let rig = cut_over_after("hook-verify-host-clock-ahead", true, |rig| {
+        rig.world.set_server_skew_ms(-600_000);
+    });
+    let session = rig.host().session_started_ms.unwrap();
+    assert!(
+        session < rig.record().unwrap().cordon.first_ms,
+        "the setup: a stamp that predates the cordon"
+    );
+    let spy = Spy::new(&rig);
+    let done = spy.verify(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(rig.record().unwrap().verify_ok);
+    only_looked(&spy);
+}
+
+#[test]
+fn a_server_clock_far_ahead_of_the_hosts_does_not_make_the_old_session_new() {
+    // The server stamped the old agent's session an hour after the instant the host's clock
+    // reads when the cordon is placed. Only the version has changed since.
+    let rig = cut_over_after("hook-verify-server-clock-ahead", false, |rig| {
+        rig.world.alter_host(|host| {
+            host.session_started_ms = Some(host.session_started_ms.unwrap() + 3_600_000)
+        });
+    });
+    let old = rig.host().session_started_ms;
+    assert_eq!(pre_stop(&rig), old);
+    rig.world
+        .alter_host(|host| host.agent_version = Some("1.4.0".to_owned()));
+    let before = rig.record_bytes();
+    let spy = Spy::new(&rig);
+    let done = spy.verify(&rig);
+    release_failure(&done, Reason::NoHello);
+    assert_eq!(rig.record_bytes(), before);
+    only_looked(&spy);
+}
+
+#[test]
+fn a_restarted_server_with_a_new_session_of_the_old_version_is_no_proof_until_the_target_says_hello()
+ {
+    let rig = cut_over("hook-verify-restart-old-version", false);
+    rig.world.forget_host();
+    let spy = Spy::new(&rig);
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 2 {
+            // The old agent's session, made again by the restarted server.
+            spy.world.hello("1.3.0").unwrap();
+        }
+        if ticks == base + 5 {
+            spy.world.hello("1.4.0").unwrap();
+        }
+    });
+    let done = spy.verify(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(
+        rig.world.ticks() - base,
+        5,
+        "the new session of the old version was no proof"
+    );
+    only_looked(&spy);
+    // And at the bound, a session of the old version only is a mismatch.
+    let rig = cut_over("hook-verify-restart-old-version-only", false);
+    rig.world.forget_host();
+    let spy = Spy::new(&rig);
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 2 {
+            spy.world.hello("1.3.0").unwrap();
+        }
+    });
+    let done = spy.verify(&rig);
+    release_failure(&done, Reason::VersionMismatch);
+    assert!(!rig.record().unwrap().verify_ok);
+}
+
+#[test]
+fn when_the_server_showed_no_session_at_the_stop_any_live_session_of_the_target_is_proof() {
+    let rig = cut_over_after("hook-verify-no-pre-stop-session", true, |rig| {
+        rig.world.forget_host();
+    });
+    assert_eq!(pre_stop(&rig), None);
+    let spy = Spy::new(&rig);
+    let done = spy.verify(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    only_looked(&spy);
+}
+
+#[test]
+fn a_first_install_accepts_a_live_session_of_the_target() {
+    let rig = Rig::first_install("hook-verify-first-install");
+    assert_eq!(Spy::new(&rig).prepare(&rig).outcome, Outcome::Success);
+    rig.kill.disarm();
+    assert_eq!(Spy::new(&rig).cutover(&rig).outcome, Outcome::Success);
+    rig.kill.disarm();
+    assert_eq!(pre_stop(&rig), None);
+    let spy = Spy::new(&rig);
+    let done = spy.verify(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(rig.record().unwrap().verify_ok);
+    only_looked(&spy);
+}
+
+#[test]
+fn verify_does_not_read_the_cordon_stamp_for_the_session() {
+    // The cordon's first stamp is far beyond every clock the server has: the proof is still
+    // the session against the one recorded before the stop.
+    let rig = cut_over("hook-verify-cordon-stamp-unused", true);
+    let mut record = rig.record().unwrap();
+    record.cordon.first_ms = u64::MAX / 2;
+    record.cordon.expires_ms = u64::MAX / 2;
+    rig.put_record(&record);
+    let spy = Spy::new(&rig);
+    let done = spy.verify(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     only_looked(&spy);
 }

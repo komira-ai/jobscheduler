@@ -567,6 +567,12 @@ pub fn end_state(rig: &Rig) -> serde_json::Value {
     serde_json::from_str(&state.to_string().replace(&root, "<root>")).unwrap()
 }
 
+/// The session of the host as the server showed it just before the stop, as the record on disk
+/// holds it.
+pub fn pre_stop(rig: &Rig) -> Option<u64> {
+    rig.record().expect("a record").pre_stop_session_ms
+}
+
 /// The `stop_begun`, `link_moved` and `start_issued` marks on disk.
 pub fn marks(rig: &Rig) -> [bool; 3] {
     let record = rig.record().unwrap();
