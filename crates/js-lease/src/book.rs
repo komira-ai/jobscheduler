@@ -242,6 +242,7 @@ pub(crate) fn bookings(path: &Path) -> Result<Vec<Booking>, OpenError> {
             lease: record.id,
             host: record.host.clone()?,
             state: record.state,
+            shares: None,
         })
     });
     Ok(named.collect())

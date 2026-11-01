@@ -425,11 +425,13 @@ fn bookings_are_the_hosts_the_file_names() {
             lease: held.id,
             host: held.host,
             state: LeaseState::Held,
+            shares: None,
         },
         Booking {
             lease: doomed.id,
             host: doomed.host,
             state: LeaseState::Releasing,
+            shares: None,
         },
     ];
     assert_eq!(bookings, expected);

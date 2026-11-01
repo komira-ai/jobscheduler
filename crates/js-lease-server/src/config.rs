@@ -29,6 +29,7 @@ use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
+use crate::sched::place::SchedPlacer;
 use crate::usage::{KeySource, ProfileKey, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
 
@@ -107,6 +108,13 @@ pub struct Cli {
     /// pool join tokens are not affected. Needs `--agent-pool-config`.
     #[arg(long)]
     pub require_host_credential: bool,
+    /// Who picks the host of a lease on a host that registered itself: `registry` (the
+    /// default) books the first free host by id, one lease to a host, and refuses a class
+    /// that books part of a host; `js-sched` has the scheduler choose among the hosts with
+    /// room (the least booked first), and lets leases of a class that books part of a host
+    /// share one. Needs `--agent-pool-config`.
+    #[arg(long, value_enum, default_value = "registry")]
+    pub placement: Placement,
     /// The ttl of a lease whose client names none, such as `600s`, `10m` or `1h`.
     #[arg(long, default_value = "600s", value_parser = parse_duration)]
     pub default_ttl: Duration,
@@ -216,6 +224,26 @@ impl From<&Cli> for Limits {
             write_timeout: cli.write_timeout,
             max_requests: cli.max_requests,
             drain_timeout: cli.drain_timeout,
+        }
+    }
+}
+
+/// Who places a lease on a registered host (`--placement`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum Placement {
+    /// The registry books the first free host by id; a lease holds a whole host.
+    #[default]
+    Registry,
+    /// `js-sched` picks the host among those with room, and leases that share a host may.
+    JsSched,
+}
+
+impl Placement {
+    /// The placer the registry takes for this choice; none for `registry`.
+    pub(crate) fn placer(self) -> Option<Arc<dyn js_registry::Placer>> {
+        match self {
+            Self::Registry => None,
+            Self::JsSched => Some(Arc::new(SchedPlacer)),
         }
     }
 }
@@ -394,6 +422,8 @@ pub(crate) struct AgentSetup {
     pub(crate) hello_limit: HelloLimit,
     /// `--require-host-credential`.
     pub(crate) require_host_credential: bool,
+    /// `--placement`.
+    pub(crate) placement: Placement,
 }
 
 impl Config {
@@ -495,6 +525,7 @@ impl Config {
                     mint_provider,
                     hello_limit: server.agents.hello_limit(),
                     require_host_credential: server.agents.require_host_credential(),
+                    placement: server.agents.placement(),
                 });
                 (
                     Hosts::Layered {
@@ -651,6 +682,12 @@ impl Config {
         self.usage.db.as_deref()
     }
 
+    /// Who places a lease on a registered host (`--placement`, or `server.placement`):
+    /// `registry` for a server with no agent registration.
+    pub fn placement(&self) -> Placement {
+        Placement::Registry
+    }
+
     /// The most bytes the learned cost curves may take (`--profile-store-bytes`).
     pub fn profile_store_bytes(&self) -> u64 {
         self.usage.profile_store_bytes
@@ -748,6 +785,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                         interval: cli.agent_hello_interval,
                     },
                     require_host_credential: cli.require_host_credential,
+                    placement: cli.placement,
                 }),
             })
         }

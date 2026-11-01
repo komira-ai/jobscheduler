@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use js_pool_static::SeatError;
 use js_provider::{Flavour, HostCapacity, Observed, Provider, StartAck, StartSpec, StopAck};
-use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
+use js_types::{HostId, LeaseId, ProviderId, ResourceClass, Resources};
 
 use crate::credential::Binding;
 use crate::registry::Registry;
@@ -91,7 +91,22 @@ impl RegisteredProvider {
         lease: LeaseId,
         binding: Option<Binding>,
     ) -> Result<(), SeatError> {
-        self.registry.seat(host, lease, binding)
+        self.seat_booked(host, lease, binding, None)
+    }
+
+    /// As [`RegisteredProvider::seat`], with what the lease booked: `Some(resources)` puts
+    /// back a lease that shares its host, which books those resources and needs a host with
+    /// no whole-host lease and room for them beside the leases seated before it; `None` books
+    /// the whole shape, as [`RegisteredProvider::seat`] does. The refusals are those of
+    /// [`js_pool_static::HostBook::seat_as`] except `Unlisted`.
+    pub fn seat_booked(
+        &self,
+        host: &HostId,
+        lease: LeaseId,
+        binding: Option<Binding>,
+        shares: Option<Resources>,
+    ) -> Result<(), SeatError> {
+        self.registry.seat(host, lease, binding, shares)
     }
 }
 

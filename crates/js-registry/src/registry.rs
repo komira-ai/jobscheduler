@@ -197,6 +197,8 @@ struct Shared {
     state: Mutex<State>,
     /// The source of the expected life of a profile ([`Registry::set_lives`]).
     lives: OnceLock<Arc<dyn crate::ProfileLives>>,
+    /// The placer that picks the host of a start ([`Registry::set_placer`]).
+    placer: OnceLock<Arc<dyn crate::Placer>>,
 }
 
 /// The hosts of one pool that registered themselves, and the lease bookings on them.
@@ -262,6 +264,7 @@ impl Registry {
                 sessions: Box::new(sessions),
                 state: Mutex::new(state),
                 lives: OnceLock::new(),
+                placer: OnceLock::new(),
             }),
         }
     }
@@ -273,6 +276,17 @@ impl Registry {
     /// source costs a lease by its max-wall bound alone.
     pub fn set_lives(&self, lives: Arc<dyn crate::ProfileLives>) {
         let _ = self.shared.lives.set(lives);
+    }
+
+    /// Gives the registry the placer that picks the host of a start. From then on a start
+    /// is shown every host that could take it and books the one the placer picks, and a
+    /// class that books part of a host is admitted: the leases of such a class share a
+    /// host that has room for them, and a host that still lists the runs of its first
+    /// lease takes the second. Without a placer the registry books the first host by id,
+    /// leases whole hosts only, and refuses a class that does not book one with
+    /// `UnsupportedClass`. Only the first call takes effect.
+    pub fn set_placer(&self, placer: Arc<dyn crate::Placer>) {
+        let _ = self.shared.placer.set(placer);
     }
 
     /// The provider the lease table runs on, serving the pool's class.

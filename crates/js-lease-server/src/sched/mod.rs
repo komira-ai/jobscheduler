@@ -1,9 +1,13 @@
 //! The server's side of placing work with `js-sched`.
 //!
-//! Only the pure conversions between this crate's vocabulary and the scheduler's exist
-//! so far ([`map`]). Nothing in the server calls them yet.
+//! [`map`] holds the pure conversions between this crate's vocabulary and the scheduler's.
+//! [`place`] is the placer a registry takes under `--placement js-sched`: it builds a
+//! scheduler over the hosts a start could book and asks it which one.
 
-// The shell that consumes `map` lands with the placement flag; until it does every
-// item is used by tests alone.
-#[allow(dead_code, reason = "the scheduler shell that calls these lands later")]
+// `host_id` and the lease-text conversions are for the step that reads grants back.
+#[allow(
+    dead_code,
+    reason = "the conversions back from the scheduler are not read yet"
+)]
 pub(crate) mod map;
+pub(crate) mod place;

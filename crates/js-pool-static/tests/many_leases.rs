@@ -1,10 +1,11 @@
 //! A host books many leases: a lease that shares a host books its own resources, and a
 //! whole-host lease books the host. Starts that book a whole host behave as they always did.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_pool_static::HostBook;
+use js_pool_static::{Candidate, HostBook, SeatError};
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
 use js_types::{Admission, ClassId, HostId, LeaseId, Request, ResourceClass, Resources, Shape};
 
@@ -279,4 +280,145 @@ fn a_stopped_lease_never_restarts_on_a_many_lease_host() {
         StartAck::Refused(RefusalCode::LeaseEnded)
     );
     assert_eq!(book.leases().get(&host("a")), Some(&vec![lease(2)]));
+}
+
+fn two_hosts() -> HostBook {
+    let mut book = HostBook::new();
+    book.insert_host(host("a"), shape());
+    book.insert_host(host("b"), shape());
+    book
+}
+
+/// Asserts that `start_by` shows its chooser every candidate in id order with the leases
+/// already booked on each, and books the host the chooser picks. The chooser here picks the
+/// last candidate, which first-fit never does: a chooser that is ignored books `a`.
+#[test]
+fn the_caller_picks_the_host_from_the_candidates() {
+    let mut book = two_hosts();
+    let class = sharing();
+    let seen = RefCell::new(Vec::new());
+    let last = |open: &[Candidate]| {
+        let shown = open.iter().map(|c| (c.host.clone(), c.leases.len()));
+        seen.borrow_mut().push(shown.collect::<Vec<_>>());
+        open.len().checked_sub(1)
+    };
+    let first = book.start_by(&spec(&class, 1, 1000), None, ANY, &last);
+    let second = book.start_by(&spec(&class, 2, 1000), None, ANY, &last);
+    assert_eq!(first, StartAck::Started { host: host("b") });
+    assert_eq!(second, StartAck::Started { host: host("b") });
+    let shown = vec![
+        vec![(host("a"), 0), (host("b"), 0)],
+        vec![(host("a"), 0), (host("b"), 1)],
+    ];
+    assert_eq!(seen.into_inner(), shown);
+}
+
+/// Asserts that a chooser that picks none, or an index past the candidates, books nothing
+/// and the start is `NoCapacity` (the hosts fit), and that a chooser is not asked when no
+/// host has room. A chooser that is ignored starts the lease.
+#[test]
+fn a_chooser_that_declines_leaves_the_start_at_no_capacity() {
+    let mut book = one_host();
+    let class = sharing();
+    let none = |_: &[Candidate]| None;
+    let past = |open: &[Candidate]| Some(open.len());
+    let chooses: [&dyn Fn(&[Candidate]) -> Option<usize>; 2] = [&none, &past];
+    for (seq, choose) in (1..).zip(chooses) {
+        assert_eq!(
+            book.start_by(&spec(&class, seq, 500), None, ANY, choose),
+            StartAck::Refused(RefusalCode::NoCapacity)
+        );
+    }
+    assert!(book.leases().is_empty());
+    let count = RefCell::new(Vec::new());
+    let count_them = |open: &[Candidate]| {
+        count.borrow_mut().push(open.len());
+        None
+    };
+    book.start_where(&spec(&class, 3, 1500), None, ANY);
+    book.start_by(&spec(&class, 4, 1000), None, ANY, &count_them);
+    assert_eq!(count.into_inner(), Vec::<usize>::new());
+}
+
+/// Asserts the gate of a provider that lets leases share: a listed class passes whether it
+/// books the whole host or part of it, and a class the provider does not list is refused
+/// `UnsupportedClass`. The whole-host gate still refuses the class that shares.
+#[test]
+fn the_listed_gate_admits_a_class_that_shares() {
+    let (share, all) = (sharing(), whole());
+    let classes = [share.clone(), all.clone()];
+    assert_eq!(HostBook::listed_gate(&classes, &spec(&share, 1, 500)), None);
+    assert_eq!(HostBook::listed_gate(&classes, &spec(&all, 2, 500)), None);
+    assert_eq!(
+        HostBook::listed_gate(std::slice::from_ref(&all), &spec(&share, 3, 500)),
+        Some(RefusalCode::UnsupportedClass)
+    );
+    assert_eq!(
+        HostBook::class_gate(&classes, &spec(&share, 4, 500)),
+        Some(RefusalCode::UnsupportedClass)
+    );
+}
+
+/// Asserts that a lease that shares is put back with its own resources: two such leases
+/// are seated on one host, the host then has room for what is left and none for more, and
+/// stopping one gives its room back. Seating books the whole shape instead, so the second
+/// seat is refused and the host is full.
+#[test]
+fn a_restored_sharing_lease_keeps_its_resources() {
+    let mut book = one_host();
+    let class = sharing();
+    let half = || Some(Resources::new(1000, 1, 0, None).unwrap());
+    assert_eq!(book.seat_as(&host("a"), lease(1), half()), Ok(()));
+    assert_eq!(book.seat_as(&host("a"), lease(2), half()), Ok(()));
+    assert_eq!(
+        book.start_where(&spec(&class, 3, 500), None, ANY),
+        StartAck::Refused(RefusalCode::NoCapacity)
+    );
+    book.stop(&lease(1));
+    assert_eq!(
+        book.start_where(&spec(&class, 4, 1000), None, ANY),
+        StartAck::Started { host: host("a") }
+    );
+    assert_eq!(
+        book.leases().get(&host("a")),
+        Some(&vec![lease(2), lease(4)])
+    );
+}
+
+/// Asserts the refusals of seating with resources: a lease too big for an empty host is
+/// `NoRoom`; one that shares beside a whole-host lease, or a whole-host lease beside one
+/// that shares, or a lease that does not fit beside the others, is `Taken` and names the
+/// first lease there; a lease already seated elsewhere is `Elsewhere`.
+#[test]
+fn seating_with_resources_refuses_what_does_not_fit() {
+    let mut book = two_hosts();
+    let big = Some(Resources::new(3000, 1, 0, None).unwrap());
+    let one = || Some(Resources::new(1000, 1, 0, None).unwrap());
+    assert_eq!(
+        book.seat_as(&host("a"), lease(1), big),
+        Err(SeatError::NoRoom(host("a")))
+    );
+    assert_eq!(book.seat(&host("a"), lease(2)), Ok(()));
+    let taken = SeatError::Taken {
+        host: host("a"),
+        holder: lease(2),
+    };
+    assert_eq!(book.seat_as(&host("a"), lease(3), one()), Err(taken));
+    assert_eq!(book.seat_as(&host("b"), lease(4), one()), Ok(()));
+    let beside = SeatError::Taken {
+        host: host("b"),
+        holder: lease(4),
+    };
+    assert_eq!(
+        book.seat_as(&host("b"), lease(5), None),
+        Err(beside.clone())
+    );
+    let most = Some(Resources::new(1500, 1, 0, None).unwrap());
+    assert_eq!(book.seat_as(&host("b"), lease(6), most), Err(beside));
+    let elsewhere = SeatError::Elsewhere {
+        lease: lease(4),
+        host: host("b"),
+    };
+    assert_eq!(book.seat_as(&host("a"), lease(4), one()), Err(elsewhere));
+    assert_eq!(book.seat_as(&host("b"), lease(4), one()), Ok(()));
 }

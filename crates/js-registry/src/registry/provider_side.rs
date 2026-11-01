@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use js_pool_static::SeatError;
 use js_provider::{HostCapacity, Observed};
-use js_types::{Admission, HostId, LeaseId};
+use js_types::{Admission, HostId, LeaseId, Resources};
 
 use super::{HostState, Record, Registry, State};
 use crate::credential::Binding;
@@ -76,15 +76,16 @@ impl Registry {
         host: &HostId,
         lease: LeaseId,
         binding: Option<Binding>,
+        shares: Option<Resources>,
     ) -> Result<(), SeatError> {
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
         let State { book, records, .. } = &mut *guard;
-        let seated = match book.seat(host, lease) {
+        let seated = match book.seat_as(host, lease, shares.clone()) {
             Err(SeatError::Unlisted(_)) => {
                 self.shared.config.list_in(book, host.clone());
                 records.insert(host.clone(), Record::awaiting(binding, now));
-                book.seat(host, lease)
+                book.seat_as(host, lease, shares)
             }
             settled => settled,
         };

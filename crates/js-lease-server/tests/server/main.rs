@@ -42,6 +42,7 @@ mod lambda_e2e_support;
 mod layering;
 mod limits;
 mod memory_percent;
+mod placement;
 mod pools_checks;
 mod pools_policy;
 mod pools_provider_checks;

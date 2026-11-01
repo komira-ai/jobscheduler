@@ -132,6 +132,7 @@ mod config;
 mod credential;
 mod lives;
 mod load;
+mod placer;
 mod provider;
 mod refusal;
 mod registry;
@@ -151,6 +152,7 @@ pub use js_whole::{
 };
 pub use lives::ProfileLives;
 pub use load::{BadLease, node_load};
+pub use placer::Placer;
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
 pub use registry::{

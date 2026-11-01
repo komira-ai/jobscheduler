@@ -28,15 +28,33 @@ pub enum SeatError {
     /// The lease was stopped, and a stopped lease never starts again.
     #[error("lease {0} was stopped")]
     Ended(LeaseId),
+    /// The host holds no lease, yet is too small for the resources the lease books.
+    #[error("host {0} has no room for the lease")]
+    NoRoom(HostId),
 }
 
 /// One lease on a host and what it books there.
-#[derive(Debug)]
-struct Booked {
-    lease: LeaseId,
-    resources: Resources,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Held {
+    /// The lease.
+    pub lease: LeaseId,
+    /// What it books on the host: its own resources, or the whole shape for a lease that
+    /// books the whole host.
+    pub resources: Resources,
     /// Whether the lease books the whole host, whatever its resources add up to.
-    whole: bool,
+    pub whole: bool,
+}
+
+/// A host a start could be booked on: it fits the request, has room for it and is
+/// eligible. [`HostBook::start_by`] shows the candidates to the caller's choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    /// The host.
+    pub host: HostId,
+    /// What the host offers to be booked.
+    pub shape: Shape,
+    /// The leases booked on it, in the order they were booked.
+    pub leases: Vec<Held>,
 }
 
 #[derive(Debug)]
@@ -44,7 +62,7 @@ struct Host {
     shape: Shape,
     memory: MemoryHeadroom,
     /// The leases on the host, in the order they were booked.
-    leases: Vec<Booked>,
+    leases: Vec<Held>,
 }
 
 impl Host {
@@ -144,22 +162,50 @@ impl HostBook {
         (!leasable).then_some(RefusalCode::UnsupportedClass)
     }
 
+    /// The refusal for a spec whose class the provider does not list. `None` when it does,
+    /// whether the class books a whole host or part of one: the gate of a provider that
+    /// lets leases share a host.
+    pub fn listed_gate(classes: &[ResourceClass], spec: &StartSpec) -> Option<RefusalCode> {
+        Self::class_gate(classes, spec)
+    }
+
     /// Books `spec`'s lease on a host, in this order of answers:
     ///
     /// 1. `LeaseEnded` when the lease was stopped;
     /// 2. `Started` on the host it already holds (a repeated start books nothing more);
     /// 3. `Refused(gate)` when the caller passes a refusal as `gate`;
-    /// 4. `Started` on the first host by id that fits the request, is free, and that
-    ///    `eligible` accepts;
-    /// 5. `NoCapacity` when a host fits but none is free and eligible, else `NoFit`.
+    /// 4. `Started` on the first host by id that fits the request, has room for it, and
+    ///    that `eligible` accepts;
+    /// 5. `NoCapacity` when a host fits but none has room and is eligible, else `NoFit`.
     ///
     /// A host that fits but is not eligible counts as a fit: the request could be served
-    /// by it later.
+    /// by it later. This is [`start_by`] with the choice of the first candidate.
+    ///
+    /// [`start_by`]: HostBook::start_by
     pub fn start_where(
         &mut self,
         spec: &StartSpec,
         gate: Option<RefusalCode>,
         eligible: &dyn Fn(&HostId, &Shape) -> bool,
+    ) -> StartAck {
+        self.start_by(spec, gate, eligible, &|open| {
+            (!open.is_empty()).then_some(0)
+        })
+    }
+
+    /// Books `spec`'s lease as [`start_where`] does, except that the caller picks the host:
+    /// `choose` is shown every candidate (a host that fits, has room and is eligible, in
+    /// id order; it is not asked when there is none) and answers the index of the one to
+    /// book. The answers are those of [`start_where`]; `NoCapacity` also when `choose`
+    /// picks none, or an index past the candidates.
+    ///
+    /// [`start_where`]: HostBook::start_where
+    pub fn start_by(
+        &mut self,
+        spec: &StartSpec,
+        gate: Option<RefusalCode>,
+        eligible: &dyn Fn(&HostId, &Shape) -> bool,
+        choose: &dyn Fn(&[Candidate]) -> Option<usize>,
     ) -> StartAck {
         if self.ended.contains(&spec.lease()) {
             return StartAck::Refused(RefusalCode::LeaseEnded);
@@ -172,34 +218,50 @@ impl HostBook {
         }
         let wanted = spec.request();
         let whole = spec.class().admission().books_whole_host();
-        let mut fits_somewhere = false;
-        for (id, host) in &mut self.hosts {
-            if !host
-                .shape
-                .satisfies(&wanted.resources, &wanted.capabilities)
-            {
-                continue;
-            }
-            fits_somewhere = true;
-            let room = host.has_room(&wanted.resources, whole);
-            let open = [room, eligible(id, &host.shape)].into_iter().all(|ok| ok);
-            if open {
-                let resources = match whole {
-                    true => host.shape.resources().clone(),
-                    false => wanted.resources.clone(),
-                };
-                host.leases.push(Booked {
-                    lease: spec.lease(),
-                    resources,
-                    whole,
-                });
-                return StartAck::Started { host: id.clone() };
-            }
-        }
-        match fits_somewhere {
-            true => StartAck::Refused(RefusalCode::NoCapacity),
-            false => StartAck::Refused(RefusalCode::NoFit),
-        }
+        let fitting: Vec<(&HostId, &Host)> = self
+            .hosts
+            .iter()
+            .filter(|(_, host)| {
+                host.shape
+                    .satisfies(&wanted.resources, &wanted.capabilities)
+            })
+            .collect();
+        let fits_somewhere = !fitting.is_empty();
+        let open: Vec<Candidate> = fitting
+            .into_iter()
+            .filter(|(id, host)| {
+                let room = host.has_room(&wanted.resources, whole);
+                [room, eligible(id, &host.shape)].into_iter().all(|ok| ok)
+            })
+            .map(|(id, host)| Candidate {
+                host: id.clone(),
+                shape: host.shape.clone(),
+                leases: host.leases.clone(),
+            })
+            .collect();
+        let _ = choose;
+        let picked = open.first();
+        let Some(picked) = picked else {
+            return match fits_somewhere {
+                true => StartAck::Refused(RefusalCode::NoCapacity),
+                false => StartAck::Refused(RefusalCode::NoFit),
+            };
+        };
+        let resources = match whole {
+            true => picked.shape.resources().clone(),
+            false => wanted.resources.clone(),
+        };
+        let id = picked.host.clone();
+        let booked = Held {
+            lease: spec.lease(),
+            resources,
+            whole,
+        };
+        let _ = self
+            .hosts
+            .entry(id.clone())
+            .and_modify(|host| host.leases.push(booked));
+        StartAck::Started { host: id }
     }
 
     /// Stops `lease`: remembers it as ended, frees its host, and reads the lease back.
@@ -245,7 +307,7 @@ impl HostBook {
         held.collect()
     }
 
-    /// Every listed host, in id order, with its shape and the lease holding it.
+    /// Every listed host, in id order, with its shape and the leases booked on it.
     pub fn hosts(&self) -> Vec<HostCapacity> {
         let listed = self.hosts.iter();
         let listed = listed.map(|(id, host)| HostCapacity {
@@ -253,6 +315,7 @@ impl HostBook {
             shape: host.shape.clone(),
             memory: host.memory,
             leased_to: host.leases.first().map(|booked| booked.lease),
+            leases: host.leases.iter().map(|booked| booked.lease).collect(),
         });
         listed.collect()
     }
@@ -260,12 +323,34 @@ impl HostBook {
     /// Books `host` for `lease` without a start: the way to put back a booking the
     /// provider lost with its process. The booking is what a start would have made, so
     /// the lease then reads `Present` on `host` and a stop frees it. Seating a lease on
-    /// the host it already holds changes nothing. The booking is of the whole shape, for
-    /// any class: putting back a lease that shares is owed to the step that starts one.
+    /// the host it already holds changes nothing. The booking is of the whole shape, as a
+    /// lease of a class that books a whole host makes; [`seat_as`] puts back a lease that
+    /// shares.
     ///
     /// Books nothing when `host` is not listed, when another lease holds it, when
     /// `lease` holds another host, or when `lease` was stopped.
+    ///
+    /// [`seat_as`]: HostBook::seat_as
     pub fn seat(&mut self, host: &HostId, lease: LeaseId) -> Result<(), SeatError> {
+        self.seat_as(host, lease, None)
+    }
+
+    /// Books `host` for `lease` as [`seat`] does, with the resources the lease booked:
+    /// `Some(resources)` puts back a lease that shares the host, which books those and
+    /// needs a host with no whole-host lease and room for them beside the leases already
+    /// there; `None` books the whole shape and needs a host with no lease.
+    ///
+    /// The refusals are those of [`seat`], and `Taken` also when the room is gone because
+    /// of the leases already seated (the first of them is named), `NoRoom` when a host
+    /// with no lease is too small for `resources`.
+    ///
+    /// [`seat`]: HostBook::seat
+    pub fn seat_as(
+        &mut self,
+        host: &HostId,
+        lease: LeaseId,
+        shares: Option<Resources>,
+    ) -> Result<(), SeatError> {
         if self.ended.contains(&lease) {
             return Err(SeatError::Ended(lease));
         }
@@ -277,20 +362,23 @@ impl HostBook {
         }
         let listed = self.hosts.get_mut(host);
         let listed = listed.ok_or_else(|| SeatError::Unlisted(host.clone()))?;
-        match listed.leases.first() {
-            Some(holder) => Err(SeatError::Taken {
-                host: host.clone(),
-                holder: holder.lease,
-            }),
-            None => {
-                let resources = listed.shape.resources().clone();
-                listed.leases.push(Booked {
-                    lease,
-                    resources,
-                    whole: true,
-                });
-                Ok(())
-            }
+        let _ = shares;
+        let whole = true;
+        let resources = listed.shape.resources().clone();
+        if !listed.has_room(&resources, whole) {
+            return Err(match listed.leases.first() {
+                Some(holder) => SeatError::Taken {
+                    host: host.clone(),
+                    holder: holder.lease,
+                },
+                None => SeatError::NoRoom(host.clone()),
+            });
         }
+        listed.leases.push(Held {
+            lease,
+            resources,
+            whole,
+        });
+        Ok(())
     }
 }
