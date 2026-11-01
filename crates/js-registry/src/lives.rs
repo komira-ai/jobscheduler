@@ -28,8 +28,12 @@ pub(crate) fn estimate_end(
     profiles: &[ProfileKey],
     lives: &dyn ProfileLives,
 ) -> Option<u64> {
-    let _ = (started_at, profiles, lives);
-    None
+    let longest = profiles
+        .iter()
+        .filter_map(|key| lives.wall_minutes_p90(key));
+    let minutes = longest.max()?;
+    let life_ms = u64::from(minutes).saturating_mul(60_000);
+    Some(started_at.saturating_add(life_ms))
 }
 
 /// The `est_ends` of a host whose booked lease has the bound `ends` (lease and latest end)
@@ -42,8 +46,11 @@ pub(crate) fn est_ends(
     ends: Option<(LeaseId, Timestamp)>,
     started_at: Option<u64>,
 ) -> Vec<Option<u64>> {
-    let _ = (lives, runs, ends, started_at);
-    Vec::new()
+    let estimate = |(lease, _): (LeaseId, Timestamp)| {
+        let (lives, started_at) = lives.zip(started_at)?;
+        estimate_end(started_at, &runs.profiles_of(&lease), lives)
+    };
+    ends.into_iter().map(estimate).collect()
 }
 
 #[cfg(test)]

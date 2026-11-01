@@ -89,18 +89,21 @@ impl ProfileCurves {
     /// [`CurveSource::wall_minutes_p90`] gives for a work key that maps to `name`.
     #[must_use]
     pub fn wall_minutes_p90_of(&self, name: &ProfileKey) -> Option<u32> {
-        let _ = name;
-        None
+        self.held_by_name(name).map(|h| h.wall_minutes_p90)
     }
 
     fn lookup(&self, key: &WorkKey) -> Option<Held> {
         let name = (self.map)(key)?;
+        self.held_by_name(&name)
+    }
+
+    fn held_by_name(&self, name: &ProfileKey) -> Option<Held> {
         let stale_before = self
             .today
             .load(Ordering::Acquire)
             .saturating_sub(STALE_DAYS);
         let map = self.held.read().unwrap_or_else(PoisonError::into_inner);
-        map.get(&name)
+        map.get(name)
             .filter(|h| h.last_used_day >= stale_before)
             .cloned()
     }

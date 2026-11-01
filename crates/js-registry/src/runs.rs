@@ -476,6 +476,13 @@ impl Runs {
         self.map.get(run_id).and_then(|run| run.profile.clone())
     }
 
+    /// The profile names of the runs of `lease` that were queued with one, finished runs
+    /// included, in no order.
+    pub(crate) fn profiles_of(&self, lease: &LeaseId) -> Vec<ProfileKey> {
+        let runs = self.map.values().filter(|run| run.lease == *lease);
+        runs.filter_map(|run| run.profile.clone()).collect()
+    }
+
     /// Asks every live run of `lease` to stop: the lease ended or is being released.
     pub(crate) fn stop_lease(&mut self, lease: &LeaseId) {
         let runs = self.map.values_mut().filter(|run| run.lease == *lease);
