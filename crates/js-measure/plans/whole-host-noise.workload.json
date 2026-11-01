@@ -1,0 +1,31 @@
+{
+  "jobs": [
+    {
+      "name": "bench",
+      "count": 1,
+      "image": "REPLACE-WITH-THE-PINNED-BENCH-IMAGE@sha256:REPLACE-WITH-ITS-DIGEST",
+      "args": [
+        "--duckdb", "REPLACE-WITH-THE-DUCKDB-PATH-IN-THE-IMAGE",
+        "--cache-dir", "REPLACE-WITH-THE-DATASET-CACHE-DIR",
+        "--out-dir", "/tmp/out",
+        "--dataset", "tpch",
+        "--scale", "sf1",
+        "--suite", "tpch",
+        "--query", "q6",
+        "--sql-file", "REPLACE-WITH-THE-Q6-SQL-FILE-IN-THE-IMAGE",
+        "--hostclass", "REPLACE-WITH-THE-HOST-CLASS-LABEL",
+        "--cpu-model", "REPLACE-WITH-THE-CPU-MODEL",
+        "--os", "REPLACE-WITH-THE-OS",
+        "--komira-version", "REPLACE-WITH-THE-KOMIRA-VERSION",
+        "--cores", "REPLACE-WITH-THE-CORE-COUNT",
+        "--mem-bytes", "REPLACE-WITH-THE-HOST-MEMORY-BYTES",
+        "--js-measure-result"
+      ],
+      "cpu_millis": 8000,
+      "memory_bytes": 17179869184,
+      "wall_ms": 900000,
+      "class": "action",
+      "profile": "komira-bench-tpch-q6-sf1"
+    }
+  ]
+}

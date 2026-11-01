@@ -2,6 +2,8 @@
 //! happened. Times are read from the injected clock at each poll, so a measurement is
 //! good to one poll interval.
 
+use js_client::LogTail;
+
 use crate::clock::Clock;
 use crate::farm::{Acquired, Farm, FarmError, Phase, Standing};
 use crate::workload::Job;
@@ -29,6 +31,8 @@ pub struct JobTiming {
     pub outcome: Option<String>,
     /// Why the job did not get through, when it did not; also a release the server refused.
     pub failure: Option<String>,
+    /// The end of the job's output, read when the poll saw the run over.
+    pub log_tail: Option<LogTail>,
 }
 
 /// What a drive saw.
@@ -131,6 +135,7 @@ impl Driver<'_> {
                 Phase::Over => {
                     live.timing.finished_ms = Some(now);
                     live.timing.outcome = standing.outcome;
+                    live.timing.log_tail = standing.log_tail;
                     self.release(live, &lease);
                 }
             },
@@ -191,6 +196,7 @@ pub fn drive(
                 host: None,
                 outcome: None,
                 failure: None,
+                log_tail: None,
             },
         })
         .collect();

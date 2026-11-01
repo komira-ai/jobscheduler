@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use js_client::{Client, ClientError, REQUEST_LIMIT, Reply};
+use js_client::{Client, ClientError, LogTail, REQUEST_LIMIT, Reply};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -83,6 +83,7 @@ struct QueuedBody {
 struct RunBody {
     state: String,
     outcome: Option<String>,
+    log_tail: Option<LogTail>,
 }
 
 #[derive(Deserialize)]
@@ -189,6 +190,7 @@ impl Farm for HttpFarm {
         Ok(RunStanding {
             state: run.state,
             outcome: run.outcome,
+            log_tail: run.log_tail,
         })
     }
 

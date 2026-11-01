@@ -13,6 +13,7 @@
 //! - [`drive`]: submits the jobs and watches them to the end ([`Observation`]).
 //! - [`assemble`]: the numbers of a run, from the observation and the server's readings.
 //! - [`run_plan`]: the plan end to end.
+//! - [`reported`]: the numbers a job prints about itself.
 //! - [`group`] and [`Summarise`]: the hand-off to the analysis.
 //!
 //! # Output
@@ -29,6 +30,46 @@
 //!
 //! A number is `null` when its source cannot be read. The sources, and what the
 //! server does not publish today, are listed in [`measure`].
+//!
+//! # Numbers a job reports
+//!
+//! A job may print `js-measure-result {"steady_ms":12.3}` to its standard output. After the
+//! run is over the harness reads the end of the run's output from the lease server and
+//! records the numbers as `reported_<key>` in the run's record (the rules, and what a
+//! missing or malformed line records, are in [`reported`]). The job runs as a container on
+//! a lease like any other, so what it reports is measured through the lease server.
+//!
+//! # Whole-host noise
+//!
+//! `plans/whole-host-noise.plan.json` and `plans/whole-host-noise.workload.json` compare
+//! the same benchmark cell (TPC-H q6 at scale sf1, run by `komira_bench_runner_main`) on a
+//! shared node (the `shared` arm, the `action` class the workload names) with the same cell
+//! on a whole host (the `whole-host` arm, which asks for the `whole-node` lease class), 20
+//! runs each. The runner takes every value as a flag; with `--js-measure-result` its last
+//! standard-output line is `js-measure-result {"steady_ms":..,"first_run_ms":..,
+//! "duckdb_steady_ms":..,"verdict":"PASS|..."}`. The numbers are recorded as
+//! `reported_steady_ms`, `reported_first_run_ms` and `reported_duckdb_steady_ms`; `verdict`
+//! is a string, so no key is recorded for it. A run whose verdict is not PASS is seen from
+//! the job's exit code (its outcome is not `succeeded`), not from that key, and the numbers
+//! of such a job are left out of the run's record and counted in `reports_dropped`;
+//! a job that succeeded but printed no line leaves the run with no `reported_` key and is
+//! counted in `reports_missing`.
+//!
+//! NOT RUNNABLE until the pinned benchmark image exists: the workload cannot be run as
+//! shipped. The image is a placeholder because no pinned benchmark image exists yet: it has
+//! to be built, with the runner, a pinned duckdb and a verified dataset cache, and pushed before a live run. The flags whose values depend on
+//! that image's layout (the duckdb path, the cache dir, the sql file) and on the host (the
+//! host class, cpu model, os, core count, memory bytes, version) are `REPLACE-WITH-...`
+//! placeholders; the workload format has no lease environment to take the host facts from.
+//! Replace them all before running. A class or image the server refuses is recorded as that
+//! job's `failure` (for example `the server answered 422 unknown-class`) in `jobs.jsonl`,
+//! and the run has no reported number. The records go to the analysis:
+//!
+//! ```text
+//! js-measure run --plan plans/whole-host-noise.plan.json \
+//!     --workload plans/whole-host-noise.workload.json --out DIR --commit SHA --live ...
+//! js-analysis DIR/records.jsonl --compare-cv shared whole-host
+//! ```
 //!
 //! # Live mode
 //!
@@ -47,6 +88,7 @@ pub mod http;
 pub mod measure;
 pub mod metric;
 pub mod plan;
+pub mod reported;
 pub mod summary;
 pub mod workload;
 

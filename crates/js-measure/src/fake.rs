@@ -8,6 +8,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
+use js_client::LogTail;
+
 use crate::clock::Clock;
 use crate::farm::{
     Acquired, Curve, Farm, FarmError, HostShape, LeaseAsk, RunAsk, RunStanding, Standing, UsageRow,
@@ -66,6 +68,7 @@ pub struct FakeFarm<'a> {
     hosts: Vec<(String, HostShape)>,
     curves: BTreeMap<String, Curve>,
     outcome: String,
+    log_tail: Option<LogTail>,
     use_percent: u64,
     acquire_latency_ms: u64,
     state: RefCell<State>,
@@ -81,6 +84,7 @@ impl<'a> FakeFarm<'a> {
             hosts,
             curves: BTreeMap::new(),
             outcome: "succeeded".to_owned(),
+            log_tail: None,
             use_percent: 50,
             acquire_latency_ms: 0,
             state: RefCell::new(State::default()),
@@ -98,6 +102,13 @@ impl<'a> FakeFarm<'a> {
     #[must_use]
     pub fn with_outcome(mut self, outcome: &str) -> Self {
         outcome.clone_into(&mut self.outcome);
+        self
+    }
+
+    /// Every exited run holds this log tail. Without it a run holds none.
+    #[must_use]
+    pub fn with_log_tail(mut self, tail: LogTail) -> Self {
+        self.log_tail = Some(tail);
         self
     }
 
@@ -207,10 +218,12 @@ impl Farm for FakeFarm<'_> {
             true => RunStanding {
                 state: "running".to_owned(),
                 outcome: None,
+                log_tail: None,
             },
             false => RunStanding {
                 state: "exited".to_owned(),
                 outcome: Some(self.outcome.clone()),
+                log_tail: self.log_tail.clone(),
             },
         })
     }

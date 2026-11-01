@@ -1,0 +1,11 @@
+{
+  "parameter": "node_sharing",
+  "settings": ["tpch/q6-sf1"],
+  "arms": [
+    { "label": "shared", "control": true },
+    { "label": "whole-host", "lease_class": "whole-node" }
+  ],
+  "runs_per_arm": 20,
+  "warmups_per_arm": 0,
+  "seed": 20
+}

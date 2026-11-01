@@ -90,7 +90,8 @@ fn a_run_lasts_its_wall_limit_and_refusals_have_codes() {
         farm.run(&id, &run).unwrap(),
         RunStanding {
             state: "exited".to_owned(),
-            outcome: Some("out_of_memory".to_owned())
+            outcome: Some("out_of_memory".to_owned()),
+            log_tail: None,
         }
     );
     assert_eq!(

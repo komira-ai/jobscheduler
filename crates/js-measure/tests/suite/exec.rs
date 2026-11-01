@@ -268,6 +268,7 @@ fn the_command_setter_runs_a_program() {
     let arm = |control| Arm {
         label: "x".to_owned(),
         control,
+        lease_class: None,
     };
     assert_eq!(ok.apply("fill", "0.8", &arm(false)), Ok(()));
     assert_eq!(ok.apply("fill", "0.8", &arm(true)), Ok(()));

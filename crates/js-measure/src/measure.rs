@@ -35,6 +35,7 @@ use serde::Serialize;
 use crate::driver::{JobTiming, Observation};
 use crate::farm::{Curve, HostShape, UsageRow};
 use crate::metric::{Record, finite, name};
+use crate::reported;
 use crate::workload::Job;
 
 /// Milliseconds in a minute of the usage store.
@@ -314,11 +315,22 @@ pub fn assemble(
             JobFacts::of(timing, job, prediction, usage.as_ref())
         })
         .collect();
+    let reports: Vec<BTreeMap<String, Option<f64>>> = obs
+        .jobs
+        .iter()
+        .map(|timing| {
+            timing
+                .log_tail
+                .as_ref()
+                .map_or_else(BTreeMap::new, |tail| reported::parse(&tail.stdout))
+        })
+        .collect();
     let job_rows = obs
         .jobs
         .iter()
         .zip(&facts)
-        .map(|(timing, facts)| JobRow {
+        .zip(&reports)
+        .map(|((timing, facts), report)| JobRow {
             setting: who.setting.clone(),
             arm: who.arm.clone(),
             run_index: who.run_index,
@@ -326,7 +338,11 @@ pub fn assemble(
             host: timing.host.clone(),
             outcome: timing.outcome.clone(),
             failure: timing.failure.clone(),
-            metrics: facts.metrics(),
+            metrics: facts
+                .metrics()
+                .into_iter()
+                .chain(reported::prefixed(report))
+                .collect(),
         })
         .collect();
     let minutes = minute_rows(who, hosts);
@@ -337,7 +353,7 @@ pub fn assemble(
         seed: who.seed,
         commit: who.commit.clone(),
         label: who.label.clone(),
-        metrics: run_metrics(obs, &facts, &minutes),
+        metrics: run_metrics(obs, &facts, &minutes, &reports),
     };
     RunOutput {
         record,
@@ -374,6 +390,7 @@ fn run_metrics(
     obs: &Observation,
     facts: &[JobFacts],
     minutes: &[MinuteRow],
+    reports: &[BTreeMap<String, Option<f64>>],
 ) -> BTreeMap<String, Option<f64>> {
     let some = |pick: fn(&JobFacts) -> Option<f64>| -> Vec<f64> {
         facts.iter().filter_map(pick).collect()
@@ -408,7 +425,28 @@ fn run_metrics(
         .iter()
         .filter(|j| j.outcome.as_deref() == Some("out_of_memory"))
         .count();
-    let mut out = BTreeMap::new();
+    // Only a job that succeeded speaks for the run: a wrong answer's numbers are not the
+    // benchmark's. What a failed job printed is counted, and stays in its own row. A job
+    // that succeeded and printed no line stays in the merge, so it lacks every key and no
+    // reported number is recorded; it is counted too.
+    let (ok, failed_jobs): (Vec<_>, Vec<_>) = obs
+        .jobs
+        .iter()
+        .zip(reports)
+        .partition(|(job, _)| is_ok(job.outcome.as_ref()));
+    let kept: Vec<_> = ok.iter().map(|(_, report)| (*report).clone()).collect();
+    let missing = ok.iter().filter(|(_, report)| report.is_empty()).count();
+    let dropped = failed_jobs
+        .iter()
+        .filter(|(_, report)| !report.is_empty())
+        .count();
+    let mut out = reported::merge(&kept);
+    for (key, count) in [
+        (name::REPORTS_DROPPED, dropped),
+        (name::REPORTS_MISSING, missing),
+    ] {
+        out.insert(key.to_owned(), Some(count as f64));
+    }
     let mut put = |key: &str, value: Option<f64>| {
         out.insert(key.to_owned(), finite(value));
     };

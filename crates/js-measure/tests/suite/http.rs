@@ -238,6 +238,47 @@ fn runs_are_queued_read_and_released() {
     );
 }
 
+/// Asserts that a run entry's `log_tail` is read with both streams and `truncated`, that
+/// an entry without one reads as none (not an empty tail), and that a tail missing its
+/// streams reads as empty text.
+#[test]
+fn a_runs_log_tail_is_read() {
+    let server = Canned::serve(vec![
+        (
+            "GET /v1/leases/1-1/runs/r-1",
+            200,
+            r#"{"run_id":"r-1","state":"exited","outcome":"succeeded","log_tail":{"stdout":"js-measure-result {\"a\":1}\n","stderr":"warn\n","truncated":true}}"#,
+        ),
+        (
+            "GET /v1/leases/1-1/runs/r-2",
+            200,
+            r#"{"run_id":"r-2","state":"exited","outcome":"succeeded"}"#,
+        ),
+        (
+            "GET /v1/leases/1-1/runs/r-3",
+            200,
+            r#"{"run_id":"r-3","state":"exited","log_tail":{}}"#,
+        ),
+    ]);
+    let (_dir, farm) = farm_at(&server.url);
+    let tail = |stdout: &str, stderr: &str, truncated| {
+        Some(js_client::LogTail {
+            stdout: stdout.to_owned(),
+            stderr: stderr.to_owned(),
+            truncated,
+        })
+    };
+    assert_eq!(
+        farm.run("1-1", "r-1").unwrap().log_tail,
+        tail("js-measure-result {\"a\":1}\n", "warn\n", true)
+    );
+    assert_eq!(farm.run("1-1", "r-2").unwrap().log_tail, None);
+    assert_eq!(
+        farm.run("1-1", "r-3").unwrap().log_tail,
+        tail("", "", false)
+    );
+}
+
 /// Asserts the reads of the server's data: a host's shape from the host list (and an
 /// unlisted host as an unreadable answer), the usage rows of a range from the query it
 /// sends, and a curve with the minutes it has, with none when the key is unknown (404) or

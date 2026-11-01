@@ -29,6 +29,7 @@ pub fn plan_over(
             .map(|label| Arm {
                 label: (*label).to_owned(),
                 control: false,
+                lease_class: None,
             })
             .collect(),
         runs_per_arm,

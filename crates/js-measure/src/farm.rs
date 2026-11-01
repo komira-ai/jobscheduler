@@ -2,6 +2,8 @@
 //! implementations, [`crate::http::HttpFarm`] (the live server) and [`crate::fake::FakeFarm`]
 //! (a simulated one with a fake clock).
 
+use js_client::LogTail;
+
 /// Why a call to the farm failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FarmError {
@@ -100,6 +102,9 @@ pub struct RunStanding {
     pub state: String,
     /// How it ended, once it has (`succeeded`, `out_of_memory`, ...).
     pub outcome: Option<String>,
+    /// The end of what the job printed, when the server holds it (a contained run that
+    /// exited); `None` is not an empty output.
+    pub log_tail: Option<LogTail>,
 }
 
 impl RunStanding {

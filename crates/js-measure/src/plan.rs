@@ -36,6 +36,10 @@ pub struct Arm {
     /// Whether the arm is the control (the old behaviour). The setter is told.
     #[serde(default)]
     pub control: bool,
+    /// The lease class every job of this arm asks for, in place of the class the workload
+    /// names; the workload's own when left out.
+    #[serde(default)]
+    pub lease_class: Option<String>,
 }
 
 /// The plan as a file holds it.
