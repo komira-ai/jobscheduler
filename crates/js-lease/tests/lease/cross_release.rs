@@ -26,9 +26,11 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use js_lease::{Booking, Boot, LeaseState, LeaseTable, read_bookings};
+use js_lease::{AcquireError, Booking, Boot, LeaseState, LeaseTable, ManualClock, read_bookings};
 use js_pool_static::{HostBook, SeatError};
-use js_provider::{Flavour, HostCapacity, Observed, Provider, StartAck, StartSpec, StopAck};
+use js_provider::{
+    Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
+};
 use js_types::{Admission, ClassId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape};
 
 use crate::support::{Scratch, clock, fake, gpu_host_request, host, open, request, secs, settings};
@@ -68,7 +70,9 @@ struct Sharing {
 
 impl Sharing {
     fn new() -> Self {
-        let resources = Resources::new(8000, 8, 1, Some("g".into())).unwrap();
+        let resources = Resources::new(8000, 8, 1, Some("g".into()))
+            .unwrap()
+            .with_disk_bytes(DISK);
         let shape = Shape::new(resources, BTreeMap::new());
         let mut book = HostBook::new();
         book.insert_host(host("h1"), shape.clone());
@@ -130,18 +134,41 @@ fn sharing_request(resources: Resources) -> Request {
     }
 }
 
-/// Every axis of a share: cores, memory, and a GPU with its class.
+/// The scratch disk of a host: 4 GiB.
+const DISK: u64 = 4 << 30;
+
+/// Every axis of a share: cores, memory, a GPU with its class, and 3 GiB of disk.
 fn with_gpu() -> Resources {
-    Resources::new(4000, 4, 1, Some("g".into())).unwrap()
+    Resources::new(4000, 4, 1, Some("g".into()))
+        .unwrap()
+        .with_disk_bytes(3 << 30)
 }
 
-/// A share with no GPU, so its row leaves `gpus` and `gpu_class` out.
+/// A share with no GPU, so its row leaves `gpus` and `gpu_class` out, and 1 GiB of disk.
 fn without_gpu() -> Resources {
-    Resources::new(2000, 2, 0, None).unwrap()
+    Resources::new(2000, 2, 0, None)
+        .unwrap()
+        .with_disk_bytes(1 << 30)
 }
 
-/// The file this release writes for two leases that share `h1` and a whole-node lease on
-/// `h2`: `lease.shares` present on the first two and absent on the third.
+/// Asserts that `h1` of `table` has exactly `left` bytes of disk unbooked: a share asking
+/// one byte more is refused for capacity (`h2` is held whole), and one asking `left` starts
+/// on `h1`. It catches a restored share whose disk is not booked again.
+fn assert_disk_left(table: &mut LeaseTable<Sharing, ManualClock>, left: u64) {
+    let asking = |disk: u64| {
+        let resources = Resources::new(500, 1, 0, None).unwrap();
+        sharing_request(resources.with_disk_bytes(disk))
+    };
+    let over = table.acquire(asking(left + 1), None).unwrap_err();
+    let refused = AcquireError::Refused(RefusalCode::NoCapacity);
+    assert_eq!(over.to_string(), refused.to_string());
+    let fits = table.acquire(asking(left), None).unwrap();
+    assert_eq!(fits.host, host("h1"));
+}
+
+/// The file this release writes for two leases that share `h1` (between them every axis,
+/// disk included) and a whole-node lease on `h2`: `lease.shares` present on the first two
+/// and absent on the third.
 fn shared_host_written(scratch: &Scratch) -> String {
     let boot = Boot::Initialise;
     let path = scratch.file();
@@ -172,20 +199,19 @@ fn shared_host_bookings() -> Vec<Booking> {
 }
 
 /// Restarts a table over the file of `scratch` as the server does: the bookings read,
-/// seated with what they book, then the table opened over them. The leases it lists and
-/// the seats refused.
-fn restarted(scratch: &Scratch) -> (Vec<LeaseId>, Vec<SeatError>) {
+/// seated with what they book, then the table opened over them. The table and the seats
+/// refused.
+fn restarted(scratch: &Scratch) -> (LeaseTable<Sharing, ManualClock>, Vec<SeatError>) {
     let bookings = read_bookings(scratch.file()).unwrap();
     let (provider, refused) = Sharing::seated(&bookings);
     let path = scratch.file();
     let table = LeaseTable::open(provider, clock(), settings(), path, Boot::Resume);
-    let listed = table
-        .unwrap()
-        .list()
-        .into_iter()
-        .map(|lease| lease.id)
-        .collect();
-    (listed, refused)
+    (table.unwrap(), refused)
+}
+
+/// The leases `table` lists, in id order.
+fn listed(table: &LeaseTable<Sharing, ManualClock>) -> Vec<LeaseId> {
+    table.list().into_iter().map(|lease| lease.id).collect()
 }
 
 /// Asserts that this release, over leases that book whole hosts (the only leases the
@@ -212,8 +238,8 @@ fn this_release_reads_the_previous_release_file() {
         .map(|booking| booking.shares.clone())
         .collect();
     assert_eq!(shares, vec![None, None]);
-    let (listed, refused) = restarted(&scratch);
-    assert_eq!(listed, vec![LeaseId::new(1, 1), LeaseId::new(1, 2)]);
+    let (table, refused) = restarted(&scratch);
+    assert_eq!(listed(&table), vec![LeaseId::new(1, 1), LeaseId::new(1, 2)]);
     assert!(refused.is_empty(), "{refused:?}");
     let next_term = WRITTEN_BY_PREVIOUS.replacen("term = 1\n", "term = 2\n", 1);
     assert_eq!(fs::read_to_string(scratch.file()).unwrap(), next_term);
@@ -287,8 +313,28 @@ fn a_restart_of_the_previous_release_keeps_the_rows_of_the_leases_it_keeps() {
     let mut expected = shared_host_bookings();
     expected.remove(1);
     assert_eq!(read_bookings(scratch.file()).unwrap(), expected);
-    let (listed, refused) = restarted(&scratch);
-    assert_eq!(listed, vec![LeaseId::new(1, 1), LeaseId::new(1, 3)]);
+    let (mut table, refused) = restarted(&scratch);
+    assert_eq!(listed(&table), vec![LeaseId::new(1, 1), LeaseId::new(1, 3)]);
     assert!(refused.is_empty(), "{refused:?}");
     assert_eq!(read_bookings(scratch.file()).unwrap(), expected);
+    assert_disk_left(&mut table, DISK - (3 << 30));
+}
+
+/// Asserts that this release, restarted over the file it wrote, seats every lease with
+/// what it booked, disk included: both shares of `h1` are seated beside each other, and the
+/// 4 GiB of disk they book stay booked, so `h1` has none left. It catches a share put back
+/// without its disk, which would let a restart overbook the host's scratch disk.
+#[test]
+fn this_release_restarts_over_its_own_file_with_every_share_booked() {
+    let scratch = Scratch::new("cross_release_own_restart");
+    fs::write(scratch.file(), WRITTEN_BY_THIS).unwrap();
+    let (mut table, refused) = restarted(&scratch);
+    let all = vec![LeaseId::new(1, 1), LeaseId::new(1, 2), LeaseId::new(1, 3)];
+    assert_eq!(listed(&table), all);
+    assert!(refused.is_empty(), "{refused:?}");
+    assert_eq!(
+        read_bookings(scratch.file()).unwrap(),
+        shared_host_bookings()
+    );
+    assert_disk_left(&mut table, 0);
 }

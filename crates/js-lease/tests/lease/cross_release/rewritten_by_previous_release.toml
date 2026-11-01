@@ -16,6 +16,7 @@ ends_at_ms = 4600000
 
 [lease.shares]
 cpu_millis = 4000
+disk_bytes = 3221225472
 gpu_class = "g"
 gpus = 1
 memory_bytes = 4
