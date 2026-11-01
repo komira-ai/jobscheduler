@@ -21,7 +21,7 @@ use rustix::fs::{
 };
 use rustix::io::Errno;
 
-use crate::{Cmd, Host, Kind, Meta, Output};
+use crate::{Cmd, Host, Kind, Meta, Output, check_binary_meta};
 
 /// The real file system and the real programs, under a root directory.
 #[derive(Clone, Debug)]
@@ -302,6 +302,12 @@ impl Host for RealHost {
         found(unlinkat(&dir, &name, AtFlags::empty()).map_err(io::Error::from))?;
         // The removal is on disk only once the directory is.
         dir.sync_all()
+    }
+
+    // The machine's own file, whatever the root directory this host stands on.
+    fn check_binary(&self) -> io::Result<()> {
+        let meta = fs::metadata(std::env::current_exe()?)?;
+        check_binary_meta(meta.uid(), meta.mode())
     }
 
     fn run(&self, cmd: &Cmd) -> io::Result<Output> {

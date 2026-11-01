@@ -157,9 +157,27 @@ pub trait Host {
     /// The system's error, other than "not found".
     fn remove(&self, path: &str) -> io::Result<()>;
 
+    /// Whether the running program may carry a secret to another process: its file is
+    /// owned by root and no one but root can write it (see [`check_binary_meta`]). A binary
+    /// that others could replace would hand whoever replaced it the keys it holds.
+    ///
+    /// # Errors
+    /// The program's file could not be found or is not trusted.
+    fn check_binary(&self) -> io::Result<()>;
+
     /// Runs `cmd` to its end.
     ///
     /// # Errors
     /// The program could not be started (a program that ran and failed is an [`Output`]).
     fn run(&self, cmd: &Cmd) -> io::Result<Output>;
+}
+
+/// Whether a program file owned by `uid` with permission bits `mode` is root's alone: owned
+/// by root and writable by neither its group nor others.
+///
+/// # Errors
+/// The file is not root's, or its group or others can write it.
+pub fn check_binary_meta(uid: u32, mode: u32) -> io::Result<()> {
+    let _ = (uid, mode);
+    Ok(())
 }

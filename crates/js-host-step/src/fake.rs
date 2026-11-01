@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 
-use crate::{Cmd, GETENT, Host, Kind, Meta, Output};
+use crate::{Cmd, GETENT, Host, Kind, Meta, Output, check_binary_meta};
 
 /// A file or directory in the fake tree. `Debug` prints the length of the content, not the
 /// content: a failed assertion on a tree that holds a secret does not print it.
@@ -49,6 +49,8 @@ struct State {
     unreadable: Vec<String>,
     unstattable: Vec<String>,
     effects: Vec<(Vec<String>, String, Node)>,
+    /// The owner and mode of the running binary (root's, mode 0, until a test says).
+    binary: (u32, u32),
 }
 
 /// The fake host.
@@ -173,6 +175,11 @@ impl FakeHost {
         self.state.borrow().nodes.keys().cloned().collect()
     }
 
+    /// Makes the running binary owned by `uid` with permission bits `mode`.
+    pub fn set_binary(&self, uid: u32, mode: u32) {
+        self.state.borrow_mut().binary = (uid, mode);
+    }
+
     /// Every command line run so far (program first), in order.
     pub fn calls(&self) -> Vec<Vec<String>> {
         self.state.borrow().calls.clone()
@@ -279,6 +286,11 @@ impl Host for FakeHost {
     fn remove(&self, path: &str) -> io::Result<()> {
         self.state.borrow_mut().nodes.remove(path);
         Ok(())
+    }
+
+    fn check_binary(&self) -> io::Result<()> {
+        let (uid, mode) = self.state.borrow().binary;
+        check_binary_meta(uid, mode)
     }
 
     fn run(&self, cmd: &Cmd) -> io::Result<Output> {

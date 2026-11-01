@@ -60,8 +60,10 @@
 //! the lexical nesting check of `MDM_STATE`, `MDM_ETC` and `MDM_BIN` does not resolve links,
 //! so `install` refuses any of the three that is a symbolic link on the host.
 
+pub mod api;
 pub mod archive;
 mod cli;
+pub mod dep;
 mod error;
 pub mod fetch;
 pub mod install;
@@ -76,6 +78,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use js_host_step::{Host, RealHost};
 
+pub use api::{Api, RealApi};
 pub use cli::{run, run_with};
 pub use error::MdmError;
 pub use net::{Download, Net};
@@ -86,6 +89,8 @@ pub struct Env<'a> {
     pub host: &'a dyn Host,
     /// Downloads.
     pub net: &'a dyn Download,
+    /// Calls to the services' loopback APIs.
+    pub api: &'a dyn Api,
     /// Fills a buffer with random bytes.
     pub random: &'a dyn Fn(&mut [u8]) -> io::Result<()>,
     /// Unix seconds now.
@@ -109,6 +114,7 @@ pub fn main() -> ExitCode {
     let env = Env {
         host: &host,
         net: &net,
+        api: &RealApi,
         random: &system_random,
         now: secs.map_or(0, |d| d.as_secs()),
     };

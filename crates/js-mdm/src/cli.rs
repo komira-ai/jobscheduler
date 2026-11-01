@@ -8,6 +8,7 @@ use js_mdm_core::acme::Acme;
 use js_mdm_core::config::MdmConfig;
 use js_mdm_core::pins::{Pins, Tool};
 
+use crate::dep::{self, Serial};
 use crate::fetch::{self, Fetch};
 use crate::install::{self, Install};
 use crate::verify::{self, Verify};
@@ -67,6 +68,11 @@ enum Verb {
         #[arg(long)]
         apply: bool,
     },
+    /// Apple Business Manager enrolment through NanoDEP (root, even as a dry run).
+    Dep {
+        #[command(subcommand)]
+        verb: DepVerb,
+    },
     /// Read-only health checks, and installed files compared with the render.
     Verify {
         /// The settings file.
@@ -76,6 +82,36 @@ enum Verb {
         /// (repeatable; every line left out is printed).
         #[arg(long)]
         ignore: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DepVerb {
+    /// Define the ADE profile at Apple and make it the assigner's, unless the recorded one is
+    /// this render. A recorded profile that is not this render is refused without --replace.
+    DefineProfile {
+        /// The settings file.
+        #[arg(long)]
+        config: String,
+        /// Define a second profile when the recorded one is not this render.
+        #[arg(long)]
+        replace: bool,
+        /// Act; without it the plan is printed and no call is made.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Assign the defined profile to devices already listed in Apple Business Manager. Exit 1
+    /// unless Apple answers SUCCESS for every one.
+    Assign {
+        /// The settings file.
+        #[arg(long)]
+        config: String,
+        /// A device serial number (8 to 14 upper-case letters and digits); repeatable.
+        #[arg(long = "serial", required = true, value_parser = Serial::new)]
+        serials: Vec<Serial>,
+        /// Act; without it the call is printed and not made.
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -162,6 +198,24 @@ fn dispatch(verb: Verb, env: &Env<'_>, pins: &Pins, out: &mut dyn Write) -> Resu
             let (config, acme) = (MdmConfig::parse(&text)?, Acme::parse(&text)?);
             tls::run(env, &config, &acme, mode(apply), out)?;
         }
+        Verb::Dep { verb } => match verb {
+            DepVerb::DefineProfile {
+                config,
+                replace,
+                apply,
+            } => {
+                let config = MdmConfig::parse(&read_config(env, &config)?)?;
+                dep::define_profile(env, &config, replace, mode(apply), out)?;
+            }
+            DepVerb::Assign {
+                config,
+                serials,
+                apply,
+            } => {
+                let config = MdmConfig::parse(&read_config(env, &config)?)?;
+                return dep::assign(env, &config, &serials, mode(apply), out);
+            }
+        },
         Verb::Verify { config, ignore } => {
             let text = read_config(env, &config)?;
             let config = MdmConfig::parse(&text)?;

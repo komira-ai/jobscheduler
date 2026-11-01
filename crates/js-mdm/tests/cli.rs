@@ -49,6 +49,12 @@ fn bad_command_lines_exit_2_and_help_exits_0() {
         ],
         &["tls"],
         &["verify", "--config"],
+        &["dep"],
+        &["dep", "frobnicate"],
+        &["dep", "define-profile"],
+        &["dep", "define-profile", "--config", "/c", "--bogus"],
+        &["dep", "assign", "--config", "/c"],
+        &["dep", "assign", "--serial", "ABCDEFGH"],
     ] {
         let (code, out, err) = cli(&host, &net, &kit, words);
         assert_eq!((code, out.as_str()), (2, ""), "{words:?}: {err}");
@@ -57,9 +63,15 @@ fn bad_command_lines_exit_2_and_help_exits_0() {
     let (code, out, err) = cli(&host, &net, &kit, &["--help"]);
     assert_eq!((code, err.as_str()), (0, ""));
     assert!(out.contains("Usage: js-mdm"), "{out}");
-    for verb in ["fetch", "install", "tls", "verify"] {
+    for verb in ["fetch", "install", "tls", "dep", "verify"] {
         assert!(out.contains(verb));
     }
+    let (code, out, _) = cli(&host, &net, &kit, &["dep", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("define-profile") && out.contains("assign"),
+        "{out}"
+    );
     // The built-in pins are the default.
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = with_env(&host, &net, |env| {
