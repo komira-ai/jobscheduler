@@ -99,6 +99,14 @@ fn real(name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("no {name} on this box"))
 }
 
+/// The variable the coverage build gives the programs it runs, so the stand-ins' coverage is
+/// counted: it names a file to write, and nothing the script could read as a setting.
+fn profile_env() -> Vec<(&'static str, String)> {
+    std::env::var("LLVM_PROFILE_FILE")
+        .map(|v| vec![("LLVM_PROFILE_FILE", v)])
+        .unwrap_or_default()
+}
+
 /// What a run printed and how it ended.
 struct Out {
     code: i32,
@@ -322,6 +330,7 @@ impl Rig {
             .env("PATH", path)
             .env("HOST_SHIM_DIR", &self.shim)
             .env("LC_ALL", "C")
+            .envs(profile_env())
             .output()
             .expect("run the script");
         let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -493,6 +502,7 @@ fn the_harness_reaches_only_stand_ins_and_names_the_calls_that_change_the_host()
         .arg("poweroff")
         .env_clear()
         .env("HOST_SHIM_DIR", &rig.shim)
+        .envs(profile_env())
         .output()
         .expect("run");
     assert_eq!(out.status.code(), Some(97));
@@ -500,9 +510,25 @@ fn the_harness_reaches_only_stand_ins_and_names_the_calls_that_change_the_host()
     // So does one run with no directory at all.
     let out = Command::new(rig.shim.join("systemctl"))
         .env_clear()
+        .envs(profile_env())
         .output()
         .expect("run");
     assert_eq!(out.status.code(), Some(97));
+    // The escapes of an answer: a tab, a backslash, a backslash before any other character, and a
+    // backslash that ends the text.
+    std::fs::write(
+        rig.shim.join("answers"),
+        rule("uname", "-s", 0, r"a\tb\\c\zd\", &[]) + "\n",
+    )
+    .expect("answers");
+    let out = Command::new(rig.shim.join("uname"))
+        .arg("-s")
+        .env_clear()
+        .env("HOST_SHIM_DIR", &rig.shim)
+        .envs(profile_env())
+        .output()
+        .expect("run");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a\tb\\czd\\");
 }
 
 /// The default is a dry run: it prints the plan, including the scratch filesystem's quota, reads

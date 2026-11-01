@@ -13,7 +13,7 @@
 //!   they end in `*`. The first matching rule answers. `<stdout>` is text (`\n`, `\t` and `\\`
 //!   are escapes), or `@<path>`: the contents of that file, nothing when the file is missing.
 //!   An effect is `append=<path>=<text>`, `write=<path>=<text>` (the file is made, with its
-//!   directories) or `copy-self=<path>` (a copy of the shim, executable, so a program the script
+//!   directories; any kind but `append` writes) or `copy-self=<path>` (a copy of the shim, executable, so a program the script
 //!   runs by an absolute path is a shim as well).
 //!
 //! A call with no `HOST_SHIM_DIR`, no answers file or no matching rule exits 97 and does nothing
@@ -67,13 +67,11 @@ fn effect(me: &Path, spec: &str) {
     let (kind, rest) = spec.split_once('=').expect("an effect is kind=path=text");
     let (path, text) = rest.split_once('=').expect("an effect is kind=path=text");
     let path = Path::new(path);
-    match kind {
-        "append" => append(path, &unescape(text)),
-        "write" => {
-            std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
-            std::fs::write(path, unescape(text)).expect("write");
-        }
-        other => panic!("unknown effect {other}"),
+    if kind == "append" {
+        append(path, &unescape(text));
+    } else {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        std::fs::write(path, unescape(text)).expect("write");
     }
 }
 
@@ -102,7 +100,7 @@ fn main() -> ExitCode {
     let answers = std::fs::read_to_string(dir.join("answers")).unwrap_or_default();
     let rule = answers.lines().find_map(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
-        (fields.len() >= 4 && fields[0] == name && matches(fields[1], &argv)).then_some(fields)
+        (fields[0] == name && matches(fields[1], &argv)).then_some(fields)
     });
     let Some(rule) = rule else {
         append(&dir.join("calls"), &format!("UNCONFIGURED {name} {argv}\n"));
