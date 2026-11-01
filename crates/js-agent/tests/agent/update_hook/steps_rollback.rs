@@ -694,3 +694,85 @@ fn the_previous_release_directory_is_what_the_link_goes_back_to() {
     assert_eq!(Spy::new(&rig).rollback(&rig).outcome, Outcome::Success);
     assert_eq!(link_target(&rig), Some(want));
 }
+
+#[test]
+fn a_unit_that_cannot_be_signalled_fails_the_rollback_with_the_stop_marked_and_a_rerun_signals_it_again()
+ {
+    let rig = verified("hook-rollback-stop-refused");
+    let spy = Spy::new(&rig);
+    spy.fail("stop");
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::StopFailed));
+    assert_eq!(done.report.class, Class::Environment);
+    assert_eq!(spy.act_names(), [stop()]);
+    assert_eq!(rb_marks(&rig), [true, true, false, false, false]);
+    let rerun = Spy::new(&rig);
+    assert_eq!(rerun.rollback(&rig).outcome, Outcome::Success);
+    assert_eq!(rerun.act_names(), [stop(), RELINK.to_owned(), start()]);
+    assert_restored(&rig);
+}
+
+#[test]
+fn a_host_that_holds_no_lease_but_has_runs_to_finish_is_still_draining() {
+    let rig = verified("hook-rollback-releasing");
+    rig.world.alter_host(|host| host.releasing = true);
+    let spy = Spy::new(&rig);
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 3 {
+            spy.world.alter_host(|host| host.releasing = false);
+        }
+    });
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(rig.world.ticks() - base, 3);
+    assert_restored(&rig);
+}
+
+#[test]
+fn a_hello_that_names_no_runtime_is_checked_by_version_alone() {
+    let rig = link_moved("hook-rollback-no-runtime");
+    let spy = Spy::new(&rig);
+    *spy.start_leaves.borrow_mut() = Some(("active", "running"));
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 1 {
+            spy.world.hello("1.3.0").unwrap();
+            spy.world.alter_host(|host| host.runtime = None);
+        }
+    });
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+}
+
+#[test]
+fn a_unit_that_is_still_starting_when_rollback_begins_is_waited_for_not_started_again() {
+    // The link is on the previous release and the unit is on its way up.
+    let rig = stopped("hook-rollback-starting");
+    rig.world.seed_unit(UNIT, "activating", "start");
+    let spy = Spy::new(&rig);
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 2 {
+            spy.world.seed_unit(UNIT, "active", "running");
+            spy.world.hello("1.3.0").unwrap();
+        }
+    });
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(spy.act_names(), Vec::<String>::new());
+    assert_eq!(rig.world.ticks() - base, 2);
+}
+
+#[test]
+fn a_previous_agent_seen_waiting_to_restart_while_awaited_is_a_release_failure() {
+    let rig = stopped("hook-rollback-restart-wait");
+    rig.world.seed_unit(UNIT, "activating", "auto-restart");
+    let spy = Spy::new(&rig);
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::StartFailed));
+    assert_eq!(done.report.class, Class::Release);
+    assert_eq!(spy.act_names(), Vec::<String>::new());
+}

@@ -461,9 +461,10 @@ fn await_hello(
         }
         pause(env, held, record, params)?;
     }
-    // After the observation, so that a mark means it was made. A step that made no act has
-    // nothing to follow: the rules let `rb.hello_ok` follow `rb.start_issued` only.
-    if record.rb.start_issued && !record.rb.hello_ok {
+    // After the observation, so that a mark means it was made (a rerun with the mark set does
+    // not come here). A step that made no act has nothing to follow: the rules let
+    // `rb.hello_ok` follow `rb.start_issued` only.
+    if record.rb.start_issued {
         mark(env, held, record, |record| record.rb.hello_ok = true)?;
     }
     Ok(())
