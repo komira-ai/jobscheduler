@@ -8,6 +8,10 @@
 //! units       = ["js-agent-crun.service"]
 //! write_paths = ["/opt/js-agent", "/var/lib/js-agent-update"]
 //!
+//! # The runtime the unit's agent must have: `crun`, `docker` or `native`. Left out, it is the
+//! # runtime of the platform the hook is built for (`crun` on Linux, `native` on macOS).
+//! # runtime   = "crun"
+//!
 //! [hook.timeout_secs]
 //! prepare = 3900
 //! # cutover, verify, rollback, cleanup likewise
@@ -24,9 +28,21 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use js_types::ExecMode;
 use serde::Deserialize;
 
 use super::plain::is_plain;
+
+/// The runtime a declaration that names none requires: what the unit of this platform runs jobs
+/// with.
+pub const DEFAULT_RUNTIME: &str = if cfg!(target_os = "macos") {
+    "native"
+} else {
+    "crun"
+};
+
+/// The runtimes an agent can list on the second line of `--version`.
+const RUNTIMES: [&str; 3] = ["crun", "docker", "native"];
 
 /// Where the declaration is installed.
 pub const DECLARATION_PATH: &str = "/etc/updater.d/js-agent.toml";
@@ -51,6 +67,9 @@ pub enum DeclarationError {
     /// the agent could then reach the record.
     #[error("state_dir and the other write paths must not lie inside one another")]
     StateDirNested,
+    /// `hook.runtime` is not one of the runtimes an agent has.
+    #[error("hook.runtime {0:?} is not one of crun, docker, native")]
+    UnknownRuntime(String),
     /// `hook.units` is empty: no unit could ever match the record's.
     #[error("hook.units is empty")]
     NoUnits,
@@ -85,6 +104,7 @@ struct WireHook {
     units: Vec<String>,
     write_paths: Vec<PathBuf>,
     timeout_secs: Timeouts,
+    runtime: Option<String>,
 }
 
 /// What the hook reads of its declaration.
@@ -98,11 +118,23 @@ pub struct Declaration {
     pub write_paths: Vec<PathBuf>,
     /// The bound on each step.
     pub timeouts: Timeouts,
-    /// The runtime the unit's agent must have.
+    /// The runtime the unit's agent must have: the staged agent must list it, and the agent
+    /// that says hello after the cutover runs jobs the way it does.
     pub runtime: String,
 }
 
 impl Declaration {
+    /// The execution mode the hello of an agent with the declared runtime names (`runtime` of
+    /// the host, in the lease server's reading): `sandbox-exec` for `native`, `container` for
+    /// the runtimes that run containers.
+    #[must_use]
+    pub fn hello_runtime(&self) -> &'static str {
+        match self.runtime.as_str() {
+            "native" => ExecMode::SandboxExec.name(),
+            _ => ExecMode::Container.name(),
+        }
+    }
+
     /// Reads the declaration at `path`.
     ///
     /// # Errors
@@ -123,7 +155,10 @@ impl Declaration {
             units: wire.hook.units,
             write_paths: wire.hook.write_paths,
             timeouts: wire.hook.timeout_secs,
-            runtime: "crun".to_owned(),
+            runtime: wire
+                .hook
+                .runtime
+                .unwrap_or_else(|| DEFAULT_RUNTIME.to_owned()),
         };
         let state_dir = &declaration.state_dir;
         let paths = &declaration.write_paths;
@@ -139,6 +174,9 @@ impl Declaration {
             .any(|path| path.starts_with(state_dir) || state_dir.starts_with(path));
         if nested {
             return Err(DeclarationError::StateDirNested);
+        }
+        if !RUNTIMES.contains(&declaration.runtime.as_str()) {
+            return Err(DeclarationError::UnknownRuntime(declaration.runtime));
         }
         if declaration.units.is_empty() {
             return Err(DeclarationError::NoUnits);

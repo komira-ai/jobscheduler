@@ -33,9 +33,6 @@ use super::{Env, check, failure, lease_failure, open_state, save, success};
 /// The agent's file in a release directory.
 const AGENT_BINARY: &str = "js-agent";
 
-/// The runtime a staged agent that names its runtimes must have: the unit is the `crun` one.
-pub(super) const REQUIRED_RUNTIME: &str = "crun";
-
 /// Runs `prepare` of the release in `params.staged_release`.
 pub fn prepare(env: &Env<'_>, params: &Params) -> Done {
     run(env, params).unwrap_or_else(|done| done)
@@ -113,7 +110,7 @@ pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
 }
 
 /// The staged agent runs and is the version the order names; if it lists its runtimes, the
-/// unit's is among them.
+/// declaration's (`crun` for the Linux unit, `native` for the Mac one) is among them.
 fn check_agent(env: &Env<'_>, params: &Params) -> Result<(), Done> {
     let binary = params.staged_release.join(AGENT_BINARY);
     let printed = env
@@ -143,10 +140,11 @@ fn check_agent(env: &Env<'_>, params: &Params) -> Result<(), Done> {
     let runtimes = printed
         .lines()
         .find_map(|line| line.strip_prefix("runtimes:"));
-    if runtimes.is_some_and(|list| !list.split_whitespace().any(|name| name == REQUIRED_RUNTIME)) {
+    let required = env.declaration.runtime.as_str();
+    if runtimes.is_some_and(|list| !list.split_whitespace().any(|name| name == required)) {
         return Err(failure(
             Reason::VersionMismatch,
-            format!("the staged agent lacks the {REQUIRED_RUNTIME} runtime"),
+            format!("the staged agent lacks the {required} runtime"),
         ));
     }
     Ok(())
@@ -328,16 +326,17 @@ fn defer(
 
 #[cfg(test)]
 mod tests {
-    use super::REQUIRED_RUNTIME;
+    use crate::update_hook::DEFAULT_RUNTIME;
 
-    /// The hook refuses a staged agent that names its runtimes without the unit's; the agent
-    /// of the same build must therefore name it. The step's own tests are in `tests/agent`.
+    /// The hook refuses a staged agent that names its runtimes without the declaration's; the
+    /// agent of the same build must therefore name the runtime a declaration that names none
+    /// requires. The step's own tests are in `tests/agent`.
     #[test]
-    fn the_runtime_the_hook_requires_is_one_this_builds_version_line_lists() {
+    fn the_default_runtime_the_hook_requires_is_one_this_builds_version_line_lists() {
         let line = crate::cli::LONG_VERSION.lines().nth(1).unwrap();
         let runtimes = line.strip_prefix("runtimes:").unwrap();
         assert!(
-            runtimes.split_whitespace().any(|r| r == REQUIRED_RUNTIME),
+            runtimes.split_whitespace().any(|r| r == DEFAULT_RUNTIME),
             "{line}"
         );
     }

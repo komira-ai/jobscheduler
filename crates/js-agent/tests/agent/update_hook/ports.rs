@@ -9,8 +9,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::update_hook::{
-    Clock, Gate, Link, NoGate, PortError, SystemClock, SystemLink, SystemUnits, Units, read_link,
-    swap_link,
+    Clock, Gate, Link, NoGate, PlatformUnits, PortError, SystemClock, SystemLink, SystemUnits,
+    Units, read_link, swap_link,
 };
 use js_testkit::dir::TestDir;
 
@@ -132,6 +132,18 @@ fn a_unit_named_like_an_option_is_passed_after_the_end_of_options() {
             "/usr/bin/systemctl is-active -- -x",
         ]
     );
+}
+
+#[test]
+fn the_unit_port_of_the_platform_is_the_one_of_the_build() {
+    let want = if cfg!(target_os = "macos") {
+        "/bin/launchctl print system/agent"
+    } else {
+        "/usr/bin/systemctl show -p ActiveState,SubState -- agent"
+    };
+    let runner = FakeCommands::default();
+    let _ = PlatformUnits::new(&runner).show("agent");
+    assert_eq!(*runner.ran.borrow(), [want]);
 }
 
 fn target_of(link: &Path) -> PathBuf {
