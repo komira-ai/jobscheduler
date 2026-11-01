@@ -59,9 +59,18 @@
 //!
 //! Exit codes: 0; 1 (every ending after the stop says `reversible: false`); 76 on a taint or an
 //! owed check. Never 75: the declared contract gives a rollback no deferral. A lease server that
-//! does not answer before the first act is waited for inside the step, up to the declared bound
-//! less the waits still to come, and then the step fails with `lease_unreachable` (class
+//! does not answer before the first act is waited for inside the step (bounded as below), and then
+//! the step fails with `lease_unreachable` (class
 //! environment) having changed nothing.
+//!
+//! Each outage wait is bounded by the declared `rollback` timeout less the start wait, the hello
+//! wait and the margin, counted from the start of that wait; the drain, the stop, the start
+//! and the hello have bounds of their own. The step as a whole is therefore not held to the
+//! declared timeout: a long outage followed by a recovery can run past it, and the updater then
+//! kills the step. That is safe: the marks say how far it got, and the rerun goes on from
+//! there. A server that flaps (answers, fails, answers) starts a new outage wait at each
+//! failure, and a server that answers with an error the hook cannot tell from an outage (for
+//! instance a refused credential) is waited for like one, and ends as `lease_unreachable`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -207,8 +216,10 @@ fn set_hello_ok(record: &mut Record) {
 }
 
 /// The host as the lease server shows it. A server that does not answer is waited for, up to the
-/// declared bound less the waits still to come, and then the step fails as an environment matter
-/// (`lease_unreachable`): asked only before this step's first act, so nothing is half-done.
+/// declared `rollback` timeout less the start wait, the hello wait and the margin, and then the
+/// step fails as an environment matter (`lease_unreachable`): asked only before this step's
+/// first act, so nothing is half-done. The bound is of this one wait, counted from this call:
+/// the step as a whole is not held to the declared timeout (see the module header).
 fn read_host(env: &Env<'_>) -> Result<HostReading, Done> {
     // What is left of the declared bound for the other waits: the start, the hello and a margin.
     let bound_ms = env
@@ -235,7 +246,8 @@ fn read_host(env: &Env<'_>) -> Result<HostReading, Done> {
 
 /// Sets a mark of an act in the record, durably, before the act it names. The first of them is
 /// saved with the session the lease server shows now: the one the previous agent's must differ
-/// from. A server that does not answer ends the step here, deferred, with nothing begun.
+/// from. A server that does not answer is waited for (see `read_host`) and then ends the step here
+/// with exit 1, class environment, `lease_unreachable`, and nothing begun.
 fn mark_act(
     env: &Env<'_>,
     held: &Held,
