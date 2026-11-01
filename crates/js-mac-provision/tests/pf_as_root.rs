@@ -136,8 +136,12 @@ enum Want {
 
 impl Want {
     fn accepts(self, got: &str) -> bool {
-        let _ = (self, got);
-        false
+        match self {
+            Want::Connected => got == "connected",
+            Want::Refused => got == "refused",
+            Want::RefusedOrDropped => got == "refused" || got == "timed out",
+            Want::NotRefused => got != "refused",
+        }
     }
 }
 
