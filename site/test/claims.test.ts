@@ -8,7 +8,8 @@
 //
 // Also held here: the "not built" and "not available" statements (each is a row), the keys of the pool file the install
 // page shows, the whole-node keys the concepts page lists, the archive names of the install page against the release
-// document, the paths the source notes name, and the host setup script the install page names.
+// document both ways (every archive it lists is named, and the count is its count), the paths the source notes name,
+// and the host setup script the install page names.
 
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync } from 'node:fs';
@@ -25,6 +26,15 @@ const ROWS: readonly Row[] = [
   ['index', 'tells the server what the host offers', 'crates/js-agent/src/lib.rs', 'tells a lease server what the machine offers'],
   ['index', 'through Docker, Podman or crun', 'crates/js-agent/src/lib.rs', '`--runtime <docker\\|crun>`'],
   ['index', 'native jobs on a Mac', 'crates/js-agent/src/lib.rs', 'with it a Mac agent runs native jobs'],
+  ['index', 'The lease server calls it only under <code>--placement js-sched</code>', 'crates/js-lease-server/src/lib.rs', '`--placement registry\\|js-sched`'],
+  ['index', 'to pick among the hosts with room by how tightly a lease fits, and not by load', 'docs/design/placement-by-load.md', 'the host the lease fits most tightly is chosen, not the first by id'],
+  ['index', 'to pick among the hosts with room by how tightly a lease fits, and not by load', 'docs/design/placement-by-load.md', 'no measurements and no curves'],
+  ['index', 'only under <code>--placement js-sched</code>; the default is <code>registry</code>', 'crates/js-lease-server/src/config.rs', '`registry` (the default)'],
+  ['index', 'its client gets the host only when nothing else is on it', 'crates/js-lease-server/src/lib.rs', 'it is listed `pending` until its host\'s agent reports it ready'],
+  ['index', 'built, not reached: the lease server sends no request id', 'crates/js-lease-server/src/lib.rs', 'Nothing in this server sends a request id on a lease request yet'],
+  ['index', 'not yet reached through the lease server', 'crates/js-lease-server/src/lib.rs', 'so no reservation is made through the HTTP routes'],
+  ['index', 'the Debian and macOS packages are built, and not published', '.github/workflows/js-agent-deb.yml', 'no release, no package repository, no registry'],
+  ['index', 'the Debian and macOS packages are built, and not published', '.github/workflows/js-agent-macos-pkg.yml', 'It publishes nothing: the packages and their SHA256SUMS are workflow artifacts for seven days'],
   ['concepts', '<code>600s</code> by default, at most <code>3600s</code>', 'crates/js-lease-server/src/lib.rs', '`--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given'],
   ['concepts', 'a renewal never extends the lease past its acquisition plus that time', 'docs/design/lease-limits.md', 'a renewal never extends it past its acquisition plus the max wall time'],
   ['concepts', 'loses the lease at the end of its TTL, never later than its maximum wall time', 'docs/design/lease-limits.md', 'loses its lease at the end of its TTL, never later than its max wall time'],
@@ -53,15 +63,33 @@ const ROWS: readonly Row[] = [
   ['concepts', 'and at least 1 GiB', 'crates/js-sizing/src/lib.rs', 'at least 1 GiB'],
   ['concepts', '<code>round_up_250m(P90(cpu_usage / wall))</code>, clamped to 250 m and the node\'s cores', 'crates/js-sizing/src/lib.rs', '`round_up_250m(P90(cpu_usage / wall))`, clamped to `[250 m, node cpus]`'],
   ['concepts', 'A booking at or above the memory of the largest matching live node owns the host', 'crates/js-sizing/src/lib.rs', 'A booking at or above the memory of the largest matching live node ([`Bounds::host_memory`]) owns the host'],
-  ['concepts', 'Nothing in the server calls them yet', 'crates/js-lease-server/src/sched/mod.rs', 'Nothing in the server calls them yet'],
-  ['concepts', 'is used by tests alone', 'crates/js-lease-server/src/sched/mod.rs', 'every item is used by tests alone'],
+  ['concepts', '<code>js-lease-server</code> calls the scheduler only under <code>--placement js-sched</code>', 'crates/js-lease-server/src/lib.rs', '`--placement registry\\|js-sched` | who picks the host of a lease on a host that registered itself, `registry` unless given'],
+  ['concepts', 'the default is <code>registry</code>, which books the first free host by id', 'crates/js-lease-server/src/lib.rs', '`registry` unless given. `registry` books the first free host by id'],
+  ['concepts', 'builds a scheduler over the hosts that have room for the lease and books the one it names', 'crates/js-lease-server/src/lib.rs', 'have room beside the leases already there, and are bookable) and books the one it names'],
+  ['concepts', 'for a class that books part of a host, the host the lease fits most tightly', 'crates/js-lease-server/src/lib.rs', 'for a class that books part of a host, the host the lease fits most tightly'],
+  ['concepts', 'a lease that books a whole host is not scored and takes the first free host by id', 'crates/js-lease-server/src/lib.rs', 'a lease that books a whole host is not scored and takes the first free host by id'],
+  ['concepts', 'The leases on those hosts are charged flat, with no measurements and no curves', 'docs/design/placement-by-load.md', 'recovered as flat-charged leases, no measurements and no curves'],
+  ['concepts', 'the placement step would let leases of such a class share a host', 'crates/js-lease-server/src/lib.rs', 'a class that books part of a host is then leasable, and its leases share a host that has room'],
+  ['concepts', 'but no pool file can name one yet', 'crates/js-lease-server/src/file.rs', 'No class a file can name books part of a host today'],
+  ['concepts', 'The registry reserves a host for a request that carries a request id', 'crates/js-registry/src/registry/start.rs', 'otherwise it waits, if it has an id'],
+  ['concepts', 'nothing in the lease server sends one yet, so no reservation is made through its routes', 'crates/js-lease-server/src/lib.rs', 'Nothing in this server sends a request id on a lease request yet, so no reservation is made through the HTTP routes'],
+  ['concepts', 'the drain cost: the host\'s tail, the latest end of its leases', 'crates/js-whole/src/cost.rs', 'smallest first: the host\'s tail (see [`tail`]) minus `now`, then the fewest leases, then the lowest host id'],
+  ['concepts', 'each ending at its estimate cut to its max-wall bound, or at the bound when it has no estimate', 'crates/js-whole/src/cost.rs', 'The end of one lease: its estimate cut to its max-wall bound when it has one, else the bound'],
+  ['concepts', 'three launch or boot failures in a row trip it back to <code>plan</code>', 'crates/js-lease-server/src/lib.rs', 'failures in a row (3, from 1 to 100) the brake trips the pool to `plan`'],
+  ['concepts', 'only an operator\'s reset clears the trip', 'crates/js-lease-server/src/lib.rs', 'Time does not end the trip'],
+  ['concepts', 'only an operator\'s reset clears the trip', 'crates/js-lease-server/src/lib.rs', 'clears the count, the trip and the cooldown'],
   ['concepts', 'A host that goes silent keeps its lease and reads <code>Unknown</code> until it is heard again', 'crates/js-lease-server/src/lib.rs', 'A host that goes silent keeps its lease and reads `Unknown` until it is heard again'],
   ['concepts', 'The lease table frees a lease only when the provider is observed without it', 'docs/design/lease-limits.md', 'freeing a lease only when the provider is observed without it'],
   ['concepts', '<code>JS_LEASE_ID</code> and <code>JS_LEASE_HOST</code>', 'crates/js-cli/src/lib.rs', '`JS_LEASE_ID` and `JS_LEASE_HOST`'],
   ['install', 'There is no lease server for macOS', 'docs/release.md', 'there is no macOS `js-lease-server`'],
   ['install', 'not codesigned or notarized', 'docs/release.md', 'are not codesigned or notarized'],
   ['install', 'That the macOS archives come out byte-identical when a partly published release is re-run', 'docs/release.md', 'Not yet proven: that the Mac archives come out byte-identical'],
-  ['install', 'the SHA-256 of the nine archives', 'docs/release.md', 'SHA-256 of the nine archives'],
+  ['install', 'the SHA-256 of the ten archives', 'docs/release.md', 'SHA-256 of the ten archives'],
+  ['install', 'the MDM that enrolls Macs as compute hosts, set up on one Linux host', 'crates/js-mdm/src/lib.rs', 'js-mdm is jobscheduler\'s MDM for enrolling Macs as compute hosts'],
+  ['install', 'the bundle tool <code>-p \'js-bundle-*-x86_64-unknown-linux-musl.tar.gz\'</code>', 'docs/release.md', 'for the bundle tool `-p \'js-bundle-*-x86_64-unknown-linux-musl.tar.gz\'`'],
+  ['install', 'no published installer', '.github/workflows/js-agent-macos-pkg.yml', 'It publishes nothing'],
+  ['install', 'The macOS installer package of the agent, in <code>packaging/js-agent-macos</code>', 'packaging/js-agent-macos/README.md', 'A signed installer package (`js-agent-<version>-aarch64-apple-darwin.pkg`)'],
+  ['install', 'which publishes nothing either', '.github/workflows/js-agent-macos-pkg.yml', 'It publishes nothing: the packages and their SHA256SUMS are workflow artifacts for seven days'],
   ['install', 'Every push to <code>main</code> that changes code that ships is released as the next version', 'docs/release.md', 'every push to `main` that changes code that ships is released as the next version'],
   ['install', 'That workflow publishes no release, no package repository and no registry', '.github/workflows/js-agent-deb.yml', 'no release, no package repository, no registry'],
   ['install', 'workflow artifact kept for seven days', '.github/workflows/js-agent-deb.yml', 'workflow artifact for seven days'],
@@ -196,6 +224,38 @@ test('the archives the install page names are in the release document', () => {
   const named = [...page('install').matchAll(/<code>(js[a-z-]*-X\.Y\.Z-[a-z0-9_-]+\.tar\.gz)<\/code>/g)].map((m) => m[1]);
   assert.ok(named.length >= 6, `${named.length} archive names`);
   for (const name of named) assert.ok(release.includes(name), `docs/release.md does not list ${name}`);
+});
+
+/** The archives of the "Assets" table of docs/release.md, in its order. */
+export function releasedArchives(release: string): string[] {
+  return [...release.matchAll(/^\| `(js[a-z-]*-X\.Y\.Z-[a-z0-9_-]+\.tar\.gz)` \|/gm)].map((m) => m[1]);
+}
+
+const COUNT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen'];
+
+/** What the install page's archive table misses or miscounts against docs/release.md: an archive released and not named, or a count that is not the number released. */
+export function archiveGaps(release: string, install: string): string[] {
+  const released = releasedArchives(release);
+  const out = released.filter((name) => !install.includes(`<code>${name}</code>`)).map((name) => `the install page does not name ${name}`);
+  const said = /the SHA-256 of the ([a-z]+) archives/.exec(install)?.[1];
+  if (said !== COUNT_WORDS[released.length]) out.push(`the install page says "${said}" archives, and docs/release.md lists ${released.length}`);
+  return out;
+}
+
+test('the install page names every archive the release document lists, and counts them right', () => {
+  const release = source('docs/release.md');
+  assert.ok(releasedArchives(release).length >= 6, `${releasedArchives(release).length} archives in the release document`);
+  assert.deepEqual(archiveGaps(release, page('install')), []);
+});
+
+test('an archive left off the install page, or a wrong count, is reported (the check can fail)', () => {
+  const release = source('docs/release.md');
+  const name = 'js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz';
+  const dropped = page('install').replace(new RegExp(`<tr><td><code>${name.replace(/\./g, '\\.')}</code>.*?</tr>`), '');
+  assert.match(archiveGaps(release, dropped).join('\n'), new RegExp(`does not name ${name.replace(/\./g, '\\.')}`));
+  const added = release.replace('| `SHA256SUMS` |', '| `js-new-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | a new tool |\n| `SHA256SUMS` |');
+  assert.match(archiveGaps(added, page('install')).join('\n'), /does not name js-new-X\.Y\.Z/);
+  assert.match(archiveGaps(added, page('install')).join('\n'), /docs\/release\.md lists 11/);
 });
 
 test('the verification commands of the install page are those of the release document', () => {

@@ -22,8 +22,8 @@
     <ul class="why-grid">
       <li><h3>A lease is a host for a bounded time</h3><p>A client posts to <code>/v1/leases</code> with a class and a maximum wall time, renews the lease before its TTL lapses, and releases it. A client that disappears loses the lease at the end of its TTL.</p></li>
       <li><h3>An agent on every host</h3><p><code>js-agent</code> offers the host's CPU, memory and GPUs, heartbeats, and runs container jobs on Linux (through Docker, Podman or crun) and native jobs on a Mac.</p></li>
-      <li><h3>A whole node, quiet, when asked</h3><p>A <code>whole-node</code> lease books every dimension of one host. A queued request gets exactly one host, drained for it, and receives it only when nothing else is on it.</p></li>
-      <li><h3>Placement by measured and predicted load</h3><p>The <code>js-sched</code> crate admits a lease to a worker when measured load plus predicted cost stays within the worker's CPU and memory. The lease server does not call it yet.</p></li>
+      <li><h3>A whole node, quiet, when asked</h3><p>A <code>whole-node</code> lease books every dimension of one host, and its client gets the host only when nothing else is on it. Reserving and draining one host for a queued request is built, and not yet reached through the lease server.</p></li>
+      <li><h3>Placement by measured and predicted load</h3><p>The <code>js-sched</code> crate admits a lease to a worker when measured load plus predicted cost stays within the worker's CPU and memory. The lease server calls it only under <code>--placement js-sched</code>, to pick among the hosts with room by how tightly a lease fits, and not by load.</p></li>
     </ul>
     <p><a href="concepts.html">The concepts page</a> says how each of these works and where it stops.</p>
   </div>
@@ -38,14 +38,16 @@
     <tbody>
     <tr><td>Lease API: acquire, renew, release, list; the <code>js</code> client; a bearer token; TLS</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>Agents that register with a join token and run container jobs on Linux or native jobs on a Mac</td><td><span class="tag tag-ok">works today</span></td></tr>
-    <tr><td>Pools of class <code>whole-node</code> or <code>gpu-host</code>, with the reservation and drain of a whole node</td><td><span class="tag tag-ok">works today</span></td></tr>
+    <tr><td>Pools of class <code>whole-node</code> or <code>gpu-host</code></td><td><span class="tag tag-ok">works today</span></td></tr>
+    <tr><td>The reservation and drain of a whole node for a queued request</td><td><span class="tag tag-planned">built, not reached: the lease server sends no request id</span></td></tr>
     <tr><td>An elastic pool on Lambda Labs</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">launches nothing until the pool file says <code>live</code></span></td></tr>
-    <tr><td>Placement by load, in the <code>js-sched</code> crate</td><td><span class="tag tag-planned">not called by the lease server</span></td></tr>
+    <tr><td><code>js-sched</code> picking the host of a lease</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">only under <code>--placement js-sched</code>; the default is <code>registry</code></span></td></tr>
+    <tr><td>Placement by load, in the <code>js-sched</code> crate</td><td><span class="tag tag-planned">not used by the lease server: it places by fit</span></td></tr>
     <tr><td>A pool that books part of a host</td><td><span class="tag tag-planned">not built: refused when the pool file loads</span></td></tr>
     <tr><td>One token for each tenant</td><td><span class="tag tag-planned">not built: one shared token</span></td></tr>
     <tr><td>An idempotency key on acquire</td><td><span class="tag tag-planned">not built</span></td></tr>
     <tr><td>A lease server for macOS</td><td><span class="tag tag-planned">none: Linux x86_64 only</span></td></tr>
-    <tr><td>A published package or image of the agent</td><td><span class="tag tag-planned">none: the Debian package is built and attested, and not published</span></td></tr>
+    <tr><td>A published package or image of the agent</td><td><span class="tag tag-planned">none: the Debian and macOS packages are built, and not published</span></td></tr>
     <tr><td>kbf running its actions on the agent</td><td><span class="tag tag-planned">design only</span></td></tr>
     </tbody></table></div>
     <p class="source-note">Sources for each row are on the <a href="concepts.html">concepts</a>, <a href="install.html">install</a> and <a href="kbf.html">kbf</a> pages.</p>

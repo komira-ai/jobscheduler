@@ -20,12 +20,15 @@ on:
       - crates/js-agent/src/**
       - crates/js-cli/src/**
       - crates/js-lease-server/src/**
+      - crates/js-mdm/src/**
+      - crates/js-registry/src/**
       - crates/js-sched/src/**
       - crates/js-server-core/src/**
       - crates/js-sizing/src/**
       - crates/js-whole/src/**
       - .github/workflows/jobscheduler-site.yml
       - .github/workflows/js-agent-deb.yml
+      - .github/workflows/js-agent-macos-pkg.yml
   push:
     branches: [main]
     paths:
@@ -37,12 +40,15 @@ on:
       - crates/js-agent/src/**
       - crates/js-cli/src/**
       - crates/js-lease-server/src/**
+      - crates/js-mdm/src/**
+      - crates/js-registry/src/**
       - crates/js-sched/src/**
       - crates/js-server-core/src/**
       - crates/js-sizing/src/**
       - crates/js-whole/src/**
       - .github/workflows/jobscheduler-site.yml
       - .github/workflows/js-agent-deb.yml
+      - .github/workflows/js-agent-macos-pkg.yml
 
 permissions: {}
 
