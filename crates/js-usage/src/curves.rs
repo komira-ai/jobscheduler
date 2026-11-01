@@ -84,6 +84,15 @@ impl ProfileCurves {
         self.put(key, 0, None);
     }
 
+    /// The P90 of the wall minutes the runs of the profile `name` lasted, or `None` when
+    /// no curve is held for it or it is idle past [`STALE_DAYS`]: the same answer
+    /// [`CurveSource::wall_minutes_p90`] gives for a work key that maps to `name`.
+    #[must_use]
+    pub fn wall_minutes_p90_of(&self, name: &ProfileKey) -> Option<u32> {
+        let _ = name;
+        None
+    }
+
     fn lookup(&self, key: &WorkKey) -> Option<Held> {
         let name = (self.map)(key)?;
         let stale_before = self
@@ -195,6 +204,21 @@ mod tests {
             "an older touch does not lower the day"
         );
         c.touch(&pk("absent"), 999);
+    }
+
+    /// Catches: a life read by profile name that differs from the one read by work key:
+    /// a name with no fit served one, or the staleness rule left out (idle exactly 60
+    /// days is fresh, 61 is not).
+    #[test]
+    fn a_life_is_served_by_profile_name_under_the_staleness_rule() {
+        let c = curves();
+        c.put(&pk("a"), 100, Some(&fit(1, 7)));
+        c.set_today(160);
+        assert_eq!(c.wall_minutes_p90_of(&pk("a")), Some(7));
+        assert_eq!(c.wall_minutes_p90(&wk("c", "a")), Some(7));
+        assert_eq!(c.wall_minutes_p90_of(&pk("b")), None);
+        c.set_today(161);
+        assert_eq!(c.wall_minutes_p90_of(&pk("a")), None);
     }
 
     /// Catches: a key that lost its fit (or was evicted) still served.

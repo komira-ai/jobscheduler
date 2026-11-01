@@ -10,6 +10,7 @@ use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
 use js_types::{Admission, HostId, ResourceClass, Shape};
 
 use super::{HostState, Registry, State};
+use crate::lives;
 use crate::whole::caps::Capability;
 use crate::whole::cost::HostLoad;
 use crate::whole::exclusive::Exclusive;
@@ -45,7 +46,7 @@ impl Registry {
                     id: id.to_string(),
                     leases: usize::from(lease.is_some()),
                     end_bounds: ends.map(|(_, end)| end.millis()).into_iter().collect(),
-                    est_ends: Vec::new(),
+                    est_ends: lives::est_ends(None, &state.runs, ends, None),
                 },
             }
         });

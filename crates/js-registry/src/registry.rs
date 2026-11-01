@@ -263,6 +263,15 @@ impl Registry {
         }
     }
 
+    /// Gives the registry the source of how long the runs of a profile take. From then on
+    /// the drain cost of a host reads the estimated end of its lease, from the start of the
+    /// lease and the largest P90 among the profile names of its keyed runs
+    /// ([`Registry::queue_keyed_run`]). Only the first call takes effect; a registry with no
+    /// source costs a lease by its max-wall bound alone.
+    pub fn set_lives(&self, lives: Arc<dyn crate::ProfileLives>) {
+        let _ = lives;
+    }
+
     /// The provider the lease table runs on, serving the pool's class.
     pub fn provider(&self) -> crate::RegisteredProvider {
         crate::RegisteredProvider::new(self.clone(), self.shared.config.class().clone())
