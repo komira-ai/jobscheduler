@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use js_provider::Provider;
-use js_registry::{ERROR_EDGES_MS, ProfileLives, TailCounters};
+use js_registry::{ERROR_EDGES_MS, ProfileLives, TailCounters, WholeNodeConfig};
 use js_usage::ProfileKey;
 use support::world::*;
 use support::*;
@@ -60,15 +60,20 @@ fn a_mark_keeps_the_end_of_the_tail_it_was_made_with() {
     );
 }
 
-/// Catches: a tail end on a mark that drains nothing: a host that turns quiet is assigned
-/// to the request, and the assigned mark has none.
+/// Catches: a tail end on a mark that drains nothing: a host that turns quiet before
+/// `drain_after` is assigned to the request, and the assigned mark has none. (A host that
+/// was reserved and then turns quiet keeps its reserved mark, so the request must still be
+/// waiting out `drain_after` for the host to be assigned.)
 #[test]
 fn an_assigned_mark_has_no_tail_end() {
-    let mut w = world();
+    let mut w = World::new(&["a"], |w| WholeNodeConfig {
+        drain_after_ms: 600_000,
+        ..w
+    });
     w.share(1, HOUR_S);
     w.ask(2, "q");
-    assert!(w.reservation("q").unwrap().tail_end.is_some());
     w.step(60_000);
+    assert!(w.reservations().is_empty());
     w.stop(1);
     w.provider.observe(&lease(1));
     let mark = w.reservation("q").unwrap();
@@ -122,12 +127,18 @@ fn the_marked_requests_own_start_is_counted_and_is_not_backfill() {
 /// Catches: the estimate error left out, signed wrongly or bucketed wrongly, and leases
 /// with no estimate mixed into it: a lease estimated at two minutes ends at two and a
 /// half, which is 30 s late and falls in the bucket above 10 s up to 60 s; a lease with no
-/// keyed run ends and is counted apart; the stop of a lease the registry never started
-/// and a second stop of an ended one count nothing.
+/// keyed run, on the other host, ends and is counted apart; the stop of a lease the
+/// registry never started and a second stop of an ended one count nothing. (Both leases
+/// are started before either stops: a host takes no new lease until a heartbeat shows
+/// the runs of the stopped one gone.)
 #[test]
 fn the_estimate_error_of_an_ended_lease_is_counted_by_sign_and_bucket() {
-    let mut w = world();
+    let mut w = World::new(&["a", "b"], plain);
+    let table = Table(BTreeMap::from([("fast", 1), ("two", 2)]));
+    w.fx.registry.set_lives(Arc::new(table));
     w.share(1, 900);
+    w.share(2, 600);
+    assert_eq!(w.lease_on("b"), Some(lease(2)));
     keyed(&w, 1, "r1", "two");
     w.step(150_000);
     w.stop(1);
@@ -142,7 +153,6 @@ fn the_estimate_error_of_an_ended_lease_is_counted_by_sign_and_bucket() {
     buckets[late] = 1;
     assert_eq!(counters.error_buckets, buckets);
 
-    w.share(2, 600);
     w.stop(2);
     w.stop(2);
     w.stop(99);
