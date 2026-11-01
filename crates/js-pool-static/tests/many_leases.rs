@@ -29,9 +29,13 @@ fn whole() -> ResourceClass {
 }
 
 fn spec(class: &ResourceClass, seq: u64, cpu_millis: u64) -> StartSpec {
+    spec_of(class, seq, Resources::new(cpu_millis, 1, 0, None).unwrap())
+}
+
+fn spec_of(class: &ResourceClass, seq: u64, resources: Resources) -> StartSpec {
     let request = Request {
         class: class.id().clone(),
-        resources: Resources::new(cpu_millis, 1, 0, None).unwrap(),
+        resources,
         capabilities: BTreeMap::new(),
         max_wall: Duration::from_secs(60),
         labels: BTreeMap::new(),
@@ -154,4 +158,125 @@ fn the_single_lease_views_name_the_first_lease() {
     let first = LeaseId::new(1, 7);
     assert_eq!(book.booked(), BTreeMap::from([(host("a"), first)]));
     assert_eq!(book.hosts()[0].leased_to, Some(first));
+}
+
+fn book_of(resources: Resources) -> HostBook {
+    let mut book = HostBook::new();
+    book.insert_host(host("a"), Shape::new(resources, BTreeMap::new()));
+    book
+}
+
+fn lease(seq: u64) -> LeaseId {
+    LeaseId::new(1, seq)
+}
+
+/// Asserts that a sharing request of all zeros is refused beside a whole-host lease:
+/// the whole lease excludes it by kind, not because the sums happen to overflow the shape.
+#[test]
+fn a_zero_request_is_refused_beside_a_whole_host_lease() {
+    let mut book = one_host();
+    let (share, all) = (sharing(), whole());
+    book.start_where(&spec(&all, 1, 1000), None, ANY);
+    let zero = Resources::new(0, 0, 0, None).unwrap();
+    assert_eq!(
+        book.start_where(&spec_of(&share, 2, zero), None, ANY),
+        StartAck::Refused(RefusalCode::NoCapacity)
+    );
+}
+
+/// Guard (the one-lease code agrees on the refusal): leases that add up to exactly the
+/// shape in every dimension fit, and one more unit does not.
+#[test]
+fn leases_that_add_up_to_exactly_the_shape_fit() {
+    let mut book = one_host();
+    let class = sharing();
+    let half = || Resources::new(1000, 2, 0, None).unwrap();
+    book.start_where(&spec_of(&class, 1, half()), None, ANY);
+    assert_eq!(
+        book.start_where(&spec_of(&class, 2, half()), None, ANY),
+        StartAck::Started { host: host("a") }
+    );
+    let one = Resources::new(1, 0, 0, None).unwrap();
+    assert_eq!(
+        book.start_where(&spec_of(&class, 3, one), None, ANY),
+        StartAck::Refused(RefusalCode::NoCapacity)
+    );
+}
+
+/// Guard: stopping the middle of three leases keeps the other two, in booking order.
+#[test]
+fn stopping_the_middle_lease_keeps_the_others_in_order() {
+    let mut book = one_host();
+    let class = sharing();
+    for seq in [1, 2, 3] {
+        book.start_where(&spec(&class, seq, 500), None, ANY);
+    }
+    book.stop(&lease(2));
+    assert_eq!(
+        book.leases(),
+        BTreeMap::from([(host("a"), vec![lease(1), lease(3)])])
+    );
+    assert_eq!(book.read(&lease(2)), Observed::Absent);
+}
+
+/// Guard: two leases that each want the host's only GPU do not share it.
+#[test]
+fn two_leases_cannot_share_one_gpu() {
+    let gpu = || Resources::new(500, 1, 1, Some("a100".into())).unwrap();
+    let mut book = book_of(Resources::new(2000, 4, 1, Some("a100".into())).unwrap());
+    let class = sharing();
+    assert_eq!(
+        book.start_where(&spec_of(&class, 1, gpu()), None, ANY),
+        StartAck::Started { host: host("a") }
+    );
+    assert_eq!(
+        book.start_where(&spec_of(&class, 2, gpu()), None, ANY),
+        StartAck::Refused(RefusalCode::NoCapacity)
+    );
+}
+
+/// Guard: memory binds on its own, with cpu to spare.
+#[test]
+fn memory_alone_can_refuse_a_lease() {
+    let mut book = one_host();
+    let class = sharing();
+    let heavy = |gib| Resources::new(100, gib, 0, None).unwrap();
+    book.start_where(&spec_of(&class, 1, heavy(3)), None, ANY);
+    assert_eq!(
+        book.start_where(&spec_of(&class, 2, heavy(2)), None, ANY),
+        StartAck::Refused(RefusalCode::NoCapacity)
+    );
+    assert_eq!(
+        book.start_where(&spec_of(&class, 3, heavy(1)), None, ANY),
+        StartAck::Started { host: host("a") }
+    );
+}
+
+/// Asserts that a sum that overflows is refused, not wrapped into a fit.
+#[test]
+fn an_overflowing_sum_is_refused() {
+    let mut book = book_of(Resources::new(u64::MAX, 4, 0, None).unwrap());
+    let class = sharing();
+    let big = Resources::new(u64::MAX - 1, 1, 0, None).unwrap();
+    book.start_where(&spec_of(&class, 1, big), None, ANY);
+    let small = Resources::new(2, 1, 0, None).unwrap();
+    assert_eq!(
+        book.start_where(&spec_of(&class, 2, small), None, ANY),
+        StartAck::Refused(RefusalCode::NoCapacity)
+    );
+}
+
+/// Guard: a lease stopped on a host that carries several never starts again.
+#[test]
+fn a_stopped_lease_never_restarts_on_a_many_lease_host() {
+    let mut book = one_host();
+    let class = sharing();
+    book.start_where(&spec(&class, 1, 500), None, ANY);
+    book.start_where(&spec(&class, 2, 500), None, ANY);
+    book.stop(&lease(1));
+    assert_eq!(
+        book.start_where(&spec(&class, 1, 500), None, ANY),
+        StartAck::Refused(RefusalCode::LeaseEnded)
+    );
+    assert_eq!(book.leases().get(&host("a")), Some(&vec![lease(2)]));
 }
