@@ -8,8 +8,7 @@
 //
 // Also held here: the "not built" and "not available" statements (each is a row), the keys of the pool file the install
 // page shows, the whole-node keys the concepts page lists, the archive names of the install page against the release
-// document, the paths the source notes name, and the absence of the host setup script the install page says is not in
-// the repository.
+// document, the paths the source notes name, and the host setup script the install page names.
 
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync } from 'node:fs';
@@ -82,7 +81,7 @@ const ROWS: readonly Row[] = [
   ['install', 'the unit restarts it every 30 seconds', 'packaging/js-agent/js-agent.service', 'RestartSec=30'],
   ['install', '<code>/usr/bin/js-agent</code>', 'packaging/js-agent/js-agent.service', 'ExecStart=/usr/bin/js-agent'],
   ['install', '<code>http://</code> is accepted only for <code>localhost</code>, <code>127.0.0.0/8</code> and <code>::1</code>', 'crates/js-agent/src/lib.rs', '`http://` only for `localhost`, `127.0.0.0/8` and `::1`'],
-  ['install', 'its header names a host setup script that this repository does not contain', 'packaging/js-agent/js-agent-crun.service', 'crun_host_setup.sh'],
+  ['install', 'sets a host up for it and installs it, and the unit is not enabled or started', 'packaging/js-agent/crun_host_setup.sh', 'the unit is NOT enabled or started'],
   ['install', 'it is refused at start', 'crates/js-agent/src/lib.rs', 'not available yet: refused at start'],
   ['install', '<code>--wait-pending</code>, 60 seconds by default', 'crates/js-cli/src/lib.rs', 'for at most `--wait-pending` (default 60s)'],
   ['install', 'the client looks at the list every two seconds', 'crates/js-cli/src/lib.rs', 'is looked at in the list every two seconds'],
@@ -226,9 +225,9 @@ function repoFiles(dir = REPO, prefix = ''): string[] {
   return out;
 }
 
-test('the host setup script the install page says is not in the repository is not', () => {
-  assert.match(page('install'), /a host setup script that this repository does not contain/);
-  assert.deepEqual(repoFiles().filter((f) => f.endsWith('crun_host_setup.sh')), []);
+test('the host setup script the install page names is in the repository', () => {
+  assert.match(page('install'), /<code>packaging\/js-agent\/crun_host_setup.sh<\/code> sets a host up/);
+  assert.deepEqual(repoFiles().filter((f) => f.endsWith('crun_host_setup.sh')), ['packaging/js-agent/crun_host_setup.sh']);
 });
 
 test('every page but the 404 has a source note, and every file a source note names exists', () => {
