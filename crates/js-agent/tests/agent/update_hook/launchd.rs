@@ -301,6 +301,106 @@ fn a_service_that_is_not_running_reads_by_how_it_last_ended() {
     }
 }
 
+fn assert_reads(state: &str, extra: &str, active: &str, sub: &str) {
+    let got = read(state, extra);
+    assert_eq!(
+        (got.active.as_str(), got.sub.as_str()),
+        (active, sub),
+        "{state} {extra:?}"
+    );
+}
+
+#[test]
+fn a_waiting_service_that_last_ended_badly_reads_failed() {
+    assert_reads(
+        "waiting",
+        "\truns = 2\n\tlast exit code = 1\n",
+        "failed",
+        "failed",
+    );
+    assert_reads(
+        "waiting",
+        "\truns = 2\n\tlast exit code = (never exited)\n\tlast terminating signal = Killed: 9\n",
+        "failed",
+        "failed",
+    );
+}
+
+#[test]
+fn an_exited_service_that_last_ended_cleanly_reads_inactive() {
+    assert_reads(
+        "exited",
+        "\truns = 1\n\tlast exit code = 0\n",
+        "inactive",
+        "dead",
+    );
+}
+
+#[test]
+fn an_exit_code_of_zero_with_a_terminating_signal_line_reads_as_a_bad_end() {
+    // The module documentation says a signal makes the end bad, whatever the code. Whether
+    // launchd keeps a stale `last terminating signal` line after a later clean exit (which would
+    // make a clean run read as failed here) can only be seen on a Mac; this pins what the port
+    // does with such a text, not what launchd prints.
+    let both = "\truns = 3\n\tlast exit code = 0\n\tlast terminating signal = Killed: 9\n";
+    assert_reads("not running", both, "failed", "failed");
+    assert_reads("exited", both, "failed", "failed");
+    // Not a clean exit, so the throttle wait is a restart and not only a start.
+    assert_reads("spawn scheduled", both, "activating", "auto-restart");
+    assert_reads("running", both, "active", "running");
+}
+
+#[test]
+fn a_negative_exit_code_is_a_bad_end() {
+    for code in ["-1", "-9", "-15: Terminated"] {
+        let extra = format!("\truns = 2\n\tlast exit code = {code}\n");
+        assert_reads("not running", &extra, "failed", "failed");
+        assert_reads("spawn scheduled", &extra, "activating", "auto-restart");
+    }
+}
+
+#[test]
+fn only_the_exact_exit_status_113_means_the_service_is_not_loaded() {
+    // Every operation takes 113 as "not loaded"...
+    let gone =
+        FakeCommands::default().with(&print_line(LABEL), Err("/bin/launchctl: exit status: 113"));
+    let units = LaunchUnits::new(&gone);
+    assert_eq!(
+        units.show(LABEL).map(|s| (s.active, s.sub)),
+        Ok(("inactive".to_owned(), "dead".to_owned()))
+    );
+    assert_eq!(units.is_active(LABEL), Ok(false));
+    assert_eq!(units.stop_no_block(LABEL), Ok(()));
+    assert_eq!(*gone.ran.borrow(), vec![print_line(LABEL); 3]);
+    // ...and no other status is: a stop that could not look must not report success.
+    for other in [
+        "exit status: 11",
+        "exit status: 1130",
+        "exit status: 2113",
+        "exit status: 13",
+    ] {
+        let why = format!("/bin/launchctl: {other}");
+        let tool = FakeCommands::default().with(&print_line(LABEL), Err(&why));
+        let units = LaunchUnits::new(&tool);
+        assert_eq!(
+            units.show(LABEL),
+            Err(PortError::Command(why.clone())),
+            "{other}"
+        );
+        assert_eq!(
+            units.stop_no_block(LABEL),
+            Err(PortError::Command(why.clone())),
+            "{other}"
+        );
+        assert_eq!(
+            units.start(LABEL),
+            Err(PortError::Command(why.clone())),
+            "{other}"
+        );
+        assert_eq!(*tool.ran.borrow(), vec![print_line(LABEL); 3], "{other}");
+    }
+}
+
 #[test]
 fn the_exit_of_an_endpoint_or_a_trigger_is_not_the_exit_of_the_service() {
     let nested = "\tendpoints = {\n\t\t\"x\" = {\n\t\t\tlast exit code = 1\n\t\t}\n\t}\n";

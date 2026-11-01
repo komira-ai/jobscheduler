@@ -90,8 +90,9 @@ fn a_plist_launchd_cannot_load_is_a_failure_of_the_host_and_not_of_the_release()
 }
 
 #[test]
-fn an_agent_launchd_holds_back_for_want_of_its_token_is_a_failure_of_the_host() {
-    let (rig, tool) = mac("hook-launchd-no-token");
+fn an_agent_that_launchd_leaves_idle_after_the_start_is_a_failure_of_the_host() {
+    // The token file is there; launchd bootstraps the plist and does not run the agent.
+    let (rig, tool) = mac("hook-launchd-left-idle");
     let gate = with_token(&rig.tmp);
     tool.next_start.set(Then::Idle);
     let done = cutover(&rig, &tool, &gate);

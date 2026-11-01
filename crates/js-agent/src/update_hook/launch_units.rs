@@ -390,3 +390,30 @@ impl Units for LaunchUnits<'_> {
             .is_some_and(|text| printed_state(&text) == Ok("running")))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::facts::SystemCommands;
+
+    /// The runner that `bootout` goes through is the one made with the limit the daemon's exit
+    /// timeout asks for: read from the command runner inside, not from the field the stop runner
+    /// keeps for `limit()`, so a runner built with another limit is seen whatever it reports.
+    #[test]
+    fn the_command_runner_of_a_stop_has_the_exit_timeout_plus_the_margin_as_its_limit() {
+        for secs in [0, 20, 120] {
+            let exit = Duration::from_secs(secs);
+            let stop = StopRunner::new(exit);
+            let wanted = SystemCommands::bounded(exit + BOOTOUT_MARGIN, PROBE_OUTPUT_CAP);
+            assert_eq!(
+                format!("{:?}", stop.runner),
+                format!("{wanted:?}"),
+                "{secs}s"
+            );
+            assert_eq!(stop.limit(), exit + BOOTOUT_MARGIN, "{secs}s");
+        }
+        let probe = SystemCommands::bounded(crate::PROBE_LIMIT, PROBE_OUTPUT_CAP);
+        let stop = StopRunner::new(Duration::from_secs(120));
+        assert_ne!(format!("{:?}", stop.runner), format!("{probe:?}"));
+    }
+}
