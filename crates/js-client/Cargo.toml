@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 js-agent-wire = { path = "../js-agent-wire" }
+getrandom = { workspace = true, features = ["std"] }
 rustix = { workspace = true, features = ["fs", "process"] }
 rustls.workspace = true
 serde.workspace = true

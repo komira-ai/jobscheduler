@@ -16,6 +16,17 @@
 //! the store the crun runtime reads, without starting the agent and without a container
 //! engine; see `image::pull`.
 //!
+//! `js-agent enroll --provider <id> --instance <id> [--apply]` (Linux, run as root) does every
+//! one-time step that makes a host a member of a pool: the packaged host setup
+//! (`crun_host_setup.sh`), the instance file `/etc/js-agent/instance` and the join token, read
+//! from standard input, in `/etc/js-agent/token` (0600). It is a dry run without `--apply`,
+//! never replaces a file, and a second run on an enrolled host changes nothing; see [`enroll`]
+//! and docs/runbooks/crun-host-setup.md. The token comes from `js lease join-token mint`:
+//!
+//! ```text
+//! js lease join-token mint --provider burst --instance i-0abc | js-agent enroll --provider burst --instance i-0abc --apply
+//! ```
+//!
 //! `js-agent cordon --server <url> --state-root <dir> --for <duration>` (Linux and macOS, run as
 //! the user who can read the host's credential) keeps the lease server from placing a lease on
 //! this host for a window, and lifts the cordon at the end or on SIGTERM or SIGINT; see
@@ -249,6 +260,8 @@ pub mod crun;
 pub mod crun_host;
 pub mod disk;
 pub mod egress;
+#[cfg(target_os = "linux")]
+pub mod enroll;
 mod exclusive;
 mod facts;
 mod host;
@@ -464,6 +477,20 @@ pub fn main_with(
         .is_some_and(|verb| verb.to_str() == Some(image::pull::VERB))
     {
         return image::pull::run(&args, out, err, &image::pull::Host::system());
+    }
+    // `enroll` is a root verb of the operator's, answered before `install()` too.
+    #[cfg(target_os = "linux")]
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(enroll::VERB))
+    {
+        return enroll::run(
+            &args,
+            &mut std::io::stdin().lock(),
+            out,
+            err,
+            &enroll::Host::system(),
+        );
     }
     // The updater's hook is answered here too, before `install()`: it is a short-lived
     // step of another program, and installs no signal handler.

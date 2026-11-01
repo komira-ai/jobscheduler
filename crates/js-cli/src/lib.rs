@@ -34,7 +34,33 @@
 //! js lease native <id> --program <path|@bundle/entry> [--arg A ...] [--network off|loopback|on]
 //!                 [--bundle name[:tag]@sha256:<digest>] --cpu-millis N --memory-bytes N
 //!                 [--wall <dur>]
+//! js lease join-token mint --provider <id> --instance <id> [--ttl <dur>] [--out <path>]
 //! ```
+//!
+//! `join-token mint` asks the server (`POST /v1/agent/join-tokens`, behind the client token)
+//! for the one-time token that lets one launched host join its pool. `--provider` is the
+//! pool's name, `--instance` the id the host's instance file will name, `--ttl` how long the
+//! token can be used to join (the server's default, 30 minutes, when absent; at most a day).
+//! The token is written to `--out` (a new file of mode 0600, made whole and linked into
+//! place; an existing file, or a missing directory, is refused before the request) or, when
+//! standard output is not a terminal, to standard output followed by a line break, so that
+//! it can be piped to `js-agent enroll`; with standard output a terminal and no `--out` the
+//! command is refused (exit 2) before any request, and the token is never printed to a
+//! terminal. It is never taken from or put on a command line. Standard error gets
+//! `join token sha256 <hex> expires <ms>` (`expires` is the server's clock in milliseconds;
+//! with `--json`, `{"sha256": ..., "expires_at_ms": ...}`), the one thing to compare with the
+//! server's log and with what `js-agent enroll` prints. The server's refusals print the
+//! status and its error code only (`join token not minted: the server answered 400
+//! (bad-request)`), never its body: a 400 is exit 4, a 404 or 429 exit 3, anything else
+//! exit 1. A token that was minted and could not be written (exit 1) is lost: the message
+//! says when the server drops it, and the answer is to mint another. The request is sent
+//! once. Before it, `--out`'s directory is probed (a file is made in it and linked, and both
+//! are removed), so a read-only directory, or a filesystem without hard links, is refused
+//! before a token exists; what the probe cannot know (a full disk, a directory changed since)
+//! is the lost token above. Once the file is linked the command has succeeded, even if the
+//! directory cannot then be synced. The token is held in ordinary memory and is not wiped
+//! when dropped: it is one-time and short-lived, and the HTTP stack and the parsed JSON hold
+//! copies this program cannot reach.
 //!
 //! `native` queues a native job (a program run on the host, no image) on a held lease and
 //! prints `run <id> <state>`. The server refuses it (exit 3) when the lease's host does not
@@ -119,10 +145,10 @@
 //! | status | meaning |
 //! |---|---|
 //! | 0 | held, renewed, freed, listed; for `run`, the command's own status |
-//! | 1 | the server or the network failed, or the token was refused (401); a start whose answer was lost (the lease may exist: run `js lease list`) |
+//! | 1 | the server or the network failed, or the token was refused (401); a start whose answer was lost (the lease may exist: run `js lease list`); a join token that was minted and could not be written |
 //! | 2 | a flag or a file it names is wrong, including what clap refuses |
-//! | 3 | refused: `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`, `unknown-lease`, `not-held`, `expired`, or a pending start that was dropped (`pending-dropped`) |
-//! | 4 | the request itself was refused: a start-contract rule (`unknown-class`, `reserved-label`, `invalid-label`, `below-class-minimum`, `wall-time-not-positive`) or a body the server cannot read |
+//! | 3 | refused (a mint: 404 or 429): `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`, `unknown-lease`, `not-held`, `expired`, or a pending start that was dropped (`pending-dropped`) |
+//! | 4 | the request itself was refused (a mint: 400): a start-contract rule (`unknown-class`, `reserved-label`, `invalid-label`, `below-class-minimum`, `wall-time-not-positive`) or a body the server cannot read |
 //! | 5 | a pending start was not confirmed within `--wait-pending` |
 //! | 6 | `release`: the stop was accepted but is not confirmed; the server retries it |
 //! | 7 | `run`: the lease was lost (gone from the server, or not renewed before the deadline short of its expiry); the command was stopped |
@@ -137,6 +163,7 @@ mod cli;
 mod command;
 mod events;
 mod failure;
+mod join_tokens;
 mod leases;
 mod render;
 mod renewals;
@@ -150,7 +177,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use cli::{Action, Cli, Command};
+use cli::{Action, Cli, Command, JoinTokenAction};
 use failure::Failure;
 use js_client::{Client, REQUEST_LIMIT};
 use render::Render;
@@ -226,5 +253,13 @@ fn dispatch(
         Action::List => leases::list(&client, render, out),
         Action::Run(args) => run::run(&client, render, &args, services, err),
         Action::Native(args) => leases::native(&client, render, &args, out),
+        Action::JoinToken(JoinTokenAction::Mint(args)) => join_tokens::mint(
+            &client,
+            render,
+            &args,
+            services.stdout_is_terminal,
+            out,
+            err,
+        ),
     }
 }

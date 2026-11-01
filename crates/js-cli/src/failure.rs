@@ -9,7 +9,8 @@ pub mod exit {
     /// Success: the lease is held, renewed, freed or listed, or the command of `lease run`
     /// ended with status 0 (any other status of the command is passed through).
     pub const OK: u8 = 0;
-    /// The server or the network failed, or answered something this client does not know.
+    /// The server or the network failed, or answered something this client does not know;
+    /// a join token was minted and could not be written where it was asked for.
     pub const SERVER: u8 = 1;
     /// A flag or a file it names is wrong. Statuses clap reports for a command line it
     /// refuses are 2 as well.
@@ -72,6 +73,29 @@ pub(crate) enum Failure {
     /// the start may have created a lease. It is not repeated.
     #[error("{0}; the request may have created a lease: run \"js lease list\" before trying again")]
     Unconfirmed(String),
+    /// The server did not mint a join token: the status and the error code it answered,
+    /// and nothing else of its answer.
+    #[error("join token not minted: the server answered {status} ({code})")]
+    Mint {
+        /// The HTTP status.
+        status: u16,
+        /// The server's error code, without control characters and cut short.
+        code: String,
+    },
+    /// A join token was minted and could not be put where it was asked for. The server has
+    /// it and nobody else does.
+    #[error(
+        "the token was minted but could not be written to {dest}: {why}; the token is lost \
+         (it expires {expires_at_ms} on the server's clock): mint another"
+    )]
+    Undelivered {
+        /// Where it should have gone: a path, or `standard output`.
+        dest: String,
+        /// The system's reason.
+        why: String,
+        /// When the server drops the token, in its milliseconds.
+        expires_at_ms: u64,
+    },
     /// The lease is gone from the server.
     #[error("lease {0} is gone from the server; stopped the command")]
     LeaseLost(String),
@@ -109,6 +133,12 @@ impl Failure {
             Self::Contract(_) => (exit::CONTRACT, "rejected"),
             Self::Unresolved { .. } => (exit::UNRESOLVED, "unresolved"),
             Self::NotStarted { .. } => (exit::NOT_STARTED, "not-started"),
+            Self::Mint { status, .. } => match status {
+                400 => (exit::CONTRACT, "rejected"),
+                404 | 429 => (exit::REFUSED, "refused"),
+                _ => (exit::SERVER, "server"),
+            },
+            Self::Undelivered { .. } => (exit::SERVER, "undelivered"),
             Self::LeaseLost(_) | Self::LeaseUnrenewed(_) => (exit::LEASE_LOST, "lease-lost"),
             Self::Interrupted(signal) => (128 + signal.number(), "interrupted"),
         }

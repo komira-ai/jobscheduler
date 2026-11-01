@@ -1048,6 +1048,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "getrandom 0.2.17",
+ "hex",
  "js-client",
  "js-lease",
  "js-lease-server",
@@ -1059,6 +1060,7 @@ dependencies = [
  "rcgen",
  "rustix",
  "serde_json",
+ "sha2 0.11.1",
  "thiserror",
  "tokio",
 ]
@@ -1067,6 +1069,7 @@ dependencies = [
 name = "js-client"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "js-agent-wire",
  "js-testkit",
  "rcgen",

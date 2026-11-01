@@ -8,6 +8,7 @@ mod acquire;
 mod binary;
 mod failures;
 mod flags;
+mod join_token;
 mod lost_reply;
 mod native;
 mod ops;

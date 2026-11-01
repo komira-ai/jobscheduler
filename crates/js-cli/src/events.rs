@@ -1,7 +1,7 @@
 //! What a command waits on: the injected waiter, the signals and the events the
 //! supervising loop of `lease run` reads.
 
-use std::io;
+use std::io::{self, IsTerminal};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -169,6 +169,7 @@ pub struct Services {
     pub(crate) waiter: Arc<dyn Waiter>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) signals: SignalSource,
+    pub(crate) stdout_is_terminal: bool,
 }
 
 impl Services {
@@ -178,6 +179,17 @@ impl Services {
             waiter,
             clock,
             signals,
+            stdout_is_terminal: false,
+        }
+    }
+
+    /// These services with standard output a terminal (or not): `lease join-token mint`
+    /// writes the token to standard output only when it is not.
+    #[must_use]
+    pub fn with_terminal_stdout(self, stdout_is_terminal: bool) -> Self {
+        Self {
+            stdout_is_terminal,
+            ..self
         }
     }
 
@@ -189,6 +201,7 @@ impl Services {
             Arc::new(SystemClock),
             Box::new(signals::install),
         )
+        .with_terminal_stdout(io::stdout().is_terminal())
     }
 }
 

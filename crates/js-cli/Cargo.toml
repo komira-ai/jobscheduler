@@ -15,8 +15,10 @@ path = "src/main.rs"
 js-client = { path = "../js-client" }
 clap.workspace = true
 getrandom.workspace = true
+hex.workspace = true
 rustix = { workspace = true, features = ["process"] }
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "signal"] }
 
