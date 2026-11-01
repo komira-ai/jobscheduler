@@ -330,6 +330,39 @@ pub fn other_volume_children(root_dev: u64, children: &[(String, u64)]) -> Vec<S
         .collect()
 }
 
+/// One attempt by root to load a launch agent: the command line, its exit status (`None` for a
+/// signal) and its text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentAttempt {
+    pub command: String,
+    pub code: Option<i32>,
+    pub text: String,
+}
+
+/// Whether root's attempts show that launchd cannot host an agent for the uid at all: no
+/// attempt worked, and the deciding attempt failed with the specific no-domain error seen on
+/// macOS for a uid without a session. For the `gui/<uid>` domain, the first attempt exited 125
+/// "Domain does not support specified action". For `user/<uid>`, the last `launchctl asuser`
+/// bootstrap exited 5 "Input/output error" (after the plain root bootstrap failed too).
+/// Anything else (another code, other words, no `asuser` attempt) is not unavailable and
+/// proves nothing.
+pub fn classify_agent_unavailable(kind: Kind, attempts: &[AgentAttempt]) -> bool {
+    let _ = (kind, attempts);
+    false
+}
+
+/// The PROBE line for one attempt: the exact command, its status and its text.
+pub fn attempt_probe(kind: Kind, attempt: &AgentAttempt) -> String {
+    let _ = (kind, attempt);
+    String::new()
+}
+
+/// The sandbox `deny(` lines in the log read, and how many of them name a pid the job ran.
+pub fn sandbox_log_counts(log: &str, job: &JobProcs) -> (usize, usize) {
+    let _ = (log, job);
+    (0, 0)
+}
+
 /// Why run A could not seed an item: the sandbox of the product profile said no (so the job
 /// could not create the state and nothing can carry over), or anything else (a full disk, a
 /// missing tool, a crash), which proves nothing.
@@ -1094,6 +1127,143 @@ mod tests {
         ];
         assert_eq!(other_volume_children(5, &children), ["/Users/Shared/mnt"]);
         assert!(other_volume_children(5, &children[..1]).is_empty());
+    }
+
+    fn attempt(command: &str, code: Option<i32>, text: &str) -> AgentAttempt {
+        AgentAttempt {
+            command: command.to_owned(),
+            code,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Asserts when root's failed attempts show the uid has no launchd domain to host an agent:
+    /// `gui/<uid>` exits 125 "Domain does not support specified action"; `user/<uid>` fails
+    /// the plain bootstrap AND the `asuser` bootstrap with 5 "Input/output error". A success
+    /// anywhere, another code or text, no `asuser` attempt and no attempts are not. It catches
+    /// an "unavailable" that excuses any launchd failure.
+    #[test]
+    fn launchd_has_no_domain_for_the_uid_only_on_the_specific_errors() {
+        let gui = [attempt(
+            "launchctl bootstrap gui/59123 /p",
+            Some(125),
+            "Bootstrap failed: 125: Domain does not support specified action",
+        )];
+        assert!(classify_agent_unavailable(Kind::GuiLaunchAgent, &gui));
+        let eio = "Bootstrap failed: 5: Input/output error";
+        let user = [
+            attempt("launchctl bootstrap user/59123 /p", Some(5), eio),
+            attempt(
+                "launchctl asuser 59123 /bin/launchctl bootstrap user/59123 /p",
+                Some(5),
+                eio,
+            ),
+        ];
+        assert!(classify_agent_unavailable(Kind::LaunchAgent, &user));
+        // The plain root bootstrap alone is not enough for the user domain.
+        assert!(!classify_agent_unavailable(Kind::LaunchAgent, &user[..1]));
+        // The wrong words or code on the deciding attempt.
+        for (code, text) in [
+            (Some(1), eio),
+            (Some(5), "Bootstrap failed: 5: something else"),
+            (Some(113), "Could not find domain"),
+            (None, ""),
+        ] {
+            let mut tried = user.to_vec();
+            tried[1] = attempt(
+                "launchctl asuser 59123 /bin/launchctl bootstrap user/59123 /p",
+                code,
+                text,
+            );
+            assert!(
+                !classify_agent_unavailable(Kind::LaunchAgent, &tried),
+                "{code:?} {text:?}"
+            );
+        }
+        let mut worked = user.to_vec();
+        worked.push(attempt(
+            "launchctl asuser 59123 /bin/launchctl bootstrap user/59123 /p",
+            Some(0),
+            "",
+        ));
+        assert!(!classify_agent_unavailable(Kind::LaunchAgent, &worked));
+        let wrong_gui = [attempt(
+            "launchctl bootstrap gui/1 /p",
+            Some(125),
+            "Input/output error",
+        )];
+        assert!(!classify_agent_unavailable(
+            Kind::GuiLaunchAgent,
+            &wrong_gui
+        ));
+        assert!(!classify_agent_unavailable(Kind::GuiLaunchAgent, &[]));
+        // The user-domain errors do not excuse the gui domain, nor the reverse.
+        assert!(!classify_agent_unavailable(Kind::GuiLaunchAgent, &user));
+        assert!(!classify_agent_unavailable(Kind::LaunchAgent, &gui));
+        // No other kind has this outcome.
+        assert!(!classify_agent_unavailable(Kind::Keychain, &user));
+    }
+
+    /// Asserts that an attempt is printed with its exact command, status and text on one line.
+    #[test]
+    fn an_attempt_is_printed_with_its_command_status_and_text() {
+        let line = attempt_probe(
+            Kind::LaunchAgent,
+            &attempt(
+                "launchctl bootstrap user/7 /p",
+                Some(5),
+                "Bootstrap failed: 5: Input/output error\nTry again",
+            ),
+        );
+        assert!(
+            line.starts_with("PROBE agent-attempt launch-agent "),
+            "{line}"
+        );
+        assert!(line.contains("cmd=launchctl bootstrap user/7 /p"), "{line}");
+        assert!(line.contains("status=Some(5)"), "{line}");
+        assert!(line.contains("Input/output error Try again"), "{line}");
+        assert!(!line.contains('\n'));
+    }
+
+    /// Asserts that the log summary counts the sandbox deny lines and those naming a pid of the
+    /// job, so a Mac run shows why a bare EPERM was or was not confirmed.
+    #[test]
+    fn the_log_summary_counts_deny_lines_and_the_jobs_own() {
+        let job = JobProcs { pids: vec![412] };
+        let log = "Sandbox: mdworker(123) deny(1) file-read-data /x\n\
+                   Sandbox: native_isolation(412) deny(1) file-write-create /private/tmp/y\n\
+                   Sandbox: security(412) deny(1) mach-lookup z\n\
+                   some other line\n\
+                   Sandbox: x(9) allow file-read\n";
+        assert_eq!(sandbox_log_counts(log, &job), (3, 2));
+        assert_eq!(sandbox_log_counts("", &job), (0, 0));
+    }
+
+    /// Asserts that a launch agent launchd cannot host for the uid covers the launch-agent
+    /// kind, and covers no other kind.
+    #[test]
+    fn an_unavailable_launch_agent_covers_only_its_kind() {
+        let unavailable = |kind| {
+            Line::new(
+                Verdict::Unavailable,
+                kind,
+                token(3),
+                "5: Input/output error",
+            )
+        };
+        let rest = [
+            seeded(Kind::HomeFile),
+            seeded(Kind::Process),
+            seeded(Kind::Keychain),
+            seeded(Kind::SysvShm),
+        ];
+        let mut lines = rest.to_vec();
+        lines.push(unavailable(Kind::LaunchAgent));
+        assert!(missing_minimum(&lines).is_empty());
+        let mut other = rest.to_vec();
+        other[2] = unavailable(Kind::Keychain);
+        other.push(seeded(Kind::LaunchAgent));
+        assert_eq!(missing_minimum(&other), ["keychain-item"]);
     }
 
     /// Asserts that the uid line round-trips among other output, that the first one is
