@@ -73,6 +73,19 @@ pub enum DeclarationError {
     /// `hook.units` is empty: no unit could ever match the record's.
     #[error("hook.units is empty")]
     NoUnits,
+    /// `verify_deadline_secs` is shorter than the `verify` bound plus the `rollback` bound: the
+    /// updater would roll back a verify that is still allowed to run.
+    #[error(
+        "verify_deadline_secs {deadline} is less than the verify bound {verify} plus the rollback bound {rollback}"
+    )]
+    VerifyDeadline {
+        /// `verify_deadline_secs`.
+        deadline: u64,
+        /// `[hook.timeout_secs] verify`.
+        verify: u64,
+        /// `[hook.timeout_secs] rollback`.
+        rollback: u64,
+    },
     /// `hook.units` names more than one unit: the hook manages one agent.
     #[error("hook.units names more than one unit")]
     ManyUnits,
@@ -96,6 +109,8 @@ pub struct Timeouts {
 #[derive(Deserialize)]
 struct Wire {
     state_dir: PathBuf,
+    #[allow(dead_code)]
+    verify_deadline_secs: Option<u64>,
     hook: WireHook,
 }
 
