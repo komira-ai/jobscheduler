@@ -119,12 +119,14 @@ impl UidRange {
     /// The range as macOS pf's `user` takes it: `600` for one uid, `{ 600, 601, 602 }`
     /// (every uid, both ends included) for more.
     ///
-    /// macOS pf reads `600:602` as a user name and refuses it ("unknown user"). The
-    /// `uid_item` rule in pfctl's `parse.y` (OpenBSD, which Apple's pfctl derives from)
-    /// takes a uid, a unary operator and a uid, or `uid PORTBINARY uid`, and `uids` takes
-    /// a braced list of those. A list needs no operator whose edges (`<>` and `><` are
-    /// exclusive and "except") could be misread, so the list is used; `UidRange` bounds
-    /// it at [`MAX_POOL_UIDS`].
+    /// pf.conf(5) says the `:` range "does not work for user and group match", so macOS
+    /// reads `600:602` as a user name and refuses it ("unknown user"). The `uid_item`
+    /// rule in pfctl's `parse.y` (OpenBSD, which Apple's pfctl derives from) takes a
+    /// uid, a unary operator and a uid, or `uid PORTBINARY uid`, and `uids` takes a
+    /// braced list of those. The binary operators are `><` (excludes both ends: `2000 >< 2004`
+    /// is 2001 to 2003), `<>` (the "except" range: below 2000 or above 2004) and `:`
+    /// (inclusive, unusable here). A list needs no operator whose edges could be
+    /// misread, so the list is used; `UidRange` bounds it at [`MAX_POOL_UIDS`].
     pub(crate) fn pf_user(self) -> String {
         if self.start == self.last {
             return self.start.to_string();
@@ -288,7 +290,10 @@ mod tests {
             "{ 4100, 4101, 4102, 4103, 4104, 4105, 4106, 4107, 4108, 4109 }"
         );
         for count in [1, 2, 10, 100] {
-            assert!(!UidRange::new(4100, count).unwrap().pf_user().contains(':'));
+            let user = UidRange::new(4100, count).unwrap().pf_user();
+            assert!(!user.contains(':'));
+            let listed = user.trim_start_matches("{ ").trim_end_matches(" }");
+            assert_eq!(listed.split(", ").count(), count as usize, "{user}");
         }
     }
 
