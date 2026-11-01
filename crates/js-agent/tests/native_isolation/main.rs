@@ -422,11 +422,6 @@ impl Trial {
             ));
         }
         let job = look::JobProcs {
-            exe: self
-                .exe
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default(),
             pids: ran_a.pids.clone(),
         };
         self.confirm_denials_by_log(started, &job);

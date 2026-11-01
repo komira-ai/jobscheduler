@@ -205,11 +205,9 @@ pub fn is_permission_failure(text: &str) -> bool {
     .any(|words| text.contains(words))
 }
 
-/// The processes the job ran: the name of the test binary (the kernel shows a process by its
-/// executable name) and the pids the runs printed.
+/// The processes the job ran: the pids the runs printed.
 #[derive(Clone, Debug, Default)]
 pub struct JobProcs {
-    pub exe: String,
     pub pids: Vec<u32>,
 }
 
@@ -225,11 +223,21 @@ impl JobProcs {
             Kind::Process => "sleep",
             _ => "",
         };
-        let named = |own: &str| {
-            !own.is_empty() && (own == name || (name.len() >= 16 && own.starts_with(name)))
-        };
-        self.pids.contains(&pid) || named(&self.exe) || named(tool)
+        self.pids.contains(&pid) || (!tool.is_empty() && tool == name)
     }
+}
+
+/// The arguments of `log show` for the sandbox lines since `start` (a local time, `YYYY-MM-DD
+/// HH:MM:SS`, read just before run A began).
+pub fn log_show_args(start: &str, predicate: &str) -> Vec<String> {
+    let _ = (start, predicate);
+    ["show", "--last", "60s"].map(str::to_owned).to_vec()
+}
+
+/// A `find -print0` listing split on NUL into raw paths (a name need not be UTF-8).
+pub fn nul_paths(bytes: &[u8]) -> Vec<&[u8]> {
+    let _ = bytes;
+    Vec::new()
 }
 
 /// The pids a run printed with `ISOPID <n>` lines.
@@ -730,9 +738,9 @@ mod tests {
             SeedFailure::Other
         );
         for text in [
-            "launchctl exited Some(1): Bootstrap failed: deny(1) mach-lookup com.apple.xpc.launchd",
+            "launchctl exited Some(1): Bootstrap failed: Sandbox: launchctl(55) deny(1) mach-lookup com.apple.xpc.launchd",
             "Sandbox: sleep(123) deny(1) process-exec /bin/sleep",
-            "/x/y: deny(1) file-write-create",
+            "/x/y: 2026-11-01 kernel: Sandbox: native_isolation(9) deny(1) file-write-create",
         ] {
             assert_eq!(
                 classify_seed_failure(text),
@@ -853,10 +861,7 @@ mod tests {
     /// log match that excuses any denial for any kind.
     #[test]
     fn the_log_confirms_a_denial_of_the_same_seed_only() {
-        let job = JobProcs {
-            exe: "native_isolation".to_owned(),
-            pids: vec![],
-        };
+        let job = JobProcs { pids: vec![412] };
         let a = token(0xa1);
         let path = format!(
             "Sandbox: native_isolation(412) deny(1) file-write-create /var/folders/x/T/iso-{a}\n"
@@ -888,35 +893,35 @@ mod tests {
     #[test]
     fn an_operation_only_line_needs_the_jobs_own_process() {
         let a = token(0xa1);
+        // The pids the runs printed: the test process, a tool it ran, the process it left.
         let job = JobProcs {
-            exe: "native_isolation".to_owned(),
-            pids: vec![777],
+            pids: vec![412, 777, 900, 901],
         };
         let stranger = "Sandbox: mdworker(123) deny(1) ipc-posix-shm-write-create /x\n";
         assert!(!log_confirms_denial(Kind::PosixShm, &a, stranger, &job));
         let mine = "Sandbox: native_isolation(412) deny(1) ipc-posix-shm-write-create /x\n";
         assert!(log_confirms_denial(Kind::PosixShm, &a, mine, &job));
-        // By pid, whatever the name; else by the name of an executable the job used for the
-        // kind (`sleep` for a process), but not by the name of anything else.
+        // The right name with a pid the job did not print is another process: a retry, a
+        // parallel runner, a concurrent job on the same Mac.
+        let same_name = "Sandbox: native_isolation(999) deny(1) ipc-posix-shm-write-create /x\n";
+        assert!(!log_confirms_denial(Kind::PosixShm, &a, same_name, &job));
+        // The process the job left running counts by its pid, and only by its pid.
         let by_pid = "Sandbox: sleep(777) deny(1) process-exec* /bin/sleep\n";
         assert!(log_confirms_denial(Kind::Process, &a, by_pid, &job));
         let other_pid = "Sandbox: sleep(778) deny(1) process-exec* /bin/sleep\n";
-        assert!(log_confirms_denial(Kind::Process, &a, other_pid, &job));
+        assert!(!log_confirms_denial(Kind::Process, &a, other_pid, &job));
+        let other_tool = "Sandbox: mdworker(777) deny(1) process-exec* /bin/sleep\n";
+        assert!(log_confirms_denial(Kind::Process, &a, other_tool, &job));
         let other_tool = "Sandbox: mdworker(778) deny(1) process-exec* /bin/sleep\n";
         assert!(!log_confirms_denial(Kind::Process, &a, other_tool, &job));
-        // A tool of the job counts for its own kind only.
+        // A tool the job ran counts by the pid it printed; another `security` does not.
         let tool = "Sandbox: security(900) deny(1) mach-lookup com.apple.SecurityServer\n";
         assert!(log_confirms_denial(Kind::Keychain, &a, tool, &job));
+        let other = "Sandbox: security(5555) deny(1) mach-lookup com.apple.SecurityServer\n";
+        assert!(!log_confirms_denial(Kind::Keychain, &a, other, &job));
         let defaults = "Sandbox: defaults(901) deny(1) user-preference-write x\n";
         assert!(!log_confirms_denial(Kind::Keychain, &a, defaults, &job));
         assert!(log_confirms_denial(Kind::Defaults, &a, defaults, &job));
-        // The kernel cuts a process name to 16 characters.
-        let long = JobProcs {
-            exe: "native_isolation-0123".to_owned(),
-            pids: vec![],
-        };
-        let cut = "Sandbox: native_isolation(412) deny(1) ipc-posix-shm-write-create /x\n";
-        assert!(log_confirms_denial(Kind::PosixShm, &a, cut, &long));
         // A token in the line is unique to the job and needs no process.
         let tokened = format!("Sandbox: mdworker(123) deny(1) file-write-create /x/iso-{a}\n");
         assert!(log_confirms_denial(Kind::HomeFile, &a, &tokened, &job));
@@ -927,9 +932,43 @@ mod tests {
             Verdict::Refused
         );
         assert_eq!(
+            resolve_seed(Kind::Keychain, &a, bare, Some(other), &job),
+            Verdict::Refused
+        );
+        assert_eq!(
             resolve_seed(Kind::PosixShm, &a, bare, Some(mine), &job),
             Verdict::Denied
         );
+    }
+
+    /// Asserts that the log is read from the start of run A (`--start`), not from a lookback
+    /// before it (`--last`), and that the predicate is passed whole.
+    #[test]
+    fn the_log_is_read_from_the_start_of_run_a() {
+        let args = log_show_args("2026-11-01 12:00:00", "eventMessage CONTAINS \"Sandbox\"");
+        assert_eq!(
+            args,
+            [
+                "show",
+                "--start",
+                "2026-11-01 12:00:00",
+                "--style",
+                "compact",
+                "--predicate",
+                "eventMessage CONTAINS \"Sandbox\""
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg == "--last"));
+    }
+
+    /// Asserts that `find -print0` output is split on NUL into raw byte paths, empty entries
+    /// dropped, and a name that is not UTF-8 kept byte for byte (so its content is scanned).
+    #[test]
+    fn nul_separated_paths_are_kept_as_bytes() {
+        let bytes = b"/a\0/b\xff\xfe\0\0/c\0";
+        let paths = nul_paths(bytes);
+        assert_eq!(paths, [&b"/a"[..], &b"/b\xff\xfe"[..], &b"/c"[..]]);
+        assert!(nul_paths(b"").is_empty());
     }
 
     /// Asserts that the kernel line is read as a process name and a pid, and a line of another
@@ -968,7 +1007,7 @@ mod tests {
     fn a_failed_seed_is_denied_only_on_the_sandbox_signature() {
         let job = JobProcs::default();
         let a = token(0xa1);
-        let sig = "x: deny(1) file-write-create";
+        let sig = "Sandbox: t(3) deny(1) file-write-create";
         assert_eq!(
             resolve_seed(Kind::HomeFile, &a, sig, None, &job),
             Verdict::Denied
