@@ -1,4 +1,4 @@
-//! The steps of the hook that have a body: `prepare`, `cutover`, `verify` and `cleanup`
+//! The steps of the hook: `prepare`, `cutover`, `verify`, `rollback` and `cleanup`
 //! (host-updates design, 4.2).
 //!
 //! A step is a function of an [`Env`] and the params table, and ends as a [`Done`]: the status
@@ -10,6 +10,7 @@
 mod cleanup;
 mod cutover;
 mod prepare;
+mod rollback;
 mod verify;
 
 use std::io;
@@ -26,6 +27,7 @@ use super::{
 pub use cleanup::cleanup;
 pub use cutover::cutover;
 pub use prepare::prepare;
+pub use rollback::rollback;
 pub use verify::verify;
 
 /// Everything a step touches.

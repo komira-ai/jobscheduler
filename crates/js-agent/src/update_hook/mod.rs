@@ -11,9 +11,9 @@
 //! this). The verb is answered before the agent's flags are parsed and before any signal
 //! handler is installed: a hook is a short-lived root process of the updater, not an agent.
 //!
-//! `prepare`, `cutover`, `verify` and `cleanup` have their bodies in [`step`], over the ports.
-//! The machine has no lease client yet, so [`Host::system`] still answers every step with the
-//! reason `not_implemented` (exit 1), and `rollback` has no body.
+//! The five steps have their bodies in [`step`], over the ports. The machine has no lease
+//! client yet, so [`Host::system`] still answers every step with the reason `not_implemented`
+//! (exit 1).
 //!
 //! The hook builds on Linux and macOS and differs between them in two places only: the unit
 //! manager ([`PlatformUnits`]: `systemctl` on Linux, `launchctl` on a Mac) and the runtime the
@@ -57,7 +57,7 @@ pub use record::{
 pub use report::{Class, MAX_REASON_LEN, Reason, Report, is_reason_token};
 pub use validate::{
     CUTOVER_MARGIN_SECS, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, PREPARE_MARGIN_SECS,
-    START_WAIT_SECS, VERIFY_MARGIN_SECS, validate,
+    ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, START_WAIT_SECS, VERIFY_MARGIN_SECS, validate,
 };
 
 /// The unit port of the platform the hook is built for.

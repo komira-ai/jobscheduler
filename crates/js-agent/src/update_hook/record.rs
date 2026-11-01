@@ -136,6 +136,14 @@ pub struct Record {
     pub verify_ok: bool,
     /// What `rollback` has done.
     pub rb: Rollback,
+    /// The `session_started_ms` the lease server showed for the host in the reading `rollback`
+    /// took last before its first act on the unit or the link, on the server's clock; `None`
+    /// when the server showed no session and until that first act. Written in the same save as
+    /// the first of the marks `rb.stop_begun`, `rb.link_restored` and `rb.start_issued`, never
+    /// overwritten by a rerun, and what the previous agent's hello is compared with by
+    /// equality (never against the host's clock). Left out of the file when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rb_pre_stop_session_ms: Option<u64>,
 }
 
 impl Record {
@@ -152,6 +160,7 @@ impl Record {
             start_issued: false,
             verify_ok: false,
             rb: Rollback::default(),
+            rb_pre_stop_session_ms: None,
         }
     }
 }

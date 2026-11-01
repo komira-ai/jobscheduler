@@ -139,3 +139,8 @@ fn the_reason_of_an_unconfirmed_cordon_is_this_exact_token() {
 fn the_reason_of_a_verify_that_heard_no_hello_is_this_exact_token() {
     assert_eq!(Reason::NoHello.as_str(), "no_hello");
 }
+
+#[test]
+fn the_reason_of_a_first_install_that_cannot_be_rolled_back_is_this_exact_token() {
+    assert_eq!(Reason::NoPreviousRelease.as_str(), "no_previous_release");
+}
