@@ -134,6 +134,7 @@ pub fn input(pool: PoolInput) -> Input {
         not_found: Vec::new(),
         entropy: Vec::new(),
         budgets: Budgets::default(),
+        brake_resets: Vec::new(),
     }
 }
 

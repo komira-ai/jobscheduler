@@ -116,6 +116,10 @@ pub struct Sim {
     pub lease_wall: Option<Duration>,
     /// When the lease on each host ends, in milliseconds on the cloud's clock.
     pub lease_end: BTreeMap<String, u64>,
+    /// When set, no machine's agent ever says hello: every boot fails.
+    pub mute: bool,
+    /// How many times the records were written.
+    pub saves: usize,
 }
 
 impl Sim {
@@ -142,6 +146,8 @@ impl Sim {
             consumers: 0,
             lease_wall: None,
             lease_end: BTreeMap::new(),
+            mute: false,
+            saves: 0,
         }
     }
 
@@ -152,6 +158,9 @@ impl Sim {
 
     /// The registry's hosts: each machine the cloud says is active has said hello.
     fn hosts(&self) -> Vec<HostFacts> {
+        if self.mute {
+            return Vec::new();
+        }
         let active = self
             .fake
             .truth()
@@ -257,7 +266,10 @@ impl Sim {
         }
         for action in actions {
             match action {
-                Action::Save(records) => self.saved = *records,
+                Action::Save(records) => {
+                    self.saved = *records;
+                    self.saves += 1;
+                }
                 Action::Acquire(plan) => {
                     if crashing == Some(Crash::AfterSave) {
                         return true;

@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use js_elastic::{Acquired, Extra, Held, HostStatus, RefusalCode, Released};
 
 use crate::input::{AcquireResult, HostFacts, HostState, Input, Mark, PoolInput};
-use crate::record::{Cooldown, CooldownReason, Phase, Record, Records, StoredOffer};
-use crate::settings::{Blocked, Settings};
+use crate::record::{CooldownReason, Phase, Record, Records, StoredOffer};
+use crate::settings::Blocked;
 use crate::state::{Action, PlanLine, State};
 use crate::time::Millis;
 
@@ -19,6 +19,13 @@ pub(crate) struct Pass<'a> {
     pub(crate) records: Records,
     pub(crate) quiet: BTreeMap<String, Millis>,
     pub(crate) quiet_now: BTreeSet<String>,
+    /// Since when each machine's host was heard from unbroken, at the last step and now
+    /// ([`State::heard`]), and the machines that have ended the count already.
+    pub(crate) heard: BTreeMap<String, Millis>,
+    pub(crate) heard_now: BTreeMap<String, Millis>,
+    pub(crate) credited: BTreeSet<String>,
+    /// The pools that have already been struck in this step ([`Pass::strike`]).
+    pub(crate) struck: BTreeSet<String>,
     /// Since when each silent host was silent at the last step, and at this one.
     silent: BTreeMap<String, Millis>,
     pub(crate) silent_now: BTreeMap<String, Millis>,
@@ -164,6 +171,10 @@ impl<'a> Pass<'a> {
             records: state.records,
             quiet: state.quiet,
             quiet_now: BTreeSet::new(),
+            heard: state.heard,
+            heard_now: BTreeMap::new(),
+            credited: state.credited,
+            struck: BTreeSet::new(),
             silent,
             silent_now: BTreeMap::new(),
             silent_released: Vec::new(),
@@ -212,14 +223,6 @@ impl<'a> Pass<'a> {
         let name = self.records.instances[i].name.clone();
         self.actions.push(Action::Revoke(name.clone()));
         self.actions.push(Action::ForgetNetwork(name));
-    }
-
-    /// The pool launches nothing until its cooldown has run.
-    fn cool(&mut self, settings: &Settings, reason: CooldownReason) {
-        let until = self.now.plus(settings.boot_fail_cooldown);
-        self.records
-            .cooldowns
-            .insert(settings.pool.clone(), Cooldown { until, reason });
     }
 
     /// Applies the answers, the list and the hosts to the pool's records.
@@ -383,8 +386,13 @@ impl<'a> Pass<'a> {
         match (before, is_dead(&held.status)) {
             (Phase::Booting | Phase::Registered | Phase::Draining, true) => {
                 self.start_release(i);
+                // A boot that ended starts the cooldown. A host the provider took back (a
+                // spot preemption) after it booted counts toward the trip and the next
+                // cooldown's length, and starts none: the replacement launches at once.
                 if before == Phase::Booting {
                     self.cool(&pool.settings, CooldownReason::BootFailed);
+                } else if held.status == HostStatus::Preempted {
+                    self.strike(&pool.settings);
                 }
             }
             (Phase::Orphan, true) => self.orphan_gone(i),
@@ -515,6 +523,7 @@ impl<'a> Pass<'a> {
                 (Phase::Registered | Phase::Draining, host) => self.on_held(pool, i, host),
                 _ => {}
             }
+            self.credit(pool, i, heard);
         }
     }
 

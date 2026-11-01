@@ -12,6 +12,10 @@ impl Pass<'_> {
     /// setting or by its `live_until`. The go began at the pool's first launch after it was
     /// last seen not live (see [`Pass::begin_go`]), so the next one begins a new budget. A
     /// pool this input does not have keeps its go: its absence may be a moment's.
+    ///
+    /// The failure brake does not end a go. A pool tripped to `Plan` by the brake keeps its go
+    /// (the trip is not its `launch` setting), and a reset keeps it too, so the spend since
+    /// the go keeps counting across a trip and a reset: a reset never re-opens a cap on it.
     pub(crate) fn end_go(&mut self) {
         for pool in &self.input.pools {
             if pool.settings.mode(self.now) != LaunchMode::Live {

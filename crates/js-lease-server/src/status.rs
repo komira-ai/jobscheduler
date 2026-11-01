@@ -288,20 +288,23 @@ impl Status {
         };
         let now = Millis::new(self.clock.now().millis());
         let settings = self.scaler.as_ref().map(Scaler::settings);
-        let launch = settings.map_or(pool.launch, |set| match set.mode(now) {
-            LaunchMode::Live => "live",
-            LaunchMode::Plan => "plan",
+        let scaled = self.scaler.as_ref().map(|scaler| scaler.state());
+        let tripped = scaled
+            .as_ref()
+            .is_some_and(|seen| seen.records.tripped(&pool.name));
+        let launch = settings.map_or(pool.launch, |set| match (set.mode(now), tripped) {
+            (LaunchMode::Live, false) => "live",
+            _ => "plan",
         });
         let live_until_ms = settings
             .and_then(|set| set.live_until)
             .map(Millis::as_millis);
-        let scaled = self.scaler.as_ref().map(|scaler| scaler.state());
         // The checks first; once they pass, the cap that keeps the scaler from launching.
         let capped = scaled
             .as_ref()
             .and_then(|seen| seen.blocked.get(&pool.name));
         let blocked = match state {
-            State::Available => capped.and_then(|why| why.cap_name()),
+            State::Available => capped.and_then(|why| why.shown_name()),
             _ => Some("unavailable"),
         };
         let records = scaled.map(|seen| seen.records);
