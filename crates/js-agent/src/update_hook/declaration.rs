@@ -73,6 +73,19 @@ pub enum DeclarationError {
     /// `hook.units` is empty: no unit could ever match the record's.
     #[error("hook.units is empty")]
     NoUnits,
+    /// `verify_deadline_secs` is shorter than the `verify` bound plus the `rollback` bound: the
+    /// updater would roll back a verify that is still allowed to run.
+    #[error(
+        "verify_deadline_secs {deadline} is less than the verify bound {verify} plus the rollback bound {rollback}"
+    )]
+    VerifyDeadline {
+        /// `verify_deadline_secs`.
+        deadline: u64,
+        /// `[hook.timeout_secs] verify`.
+        verify: u64,
+        /// `[hook.timeout_secs] rollback`.
+        rollback: u64,
+    },
     /// `hook.units` names more than one unit: the hook manages one agent.
     #[error("hook.units names more than one unit")]
     ManyUnits,
@@ -96,6 +109,7 @@ pub struct Timeouts {
 #[derive(Deserialize)]
 struct Wire {
     state_dir: PathBuf,
+    verify_deadline_secs: Option<u64>,
     hook: WireHook,
 }
 
@@ -150,6 +164,18 @@ impl Declaration {
     /// [`DeclarationError`]: see [`Declaration::read`].
     pub fn parse(text: &str) -> Result<Declaration, DeclarationError> {
         let wire: Wire = toml::from_str(text)?;
+        let timeouts = wire.hook.timeout_secs;
+        // The updater rolls back a verify that has not succeeded by the deadline: it must not
+        // do that to one that is still allowed to run, and the rollback needs its own bound.
+        if let Some(deadline) = wire.verify_deadline_secs
+            && deadline < timeouts.verify.saturating_add(timeouts.rollback)
+        {
+            return Err(DeclarationError::VerifyDeadline {
+                deadline,
+                verify: timeouts.verify,
+                rollback: timeouts.rollback,
+            });
+        }
         let declaration = Declaration {
             state_dir: wire.state_dir,
             units: wire.hook.units,

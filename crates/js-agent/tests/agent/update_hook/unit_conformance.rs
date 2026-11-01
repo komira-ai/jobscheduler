@@ -20,6 +20,13 @@ pub enum Condition {
     Stopped,
     /// It died and the manager will start it again; it is not running now.
     Restarting,
+    /// It ran and died, and the manager is not going to start it by itself now.
+    Crashed,
+    /// It died and the manager is waiting to start it again, after a crash.
+    CrashLooping,
+    /// The manager knows it and has never run it (what keeps it from running is not a fault
+    /// of the program).
+    NeverRan,
 }
 
 /// A unit manager with a fake tool under the port.
@@ -116,7 +123,9 @@ impl Manager for SystemdManager {
         let (active, sub) = match condition {
             Condition::Running => ("active", "running"),
             Condition::Stopped => ("inactive", "dead"),
-            Condition::Restarting => ("activating", "auto-restart"),
+            Condition::Restarting | Condition::CrashLooping => ("activating", "auto-restart"),
+            Condition::Crashed => ("failed", "failed"),
+            Condition::NeverRan => ("inactive", "dead"),
         };
         let launches = u32::from(matches!(condition, Condition::Running));
         self.0
@@ -144,11 +153,75 @@ impl Manager for SystemdManager {
 
 // ---- launchctl ----
 
+/// How a service last ended, as `launchctl print` tells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// `last exit code = (never exited)`.
+    Never,
+    /// `last exit code = <n>`.
+    Code(i32),
+    /// `last terminating signal = Killed: 9`.
+    Signal,
+}
+
+/// What a start of the service comes to once launchd has done it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Then {
+    /// The program runs.
+    #[default]
+    Runs,
+    /// The program is started and ends at once, with this.
+    Dies(Exit),
+    /// launchd does not start it (its gate file is absent): nothing changes.
+    Idle,
+}
+
 /// What launchd holds of a loaded service.
 #[derive(Clone)]
 pub struct Service {
     /// The `state` line `launchctl print` shows.
     pub state: &'static str,
+    /// The `runs` line.
+    pub runs: u32,
+    /// How it last ended.
+    pub exit: Exit,
+    /// The prints that still show the service as it was before a start that was made.
+    pub pending: u32,
+    /// What the start that is pending comes to.
+    pub then: Then,
+}
+
+impl Service {
+    /// A service in `state` that has run `runs` times and last ended as `exit`.
+    pub fn new(state: &'static str, runs: u32, exit: Exit) -> Self {
+        Self {
+            state,
+            runs,
+            exit,
+            pending: 0,
+            then: Then::Runs,
+        }
+    }
+
+    /// A running service.
+    pub fn running() -> Self {
+        Self::new("running", 1, Exit::Never)
+    }
+
+    fn finish_start(&mut self) {
+        match self.then {
+            Then::Runs => {
+                self.runs += 1;
+                self.state = "running";
+            }
+            Then::Dies(exit) => {
+                self.runs += 1;
+                self.state = "not running";
+                self.exit = exit;
+            }
+            Then::Idle => self.state = "not running",
+        }
+    }
 }
 
 /// A `launchctl` that keeps services in the system domain, the plists in
@@ -158,11 +231,25 @@ pub struct Launchctl {
     pub loaded: RefCell<BTreeMap<String, Service>>,
     pub plists: RefCell<BTreeSet<String>>,
     pub launches: RefCell<BTreeMap<String, u32>>,
+    /// How many prints of a service that was started still show it as it was.
+    pub settle: Cell<u32>,
+    /// What the next start of a service comes to.
+    pub next_start: Cell<Then>,
     broken: Cell<bool>,
     ran: RefCell<Vec<String>>,
 }
 
 impl Launchctl {
+    /// Begins the start of `service`: it comes to what `next_start` says after `settle` prints.
+    fn begin_start(&self, label: &str, service: &mut Service) {
+        service.pending = self.settle.get();
+        service.then = self.next_start.get();
+        if service.pending == 0 {
+            service.finish_start();
+        }
+        self.started(label);
+    }
+
     fn started(&self, label: &str) {
         *self
             .launches
@@ -179,10 +266,13 @@ impl Launchctl {
     /// A service launchd holds that is not running (a daemon whose gate file is absent, or
     /// one between two starts).
     pub fn load_idle(&self, label: &str, state: &'static str) {
+        self.load(label, Service::new(state, 0, Exit::Never));
+    }
+
+    /// Loads `service` under `label`.
+    pub fn load(&self, label: &str, service: Service) {
         self.plists.borrow_mut().insert(label.to_owned());
-        self.loaded
-            .borrow_mut()
-            .insert(label.to_owned(), Service { state });
+        self.loaded.borrow_mut().insert(label.to_owned(), service);
     }
 }
 
@@ -194,10 +284,21 @@ pub fn plist_of(label: &str) -> String {
 /// What `launchctl print system/<label>` prints of a service: the properties of the service are
 /// one tab in, and the endpoints and the event triggers below it have `state` lines of their
 /// own.
-fn print_of(label: &str, state: &str) -> String {
+fn print_of(label: &str, service: &Service) -> String {
+    let (state, runs) = (service.state, service.runs);
+    let exit = match service.exit {
+        Exit::Never | Exit::Signal => "(never exited)".to_owned(),
+        Exit::Code(78) => "78: EX_CONFIG".to_owned(),
+        Exit::Code(code) => code.to_string(),
+    };
+    let signal = match service.exit {
+        Exit::Signal => "\tlast terminating signal = Killed: 9\n",
+        _ => "",
+    };
     format!(
         "system/{label} = {{\n\tactive count = 1\n\tpath = {path}\n\ttype = LaunchDaemon\n\
          \tstate = {state}\n\n\tprogram = /usr/local/js-agent/link/current/js-agent\n\
+         \truns = {runs}\n\tlast exit code = {exit}\n{signal}\
          \tendpoints = {{\n\t\t\"com.komira.x\" = {{\n\t\t\tport = 0x1\n\t\t\tstate = active\n\
          \t\t}}\n\t}}\n\n\tevent triggers = {{\n\t\tcom.komira.y => {{\n\t\t\tstate = waiting\n\
          \t\t}}\n\t}}\n}}\n",
@@ -218,8 +319,17 @@ impl CommandRunner for Launchctl {
         match args {
             ["print", target] => {
                 let label = domain_label(target).ok_or("not in the system domain")?;
-                match self.loaded.borrow().get(&label) {
-                    Some(service) => Ok(print_of(&label, service.state)),
+                match self.loaded.borrow_mut().get_mut(&label) {
+                    Some(service) => {
+                        let shown = service.clone();
+                        if service.pending > 0 {
+                            service.pending -= 1;
+                            if service.pending == 0 {
+                                service.finish_start();
+                            }
+                        }
+                        Ok(print_of(&label, &shown))
+                    }
                     // "Could not find service".
                     None => exit(113),
                 }
@@ -243,16 +353,16 @@ impl CommandRunner for Launchctl {
                     return exit(5);
                 }
                 // The gate file exists in this world: launchd starts the daemon at load.
-                loaded.insert(label.clone(), Service { state: "running" });
-                self.started(&label);
+                let mut service = Service::new("not running", 0, Exit::Never);
+                self.begin_start(&label, &mut service);
+                loaded.insert(label, service);
                 Ok(String::new())
             }
             ["kickstart", "-k", target] => {
                 let label = domain_label(target).ok_or("not in the system domain")?;
                 match self.loaded.borrow_mut().get_mut(&label) {
                     Some(service) => {
-                        service.state = "running";
-                        self.started(&label);
+                        self.begin_start(&label, service);
                         Ok(String::new())
                     }
                     None => exit(113),
@@ -284,10 +394,7 @@ impl Manager for LaunchdManager {
         self.0.plists.borrow_mut().insert(unit.to_owned());
         match condition {
             Condition::Running => {
-                self.0
-                    .loaded
-                    .borrow_mut()
-                    .insert(unit.to_owned(), Service { state: "running" });
+                self.0.load(unit, Service::running());
                 *self
                     .0
                     .launches
@@ -300,6 +407,15 @@ impl Manager for LaunchdManager {
                 self.0.loaded.borrow_mut().remove(unit);
             }
             Condition::Restarting => self.0.load_idle(unit, "spawn scheduled"),
+            // Loaded, not running, and its last run ended badly.
+            Condition::Crashed => self
+                .0
+                .load(unit, Service::new("not running", 2, Exit::Code(1))),
+            Condition::CrashLooping => self
+                .0
+                .load(unit, Service::new("spawn scheduled", 2, Exit::Signal)),
+            // Loaded and waiting for its gate file.
+            Condition::NeverRan => self.0.load_idle(unit, "not running"),
         }
     }
 
@@ -351,6 +467,37 @@ fn unit_waiting_to_restart_is_neither_active_nor_stopped(m: &dyn Manager) {
         ("activating".to_owned(), "auto-restart".to_owned())
     );
     assert_eq!(m.units().is_active(UNIT), Ok(false));
+}
+
+fn crashed(m: &dyn Manager) -> bool {
+    m.units().show(UNIT).unwrap().crashed()
+}
+
+fn a_unit_that_ran_and_died_reads_as_crashed_and_is_not_active(m: &dyn Manager) {
+    m.put(UNIT, Condition::Crashed);
+    assert!(crashed(m), "{:?}", m.units().show(UNIT));
+    assert_eq!(m.units().is_active(UNIT), Ok(false));
+}
+
+fn a_unit_waiting_to_start_again_after_a_crash_reads_as_crashed(m: &dyn Manager) {
+    m.put(UNIT, Condition::CrashLooping);
+    assert!(crashed(m), "{:?}", m.units().show(UNIT));
+}
+
+fn a_unit_that_never_ran_or_runs_or_was_stopped_does_not_read_as_crashed(m: &dyn Manager) {
+    for condition in [Condition::NeverRan, Condition::Running, Condition::Stopped] {
+        m.put(UNIT, condition);
+        assert!(!crashed(m), "{condition:?}: {:?}", m.units().show(UNIT));
+    }
+}
+
+fn start_runs_a_crashed_unit(m: &dyn Manager) {
+    m.put(UNIT, Condition::Crashed);
+    let before = m.launches(UNIT);
+    m.units().start(UNIT).unwrap();
+    assert_eq!(state(m), ("active".to_owned(), "running".to_owned()));
+    assert_eq!(m.launches(UNIT), before + 1);
+    assert!(!crashed(m));
 }
 
 fn stop_ends_a_running_unit(m: &dyn Manager) {
@@ -474,6 +621,10 @@ both!(
     start_runs_a_stopped_unit_once,
     start_leaves_a_running_unit_alone,
     start_runs_a_unit_waiting_to_restart,
+    a_unit_that_ran_and_died_reads_as_crashed_and_is_not_active,
+    a_unit_waiting_to_start_again_after_a_crash_reads_as_crashed,
+    a_unit_that_never_ran_or_runs_or_was_stopped_does_not_read_as_crashed,
+    start_runs_a_crashed_unit,
     stop_then_start_is_a_restart,
     start_of_a_unit_the_manager_cannot_run_is_an_error_naming_the_tool,
     a_tool_that_cannot_run_is_an_error_and_reads_as_not_active,

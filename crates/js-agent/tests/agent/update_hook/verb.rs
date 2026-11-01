@@ -1,4 +1,4 @@
-//! The verb itself: argument handling, the exit status of each outcome, the stub steps, the
+//! The verb itself: argument handling, the exit status of each outcome, the machine's steps, the
 //! dispatch in `main_with` and the process.
 
 use std::cell::{Cell, RefCell};
@@ -6,7 +6,8 @@ use std::ffi::OsString;
 use std::process::{Command, ExitCode};
 
 use js_agent::update_hook::{
-    Class, Done, Host, Invocation, Outcome, Params, Reason, Report, Step, VERB, run,
+    Class, DECLARATION_PATH, Done, Host, Invocation, Outcome, Params, Reason, Report, Step, VERB,
+    run,
 };
 use js_testkit::dir::TestDir;
 
@@ -199,8 +200,12 @@ fn an_unreadable_or_incomplete_params_file_runs_no_step() {
 }
 
 #[test]
-fn every_step_of_this_machine_is_a_stub_that_fails_with_not_implemented() {
-    let (_dir, params) = params_file("hook-verb-stubs", PARAMS);
+fn every_step_of_this_machine_reads_the_installed_declaration_before_anything_else() {
+    assert!(
+        !std::path::Path::new(DECLARATION_PATH).exists(),
+        "this test needs a machine with no declaration installed"
+    );
+    let (_dir, params) = params_file("hook-verb-machine", PARAMS);
     for step in Step::ALL {
         let mut args = vec![step.name()];
         if step == Step::Prepare {
@@ -210,8 +215,11 @@ fn every_step_of_this_machine_is_a_stub_that_fails_with_not_implemented() {
         let ran = run_with(&args, &Host::system());
         assert_eq!(ran.status, status(1), "{step}");
         let line = last_line(&ran.out);
-        assert_eq!(line["reason"], "not_implemented", "{step}");
-        assert_eq!(line["detail"], format!("{step} is not implemented"));
+        assert_eq!(line["reason"], "state_invalid", "{step}");
+        assert!(
+            line["detail"].as_str().unwrap().contains("declaration"),
+            "{step}: {line}"
+        );
         assert_eq!(line["class"], "release");
         assert_eq!(line["reversible"], true);
         assert_eq!(line["promotion_pending"], false);
@@ -236,7 +244,7 @@ fn main_with_answers_the_verb_before_it_installs_the_signal_handlers() {
     assert!(!installed.get(), "the verb installed the signal handlers");
     assert_eq!(format!("{code:?}"), status(1));
     let line = last_line(&String::from_utf8(out).unwrap());
-    assert_eq!(line["reason"], "not_implemented");
+    assert_eq!(line["reason"], "state_invalid");
 }
 
 #[test]
@@ -252,7 +260,7 @@ fn the_binary_prints_one_valid_last_line_and_exits_1() {
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     let line = last_line(&String::from_utf8(output.stdout).unwrap());
     assert_eq!(line["class"], "release");
-    assert_eq!(line["reason"], "not_implemented");
+    assert_eq!(line["reason"], "state_invalid");
     assert_eq!(line["reversible"], true);
     assert_eq!(line["promotion_pending"], false);
 }

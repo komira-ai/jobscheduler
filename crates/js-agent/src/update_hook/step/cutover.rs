@@ -10,9 +10,11 @@
 //!    must be cordoned and hold no lease. `prepare` can end with no cordon held (it was killed
 //!    between the placing and the confirming), so a cordon of ours that is gone is put back
 //!    within the cap, and a cap that is spent or a lease that came in defers (75, class
-//!    environment) with nothing stopped. A cordon that is not ours (an operator's) is neither
-//!    renewed nor lifted. A cordon in force under a mark that was never confirmed may be ours or
-//!    not, and nothing would renew it through the stop: that defers too, the mark left as it is;
+//!    environment) with nothing stopped (a failed lift of the cordon on the way is no reason to
+//!    fail: the cordon stays as recorded, as in `prepare`, for the next prepare, cleanup or
+//!    rollback to lift). A cordon that is not ours (an operator's) is neither renewed nor
+//!    lifted. A cordon in force under a mark that was never confirmed may be ours or not, and
+//!    nothing would renew it through the stop: that defers too, the mark left as it is;
 //! 3. the unit and the link are read, so that a read that fails leaves nothing begun; then the
 //!    record gets `stop_begun` together with `pre_stop_session_ms`, the session the lease server
 //!    showed for the host in the reading of step 2 (one save, so that the stop is never marked
@@ -70,7 +72,7 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
 
 /// Whether the first irreversible act is begun: the stop, or for a first install (nothing to
 /// stop) the move of the link.
-fn begun(record: &Record) -> bool {
+pub(super) fn begun(record: &Record) -> bool {
     if record.update.previous.is_none() {
         record.link_moved
     } else {
@@ -78,7 +80,7 @@ fn begun(record: &Record) -> bool {
     }
 }
 
-fn irreversible(mut done: Done) -> Done {
+pub(super) fn irreversible(mut done: Done) -> Done {
     done.report.reversible = false;
     done
 }
@@ -114,7 +116,7 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
 }
 
 /// A failure of something remote or shared: not the release's doing.
-fn environment(reason: Reason, detail: impl Into<String>) -> Done {
+pub(super) fn environment(reason: Reason, detail: impl Into<String>) -> Done {
     let mut done = failure(reason, detail);
     done.report.class = Class::Environment;
     done
@@ -137,7 +139,7 @@ fn deferred(params: &Params, reason: Reason, detail: impl Into<String>) -> Done 
 /// The release link the declaration names, held to the rules the record's paths are held to:
 /// plain, inside a declared directory other than the state directory (never one of them
 /// itself: the swap writes the link's parent), and in neither release.
-fn release_link(env: &Env<'_>, params: &Params) -> Result<std::path::PathBuf, Done> {
+pub(super) fn release_link(env: &Env<'_>, params: &Params) -> Result<std::path::PathBuf, Done> {
     let declaration = env.declaration;
     let link = params.release_link.clone().ok_or_else(|| {
         failure(
@@ -169,12 +171,17 @@ fn release_link(env: &Env<'_>, params: &Params) -> Result<std::path::PathBuf, Do
 }
 
 /// Whether the cordon is one this update placed and confirmed, and has not lapsed.
-fn ours(record: &Record, now_ms: u64) -> bool {
+pub(super) fn ours(record: &Record, now_ms: u64) -> bool {
     record.cordon.placed && !record.cordon.provisional && now_ms < record.cordon.expires_ms
 }
 
 /// Sets a mark in the record, durably, before the act it names.
-fn mark(env: &Env<'_>, held: &Held, record: &mut Record, set: fn(&mut Record)) -> Result<(), Done> {
+pub(super) fn mark(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    set: fn(&mut Record),
+) -> Result<(), Done> {
     let mut next = record.clone();
     set(&mut next);
     save(env, held, &next)?;
@@ -245,6 +252,10 @@ fn replace(
 
 /// The host holds a lease under the cordon (or in its absence): lift the cordon if it is ours
 /// and defer. Nothing was stopped.
+///
+/// A cordon that cannot be lifted is left as recorded (placed, with its expiry), as `prepare`'s
+/// deferral leaves it: the next prepare, cleanup or rollback tries to lift it, and it lapses
+/// within one lease if nothing does. The deferral stands; the failure goes in the detail.
 fn busy(
     env: &Env<'_>,
     held: &Held,
@@ -252,24 +263,31 @@ fn busy(
     params: &Params,
     host: &HostReading,
 ) -> Result<Done, Done> {
+    let mut left = None;
     if ours(record, env.ports.clock.now_ms()) {
         env.ports.point();
-        env.ports.lease.uncordon().map_err(lease_failure)?;
-        record.cordon = Cordon::default();
-        save(env, held, record)?;
+        match env.ports.lease.uncordon() {
+            Ok(_) => {
+                record.cordon = Cordon::default();
+                save(env, held, record)?;
+            }
+            Err(error) => left = Some(error),
+        }
     }
-    Ok(deferred(
-        params,
-        Reason::DrainBound,
-        format!(
-            "the host is not idle: {} lease(s), releasing: {}",
-            host.leases, host.releasing
-        ),
-    ))
+    let mut detail = format!(
+        "the host is not idle: {} lease(s), releasing: {}",
+        host.leases, host.releasing
+    );
+    if let Some(error) = left {
+        detail.push_str(&format!(
+            "; the cordon could not be lifted and is left as recorded; it lapses within one lease if nothing lifts it: {error}"
+        ));
+    }
+    Ok(deferred(params, Reason::DrainBound, detail))
 }
 
 /// What the unit manager says of a unit, in the three ways that matter here.
-enum Life {
+pub(super) enum Life {
     /// `active`.
     Up,
     /// `activating`, `reloading` and the like: on its way up, or waiting to restart.
@@ -280,7 +298,7 @@ enum Life {
     Down,
 }
 
-fn life(state: &UnitState) -> Life {
+pub(super) fn life(state: &UnitState) -> Life {
     match state.active.as_str() {
         "active" => Life::Up,
         "inactive" | "failed" => Life::Down,
@@ -289,7 +307,7 @@ fn life(state: &UnitState) -> Life {
     }
 }
 
-fn show(env: &Env<'_>, unit: &str, reason: Reason) -> Result<UnitState, Done> {
+pub(super) fn show(env: &Env<'_>, unit: &str, reason: Reason) -> Result<UnitState, Done> {
     env.ports
         .units
         .show(unit)
@@ -297,7 +315,7 @@ fn show(env: &Env<'_>, unit: &str, reason: Reason) -> Result<UnitState, Done> {
 }
 
 /// Whether the link points at the staged release.
-fn linked(env: &Env<'_>, link: &Path, staged: &Path) -> Result<bool, Done> {
+pub(super) fn linked(env: &Env<'_>, link: &Path, staged: &Path) -> Result<bool, Done> {
     let target = env.ports.link.target(link).map_err(|why| {
         environment(
             Reason::LinkFailed,
@@ -308,7 +326,12 @@ fn linked(env: &Env<'_>, link: &Path, staged: &Path) -> Result<bool, Done> {
 }
 
 /// Waits one poll and renews the cordon if it is ours.
-fn pause(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Result<(), Done> {
+pub(super) fn pause(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    params: &Params,
+) -> Result<(), Done> {
     env.ports.clock.pause(Duration::from_secs(POLL_SECS));
     if ours(record, env.ports.clock.now_ms()) {
         renew(env, held, record, params)?;
@@ -391,12 +414,6 @@ fn move_link(env: &Env<'_>, held: &Held, record: &mut Record, link: &Path) -> Re
     })
 }
 
-/// Whether the unit shows that the binary ran and died: `failed`, or waiting to restart after a
-/// crash (`auto-restart`, as under `Restart=on-failure`).
-fn crashed(state: &UnitState) -> bool {
-    state.active == "failed" || state.sub == "auto-restart"
-}
-
 /// A start that failed: the release's fault only if the unit ran and died, now or at an earlier
 /// look (`seen_crash`); a unit that is anything else says nothing of the binary.
 fn start_failure(env: &Env<'_>, unit: &str, detail: String, seen_crash: bool) -> Done {
@@ -405,7 +422,7 @@ fn start_failure(env: &Env<'_>, unit: &str, detail: String, seen_crash: bool) ->
             .ports
             .units
             .show(unit)
-            .is_ok_and(|state| crashed(&state));
+            .is_ok_and(|state| state.crashed());
     if ran {
         failure(Reason::StartFailed, detail)
     } else {
@@ -413,12 +430,24 @@ fn start_failure(env: &Env<'_>, unit: &str, detail: String, seen_crash: bool) ->
     }
 }
 
-/// Starts the unit and waits for it to be active.
+/// Marks the start, then starts the unit and waits for it to be active.
 fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Result<(), Done> {
-    let unit = record.update.unit.clone();
     if !record.start_issued {
         mark(env, held, record, |record| record.start_issued = true)?;
     }
+    bring_up(env, held, record, params)
+}
+
+/// Starts the unit if it is down and waits for it to be active, for at most the start wait. A
+/// start that fails is the release's fault only if the unit ran and died. The mark of the
+/// start is the caller's: `cutover`'s and `rollback`'s are not the same.
+pub(super) fn bring_up(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    params: &Params,
+) -> Result<(), Done> {
+    let unit = record.update.unit.clone();
     let state = show(env, &unit, Reason::StartFailed)?;
     if matches!(life(&state), Life::Down | Life::Stopping) {
         env.ports.point();
@@ -431,7 +460,7 @@ fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Re
     let mut seen_crash = false;
     loop {
         let state = show(env, &unit, Reason::StartFailed)?;
-        seen_crash |= crashed(&state);
+        seen_crash |= state.crashed();
         match life(&state) {
             Life::Up => return Ok(()),
             Life::Down | Life::Stopping => {
