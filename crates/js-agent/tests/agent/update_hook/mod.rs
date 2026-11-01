@@ -12,6 +12,7 @@ mod fake_bin;
 #[path = "../../update_hook_fakes/mod.rs"]
 mod fakes;
 mod fakes_tests;
+mod launchd;
 mod params;
 mod ports;
 mod record;
@@ -24,5 +25,6 @@ mod steps_cutover_cordon;
 mod steps_prepare;
 mod steps_prepare_cordon;
 mod steps_verify;
+mod unit_conformance;
 mod validate;
 mod verb;

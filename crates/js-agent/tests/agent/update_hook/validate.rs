@@ -27,6 +27,7 @@ fn declaration() -> Declaration {
             rollback: 8220,
             cleanup: 120,
         },
+        runtime: "crun".to_owned(),
     }
 }
 

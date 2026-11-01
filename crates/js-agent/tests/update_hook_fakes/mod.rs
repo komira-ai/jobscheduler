@@ -28,8 +28,9 @@ use serde::{Deserialize, Serialize};
 /// Where the fake clock starts, in milliseconds.
 pub const START_MS: u64 = 1_000_000;
 
-/// The runtime a fake hello reports.
-pub const RUNTIME: &str = "crun";
+/// The runtime a fake hello reports unless a test says otherwise: the execution mode of a
+/// container agent, which is what a real agent's hello names (`ExecMode::name`).
+pub const RUNTIME: &str = "container";
 
 /// What the server saved of a host with its binding, and a restart keeps.
 #[derive(Default, Serialize, Deserialize)]
@@ -127,7 +128,7 @@ impl World {
             cordon: None,
             taint: None,
             agent_version: Some(agent_version.to_owned()),
-            runtime: Some(RUNTIME.to_owned()),
+            runtime: Some(self.exec_mode()),
         };
         fs::write(self.lease_file(), serde_json::to_vec(&host).unwrap()).unwrap();
         fs::write(self.control.join("host-id"), id).unwrap();
@@ -237,6 +238,19 @@ impl World {
         })
     }
 
+    /// The agents of this world say hello with the execution mode `mode` (`sandbox-exec` for a
+    /// Mac's native agent), from now on.
+    ///
+    /// # Panics
+    /// The file cannot be written.
+    pub fn set_exec_mode(&self, mode: &str) {
+        fs::write(self.control.join("exec-mode"), mode).unwrap();
+    }
+
+    fn exec_mode(&self) -> String {
+        fs::read_to_string(self.control.join("exec-mode")).unwrap_or_else(|_| RUNTIME.to_owned())
+    }
+
     fn host_id(&self) -> String {
         fs::read_to_string(self.control.join("host-id")).unwrap_or_else(|_| "host-1".to_owned())
     }
@@ -283,7 +297,7 @@ impl World {
         host.state = "live".to_owned();
         host.session_started_ms = Some(self.server_now_ms());
         host.agent_version = Some(agent_version.to_owned());
-        host.runtime = Some(RUNTIME.to_owned());
+        host.runtime = Some(self.exec_mode());
         self.save(&host)
     }
 

@@ -70,9 +70,10 @@ MAJOR.MINOR.PATCH before it is used in a file name.
 - The package is a workflow artifact for seven days, not a release asset: `release.yml` lists
   its assets by name and attests `*.tar.gz`.
 - The updater declaration is shipped under `share/`; putting it in `/etc/updater.d` belongs to enrolment.
-- The update hook (`js-agent update-hook`) is built on Linux only, so a Mac's js-agent does not
-  have the verb at all and the hook cannot run there. Building it on a Mac needs a `launchctl`
-  form of the hook's unit port (`bootout`/`kill`, `kickstart`, `print`) and the cutover of the
-  open update-hook change; until then `updater.toml` is the declaration the hook will take.
+- The update hook (`js-agent update-hook`) is built on a Mac, with a `launchctl` form of its unit
+  port (`bootout`, `bootstrap`, `kickstart -k`, `print`) and `runtime = "native"` in
+  `updater.toml`. Its steps are not wired to the lease server yet, on a Mac as on Linux: the
+  verb answers every step `not_implemented`. The port has run against a fake of `launchctl`
+  only, never against a real launchd.
 - The agent's state and scratch directories (`/var/db/js-agent/{state,scratch}`, on separate
   volumes, as the agent requires) and the helper's socket group are host setup.
