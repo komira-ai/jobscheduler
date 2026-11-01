@@ -574,20 +574,30 @@ fn the_whole_host_noise_plan_has_two_arms_of_twenty() {
     }
 }
 
-/// Asserts the shipped workload: one job that runs the bench cell and prints the result
-/// line, and that the cell the plan varies is an argument of the job.
+/// Asserts the shipped workload: one job that runs the bench runner with its real flags
+/// (query q6, scale 1, the result-line opt-in), asks for the `action` class, and that the
+/// plan's whole-host arm asks for a different one, `whole-node`.
 #[test]
 fn the_whole_host_noise_workload_runs_the_cell() {
     let workload: Workload =
         serde_json::from_str(&read_shipped("whole-host-noise.workload.json")).unwrap();
+    let plan: Plan = serde_json::from_str(&read_shipped("whole-host-noise.plan.json")).unwrap();
     let jobs = workload.expand().unwrap();
     assert_eq!(jobs.len(), 1);
-    assert!(
-        jobs[0].run.args.iter().any(|a| a == "tpch/q6-sf1"),
-        "{:?}",
-        jobs[0].run.args
-    );
-    assert_ne!(jobs[0].lease.class, "whole-node");
+    let args = &jobs[0].run.args;
+    let value_of = |flag: &str| {
+        let at = args.iter().position(|a| a == flag).unwrap_or_else(|| panic!("{flag}: {args:?}"));
+        args[at + 1].as_str()
+    };
+    assert_eq!(value_of("--query"), "q6");
+    assert_eq!(value_of("--scale"), "1");
+    assert_eq!(value_of("--dataset"), "tpch");
+    assert_eq!(value_of("--suite"), "tpch");
+    assert_eq!(args.last().map(String::as_str), Some("--js-measure-result"));
+    assert!(!args.iter().any(|a| a == "--cell" || a == "--result-line"), "{args:?}");
+    assert_eq!(jobs[0].lease.class, "action");
+    let whole = plan.arms.iter().find(|a| a.label == "whole-host").unwrap();
+    assert_eq!(whole.lease_class.as_deref(), Some("whole-node"));
     assert!(
         jobs[0].run.image.contains("@sha256:"),
         "{}",
@@ -606,13 +616,18 @@ fn the_shipped_plan_feeds_the_analysis_compare_cv() {
         serde_json::from_str(&read_shipped("whole-host-noise.workload.json")).unwrap();
     let clock = FakeClock::at(T0);
     let printed = tail(
-        "js-measure-result {\"steady_ms\":12.3,\"first_run_ms\":45.6}\n",
+        "js-measure-result {\"steady_ms\":12.3,\"first_run_ms\":45.6,\"duckdb_steady_ms\":10.1,\"verdict\":\"PASS\"}\n",
         "",
         false,
     );
     let farm = fake_with(&clock, Some(printed));
     let outputs = run_everything(&plan, &workload, &farm, &clock);
     assert_eq!(outputs.len(), 40);
+    let m = &outputs[0].record.metrics;
+    assert_eq!(m["reported_steady_ms"], Some(12.3));
+    assert_eq!(m["reported_first_run_ms"], Some(45.6));
+    assert_eq!(m["reported_duckdb_steady_ms"], Some(10.1));
+    assert_eq!(m["reported_verdict"], None);
     let text: String = outputs
         .iter()
         .map(|o| serde_json::to_string(&o.record).unwrap() + "\n")
