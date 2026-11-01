@@ -223,6 +223,18 @@ pub fn validate(
             verify: declaration.timeouts.verify,
         });
     }
+    // The waits of `rollback`: the drain, the stop, the start and the hello, and a margin.
+    let rollback_needed = params
+        .drain_wait_secs
+        .saturating_add(START_WAIT_SECS)
+        .saturating_add(ROLLBACK_HELLO_SECS)
+        .saturating_add(ROLLBACK_MARGIN_SECS);
+    if declaration.timeouts.rollback <= rollback_needed {
+        return Err(Invalid::RollbackTimeout {
+            rollback: declaration.timeouts.rollback,
+            wait: params.drain_wait_secs,
+        });
+    }
     if record.schema != SCHEMA {
         return Err(Invalid::Schema {
             found: record.schema,
@@ -373,12 +385,33 @@ fn marks(record: &Record) -> Result<(), Invalid> {
         record.stop_begun,
         record.update.previous.is_some(),
     ) {
+        (Some(_), false, _) => {
+            return Err(Invalid::Marks {
+                mark: "pre_stop_session_ms",
+                needs: "stop_begun",
+            });
+        }
+        (Some(_), true, false) => {
+            return Err(Invalid::Marks {
+                mark: "pre_stop_session_ms",
+                needs: "a previous release",
+            });
+        }
+        _ => {}
+    }
+    // The session before the rollback's first act is written with the first of its act marks.
+    let acted = rb.stop_begun || rb.link_restored || rb.start_issued;
+    match (
+        record.rb_pre_stop_session_ms,
+        acted,
+        record.update.previous.is_some(),
+    ) {
         (Some(_), false, _) => Err(Invalid::Marks {
-            mark: "pre_stop_session_ms",
-            needs: "stop_begun",
+            mark: "rb_pre_stop_session_ms",
+            needs: "an rb act mark",
         }),
         (Some(_), true, false) => Err(Invalid::Marks {
-            mark: "pre_stop_session_ms",
+            mark: "rb_pre_stop_session_ms",
             needs: "a previous release",
         }),
         _ => Ok(()),

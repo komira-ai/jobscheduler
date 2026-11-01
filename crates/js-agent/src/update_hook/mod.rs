@@ -11,9 +11,9 @@
 //! this). The verb is answered before the agent's flags are parsed and before any signal
 //! handler is installed: a hook is a short-lived root process of the updater, not an agent.
 //!
-//! `prepare`, `cutover`, `verify` and `cleanup` have their bodies in [`step`], over the ports.
-//! The machine has no lease client yet, so [`Host::system`] still answers every step with the
-//! reason `not_implemented` (exit 1), and `rollback` has no body.
+//! The five steps have their bodies in [`step`], over the ports. The machine has no lease
+//! client yet, so [`Host::system`] still answers every step with the reason `not_implemented`
+//! (exit 1).
 
 mod args;
 mod declaration;
