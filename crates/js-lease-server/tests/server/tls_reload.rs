@@ -15,6 +15,8 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use js_lease::Timestamp;
+
 use crate::binary::launch;
 use crate::support::{
     Harness, LogCapture, Scratch, TOKEN, args_with, base_args, config, guard, lease_body,
@@ -36,7 +38,7 @@ fn identity(serial: u64, from: (i32, u8, u8), to: (i32, u8, u8)) -> (String, Str
 
 /// A certificate that is valid now and for a long time.
 fn current(serial: u64) -> (String, String) {
-    identity(serial, (1960, 1, 1), (3000, 1, 1))
+    identity(serial, (2020, 1, 1), (3000, 1, 1))
 }
 
 /// The certificate and key files of one test server, and the PEM of what they hold.
@@ -67,6 +69,9 @@ impl Files {
     }
 }
 
+/// 2030-01-01T00:00:00Z, the time the server's clock reads in these tests.
+const START_OF_2030_MS: u64 = 1_893_456_000_000;
+
 /// A TLS server on the pair with serial 1.
 async fn server(name: &str) -> (Harness, Files, (String, String)) {
     let scratch = Scratch::new(name);
@@ -86,6 +91,7 @@ async fn server(name: &str) -> (Harness, Files, (String, String)) {
         ],
     );
     let h = Harness::over(scratch, config(args).unwrap()).await;
+    h.clock.set(Timestamp::from_millis(START_OF_2030_MS));
     (h, files, first)
 }
 
@@ -171,7 +177,7 @@ async fn a_bad_pair_is_refused_and_the_old_certificate_is_still_served() {
     let (h, files, first) = server("tls_reload_bad").await;
     let new = current(2);
     let other = current(3);
-    let expired = identity(4, (1960, 1, 1), (1965, 1, 1));
+    let expired = identity(4, (2020, 1, 1), (2021, 1, 1));
     let not_yet = identity(5, (3000, 1, 1), (3001, 1, 1));
     let s = &h.scratch;
     type Plant<'a> = Box<dyn Fn() + 'a>;
@@ -413,12 +419,12 @@ async fn a_symlinked_key_with_an_owner_only_target_is_accepted() {
 
 /// Asserts that "valid now" is the server's clock: a certificate valid at the injected
 /// time is taken, and once the clock has passed its end the same kind of certificate is
-/// refused as expired and the earlier one is still served. The test clock starts in
-/// 1970, so no date of the real calendar decides it.
+/// refused as expired and the earlier one is still served. The clock is set to the
+/// start of 2030, so the date of the day the test runs decides nothing.
 #[tokio::test]
 async fn validity_is_judged_by_the_servers_clock() {
     let (h, files, _) = server("tls_reload_clock").await;
-    let short = |serial| identity(serial, (1960, 1, 1), (1970, 1, 2));
+    let short = |serial| identity(serial, (2020, 1, 1), (2030, 1, 2));
     let (second, third) = (short(2), short(3));
     files.put(&h.scratch, &second);
     h.running.reload_tls().unwrap();
