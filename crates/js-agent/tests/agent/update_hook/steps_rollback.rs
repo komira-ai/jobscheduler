@@ -858,3 +858,25 @@ fn a_unit_manager_that_goes_dark_while_the_previous_agent_is_awaited_ends_the_ro
     assert_eq!(done.report.reason, Some(Reason::StartFailed));
     assert_eq!(done.report.class, Class::Environment);
 }
+
+#[test]
+fn a_previous_agent_whose_unit_goes_inactive_or_deactivating_while_awaited_is_a_release_failure() {
+    for (name, active) in [
+        ("hook-rollback-inactive-waiting", "inactive"),
+        ("hook-rollback-deactivating-waiting", "deactivating"),
+    ] {
+        let rig = link_moved(name);
+        let spy = Spy::new(&rig);
+        *spy.start_leaves.borrow_mut() = Some(("active", "running"));
+        let base = rig.world.ticks();
+        spy.on_pause(move |spy, ticks| {
+            if ticks == base + 1 {
+                spy.world.seed_unit(UNIT, active, "dead");
+            }
+        });
+        let done = spy.rollback(&rig);
+        assert_eq!(done.outcome, Outcome::Failure, "{active}: {done:?}");
+        assert_eq!(done.report.reason, Some(Reason::StartFailed), "{active}");
+        assert_eq!(done.report.class, Class::Release, "{active}");
+    }
+}

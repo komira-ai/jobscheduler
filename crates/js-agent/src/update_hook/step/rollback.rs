@@ -156,27 +156,29 @@ fn restore(
     previous: &Path,
 ) -> Result<(), Done> {
     let unit = record.update.unit.clone();
-    let mut state = show(env, &unit, Reason::StopFailed)?;
+    let state = show(env, &unit, Reason::StopFailed)?;
     let at = link_at(env, link, record, previous)?;
+    let mut down = matches!(life(&state), Life::Down);
     if matches!(life(&state), Life::Stopping) {
         wait_down(env, params, held, record, &unit)?;
-        state = show(env, &unit, Reason::StopFailed)?;
+        down = true;
     }
-    match (life(&state), at) {
-        (Life::Up | Life::Starting, At::Previous) => return await_hello(env, params, held, record),
-        (Life::Up | Life::Starting, At::Other) => {
-            return Err(failure(
-                Reason::StateInvalid,
-                format!(
-                    "{unit} runs from a release link that is neither the staged nor the previous release"
-                ),
-            ));
+    if !down {
+        match at {
+            At::Previous => return await_hello(env, params, held, record),
+            At::Other => {
+                return Err(failure(
+                    Reason::StateInvalid,
+                    format!(
+                        "{unit} runs from a release link that is neither the staged nor the previous release"
+                    ),
+                ));
+            }
+            At::Staged => {
+                drain(env, params, held, record)?;
+                stop(env, params, held, record, &unit)?;
+            }
         }
-        (Life::Up | Life::Starting, At::Staged) => {
-            drain(env, params, held, record)?;
-            stop(env, params, held, record, &unit)?;
-        }
-        (Life::Down | Life::Stopping, _) => {}
     }
     refuse_host(env)?;
     relink(env, params, held, record, link, previous)?;
