@@ -161,8 +161,9 @@ impl Line {
 /// that died midway may end in a half line, and what it had already left must still be
 /// cleaned up.
 pub fn parse_lines_lenient(text: &str) -> Vec<Line> {
-    let _ = text;
-    Vec::new()
+    text.lines()
+        .filter_map(|line| parse_lines(line).ok()?.pop())
+        .collect()
 }
 
 /// The lines of `text` that are ours. A line that starts with `ISO ` and is not a

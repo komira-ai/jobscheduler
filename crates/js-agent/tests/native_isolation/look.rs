@@ -12,13 +12,21 @@
 //!   absence;
 //! - `shmget`, `semget`, `msgget`, `shm_open`, `sem_open`: errno `ENOENT`;
 //! - `security find-generic-password`: exit status 44 with "could not be found" on
-//!   standard error (`errSecItemNotFound`), or a "default keychain could not be found" (the
-//!   fresh user has no keychain at all, so it has no item);
+//!   standard error (`errSecItemNotFound`), or exit status 37 with "default keychain could not be
+//!   found" (`errSecNoDefaultKeychain`; the fresh user has no keychain at all, so it has no item). The tool exits with the negated error code modulo 256: -25300 gives 44, -25307 gives 37;
 //! - `defaults read`: exit status 1 with "does not exist" on standard error (the domain or
 //!   the domain/key pair is missing). Exit status 1 alone is not absence;
 //! - `launchctl print <domain>`: exit status 113 with "Could not find domain" on standard
 //!   error;
 //! - `ps`, `ipcs`, `find`: no not-found answer; any status but 0 is a failed look.
+//!
+//! The same care applies to run A's seeds. A kind counts as COVERED when it was seeded, or
+//! when the product profile refused the seed with a SANDBOX denial (the job could not create
+//! the state, so nothing can carry over): `EPERM` or `EACCES` from the call, or the sandbox's
+//! own words from a tool ("Operation not permitted", "deny(1)", sandbox-violation text).
+//! That row is recorded as refused by the profile. Any other seed failure (`ENOSPC`, a
+//! missing tool, a crash) proves nothing. The minimum set (a file, a process, a keychain item,
+//! a launchd agent, shared memory) is met when each kind is covered.
 
 use std::io;
 use std::path::Path;
@@ -61,7 +69,7 @@ pub fn classify_security(code: Option<i32>, stderr: &str) -> Outcome {
             "a generic password with the token is in the keychain search list".to_owned(),
         );
     }
-    if stderr.contains("default keychain could not be found") {
+    if code == Some(37) && stderr.contains("default keychain could not be found") {
         return Outcome::Absent;
     }
     if code == Some(44) && stderr.contains("could not be found") {
@@ -105,27 +113,28 @@ pub fn view_output(
     }
 }
 
-/// The paths a bounded `find -uid` printed: those with a token in them, which are left
-/// behind by the run, and the others, which are only reported (the uid's own caches get
-/// files of the machine's making). At most `limit` paths are read; the second value says
-/// whether there were more.
+/// The paths a `find -uid` printed: those with a token in them, which are left behind by the
+/// run, and the others, which are only reported (the uid's own caches get files of the
+/// machine's making). EVERY path is examined for a token; only the notes are cut at `limit`,
+/// and the third value says whether they were.
 pub fn split_found_files(
     output: &str,
     tokens: &[Token],
     limit: usize,
 ) -> (Vec<String>, Vec<String>, bool) {
-    let paths: Vec<&str> = output.lines().filter(|line| !line.is_empty()).collect();
-    let cut = paths.len() > limit;
     let mut with = Vec::new();
-    let mut without = Vec::new();
-    for path in paths.into_iter().take(limit) {
+    let mut notes = Vec::new();
+    let mut cut = false;
+    for path in output.lines().filter(|line| !line.is_empty()) {
         if tokens.iter().any(|token| path.contains(token.as_str())) {
             with.push(path.to_owned());
+        } else if notes.len() < limit {
+            notes.push(path.to_owned());
         } else {
-            without.push(path.to_owned());
+            cut = true;
         }
     }
-    (with, without, cut)
+    (with, notes, cut)
 }
 
 /// Records `handle` in `runs`, then finishes the run. The handle is in `runs` whatever
@@ -135,9 +144,9 @@ pub fn record_then<H, R>(
     handle: H,
     finish: impl FnOnce(&H) -> Result<R, String>,
 ) -> Result<R, String> {
-    let done = finish(&handle)?;
     runs.push(handle);
-    Ok(done)
+    let handle = runs.last().expect("just pushed");
+    finish(handle)
 }
 
 /// A value read back after a seed must be the one written.
@@ -145,8 +154,13 @@ pub fn record_then<H, R>(
 /// # Errors
 /// The two differ (compared trimmed).
 pub fn readback_matches(expected: &str, actual: &str) -> Result<(), String> {
-    let _ = (expected, actual);
-    Ok(())
+    match actual.trim() == expected.trim() {
+        true => Ok(()),
+        false => Err(format!(
+            "wrote {expected:?} and read back {:?}",
+            actual.trim()
+        )),
+    }
 }
 
 /// Root's `launchctl print` of `domain` proves an agent with `token` is loaded.
@@ -154,14 +168,20 @@ pub fn readback_matches(expected: &str, actual: &str) -> Result<(), String> {
 /// # Errors
 /// The domain is absent, could not be read, or does not hold the token.
 pub fn domain_holds(domain: &str, seen: &Outcome, token: &Token) -> Result<(), String> {
-    let _ = (domain, seen, token);
-    Ok(())
+    match seen {
+        Outcome::Found(text) if text.contains(token.as_str()) => Ok(()),
+        Outcome::Found(_) => Err(format!("launchctl print {domain} does not hold the agent")),
+        Outcome::Absent => Err(format!("launchctl print {domain}: there is no such domain")),
+        Outcome::CouldNotLook(why) => Err(format!("launchctl print {domain}: {why}")),
+    }
 }
 
 /// Whether `bytes` hold any of `tokens`.
 pub fn content_with_token(bytes: &[u8], tokens: &[Token]) -> bool {
-    let _ = (bytes, tokens);
-    false
+    tokens.iter().any(|token| {
+        let needle = token.as_str().as_bytes();
+        bytes.windows(needle.len()).any(|window| window == needle)
+    })
 }
 
 /// Why run A could not seed an item: the sandbox of the product profile said no (so the job
@@ -176,18 +196,31 @@ pub enum SeedFailure {
 /// Tells the two apart from the failure text of a seed: `EPERM` or `EACCES` from the call
 /// (as `io::Error` prints them), or the sandbox's own words from a tool.
 pub fn classify_seed_failure(text: &str) -> SeedFailure {
-    let _ = text;
-    SeedFailure::Other
+    let text = text.to_lowercase();
+    let sandbox = [
+        "operation not permitted",
+        "permission denied",
+        "(os error 1)",
+        "(os error 13)",
+        "deny(1)",
+        "sandbox:",
+        "sandbox violation",
+    ];
+    match sandbox.iter().any(|words| text.contains(words)) {
+        true => SeedFailure::ProfileRefused,
+        false => SeedFailure::Other,
+    }
 }
 
-/// The kinds a run A must have seeded for the result to mean anything: a file, a process,
-/// a keychain item, a launchd agent and some shared memory. What is missing, by name. A run
-/// where these were refused proves nothing.
+/// The kinds a run A must have covered for the result to mean anything: a file, a process,
+/// a keychain item, a launchd agent and some shared memory. A kind is covered when it was
+/// seeded or denied by the profile. What is missing, by name; a run where these were refused
+/// for another reason proves nothing.
 pub fn missing_minimum(lines: &[Line]) -> Vec<&'static str> {
     let seeded = |kind: Kind| {
-        lines
-            .iter()
-            .any(|line| line.kind == kind && line.verdict == Verdict::Seeded)
+        lines.iter().any(|line| {
+            line.kind == kind && matches!(line.verdict, Verdict::Seeded | Verdict::Denied)
+        })
     };
     let mut missing = Vec::new();
     for (kind, name) in [

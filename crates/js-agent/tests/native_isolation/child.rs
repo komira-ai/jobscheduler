@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::lines::{Kind, Line, Verdict};
-use super::look::{Outcome, classify_defaults, classify_errno, classify_path, classify_security};
+use super::look::{
+    Outcome, SeedFailure, classify_defaults, classify_errno, classify_path, classify_security,
+    classify_seed_failure, readback_matches,
+};
 use super::token::Token;
 
 // The calls libc has no declaration of on macOS. All take C strings or plain integers.
@@ -75,8 +78,10 @@ fn errno(what: &str) -> String {
     format!("{what}: {}", std::io::Error::last_os_error())
 }
 
-fn cstring(name: &str) -> CString {
-    CString::new(name).expect("a name without NUL")
+/// The C string of `name`, or none when it holds a NUL. Never panics: the cleanup runs on
+/// text a run printed.
+fn cstring(name: &str) -> Option<CString> {
+    CString::new(name).ok()
 }
 
 fn key_of(locator: &str) -> Option<c_int> {
@@ -142,6 +147,13 @@ fn seed(kind: Kind, token: &Token, spot: &Spot) -> Result<String, String> {
                 ],
                 &spot.home,
             )?;
+            // Proved by the job itself: the password reads back.
+            let back = tool(
+                "/usr/bin/security",
+                &["find-generic-password", "-a", tok, "-s", tok, "-w", &shown],
+                &spot.home,
+            )?;
+            readback_matches(tok, &back)?;
             Ok(shown)
         }
         Kind::Defaults => {
@@ -151,6 +163,13 @@ fn seed(kind: Kind, token: &Token, spot: &Spot) -> Result<String, String> {
                 &["write", &domain, DEFAULTS_KEY, tok],
                 &spot.home,
             )?;
+            // Proved by the job itself: the key reads back, or the seed is not a seed.
+            let back = tool(
+                "/usr/bin/defaults",
+                &["read", &domain, DEFAULTS_KEY],
+                &spot.home,
+            )?;
+            readback_matches(tok, &back)?;
             Ok(domain)
         }
         Kind::LaunchAgent => seed_agent(token, spot, "user"),
@@ -193,7 +212,7 @@ fn seed(kind: Kind, token: &Token, spot: &Spot) -> Result<String, String> {
         }
         Kind::PosixShm => {
             let name = token.posix_name(POSIX_PREFIX);
-            let c = cstring(&name);
+            let c = cstring(&name).ok_or_else(|| "a name with a NUL".to_owned())?;
             // SAFETY: `c` is a NUL-terminated string that outlives the call; the mode is
             // passed as the unsigned int a variadic call promotes it to.
             let fd = unsafe {
@@ -212,7 +231,7 @@ fn seed(kind: Kind, token: &Token, spot: &Spot) -> Result<String, String> {
         }
         Kind::PosixSem => {
             let name = token.posix_name(POSIX_PREFIX);
-            let c = cstring(&name);
+            let c = cstring(&name).ok_or_else(|| "a name with a NUL".to_owned())?;
             // SAFETY: as above; `sem_open` with `O_CREAT` takes a mode and a value, both
             // unsigned ints.
             let sem = unsafe {
@@ -269,7 +288,15 @@ pub fn seed_all(spot: &Spot) -> Vec<Line> {
             let token = Token::fresh();
             match seed(kind, &token, spot) {
                 Ok(locator) => Line::new(Verdict::Seeded, kind, token, &locator),
-                Err(why) => Line::new(Verdict::Refused, kind, token, &why),
+                Err(why) => match classify_seed_failure(&why) {
+                    SeedFailure::ProfileRefused => Line::new(
+                        Verdict::Denied,
+                        kind,
+                        token,
+                        &format!("refused by the profile: {why}"),
+                    ),
+                    SeedFailure::Other => Line::new(Verdict::Refused, kind, token, &why),
+                },
             }
         })
         .collect()
@@ -334,7 +361,9 @@ pub fn probe(seeded: &Line, home: &Path) -> Outcome {
             }
         }
         Kind::PosixShm => {
-            let c = cstring(locator);
+            let Some(c) = cstring(locator) else {
+                return Outcome::CouldNotLook("the locator holds a NUL".to_owned());
+            };
             // SAFETY: `c` is a NUL-terminated string that outlives the call.
             let fd = unsafe { libc::shm_open(c.as_ptr(), libc::O_RDONLY, 0 as c_uint) };
             if fd < 0 {
@@ -345,7 +374,9 @@ pub fn probe(seeded: &Line, home: &Path) -> Outcome {
             Outcome::Found(locator.to_owned())
         }
         Kind::PosixSem => {
-            let c = cstring(locator);
+            let Some(c) = cstring(locator) else {
+                return Outcome::CouldNotLook("the locator holds a NUL".to_owned());
+            };
             // SAFETY: `c` is a NUL-terminated string; without `O_CREAT` no more arguments.
             let sem = unsafe { sem_open(c.as_ptr(), 0) };
             if sem == SEM_FAILED {
@@ -439,14 +470,16 @@ pub fn remove(seeded: &Line) {
             }
         }
         Kind::PosixShm => {
-            let c = cstring(locator);
-            // SAFETY: `c` is a NUL-terminated string that outlives the call.
-            unsafe { shm_unlink(c.as_ptr()) };
+            if let Some(c) = cstring(locator) {
+                // SAFETY: `c` is a NUL-terminated string that outlives the call.
+                unsafe { shm_unlink(c.as_ptr()) };
+            }
         }
         Kind::PosixSem => {
-            let c = cstring(locator);
-            // SAFETY: as above.
-            unsafe { sem_unlink(c.as_ptr()) };
+            if let Some(c) = cstring(locator) {
+                // SAFETY: as above.
+                unsafe { sem_unlink(c.as_ptr()) };
+            }
         }
     }
 }
