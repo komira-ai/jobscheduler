@@ -32,10 +32,16 @@ pub(crate) fn create_report(lease: &Path) -> Result<std::fs::File, String> {
 /// Writes the program into `<scratch>/oci-bin/js-init` (mode 0755, replaced
 /// atomically) and returns that path.
 pub(crate) fn install(scratch: &Path) -> std::io::Result<PathBuf> {
-    install_bytes(scratch, BINARY)
+    install_bytes(scratch, BINARY, &super::install::settle)
 }
 
-fn install_bytes(scratch: &Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+/// [`install`] of `bytes`, with `settle` the wait for the staged file to be startable.
+fn install_bytes(
+    scratch: &Path,
+    bytes: &[u8],
+    settle: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
+    let _ = settle;
     if bytes.is_empty() {
         return Err(std::io::Error::other(
             "this build has no container init: containers run on Linux only",
@@ -98,7 +104,35 @@ mod tests {
         assert_eq!(std::fs::read(report_path(&lease)).expect("read"), b"");
         let why = create_report(&scratch.join("gone")).expect_err("no lease directory");
         assert!(why.contains("gone/init-report: "), "{why}");
-        let empty = install_bytes(&scratch, b"").expect_err("empty");
+        let empty = install_bytes(&scratch, b"", &|_| Ok(())).expect_err("empty");
         assert!(empty.to_string().contains("no container init"), "{empty}");
+    }
+
+    /// Catches a program published while something still has it open for writing (the
+    /// start would fail busy), one that is asked about before it is whole, a failed wait
+    /// replacing the program already installed, and a staged file left behind.
+    #[test]
+    fn a_program_that_stays_busy_is_not_published() {
+        let scratch = scratch("busy");
+        let first = install(&scratch).expect("install");
+        let asked = std::cell::RefCell::new(Vec::new());
+        let busy = |staged: &Path| {
+            asked.borrow_mut().push((
+                staged.to_owned(),
+                std::fs::read(staged).expect("staged"),
+                staged.metadata().expect("meta").permissions().mode() & 0o777,
+            ));
+            Err(std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy))
+        };
+        let error = install_bytes(&scratch, b"new", &busy).expect_err("busy");
+        assert_eq!(error.kind(), std::io::ErrorKind::ExecutableFileBusy);
+        let staged = scratch.join(format!("oci-bin/.js-init-{}", std::process::id()));
+        assert_eq!(*asked.borrow(), [(staged, b"new".to_vec(), 0o755)]);
+        assert_eq!(std::fs::read(&first).expect("read"), BINARY);
+        let names: Vec<_> = std::fs::read_dir(first.parent().expect("dir"))
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, ["js-init"], "no staged file left");
     }
 }

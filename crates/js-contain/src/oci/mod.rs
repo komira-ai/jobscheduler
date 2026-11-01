@@ -54,6 +54,7 @@ pub(crate) mod hardening;
 pub mod helper;
 pub mod image;
 pub mod init;
+mod install;
 mod lease;
 pub mod lock;
 pub(crate) mod logs;

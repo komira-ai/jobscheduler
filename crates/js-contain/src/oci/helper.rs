@@ -317,6 +317,16 @@ pub(crate) fn prepare_rootfs(dir: &Path, binary: &str) -> std::io::Result<()> {
 /// directories the binary was installed or built under (a home directory is 0750), but the
 /// scratch directory was checked to be searchable by others.
 pub(crate) fn install_daemon(scratch: &Path, daemon: &Path) -> std::io::Result<PathBuf> {
+    install_daemon_settling(scratch, daemon, &super::install::settle)
+}
+
+/// [`install_daemon`], with `settle` the wait for the staged file to be startable.
+fn install_daemon_settling(
+    scratch: &Path,
+    daemon: &Path,
+    settle: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
+    let _ = settle;
     use std::os::unix::fs::PermissionsExt as _;
     let dir = scratch.join("oci-bin");
     std::fs::create_dir_all(&dir)?;
@@ -327,4 +337,47 @@ pub(crate) fn install_daemon(scratch: &Path, daemon: &Path) -> std::io::Result<P
     let target = dir.join("daemon");
     std::fs::rename(&staged, &target)?;
     Ok(target)
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// Catches a daemon published while something still has it open for writing, one
+    /// asked about before it is a whole copy with its mode, a failed wait replacing the
+    /// daemon already installed, and a staged file left behind; and the copy a start
+    /// that waits returns.
+    #[test]
+    fn a_daemon_that_stays_busy_is_not_published() {
+        let dir = crate::unit_dir("oci-daemon-install");
+        let source = dir.join("source");
+        std::fs::write(&source, b"daemon").expect("source");
+        let scratch = dir.join("s");
+        let target = install_daemon_settling(&scratch, &source, &|_| Ok(())).expect("install");
+        assert_eq!(target, scratch.join("oci-bin/daemon"));
+        std::fs::write(&source, b"newer").expect("source");
+        let asked = std::cell::RefCell::new(Vec::new());
+        let error = install_daemon_settling(&scratch, &source, &|staged| {
+            asked.borrow_mut().push((
+                staged.to_owned(),
+                std::fs::read(staged).expect("staged"),
+                staged.metadata().expect("meta").permissions().mode() & 0o777,
+            ));
+            Err(std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy))
+        })
+        .expect_err("busy");
+        assert_eq!(error.kind(), std::io::ErrorKind::ExecutableFileBusy);
+        let staged = scratch.join(format!("oci-bin/.daemon-{}", std::process::id()));
+        assert_eq!(*asked.borrow(), [(staged, b"newer".to_vec(), 0o755)]);
+        assert_eq!(std::fs::read(&target).expect("read"), b"daemon");
+        let names: Vec<_> = std::fs::read_dir(scratch.join("oci-bin"))
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, ["daemon"], "no staged file left");
+        // The real wait, on a file nothing holds open.
+        install_daemon(&scratch, &source).expect("settles");
+        assert_eq!(std::fs::read(&target).expect("read"), b"newer");
+    }
 }
