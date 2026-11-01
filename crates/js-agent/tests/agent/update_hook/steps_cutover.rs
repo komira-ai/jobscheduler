@@ -653,11 +653,13 @@ fn a_cutover_rerun_after_the_stop_keeps_the_session_it_recorded_before_it() {
     let baseline = running(Rig::new("hook-cutover-pre-stop-rerun-base"));
     let spy = Spy::new(&baseline);
     assert_eq!(spy.cutover(&baseline).outcome, Outcome::Success);
-    // Killed before the move of the link: the unit is stopped, the stop mark is on disk.
+    // Killed just before the move of the link: the unit is stopped, the stop mark and the
+    // link mark are on disk.
     rig.kill.arm(spy.acts.borrow()[1].points);
     assert!(killable(|| Spy::new(&rig).cutover(&rig)).is_none());
     rig.kill.disarm();
-    assert_eq!(marks(&rig), [true, false, false]);
+    assert_eq!(marks(&rig), [true, true, false]);
+    assert_eq!(unit_state(&rig), "inactive dead");
     assert_eq!(pre_stop(&rig), before);
     // The server now shows another session (the stopped agent's successor, say).
     rig.world

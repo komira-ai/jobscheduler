@@ -346,23 +346,8 @@ fn marks(record: &Record) -> Result<(), Invalid> {
             rb.start_issued,
         ),
     ];
-    if let Some(&(mark, _, needs, _)) = rules.iter().find(|(_, set, _, needed)| *set && !*needed) {
-        return Err(Invalid::Marks { mark, needs });
-    }
-    // The session before the stop is written with the stop mark; a first install has no stop.
-    match (
-        record.pre_stop_session_ms,
-        record.stop_begun,
-        record.update.previous.is_some(),
-    ) {
-        (Some(_), false, _) => Err(Invalid::Marks {
-            mark: "pre_stop_session_ms",
-            needs: "stop_begun",
-        }),
-        (Some(_), true, false) => Err(Invalid::Marks {
-            mark: "pre_stop_session_ms",
-            needs: "a previous release",
-        }),
-        _ => Ok(()),
+    match rules.iter().find(|(_, set, _, needed)| *set && !*needed) {
+        Some(&(mark, _, needs, _)) => Err(Invalid::Marks { mark, needs }),
+        None => Ok(()),
     }
 }
