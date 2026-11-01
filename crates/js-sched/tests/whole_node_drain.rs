@@ -170,8 +170,8 @@ fn the_given_up_worker_is_barred_until_exactly_the_backoff_ends() {
 
 both_rules! {
 /// Catches: no other worker tried after a give-up: `a` is the cheaper to drain and is held
-/// first; given up, the request holds `b` with a deadline from the give-up, and keeps it
-/// when `a`'s back-off ends.
+/// first; given up, the request holds `b` with a deadline from the give-up, and moves back
+/// to the cheaper `a` when its back-off ends, keeping the time the mark was made.
 fn a_second_worker_is_held_after_a_give_up() {
     let mut f = busy(Some(cfg(0, 2)));
     f.worker("b");
@@ -186,7 +186,9 @@ fn a_second_worker_is_held_after_a_give_up() {
         (w("b"), t(60_000), t(120_000))
     );
     tick_at(&mut f, 70_000);
-    assert_eq!(f.held_for(op), Some(&w("b")));
+    // Rule 2 (kbf#2160 step 4): the pick is made again every round, so the hold moves back
+    // to the cheaper `a` when its back-off ends, keeping the time it was made.
+    assert_eq!(f.held_for(op), Some(&w("a")));
     assert_eq!(mark(&f, op).map(|m| m.made), Some(t(60_000)));
 }
 }
@@ -267,8 +269,8 @@ fn a_cancelled_request_has_no_mark_and_no_count() {
 
 both_rules! {
 /// Catches: a worker that cannot be held any more leaving its mark and costing an attempt:
-/// the mark moves to the other worker with the deadline from the move, and no give-up is
-/// counted.
+/// the mark moves to the other worker with the deadline from the move and the time it was
+/// first made, and no give-up is counted.
 fn a_worker_that_goes_away_moves_the_mark_without_a_give_up() {
     let mut f = busy(Some(cfg(0, 2)));
     f.worker("b");
@@ -279,9 +281,11 @@ fn a_worker_that_goes_away_moves_the_mark_without_a_give_up() {
     f.feed(Event::Cordon { worker: w("a") });
     f.grants();
     assert_eq!(f.held_for(op), Some(&w("b")));
+    // Rule 2 (kbf#2160 step 4): a move keeps the time the mark was made (0), not the time
+    // of the move; the deadline still follows the move.
     assert_eq!(
         mark(&f, op).map(|m| (m.made, m.deadline)),
-        Some((t(20_000), t(80_000)))
+        Some((t(0), t(80_000)))
     );
     assert_eq!(f.s.whole_give_ups(op), 0);
 }
@@ -357,8 +361,16 @@ fn a_hold_at_the_attempt_cap_is_not_given_up_at_the_request_wall_time() {
     tick_at(&mut f, 60_000 + MAX_WALL * 1_000);
     tick_at(&mut f, 60_000 + MAX_WALL * 2_000);
     assert_eq!(f.s.whole_give_ups(op), 1);
-    assert_eq!(f.held_for(op), Some(&w("b")));
-    assert_eq!(mark(&f, op), Some(m));
+    // Changed with the non-sticky pick (design rule 2, step 4): the hold is picked again
+    // every round, so when `a`'s back-off ends at 70 s the hold moves back to `a`, the
+    // cheaper to drain, keeping the time it was made (`m.made`) and taking the capped
+    // deadline (the request's wall time) from the move. It is still never given up again.
+    assert_eq!(f.held_for(op), Some(&w("a")));
+    let moved = mark(&f, op).expect("marked");
+    assert_eq!(
+        (moved.worker, moved.made, moved.deadline),
+        (w("a"), m.made, t(70_000 + MAX_WALL * 1_000))
+    );
 }
 }
 
