@@ -134,3 +134,8 @@ fn the_reasons_of_cutover_are_these_exact_tokens() {
 fn the_reason_of_an_unconfirmed_cordon_is_this_exact_token() {
     assert_eq!(Reason::CordonUnconfirmed.as_str(), "cordon_unconfirmed");
 }
+
+#[test]
+fn the_reason_of_a_verify_that_heard_no_hello_is_this_exact_token() {
+    assert_eq!(Reason::NoHello.as_str(), "no_hello");
+}

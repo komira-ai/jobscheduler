@@ -1,5 +1,5 @@
-//! The steps of the hook that have a body: `prepare`, `cutover` and `cleanup` (host-updates
-//! design, 4.2).
+//! The steps of the hook that have a body: `prepare`, `cutover`, `verify` and `cleanup`
+//! (host-updates design, 4.2).
 //!
 //! A step is a function of an [`Env`] and the params table, and ends as a [`Done`]: the status
 //! and the last line. It takes the state directory's lock first, loads and validates the
@@ -10,6 +10,7 @@
 mod cleanup;
 mod cutover;
 mod prepare;
+mod verify;
 
 use std::io;
 use std::os::fd::BorrowedFd;
@@ -25,6 +26,7 @@ use super::{
 pub use cleanup::cleanup;
 pub use cutover::cutover;
 pub use prepare::prepare;
+pub use verify::verify;
 
 /// Everything a step touches.
 pub struct Env<'a> {

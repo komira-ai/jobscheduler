@@ -35,6 +35,9 @@ pub const START_WAIT_SECS: u64 = 120;
 /// timeout, besides the start wait, in seconds.
 pub const CUTOVER_MARGIN_SECS: u64 = 60;
 
+/// The margin `verify` keeps between the end of its wait and the declared timeout, in seconds.
+pub const VERIFY_MARGIN_SECS: u64 = 15;
+
 /// The rule a record broke.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Invalid {

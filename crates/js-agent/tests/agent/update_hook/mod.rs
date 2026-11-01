@@ -1,8 +1,8 @@
 //! `js-agent update-hook` (host-updates design, 4.2), the verb skeleton: what the command
 //! line, the last line and the params file accept and refuse, how an outcome becomes an exit
 //! status, and that the verb is answered before the agent installs a signal handler. The steps
-//! have no body yet except `prepare`, `cutover` and `cleanup` (tests on the fakes: steps_*.rs); the others are
-//! stubs that exit 1. The hook record, its lock, the declaration and
+//! have no body yet except `prepare`, `cutover`, `verify` and `cleanup` (tests on the fakes:
+//! steps_*.rs); the other is a stub that exits 1. The hook record, its lock, the declaration and
 //! the rules the record is held to are pure of the steps and tested here on their own.
 
 mod args;
@@ -23,5 +23,6 @@ mod steps_cutover;
 mod steps_cutover_cordon;
 mod steps_prepare;
 mod steps_prepare_cordon;
+mod steps_verify;
 mod validate;
 mod verb;
