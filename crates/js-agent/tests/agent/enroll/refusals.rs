@@ -48,7 +48,7 @@ fn a_provider_or_instance_the_server_would_refuse_is_refused() {
         (&long, INSTANCE, "provider"),
         (PROVIDER, "i 0", "instance"),
         (PROVIDER, "", "instance"),
-        (PROVIDER, "-lead", "instance"),
+        (PROVIDER, "_lead", "instance"),
     ];
     for (provider, instance, field) in bad {
         let rig = Rig::new("enroll_bad_ids");
