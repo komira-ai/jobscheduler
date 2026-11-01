@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::{Isolation, LogTail, NativeSpec, refusal};
+use js_agent_wire::{Isolation, LogTail, NativeSpec, NetworkLevel, refusal};
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -361,14 +361,28 @@ pub trait Runtime {
     }
 
     /// Whether the network a native job would get is limited as the agent was told. Called
-    /// before every native start; a start whose check fails is refused (`egress-unchecked`)
-    /// and creates nothing. A runtime with nothing to check passes.
+    /// before every native start, and only for a native start (a container start has
+    /// [`Runtime::check_egress`]); a start whose check fails is refused (`egress-unchecked`)
+    /// and creates nothing.
+    ///
+    /// The default fails closed: a runtime that does not say how it limits the network
+    /// refuses a job that asks for it (`on`) and passes one that does not. A runtime that
+    /// takes native jobs and limits the network overrides it.
+    ///
+    /// The check is made at admission. The window from there to the helper's `run` (the
+    /// slot, the user, the launch) is not checked again, and a run that is under way is not
+    /// checked again after a reload of the packet filter.
     ///
     /// # Errors
     ///
     /// What is wrong with the limit; the text stays on the host.
-    fn check_native_egress(&self, _native: &NativeSpec) -> Result<(), RuntimeError> {
-        Ok(())
+    fn check_native_egress(&self, native: &NativeSpec) -> Result<(), RuntimeError> {
+        match native.network {
+            NetworkLevel::On => Err(RuntimeError::new(
+                "this runtime does not say how it limits the network of a native job",
+            )),
+            NetworkLevel::Off | NetworkLevel::Loopback => Ok(()),
+        }
     }
 
     /// The control group directory (an absolute path of the cgroup version 2 file system)

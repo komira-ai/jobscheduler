@@ -3,6 +3,10 @@
 //! A Seatbelt profile cannot name the hosts a run may reach, so the egress of a Mac pool's
 //! users is limited by a pf anchor keyed on their uids (`js-mac-provision`). The agent runs
 //! no job with the network on unless that anchor is enforced right now.
+//!
+//! The check is made at admission. The window from there to the helper's `run` (the slot,
+//! the user, the launch) is not checked again, and a run that is under way is not checked
+//! again after a reload of the pf ruleset.
 
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};

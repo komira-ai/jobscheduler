@@ -576,7 +576,7 @@ impl Cli {
     /// runtime that takes none of them refuses them all; a test walks the flags clap knows
     /// and fails when one is missing here.
     #[must_use]
-    pub fn native_flags(&self) -> [(&'static str, bool); 7] {
+    pub fn native_flags(&self) -> [(&'static str, bool); 13] {
         [
             (
                 "--native-helper-socket",
@@ -591,6 +591,12 @@ impl Cli {
                 self.native_max_processes.is_some(),
             ),
             ("--native-tool-root", !self.native_tool_roots.is_empty()),
+            ("--native-pf-uid-start", self.native_pf_uid_start.is_some()),
+            ("--native-pf-uid-count", self.native_pf_uid_count.is_some()),
+            ("--native-pf-endpoint", !self.native_pf_endpoints.is_empty()),
+            ("--native-pf-anchor", self.native_pf_anchor.is_some()),
+            ("--native-pf-state-dir", self.native_pf_state_dir.is_some()),
+            ("--native-pfctl", self.native_pfctl.is_some()),
         ]
     }
 }

@@ -350,12 +350,17 @@ impl NativeRuntime {
     /// the anchor at any time, so no answer is kept. The text is the first line of what the
     /// provisioner said, with the flag that makes the check necessary.
     fn pf_in_force(&self) -> Result<(), RuntimeError> {
-        let Some(check) = &self.config.egress else {
-            return Ok(());
-        };
         if self.config.net != Net::On {
             return Ok(());
         }
+        // Fails closed: `open` refuses a cap of `on` with no check, and this does not rely
+        // on it.
+        let Some(check) = &self.config.egress else {
+            return Err(fail(
+                &"--native-network",
+                &"on has no check of the pf anchor of the pool",
+            ));
+        };
         check.enforced().map_err(|why| {
             tracing::warn!("the pf anchor is not in force: {why}");
             let said = why.to_string();
