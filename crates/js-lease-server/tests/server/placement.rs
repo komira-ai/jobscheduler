@@ -139,6 +139,21 @@ async fn with_the_flag_the_scheduler_places_the_leases() {
     let held = vec![LeaseId::new(1, 1), LeaseId::new(1, 2)];
     assert_eq!(listed[&HostId::new("h2").unwrap()], held);
     assert!(listed[&HostId::new("h1").unwrap()].is_empty());
+
+    // The registered listing (the registry's view and `GET /v1/hosts`) shows both leases
+    // of `h2` in booking order and none for `h1`. A guard: it fails if the listing shows
+    // only the first lease.
+    let views = _h.running.registry().unwrap().hosts();
+    let of = |name: &str| views.iter().find(|v| v.id.as_str() == name).unwrap();
+    assert_eq!(of("h2").leases, held);
+    assert_eq!(of("h2").lease, Some(held[0]));
+    assert!(of("h1").leases.is_empty());
+    let body = _h.call("GET", "/v1/hosts", None).await.json();
+    let hosts = body["hosts"].as_array().unwrap();
+    let entry = |name: &str| hosts.iter().find(|h| h["id"] == name).unwrap().clone();
+    assert_eq!(entry("h2")["leases"], serde_json::json!(["1-1", "1-2"]));
+    assert_eq!(entry("h2")["lease"], "1-1");
+    assert!(entry("h1").get("leases").is_none());
 }
 
 /// Asserts that a host with room takes a second lease and a full one takes none: eight
