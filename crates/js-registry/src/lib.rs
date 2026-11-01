@@ -130,6 +130,7 @@
 
 mod config;
 mod credential;
+mod lives;
 mod load;
 mod provider;
 mod refusal;
@@ -148,6 +149,7 @@ pub use js_whole::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_REGAIN_GRACE_MS, DEFAULT_RESERVE_BACKOFF_MS,
     WholeNodeConfig,
 };
+pub use lives::ProfileLives;
 pub use load::{BadLease, node_load};
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;

@@ -10,6 +10,7 @@ use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
 use js_types::{Admission, HostId, ResourceClass, Shape};
 
 use super::{HostState, Registry, State};
+use crate::lives;
 use crate::whole::caps::Capability;
 use crate::whole::cost::HostLoad;
 use crate::whole::exclusive::Exclusive;
@@ -24,6 +25,7 @@ impl Registry {
     pub(super) fn host_facts(&self, state: &State, now: Timestamp) -> Vec<HostFacts> {
         let booked = state.book.booked();
         let grace_ms = self.grace_ms();
+        let source = self.shared.lives.get().map(|lives| &**lives);
         let facts = state.records.iter().map(|(id, record)| {
             let live = record.state(now, grace_ms) == HostState::Live;
             // A host being scaled away is leaving the pool: no reservation drains it.
@@ -45,7 +47,7 @@ impl Registry {
                     id: id.to_string(),
                     leases: usize::from(lease.is_some()),
                     end_bounds: ends.map(|(_, end)| end.millis()).into_iter().collect(),
-                    est_ends: Vec::new(),
+                    est_ends: lives::est_ends(source, &state.runs, ends, record.started_at),
                 },
             }
         });
@@ -196,6 +198,7 @@ impl Registry {
             let record = records.get_mut(host);
             record.into_iter().for_each(|record| {
                 record.bound = Some((lease, end));
+                record.started_at = Some(now.millis());
             });
         }
         if let (StartAck::Started { host }, true) = (&ack, commit) {

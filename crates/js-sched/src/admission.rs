@@ -264,6 +264,12 @@ impl Admission {
         self.curves = Curves(curves);
     }
 
+    /// The P90 of the wall minutes the runs of `key` lasted, when the curve source knows
+    /// it. Read whatever the load settings are: the drain cost uses it for the tail.
+    pub(crate) fn wall_minutes_p90(&self, key: &WorkKey) -> Option<u32> {
+        self.curves.0.wall_minutes_p90(key)
+    }
+
     /// Whether placement is decided by the predicate.
     pub(crate) fn by_load(&self) -> bool {
         self.cfg.mode == PlacementLoad::On
