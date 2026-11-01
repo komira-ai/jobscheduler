@@ -489,10 +489,20 @@ mod tests {
         };
         shares.start(sharing_spec(1));
         shares.start(sharing_spec(2));
+        assert_eq!(shares.id().as_str(), "shares");
+        assert_eq!(shares.flavour(), Flavour::Delegated);
+        assert_eq!(shares.classes(), vec![sharing()]);
         let free = fake("a", &[("a-1", 4000, 0)]).with_class(sharing());
         let mut provider = layer_of(vec![Box::new(free), Box::new(shares)]);
         assert_eq!(provider.start(sharing_spec(2)), on("x"));
         assert_eq!(leased(&provider, "a-1"), None);
+        let second = LeaseId::new(1, 2);
+        let present = Observed::Present { host: host("x") };
+        assert_eq!(provider.observe(&second), present);
+        let gone = StopAck::Stopped {
+            read_back: Observed::Absent,
+        };
+        assert_eq!(provider.stop(&second), gone);
     }
 
     /// The lease file's bookings of leases that share a host are seated with the resources
