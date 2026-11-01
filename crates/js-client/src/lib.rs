@@ -9,10 +9,12 @@
 
 mod client;
 mod error;
+mod run;
 mod server_url;
 mod token;
 
 pub use client::{Client, REQUEST_LIMIT, Reply};
 pub use error::ClientError;
+pub use run::{LogTail, Outcome, RunRead, RunReadError};
 pub use server_url::ServerUrl;
 pub use token::{bearer, bearer_of};

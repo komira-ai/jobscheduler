@@ -1066,10 +1066,12 @@ dependencies = [
 name = "js-client"
 version = "0.1.0"
 dependencies = [
+ "js-agent-wire",
  "js-testkit",
  "rcgen",
  "rustix",
  "rustls",
+ "serde",
  "serde_json",
  "thiserror",
  "ureq",
