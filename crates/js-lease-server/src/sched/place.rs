@@ -8,10 +8,12 @@
 //! the only place that books: it checks the room and makes the booking, as it does without
 //! a placer, and the scheduler only ranks the hosts that have room, by its own score (the
 //! host the lease fits most tightly; equal hosts by a hash of the lease and the host).
+//!
+//! Cost: the scheduler is rebuilt for every start over all the open hosts and their leases,
+//! under the registry's lock, so a start is linear in hosts plus leases. A cache would have
+//! to follow every booking and stop; none is kept.
 
-use std::sync::atomic::AtomicU64;
-#[cfg(test)]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use js_pool_static::Candidate;
 use js_provider::StartSpec;
@@ -22,6 +24,8 @@ use js_types::sched::{
     Effect, FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, WaiterId, WorkKey,
 };
 
+use tracing::warn;
+
 use super::map::{self, MapError};
 
 /// The term the scheduler is built for. It is one start long, so the number only has to
@@ -30,7 +34,6 @@ const TERM: u64 = 1;
 
 /// Places the starts of a registry with `js-sched`, and counts the starts it could not.
 #[derive(Debug, Default)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct SchedPlacer {
     unmappable: AtomicU64,
     declined: AtomicU64,
@@ -58,15 +61,32 @@ impl SchedPlacer {
 }
 
 impl Placer for SchedPlacer {
-    /// The host the scheduler gives the start, as an index of `open`. When the scheduler
-    /// cannot be built over these hosts or this request (a shape that does not describe a
-    /// node, a capability that is not a platform requirement) the first host is booked, as
-    /// a registry with no placer does; when it is built and places the start nowhere, none.
+    /// The host the scheduler gives the start, as an index of `open`.
+    ///
+    /// When the scheduler cannot be built over these hosts or this request (a shape that
+    /// does not describe a node, a capability that is not a platform requirement), or is
+    /// built and places the start nowhere though the registry found room for it, the first
+    /// host is booked, as a registry with no placer does: the registry's check of the room
+    /// stands, and a difference between the two models must not leave a lease retrying for
+    /// ever. Each such start is counted by cause and logged.
+    ///
+    /// The scheduler is built afresh for each start over every open host and every lease on
+    /// them, so a start costs time in their number (hosts plus leases), and the registry's
+    /// lock is held for it. Nothing is cached between starts.
     fn pick(&self, spec: &StartSpec, open: &[Candidate]) -> Option<usize> {
-        match grant(spec, open) {
-            Ok(chosen) => chosen,
-            Err(_) => open.first().map(|_| 0),
-        }
+        let (counter, cause) = match grant(spec, open) {
+            Ok(Some(at)) => return Some(at),
+            Ok(None) => (
+                &self.declined,
+                "the scheduler placed the start nowhere".to_owned(),
+            ),
+            Err(err) => (&self.unmappable, err.to_string()),
+        };
+        open.first().map(|_| {
+            let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            warn!(lease = %spec.lease(), %cause, count, "placement fell back to the first host");
+            0
+        })
     }
 }
 

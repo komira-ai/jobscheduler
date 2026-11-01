@@ -29,6 +29,7 @@ use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
+use crate::sched::map;
 use crate::sched::place::SchedPlacer;
 use crate::usage::{KeySource, ProfileKey, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
@@ -111,8 +112,10 @@ pub struct Cli {
     /// Who picks the host of a lease on a host that registered itself: `registry` (the
     /// default) books the first free host by id, one lease to a host, and refuses a class
     /// that books part of a host; `js-sched` has the scheduler choose among the hosts with
-    /// room (the least booked first), and lets leases of a class that books part of a host
-    /// share one. Needs `--agent-pool-config`.
+    /// room (the one the lease fits most tightly, so the most booked first; equal hosts by
+    /// a hash of the lease and the host), and lets leases of a class that books part of a
+    /// host share one. Needs `--agent-pool-config`, and a pool whose capabilities name an
+    /// `arch`.
     #[arg(long, value_enum, default_value = "registry")]
     pub placement: Placement,
     /// The ttl of a lease whose client names none, such as `600s`, `10m` or `1h`.
@@ -243,8 +246,16 @@ impl Placement {
     /// shape with no `arch`): every start would fall back to the first host, and the flag
     /// would do nothing it says. `place` names the flag or key for the message.
     pub(crate) fn check(self, pool: &PoolConfig, place: &str) -> Result<(), StartupError> {
-        let _ = (pool, place);
-        Ok(())
+        match self {
+            Self::Registry => Ok(()),
+            Self::JsSched => map::host(pool.shape()).map(|_| ()).map_err(|err| {
+                let reason = format!(
+                    "the pool's shape cannot be taken as a node by the scheduler ({err}); \
+                     give the pool capabilities with an arch"
+                );
+                StartupError::at(place, reason)
+            }),
+        }
     }
 
     /// The placer the registry takes for this choice; none for `registry`.

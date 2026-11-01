@@ -206,11 +206,16 @@ impl Registry {
             let allowed = reserve::may_start(marks.holder(id), whole, spec.request_id(), room);
             [bookable, !barred, allowed].into_iter().all(|ok| ok)
         };
-        let choose = |open: &[Candidate]| match placer {
-            Some(placer) => placer.pick(spec, open),
-            None => (!open.is_empty()).then_some(0),
+        // Without a placer the book books the first host that qualifies, stopping at it;
+        // with one it is shown every host that qualifies. The placer runs under this
+        // registry's lock and costs time in the hosts and leases it is shown.
+        let ack = match placer {
+            Some(placer) => {
+                let choose = |open: &[Candidate]| placer.pick(spec, open);
+                book.start_by(spec, gate, &eligible, &choose)
+            }
+            None => book.start_where(spec, gate, &eligible),
         };
-        let ack = book.start_by(spec, gate, &eligible, &choose);
         let started = matches!(ack, StartAck::Started { .. });
         let ended = matches!(ack, StartAck::Refused(RefusalCode::LeaseEnded));
         let commit = [whole, fresh].into_iter().all(|ok| ok);

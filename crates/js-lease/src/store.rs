@@ -123,7 +123,11 @@ pub(crate) struct StoredLease {
     pub wall_ms: Option<u64>,
     /// What the lease books when its class lets leases share a host; absent for a lease
     /// that books the whole host and in a file written before the field existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_shares"
+    )]
     pub shares: Option<StoredShares>,
     /// Fields of a later version, kept as read.
     #[serde(flatten)]
@@ -142,6 +146,17 @@ pub(crate) struct StoredShares {
     pub gpu_class: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub disk_bytes: u64,
+}
+
+/// Reads a `shares` value as the row it should be, or as none when it is not one (not a
+/// table, a missing or mistyped count): a bad row must not fail the whole file, and the
+/// lease it belongs to is then put back as booking the whole host.
+fn lenient_shares<'de, D>(deserializer: D) -> Result<Option<StoredShares>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<toml::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| value.try_into().ok()))
 }
 
 impl StoredShares {

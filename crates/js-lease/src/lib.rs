@@ -77,7 +77,15 @@
 //! leases share a host puts the lease back with what it booked. The field is read
 //! leniently: a file from before it, or a row whose resources are not a valid vector,
 //! reads as a lease that books the whole host, and a field of the row that this build does
-//! not know is ignored.
+//! not know is ignored. A row that is not a table, or lacks `cpu_millis` or `memory_bytes`,
+//! reads the same way and the rest of the file is read as usual.
+//!
+//! Rolling back: a build that predates the row keeps it in `extra` and writes it back, so
+//! the file is not broken by going back and forth, but it seats every restored lease as
+//! booking the whole host. A host's second lease is then refused as taken at the start and
+//! reported unseated (the table drops it), until the newer build is back. A newer build
+//! restarted with `--placement registry` still seats the leases it finds with their
+//! resources: the flag chooses who places new leases, not what the file says.
 //!
 //! A lease of a whole-node class (admission `Whole`) waits differently while pending: its
 //! expiry is the settings' prepare timeout, not its ttl, and when the provider is first

@@ -70,6 +70,20 @@ impl Host {
         self.leases.iter().any(|booked| booked.lease == *lease)
     }
 
+    /// Books `spec`'s lease here: the whole shape for a lease that books the whole host,
+    /// else the resources it asks for.
+    fn book(&mut self, spec: &StartSpec, whole: bool) {
+        let resources = match whole {
+            true => self.shape.resources().clone(),
+            false => spec.request().resources.clone(),
+        };
+        self.leases.push(Held {
+            lease: spec.lease(),
+            resources,
+            whole,
+        });
+    }
+
     /// Whether a lease asking `wanted` can be booked here now. A lease that books a
     /// whole host needs a host with no lease. A lease that shares needs a host with no
     /// whole-host lease, and room in every dimension (count of GPUs and their class
@@ -179,7 +193,8 @@ impl HostBook {
     /// 5. `NoCapacity` when a host fits but none has room and is eligible, else `NoFit`.
     ///
     /// A host that fits but is not eligible counts as a fit: the request could be served
-    /// by it later. This is [`start_by`] with the choice of the first candidate.
+    /// by it later. This stops at the first host that qualifies; [`start_by`] shows the
+    /// caller every one.
     ///
     /// [`start_by`]: HostBook::start_by
     pub fn start_where(
@@ -188,9 +203,48 @@ impl HostBook {
         gate: Option<RefusalCode>,
         eligible: &dyn Fn(&HostId, &Shape) -> bool,
     ) -> StartAck {
-        self.start_by(spec, gate, eligible, &|open| {
-            (!open.is_empty()).then_some(0)
-        })
+        if let Some(settled) = self.settled(spec, gate) {
+            return settled;
+        }
+        let wanted = spec.request();
+        let whole = spec.class().admission().books_whole_host();
+        let mut fits_somewhere = false;
+        for (id, host) in &mut self.hosts {
+            if !host
+                .shape
+                .satisfies(&wanted.resources, &wanted.capabilities)
+            {
+                continue;
+            }
+            fits_somewhere = true;
+            let room = host.has_room(&wanted.resources, whole);
+            let open = [room, eligible(id, &host.shape)].into_iter().all(|ok| ok);
+            if open {
+                host.book(spec, whole);
+                return StartAck::Started { host: id.clone() };
+            }
+        }
+        Self::declined(fits_somewhere)
+    }
+
+    /// The answer a start already has before any host is looked at: the lease was stopped,
+    /// it already holds a host, or the caller's gate refuses it.
+    fn settled(&self, spec: &StartSpec, gate: Option<RefusalCode>) -> Option<StartAck> {
+        if self.ended.contains(&spec.lease()) {
+            return Some(StartAck::Refused(RefusalCode::LeaseEnded));
+        }
+        if let Observed::Present { host } = self.read(&spec.lease()) {
+            return Some(StartAck::Started { host });
+        }
+        gate.map(StartAck::Refused)
+    }
+
+    /// The refusal of a start no host took: `NoCapacity` when a host fits, else `NoFit`.
+    fn declined(fits_somewhere: bool) -> StartAck {
+        match fits_somewhere {
+            true => StartAck::Refused(RefusalCode::NoCapacity),
+            false => StartAck::Refused(RefusalCode::NoFit),
+        }
     }
 
     /// Books `spec`'s lease as [`start_where`] does, except that the caller picks the host:
@@ -207,14 +261,8 @@ impl HostBook {
         eligible: &dyn Fn(&HostId, &Shape) -> bool,
         choose: &dyn Fn(&[Candidate]) -> Option<usize>,
     ) -> StartAck {
-        if self.ended.contains(&spec.lease()) {
-            return StartAck::Refused(RefusalCode::LeaseEnded);
-        }
-        if let Observed::Present { host } = self.read(&spec.lease()) {
-            return StartAck::Started { host };
-        }
-        if let Some(code) = gate {
-            return StartAck::Refused(code);
+        if let Some(settled) = self.settled(spec, gate) {
+            return settled;
         }
         let wanted = spec.request();
         let whole = spec.class().admission().books_whole_host();
@@ -245,25 +293,14 @@ impl HostBook {
         };
         let picked = chosen.and_then(|at| open.get(at));
         let Some(picked) = picked else {
-            return match fits_somewhere {
-                true => StartAck::Refused(RefusalCode::NoCapacity),
-                false => StartAck::Refused(RefusalCode::NoFit),
-            };
-        };
-        let resources = match whole {
-            true => picked.shape.resources().clone(),
-            false => wanted.resources.clone(),
+            return Self::declined(fits_somewhere);
         };
         let id = picked.host.clone();
-        let booked = Held {
-            lease: spec.lease(),
-            resources,
-            whole,
-        };
+        // The candidate was read from this map a moment ago, so the entry is there.
         let _ = self
             .hosts
             .entry(id.clone())
-            .and_modify(|host| host.leases.push(booked));
+            .and_modify(|host| host.book(spec, whole));
         StartAck::Started { host: id }
     }
 

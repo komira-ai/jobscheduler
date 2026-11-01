@@ -204,6 +204,10 @@ fn shape_view(shape: &Shape) -> ShapeView {
     }
 }
 
+fn lease_texts(leases: &[LeaseId]) -> Vec<String> {
+    leases.iter().map(ToString::to_string).collect()
+}
+
 fn at_most_one(leases: &[String]) -> bool {
     leases.len() <= 1
 }
@@ -240,7 +244,7 @@ impl HostEntry {
             lost: None,
             phase: None,
             lease: lease_text(host.leased_to),
-            leases: Vec::new(),
+            leases: lease_texts(&host.leases),
             shape: shape_view(&host.shape),
             memory: MemoryView::of(host.memory),
             capabilities: host.shape.capabilities().clone(),
@@ -265,7 +269,7 @@ impl HostEntry {
             lost: Some(host.state == HostState::Lost),
             phase: Some(String::from(host.phase)),
             lease: lease_text(host.lease),
-            leases: Vec::new(),
+            leases: lease_texts(&host.leases),
             shape: shape_view(&host.shape),
             memory: MemoryView::of(host.memory),
             capabilities: host.shape.capabilities().clone(),
