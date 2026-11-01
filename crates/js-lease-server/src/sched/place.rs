@@ -6,8 +6,18 @@
 //! submitted request. One placement round later the scheduler has named a worker, and that
 //! is the host. The scheduler is built for the one start and dropped, so the registry stays
 //! the only place that books: it checks the room and makes the booking, as it does without
-//! a placer, and the scheduler only ranks the hosts that have room, by its own score (the
-//! host the lease fits most tightly; equal hosts by a hash of the lease and the host).
+//! a placer, and the scheduler only picks among the hosts that have room.
+//!
+//! How it picks depends on the lease's class:
+//!
+//! - A class that books part of a host: by the scheduler's score, the host the lease fits
+//!   most tightly (so the most booked first), and equal hosts by a hash of the lease and the
+//!   host, so two leases can break the same tie differently.
+//! - A class that books the whole host: no score. The registry offers such a lease only
+//!   hosts that carry no lease, and the scheduler gives a worker that a request would own
+//!   whole no score and takes the first by worker name, which is the host id here
+//!   ([`map::worker`]). So the lease takes the first open host by id, whatever its number
+//!   or the order the hosts are fed in: the host a registry with no placer books.
 //!
 //! Cost: the scheduler is rebuilt for every start over all the open hosts and their leases,
 //! under the registry's lock, so a start is linear in hosts plus leases. A cache would have
@@ -271,6 +281,35 @@ mod tests {
             SchedPlacer::default().pick(&spec_of(&whole, 1), &open),
             Some(0)
         );
+    }
+
+    /// Catches: the module header's account of a whole-host lease going stale. A lease that
+    /// books the whole host is offered only empty hosts, and takes the first by host id
+    /// whatever the order they are offered in and whatever its number, where a lease that
+    /// shares is placed by the hash tie-break and so lands on more than one of them.
+    #[test]
+    fn a_whole_host_lease_takes_the_first_open_host_by_id() {
+        let id = ClassId::new("box").unwrap();
+        let whole = ResourceClass::new(id, Admission::BookAll, 0);
+        let orders = [["a", "b", "c"], ["c", "b", "a"], ["b", "c", "a"]];
+        let mut shared_hosts = std::collections::BTreeSet::new();
+        for names in orders {
+            let open: Vec<Candidate> = names.iter().map(|name| host(name, x86(), &[])).collect();
+            let first = names.iter().position(|name| *name == "a");
+            for sequence in 1..=16 {
+                let placer = SchedPlacer::default();
+                let picked = placer.pick(&spec_of(&whole, sequence), &open);
+                assert_eq!(picked, first, "order {names:?}, lease {sequence}");
+                let shared = placer.pick(&spec_of(&sharing(), sequence), &open).unwrap();
+                shared_hosts.insert(names[shared]);
+                let none = Fallbacks {
+                    unmappable: 0,
+                    declined: 0,
+                };
+                assert_eq!(placer.fallbacks(), none);
+            }
+        }
+        assert!(shared_hosts.len() > 1, "{shared_hosts:?}");
     }
 
     /// Catches: a host the scheduler cannot describe (no `arch`) failing the start or being
