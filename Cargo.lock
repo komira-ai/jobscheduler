@@ -1280,6 +1280,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-mdm-core"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "plist",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
+]
+
+[[package]]
 name = "js-oci"
 version = "0.1.0"
 dependencies = [
