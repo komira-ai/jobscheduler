@@ -102,7 +102,7 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         let on_staged = linked(env, &link, &record.update.staged)?;
         if !entered_begun {
             // One save: the stop is never marked without the session it is to be judged against.
-            mark(env, held, record, |record| {
+            mark(env, held, record, &|record| {
                 record.stop_begun = true;
                 record.pre_stop_session_ms = session;
             })?;
@@ -174,12 +174,13 @@ fn ours(record: &Record, now_ms: u64) -> bool {
     record.cordon.placed && !record.cordon.provisional && now_ms < record.cordon.expires_ms
 }
 
-/// Sets a mark in the record, durably, before the act it names.
+/// Sets a mark in the record, durably, before the act it names. (`set` is a trait object so
+/// that there is one copy of this function to cover.)
 fn mark(
     env: &Env<'_>,
     held: &Held,
     record: &mut Record,
-    set: impl FnOnce(&mut Record),
+    set: &dyn Fn(&mut Record),
 ) -> Result<(), Done> {
     let mut next = record.clone();
     set(&mut next);
@@ -379,7 +380,7 @@ fn move_link(env: &Env<'_>, held: &Held, record: &mut Record, link: &Path) -> Re
     // Read before the mark: on a first install the mark is the commit.
     let on_staged = linked(env, link, &staged)?;
     if !record.link_moved {
-        mark(env, held, record, |record| record.link_moved = true)?;
+        mark(env, held, record, &|record| record.link_moved = true)?;
     }
     if on_staged {
         return Ok(());
@@ -423,7 +424,7 @@ fn start_failure(env: &Env<'_>, unit: &str, detail: String, seen_crash: bool) ->
 fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Result<(), Done> {
     let unit = record.update.unit.clone();
     if !record.start_issued {
-        mark(env, held, record, |record| record.start_issued = true)?;
+        mark(env, held, record, &|record| record.start_issued = true)?;
     }
     let state = show(env, &unit, Reason::StartFailed)?;
     if matches!(life(&state), Life::Down | Life::Stopping) {
