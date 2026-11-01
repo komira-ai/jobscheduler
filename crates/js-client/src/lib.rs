@@ -6,6 +6,9 @@
 //!
 //! Failures name the flags `--server`, `--token-file` and `--ca-cert`, so a program that
 //! uses this crate takes its settings from flags of those names.
+//!
+//! [`create_new`] is how the programs that put a secret in a file do it: a new file,
+//! written whole beside its name and linked to it, never over a file that is there.
 
 mod client;
 mod error;

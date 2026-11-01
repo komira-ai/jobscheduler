@@ -9,6 +9,58 @@ The script is in the repository (`packaging/js-agent/crun_host_setup.sh`) and in
 `packaging/js-agent/js-agent-crun.service` and `tmpfiles-crun.conf` of the same release: it takes
 them by path and sha256, so what lands in `/etc` is the file you checked.
 
+## The short way: `js-agent enroll`
+
+`js-agent enroll` runs the setup script below and does the two other one-time steps of a new
+host, in one verb run as root on the host: it writes the instance file the host's join token is
+bound to, and puts the join token in place. It is a dry run until `--apply`, never replaces a
+file, and a second run on an enrolled host changes nothing, so it is safe to run again after an
+interruption.
+
+```text
+# On a machine with the client token, mint the host's one-time token and pipe it in. The token
+# goes through the pipe only: not onto a terminal, not onto a command line.
+js --server https://scheduler.example.org:7300 --token-file ~/.config/js/token \
+    lease join-token mint --provider farm --instance i-0abc \
+  | ssh root@host js-agent enroll --provider farm --instance i-0abc \
+      --server https://scheduler.example.org:7300 \
+      --unit /root/js-agent-crun.service --unit-sha256 <sha256> \
+      --tmpfiles /root/tmpfiles-crun.conf --tmpfiles-sha256 <sha256> \
+      --apply
+```
+
+Leave `--apply` out first: the setup script is run as its own dry run, the files are only
+looked at, and the output says what an apply would do. With it, `enroll` does this, in order,
+after every check has passed (a refusal changes nothing):
+
+1. runs `/usr/share/js-agent/crun_host_setup.sh --apply` with the setup flags it was given
+   (`--server`, `--unit`, `--unit-sha256`, `--tmpfiles`, `--tmpfiles-sha256`, `--job-user`,
+   `--subid-start`, `--scratch-mount-unit`, `--dependents-limit`, `--skip-scratch-quota`; `--pool`
+   is the provider unless named). The script's exit 0 and 3 (nothing to do) go on; its exit 2 is
+   a refusal of `enroll` (exit 2) and its exit 1 a failure (exit 1, and the script's manifest,
+   below, says what it did). A script that is missing, or that is not root's or is writable by
+   others, is not run.
+2. writes `/etc/js-agent/instance`: `PROVIDER:INSTANCE`, root, mode 0644.
+3. writes `/etc/js-agent/token`: the token from standard input, root, mode 0600. Only its
+   sha256 is printed; compare it with `js`'s own line (`join token sha256 ...`) and the lease
+   server's log.
+
+An instance file or a token file that is already there is left alone if it holds what would be
+written (the token is compared by sha256) and refused otherwise (`present but differs; remove it
+by hand and run again`): nothing is ever overwritten. Run it again with the same token on an
+enrolled host to see `status=already-enrolled`. The token is one-time, so a host that has
+already joined needs a new token and its old token file removed by hand.
+
+`enroll` does not enable or start the unit, and does not add `--instance-file` to it: the
+agent names its instance in its hello only when it is started with
+`--instance-file /etc/js-agent/instance`, which a join token minted for an instance requires.
+Add the flag to `ExecStart` with `systemctl edit js-agent-crun` before the first start.
+
+Exit statuses: 0 enrolled, nothing to do, or a plan; 1 a step failed after the checks; 2 refused
+with nothing changed (not root, a terminal on standard input, a token that is not 64 lower-case
+hex digits, a file that is there and differs, the script's refusal). The full reference is the
+module documentation of `js_agent::enroll`.
+
 ## What it sets up
 
 | step | what | when it is already so |
@@ -114,6 +166,12 @@ by hand. Undoing `mount-options` means putting the old `Options=` back and mount
 again.
 
 ## How it is tested
+
+`crates/js-agent/tests/agent/enroll` runs `js-agent enroll` over real files in a directory of the
+test and a stand-in for the setup script (a few lines that record how they were called and exit
+with a chosen status): the order, the modes, the files that are already there, every exit status
+of the script, and that the token is in no output, no `Debug` text and no argument. The script
+itself:
 
 `crates/xtask/tests/crun_host_setup.rs` runs the script against a fake root, with a `PATH` of
 recording stand-ins (`crates/xtask/src/bin/host-shim.rs`) for `systemctl`, `mount`, `umount`,

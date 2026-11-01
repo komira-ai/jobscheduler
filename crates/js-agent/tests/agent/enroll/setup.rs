@@ -132,3 +132,26 @@ fn a_script_that_is_not_fit_to_run_as_root_is_refused() {
     assert!(ran.err.contains("not a regular file"), "{ran:?}");
     assert_eq!(rig.names(), Vec::<String>::new());
 }
+
+/// Asserts that the script runs as a root process should: with an empty environment but a
+/// fixed `PATH` (and the shell's own `PWD`, `SHLVL`, `_`), not the caller's. It catches a
+/// `PATH` or a `LD_PRELOAD` of the operator's session reaching a root script.
+#[test]
+fn the_script_runs_with_a_clean_environment() {
+    let rig = Rig::new("enroll_env");
+    rig.script_with("env > \"$0.env\"\nexit 0");
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(0), "{ran:?}");
+    let text = fs::read_to_string(format!("{}.env", rig.host.setup_script.display())).unwrap();
+    let names: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, _)| name)
+        .collect();
+    let own = ["PATH", "LC_ALL", "PWD", "SHLVL", "_", "OLDPWD"];
+    assert!(names.iter().all(|name| own.contains(name)), "{names:?}");
+    assert!(
+        text.contains("PATH=/usr/sbin:/usr/bin:/sbin:/bin\n"),
+        "{text}"
+    );
+}

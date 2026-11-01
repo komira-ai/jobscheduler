@@ -55,6 +55,14 @@ impl Render {
         }
     }
 
+    /// A join token that was minted: its sha256 and the server's expiry, never the token.
+    pub(crate) fn minted(&self, sha256: &str, expires_at_ms: u64) -> String {
+        match self.json {
+            true => line(&json!({ "sha256": sha256, "expires_at_ms": expires_at_ms })),
+            false => format!("join token sha256 {sha256} expires {expires_at_ms}\n"),
+        }
+    }
+
     /// The server's list: its own JSON, or a line per lease.
     pub(crate) fn listing(&self, body: &Value, entries: &[Entry]) -> String {
         let lines = entries.iter().map(|entry| {

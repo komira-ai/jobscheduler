@@ -70,6 +70,12 @@ impl Entry {
     }
 }
 
+/// A join token the server minted. It has no `Debug`.
+pub(crate) struct Minted {
+    pub(crate) token: String,
+    pub(crate) expires_at_ms: u64,
+}
+
 /// The routes of the lease server as methods of the [`Client`].
 pub(crate) trait Routes {
     /// `POST /v1/leases`: 201 held, 202 pending, anything else a failure. The request is
@@ -101,6 +107,11 @@ pub(crate) trait Routes {
     /// `POST /v1/leases/{id}/runs`: 202 with the run's id and state, anything else a
     /// failure.
     fn queue_run(&self, id: &str, body: &Value) -> Result<Queued, Failure>;
+
+    /// `POST /v1/agent/join-tokens`: 201 with the token and its expiry, anything else a
+    /// failure that holds the status and the error code and nothing more of the answer. The
+    /// request is sent once: a token minted and lost is dropped by the server at its expiry.
+    fn mint_join_token(&self, body: &Value) -> Result<Minted, Failure>;
 }
 
 /// The answer to a queued run.
@@ -167,6 +178,20 @@ impl Routes for Client {
         Ok(found.map_or(Standing::Gone, Entry::standing))
     }
 
+    fn mint_join_token(&self, body: &Value) -> Result<Minted, Failure> {
+        let reply = self.post("/v1/agent/join-tokens", body)?;
+        match reply.status {
+            201 => minted(&reply.body),
+            status => Err(Failure::Mint {
+                status,
+                code: printable(reply.body["error"].as_str().unwrap_or("none"))
+                    .chars()
+                    .take(CODE_LIMIT)
+                    .collect(),
+            }),
+        }
+    }
+
     fn queue_run(&self, id: &str, body: &Value) -> Result<Queued, Failure> {
         let reply = self.post(&format!("/v1/leases/{id}/runs"), body)?;
         match reply.status {
@@ -177,6 +202,29 @@ impl Routes for Client {
             _ => Err(refusal(&reply)),
         }
     }
+}
+
+/// The most of a server's error code that is printed.
+const CODE_LIMIT: usize = 64;
+
+/// The token and expiry of a mint's 201. The token is what the server mints, 64 lower-case
+/// hex digits; the failure for another form names the field and never holds the value.
+fn minted(body: &Value) -> Result<Minted, Failure> {
+    let token = text(body, "token")?;
+    let expires_at_ms = number(body, "expires_at_ms")?;
+    let usable = [
+        token.len() == 64,
+        token
+            .bytes()
+            .all(|byte| b"0123456789abcdef".contains(&byte)),
+    ];
+    if !usable.into_iter().all(|ok| ok) {
+        return Err(malformed("token"));
+    }
+    Ok(Minted {
+        token,
+        expires_at_ms,
+    })
 }
 
 /// The leases of a list body.
