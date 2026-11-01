@@ -396,10 +396,78 @@ fn the_package_is_built_checked_summed_and_checked_again_after_signing() {
     let sign = job_text(&text, "sign");
     assert_eq!(
         sign.matches("pkg check-macos").count(),
-        2,
-        "before and after signing"
+        1,
+        "once, after signing and notarizing"
     );
-    assert!(sign.contains("shasum -a 256 --check"));
+    assert!(sign.contains("/usr/bin/shasum -a 256 --check"));
+}
+
+/// The lines of the steps of the sign job before its first signing step, as one text.
+fn before_signing() -> String {
+    let text = read(WORKFLOW);
+    let sign = jobs(&text)["sign"].clone();
+    steps(&sign)
+        .into_iter()
+        .take_while(|(name, _)| !name.starts_with("Sign"))
+        .flat_map(|(_, lines)| lines)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn nothing_built_from_the_repository_runs_in_the_sign_job_before_the_secret_steps() {
+    let before = before_signing();
+    assert!(before.contains("Check the signing secrets"), "{before}");
+    for word in ["tools/xtask", "check-macos", "chmod", "./"] {
+        assert!(!before.contains(word), "a step before signing has {word:?}");
+    }
+    // The only program run from the downloaded files is shasum, by absolute path.
+    for line in before.lines().filter(|l| l.contains("shasum")) {
+        assert!(line.contains("/usr/bin/shasum"), "{line}");
+    }
+    assert!(before.contains("/usr/bin/shasum -a 256 --check SHA256SUMS"));
+}
+
+#[test]
+fn the_checker_runs_in_the_sign_job_only_after_signing_and_notarizing() {
+    let text = read(WORKFLOW);
+    let sign = jobs(&text)["sign"].clone();
+    let all = steps(&sign);
+    let at = |prefix: &str| all.iter().position(|(n, _)| n.starts_with(prefix)).unwrap();
+    let notarize = at("Notarize");
+    let checks: Vec<usize> = all
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, lines))| lines.iter().any(|l| l.contains("check-macos")))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(checks.len(), 1, "{checks:?}");
+    assert!(checks[0] > notarize, "{checks:?} {notarize}");
+}
+
+#[test]
+fn the_sign_job_calls_the_system_tools_by_absolute_path() {
+    let text = read(WORKFLOW);
+    let sign = jobs(&text)["sign"].clone();
+    let mut calls = 0;
+    for line in sign.iter().filter(|l| !l.trim_start().starts_with("name:")) {
+        for token in line.split(|c: char| c.is_whitespace() || "();|&\"'".contains(c)) {
+            if ["security", "productsign", "xcrun", "shasum"].contains(&token) {
+                panic!("{token} is called by name: {line}");
+            }
+            if [
+                "/usr/bin/security",
+                "/usr/bin/productsign",
+                "/usr/bin/xcrun",
+                "/usr/bin/shasum",
+            ]
+            .contains(&token)
+            {
+                calls += 1;
+            }
+        }
+    }
+    assert!(calls >= 10, "{calls}");
 }
 
 #[test]
