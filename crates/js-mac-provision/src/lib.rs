@@ -9,6 +9,7 @@
 //! - [`render()`]: the anchor's text, a pure function of the policy.
 //! - [`pfctl`]: `pfctl` behind a trait, with the real runner.
 //! - [`provision`]: install, check and remove over a [`pfctl::Pfctl`].
+//! - [`counters`]: the per-rule packet counters of the anchor, which show pf blocked a packet.
 //! - [`launchd`]: the property list of the LaunchDaemon that keeps the anchor loaded.
 //! - [`daemon`]: the property lists of the js-agent package's two LaunchDaemons.
 //! - [`postinstall`]: what the package's postinstall does, over a `launchctl` trait.
@@ -19,6 +20,7 @@
 //! `pfctl` needs a Mac and root.
 
 pub mod cli;
+pub mod counters;
 pub mod daemon;
 pub mod launchd;
 pub mod pfctl;
