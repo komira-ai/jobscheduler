@@ -146,6 +146,9 @@ pub struct Rig {
     pub lowered_asked: usize,
     /// The prediction the rig answers `predicted` with for each action it has one for.
     pub predictions: BTreeMap<WorkKey, Prediction>,
+    /// The prediction the rig answers `predicted` with for each parcel it has one for: the
+    /// parcel the operation was queued with, as the adapter learns it.
+    pub parcel_predictions: BTreeMap<Vec<u8>, Prediction>,
     /// The operations `predicted` was asked about, in order.
     pub predicted_for: Vec<OperationId>,
 }
@@ -364,11 +367,15 @@ impl Adapter for Rig {
     fn predicted(
         &mut self,
         operation: OperationId,
+        parcel: Option<&[u8]>,
         request: &Request,
         _: Option<u64>,
     ) -> Option<Prediction> {
         self.predicted_for.push(operation);
-        self.predictions.get(&request.key).copied()
+        let by_parcel = parcel.and_then(|parcel| self.parcel_predictions.get(parcel));
+        by_parcel
+            .or_else(|| self.predictions.get(&request.key))
+            .copied()
     }
 
     fn waiting_among(&self, callers: &[WaiterId]) -> Vec<WaiterId> {

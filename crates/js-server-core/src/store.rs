@@ -326,7 +326,7 @@ impl Engine {
         if op.lease.is_some() {
             return None;
         }
-        a.predicted(op.operation, &op.request, op.size_key)
+        a.predicted(op.operation, op.parcel.as_deref(), &op.request, op.size_key)
     }
 
     /// Runs `write` on the state store, if the core has one, and says how it ended; a
