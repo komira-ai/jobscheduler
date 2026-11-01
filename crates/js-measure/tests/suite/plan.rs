@@ -14,8 +14,8 @@ fn arms_of(slots: &[Slot]) -> Vec<usize> {
 
 /// Asserts that the same plan and seed give the same schedule, that the schedule is the
 /// one pinned for a seed, so it is the same on every machine, and that another seed gives
-/// another order. The pinned orders follow from the generator, pinned to the published
-/// SplitMix64 vector by `the_generator_is_splitmix64`, plus a standard Fisher-Yates
+/// another order. The pinned orders follow from the generator, pinned to the
+/// SplitMix64 reference values by `the_generator_is_splitmix64`, plus a standard Fisher-Yates
 /// shuffle from the last index down to 1.
 #[test]
 fn the_order_is_reproducible_from_the_seed() {
@@ -136,21 +136,22 @@ fn every_setting_and_arm_pair_is_a_cell_run_n_times() {
     assert!(counts.values().all(|n| *n == 2));
 }
 
-/// Asserts that the generator is SplitMix64: its first draws for seed 1234567 are the
-/// published test vector: the five numbers of the `reference` test of the rand_xoshiro
-/// crate's `SplitMix64` (seed 1234567), an implementation of Vigna's `splitmix64.c`
-/// (https://prng.di.unimi.it/splitmix64.c). It catches a changed constant or shift that
+/// Asserts that the generator is SplitMix64: its first five draws for seed
+/// 1477776061723855037 are the values in the `reference` test of `SplitMix64` in
+/// rand_xoshiro (rust-random/rngs, `rand_xoshiro/src/splitmix64.rs`), whose comment says
+/// they were produced with the reference implementation at
+/// http://xoshiro.di.unimi.it/splitmix64.c. It catches a changed constant or shift that
 /// would still give a reproducible, but different, order.
 #[test]
 fn the_generator_is_splitmix64() {
     assert_eq!(
-        draws(1_234_567, 5),
+        draws(1_477_776_061_723_855_037, 5),
         vec![
-            6_457_827_717_110_365_317,
-            3_203_168_211_198_807_973,
-            9_817_491_932_198_370_423,
-            4_593_380_528_125_082_431,
-            16_408_922_859_458_223_821,
+            1_985_237_415_132_408_290,
+            2_979_275_885_539_914_483,
+            13_511_426_838_097_143_398,
+            8_488_337_342_461_049_707,
+            15_141_737_807_933_549_159,
         ]
     );
 }

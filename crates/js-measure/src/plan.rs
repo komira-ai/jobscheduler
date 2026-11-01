@@ -92,7 +92,7 @@ impl Rng {
 }
 
 /// The first `count` raw draws of the generator for `seed`, so that a test can pin them to
-/// the published SplitMix64 vector (seed 1234567, five draws).
+/// the SplitMix64 reference values of rand_xoshiro's tests (see `the_generator_is_splitmix64`).
 #[doc(hidden)]
 #[must_use]
 pub fn draws(seed: u64, count: usize) -> Vec<u64> {
