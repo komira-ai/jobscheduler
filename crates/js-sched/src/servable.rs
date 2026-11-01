@@ -25,7 +25,7 @@ use js_types::sched::LeaseId;
 use js_types::sched::usage::LeaseCost;
 
 use crate::admission::{
-    Admission, Blocked, Left, Profile, Ratio, Refusal, binding, clamped, new_charge, pick,
+    Admission, Blocked, Left, Profile, Ratio, Refusal, binding, clamped, new_charge, start_time,
 };
 use crate::cordon::Cordons;
 use crate::input::Request;
@@ -481,21 +481,22 @@ impl Servable {
 
     /// The worker a blocked head of the queue holds: of the workers `request` could run
     /// on but for the load, not in `reserved` or skipped for `avoid` and not owned whole
-    /// by the request, the one with the smallest binding ratio, keeping `kept` while its
-    /// ratio is within a tenth of the best ([`pick`]). `None` when no worker could take
-    /// it at all.
+    /// by the request, the one it can start on first ([`start_time`], with the lease ends
+    /// in `ends`), a worker with no start time after every worker with one; among equals
+    /// the smallest binding ratio, then the first by name. Nothing is kept from the last
+    /// round. `None` when no worker could take it at all.
     pub(crate) fn hold_for_head(
         &mut self,
         workers: &BTreeMap<WorkerId, Worker>,
         adm: &Admission,
         attempt: &Attempt<'_>,
-        kept: Option<&WorkerId>,
+        ends: &BTreeMap<LeaseId, Option<u64>>,
     ) -> Option<WorkerId> {
         let request = attempt.request;
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, attempt.avoid);
         let now = self.now;
-        let ratios: Vec<(&WorkerId, Ratio)> = self.memo[at]
+        let held: Vec<(&WorkerId, (Option<u64>, Ratio))> = self.memo[at]
             .1
             .iter()
             .map(|&i| &self.live[i])
@@ -525,10 +526,26 @@ impl Servable {
                     (left.cpu.saturating_add(new_cpu), w.capacity.cpu_millis),
                     (left.mem.saturating_add(new_mem), w.capacity.memory_bytes),
                 );
-                (name, ratio)
+                let charges = w.load_state.charges(&left);
+                let limits = (
+                    adm.cfg.cpu_limit(&w.capacity),
+                    adm.cfg.mem_limit(&w.capacity),
+                );
+                let start = start_time(
+                    &left,
+                    &charges,
+                    ends,
+                    limits,
+                    (new_cpu, new_mem),
+                    now.as_millis(),
+                );
+                (name, (start, ratio))
             })
             .collect();
-        pick(&ratios, kept).cloned()
+        // The first of the least: `held` is in name order.
+        held.into_iter()
+            .min_by_key(|(_, (start, ratio))| (start.is_none(), *start, *ratio))
+            .map(|(name, _)| name.clone())
     }
 
     /// The pool `request` is run from: the platform and kind it needs, shared by every

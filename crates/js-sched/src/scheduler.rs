@@ -779,8 +779,9 @@ impl Scheduler {
                     fit_minutes,
                 };
                 let kept = self.head_holds.get(&id);
+                let ends = self.lease_ends(&placed);
                 if let Some(name) =
-                    servable.hold_for_head(&self.workers, &self.admission, &attempt, kept)
+                    servable.hold_for_head(&self.workers, &self.admission, &attempt, &ends)
                 {
                     self.admission.counters.reservations += u64::from(kept != Some(&name));
                     reserved.insert(name.clone());

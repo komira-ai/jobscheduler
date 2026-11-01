@@ -16,13 +16,13 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_types::sched::{FarmTime, LeaseKind, NodePhase, OperationId, WorkerId};
+use js_types::sched::{FarmTime, LeaseId, LeaseKind, NodePhase, OperationId, WorkerId};
 use js_whole::WholeNodeConfig;
 use js_whole::caps::{
     Blocked, Capability, Counts, Limits, Mark, OrdinaryRequest, capable_hosts, ceiling,
     ceiling_excess, last_capable_blocks, may_reserve,
 };
-use js_whole::cost::{DrainCost, HostLoad, drain_cost, reserve_deadline};
+use js_whole::cost::{DrainCost, HostLoad, drain_cost, reserve_deadline, tail};
 
 use super::{Scheduler, Worker};
 use crate::servable::{Placed, Servable, serves};
@@ -286,35 +286,19 @@ impl Scheduler {
     /// The registered workers by drain cost, cheapest first: by the least tail, whether or
     /// not whole-node settings are on. `placed` are this round's placements, not yet held.
     pub(super) fn drain_order(&self, placed: &[(OperationId, Placed)]) -> Vec<DrainCost> {
-        let end_of = |operation: OperationId, start: u64| {
-            self.max_walls.get(&operation).map_or(u64::MAX, |wall| {
-                start.saturating_add(u64::try_from(wall.as_millis()).unwrap_or(u64::MAX))
-            })
-        };
-        // The estimated end of a lease: its start plus the P90 of the wall minutes of its
-        // key, raw (the tail cuts it to the bound); unknown when the key has no P90.
-        let estimate_of = |operation: OperationId, start: u64| {
-            let key = &self.ops[&operation].request.key;
-            let minutes = self.admission.wall_minutes_p90(key)?;
-            Some(start.saturating_add(u64::from(minutes).saturating_mul(60_000)))
-        };
         // Every held lease belongs to an operation that holds it. Each entry is the end
         // bound of a lease and its estimated end.
         let mut ends: BTreeMap<&WorkerId, Vec<(u64, Option<u64>)>> = BTreeMap::new();
         for held in self.held.values() {
             let start = held.started_at.unwrap_or(held.granted_at).as_millis();
-            let end = (
-                end_of(held.operation, start),
-                estimate_of(held.operation, start),
-            );
+            let end = self.end_times(held.operation, start);
             let holding = self.ops[&held.operation].state.holding();
             holding
                 .into_iter()
                 .for_each(|(_, worker)| ends.entry(worker).or_default().push(end));
         }
         for (operation, placed) in placed {
-            let start = self.now.as_millis();
-            let end = (end_of(*operation, start), estimate_of(*operation, start));
+            let end = self.end_times(*operation, self.now.as_millis());
             ends.entry(&placed.worker).or_default().push(end);
         }
         let loads: Vec<HostLoad> = self
@@ -332,6 +316,48 @@ impl Scheduler {
             })
             .collect();
         drain_cost(&loads, self.now.as_millis())
+    }
+
+    /// The end bound (start plus max wall time, the latest time there is for a lease with
+    /// none) and the estimated end (start plus the P90 of the wall minutes of its key, raw;
+    /// unknown when the key has none) of a lease of `operation` started at `start`.
+    fn end_times(&self, operation: OperationId, start: u64) -> (u64, Option<u64>) {
+        let bound = self.max_walls.get(&operation).map_or(u64::MAX, |wall| {
+            start.saturating_add(u64::try_from(wall.as_millis()).unwrap_or(u64::MAX))
+        });
+        let key = &self.ops[&operation].request.key;
+        let estimate = self
+            .admission
+            .wall_minutes_p90(key)
+            .map(|minutes| start.saturating_add(u64::from(minutes).saturating_mul(60_000)));
+        (bound, estimate)
+    }
+
+    /// The end of each lease held or placed this round, as farm milliseconds: its estimate
+    /// cut to its bound, else its bound; `None` for a lease with neither. A lease placed
+    /// this round starts now.
+    pub(super) fn lease_ends(
+        &self,
+        placed: &[(OperationId, Placed)],
+    ) -> BTreeMap<LeaseId, Option<u64>> {
+        let end = |(bound, estimate): (u64, Option<u64>)| {
+            tail(&HostLoad {
+                id: String::new(),
+                leases: 1,
+                end_bounds: vec![bound],
+                est_ends: vec![estimate],
+            })
+        };
+        let held = self.held.iter().map(|(lease, held)| {
+            let start = held.started_at.unwrap_or(held.granted_at).as_millis();
+            (*lease, end(self.end_times(held.operation, start)))
+        });
+        let now = self.now.as_millis();
+        let this_round = (0u64..).zip(placed).map(|(i, (operation, _))| {
+            let lease = LeaseId::new(self.term, self.next_seq + i);
+            (lease, end(self.end_times(*operation, now)))
+        });
+        held.chain(this_round).collect()
     }
 }
 
