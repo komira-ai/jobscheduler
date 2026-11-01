@@ -74,7 +74,7 @@ pub fn prefixed(reported: &BTreeMap<String, Option<f64>>) -> BTreeMap<String, Op
 pub fn merge(jobs: &[BTreeMap<String, Option<f64>>]) -> BTreeMap<String, Option<f64>> {
     let keys: BTreeSet<&String> = jobs.iter().flat_map(BTreeMap::keys).collect();
     keys.into_iter()
-        .map(|key| {
+        .filter_map(|key| {
             let numbers: Option<Vec<f64>> = jobs
                 .iter()
                 .map(|job| job.get(key).copied().flatten())
