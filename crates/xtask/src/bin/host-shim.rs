@@ -11,8 +11,10 @@
 //! - `answers`: one rule per line, tab separated: `<name>`, `<arguments>`, `<exit code>`,
 //!   `<stdout>`, then any number of effects. The arguments match exactly, or by prefix when
 //!   they end in `*`. The first matching rule answers. `<stdout>` is text (`\n`, `\t` and `\\`
-//!   are escapes), or `@<path>`: the contents of that file, nothing when the file is missing.
-//!   An effect is `append=<path>=<text>`, `write=<path>=<text>` (the file is made, with its
+//!   are escapes), or `@<path>`: the contents of that file, nothing when the file is missing,
+//!   or `!<path>`: the real program at that path is run with the call's arguments and its
+//!   exit status is the answer (used for the file tools whose answer is a real hash). The
+//!   effects are done before the answer. An effect is `append=<path>=<text>`, `write=<path>=<text>` (the file is made, with its
 //!   directories; any kind but `append` writes) or `copy-self=<path>` (a copy of the shim, executable, so a program the script
 //!   runs by an absolute path is a shim as well).
 //!
@@ -91,7 +93,8 @@ fn main() -> ExitCode {
         .expect("a name")
         .to_string_lossy()
         .into_owned();
-    let argv = args.collect::<Vec<_>>().join(" ");
+    let words: Vec<String> = args.collect();
+    let argv = words.join(" ");
     // A test may limit the size of the files the script writes (to make its writes fail); the
     // stand-ins' own logs are not the script's.
     let _ = rustix::process::setrlimit(
@@ -117,14 +120,21 @@ fn main() -> ExitCode {
         return ExitCode::from(UNCONFIGURED);
     };
     append(&dir.join("calls"), &format!("{name} {argv}\n"));
+    let me = std::env::current_exe().expect("the shim's own path");
+    for spec in &rule[4..] {
+        effect(&me, spec);
+    }
+    if let Some(program) = rule[3].strip_prefix('!') {
+        let status = std::process::Command::new(program)
+            .args(&words)
+            .status()
+            .expect("run the real program");
+        return ExitCode::from(u8::try_from(status.code().unwrap_or(1)).unwrap_or(1));
+    }
     let stdout = match rule[3].strip_prefix('@') {
         Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
         None => unescape(rule[3]),
     };
     print!("{stdout}");
-    let me = std::env::current_exe().expect("the shim's own path");
-    for spec in &rule[4..] {
-        effect(&me, spec);
-    }
     ExitCode::from(rule[2].parse::<u8>().expect("an exit code"))
 }
