@@ -90,7 +90,7 @@ ExecStartPre=+systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf
 # containers detached under the engine's own cgroup, so KillMode=process would save none of
 # them and would orphan the agent's readiness and GPU hook processes.
 TimeoutStopSec=120
-ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --container-bin /usr/bin/docker --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
+ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --runtime docker --container-bin /usr/bin/docker --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
 Restart=always
 RestartSec=30
 

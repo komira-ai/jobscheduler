@@ -150,6 +150,7 @@ pub fn heartbeat(host: &str, epoch: u64) -> Heartbeat {
         exclusive_ready: None,
         exclusive_refused: None,
         load: None,
+        disk_gib: None,
     }
 }
 

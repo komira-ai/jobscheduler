@@ -141,7 +141,7 @@ fn an_unusable_default_files_root_is_a_warning() {
     };
     let cli = Cli::try_parse_from(&without).unwrap();
     let blocker = dir.write("blocker", "a file", 0o600);
-    let bad = Local::from_cli_with_default_files_root(&cli, &blocker.join("files")).unwrap();
+    let bad = Local::from_cli_with_default_files_root(&cli, &blocker.join("files"), 0).unwrap();
     assert!(bad.files.is_none());
     let said = bad.files_warning.unwrap();
     assert!(
@@ -150,13 +150,14 @@ fn an_unusable_default_files_root_is_a_warning() {
     );
     // A default that is the state root is never swept over it: run files go off, with a
     // warning, and the agent still starts (a default must not break an unrelated setup).
-    let clash = Local::from_cli_with_default_files_root(&cli, &dir.path("state")).unwrap();
+    let clash = Local::from_cli_with_default_files_root(&cli, &dir.path("state"), 0).unwrap();
     assert!(clash.files.is_none());
     let said = clash.files_warning.unwrap();
     assert!(
         said.contains("is, holds or lies in the --state-root"),
         "{said}"
     );
-    let good = Local::from_cli_with_default_files_root(&cli, &dir.path("default-files")).unwrap();
+    let good =
+        Local::from_cli_with_default_files_root(&cli, &dir.path("default-files"), 0).unwrap();
     assert!(good.files.is_some() && good.files_warning.is_none());
 }

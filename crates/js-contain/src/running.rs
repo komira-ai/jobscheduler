@@ -1,8 +1,10 @@
 //! A `crun run` the driver started: [`Running`].
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::oci::RunEnd;
+use crate::oci::logs::Capture;
+use crate::oci::{LogTail, RunEnd};
 
 /// A `crun run` driven by the `runc` crate's async client in a thread of its own, on a
 /// one-thread runtime that thread owns. It ends when the container does, and kills
@@ -21,6 +23,8 @@ pub struct Running {
     /// panics.
     ended: tokio::sync::watch::Receiver<Option<RunEnd>>,
     abort: Option<tokio::sync::oneshot::Sender<()>>,
+    /// What the container wrote, for a run that has its output drained.
+    capture: Option<Arc<Capture>>,
 }
 
 impl Running {
@@ -63,7 +67,22 @@ impl Running {
             thread,
             ended,
             abort: Some(abort_tx),
+            capture: None,
         })
+    }
+
+    /// This run, with the output `capture` reads from the container's pipes.
+    pub(crate) fn with_capture(mut self, capture: Arc<Capture>) -> Self {
+        self.capture = Some(capture);
+        self
+    }
+
+    /// What the container has written so far, the last bytes of each stream apart (copied
+    /// out; see [`crate::oci::LogLimits`] for the bounds). Complete once [`Running::wait`]
+    /// returned, up to the output of a process the job left behind. Empty for a run that
+    /// has no output drained.
+    pub fn tail(&self) -> LogTail {
+        self.capture.as_ref().map(|c| c.tail()).unwrap_or_default()
     }
 
     /// Waits until the run has ended. Cancel-safe; may be called again.
@@ -78,12 +97,15 @@ impl Running {
         self.wait().await;
     }
 
+    /// How the run ended, or `None` while it has not (without waiting).
+    pub fn try_end(&self) -> Option<RunEnd> {
+        self.ended.borrow().clone()
+    }
+
     /// How the run ended, once [`Running::wait`] returned. A run that did not say (its
     /// thread panicked) is a failure.
     pub fn run_end(&self) -> RunEnd {
-        self.ended
-            .borrow()
-            .clone()
+        self.try_end()
             .unwrap_or_else(|| RunEnd::Failed("crun run did not say how it ended".to_owned()))
     }
 
@@ -137,6 +159,20 @@ mod tests {
     const SOON: Duration = Duration::from_secs(5);
     const PAUSE: Duration = Duration::from_millis(1);
 
+    /// Catches a run without drained output reporting one, and a capture not handed
+    /// through: no output is an empty tail, a capture's bytes are the run's tail.
+    #[tokio::test]
+    async fn a_run_reports_the_tail_of_its_capture_if_it_has_one() {
+        let dir = crate::unit_dir("running-tail");
+        let mut run = Running::spawn("tail".to_owned(), async { RunEnd::Exited(0) }).expect("run");
+        run.wait().await;
+        assert_eq!(run.tail(), LogTail::default());
+        let capture =
+            Arc::new(Capture::create(&dir, crate::oci::LogLimits::default()).expect("files"));
+        let run = run.with_capture(capture);
+        assert_eq!(run.tail(), LogTail::default());
+    }
+
     /// Catches a run whose answer is lost or wrong: the thread's own failures (no
     /// runtime, no thread), a panic in the work (no answer), an abort (twice is the same
     /// as once), and a normal end, each ending the run with what it was instead of a
@@ -187,6 +223,23 @@ mod tests {
             Running::start(build("done"), one_thread_runtime, Box::pin(done)).expect("started");
         run.wait().await;
         assert_eq!(run.run_end(), RunEnd::Exited(3));
+        run.reap(SOON, PAUSE).expect("gone");
+    }
+
+    /// Catches a run reported as ended before it is, and its end hidden after: no answer
+    /// while the work is pending, the end once it is done.
+    #[tokio::test]
+    async fn a_run_has_no_end_until_it_has_one() {
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let work = async move {
+            let _ = finished.await;
+            RunEnd::Exited(4)
+        };
+        let mut run = Running::spawn("pending".to_owned(), work).expect("run");
+        assert_eq!(run.try_end(), None);
+        finish.send(()).expect("finish");
+        run.wait().await;
+        assert_eq!(run.try_end(), Some(RunEnd::Exited(4)));
         run.reap(SOON, PAUSE).expect("gone");
     }
 

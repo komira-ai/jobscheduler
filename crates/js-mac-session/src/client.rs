@@ -7,7 +7,7 @@ use std::os::fd::{AsFd as _, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-use crate::proto::{self, Call, Reply, Request, Session};
+use crate::proto::{self, Call, Limits, Reply, Request, Session};
 
 /// Why a call did not succeed.
 #[derive(Debug)]
@@ -121,11 +121,30 @@ impl Client {
         fds: [BorrowedFd<'_>; 4],
         session: Session,
     ) -> Result<Running, ClientError> {
+        self.run_limited(lease, argv, env, fds, session, None)
+    }
+
+    /// [`Self::run_in`] with `limits` for the helper to set on the process before it
+    /// starts it. The helper refuses limits in the GUI session, and values that are zero or
+    /// above their caps ([`Limits::new`] checks the same).
+    ///
+    /// # Errors
+    /// The call failed or was refused.
+    pub fn run_limited(
+        &self,
+        lease: &str,
+        argv: &[String],
+        env: &[(String, String)],
+        fds: [BorrowedFd<'_>; 4],
+        session: Session,
+        limits: Option<Limits>,
+    ) -> Result<Running, ClientError> {
         let request = Request::Run {
             lease: lease.to_owned(),
             argv: argv.to_vec(),
             env: env.to_vec(),
             session,
+            limits,
         };
         match self.call(&request, &fds)? {
             (stream, Reply::Started { pid }) => Ok(Running { stream, pid }),

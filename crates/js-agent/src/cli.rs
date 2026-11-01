@@ -2,13 +2,29 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+/// What `--version` prints after the version: the runtimes this build can run jobs with, on a
+/// line a script can read (`js-agent --version | grep -x 'runtimes: docker crun'`). A build
+/// where `--runtime crun` is wired says `docker crun`; a Mac build says `docker native` (it
+/// runs native jobs through the root helper, and has no crun); others say `docker`.
+#[cfg(target_os = "linux")]
+pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker crun");
+
+/// See the Linux form.
+#[cfg(target_os = "macos")]
+pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker native");
+
+/// See the Linux form.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker");
 
 /// The flags of `js-agent`.
 #[derive(Debug, Parser)]
 #[command(
     name = "js-agent",
     version,
+    long_version = LONG_VERSION,
     about = "Registers this machine with a lease server and keeps it registered"
 )]
 pub struct Cli {
@@ -45,7 +61,10 @@ pub struct Cli {
     #[arg(long, value_name = "NAME")]
     pub pool: String,
     /// The id this host registers under. By default a salted hash of the machine id
-    /// (`/etc/machine-id`, or the platform UUID on a Mac), never the machine id itself.
+    /// (`/etc/machine-id`, or the platform UUID on a Mac), never the machine id itself. With
+    /// `--runtime crun` one agent may hold a host id: the claim is a lock file in the
+    /// directory above `--scratch-root`, so agents that share a host id must share that
+    /// directory to be refused.
     #[arg(long, value_name = "ID")]
     pub host_id: Option<String>,
     /// A label to put on the host, as `key=value`. May be given more than once; a key
@@ -94,13 +113,47 @@ pub struct Cli {
     /// see to it that there is none.
     #[arg(long = "mount-root-ro", value_name = "NAME=PATH", value_parser = named_path)]
     pub mount_roots_ro: Vec<(String, PathBuf)>,
-    /// The scratch root's file system is to bound each run's disk with a quota. Today the
-    /// flag only makes the agent refuse to start when a `--mount-root` is on the same file
-    /// system as the scratch root (a read-write mount there would be an unbounded path to
-    /// its disk); `--mount-root-ro` roots may be there. It enables no quota yet and
-    /// advertises nothing. Needs `--scratch-root`.
+    /// Bound each run's disk with a project quota on the scratch root's file system. At
+    /// start the agent probes the root and refuses to start unless the file system
+    /// enforces project quota; then it advertises `scratch-quota=project` and
+    /// `scratch-default-gib`, books `--scratch-default-gib` for a run that names no
+    /// `disk_bytes`, and gives each run's scratch directory a block limit of the bytes it
+    /// books and an inode limit of `--scratch-max-inodes`. With `--runtime crun` the same
+    /// project covers the run's lease directory, made beside the run's directory in the
+    /// scratch root, so one bound holds what a job writes to `/scratch`, `/work` and
+    /// `/root`. It also refuses to start when a
+    /// `--mount-root` is on the same file system as the scratch root (a read-write mount
+    /// there would be an unbounded path to its disk); `--mount-root-ro` roots may be there.
+    /// Needs `--scratch-root`.
     #[arg(long)]
     pub scratch_quota: bool,
+    /// The GiB a run that names no `disk_bytes` books and is bounded to, and the
+    /// `scratch-default-gib` capability. From 1; default 2. Needs `--scratch-quota`.
+    #[arg(long, value_name = "GIB")]
+    pub scratch_default_gib: Option<u64>,
+    /// The inode limit of each run's scratch directory, so a flood of empty files cannot
+    /// exhaust the file system's inodes. From 1; default 1000000. Needs `--scratch-quota`.
+    #[arg(long, value_name = "N")]
+    pub scratch_max_inodes: Option<u64>,
+    /// The quota calls (`apply`, a usage read, `clear`) that may fail in a row before the
+    /// agent probes the scratch root again; if it no longer enforces project quota the agent
+    /// starts no run until it does, and says so every minute. From 1; default 3. Needs
+    /// `--scratch-quota`.
+    #[arg(long, value_name = "N")]
+    pub scratch_quota_failures: Option<u64>,
+    /// The seconds a finished run's slot is held for its project's usage to read zero (the
+    /// file system frees a removed tree's inodes in the background). After that the slot is
+    /// parked, the run's place and booked bytes are given back, and the quota counts one
+    /// failure. From 1 to 86400; default 600. Needs `--scratch-quota`.
+    #[arg(long, value_name = "SECS")]
+    pub scratch_usage_wait_secs: Option<u64>,
+    /// The slots the agent may give up on (their usage never read zero within
+    /// `--scratch-usage-wait-secs`) over its life before the quota is unavailable: no run
+    /// starts, each start is refused `quota-unavailable`, until the agent is restarted. A
+    /// run that ends well does not take one back. From 1; default 8. Needs
+    /// `--scratch-quota`.
+    #[arg(long, value_name = "N")]
+    pub scratch_abandon_limit: Option<u64>,
     /// The most GiB of the scratch root's free disk the agent keeps back from jobs: the
     /// disk it offers is the free space of that volume when the agent starts minus this
     /// (0 when this is more). Needs `--scratch-root`. Without it, the free space is offered.
@@ -108,7 +161,9 @@ pub struct Cli {
     pub scratch_low_water_gib: Option<u64>,
     /// The directory under which every run gets a private scratch directory (`0700`). It
     /// must be owned by the user running the agent, with no permission for group or
-    /// others.
+    /// others. With `--runtime crun` the image store and the claim files are kept in the
+    /// directory above it, which must be on the same file system, and every directory above
+    /// the root must be owned by root or by the agent's user with no group or other write.
     #[arg(long, value_name = "PATH")]
     pub scratch_root: Option<PathBuf>,
     /// The directory under which each run's files (`files` of a start: URLs and tokens) are
@@ -159,6 +214,84 @@ pub struct Cli {
     /// job). Needs `--container-bin`.
     #[arg(long = "watch-dir", value_name = "PATH")]
     pub watch_dirs: Vec<PathBuf>,
+    /// The Unix socket of the root helper `js-mac-session` (its `--socket`): with it this
+    /// agent runs native jobs, programs started as a user the helper makes for each run, under
+    /// a Seatbelt profile, and reports `exec = sandbox-exec`. macOS only. Needs `--scratch-root`
+    /// and `--state-root`, the agent must run as root, and it cannot be combined with
+    /// `--container-bin`. The agent checks at start that `sandbox-exec` applies a profile.
+    /// The helper must be dedicated to this agent, on a Mac used for native jobs only, and
+    /// started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes`,
+    /// never the defaults of another helper: the agent asks it for its boot reset, which ends
+    /// the lease users of whoever used it before and clears the Mac's auto-login. Native runs
+    /// are NOT stopped when the agent stops, restarts or dies: the lease journal in the state
+    /// root ends them when the agent next starts, or when the rescue of an agent whose worker
+    /// died runs; until then they run on, and their wall limit is enforced only while an
+    /// agent runs.
+    /// The profile does not deny System V or POSIX shared memory, semaphores or message
+    /// queues, and the helper reuses uids, so what a run leaves in them can be read by a later
+    /// run that gets the same uid: an open channel between runs on one Mac.
+    #[arg(long, value_name = "PATH")]
+    pub native_helper_socket: Option<PathBuf>,
+    /// The directory the helper makes its lease users' homes in (its `--homes`), by default
+    /// `/Users`. It must exist; the agent canonicalises it. Needs `--native-helper-socket`.
+    #[arg(long, value_name = "PATH")]
+    pub native_homes: Option<PathBuf>,
+    /// The most network a native run gets: `off` (the default), `loopback` or `on`. A start
+    /// that asks for more is held to this. `on` is limited by the pf anchor of
+    /// `js-mac-provision` (see `--native-pf-uid-start`): without it a run could reach the
+    /// scheduler, the cloud metadata address and the rest of the network, so the agent does
+    /// not start with `on` unless the anchor is in force, and refuses each job that asks for
+    /// the network (`egress-unchecked`) while it is not. `loopback` is shared by every run
+    /// of the Mac. Needs `--native-helper-socket`.
+    #[arg(long, value_name = "off|loopback|on")]
+    pub native_network: Option<String>,
+    /// A path no native run may read, in addition to the agent's own roots, its token,
+    /// instance and CA files, the helper's socket directory and `/etc/kcpassword`; repeatable.
+    /// Name the helper's `--state-dir` here. It must exist. Needs `--native-helper-socket`.
+    #[arg(long = "native-deny-read", value_name = "PATH")]
+    pub native_deny_read: Vec<PathBuf>,
+    /// The most MiB any one file a native run writes may reach, its output included (the
+    /// run's `RLIMIT_FSIZE`); by default 4096. A run that writes more is ended by
+    /// `SIGXFSZ`. Needs `--native-helper-socket`.
+    #[arg(long, value_name = "MIB")]
+    pub native_max_file_mib: Option<u64>,
+    /// The most processes a native run's user may have (the run's `RLIMIT_NPROC`); by
+    /// default 512. A fork bomb stops there; the helper's kill is not held by it. Needs
+    /// `--native-helper-socket`.
+    #[arg(long, value_name = "N")]
+    pub native_max_processes: Option<u32>,
+    /// A directory a native start's program must lie under; repeatable. By default `/usr/bin`,
+    /// `/bin`, `/usr/sbin` and `/sbin`. Needs `--native-helper-socket`.
+    #[arg(long = "native-tool-root", value_name = "PATH")]
+    pub native_tool_roots: Vec<PathBuf>,
+    /// The first uid of the pool whose egress the pf anchor limits: the helper's
+    /// `--uid-range` start. With `--native-network on` the agent refuses to start, and
+    /// refuses every job that asks for the network (`egress-unchecked`), unless the anchor
+    /// `js-mac-provision` installed is in force (pf enabled, the main ruleset reaches the
+    /// anchor, the loaded rules are the ones these flags render); required then, and
+    /// refused otherwise. Needs `--native-network on`.
+    #[arg(long, value_name = "UID")]
+    pub native_pf_uid_start: Option<u32>,
+    /// How many uids the pool holds: the helper's `--uid-range` count. Required with
+    /// `--native-network on`; see `--native-pf-uid-start`.
+    #[arg(long, value_name = "N")]
+    pub native_pf_uid_count: Option<u32>,
+    /// An endpoint the pool may reach over TCP, as `192.0.2.10:443`; repeatable. These must
+    /// be the `--endpoint` flags `js-mac-provision install` was given, or the anchor reads
+    /// back as different and every job is refused. Needs `--native-network on`.
+    #[arg(long = "native-pf-endpoint", value_name = "IPV4:PORT")]
+    pub native_pf_endpoints: Vec<String>,
+    /// The pf anchor the rules are loaded under (the `--anchor` of `js-mac-provision`); by
+    /// default `com.apple/com.komira.js.pool`. Needs `--native-network on`.
+    #[arg(long, value_name = "NAME")]
+    pub native_pf_anchor: Option<String>,
+    /// The state directory of `js-mac-provision` (its `--state-dir`); by default
+    /// `/var/db/com.komira.js-pf`. Needs `--native-network on`.
+    #[arg(long, value_name = "PATH")]
+    pub native_pf_state_dir: Option<PathBuf>,
+    /// The `pfctl` program to ask (by default `/sbin/pfctl`). Needs `--native-network on`.
+    #[arg(long, value_name = "PATH")]
+    pub native_pfctl: Option<PathBuf>,
     /// The absolute path of the `docker` or `podman` program that runs container jobs.
     /// It is started by exactly this path, never looked up on the `PATH`, with an
     /// environment of its own (a fixed `PATH` and `--container-host`, nothing the agent
@@ -176,6 +309,29 @@ pub struct Cli {
     /// `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start.
     #[arg(long, value_name = "PATH")]
     pub container_bin: Option<PathBuf>,
+    /// The runtime that runs jobs: `docker` (the engine program at `--container-bin`, which
+    /// may be Docker or Podman, exactly as before) or `crun` (`js-contain` drives the
+    /// distribution's `crun`, run as the `--job-user`; Linux only, and the agent must be
+    /// root). Without the flag the runtime is the engine of `--container-bin`, as before. The
+    /// packaged unit of the Docker cloud hosts names `--runtime docker`; the unit for the
+    /// Linux farm names `--runtime crun`. With `crun` the agent checks the host before it
+    /// registers and exits 2 naming every piece that is missing (see `--crun-bin`).
+    #[arg(long, value_enum, value_name = "docker|crun")]
+    pub runtime: Option<RuntimeKind>,
+    /// The `crun` program of `--runtime crun`, by absolute path; by default
+    /// `/usr/bin/crun`. It must be the distribution's own file at that path: the
+    /// distribution's AppArmor profile for `crun` (the one that allows it a user
+    /// namespace where `kernel.apparmor_restrict_unprivileged_userns` is 1) attaches to
+    /// that path, so a copy elsewhere is refused by the kernel. Any other path starts the
+    /// agent with a loud warning. Needs `--runtime crun`.
+    #[arg(long, value_name = "PATH")]
+    pub crun_bin: Option<PathBuf>,
+    /// The dedicated non-root user every `crun` command of `--runtime crun` runs as, such as
+    /// `jsjob`: the account whose ranges in `/etc/subuid` and `/etc/subgid` (at least 65536
+    /// ids each) every job's user namespace is mapped onto. It must exist, with a uid and a
+    /// gid above 0. The agent stays root. Required with `--runtime crun`, and needs it.
+    #[arg(long, value_name = "USER")]
+    pub job_user: Option<String>,
     /// The network containers join: the name of a user-defined network. By default
     /// `none`, no network at all. `host` is refused. Any named network gives the job
     /// egress to whatever that network reaches, the host's metadata endpoint included;
@@ -244,6 +400,43 @@ pub struct Cli {
     /// `/usr/sbin/nft`. Needs `--container-egress-allow`.
     #[arg(long, value_name = "PATH")]
     pub container_nft: Option<String>,
+    /// The network a job's `crun` container gets: `none` (the default: loopback only, no
+    /// route) or `allow-list` (one interface to the host, which forwards only what
+    /// `--egress-allow` and `--egress-dns` name and refuses everything else, the metadata
+    /// range and all IPv6 first). The agent, as root in the host's network namespace, wires
+    /// each container from outside and keeps the firewall; see `docs/design/agent-egress.md`.
+    /// Only the `crun` runtime reads it, and the `crun` runtime of this build gives jobs
+    /// loopback only, so anything but `none` is refused at start, with either runtime; the Podman network flags above are the
+    /// Podman runtime's own and are refused together with this one.
+    #[arg(long, value_name = "none|allow-list")]
+    pub egress: Option<String>,
+    /// An endpoint an `allow-list` may reach, `IPV4:PORT` or `CIDR:PORT` (TCP; a prefix of
+    /// 24 to 32, outside 169.254.0.0/16 and the pool); repeatable, at most 16; at least one
+    /// is required by `--egress allow-list`.
+    #[arg(long, value_name = "IP:PORT")]
+    pub egress_allow: Vec<String>,
+    /// A resolver an `allow-list` may ask (UDP and TCP, port 53), and the only nameserver of
+    /// a job's `/etc/resolv.conf`; an IPv4 address, repeatable, at most 4. Without one a job
+    /// resolves no name.
+    #[arg(long, value_name = "IP")]
+    pub egress_dns: Vec<String>,
+    /// The IPv4 network the jobs' addresses are taken from, one /30 each, `<addr>/16` to
+    /// `<addr>/24`; by default `198.18.0.0/16`. Needs `--egress allow-list`.
+    #[arg(long, value_name = "CIDR")]
+    pub egress_pool: Option<String>,
+    /// The absolute path of the `ip` program the egress setup runs, by default
+    /// `/usr/sbin/ip`. Needs `--egress allow-list`.
+    #[arg(long, value_name = "PATH")]
+    pub egress_ip: Option<String>,
+    /// The absolute path of the `nft` program the egress setup runs, by default
+    /// `/usr/sbin/nft`. Needs `--egress allow-list`.
+    #[arg(long, value_name = "PATH")]
+    pub egress_nft: Option<String>,
+    /// The absolute path of the `nsenter` program the egress setup runs to configure a
+    /// job's network namespace from outside, by default `/usr/bin/nsenter`. Needs
+    /// `--egress allow-list`.
+    #[arg(long, value_name = "PATH")]
+    pub egress_nsenter: Option<String>,
     /// The control group that holds every container the agent starts, as a directory of
     /// the cgroup version 2 file system below `/sys/fs/cgroup` (such as
     /// `/sys/fs/cgroup/jobscheduler.slice`). The operator makes and delegates it. The
@@ -284,6 +477,13 @@ pub struct Cli {
         allow_hyphen_values = true
     )]
     pub readiness_hook_args: Vec<String>,
+    /// A registry and namespace an image may be pulled from, `HOST[:PORT]/PREFIX` such as
+    /// `ghcr.io/komira-ai/`; repeatable. The prefix is whole path components, and a bare
+    /// host (every account on it) is refused at start. An image on no entry is never
+    /// pulled. The runtime that pulls with js-oci reads the list; the Docker and Podman
+    /// runtimes do not.
+    #[arg(long, value_name = "HOST/PREFIX")]
+    pub image_allow: Vec<String>,
     /// How many seconds a container gets to stop on its own before it is killed, whenever
     /// the agent stops one: a `Stop` or `Cancel` from the server, a job past its wall-time
     /// limit, the end of a drain. By default 10; at most 3600. Needs `--container-bin`.
@@ -295,6 +495,113 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SECONDS")]
     pub drain_wait: Option<u64>,
+
+    /// The bundle store: the directory a Mac keeps unpacked toolchain bundles in (`--bundle-*`
+    /// flags need it). Absolute; on the same APFS volume as `--scratch-root` (cloning needs
+    /// one volume) mounted with ownership honoured and not `noexec`, and the kernel's
+    /// securelevel must be 0 or less; the agent refuses to start otherwise, and on a host
+    /// that is not a Mac. Needs `--scratch-root` and `--bundle-budget-gib`. The disk the agent
+    /// offers (`disk-gib`) is reduced by the part of the budget the store has not used yet.
+    /// The hello reports `bundle-root` (this path) and `bundle` (the manifest digests the
+    /// store holds, that the deny and allow lists let through) only when the agent can run a
+    /// bundle: it runs native jobs (`--native-helper-socket`) and the store opened; without
+    /// the helper it reports neither. A job that pins a bundle runs `@bundle/<entrypoint>`
+    /// from the store's trees, under the same profile as any native job. Until a server says it
+    /// takes a longer value, `bundle` holds one digest. Roll out servers first, then agents,
+    /// then this flag, then placement by `bundle`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_store: Option<PathBuf>,
+    /// The most GiB the store's trees (and the trees waiting to be deleted) may take
+    /// together. Required with `--bundle-store`; above 0.
+    #[arg(long, value_name = "GIB")]
+    pub bundle_budget_gib: Option<u64>,
+    /// New fetches are refused (`bundle-no-space`) while the store volume has less than this
+    /// many GiB free. By default 0. Needs `--bundle-store`.
+    #[arg(long, value_name = "GIB")]
+    pub bundle_low_water_gib: Option<u64>,
+    /// Whether a bundle that is not in the store is fetched: `never` (the default: the
+    /// operator, or the updater, puts it there first, and a job that names another is
+    /// refused `bundle-not-held`) or `missing` (only with `--bundle-trust list`, and at
+    /// least one registry flag): the first start that names one begins a fetch in the
+    /// background (`bundle-pending` until the bundle is held; every byte is checked against
+    /// its digest, and a fetch that fails is reported once as `bundle-fetch-failed`). Needs
+    /// `--bundle-store`.
+    #[arg(long, value_name = "never|missing")]
+    pub bundle_pull: Option<String>,
+    /// A registry and namespace a bundle may be fetched from, `HOST[:PORT]/PREFIX`
+    /// (`ghcr.io/example/`); not a bare host. A job's bundle must name one when any is
+    /// given. May be given more than once. Needs `--bundle-store`.
+    #[arg(long = "bundle-registry-allow", value_name = "HOST[:PORT]/PREFIX")]
+    pub bundle_registry_allow: Vec<String>,
+    /// Like `--bundle-registry-allow`, for a registry on a private address, and for that
+    /// registry only. May be given more than once. Needs `--bundle-store`.
+    #[arg(
+        long = "bundle-registry-allow-private",
+        value_name = "HOST[:PORT]/PREFIX"
+    )]
+    pub bundle_registry_allow_private: Vec<String>,
+    /// Minutes a bundle's trees are kept after their last use before they may be evicted.
+    /// By default 30. Needs `--bundle-store`.
+    #[arg(long, value_name = "MINUTES")]
+    pub bundle_min_age_min: Option<u64>,
+    /// A root-owned file of manifest digests (`sha256:<hex>`, one a line, `#` comments) the
+    /// store never evicts. Needs `--bundle-store`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_keep_file: Option<PathBuf>,
+    /// A file of manifest digests (same form) that are refused (`bundle-denied`) even when
+    /// listed. Read at every start of a job, so a change takes effect at once. Needs
+    /// `--bundle-store`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_deny_file: Option<PathBuf>,
+    /// A file of manifest digests (same form) a fetcher puts in the store ahead of the jobs
+    /// that name them. Checked at start; this build has no fetcher. Needs `--bundle-store`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_prefetch_file: Option<PathBuf>,
+    /// Which digests may run: `list` (the default: only those in `--bundle-allow-file`) or
+    /// `digest` (any a job names; for developer hosts only, and never with
+    /// `--bundle-pull missing`). Needs `--bundle-store`.
+    #[arg(long, value_name = "list|digest")]
+    pub bundle_trust: Option<String>,
+    /// The allow list for `--bundle-trust list`: manifest digests (same form), one a line.
+    /// Required with `list` and must hold a digest; refused with `digest`. Read at every
+    /// start of a job, so a change takes effect at once. A job whose digest is not in it is
+    /// refused `bundle-not-allowed`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle_allow_file: Option<PathBuf>,
+    /// The read model of a run's profile: `open` (the default) or `allow`. `allow` is not
+    /// available yet: the agent refuses it at start.
+    #[arg(long, value_name = "open|allow")]
+    pub read_model: Option<String>,
+}
+
+impl Cli {
+    /// Every `--native-*` flag with whether it was given, kept beside the fields so that a
+    /// runtime that takes none of them refuses them all; a test walks the flags clap knows
+    /// and fails when one is missing here.
+    #[must_use]
+    pub fn native_flags(&self) -> [(&'static str, bool); 13] {
+        [
+            (
+                "--native-helper-socket",
+                self.native_helper_socket.is_some(),
+            ),
+            ("--native-homes", self.native_homes.is_some()),
+            ("--native-network", self.native_network.is_some()),
+            ("--native-deny-read", !self.native_deny_read.is_empty()),
+            ("--native-max-file-mib", self.native_max_file_mib.is_some()),
+            (
+                "--native-max-processes",
+                self.native_max_processes.is_some(),
+            ),
+            ("--native-tool-root", !self.native_tool_roots.is_empty()),
+            ("--native-pf-uid-start", self.native_pf_uid_start.is_some()),
+            ("--native-pf-uid-count", self.native_pf_uid_count.is_some()),
+            ("--native-pf-endpoint", !self.native_pf_endpoints.is_empty()),
+            ("--native-pf-anchor", self.native_pf_anchor.is_some()),
+            ("--native-pf-state-dir", self.native_pf_state_dir.is_some()),
+            ("--native-pfctl", self.native_pfctl.is_some()),
+        ]
+    }
 }
 
 /// `name=path` split at the first `=`.
@@ -307,4 +614,13 @@ fn key_value(text: &str) -> Result<(String, String), String> {
     text.split_once('=')
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .ok_or_else(|| format!("{text:?} is not key=value"))
+}
+
+/// What runs a job: the value of `--runtime`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RuntimeKind {
+    /// The engine program of `--container-bin` (Docker or Podman).
+    Docker,
+    /// `js-contain`'s `crun` backend, over the distribution's `crun`.
+    Crun,
 }

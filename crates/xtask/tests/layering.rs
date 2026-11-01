@@ -627,12 +627,12 @@ fn an_external_dependency_must_come_from_the_workspace_table() {
     copy.edit(
         "crates/js-client/Cargo.toml",
         "[lints]",
-        "[dependencies.serde]\nversion = \"1\"\n\n[lints]",
+        "[dependencies.toml]\nversion = \"1\"\n\n[lints]",
     );
     assert_eq!(
         copy.found(),
         [
-            "crates/js-client/Cargo.toml depends on serde without `workspace = true`; external dependencies are declared once in the root [workspace.dependencies]"
+            "crates/js-client/Cargo.toml depends on toml without `workspace = true`; external dependencies are declared once in the root [workspace.dependencies]"
         ]
     );
 }

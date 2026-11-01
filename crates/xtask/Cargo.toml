@@ -6,6 +6,22 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+# `cargo xtask` runs this bin, not the test fake.
+default-run = "xtask"
+
+# `xtask-fake`, the program this crate's tests run in place of `cargo` and of `sudo`
+# (see its docs). Never run by CI itself.
+[[bin]]
+name = "xtask-fake"
+path = "src/bin/xtask-fake.rs"
+test = false
+
+# `host-shim`, the program the tests of `packaging/js-agent/crun_host_setup.sh` run in place of the
+# host's `systemctl`, `mount`, `useradd` and the rest (see its docs). Never run by CI itself.
+[[bin]]
+name = "host-shim"
+path = "src/bin/host-shim.rs"
+test = false
 
 [dependencies]
 clap.workspace = true
@@ -13,6 +29,8 @@ flate2.workspace = true
 hex.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
+# The runner user's uid and gid, and `uname -m`, for `crun-tests`.
+rustix = { workspace = true, features = ["process", "system"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -27,6 +45,10 @@ ureq.workspace = true
 js-agent = { path = "../js-agent" }
 js-client = { path = "../js-client" }
 js-elastic = { path = "../js-elastic" }
+# The plists the package carries must be flags the programs accept (tests/macos_pkg.rs).
+js-mac-provision = { path = "../js-mac-provision" }
+js-mac-session = { path = "../js-mac-session" }
+js-testkit = { path = "../js-testkit" }
 rcgen.workspace = true
 
 [lints]

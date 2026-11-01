@@ -95,10 +95,22 @@ struct HostEntry {
     /// When a reservation that is draining a busy host is given up, in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     drain_deadline_ms: Option<u64>,
+    /// Set for a registered host that is cordoned: when the cordon lapses. The host cordoned
+    /// itself for an update of its agent; if the agent that did so is gone, the cordon
+    /// lapses by itself within the last `lease_secs` it asked for (at most 3600 s from
+    /// its last extension), or the host's own `:uncordon` lifts it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cordon: Option<CordonListed>,
     /// Set for a registered host whose latest heartbeat carried a load: the reading of
     /// its actions control group.
     #[serde(skip_serializing_if = "Option::is_none")]
     load: Option<LoadView>,
+}
+
+/// The cordon of a listed host.
+#[derive(Debug, Serialize)]
+struct CordonListed {
+    expires_at_ms: u64,
 }
 
 /// The latest load of a host, in the units its field names state. It is what the agent
@@ -192,6 +204,25 @@ fn lease_text(lease: Option<LeaseId>) -> Option<String> {
     lease.map(|lease| lease.to_string())
 }
 
+/// How a session is told in an answer: `awaiting`, `live` or `lost`.
+pub(crate) fn state_text(state: HostState) -> &'static str {
+    match state {
+        HostState::Awaiting => "awaiting",
+        HostState::Live => "live",
+        HostState::Lost => "lost",
+    }
+}
+
+/// How a set-aside host is told in an answer: `reserved`, `held`, `draining` or `releasing`.
+pub(crate) fn mark_text(mark: HostMark) -> &'static str {
+    match mark {
+        HostMark::Reserved => "reserved",
+        HostMark::Held => "held",
+        HostMark::Draining => "draining",
+        HostMark::Releasing => "releasing",
+    }
+}
+
 impl HostEntry {
     fn listed(host: HostCapacity) -> Self {
         Self {
@@ -211,16 +242,13 @@ impl HostEntry {
             mark: None,
             reserved_for: None,
             drain_deadline_ms: None,
+            cordon: None,
             load: None,
         }
     }
 
     fn registered(host: HostView) -> Self {
-        let state = match host.state {
-            HostState::Awaiting => "awaiting",
-            HostState::Live => "live",
-            HostState::Lost => "lost",
-        };
+        let state = state_text(host.state);
         Self {
             id: host.id.to_string(),
             source: "registered",
@@ -235,14 +263,12 @@ impl HostEntry {
             agent_version: host.agent_version,
             releasing: Some(host.releasing),
             taint: host.taint,
-            mark: host.mark.map(|mark| match mark {
-                HostMark::Reserved => "reserved",
-                HostMark::Held => "held",
-                HostMark::Draining => "draining",
-                HostMark::Releasing => "releasing",
-            }),
+            mark: host.mark.map(mark_text),
             reserved_for: host.reserved_for.map(|id| id.to_string()),
             drain_deadline_ms: host.drain_deadline.map(|at| at.millis()),
+            cordon: host.cordon_until.map(|at| CordonListed {
+                expires_at_ms: at.millis(),
+            }),
             load: host.load.map(LoadView::of),
         }
     }
@@ -298,6 +324,7 @@ mod tests {
             mark,
             reserved_for: None,
             drain_deadline: None,
+            cordon_until: None,
             load: None,
         }
     }

@@ -60,8 +60,8 @@ pub use binner::{
     WindowPart, window_parts,
 };
 pub use cgroup::{
-    cpu_limited, parse_active_file, parse_inactive_file, parse_single_u64, parse_stat_key,
-    parse_usage_usec, working_set,
+    Layout, cpu_limited, layout_of, parse_active_file, parse_inactive_file, parse_single_u64,
+    parse_stat_key, parse_usage_usec, working_set,
 };
 pub use clock::{MINUTE_USEC, MonotonicClock, UsageClock};
 pub use collect::Collector;

@@ -12,9 +12,23 @@
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
 //!   order and waiting for it to converge (docs/release.md).
+//! - `crun-tests [--sudo <path>] [--root <dir>] [--job-user <name>]` ([`crun_tests`]): the
+//!   real-`crun` tests of `js-contain` (every one `#[ignore]`d under a plain `cargo test`),
+//!   each test target built as this user and run in a `Delegate=yes` system unit of its own;
+//!   with `--job-user`, the targets of a root daemon, run as root, which start every
+//!   container as that user.
+//! - `unit-result --unit <name> --count-file <path> [--sudo <path>]` ([`crun_tests::check_unit`]): fails unless a
+//!   system unit a step ran with `systemd-run --wait` exited 0, by the unit's own result, and
+//!   ran at least one test, by the `--count-file` its `count-run` wrote.
+//!   Each unit runs its binary through `count-run --count-file <path> -- <binary> <args>...`
+//!   ([`count_run`]), which writes the number of tests the binary ran; a target fails unless
+//!   that count is at least one.
 //! - `pkg check-deb --deb F --version X.Y.Z --binary B --packaging DIR --license F` ([`pkg`]):
 //!   refuses a js-agent deb that is not exactly the package `packaging/js-agent` describes, or
 //!   whose binary is not a static x86-64 Linux executable.
+//! - `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): the macOS installer package's
+//!   payload and scripts, laid down for `pkgbuild`, and the built package read back with
+//!   `pkgutil` and `lsbom` and refused unless it is exactly that.
 //! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
 //!
@@ -27,11 +41,15 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+pub mod count_run;
+pub mod crun_tests;
 pub mod deploy;
 pub mod fetch;
 pub mod layering;
+pub mod macpkg;
 pub mod pkg;
 pub mod release;
+pub mod test_build;
 
 /// Why a verb failed.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -48,6 +66,15 @@ pub enum Error {
     /// A package check failed.
     #[error(transparent)]
     Pkg(#[from] pkg::Error),
+    /// The macOS package could not be staged or checked.
+    #[error(transparent)]
+    MacPkg(#[from] macpkg::Error),
+    /// A program `count-run` ran ended with a failure status, which is also this one's.
+    #[error("the program ended with status {0}")]
+    Child(u8),
+    /// The real-crun tests, or the build of their targets, failed.
+    #[error(transparent)]
+    CrunTests(#[from] test_build::Error),
     /// Flags that do not fit together (exit status 2, like a clap error).
     #[error("{0}")]
     Usage(String),
@@ -84,6 +111,46 @@ enum Verb {
     },
     /// Set the release's version for services on the update coordinator and wait for them.
     Deploy(deploy::Args),
+    /// Run the real-crun tests of js-contain, each test target in its own `Delegate=yes`
+    /// system unit as this user (a Linux host with crun, uidmap and passwordless sudo).
+    CrunTests {
+        /// The sudo program; it is run with `-n`, so it never prompts.
+        #[arg(long, default_value = "sudo")]
+        sudo: PathBuf,
+        /// The repository root, where cargo builds the test targets.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Run the tests of a root daemon instead: each target in a unit as root, starting
+        /// every container as this job user (an existing account with a subordinate id
+        /// range).
+        #[arg(long)]
+        job_user: Option<String>,
+    },
+    /// Fail unless the system unit a step ran with `systemd-run --wait` (without
+    /// `--collect`) exited 0, reading the unit's own result rather than `systemd-run`'s
+    /// exit status, and clear the unit's failed state.
+    UnitResult {
+        /// The sudo program; it is run with `-n`, so it never prompts.
+        #[arg(long, default_value = "sudo")]
+        sudo: PathBuf,
+        /// The unit's name (`--unit` of the `systemd-run`).
+        #[arg(long)]
+        unit: String,
+        /// The file the unit's `count-run` wrote the number of tests it ran to: the unit
+        /// fails unless it holds a count of at least one.
+        #[arg(long)]
+        count_file: PathBuf,
+    },
+    /// Run a test binary and write the number of tests it ran to a file (what a `crun-tests`
+    /// unit runs; the exit status is the binary's).
+    CountRun {
+        /// Where to write the count.
+        #[arg(long)]
+        count_file: PathBuf,
+        /// The test binary and its arguments.
+        #[arg(last = true)]
+        command: Vec<std::ffi::OsString>,
+    },
     /// The js-agent Linux package.
     Pkg {
         /// Which step.
@@ -103,6 +170,10 @@ enum Verb {
 enum PkgVerb {
     /// Refuse a deb that is not exactly the js-agent package.
     CheckDeb(pkg::CheckArgs),
+    /// Lay the macOS package's payload and scripts down, ready for `pkgbuild`.
+    StageMacos(macpkg::StageArgs),
+    /// Refuse a macOS package that is not exactly the js-agent package (a Mac only).
+    CheckMacos(macpkg::CheckArgs),
 }
 
 /// The `release` verbs.
@@ -129,8 +200,37 @@ fn run(cli: Cli) -> Result<String, Error> {
             Ok(fetch::fetch(&url, &sha256, &unpack, &out, &roots)?)
         }
         Verb::Deploy(args) => Ok(deploy::run(&args)?),
+        Verb::CrunTests {
+            sudo,
+            root,
+            job_user,
+        } => {
+            // `cargo xtask` runs this program under cargo, which sets `CARGO`.
+            let cargo = std::env::var_os("CARGO").unwrap_or_default();
+            Ok(crun_tests::run(&crun_tests::CrunTests {
+                cargo: &cargo,
+                sudo: &crun_tests::SudoProgram(&sudo),
+                root: &root,
+                job_user: job_user.as_deref(),
+            })?)
+        }
+        Verb::UnitResult {
+            sudo,
+            unit,
+            count_file,
+        } => Ok(crun_tests::check_unit(
+            &crun_tests::SudoProgram(&sudo),
+            &unit,
+            &count_file,
+        )?),
+        Verb::CountRun {
+            count_file,
+            command,
+        } => count_run::run(&count_file, &command),
         Verb::Pkg { verb } => Ok(match verb {
             PkgVerb::CheckDeb(args) => pkg::check(&args)?,
+            PkgVerb::StageMacos(args) => macpkg::stage(&args)?,
+            PkgVerb::CheckMacos(args) => macpkg::check(&args)?,
         }),
         Verb::Release { verb } => Ok(match verb {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,
@@ -146,6 +246,7 @@ pub fn report(result: Result<String, Error>, out: &mut dyn Write, err: &mut dyn 
             let _ = writeln!(out, "{line}");
             ExitCode::SUCCESS
         }
+        Err(Error::Child(code)) => ExitCode::from(code),
         Err(Error::Usage(why)) => {
             let _ = writeln!(err, "xtask: {why}");
             ExitCode::from(2)

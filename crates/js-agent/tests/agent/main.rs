@@ -13,21 +13,34 @@
 mod backoff;
 mod binary;
 mod bounds;
+mod bundle;
 mod cli_runtime;
 mod container;
+mod cordon;
 mod credential;
 mod credential_e2e;
+#[cfg(target_os = "linux")]
+mod crun_host;
+mod disk;
 mod drive;
 mod e2e;
 mod exclusive;
 mod facts;
 mod flags;
+#[cfg(target_os = "linux")]
+mod helper_modes;
 mod integrity;
 mod jobs;
 mod lifecycle;
+mod native;
 mod quota;
 mod readiness;
+mod runtime_conformance;
+#[path = "../runtime_suite/mod.rs"]
+mod runtime_suite;
 mod server;
 mod session;
 mod support;
+#[cfg(target_os = "linux")]
+mod update_hook;
 mod usage;

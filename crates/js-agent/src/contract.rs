@@ -12,6 +12,11 @@
 //!   jobs (no `--container-bin`) reports neither.
 //! - `run-files` is `true` for an agent with a run files root (`--run-files-root`, on a
 //!   tmpfs): it writes a start's `files` and mounts them at `/run/js-files`. The server sends a start with files to a host that reports it only.
+//! - `scratch-quota` is `project` and `scratch-default-gib` is the GiB a run without
+//!   `disk_bytes` books, for an agent started with `--scratch-quota` whose scratch root
+//!   passed the probe (an agent whose root did not pass does not start). The server books
+//!   that default for such a run and places a job that sets `disk_bytes` only on a host
+//!   that reports `scratch-quota`.
 //! - `gpu-toolkit` is `true` when the host offers GPUs and `--gpu-toolkit-hook` ran and
 //!   exited 0. The hook is the operator's check that a container can use a GPU (for
 //!   example, a container that runs `nvidia-smi`); the agent knows only its exit status.
@@ -21,7 +26,10 @@
 use std::path::Path;
 
 use js_agent_wire::Hello;
-use js_caps::{EXEC, FLAG_SET, GPU_TOOLKIT, RUN_FILES, RUNTIME};
+use js_caps::{
+    EXEC, FLAG_SET, GPU_TOOLKIT, RUN_FILES, RUNTIME, SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA,
+    SCRATCH_QUOTA_PROJECT,
+};
 use js_types::ExecMode;
 
 use crate::cli::Cli;
@@ -58,13 +66,26 @@ impl ToolkitHook {
     }
 }
 
+/// Adds the capabilities of the host contract to the hello of an agent that runs native
+/// jobs: `runtime` and `exec` are `sandbox-exec`. The hello is sent only after the job half
+/// has started, which asked the helper for its boot reset, so no hello names a mode the
+/// agent cannot serve. Returns the warnings the operator should read: none.
+pub(crate) fn report_native(hello: &mut Hello) -> Vec<String> {
+    let mode = ExecMode::SandboxExec.name().to_owned();
+    hello.capabilities.insert(RUNTIME.to_owned(), mode.clone());
+    hello.capabilities.insert(EXEC.to_owned(), mode);
+    Vec::new()
+}
+
 /// Adds the capabilities of the host contract to the hello of an agent that runs
-/// containers. Returns the warnings the operator should read.
+/// containers. `scratch_default_gib` is the default of an agent whose scratch quota is on.
+/// Returns the warnings the operator should read.
 pub(crate) fn report(
     hello: &mut Hello,
     hook: Option<&ToolkitHook>,
     commands: &dyn CommandRunner,
     run_files: bool,
+    scratch_default_gib: Option<u64>,
 ) -> Vec<String> {
     let mode = ExecMode::Container.name().to_owned();
     hello.capabilities.insert(RUNTIME.to_owned(), mode.clone());
@@ -75,6 +96,14 @@ pub(crate) fn report(
         hello
             .capabilities
             .insert(RUN_FILES.to_owned(), FLAG_SET.to_owned());
+    }
+    if let Some(gib) = scratch_default_gib {
+        hello
+            .capabilities
+            .insert(SCRATCH_QUOTA.to_owned(), SCRATCH_QUOTA_PROJECT.to_owned());
+        hello
+            .capabilities
+            .insert(SCRATCH_DEFAULT_GIB.to_owned(), gib.to_string());
     }
     let Some(hook) = hook.filter(|_| hello.shape.gpus > 0) else {
         return Vec::new();

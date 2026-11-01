@@ -30,6 +30,42 @@ fn a_pool_lends_connections_and_drops_a_discarded_one() {
     assert_eq!(row.get::<_, i32>(0), 8);
 }
 
+/// Asserts that a loan whose failure was reported is dropped unless the server only refused a
+/// statement: a refused statement keeps the connection, and a backend that ends itself in the
+/// statement is never lent again, however often it is tried.
+#[test]
+fn a_reported_failure_drops_the_connection_unless_the_server_only_refused() {
+    let database = test_database();
+    let config = PostgresConfig::parse(&database.url()).expect("the URL parses");
+    let pool = ExtensionPool::open(&config).expect("the pool opens");
+    let pid = || -> i32 {
+        let mut loan = pool.checkout().expect("a connection");
+        let row = loan
+            .conn()
+            .query_one("SELECT pg_backend_pid()", &[])
+            .expect("a live connection");
+        row.get(0)
+    };
+    let fail = |statement: &str| {
+        let mut loan = pool.checkout().expect("a connection");
+        let err = loan
+            .conn()
+            .batch_execute(statement)
+            .expect_err("the statement fails");
+        loan.note_failure(&err);
+    };
+    let first = pid();
+    fail("SELECT 1/0");
+    assert_eq!(pid(), first, "a refused statement keeps the connection");
+    let mut before = first;
+    for _ in 0..50 {
+        fail("SELECT pg_terminate_backend(pg_backend_pid())");
+        let after = pid();
+        assert_ne!(after, before, "the dead connection was lent again");
+        before = after;
+    }
+}
+
 /// Asserts that a failed client call becomes a `StoreError::Failed` that says what the server
 /// said.
 #[test]

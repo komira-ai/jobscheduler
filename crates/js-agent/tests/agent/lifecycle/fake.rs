@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckFinding, CheckHook, Clock, Exit, Finished, Found, RunHandle, RunSpec, Runtime,
-    RuntimeError, Status, label,
+    CheckFinding, CheckHook, Clock, Exit, Finished, Found, Prepared, RunHandle, RunSpec, Runtime,
+    RuntimeError, Status, Ticket, label,
 };
 use js_agent_wire::LogTail;
 
@@ -29,6 +29,12 @@ impl Clock for ManualClock {
     }
 }
 
+/// The agent label of every container the fake makes.
+const AGENT: &str = "fake-host";
+
+/// Says whether a scratch directory has its quota.
+type QuotaWatch = Box<dyn Fn(&Path) -> bool>;
+
 /// The calls the tests compare in order, shared by the runtime and the check hook.
 pub type Log = Rc<RefCell<Vec<String>>>;
 
@@ -38,6 +44,8 @@ struct Container {
     labels: BTreeMap<String, String>,
     running_ms: u64,
     exit: Option<Exit>,
+    /// Whether it was started: a staged one (see [`FakeRuntime::stage`]) was only created.
+    started: bool,
 }
 
 #[derive(Default)]
@@ -56,12 +64,39 @@ struct State {
     marker: Option<PathBuf>,
     /// Whether the next create fails as a start that shows the host is not seen.
     blind: bool,
+    /// What `places_in_cgroup` answers.
+    places: bool,
     /// The log tail `log_tail` answers for the container of a run.
     tails: BTreeMap<String, LogTail>,
     /// The control group directory of the container of each run.
     cgroups: BTreeMap<String, PathBuf>,
     /// How many times the scripted checks were told the host is idle.
     idles: u32,
+    /// When set, the log notes at every create whether this says the scratch directory has
+    /// its quota (see [`FakeRuntime::watch_quota`]).
+    quota_applied: Option<QuotaWatch>,
+    /// The images whose pull is scripted: absent ones are here.
+    pulls: BTreeMap<String, Pull>,
+    /// The tickets `prepare` was asked with for each scripted image, in order.
+    asks: BTreeMap<String, Vec<Option<Ticket>>>,
+    /// The ticket the next scripted pull is given.
+    generation: u64,
+    /// Whether the runtime cannot use a GPU (`supports_gpus` says so).
+    gpus_off: bool,
+    /// The exit code of a container that handles SIGTERM, by run id: a stop ends it with
+    /// that code instead of the kill's 137.
+    term_exits: BTreeMap<String, i32>,
+    /// The directory the runtime keeps each container's own directory in (see
+    /// [`FakeRuntime::keep_lease_dirs_in`]).
+    lease_root: Option<PathBuf>,
+    /// Whether the directory it names has no name to make it by.
+    lease_unnamable: bool,
+}
+
+/// Where a scripted pull stands.
+enum Pull {
+    Pending(Ticket),
+    Failed(String),
 }
 
 /// A runtime whose containers exit when a test says so, whose calls fail when a test
@@ -90,6 +125,45 @@ impl FakeRuntime {
         }
     }
 
+    /// The same runtime, which cannot use a GPU: `supports_gpus` is false.
+    #[must_use]
+    pub fn without_gpus(self) -> Self {
+        self.state.borrow_mut().gpus_off = true;
+        self
+    }
+
+    /// The container of `run_id` handles SIGTERM: a stop ends it with `code` (the kill of a
+    /// program that ignores the signal ends it with 137, which is what a stop does by
+    /// default).
+    pub fn on_term(&self, run_id: &str, code: i32) {
+        self.state
+            .borrow_mut()
+            .term_exits
+            .insert(run_id.to_owned(), code);
+    }
+
+    /// Creates the container of `spec` and does not start it, as a runtime does that is
+    /// stopped between the two.
+    pub fn stage(&self, spec: &RunSpec) -> RunHandle {
+        let mut state = self.state.borrow_mut();
+        state.next += 1;
+        let id = format!("c{}", state.next);
+        let mut labels = spec.labels.clone();
+        labels.insert(label::AGENT.to_owned(), AGENT.to_owned());
+        state.containers.insert(
+            id.clone(),
+            Container {
+                run_id: spec.run_id.clone(),
+                scratch: spec.scratch.clone(),
+                labels,
+                running_ms: 0,
+                exit: None,
+                started: false,
+            },
+        );
+        RunHandle(id)
+    }
+
     /// The container of `run_id` has printed `tail`. The log notes `logs <id>` when it is
     /// read, for a run with a tail or when the read fails and for no other run, so the logs
     /// of tests that do not care are unchanged.
@@ -104,6 +178,12 @@ impl FakeRuntime {
     /// `list`) fail; `u32::MAX` for as long as the test wants.
     pub fn fail(&self, call: &'static str, times: u32) {
         self.state.borrow_mut().failing.insert(call, times);
+    }
+
+    /// Whether the runtime says it puts every container in a control group the agent can
+    /// read (`Runtime::places_in_cgroup`), as the direct runner does. Off by default.
+    pub fn promise_cgroups(&self, on: bool) {
+        self.state.borrow_mut().places = on;
     }
 
     /// How many times the scripted checks were told the host is idle (`CheckHook::idle`).
@@ -128,6 +208,26 @@ impl FakeRuntime {
         self.state.borrow_mut().marker = Some(marker);
     }
 
+    /// From now on the log notes, on every create, whether `applied` says the container's
+    /// scratch directory already has its quota: the real runtime gives that directory to the
+    /// slot's user in the create, so a quota set later would come after the chown.
+    pub fn watch_quota(&self, applied: impl Fn(&Path) -> bool + 'static) {
+        self.state.borrow_mut().quota_applied = Some(Box::new(applied));
+    }
+
+    /// From now the runtime keeps a directory of its own for each container in `root`
+    /// (`.lease-fake-<run id>`), as the crun runtime does beside the runs' directories: the
+    /// lifecycle makes it, bounds it with the run and removes it.
+    pub fn keep_lease_dirs_in(&self, root: &Path) {
+        self.state.borrow_mut().lease_root = Some(root.to_owned());
+    }
+
+    /// From now the directory the runtime names for a container is one that has no name (the
+    /// parent of the scratch root's own), so that it cannot be made.
+    pub fn keep_unnamable_lease_dirs(&self) {
+        self.state.borrow_mut().lease_unnamable = true;
+    }
+
     /// The note for the log: nothing when no marker is watched.
     fn marker_note(&self) -> String {
         match &self.state.borrow().marker {
@@ -135,6 +235,41 @@ impl FakeRuntime {
             Some(path) if path.exists() => " [marker present]".to_owned(),
             Some(_) => " [no marker]".to_owned(),
         }
+    }
+
+    /// The image is being pulled: `prepare` answers `Pending` (with a new ticket, which is
+    /// returned) until [`FakeRuntime::pull_done`]. Calling it again for the image starts a
+    /// new pull, with a new ticket.
+    pub fn pull_pending(&self, image: &str) -> Ticket {
+        let mut state = self.state.borrow_mut();
+        state.generation += 1;
+        let ticket = Ticket(state.generation);
+        state.pulls.insert(image.to_owned(), Pull::Pending(ticket));
+        ticket
+    }
+
+    /// The pull of the image ended: it is here.
+    pub fn pull_done(&self, image: &str) {
+        self.state.borrow_mut().pulls.remove(image);
+    }
+
+    /// The pull of the image failed: `prepare` answers `Failed(why)` (every time).
+    pub fn pull_fails(&self, image: &str, why: &str) {
+        self.state
+            .borrow_mut()
+            .pulls
+            .insert(image.to_owned(), Pull::Failed(why.to_owned()));
+    }
+
+    /// The tickets the runtime was asked about a scripted image with, in order (none for the
+    /// ask of a start).
+    pub fn asks(&self, image: &str) -> Vec<Option<Ticket>> {
+        self.state
+            .borrow()
+            .asks
+            .get(image)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Every `create_and_start` takes `ms` on the test's clock.
@@ -205,6 +340,7 @@ impl FakeRuntime {
                 labels,
                 running_ms,
                 exit: None,
+                started: true,
             },
         );
         id
@@ -244,10 +380,37 @@ impl FakeRuntime {
 }
 
 impl Runtime for FakeRuntime {
+    fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {
+        let state = self.state.borrow();
+        if state.lease_unnamable {
+            return Some(PathBuf::from("/.."));
+        }
+        let root = state.lease_root.clone();
+        root.map(|root| root.join(format!(".lease-fake-{run_id}")))
+    }
+
+    fn prepare(&mut self, image: &str, waited: Option<Ticket>) -> Prepared {
+        let mut state = self.state.borrow_mut();
+        let answer = match state.pulls.get(image) {
+            None => return Prepared::Ready,
+            Some(Pull::Pending(ticket)) => Prepared::Pending(*ticket),
+            Some(Pull::Failed(why)) => Prepared::Failed(RuntimeError::new(why.clone())),
+        };
+        state.asks.entry(image.to_owned()).or_default().push(waited);
+        answer
+    }
+
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
-        self.log
-            .borrow_mut()
-            .push(format!("create {}{}", spec.run_id, self.marker_note()));
+        let quota = match &self.state.borrow().quota_applied {
+            None => "",
+            Some(applied) if applied(&spec.scratch) => " [quota set]",
+            Some(_) => " [no quota]",
+        };
+        self.log.borrow_mut().push(format!(
+            "create {}{}{quota}",
+            spec.run_id,
+            self.marker_note()
+        ));
         self.clock.advance(self.state.borrow().create_takes_ms);
         if self.fails("create") {
             return Err(err("create"));
@@ -258,17 +421,27 @@ impl Runtime for FakeRuntime {
             ));
         }
         let mut state = self.state.borrow_mut();
+        // Refused as a real runtime refuses them, before anything is made.
+        if !spec.gpu_indices.is_empty() && state.gpus_off {
+            return Err(RuntimeError::new("this runtime cannot use a GPU"));
+        }
+        if state.containers.values().any(|c| c.run_id == spec.run_id) {
+            return Err(RuntimeError::new("a container of this run exists"));
+        }
         state.next += 1;
         let id = format!("c{}", state.next);
         state.creates.push(spec.clone());
+        let mut labels = spec.labels.clone();
+        labels.insert(label::AGENT.to_owned(), AGENT.to_owned());
         state.containers.insert(
             id.clone(),
             Container {
                 run_id: spec.run_id.clone(),
                 scratch: spec.scratch.clone(),
-                labels: spec.labels.clone(),
+                labels,
                 running_ms: 0,
                 exit: None,
+                started: true,
             },
         );
         Ok(RunHandle(id))
@@ -293,11 +466,17 @@ impl Runtime for FakeRuntime {
         let mut state = self.state.borrow_mut();
         state.stops.push((id.0.clone(), grace));
         let exits = state.stop_exits;
+        let term = state
+            .containers
+            .get(&id.0)
+            .and_then(|c| state.term_exits.get(&c.run_id))
+            .copied()
+            .unwrap_or(137);
         let container = state.containers.get_mut(&id.0);
         container.into_iter().for_each(|c| {
             if exits && c.exit.is_none() {
                 c.exit = Some(Exit {
-                    code: 137,
+                    code: term,
                     oom_killed: false,
                 });
             }
@@ -342,6 +521,14 @@ impl Runtime for FakeRuntime {
         Ok(())
     }
 
+    fn places_in_cgroup(&self) -> bool {
+        self.state.borrow().places
+    }
+
+    fn supports_gpus(&self) -> bool {
+        !self.state.borrow().gpus_off
+    }
+
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         let state = self.state.borrow();
         let run = &state.containers.get(&id.0)?.run_id;
@@ -360,7 +547,7 @@ impl Runtime for FakeRuntime {
                 id: RunHandle(id.clone()),
                 labels: c.labels.clone(),
                 running_ms: c.running_ms,
-                never_started: false,
+                never_started: !c.started,
             })
             .collect())
     }

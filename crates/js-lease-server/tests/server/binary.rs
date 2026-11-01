@@ -19,7 +19,7 @@ const START_LIMIT: Duration = Duration::from_secs(60);
 
 /// A child process that is killed and reaped when the guard is dropped, so a failed
 /// assertion leaves no server behind holding its files.
-struct Guard(Child);
+pub(crate) struct Guard(pub(crate) Child);
 
 impl Drop for Guard {
     fn drop(&mut self) {
@@ -31,7 +31,7 @@ impl Drop for Guard {
 /// Starts the program on `args` (the program name first) with a timer that never fires
 /// in a test, standard error going to `stderr`, and returns it with the address it
 /// printed.
-fn launch(args: &[OsString], stderr: Stdio) -> (Guard, SocketAddr) {
+pub(crate) fn launch(args: &[OsString], stderr: Stdio) -> (Guard, SocketAddr) {
     let mut child = Guard(
         Command::new(PROGRAM)
             .args(&args[1..])

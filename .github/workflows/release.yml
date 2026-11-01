@@ -195,18 +195,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The lease server is Linux-only; the client and the agent also build for Apple
-        # silicon.
+        # The lease server is Linux-only; the client, the agent, the js-bundle CLI and the
+        # Mac host tools (js-mac-session, js-mac-provision) also build for Apple silicon.
         include:
           # Static musl binaries: they run on gcr.io/distroless/cc-debian12 and on any
           # Linux host, whatever its libc. rustls links ring, which compiles C, hence
           # musl-tools.
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
-            builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent
+            builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent js-bundle-cli:js-bundle
           - target: aarch64-apple-darwin
-            runner: macos-14
-            builds: js-cli:js js-agent:js-agent
+            runner: macos-15
+            builds: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.plan.outputs.version }}
@@ -241,6 +241,11 @@ jobs:
           # commit's time as the modification time, numeric owner 0/0, no name or time in
           # the gzip header. A full re-run then makes the same files as the first run.
           mtime="$(git log -1 --format=%ct "$COMMIT")"
+          # The oldest macOS the Apple silicon binaries must run on; a newer runner image
+          # must not raise it (the check step below reads each binary's minos).
+          case "$TARGET" in
+            *-apple-darwin) export MACOSX_DEPLOYMENT_TARGET=11.0 ;;
+          esac
           # The options below are GNU tar's: on a Mac, Homebrew's gnu-tar is `gtar`.
           tar=tar
           if command -v gtar > /dev/null; then
@@ -265,6 +270,21 @@ jobs:
             file "target/$TARGET/release/$bin"
           done
           case "$TARGET" in
+            *-apple-darwin)
+              for entry in $BUILDS; do
+                bin="${entry##*:}"
+                minos="$(otool -l "target/$TARGET/release/$bin" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')"
+                echo "$bin minos $minos"
+                if [ -z "$minos" ]; then
+                  echo "::error::$bin has no LC_BUILD_VERSION minos to check"
+                  exit 1
+                fi
+                if [ "$(printf '%s\n%s\n' "$minos" 11.0 | sort -V | tail -n 1)" != "11.0" ]; then
+                  echo "::error::$bin needs macOS $minos, above the pinned 11.0"
+                  exit 1
+                fi
+              done
+              ;;
             *-linux-musl)
               for entry in $BUILDS; do
                 bin="${entry##*:}"
@@ -276,11 +296,13 @@ jobs:
               done
               ;;
           esac
-          # Every binary runs on the build host and prints the release version.
+          # Every binary runs on the build host and prints the release version on the first
+          # line of --version; js-agent prints a `runtimes:` line after it.
           for entry in $BUILDS; do
             bin="${entry##*:}"
             printed="$("target/$TARGET/release/$bin" --version)"
             echo "$printed"
+            printed="$(printf '%s\n' "$printed" | sed -n 1p)"
             case "$printed" in
               *" $VERSION") ;;
               *)
@@ -317,7 +339,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          expected="js-$VERSION-aarch64-apple-darwin.tar.gz js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-aarch64-apple-darwin.tar.gz js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          expected="js-$VERSION-aarch64-apple-darwin.tar.gz js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-aarch64-apple-darwin.tar.gz js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-bundle-$VERSION-aarch64-apple-darwin.tar.gz js-bundle-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz js-mac-provision-$VERSION-aarch64-apple-darwin.tar.gz js-mac-session-$VERSION-aarch64-apple-darwin.tar.gz"
           actual="$(ls | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
           if [ "$actual" != "$expected" ]; then
             echo "::error::unexpected assets: '$actual' (expected '$expected')"
@@ -434,7 +456,7 @@ jobs:
           # A draft for this version at this commit (tag_name and target_commitish).
           new_draft() {
             gh api "$api/releases" -f tag_name="$TAG" -f target_commitish="$COMMIT" -f name="jobscheduler $VERSION" \
-              -f body="js-lease-server, js and js-agent $VERSION. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
+              -f body="js-lease-server, js, js-agent, js-bundle and the Mac host tools $VERSION. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
               -F draft=true -F generate_release_notes=true --jq .id
           }
           # `plan` found no tag for this version: one that exists now was made since, and

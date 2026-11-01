@@ -125,3 +125,90 @@ pub const NO_MATCHING_POOL: &str = "no-matching-pool";
 /// the lease holds the host, but the host is still being prepared. Used by the server,
 /// not by the agent.
 pub const NOT_READY: &str = "not-ready";
+/// As the detail of a `failed_to_start` result: the agent's scratch disk quota is not
+/// working (it failed several calls in a row and no longer passes its own check, or too many
+/// slots were given up on), so the `Start` was refused and nothing was created. It tells the
+/// consumer that this host's quota is unavailable: the host's fault and not the run's, and,
+/// unlike [`HOST_TAINTED`], not a taint (the host is clean; a repaired quota, or a restart
+/// of the agent after it gave up on too many slots, ends it). The run may be sent to
+/// another host. Whether a retry is charged to the run is the consumer's choice; nothing in
+/// the scheduler counts retries.
+pub const QUOTA_UNAVAILABLE: &str = "quota-unavailable";
+
+/// A capabilities frame whose digests, root or Xcode builds are malformed.
+pub const INVALID_CAPS: &str = "invalid-caps";
+/// A start that names a bundle, sent to an agent that holds no bundle store (it reports no
+/// `bundle` capability). The placement should not have sent it there; the agent refuses
+/// rather than run the program with the host's tools.
+pub const BUNDLE_UNSUPPORTED: &str = "bundle-unsupported";
+/// A start whose bundle the agent has begun to fetch and does not hold yet; ask again.
+pub const BUNDLE_PENDING: &str = "bundle-pending";
+/// A start whose bundle the agent does not hold, on an agent that fetches nothing
+/// (`--bundle-pull never`): the bundle was not prefetched before the job was placed.
+pub const BUNDLE_NOT_HELD: &str = "bundle-not-held";
+/// A start whose bundle would have to be fetched while the store has no room: over its
+/// budget with nothing to evict, or the volume under its low-water mark. Retriable.
+pub const BUNDLE_NO_SPACE: &str = "bundle-no-space";
+/// A start whose bundle needs a newer macOS than the host runs.
+pub const BUNDLE_OS_TOO_OLD: &str = "bundle-os-too-old";
+/// A start whose bundle needs an Xcode the host does not have.
+pub const BUNDLE_XCODE_MISMATCH: &str = "bundle-xcode-mismatch";
+/// A start whose bundle digest is not on the host's allow list (`--bundle-trust list`).
+pub const BUNDLE_NOT_ALLOWED: &str = "bundle-not-allowed";
+/// A start whose bundle digest is on the host's deny list.
+pub const BUNDLE_DENIED: &str = "bundle-denied";
+/// A start whose bundle name is outside every registry and namespace the host may fetch
+/// from (`--bundle-registry-allow`).
+pub const BUNDLE_REGISTRY_NOT_ALLOWED: &str = "bundle-registry-not-allowed";
+/// A start whose bundle could not be fetched or did not verify (a digest or size
+/// mismatch).
+pub const BUNDLE_FETCH_FAILED: &str = "bundle-fetch-failed";
+/// A start whose pin names an index, not a manifest.
+pub const BUNDLE_INDEX: &str = "bundle-index";
+
+/// Whose fault a refused start is, which decides what a client does with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalClass {
+    /// The node was not ready or the rollout order was wrong: the work can run elsewhere
+    /// or later, and the refusal is never cached as the action's result.
+    Farm,
+    /// The client sent something wrong: a precondition failure that asking again cannot
+    /// change.
+    Request,
+}
+
+/// The refusals of a bundle start that are the farm's fault.
+const FARM_CODES: [&str; 10] = [
+    BUNDLE_UNSUPPORTED,
+    BUNDLE_PENDING,
+    BUNDLE_NOT_HELD,
+    BUNDLE_NO_SPACE,
+    BUNDLE_OS_TOO_OLD,
+    BUNDLE_XCODE_MISMATCH,
+    BUNDLE_NOT_ALLOWED,
+    BUNDLE_DENIED,
+    BUNDLE_REGISTRY_NOT_ALLOWED,
+    BUNDLE_FETCH_FAILED,
+];
+
+/// The refusals of a bundle start that are the request's fault.
+const REQUEST_CODES: [&str; 4] = [
+    BUNDLE_DIGEST_REQUIRED,
+    INVALID_BUNDLE,
+    BUNDLE_INDEX,
+    INVALID_ENV,
+];
+
+/// The class of a refusal a bundle start can meet, or `None` for any other code. A bundle
+/// start that an agent admits but cannot run ends as `native-unsupported`, which has no
+/// class: it is the agent's lack of a runtime, and a consumer must neither cache it as the
+/// action's result nor treat it as the request's fault.
+#[must_use]
+pub fn bundle_class(code: &str) -> Option<RefusalClass> {
+    let farm = FARM_CODES.contains(&code).then_some(RefusalClass::Farm);
+    farm.or_else(|| {
+        REQUEST_CODES
+            .contains(&code)
+            .then_some(RefusalClass::Request)
+    })
+}

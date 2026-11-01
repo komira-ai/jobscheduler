@@ -17,6 +17,10 @@
 //!   the embedding process is given as plain data or a trait: the arguments of the helper
 //!   modes ([`oci::helper::HelperModes`]), the registry client ([`oci::image::ImageSource`])
 //!   and the environment scrub ([`oci::EnvScrub`]).
+//! - [`unpack`], [`unpack_layers`], [`give`] and [`modes`]: the helper modes of the
+//!   daemon's own binary that [`oci`]'s helper containers run: applying an image's layer
+//!   tars to a root, and giving directories to the job's ids. The embedding process calls
+//!   [`modes::dispatch`] first in `main`.
 //! - [`running`]: one `crun run`, on a thread of its own.
 //! - [`keeper`]: the handle of the process that kills a lease's cgroup if the daemon dies.
 //! - [`remove`]: removing a scratch directory without recursion and without following
@@ -30,20 +34,24 @@ pub mod cgroup;
 pub mod cgroup_usage;
 pub mod container;
 pub mod delegate;
+pub mod give;
 pub mod keeper;
+pub mod modes;
 pub mod numa;
 pub mod oci;
 pub mod remove;
 pub mod running;
 pub mod subids;
+pub mod unpack;
+pub mod unpack_layers;
 pub mod walk;
 
 #[cfg(test)]
 mod test_dir;
 
-pub use cgroup::{SwapKill, cpu_weight, memory_max};
+pub use cgroup::{LeasePolicy, SwapKill, cpu_max, cpu_weight, hard_memory_max, memory_max};
 pub use cgroup_usage::{CgroupUsage, NumaNodeBytes};
-pub use container::{ContainerLimits, ContainerSpec, Dirs, Ended, SharedMount};
+pub use container::{ContainerLimits, ContainerSpec, Dirs, Ended, HostMount, SharedMount};
 pub use delegate::Capacity;
 pub use numa::Spot;
 pub use oci::{Oci, OciConfig, OciError};

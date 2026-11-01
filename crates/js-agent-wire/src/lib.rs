@@ -99,6 +99,7 @@
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
+mod caps;
 mod check;
 mod command;
 mod credential;
@@ -113,6 +114,7 @@ mod native;
 pub mod protocol;
 pub mod refusal;
 
+pub use caps::{Caps, ReadModel, bundle_capability};
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use credential::HostCredential;
 pub use error::{Rule, ValidationError};
@@ -125,7 +127,10 @@ pub use hello::{
     GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireShape,
 };
 pub use load::{LeaseClock, LeaseMinute, LoadDrops, NodeLoad, lease_parts};
-pub use native::{InputRef, NativeSpec, NetworkLevel, OutputKind, OutputSpec, Placement};
+pub use native::{
+    BUNDLE_ENTRYPOINT_MAX, BUNDLE_PROGRAM_PREFIX, InputRef, NativeSpec, NetworkLevel, OutputKind,
+    OutputSpec, Placement,
+};
 pub use protocol::{PROTOCOL_MAJOR, PROTOCOL_NAME, ProtocolRange};
 
 /// The heartbeat interval the server proposes in [`Welcome`] unless its configuration

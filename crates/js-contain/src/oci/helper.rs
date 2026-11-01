@@ -11,7 +11,8 @@
 //!
 //! A helper runs one program, never a shell: this daemon's own binary in its
 //! give mode (descriptor-relative, never following a symlink) or its unpack mode (the
-//! arguments that select them are [`HelperModes`]), or the node's `find`, from a
+//! arguments that select them are [`HelperModes`]; the modes are [`crate::give`] and
+//! [`crate::unpack_layers`], reached by [`crate::modes::dispatch`]), or the node's `find`, from a
 //! read-only bind of the host's `/usr`. Its
 //! root is a small directory of mount points (`prepare_rootfs`) shared by all helpers.
 //! The directories it works on are bound at `/t/0`, `/t/1`, ... so no per-lease path
@@ -37,8 +38,9 @@ use crate::subids::DaemonIds;
 /// and every entry below each tree after `<whole>`, to the owner, by descriptor and
 /// never through a symlink. The unpack mode is run as
 /// `<binary> <unpack> <stage> <blobs> <layer>...`: it applies the layer files of `blobs`,
-/// in order, into `stage/`[`image::ROOTFS`](super::image::ROOTFS). Both implementations
-/// belong to the process that embeds this crate.
+/// in order, into `stage/`[`image::ROOTFS`](super::image::ROOTFS). Both are implemented
+/// here ([`crate::modes`]); the embedding process's `main` calls [`crate::modes::dispatch`]
+/// with the same value first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HelperModes {
     /// The argument that selects the give mode.

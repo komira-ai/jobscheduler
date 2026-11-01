@@ -128,6 +128,11 @@ fn good() -> Spec {
             file("./usr/bin/js-agent", 0o755, &static_elf()),
             file("./usr/lib/systemd/system/js-agent.service", 0o644, b"unit"),
             file("./usr/lib/tmpfiles.d/js-agent.conf", 0o644, b"tmpfiles"),
+            file(
+                "./usr/share/js-agent/crun_host_setup.sh",
+                0o755,
+                b"host setup",
+            ),
             file("./usr/share/doc/js-agent/copyright", 0o644, b"license"),
         ],
     }
@@ -216,6 +221,7 @@ fn digests() -> Digests {
         binary: sha(&static_elf()),
         service: sha(b"unit"),
         tmpfiles: sha(b"tmpfiles"),
+        host_setup: sha(b"host setup"),
         license: sha(b"license"),
     }
 }
@@ -365,6 +371,7 @@ fn only_the_directories_the_files_lie_in_are_accepted() {
         "./usr/lib/systemd/system/",
         "./usr/lib/tmpfiles.d/",
         "./usr/share/",
+        "./usr/share/js-agent/",
         "./usr/share/doc/",
         "./usr/share/doc/js-agent/",
     ] {
@@ -391,6 +398,9 @@ fn a_wrong_mode_is_refused() {
     let mut spec = good();
     at(&mut spec, "usr/lib/systemd/system/js-agent.service").mode = 0o664;
     only(&spec, "js-agent.service: mode 664, not 644");
+    let mut spec = good();
+    at(&mut spec, "usr/share/js-agent/crun_host_setup.sh").mode = 0o644;
+    only(&spec, "crun_host_setup.sh: mode 644, not 755");
 }
 
 /// A file or a directory owned by anyone but root (nfpm gives the builder's uid when
@@ -457,6 +467,7 @@ fn bytes_other_than_the_sources_are_refused() {
         ("usr/bin/js-agent", "Binary"),
         ("usr/lib/systemd/system/js-agent.service", "Service"),
         ("usr/lib/tmpfiles.d/js-agent.conf", "Tmpfiles"),
+        ("usr/share/js-agent/crun_host_setup.sh", "HostSetup"),
         ("usr/share/doc/js-agent/copyright", "License"),
     ] {
         let mut spec = good();
@@ -698,6 +709,7 @@ fn scratch(name: &str) -> PathBuf {
     std::fs::write(dir.join("js-agent"), static_elf()).expect("binary");
     std::fs::write(dir.join("packaging/js-agent.service"), b"unit").expect("unit");
     std::fs::write(dir.join("packaging/tmpfiles.conf"), b"tmpfiles").expect("tmpfiles");
+    std::fs::write(dir.join("packaging/crun_host_setup.sh"), b"host setup").expect("script");
     std::fs::write(dir.join("LICENSE"), b"license").expect("license");
     std::fs::write(dir.join("js-agent.deb"), deb(&good())).expect("deb");
     dir
@@ -728,7 +740,7 @@ fn refused(dir: &Path) -> Vec<String> {
 fn check_compares_the_deb_with_the_files_it_was_built_from() {
     let dir = scratch("check");
     let line = check(&args(&dir)).expect("the package");
-    assert!(line.ends_with("js-agent 1.2.3 with 4 files"), "{line}");
+    assert!(line.ends_with("js-agent 1.2.3 with 5 files"), "{line}");
     let other = elf_with(2, 1, X86_64, &[(PT_LOAD, vec![1; 8])]);
     for (file, bytes, source) in [
         ("js-agent", other.as_slice(), "Binary"),
@@ -738,6 +750,11 @@ fn check_compares_the_deb_with_the_files_it_was_built_from() {
             "Service",
         ),
         ("packaging/tmpfiles.conf", &b"another file"[..], "Tmpfiles"),
+        (
+            "packaging/crun_host_setup.sh",
+            &b"another script"[..],
+            "HostSetup",
+        ),
         ("LICENSE", &b"another license"[..], "License"),
     ] {
         let dir = scratch(&format!("changed-{}", file.replace('/', "-")));
@@ -774,6 +791,7 @@ fn check_names_the_file_it_cannot_read() {
         "js-agent",
         "packaging/js-agent.service",
         "packaging/tmpfiles.conf",
+        "packaging/crun_host_setup.sh",
         "LICENSE",
     ] {
         let dir = scratch(&format!("unreadable-{}", gone.replace('/', "-")));

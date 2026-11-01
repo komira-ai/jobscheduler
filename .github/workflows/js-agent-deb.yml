@@ -4,11 +4,15 @@
 # bucket. The deb is a workflow artifact for seven days, and its provenance attestation is
 # stored by GitHub; getting it anywhere else is a separate, deliberate step.
 #
-# A pull request that changes the package, its checker or the agent builds and checks it as
-# version 0.0.0 and attests nothing. The filter lists what the package and its checker are made
-# of (the workflow, packaging/js-agent, js-agent, xtask, Cargo.lock, LICENSE); a change to a
-# crate that js-agent depends on is built into the deb at the next manual run, which is
-# deliberate. A manual run on main with a version builds and checks the deb of that version,
+# A pull request that changes the package, its checker, or any crate (the agent's dependency
+# closure is most of the workspace: js-agent links js-contain, whose build script builds a
+# static init for the musl target), the toolchain or the lock file builds and checks it as
+# version 0.0.0 and attests nothing. The build is the one the release makes of the agent
+# (`cargo build --locked --release --target x86_64-unknown-linux-musl -p js-agent --bin
+# js-agent`), and `cargo xtask pkg check-deb` refuses a deb whose binary is not a static x86-64
+# executable, so a change that breaks the musl release binary or the deb is red on the pull
+# request and not on the release push. A manual run on main with a version builds and checks
+# the deb of that version,
 # then attests it and verifies the attestation as a host would (`gh attestation verify`). Only
 # the `attest` job holds id-token and attestations write, and it runs no repository code.
 #
@@ -28,9 +32,11 @@ on:
     paths:
       - '.github/workflows/js-agent-deb.yml'
       - 'packaging/js-agent/**'
-      - 'crates/js-agent/**'
-      - 'crates/xtask/**'
+      - 'crates/**'
+      - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
       - 'LICENSE'
   workflow_dispatch:
     inputs:

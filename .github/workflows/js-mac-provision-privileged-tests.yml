@@ -1,0 +1,88 @@
+# Builds the js-mac-provision root test (`--test pf_as_root`) for aarch64-apple-darwin, with
+# the js-mac-provision program it starts, and uploads both WITHOUT running them.
+# The test (crates/js-mac-provision/tests/pf_as_root.rs, `#[ignore]`) loads pf rules under its
+# own anchor on a Mac and starts probes as pool uids, so it needs root on a provisioned Mac,
+# which a hosted runner is not for: an operator runs it once on a farm Mac.
+# Download the artifact, check SHA256SUMS, copy the two files over, chmod +x them (the
+# artifact zip drops the mode) and, as root, run
+#   JS_MAC_PROVISION_BIN=<the js-mac-provision file> ./pf_as_root --ignored --test-threads=1
+# (libtest flags come first.)
+#
+# Manual runs only. It publishes nothing: the binaries are a workflow artifact for seven days.
+name: js-mac-provision-privileged-tests
+
+on:
+  # No inputs: it builds exactly the commit it is dispatched on.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  TARGET: aarch64-apple-darwin
+  # The oldest macOS the binaries must run on; a newer image must not raise it.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: rustup target add "$TARGET"
+      - name: Build the test binary without running it
+        run: |
+          set -euo pipefail
+          cargo test -p js-mac-provision --test pf_as_root --no-run --locked --target "$TARGET" --message-format=json > build.json
+      - name: Pick the binaries and check what they are
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          short="${commit:0:12}"
+          mkdir dist
+          # The test executable of the integration test, and the program: compiler-artifact
+          # messages with that target's name and kind, never a guess by file name.
+          test_exe="$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "pf_as_root" and (.target.kind | index("test")) != null and .executable != null) | .executable' build.json)"
+          program="$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == false and .target.name == "js-mac-provision" and (.target.kind | index("bin")) != null and .executable != null) | .executable' build.json)"
+          for found in "$test_exe" "$program"; do
+            if [ "$(printf '%s\n' "$found" | grep -c .)" != 1 ]; then
+              echo "::error::expected exactly one executable, got: $found"
+              exit 1
+            fi
+          done
+          cp "$test_exe" dist/pf_as_root
+          cp "$program" dist/js-mac-provision
+          for name in pf_as_root js-mac-provision; do
+            description="$(file "dist/$name")"
+            echo "$description"
+            case "$description" in
+              *"Mach-O 64-bit executable arm64"*) ;;
+              *)
+                echo "::error::dist/$name is not an arm64 Mach-O executable"
+                exit 1
+                ;;
+            esac
+          done
+          (cd dist && shasum -a 256 pf_as_root js-mac-provision > SHA256SUMS)
+          {
+            echo "### js-mac-provision privileged test binaries"
+            echo
+            echo "- commit: \`$commit\`"
+            echo "- target: \`$TARGET\`"
+            sed 's/^\([0-9a-f]*\)  \(.*\)$/- \2 sha256: `\1`/' dist/SHA256SUMS
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "SHORT=$short" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-mac-provision-privileged-tests-${{ env.SHORT }}
+          path: |
+            dist/pf_as_root
+            dist/js-mac-provision
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7

@@ -7,11 +7,13 @@ use std::time::Duration;
 
 use js_agent_wire::Hello;
 
+use crate::bundle::Admission;
 use crate::facts::Platform;
 use crate::lifecycle::{Capacity, Config, Local};
+use crate::quota::ScratchQuota;
 use crate::readiness::WorkerHook;
 use crate::session::Drain;
-use crate::system::Machine;
+use crate::system::{Backend, Machine};
 use crate::usage::Outbox;
 use crate::worker::{Handle, Plan, STEP_EVERY, Worker};
 
@@ -30,21 +32,27 @@ pub struct Seams<'a> {
     /// The readiness hook the worker runs for a whole-node lease; `None` without
     /// `--readiness-hook`.
     pub readiness: Option<WorkerHook>,
+    /// The rules for a start that names a bundle; `None` without `--bundle-store`.
+    pub bundle: Option<Admission>,
+    /// The scratch quota to bound the runs with: given exactly when `--scratch-quota` is,
+    /// after its probe passed.
+    pub quota: Option<Arc<dyn ScratchQuota>>,
 }
 
-/// Starts the worker when `--container-bin` is given, and `None` when it is not: an agent
-/// without it registers and heartbeats and runs no job. The worker has built the
-/// lifecycle and adopted the containers an earlier process left when this returns, and
-/// the lines it has to say (the engine's warnings, what it adopted) are written to `err`.
+/// Starts the worker when `--container-bin`, `--runtime crun` or `--native-helper-socket` is
+/// given, and `None` when none is: an agent without them registers and heartbeats and runs
+/// no job. The worker has built the lifecycle and adopted the containers an earlier process
+/// left when this returns, and the lines it has to say (the engine's warnings, what it
+/// adopted) are written to `err`.
 /// The hook of `seams` is handed a [`Handle`] to the worker. The outbox returned is where
 /// the worker publishes the usage of the leases (nothing, without `--actions-cgroup`) and
 /// the session takes it from.
 ///
 /// # Errors
 ///
-/// The text names `--container-bin`: the engine is not Docker or Podman or does not
+/// The text names `--container-bin` (the engine is not Docker or Podman or does not
 /// answer, the agent cannot see the host, or the containers of an earlier run cannot be
-/// listed.
+/// listed) or `--native-helper-socket` (the helper does not answer).
 pub fn start(
     local: Local,
     hello: &Hello,
@@ -52,20 +60,42 @@ pub fn start(
     seams: Seams<'_>,
     err: &mut dyn Write,
 ) -> Result<Option<(Worker, Drain, Arc<Outbox>)>, String> {
+    let quota = seams.quota.map(|quota| local.run_quota(quota));
     let Local {
         mounts,
         scratch,
         files,
         files_warning: _,
         scratch_quota: _,
+        scratch_default_gib: _,
+        scratch_max_inodes: _,
+        scratch_quota_failures: _,
+        scratch_usage_wait_secs: _,
+        scratch_abandon_limit: _,
         container,
+        native,
         state,
         watch,
         stop_grace,
         drain_wait,
+        image_allow: _,
+        egress: _,
     } = local;
-    let (Some(settings), Some(scratch), Some(state)) = (container, scratch, state) else {
-        return Ok(None);
+    // `Local` holds at most one of the two, and a state root and a scratch root with it.
+    let (backend, scratch, state) = match (container, native, scratch, state) {
+        (Some(container), _, Some(scratch), Some(state)) => {
+            (Backend::Container(container), scratch, state)
+        }
+        (None, Some(native), Some(scratch), Some(state)) => {
+            (Backend::Native(native), scratch, state)
+        }
+        _ => return Ok(None),
+    };
+    let flag = match &backend {
+        Backend::Container(settings) => settings
+            .crun()
+            .map_or("--container-bin", |_| "--runtime crun"),
+        Backend::Native(_) => "--native-helper-socket",
     };
     let config = Config {
         capacity: Capacity::of(hello),
@@ -75,11 +105,13 @@ pub fn start(
         files,
         state,
         stop_grace,
+        bundle: seams.bundle.clone(),
+        quota,
     };
     let outbox = Arc::new(Outbox::new());
     let worker = Worker::start(Plan {
         config,
-        settings,
+        backend,
         host_id: hello.host_id.clone(),
         platform: platform.clone(),
         watch,
@@ -89,7 +121,7 @@ pub fn start(
         rescue_bound: seams.rescue_bound,
         readiness: seams.readiness,
     })
-    .map_err(|why| format!("--container-bin: {why}"))?;
+    .map_err(|why| format!("{flag}: {why}"))?;
     worker.take_lines().iter().for_each(|line| {
         let _ = writeln!(err, "js-agent: {line}");
     });

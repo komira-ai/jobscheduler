@@ -210,6 +210,8 @@ impl Agent {
             files: None,
             state: StateRoot::open(state.path()).unwrap(),
             stop_grace: Duration::from_secs(1),
+            bundle: None,
+            quota: None,
         };
         let fake = Fake::default();
         let (life, _) = Lifecycle::adopt(
@@ -254,6 +256,7 @@ impl Agent {
             exclusive_ready: self.prepared.take(),
             exclusive_refused: None,
             load: None,
+            disk_gib: None,
         };
         let reply = registry.heartbeat(&message, &credential()).unwrap();
         self.prepared = reply.exclusive.clone();

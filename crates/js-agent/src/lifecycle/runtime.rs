@@ -9,14 +9,16 @@
 //!
 //! The calls run on the lifecycle's own worker thread, never on the session's heartbeat
 //! loop (see the [module](super) documentation). A call may take as long as the runtime
-//! needs: a pull inside `create_and_start`, the grace of a `stop`. It delays the
-//! lifecycle's next step and nothing else.
+//! needs: the grace of a `stop`, or, for a runtime that has not [`Runtime::prepare`]d its
+//! images, a pull inside `create_and_start`. It delays the lifecycle's next step and
+//! nothing else. A runtime that pulls in the background ([`Prefetcher`](super::Prefetcher))
+//! answers `prepare` at once and never makes the worker wait for a pull.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::{Isolation, LogTail};
+use js_agent_wire::{Isolation, LogTail, NativeSpec, NetworkLevel, refusal};
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -83,6 +85,9 @@ pub enum Body {
         /// The command line after the image.
         args: Vec<String>,
     },
+    /// A program run on the host as a user of its own, under a sandbox profile (macOS only):
+    /// the body of a native start as the wire carries it.
+    Native(NativeSpec),
 }
 
 /// Everything a runtime needs to create and start one run.
@@ -115,6 +120,12 @@ pub struct RunSpec {
     pub isolation: Isolation,
     /// The job's labels and the agent's own ([`label`]); the agent's win.
     pub labels: BTreeMap<String, String>,
+    /// The darwin bundle a native run pins, `name[:tag]@sha256:<manifest digest>`: the
+    /// runtime pins its trees for the run, may resolve `@bundle/<entrypoint>` through
+    /// it, and unpins them when the run is removed. The agent has judged it already
+    /// ([`Admission`](crate::bundle::Admission)); a runtime that holds no bundle store
+    /// fails a start that has one.
+    pub bundle: Option<String>,
 }
 
 /// How a container ended.
@@ -184,10 +195,63 @@ impl RuntimeError {
     }
 }
 
+/// Why a runtime will not run a native body: the wire code the start is answered with and
+/// the text that stays on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRefusal {
+    /// A refusal code of the wire ([`refusal`]).
+    pub code: &'static str,
+    /// What is wrong, for the log.
+    pub why: String,
+}
+
+/// Names one fetch of an image, so that every run that waited on it hears how it ended
+/// (see [`Runtime::prepare`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ticket(pub u64);
+
+/// Whether the image of a run is on the host, as [`Runtime::prepare`] finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prepared {
+    /// The image is here: the container can be created without a pull.
+    Ready,
+    /// The image is being fetched by the fetch the ticket names; ask again at the next
+    /// step, naming it.
+    Pending(Ticket),
+    /// The image could not be had. The reason stays on the host.
+    Failed(RuntimeError),
+}
+
 /// What the lifecycle needs of a container runtime.
 pub trait Runtime {
+    /// Begins getting `image` onto the host when it is not there, and says where that
+    /// stands. It never waits for a pull: a run whose image is [`Prepared::Pending`] is held
+    /// as `starting` (and books its slot) without the lifecycle's worker being busy, so
+    /// other runs go on starting, running and ending beside it, and the job's wall-time
+    /// limit and the runner's [`CALL_LIMIT`](crate::cli_runtime::CALL_LIMIT) do not count
+    /// the pull: both begin when the image is [`Prepared::Ready`] and the container is
+    /// created.
+    ///
+    /// The lifecycle calls it with `waited: None` when a start is admitted and again at
+    /// every step while the answer is `Pending`, naming the ticket it was given. Calls for
+    /// one image while it is being fetched do not start a second fetch. A failure is
+    /// reported to every call that names the ticket of the fetch that failed, so every run
+    /// that waited on it ends; a call that names no ticket (a new start) or another one
+    /// starts a new fetch.
+    ///
+    /// The default is a runtime that pulls inside [`Runtime::create_and_start`] (Docker and
+    /// Podman, as `--container-pull` says): the image is always `Ready`. A runtime that
+    /// prepares must answer `Ready` for a run that does not use the image store (an
+    /// `isolation = host` run), and its fetch must have a hard total deadline of its own:
+    /// nothing else ends a fetch that hangs, and every run that names the image waits on it.
+    fn prepare(&mut self, _image: &str, _waited: Option<Ticket>) -> Prepared {
+        Prepared::Ready
+    }
+
     /// Creates and starts the container of `spec`. A call that fails leaves no
-    /// container behind: the backend rolls back what it created.
+    /// container behind: the backend rolls back what it created. A run id that already has a
+    /// container (running, exited or not yet removed) is refused, and that container is left
+    /// as it is.
     ///
     /// # Errors
     ///
@@ -256,6 +320,29 @@ pub trait Runtime {
         Ok(None)
     }
 
+    /// Whether this runtime runs the native body `native`, asked before a native start
+    /// creates anything. The default runs none, which is every runtime but the one a Mac
+    /// agent has: a native start on a Linux host is refused `native-unsupported`.
+    ///
+    /// # Errors
+    ///
+    /// The code the start is refused with, and why.
+    fn check_native(&self, _native: &NativeSpec) -> Result<(), NativeRefusal> {
+        Err(NativeRefusal {
+            code: refusal::NATIVE_UNSUPPORTED,
+            why: "this agent runs no native jobs".to_owned(),
+        })
+    }
+
+    /// Ends and removes whatever an earlier process left, which no list of the runtime's
+    /// can say: the leases a native runtime journalled and never saw deleted. Called when a
+    /// worker starts and by the rescue, before anything else; returns one line for each
+    /// thing done or not done. A runtime whose leftovers are listed (the container one)
+    /// has nothing to do.
+    fn reclaim(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Whether a container made here can use a GPU. A start that names a GPU where this
     /// is false is refused (`gpu-unsupported`) and creates nothing.
     fn supports_gpus(&self) -> bool {
@@ -273,6 +360,31 @@ pub trait Runtime {
         Ok(())
     }
 
+    /// Whether the network a native job would get is limited as the agent was told. Called
+    /// before every native start, and only for a native start (a container start has
+    /// [`Runtime::check_egress`]); a start whose check fails is refused (`egress-unchecked`)
+    /// and creates nothing.
+    ///
+    /// The default fails closed: a runtime that does not say how it limits the network
+    /// refuses a job that asks for it (`on`) and passes one that does not. A runtime that
+    /// takes native jobs and limits the network overrides it.
+    ///
+    /// The check is made at admission. The window from there to the helper's `run` (the
+    /// slot, the user, the launch) is not checked again, and a run that is under way is not
+    /// checked again after a reload of the packet filter.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong with the limit; the text stays on the host.
+    fn check_native_egress(&self, native: &NativeSpec) -> Result<(), RuntimeError> {
+        match native.network {
+            NetworkLevel::On => Err(RuntimeError::new(
+                "this runtime does not say how it limits the network of a native job",
+            )),
+            NetworkLevel::Off | NetworkLevel::Loopback => Ok(()),
+        }
+    }
+
     /// The control group directory (an absolute path of the cgroup version 2 file system)
     /// of a container that runs, or `None` when the runtime cannot say: the container is
     /// not in the agent's `/proc`, its control group is not the unified one, or it lies
@@ -282,5 +394,25 @@ pub trait Runtime {
     /// control group is not sampled. A runtime with no control groups keeps the default.
     fn cgroup(&mut self, _id: &RunHandle) -> Option<PathBuf> {
         None
+    }
+
+    /// The directory, directly below the scratch root, where this runtime keeps the writable
+    /// state of the container of `run_id` that is not in the run's own scratch directory (a
+    /// container's `/work` overlay and home), or `None` when it keeps none there. The
+    /// lifecycle makes the directory empty beside the run's, puts it under the run's scratch
+    /// quota, and removes it with the run's, so that one bound covers what the job writes
+    /// everywhere. The runtime makes what goes in it and removes the directory with the
+    /// container.
+    fn lease_dir(&self, _run_id: &str) -> Option<PathBuf> {
+        None
+    }
+
+    /// Whether every container this runtime starts is in a control group the agent can
+    /// read ([`Runtime::cgroup`]). A runtime that says so and then cannot name a run's
+    /// control group is blind to that run: the lifecycle taints the host as unchecked
+    /// when it watches the run. The default is `false`: a runtime that keeps no control groups
+    /// of its own is never blind for lack of one.
+    fn places_in_cgroup(&self) -> bool {
+        false
     }
 }

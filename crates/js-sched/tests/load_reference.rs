@@ -7,6 +7,16 @@
 //! no call into `js-sched`. The cases are all flat, as the reference is: every request
 //! asks for cores only (a core or more, so the unmeasured floor changes nothing unless a
 //! test is about it), and no worker measures.
+//!
+//! The tie-breaks of the document, in order, and the test that fixes each:
+//!
+//! 1. fewer uncovered leases and 2. the larger worker: `ties_go_to_fewer_leases_then_the_larger_worker`;
+//! 3. the larger headroom: `a_tie_goes_to_the_larger_headroom_before_the_hash`;
+//! 4. the hash of lease and worker: `identical_workers_are_told_apart_by_the_hash_of_lease_and_worker`
+//!    (and the encoding in `the_tie_break_hash_is_length_prefixed_fnv_1a`);
+//! 5. the first by name, which the code takes when the hashes are equal. The reference only
+//!    reaches it for a request that owns every candidate whole
+//!    (`an_action_that_owns_a_worker_whole_is_not_scored`); two distinct workers never hash alike.
 
 #[path = "load_reference/mod.rs"]
 mod load_reference;
@@ -347,4 +357,63 @@ fn an_action_that_owns_a_worker_whole_is_not_scored() {
     assert_eq!(place(&mut p, 1, &key(1), req, 0, &[0, 1]), Some(0));
     // And nothing is placed beside it.
     assert_eq!(place(&mut p, 2, &key(2), cores(1_000), 0, &[0]), None);
+}
+
+/// Catches: the limit rounded up (or to the nearest) instead of down: `C (1 + s_cpu)` of
+/// 505 millicores is 555.5, planned as 555, and of 10,005 is 11,005.5, planned as 11,005.
+/// On the second the leases are charged 10,005 millicores in all, so a request of 1,000
+/// reaches the limit exactly and is admitted while one millicore more is refused (a limit
+/// of 11,006 would admit it).
+#[test]
+fn the_limit_is_rounded_down_to_a_millicore() {
+    let half = Host::new(
+        WorkerId::new("h"),
+        Resources::new(505, GIB),
+        0,
+        0,
+        false,
+        Vec::new(),
+    );
+    assert_eq!(half.cpu_limit(), 555);
+    // An empty worker of 505 millicores charges a lease its 505 (the floor is cut to its
+    // cores): 505 <= 555.
+    assert!(half.admits(&Resources::new(505, 0)));
+    let odd = Host::new(
+        WorkerId::new("o"),
+        Resources::new(10_005, 32 * GIB),
+        0,
+        0,
+        false,
+        vec![(key(1), 5_000), (key(2), 5_005)],
+    );
+    assert_eq!(odd.cpu_limit(), 11_005);
+    assert_eq!(odd.left(), 10_005);
+    assert!(odd.admits(&Resources::new(1_000, GIB)), "11,005 fills it");
+    assert!(
+        !odd.admits(&Resources::new(1_001, GIB)),
+        "11,006 is past it"
+    );
+}
+
+/// Catches: the third tie-break (the larger headroom, the cores the worker has over those
+/// charged) missing or taken the wrong way. Two workers of 10 cores each hold one lease
+/// and take the request to 10,050 and 10,000 millicores (`a`, charged 9,050, ends 50 over;
+/// `b`, charged 9,000, ends exactly full): both have a leftover of 0 and an overshoot inside the
+/// tolerance, so keys 1 to 5 and the first two tie-breaks are equal, and `b` has the
+/// larger headroom (1,000 against 950). The hash prefers `a` for the leases 1-0 and 1-3
+/// (see `identical_workers_are_told_apart_by_the_hash_of_lease_and_worker`), so `b` wins
+/// for them only through the headroom.
+#[test]
+fn a_tie_goes_to_the_larger_headroom_before_the_hash() {
+    for n in 0..4 {
+        let mut p = placer(
+            vec![host("a", 10, 32, &[9_050]), host("b", 10, 32, &[9_000])],
+            n,
+        );
+        assert_eq!(
+            place(&mut p, 1, &key(1), cores(1_000), 0, &[0, 1]),
+            Some(1),
+            "lease 1-{n}"
+        );
+    }
 }

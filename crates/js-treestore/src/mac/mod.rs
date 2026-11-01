@@ -12,9 +12,10 @@ mod securelevel;
 mod sys;
 mod volume;
 
+pub use crate::sealer::Owner;
 #[cfg(target_os = "macos")]
-pub use seal::{Fchflags, MacSealer};
-pub use seal::{FlagSealer, IMMUTABLE, Owner, UserFlags};
+pub use seal::{Clonefile, Fchflags, MacSealer};
+pub use seal::{Cloner, FlagSealer, IMMUTABLE, UserFlags};
 pub use securelevel::{SecurelevelError, check_securelevel};
 #[cfg(target_os = "macos")]
 pub use sys::{StartError, start_checks};

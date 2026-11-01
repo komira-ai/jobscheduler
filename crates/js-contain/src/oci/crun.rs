@@ -15,16 +15,17 @@
 //! - It runs its commands with `tokio::process`, without `kill_on_drop`; [`KillOnDrop`]
 //!   is the spawner that adds it, so a `run` that is dropped or aborted does not leave
 //!   `crun` behind.
-//! - Its `Io` hook sets the child's stdin/stdout/stderr; [`FileIo`] points the
-//!   container's stdout and stderr at the lease's files instead of the crate's pipes
-//!   (a job's output is not held in memory).
+//! - Its `Io` hook sets the child's stdin/stdout/stderr; [`PipeIo`] points the
+//!   container's stdout and stderr at pipes the caller drains (`logs`), instead of the
+//!   crate's, which are read to the end into memory.
 //! - The synchronous client is the same crate without its `async` feature, so the two
 //!   cannot be built together: the blocking paths (a dropped lease's clean) use
 //!   `std::process` with the same arguments ([`Crun::delete_blocking`]).
 
+use std::os::fd::OwnedFd;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
+use std::process::{Child, ExitStatus, Output};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,105 @@ pub type EnvScrub = fn(&mut std::process::Command);
 
 /// The default [`EnvScrub`]: nothing is removed.
 pub fn no_scrub(_: &mut std::process::Command) {}
+
+/// What a root daemon does to every command line it starts (`OciConfig::job_user`): the
+/// program runs as the dedicated job user, with no supplementary group, from `/`, with
+/// an environment of `PATH` and `HOME` only (so no `XDG_RUNTIME_DIR` and nothing of the
+/// daemon's credentials is inherited). The drop is part of the backend: it does not
+/// depend on the caller's [`EnvScrub`]. The lease's keeper is started with the same drop
+/// ([`crate::keeper::Keeper::watch_as`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobDrop {
+    uid: u32,
+    gid: u32,
+    /// The `PATH` the program gets: where it finds `newuidmap` and `newgidmap`.
+    path: std::ffi::OsString,
+}
+
+impl JobDrop {
+    /// The drop for job user `(uid, gid)`, or `None` when this process is not root (a
+    /// user that is not root cannot change its ids, and runs `crun` as itself) or the job
+    /// user is root by its uid or its gid: a drop to root would look like one and change
+    /// nothing, so it is refused here as `Oci::new` refuses it ([`SubidError::Root`]).
+    ///
+    /// [`SubidError::Root`]: crate::subids::SubidError::Root
+    #[must_use]
+    pub fn new(
+        job: Option<(u32, u32)>,
+        path: Option<&std::ffi::OsStr>,
+        daemon_uid: u32,
+    ) -> Option<Self> {
+        let (uid, gid) = job.filter(|&(uid, gid)| uid != 0 && gid != 0)?;
+        (daemon_uid == 0).then(|| Self {
+            uid,
+            gid,
+            path: path.map(ToOwned::to_owned).unwrap_or_default(),
+        })
+    }
+
+    /// Makes `command` start as the job user: `setgroups([])`, then the gid, then the uid
+    /// (the order in which each call is still allowed), all three real, effective and saved.
+    pub(crate) fn apply(&self, command: &mut std::process::Command) {
+        use std::os::unix::process::CommandExt as _;
+        command
+            .env_clear()
+            .env("PATH", &self.path)
+            .env("HOME", "/")
+            .current_dir("/");
+        // SAFETY: `drop_ids` makes three system calls and nothing else (no allocation, no
+        // lock) in the forked child before it execs.
+        unsafe {
+            command.pre_exec(self.in_child());
+        }
+    }
+}
+
+impl JobDrop {
+    /// The function run in the forked child before the exec.
+    fn in_child(&self) -> impl FnMut() -> std::io::Result<()> + Send + Sync + 'static {
+        let (uid, gid) = (self.uid, self.gid);
+        move || drop_ids(uid, gid, clear_groups)
+    }
+}
+
+/// `setgroups([])`: the process keeps no supplementary group.
+fn clear_groups() -> std::io::Result<()> {
+    rustix::thread::set_thread_groups(&[]).map_err(Into::into)
+}
+
+/// The drop, in the order each call is still allowed: the groups (`groups`, which needs
+/// the privilege the later calls take away), then the gid, then the uid, each as real,
+/// effective and saved id. The first call that fails ends it, and later ones are not made.
+fn drop_ids(
+    uid: u32,
+    gid: u32,
+    groups: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let (uid, gid) = (
+        rustix::process::Uid::from_raw(uid),
+        rustix::process::Gid::from_raw(gid),
+    );
+    groups()
+        .and_then(|()| rustix::thread::set_thread_res_gid(gid, gid, gid).map_err(Into::into))
+        .and_then(|()| rustix::thread::set_thread_res_uid(uid, uid, uid).map_err(Into::into))
+}
+
+/// How the backend prepares each command line it starts: the caller's [`EnvScrub`] first,
+/// then, for a root daemon, the [`JobDrop`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Launch<'a> {
+    scrub: EnvScrub,
+    job: Option<&'a JobDrop>,
+}
+
+impl Launch<'_> {
+    fn apply(self, command: &mut std::process::Command) {
+        (self.scrub)(command);
+        if let Some(job) = self.job {
+            job.apply(command);
+        }
+    }
+}
 
 /// How one `crun run` ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,13 +189,13 @@ fn wait_exited(child: &mut tokio::process::Child, limit: Duration) {
 /// The `Spawner` of this driver: [`runc::DefaultExecutor`], with `kill_on_drop` and a
 /// child that is reaped when its future is dropped ([`Reaped`]).
 #[derive(Debug)]
-struct KillOnDrop(EnvScrub);
+struct KillOnDrop(Crun);
 
 #[async_trait]
 impl Spawner for KillOnDrop {
     async fn execute(&self, mut cmd: Command) -> runc::Result<(ExitStatus, u32, String, String)> {
         cmd.kill_on_drop(true);
-        (self.0)(cmd.as_std_mut());
+        self.0.launch().apply(cmd.as_std_mut());
         let mut child = cmd.spawn().map_err(Error::ProcessSpawnFailed)?;
         let pid = child.id().unwrap_or(0);
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
@@ -122,17 +222,18 @@ async fn read_all<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) -> std::io::
     Ok(bytes)
 }
 
-/// `Io` that gives `crun run` the lease's stdout and stderr files, and as stdin the file
-/// the container's init reports a program it could not start in (`oci::init`).
+/// `Io` that gives `crun run` the write ends of the pipes its output is drained from
+/// (`logs`), and as stdin the file the container's init reports a program it could not
+/// start in (`oci::init`). The write ends are closed when this is dropped, with the call.
 #[derive(Debug)]
-struct FileIo {
+struct PipeIo {
     stdin: std::fs::File,
-    stdout: std::fs::File,
-    stderr: std::fs::File,
+    stdout: OwnedFd,
+    stderr: OwnedFd,
 }
 
 #[async_trait]
-impl Io for FileIo {
+impl Io for PipeIo {
     async fn set(&self, cmd: &mut Command) -> std::io::Result<()> {
         cmd.stdin(self.stdin.try_clone()?);
         cmd.stdout(self.stdout.try_clone()?);
@@ -148,6 +249,7 @@ impl Io for FileIo {
 pub(crate) struct Crun {
     program: PathBuf,
     scrub: EnvScrub,
+    job: Option<JobDrop>,
 }
 
 /// The state directory of a lease's `crun` (`--root`), inside the lease directory: no
@@ -162,8 +264,25 @@ pub(crate) fn log_path(lease: &Path) -> PathBuf {
 }
 
 impl Crun {
-    pub(crate) fn new(program: PathBuf, scrub: EnvScrub) -> Self {
-        Self { program, scrub }
+    pub(crate) fn new(program: PathBuf, scrub: EnvScrub, job: Option<JobDrop>) -> Self {
+        Self {
+            program,
+            scrub,
+            job,
+        }
+    }
+
+    /// The drop to the job user every command of this driver gets, if any.
+    pub(crate) fn job(&self) -> Option<&JobDrop> {
+        self.job.as_ref()
+    }
+
+    /// How every command of this driver is prepared.
+    fn launch(&self) -> Launch<'_> {
+        Launch {
+            scrub: self.scrub,
+            job: self.job.as_ref(),
+        }
     }
 
     /// The client for the lease in `lease`: its own state directory and log.
@@ -173,12 +292,12 @@ impl Crun {
             .root(state_dir(lease))
             .log(log_path(lease))
             .log_json();
-        opts.custom_spawner(Arc::new(KillOnDrop(self.scrub)));
+        opts.custom_spawner(Arc::new(KillOnDrop(self.clone())));
         opts.build().map_err(|e| self.refused(&e))
     }
 
     /// Runs the container `id` of the bundle in `bundle` to its end (`crun run`: create,
-    /// start and delete in one process), its stdout and stderr in the given files. The
+    /// start and delete in one process), its stdout and stderr to the given pipes. The
     /// result is `crun`'s exit status. Dropping the future kills `crun`.
     pub(crate) async fn run(
         &self,
@@ -186,14 +305,14 @@ impl Crun {
         id: &str,
         bundle: &Path,
         stdin: std::fs::File,
-        stdout: std::fs::File,
-        stderr: std::fs::File,
+        stdout: OwnedFd,
+        stderr: OwnedFd,
     ) -> RunEnd {
         let client = match self.client(lease) {
             Ok(client) => client,
             Err(e) => return RunEnd::Failed(e),
         };
-        let opts = CreateOpts::new().io(Arc::new(FileIo {
+        let opts = CreateOpts::new().io(Arc::new(PipeIo {
             stdin,
             stdout,
             stderr,
@@ -220,7 +339,7 @@ impl Crun {
             .debug(true)
             .log(&log)
             .log_json();
-        opts.custom_spawner(Arc::new(KillOnDrop(self.scrub)));
+        opts.custom_spawner(Arc::new(KillOnDrop(self.clone())));
         let client = opts.build().map_err(|e| self.refused(&e))?;
         match client.run(id, bundle, None).await {
             Ok(()) => Ok(()),
@@ -294,23 +413,53 @@ impl Crun {
     /// Runs `crun --root <state> <args>` and waits: `Ok` if it exits 0, else its status
     /// and what it said on stderr.
     fn blocking(&self, state: &Path, args: &[&str], what: &str) -> Result<(), String> {
+        self.stdout_of(state, args, what).map(drop)
+    }
+
+    /// [`Crun::blocking`], returning what `crun` printed on stdout.
+    fn stdout_of(&self, state: &Path, args: &[&str], what: &str) -> Result<String, String> {
+        self.stdout_within(state, args, what, CALL_LIMIT)
+    }
+
+    /// [`Crun::stdout_of`], killing `crun` and failing when it has not ended within `limit`.
+    fn stdout_within(
+        &self,
+        state: &Path,
+        args: &[&str],
+        what: &str,
+        limit: Duration,
+    ) -> Result<String, String> {
         let mut command = std::process::Command::new(&self.program);
-        (self.scrub)(&mut command);
+        self.launch().apply(&mut command);
         let output = command
             .arg("--root")
             .arg(state)
             .args(args)
             .stdin(std::process::Stdio::null())
-            .output();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|child| output_within(child, limit));
         match output {
-            Ok(out) if out.status.success() => Ok(()),
-            Ok(out) => Err(format!(
+            Ok(Some(out)) if out.status.success() => Ok(text(&out.stdout)),
+            Ok(Some(out)) => Err(format!(
                 "crun {what}: {}: {}",
                 out.status,
                 String::from_utf8_lossy(&out.stderr).trim()
             )),
+            Ok(None) => Err(format!("crun {what}: did not finish within {limit:?}")),
             Err(e) => Err(format!("run {}: {e}", self.program.display())),
         }
+    }
+
+    /// The pid, on the host, of the first process of the running container `id` of the
+    /// lease in `lease` (`crun state`). Blocking.
+    pub(crate) fn pid(&self, lease: &Path, id: &str) -> Result<u64, String> {
+        let state = self.stdout_of(&state_dir(lease), &["state", id], "state")?;
+        serde_json::from_str::<serde_json::Value>(&state)
+            .ok()
+            .and_then(|state| state["pid"].as_u64())
+            .ok_or_else(|| format!("crun state: no pid in {:?}", state.trim()))
     }
 
     /// The words for a client `crun` could not be found for.
@@ -323,6 +472,68 @@ impl Crun {
 /// the `crun run` that owns it. That run is removing it already; the wait ends the moment
 /// the directory is gone.
 const STATE_REMOVAL_WAIT: Duration = Duration::from_secs(3);
+
+/// How long a `crun` command that is waited for (`kill`, `delete`, `state`, the blocking
+/// helper) may take before it is killed and counts as failed.
+const CALL_LIMIT: Duration = Duration::from_secs(120);
+
+/// What `child` printed once it ended, or `None` when it had not ended within `limit` and
+/// was killed. The child is waited for on a thread of its own (which also reads its pipes), so
+/// a full pipe never stalls it and the caller never waits longer than `limit`.
+///
+/// # Errors
+/// The child could not be waited for, or no handle on it could be had (`pidfd_open` failed):
+/// then it is killed and reaped here, before any thread has it, and the error names the
+/// failure. No signal is ever sent by pid.
+fn output_within(child: Child, limit: Duration) -> std::io::Result<Option<Output>> {
+    // A handle on this very process: the signal below can never reach another one that took
+    // the pid after the child was reaped.
+    let pidfd = rustix::process::pidfd_open(
+        rustix::process::Pid::from_child(&child),
+        rustix::process::PidfdFlags::empty(),
+    );
+    output_within_by(child, limit, pidfd)
+}
+
+/// [`output_within`] with the handle on the child given, so a test drives the case where the
+/// kernel refused one.
+fn output_within_by(
+    mut child: Child,
+    limit: Duration,
+    pidfd: rustix::io::Result<std::os::fd::OwnedFd>,
+) -> std::io::Result<Option<Output>> {
+    let pidfd = match pidfd {
+        Ok(fd) => fd,
+        Err(why) => {
+            // Still the owner of the child: end it through the handle, and reap it.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::other(format!(
+                "pidfd_open failed ({why}); the process was killed"
+            )));
+        }
+    };
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || done.send(child.wait_with_output()));
+    match ended.recv_timeout(limit) {
+        Ok(output) => output.map(Some),
+        Err(_) => Ok(give_up(&pidfd)),
+    }
+}
+
+/// Ends the child that `pidfd` stands for, which did not end in time; its thread ends with
+/// it and its output is dropped. There is no output to give. SIGKILL reaches `crun` alone,
+/// not the processes `crun` started: it is the kill of the lease's cgroup on the stop path
+/// that ends those.
+fn give_up(pidfd: &std::os::fd::OwnedFd) -> Option<Output> {
+    let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+    None
+}
+
+/// What a program printed, as text.
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
 
 /// Whether `path` is gone, polling until `limit` has passed.
 fn wait_gone(path: &Path, limit: Duration) -> bool {
@@ -388,7 +599,8 @@ mod tests {
         for round in 0..25 {
             let mut command = Command::new("sleep");
             command.arg("600");
-            let mut run = Box::pin(KillOnDrop(super::no_scrub).execute(command));
+            let spawner = KillOnDrop(Crun::new(PathBuf::from("sleep"), super::no_scrub, None));
+            let mut run = Box::pin(spawner.execute(command));
             let polled =
                 runtime.block_on(async { tokio::time::timeout(Duration::ZERO, &mut run).await });
             assert!(polled.is_err(), "round {round}: sleep 600 ended");
@@ -457,13 +669,13 @@ mod tests {
             .arg("JS_SCRUBBED")
             .stdout(std::process::Stdio::piped());
         let (status, _, out, _) = runtime
-            .block_on(KillOnDrop(mark).execute(command))
+            .block_on(KillOnDrop(Crun::new(PathBuf::from("printenv"), mark, None)).execute(command))
             .expect("printenv");
         assert!(status.success());
         assert_eq!(out, "yes\n", "the child did not see the scrub");
         assert_eq!(CALLS.load(Ordering::SeqCst), 1);
 
-        let crun = Crun::new(PathBuf::from("true"), mark);
+        let crun = Crun::new(PathBuf::from("true"), mark, None);
         let lease = crate::unit_dir("crun-scrub");
         crun.delete_blocking(&lease, "c").expect("true exits 0");
         assert_eq!(CALLS.load(Ordering::SeqCst), 2);
@@ -476,6 +688,185 @@ mod tests {
         assert_eq!(plain.get_envs().count(), 0);
     }
 
+    /// Catches a hung `crun` stalling its caller: a command that has not ended within the
+    /// limit (given as zero, so a `crun` that sleeps has not) is killed and fails saying so,
+    /// for the blocking calls; one that ends is read as before.
+    #[test]
+    fn a_crun_that_does_not_end_is_killed_and_fails() {
+        // A script is written by a process of its own that has ended, so that no descriptor
+        // open for writing is inherited by a child another test forks meanwhile (which would
+        // make the file busy for `exec`).
+        fn script(path: &Path, body: &str) {
+            let made = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"",
+                    "sh",
+                ])
+                .arg(body)
+                .arg(path)
+                .status();
+            assert!(made.expect("sh").success());
+        }
+        let dir = crate::unit_dir("crun-hung");
+        let lease: &Path = &dir;
+        let run = |name: &str, body: &str, limit: Duration| {
+            let program = lease.join(name);
+            script(&program, body);
+            let crun = Crun::new(program, no_scrub, None);
+            crun.stdout_within(lease, &["state", "c"], "state", limit)
+        };
+        let why = run("hung", "#!/bin/sh\nexec sleep 600\n", Duration::ZERO).expect_err("killed");
+        assert!(why.contains("did not finish"), "{why}");
+        // With a generous limit, a command that takes a moment still returns its output.
+        let said = run(
+            "slow",
+            "#!/bin/sh\nsleep 0.3\necho done\n",
+            Duration::from_secs(600),
+        );
+        assert_eq!(said.expect("it ends in time"), "done\n");
+        let body = "#!/bin/sh\necho out\necho oops >&2\nexit 3\n";
+        let why = run("quick", body, Duration::from_secs(600)).expect_err("exit 3");
+        assert!(why.contains("oops"), "{why}");
+        assert!(why.contains('3'), "{why}");
+        // A program that is not there never starts: the call fails naming it.
+        let absent = lease.join("absent");
+        let crun = Crun::new(absent.clone(), no_scrub, None);
+        let why = crun
+            .stdout_within(lease, &["state", "c"], "state", Duration::from_secs(600))
+            .expect_err("no such program");
+        assert!(
+            why.starts_with(&format!("run {}: ", absent.display())),
+            "{why}"
+        );
+    }
+
+    /// Catches a hung `crun` left running when the kernel refuses a handle on it
+    /// (`pidfd_open` failed): the child is killed and reaped at once, and the call returns an
+    /// error naming the failure, whatever the limit. The child holds the write end of a pipe
+    /// the test keeps the read end of, so the read ends only when the child is gone; and it
+    /// is gone before the call returns.
+    #[test]
+    fn a_crun_is_killed_and_the_call_fails_when_there_is_no_pidfd() {
+        use std::io::Read as _;
+        let (mut reader, writer) = std::io::pipe().expect("pipe");
+        let child = {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("600").stdout(writer);
+            command.spawn().expect("sleep")
+        };
+        let refused = Err(rustix::io::Errno::MFILE);
+        let why = output_within_by(child, Duration::from_secs(600), refused).expect_err("failed");
+        assert!(why.to_string().contains("pidfd_open failed"), "{why}");
+        let mut rest = Vec::new();
+        reader
+            .read_to_end(&mut rest)
+            .expect("the pipe ends with the child");
+    }
+
+    /// Catches the privilege drop applied to a daemon that is not root, or without a job
+    /// user (`setresuid` would fail, or change nothing wanted), and the drop's environment:
+    /// only `PATH` (the id tools' directories) and `HOME=/`, never the daemon's own.
+    #[test]
+    fn the_job_drop_is_made_only_for_a_root_daemon_with_a_job_user() {
+        let path = std::ffi::OsStr::new("/id/tools");
+        assert!(JobDrop::new(None, Some(path), 0).is_none());
+        assert!(JobDrop::new(Some((900, 900)), Some(path), 1000).is_none());
+        assert!(JobDrop::new(Some((0, 0)), Some(path), 0).is_none());
+        assert!(JobDrop::new(Some((0, 900)), Some(path), 0).is_none());
+        assert!(JobDrop::new(Some((900, 0)), Some(path), 0).is_none());
+        let drop = JobDrop::new(Some((900, 901)), Some(path), 0).expect("root with a job user");
+        assert_eq!((drop.uid, drop.gid), (900, 901));
+
+        let mut command = std::process::Command::new("true");
+        command
+            .env("XDG_RUNTIME_DIR", "/run/user/0")
+            .env("TOKEN", "x");
+        fn mark(command: &mut std::process::Command) {
+            command.env("MARKED", "yes");
+        }
+        let launch = Launch {
+            scrub: mark,
+            job: Some(&drop),
+        };
+        launch.apply(&mut command);
+        let envs: Vec<_> = command.get_envs().collect();
+        assert_eq!(
+            envs,
+            [
+                (
+                    std::ffi::OsStr::new("HOME"),
+                    Some(std::ffi::OsStr::new("/"))
+                ),
+                (std::ffi::OsStr::new("PATH"), Some(path)),
+            ],
+            "the caller's scrub runs first and env_clear leaves exactly the allowlist"
+        );
+        assert_eq!(command.get_current_dir(), Some(Path::new("/")));
+    }
+
+    /// Catches a backend that runs anything but the configured runtime path, or makes a
+    /// copy of it: a stand-in at a path of the test is run by `delete` and by the helper
+    /// run under exactly that path (`$0`), and no other file named `crun` is made beside
+    /// the lease or its state.
+    #[test]
+    fn the_configured_runtime_path_is_what_runs_and_no_copy_is_made() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::unit_dir("crun-path");
+        let program = dir.join("my-runtime");
+        let seen = dir.join("seen");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\necho \"$0\" >> {}\n", seen.display()),
+        )
+        .expect("stand-in");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let crun = Crun::new(program.clone(), no_scrub, None);
+        let lease = dir.join("lease");
+        crun.delete_blocking(&lease, "c").expect("runs");
+        crun.run_helper_blocking(&lease.join("state"), "h", &lease.join("bundle"))
+            .expect("runs");
+        let said = std::fs::read_to_string(&seen).expect("recorded");
+        let path = program.display().to_string();
+        assert_eq!(said, format!("{path}\n{path}\n"));
+        let mut names: Vec<String> = std::fs::read_dir(&*dir)
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["my-runtime", "seen"],
+            "a copy or other file was made"
+        );
+    }
+
+    /// Catches the drop's order and its stop at the first failure, with the real calls as an
+    /// ordinary user (setting one's own ids is allowed; another gid and `setgroups` are not
+    /// without privilege, so the failures are the kernel's): a failing `groups` ends it
+    /// before any id call (and no id changed), a gid that is not ours ends it before the uid,
+    /// and our own ids pass. Run as root, the "not ours" calls succeed, so each result is
+    /// compared with whether this process is root.
+    #[test]
+    fn the_drop_stops_at_the_first_failing_call() {
+        let (uid, gid) = (
+            rustix::process::getuid().as_raw(),
+            rustix::process::getgid().as_raw(),
+        );
+        let root = uid == 0;
+        let boom = || Err(std::io::Error::other("groups"));
+        let failed = drop_ids(uid, gid + 1, boom).expect_err("groups first");
+        assert_eq!(failed.to_string(), "groups");
+        assert_eq!(rustix::process::getgid().as_raw(), gid);
+        assert!(drop_ids(uid, gid, || Ok(())).is_ok());
+        let other_gid = drop_ids(uid, gid + 1, || Ok(()));
+        assert_eq!(other_gid.is_ok(), root);
+        // The real `setgroups`, and the closure given to the child, as an ordinary user.
+        assert_eq!(clear_groups().is_ok(), root);
+        let job = JobDrop::new(Some((uid, gid)), None, 0).expect("root daemon");
+        assert_eq!(job.in_child()().is_ok(), root);
+    }
+
     /// Catches a failed `crun delete` taken for a success while the container's state is
     /// still there (nothing was deleted, and the state is the lease's to keep until the
     /// clean can remove it), one that fails when the state is already gone (the `crun run`
@@ -484,8 +875,8 @@ mod tests {
     #[test]
     fn a_failed_delete_is_an_error_unless_the_state_is_gone() {
         let lease = crate::unit_dir("crun-delete");
-        let fails = Crun::new(PathBuf::from("false"), no_scrub);
-        let succeeds = Crun::new(PathBuf::from("true"), no_scrub);
+        let fails = Crun::new(PathBuf::from("false"), no_scrub, None);
+        let succeeds = Crun::new(PathBuf::from("true"), no_scrub, None);
         succeeds
             .delete_waiting(&lease, "c", Duration::ZERO)
             .expect("deleted");
@@ -575,14 +966,14 @@ mod tests {
     }
 
     /// The `Io` hook `crun run` is given has nothing to close once the child has the
-    /// files (the crate calls it for `create` and `exec`, not `run`).
+    /// pipes (the crate calls it for `create` and `exec`, not `run`).
     #[tokio::test]
-    async fn the_file_io_has_nothing_to_close_after_the_start() {
+    async fn the_pipe_io_has_nothing_to_close_after_the_start() {
         let null = || std::fs::File::open("/dev/null").expect("/dev/null");
-        FileIo {
+        PipeIo {
             stdin: null(),
-            stdout: null(),
-            stderr: null(),
+            stdout: null().into(),
+            stderr: null().into(),
         }
         .close_after_start()
         .await;

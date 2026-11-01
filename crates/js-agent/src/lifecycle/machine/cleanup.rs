@@ -2,9 +2,13 @@
 //! cleanup in order.
 
 use super::Lifecycle;
-use super::job::{Cause, Stage, check_taint, cleanup_taint, outcome};
+use super::job::{Cause, Stage, blind_taint, check_taint, cleanup_taint, outcome};
 use crate::lifecycle::runtime::{RunHandle, Status};
-use crate::lifecycle::{CheckFinding, Config, Event, Finished, code};
+use crate::lifecycle::{CheckFinding, Config, Event, Finding, Finished, code};
+
+/// How often a finished run's usage that stays nonzero is reported again while the agent
+/// waits for it (one hour).
+const REMIND_HELD_MS: u64 = 3_600_000;
 
 impl Lifecycle {
     /// Watches one running job: the wall-time limit, a stop that is owed, the exit.
@@ -14,6 +18,7 @@ impl Lifecycle {
             jobs,
             runtime,
             config,
+            taint,
             ..
         } = self;
         let job = &mut jobs[index];
@@ -41,7 +46,21 @@ impl Lifecycle {
             }
         }
         match seen {
-            Ok(Status::Running) => {}
+            Ok(Status::Running) => {
+                // A runtime that puts every container in a group the agent can read, and
+                // cannot name this running container's group (not at the start, not at a
+                // window, not now), left the agent blind to it: its usage is not sampled
+                // and what it leaves is not known to be checkable. A run seen only after
+                // it ended has no group to look at (`cgroup` says `None` for it): that is
+                // not blindness.
+                if runtime.places_in_cgroup() && job.cgroup.is_none() && !job.blind_told {
+                    job.cgroup = runtime.cgroup(&id);
+                    if job.cgroup.is_none() {
+                        job.blind_told = true;
+                        job.taint(taint, blind_taint(&job.run_id), events);
+                    }
+                }
+            }
             Ok(ended @ (Status::Exited(_) | Status::Gone)) => {
                 let exit = match ended {
                     Status::Exited(exit) => Some(exit),
@@ -79,6 +98,10 @@ impl Lifecycle {
     /// container, the scratch directory, the checks, then the slot. A step that fails
     /// ends the pass with the slot still booked.
     pub(super) fn clean(&mut self, index: usize, events: &mut Vec<Event>) {
+        // A run waiting for its image has nothing to clean (and its stage holds the start).
+        if matches!(self.jobs[index].stage, Stage::Preparing(_)) {
+            return;
+        }
         let live: Vec<RunHandle> = self
             .jobs
             .iter()
@@ -104,10 +127,13 @@ impl Lifecycle {
             checks,
             taint,
             slots,
+            quota_health,
+            clock,
             ..
         } = self;
         let job = &mut jobs[index];
         let run_id = job.run_id.clone();
+        let lease = runtime.lease_dir(&run_id);
         loop {
             let stage = job.stage.clone();
             // The checks are owed from before the first step of the cleanup until they have
@@ -138,8 +164,71 @@ impl Lifecycle {
                         return;
                     }
                 },
-                Stage::Scratch => match remove_run_dirs(config, &run_id) {
+                Stage::Scratch => match remove_run_dirs(config, &run_id, lease.as_deref()) {
                     Ok(()) => {
+                        // The tree is gone; now the bound comes off its project, and the
+                        // slot stays held until the project reads no usage (the file system
+                        // frees the inodes of a removed tree in the background, and a run
+                        // that took the slot sooner would be counted with them). The booked
+                        // bytes stay held with it: the server counts them as free once the
+                        // run has ended, so holding them a little longer only makes the
+                        // agent refuse later than the server admits for the seconds the
+                        // lag lasts, the same as for every other booked dimension, which
+                        // are held until this cleanup has passed. A failure is tried again
+                        // at the next step, together with the removal, which finds nothing
+                        // to do. None of it taints: nothing is left on disk.
+                        if let (Some(quota), Some(slot)) = (&config.quota, job.slot) {
+                            let dir = config.scratch.of(&run_id);
+                            let now = clock.now_ms();
+                            let health = config.scratch.health_dir();
+                            if let Err(why) = quota.clear(&dir, slot) {
+                                quota_health.failed(quota, now, &health, events);
+                                job.note(code::QUOTA_CLEAR_FAILED, why.to_string(), events);
+                                return;
+                            }
+                            match quota.usage(slot) {
+                                Ok(used) if used.is_zero() => quota_health.ok(),
+                                Ok(used) => {
+                                    let held = format!(
+                                        "the project still holds {} bytes in {} inodes",
+                                        used.bytes, used.inodes
+                                    );
+                                    let (since, reported) =
+                                        *job.usage_held.get_or_insert((now, now));
+                                    if now.saturating_sub(since) < quota.usage_wait_ms() {
+                                        job.note(code::QUOTA_USAGE_HELD, held.clone(), events);
+                                        if now.saturating_sub(reported) >= REMIND_HELD_MS {
+                                            job.usage_held = Some((since, now));
+                                            events.push(Event::Finding(Finding {
+                                                run_id: Some(run_id.clone()),
+                                                code: code::QUOTA_USAGE_HELD,
+                                                message: held,
+                                            }));
+                                        }
+                                        return;
+                                    }
+                                    // The usage never reached zero in the time the agent waits
+                                    // (a file held open outside the container, accounting that
+                                    // drifted): the slot is parked instead of held for good, the
+                                    // cleanup goes on, so the run's place and bytes are given
+                                    // back, and the quota counts a failure.
+                                    let gave_up = format!(
+                                        "{held} {} seconds after its tree was removed: the slot is \
+                                         parked and the cleanup goes on",
+                                        quota.usage_wait_ms() / 1000
+                                    );
+                                    job.note(code::QUOTA_USAGE_ABANDONED, gave_up, events);
+                                    job.slot_parked = true;
+                                    quota_health.failed(quota, now, &health, events);
+                                    quota_health.abandoned(quota, now, events);
+                                }
+                                Err(why) => {
+                                    quota_health.failed(quota, now, &health, events);
+                                    job.note(code::QUOTA_CLEAR_FAILED, why.to_string(), events);
+                                    return;
+                                }
+                            }
+                        }
                         events.push(Event::ScratchRemoved {
                             run_id: run_id.clone(),
                         });
@@ -176,8 +265,10 @@ impl Lifecycle {
                         job.stage = Stage::Freed;
                         // The cleanup passed: no container, no scratch directory and no
                         // process of the slot's uid. Only here does the slot come back.
-                        if let Some(slot) = job.slot {
-                            slots.release(slot);
+                        match (job.slot, job.slot_parked) {
+                            (Some(slot), true) => slots.park(slot),
+                            (Some(slot), false) => slots.release(slot),
+                            (None, _) => {}
                         }
                         events.push(Event::SlotFreed {
                             run_id: run_id.clone(),
@@ -209,7 +300,7 @@ impl Lifecycle {
                         return;
                     }
                 },
-                Stage::Running(_) | Stage::Blocked | Stage::Freed => return,
+                Stage::Preparing(_) | Stage::Running(_) | Stage::Blocked | Stage::Freed => return,
             }
         }
     }
@@ -217,8 +308,15 @@ impl Lifecycle {
 
 /// Removes the run's scratch directory and its files directory; both are tried, and the
 /// first failure is the one reported.
-fn remove_run_dirs(config: &Config, run_id: &str) -> std::io::Result<()> {
-    let scratch = config.scratch.remove(run_id);
+fn remove_run_dirs(
+    config: &Config,
+    run_id: &str,
+    lease: Option<&std::path::Path>,
+) -> std::io::Result<()> {
+    // The runtime removes its own directory with the container; one it left (a start that
+    // failed after the directory was made) goes with the run's.
+    let lease = lease.map_or(Ok(()), |dir| config.scratch.remove_lease(dir));
+    let scratch = config.scratch.remove(run_id).and(lease);
     let files = config
         .files
         .as_ref()

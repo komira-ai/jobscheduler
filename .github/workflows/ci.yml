@@ -112,7 +112,7 @@ jobs:
   # the job when any of these holds:
   #   - the pull request carries the label `macos`;
   #   - a changed path contains darwin, apple, macos or seatbelt (any case), is under a
-  #     js-mac-* crate (crates/js-mac-), or is rust-toolchain.toml or this file;
+  #     js-mac-* crate (crates/js-mac-), under js-bundle or js-bundle-cli, or is rust-toolchain.toml or this file;
   #   - the diff adds or removes a line with `target_os = "macos"` or `target_vendor = "apple"`
   #     (the cfg( ), cfg!( ), cfg(any( ... )) and no-space spellings all contain it).
   # If the diff cannot be computed the job runs (fail closed). The label is read
@@ -150,7 +150,7 @@ jobs:
             exit 0
           fi
           macos=false
-          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^crates/js-treestore/(src/mac/|tests/(privileged|treestore/mac_))|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
+          if printf '%s\n' "$files" | grep -Eiq 'darwin|apple|macos|seatbelt|^crates/js-mac-|^crates/js-(bundle|bundle-cli|oci)/|^crates/js-treestore/(src/mac/|tests/(privileged|treestore/mac_))|^rust-toolchain\.toml$|^\.github/workflows/ci\.yml$'; then
             macos=true
           elif printf '%s\n' "$patch" | grep -Ev '^(\+\+\+|---) ' | grep -Eq '^[+-].*target_(os[[:space:]]*=[[:space:]]*"macos"|vendor[[:space:]]*=[[:space:]]*"apple")'; then
             macos=true
@@ -166,7 +166,7 @@ jobs:
     # !cancelled(): a push to main, or a failed changes job, still runs the macOS job, while a
     # run cancelled by a newer push to the same pull request does not.
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}
-    runs-on: macos-14
+    runs-on: macos-15
     # Pushes to main share one group with cancel-in-progress false: one run executes, one
     # waits, and a newer waiting run replaces an older one, so the hosted macOS pool never
     # holds a backlog of main runs (the newest main commit's result covers the older ones;
@@ -176,6 +176,10 @@ jobs:
       group: ${{ github.event_name == 'pull_request' && format('ci-macos-{0}', github.run_id) || 'ci-macos-main' }}
       cancel-in-progress: false
     timeout-minutes: 45
+    env:
+      # The oldest macOS the binaries must run on; a newer image must not raise it
+      # (the step after the build reads each binary's minos and fails above this).
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     permissions:
       contents: read
     steps:
@@ -192,8 +196,27 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - run: cargo build --locked -p js-agent -p js-cli -p js-treestore -p js-mac-pool
-      - run: cargo test --locked -p js-agent -p js-cli -p js-treestore -p js-mac-pool
+      - run: cargo build --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-bundle -p js-bundle-cli -p js-mac-provision
+      - name: Check the minimum macOS of the built binaries
+        run: |
+          set -euo pipefail
+          checked=0
+          for f in target/debug/*; do
+            [ -f "$f" ] && [ -x "$f" ] || continue
+            file "$f" | grep -q 'Mach-O 64-bit executable arm64' || continue
+            minos="$(otool -l "$f" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')"
+            echo "$f minos $minos"
+            if [ "$(printf '%s\n%s\n' "$minos" "$MACOSX_DEPLOYMENT_TARGET" | sort -V | tail -n 1)" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+              echo "::error::$f needs macOS $minos, above the pinned $MACOSX_DEPLOYMENT_TARGET"
+              exit 1
+            fi
+            checked=$((checked + 1))
+          done
+          [ "$checked" -gt 0 ] || { echo "::error::no Mach-O binary found to check"; exit 1; }
+      - run: cargo test --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-bundle -p js-bundle-cli -p js-mac-provision
+      # The package of the agent, built with Apple's pkgbuild from stand-in files and read back.
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked -p xtask --test macos_pkg --test macos_pkg_real
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
@@ -305,6 +328,255 @@ jobs:
         run: |
           sudo podman ps -a
           sudo podman logs --latest || true
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # The privilege model of the agent on the rootless crun runtime, settled by the kernel
+  # (crates/js-agent/tests/privilege, ignored in every other job; the design is
+  # docs/design/agent-privilege.md). The tests start this very binary again as an ordinary
+  # user holding exactly the capabilities a test names and read what it can do: the init
+  # namespace read, the watched directories, the XFS project quota, the directory layout
+  # and the state directory. The quota tests need a prjquota XFS volume: a loop image made
+  # and mounted here and only read by the tests. The job stands alone, so a failure here
+  # blocks no other job.
+  agent-privilege:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      JS_PRIV_XFS_ROOT: /mnt/js-priv-xfs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - name: Make and mount a project-quota XFS volume on a loop device
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xfsprogs nftables
+          truncate -s 512M "$RUNNER_TEMP/js-priv-xfs.img"
+          sudo mkfs.xfs -q "$RUNNER_TEMP/js-priv-xfs.img"
+          sudo mkdir -p "$JS_PRIV_XFS_ROOT"
+          sudo mount -o loop,prjquota "$RUNNER_TEMP/js-priv-xfs.img" "$JS_PRIV_XFS_ROOT"
+          findmnt "$JS_PRIV_XFS_ROOT"
+      # Option B, against a real crun: a root daemon starts every container as a dedicated
+      # job user. The user has a subordinate id range (made here if useradd did not).
+      - name: Install crun, uidmap and busybox and make the job user
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends crun uidmap busybox-static apparmor
+          sudo useradd --create-home --shell /usr/sbin/nologin js-job
+          grep -q '^js-job:' /etc/subuid || echo 'js-job:300000:65536' | sudo tee -a /etc/subuid
+          grep -q '^js-job:' /etc/subgid || echo 'js-job:300000:65536' | sudo tee -a /etc/subgid
+          echo "JS_B_CRUN=$(command -v crun)" >> "$GITHUB_ENV"
+          echo "JS_B_BUSYBOX=$(command -v busybox)" >> "$GITHUB_ENV"
+          echo "JS_B_UID=$(id -u js-job)" >> "$GITHUB_ENV"
+          echo "JS_B_GID=$(id -g js-job)" >> "$GITHUB_ENV"
+          crun --version | head -1
+      # The AppArmor user-namespace restriction stays ON for the whole job: it is the
+      # runner's default and the farm's likely policy, and the job user's crun is an
+      # unprivileged process it applies to. The facts are printed, and root_daemon.rs
+      # asserts the two sides of the control (the distribution's /usr/bin/crun, which its
+      # profile lets create the namespace, runs the container; a copy of the same binary
+      # at another path is refused it).
+      - name: Record the AppArmor facts the container tests depend on
+        run: |
+          echo "apparmor_restrict_unprivileged_userns = $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          ls -l /etc/apparmor.d | grep -i crun || echo "no crun file in /etc/apparmor.d"
+          sudo aa-status 2>&1 | grep -i crun || echo "no crun profile loaded"
+          getcap "$(command -v crun)" || true
+          cat /etc/apparmor.d/crun 2>/dev/null || true
+      - name: Build the tests as the runner user
+        run: |
+          cargo test -p js-agent --test privilege --locked --no-run
+          cargo test -p js-contain --test root_daemon --locked --no-run
+          cargo test -p js-agent --test pull_root --locked --no-run
+      # Root runs the tests (they start the unprivileged children themselves), with the
+      # runner's toolchain and home.
+      - name: Run the privilege tests as root
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test privilege --locked -- --ignored --nocapture --test-threads=1
+      - name: Run js-contain's Oci under a root daemon, as the job user, with the AppArmor restriction on
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-contain --test root_daemon --locked -- --ignored --nocapture --test-threads=1 --skip counter_run
+      # `js-agent image-pull` as root: the image from an in-process registry, unpacked by the
+      # agent's own binary in a helper container run as the job user, published read-only.
+      - name: Run js-agent image-pull as root against the real crun
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test pull_root --locked -- --ignored --nocapture --test-threads=1
+      # The counter-run of the copy control: with the restriction off the same copy of crun
+      # starts the container, so the sysctl is the only difference from the refusal above.
+      # The sysctl is put back to 1 whatever the result.
+      - name: Counter-run the copy control with the AppArmor restriction off
+        run: |
+          set -euo pipefail
+          restore() { sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1; }
+          trap restore EXIT
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-contain --test root_daemon --locked -- --ignored --nocapture --test-threads=1 counter_run
+      - name: The restriction is back on
+        run: test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # The container runtime against a real `crun`, in a `Delegate=yes` system unit each, with
+  # every step one command (`cargo xtask crun-tests`, crates/xtask/src/crun_tests.rs; the
+  # tests are crates/js-contain/tests/crun and crates/js-contain/tests/crun_root, `#[ignore]`d
+  # in every other job).
+  #
+  # `crun-rootless` runs the tests as an ordinary user: the image unpack and a job over the
+  # unpacked root, with the runner user's own subordinate ids.
+  #
+  # `crun-root` runs them as the agent runs on a node: a ROOT process that starts every
+  # container as a dedicated non-root job user (`js-job`, which `useradd` gives a range of
+  # subordinate ids), and reads from inside each container the ids it runs as, its
+  # capabilities, the seccomp filter, the read-only root, `/tmp`, the network namespace, the
+  # OOM group and the exec-root overlay's options; that an out-of-memory kill is the lease's
+  # own, that a kill leaves no process or cgroup, and that one job at its process limit does
+  # not stop another from forking. The AppArmor restriction on user namespaces stays at the
+  # runner's default (on): the distribution's `/usr/bin/crun` profile lets the job user's
+  # `crun` make one. A hosted runner's kernel and AppArmor policy are not a node's, so a
+  # node's own canary stays the gate. The jobs stand alone: a failure here blocks no other.
+  crun-rootless:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y --no-install-recommends crun uidmap
+      - run: cargo xtask crun-tests
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  crun-root:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y --no-install-recommends crun uidmap busybox-static apparmor
+      - run: sudo useradd --create-home --shell /usr/sbin/nologin js-job
+      - run: cargo xtask crun-tests --job-user js-job
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # Egress of jobs under privilege option B (crates/js-agent/tests/egress, ignored in every
+  # other job; the design is docs/design/agent-egress.md): the agent's firewall, its veth and
+  # routes, and real containers made by js-contain's `Oci` as the job user with the AppArmor
+  # user-namespace restriction left on. A second network namespace stands for another host
+  # behind the runner's routing, so the allowed path is forwarded and masqueraded, never local.
+  # Docker is stopped and its forward policy opened first: the runner's Docker would drop
+  # forwarded packets in its own chain, which has nothing to do with what is under test.
+  # The job stands alone, so a failure here blocks no other job.
+  agent-egress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - name: Install crun, uidmap, busybox and the network tools, and make the job user
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends crun uidmap busybox-static apparmor nftables iproute2 util-linux
+          sudo useradd --create-home --shell /usr/sbin/nologin js-job
+          grep -q '^js-job:' /etc/subuid || echo 'js-job:300000:65536' | sudo tee -a /etc/subuid
+          grep -q '^js-job:' /etc/subgid || echo 'js-job:300000:65536' | sudo tee -a /etc/subgid
+          echo "JS_B_CRUN=$(command -v crun)" >> "$GITHUB_ENV"
+          echo "JS_B_BUSYBOX=$(command -v busybox)" >> "$GITHUB_ENV"
+          echo "JS_B_UID=$(id -u js-job)" >> "$GITHUB_ENV"
+          echo "JS_B_GID=$(id -g js-job)" >> "$GITHUB_ENV"
+          crun --version | head -1
+          nft --version
+          busybox --list | tr '\n' ' '
+      - name: Take Docker's firewall out of the way and record the host facts
+        run: |
+          sudo systemctl stop docker.socket docker.service containerd.service || true
+          sudo iptables -P FORWARD ACCEPT || true
+          sudo ip6tables -P FORWARD ACCEPT || true
+          uname -r
+          echo "apparmor_restrict_unprivileged_userns = $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          sudo nft list ruleset | head -60 || true
+          sudo iptables -S | head -20 || true
+      - name: Build the tests as the runner user
+        run: cargo test -p js-agent --test egress --locked --no-run
+      - name: Run the egress tests as root
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test egress --locked -- --ignored --nocapture --test-threads=1
+      - name: The restriction is still on
+        run: test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

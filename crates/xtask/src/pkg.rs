@@ -12,7 +12,8 @@
 //! - at `/usr/bin/js-agent`, the bytes of `--binary`, which must be a statically linked
 //!   x86-64 Linux ELF executable (no interpreter, no needed library); as the unit and the
 //!   tmpfiles file, the bytes of `js-agent.service` and `tmpfiles.conf` in `--packaging`; as the
-//!   copyright file, the bytes of `--license`;
+//!   host setup script, the bytes of `crun_host_setup.sh` in `--packaging`; as the copyright
+//!   file, the bytes of `--license`;
 //! - a control file with exactly one `Package: js-agent`, `Version:` of `--version` and
 //!   `Architecture: amd64`, and no `Depends`, `Pre-Depends`, `Breaks`, `Conflicts`, `Replaces`,
 //!   `Provides` or `Essential` field in any letter case (a host installs it with a plain
@@ -30,7 +31,7 @@ use sha2::{Digest, Sha256};
 use crate::release::Version;
 
 /// The files of the package: path, mode, and where the bytes it must hold come from.
-pub const FILES: [(&str, u32, Source); 4] = [
+pub const FILES: [(&str, u32, Source); 5] = [
     ("usr/bin/js-agent", 0o755, Source::Binary),
     (
         "usr/lib/systemd/system/js-agent.service",
@@ -38,6 +39,11 @@ pub const FILES: [(&str, u32, Source); 4] = [
         Source::Service,
     ),
     ("usr/lib/tmpfiles.d/js-agent.conf", 0o644, Source::Tmpfiles),
+    (
+        "usr/share/js-agent/crun_host_setup.sh",
+        0o755,
+        Source::HostSetup,
+    ),
     ("usr/share/doc/js-agent/copyright", 0o644, Source::License),
 ];
 
@@ -67,6 +73,8 @@ pub enum Source {
     Service,
     /// `tmpfiles.conf` in `--packaging`.
     Tmpfiles,
+    /// `crun_host_setup.sh` in `--packaging`.
+    HostSetup,
     /// The `--license` file.
     License,
 }
@@ -79,6 +87,8 @@ pub struct Digests {
     pub service: String,
     /// Of `tmpfiles.conf`.
     pub tmpfiles: String,
+    /// Of `crun_host_setup.sh`.
+    pub host_setup: String,
     /// Of the `--license` file.
     pub license: String,
 }
@@ -89,6 +99,7 @@ impl Digests {
             Source::Binary => &self.binary,
             Source::Service => &self.service,
             Source::Tmpfiles => &self.tmpfiles,
+            Source::HostSetup => &self.host_setup,
             Source::License => &self.license,
         }
     }
@@ -106,7 +117,7 @@ pub struct CheckArgs {
     /// The js-agent binary the package must hold.
     #[arg(long)]
     pub binary: PathBuf,
-    /// The directory (`packaging/js-agent`) with the unit and the tmpfiles file.
+    /// The directory (`packaging/js-agent`) with the unit, the tmpfiles file and the host setup script.
     #[arg(long)]
     pub packaging: PathBuf,
     /// The license file the package must hold as its copyright file.
@@ -475,6 +486,7 @@ pub fn check(args: &CheckArgs) -> Result<String, Error> {
         binary: sha(&binary),
         service: sha(&read(&args.packaging.join("js-agent.service"))?),
         tmpfiles: sha(&read(&args.packaging.join("tmpfiles.conf"))?),
+        host_setup: sha(&read(&args.packaging.join("crun_host_setup.sh"))?),
         license: sha(&read(&args.license)?),
     };
     let mut found = problems(&deb, &args.version.to_string(), &digests);

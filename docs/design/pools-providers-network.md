@@ -252,7 +252,7 @@ agent reports in its hello, as capabilities declared in `crates/js-caps`:
 - `gpu-toolkit` (flag): set only if the toolkit hook works, reported only when gpus > 0.
 - `exec` (text): the mode the agent runs jobs in. PR 6 reports it; PR 11 lets a job require it.
 - `disk-gib` (whole number): the free space of the volume that holds `--scratch-root`, where
-  every run gets its directory, in GiB rounded down, read once when the hello is made with
+  every run gets its directory, in GiB rounded down, read when the hello is made, and again for the heartbeats, with
   `df -P -k` (the same on Linux and macOS). An agent with no `--scratch-root`, or whose volume
   cannot be read (a warning says why), reports none, and a job that requires disk is not
   placed on it. Like the others, an operator cannot set it.
@@ -276,9 +276,10 @@ Two limits, stated plainly:
 - Registry pools place jobs by the pool's booked shape. A host's reported `disk-gib` is only an
   admission floor against the pool's promise, and never places a job by itself. A job with
   `disk-gib` on a pool whose `[capabilities]` omit `disk-gib` gets no fit.
-- Disk is read once, at hello, so it goes stale afterwards. A host that fills up keeps its
-  booked promise. Re-reading it periodically or per heartbeat is tracked in
-  komira-ai/jobscheduler#328.
+- Disk is read at hello and again at most every 30 s (`js_agent::disk`); the heartbeat carries
+  `disk_gib` when it differs from the last value the server took (absent: unchanged; an older
+  server ignores it). The registry does not yet act on it: a host that fills up keeps its
+  booked promise until it does (komira-ai/jobscheduler#328).
 
 ## 4. Configuration (requirement 9, 10)
 

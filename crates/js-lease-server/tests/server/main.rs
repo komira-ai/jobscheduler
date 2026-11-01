@@ -6,6 +6,7 @@
 
 mod agents;
 mod agents_contract;
+mod agents_cordon;
 mod agents_load;
 mod agents_no_shared_token;
 mod agents_restart;
@@ -51,6 +52,7 @@ mod routes;
 mod runs;
 mod runs_files;
 mod runs_more;
+mod runs_native;
 mod runs_routes;
 mod runs_support;
 mod scaler_network;
@@ -67,6 +69,7 @@ mod tailnet;
 mod ticks;
 mod timings;
 mod tls;
+mod tls_reload;
 mod usage;
 mod usage_keys;
 mod usage_support;

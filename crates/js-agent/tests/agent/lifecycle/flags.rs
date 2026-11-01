@@ -4,6 +4,9 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
+use js_oci::Allow;
+
+use super::quota::local_with;
 use crate::support::{Scratch, code, linux_host, run_scripted, welcome};
 
 /// Runs the agent to its first wait with `extra` and returns (status, stderr, sent).
@@ -482,4 +485,46 @@ fn a_wrong_job_flag_stops_the_agent_before_it_registers() {
     assert_eq!(status, code(2));
     assert!(err.contains("is not key=value"), "{err}");
     assert_eq!(sent, 0);
+}
+
+/// Asserts that `--image-allow` entries reach the job flags, each parsed, in the order given,
+/// and that none given means none: an image on no entry is never pulled. It catches a flag
+/// that is read and dropped, and entries reordered or merged.
+#[test]
+fn image_allow_entries_reach_the_job_flags_in_order() {
+    let local = local_with(
+        "image-allow",
+        &[
+            "--image-allow",
+            "registry.example:5000/team/",
+            "--image-allow",
+            "ghcr.io/komira-ai/",
+        ],
+    );
+    assert_eq!(
+        local.image_allow,
+        [
+            Allow::parse("registry.example:5000/team/").unwrap(),
+            Allow::parse("ghcr.io/komira-ai/").unwrap(),
+        ]
+    );
+    assert!(local_with("image-allow-none", &[]).image_allow.is_empty());
+}
+
+/// Asserts that an `--image-allow` entry that names a bare host (every account on it) or is
+/// not a registry reference ends the agent with status 2 before it registers, and says
+/// which flag. It catches an allow-list that is only found wrong at the first pull.
+#[test]
+fn a_wrong_image_allow_entry_stops_the_agent_before_it_registers() {
+    for entry in ["ghcr.io", "ghcr.io/Komira AI/"] {
+        let (status, err, sent) = start(&["--image-allow", entry]);
+        assert_eq!(status, code(2), "{entry}");
+        assert!(
+            err.contains(&format!(
+                "--image-allow: {entry:?} is not a well formed registry reference"
+            )),
+            "{entry}: {err}"
+        );
+        assert_eq!(sent, 0, "{entry}");
+    }
 }

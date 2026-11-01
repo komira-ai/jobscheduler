@@ -25,6 +25,16 @@ Section 7 says how to stop spend from any step.
 Write down each step's output (with every secret masked) in the launch record: the date, the
 scheduler version, the head of this repository, and who ran it.
 
+## Agent artifact must know `--runtime`
+
+The boot payload's agent unit names `--runtime docker` (`js_elastic::RUNTIME`). An agent built
+before the `--runtime` flag exists exits 2 on it, so every instance the scheduler launches
+would boot, fail to start its agent and be reaped. Bump the pinned agent artifact (its URL and
+SHA-256 in the pool's config) to a build that accepts `--runtime` **before** a lease server
+that renders the flag is deployed, and confirm on one instance that `js-agent --version` runs
+and the unit is active. The boot plan's artifact is a URL and a digest with no version, so the
+payload cannot check this itself and the order is a rollout rule, not a gate.
+
 ## Must land before the first live launch
 
 Each item is marked **blocking** (do not set `launch = "live"` until it has merged), **accepted risk**

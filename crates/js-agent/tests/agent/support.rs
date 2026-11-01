@@ -21,6 +21,7 @@ use js_testkit::dir::TestDir;
 use serde_json::{Value, json};
 
 use crate::bounds::{self, Capped, SENT_LIMIT, WakeBudget};
+use crate::bundle::fake::FakeHost;
 use crate::jobs::fake::FakeMachine;
 
 /// The pool the tests' hosts ask to join.
@@ -313,6 +314,10 @@ pub struct Host {
     pub platform: Platform,
     pub commands: FakeCommands,
     pub files: FakeFiles,
+    /// The agent's effective user id.
+    pub euid: u32,
+    /// Where the check of the directories above a scratch root begins (`/` as in production).
+    pub ancestors_floor: PathBuf,
 }
 
 pub fn platform(os: &str, arch: &str) -> Platform {
@@ -338,6 +343,8 @@ pub fn linux_host() -> Host {
             .with_link("/proc/1/ns/pid", "pid:[4026531836]")
             .with_link("/proc/self/ns/mnt", "mnt:[4026531841]")
             .with_link("/proc/1/ns/mnt", "mnt:[4026531841]"),
+        euid: 0,
+        ancestors_floor: PathBuf::from("/"),
     }
 }
 
@@ -351,6 +358,8 @@ pub fn mac_host() -> Host {
             .with(PROFILER_CMD, Ok(APPLE_M2))
             .with(IOREG_CMD, Ok(&ioreg())),
         files: FakeFiles::default(),
+        euid: 0,
+        ancestors_floor: PathBuf::from("/"),
     }
 }
 
@@ -639,6 +648,27 @@ pub fn run_on(
     jitter: &mut dyn Jitter,
     jobs: Jobs<'_>,
 ) -> Ran {
+    run_with_store(
+        args,
+        host,
+        connector,
+        sleeper,
+        jitter,
+        jobs,
+        FakeHost::new(),
+    )
+}
+
+/// [`run_on`] with the bundle store's host given.
+pub fn run_with_store(
+    args: &[&str],
+    host: &Host,
+    connector: &dyn Connector,
+    sleeper: &mut dyn Sleeper,
+    jitter: &mut dyn Jitter,
+    jobs: Jobs<'_>,
+    store: Arc<FakeHost>,
+) -> Ran {
     let (mut out, mut err) = (Capped::new(), Capped::new());
     let mut services = Services {
         platform: host.platform.clone(),
@@ -648,8 +678,12 @@ pub fn run_on(
         jitter,
         sleeper,
         machine: jobs.0,
+        long_bundle_values: store.get(|s| s.long_values),
+        bundle: store,
         worker_hook: jobs.1,
         rescue_bound: Some(RESCUE_TEST_BOUND),
+        euid: host.euid,
+        ancestors_floor: &host.ancestors_floor,
     };
     let argv = std::iter::once("js-agent").chain(args.iter().copied());
     let argv = argv.map(Into::into).collect();

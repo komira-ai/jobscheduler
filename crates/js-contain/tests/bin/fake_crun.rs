@@ -6,12 +6,20 @@
 //!
 //! - `run-exit <n>`: `crun run` of a job's container exits `n` (default 0);
 //! - `run-log <json>`: it first appends this line to its `--log` file;
+//! - `run-out <text>` and `run-err <text>`: it writes the text and a newline to its
+//!   standard output or error before it exits;
+//! - `run-flood <n>`: it writes `n` bytes (`x`, then a final newline) to its standard
+//!   output, in 4096-byte writes;
 //! - `helper-fail <text>`: `crun run` of a helper bundle (a bundle directory whose name
 //!   starts with `helper-`) prints the text on stderr and exits 1;
-//! - `kill-fail <text>` and `delete-fail <text>`: `kill` and `delete` do the same.
+//! - `kill-fail <text>` and `delete-fail <text>`: `kill` and `delete` do the same;
+//! - `state-pid <n>`: `state` prints a state whose `pid` is `n` (default 1); `state-raw
+//!   <text>` prints the text instead; `state-fail <text>` fails like `kill-fail`.
 //!
 //! Every call appends its arguments, joined by spaces, as a line to the copy's path with
-//! the extension `calls`.
+//! the extension `calls`, and, to the extension `who`, a line of what it ran as: the
+//! real, effective and saved uid and gid and the supplementary groups (from
+//! `/proc/self/status`), the names of its environment variables, and its `PATH`, `HOME`.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -39,6 +47,37 @@ fn main() -> ExitCode {
         .open(me.with_extension("calls"))
         .expect("calls file");
     writeln!(calls, "{}", args.join(" ")).expect("record");
+
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(name))
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut keys: Vec<String> = std::env::vars_os()
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    keys.sort();
+    let mut who = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(me.with_extension("who"))
+        .expect("who file");
+    writeln!(
+        who,
+        "uid={} gid={} groups={} env={} path={} home={}",
+        field("Uid:"),
+        field("Gid:"),
+        field("Groups:"),
+        keys.join(","),
+        std::env::var("PATH").unwrap_or_default(),
+        std::env::var("HOME").unwrap_or_default()
+    )
+    .expect("record who");
 
     let mut log = None;
     let mut bundle = None;
@@ -72,11 +111,44 @@ fn main() -> ExitCode {
                     .expect("crun log");
                 writeln!(file, "{line}").expect("log");
             }
+            if let Some(text) = directive(&script, "run-out") {
+                println!("{text}");
+            }
+            if let Some(text) = directive(&script, "run-err") {
+                eprintln!("{text}");
+            }
+            if let Some(n) = directive(&script, "run-flood") {
+                let mut left: usize = n.parse().expect("flood size");
+                let mut out = std::io::stdout().lock();
+                while left > 0 {
+                    let step = left.min(4096);
+                    let mut block = vec![b'x'; step];
+                    if left == step {
+                        block[step - 1] = b'\n';
+                    }
+                    out.write_all(&block).expect("flood");
+                    left -= step;
+                }
+            }
             let code = directive(&script, "run-exit").map_or(0, |n| n.parse().expect("exit code"));
             ExitCode::from(code)
         }
         Some("kill") => directive(&script, "kill-fail").map_or(ExitCode::SUCCESS, |t| fail(&t)),
         Some("delete") => directive(&script, "delete-fail").map_or(ExitCode::SUCCESS, |t| fail(&t)),
+        Some("state") => {
+            if let Some(text) = directive(&script, "state-fail") {
+                return fail(&text);
+            }
+            let pid = directive(&script, "state-pid").unwrap_or_else(|| "1".to_owned());
+            let raw = directive(&script, "state-raw");
+            println!(
+                "{}",
+                raw.unwrap_or_else(|| format!(
+                    "{{\"id\":\"x\",\"pid\":{pid},\"status\":\"running\"}}"
+                ))
+            );
+            ExitCode::SUCCESS
+        }
         _ => fail("fake crun: unknown command"),
     }
 }
