@@ -56,6 +56,10 @@ pub enum RunReadError {
         /// The body's `error` code, or empty.
         code: String,
     },
+    /// An id that is not of the form the server mints, refused before any request is made.
+    /// Names the argument (`lease_id` or `run_id`), never the text.
+    #[error("{0} is not an id the server mints")]
+    BadId(&'static str),
     /// A 200 whose body is not a run entry.
     #[error("the run entry cannot be read: {0}")]
     Malformed(String),
