@@ -40,7 +40,8 @@ block return out quick proto { tcp, udp } from any to any user { 600, 601, 602 }
 - IPv6 is refused for the range, `::1` included.
 - A refused connection is `block return`: the pool user's `connect` fails at once with
   "connection refused" instead of hanging to its timeout, and a test can tell pf's refusal
-  from a host that is simply not there.
+  from a host that is simply not there. A connect to the node's own address is the
+  exception (below).
 - The policy is refused (nothing is rendered) for an empty range, a range that starts
   below uid 500 (system accounts) or ends past the last uid, an endpoint that is not an
   IPv4 literal with a port (a name would need DNS; IPv6 is denied), port 0, and an endpoint
@@ -156,8 +157,14 @@ pf by uid is a control on the packets a pool user's sockets send, and it has lim
   services; those must not rely on the network for access control (use a unix socket
   with file modes, or check the peer uid).
 - **The node's own address.** A connection from a pool user to the node's own non-loopback
-  address leaves through `lo0` and meets the rules as any other destination: refused
-  unless that address is a listed endpoint.
+  address leaves through `lo0` and meets the rules as any other destination: blocked
+  unless that address is a listed endpoint. It is blocked but not refused at once: macOS
+  pf builds the reset of a `block return` only after it verifies the TCP checksum of the
+  packet, and a SYN going out `lo0` (`if_loop.c` sets `lo0`'s hardware-assist flags to include TCP and UDP checksum, which
+  `pf_inet_hook` reads to decide whether to complete the checksum before pf runs; the
+  checksum-valid flags `lo0` sets on its own loop path come after pf's output hook) still has its
+  checksum to be computed, so no reset is sent and the connect times out. No rule changes
+  this; destinations that are not the node's own address are refused at once.
 - **DNS and mDNSResponder.** The anchor lists IPv4 literals, so a pool user needs no
   resolver, but the unix socket to mDNSResponder is not a packet and is outside pf:
   a pool user can ask the system resolver, which sends the query as its own uid
@@ -178,6 +185,8 @@ pf by uid is a control on the packets a pool user's sockets send, and it has lim
 `tests/pf_as_root.rs`, `#[ignore]`d (root, loads pf rules under its own anchor
 `com.apple/js-mac-provision-test`). As pool uids it connects, through the program's `probe`
 verb, to a listed endpoint (this Mac's own address and a port of a listener the test
-opens): connected; to another port of the same address, to `169.254.169.254:80` and to a
-documentation address: refused; to loopback: connected. The uids on each side of the
+opens): connected; to `169.254.169.254:80` and to a documentation address: refused; to
+loopback: connected; to another port of this Mac's own address: refused or timed out,
+never connected (see above). The probes are all recorded
+and printed as a table before the test judges them. The uids on each side of the
 range and a control uid are not refused by anything. After `remove` the pool uid connects again.

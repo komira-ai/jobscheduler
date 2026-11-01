@@ -28,16 +28,24 @@
 //! the others.
 //!
 //! What it shows, with the control as the half that would pass without pf:
-//! - a pool uid reaches the listed endpoint and is refused at once everywhere else (a
-//!   `block return` rule answers with a reset, so "refused" is pf's answer: a connect
-//!   that goes nowhere would time out instead);
+//! - a pool uid reaches the listed endpoint and is refused at once at every address that
+//!   is not this Mac's own (a `block return` rule answers with a reset, so "refused" is
+//!   pf's answer: a connect that goes nowhere would time out instead);
+//! - at this Mac's own address, on a port that is not listed, "refused" or "timed out" is
+//!   accepted and "connected" is not: macOS pf does not send the reset for a SYN that
+//!   leaves through `lo0` (see `Want::RefusedOrDropped`);
 //! - the same uid reaches IPv4 loopback;
 //! - a uid outside the pool is refused by nothing;
 //! - after `remove` the pool uid is no longer refused.
 //!
+//! Every probe is recorded as a row, `(uid, target, outcome, expected)`; the table is
+//! printed after the last probe and only then does the test fail, so one run on a Mac shows
+//! every outcome and not just the first that differs.
+//!
 //! The file builds on every platform, so clippy reads it on Linux; run anywhere but macOS,
 //! the test stops at its first line.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
 use std::os::unix::fs::PermissionsExt as _;
@@ -94,6 +102,11 @@ fn own_address() -> Ipv4Addr {
 }
 
 /// What `probe` printed running as `uid`.
+///
+/// The 2000 ms connect bound is how a drop is observed as an outcome (a connect nobody
+/// answers ends in "timed out"); it is a bound, not a measurement, and nothing here
+/// asserts how long a probe took. The `probe` verb prints "timed out" for both
+/// `ErrorKind::TimedOut` and `ErrorKind::WouldBlock`.
 fn probe_as(program: &Path, uid: u32, addr: &str) -> String {
     let out = Command::new(program)
         .args(["probe", addr, "--timeout-ms", "2000"])
@@ -102,6 +115,95 @@ fn probe_as(program: &Path, uid: u32, addr: &str) -> String {
         .output()
         .unwrap_or_else(|e| panic!("start the probe as uid {uid} (is this root?): {e}"));
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// What a probe may print.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Want {
+    /// The connection is made.
+    Connected,
+    /// pf's `block return` answered with a reset: exactly "refused".
+    Refused,
+    /// "refused" or "timed out", for a destination that is this Mac's own address only.
+    ///
+    /// A connect to an address of this Mac leaves through `lo0`. `lo0` is set up with TCP and
+    /// UDP checksum assist (`ifnet_set_offload` in xnu `bsd/net/if_loop.c`), which
+    /// `pf_inet_hook` reads to decide whether to complete the checksum before pf runs, so
+    /// the SYN reaches pf with its TCP checksum still to be computed. (The checksum-valid
+    /// flags `lo0` sets on its own loop path come after pf's output hook and do not help.)
+    /// pf builds the reset of a `block return` only after it has checked the checksum of
+    /// the packet it answers (`pf_test_rule` calling `pf_check_proto_cksum`, xnu
+    /// `bsd/net/pf.c`), and that check fails for such a SYN: the SYN is dropped and no reset
+    /// is sent. The packet is still blocked, so "timed out" is the safe outcome there; what
+    /// must never happen is "connected". Every destination that is not this Mac's own is
+    /// `Refused`, with no such allowance.
+    RefusedOrDropped,
+    /// Anything but "refused" (a control uid: no rule matches it).
+    NotRefused,
+}
+
+impl Want {
+    fn accepts(self, got: &str) -> bool {
+        match self {
+            Want::Connected => got == "connected",
+            Want::Refused => got == "refused",
+            Want::RefusedOrDropped => got == "refused" || got == "timed out",
+            Want::NotRefused => got != "refused",
+        }
+    }
+}
+
+/// One probe: who connected where, what came of it, and what was expected.
+struct Row {
+    uid: u32,
+    target: String,
+    what: &'static str,
+    got: String,
+    want: Want,
+}
+
+impl Row {
+    fn ok(&self) -> bool {
+        self.want.accepts(&self.got)
+    }
+}
+
+/// Runs the probe as `uid` and records it.
+fn record(
+    rows: &mut Vec<Row>,
+    program: &Path,
+    uid: u32,
+    what: &'static str,
+    target: &str,
+    want: Want,
+) {
+    rows.push(Row {
+        uid,
+        target: target.to_owned(),
+        what,
+        got: probe_as(program, uid, target),
+        want,
+    });
+}
+
+/// The rows that did not show what was expected.
+fn failed(rows: &[Row]) -> Vec<&Row> {
+    rows.iter().filter(|r| !r.ok()).collect()
+}
+
+/// Every row, one line each, the ones that differ from what was expected marked `FAIL`.
+fn table(rows: &[Row]) -> String {
+    let mut text = String::new();
+    for r in rows {
+        let mark = if r.ok() { "ok  " } else { "FAIL" };
+        // Writing to a String cannot fail.
+        let _ = writeln!(
+            text,
+            "{mark} uid {:<5} {:<22} {:<28} got {:<12} expected {:?}",
+            r.uid, r.target, r.what, r.got, r.want
+        );
+    }
+    text
 }
 
 #[test]
@@ -151,59 +253,188 @@ fn pool_uids_reach_only_the_listed_endpoint_and_other_uids_are_not_affected() {
         .check(uids, &endpoints)
         .expect("the loaded rules are the rendered ones");
 
+    let mut rows = Vec::new();
+
     // The pool: the first and the last uid of the range.
     for uid in [POOL_FIRST, POOL_FIRST + POOL_COUNT - 1] {
-        assert_eq!(
-            probe_as(&program, uid, &allowed_at),
-            "connected",
-            "uid {uid}: listed"
+        record(
+            &mut rows,
+            &program,
+            uid,
+            "listed",
+            &allowed_at,
+            Want::Connected,
         );
-        assert_eq!(
-            probe_as(&program, uid, &unlisted_at),
-            "refused",
-            "uid {uid}: same host, other port"
+        // This Mac's own address leaves through lo0, where pf sends no reset.
+        record(
+            &mut rows,
+            &program,
+            uid,
+            "own host, other port",
+            &unlisted_at,
+            Want::RefusedOrDropped,
         );
-        assert_eq!(
-            probe_as(&program, uid, METADATA),
-            "refused",
-            "uid {uid}: metadata address"
+        record(
+            &mut rows,
+            &program,
+            uid,
+            "metadata address",
+            METADATA,
+            Want::Refused,
         );
-        assert_eq!(
-            probe_as(&program, uid, DOCUMENTATION),
-            "refused",
-            "uid {uid}: unlisted address"
+        record(
+            &mut rows,
+            &program,
+            uid,
+            "unlisted address",
+            DOCUMENTATION,
+            Want::Refused,
         );
-        assert_eq!(
-            probe_as(&program, uid, &loopback_at),
-            "connected",
-            "uid {uid}: loopback"
+        record(
+            &mut rows,
+            &program,
+            uid,
+            "loopback",
+            &loopback_at,
+            Want::Connected,
         );
     }
     // The uids either side of the range: the rules name the uids 4100 to 4109 and no more.
     for uid in [POOL_FIRST - 1, POOL_FIRST + POOL_COUNT] {
-        assert_eq!(
-            probe_as(&program, uid, &unlisted_at),
-            "connected",
-            "uid {uid}: outside the range"
+        record(
+            &mut rows,
+            &program,
+            uid,
+            "outside the range",
+            &unlisted_at,
+            Want::Connected,
         );
     }
 
     // The control: a uid outside the pool is not affected. These would also hold with no
-    // anchor at all, which is the point: pf changed nothing for them.
-    assert_eq!(probe_as(&program, CONTROL_UID, &allowed_at), "connected");
-    assert_eq!(probe_as(&program, CONTROL_UID, &unlisted_at), "connected");
-    assert_ne!(
-        probe_as(&program, CONTROL_UID, METADATA),
-        "refused",
-        "no rule matches the control uid (a time-out or a failure is the Mac having no such host)"
+    // anchor at all, which is the point: pf changed nothing for them. The metadata and
+    // documentation addresses may time out (the Mac has no such host), but no rule
+    // answers them.
+    record(
+        &mut rows,
+        &program,
+        CONTROL_UID,
+        "control, listed",
+        &allowed_at,
+        Want::Connected,
     );
-    assert_ne!(probe_as(&program, CONTROL_UID, DOCUMENTATION), "refused");
+    record(
+        &mut rows,
+        &program,
+        CONTROL_UID,
+        "control, own host",
+        &unlisted_at,
+        Want::Connected,
+    );
+    record(
+        &mut rows,
+        &program,
+        CONTROL_UID,
+        "control, metadata",
+        METADATA,
+        Want::NotRefused,
+    );
+    record(
+        &mut rows,
+        &program,
+        CONTROL_UID,
+        "control, documentation",
+        DOCUMENTATION,
+        Want::NotRefused,
+    );
 
     // Remove flushes the anchor: the pool uid is reaching the listener again.
     provisioner.remove().expect("remove the anchor");
-    assert_eq!(
-        probe_as(&program, POOL_FIRST, &unlisted_at),
-        "connected",
-        "after remove, a pool uid reaches a listener on this Mac again"
+    record(
+        &mut rows,
+        &program,
+        POOL_FIRST,
+        "after remove",
+        &unlisted_at,
+        Want::Connected,
     );
+
+    // Everything is printed before anything is judged.
+    println!("{}", table(&rows));
+    let bad = failed(&rows);
+    assert!(
+        bad.is_empty(),
+        "{} of {} probes did not show what was expected (the table above has every one)",
+        bad.len(),
+        rows.len()
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(want: Want, got: &str) -> Row {
+        Row {
+            uid: 4100,
+            target: "192.0.2.1:80".to_owned(),
+            what: "a probe",
+            got: got.to_owned(),
+            want,
+        }
+    }
+
+    #[test]
+    fn refused_is_exactly_refused() {
+        assert!(Want::Refused.accepts("refused"));
+        assert!(!Want::Refused.accepts("timed out"));
+        assert!(!Want::Refused.accepts("connected"));
+        assert!(!Want::Refused.accepts("failed: host unreachable"));
+    }
+
+    #[test]
+    fn the_own_host_allowance_is_a_drop_and_never_a_connection() {
+        assert!(Want::RefusedOrDropped.accepts("refused"));
+        assert!(Want::RefusedOrDropped.accepts("timed out"));
+        assert!(!Want::RefusedOrDropped.accepts("connected"));
+        assert!(!Want::RefusedOrDropped.accepts("failed: host unreachable"));
+    }
+
+    #[test]
+    fn connected_and_not_refused_mean_what_they_say() {
+        assert!(Want::Connected.accepts("connected"));
+        assert!(!Want::Connected.accepts("refused"));
+        assert!(!Want::Connected.accepts("timed out"));
+        assert!(Want::NotRefused.accepts("timed out"));
+        assert!(Want::NotRefused.accepts("connected"));
+        assert!(!Want::NotRefused.accepts("refused"));
+    }
+
+    #[test]
+    fn the_table_lists_every_row_and_marks_the_ones_that_differ() {
+        let rows = vec![
+            row(Want::Refused, "refused"),
+            row(Want::Refused, "timed out"),
+            row(Want::Connected, "connected"),
+        ];
+        let text = table(&rows);
+        assert_eq!(text.lines().count(), 3);
+        assert_eq!(text.matches("FAIL").count(), 1);
+        assert!(text.lines().nth(1).unwrap().starts_with("FAIL"));
+        assert!(!text.contains("expected RefusedOrDropped"));
+        assert!(text.contains("192.0.2.1:80"));
+    }
+
+    #[test]
+    fn failed_keeps_only_the_rows_that_differ() {
+        let rows = vec![
+            row(Want::Refused, "refused"),
+            row(Want::Refused, "timed out"),
+            row(Want::RefusedOrDropped, "connected"),
+        ];
+        let bad = failed(&rows);
+        assert_eq!(bad.len(), 2);
+        assert_eq!(bad[0].got, "timed out");
+        assert_eq!(bad[1].got, "connected");
+    }
 }
