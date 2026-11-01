@@ -357,3 +357,17 @@ fn a_unit_still_starting_is_no_proof_even_when_the_server_shows_a_hello() {
     assert!(rig.record().unwrap().verify_ok);
     only_looked(&spy);
 }
+
+#[test]
+fn a_rerun_after_verify_ok_on_a_tainted_agent_halts() {
+    let rig = cut_over("hook-verify-rerun-taint", true);
+    assert_eq!(Spy::new(&rig).verify(&rig).outcome, Outcome::Success);
+    let record = rig.record_bytes();
+    rig.taint();
+    let spy = Spy::new(&rig);
+    let done = spy.verify(&rig);
+    assert_eq!(done.outcome, Outcome::Halt, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::Tainted));
+    assert_eq!(rig.record_bytes(), record);
+    only_looked(&spy);
+}
