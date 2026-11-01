@@ -52,14 +52,14 @@ pub fn drain_cost(hosts: &[HostLoad], now: u64) -> Vec<DrainCost> {
         })
         .collect();
     out.sort_by(|a, b| {
-        let key = |c: &DrainCost| (c.tail_end.is_none(), c.wait_ms, c.leases, c.id.clone());
-        key(a).cmp(&key(b))
+        let key = |c: &DrainCost| (c.tail_end.is_none(), c.wait_ms, c.leases);
+        (key(a), &a.id).cmp(&(key(b), &b.id))
     });
     out
 }
 
 /// The default margin [`fits_in_tail`] keeps between backfilled work and the end of the
-/// tail: one minute.
+/// tail: one minute. Nothing in production uses it yet; the backfill gate (step 3) will.
 pub const DEFAULT_BACKFILL_MARGIN_MS: u64 = 60_000;
 
 /// The end of one lease: its estimate cut to its max-wall bound when it has one, else the
@@ -92,6 +92,8 @@ pub fn tail(load: &HostLoad) -> Option<u64> {
 /// host whose tail ends at `tail_end`: it must end, with `margin` to spare, no later
 /// than the tail. Work with no estimate never fits, and nothing fits a host whose tail is
 /// unknown: the check fails closed.
+///
+/// Nothing in production calls this yet; the backfill gate (step 3) will.
 pub fn fits_in_tail(
     now: u64,
     estimated_duration: Option<u64>,
@@ -136,7 +138,7 @@ mod tests {
 
     #[test]
     fn smallest_latest_end_bound_wins() {
-        // Kills: ordering by the earliest bound, by the sum, or largest first. Host b
+        // Catches: ordering by the earliest bound, by the sum, or largest first. Host b
         // has the earliest single bound but the latest one is what counts.
         let hosts = [
             load("a", 1, &[500]),
@@ -151,14 +153,14 @@ mod tests {
 
     #[test]
     fn tie_on_bound_takes_fewest_leases() {
-        // Kills: skipping the lease-count tiebreak (input order would put a first).
+        // Catches: skipping the lease-count tiebreak (input order would put a first).
         let hosts = [load("a", 3, &[400]), load("b", 1, &[400])];
         assert_eq!(ids(&drain_cost(&hosts, 0)), ["b", "a"]);
     }
 
     #[test]
     fn tie_again_takes_lowest_id() {
-        // Kills: keeping input order on a full tie.
+        // Catches: keeping input order on a full tie.
         let hosts = [
             load("c", 1, &[400]),
             load("a", 1, &[400]),
@@ -169,7 +171,7 @@ mod tests {
 
     #[test]
     fn idle_host_costs_zero_and_beats_all() {
-        // Kills: a host with no work sorting last, or costing now.
+        // Catches: a host with no work sorting last, or costing now.
         let hosts = [load("a", 1, &[50]), load("z", 0, &[])];
         let got = drain_cost(&hosts, 10);
         assert_eq!(ids(&got), ["z", "a"]);
@@ -179,7 +181,7 @@ mod tests {
 
     #[test]
     fn a_bound_already_passed_costs_zero_without_underflow() {
-        // Kills: plain subtraction (panics in debug, wraps in release).
+        // Catches: plain subtraction (panics in debug, wraps in release).
         let hosts = [load("a", 1, &[5])];
         assert_eq!(drain_cost(&hosts, 100)[0].wait_ms, 0);
     }
@@ -206,6 +208,96 @@ mod tests {
         assert!(drain_cost(&[], 0).is_empty());
     }
 
+    /// The `drain_cost` of the code before the tail rule, verbatim, kept as an oracle.
+    /// It returns `(id, wait_ms, leases)` since the old `DrainCost` had no `tail_end`.
+    fn drain_cost_before_tail(hosts: &[HostLoad], now: u64) -> Vec<(String, u64, usize)> {
+        let mut out: Vec<(String, u64, usize)> = hosts
+            .iter()
+            .map(|h| {
+                (
+                    h.id.clone(),
+                    h.end_bounds
+                        .iter()
+                        .max()
+                        .map_or(0, |end| end.saturating_sub(now)),
+                    h.leases,
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| (a.1, a.2, &a.0).cmp(&(b.1, b.2, &b.0)));
+        out
+    }
+
+    fn fields(v: &[DrainCost]) -> Vec<(String, u64, usize)> {
+        v.iter()
+            .map(|c| (c.id.clone(), c.wait_ms, c.leases))
+            .collect()
+    }
+
+    #[test]
+    fn with_no_estimates_every_old_case_gives_the_old_order_and_waits() {
+        // Catches: any change in id, wait_ms, leases or order for the inputs the
+        // pre-tail tests used, at several clocks; tail_end is checked on its own.
+        let cases: Vec<Vec<HostLoad>> = vec![
+            vec![
+                load("a", 1, &[500]),
+                load("b", 2, &[100, 900]),
+                load("c", 1, &[300]),
+            ],
+            vec![load("a", 3, &[400]), load("b", 1, &[400])],
+            vec![
+                load("c", 1, &[400]),
+                load("a", 1, &[400]),
+                load("b", 1, &[400]),
+            ],
+            vec![load("a", 1, &[50]), load("z", 0, &[])],
+            vec![load("a", 1, &[5])],
+            vec![
+                load("e", 2, &[400]),
+                load("c", 1, &[400]),
+                load("d", 2, &[400]),
+                load("b", 1, &[400]),
+                load("a", 3, &[400]),
+            ],
+            vec![],
+            vec![
+                load("c", 1, &[NO_BOUND]),
+                load("b", 2, &[NO_BOUND, NO_BOUND]),
+                load("a", 1, &[NO_BOUND]),
+                load("k", 1, &[1_000]),
+            ],
+        ];
+        for hosts in cases {
+            for now in [0, 10, 100, 450, 1_000_000] {
+                let new = drain_cost(&hosts, now);
+                assert_eq!(fields(&new), drain_cost_before_tail(&hosts, now));
+                for cost in &new {
+                    let h = hosts.iter().find(|h| h.id == cost.id).unwrap();
+                    let want = match h.end_bounds.iter().max().copied() {
+                        None => Some(0),
+                        Some(NO_BOUND) => None,
+                        Some(m) => Some(m),
+                    };
+                    assert_eq!(cost.tail_end, want, "host {}", cost.id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_host_with_no_max_wall_ranks_after_one_with_a_finite_bound() {
+        // Catches: a bound-less lease ranking first or by its known part, and its wait
+        // not being the old `u64::MAX - now`.
+        let hosts = [load("a", 1, &[NO_BOUND]), load("b", 1, &[7_000])];
+        let now = 1_000;
+        let got = drain_cost(&hosts, now);
+        assert_eq!(ids(&got), ["b", "a"]);
+        assert_eq!(got[0].wait_ms, 6_000);
+        assert_eq!(got[1].wait_ms, u64::MAX - now);
+        assert_eq!(got[1].tail_end, None);
+        assert_eq!(fields(&got), drain_cost_before_tail(&hosts, now));
+    }
+
     fn with_est(id: &str, bounds: &[u64], ests: &[Option<u64>]) -> HostLoad {
         HostLoad {
             id: id.to_string(),
@@ -219,7 +311,7 @@ mod tests {
 
     #[test]
     fn the_shorter_estimated_tail_wins_over_the_shorter_max_wall() {
-        // Kills: ordering by the max-wall bound. Host z has the longer bound (10_000) but
+        // Catches: ordering by the max-wall bound. Host z has the longer bound (10_000) but
         // is estimated to end at 2_000; host a has bound 5_000 and no estimate. The ids
         // are chosen so the id tie-break would pick the other host.
         let hosts = [
@@ -235,7 +327,7 @@ mod tests {
 
     #[test]
     fn an_estimate_past_the_max_wall_is_cut_to_it() {
-        // Kills: trusting an estimate beyond the hard bound.
+        // Catches: trusting an estimate beyond the hard bound.
         let hosts = [
             with_est("a", &[1_000], &[Some(9_000)]),
             with_est("b", &[3_000], &[Some(2_000)]),
@@ -247,7 +339,7 @@ mod tests {
 
     #[test]
     fn a_host_with_an_unknown_lease_ranks_after_every_known_tail() {
-        // Kills: ranking an unknown tail by its known part, or first. Host u has one
+        // Catches: ranking an unknown tail by its known part, or first. Host u has one
         // lease that ends at 100 and one with neither an estimate nor a bound; host k
         // has a far tail. Host e ends at 7_000 by estimate alone (no bound).
         let hosts = [
@@ -263,7 +355,7 @@ mod tests {
 
     #[test]
     fn unknown_hosts_keep_the_lease_count_then_id_order() {
-        // Kills: dropping the existing tie-breaks inside the unknown group.
+        // Catches: dropping the existing tie-breaks inside the unknown group.
         let hosts = [
             load("c", 1, &[NO_BOUND]),
             load("b", 2, &[NO_BOUND, NO_BOUND]),
@@ -299,7 +391,7 @@ mod tests {
 
     #[test]
     fn tail_clamps_each_estimate_and_falls_back_to_the_bound() {
-        // Kills: max over the raw estimates; no clamp; no fallback; wrong index pairing.
+        // Catches: max over the raw estimates; no clamp; no fallback; wrong index pairing.
         assert_eq!(tail(&with_est("h", &[100], &[Some(500)])), Some(100));
         assert_eq!(tail(&with_est("h", &[100], &[Some(50)])), Some(50));
         assert_eq!(tail(&with_est("h", &[NO_BOUND], &[Some(50)])), Some(50));
@@ -330,7 +422,7 @@ mod tests {
 
     #[test]
     fn work_fits_up_to_the_tail_end_less_the_margin_and_not_a_millisecond_more() {
-        // Kills: < for <=, forgetting the margin, adding it twice.
+        // Catches: < for <=, forgetting the margin, adding it twice.
         let (now, tail_end, margin) = (1_000, 2_000, 100);
         assert!(fits_in_tail(now, Some(900), Some(tail_end), margin));
         assert!(!fits_in_tail(now, Some(901), Some(tail_end), margin));
@@ -340,7 +432,7 @@ mod tests {
 
     #[test]
     fn work_with_an_unknown_estimate_or_a_host_with_an_unknown_tail_never_fits() {
-        // Kills: failing open.
+        // Catches: failing open.
         assert!(!fits_in_tail(0, None, Some(u64::MAX), 0));
         assert!(!fits_in_tail(0, Some(1), None, 0));
         assert!(!fits_in_tail(0, None, None, 0));
@@ -348,7 +440,7 @@ mod tests {
 
     #[test]
     fn the_fit_sum_saturates_instead_of_wrapping() {
-        // Kills: plain addition (wraps in release and would let huge work fit).
+        // Catches: plain addition (wraps in release and would let huge work fit).
         assert!(!fits_in_tail(10, Some(u64::MAX), Some(100), 5));
         assert!(!fits_in_tail(u64::MAX, Some(1), Some(100), 0));
     }
@@ -363,14 +455,14 @@ mod tests {
 
     #[test]
     fn deadline_below_the_attempt_cap_is_the_configured_one() {
-        // Kills: always returning max wall.
+        // Catches: always returning max wall.
         assert_eq!(reserve_deadline(0, &cfg(Some(60), 2), 1000), 60);
         assert_eq!(reserve_deadline(1, &cfg(Some(60), 2), 1000), 60);
     }
 
     #[test]
     fn unset_deadline_is_max_wall() {
-        // Kills: treating None as zero.
+        // Catches: treating None as zero.
         assert_eq!(reserve_deadline(0, &cfg(None, 2), 1000), 1000);
     }
 
@@ -383,7 +475,7 @@ mod tests {
 
     #[test]
     fn a_longer_configured_deadline_is_also_cut_to_max_wall_at_the_cap() {
-        // Kills: max() instead of the max wall at the cap; the bound is max wall.
+        // Catches: max() instead of the max wall at the cap; the bound is max wall.
         assert_eq!(reserve_deadline(2, &cfg(Some(5000), 2), 1000), 1000);
     }
 }
