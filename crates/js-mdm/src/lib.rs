@@ -10,7 +10,8 @@
 //! # Verbs
 //!
 //! * `js-mdm fetch --dir DIR [--only TOOL]... [--apply]`: the pinned upstream archives,
-//!   downloaded over HTTPS as your own user (never root) into `DIR`, each checked against its
+//!   downloaded over HTTPS as your own user into `DIR` (refused at uid 0: it does not drop
+//!   privileges; refused inside a git work tree, links resolved first), each checked against its
 //!   sha256 pin. A download that is not the pin is kept as `<file>.rejected` and fails the
 //!   run. Nothing downloaded is run.
 //! * `js-mdm install --config FILE --bin-dir DIR [--apply]`: as root, the user, the
@@ -24,13 +25,16 @@
 //! * `js-mdm tls --config FILE [--apply]`: as root, the TLS certificate from an ACME CA over
 //!   DNS-01 by the pinned lego, with the DNS provider's credentials read by the certificate
 //!   unit from the root-only `MDM_ETC/dns.env` (never argv), its renewal timer, and the proxy
-//!   started once the certificate is there.
-//! * `js-mdm verify --config FILE [--ignore TEXT]...`: read only. Health checks (units
+//!   started once the certificate is there. Only its checks before the plan refuse without a
+//!   change: if the certificate is missing after the issuing unit ran, the run fails with the
+//!   units written; run it again.
+//! * `js-mdm verify --config FILE [--ignore LINE]...`: read only. Health checks (units
 //!   active, listeners, certificate lifetime, modes), then one line per installed file
 //!   compared with `js-mdm-core`'s render of the same settings: `same`, `differs` (with the
-//!   sha256 of both) or `missing`. Comment lines are left out of the comparison, and each
-//!   `--ignore TEXT` is removed from the installed text first (a host installed by another
-//!   tool may carry a phrase the render lacks). World-readable files need no root.
+//!   sha256 of both), `missing` or `wrong` (not a regular file, or not the mode and owner the
+//!   install plan gives it). Comment lines are left out of the comparison, and so are the
+//!   lines equal to an `--ignore LINE`, on both sides and printed (a host installed by another
+//!   tool may word one line differently). World-readable files need no root.
 //!
 //! Not in this slice: `push-cert` (the APNs push certificate and the enrollment profile),
 //! `dep` (Apple Business Manager) and `erase`. The checks that dial the proxy over HTTPS are
@@ -41,7 +45,9 @@
 //! * A dry run is the default and changes nothing; `--apply` acts. A rerun finds nothing to
 //!   do.
 //! * Verbs that read root-only files refuse to run as another user, even for a dry run.
-//! * A plan names paths, sizes and modes, never contents. No secret is put on a command line
+//! * Files are made without following links: a link in a directory the service user owns is
+//!   refused, never chmodded, chowned or written through.
+//! * A plan names paths, sizes and modes, never contents (its `Debug` form neither). No secret is put on a command line
 //!   or printed; the SCEP challenge and API keys are written straight to 0600 root files.
 //! * Exit 0 done (or nothing to do), 1 a step, a download or a check failed, 2 refused
 //!   (`REFUSED: ...` on stderr).

@@ -4,10 +4,13 @@
 //! Each check prints `ok    <check>` or `FAIL  <check>: <why>`. Then one line per file the
 //! kit installs (the slice, the services, the Caddyfile, and the certificate job's units when
 //! the ACME settings are given): `same`, `differs` (with the sha256 of the installed and of
-//! the rendered text) or `missing`, and `unreadable` for a file this user may not read. The
-//! comparison leaves out comment lines, so a host installed by a tool whose templates are
-//! worded differently compares equal when the settings are the same; each `--ignore` text is
-//! removed from the installed text first. A summary line ends the output. The verb exits 0
+//! the rendered text), `missing`, `wrong` (not a regular file, or not the mode and owner the
+//! install plan gives it: a link is never followed) and `unreadable` for a file this user may
+//! not read. The comparison leaves out comment lines, so a host installed by a tool whose
+//! templates are worded differently compares equal when the settings are the same. Each
+//! `--ignore LINE` leaves out of both texts the lines equal to LINE, whole (a line that holds
+//! LINE and more is kept), and every line left out is printed under its file; a LINE that is
+//! empty or holds a line break is refused. A summary line ends the output. The verb exits 0
 //! when everything passes and 1 otherwise. It changes nothing, and needs no root for
 //! world-readable files; the checks of the 0700 state and the 0600 secrets fail for another
 //! user, since they cannot be seen.
@@ -47,7 +50,7 @@ pub struct Verify<'a> {
     pub config: &'a MdmConfig,
     /// The ACME settings, when the file has them: the certificate job's units are compared.
     pub acme: Option<&'a Acme>,
-    /// Text removed from every installed file before it is compared.
+    /// Whole lines left out of both texts of every file before they are compared.
     pub ignore: &'a [String],
 }
 
@@ -211,6 +214,9 @@ pub enum Compared {
     },
     /// Not installed.
     Missing,
+    /// Not a regular file, or not the mode and owner `install` gives it (a link whose target
+    /// holds the same text, a 0666 file, a file of another user).
+    Wrong(String),
     /// Not readable by this user.
     Unreadable(String),
 }
@@ -222,18 +228,30 @@ impl Compared {
     }
 }
 
+/// A file `install` or `tls` makes: where, what text, and the mode and owner it is given.
+#[derive(Clone, Debug)]
+pub struct Want {
+    /// Where.
+    pub path: String,
+    /// The rendered text.
+    pub text: String,
+    /// The permission bits.
+    pub mode: u32,
+    /// The owner.
+    pub owner: Account,
+}
+
 fn sha(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
 }
 
-/// Compare the file at `path` with `rendered`, leaving out comment lines and, from the
-/// installed text, every `ignore` text.
-pub fn compare(host: &dyn Host, path: &str, rendered: &str, ignore: &[String]) -> Compared {
-    match host.read(path) {
+/// Compare the file `want` names with what is installed.
+pub fn compare(host: &dyn Host, want: &Want, ignore: &[String]) -> (Compared, Vec<String>) {
+    let how = match host.read(&want.path) {
         Ok(Some(bytes)) => {
             let plain = strip_comments(&String::from_utf8_lossy(&bytes));
             let installed = sha(&ignore.iter().fold(plain, |t, i| t.replace(i.as_str(), "")));
-            let rendered = sha(&strip_comments(rendered));
+            let rendered = sha(&strip_comments(&want.text));
             match installed == rendered {
                 true => Compared::Same,
                 false => Compared::Differs {
@@ -244,38 +262,68 @@ pub fn compare(host: &dyn Host, path: &str, rendered: &str, ignore: &[String]) -
         }
         Ok(None) => Compared::Missing,
         Err(e) => Compared::Unreadable(e.to_string()),
-    }
+    };
+    (how, Vec::new())
 }
 
-/// Every installed file compared with the render: `(path, result)` in install order.
-pub fn files(host: &dyn Host, v: &Verify<'_>) -> Result<Vec<(String, Compared)>, MdmError> {
+/// Every installed file compared with the render, in install order: the path, how it
+/// compares and the lines left out of the comparison.
+pub fn files(
+    host: &dyn Host,
+    v: &Verify<'_>,
+) -> Result<Vec<(String, Compared, Vec<String>)>, MdmError> {
     let c = v.config;
     let rendered = render::render(c)?;
-    let mut wanted: Vec<(String, String)> = Vec::new();
+    let root = Account::root();
+    let mut wanted: Vec<Want> = Vec::new();
+    let mut add = |path: String, text: String, mode: u32, owner: &Account| {
+        wanted.push(Want {
+            path,
+            text,
+            mode,
+            owner: owner.clone(),
+        });
+    };
     for unit in &rendered.units {
-        wanted.push((format!("{UNITS_DIR}/{}", unit.name), unit.text.clone()));
+        add(
+            format!("{UNITS_DIR}/{}", unit.name),
+            unit.text.clone(),
+            0o644,
+            &root,
+        );
     }
-    wanted.push((
+    let caddy_owner = Account::new("root", &c.user);
+    add(
         format!("{}/{}", c.etc, render::CADDYFILE_NAME),
         rendered.caddyfile,
-    ));
+        0o640,
+        &caddy_owner,
+    );
     let tls = match v.acme {
         Some(a) => render_tls(c, a)?,
         None => Vec::new(),
     };
     for unit in tls {
-        wanted.push((format!("{UNITS_DIR}/{}", unit.name), unit.text));
+        add(
+            format!("{UNITS_DIR}/{}", unit.name),
+            unit.text,
+            0o644,
+            &root,
+        );
     }
     Ok(wanted
-        .into_iter()
-        .map(|(path, text)| {
-            let how = compare(host, &path, &text, v.ignore);
-            (path, how)
+        .iter()
+        .map(|w| {
+            let (how, dropped) = compare(host, w, v.ignore);
+            (w.path.clone(), how, dropped)
         })
         .collect())
 }
 
 /// Print every check, the file comparison and the summary; whether all passed.
+///
+/// # Errors
+/// An `--ignore` value that is empty or holds a line break; the output could not be written.
 pub fn run(env: &Env<'_>, v: &Verify<'_>, out: &mut dyn Write) -> Result<bool, MdmError> {
     let host = env.host;
     if host.euid() != 0 {
@@ -289,7 +337,7 @@ pub fn run(env: &Env<'_>, v: &Verify<'_>, out: &mut dyn Write) -> Result<bool, M
     if v.acme.is_none() {
         writeln!(out, "{NO_ACME}")?;
     }
-    for (path, how) in files(host, v)? {
+    for (path, how, dropped) in files(host, v)? {
         fails += usize::from(!how.is_same());
         let line = match how {
             Compared::Same => format!("same       {path}"),
@@ -300,9 +348,13 @@ pub fn run(env: &Env<'_>, v: &Verify<'_>, out: &mut dyn Write) -> Result<bool, M
                 "differs    {path}: installed sha256 {installed}, rendered sha256 {rendered}"
             ),
             Compared::Missing => format!("missing    {path}"),
+            Compared::Wrong(why) => format!("wrong      {path}: {why}"),
             Compared::Unreadable(why) => format!("unreadable {path}: {why}"),
         };
         writeln!(out, "{line}")?;
+        for left_out in dropped {
+            writeln!(out, "ignored    {path}: {left_out}")?;
+        }
     }
     match fails {
         0 => writeln!(out, "verify: all checks passed")?,

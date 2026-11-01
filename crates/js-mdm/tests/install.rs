@@ -24,6 +24,7 @@ fn install(host: &FakeHost, kit: &Kit, mode: Mode) -> (Result<(), MdmError>, Str
     let a = Install {
         config: config(),
         bin_dir: "/srv/fetch".to_owned(),
+        max_archive: 1 << 30,
     };
     let mut out = Vec::new();
     let result = common::with_env(host, &net, |env| run(env, &a, &kit.pins, mode, &mut out));
@@ -501,6 +502,7 @@ fn a_failing_random_source_fails_the_run_and_writes_no_secret() {
     let a = Install {
         config: config(),
         bin_dir: "/srv/fetch".to_owned(),
+        max_archive: 1 << 30,
     };
     let err = run(&env, &a, &kit.pins, Mode::Apply, &mut Vec::new()).unwrap_err();
     assert!(matches!(err, MdmError::Io(_)), "{err}");
@@ -557,6 +559,8 @@ fn uninstall_moves_units_aside_and_keeps_state_and_the_certificate() {
         );
         let moved = host.node(&format!("{aside}/{}", unit.name)).unwrap();
         assert_eq!(moved.bytes, unit.text.as_bytes());
+        // The copies are the service user's, so every directory on the way is root's or its.
+        assert_eq!((moved.uid, moved.gid), (SVC, SVC));
     }
     for (path, before) in keep.iter().zip(kept_before) {
         assert_eq!(host.node(path), before, "{path} changed");
@@ -581,4 +585,51 @@ fn uninstall_with_nothing_installed_does_nothing() {
     );
     assert!(shown.ends_with("nothing to do\n"));
     assert!(changes(&host).is_empty());
+}
+
+/// Catches an archive read whole whatever its size: one above the cap is refused (exit 2)
+/// before it is read, and nothing is planned.
+#[test]
+fn an_archive_above_the_size_cap_is_refused() {
+    let kit = kit();
+    let host = ready_host(&kit);
+    let net = FakeNet::new(Default::default());
+    let a = Install {
+        config: config(),
+        bin_dir: "/srv/fetch".to_owned(),
+        max_archive: 10,
+    };
+    let err = common::with_env(&host, &net, |env| {
+        run(env, &a, &kit.pins, Mode::Apply, &mut Vec::new())
+    })
+    .unwrap_err();
+    assert!(
+        matches!(err, MdmError::ArchiveTooBig { max: 10, .. }),
+        "{err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("more than the 10 an archive may be")
+    );
+    assert_eq!(err.exit_code(), 2);
+    assert!(host.node(&format!("{ETC}/nanohub.env")).is_none());
+}
+
+/// Catches a secret file that loses what else it holds: an empty value is made again only
+/// when nothing else is in the file; otherwise the run is refused and the file is untouched.
+#[test]
+fn a_secret_file_with_other_lines_and_no_value_is_not_overwritten() {
+    let kit = kit();
+    let host = ready_host(&kit);
+    let path = format!("{ETC}/nanohub.env");
+    host.put_file(&path, 0o600, (0, 0), b"EXTRA_SETTING=1\nNANOHUB_API_KEY=\n");
+    let (result, _) = install(&host, &kit, Mode::Apply);
+    let err = result.unwrap_err();
+    assert!(matches!(err, MdmError::SecretOther { .. }), "{err}");
+    assert!(err.to_string().contains("holds other lines"));
+    assert_eq!(err.exit_code(), 2);
+    assert_eq!(
+        host.node(&path).unwrap().bytes,
+        b"EXTRA_SETTING=1\nNANOHUB_API_KEY=\n"
+    );
 }

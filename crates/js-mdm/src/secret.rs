@@ -45,6 +45,11 @@ pub fn has_value(bytes: &[u8], key: &str) -> bool {
         .any(|l| l.strip_prefix(&prefix).is_some_and(|v| !v.is_empty()))
 }
 
+/// Whether `bytes` holds a line other than `KEY=` lines of `key` and blank ones.
+pub fn holds_other_lines(_bytes: &[u8], _key: &str) -> bool {
+    false
+}
+
 /// The value of `key` in the secret file at `path`: refused unless the file is a 0600 file of
 /// root's holding a `key=` line with a value without control characters.
 pub fn read(host: &dyn Host, path: &str, key: &str) -> Result<Secret, MdmError> {

@@ -12,7 +12,7 @@ publish.workspace = true
 # (`fake::FakeHost`). The programs that configure a host (js-mdm first) are built on it.
 
 [dependencies]
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["fs", "process"] }
 thiserror.workspace = true
 
 [dev-dependencies]

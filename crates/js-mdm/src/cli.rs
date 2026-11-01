@@ -55,7 +55,10 @@ enum Verb {
         #[arg(long)]
         apply: bool,
     },
-    /// The TLS certificate over ACME DNS-01 and its renewal (root).
+    /// The TLS certificate over ACME DNS-01 and its renewal (root). Only the checks before the
+    /// plan refuse without changing anything: the plan runs in two parts, and when the
+    /// certificate is not there after the issuing unit ran, the run fails (exit 1) with the
+    /// units already written; run it again once the cause is fixed.
     Tls {
         /// The settings file.
         #[arg(long)]
@@ -69,7 +72,8 @@ enum Verb {
         /// The settings file.
         #[arg(long)]
         config: String,
-        /// Text removed from every installed file before it is compared (repeatable).
+        /// Leave out of both texts of every file the lines equal to this one, whole
+        /// (repeatable; every line left out is printed).
         #[arg(long)]
         ignore: Vec<String>,
     },
@@ -143,7 +147,11 @@ fn dispatch(verb: Verb, env: &Env<'_>, pins: &Pins, out: &mut dyn Write) -> Resu
             let config = MdmConfig::parse(&read_config(env, &config)?)?;
             match (uninstall, bin_dir) {
                 (false, Some(bin_dir)) => {
-                    let a = Install { config, bin_dir };
+                    let a = Install {
+                        config,
+                        bin_dir,
+                        max_archive: fetch::MAX_ARCHIVE,
+                    };
                     install::run(env, &a, pins, mode(apply), out)?;
                 }
                 _ => install::run_uninstall(env, &config, mode(apply), out)?,

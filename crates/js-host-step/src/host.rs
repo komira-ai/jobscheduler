@@ -108,6 +108,13 @@ pub trait Host {
     /// The effective group id.
     fn egid(&self) -> u32;
 
+    /// `path` with every symbolic link on the way resolved. The part of the path that does
+    /// not exist yet is kept as given.
+    ///
+    /// # Errors
+    /// The system's error, other than "not found"; too many links.
+    fn canonical(&self, path: &str) -> io::Result<String>;
+
     /// `lstat` of `path`; `None` when there is nothing there.
     ///
     /// # Errors

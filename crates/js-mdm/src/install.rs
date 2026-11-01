@@ -69,6 +69,8 @@ pub struct Install {
     pub config: MdmConfig,
     /// Where `fetch` put the archives.
     pub bin_dir: String,
+    /// The largest archive read, in bytes.
+    pub max_archive: u64,
 }
 
 /// Run `cmd` and return its standard output, or why it failed.

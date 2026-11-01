@@ -105,6 +105,29 @@ pub enum MdmError {
     /// A directory the kit owns is a symbolic link.
     #[error("{0} is a symbolic link: name the real directory")]
     IsLink(String),
+    /// An archive is larger than the cap.
+    #[error("{path} is {size} bytes, more than the {max} an archive may be")]
+    ArchiveTooBig {
+        /// The file.
+        path: String,
+        /// Its size.
+        size: u64,
+        /// The cap.
+        max: u64,
+    },
+    /// A secret file would lose other lines when it is made again.
+    #[error(
+        "{path} has no value for {key} but holds other lines: remove them or give {key} a value, and run again"
+    )]
+    SecretOther {
+        /// The file.
+        path: String,
+        /// The key.
+        key: String,
+    },
+    /// An `--ignore` value that cannot be one whole line.
+    #[error("--ignore {0:?} must be one non-empty line")]
+    BadIgnore(String),
     /// The bind address is on no interface.
     #[error("no interface carries MDM_BIND={0} (ip -4 addr)")]
     NotCarried(String),

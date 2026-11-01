@@ -405,3 +405,87 @@ fn the_fake_can_hold_a_link_and_a_command_can_leave_a_file() {
         (0o600, 1, 2, b"data".to_vec())
     );
 }
+
+/// Catches a plan that shows a secret when it is formatted by an assertion, a panic or a log
+/// line: `Debug` of every step prints the length of a file's bytes and never the bytes.
+#[test]
+fn a_plan_formatted_with_debug_shows_no_file_contents() {
+    let plan = js_host_step::Plan {
+        steps: vec![
+            Step::Dir {
+                path: "/d".to_owned(),
+                mode: 0o700,
+                owner: Account::root(),
+            },
+            Step::File {
+                path: "/s".to_owned(),
+                mode: 0o600,
+                owner: Account::root(),
+                bytes: b"TOPSECRET-VALUE".to_vec(),
+            },
+            Step::Absent {
+                path: "/a".to_owned(),
+            },
+            Step::User {
+                name: "svc".to_owned(),
+                home: "/h".to_owned(),
+            },
+            Step::Unit {
+                verb: UnitVerb::Restart,
+                units: vec!["a.service".to_owned()],
+            },
+            Step::Run(Cmd::new("/bin/x").arg("go")),
+        ],
+    };
+    for shown in [format!("{plan:?}"), format!("{:#?}", plan.steps)] {
+        assert!(!shown.contains("TOPSECRET"), "{shown}");
+        assert!(
+            shown.contains("File") && shown.contains("15 bytes") && shown.contains("0600"),
+            "{shown}"
+        );
+        for word in [
+            "Dir",
+            "Absent",
+            "User",
+            "Unit",
+            "Run",
+            "Restart",
+            "a.service",
+            "/bin/x",
+        ] {
+            assert!(shown.contains(word), "{word} missing in {shown}");
+        }
+    }
+    // A failed equality assertion prints through Debug too.
+    let other = Step::File {
+        path: "/s".to_owned(),
+        mode: 0o600,
+        owner: Account::root(),
+        bytes: b"OTHER-SECRET".to_vec(),
+    };
+    let panicked = std::panic::catch_unwind(|| assert_eq!(plan.steps[1], other));
+    assert!(panicked.is_err());
+}
+
+/// Catches a fake that cannot resolve links the way the real host does: a link in the middle
+/// of a path is replaced by its target, the part that does not exist is kept, and a loop
+/// of links is an error rather than a hang.
+#[test]
+fn the_fake_resolves_symbolic_links() {
+    let host = FakeHost::new(0);
+    host.put_symlink("/home/op/archives", "/data/real");
+    host.put_symlink("/data/real/inner", "/elsewhere");
+    assert_eq!(host.canonical("/plain/path").unwrap(), "/plain/path");
+    assert_eq!(host.canonical("/").unwrap(), "/");
+    assert_eq!(
+        host.canonical("/home/op/archives/x").unwrap(),
+        "/data/real/x"
+    );
+    assert_eq!(
+        host.canonical("/home/op/archives/inner/y").unwrap(),
+        "/elsewhere/y"
+    );
+    host.put_symlink("/loop/a", "/loop/b");
+    host.put_symlink("/loop/b", "/loop/a");
+    assert!(host.canonical("/loop/a").is_err());
+}

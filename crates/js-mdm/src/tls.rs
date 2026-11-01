@@ -19,8 +19,15 @@
 //! 4. in a second plan, once the certificate is there (after step 3 when it runs; a dry run
 //!    that would issue shows no proxy step), the proxy enabled and started when not active.
 //!
-//! After an apply the certificate must be there, else the run fails before the proxy; its
-//! subject, issuer and expiry are printed (public data, read by `openssl`).
+//! After an apply the certificate must be there, else the run fails (exit 1) before the proxy;
+//! its subject, issuer and expiry are printed (public data, read by `openssl`).
+//!
+//! A refusal changes nothing only for the checks above, which run before the first plan. The
+//! plan runs in two parts, because the proxy can be planned only once the certificate is
+//! there, so a run can end halfway: when the certificate is missing after the issuing unit
+//! ran, the units, the timer and the first issuance attempt stay in place and the proxy is not
+//! started. Fix the cause (`journalctl -u` the certificate unit) and run `tls --apply` again;
+//! the second run finds the rest to do.
 
 use std::collections::BTreeSet;
 use std::io::Write;

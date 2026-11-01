@@ -33,6 +33,7 @@ struct State {
     prefixes: Vec<(Vec<String>, Output)>,
     calls: Vec<Vec<String>>,
     unreadable: Vec<String>,
+    unstattable: Vec<String>,
     effects: Vec<(Vec<String>, String, Node)>,
 }
 
@@ -107,9 +108,14 @@ impl FakeHost {
         state.effects.push((words(argv), path.to_owned(), node));
     }
 
-    /// A symbolic link (any node that is neither file nor directory) at `path`.
+    /// A symbolic link at `path` to the absolute path `target`.
+    pub fn put_symlink(&self, path: &str, target: &str) {
+        self.put(path, Kind::Other, 0o777, (0, 0), target.as_bytes());
+    }
+
+    /// A symbolic link at `path` to somewhere that does not matter.
     pub fn put_link(&self, path: &str) {
-        self.put(path, Kind::Other, 0o777, (0, 0), b"");
+        self.put_symlink(path, "/link-target");
     }
 
     /// A file at `path`, replacing what is there.
@@ -136,6 +142,11 @@ impl FakeHost {
     /// Makes reading `path` fail with "permission denied" (it is still there).
     pub fn deny_read(&self, path: &str) {
         self.state.borrow_mut().unreadable.push(path.to_owned());
+    }
+
+    /// Makes `stat` of `path` fail with "permission denied".
+    pub fn deny_stat(&self, path: &str) {
+        self.state.borrow_mut().unstattable.push(path.to_owned());
     }
 
     /// The node at `path`.
@@ -168,7 +179,14 @@ impl Host for FakeHost {
         self.euid
     }
 
+    fn canonical(&self, path: &str) -> io::Result<String> {
+        Ok(path.to_owned())
+    }
+
     fn stat(&self, path: &str) -> io::Result<Option<Meta>> {
+        if self.state.borrow().unstattable.iter().any(|p| p == path) {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
         let node = self.node(path);
         Ok(node.map(|n| Meta {
             kind: n.kind,

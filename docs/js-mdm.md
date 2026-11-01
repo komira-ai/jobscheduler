@@ -35,7 +35,11 @@ stderr).
 * `js-mdm tls --config FILE [--apply]`: root. lego over DNS-01 with the configured provider
   (GoDaddy, Route 53 or Cloudflare). The provider's credentials are lines of the root-only
   `MDM_ETC/dns.env`, which the certificate unit loads itself; they are never read into this
-  program's output or any argument list.
+  program's output or any argument list. Only the checks before the plan refuse without
+  changing anything: the plan runs in two parts (the proxy can be planned only once the
+  certificate is there), so when the certificate is missing after the issuing unit ran, the run
+  fails with exit 1 and the units and the first issuance attempt stay in place. Fix the cause
+  and run it again.
 * `js-mdm verify --config FILE [--ignore TEXT]...`: read only. Health checks (units active,
   listeners, certificate lifetime, modes), then one line per installed file against the render
   of the same settings:
@@ -46,9 +50,13 @@ stderr).
   missing    /etc/systemd/system/js-mdm-cert.timer
   ```
 
-  Comment lines are left out of both sides before hashing. `--ignore TEXT` removes TEXT from the
-  installed text first, so a host installed by another tool that words one line differently can
-  be compared (`--ignore " (local note)"`). A file this user may not read is `unreadable`;
+  `wrong` is printed for a file that is not a regular file (a link is never followed) or does not
+  have the mode and owner `install` gives it, whatever its text. Comment lines are left out of
+  both sides before hashing. `--ignore LINE` leaves out, from both sides, the lines equal to
+  LINE, whole (a line that holds LINE and more is kept; an empty LINE or one with a line break
+  is refused), and every line left out is printed under its file as `ignored`. A host
+  installed by another tool that words one line differently is compared with one `--ignore` for
+  its wording and one for the render's. A file this user may not read is `unreadable`;
   world-readable files need no root, the checks of root-only files do.
 
 ## Not in this slice

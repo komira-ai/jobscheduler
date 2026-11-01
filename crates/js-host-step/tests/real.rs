@@ -103,3 +103,146 @@ fn run_executes_without_a_shell_or_environment() {
         Kind::Dir
     );
 }
+
+fn mode_and_owner(path: &std::path::Path) -> (u32, u32, u32) {
+    let m = std::fs::metadata(path).unwrap();
+    (m.permissions().mode() & 0o7777, m.uid(), m.gid())
+}
+
+/// Catches a mkdir that follows a link the service user planted where a planned subdirectory
+/// should be: root would chmod and chown the link's target (any directory of the host). The
+/// link is refused, and its target's mode and owner are exactly what they were.
+#[test]
+fn mkdir_refuses_a_link_at_a_planned_subdirectory_and_changes_nothing_behind_it() {
+    let (dir, host) = scratch("mkdirlink");
+    let owner = me(&dir);
+    let victim = dir.path().join("victim");
+    std::fs::create_dir(&victim).unwrap();
+    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let before = mode_and_owner(&victim);
+    host.mkdir("/state", 0o700, owner).unwrap();
+    symlink(&victim, dir.path().join("state/nanohub")).unwrap();
+
+    let err = host.mkdir("/state/nanohub", 0o700, owner).unwrap_err();
+    assert!(err.to_string().contains("refused"), "{err}");
+    // A directory to be made below the link is not made behind it.
+    let err = host
+        .mkdir("/state/nanohub/inner", 0o700, owner)
+        .unwrap_err();
+    assert!(err.to_string().contains("refused"), "{err}");
+    assert!(!victim.join("inner").exists());
+    assert_eq!(mode_and_owner(&victim), before);
+    // A link to a file is not a directory either.
+    std::fs::write(dir.path().join("afile"), b"x").unwrap();
+    symlink(dir.path().join("afile"), dir.path().join("state/scep")).unwrap();
+    assert!(host.mkdir("/state/scep", 0o700, owner).is_err());
+    assert_eq!(std::fs::read(dir.path().join("afile")).unwrap(), b"x");
+}
+
+/// Catches a write, or a remove, that goes through a link in a directory on the way: the file
+/// must not appear behind the link (a rename through it would be a write anywhere), and what
+/// is behind the link must stay. A link as the file's own name is replaced, not followed.
+#[test]
+fn write_and_remove_refuse_a_link_on_the_way_and_replace_a_link_as_the_name() {
+    let (dir, host) = scratch("writelink");
+    let owner = me(&dir);
+    let victim = dir.path().join("victim");
+    std::fs::create_dir(&victim).unwrap();
+    std::fs::write(victim.join("keep"), b"keep").unwrap();
+    host.mkdir("/state", 0o700, owner).unwrap();
+    symlink(&victim, dir.path().join("state/removed")).unwrap();
+
+    let err = host
+        .write("/state/removed/unit", 0o644, owner, b"unit")
+        .unwrap_err();
+    assert!(err.to_string().contains("refused"), "{err}");
+    assert!(!victim.join("unit").exists());
+    assert!(host.remove("/state/removed/keep").is_err());
+    assert_eq!(std::fs::read(victim.join("keep")).unwrap(), b"keep");
+
+    // The name itself a link: the link is replaced and its target keeps its bytes.
+    symlink(victim.join("keep"), dir.path().join("state/f")).unwrap();
+    host.write("/state/f", 0o600, owner, b"new").unwrap();
+    assert_eq!(std::fs::read(victim.join("keep")).unwrap(), b"keep");
+    let now = std::fs::symlink_metadata(dir.path().join("state/f")).unwrap();
+    assert!(now.is_file() && !now.file_type().is_symlink());
+    assert_eq!(std::fs::read(dir.path().join("state/f")).unwrap(), b"new");
+    // Removing a name that is a link removes the link only.
+    symlink(victim.join("keep"), dir.path().join("state/g")).unwrap();
+    host.remove("/state/g").unwrap();
+    assert!(victim.join("keep").exists() && !dir.path().join("state/g").exists());
+}
+
+/// Catches a directory owned by a user nobody trusts on the way to a path: it is refused,
+/// unless it is owned by the owner the step asks for. And a path that names no file at all.
+#[test]
+fn a_directory_of_another_user_on_the_way_is_refused() {
+    let (dir, _) = scratch("owners");
+    let mine = me(&dir);
+    let nobody_trusted = RealHost::trusting(dir.path(), &[]);
+    let err = nobody_trusted
+        .mkdir("/a/b", 0o700, (mine.0 + 1, mine.1))
+        .unwrap_err();
+    assert!(err.to_string().contains("owned by another user"), "{err}");
+    // The owner the step asks for is trusted, and so is a user in the list.
+    nobody_trusted.mkdir("/c/d", 0o700, mine).unwrap();
+    RealHost::trusting(dir.path(), &[mine.0])
+        .mkdir("/c/e", 0o700, mine)
+        .unwrap();
+    assert!(nobody_trusted.write("/", 0o600, mine, b"x").is_err());
+    assert!(nobody_trusted.mkdir("/", 0o700, mine).is_err());
+}
+
+/// Catches a failed write that leaves its temporary file behind (the next write would find
+/// it, and a reader would see junk): the temporary name is gone after a rename that fails, and
+/// a temporary name taken by a directory is an error.
+#[test]
+fn a_failed_write_leaves_no_temporary_file() {
+    let (dir, host) = scratch("tmp");
+    let owner = me(&dir);
+    host.mkdir("/d", 0o700, owner).unwrap();
+    std::fs::create_dir_all(dir.path().join("d/target/inside")).unwrap();
+    assert!(host.write("/d/target", 0o600, owner, b"x").is_err());
+    assert!(!dir.path().join("d/target.js-host.tmp").exists());
+    std::fs::create_dir(dir.path().join("d/f.js-host.tmp")).unwrap();
+    assert!(host.write("/d/f", 0o600, owner, b"x").is_err());
+    assert!(dir.path().join("d/f.js-host.tmp").is_dir());
+    assert!(!dir.path().join("d/f").exists());
+    // A missing directory is a plain "not found", and removing from one is nothing to do.
+    assert_eq!(
+        host.write("/missing/f", 0o600, owner, b"x")
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    host.remove("/missing/f").unwrap();
+}
+
+/// Catches a canonical path that does not resolve links on the way (a link into a work tree
+/// would hide it) or that fails on a path that is not there yet: the existing part is resolved,
+/// the rest is kept, and a file in the middle is an error.
+#[test]
+fn canonical_resolves_the_part_that_exists() {
+    let (dir, host) = scratch("canon");
+    std::fs::create_dir_all(dir.path().join("real/sub")).unwrap();
+    symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+    assert_eq!(host.canonical("/link/sub").unwrap(), "/real/sub");
+    assert_eq!(
+        host.canonical("/link/sub/new/deeper").unwrap(),
+        "/real/sub/new/deeper"
+    );
+    assert_eq!(host.canonical("/").unwrap(), "/");
+    std::fs::write(dir.path().join("file"), b"x").unwrap();
+    assert!(host.canonical("/file/x").is_err());
+}
+
+/// Catches system errors that are swallowed on the way: a name the file system cannot hold is
+/// an error for mkdir and for write, and the error is the system's.
+#[test]
+fn system_errors_on_the_last_component_are_returned() {
+    let (dir, host) = scratch("longname");
+    let owner = me(&dir);
+    let long = format!("/{}", "n".repeat(300));
+    assert!(host.mkdir(&long, 0o700, owner).is_err());
+    assert!(host.write(&long, 0o600, owner, b"x").is_err());
+}

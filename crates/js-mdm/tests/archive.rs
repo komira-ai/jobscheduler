@@ -3,7 +3,7 @@
 mod common;
 
 use common::{Tweak, tar_gz_of, zip_of, zip_raw};
-use js_mdm::archive::{ArchiveError, member};
+use js_mdm::archive::{ArchiveError, member, member_with_limit};
 use js_mdm_core::pins::Packing;
 
 fn zip_err(bytes: &[u8]) -> String {
@@ -135,5 +135,35 @@ fn a_tar_gz_member_is_found_by_exact_path() {
     assert!(
         err.to_string()
             .starts_with("l.tar.gz is not a readable TarGz archive: ")
+    );
+}
+
+/// Catches a member cut off at the size limit and returned as if whole: a member longer than
+/// the limit is an error in a zip (stored or deflated) and in a tar.gz, and one exactly the
+/// limit is read in full.
+#[test]
+fn a_member_above_the_limit_is_an_error_not_a_short_read() {
+    let body = [9u8; 10];
+    let zips = [
+        zip_raw(&[("m", &body[..])], true, &Tweak::default()),
+        zip_raw(&[("m", &body[..])], false, &Tweak::default()),
+    ];
+    for zip in &zips {
+        let err = member_with_limit("a.zip", Packing::Zip, zip, "m", 5).unwrap_err();
+        assert!(matches!(err, ArchiveError::Unreadable { .. }), "{err}");
+        assert_eq!(
+            member_with_limit("a.zip", Packing::Zip, zip, "m", 10).unwrap(),
+            body
+        );
+    }
+    let tgz = tar_gz_of(&[("m", &body[..])]);
+    let err = member_with_limit("a.tar.gz", Packing::TarGz, &tgz, "m", 5).unwrap_err();
+    assert!(
+        err.to_string().contains("member is larger than 5 bytes"),
+        "{err}"
+    );
+    assert_eq!(
+        member_with_limit("a.tar.gz", Packing::TarGz, &tgz, "m", 10).unwrap(),
+        body
     );
 }

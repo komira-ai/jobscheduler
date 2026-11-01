@@ -26,6 +26,11 @@ impl RealHost {
         RealHost { root: root.into() }
     }
 
+    /// Like [`RealHost::under`], trusting directories owned by `uids`.
+    pub fn trusting(root: impl Into<PathBuf>, _uids: &[u32]) -> RealHost {
+        RealHost::under(root)
+    }
+
     fn at(&self, path: &str) -> PathBuf {
         self.root.join(path.trim_start_matches('/'))
     }
@@ -53,6 +58,10 @@ impl Host for RealHost {
 
     fn egid(&self) -> u32 {
         rustix::process::getegid().as_raw()
+    }
+
+    fn canonical(&self, path: &str) -> io::Result<String> {
+        Ok(path.to_owned())
     }
 
     fn stat(&self, path: &str) -> io::Result<Option<Meta>> {

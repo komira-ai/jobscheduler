@@ -175,3 +175,30 @@ fn a_failed_download_fails_the_run_and_writes_nothing() {
     assert!(err.to_string().ends_with("failed: answered 404"));
     assert!(host.paths().is_empty());
 }
+
+/// Catches a git work tree hidden behind a symbolic link: `--dir` is resolved first, so a link
+/// into a repository is refused (and names the directory given), while a link elsewhere is
+/// followed and the archives land at its target.
+#[test]
+fn a_dir_that_links_into_a_git_tree_is_refused_and_a_link_elsewhere_is_followed() {
+    let kit = kit();
+    let net = FakeNet::new(kit.urls.clone());
+    let host = FakeHost::new(1000);
+    host.put_dir("/repo/.git", 0o755, (1000, 1000));
+    host.put_symlink(DIR, "/repo/sub/archives");
+    let (result, _) = go(&host, &net, &[], Mode::Apply);
+    let err = result.unwrap_err();
+    assert!(matches!(err, MdmError::InGitTree { .. }), "{err}");
+    assert!(
+        err.to_string()
+            .starts_with("--dir /home/op/archives is inside a git work tree (/repo/.git exists)"),
+        "{err}"
+    );
+    assert!(net.asked.borrow().is_empty());
+
+    let host = FakeHost::new(1000);
+    host.put_symlink(DIR, "/data/archives");
+    let (result, _) = go(&host, &net, &[Tool::Caddy], Mode::Apply);
+    result.unwrap();
+    assert!(host.node("/data/archives/caddy-v1.0.0.tar.gz").is_some());
+}

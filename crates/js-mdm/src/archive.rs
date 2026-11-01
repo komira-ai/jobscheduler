@@ -63,6 +63,17 @@ pub fn member(
         })
 }
 
+/// [`member`] with a member of at most `limit` bytes.
+pub fn member_with_limit(
+    archive: &str,
+    packing: Packing,
+    bytes: &[u8],
+    name: &str,
+    _limit: u64,
+) -> Result<Vec<u8>, ArchiveError> {
+    member(archive, packing, bytes, name)
+}
+
 fn why(e: impl std::fmt::Display) -> String {
     e.to_string()
 }

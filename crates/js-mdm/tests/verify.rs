@@ -3,9 +3,10 @@
 mod common;
 
 use common::{FakeNet, SVC, acme, config, kit, ready_host, with_env};
+use js_host_step::Account;
 use js_host_step::fake::FakeHost;
 use js_host_step::{Host, SYSTEMCTL};
-use js_mdm::verify::{Compared, Verify, compare, run};
+use js_mdm::verify::{Compared, Verify, Want, compare, run};
 use js_mdm_core::render::{render, render_tls, strip_comments};
 use sha2::{Digest, Sha256};
 
@@ -171,10 +172,12 @@ fn files_are_same_differs_or_missing_and_comments_do_not_count() {
     assert!(shown.ends_with("verify: 2 check(s) failed\n"), "{shown}");
 }
 
-/// Catches `--ignore` that is not applied to the installed text (a host installed by another
-/// tool carries a phrase the render lacks), and one that hides a real difference.
+/// Catches `--ignore` that is wider than one whole line, or silent: a line that differs on
+/// the installed side and on the render's is left out of both by one `--ignore` each, and the
+/// lines left out are printed under the file. A part of a line (`User=`) masks nothing, so a
+/// real change to that line still shows.
 #[test]
-fn ignore_removes_text_from_the_installed_file_before_comparing() {
+fn ignore_leaves_out_whole_lines_of_both_sides_and_prints_them() {
     let host = installed();
     let rendered = render(&config()).unwrap();
     let slice = &rendered.units[0];
@@ -182,21 +185,126 @@ fn ignore_removes_text_from_the_installed_file_before_comparing() {
         .text
         .lines()
         .find(|l| l.starts_with("Description="))
-        .unwrap();
-    let old = slice.text.replace(line, &format!("{line} (local note)"));
-    host.put_file(
-        &format!("{UNITS}/{}", slice.name),
-        0o644,
-        (0, 0),
-        old.as_bytes(),
-    );
+        .unwrap()
+        .to_owned();
+    let old_line = format!("{line} (local note)");
+    let old = slice.text.replace(&line, &old_line);
+    let path = format!("{UNITS}/{}", slice.name);
+    host.put_file(&path, 0o644, (0, 0), old.as_bytes());
     let (ok, shown) = go(&host, true, &[]);
     assert!(!ok);
     assert!(shown.contains("differs    /etc/systemd/system/js-mdm.slice: installed sha256 "));
-    let (ok, shown) = go(&host, true, &[" (local note)".to_owned()]);
-    assert!(ok, "{shown}");
-    let (ok, _) = go(&host, true, &["Slice".to_owned()]);
+    // One side's wording alone is not enough: the other side's line is still there.
+    let (ok, _) = go(&host, true, std::slice::from_ref(&old_line));
     assert!(!ok);
+    let (ok, shown) = go(&host, true, &[old_line.clone(), line.clone()]);
+    assert!(ok, "{shown}");
+    assert!(shown.contains(&format!(
+        "ignoring   every line equal to {old_line:?}, on both sides\n"
+    )));
+    assert!(
+        shown.contains(&format!("ignored    {path}: installed: {old_line}\n")),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(&format!("ignored    {path}: rendered: {line}\n")),
+        "{shown}"
+    );
+
+    // A piece of a line masks nothing: `User=` does not hide a changed User= line.
+    let scep = rendered
+        .units
+        .iter()
+        .find(|u| u.name == "js-mdm-scep.service")
+        .unwrap();
+    let user_line = scep.text.lines().find(|l| l.starts_with("User=")).unwrap();
+    let changed = scep.text.replace(user_line, "User=root");
+    host.put_file(
+        &format!("{UNITS}/{}", scep.name),
+        0o644,
+        (0, 0),
+        changed.as_bytes(),
+    );
+    let (ok, shown) = go(&host, true, &["User=".to_owned()]);
+    assert!(!ok);
+    assert!(
+        shown.contains("differs    /etc/systemd/system/js-mdm-scep.service"),
+        "{shown}"
+    );
+}
+
+/// Catches an `--ignore` that could mask more than a line: an empty value, or one with a line
+/// break, is refused (exit 2) before anything is checked.
+#[test]
+fn an_ignore_that_is_empty_or_holds_a_line_break_is_refused() {
+    let host = installed();
+    let (c, a) = (config(), acme());
+    let net = FakeNet::new(Default::default());
+    for bad in ["", "a\nb", "a\rb"] {
+        let ignore = [bad.to_owned()];
+        let v = Verify {
+            config: &c,
+            acme: Some(&a),
+            ignore: &ignore,
+        };
+        let mut out = Vec::new();
+        let err = with_env(&host, &net, |env| run(env, &v, &mut out)).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.to_string().contains("must be one non-empty line"),
+            "{err}"
+        );
+        assert!(out.is_empty());
+    }
+}
+
+/// Catches a comparison of text alone: a unit that is a link to a file with the right text, a
+/// Caddyfile anyone can write, one of another owner, or a directory, is `wrong` and fails the
+/// run, whatever the text says.
+#[test]
+fn a_link_a_wrong_mode_or_a_wrong_owner_is_wrong_whatever_the_text() {
+    let rendered = render(&config()).unwrap();
+    let caddy = format!("{ETC}/Caddyfile");
+    let scep = format!("{UNITS}/js-mdm-scep.service");
+    type Damage<'a> = Box<dyn Fn(&FakeHost) + 'a>;
+    let cases: [(&str, Damage<'_>, &str); 5] = [
+        (
+            scep.as_str(),
+            Box::new(|h| h.put_symlink(&scep, "/somewhere/with/the/same/text")),
+            "is Other 0777 owner 0:0, not File 0644 owner root:root",
+        ),
+        (
+            caddy.as_str(),
+            Box::new(|h| h.put_file(&caddy, 0o666, (0, SVC), rendered.caddyfile.as_bytes())),
+            "is File 0666 owner 0:900, not File 0640 owner root:js-mdm",
+        ),
+        (
+            caddy.as_str(),
+            Box::new(|h| h.put_file(&caddy, 0o640, (0, 0), rendered.caddyfile.as_bytes())),
+            "is File 0640 owner 0:0, not File 0640 owner root:js-mdm",
+        ),
+        (
+            scep.as_str(),
+            Box::new(|h| h.put_file(&scep, 0o644, (SVC, SVC), b"x")),
+            "is File 0644 owner 900:900, not File 0644 owner root:root",
+        ),
+        (
+            scep.as_str(),
+            Box::new(|h| h.put_dir(&scep, 0o755, (0, 0))),
+            "is Dir 0755 owner 0:0, not File 0644 owner root:root",
+        ),
+    ];
+    for (path, damage, why) in cases {
+        let host = installed();
+        damage(&host);
+        let (ok, shown) = go(&host, true, &[]);
+        assert!(!ok);
+        assert!(
+            shown.contains(&format!("wrong      {path}: {why}\n")),
+            "{shown}"
+        );
+        assert!(shown.ends_with("verify: 1 check(s) failed\n"), "{shown}");
+    }
 }
 
 /// Catches a verify that needs root for what anyone may read: as another user the world-readable
@@ -371,20 +479,28 @@ fn without_acme_settings_the_certificate_units_are_skipped() {
 }
 
 /// Catches `compare` that reads an installed file as something it is not: invalid UTF-8 is
-/// compared as text with replacement characters (so it differs), and an empty file differs.
+/// compared as text with replacement characters, a missing file is `Missing`, and a stat that
+/// fails is reported as unreadable.
 #[test]
 fn compare_handles_odd_bytes_and_the_check_display_covers_each_form() {
     let host = FakeHost::new(0);
     host.put_file("/f", 0o644, (0, 0), &[0xff, 0xfe, b'\n']);
-    assert!(matches!(
-        compare(&host, "/f", "x\n", &[]),
-        Compared::Differs { .. }
-    ));
+    let want = |path: &str, text: &str| Want {
+        path: path.to_owned(),
+        text: text.to_owned(),
+        mode: 0o644,
+        owner: Account::root(),
+    };
+    let how = |path: &str, text: &str| compare(&host, &want(path, text), &[]).0;
+    assert!(matches!(how("/f", "x\n"), Compared::Differs { .. }));
+    assert_eq!(how("/f", "\u{fffd}\u{fffd}\n"), Compared::Same);
+    assert_eq!(how("/none", "x"), Compared::Missing);
+    host.put_file("/hidden", 0o644, (0, 0), b"x");
+    host.deny_stat("/hidden");
     assert_eq!(
-        compare(&host, "/f", "\u{fffd}\u{fffd}\n", &[]),
-        Compared::Same
+        how("/hidden", "x"),
+        Compared::Unreadable("permission denied".to_owned())
     );
-    assert_eq!(compare(&host, "/none", "x", &[]), Compared::Missing);
     let c = js_mdm::verify::Check {
         name: "n".to_owned(),
         result: Ok("seen".to_owned()),
