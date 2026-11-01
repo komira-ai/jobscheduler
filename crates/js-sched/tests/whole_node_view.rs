@@ -210,7 +210,11 @@ fn a_given_up_request_holds_another_worker_and_at_the_cap_no_deadline() {
     tick_at(&mut f, 70_000);
     assert_eq!(state(&f, op), holding("b", 70_000, Some(130_000), 1));
     tick_at(&mut f, 130_000);
-    assert_eq!(state(&f, op), holding("a", 130_000, None, 2));
+    // Changed with the non-sticky pick (design rule 2, step 4): the hold is picked again
+    // every round, so when `a`'s back-off ends at 80 s it moves back to `a`, the cheaper to
+    // drain, keeping the time it was made (70 s) and taking its deadline from the move
+    // (80 s plus the minute). The count is still one: a move is not a give-up.
+    assert_eq!(state(&f, op), holding("a", 70_000, Some(140_000), 1));
     f.finish(&grants[0]);
     let granted = f.advance(140_000);
     assert_eq!(granted.len(), 1);

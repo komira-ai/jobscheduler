@@ -754,7 +754,6 @@ impl Scheduler {
                                     request,
                                     &reserved,
                                     &op.avoid,
-                                    None,
                                     &drain,
                                 )
                             })

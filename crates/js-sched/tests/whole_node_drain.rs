@@ -357,8 +357,16 @@ fn a_hold_at_the_attempt_cap_is_not_given_up_at_the_request_wall_time() {
     tick_at(&mut f, 60_000 + MAX_WALL * 1_000);
     tick_at(&mut f, 60_000 + MAX_WALL * 2_000);
     assert_eq!(f.s.whole_give_ups(op), 1);
-    assert_eq!(f.held_for(op), Some(&w("b")));
-    assert_eq!(mark(&f, op), Some(m));
+    // Changed with the non-sticky pick (design rule 2, step 4): the hold is picked again
+    // every round, so when `a`'s back-off ends at 70 s the hold moves back to `a`, the
+    // cheaper to drain, keeping the time it was made (`m.made`) and taking the capped
+    // deadline (the request's wall time) from the move. It is still never given up again.
+    assert_eq!(f.held_for(op), Some(&w("a")));
+    let moved = mark(&f, op).expect("marked");
+    assert_eq!(
+        (moved.worker, moved.made, moved.deadline),
+        (w("a"), m.made, t(70_000 + MAX_WALL * 1_000))
+    );
 }
 }
 

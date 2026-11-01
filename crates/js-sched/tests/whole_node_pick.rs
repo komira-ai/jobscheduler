@@ -1,9 +1,9 @@
 //! Which worker a request that waits for a worker to empty holds. With whole-node
-//! settings an action that owns its worker takes one hold per pool, by the least tail,
-//! made again every round; a whole-machine hold is the drain order's, kept while it could
-//! run the request. Without settings nothing is changed: the worker with the fewest leases, kept while it
-//! could run the request, and no limit on how many requests hold a worker. Every time is
-//! farm time fed to the scheduler.
+//! settings the pick is the least tail, made again every round with no stickiness: an
+//! action that owns its worker takes one hold per pool, and a whole-machine hold that
+//! moves keeps the time it was made. Without settings nothing is changed: the worker with
+//! the fewest leases, kept while it could run the request, and no limit on how many
+//! requests hold a worker. Every time is farm time fed to the scheduler.
 
 #[macro_use]
 #[path = "booked/mod.rs"]
@@ -161,6 +161,31 @@ fn with_settings_four_owner_actions_in_one_pool_hold_one_worker() {
     let ops: Vec<OperationId> = (0..4).map(|_| owner(&mut f)).collect();
     let held: Vec<bool> = ops.iter().map(|op| f.held_for(*op).is_some()).collect();
     assert_eq!(held, [true, false, false, false]);
+}
+
+/// Catches: a hold that stays where it was put: `a` holds two leases of a minute, `b` an
+/// hour-long one and a lease of 30 s; the request holds `a`, and when the hour-long lease
+/// ends `b` is the cheaper and the hold moves there, keeping the time it was made.
+#[test]
+fn the_hold_moves_to_the_cheaper_worker_and_keeps_its_made_time() {
+    let mut f = with_settings(1);
+    f.worker("a");
+    f.lease_on("a", secs(60));
+    f.lease_on("a", secs(60));
+    f.worker("b");
+    let long = f.lease_on("b", secs(3_600));
+    f.lease_on("b", secs(30));
+    f.at(5_000);
+    f.beat();
+    let whole = f.whole();
+    let made = f.s.whole_mark(whole).expect("marked").made;
+    f.finish(&long);
+    f.at(10_000);
+    f.beat();
+    assert!(f.grants().is_empty());
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+    let mark = f.s.whole_mark(whole).expect("still marked");
+    assert_eq!((mark.worker.clone(), mark.made), (w("b"), made));
 }
 
 /// Catches: a tie flapping: two workers end together and the hold stays on the first by

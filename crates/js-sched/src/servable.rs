@@ -672,8 +672,8 @@ impl Servable {
     }
 
     /// The worker to hold for a request that fits nowhere now, with whole-node settings on:
-    /// `kept` if it still could run it, else the first of `drain` (the workers by drain
-    /// cost, the least tail first) that could. Never one in `reserved`,
+    /// the first of `drain` (the workers by drain cost, the least tail first) that could
+    /// run it, with no preference for a worker held before. Never one in `reserved`,
     /// nor one in `avoid` while [`Servable::fit`] skips it. Only a whole-machine lease or an
     /// action that owns its worker ([`Request::owns_worker`]) holds a worker (the caller
     /// asks only for one); an action at a worker's whole memory waits until some worker
@@ -684,7 +684,6 @@ impl Servable {
         request: &Request,
         reserved: &BTreeSet<WorkerId>,
         avoid: &BTreeSet<WorkerId>,
-        kept: Option<&WorkerId>,
         drain: &[DrainCost],
     ) -> Option<WorkerId> {
         let at = self.matching(workers, request);
@@ -699,9 +698,6 @@ impl Servable {
                     && workers[*name].capacity.fits(&request.demand())
             })
             .collect();
-        if let Some(kept) = kept.filter(|kept| candidates.contains(kept)) {
-            return Some(kept.clone());
-        }
         drain
             .iter()
             .find_map(|cost| candidates.iter().find(|name| name.as_str() == cost.id))
