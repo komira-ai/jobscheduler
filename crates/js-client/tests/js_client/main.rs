@@ -3,6 +3,7 @@
 //! plain http and over TLS with a certificate made for the test.
 
 mod client;
+mod new_file;
 mod run;
 mod server_url;
 mod support;

@@ -9,12 +9,14 @@
 
 mod client;
 mod error;
+mod new_file;
 mod run;
 mod server_url;
 mod token;
 
 pub use client::{Client, REQUEST_LIMIT, Reply};
 pub use error::ClientError;
+pub use new_file::create_new;
 pub use run::{LogTail, Outcome, RunRead, RunReadError};
 pub use server_url::ServerUrl;
 pub use token::{bearer, bearer_of};

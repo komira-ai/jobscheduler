@@ -249,6 +249,8 @@ pub mod crun;
 pub mod crun_host;
 pub mod disk;
 pub mod egress;
+#[cfg(target_os = "linux")]
+pub mod enroll;
 mod exclusive;
 mod facts;
 mod host;

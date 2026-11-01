@@ -103,6 +103,56 @@ pub(crate) enum Action {
     /// `@bundle/<entrypoint>` with --bundle. Prints the run's id; the job's state and
     /// output are the server's, at `/v1/leases/<id>/runs`.
     Native(NativeArgs),
+    /// Work with the one-time join tokens of hosts that are launched.
+    #[command(subcommand)]
+    JoinToken(JoinTokenAction),
+}
+
+/// What to do with join tokens.
+#[derive(Debug, Subcommand)]
+pub(crate) enum JoinTokenAction {
+    /// Mint a one-time join token for a host and print its sha256 and expiry.
+    ///
+    /// The server binds the token to PROVIDER:INSTANCE and retires it at the host's first
+    /// hello. The token is written to --out (a new file, mode 0600) or, when standard
+    /// output is not a terminal, to standard output, so that it can be piped to
+    /// `js-agent enroll`; it is never printed to a terminal and never taken from or put on a
+    /// command line. The sha256 of the token and its expiry (the server's clock in
+    /// milliseconds) go to standard error.
+    Mint(MintArgs),
+}
+
+/// `lease join-token mint`: the host the token is for, how long it lasts, where it goes.
+#[derive(Debug, Args)]
+pub(crate) struct MintArgs {
+    /// The provider of the host: the name of the pool the host joins.
+    #[arg(long, value_name = "ID")]
+    pub(crate) provider: String,
+    /// The instance the token is bound to: the id the host's instance file names.
+    #[arg(long, value_name = "ID")]
+    pub(crate) instance: String,
+    /// How long the token can be used to join (the server's default when absent; at most a
+    /// day).
+    #[arg(long, value_parser = parse_duration)]
+    pub(crate) ttl: Option<Duration>,
+    /// Write the token to this new file (mode 0600) instead of standard output. The file
+    /// must not exist; the directory must.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) out: Option<PathBuf>,
+}
+
+impl MintArgs {
+    /// The body of `POST /v1/agent/join-tokens`: the two ids, and the ttl when given.
+    pub(crate) fn body(&self) -> Value {
+        let mut body = json!({
+            "provider": self.provider,
+            "instance_id": self.instance,
+        });
+        if let Some(ttl) = self.ttl {
+            body["ttl_seconds"] = json!(ttl.as_secs());
+        }
+        body
+    }
 }
 
 /// What a start asks for.

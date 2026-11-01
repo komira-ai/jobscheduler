@@ -137,6 +137,7 @@ mod cli;
 mod command;
 mod events;
 mod failure;
+mod join_tokens;
 mod leases;
 mod render;
 mod renewals;
@@ -150,7 +151,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use cli::{Action, Cli, Command};
+use cli::{Action, Cli, Command, JoinTokenAction};
 use failure::Failure;
 use js_client::{Client, REQUEST_LIMIT};
 use render::Render;
@@ -226,5 +227,13 @@ fn dispatch(
         Action::List => leases::list(&client, render, out),
         Action::Run(args) => run::run(&client, render, &args, services, err),
         Action::Native(args) => leases::native(&client, render, &args, out),
+        Action::JoinToken(JoinTokenAction::Mint(args)) => join_tokens::mint(
+            &client,
+            render,
+            &args,
+            services.stdout_is_terminal,
+            out,
+            err,
+        ),
     }
 }
