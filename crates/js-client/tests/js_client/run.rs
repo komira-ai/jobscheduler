@@ -301,7 +301,10 @@ fn a_malformed_entry_error_holds_no_value_from_the_body() {
             200,
             r#"{"run_id":"r-1","state":"exited","log_tail":{"stdout":"x","stderr":"y","truncated":"hunter2-secret"}}"#,
         ),
-        json_reply(200, r#"{"run_id":"r-1","state":"exited","outcome":"s3cret-outcome"}"#),
+        json_reply(
+            200,
+            r#"{"run_id":"r-1","state":"exited","outcome":"s3cret-outcome"}"#,
+        ),
     ]);
     let client = client_of(&dir, &fake.url("http"));
 
