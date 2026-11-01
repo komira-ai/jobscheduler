@@ -425,8 +425,8 @@ impl Runs {
     /// lease; this checks what is left of the lease's budget: the live runs of the host,
     /// their limits, their booked disk and their GPU indices together with this run's must
     /// fit `shape`. A lease that shares the host (`share`, what it booked) is also held to
-    /// its own share: the limits and disk of its live runs together with this run's must
-    /// fit `share`, so one lease cannot take what another lease on the host booked.
+    /// its own share: the limits, disk and GPUs of its live runs together with this run's
+    /// must fit `share`, so one lease cannot take what another lease on the host booked.
     /// `quota_default` is the quota the host enforces on a run that sets no `disk_bytes`,
     /// when it reported one.
     ///
@@ -466,16 +466,19 @@ impl Runs {
         let taken = live.iter().flat_map(|run| run.spec.gpu_indices.iter());
         let taken = taken.collect::<BTreeSet<_>>();
         let clash = spec.gpu_indices.iter().any(|index| taken.contains(index));
-        // What this lease's live runs hold with this run's, against its own share.
+        // What this lease's live runs hold with this run's, against its own share: cores,
+        // memory, booked disk and the number of GPUs their indices name.
+        let gpus = |spec: &JobSpec| spec.gpu_indices.len() as u64;
         let own = live.iter().filter(|run| run.lease == *lease);
-        let (own_cpu, own_memory, own_disk) = own.fold(
-            (limits.cpu_millis, limits.memory_bytes, disk),
-            |(cpu, memory, disk), run| {
+        let (own_cpu, own_memory, own_disk, own_gpus) = own.fold(
+            (limits.cpu_millis, limits.memory_bytes, disk, gpus(&spec)),
+            |(cpu, memory, disk, count), run| {
                 let held = &run.spec.limits;
                 (
                     cpu.saturating_add(held.cpu_millis),
                     memory.saturating_add(held.memory_bytes),
                     disk.saturating_add(run.disk),
+                    count.saturating_add(gpus(&run.spec)),
                 )
             },
         );
@@ -484,6 +487,7 @@ impl Runs {
                 own_cpu <= share.cpu_millis(),
                 own_memory <= share.memory_bytes(),
                 own_disk <= share.disk_bytes(),
+                own_gpus <= share.gpus(),
             ]
             .into_iter()
             .all(|ok| ok)
