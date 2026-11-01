@@ -22,11 +22,15 @@
 //!
 //! The same care applies to run A's seeds. A kind counts as COVERED when it was seeded, or
 //! when the product profile refused the seed with a SANDBOX denial (the job could not create
-//! the state, so nothing can carry over): `EPERM` or `EACCES` from the call, or the sandbox's
-//! own words from a tool ("Operation not permitted", "deny(1)", sandbox-violation text).
-//! That row is recorded as refused by the profile. Any other seed failure (`ENOSPC`, a
-//! missing tool, a crash) proves nothing. The minimum set (a file, a process, a keychain item,
-//! a launchd agent, shared memory) is met when each kind is covered.
+//! the state, so nothing can carry over). The denial must carry the SANDBOX's own signature:
+//! `deny(1)` or `Sandbox:` in the failure, or a bare `EPERM`/`EACCES` that the unified log
+//! (read for run A's window) confirms as that seed's by a sandbox `deny(` line with its token
+//! or its operation. A bare `EPERM` or `EACCES` alone is an ordinary permission failure (a
+//! home with the wrong owner, a tool that is not executable) and proves nothing, like any
+//! other failure (`ENOSPC`, a missing tool, a crash). The denied row is recorded as refused by
+//! the profile. The minimum set (a file, a process, a keychain item, a launchd agent, shared
+//! memory) is met when each kind is covered, and at least one item must have been really
+//! seeded by the job (an agent loaded by root does not count).
 
 use std::io::{self, Read as _};
 use std::path::Path;
@@ -113,7 +117,7 @@ pub fn view_output(
     }
 }
 
-/// The paths a `find -uid` printed: those with a token in them, which are left behind by the
+/// The paths a `find -uid -print0` printed (NUL-separated, so a name with a line break is one path): those with a token in them, which are left behind by the
 /// run, and the others, which are only reported (the uid's own caches get files of the
 /// machine's making). EVERY path is examined for a token; only the notes are cut at `limit`,
 /// and the third value says whether they were.
@@ -125,7 +129,7 @@ pub fn split_found_files(
     let mut with = Vec::new();
     let mut notes = Vec::new();
     let mut cut = false;
-    for path in output.lines().filter(|line| !line.is_empty()) {
+    for path in output.split('\0').filter(|path| !path.is_empty()) {
         if tokens.iter().any(|token| path.contains(token.as_str())) {
             with.push(path.to_owned());
         } else if notes.len() < limit {
@@ -190,22 +194,47 @@ pub const LOADED_BY_ROOT: &str = "loaded by root";
 /// Whether a seed failure could be a sandbox denial that the unified log may confirm: a
 /// permission failure (`EPERM`, `EACCES`). Anything else never is.
 pub fn is_permission_failure(text: &str) -> bool {
-    let _ = text;
-    false
+    let text = text.to_lowercase();
+    [
+        "operation not permitted",
+        "permission denied",
+        "(os error 1)",
+        "(os error 13)",
+    ]
+    .iter()
+    .any(|words| text.contains(words))
 }
 
 /// Whether the unified log (`log show` lines of the sandbox) holds a denial that is this
 /// seed's: a sandbox `deny(` line with the token in it, or the operation of the kind.
 pub fn log_confirms_denial(kind: Kind, token: &Token, log: &str) -> bool {
-    let _ = (kind, token, log);
-    false
+    let markers: &[&str] = match kind {
+        Kind::Process => &["process-exec", "process-fork"],
+        Kind::Keychain => &["com.apple.SecurityServer"],
+        Kind::Defaults => &["cfprefs", "user-preference"],
+        Kind::LaunchAgent | Kind::GuiLaunchAgent => &["launchd"],
+        Kind::SysvShm => &["ipc-sysv-shm"],
+        Kind::SysvSem => &["ipc-sysv-sem"],
+        Kind::SysvMsg => &["ipc-sysv-msg"],
+        Kind::PosixShm => &["ipc-posix-shm"],
+        Kind::PosixSem => &["ipc-posix-sem"],
+        _ => &[],
+    };
+    log.lines()
+        .filter(|line| line.contains("Sandbox") && line.contains("deny("))
+        .any(|line| line.contains(token.as_str()) || markers.iter().any(|m| line.contains(m)))
 }
 
 /// The verdict of a failed seed. `log` is the sandbox lines of the unified log for run A's
 /// window, or none when it could not be read.
 pub fn resolve_seed(kind: Kind, token: &Token, text: &str, log: Option<&str>) -> Verdict {
-    let _ = (kind, token, text, log);
-    Verdict::Refused
+    let confirmed = || {
+        is_permission_failure(text) && log.is_some_and(|log| log_confirms_denial(kind, token, log))
+    };
+    match classify_seed_failure(text) == SeedFailure::ProfileRefused || confirmed() {
+        true => Verdict::Denied,
+        false => Verdict::Refused,
+    }
 }
 
 /// Reads at most `limit` bytes and says whether the reader had more.
@@ -213,15 +242,21 @@ pub fn resolve_seed(kind: Kind, token: &Token, text: &str, log: Option<&str>) ->
 /// # Errors
 /// The read failed.
 pub fn read_bounded(reader: impl io::Read, limit: u64) -> io::Result<(Vec<u8>, bool)> {
+    let mut reader = reader;
     let mut bytes = Vec::new();
-    reader.take(limit).read_to_end(&mut bytes)?;
-    Ok((bytes, false))
+    (&mut reader).take(limit).read_to_end(&mut bytes)?;
+    let mut one = [0u8; 1];
+    let more = reader.read(&mut one)? > 0;
+    Ok((bytes, more))
 }
 
 /// The children whose device differs from the root's (`find -x` skips them).
 pub fn other_volume_children(root_dev: u64, children: &[(String, u64)]) -> Vec<String> {
-    let _ = (root_dev, children);
-    Vec::new()
+    children
+        .iter()
+        .filter(|(_, dev)| *dev != root_dev)
+        .map(|(path, _)| path.clone())
+        .collect()
 }
 
 /// Why run A could not seed an item: the sandbox of the product profile said no (so the job
@@ -233,20 +268,16 @@ pub enum SeedFailure {
     Other,
 }
 
-/// Tells the two apart from the failure text of a seed: `EPERM` or `EACCES` from the call
-/// (as `io::Error` prints them), or the sandbox's own words from a tool.
+/// Tells the two apart from the failure text of a seed: only the SANDBOX's own signature
+/// (`deny(1)`, `Sandbox:`) is the profile's. A bare `EPERM` or `EACCES` is an ordinary
+/// permission failure (a home with the wrong owner, a tool that is not executable) and proves
+/// nothing, unless the unified log confirms it ([`resolve_seed`]).
 pub fn classify_seed_failure(text: &str) -> SeedFailure {
     let text = text.to_lowercase();
-    let sandbox = [
-        "operation not permitted",
-        "permission denied",
-        "(os error 1)",
-        "(os error 13)",
-        "deny(1)",
-        "sandbox:",
-        "sandbox violation",
-    ];
-    match sandbox.iter().any(|words| text.contains(words)) {
+    match ["deny(1)", "sandbox:"]
+        .iter()
+        .any(|words| text.contains(words))
+    {
         true => SeedFailure::ProfileRefused,
         false => SeedFailure::Other,
     }
@@ -275,6 +306,14 @@ pub fn missing_minimum(lines: &[Line]) -> Vec<&'static str> {
     }
     if !seeded(Kind::SysvShm) && !seeded(Kind::PosixShm) {
         missing.push("shared memory (System V or POSIX)");
+    }
+    // Something the job itself seeded, so that a run where everything was denied (or loaded by
+    // root) cannot pass having proven nothing.
+    let by_the_job = lines
+        .iter()
+        .any(|line| line.verdict == Verdict::Seeded && !line.text.contains(LOADED_BY_ROOT));
+    if !by_the_job {
+        missing.push("an item seeded by the job");
     }
     missing
 }

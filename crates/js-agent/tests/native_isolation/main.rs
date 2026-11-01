@@ -17,10 +17,13 @@
 //!    directories under `/var/folders`, whose exact paths run A reports), a file in
 //!    `/Users/Shared`, and a launchd agent in the `gui/<uid>` domain. What the profile or the
 //!    machine refuses is printed as refused, with the reason. A kind is covered when it was
-//!    seeded or the profile denied the seed with a sandbox denial (EPERM, EACCES or the
-//!    sandbox's own message, see `look.rs`): the job could not create the state, so nothing can
-//!    carry over. Any other seed failure proves nothing. A run that did not cover at least a
-//!    file, a process, a keychain item, a launchd agent and shared memory fails.
+//!    seeded or the profile denied the seed with the sandbox's own signature (`deny(1)`,
+//!    `Sandbox:`, or a bare permission error the unified log confirms as that seed's, see
+//!    `look.rs`): the job could not create the state, so nothing can carry over. Any other
+//!    seed failure, a bare EPERM/EACCES included, proves nothing. A run that did not cover at
+//!    least a file, a process, a keychain item, a launchd agent and shared memory, or seeded
+//!    nothing itself, fails. A launch agent that root loaded is labelled "loaded by root" and
+//!    is no sandbox claim.
 //! 2. Between the runs the test does what the agent does when a run ends and the next
 //!    begins: `NativeRuntime::remove` (the helper's `kill-uid`, then `user-delete`), and
 //!    the next start makes the user again (`user-create`).
@@ -69,6 +72,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status};
 use js_agent::native::{NativeConfig, NativeRuntime};
@@ -395,6 +399,7 @@ impl Trial {
         let exe = self.exe.clone();
 
         // Run A.
+        let started = Instant::now();
         let ran_a = child_run(
             &mut self.rt,
             &self.fixture,
@@ -413,6 +418,7 @@ impl Trial {
                 "run A ran as uid {owner}, not the uid {uid} asked for"
             ));
         }
+        self.confirm_denials_by_log(started);
         self.bootstrap_agents_as_root(uid);
         println!("{}", self.seeded_table());
         let missing = look::missing_minimum(&self.seeded);
@@ -489,6 +495,9 @@ impl Trial {
                 [
                     line.kind.label().to_owned(),
                     match line.verdict {
+                        Verdict::Seeded if line.text.contains(look::LOADED_BY_ROOT) => {
+                            "loaded by root (not by the job; not a sandbox claim)".to_owned()
+                        }
                         Verdict::Seeded => "seeded".to_owned(),
                         Verdict::Denied => "refused by the profile".to_owned(),
                         _ => "refused (proves nothing)".to_owned(),
@@ -501,6 +510,49 @@ impl Trial {
             println!("PROBE {} {} {}", row[0], row[1], row[2]);
         }
         report::table(["KIND", "RUN A", "WHERE OR WHY"], &rows)
+    }
+
+    /// A seed that failed with a bare permission error is the profile's only if the unified
+    /// log, read for run A's window, holds a sandbox denial that is that seed's; the log is
+    /// not read when nothing failed that way. A log that cannot be read leaves them refused.
+    fn confirm_denials_by_log(&mut self, since: Instant) {
+        let candidates = self.seeded.iter().any(|line| {
+            line.verdict == Verdict::Refused && look::is_permission_failure(&line.text)
+        });
+        if !candidates {
+            return;
+        }
+        let secs = since.elapsed().as_secs() + 60;
+        let predicate = "eventMessage CONTAINS \"Sandbox\" AND eventMessage CONTAINS \"deny(\"";
+        let shown = view(
+            "/usr/bin/log",
+            &[
+                "show",
+                "--last",
+                &format!("{secs}s"),
+                "--style",
+                "compact",
+                "--predicate",
+                predicate,
+            ],
+        );
+        let log = match shown {
+            Ok(text) => Some(text),
+            Err(why) => {
+                println!("PROBE note the unified log could not be read: {why}");
+                None
+            }
+        };
+        for line in &mut self.seeded {
+            if line.verdict != Verdict::Refused {
+                continue;
+            }
+            let verdict = look::resolve_seed(line.kind, &line.token, &line.text, log.as_deref());
+            if verdict == Verdict::Denied {
+                line.verdict = Verdict::Denied;
+                line.text = format!("confirmed in the unified log: {}", line.text);
+            }
+        }
     }
 
     /// A launch agent run A could not load (a user cannot load into its own domain on
@@ -531,7 +583,10 @@ impl Trial {
                     Verdict::Seeded,
                     kind,
                     line.token.clone(),
-                    &format!("{label} (loaded by root into {target}: run A could not)"),
+                    &format!(
+                        "{label} ({} into {target}: run A could not)",
+                        look::LOADED_BY_ROOT
+                    ),
                 );
             }
         }
@@ -660,8 +715,17 @@ impl Trial {
             // No depth limit: a limit would hide a file below it. '-x' stays on the volume.
             let found = view(
                 "/usr/bin/find",
-                &["-x", root, "-uid", &uid.to_string(), "-type", "f"],
+                &[
+                    "-x",
+                    root,
+                    "-uid",
+                    &uid.to_string(),
+                    "-type",
+                    "f",
+                    "-print0",
+                ],
             );
+            note_other_volumes(root);
             match found {
                 Ok(text) => {
                     let (with, notes, cut) = look::split_found_files(&text, &tokens, FIND_LIMIT);
@@ -725,13 +789,35 @@ const FIND_LIMIT: usize = 500;
 const CONTENT_FILES: usize = 2000;
 const CONTENT_BYTES: u64 = 1 << 20;
 
+/// `find -x` does not enter a volume mounted below a root: say which children are on another
+/// device, so that a leak there is not a silent pass.
+fn note_other_volumes(root: &str) {
+    let Ok(root_meta) = fs::metadata(root) else {
+        return;
+    };
+    let children: Vec<(String, u64)> = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let meta = fs::symlink_metadata(entry.path()).ok()?;
+            Some((entry.path().display().to_string(), meta.dev()))
+        })
+        .collect();
+    for path in look::other_volume_children(root_meta.dev(), &children) {
+        println!("PROBE note {path} is on another volume than {root}: find -x did not look in it");
+    }
+}
+
 /// The files `find` listed, read for the tokens (a file whose name lacks the token, a cfprefs
 /// plist or a keychain database, can still hold it). At most `CONTENT_FILES` files and
 /// `CONTENT_BYTES` of each: what is beyond is a COULD NOT LOOK row, never a pass.
 fn scan_content(uid: u32, root: &str, listing: &str, tokens: &[Token]) -> Vec<Row> {
-    use std::io::Read as _;
     let mut rows = Vec::new();
-    let paths: Vec<&str> = listing.lines().filter(|line| !line.is_empty()).collect();
+    let paths: Vec<&str> = listing
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .collect();
     if paths.len() > CONTENT_FILES {
         rows.push(row(
             Kind::SharedFile,
@@ -744,16 +830,17 @@ fn scan_content(uid: u32, root: &str, listing: &str, tokens: &[Token]) -> Vec<Ro
         ));
     }
     for path in paths.into_iter().take(CONTENT_FILES) {
-        let read = fs::File::open(path).and_then(|file| {
-            let mut bytes = Vec::new();
-            file.take(CONTENT_BYTES).read_to_end(&mut bytes)?;
-            Ok(bytes)
-        });
+        let read = fs::File::open(path).and_then(|file| look::read_bounded(file, CONTENT_BYTES));
         match read {
-            Ok(bytes) if look::content_with_token(&bytes, tokens) => rows.push(row(
+            Ok((bytes, _)) if look::content_with_token(&bytes, tokens) => rows.push(row(
                 Kind::SharedFile,
                 path,
                 format!("find -uid {uid} under {root}: a token is in the content of the file"),
+            )),
+            Ok((_, true)) => rows.push(row(
+                Kind::SharedFile,
+                "COULD NOT LOOK",
+                format!("{path}: longer than {CONTENT_BYTES} bytes, the rest was not read"),
             )),
             Ok(_) => {}
             // The file went between the listing and the read: not there.
