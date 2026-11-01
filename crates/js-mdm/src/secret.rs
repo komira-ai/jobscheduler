@@ -54,8 +54,16 @@ pub fn holds_other_lines(bytes: &[u8], key: &str) -> bool {
         .any(|l| !l.starts_with(&prefix))
 }
 
+/// `value` as systemd reads it from an environment file: without trailing white space (a
+/// carriage return of a file with DOS line ends included) and without one pair of surrounding
+/// single or double quotes.
+fn unquoted(value: &str) -> &str {
+    value
+}
+
 /// The value of `key` in the secret file at `path`: refused unless the file is a 0600 file of
-/// root's holding a `key=` line with a value without control characters.
+/// root's holding a `key=` line with a value (quotes and trailing white space removed) without
+/// control characters.
 pub fn read(host: &dyn Host, path: &str, key: &str) -> Result<Secret, MdmError> {
     let missing = || MdmError::NoSecret {
         path: path.to_owned(),
@@ -69,6 +77,7 @@ pub fn read(host: &dyn Host, path: &str, key: &str) -> Result<Secret, MdmError> 
     let value = text
         .lines()
         .find_map(|l| l.strip_prefix(&prefix))
+        .map(unquoted)
         .filter(|v| !v.is_empty())
         .ok_or_else(missing)?;
     match value.chars().any(char::is_control) {

@@ -25,7 +25,7 @@ fn key(host: &FakeHost) -> secret::Secret {
 
 fn service(host: &FakeHost, addr: &str) -> Result<Service, MdmError> {
     let addr: SocketAddr = addr.parse().unwrap();
-    Service::new("NanoDEP", "depserver", addr, key(host))
+    Service::new("NanoDEP", "depserver", addr, key(host), &[900])
 }
 
 /// Catches an API key that could be sent off the host: a service address that is not
@@ -150,12 +150,54 @@ fn damaged_answers_are_errors() {
     }
 }
 
-/// Catches an error that quotes too much or too little of an answer: 300 characters at most,
-/// trimmed, whole characters (not bytes).
+/// Catches an error that quotes too much or too little of an answer, or shows a server's
+/// control characters: 300 characters at most, trimmed, whole characters (not bytes), and
+/// every control character written out (an escape sequence would otherwise reach a terminal).
 #[test]
-fn quoted_answers_are_trimmed_and_capped() {
-    assert_eq!(api::quoted(b"  no such name \n"), "no such name");
-    assert_eq!(api::quoted("é".repeat(400).as_bytes()), "é".repeat(300));
+fn quoted_answers_are_trimmed_capped_and_printable() {
+    let host = FakeHost::new(0);
+    let svc = service(&host, "127.0.0.1:9001").unwrap();
+    assert_eq!(svc.quote(b"  no such name \n"), "no such name");
+    assert_eq!(svc.quote("é".repeat(400).as_bytes()), "é".repeat(300));
+    assert_eq!(
+        svc.quote(b"a\x1b[31mred\nline\r\x07"),
+        "a\\u{1b}[31mred\\nline\\r\\u{7}"
+    );
+    assert_eq!(api::printable("ok é"), "ok é");
+    assert_eq!(api::printable("a\tb"), "a\\tb");
+}
+
+/// Catches the key reaching an error message or a log through a server that reflects what it was
+/// sent: the raw key, its base64 (alone and as `user:key`, standard and URL-safe, padded or
+/// not) and any line naming an `Authorization` header are replaced before text is quoted, and
+/// the text around them is kept; text that holds none of them is unchanged.
+#[test]
+fn a_reflected_key_is_redacted() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    let host = FakeHost::new(0);
+    let svc = service(&host, "127.0.0.1:9001").unwrap();
+    let pair = format!("depserver:{KEY}");
+    let mut leaks = vec![KEY.to_owned(), pair.clone()];
+    for e in [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD] {
+        leaks.push(e.encode(KEY));
+        leaks.push(e.encode(&pair));
+    }
+    for leak in leaks {
+        let said = svc.redact(&format!("echo: [{leak}] end"));
+        assert_eq!(said, "echo: [[redacted]] end");
+        assert!(!svc.quote(format!("x {leak} y").as_bytes()).contains(&leak));
+    }
+    let reflected = "GET / HTTP/1.1\nHost: x\nauthorization: Basic QUJD\nAccept: */*";
+    assert_eq!(
+        svc.redact(reflected),
+        "GET / HTTP/1.1\nHost: x\n[redacted]\nAccept: */*"
+    );
+    assert_eq!(
+        svc.redact("{\"Authorization\":\"Basic QUJD\"}"),
+        "[redacted]"
+    );
+    assert_eq!(svc.redact("no such name"), "no such name");
 }
 
 fn run_call(
@@ -285,10 +327,11 @@ fn the_real_client_speaks_http_to_a_loopback_listener() {
     let host = FakeHost::new(0);
     let svc = service(&host, &addr.to_string()).unwrap();
     let net = FakeNet::new(Default::default());
+    let real = RealApi::new();
     let env = Env {
         host: &host,
         net: &net,
-        api: &RealApi,
+        api: &real,
         random: &common::fill,
         now: 0,
     };
@@ -342,7 +385,7 @@ fn the_real_client_reports_a_closed_port_and_a_non_http_answer() {
     let host = FakeHost::new(0);
     let svc = service(&host, &addr.to_string()).unwrap();
     let put = Call::put("/x", Vec::new());
-    let (result, _) = run_call(&host, &RealApi, &svc, &put, Mode::Apply);
+    let (result, _) = run_call(&host, &RealApi::new(), &svc, &put, Mode::Apply);
     let err = result.unwrap_err();
     assert_eq!(err.exit_code(), 1);
     assert!(
@@ -353,7 +396,7 @@ fn the_real_client_reports_a_closed_port_and_a_non_http_answer() {
 
     let (addr, thread) = serve(vec![b"not http at all".to_vec()]);
     let svc = service(&host, &addr.to_string()).unwrap();
-    let (result, _) = run_call(&host, &RealApi, &svc, &put, Mode::Apply);
+    let (result, _) = run_call(&host, &RealApi::new(), &svc, &put, Mode::Apply);
     thread.join().unwrap();
     assert!(
         result
@@ -361,4 +404,114 @@ fn the_real_client_reports_a_closed_port_and_a_non_http_answer() {
             .to_string()
             .ends_with("the answer has no end of headers")
     );
+}
+
+/// Catches a key sent to a process that is not the service: the listener on the port must be
+/// owned by root or by the service user. A listener of another user (alone, or beside the
+/// service's own), refuses the call (exit 2, naming the port and uid) before anything is sent;
+/// no listener, root's, and the service user's go on.
+#[test]
+fn the_key_goes_only_to_a_listener_root_or_the_service_owns() {
+    let svc_host = FakeHost::new(0);
+    let svc = service(&svc_host, "127.0.0.1:9001").unwrap();
+    let api = FakeApi::new(|_| ok("{}"));
+    let put = Call::put("/x", Vec::new());
+    for (listeners, bad) in [
+        (vec![], None),
+        (vec![0], None),
+        (vec![900], None),
+        (vec![0, 900], None),
+        (vec![1000], Some(1000)),
+        (vec![900, 1000], Some(1000)),
+        (vec![1000, 0], Some(1000)),
+    ] {
+        let host = FakeHost::new(0);
+        host.add_listener(9002, 4242);
+        for uid in listeners {
+            host.add_listener(9001, uid);
+        }
+        let (result, out) = run_call(&host, &api, &svc, &put, Mode::Apply);
+        match bad {
+            None => assert!(result.is_ok(), "{out}"),
+            Some(uid) => {
+                let err = result.unwrap_err();
+                assert_eq!(err.exit_code(), 2);
+                assert_eq!(
+                    err.to_string(),
+                    format!(
+                        "port 9001 on loopback is held by uid {uid}, not root or the service user: the API key is not sent (ss -ltnp 'sport = :9001')"
+                    )
+                );
+                assert_eq!(out, "");
+            }
+        }
+    }
+    // Two successes above sent nothing wrong; the refused ones sent nothing at all.
+    assert_eq!(api.sent.borrow().len(), 4);
+}
+
+/// Catches a call that can be held open forever by a server that trickles bytes: the whole call,
+/// not each read, has a deadline. A server sends one byte every 20 ms and never finishes its
+/// headers; with a total of 200 ms the call fails (exit 1) in a few seconds at most, long before
+/// the 60 s a single read may take. The server thread is joined after the client hangs up.
+#[test]
+fn a_trickling_server_ends_at_the_total_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let thread = std::thread::spawn(move || {
+        let (mut tcp, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(tcp.try_clone().unwrap());
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line.trim_end().is_empty() {
+                break;
+            }
+        }
+        // One byte at a time until the client has gone.
+        while tcp.write_all(b"H").is_ok() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    });
+    let host = FakeHost::new(0);
+    let svc = service(&host, &addr.to_string()).unwrap();
+    let real = RealApi {
+        total: std::time::Duration::from_millis(200),
+    };
+    let began = std::time::Instant::now();
+    let (result, _) = run_call(
+        &host,
+        &real,
+        &svc,
+        &Call::put("/x", Vec::new()),
+        Mode::Apply,
+    );
+    let took = began.elapsed();
+    let err = result.unwrap_err();
+    assert_eq!(err.exit_code(), 1);
+    assert!(err.to_string().contains("(NanoDEP API): "), "{err}");
+    assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+    thread.join().unwrap();
+}
+
+/// Catches an error that quotes what Apple's server says without redacting: a 403 whose body
+/// reflects the request's `Authorization` header and the key prints neither.
+#[test]
+fn an_error_quoting_a_reflected_request_shows_no_key() {
+    let host = FakeHost::new(0);
+    let svc = service(&host, "127.0.0.1:9001").unwrap();
+    let auth = svc.authorization();
+    let api = FakeApi::new(move |_| {
+        answer(
+            403,
+            &format!(
+                "denied\nAuthorization: {auth}\nkey {KEY} in {}",
+                "x".repeat(10)
+            ),
+        )
+    });
+    let (result, _) = run_call(&host, &api, &svc, &Call::put("/x", Vec::new()), Mode::Apply);
+    let text = result.unwrap_err().to_string();
+    assert!(text.contains("denied"), "{text}");
+    assert!(!text.contains(KEY) && !text.contains("Basic"), "{text}");
 }

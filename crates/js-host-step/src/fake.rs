@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 
-use crate::{Cmd, GETENT, Host, Kind, Meta, Output, check_binary_meta};
+use crate::{Cmd, GETENT, Host, Kind, Meta, Output, check_ancestry, check_owner_mode};
 
 /// A file or directory in the fake tree. `Debug` prints the length of the content, not the
 /// content: a failed assertion on a tree that holds a secret does not print it.
@@ -49,8 +49,12 @@ struct State {
     unreadable: Vec<String>,
     unstattable: Vec<String>,
     effects: Vec<(Vec<String>, String, Node)>,
-    /// The owner and mode of the running binary (root's, mode 0, until a test says).
+    /// The owner and mode of the running binary's image (root's, mode 0, until a test says).
     binary: (u32, u32),
+    /// Where the running binary is, when its ancestry is to be judged against the tree.
+    binary_path: Option<String>,
+    /// `(port, uid)` of every listener.
+    listeners: Vec<(u16, u32)>,
 }
 
 /// The fake host.
@@ -180,6 +184,17 @@ impl FakeHost {
         self.state.borrow_mut().binary = (uid, mode);
     }
 
+    /// Puts the running binary at `path` (links resolved against the tree): `check_binary`
+    /// then also judges the file there and every directory above it.
+    pub fn set_binary_path(&self, path: &str) {
+        self.state.borrow_mut().binary_path = Some(path.to_owned());
+    }
+
+    /// A socket owned by `uid` listens on `port`.
+    pub fn add_listener(&self, port: u16, uid: u32) {
+        self.state.borrow_mut().listeners.push((port, uid));
+    }
+
     /// Every command line run so far (program first), in order.
     pub fn calls(&self) -> Vec<Vec<String>> {
         self.state.borrow().calls.clone()
@@ -289,8 +304,28 @@ impl Host for FakeHost {
     }
 
     fn check_binary(&self) -> io::Result<()> {
-        let (uid, mode) = self.state.borrow().binary;
-        check_binary_meta(uid, mode)
+        let (uid, mode, path) = {
+            let state = self.state.borrow();
+            (state.binary.0, state.binary.1, state.binary_path.clone())
+        };
+        check_owner_mode("the running binary", uid, mode)?;
+        match path {
+            Some(path) => {
+                let canonical = self.canonical(&path)?;
+                check_ancestry(&canonical, |at| Ok(self.node(at).map(|n| (n.uid, n.mode))))
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn listener_uids(&self, port: u16) -> io::Result<Vec<u32>> {
+        let state = self.state.borrow();
+        Ok(state
+            .listeners
+            .iter()
+            .filter(|(p, _)| *p == port)
+            .map(|(_, uid)| *uid)
+            .collect())
     }
 
     fn run(&self, cmd: &Cmd) -> io::Result<Output> {

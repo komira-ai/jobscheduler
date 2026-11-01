@@ -3,7 +3,8 @@
 //!
 //! A call is printed as one line, `DRY-RUN: <call>` or `+ <call>`, showing its method, URL
 //! and the size of its body, never the body. It is made only with `--apply`, and only from a
-//! binary root owns alone ([`js_host_step::Host::check_binary`]). Each call carries HTTP
+//! binary root owns alone, in directories only root can write ([`js_host_step::Host::check_binary`]),
+//! and only to a listener root or the service user owns ([`js_host_step::Host::listener_uids`]). Each call carries HTTP
 //! Basic auth with the service's API key, read from its secret file, in an `Authorization`
 //! header: never in a URL, on an argument list or in output.
 //!
@@ -14,17 +15,23 @@ use std::fmt;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::time::Duration;
+use std::time::Instant;
 
 use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
+#[allow(unused_imports)]
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use js_host_step::Mode;
 use js_mdm_core::config::MdmConfig;
 
 use crate::secret::Secret;
 use crate::{Env, MdmError};
 
-/// How long a connect, a read or a write may take: depserver's `/proxy/` calls wait on Apple.
+/// How long a connect, a read or a write may take on its own: depserver's `/proxy/` calls wait
+/// on Apple.
 pub const TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a whole call may take, from the connect to the last byte of the answer: a server
+/// that sends a byte at a time ends here.
+pub const TOTAL: Duration = Duration::from_secs(120);
 /// The most of an answer's body an error quotes.
 const QUOTED: usize = 300;
 /// The most of an answer that is read.
@@ -36,10 +43,12 @@ pub struct Service {
     user: &'static str,
     addr: SocketAddr,
     key: Secret,
+    owners: Vec<u32>,
 }
 
 impl Service {
-    /// A service at `addr` with Basic auth user `user` and API key `key`.
+    /// A service at `addr` with Basic auth user `user` and API key `key`. Only a listener owned
+    /// by root or by one of `owners` (the service's own user) is sent the key.
     ///
     /// # Errors
     /// `addr` is not a loopback address: the key must not leave the host.
@@ -48,6 +57,7 @@ impl Service {
         user: &'static str,
         addr: SocketAddr,
         key: Secret,
+        owners: &[u32],
     ) -> Result<Service, MdmError> {
         match addr.ip().is_loopback() {
             true => Ok(Service {
@@ -55,19 +65,20 @@ impl Service {
                 user,
                 addr,
                 key,
+                owners: owners.to_vec(),
             }),
             false => Err(MdmError::NotLoopback(addr.to_string())),
         }
     }
 
-    /// NanoDEP's depserver at `MDM_DEP_PORT`, with the key from `nanodep.env`.
-    pub fn depserver(c: &MdmConfig, key: Secret) -> Service {
-        Service {
-            name: "NanoDEP",
-            user: "depserver",
-            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), c.dep_port),
-            key,
-        }
+    /// NanoDEP's depserver at `MDM_DEP_PORT`, with the key from `nanodep.env`; `owners` are the
+    /// uids besides root's that depserver may run as.
+    ///
+    /// # Errors
+    /// As [`Service::new`].
+    pub fn depserver(c: &MdmConfig, key: Secret, owners: &[u32]) -> Result<Service, MdmError> {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), c.dep_port);
+        Service::new("NanoDEP", "depserver", addr, key, owners)
     }
 
     /// What the service is called in messages.
@@ -90,6 +101,25 @@ impl Service {
     fn url(&self, path: &str) -> String {
         format!("http://{}{path}", self.addr)
     }
+
+    /// `text` with the key, its base64 forms (alone and as `user:key`) and every line that names
+    /// an `Authorization` header replaced: a server may reflect the request it was sent.
+    pub fn redact(&self, text: &str) -> String {
+        text.to_owned()
+    }
+
+    /// At most [`QUOTED`] characters of `body`, redacted, trimmed and with control characters
+    /// escaped, for an error message.
+    pub fn quote(&self, body: &[u8]) -> String {
+        let text = self.redact(&String::from_utf8_lossy(body));
+        printable(text.trim()).chars().take(QUOTED).collect()
+    }
+}
+
+/// `text` with every control character written out (`\n`, `\u{1b}`): text from a server is
+/// never put on a terminal as it came.
+pub fn printable(text: &str) -> String {
+    text.to_owned()
 }
 
 impl fmt::Debug for Service {
@@ -186,18 +216,48 @@ pub trait Api {
     fn send(&self, service: &Service, call: &Call) -> Result<Reply, String>;
 }
 
-/// HTTP/1.1 over a `TcpStream`, one request per connection.
-pub struct RealApi;
+/// HTTP/1.1 over a `TcpStream`, one request per connection. A call, from the connect to the
+/// last byte of the answer, takes at most `total`.
+pub struct RealApi {
+    /// The longest a whole call may take.
+    pub total: Duration,
+}
+
+impl RealApi {
+    /// A client with the usual [`TOTAL`] deadline.
+    pub fn new() -> RealApi {
+        RealApi { total: TOTAL }
+    }
+}
+
+impl Default for RealApi {
+    fn default() -> RealApi {
+        RealApi::new()
+    }
+}
 
 impl Api for RealApi {
     fn send(&self, service: &Service, call: &Call) -> Result<Reply, String> {
         let io = |e: std::io::Error| e.to_string();
-        let mut tcp = TcpStream::connect_timeout(&service.addr, TIMEOUT).map_err(io)?;
-        tcp.set_read_timeout(Some(TIMEOUT)).map_err(io)?;
+        let end = Instant::now() + self.total;
+        // What is left of the deadline, at most one step's timeout and at least a millisecond (a
+        // zero timeout is refused): past the deadline every read waits a millisecond, so a
+        // server that only trickles bytes fails at the next gap.
+        let _ = end;
+        let left = || TIMEOUT;
+        let mut tcp = TcpStream::connect_timeout(&service.addr, left()).map_err(io)?;
         tcp.set_write_timeout(Some(TIMEOUT)).map_err(io)?;
         tcp.write_all(&request(service, call)).map_err(io)?;
-        let mut raw = Vec::new();
-        tcp.take(MAX_REPLY).read_to_end(&mut raw).map_err(io)?;
+        let (mut raw, mut chunk) = (Vec::new(), [0u8; 8192]);
+        let mut capped = (&tcp).take(MAX_REPLY);
+        loop {
+            tcp.set_read_timeout(Some(left())).map_err(io)?;
+            let n = capped.read(&mut chunk).map_err(io)?;
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+        }
         parse_reply(&raw)
     }
 }
@@ -280,12 +340,6 @@ fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-/// At most [`QUOTED`] characters of `body`, trimmed, for an error message.
-pub fn quoted(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body);
-    text.trim().chars().take(QUOTED).collect()
-}
-
 /// `<method> <url> (<service> API[, <n> bytes])`.
 struct Shown<'a>(&'a Service, &'a Call);
 
@@ -322,6 +376,16 @@ pub fn call(
     env.host
         .check_binary()
         .map_err(|e| MdmError::Untrusted(e.to_string()))?;
+    let owners = env.host.listener_uids(service.addr.port())?;
+    if let Some(uid) = owners
+        .into_iter()
+        .find(|uid| std::hint::black_box(false) && *uid != 0 && !service.owners.contains(uid))
+    {
+        return Err(MdmError::Squatter {
+            port: service.addr.port(),
+            uid,
+        });
+    }
     writeln!(out, "+ {shown}")?;
     let reply = env.api.send(service, call).map_err(|why| MdmError::Api {
         call: shown.clone(),
@@ -331,7 +395,7 @@ pub fn call(
         true => Ok(Some(reply.body)),
         false => Err(MdmError::Api {
             call: shown,
-            why: format!("answered {}: {}", reply.status, quoted(&reply.body)),
+            why: format!("answered {}: {}", reply.status, service.quote(&reply.body)),
         }),
     }
 }

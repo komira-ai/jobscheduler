@@ -25,6 +25,7 @@ const SERIAL: &str = "C02ABCDEF123";
 /// enabled nor running.
 fn host() -> FakeHost {
     let host = FakeHost::new(0);
+    host.add_user("js-mdm", 900);
     host.put_file("/cfg", 0o644, (0, 0), EXAMPLE.as_bytes());
     host.put_file(
         "/etc/js-mdm/nanodep.env",
@@ -680,5 +681,186 @@ fn serial_numbers_are_checked() {
     assert_eq!(
         js_mdm::dep::Serial::new("ABCDEFGH").unwrap().as_str(),
         "ABCDEFGH"
+    );
+}
+
+/// Catches the key being sent to whoever holds depserver's port: a listener on `MDM_DEP_PORT`
+/// owned by a user who is neither root nor the service user (alone or beside depserver's own)
+/// refuses `--apply` for both verbs (exit 2) before any call or write; depserver's own
+/// (the service user's, or root's) and no listener go on; a dry run calls nothing and so
+/// refuses nothing.
+#[test]
+fn the_key_is_not_sent_to_a_squatter_on_the_dep_port() {
+    for (listeners, refused) in [
+        (vec![], false),
+        (vec![900], false),
+        (vec![0], false),
+        (vec![1000], true),
+        (vec![900, 1001], true),
+    ] {
+        let (fresh, known) = (
+            host(),
+            host_with_key_file(0o600, 0, &format!("NANODEP_API={KEY}\n")),
+        );
+        for h in [&fresh, &known] {
+            h.add_listener(9004, 1234);
+            for uid in &listeners {
+                h.add_listener(9001, *uid);
+            }
+        }
+        let api = FakeApi::apple();
+        let (before_a, before_b) = (fresh.paths(), known.paths());
+        let (code, out, err) = define(&fresh, &api, &["--apply"]);
+        let (code2, _, err2) = assign(&known, &api, &["--serial", SERIAL, "--apply"]);
+        match refused {
+            true => {
+                assert_eq!((code, code2), (2, 2), "{out}");
+                for e in [&err, &err2] {
+                    assert!(
+                        e.starts_with("REFUSED: port 9001 on loopback is held by uid "),
+                        "{e}"
+                    );
+                    assert!(!e.contains(KEY));
+                }
+                assert!(api.sent.borrow().is_empty());
+                assert_eq!((fresh.paths(), known.paths()), (before_a, before_b));
+                assert_eq!(define(&fresh, &api, &[]).0, 0);
+                assert_eq!(assign(&known, &api, &["--serial", SERIAL]).0, 0);
+                assert!(api.sent.borrow().is_empty());
+            }
+            false => {
+                assert_eq!((code, code2), (0, 0), "{err} {err2}");
+                assert_eq!(api.sent.borrow().len(), 3);
+            }
+        }
+    }
+}
+
+/// Catches the key leaking through a server that reflects the request it got: an answer that
+/// repeats the `Authorization` header and the key, as an error status (define and assign) and
+/// as a 200 without a profile uuid, appears in no error text or output; the status is still
+/// reported.
+#[test]
+fn a_server_that_reflects_the_request_leaks_no_key() {
+    let reflect = |status| {
+        move |_: &js_mdm::api::Call| {
+            answer(
+                status,
+                &format!(
+                    "seen\nAuthorization: {AUTH}\nand {KEY} and {}",
+                    AUTH.trim_start_matches("Basic ")
+                ),
+            )
+        }
+    };
+    for status in [403, 200] {
+        let host = host();
+        let api = FakeApi::new(reflect(status));
+        let (code, out, err) = define(&host, &api, &["--apply"]);
+        assert_eq!(code, 1);
+        let all = format!("{out}{err}");
+        assert!(
+            !all.contains(KEY) && !all.contains("Basic") && !all.contains(&AUTH[6..]),
+            "{all}"
+        );
+        assert!(all.contains("seen"), "{all}");
+    }
+    let host = defined(UUID, &rendered_sum());
+    let api = FakeApi::new(reflect(500));
+    let (code, out, err) = assign(&host, &api, &["--serial", SERIAL, "--apply"]);
+    assert_eq!(code, 1);
+    let all = format!("{out}{err}");
+    assert!(!all.contains(KEY) && !all.contains("Basic"), "{all}");
+}
+
+/// Catches an assign sent with a recorded profile that is not a uuid (a damaged or hand-edited
+/// file would go to Apple as the profile): refused (exit 2) naming the file, before any call,
+/// dry run or not.
+#[test]
+fn assign_refuses_a_recorded_profile_that_is_not_a_uuid() {
+    let long = "f".repeat(65);
+    for bad in ["not-a-uuid", "", "abc123", long.as_str()] {
+        let host = host();
+        host.put_file(UUID_FILE, 0o644, (0, 0), format!("{bad}\n").as_bytes());
+        let api = FakeApi::apple();
+        for extra in [&["--serial", SERIAL][..], &["--serial", SERIAL, "--apply"]] {
+            let (code, out, err) = assign(&host, &api, extra);
+            assert_eq!((code, out.as_str()), (2, ""), "{bad:?}");
+            assert!(
+                err.starts_with("REFUSED: /var/lib/js-mdm/dep-profile-uuid does not hold a profile uuid of 16 to 64 hex digits"),
+                "{err}"
+            );
+        }
+        assert!(api.sent.borrow().is_empty());
+    }
+}
+
+/// Catches Apple's per-device status reaching the terminal raw: a status with an escape
+/// sequence and a line break is printed written out, and the device is still not a success.
+#[test]
+fn a_device_status_is_printed_without_control_characters() {
+    let host = defined(UUID, &rendered_sum());
+    let api = FakeApi::new(|_| ok("{\"devices\":{\"C02ABCDEF123\":\"OK\\u001b[2J\\nSUCCESS\"}}"));
+    let (code, out, _) = assign(&host, &api, &["--serial", SERIAL, "--apply"]);
+    assert_eq!(code, 1);
+    assert!(
+        out.ends_with("C02ABCDEF123: OK\\u{1b}[2J\\nSUCCESS\n"),
+        "{out:?}"
+    );
+    assert!(!out.contains('\x1b'));
+}
+
+/// Catches a key read differently from the way systemd gives it to depserver: surrounding double
+/// or single quotes, trailing blanks and a DOS line end are not part of the key (the call
+/// carries the same Authorization either way); an empty quoted value is no key.
+#[test]
+fn the_key_is_read_as_systemd_reads_it() {
+    for text in [
+        format!("NANODEP_API=\"{KEY}\"\n"),
+        format!("NANODEP_API='{KEY}'  \n"),
+        format!("NANODEP_API={KEY}\t \r\n"),
+        format!("NANODEP_API={KEY}\n"),
+    ] {
+        let host = host_with_key_file(0o600, 0, &text);
+        let api = FakeApi::apple();
+        let (code, _, err) = assign(&host, &api, &["--serial", SERIAL, "--apply"]);
+        assert_eq!((code, err.as_str()), (0, ""), "{text:?}");
+        assert_eq!(*api.authorizations.borrow(), [AUTH], "{text:?}");
+    }
+    for text in [
+        "NANODEP_API=\"\"\n",
+        "NANODEP_API='\n",
+        "NANODEP_API=\"abc\n",
+    ] {
+        let host = host_with_key_file(0o600, 0, text);
+        let api = FakeApi::apple();
+        let (code, _, err) = assign(&host, &api, &["--serial", SERIAL, "--apply"]);
+        if text == "NANODEP_API=\"\"\n" {
+            assert_eq!(code, 2, "{err}");
+            assert!(
+                err.contains("has no NANODEP_API= line with a value"),
+                "{err}"
+            );
+        } else {
+            // A lone or unbalanced quote is kept as part of the value.
+            assert_eq!(code, 0, "{err}");
+        }
+    }
+}
+
+/// Catches `--replace` documented as defining something when the render is already recorded:
+/// the help of define-profile says it changes nothing then.
+#[test]
+fn the_replace_flag_is_documented_as_a_no_op_for_a_recorded_render() {
+    let (code, out, _) = cli(
+        &host(),
+        &FakeApi::apple(),
+        &["dep", "define-profile", "--help"],
+    );
+    assert_eq!(code, 0);
+    let flat = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("With a recorded profile that is this render it changes nothing."),
+        "{out}"
     );
 }

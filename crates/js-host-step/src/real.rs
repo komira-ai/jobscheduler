@@ -21,7 +21,7 @@ use rustix::fs::{
 };
 use rustix::io::Errno;
 
-use crate::{Cmd, Host, Kind, Meta, Output, check_binary_meta};
+use crate::{Cmd, Host, Kind, Meta, Output, check_ancestry, check_owner_mode, parse_listeners};
 
 /// The real file system and the real programs, under a root directory.
 #[derive(Clone, Debug)]
@@ -304,10 +304,29 @@ impl Host for RealHost {
         dir.sync_all()
     }
 
-    // The machine's own file, whatever the root directory this host stands on.
+    // The machine's own image and path, whatever the root directory this host stands on: the
+    // image is the open file behind /proc/self/exe (judged by its descriptor), the path is its
+    // canonical name, and every name on the way up is judged, links resolved first.
     fn check_binary(&self) -> io::Result<()> {
-        let meta = fs::metadata(std::env::current_exe()?)?;
-        check_binary_meta(meta.uid(), meta.mode())
+        let image = File::open("/proc/self/exe")?.metadata()?;
+        let canonical = fs::canonicalize("/proc/self/exe")?;
+        let path = canonical.to_string_lossy();
+        check_owner_mode(&path, image.uid(), image.mode())?;
+        check_ancestry(&path, |at| {
+            let meta = found(fs::symlink_metadata(at))?;
+            Ok(meta.map(|m| (m.uid(), m.mode())))
+        })
+    }
+
+    // The machine's own tables, whatever the root directory this host stands on. IPv6 may be
+    // absent.
+    fn listener_uids(&self, port: u16) -> io::Result<Vec<u32>> {
+        let mut uids = Vec::new();
+        for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+            let text = found(fs::read_to_string(table))?.unwrap_or_default();
+            uids.extend(parse_listeners(&text, port));
+        }
+        Ok(uids)
     }
 
     fn run(&self, cmd: &Cmd) -> io::Result<Output> {

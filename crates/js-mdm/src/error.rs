@@ -193,6 +193,21 @@ pub enum MdmError {
         "{0}: the API calls carry keys, so they are made only by a binary root owns alone (chown root and chmod go-w it)"
     )]
     Untrusted(String),
+    /// The listener on a service's port is not the service's.
+    #[error(
+        "port {port} on loopback is held by uid {uid}, not root or the service user: the API key is not sent (ss -ltnp 'sport = :{port}')"
+    )]
+    Squatter {
+        /// The port.
+        port: u16,
+        /// The owner of the listener.
+        uid: u32,
+    },
+    /// The recorded profile uuid is not one.
+    #[error(
+        "{0} does not hold a profile uuid of 16 to 64 hex digits: run js-mdm dep define-profile --apply --replace"
+    )]
+    BadRecord(String),
     /// A call to a service failed or was refused by it.
     #[error("{call}: {why}")]
     Api {

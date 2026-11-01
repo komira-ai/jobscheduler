@@ -121,11 +121,12 @@ pub fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let host = RealHost::new();
     let net = Net::new(true);
+    let api = RealApi::new();
     let secs = SystemTime::now().duration_since(UNIX_EPOCH);
     let env = Env {
         host: &host,
         net: &net,
-        api: &RealApi,
+        api: &api,
         random: &system_random,
         now: secs.map_or(0, |d| d.as_secs()),
     };

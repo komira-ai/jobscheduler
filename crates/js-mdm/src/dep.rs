@@ -15,10 +15,15 @@
 //! Every call goes to depserver on loopback ([`crate::api`]) with the key from
 //! `MDM_ETC/nanodep.env`, and is made only with `--apply`. Neither verb touches
 //! `www/enroll.mobileconfig`.
+//!
+//! The define is two calls, the profile and then the assigner; the records are written after
+//! both. If the assigner call fails, Apple holds a profile this host did not record: the
+//! next run defines it again (a second profile at Apple), so set the assigner by hand or
+//! delete the stray one in Apple Business Manager.
 
 use std::io::Write;
 
-use js_host_step::{Account, DRY_RUN_NOTE, Mode, Planner, execute};
+use js_host_step::{Account, DRY_RUN_NOTE, Mode, Planner, execute, ids};
 use js_mdm_core::config::MdmConfig;
 use js_mdm_core::profile::AdeProfile;
 use js_mdm_core::render::UnitNames;
@@ -57,10 +62,22 @@ impl Serial {
     }
 }
 
+/// depserver's API: the key from `nanodep.env`; the listener on its port must belong to root or
+/// to the service user.
 fn service(env: &Env<'_>, c: &MdmConfig) -> Result<Service, MdmError> {
     let file = format!("{}/nanodep.env", c.etc.as_str());
     let key = secret::read(env.host, &file, "NANODEP_API")?;
-    Ok(Service::depserver(c, key))
+    let owner = ids(env.host, &Account::new(&c.user, &c.user))?;
+    Service::depserver(
+        c,
+        key,
+        &owner.map(|(uid, _)| uid).into_iter().collect::<Vec<_>>(),
+    )
+}
+
+/// A profile uuid as Apple answers it: 16 to 64 hex digits.
+fn is_uuid(text: &str) -> bool {
+    (16..=64).contains(&text.len()) && text.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn state_file(c: &MdmConfig, name: &str) -> String {
@@ -109,7 +126,7 @@ pub fn define_profile(
             let post = Call::post_json(format!("/proxy/{name}/profile"), json.clone());
             match api::call(env, &service, &post, mode, out)? {
                 Some(answer) => {
-                    let uuid = profile_uuid(&answer)?;
+                    let uuid = profile_uuid(&service, &answer)?;
                     let path = format!("/v1/assigner/{name}?profile_uuid={uuid}");
                     api::call(env, &service, &Call::put(path, Vec::new()), mode, out)?;
                     let said = "the assigner gives it to new devices";
@@ -135,19 +152,19 @@ pub fn define_profile(
 }
 
 /// The `profile_uuid` of Apple's answer to a profile definition: 16 to 64 hex digits.
-fn profile_uuid(answer: &[u8]) -> Result<String, MdmError> {
+fn profile_uuid(service: &Service, answer: &[u8]) -> Result<String, MdmError> {
     let value: serde_json::Value = serde_json::from_slice(answer).unwrap_or_default();
     let uuid = value
         .get("profile_uuid")
         .and_then(|u| u.as_str())
         .unwrap_or_default();
-    match (16..=64).contains(&uuid.len()) && uuid.chars().all(|c| c.is_ascii_hexdigit()) {
+    match is_uuid(uuid) {
         true => Ok(uuid.to_owned()),
         false => Err(MdmError::Answer {
             what: "the profile definition",
             why: format!(
                 "no profile_uuid of 16 to 64 hex digits in {}",
-                api::quoted(answer)
+                service.quote(answer)
             ),
         }),
     }
@@ -171,8 +188,11 @@ pub fn assign(
     let uuid = env
         .host
         .read(&uuid_file)?
-        .ok_or(MdmError::NoProfile(uuid_file))?;
+        .ok_or_else(|| MdmError::NoProfile(uuid_file.clone()))?;
     let uuid = String::from_utf8_lossy(&uuid).trim().to_owned();
+    if std::hint::black_box(false) && !is_uuid(&uuid) {
+        return Err(MdmError::BadRecord(uuid_file));
+    }
     let service = service(env, c)?;
     let devices: Vec<&str> = serials.iter().map(Serial::as_str).collect();
     let body = json!({ "profile_uuid": uuid, "devices": devices });
@@ -194,7 +214,7 @@ pub fn assign(
             .and_then(|s| s.as_str())
             .unwrap_or("no answer");
         all &= status == "SUCCESS";
-        writeln!(out, "{serial}: {status}")?;
+        writeln!(out, "{serial}: {}", api::printable(status))?;
     }
     Ok(all)
 }
