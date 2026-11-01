@@ -38,7 +38,7 @@ use std::process::ExitCode;
 
 pub use args::{ArgsError, Invocation, Step};
 pub use declaration::{DECLARATION_PATH, DEFAULT_RUNTIME, Declaration, DeclarationError, Timeouts};
-pub use launch_units::{LAUNCHCTL, LaunchUnits};
+pub use launch_units::{BOOTOUT_MARGIN, LAUNCHCTL, LaunchUnits, SETTLE_READS, StopRunner};
 pub use params::{
     ARTIFACT_DIGEST_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY, DEFER_RETRY_KEY, DRAIN_WAIT_KEY,
     MIN_CORDON_LEASE_SECS, POLL_SECS, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY,

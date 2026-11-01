@@ -58,6 +58,17 @@ pub struct UnitState {
     pub sub: String,
 }
 
+impl UnitState {
+    /// Whether the unit shows that its program ran and died: `failed`, or waiting to be started
+    /// again after a crash (`auto-restart`, as under `Restart=on-failure`). Both unit ports map
+    /// what their manager prints onto these two words, so a crash reads the same on a Mac as on
+    /// Linux and the steps blame the release for it, not the host.
+    #[must_use]
+    pub fn crashed(&self) -> bool {
+        self.active == "failed" || self.sub == "auto-restart"
+    }
+}
+
 /// The unit manager.
 pub trait Units {
     /// `ActiveState` and `SubState` of `unit`.
