@@ -721,12 +721,11 @@ fn the_declared_verify_timeout_must_outlast_the_margin_and_one_poll() {
     }
 }
 
-/// `record` with the session the server showed before the stop. Built through the record's
-/// JSON, so that the field's name is what is pinned.
+/// `record` with the session the server showed before the stop.
 fn with_pre_stop(record: &Record, session_ms: u64) -> Record {
-    let mut value = serde_json::to_value(record).unwrap();
-    value["pre_stop_session_ms"] = serde_json::json!(session_ms);
-    serde_json::from_value(value).expect("a record with the field is a record")
+    let mut record = record.clone();
+    record.pre_stop_session_ms = Some(session_ms);
+    record
 }
 
 #[test]
