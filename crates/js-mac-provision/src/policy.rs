@@ -12,6 +12,10 @@ pub const MIN_UID: u32 = 500;
 /// The highest uid a range may end at: `u32::MAX` is `(uid_t)-1` and the one below it is
 /// the account `nobody` has on macOS.
 pub const MAX_UID: u32 = u32::MAX - 2;
+/// The most uids a range may hold. pf's `user` takes a list and expands every rule over
+/// every listed uid, so the anchor grows with the pool; a pool is about ten uids and this
+/// leaves room for more without letting a typo write thousands of rules.
+pub const MAX_POOL_UIDS: u32 = 128;
 /// The longest anchor name, in bytes.
 pub const MAX_ANCHOR_LEN: usize = 128;
 /// The longest component of an anchor name, in bytes (pf's own limit is 63).
@@ -20,6 +24,12 @@ pub const MAX_COMPONENT_LEN: usize = 63;
 /// Why a policy was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyError {
+    /// The range holds more uids than [`MAX_POOL_UIDS`].
+    #[error("a uid range of {count} is over the {MAX_POOL_UIDS} a pool may hold")]
+    TooManyUids {
+        /// How many uids were asked for.
+        count: u32,
+    },
     /// The range holds no uid.
     #[error("the uid range is empty (a count of 0)")]
     EmptyRange,
@@ -75,6 +85,9 @@ impl UidRange {
     /// [`MAX_UID`].
     pub fn new(start: u32, count: u32) -> Result<Self, PolicyError> {
         let span = count.checked_sub(1).ok_or(PolicyError::EmptyRange)?;
+        if count > MAX_POOL_UIDS {
+            return Err(PolicyError::TooManyUids { count });
+        }
         if start < MIN_UID {
             return Err(PolicyError::SystemUids { start });
         }
@@ -103,14 +116,21 @@ impl UidRange {
         (self.start..=self.last).contains(&uid)
     }
 
-    /// The range as pf's `user` takes it: `600` for one uid, `600:699` (both ends
-    /// included) for more.
+    /// The range as macOS pf's `user` takes it: `600` for one uid, `{ 600, 601, 602 }`
+    /// (every uid, both ends included) for more.
+    ///
+    /// macOS pf reads `600:602` as a user name and refuses it ("unknown user"). The
+    /// `uid_item` rule in pfctl's `parse.y` (OpenBSD, which Apple's pfctl derives from)
+    /// takes a uid, a unary operator and a uid, or `uid PORTBINARY uid`, and `uids` takes
+    /// a braced list of those. A list needs no operator whose edges (`<>` and `><` are
+    /// exclusive and "except") could be misread, so the list is used; `UidRange` bounds
+    /// it at [`MAX_POOL_UIDS`].
     pub(crate) fn pf_user(self) -> String {
         if self.start == self.last {
-            self.start.to_string()
-        } else {
-            format!("{}:{}", self.start, self.last)
+            return self.start.to_string();
         }
+        let uids: Vec<String> = (self.start..=self.last).map(|u| u.to_string()).collect();
+        format!("{{ {} }}", uids.join(", "))
     }
 }
 

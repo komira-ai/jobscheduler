@@ -21,19 +21,19 @@ Flags shared by the verbs: `--anchor` (default `com.apple/com.komira.js.pool`),
 
 `render` is a pure function of the uid range, the endpoints and the anchor name: the same
 input gives the same bytes, endpoints sorted by address then port, repeats once. For the
-pool `600-699` and one endpoint it is:
+pool `600-602` and one endpoint it is:
 
 ```text
-block return out quick inet proto { tcp, udp } from any to 169.254.0.0/16 user 600:699
-pass out quick on lo0 inet proto { tcp, udp } from 127.0.0.0/8 to 127.0.0.0/8 user 600:699 keep state
-pass out quick inet proto tcp from any to 192.0.2.10 port 443 user 600:699 keep state
-block return out quick inet6 proto { tcp, udp } from any to any user 600:699
-block return out quick proto { tcp, udp } from any to any user 600:699
+block return out quick inet proto { tcp, udp } from any to 169.254.0.0/16 user { 600, 601, 602 }
+pass out quick on lo0 inet proto { tcp, udp } from 127.0.0.0/8 to 127.0.0.0/8 user { 600, 601, 602 } keep state
+pass out quick inet proto tcp from any to 192.0.2.10 port 443 user { 600, 601, 602 } keep state
+block return out quick inet6 proto { tcp, udp } from any to any user { 600, 601, 602 }
+block return out quick proto { tcp, udp } from any to any user { 600, 601, 602 }
 ```
 
 - Every rule is `quick` (the first match ends the evaluation, so nothing later in the main
   ruleset reopens what the anchor closed) and carries `user`, so it touches no process
-  outside the range. `user 600:699` is pf's inclusive range; a single uid renders as `user 600`.
+  outside the range. `user { 600, 601, ... }` lists every uid of the range (macOS pf refuses the `600:699` colon form), so a range holds at most 128 uids; a single uid renders as `user 600`.
 - `169.254.0.0/16` is refused first: the cloud metadata address, `169.254.169.254`, is in
   it. An endpoint inside it is refused when the policy is read, so no later edit opens it.
 - `keep state` lets the answers of an allowed connection come back.
