@@ -198,12 +198,12 @@ fn a_given_up_hold_is_barred_until_the_backoff_ends_then_holds_again() {
     assert_eq!(f.s.whole_state(op), None);
 }
 
-/// Catches: the next worker and the end of give-ups not shown: given up at its deadline,
-/// the request holds the other worker at once with the count raised; given up there
-/// too (the attempts it has are two), it holds the first again with no deadline, as it is
-/// not given up again, and is granted when that worker empties.
+/// Catches: the next worker not shown after a give-up, or a move taken for a give-up:
+/// given up at its deadline, the request holds the other worker at once with the count
+/// raised; when the first worker's back-off ends the hold moves back to it, the cheaper
+/// to drain, with one give-up still counted, and it is granted when that worker empties.
 #[test]
-fn a_given_up_request_holds_another_worker_and_at_the_cap_no_deadline() {
+fn a_given_up_hold_moves_back_to_the_cheaper_worker_with_one_give_up() {
     let (mut f, grants) = busy(cfg(0, 2), &[("a", 600), ("b", 1_200)]);
     let op = ask(&mut f);
     assert_eq!(state(&f, op), holding("a", 10_000, Some(70_000), 0));
@@ -217,6 +217,33 @@ fn a_given_up_request_holds_another_worker_and_at_the_cap_no_deadline() {
     assert_eq!(state(&f, op), holding("a", 70_000, Some(140_000), 1));
     f.finish(&grants[0]);
     let granted = f.advance(140_000);
+    assert_eq!(granted.len(), 1);
+    assert_eq!((granted[0].operation, &granted[0].worker), (op, &w("a")));
+    assert_eq!(f.s.whole_state(op), None);
+}
+
+/// Catches: the end of give-ups lost under the non-sticky pick. `a` is always the cheaper
+/// to drain, so the hold keeps coming back to it: given up there at 70 s (count one) it
+/// holds `b`, moves back to `a` at 80 s, and is given up there at 140 s (count two, the
+/// attempts it has). From then on the hold has no deadline: it holds `b` while `a` is
+/// barred, moves back to `a` when the back-off ends, is not given up again however long it
+/// waits, and is granted when `a` empties.
+#[test]
+fn at_the_cap_the_hold_has_no_deadline_and_is_not_given_up_again() {
+    let (mut f, grants) = busy(cfg(0, 2), &[("a", 600), ("b", 1_200)]);
+    let op = ask(&mut f);
+    tick_at(&mut f, 70_000);
+    assert_eq!(state(&f, op), holding("b", 70_000, Some(130_000), 1));
+    tick_at(&mut f, 130_000);
+    assert_eq!(state(&f, op), holding("a", 70_000, Some(140_000), 1));
+    tick_at(&mut f, 140_000);
+    assert_eq!(state(&f, op), holding("b", 140_000, None, 2));
+    tick_at(&mut f, 150_000);
+    assert_eq!(state(&f, op), holding("a", 140_000, None, 2));
+    tick_at(&mut f, 900_000);
+    assert_eq!(state(&f, op), holding("a", 140_000, None, 2));
+    f.finish(&grants[0]);
+    let granted = f.advance(910_000);
     assert_eq!(granted.len(), 1);
     assert_eq!((granted[0].operation, &granted[0].worker), (op, &w("a")));
     assert_eq!(f.s.whole_state(op), None);
