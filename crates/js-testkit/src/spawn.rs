@@ -79,7 +79,7 @@ pub fn retry_busy(
 /// When `sh` cannot be run, or the copy fails.
 pub fn install_copy(source: &Path, dest: &Path, mode: &str) {
     run_sh(
-        r#"cp "$1" "$2" && chmod "$3" "$2""#,
+        r#"cp -- "$1" "$2" && chmod -- "$3" "$2""#,
         &[source.as_os_str(), dest.as_os_str(), OsStr::new(mode)],
     );
 }
@@ -91,7 +91,7 @@ pub fn install_copy(source: &Path, dest: &Path, mode: &str) {
 /// When `sh` cannot be run, or the write fails.
 pub fn install_script(dest: &Path, body: &str, mode: &str) {
     run_sh(
-        r#"printf '%s' "$1" > "$2" && chmod "$3" "$2""#,
+        r#"printf '%s' "$1" > "$2" && chmod -- "$3" "$2""#,
         &[OsStr::new(body), dest.as_os_str(), OsStr::new(mode)],
     );
 }

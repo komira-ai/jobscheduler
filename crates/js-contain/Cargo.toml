@@ -24,6 +24,7 @@ test = false
 async-trait.workspace = true
 flate2.workspace = true
 js-types = { path = "../js-types" }
+libc.workspace = true
 oci-spec.workspace = true
 runc.workspace = true
 rustix = { workspace = true, features = ["fs", "process", "thread"] }
@@ -40,8 +41,7 @@ js-oci = { path = "../js-oci" }
 js-testkit = { path = "../js-testkit" }
 hex.workspace = true
 # The egress spike tests (tests/egress_spike): unshare, ioctl and open for the probe that runs
-# inside the container.
-libc.workspace = true
+# inside the container (libc is a dependency).
 sha2.workspace = true
 # gettid, for the test that finds the child of its own thread.
 rustix = { workspace = true, features = ["thread"] }

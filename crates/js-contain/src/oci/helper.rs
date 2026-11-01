@@ -313,7 +313,8 @@ pub(crate) fn prepare_rootfs(dir: &Path, binary: &str) -> std::io::Result<()> {
 }
 
 /// Copies the daemon's binary to `<scratch>/oci-bin/daemon` (mode 0755, replaced
-/// atomically) and returns that path. A helper with a job's ids cannot search the
+/// atomically, once nothing has it open for writing: see [`super::install`]) and returns that
+/// path. A helper with a job's ids cannot search the
 /// directories the binary was installed or built under (a home directory is 0750), but the
 /// scratch directory was checked to be searchable by others.
 pub(crate) fn install_daemon(scratch: &Path, daemon: &Path) -> std::io::Result<PathBuf> {
@@ -326,7 +327,6 @@ fn install_daemon_settling(
     daemon: &Path,
     settle: &dyn Fn(&Path) -> std::io::Result<()>,
 ) -> std::io::Result<PathBuf> {
-    let _ = settle;
     use std::os::unix::fs::PermissionsExt as _;
     let dir = scratch.join("oci-bin");
     std::fs::create_dir_all(&dir)?;
@@ -335,7 +335,7 @@ fn install_daemon_settling(
     std::fs::copy(daemon, &staged)?;
     std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
     let target = dir.join("daemon");
-    std::fs::rename(&staged, &target)?;
+    super::install::publish(&staged, &target, settle)?;
     Ok(target)
 }
 

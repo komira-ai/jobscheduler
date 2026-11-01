@@ -40,13 +40,60 @@ pub(crate) fn settle_with(
     pause: Duration,
     busy: &mut dyn FnMut(&Path) -> io::Result<bool>,
 ) -> io::Result<()> {
-    let _ = (path, attempts, pause, busy);
-    Ok(())
+    let attempts = attempts.max(1);
+    for asked in 1..=attempts {
+        if !busy(path)? {
+            return Ok(());
+        }
+        if asked < attempts {
+            std::thread::sleep(pause);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::ExecutableFileBusy,
+        format!(
+            "{}: still open for writing after {attempts} checks",
+            path.display()
+        ),
+    ))
 }
 
-/// Whether something has `path` open for writing.
+/// Moves the written `staged` file to `target` once `settle` says it can be started. When
+/// it cannot, `staged` is removed and `target` (an earlier install) is left alone.
+///
+/// # Errors
+/// What `settle` or the rename says.
+pub(crate) fn publish(
+    staged: &Path,
+    target: &Path,
+    settle: &dyn Fn(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    if let Err(error) = settle(staged) {
+        let _ = std::fs::remove_file(staged);
+        return Err(error);
+    }
+    std::fs::rename(staged, target)
+}
+
+/// Whether something has `path` open for writing: a read lease, which the kernel grants
+/// only while no descriptor is open for writing (the count `exec` checks), is asked for
+/// and dropped with the descriptor. A file system that takes no leases, or a file the
+/// caller does not own, answers no: the file is published as it was before there was a
+/// wait.
+#[cfg(target_os = "linux")]
 fn probe(path: &Path) -> io::Result<bool> {
-    let _ = path;
+    use std::os::fd::AsRawFd as _;
+    let file = std::fs::File::open(path)?;
+    // SAFETY: `fcntl` with `F_SETLEASE` takes the descriptor of `file`, open for the whole
+    // call, and an integer; it reads and writes no memory.
+    let granted = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLEASE, libc::F_RDLCK) };
+    Ok(granted != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN))
+}
+
+/// Whether something has `path` open for writing: not asked on this target, where no
+/// container runs.
+#[cfg(not(target_os = "linux"))]
+fn probe(_path: &Path) -> io::Result<bool> {
     Ok(false)
 }
 

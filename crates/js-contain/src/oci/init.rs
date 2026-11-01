@@ -30,7 +30,8 @@ pub(crate) fn create_report(lease: &Path) -> Result<std::fs::File, String> {
 }
 
 /// Writes the program into `<scratch>/oci-bin/js-init` (mode 0755, replaced
-/// atomically) and returns that path.
+/// atomically, once nothing has it open for writing: see [`super::install`]) and returns that
+/// path.
 pub(crate) fn install(scratch: &Path) -> std::io::Result<PathBuf> {
     install_bytes(scratch, BINARY, &super::install::settle)
 }
@@ -41,7 +42,6 @@ fn install_bytes(
     bytes: &[u8],
     settle: &dyn Fn(&Path) -> std::io::Result<()>,
 ) -> std::io::Result<PathBuf> {
-    let _ = settle;
     if bytes.is_empty() {
         return Err(std::io::Error::other(
             "this build has no container init: containers run on Linux only",
@@ -54,7 +54,7 @@ fn install_bytes(
     std::fs::write(&staged, bytes)?;
     std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
     let target = dir.join("js-init");
-    std::fs::rename(&staged, &target)?;
+    super::install::publish(&staged, &target, settle)?;
     Ok(target)
 }
 
