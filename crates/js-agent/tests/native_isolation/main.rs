@@ -522,6 +522,7 @@ impl Trial {
         if !candidates {
             return;
         }
+        let job = look::JobProcs::default();
         let secs = since.elapsed().as_secs() + 60;
         let predicate = "eventMessage CONTAINS \"Sandbox\" AND eventMessage CONTAINS \"deny(\"";
         let shown = view(
@@ -547,7 +548,8 @@ impl Trial {
             if line.verdict != Verdict::Refused {
                 continue;
             }
-            let verdict = look::resolve_seed(line.kind, &line.token, &line.text, log.as_deref());
+            let verdict =
+                look::resolve_seed(line.kind, &line.token, &line.text, log.as_deref(), &job);
             if verdict == Verdict::Denied {
                 line.verdict = Verdict::Denied;
                 line.text = format!("confirmed in the unified log: {}", line.text);
