@@ -70,11 +70,10 @@ MAJOR.MINOR.PATCH before it is used in a file name.
 - The package is a workflow artifact for seven days, not a release asset: `release.yml` lists
   its assets by name and attests `*.tar.gz`.
 - The updater declaration is shipped under `share/`; putting it in `/etc/updater.d` belongs to enrolment.
-- The update hook (`js-agent update-hook`) runs `prepare`, `cutover`, `verify` and `cleanup` on a
-  Mac, with a `launchctl` form of its unit port (`bootout`, `bootstrap`, `kickstart -k`,
+- The update hook (`js-agent update-hook`) runs its five steps on a Mac, with a `launchctl` form of its unit port (`bootout`, `bootstrap`, `kickstart -k`,
   `print`) and `runtime = "native"` in `updater.toml`, over the lease server's own-host routes
   and the agent's state root, which `updater.toml` names beside the release link (`server`,
-  `state_root`, `token_file`). `rollback` has no body yet and answers `not_implemented`. The
+  `state_root`, `token_file`). The
   port has run against a fake of `launchctl` only, never against a real launchd: what
   `launchctl print` prints of a daemon that crashed (its `last exit code`), the time a
   `bootstrap` takes to start the daemon, and `bootout` waiting out the agent's `ExitTimeOut`

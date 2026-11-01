@@ -263,15 +263,11 @@ fn every_step_the_updater_can_ask_for_is_run_by_its_own_body() {
     let tree = Tree::new("hook-machine-dispatch");
     let params = tree.params(true, "");
     // With no record: `cutover` and `verify` have no `prepare` behind them and `cleanup` has
-    // nothing to finish. `rollback` has no body yet.
+    // nothing to finish.
     for (step, outcome, reason) in [
         (Step::Cutover, Outcome::Failure, Some(Reason::StateInvalid)),
         (Step::Verify, Outcome::Failure, Some(Reason::StateInvalid)),
-        (
-            Step::Rollback,
-            Outcome::Failure,
-            Some(Reason::NotImplemented),
-        ),
+        (Step::Rollback, Outcome::Success, None),
         (Step::Cleanup, Outcome::Success, None),
     ] {
         let done = tree.run(step, &params, Err("unused"));
