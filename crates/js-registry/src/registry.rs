@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome};
@@ -195,6 +195,8 @@ struct Shared {
     clock: Arc<dyn Clock + Send + Sync>,
     sessions: Box<dyn SessionSource>,
     state: Mutex<State>,
+    /// The source of the expected life of a profile ([`Registry::set_lives`]).
+    lives: OnceLock<Arc<dyn crate::ProfileLives>>,
 }
 
 /// The hosts of one pool that registered themselves, and the lease bookings on them.
@@ -259,8 +261,18 @@ impl Registry {
                 clock: Arc::new(clock),
                 sessions: Box::new(sessions),
                 state: Mutex::new(state),
+                lives: OnceLock::new(),
             }),
         }
+    }
+
+    /// Gives the registry the source of how long the runs of a profile take. From then on
+    /// the drain cost of a host reads the estimated end of its lease, from the start of the
+    /// lease and the largest P90 among the profile names of its keyed runs
+    /// ([`Registry::queue_keyed_run`]). Only the first call takes effect; a registry with no
+    /// source costs a lease by its max-wall bound alone.
+    pub fn set_lives(&self, lives: Arc<dyn crate::ProfileLives>) {
+        let _ = self.shared.lives.set(lives);
     }
 
     /// The provider the lease table runs on, serving the pool's class.
@@ -502,6 +514,7 @@ impl Registry {
         let kept_exclusive =
             known.map_or(Exclusive::Free, |record| record.exclusive.after_hello(now));
         let kept_bound = known.and_then(|record| record.bound);
+        let kept_started = known.and_then(|record| record.started_at);
         let kept_leaving = known.and_then(|record| record.leaving);
         let kept_leaving = match state.ending.contains(&host) {
             true => Some(marks::Leaving::Releasing),
@@ -592,6 +605,7 @@ impl Registry {
                 runtime: hello.capabilities.get(RUNTIME).cloned(),
                 exclusive: kept_exclusive,
                 bound: kept_bound,
+                started_at: kept_started,
                 leaving: kept_leaving,
                 claim,
                 load: load::Kept::default(),

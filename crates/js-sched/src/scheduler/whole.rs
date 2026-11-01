@@ -290,28 +290,44 @@ impl Scheduler {
                 start.saturating_add(u64::try_from(wall.as_millis()).unwrap_or(u64::MAX))
             })
         };
-        // Every held lease belongs to an operation that holds it.
-        let mut ends: BTreeMap<&WorkerId, Vec<u64>> = BTreeMap::new();
+        // The estimated end of a lease: its start plus the P90 of the wall minutes of its
+        // key, raw (the tail cuts it to the bound); unknown when the key has no P90.
+        let estimate_of = |operation: OperationId, start: u64| {
+            let key = &self.ops[&operation].request.key;
+            let minutes = self.admission.wall_minutes_p90(key)?;
+            Some(start.saturating_add(u64::from(minutes).saturating_mul(60_000)))
+        };
+        // Every held lease belongs to an operation that holds it. Each entry is the end
+        // bound of a lease and its estimated end.
+        let mut ends: BTreeMap<&WorkerId, Vec<(u64, Option<u64>)>> = BTreeMap::new();
         for held in self.held.values() {
             let start = held.started_at.unwrap_or(held.granted_at).as_millis();
-            let end = end_of(held.operation, start);
+            let end = (
+                end_of(held.operation, start),
+                estimate_of(held.operation, start),
+            );
             let holding = self.ops[&held.operation].state.holding();
             holding
                 .into_iter()
                 .for_each(|(_, worker)| ends.entry(worker).or_default().push(end));
         }
         for (operation, placed) in placed {
-            let end = end_of(*operation, self.now.as_millis());
+            let start = self.now.as_millis();
+            let end = (end_of(*operation, start), estimate_of(*operation, start));
             ends.entry(&placed.worker).or_default().push(end);
         }
         let loads: Vec<HostLoad> = self
             .workers
             .iter()
-            .map(|(name, w)| HostLoad {
-                id: name.as_str().to_owned(),
-                leases: w.leases,
-                end_bounds: ends.remove(name).unwrap_or_default(),
-                est_ends: Vec::new(),
+            .map(|(name, w)| {
+                let (end_bounds, est_ends) =
+                    ends.remove(name).unwrap_or_default().into_iter().unzip();
+                HostLoad {
+                    id: name.as_str().to_owned(),
+                    leases: w.leases,
+                    end_bounds,
+                    est_ends,
+                }
             })
             .collect();
         Some(drain_cost(&loads, self.now.as_millis()))
