@@ -425,3 +425,29 @@ fn seating_with_resources_refuses_what_does_not_fit() {
     assert_eq!(book.seat_as(&host("a"), lease(4), one()), Err(elsewhere));
     assert_eq!(book.seat_as(&host("b"), lease(4), one()), Ok(()));
 }
+
+/// Asserts that `start_by` answers as `start_where` does before it looks at any host: a
+/// stopped lease is `LeaseEnded`, a lease that holds a host is `Started` there again
+/// without asking the chooser, and a gate refusal is passed on. A chooser asked in these
+/// cases would book a second time or ignore the gate.
+#[test]
+fn start_by_settles_a_start_before_it_asks_the_chooser() {
+    let mut book = one_host();
+    let class = sharing();
+    let asked = RefCell::new(0);
+    let first = |open: &[Candidate]| {
+        *asked.borrow_mut() += 1;
+        (!open.is_empty()).then_some(0)
+    };
+    let started = book.start_by(&spec(&class, 1, 500), None, ANY, &first);
+    assert_eq!(started, StartAck::Started { host: host("a") });
+    let again = book.start_by(&spec(&class, 1, 500), None, ANY, &first);
+    assert_eq!(again, StartAck::Started { host: host("a") });
+    let gate = Some(RefusalCode::UnsupportedClass);
+    let gated = book.start_by(&spec(&class, 2, 500), gate, ANY, &first);
+    assert_eq!(gated, StartAck::Refused(RefusalCode::UnsupportedClass));
+    book.stop(&lease(1));
+    let ended = book.start_by(&spec(&class, 1, 500), None, ANY, &first);
+    assert_eq!(ended, StartAck::Refused(RefusalCode::LeaseEnded));
+    assert_eq!(asked.into_inner(), 1);
+}
