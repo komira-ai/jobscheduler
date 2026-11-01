@@ -8,10 +8,10 @@ mod support;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_agent_wire::{Heartbeat, HeldRun, HeldState, Hello};
+use js_agent_wire::{Command, Heartbeat, HeldRun, HeldState, Hello};
 use js_pool_static::Candidate;
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
-use js_registry::{Placer, PoolConfig};
+use js_registry::{Placer, PoolConfig, RunRefusal};
 use js_types::{Admission, ClassId, Dims, Request, ResourceClass, Resources};
 use support::world::*;
 use support::*;
@@ -24,13 +24,32 @@ fn book() -> ResourceClass {
     )
 }
 
+/// A `book` lease of one core and 1 MiB, enough for one run of [`job`].
 fn sharing_spec(sequence: u64, wall_s: u64) -> StartSpec {
+    sharing_spec_of(
+        sequence,
+        wall_s,
+        Resources::new(1000, 1 << 20, 0, None).unwrap(),
+    )
+}
+
+/// A `book` lease that books `resources`.
+fn sharing_spec_of(sequence: u64, wall_s: u64, resources: Resources) -> StartSpec {
     let request = Request {
         class: book().id().clone(),
         max_wall: Duration::from_secs(wall_s),
+        resources,
         ..request()
     };
     StartSpec::new(lease(sequence), request, &[book()]).unwrap()
+}
+
+/// A run named `run` with limits of `cpu_millis` and `memory_bytes`.
+fn job_of(run: &str, cpu_millis: u64, memory_bytes: u64) -> js_agent_wire::JobSpec {
+    let mut spec = job(run);
+    spec.limits.cpu_millis = cpu_millis;
+    spec.limits.memory_bytes = memory_bytes;
+    spec
 }
 
 /// A placer that books the last candidate it is shown, and remembers which hosts it was
@@ -190,7 +209,7 @@ fn a_restored_sharing_lease_keeps_its_resources() {
 fn a_share_is_kept_off_a_host_that_holds_runs_of_no_booked_lease() {
     let mut p = pool(&[]);
     p.fx.registry.set_placer(Arc::new(Last::default()));
-    let one = Some(Resources::new(1000, 1, 0, None).unwrap());
+    let one = Some(Resources::new(1000, 1 << 20, 0, None).unwrap());
     let seated = p.provider.seat_booked(&host("a"), lease(1), None, one);
     assert_eq!(seated, Ok(()));
     let orphan = HeldRun {
@@ -225,6 +244,100 @@ fn a_share_is_kept_off_a_host_that_holds_runs_of_no_booked_lease() {
     p.provider.stop(&lease(1));
     p.fx.registry.heartbeat(&listing, &cred("t")).unwrap();
     assert_eq!(p.provider.start(sharing_spec(4, 600)), refused);
+}
+
+/// Catches: a lease that shares a host running past what it booked, on the host's whole
+/// budget. Two leases share `a` (4 cores, 8 GiB), each booking 2 cores and 1 GiB. A run of
+/// lease 1 past its share (one millicore or one byte over) is refused as past the shape,
+/// though the host has room for it; its runs together may fill its share exactly, and one
+/// millicore more is refused for capacity. Lease 2's share is untouched: it still runs its
+/// full 2 cores and 1 GiB.
+#[test]
+fn a_run_is_held_to_the_share_its_lease_booked() {
+    let mut p = pool(&["a"]);
+    p.fx.registry.set_placer(Arc::new(Last::default()));
+    let share = Resources::new(2000, 1 << 30, 0, None).unwrap();
+    for n in 1..=2 {
+        let ack = p.provider.start(sharing_spec_of(n, 600, share.clone()));
+        assert_eq!(on(&ack), Some("a"));
+    }
+    assert_runs_held_to_share(&p);
+}
+
+/// The checks of [`a_run_is_held_to_the_share_its_lease_booked`], over a host `a` where
+/// leases 1 and 2 each book 2 cores and 1 GiB.
+fn assert_runs_held_to_share(p: &Pool) {
+    let queue = |n: u64, spec| p.fx.registry.queue_run(&host("a"), &lease(n), spec);
+    let gib = 1 << 30;
+    assert_eq!(
+        queue(1, job_of("over-cpu", 2001, 1)).unwrap_err(),
+        RunRefusal::LimitsExceedShape
+    );
+    assert_eq!(
+        queue(1, job_of("over-mem", 1, gib + 1)).unwrap_err(),
+        RunRefusal::LimitsExceedShape
+    );
+    queue(1, job_of("a1", 1500, gib / 2)).unwrap();
+    queue(1, job_of("a2", 500, gib / 2)).unwrap();
+    assert_eq!(
+        queue(1, job_of("a3", 1, 1)).unwrap_err(),
+        RunRefusal::NoCapacity
+    );
+    queue(2, job_of("b1", 2000, gib)).unwrap();
+}
+
+/// Catches: a lease put back after a restart whose runs are held to the whole host, or to
+/// nothing: two shares are restored on `a` with what they booked, and their runs are held
+/// to those shares as a lease that started here is.
+#[test]
+fn a_restored_lease_runs_within_its_share() {
+    let p = pool(&[]);
+    p.fx.registry.set_placer(Arc::new(Last::default()));
+    let share = || Some(Resources::new(2000, 1 << 30, 0, None).unwrap());
+    for n in 1..=2 {
+        let seated = p.provider.seat_booked(&host("a"), lease(n), None, share());
+        assert_eq!(seated, Ok(()));
+    }
+    p.fx.join("a", "t");
+    assert_runs_held_to_share(&p);
+}
+
+/// Catches: a queued run that the host never listed, of a lease that is no longer booked,
+/// let through by a share check that reads only the host's list. Lease 1 queues a run that
+/// is not yet listed, lease 2 stays booked beside it, and lease 1 is stopped: a third
+/// share is refused while the run is queued. The heartbeat after the stop carries the
+/// stop of the run; the host's next heartbeat, which still does not list it, retires it,
+/// and only then is the share admitted.
+#[test]
+fn an_unlisted_run_of_an_ended_lease_keeps_a_share_out_until_it_is_retired() {
+    let mut p = pool(&[]);
+    p.fx.registry.set_placer(Arc::new(Last::default()));
+    let epoch = p.fx.join("a", "t");
+    for n in 1..=2 {
+        assert_eq!(on(&p.provider.start(sharing_spec(n, 600))), Some("a"));
+    }
+    p.fx.registry
+        .queue_run(&host("a"), &lease(1), job("queued"))
+        .unwrap();
+    p.provider.stop(&lease(1));
+    let refused = StartAck::Refused(RefusalCode::NoCapacity);
+    assert_eq!(p.provider.start(sharing_spec(3, 600)), refused);
+    let beat = || {
+        let empty = p.fx.heartbeat("a", epoch);
+        p.fx.registry.heartbeat(&empty, &cred("t")).unwrap()
+    };
+    let mut beats = 0;
+    while p.provider.start(sharing_spec(3, 600)) == refused {
+        beats += 1;
+        assert!(beats <= 3, "the run of the stopped lease is never retired");
+        let reply = beat();
+        let stops = reply
+            .commands
+            .iter()
+            .filter(|c| matches!(c, Command::Stop { .. }));
+        assert!(beats > 1 || stops.count() == 1, "{reply:?}");
+    }
+    assert_eq!(p.provider.capacity()[0].leases, vec![lease(2), lease(3)]);
 }
 
 /// The world of the reservation tests with `book` leases beside its whole-node requests:

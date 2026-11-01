@@ -322,6 +322,13 @@ impl HostBook {
         }
     }
 
+    /// What `lease` books where it is booked: its own resources for a lease that shares the
+    /// host, the whole shape for one that books it all. `None` when it is not booked.
+    pub fn held(&self, lease: &LeaseId) -> Option<&Held> {
+        let leases = self.hosts.values().flat_map(|host| host.leases.iter());
+        leases.into_iter().find(|held| held.lease == *lease)
+    }
+
     /// The hosts that are booked and the lease holding each.
     pub fn booked(&self) -> BTreeMap<HostId, LeaseId> {
         let held = self

@@ -451,3 +451,24 @@ fn start_by_settles_a_start_before_it_asks_the_chooser() {
     assert_eq!(ended, StartAck::Refused(RefusalCode::LeaseEnded));
     assert_eq!(asked.into_inner(), 1);
 }
+
+/// Asserts what `held` reports a lease books: its own resources for a lease that shares
+/// the host, the host's whole shape for one that books all of it, and nothing for a lease
+/// that is not booked or was stopped. It catches a booking read as another lease's.
+#[test]
+fn held_reports_what_each_lease_books() {
+    let mut book = one_host();
+    book.insert_host(host("b"), shape());
+    let started = book.start_where(&spec(&sharing(), 1, 500), None, ANY);
+    assert_eq!(started, StartAck::Started { host: host("a") });
+    let started = book.start_where(&spec(&whole(), 2, 500), None, ANY);
+    assert_eq!(started, StartAck::Started { host: host("b") });
+    let shared = book.held(&LeaseId::new(1, 1)).unwrap();
+    assert_eq!(shared.resources, Resources::new(500, 1, 0, None).unwrap());
+    assert!(!shared.whole);
+    let all = book.held(&LeaseId::new(1, 2)).unwrap();
+    assert_eq!((&all.resources, all.whole), (shape().resources(), true));
+    assert_eq!(book.held(&LeaseId::new(1, 3)), None);
+    book.stop(&LeaseId::new(1, 1));
+    assert_eq!(book.held(&LeaseId::new(1, 1)), None);
+}

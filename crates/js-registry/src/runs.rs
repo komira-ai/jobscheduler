@@ -424,8 +424,11 @@ impl Runs {
     /// its session, at `now`. The caller has vetted the job and checked the host and the
     /// lease; this checks what is left of the lease's budget: the live runs of the host,
     /// their limits, their booked disk and their GPU indices together with this run's must
-    /// fit `shape`. `quota_default` is the quota the host enforces on a run that sets no
-    /// `disk_bytes`, when it reported one.
+    /// fit `shape`. A lease that shares the host (`share`, what it booked) is also held to
+    /// its own share: the limits and disk of its live runs together with this run's must
+    /// fit `share`, so one lease cannot take what another lease on the host booked.
+    /// `quota_default` is the quota the host enforces on a run that sets no `disk_bytes`,
+    /// when it reported one.
     ///
     /// A `spec.valid_for_ms` above zero is the time the lease has left: the run ends its
     /// bound that long after `now`. `profile` is the name the lease holder supplied for the
@@ -435,7 +438,7 @@ impl Runs {
         host: &HostId,
         lease: &LeaseId,
         (mut spec, profile): (JobSpec, Option<ProfileKey>),
-        shape: &Resources,
+        (shape, share): (&Resources, Option<&Resources>),
         quota_default: Option<u64>,
         (beats, now): (u64, u64),
     ) -> Result<RunView, RunRefusal> {
@@ -463,12 +466,35 @@ impl Runs {
         let taken = live.iter().flat_map(|run| run.spec.gpu_indices.iter());
         let taken = taken.collect::<BTreeSet<_>>();
         let clash = spec.gpu_indices.iter().any(|index| taken.contains(index));
+        // What this lease's live runs hold with this run's, against its own share.
+        let own = live.iter().filter(|run| run.lease == *lease);
+        let (own_cpu, own_memory, own_disk) = own.fold(
+            (limits.cpu_millis, limits.memory_bytes, disk),
+            |(cpu, memory, disk), run| {
+                let held = &run.spec.limits;
+                (
+                    cpu.saturating_add(held.cpu_millis),
+                    memory.saturating_add(held.memory_bytes),
+                    disk.saturating_add(run.disk),
+                )
+            },
+        );
+        let within_share = share.is_none_or(|share| {
+            [
+                own_cpu <= share.cpu_millis(),
+                own_memory <= share.memory_bytes(),
+                own_disk <= share.disk_bytes(),
+            ]
+            .into_iter()
+            .all(|ok| ok)
+        });
         let room = [
             live.len() < MAX_LIVE_RUNS,
             cpu <= shape.cpu_millis(),
             memory <= shape.memory_bytes(),
             disk_sum <= shape.disk_bytes(),
             !clash,
+            within_share,
         ];
         if !room.into_iter().all(|ok| ok) {
             return Err(RunRefusal::NoCapacity);
@@ -770,7 +796,7 @@ mod tests {
             &host,
             &LeaseId::new(1, 1),
             (job(), None),
-            &shape,
+            (&shape, None),
             None,
             (0, 0),
         )
@@ -809,7 +835,7 @@ mod tests {
             &host,
             &LeaseId::new(1, 1),
             (spec.clone(), None),
-            &shape,
+            (&shape, None),
             None,
             (0, 0),
         )
@@ -854,7 +880,7 @@ mod tests {
         }];
         let lease = LeaseId::new(1, 1);
         let mut runs = Runs::default();
-        runs.admit(&host, &lease, (spec, None), &shape, None, (0, 0))
+        runs.admit(&host, &lease, (spec, None), (&shape, None), None, (0, 0))
             .unwrap();
         runs.stop_run(&lease, "r1").unwrap();
         assert!(runs.map["r1"].spec.files.is_empty());
@@ -893,8 +919,15 @@ mod tests {
         let shape = Resources::new(4000, 8 << 30, 0, None).unwrap();
         let key = ProfileKey::parse("known").unwrap();
         let mut runs = Runs::default();
-        runs.admit(&host, &lease, (job(), Some(key)), &shape, None, (0, 0))
-            .unwrap();
+        runs.admit(
+            &host,
+            &lease,
+            (job(), Some(key)),
+            (&shape, None),
+            None,
+            (0, 0),
+        )
+        .unwrap();
         let lives: &dyn ProfileLives = &Known;
         assert_eq!(
             est_ends(Some(lives), &runs, &[(lease, 1_000)]),

@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use js_agent_wire::refusal as refusal_code;
-use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome};
+use js_agent_wire::{
+    Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome, WireShape,
+};
 use js_caps::{BUNDLE_ROOT, EXEC, FLAG_SET, HostContract, RUN_FILES, RUNTIME, SCRATCH_QUOTA};
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
@@ -880,6 +882,14 @@ impl Registry {
         if book.read(lease) != booked {
             return Err(RunRefusal::NotHeld);
         }
+        // A lease that shares the host runs within what it booked: one run past its share is
+        // refused as past the shape, and its runs together are held to it at admission.
+        let held = book.held(lease);
+        let share = held.filter(|held| !held.whole).map(|held| &held.resources);
+        let wire = share.map(WireShape::from_resources);
+        if wire.is_some_and(|wire| spec.fits_shape(&wire).is_err()) {
+            return Err(RunRefusal::LimitsExceedShape);
+        }
         if record.taint.is_some() {
             return Err(RunRefusal::HostTainted);
         }
@@ -901,7 +911,7 @@ impl Registry {
             host,
             lease,
             (spec, profile),
-            shape.resources(),
+            (shape.resources(), share),
             record.quota_default,
             seen,
         )
