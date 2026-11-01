@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 pub use js_agent_wire::{LogTail, Outcome};
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::client::Client;
 use crate::error::ClientError;
@@ -70,7 +71,23 @@ impl Client {
     /// `UnknownRun` and `Forgotten` for the three documented refusals, `Refused` for any
     /// other status, `Malformed` for a 200 that is not a run entry.
     pub fn run(&self, lease_id: &str, run_id: &str) -> Result<RunRead, RunReadError> {
-        let _ = (self, lease_id, run_id);
-        Err(RunReadError::Malformed("not written yet".to_owned()))
+        let reply = self.get(&format!("/v1/leases/{lease_id}/runs/{run_id}"))?;
+        let code = reply
+            .body
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        match (reply.status, code.as_str()) {
+            (200, _) => serde_json::from_value(reply.body)
+                .map_err(|why| RunReadError::Malformed(why.to_string())),
+            (404, "unknown-lease") => Err(RunReadError::UnknownLease(lease_id.to_owned())),
+            (404, "unknown-run") => Err(RunReadError::UnknownRun(run_id.to_owned())),
+            (410, "run-forgotten") => Err(RunReadError::Forgotten(run_id.to_owned())),
+            (status, code) => Err(RunReadError::Refused {
+                status,
+                code: code.to_owned(),
+            }),
+        }
     }
 }
