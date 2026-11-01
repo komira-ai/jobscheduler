@@ -850,4 +850,35 @@ mod tests {
             reply.commands
         );
     }
+
+    /// Asserts the restart case of the estimate feed: a booked lease with a keyed run
+    /// whose profile has a known P90, but with no recorded start (as a lease put back
+    /// after a restart has none), is fed as one lease with no estimate, so the drain cost
+    /// falls back to its bound; with the start known the same run is fed start plus P90.
+    /// It catches an estimate counted from a start that is not known.
+    #[test]
+    fn a_lease_with_no_recorded_start_is_fed_no_estimate() {
+        use crate::lives::{ProfileLives, est_ends};
+        use js_lease::Timestamp;
+        struct Known;
+        impl ProfileLives for Known {
+            fn wall_minutes_p90(&self, _: &ProfileKey) -> Option<u32> {
+                Some(2)
+            }
+        }
+        let host = HostId::new("a").unwrap();
+        let lease = LeaseId::new(1, 1);
+        let shape = Resources::new(4000, 8 << 30, 0, None).unwrap();
+        let key = ProfileKey::parse("known").unwrap();
+        let mut runs = Runs::default();
+        runs.admit(&host, &lease, (job(), Some(key)), &shape, None, (0, 0))
+            .unwrap();
+        let bound = Some((lease, Timestamp::from_millis(900_000)));
+        let lives: &dyn ProfileLives = &Known;
+        assert_eq!(est_ends(Some(lives), &runs, bound, None), [None]);
+        assert_eq!(
+            est_ends(Some(lives), &runs, bound, Some(1_000)),
+            [Some(1_000 + 120_000)]
+        );
+    }
 }

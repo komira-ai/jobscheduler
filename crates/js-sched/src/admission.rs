@@ -265,7 +265,9 @@ impl Admission {
     }
 
     /// The P90 of the wall minutes the runs of `key` lasted, when the curve source knows
-    /// it. Read whatever the load settings are: the drain cost uses it for the tail.
+    /// it. Read whatever the load settings are: the drain cost uses it for the tail. It is
+    /// the raw P90 (`Fit.wall_minutes_p90`), not `Profile.life`, which adds
+    /// `expected_life_delta_minutes`.
     pub(crate) fn wall_minutes_p90(&self, key: &WorkKey) -> Option<u32> {
         self.curves.0.wall_minutes_p90(key)
     }

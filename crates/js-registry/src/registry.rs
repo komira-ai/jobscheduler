@@ -269,8 +269,9 @@ impl Registry {
     /// Gives the registry the source of how long the runs of a profile take. From then on
     /// the drain cost of a host reads the estimated end of its lease, from the start of the
     /// lease and the largest P90 among the profile names of its keyed runs
-    /// ([`Registry::queue_keyed_run`]). Only the first call takes effect; a registry with no
-    /// source costs a lease by its max-wall bound alone.
+    /// ([`Registry::queue_keyed_run`]). The source is set once (a `OnceLock`): only the
+    /// first call takes effect and a second is ignored, which is right with one usage store
+    /// per pool. A registry with no source costs a lease by its max-wall bound alone.
     pub fn set_lives(&self, lives: Arc<dyn crate::ProfileLives>) {
         let _ = self.shared.lives.set(lives);
     }
