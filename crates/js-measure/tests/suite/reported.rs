@@ -586,7 +586,10 @@ fn the_whole_host_noise_workload_runs_the_cell() {
     assert_eq!(jobs.len(), 1);
     let args = &jobs[0].run.args;
     let value_of = |flag: &str| {
-        let at = args.iter().position(|a| a == flag).unwrap_or_else(|| panic!("{flag}: {args:?}"));
+        let at = args
+            .iter()
+            .position(|a| a == flag)
+            .unwrap_or_else(|| panic!("{flag}: {args:?}"));
         args[at + 1].as_str()
     };
     assert_eq!(value_of("--query"), "q6");
@@ -594,7 +597,10 @@ fn the_whole_host_noise_workload_runs_the_cell() {
     assert_eq!(value_of("--dataset"), "tpch");
     assert_eq!(value_of("--suite"), "tpch");
     assert_eq!(args.last().map(String::as_str), Some("--js-measure-result"));
-    assert!(!args.iter().any(|a| a == "--cell" || a == "--result-line"), "{args:?}");
+    assert!(
+        !args.iter().any(|a| a == "--cell" || a == "--result-line"),
+        "{args:?}"
+    );
     assert_eq!(jobs[0].lease.class, "action");
     let whole = plan.arms.iter().find(|a| a.label == "whole-host").unwrap();
     assert_eq!(whole.lease_class.as_deref(), Some("whole-node"));
