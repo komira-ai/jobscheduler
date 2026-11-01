@@ -36,9 +36,20 @@
 //!   lines equal to an `--ignore LINE`, on both sides and printed (a host installed by another
 //!   tool may word one line differently). World-readable files need no root.
 //!
+//! * `js-mdm dep define-profile --config FILE [--replace] [--apply]`: as root, the ADE profile
+//!   defined at Apple through depserver on loopback and made the assigner's, recorded in
+//!   `MDM_STATE/dep-profile-uuid` and `dep-profile.sha256`, and the depsyncer enabled. A
+//!   profile with the recorded sha256 is not defined again; a recorded profile that is not
+//!   this render is refused unless `--replace`. The API key is read from the root-only
+//!   `MDM_ETC/nanodep.env`, goes only into an `Authorization` header and is used only from a
+//!   binary root owns alone.
+//! * `js-mdm dep assign --config FILE --serial SERIAL... [--apply]`: as root, the recorded
+//!   profile assigned to devices already in Apple Business Manager; exit 1 unless every device
+//!   answers `SUCCESS`.
+//!
 //! Not in this slice: `push-cert` (the APNs push certificate and the enrollment profile),
-//! `dep` (Apple Business Manager) and `erase`. The checks that dial the proxy over HTTPS are
-//! not either.
+//! `dep get-cert` and `dep upload-token`, and `erase`. The checks that dial the proxy over
+//! HTTPS are not either.
 //!
 //! # Rules every verb keeps
 //!

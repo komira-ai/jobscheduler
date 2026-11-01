@@ -178,6 +178,14 @@ pub trait Host {
 /// # Errors
 /// The file is not root's, or its group or others can write it.
 pub fn check_binary_meta(uid: u32, mode: u32) -> io::Result<()> {
-    let _ = (uid, mode);
-    Ok(())
+    match (uid, mode & 0o022) {
+        (0, 0) => Ok(()),
+        (0, _) => Err(io::Error::other(format!(
+            "the running binary is writable by its group or others (mode {:04o})",
+            mode & 0o7777
+        ))),
+        (uid, _) => Err(io::Error::other(format!(
+            "the running binary is owned by uid {uid}, not root"
+        ))),
+    }
 }

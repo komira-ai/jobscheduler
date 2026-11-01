@@ -71,12 +71,55 @@ stderr).
   world-readable files need no root, the checks of root-only files do. A unit an admin has
   masked (a link to `/dev/null`) is reported as `wrong`, a link, not as `same` or `missing`.
 
+* `js-mdm dep define-profile --config FILE [--replace] [--apply]`: root, even as a dry run.
+  Renders the ADE profile (`js-mdm-core`'s `AdeProfile`), defines it at Apple through
+  depserver (`POST /proxy/<MDM_DEP_NAME>/profile`), makes it the assigner's
+  (`PUT /v1/assigner/<MDM_DEP_NAME>?profile_uuid=...`, which depsyncer gives to new devices),
+  records it in `MDM_STATE/dep-profile-uuid` and `MDM_STATE/dep-profile.sha256` (0644 root;
+  `<uuid>\n` and `<sha256 hex of the profile JSON>\n`) and enables and starts the depsyncer.
+  A dry run prints the profile JSON and the calls and makes none. The records decide a rerun:
+
+  * the recorded sha256 is this render's: `ADE profile: unchanged`, no call (the depsyncer is
+    still brought up if it is not);
+  * a profile is recorded with another sha256 (or none): refused, exit 2, before any call. The
+    `MDM_ADE_*`, `MDM_LANGUAGE` or `MDM_REGION` settings changed, or another tool defined the
+    profile with other values. `--replace` defines a second profile (Apple keeps the old one)
+    and moves the assigner to it; with no record the first define needs no flag.
+
+  The API key `NANODEP_API` is read from `MDM_ETC/nanodep.env` (0600, root). It travels only as
+  the `Authorization` header of calls to `127.0.0.1:MDM_DEP_PORT`; the calls are made only by
+  a binary that root owns and nobody else can write (`REFUSED` otherwise), and are printed
+  with their size, never their body.
+
+  A call that succeeded followed by a failed record write leaves Apple ahead of the record; the
+  rerun then defines the profile again.
+
+  Compatibility with `kbf-deploy mdm dep define-profile`: it writes the same two files in the
+  same formats, so a box it ran on is adopted: the render hashes the same as kbf-deploy's only
+  if `MDM_ADE_PROFILE_NAME` (kbf-deploy: `<MDM_ORG> build farm`), `MDM_ADE_ORG_MAGIC`
+  (`kbf-mdm`), `MDM_LANGUAGE` (`en`), `MDM_REGION` (`US`) and `MDM_ADE_SKIP_ITEMS` (the
+  default list) equal kbf-deploy's values and `MDM_DNS_NAME` is the same. With other values
+  the sha256 differs, and the verb refuses to define a second profile unless `--replace` is
+  given. To keep the profile Apple already holds, set those keys to kbf-deploy's values.
+* `js-mdm dep assign --config FILE --serial SERIAL... [--apply]`: root. Assigns the recorded
+  profile to devices already listed in Apple Business Manager (`POST
+  /proxy/<MDM_DEP_NAME>/profile/devices`; the depsyncer covers devices that sync in later). A
+  serial is 8 to 14 upper-case letters and digits. One line `SERIAL: STATUS` per device; exit 1
+  unless Apple answers `SUCCESS` for each (a serial missing from the answer is `no answer`).
+  Refused (exit 2) when no profile is recorded: run `dep define-profile --apply` first.
+
+Neither `dep` verb touches `www/enroll.mobileconfig`, and `install` does not write it: an
+enrollment profile written by another tool stays as it is. (Its payload UUIDs are derived from
+`MDM_PROFILE_ID` here and are fixed in kbf-deploy's render, so a Mac that took one would hold
+two profiles if the file were replaced.) Writing it is the job of the `push-cert` verb, which
+is not in this slice.
+
 ## Not in this slice
 
-`push-cert` (the APNs push certificate and the enrollment profile), `dep` (Apple Business
-Manager) and `erase`, and the checks that dial the proxy over HTTPS. The enrollment profile is
-therefore not yet written or compared. Security notes for the profile are in `js-mdm-core`'s
-crate documentation.
+`push-cert` (the APNs push certificate and the enrollment profile), `dep get-cert` and
+`dep upload-token` (the Apple Business Manager token), and `erase`, and the checks that dial
+the proxy over HTTPS. The enrollment profile is therefore not yet written or compared.
+Security notes for the profile are in `js-mdm-core`'s crate documentation.
 
 ## Tests
 

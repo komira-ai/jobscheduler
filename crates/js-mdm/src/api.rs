@@ -26,7 +26,6 @@ use crate::{Env, MdmError};
 /// How long a connect, a read or a write may take: depserver's `/proxy/` calls wait on Apple.
 pub const TIMEOUT: Duration = Duration::from_secs(60);
 /// The most of an answer's body an error quotes.
-#[allow(dead_code)]
 const QUOTED: usize = 300;
 /// The most of an answer that is read.
 const MAX_REPLY: u64 = 4 << 20;
@@ -50,12 +49,15 @@ impl Service {
         addr: SocketAddr,
         key: Secret,
     ) -> Result<Service, MdmError> {
-        Ok(Service {
-            name,
-            user,
-            addr,
-            key,
-        })
+        match addr.ip().is_loopback() {
+            true => Ok(Service {
+                name,
+                user,
+                addr,
+                key,
+            }),
+            false => Err(MdmError::NotLoopback(addr.to_string())),
+        }
     }
 
     /// NanoDEP's depserver at `MDM_DEP_PORT`, with the key from `nanodep.env`.
@@ -85,7 +87,6 @@ impl Service {
         format!("Basic {}", STANDARD.encode(pair))
     }
 
-    #[allow(dead_code)]
     fn url(&self, path: &str) -> String {
         format!("http://{}{path}", self.addr)
     }
@@ -219,7 +220,6 @@ fn request(service: &Service, call: &Call) -> Vec<u8> {
     bytes
 }
 
-#[allow(dead_code)]
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
@@ -230,12 +230,36 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// # Errors
 /// What is wrong with the answer.
 pub fn parse_reply(raw: &[u8]) -> Result<Reply, String> {
-    let _ = raw;
-    Err("stub".to_owned())
+    let end = find(raw, b"\r\n\r\n").ok_or("the answer has no end of headers")?;
+    let head = String::from_utf8_lossy(&raw[..end]);
+    let lines: Vec<&str> = head.split("\r\n").collect();
+    let status = lines[0]
+        .split(' ')
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or("the answer has no status")?;
+    let header = |name: &str| {
+        lines.iter().find_map(|l| {
+            let (n, v) = l.split_once(':')?;
+            n.eq_ignore_ascii_case(name).then_some(v.trim())
+        })
+    };
+    let body = &raw[end + 4..];
+    let body = match (header("transfer-encoding"), header("content-length")) {
+        (Some(t), _) if t.eq_ignore_ascii_case("chunked") => dechunk(body)?,
+        (_, Some(n)) => {
+            let n: usize = n
+                .parse()
+                .map_err(|_| "the answer's length is not a number")?;
+            let whole = body.get(..n).ok_or("the answer is shorter than it says")?;
+            whole.to_vec()
+        }
+        _ => body.to_vec(),
+    };
+    Ok(Reply { status, body })
 }
 
 /// The body of a chunked answer.
-#[allow(dead_code)]
 fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
     loop {
@@ -258,12 +282,11 @@ fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>, String> {
 
 /// At most [`QUOTED`] characters of `body`, trimmed, for an error message.
 pub fn quoted(body: &[u8]) -> String {
-    let _ = body;
-    String::new()
+    let text = String::from_utf8_lossy(body);
+    text.trim().chars().take(QUOTED).collect()
 }
 
 /// `<method> <url> (<service> API[, <n> bytes])`.
-#[allow(dead_code)]
 struct Shown<'a>(&'a Service, &'a Call);
 
 impl fmt::Display for Shown<'_> {
@@ -291,6 +314,24 @@ pub fn call(
     mode: Mode,
     out: &mut dyn Write,
 ) -> Result<Option<Vec<u8>>, MdmError> {
-    let _ = (env, service, call, mode, out);
-    Ok(None)
+    let shown = Shown(service, call).to_string();
+    if mode == Mode::DryRun {
+        writeln!(out, "DRY-RUN: {shown}")?;
+        return Ok(None);
+    }
+    env.host
+        .check_binary()
+        .map_err(|e| MdmError::Untrusted(e.to_string()))?;
+    writeln!(out, "+ {shown}")?;
+    let reply = env.api.send(service, call).map_err(|why| MdmError::Api {
+        call: shown.clone(),
+        why,
+    })?;
+    match (200..300).contains(&reply.status) {
+        true => Ok(Some(reply.body)),
+        false => Err(MdmError::Api {
+            call: shown,
+            why: format!("answered {}: {}", reply.status, quoted(&reply.body)),
+        }),
+    }
 }
