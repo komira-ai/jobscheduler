@@ -16,7 +16,7 @@ use super::rollback_entries::{
     RELINK, assert_restored, link_moved, link_target, previous, rb_marks, staged, start,
     start_failed, stop, stopped, unit_state, verified, verify_failed,
 };
-use super::step_rig::{Rig, Spy, UNIT, end_state, killable, line, running};
+use super::step_rig::{LEASE_SECS, Rig, Spy, UNIT, end_state, killable, line, running};
 
 fn uncordons(spy: &Spy<'_>) -> usize {
     spy.log().iter().filter(|call| *call == "uncordon").count()
@@ -356,11 +356,26 @@ fn the_wait_for_the_hello_ends_at_its_bound() {
 
 #[test]
 fn the_new_agents_own_session_is_not_proof_after_a_failed_verify() {
-    let rig = verify_failed("hook-rollback-new-agents-session");
+    // The new agent said hello (on the wrong runtime, so that verify failed) and runs.
+    let rig = running(Rig::new("hook-rollback-new-agents-session"));
+    rig.world.pause(super::rollback_entries::WAIT);
+    assert_eq!(Spy::new(&rig).cutover(&rig).outcome, Outcome::Success);
+    rig.world
+        .alter_host(|host| host.runtime = Some("docker".to_owned()));
+    let verify = Spy::new(&rig).verify(&rig);
+    assert_eq!(
+        verify.report.reason,
+        Some(Reason::VersionMismatch),
+        "{verify:?}"
+    );
+    rig.kill.disarm();
+    rig.world.pause(super::rollback_entries::WAIT);
+    assert_eq!(rig.host().agent_version.as_deref(), Some("1.4.0"));
     let spy = Spy::new(&rig);
     *spy.start_leaves.borrow_mut() = Some(("active", "running"));
     let done = spy.rollback(&rig);
     assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    // Not a wrong version: the session is the new agent's own, and is not another one.
     assert_eq!(done.report.reason, Some(Reason::NoHello));
     assert_eq!(rig.host().agent_version.as_deref(), Some("1.4.0"));
 }
@@ -423,9 +438,16 @@ fn a_unit_that_dies_during_the_hello_wait_is_a_release_failure() {
 
 // Re-running: every kill point, every act at most once.
 
-fn agent_says_hello(spy: &Spy<'_>, link: &std::path::Path, previous: &std::path::Path) {
+/// The agent a start began says hello on its own, some time after: when the unit is up on the
+/// previous release and the server still shows the session of before.
+fn agent_says_hello(
+    spy: &Spy<'_>,
+    link: &std::path::Path,
+    previous: &std::path::Path,
+    old_session: Option<u64>,
+) {
     let linked = spy.world.target(link).unwrap().as_deref() == Some(previous);
-    let said = spy.world.host().unwrap().agent_version.as_deref() == Some("1.3.0");
+    let said = spy.world.host().unwrap().session_started_ms != old_session;
     if linked && !said && spy.world.is_active(UNIT).unwrap() {
         spy.world.hello("1.3.0").unwrap();
     }
@@ -433,8 +455,10 @@ fn agent_says_hello(spy: &Spy<'_>, link: &std::path::Path, previous: &std::path:
 
 /// Runs the rollback of `build`'s host to its end; then, from a fresh host, once for each kill
 /// point it passes: killed there, run again, and the same end required, with every act made
-/// as often as in the uninterrupted run.
-fn sweep(label: &str, build: fn(&str) -> Rig) {
+/// as often as in the uninterrupted run. With `lapsed_ok` the cordon may be left in force at the
+/// end where it was placed again and the kill came between the placing and the record of it:
+/// the record then cannot say it is ours, so it is not lifted, and it lapses within a lease.
+fn sweep(label: &str, build: fn(&str) -> Rig, lapsed_ok: bool) {
     let baseline = build(&format!("{label}-base"));
     let spy = Spy::new(&baseline);
     assert_eq!(spy.rollback(&baseline).outcome, Outcome::Success);
@@ -470,7 +494,7 @@ fn sweep(label: &str, build: fn(&str) -> Rig) {
             made.pop();
         }
         let rerun = Spy::new(&rig);
-        rerun.on_pause(move |spy, _| agent_says_hello(spy, &link, &prev));
+        rerun.on_pause(move |spy, _| agent_says_hello(spy, &link, &prev, session));
         let done = rerun.rollback(&rig);
         assert_eq!(
             done.outcome,
@@ -480,19 +504,31 @@ fn sweep(label: &str, build: fn(&str) -> Rig) {
         let mut names: Vec<String> = made.iter().map(|act| act.call.clone()).collect();
         names.extend(rerun.act_names());
         assert_eq!(names, want, "killed at point {k}");
-        assert_eq!(end_state(&rig), end, "killed at point {k}");
+        let mut got = end_state(&rig);
+        let mut want_end = end.clone();
+        if lapsed_ok {
+            let left = got["cordon"].as_u64();
+            let lapses = rig.world.now_ms() + LEASE_SECS * 1000;
+            assert!(
+                left.is_none_or(|expiry| expiry <= lapses),
+                "killed at point {k}: {left:?}"
+            );
+            got["cordon"] = serde_json::Value::Null;
+            want_end["cordon"] = serde_json::Value::Null;
+        }
+        assert_eq!(got, want_end, "killed at point {k}");
     }
 }
 
 #[test]
 fn a_rollback_of_a_link_moved_host_killed_at_any_point_and_run_again_ends_as_an_uninterrupted_one()
 {
-    sweep("hook-rollback-sweep-linked", link_moved);
+    sweep("hook-rollback-sweep-linked", link_moved, false);
 }
 
 #[test]
 fn a_rollback_of_a_failed_verify_killed_at_any_point_and_run_again_ends_as_an_uninterrupted_one() {
-    sweep("hook-rollback-sweep-verify", verify_failed);
+    sweep("hook-rollback-sweep-verify", verify_failed, true);
 }
 
 /// Kills the rollback of `build`'s host just before each of its acts: the marks of that act are
@@ -506,6 +542,7 @@ fn killed_before_each_act(label: &str, build: fn(&str) -> Rig) {
     for (k, act) in acts.iter().enumerate() {
         let rig = build(&format!("{label}-{k}"));
         let (link, prev) = (rig.link.clone(), previous(&rig));
+        let session = rig.host().session_started_ms;
         rig.kill.arm(act.points);
         let first = Spy::new(&rig);
         assert!(killable(|| first.rollback(&rig)).is_none());
@@ -514,7 +551,7 @@ fn killed_before_each_act(label: &str, build: fn(&str) -> Rig) {
         let before: Vec<String> = acts[..k].iter().map(|a| a.call.clone()).collect();
         assert_eq!(first.act_names(), before, "killed before {}", act.call);
         let rerun = Spy::new(&rig);
-        rerun.on_pause(move |spy, _| agent_says_hello(spy, &link, &prev));
+        rerun.on_pause(move |spy, _| agent_says_hello(spy, &link, &prev, session));
         assert_eq!(rerun.rollback(&rig).outcome, Outcome::Success);
         let after: Vec<String> = acts[k..].iter().map(|a| a.call.clone()).collect();
         assert_eq!(rerun.act_names(), after, "killed before {}", act.call);
