@@ -1,0 +1,41 @@
+<h1>kbf on jobscheduler</h1>
+<p class="lede">kbf is the first user of jobscheduler and the repository it was lifted out of. This page separates three things: what kbf takes from this repository today, what the documents say kbf does with it, and the design for running kbf's actions on the agent, which is not built.</p>
+
+<div class="notice notice-warn"><p><strong>About the kbf facts.</strong> The statements about kbf below are the repository's own documents, written against a kbf revision those documents name. This repository does not contain kbf, and kbf may have moved since. Check kbf's tree before you rely on a statement about it.</p></div>
+
+<h2 id="today">What kbf takes from this repository</h2>
+<p>The code here was written for kbf and lifted out of it. The first user depends on these crates by git revision: it names every <code>js-*</code> crate once, in its root <code>[workspace.dependencies]</code>, all at the same revision of this repository, and a bump is a deliberate pull request there that runs its full CI. Where a crate moved, kbf keeps its name as a shim that re-exports the crate here. This repository never depends on kbf: a test refuses a <code>kbf-*</code> dependency, and <code>deny.toml</code> bans kbf's crates by name.</p>
+<p>The pieces a scheduler server is built from are here:</p>
+<ul>
+  <li><code>js-sched</code>, the pure scheduler core, including admission by load (see <a href="concepts.html#placement">placement</a>);</li>
+  <li><code>js-server-core</code>, the loop around it that carries its effects out: a record is committed before anything that depends on it happens, and several frontends may share one store;</li>
+  <li><code>js-sizing</code>, the estimator that predicts an action's CPU and memory from earlier runs;</li>
+  <li><code>js-agent</code>, which the design documents call the generic half of the kbf daemon.</li>
+</ul>
+<p class="source-note">Sources: <code>docs/layering.md</code> ("Depending on the crates by git revision" and "Moving a crate in from another repository"), the module documentation of <code>crates/js-server-core/src/lib.rs</code> and <code>crates/js-sizing/src/lib.rs</code>, and <code>docs/design.md</code>, decisions 1 and 2 of the summary.</p>
+
+<h2 id="running">What kbf runs today</h2>
+<p>According to <code>docs/design/kbf-today.md</code>, checked against the kbf revision it names, kbf has two scheduler cores selected by <code>--scheduler-core</code>, and only the <code>legacy</code> one is built into a running server; <code>js</code> is refused at start unless a test-only feature is built. The same document says that nothing in kbf runs <code>js-agent</code>, and that no lease client of jobscheduler was in use.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Thing</th><th>State</th></tr></thead>
+<tbody>
+<tr><td>kbf depends on the <code>js-*</code> crates by git revision</td><td><span class="tag tag-ok">works today</span></td></tr>
+<tr><td>kbf's running server uses the <code>js</code> scheduler core</td><td><span class="tag tag-planned">not at the revision the document names</span></td></tr>
+<tr><td>kbf runs <code>js-agent</code> on its hosts</td><td><span class="tag tag-planned">not at the revision the document names</span></td></tr>
+</tbody></table></div>
+<p class="source-note">Source: the section "Corrections" of <code>docs/design/kbf-today.md</code>.</p>
+
+<h2 id="design">The design for kbf on the agent</h2>
+<p><code>docs/design/kbf-on-js-agent.md</code> is marked "design only": nothing in it is built or approved to run. It proposes the following, and the right-hand column is the state of each part in this repository.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Proposal</th><th>State</th></tr></thead>
+<tbody>
+<tr><td>A lease server is deployed; kbf leases whole hosts from it</td><td><span class="tag tag-ok">the lease API exists</span> <span class="tag tag-planned">kbf's client: not built</span></td></tr>
+<tr><td>kbf submits each action as a run on its lease, through <code>POST</code>, <code>GET</code> and <code>DELETE</code> on <code>/v1/leases/{id}/runs</code></td><td><span class="tag tag-ok">the interim run API exists</span> <span class="tag tag-muted">runs are in memory only: a restart forgets them</span></td></tr>
+<tr><td><code>js-agent</code> stands alone on every host, with no kbf process beside it</td><td><span class="tag tag-ok">the agent is standalone</span> <span class="tag tag-planned">kbf on it: design only</span></td></tr>
+<tr><td>Each action runs in its own digest-pinned image; the agent returns the container's exit code</td><td><span class="tag tag-planned">design only</span></td></tr>
+<tr><td>The task writes its outputs with one presigned upload, and kbf's frontend verifies what it reads back</td><td><span class="tag tag-planned">design only</span></td></tr>
+<tr><td>A kbf flag, <code>--executor</code>, chooses between the agent and kbf's own daemon, as the way back</td><td><span class="tag tag-planned">design only</span></td></tr>
+</tbody></table></div>
+<p>The document keeps jobscheduler generic: kbf's own types stay in kbf, and jobscheduler gets only generic fields.</p>
+<p class="source-note">Sources: <code>docs/design/kbf-on-js-agent.md</code> (its first lines, section 1 and requirement R1), <code>crates/js-lease-server/src/run_api.rs</code> (the module documentation) and <code>crates/js-lease-server/src/lib.rs</code> (the API table).</p>

@@ -1,0 +1,78 @@
+# Build and tests of the jobscheduler.dev website (site/): TypeScript compiled by tsc, a build
+# program that prerenders the pages, and node:test tests over the built tree (golden output,
+# links, the Content-Security-Policy rules, the pinned theme, a public-repo scan, and the
+# statements of the pages held to the code and documents they rest on). Runs when the site
+# changes, when a file the statements are held to changes (the claims test reads them), or when
+# this file changes. The Node version is exactly the one in the site's .node-version. The
+# network is touched by `npm ci` alone, with install scripts off.
+# This file builds and tests; it holds no cloud access and puts nothing anywhere.
+# GitHub-hosted runner, commit-pinned actions, no token rights beyond reading the checkout.
+name: jobscheduler-site
+
+on:
+  pull_request:
+    paths:
+      - site/**
+      - README.md
+      - Cargo.toml
+      - docs/**
+      - packaging/js-agent/**
+      - crates/js-agent/src/**
+      - crates/js-cli/src/**
+      - crates/js-lease-server/src/**
+      - crates/js-mdm/src/**
+      - crates/js-registry/src/**
+      - crates/js-sched/src/**
+      - crates/js-server-core/src/**
+      - crates/js-sizing/src/**
+      - crates/js-whole/src/**
+      - .github/workflows/jobscheduler-site.yml
+      - .github/workflows/js-agent-deb.yml
+      - .github/workflows/js-agent-macos-pkg.yml
+  push:
+    branches: [main]
+    paths:
+      - site/**
+      - README.md
+      - Cargo.toml
+      - docs/**
+      - packaging/js-agent/**
+      - crates/js-agent/src/**
+      - crates/js-cli/src/**
+      - crates/js-lease-server/src/**
+      - crates/js-mdm/src/**
+      - crates/js-registry/src/**
+      - crates/js-sched/src/**
+      - crates/js-server-core/src/**
+      - crates/js-sizing/src/**
+      - crates/js-whole/src/**
+      - .github/workflows/jobscheduler-site.yml
+      - .github/workflows/js-agent-deb.yml
+      - .github/workflows/js-agent-macos-pkg.yml
+
+permissions: {}
+
+concurrency:
+  group: jobscheduler-site-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: site/.node-version
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
