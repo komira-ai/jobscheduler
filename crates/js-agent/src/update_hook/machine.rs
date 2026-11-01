@@ -23,7 +23,9 @@ use js_mac_provision::daemon::AGENT_EXIT_TIMEOUT_SECS;
 use js_types::HostId;
 
 use crate::CredentialFile;
-use crate::facts::{Platform, SystemCommands, SystemFiles, host_id, machine_id};
+use crate::facts::{
+    CommandRunner, FileReader, Platform, SystemCommands, SystemFiles, host_id, machine_id,
+};
 use crate::lifecycle::StateRoot;
 use crate::own_host::{Cordoned, HostReading, HttpLease, Lease, LeaseError, Uncordoned};
 
@@ -52,14 +54,25 @@ fn system_stat(_: &Path, fd: BorrowedFd<'_>) -> io::Result<DirStat> {
     fd_stat(fd)
 }
 
-/// The id the agent registers under: a salted hash of the machine id.
+/// The id the agent registers under, a salted hash of the machine id that `runner` and `files`
+/// read on `platform`.
+///
+/// # Errors
+/// The machine id could not be read.
+pub fn own_host_id(
+    platform: &Platform,
+    runner: &dyn CommandRunner,
+    files: &dyn FileReader,
+) -> Result<String, String> {
+    machine_id(platform, runner, files).map(|machine| host_id(&machine))
+}
+
 fn system_host_id() -> Result<String, String> {
-    machine_id(
+    own_host_id(
         &Platform::current(),
         &SystemCommands::default(),
         &SystemFiles,
     )
-    .map(|machine| host_id(&machine))
 }
 
 impl Machine<'static> {
