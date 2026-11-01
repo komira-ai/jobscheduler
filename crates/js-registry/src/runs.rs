@@ -782,6 +782,25 @@ mod tests {
         }
     }
 
+    /// Asserts what `only_of` takes for runs of booked leases: a run the host lists, of a
+    /// booked lease, on that host is one; the same run listed by another host is not (the
+    /// registry knows it on `a`), nor is a listed id it does not know, nor a live run of a
+    /// lease not among those booked. It catches a listed run counted for a host by its id
+    /// alone.
+    #[test]
+    fn only_runs_of_this_host_and_its_booked_leases_count() {
+        let (a, b) = (HostId::new("a").unwrap(), HostId::new("b").unwrap());
+        let shape = Resources::new(4000, 8 << 30, 0, None).unwrap();
+        let lease = LeaseId::new(1, 1);
+        let mut runs = Runs::default();
+        let queued = runs.admit(&a, &lease, (job(), None), (&shape, None), None, (0, 0));
+        let run_id = queued.unwrap().run_id;
+        let listed = BTreeSet::from([run_id]);
+        assert!(runs.only_of(&a, &listed, &[lease]));
+        assert!(!runs.only_of(&b, &listed, &[lease]));
+        assert!(!runs.only_of(&a, &BTreeSet::from(["ghost".to_owned()]), &[lease]));
+        assert!(!runs.only_of(&a, &BTreeSet::new(), &[LeaseId::new(1, 2)]));
+    }
     /// Asserts the starts gate on its own, whatever the registry lets into the queue: a
     /// queued run of a host whose exclusive lease is not ready is sent no start, and the
     /// same run is started once the host is. It catches a start sent to a host that is
