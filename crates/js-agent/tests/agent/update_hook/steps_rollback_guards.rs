@@ -2,14 +2,16 @@
 //! (which has no previous release), that a taint or an owed check halts it before any act, and
 //! what it does when the lease server does not answer.
 
-use js_agent::update_hook::{Class, Clock, Outcome, Reason};
+use js_agent::update_hook::{
+    Class, Clock, Outcome, ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, Reason, START_WAIT_SECS,
+};
 use serde_json::json;
 
 use super::rollback_entries::{
-    RELINK, assert_restored, first_prepared, link_moved, link_target, rb_marks, staged, start,
-    unit_state, verified, verified_on, verify_failed, verify_failed_on,
+    RELINK, assert_restored, first_prepared, link_moved, link_target, staged, start, start_failed,
+    stopped, unit_state, verified, verified_on, verify_failed, verify_failed_on,
 };
-use super::step_rig::{RETRY_AFTER_SECS, Rig, Spy, end_state, line, running};
+use super::step_rig::{Rig, Spy, end_state, line, running};
 
 fn uncordons(spy: &Spy<'_>) -> usize {
     spy.log().iter().filter(|call| *call == "uncordon").count()
@@ -301,8 +303,15 @@ fn a_taint_that_appears_while_the_previous_agent_is_awaited_halts_there() {
 
 // The lease server does not answer.
 
+/// How long the rollback waits for a lease server that does not answer before its first act: the
+/// declared bound less the start, the hello and the margin.
+fn outage_bound_secs(rig: &Rig) -> u64 {
+    rig.declaration.timeouts.rollback - START_WAIT_SECS - ROLLBACK_HELLO_SECS - ROLLBACK_MARGIN_SECS
+}
+
 #[test]
-fn a_lease_server_that_is_down_before_the_first_act_defers_the_rollback_with_nothing_done() {
+fn a_lease_server_that_stays_down_before_the_first_act_is_waited_for_and_then_fails_as_environment()
+{
     for (label, rig) in [
         ("link-moved", link_moved("hook-rollback-outage-linked")),
         (
@@ -314,22 +323,24 @@ fn a_lease_server_that_is_down_before_the_first_act_defers_the_rollback_with_not
         let before = (rig.record_bytes(), end_state(&rig));
         let spy = Spy::new(&rig);
         spy.fail("host");
+        let ticks = rig.world.ticks();
         let done = spy.rollback(&rig);
-        assert_eq!(done.outcome, Outcome::Deferred, "{label}: {done:?}");
+        assert_eq!(done.outcome, Outcome::Failure, "{label}: {done:?}");
         assert_eq!(
             done.report.reason,
             Some(Reason::LeaseUnreachable),
             "{label}"
         );
         assert_eq!(done.report.class, Class::Environment, "{label}");
-        assert_eq!(
-            done.report.retry_after_secs,
-            Some(RETRY_AFTER_SECS),
-            "{label}"
-        );
+        assert_eq!(done.report.retry_after_secs, None, "{label}");
         assert!(
             !done.report.reversible,
             "{label}: the stop was made by the cutover"
+        );
+        assert_eq!(
+            rig.world.ticks() - ticks,
+            usize::try_from(outage_bound_secs(&rig) / 10).unwrap(),
+            "{label}: retried inside the step until the bound"
         );
         assert_eq!(spy.act_names(), Vec::<String>::new(), "{label}");
         assert_eq!(
@@ -345,32 +356,101 @@ fn a_lease_server_that_is_down_before_the_first_act_defers_the_rollback_with_not
 }
 
 #[test]
-fn a_cordon_that_cannot_be_lifted_after_the_previous_agent_is_back_defers_and_a_rerun_lifts_it() {
+fn a_lease_server_that_comes_back_while_the_rollback_waits_for_it_lets_it_go_on() {
+    let rig = link_moved("hook-rollback-outage-transient");
+    let spy = Spy::new(&rig);
+    spy.fail("host");
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 3 {
+            spy.heal("host");
+        }
+    });
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(rig.world.ticks() - base, 3);
+    assert_eq!(spy.act_names(), [RELINK.to_owned(), start()]);
+    assert_restored(&rig);
+}
+
+#[test]
+fn a_cordon_that_cannot_be_lifted_is_left_to_lapse_and_the_rollback_ends_in_success() {
     let rig = link_moved("hook-rollback-outage-uncordon");
     let spy = Spy::new(&rig);
     spy.fail("uncordon");
     let done = spy.rollback(&rig);
-    assert_eq!(done.outcome, Outcome::Deferred, "{done:?}");
-    assert_eq!(done.report.reason, Some(Reason::LeaseUnreachable));
-    assert_eq!(done.report.class, Class::Environment);
-    assert_eq!(done.report.retry_after_secs, Some(RETRY_AFTER_SECS));
-    assert_eq!(spy.act_names(), [RELINK.to_owned(), start()]);
-    // The hello was seen and is marked; the record stays for the cordon.
-    assert_eq!(rb_marks(&rig), [false, false, true, true, true]);
-    assert!(rig.record().unwrap().cordon.placed);
-    assert!(rig.cordon_expiry().is_some());
-    let rerun = Spy::new(&rig);
-    let done = rerun.rollback(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert_eq!(
-        rerun.act_names(),
-        Vec::<String>::new(),
-        "nothing is done twice"
+    assert_eq!(done.report.reason, None);
+    assert!(
+        done.report
+            .detail
+            .as_deref()
+            .is_some_and(|text| text.contains("cordon left to lapse")),
+        "{done:?}"
     );
-    assert_eq!(uncordons(&rerun), 1);
-    assert_restored(&rig);
+    assert_eq!(spy.act_names(), [RELINK.to_owned(), start()]);
+    // Nothing renews it any more; the record is gone, and a rerun has nothing to do.
+    assert_eq!(rig.record(), None);
+    assert!(rig.cordon_expiry().is_some(), "it lapses on its own");
+    let rerun = Spy::new(&rig);
+    assert_eq!(rerun.rollback(&rig).outcome, Outcome::Success);
+    assert_eq!(rerun.act_names(), Vec::<String>::new());
+    rig.world.pause(std::time::Duration::from_secs(400));
+    assert!(rig.cordon_expiry().is_none());
 }
 
+#[test]
+fn a_cordon_that_cannot_be_lifted_when_nothing_was_stopped_is_left_to_lapse_and_stays_reversible() {
+    let rig = running(Rig::new("hook-rollback-outage-prepared"));
+    let spy = Spy::new(&rig);
+    spy.fail("uncordon");
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(done.report.reversible, "nothing irreversible happened");
+    assert!(
+        done.report
+            .detail
+            .as_deref()
+            .is_some_and(|text| text.contains("cordon left to lapse")),
+        "{done:?}"
+    );
+    assert_eq!(rig.record(), None);
+    assert_eq!(unit_state(&rig), "active running");
+}
+
+#[test]
+fn rollback_never_exits_75_at_any_entry_with_the_lease_server_down() {
+    let entries: Vec<(&str, Rig)> = vec![
+        ("prepared", running(Rig::new("hook-rollback-n75-prepared"))),
+        ("stopped", stopped("hook-rollback-n75-stopped")),
+        ("link-moved", link_moved("hook-rollback-n75-linked")),
+        ("start-failed", start_failed("hook-rollback-n75-failed")),
+        ("verify-failed", verify_failed("hook-rollback-n75-vf")),
+        ("verified", verified("hook-rollback-n75-verified")),
+        ("first", first_prepared("hook-rollback-n75-first")),
+        ("no-record", Rig::new("hook-rollback-n75-none")),
+    ];
+    for (label, rig) in entries {
+        for down in [
+            &["host", "uncordon", "cordon"][..],
+            &["host"],
+            &["uncordon"],
+        ] {
+            let spy = Spy::new(&rig);
+            for call in down {
+                spy.fail(call);
+            }
+            let done = spy.rollback(&rig);
+            assert_ne!(
+                done.outcome,
+                Outcome::Deferred,
+                "{label} {down:?}: {done:?}"
+            );
+            assert_ne!(done.outcome.code(), 75, "{label} {down:?}");
+            assert_eq!(done.report.retry_after_secs, None, "{label} {down:?}");
+        }
+    }
+}
 #[test]
 fn a_lease_server_that_goes_down_while_the_previous_agent_is_awaited_fails_as_environment() {
     let rig = link_moved("hook-rollback-outage-hello");
@@ -398,21 +478,4 @@ fn a_lease_server_that_goes_down_while_the_previous_agent_is_awaited_fails_as_en
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(rerun.act_names(), Vec::<String>::new());
     assert_restored(&rig);
-}
-
-#[test]
-fn a_cordon_that_cannot_be_lifted_defers_a_rollback_that_stopped_nothing_and_it_stays_reversible() {
-    let rig = running(Rig::new("hook-rollback-outage-prepared"));
-    let before = (rig.record_bytes(), end_state(&rig));
-    let spy = Spy::new(&rig);
-    spy.fail("uncordon");
-    let done = spy.rollback(&rig);
-    assert_eq!(done.outcome, Outcome::Deferred, "{done:?}");
-    assert!(done.report.reversible, "nothing irreversible happened");
-    assert_eq!((rig.record_bytes(), end_state(&rig)), before);
-    let rerun = Spy::new(&rig);
-    assert_eq!(rerun.rollback(&rig).outcome, Outcome::Success);
-    assert_eq!(rig.record(), None);
-    assert!(rig.cordon_expiry().is_none());
-    assert_eq!(unit_state(&rig), "active running");
 }

@@ -258,3 +258,30 @@ fn a_runtime_the_agent_does_not_have_is_refused() {
     let wrong_type = with_runtime("runtime = 3");
     assert!(Declaration::parse(&wrong_type).is_err());
 }
+
+#[test]
+fn the_verify_deadline_must_cover_the_verify_bound_and_the_rollback_bound() {
+    // 615 + 8220 = 8835
+    let with = |deadline: u64| {
+        GOOD.replace(
+            "verify_deadline_secs = 9000",
+            &format!("verify_deadline_secs = {deadline}"),
+        )
+    };
+    assert!(Declaration::parse(&with(8835)).is_ok());
+    assert!(Declaration::parse(&with(9000)).is_ok());
+    for deadline in [8834, 615, 0] {
+        match refused(&with(deadline)) {
+            DeclarationError::VerifyDeadline {
+                deadline: d,
+                verify,
+                rollback,
+            } => {
+                assert_eq!((d, verify, rollback), (deadline, 615, 8220));
+            }
+            other => panic!("{deadline}: {other}"),
+        }
+    }
+    // A declaration that names no deadline has no rule to break.
+    assert!(Declaration::parse(&GOOD.replace("verify_deadline_secs = 9000\n", "")).is_ok());
+}

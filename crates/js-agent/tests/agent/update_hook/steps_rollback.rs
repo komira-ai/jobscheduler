@@ -13,8 +13,8 @@ use js_agent::update_hook::{
 use serde_json::json;
 
 use super::rollback_entries::{
-    RELINK, assert_restored, link_moved, link_target, previous, rb_marks, staged, start,
-    start_failed, stop, stopped, unit_state, verified, verify_failed,
+    RELINK, assert_restored, deactivating, link_moved, link_target, previous, rb_marks, staged,
+    start, start_failed, stop, stopped, unit_state, verified, verify_failed,
 };
 use super::step_rig::{LEASE_SECS, Rig, Spy, UNIT, end_state, killable, line, running};
 
@@ -446,6 +446,10 @@ fn agent_says_hello(
     previous: &std::path::Path,
     old_session: Option<u64>,
 ) {
+    // A unit that was stopping finishes stopping.
+    if spy.world.show(UNIT).unwrap().active == "deactivating" {
+        spy.world.seed_unit(UNIT, "inactive", "dead");
+    }
     let linked = spy.world.target(link).unwrap().as_deref() == Some(previous);
     let said = spy.world.host().unwrap().session_started_ms != old_session;
     if linked && !said && spy.world.is_active(UNIT).unwrap() {
@@ -460,7 +464,10 @@ fn agent_says_hello(
 /// the record then cannot say it is ours, so it is not lifted, and it lapses within a lease.
 fn sweep(label: &str, build: fn(&str) -> Rig, lapsed_ok: bool) {
     let baseline = build(&format!("{label}-base"));
+    let (blink, bprev) = (baseline.link.clone(), previous(&baseline));
+    let bsession = baseline.host().session_started_ms;
     let spy = Spy::new(&baseline);
+    spy.on_pause(move |spy, _| agent_says_hello(spy, &blink, &bprev, bsession));
     assert_eq!(spy.rollback(&baseline).outcome, Outcome::Success);
     let want = spy.act_names();
     let points = baseline.kill.points();
@@ -475,6 +482,8 @@ fn sweep(label: &str, build: fn(&str) -> Rig, lapsed_ok: bool) {
         let (link, prev) = (rig.link.clone(), previous(&rig));
         rig.kill.arm(k);
         let first = Spy::new(&rig);
+        let (flink, fprev) = (link.clone(), prev.clone());
+        first.on_pause(move |spy, _| agent_says_hello(spy, &flink, &fprev, session));
         assert!(
             killable(|| first.rollback(&rig)).is_none(),
             "kill point {k} of {points} is reached"
@@ -557,6 +566,14 @@ fn killed_before_each_act(label: &str, build: fn(&str) -> Rig) {
         assert_eq!(rerun.act_names(), after, "killed before {}", act.call);
         assert_eq!(end_state(&rig), end);
     }
+}
+
+#[test]
+fn a_rollback_of_a_host_whose_unit_is_stopped_or_stopping_killed_at_any_point_and_run_again_ends_as_an_uninterrupted_one()
+ {
+    sweep("hook-rollback-sweep-stopped", stopped, false);
+    sweep("hook-rollback-sweep-start-failed", start_failed, false);
+    sweep("hook-rollback-sweep-stopping", deactivating, false);
 }
 
 #[test]

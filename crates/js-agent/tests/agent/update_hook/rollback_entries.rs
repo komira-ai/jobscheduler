@@ -164,3 +164,20 @@ pub fn assert_restored(rig: &Rig) {
     assert_eq!(host.agent_version.as_deref(), Some("1.3.0"));
     assert!(host.cordon.is_none(), "the cordon of this update is lifted");
 }
+
+/// A `cutover` was killed while the unit stopped: it is `deactivating`, the link still names the
+/// previous release.
+pub fn deactivating(name: &str) -> Rig {
+    let rig = running(Rig::new(name));
+    {
+        let killed = Spy::new(&rig);
+        *killed.stop_leaves.borrow_mut() = Some(("deactivating", "stop-sigterm"));
+        killed.on_pause(|_, ticks| assert!(ticks < 3, "killed during the wait"));
+        assert!(killable(|| killed.cutover(&rig)).is_none());
+    }
+    rig.kill.disarm();
+    rig.world.pause(WAIT);
+    assert_eq!(unit_state(&rig), "deactivating stop-sigterm");
+    assert_eq!(link_target(&rig), Some(previous(&rig)));
+    rig
+}
