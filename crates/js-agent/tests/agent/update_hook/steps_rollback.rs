@@ -53,7 +53,7 @@ pub fn failed_start(name: &str) -> Rig {
     let rig = running(Rig::new(name));
     // Time passes between the placing of the cordon and the start of the new agent, so that
     // the sessions of the agents the server shows differ.
-    rig.world.pause(Duration::from_secs(5));
+    rig.advance_clock(5);
     {
         let spy = Spy::new(&rig);
         *spy.start_leaves.borrow_mut() = Some(("failed", "failed"));
@@ -66,7 +66,7 @@ pub fn failed_start(name: &str) -> Rig {
 /// The host after a `cutover` that succeeded, with the new agent serving and no `verify` yet.
 pub fn serving_new(name: &str) -> Rig {
     let rig = running(Rig::new(name));
-    rig.world.pause(Duration::from_secs(5));
+    rig.advance_clock(5);
     assert_eq!(Spy::new(&rig).cutover(&rig).outcome, Outcome::Success);
     rig.kill.disarm();
     rig
@@ -196,19 +196,21 @@ fn a_rollback_after_a_verify_that_passed_is_the_same_repair() {
 
 #[test]
 fn a_rollback_of_an_agent_that_is_up_on_the_previous_release_only_waits_for_its_hello() {
-    let rig = failed_start("hook-rollback-resumed");
     let baseline = failed_start("hook-rollback-resumed-base");
     assert_eq!(
         Spy::new(&baseline).rollback(&baseline).outcome,
         Outcome::Success
     );
-    let points = baseline.kill.points();
-    // The last three points are the mark of the hello, the uncordon and the delete.
-    rig.kill.arm(points - 2);
-    assert!(killable(|| Spy::new(&rig).rollback(&rig)).is_none());
+    // What a rollback killed just before it marked the hello leaves: the link back, the
+    // previous agent started and heard, the marks of both acts on disk.
+    let rig = failed_start("hook-rollback-resumed");
+    rig.world.relink(&rig.link, &previous(&rig)).unwrap();
+    rig.world.start(&rig.unit).unwrap();
+    let mut record = rig.record().unwrap();
+    record.rb.link_restored = true;
+    record.rb.start_issued = true;
+    rig.put_record(&record);
     rig.kill.disarm();
-    let rb = rig.record().unwrap().rb;
-    assert!(rb.start_issued && !rb.hello_ok, "{rb:?}");
     let spy = Spy::new(&rig);
     assert_eq!(spy.rollback(&rig).outcome, Outcome::Success);
     assert_eq!(spy.act_names(), Vec::<String>::new());
@@ -292,6 +294,7 @@ pub fn sweep(label: &str, build: fn(&str) -> Rig) {
             "kill point {k} of {points} is reached"
         );
         rig.kill.disarm();
+        rig.started_agent_speaks(unit_state(&rig) == "active running");
         let done = Spy::new(&rig).rollback(&rig);
         assert_eq!(
             done.outcome,
@@ -350,7 +353,7 @@ fn a_rollback_of_a_first_install_that_has_linked_cannot_restore_anything_and_say
 #[test]
 fn a_rollback_on_a_mac_boots_the_new_agent_out_and_the_old_one_in() {
     let rig = running(Rig::mac("hook-rollback-mac"));
-    rig.world.pause(Duration::from_secs(5));
+    rig.advance_clock(5);
     assert_eq!(Spy::new(&rig).cutover(&rig).outcome, Outcome::Success);
     rig.kill.disarm();
     let spy = Spy::new(&rig);

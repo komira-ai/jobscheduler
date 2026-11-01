@@ -215,6 +215,34 @@ impl Rig {
         }
     }
 
+    /// Time passes on the fakes' clock without a poll: the fake counts polls (`ticks`), and a
+    /// test of a step's waits counts the step's.
+    pub fn advance_clock(&self, secs: u64) {
+        let now = self.world.now_ms() + secs * 1000;
+        fs::write(self.tmp.path().join("control/clock"), now.to_string()).unwrap();
+    }
+
+    /// An agent that was started says hello on its own, as a real one does. The fake says hello
+    /// inside a start; a step killed between the unit's start and that hello leaves an agent
+    /// that runs and has not been heard. `runs` says whether an agent runs.
+    pub fn started_agent_speaks(&self, runs: bool) {
+        let Some(record) = self.record() else {
+            return;
+        };
+        let linked = self.world.target(&self.link).unwrap();
+        let version = if linked == self.params.previous_release {
+            "1.3.0"
+        } else {
+            "1.4.0"
+        };
+        let host = self.host();
+        let heard = host.agent_version.as_deref() == Some(version)
+            && host.session_started_ms != record.pre_stop_session_ms;
+        if runs && !heard {
+            self.world.hello(version).unwrap();
+        }
+    }
+
     /// The same rig with the declared `rollback` timeout set to `secs`.
     pub fn with_rollback_timeout(mut self, secs: u64) -> Rig {
         self.declaration.timeouts.rollback = secs;

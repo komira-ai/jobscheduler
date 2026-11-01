@@ -20,7 +20,7 @@ fn mac(name: &str) -> (Rig, Launchctl) {
     let rig = running(Rig::mac(name));
     // Time passes between the placing of the cordon and the start of the new agent, so that
     // the sessions of the agents the server shows differ.
-    js_agent::update_hook::Clock::pause(&rig.world, std::time::Duration::from_secs(5));
+    rig.advance_clock(5);
     let tool = Launchctl::default();
     tool.load(MAC_UNIT, Service::running());
     (rig, tool)
@@ -216,6 +216,12 @@ fn sweep(
             "kill point {k} of {points} is reached"
         );
         rig.kill.disarm();
+        let running = tool
+            .loaded
+            .borrow()
+            .get(MAC_UNIT)
+            .is_some_and(|service| service.state == "running");
+        rig.started_agent_speaks(running);
         let done = run(&rig, &tool, &gate);
         assert_eq!(
             done.outcome,

@@ -327,10 +327,12 @@ fn start(env: &Env<'_>, held: &Held, record: &mut Record) -> Result<(), Done> {
     }
     let unit = record.update.unit.clone();
     env.ports.point();
+    // The unit may still show the failed run being rolled back: a start that errors says
+    // nothing of the previous release.
     env.ports
         .units
         .start(&unit)
-        .map_err(|why| start_failure(env, &unit, format!("cannot start {unit}: {why}"), false))
+        .map_err(|why| environment(Reason::StartFailed, format!("cannot start {unit}: {why}")))
 }
 
 /// Looks until the previous agent says hello, or the hello wait ends.
