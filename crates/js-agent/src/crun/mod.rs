@@ -533,7 +533,12 @@ impl CrunRuntime {
     fn tear_down(&self, name: &str) -> Result<(), String> {
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
         let lease = self.oci.lease_dirs(name);
-        let (has_cgroup, has_dir) = (cgroup.dir().exists(), lease.dir.exists());
+        // A lease an agent from before the leases were beside the runs left in the store.
+        let legacy = self.leases_beside.then(|| self.store.join(name));
+        let (has_cgroup, has_dir) = (
+            cgroup.dir().exists(),
+            lease.dir.exists() || legacy.as_ref().is_some_and(|dir| dir.exists()),
+        );
         if has_cgroup {
             // A process the dead agent's keeper did not reach; the removals below retry.
             let _ = cgroup.kill();
@@ -545,18 +550,14 @@ impl CrunRuntime {
             step("remove the lease's cgroup", cgroup.remove())?;
         }
         if has_dir {
-            step(
-                "remove the lease directory",
-                js_contain::remove::remove_tree(&lease.dir),
-            )?;
-        }
-        // A lease an agent from before the leases were beside the runs left in the store.
-        let legacy = self.store.join(name);
-        if self.leases_beside && legacy.exists() {
-            step(
-                "remove the lease directory in the store",
-                js_contain::remove::remove_tree(&legacy),
-            )?;
+            for dir in [Some(&lease.dir), legacy.as_ref()].into_iter().flatten() {
+                if dir.exists() {
+                    step(
+                        "remove the lease directory",
+                        js_contain::remove::remove_tree(dir),
+                    )?;
+                }
+            }
         }
         Ok(())
     }
