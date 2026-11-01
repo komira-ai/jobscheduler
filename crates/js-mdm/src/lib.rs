@@ -90,8 +90,8 @@ pub struct Env<'a> {
 ///
 /// # Errors
 /// The source could not be read.
-pub fn system_random(_buf: &mut [u8]) -> io::Result<()> {
-    Ok(())
+pub fn system_random(buf: &mut [u8]) -> io::Result<()> {
+    getrandom::getrandom(buf).map_err(io::Error::from)
 }
 
 /// Runs the program: reads the arguments, acts on the machine, exits as documented.

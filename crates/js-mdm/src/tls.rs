@@ -22,14 +22,18 @@
 //! After an apply the certificate must be there, else the run fails before the proxy; its
 //! subject, issuer and expiry are printed (public data, read by `openssl`).
 
+use std::collections::BTreeSet;
 use std::io::Write;
 
-use js_host_step::Mode;
+use js_host_step::{Account, Cmd, Kind, Mode, Planner, UnitVerb, execute};
 use js_mdm_core::acme::Acme;
 use js_mdm_core::config::MdmConfig;
+use js_mdm_core::render::{UnitNames, render_tls};
 
-use crate::{Env, MdmError};
+use crate::install::UNITS_DIR;
+use crate::{Env, MdmError, secret};
 
+const OPENSSL: &str = "/usr/bin/openssl";
 /// The flags of `lego run` the certificate unit passes.
 pub const LEGO_FLAGS: [&str; 9] = [
     "--accept-tos",
@@ -45,11 +49,83 @@ pub const LEGO_FLAGS: [&str; 9] = [
 
 /// Check, then print or carry out the units, the first issuance and the proxy's start.
 pub fn run(
-    _env: &Env<'_>,
-    _c: &MdmConfig,
-    _acme: &Acme,
-    _mode: Mode,
-    _out: &mut dyn Write,
+    env: &Env<'_>,
+    c: &MdmConfig,
+    acme: &Acme,
+    mode: Mode,
+    out: &mut dyn Write,
 ) -> Result<(), MdmError> {
+    let host = env.host;
+    let euid = host.euid();
+    if euid != 0 {
+        return Err(MdmError::NeedsRoot { verb: "tls", euid });
+    }
+    let dns_env = format!("{}/dns.env", c.etc);
+    let vars = acme.provider.vars();
+    for var in vars {
+        secret::read(host, &dns_env, var)?;
+    }
+    writeln!(out, "dns.env: holds {} (values not shown)", vars.join(" "))?;
+    let lego = format!("{}/lego", c.bin);
+    if host.stat(&lego)?.map(|m| m.kind) != Some(Kind::File) {
+        return Err(MdmError::NoLego(lego));
+    }
+    let help = host.run(&Cmd::new(&lego).arg("run").arg("--help"))?;
+    let help = help.stdout + &help.stderr;
+    // Whole words: `--dns` is not there because `--dns.resolvers` is.
+    let words: BTreeSet<&str> = help
+        .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '=')
+        .collect();
+    if let Some(flag) = LEGO_FLAGS.into_iter().find(|f| !words.contains(f)) {
+        return Err(MdmError::LegoFlag { lego, flag });
+    }
+
+    let n = UnitNames::new(c);
+    let root = Account::root();
+    let mut p = Planner::new(host);
+    let mut changed = BTreeSet::new();
+    for unit in render_tls(c, acme)? {
+        let path = format!("{UNITS_DIR}/{}", unit.name);
+        if p.file(&path, 0o644, &root, unit.text.as_bytes())? {
+            changed.insert(unit.name);
+        }
+    }
+    if !changed.is_empty() {
+        p.unit(UnitVerb::DaemonReload, &[]);
+    }
+    for unit in [&n.reload_path, &n.cert_timer] {
+        p.service(unit, changed.contains(unit))?;
+    }
+    // The proxy is planned only with its certificate there: started without it, Caddy fails
+    // and restarts every 5 s. A first issuance runs in this plan, so the proxy has a plan of
+    // its own after it, planned once the certificate is there.
+    let crt = format!("{}/lego/certificates/{}.crt", c.state, c.dns_name);
+    let issue = host.stat(&crt)?.is_none();
+    if issue {
+        p.unit(UnitVerb::Start, &[n.cert_service.as_str()]);
+    }
+    execute(&p.finish(), mode, host, out)?;
+    if issue && mode == Mode::DryRun {
+        writeln!(out, "proxy: started once {crt} is there")?;
+        return Ok(());
+    }
+    if host.stat(&crt)?.is_none() {
+        return Err(MdmError::NoCertificate(crt));
+    }
+    let mut p = Planner::new(host);
+    p.service(&n.proxy, false)?;
+    execute(&p.finish(), mode, host, out)?;
+    if mode == Mode::DryRun {
+        return Ok(());
+    }
+    let shown = host.run(&Cmd::new(OPENSSL).args(&[
+        "x509", "-noout", "-subject", "-issuer", "-enddate", "-in", &crt,
+    ]))?;
+    if shown.code != 0 {
+        return Err(MdmError::NotCertificate(crt));
+    }
+    for line in shown.stdout.lines() {
+        writeln!(out, "certificate: {line}")?;
+    }
     Ok(())
 }

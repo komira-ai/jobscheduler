@@ -170,6 +170,15 @@ impl MdmError {
     /// The exit code: 1 when a step, a download or a program failed, 2 when the input or
     /// the host was refused.
     pub fn exit_code(&self) -> u8 {
-        0
+        match self {
+            MdmError::Exec(ExecError::Step { .. } | ExecError::Write(_))
+            | MdmError::Io(_)
+            | MdmError::Rejected { .. }
+            | MdmError::Download { .. }
+            | MdmError::Command { .. }
+            | MdmError::NoCertificate(_)
+            | MdmError::NotCertificate(_) => 1,
+            _ => 2,
+        }
     }
 }

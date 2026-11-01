@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 
-use crate::{Cmd, Host, SYSTEMCTL};
+use crate::{Cmd, DRY_RUN_NOTE, GETENT, Host, Kind, NOTHING_TO_DO, Output, SYSTEMCTL, USERADD};
 
 /// Whether a plan is printed or carried out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,19 +163,33 @@ pub struct Plan {
 ///
 /// # Errors
 /// A lookup command could not be started.
-pub fn ids(_host: &dyn Host, _account: &Account) -> io::Result<Option<(u32, u32)>> {
-    Ok(None)
+pub fn ids(host: &dyn Host, account: &Account) -> io::Result<Option<(u32, u32)>> {
+    let uid = id(host, "passwd", &account.user)?;
+    let gid = id(host, "group", &account.group)?;
+    Ok(uid.zip(gid))
+}
+
+fn id(host: &dyn Host, database: &str, name: &str) -> io::Result<Option<u32>> {
+    // `getent passwd NAME` prints `name:x:uid:gid:...`, `getent group NAME` `name:x:gid:...`.
+    let found = host.run(&Cmd::new(GETENT).arg(database).arg(name))?;
+    let field = found.stdout.trim().split(':').nth(2);
+    let id = field.and_then(|f| f.parse().ok());
+    Ok(id.filter(|_| found.code == 0))
 }
 
 /// Looks at a host and records what would change it.
 pub struct Planner<'h> {
     host: &'h dyn Host,
+    steps: Vec<Step>,
 }
 
 impl<'h> Planner<'h> {
     /// A planner for `host` with no steps.
     pub fn new(host: &'h dyn Host) -> Planner<'h> {
-        Planner { host }
+        Planner {
+            host,
+            steps: Vec::new(),
+        }
     }
 
     /// The host being planned against.
@@ -185,67 +199,134 @@ impl<'h> Planner<'h> {
 
     /// The plan made.
     pub fn finish(self) -> Plan {
-        Plan::default()
+        Plan { steps: self.steps }
     }
 
-    /// The user `name`, unless it exists.
+    /// The user `name`, unless it exists. Whether a step was added.
     ///
     /// # Errors
     /// A lookup command could not be started.
-    pub fn user(&mut self, _name: &str, _home: &str) -> io::Result<bool> {
-        Ok(false)
+    pub fn user(&mut self, name: &str, home: &str) -> io::Result<bool> {
+        let exists = id(self.host, "passwd", name)?.is_some();
+        if !exists {
+            self.steps.push(Step::User {
+                name: name.to_owned(),
+                home: home.to_owned(),
+            });
+        }
+        Ok(!exists)
     }
 
-    /// The directory, unless it is there with this mode and owner.
+    /// The directory, unless it is there with this mode and owner. Whether a step was added.
     ///
     /// # Errors
     /// A read or a lookup failed.
-    pub fn dir(&mut self, _path: &str, _mode: u32, _owner: &Account) -> io::Result<bool> {
-        Ok(false)
+    pub fn dir(&mut self, path: &str, mode: u32, owner: &Account) -> io::Result<bool> {
+        let have = self
+            .host
+            .stat(path)?
+            .map(|m| (m.kind, m.mode, (m.uid, m.gid)));
+        let want = Some((
+            Kind::Dir,
+            mode,
+            ids(self.host, owner)?.unwrap_or((u32::MAX, u32::MAX)),
+        ));
+        let same = have == want;
+        if !same {
+            self.steps.push(Step::Dir {
+                path: path.to_owned(),
+                mode,
+                owner: owner.clone(),
+            });
+        }
+        Ok(!same)
     }
 
-    /// The file, unless it is there with these bytes, this mode and owner.
+    /// The file, unless it is there with these bytes, this mode and owner. Whether a step
+    /// was added.
     ///
     /// # Errors
     /// A read or a lookup failed.
     pub fn file(
         &mut self,
-        _path: &str,
-        _mode: u32,
-        _owner: &Account,
-        _bytes: &[u8],
+        path: &str,
+        mode: u32,
+        owner: &Account,
+        bytes: &[u8],
     ) -> io::Result<bool> {
-        Ok(false)
+        let have = self
+            .host
+            .stat(path)?
+            .map(|m| (m.kind, m.mode, (m.uid, m.gid)));
+        let want = Some((
+            Kind::File,
+            mode,
+            ids(self.host, owner)?.unwrap_or((u32::MAX, u32::MAX)),
+        ));
+        let same = (have, self.host.read(path)?) == (want, Some(bytes.to_vec()));
+        if !same {
+            self.steps.push(Step::File {
+                path: path.to_owned(),
+                mode,
+                owner: owner.clone(),
+                bytes: bytes.to_vec(),
+            });
+        }
+        Ok(!same)
     }
 
-    /// No file at `path`, if there is one.
+    /// No file at `path`, if there is one. Whether a step was added.
     ///
     /// # Errors
     /// The stat failed.
-    pub fn absent(&mut self, _path: &str) -> io::Result<bool> {
-        Ok(false)
+    pub fn absent(&mut self, path: &str) -> io::Result<bool> {
+        let there = self.host.stat(path)?.is_some();
+        if there {
+            self.steps.push(Step::Absent {
+                path: path.to_owned(),
+            });
+        }
+        Ok(there)
     }
 
     /// A systemctl action.
-    pub fn unit(&mut self, _verb: UnitVerb, _units: &[&str]) {}
+    pub fn unit(&mut self, verb: UnitVerb, units: &[&str]) {
+        self.steps.push(Step::Unit {
+            verb,
+            units: units.iter().map(|u| (*u).to_owned()).collect(),
+        });
+    }
 
     /// A program.
-    pub fn run(&mut self, _cmd: Cmd) {}
+    pub fn run(&mut self, cmd: Cmd) {
+        self.steps.push(Step::Run(cmd));
+    }
 
-    /// Whether `systemctl <query> <unit>` succeeds.
+    /// Whether `systemctl <query> <unit>` succeeds (`is-enabled`, `is-active`).
     ///
     /// # Errors
     /// systemctl could not be started.
-    pub fn unit_is(&self, _query: &str, _unit: &str) -> io::Result<bool> {
-        Ok(false)
+    pub fn unit_is(&self, query: &str, unit: &str) -> io::Result<bool> {
+        let out = self.host.run(&Cmd::new(SYSTEMCTL).arg(query).arg(unit))?;
+        Ok(out.code == 0)
     }
 
     /// `unit` enabled, and restarted when `again`, else started when it is not active.
+    /// Whether it is (re)started.
     ///
     /// # Errors
     /// systemctl could not be started.
-    pub fn service(&mut self, _unit: &str, _again: bool) -> io::Result<bool> {
-        Ok(false)
+    pub fn service(&mut self, unit: &str, again: bool) -> io::Result<bool> {
+        if !self.unit_is("is-enabled", unit)? {
+            self.unit(UnitVerb::Enable, &[unit]);
+        }
+        let idle = !self.unit_is("is-active", unit)?;
+        if again {
+            self.unit(UnitVerb::Restart, &[unit]);
+        } else if idle {
+            self.unit(UnitVerb::Start, &[unit]);
+        }
+        Ok(again || idle)
     }
 }
 
@@ -270,15 +351,88 @@ pub enum ExecError {
     Write(#[from] io::Error),
 }
 
-/// Prints `plan`, and with [`Mode::Apply`] carries it out.
+/// Prints `plan`, and with [`Mode::Apply`] carries it out step by step, stopping at the first
+/// that fails.
 ///
 /// # Errors
 /// [`ExecError`].
 pub fn execute(
-    _plan: &Plan,
-    _mode: Mode,
-    _host: &dyn Host,
-    _out: &mut dyn Write,
+    plan: &Plan,
+    mode: Mode,
+    host: &dyn Host,
+    out: &mut dyn Write,
 ) -> Result<(), ExecError> {
+    if mode == Mode::Apply && host.euid() != 0 {
+        return Err(ExecError::NotRoot(host.euid()));
+    }
+    if plan.steps.is_empty() {
+        writeln!(out, "{NOTHING_TO_DO}")?;
+    }
+    for (i, step) in plan.steps.iter().enumerate() {
+        let what = step.describe();
+        match mode {
+            Mode::DryRun => writeln!(out, "DRY-RUN: {what}")?,
+            Mode::Apply => {
+                writeln!(out, "+ {what}")?;
+                apply(host, step).map_err(|why| ExecError::Step {
+                    index: i + 1,
+                    what,
+                    why,
+                })?;
+            }
+        }
+    }
+    if mode == Mode::DryRun && !plan.steps.is_empty() {
+        writeln!(out, "{DRY_RUN_NOTE}")?;
+    }
     Ok(())
+}
+
+fn apply(host: &dyn Host, step: &Step) -> Result<(), String> {
+    let text = |e: io::Error| e.to_string();
+    match step {
+        Step::Dir { path, mode, owner } => {
+            let owner = owner_ids(host, owner)?;
+            host.mkdir(path, *mode, owner).map_err(text)
+        }
+        Step::File {
+            path,
+            mode,
+            owner,
+            bytes,
+        } => {
+            let owner = owner_ids(host, owner)?;
+            host.write(path, *mode, owner, bytes).map_err(text)
+        }
+        Step::Absent { path } => host.remove(path).map_err(text),
+        Step::User { name, home } => {
+            let cmd = Cmd::new(USERADD).args(&[
+                "--system",
+                "--user-group",
+                "--home-dir",
+                home,
+                "--no-create-home",
+                "--shell",
+                "/usr/sbin/nologin",
+                name,
+            ]);
+            succeeded(host.run(&cmd).map_err(text)?)
+        }
+        Step::Unit { verb, units } => succeeded(host.run(&unit_cmd(*verb, units)).map_err(text)?),
+        Step::Run(cmd) => succeeded(host.run(cmd).map_err(text)?),
+    }
+}
+
+fn owner_ids(host: &dyn Host, owner: &Account) -> Result<(u32, u32), String> {
+    let found = ids(host, owner).map_err(|e| e.to_string())?;
+    found.ok_or(format!("no user {} or group {}", owner.user, owner.group))
+}
+
+/// A program's exit status as a result. Its output is not repeated: a program may print a
+/// value it should not.
+fn succeeded(out: Output) -> Result<(), String> {
+    match out.code {
+        0 => Ok(()),
+        code => Err(format!("exit status {code}")),
+    }
 }

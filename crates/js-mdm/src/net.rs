@@ -47,8 +47,14 @@ impl Net {
 }
 
 impl Download for Net {
-    fn get(&self, url: &str, _limit: u64) -> Result<Vec<u8>, String> {
-        let _ = &self.agent;
-        Err(format!("not written yet ({url})"))
+    fn get(&self, url: &str, limit: u64) -> Result<Vec<u8>, String> {
+        let why = |e: ureq::Error| e.to_string();
+        let mut answer = self.agent.get(url).call().map_err(why)?;
+        let status = answer.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(format!("answered {status}"));
+        }
+        let body = answer.body_mut().with_config().limit(limit);
+        body.read_to_vec().map_err(why)
     }
 }

@@ -26,19 +26,47 @@ impl fmt::Debug for Secret {
 }
 
 /// Refuse a secret file that is not mode 0600 or not root's.
-pub fn check_mode(_path: &str, _mode: u32, _uid: u32) -> Result<(), MdmError> {
-    Ok(())
+pub fn check_mode(path: &str, mode: u32, uid: u32) -> Result<(), MdmError> {
+    match (mode, uid) {
+        (0o600, 0) => Ok(()),
+        (mode, uid) => Err(MdmError::SecretMode {
+            path: path.to_owned(),
+            mode,
+            uid,
+        }),
+    }
 }
 
 /// A `KEY=<value>` line with a value is in `bytes`.
-pub fn has_value(_bytes: &[u8], _key: &str) -> bool {
-    false
+pub fn has_value(bytes: &[u8], key: &str) -> bool {
+    let prefix = format!("{key}=");
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .any(|l| l.strip_prefix(&prefix).is_some_and(|v| !v.is_empty()))
 }
 
-/// The value of `key` in the secret file at `path`.
-pub fn read(_host: &dyn Host, path: &str, key: &str) -> Result<Secret, MdmError> {
-    Err(MdmError::NoSecret {
+/// The value of `key` in the secret file at `path`: refused unless the file is a 0600 file of
+/// root's holding a `key=` line with a value without control characters.
+pub fn read(host: &dyn Host, path: &str, key: &str) -> Result<Secret, MdmError> {
+    let missing = || MdmError::NoSecret {
         path: path.to_owned(),
         key: key.to_owned(),
-    })
+    };
+    let meta = host.stat(path)?.ok_or_else(missing)?;
+    check_mode(path, meta.mode, meta.uid)?;
+    let bytes = host.read(path)?.ok_or_else(missing)?;
+    let prefix = format!("{key}=");
+    let text = String::from_utf8_lossy(&bytes);
+    let value = text
+        .lines()
+        .find_map(|l| l.strip_prefix(&prefix))
+        .filter(|v| !v.is_empty())
+        .ok_or_else(missing)?;
+    match value.chars().any(char::is_control) {
+        true => Err(MdmError::SecretValue {
+            path: path.to_owned(),
+            key: key.to_owned(),
+        }),
+        false => Ok(Secret(value.to_owned())),
+    }
 }

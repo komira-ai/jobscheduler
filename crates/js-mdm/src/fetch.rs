@@ -8,9 +8,12 @@
 //! the pin is written to `<file>.rejected` for inspection and fails the run.
 
 use std::io::Write;
+use std::path::Path;
 
-use js_host_step::Mode;
-use js_mdm_core::pins::{Pins, Tool};
+use js_host_step::{DRY_RUN_NOTE, Mode, NOTHING_TO_DO};
+use js_mdm_core::path::AbsPath;
+use js_mdm_core::pins::{Pin, Pins, Tool};
+use sha2::{Digest, Sha256};
 
 use crate::{Env, MdmError};
 
@@ -27,11 +30,114 @@ pub struct Fetch {
 
 /// Check what is in the directory, then print or carry out the downloads.
 pub fn run(
-    _env: &Env<'_>,
-    _f: &Fetch,
-    _pins: &Pins,
-    _mode: Mode,
-    _out: &mut dyn Write,
+    env: &Env<'_>,
+    f: &Fetch,
+    pins: &Pins,
+    mode: Mode,
+    out: &mut dyn Write,
 ) -> Result<(), MdmError> {
+    let host = env.host;
+    if host.euid() == 0 {
+        return Err(MdmError::FetchAsRoot);
+    }
+    let dir = AbsPath::new(&f.dir)?;
+    outside_git(env, &f.dir)?;
+    let mut todo = Vec::new();
+    for pin in pins.all() {
+        let wanted = f.only.is_empty() || f.only.contains(&pin.tool);
+        if !wanted {
+            continue;
+        }
+        let file = format!("{dir}/{}", pin.archive());
+        match host.read(&file)? {
+            Some(bytes) => {
+                let got = hex::encode(Sha256::digest(&bytes));
+                if got != pin.sha256_hex() {
+                    return Err(MdmError::KeptDiffers {
+                        file,
+                        got,
+                        want: pin.sha256_hex(),
+                    });
+                }
+                writeln!(
+                    out,
+                    "kept: {file} ({} {}, sha256 is the pin)",
+                    pin.tool, pin.version
+                )?;
+            }
+            None => todo.push((pin, file)),
+        }
+    }
+    if todo.is_empty() {
+        writeln!(out, "{NOTHING_TO_DO}")?;
+    }
+    for (pin, file) in &todo {
+        writeln!(
+            out,
+            "fetch: {} {} from {} (pin {})",
+            pin.tool,
+            pin.version,
+            pin.url,
+            pin.sha256_hex()
+        )?;
+        let step = format!("download {} to {file} and check its sha256", pin.url);
+        match mode {
+            Mode::DryRun => writeln!(out, "DRY-RUN: {step}")?,
+            Mode::Apply => {
+                writeln!(out, "+ {step}")?;
+                download(env, pin, &dir, file)?;
+                writeln!(out, "ok: {file}")?;
+            }
+        }
+    }
+    if mode == Mode::DryRun && !todo.is_empty() {
+        writeln!(out, "{DRY_RUN_NOTE}")?;
+    }
+    Ok(())
+}
+
+/// Refuse `dir` when it or a directory above it holds `.git`: archives and keys are never kept
+/// where they could be committed.
+fn outside_git(env: &Env<'_>, dir: &str) -> Result<(), MdmError> {
+    for above in Path::new(dir).ancestors() {
+        let root = above.to_str().unwrap_or_default().trim_end_matches('/');
+        let git = format!("{root}/.git");
+        if env.host.stat(&git)?.is_some() {
+            return Err(MdmError::InGitTree {
+                dir: dir.to_owned(),
+                git,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Download `pin`, check it, and write it to `file`.
+fn download(env: &Env<'_>, pin: &Pin, dir: &AbsPath, file: &str) -> Result<(), MdmError> {
+    let host = env.host;
+    let owner = (host.euid(), host.egid());
+    let url = pin.url.to_string();
+    let bytes = env
+        .net
+        .get(&url, MAX_ARCHIVE)
+        .map_err(|why| MdmError::Download {
+            url: url.clone(),
+            why,
+        })?;
+    if host.stat(dir.as_str())?.is_none() {
+        host.mkdir(dir.as_str(), 0o755, owner)?;
+    }
+    let got = hex::encode(Sha256::digest(&bytes));
+    if got != pin.sha256_hex() {
+        let kept = format!("{file}.rejected");
+        host.write(&kept, 0o644, owner, &bytes)?;
+        return Err(MdmError::Rejected {
+            tool: pin.tool.to_string(),
+            got,
+            want: pin.sha256_hex(),
+            kept,
+        });
+    }
+    host.write(file, 0o644, owner, &bytes)?;
     Ok(())
 }
