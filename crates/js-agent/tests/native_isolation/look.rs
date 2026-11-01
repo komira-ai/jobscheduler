@@ -222,6 +222,12 @@ impl JobProcs {
     fn owns(&self, pid: u32) -> bool {
         self.pids.contains(&pid)
     }
+
+    /// The job's own process: the first pid a run prints, before it runs any tool
+    /// (`child_of_the_runs`). A seed that failed with no tool named was tried by it.
+    fn own(&self) -> Option<u32> {
+        self.pids.first().copied()
+    }
 }
 
 /// The arguments of `log show` for the sandbox lines since `start` (a local time, `YYYY-MM-DD
@@ -295,14 +301,15 @@ pub fn failed_tool_pid(text: &str) -> Option<u32> {
 
 /// Whether the unified log (`log show` lines of the sandbox) holds a denial that is this
 /// seed's. EVERY confirming line is a sandbox `deny(` line whose pid is the process that tried
-/// the seed: the tool named in the failure `text` when a tool failed, or else a process the
-/// job ran (`job`). Bound so, the line confirms by the token in it (tokens are unique), or by
+/// the seed: the tool named in the failure `text` when a tool failed (a pid of the job), or
+/// else the job's own process ([`JobProcs::own`]), never another tool or the process the job
+/// left running. Bound so, the line confirms by the token in it (tokens are unique), or by
 /// the operation of the kind. A token or an operation alone is never enough: another run, a
 /// retry or a bystander logs such lines too.
 ///
 /// The operation of a keychain item, a defaults key and a launch agent is a tool's (`security`,
 /// `defaults`, `launchctl`): when no tool is named, the job's own file write failed (the
-/// agent's plist, say), and only a line with the token, from a pid of the job, is that seed's.
+/// agent's plist, say), and only a line with the token, from the job's own pid, is that seed's.
 pub fn log_confirms_denial(
     kind: Kind,
     token: &Token,
@@ -331,7 +338,10 @@ pub fn log_confirms_denial(
         true => &[][..],
         false => markers,
     };
-    let tried = |pid: u32| job.owns(pid) && tool.is_none_or(|tool| pid == tool);
+    let tried = |pid: u32| match tool {
+        Some(tool) => pid == tool && job.owns(pid),
+        None => job.own() == Some(pid),
+    };
     log.lines()
         .filter(|line| line.contains("Sandbox") && line.contains("deny("))
         .any(|line| {
@@ -1162,10 +1172,10 @@ mod tests {
             same_name,
             &job
         ));
-        // The process the job left running counts by its pid, and only by its pid.
-        let by_pid = "Sandbox: sleep(777) deny(1) process-exec* /bin/sleep\n";
+        // The job's own process counts by its pid, and only by its pid.
+        let by_pid = "Sandbox: native_isolation(412) deny(1) process-fork\n";
         assert!(log_confirms_denial(Kind::Process, &a, BARE, by_pid, &job));
-        let other_pid = "Sandbox: sleep(778) deny(1) process-exec* /bin/sleep\n";
+        let other_pid = "Sandbox: native_isolation(413) deny(1) process-fork\n";
         assert!(!log_confirms_denial(
             Kind::Process,
             &a,
@@ -1173,7 +1183,7 @@ mod tests {
             other_pid,
             &job
         ));
-        let other_tool = "Sandbox: mdworker(777) deny(1) process-exec* /bin/sleep\n";
+        let other_tool = "Sandbox: mdworker(412) deny(1) process-exec* /bin/sleep\n";
         assert!(log_confirms_denial(
             Kind::Process,
             &a,
@@ -1388,6 +1398,58 @@ mod tests {
             resolve_seed(Kind::HomeFile, &a, BARE, Some(&home), &job),
             Verdict::Denied
         );
+    }
+
+    /// Asserts that a seed that failed in the job's own process (no tool named) is confirmed
+    /// only by a line from that process, the first pid a run prints: the kind's operation from
+    /// another seed's tool, or from the process the job left running, is not this seed's, though
+    /// both are pids of the job. It catches a binding to any pid of the job instead of the one
+    /// that tried the seed.
+    #[test]
+    fn an_in_process_seed_is_confirmed_only_by_the_jobs_own_pid() {
+        let a = token(0xa1);
+        let job = JobProcs {
+            pids: vec![412, 777, 900],
+        };
+        for (kind, line) in [
+            (
+                Kind::Process,
+                "Sandbox: security(900) deny(1) process-exec* /bin/sleep\n",
+            ),
+            (Kind::Process, "Sandbox: sleep(777) deny(1) process-fork\n"),
+            (
+                Kind::PosixShm,
+                "Sandbox: launchctl(900) deny(1) ipc-posix-shm-write-create /x\n",
+            ),
+            (Kind::SysvSem, "Sandbox: sleep(777) deny(1) ipc-sysv-sem\n"),
+        ] {
+            assert!(!log_confirms_denial(kind, &a, BARE, line, &job), "{line}");
+            assert_eq!(
+                resolve_seed(kind, &a, BARE, Some(line), &job),
+                Verdict::Refused
+            );
+        }
+        let tokened = format!("Sandbox: getconf(900) deny(1) file-write-create /x/iso-{a}\n");
+        assert!(!log_confirms_denial(
+            Kind::UserTempDir,
+            &a,
+            BARE,
+            &tokened,
+            &job
+        ));
+        let own = "Sandbox: native_isolation(412) deny(1) ipc-sysv-sem\n";
+        assert_eq!(
+            resolve_seed(Kind::SysvSem, &a, BARE, Some(own), &job),
+            Verdict::Denied
+        );
+        assert_eq!(JobProcs::default().own(), None);
+        assert!(!log_confirms_denial(
+            Kind::SysvSem,
+            &a,
+            BARE,
+            own,
+            &JobProcs::default()
+        ));
     }
 
     /// Asserts that a tool's failure names its pid and the pid reads back, and that text with
