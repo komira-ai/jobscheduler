@@ -12,7 +12,7 @@ use js_measure::farm::{Phase, RunStanding, Standing};
 use js_measure::measure::{HostReading, Identity, assemble};
 use js_measure::reported::{PREFIX, TAG, merge, parse, prefixed};
 use js_measure::{
-    Acquired, Curve, Experiment, FakeClock, FakeFarm, Farm, FarmError, HostShape, JobTiming,
+    Acquired, Clock, Curve, Experiment, FakeClock, FakeFarm, Farm, FarmError, HostShape, JobTiming,
     LeaseAsk, NoSetter, Observation, Plan, RunAsk, RunOutput, UsageRow, Workload, drive, run_plan,
 };
 
