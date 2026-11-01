@@ -14,18 +14,18 @@
 
 mod common;
 
-use common::mac::{describe, outcomes, run_steps};
+use common::mac::{describe, host_major, outcomes, run_steps};
 use common::priv_root::{fixture, ids};
 use common::run;
-use js_mac_pool::seatbelt::{Class, MacosMajor, Role, SelfTest};
+use js_mac_pool::seatbelt::{Class, Role, SelfTest};
 
 #[test]
 #[ignore = "needs root on a provisioned Mac (js-mac-pool-privileged-tests)"]
 fn the_self_test_passes_as_the_pool_user_against_root_owned_canaries() {
     let ids = ids();
     let mac = fixture("priv-selftest");
-    let test =
-        SelfTest::new(MacosMajor::Macos14, mac.fixture(MacosMajor::Macos14.scan())).expect("steps");
+    let major = host_major();
+    let test = SelfTest::new(major, mac.fixture(major.scan())).expect("steps");
     let ran = run_steps(&test, Some(ids));
     let results = outcomes(&ran);
     if let Err(failures) = test.judge(&results) {
@@ -43,8 +43,8 @@ fn the_self_test_passes_as_the_pool_user_against_root_owned_canaries() {
 fn the_canaries_are_readable_by_the_pool_user_without_the_profile() {
     let ids = ids();
     let mac = fixture("priv-controls");
-    let test =
-        SelfTest::new(MacosMajor::Macos14, mac.fixture(MacosMajor::Macos14.scan())).expect("steps");
+    let major = host_major();
+    let test = SelfTest::new(major, mac.fixture(major.scan())).expect("steps");
     let controls: Vec<Class> = test
         .steps()
         .iter()

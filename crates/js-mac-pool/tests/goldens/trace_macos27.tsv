@@ -1,0 +1,80 @@
+# tool=js-mac-pool trace_base_set
+# traced-set=macos15
+# product-version=27.0.1
+# build-version=26A434
+# arch=arm64
+# xcode=Xcode 27.1 Build version 27A9275
+# fs-usage-windows=6
+kind	line	touched	needed	workloads	touched_by	denial_changed
+baseline	control:read-other-home	-	-	success	-	-
+baseline	control:read-input-store	-	-	success	-	-
+baseline	control:read-bundle-tree-not-pinned	-	-	success	-	-
+baseline	control:read-users-shared	-	-	success	-	-
+baseline	control:read-private-var-tmp	-	-	success	-	-
+baseline	control:read-system-volumes-data	-	-	success	-	-
+baseline	control:read-sibling-run	-	-	success	-	-
+baseline	control:read-agent-state	-	-	success	-	-
+baseline	control:read-helper-state	-	-	success	-	-
+baseline	control:read-keychain	-	-	success	-	-
+baseline	control:read-setuid-binary	-	-	success	-	-
+baseline	control:list-denied-dir	-	-	success	-	-
+baseline	control:list-ancestor	-	-	success	-	-
+baseline	control:stat-canary	-	-	success	-	-
+baseline	control:xattr-canary	-	-	success	-	-
+baseline	denied:read-other-home	-	-	refused	-	-
+baseline	denied:read-input-store	-	-	refused	-	-
+baseline	denied:read-bundle-tree-not-pinned	-	-	refused	-	-
+baseline	denied:read-users-shared	-	-	refused	-	-
+baseline	denied:read-private-var-tmp	-	-	refused	-	-
+baseline	denied:read-system-volumes-data	-	-	refused	-	-
+baseline	denied:read-sibling-run	-	-	refused	-	-
+baseline	denied:read-agent-state	-	-	refused	-	-
+baseline	denied:read-helper-state	-	-	refused	-	-
+baseline	denied:read-keychain	-	-	refused	-	-
+baseline	denied:read-setuid-binary	-	-	refused	-	-
+baseline	denied:list-denied-dir	-	-	refused	-	-
+baseline	denied:list-ancestor	-	-	refused	-	-
+baseline	denied:stat-canary	-	-	refused	-	-
+baseline	denied:xattr-canary	-	-	refused	-	-
+baseline	granted-tree-read	-	-	success	-	-
+baseline	run-true	-	-	success	-	-
+baseline	compile	-	-	success	-	-
+baseline	codesign	-	-	success	-	-
+baseline	bundle-entrypoint	-	-	success	-	-
+baseline	time-zone-link	-	-	success	-	-
+name	literal /etc	no	no	-	-	-
+name	literal /usr	yes	no	-	bundle-entrypoint/bash,bundle-entrypoint/cat,bundle-entrypoint/sandbox-exec,bundle-entrypoint/trace_base_set,codesign/codesign,codesign/sandbox-exec,codesign/trace_base_set,compile/bash,compile/biomesyncd,compile/cc,compile/clang,compile/launchd,compile/ld,compile/ls,compile/runningboardd,compile/sandbox-exec,compile/tccd,compile/trace_base_set,compile/xcodebuild,compile/xpcproxy,granted-tree-read/cat,granted-tree-read/sandbox-exec,granted-tree-read/trace_base_set,run-true/sandbox-exec,run-true/trace_base_set,run-true/true,time-zone-link/cat,time-zone-link/sandbox-exec,time-zone-link/trace_base_set	-
+name	literal /var	yes	yes	compile,time-zone-link	compile/biomesyncd	-
+read	literal /	yes	yes	granted-tree-read,run-true,compile,codesign,bundle-entrypoint,time-zone-link	bundle-entrypoint/bash,bundle-entrypoint/cat,bundle-entrypoint/logd,bundle-entrypoint/sandbox-exec,bundle-entrypoint/trace_base_set,codesign/Finder,codesign/cfprefsd,codesign/codesign,codesign/logd,codesign/nxserver.bin,codesign/sandbox-exec,codesign/trace_base_set,compile/BiomeAgent,compile/Finder,compile/airportd,compile/bash,compile/biomesyncd,compile/cc,compile/cfprefsd,compile/clang,compile/configd,compile/fseventsd,compile/launchd,compile/ld,compile/locationd,compile/logd,compile/ls,compile/mds,compile/mdworker_shared,compile/nxrunner,compile/runningboardd,compile/sandbox-exec,compile/tccd,compile/trace_base_set,compile/wifip2pd,compile/xcodebuild,compile/xpcproxy,granted-tree-read/cat,granted-tree-read/logd,granted-tree-read/sandbox-exec,granted-tree-read/trace_base_set,run-true/logd,run-true/sandbox-exec,run-true/trace_base_set,run-true/true,time-zone-link/cat,time-zone-link/logd,time-zone-link/sandbox-exec,time-zone-link/trace_base_set	denied:read-other-home,denied:read-input-store,denied:read-bundle-tree-not-pinned,denied:read-users-shared,denied:read-private-var-tmp,denied:read-system-volumes-data,denied:read-sibling-run,denied:read-agent-state,denied:read-helper-state,denied:read-keychain,denied:read-setuid-binary,denied:list-denied-dir,denied:list-ancestor,denied:stat-canary,denied:xattr-canary
+read	subpath /System/Library	yes	yes	compile	bundle-entrypoint/bash,bundle-entrypoint/cat,codesign/codesign,compile/airportd,compile/bash,compile/biomesyncd,compile/cc,compile/clang,compile/ld,compile/locationd,compile/runningboardd,compile/wifip2pd,compile/xcodebuild,granted-tree-read/cat,run-true/true,time-zone-link/cat	-
+read	subpath /System/Volumes/Preboot/Cryptexes	yes	no	-	bundle-entrypoint/bash,bundle-entrypoint/cat,bundle-entrypoint/sandbox-exec,codesign/codesign,codesign/sandbox-exec,compile/bash,compile/biomesyncd,compile/cc,compile/clang,compile/ld,compile/ls,compile/sandbox-exec,compile/xcodebuild,compile/xpcproxy,granted-tree-read/cat,granted-tree-read/sandbox-exec,run-true/sandbox-exec,run-true/true,time-zone-link/cat,time-zone-link/sandbox-exec	-
+read	subpath /usr/lib	yes	yes	compile	bundle-entrypoint/bash,bundle-entrypoint/cat,bundle-entrypoint/sandbox-exec,codesign/codesign,codesign/sandbox-exec,compile/bash,compile/biomesyncd,compile/cc,compile/clang,compile/ld,compile/ls,compile/sandbox-exec,compile/xcodebuild,compile/xpcproxy,granted-tree-read/cat,granted-tree-read/sandbox-exec,run-true/sandbox-exec,run-true/true,time-zone-link/cat,time-zone-link/sandbox-exec	-
+read	subpath /usr/bin	yes	no	-	bundle-entrypoint/sandbox-exec,bundle-entrypoint/trace_base_set,codesign/codesign,codesign/sandbox-exec,codesign/trace_base_set,compile/cc,compile/sandbox-exec,compile/trace_base_set,granted-tree-read/sandbox-exec,granted-tree-read/trace_base_set,run-true/sandbox-exec,run-true/trace_base_set,run-true/true,time-zone-link/sandbox-exec,time-zone-link/trace_base_set	-
+read	subpath /usr/share	yes	yes	compile	codesign/codesign,compile/biomesyncd,compile/xcodebuild	-
+read	subpath /bin	yes	no	-	bundle-entrypoint/bash,bundle-entrypoint/cat,compile/bash,compile/cc,compile/ls,compile/tccd,granted-tree-read/cat,granted-tree-read/sandbox-exec,time-zone-link/cat,time-zone-link/sandbox-exec	-
+read	subpath /private/var/db/timezone	no	yes	time-zone-link	-	-
+read	literal /dev/null	yes	no	-	bundle-entrypoint/trace_base_set,codesign/trace_base_set,compile/bash,compile/trace_base_set,compile/xpcproxy,granted-tree-read/trace_base_set,run-true/trace_base_set,time-zone-link/trace_base_set	-
+read	literal /dev/zero	no	no	-	-	-
+read	literal /dev/random	no	no	-	-	-
+read	literal /dev/urandom	no	no	-	-	-
+read	literal /dev/tty	yes	no	-	bundle-entrypoint/bash,compile/bash,compile/xpcproxy	-
+setuid	/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent	-	-	-	-	-
+setuid	/bin/ps	-	-	-	-	-
+setuid	/usr/bin/at	-	-	-	-	-
+setuid	/usr/bin/atq	-	-	-	-	-
+setuid	/usr/bin/atrm	-	-	-	-	-
+setuid	/usr/bin/batch	-	-	-	-	-
+setuid	/usr/bin/crontab	-	-	-	-	-
+setuid	/usr/bin/login	-	-	-	-	-
+setuid	/usr/bin/newgrp	-	-	-	-	-
+setuid	/usr/bin/quota	-	-	-	-	-
+setuid	/usr/bin/su	-	-	-	-	-
+setuid	/usr/bin/sudo	-	-	-	-	-
+setuid	/usr/bin/top	-	-	-	-	-
+setuid	/usr/bin/write	-	-	-	-	-
+setuid-new	/usr/libexec/authopen	-	-	-	-	-
+setuid-new	/usr/libexec/security_authtrampoline	-	-	-	-	-
+setuid-new	/usr/sbin/postdrop	-	-	-	-	-
+setuid-new	/usr/sbin/postqueue	-	-	-	-	-
+setuid-new	/usr/sbin/traceroute	-	-	-	-	-
+setuid-new	/usr/sbin/traceroute6	-	-	-	-	-

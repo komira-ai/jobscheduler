@@ -13,7 +13,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 
-use common::mac::{DATA, Mac, describe, outcomes, run_steps};
+use common::mac::{DATA, Mac, describe, host_major, outcomes, run_steps};
 use common::{Scratch, run};
 use js_bundle::ReadGrantKind;
 use js_mac_pool::seatbelt::{
@@ -35,13 +35,7 @@ fn mac(tag: &str) -> Mac {
 }
 
 fn major() -> MacosMajor {
-    let out = Command::new("/usr/bin/sw_vers")
-        .arg("-productVersion")
-        .output()
-        .expect("sw_vers");
-    let version = String::from_utf8(out.stdout).expect("utf8");
-    MacosMajor::from_product_version(&version)
-        .unwrap_or_else(|| panic!("macOS {version} has no base set"))
+    host_major()
 }
 
 #[test]

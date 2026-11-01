@@ -3,6 +3,7 @@
 
 mod common;
 
+use common::trace::{Kind, Mark, Row, parse};
 use common::{Scratch, assurance, assurance_for, layout, path, tree, xcode_host};
 use js_bundle::ReadGrantKind;
 use js_mac_pool::seatbelt::{
@@ -196,6 +197,189 @@ fn the_macos_15_base_set_reads_nothing_the_macos_14_set_does_not() {
             .iter()
             .any(|dir| file.starts_with(&format!("{dir}/")));
         assert_eq!(new.setuid().contains(file), under, "{file}");
+    }
+}
+
+#[test]
+fn a_macos_27_profile_without_grants_matches_its_golden() {
+    let bare = SlotLayout {
+        inputs: vec![],
+        read_denies: vec![],
+        ..layout()
+    };
+    let policy = Policy::base(bare, allow_caps(Net::Loopback))
+        .unwrap()
+        .narrowed(Narrowing {
+            drop_uid_entry: true,
+            ..Narrowing::default()
+        })
+        .unwrap()
+        .allowing(&assurance_for(MacosMajor::Macos27), vec![])
+        .unwrap();
+    assert_eq!(
+        text_of(&policy),
+        include_str!("goldens/allow_macos27_bare.sb")
+    );
+}
+
+/// The table of the trace on macOS 27.0.1 (build 26A434, arm64, Xcode 27.1), committed as
+/// the trace wrote it.
+const TRACE_MACOS_27: &str = include_str!("goldens/trace_macos27.tsv");
+
+fn trace_rows() -> Vec<Row> {
+    parse(TRACE_MACOS_27).expect("the table is in the table format")
+}
+
+/// A table line (`literal /usr`, `subpath /bin`) as the base set spells it.
+fn table_line(line: &str) -> (Match, String) {
+    let (how, path) = line.split_once(' ').expect("a match and a path");
+    let how = match how {
+        "literal" => Match::Literal,
+        "subpath" => Match::Subpath,
+        other => panic!("unknown match {other:?}"),
+    };
+    (how, path.to_owned())
+}
+
+/// A line is in a set only when a workload touched it or failed without it.
+fn kept(row: &Row) -> bool {
+    row.touched == Mark::Yes || row.needed == Mark::Yes
+}
+
+fn is_line(row: &Row) -> bool {
+    matches!(row.kind, Kind::Name | Kind::Read)
+}
+
+/// The macOS 27 base set is what the trace produced: every name and read line that a
+/// workload touched or failed without, in the table's order, and the setuid files the
+/// traced image listed under the directories the set grants.
+#[test]
+fn the_macos_27_base_set_is_what_the_trace_produced() {
+    for header in [
+        "# product-version=27.0.1\n",
+        "# build-version=26A434\n",
+        "# arch=arm64\n",
+    ] {
+        assert!(TRACE_MACOS_27.contains(header), "{header:?}");
+    }
+    let rows = trace_rows();
+    let base = MacosMajor::Macos27.base();
+
+    let names: Vec<String> = rows
+        .iter()
+        .filter(|row| row.kind == Kind::Name && kept(row))
+        .map(|row| table_line(&row.line).1)
+        .collect();
+    assert_eq!(base.names(), names);
+
+    let reads: Vec<(Match, String)> = rows
+        .iter()
+        .filter(|row| row.kind == Kind::Read && kept(row))
+        .map(|row| table_line(&row.line))
+        .collect();
+    let have: Vec<(Match, String)> = base
+        .reads()
+        .iter()
+        .map(|(how, path)| (*how, (*path).to_owned()))
+        .collect();
+    assert!(reads.len() > 5);
+    assert_eq!(have, reads);
+
+    let setuid: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.kind == Kind::Setuid)
+        .map(|row| row.line.as_str())
+        .collect();
+    assert_eq!(base.setuid(), setuid);
+}
+
+/// A line no workload touched and none failed without is not in the set, whatever an
+/// older set held.
+#[test]
+fn the_macos_27_base_set_leaves_out_every_line_the_trace_found_unused() {
+    let base = MacosMajor::Macos27.base();
+    let rows = trace_rows();
+    let unused: Vec<&Row> = rows
+        .iter()
+        .filter(|row| is_line(row) && !kept(row))
+        .collect();
+    assert!(!unused.is_empty());
+    for row in unused {
+        let (how, path) = table_line(&row.line);
+        let listed = match row.kind {
+            Kind::Name => base.names().contains(&path.as_str()),
+            _ => base.reads().contains(&(how, path.as_str())),
+        };
+        assert!(!listed, "{}", row.line);
+    }
+}
+
+/// The trace ran clean: every workload and control worked with the whole set, every
+/// denied read was refused, and removing a line changed no denial.
+#[test]
+fn the_macos_27_trace_shows_every_workload_working_and_every_denial_holding() {
+    let rows = trace_rows();
+    let baselines: Vec<&Row> = rows
+        .iter()
+        .filter(|row| row.kind == Kind::Baseline)
+        .collect();
+    assert!(baselines.len() > 30);
+    for row in baselines {
+        let want = if row.line.starts_with("denied:") {
+            "refused"
+        } else {
+            "success"
+        };
+        assert_eq!(row.workloads, [want], "{}", row.line);
+    }
+    for row in rows.iter().filter(|row| is_line(row)) {
+        let expected_changes = row.line == "literal /";
+        assert_eq!(
+            row.denial_changed.is_empty(),
+            !expected_changes,
+            "{}",
+            row.line
+        );
+        assert_ne!(row.touched, Mark::Unknown, "{}", row.line);
+    }
+}
+
+/// A newer major version never reads a place the reviewed macOS 15 set does not, and it
+/// denies exactly the setuid files of the traced image that lie under a directory it
+/// grants: the listed ones and the ones the trace found new, which lie in directories
+/// the set does not grant.
+#[test]
+fn the_macos_27_base_set_reads_nothing_the_macos_15_set_does_not() {
+    let old = MacosMajor::Macos15.base();
+    let new = MacosMajor::Macos27.base();
+    for read in new.reads() {
+        assert!(old.reads().contains(read), "{read:?}");
+    }
+    for name in new.names() {
+        assert!(old.names().contains(name), "{name}");
+    }
+    let granted: Vec<&str> = new
+        .reads()
+        .iter()
+        .filter(|(how, _)| *how == Match::Subpath)
+        .map(|(_, path)| *path)
+        .collect();
+    let found: Vec<Row> = trace_rows()
+        .into_iter()
+        .filter(|row| matches!(row.kind, Kind::Setuid | Kind::SetuidNew))
+        .collect();
+    assert!(found.len() > 15);
+    for row in found {
+        let under = granted
+            .iter()
+            .any(|dir| row.line.starts_with(&format!("{dir}/")));
+        assert_eq!(
+            new.setuid().contains(&row.line.as_str()),
+            under,
+            "{}",
+            row.line
+        );
+        assert_eq!(row.kind == Kind::Setuid, under, "{}", row.line);
     }
 }
 
@@ -481,7 +665,9 @@ fn macos_versions_are_read_from_a_product_version() {
         (" 14.5.1\n", Some(MacosMajor::Macos14)),
         ("15.0", Some(MacosMajor::Macos15)),
         ("15.8.2", Some(MacosMajor::Macos15)),
+        ("27.0.1", Some(MacosMajor::Macos27)),
         ("16.0", None),
+        ("26.0", None),
         ("13.6", None),
         ("fourteen", None),
         ("", None),
@@ -491,16 +677,18 @@ fn macos_versions_are_read_from_a_product_version() {
     }
     assert_eq!(MacosMajor::from_major(14), Some(MacosMajor::Macos14));
     assert_eq!(MacosMajor::from_major(15), Some(MacosMajor::Macos15));
+    assert_eq!(MacosMajor::from_major(27), Some(MacosMajor::Macos27));
     assert_eq!(MacosMajor::Macos14.major(), 14);
     assert_eq!(MacosMajor::Macos15.major(), 15);
+    assert_eq!(MacosMajor::Macos27.major(), 27);
 }
 
 /// A major version without a reviewed base set has no value, so no allow profile of it
-/// can be built: the next major (16), the one after the hosted runner's (26) and the
-/// older ones fail closed.
+/// can be built: the majors between the reviewed ones (16 to 26), the one after the
+/// newest (28) and the older ones fail closed.
 #[test]
 fn a_major_version_without_a_base_set_fails_closed() {
-    for major in [0, 1, 10, 11, 12, 13, 16, 17, 25, 26, 27, u32::MAX] {
+    for major in [0, 1, 10, 11, 12, 13, 16, 17, 25, 26, 28, u32::MAX] {
         assert_eq!(MacosMajor::from_major(major), None, "{major}");
         assert_eq!(
             MacosMajor::from_product_version(&format!("{major}.0.1")),
@@ -509,7 +697,7 @@ fn a_major_version_without_a_base_set_fails_closed() {
         );
     }
     let known: Vec<u32> = MacosMajor::ALL.iter().map(|m| m.major()).collect();
-    assert_eq!(known, [14, 15]);
+    assert_eq!(known, [14, 15, 27]);
 }
 
 #[test]
