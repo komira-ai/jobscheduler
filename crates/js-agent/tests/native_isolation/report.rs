@@ -3,8 +3,27 @@
 /// `rows` under `header`, one line each, the columns padded to the widest cell. The last
 /// column is not padded. With no rows, only the header.
 pub fn table(header: [&str; 3], rows: &[[String; 3]]) -> String {
-    let _ = (header, rows);
-    String::new()
+    let mut widths = header.map(str::len);
+    for row in rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.len());
+        }
+    }
+    let line = |cells: [&str; 3]| {
+        format!(
+            "{:<w0$}  {:<w1$}  {}",
+            cells[0],
+            cells[1],
+            cells[2],
+            w0 = widths[0],
+            w1 = widths[1]
+        )
+        .trim_end()
+        .to_owned()
+    };
+    let mut out = vec![line(header)];
+    out.extend(rows.iter().map(|row| line([&row[0], &row[1], &row[2]])));
+    out.join("\n")
 }
 
 #[cfg(test)]

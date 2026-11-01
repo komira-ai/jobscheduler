@@ -15,7 +15,7 @@ impl Token {
     pub fn from_bytes(bytes: [u8; 8]) -> Self {
         Self {
             bytes,
-            text: String::new(),
+            text: hex::encode(bytes),
         }
     }
 
@@ -28,8 +28,16 @@ impl Token {
     /// The token written as `as_str` prints it: sixteen lowercase hex digits and nothing
     /// else.
     pub fn parse(text: &str) -> Option<Self> {
-        let _ = text;
-        None
+        let well_formed = text.len() == 16
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !well_formed {
+            return None;
+        }
+        let mut bytes = [0u8; 8];
+        hex::decode_to_slice(text, &mut bytes).ok()?;
+        Some(Self::from_bytes(bytes))
     }
 
     pub fn as_str(&self) -> &str {
@@ -39,14 +47,14 @@ impl Token {
     /// The key of this token's System V objects: the last four bytes, never 0 (which
     /// is `IPC_PRIVATE`, a key nobody can look up again).
     pub fn sysv_key(&self) -> i32 {
-        0
+        let key = i32::from_be_bytes([self.bytes[4], self.bytes[5], self.bytes[6], self.bytes[7]]);
+        if key == 0 { 1 } else { key }
     }
 
     /// The name of this token's POSIX objects: a slash, `prefix`, the token. macOS holds
     /// a POSIX name to 31 bytes, so the prefix is short.
     pub fn posix_name(&self, prefix: &str) -> String {
-        let _ = prefix;
-        String::new()
+        format!("/{prefix}{}", self.text)
     }
 }
 
@@ -58,8 +66,10 @@ impl fmt::Display for Token {
 
 /// The tokens of `tokens` that occur in `text`, each once, in the order given.
 pub fn find_tokens<'a>(text: &str, tokens: &'a [Token]) -> Vec<&'a Token> {
-    let _ = (text, tokens);
-    Vec::new()
+    tokens
+        .iter()
+        .filter(|token| text.contains(token.as_str()))
+        .collect()
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! Readers of the machine's system-wide views: `ipcs` for System V objects by owner,
 //! `ps` for processes by uid, and the text of `launchctl print user/<uid>`.
 
-use super::token::Token;
+use super::token::{Token, find_tokens};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IpcKind {
@@ -22,16 +22,37 @@ pub struct IpcObject {
 /// The objects `ipcs -a` lists, from its three tables. A heading, a header row, a blank
 /// line or a line of another shape is skipped.
 pub fn parse_ipcs(text: &str) -> Vec<IpcObject> {
-    let _ = text;
-    Vec::new()
+    text.lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 6 {
+                return None;
+            }
+            let kind = match fields[0] {
+                "q" => IpcKind::Message,
+                "m" => IpcKind::Shared,
+                "s" => IpcKind::Semaphore,
+                _ => return None,
+            };
+            Some(IpcObject {
+                kind,
+                id: fields[1].parse().ok()?,
+                key: fields[2].to_owned(),
+                owner: fields[4].to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// The objects owned by `uid`: `ipcs` prints the owner as a user name, or as the number
 /// when no user has the uid (the case after a delete), so both spellings count, and so
 /// do the `names` given.
 pub fn ipc_owned_by<'a>(objects: &'a [IpcObject], uid: u32, names: &[&str]) -> Vec<&'a IpcObject> {
-    let _ = (objects, uid, names);
-    Vec::new()
+    let number = uid.to_string();
+    objects
+        .iter()
+        .filter(|object| object.owner == number || names.contains(&object.owner.as_str()))
+        .collect()
 }
 
 /// One row of `ps -A -o uid=,pid=,command=`.
@@ -43,26 +64,38 @@ pub struct Proc {
 }
 
 pub fn parse_ps(text: &str) -> Vec<Proc> {
-    let _ = text;
-    Vec::new()
+    text.lines()
+        .filter_map(|line| {
+            let (uid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let (pid, command) = rest.trim_start().split_once(char::is_whitespace)?;
+            Some(Proc {
+                uid: uid.parse().ok()?,
+                pid: pid.parse().ok()?,
+                command: command.trim().to_owned(),
+            })
+        })
+        .collect()
 }
 
 pub fn procs_of_uid(procs: &[Proc], uid: u32) -> Vec<&Proc> {
-    let _ = (procs, uid);
-    Vec::new()
+    procs.iter().filter(|proc| proc.uid == uid).collect()
 }
 
 /// The processes of `uid` whose command line carries one of `tokens`.
 pub fn procs_with_token<'a>(procs: &'a [Proc], uid: u32, tokens: &[Token]) -> Vec<&'a Proc> {
-    let _ = (procs, uid, tokens);
-    Vec::new()
+    procs_of_uid(procs, uid)
+        .into_iter()
+        .filter(|proc| !find_tokens(&proc.command, tokens).is_empty())
+        .collect()
 }
 
 /// The lines of `text` (the output of `launchctl print user/<uid>`) that carry a token,
 /// trimmed.
 pub fn lines_with_token(text: &str, tokens: &[Token]) -> Vec<String> {
-    let _ = (text, tokens);
-    Vec::new()
+    text.lines()
+        .filter(|line| !find_tokens(line, tokens).is_empty())
+        .map(|line| line.trim().to_owned())
+        .collect()
 }
 
 #[cfg(test)]

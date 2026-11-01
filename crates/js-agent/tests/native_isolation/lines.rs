@@ -38,12 +38,24 @@ impl Kind {
     ];
 
     pub fn label(self) -> &'static str {
-        ""
+        match self {
+            Kind::HomeFile => "home-file",
+            Kind::ScratchFile => "scratch-file",
+            Kind::SystemTempFile => "system-temp-file",
+            Kind::Process => "process",
+            Kind::Keychain => "keychain-item",
+            Kind::Defaults => "defaults-key",
+            Kind::LaunchAgent => "launch-agent",
+            Kind::SysvShm => "sysv-shared-memory",
+            Kind::SysvSem => "sysv-semaphore",
+            Kind::SysvMsg => "sysv-message-queue",
+            Kind::PosixShm => "posix-shared-memory",
+            Kind::PosixSem => "posix-semaphore",
+        }
     }
 
     pub fn from_label(label: &str) -> Option<Kind> {
-        let _ = label;
-        None
+        Kind::ALL.into_iter().find(|kind| kind.label() == label)
     }
 }
 
@@ -85,7 +97,17 @@ impl Line {
     /// A line whose text is flattened to one line: a tab or a line break (a tool's error
     /// message has them) becomes a space.
     pub fn new(verdict: Verdict, kind: Kind, token: Token, text: &str) -> Self {
-        let text = text.to_owned();
+        let text = text
+            .trim()
+            .chars()
+            .map(|c| {
+                if c == '\n' || c == '\r' || c == '\t' {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .collect();
         Self {
             verdict,
             kind,
@@ -95,7 +117,13 @@ impl Line {
     }
 
     pub fn encode(&self) -> String {
-        String::new()
+        format!(
+            "ISO {} {}\t{}\t{}",
+            self.verdict.word(),
+            self.kind.label(),
+            self.token,
+            self.text
+        )
     }
 }
 
@@ -107,8 +135,23 @@ impl Line {
 /// A line that starts with `ISO ` and has an unknown verdict or kind, a token that is not
 /// one, or a missing field.
 pub fn parse_lines(text: &str) -> Result<Vec<Line>, String> {
-    let _ = text;
-    Ok(Vec::new())
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("ISO ") else {
+            continue;
+        };
+        let bad = || format!("a malformed report line: {line:?}");
+        let (head, tail) = rest.split_once('\t').ok_or_else(bad)?;
+        let (token, text) = tail.split_once('\t').ok_or_else(bad)?;
+        let (verdict, kind) = head.split_once(' ').ok_or_else(bad)?;
+        lines.push(Line {
+            verdict: Verdict::from_word(verdict).ok_or_else(bad)?,
+            kind: Kind::from_label(kind).ok_or_else(bad)?,
+            token: Token::parse(token).ok_or_else(bad)?,
+            text: text.to_owned(),
+        });
+    }
+    Ok(lines)
 }
 
 #[cfg(test)]
