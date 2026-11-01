@@ -82,6 +82,9 @@ pub enum Verdict {
     Seeded,
     /// Run A could not leave it; the text says why.
     Refused,
+    /// Run A could not leave it because the product profile (the sandbox) denied it; the text
+    /// says how. The job could not create the state, so nothing can carry over.
+    Denied,
     /// Run B found the item; the text says where.
     Found,
     /// Run B could not tell whether the item is there; the text says why. Never a pass.
@@ -93,6 +96,7 @@ impl Verdict {
         match self {
             Verdict::Seeded => "seeded",
             Verdict::Refused => "refused",
+            Verdict::Denied => "denied",
             Verdict::Found => "found",
             Verdict::Unlooked => "unlooked",
         }
@@ -102,6 +106,7 @@ impl Verdict {
         [
             Verdict::Seeded,
             Verdict::Refused,
+            Verdict::Denied,
             Verdict::Found,
             Verdict::Unlooked,
         ]
@@ -220,6 +225,13 @@ mod tests {
         );
         assert_eq!(messy.text, "security: no keychain found");
         assert_eq!(parse_lines(&messy.encode()).unwrap(), vec![messy]);
+        let denied = Line::new(
+            Verdict::Denied,
+            Kind::Process,
+            token(5),
+            "refused by the profile",
+        );
+        assert_eq!(parse_lines(&denied.encode()).unwrap(), vec![denied]);
         let unlooked = Line::new(
             Verdict::Unlooked,
             Kind::Keychain,

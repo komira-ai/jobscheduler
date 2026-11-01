@@ -128,6 +128,22 @@ pub fn split_found_files(
     (with, without, cut)
 }
 
+/// Why run A could not seed an item: the sandbox of the product profile said no (so the job
+/// could not create the state and nothing can carry over), or anything else (a full disk, a
+/// missing tool, a crash), which proves nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeedFailure {
+    ProfileRefused,
+    Other,
+}
+
+/// Tells the two apart from the failure text of a seed: `EPERM` or `EACCES` from the call
+/// (as `io::Error` prints them), or the sandbox's own words from a tool.
+pub fn classify_seed_failure(text: &str) -> SeedFailure {
+    let _ = text;
+    SeedFailure::Other
+}
+
 /// The kinds a run A must have seeded for the result to mean anything: a file, a process,
 /// a keychain item, a launchd agent and some shared memory. What is missing, by name. A run
 /// where these were refused proves nothing.
@@ -392,6 +408,86 @@ mod tests {
         );
         let semaphores = [seeded(Kind::SysvSem), seeded(Kind::PosixSem)];
         assert_eq!(missing_minimum(&semaphores).len(), 5);
+    }
+
+    /// Asserts that a seed failure is the profile's only when it says so: `EPERM` and `EACCES`
+    /// as `io::Error` prints them, and the sandbox's words from a tool ("Operation not
+    /// permitted", "deny(1)", sandbox-violation text). `ENOSPC`, a missing tool, a crash and
+    /// the empty text are not. It catches a classifier that excuses any failure, which would
+    /// turn a broken seed into a pass.
+    #[test]
+    fn only_a_sandbox_denial_excuses_a_seed() {
+        for code in [libc::EPERM, libc::EACCES] {
+            let text = format!("/x/y: {}", io::Error::from_raw_os_error(code));
+            assert_eq!(
+                classify_seed_failure(&text),
+                SeedFailure::ProfileRefused,
+                "{text}"
+            );
+        }
+        for text in [
+            "/usr/bin/security exited Some(1):  security: Operation not permitted",
+            "launchctl exited Some(1): Bootstrap failed: deny(1) mach-lookup com.apple.xpc.launchd",
+            "Sandbox: sleep(123) deny(1) process-exec /bin/sleep",
+            "defaults exited Some(1): sandbox violation: cfprefsd",
+        ] {
+            assert_eq!(
+                classify_seed_failure(text),
+                SeedFailure::ProfileRefused,
+                "{text}"
+            );
+        }
+        for code in [
+            libc::ENOSPC,
+            libc::ENOENT,
+            libc::EIO,
+            libc::EEXIST,
+            libc::EINVAL,
+        ] {
+            let text = format!("/x/y: {}", io::Error::from_raw_os_error(code));
+            assert_eq!(classify_seed_failure(&text), SeedFailure::Other, "{text}");
+        }
+        for text in [
+            "/usr/bin/getconf: No such file or directory (os error 2)",
+            "security exited None: ",
+            "defaults exited Some(1): cfprefsd crashed",
+            "shmget: Invalid argument (os error 22)",
+            "",
+        ] {
+            assert_eq!(classify_seed_failure(text), SeedFailure::Other, "{text}");
+        }
+    }
+
+    /// Asserts that the minimum set is met by each kind being seeded or denied by the
+    /// profile, and not by one that was refused for another reason. It catches a minimum that
+    /// counts a broken seed as covered.
+    #[test]
+    fn a_denial_by_the_profile_covers_a_kind_and_another_refusal_does_not() {
+        let denied = |kind| Line::new(Verdict::Denied, kind, token(3), "Operation not permitted");
+        let covered = [
+            seeded(Kind::HomeFile),
+            denied(Kind::Process),
+            denied(Kind::Keychain),
+            denied(Kind::LaunchAgent),
+            denied(Kind::SysvShm),
+        ];
+        assert!(missing_minimum(&covered).is_empty());
+        let mut broken = covered.to_vec();
+        broken[2] = Line::new(Verdict::Refused, Kind::Keychain, token(4), "ENOSPC");
+        assert_eq!(missing_minimum(&broken), ["keychain-item"]);
+        let all_denied: Vec<Line> = [
+            Kind::HomeFile,
+            Kind::Process,
+            Kind::Keychain,
+            Kind::LaunchAgent,
+        ]
+        .into_iter()
+        .map(denied)
+        .collect();
+        assert_eq!(
+            missing_minimum(&all_denied),
+            ["shared memory (System V or POSIX)"]
+        );
     }
 
     /// Asserts that the uid line round-trips among other output, that the first one is
