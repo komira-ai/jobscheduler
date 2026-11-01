@@ -65,6 +65,17 @@ pub(crate) fn binding(cpu: (u64, u64), mem: (u64, u64)) -> Ratio {
 /// are. A lease whose end is in the past is released at `now`; a lease with no end in
 /// `ends` is never released. `None` when the lease does not fit even after every lease
 /// with an end is released.
+///
+/// The fit is the flat predicate: the CPU and memory caps against the left side. It does
+/// not model the horizon curves, the flat-memory guard or the cold cap. That is safe in
+/// the direction that matters: those limits can only make the real start later, so the
+/// start time here is a lower bound of the start the full predicate allows, and a
+/// backfill gate that admits work only if it ends before this start (`fits_in_tail`:
+/// end no later than the start) admits only work that also ends before the real start.
+/// It costs some backfill and never starves the head.
+///
+/// Among heads whose start time is unknown or equal, the caller ranks by the binding
+/// ratio, which keeps the order the hold had before start times.
 pub(crate) fn start_time(
     left: &Left,
     leases: &[(LeaseId, u64, u64)],
@@ -105,6 +116,9 @@ pub(crate) fn start_time(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admission::{LoadConfig, WorkerLoad};
+    use js_types::sched::usage::LeaseCost;
+    use js_types::sched::{FarmTime, Resources};
 
     fn r(num: u64, den: u64) -> Ratio {
         Ratio::new(num, den)
@@ -237,5 +251,75 @@ mod tests {
             start_time(&l, &leases, &known, CAPS, (0, 16 * GIB), 0),
             Some(200)
         );
+    }
+
+    fn lease_cost(cpu: u64, cold: bool) -> LeaseCost {
+        LeaseCost {
+            cpu_millis: cpu,
+            memory_bytes: 0,
+            limit_bytes: 0,
+            cold,
+            retry: false,
+            key_hash: 0,
+        }
+    }
+
+    /// A worker of 8 cores holding four leases of a core, one cold lease already
+    /// admitted in this window, and the first of `releases` leases taken off.
+    fn worker(releases: u64) -> WorkerLoad {
+        let at = FarmTime::from_millis(0);
+        let mut load = WorkerLoad::default();
+        for n in 1..=4 {
+            load.insert(lease(n), lease_cost(1_000, false), false, None);
+        }
+        load.note_cold(at, &LoadConfig::default());
+        for n in 1..=releases {
+            load.remove(lease(n));
+        }
+        load
+    }
+
+    /// The first instant of `steps` (instant, leases released by then) at which the full
+    /// predicate admits a head of 6 cores, `cold` or not; `None` when it never does.
+    fn full_start(cold: bool, steps: &[(u64, u64)]) -> Option<u64> {
+        let cfg = LoadConfig::default();
+        let capacity = Resources::new(8_000, 32 * GIB);
+        let at = FarmTime::from_millis(0);
+        steps.iter().find_map(|&(instant, released)| {
+            let load = worker(released);
+            let left = load.left(at, &capacity, &cfg);
+            let cost = lease_cost(6_000, cold);
+            load.admits(&cost, None, &left, &capacity, at, &cfg)
+                .is_ok()
+                .then_some(instant)
+        })
+    }
+
+    /// Catches: a start time later than the one the full predicate allows. The leases end
+    /// two at 100 and two at 900; a cold head is also held by the cold cap, which refuses
+    /// it however many leases end (the cap is full in this window), so its real start is
+    /// later (here, never), and the projected start (100) is no later than that: a gate
+    /// that admits only work ending by 100 never delays it. A head that is not cold has no
+    /// other limit, and its projected start is the real one. The backfill gate
+    /// (`fits_in_tail`) is not called on this path yet, so the property is tested at the
+    /// level that exists: the projection against the full predicate.
+    #[test]
+    fn the_projected_start_is_no_later_than_the_start_the_full_predicate_allows() {
+        let cfg = LoadConfig::default();
+        let capacity = Resources::new(8_000, 32 * GIB);
+        let load = worker(0);
+        let left = load.left(FarmTime::from_millis(0), &capacity, &cfg);
+        let ends = ends([Some(100), Some(100), Some(900), Some(900)]);
+        let limits = (cfg.cpu_limit(&capacity), cfg.mem_limit(&capacity));
+        let projected = start_time(&left, &load.charges(&left), &ends, limits, (6_000, 0), 0);
+        let steps = [(0, 0), (100, 2), (900, 4)];
+        let plain = full_start(false, &steps);
+        let cold = full_start(true, &steps);
+        assert_eq!(projected, Some(100));
+        assert_eq!(plain, Some(100), "no other limit: the projection is exact");
+        assert_eq!(cold, None, "the cold cap refuses it in every step");
+        for real in [plain, cold] {
+            assert!(real.is_none_or(|real| projected.is_some_and(|p| p <= real)));
+        }
     }
 }

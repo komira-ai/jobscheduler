@@ -485,6 +485,14 @@ impl Servable {
     /// in `ends`), a worker with no start time after every worker with one; among equals
     /// the smallest binding ratio, then the first by name. Nothing is kept from the last
     /// round. `None` when no worker could take it at all.
+    ///
+    /// Two choices are deliberate. Ties among workers whose start time is unknown or equal
+    /// use the binding ratio, which keeps the order the hold had before start times. And
+    /// the start time is projected against the flat predicate (CPU and memory caps), not
+    /// the horizon curves, the flat-memory guard or the cold cap: those can only make the
+    /// real start later, so the projected start is a lower bound, and a backfill gate that
+    /// admits only work ending by it admits only work that also ends before the real
+    /// start. It costs some backfill and never starves the head.
     pub(crate) fn hold_for_head(
         &mut self,
         workers: &BTreeMap<WorkerId, Worker>,
