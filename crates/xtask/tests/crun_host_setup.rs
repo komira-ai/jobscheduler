@@ -453,7 +453,18 @@ fn a_write_that_fails_installs_nothing_and_records_nothing() {
         .collect();
     assert!(left.is_empty(), "{left:?}");
     let manifest = rig.text("var/lib/js-crun-host-setup/manifest");
-    assert!(!manifest.contains("js-agent-crun.service"), "{manifest}");
+    assert!(
+        !manifest
+            .lines()
+            .any(|l| l.starts_with("file\t") && l.contains("js-agent-crun.service")),
+        "{manifest}"
+    );
+    // The run says which command failed first.
+    let last = manifest.lines().last().expect("a line");
+    assert!(
+        last.starts_with("incomplete\t1\tinstall ") && last.contains("js-agent-crun.service"),
+        "{manifest}"
+    );
     assert!(!rig.calls().iter().any(|c| c.starts_with("UNCONFIGURED")));
 }
 
