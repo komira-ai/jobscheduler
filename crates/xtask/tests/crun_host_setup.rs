@@ -317,12 +317,23 @@ impl Rig {
 
     /// Runs the script with `args` against the root; the calls it made are in `calls`.
     fn run(&self, args: &[&str]) -> Out {
+        self.run_with(args, false)
+    }
+
+    /// Like `run`; with `small_files` the script may write files of 2 KiB at most (a full disk
+    /// for anything bigger: the write fails, and the signal that would kill the writer is ignored).
+    fn run_with(&self, args: &[&str], small_files: bool) -> Out {
         let mut answers = self.front.clone();
         answers.extend(self.defaults());
         std::fs::write(self.shim.join("answers"), answers.join("\n") + "\n").expect("answers");
         // The program the script runs by an absolute path under the root is a stand-in as well.
         let path = format!("{}:{}", self.shim.display(), self.tools.display());
-        let out = Command::new(real("bash"))
+        let mut command = Command::new(real("bash"));
+        if small_files {
+            command.args(["-c", "ulimit -S -f 2; trap '' XFSZ; exec \"$0\" \"$@\""]);
+            command.arg(real("bash"));
+        }
+        let out = command
             .arg(repo(SCRIPT))
             .args(["--root", &self.root.display().to_string()])
             .args(args)
@@ -884,4 +895,63 @@ fn help_lists_the_flags() {
     }
     assert_untouched(&rig, &before);
     assert!(rig.calls().is_empty(), "--help ran a program");
+}
+
+/// A write that fails (here: a unit bigger than the 2 KiB a full disk would take) is a failed step:
+/// exit 1, the file is not installed, no half-written copy is left, and the manifest does not
+/// record a file that was not written.
+#[test]
+fn a_write_that_fails_installs_nothing_and_records_nothing() {
+    let rig = Rig::new("write-fails");
+    let args = rig.apply_args();
+    let out = rig.run_with(&args.iter().map(String::as_str).collect::<Vec<_>>(), true);
+    assert_eq!(out.code, 1, "{}", out.text);
+    assert!(out.text.contains("FAILED"), "{}", out.text);
+    assert!(
+        !rig.path("etc/systemd/system/js-agent-crun.service")
+            .exists(),
+        "a unit was installed"
+    );
+    let left: Vec<String> = rig
+        .snapshot()
+        .into_keys()
+        .filter(|p| p.contains(".new."))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    let manifest = rig.text("var/lib/js-crun-host-setup/manifest");
+    assert!(!manifest.contains("js-agent-crun.service"), "{manifest}");
+    assert!(!rig.calls().iter().any(|c| c.starts_with("UNCONFIGURED")));
+}
+
+/// The mount does not start after it was stopped: the remaining steps do not run (the scratch
+/// directories are not made on the root filesystem under the mount point), the run exits 1, the
+/// manifest keeps the unit edit, and the output says how to start the mount again.
+#[test]
+fn a_mount_that_does_not_start_again_aborts_the_run_and_says_how_to_recover() {
+    let mut rig = Rig::new("start-fails");
+    rig.rule(rule("systemctl", &format!("start {MOUNT}"), 1, "", &[]));
+    let out = rig.apply();
+    assert_eq!(out.code, 1, "{}", out.text);
+    assert!(
+        out.text.contains(&format!("systemctl start {MOUNT}")),
+        "{}",
+        out.text
+    );
+    assert!(out.text.contains("unmounted"), "{}", out.text);
+    assert!(
+        !rig.path("var/lib/js-agent").exists(),
+        "directories were made"
+    );
+    assert!(
+        !rig.path("etc/systemd/system/js-agent-crun.service")
+            .exists(),
+        "the unit was installed"
+    );
+    let manifest = rig.text("var/lib/js-crun-host-setup/manifest");
+    assert!(manifest.contains("mount-options\t"), "{manifest}");
+    let calls = rig.calls();
+    assert!(
+        calls.contains(&format!("systemctl stop {MOUNT}")),
+        "{calls:?}"
+    );
 }

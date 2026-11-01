@@ -92,6 +92,15 @@ fn main() -> ExitCode {
         .to_string_lossy()
         .into_owned();
     let argv = args.collect::<Vec<_>>().join(" ");
+    // A test may limit the size of the files the script writes (to make its writes fail); the
+    // stand-ins' own logs are not the script's.
+    let _ = rustix::process::setrlimit(
+        rustix::process::Resource::Fsize,
+        rustix::process::Rlimit {
+            current: None,
+            maximum: None,
+        },
+    );
     let Ok(dir) = std::env::var("HOST_SHIM_DIR") else {
         eprintln!("host-shim: {name} {argv}: HOST_SHIM_DIR is not set");
         return ExitCode::from(UNCONFIGURED);
