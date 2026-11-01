@@ -11,3 +11,6 @@
 )]
 pub(crate) mod map;
 pub(crate) mod place;
+
+#[cfg(test)]
+mod wiring_tests;
