@@ -82,31 +82,31 @@ mod tests {
     #[test]
     fn two_endpoints_render_to_this_exact_anchor() {
         let text = render(
-            UidRange::new(600, 100).unwrap(),
+            UidRange::new(600, 3).unwrap(),
             &eps(&["192.0.2.10:443", "198.51.100.7:8443"]),
             &anchor(),
         );
         let golden = "\
-# js-mac-provision: egress of pool uids 600-699 (anchor com.apple/com.komira.js.pool). Generated; do not edit.
-block return out quick inet proto { tcp, udp } from any to 169.254.0.0/16 user 600:699
-pass out quick on lo0 inet proto { tcp, udp } from 127.0.0.0/8 to 127.0.0.0/8 user 600:699 keep state
-pass out quick inet proto tcp from any to 192.0.2.10 port 443 user 600:699 keep state
-pass out quick inet proto tcp from any to 198.51.100.7 port 8443 user 600:699 keep state
-block return out quick inet6 proto { tcp, udp } from any to any user 600:699
-block return out quick proto { tcp, udp } from any to any user 600:699
+# js-mac-provision: egress of pool uids 600-602 (anchor com.apple/com.komira.js.pool). Generated; do not edit.
+block return out quick inet proto { tcp, udp } from any to 169.254.0.0/16 user { 600, 601, 602 }
+pass out quick on lo0 inet proto { tcp, udp } from 127.0.0.0/8 to 127.0.0.0/8 user { 600, 601, 602 } keep state
+pass out quick inet proto tcp from any to 192.0.2.10 port 443 user { 600, 601, 602 } keep state
+pass out quick inet proto tcp from any to 198.51.100.7 port 8443 user { 600, 601, 602 } keep state
+block return out quick inet6 proto { tcp, udp } from any to any user { 600, 601, 602 }
+block return out quick proto { tcp, udp } from any to any user { 600, 601, 602 }
 ";
         assert_eq!(text, golden);
     }
 
     #[test]
     fn no_endpoint_leaves_only_loopback() {
-        let text = render(UidRange::new(600, 100).unwrap(), &[], &anchor());
+        let text = render(UidRange::new(600, 3).unwrap(), &[], &anchor());
         let golden = "\
-# js-mac-provision: egress of pool uids 600-699 (anchor com.apple/com.komira.js.pool). Generated; do not edit.
-block return out quick inet proto { tcp, udp } from any to 169.254.0.0/16 user 600:699
-pass out quick on lo0 inet proto { tcp, udp } from 127.0.0.0/8 to 127.0.0.0/8 user 600:699 keep state
-block return out quick inet6 proto { tcp, udp } from any to any user 600:699
-block return out quick proto { tcp, udp } from any to any user 600:699
+# js-mac-provision: egress of pool uids 600-602 (anchor com.apple/com.komira.js.pool). Generated; do not edit.
+block return out quick inet proto { tcp, udp } from any to 169.254.0.0/16 user { 600, 601, 602 }
+pass out quick on lo0 inet proto { tcp, udp } from 127.0.0.0/8 to 127.0.0.0/8 user { 600, 601, 602 } keep state
+block return out quick inet6 proto { tcp, udp } from any to any user { 600, 601, 602 }
+block return out quick proto { tcp, udp } from any to any user { 600, 601, 602 }
 ";
         assert_eq!(text, golden);
     }
@@ -152,7 +152,7 @@ block return out quick proto { tcp, udp } from any to any user 600:699
     #[test]
     fn the_metadata_range_is_refused_before_any_pass_and_the_default_comes_last() {
         let text = render(
-            UidRange::new(600, 100).unwrap(),
+            UidRange::new(600, 3).unwrap(),
             &eps(&["192.0.2.10:443"]),
             &anchor(),
         );
@@ -169,20 +169,35 @@ block return out quick proto { tcp, udp } from any to any user 600:699
     #[test]
     fn every_rule_is_quick_and_bound_to_the_uid_range() {
         let text = render(
-            UidRange::new(600, 100).unwrap(),
+            UidRange::new(600, 3).unwrap(),
             &eps(&["192.0.2.10:443"]),
             &anchor(),
         );
         for rule in text.lines().filter(|l| !l.starts_with('#')) {
             assert!(rule.contains(" out quick "), "{rule}");
-            assert!(rule.contains(" user 600:699"), "{rule}");
+            assert!(rule.contains(" user { 600, 601, 602 }"), "{rule}");
+        }
+    }
+
+    #[test]
+    fn no_rule_uses_the_colon_range_that_macos_pf_rejects() {
+        for count in [1, 2, 10] {
+            let text = render(
+                UidRange::new(4100, count).unwrap(),
+                &eps(&["192.0.2.10:443"]),
+                &anchor(),
+            );
+            for rule in text.lines().filter(|l| !l.starts_with('#')) {
+                let user = rule.split(" user ").nth(1).unwrap();
+                assert!(!user.contains(':'), "{rule}");
+            }
         }
     }
 
     #[test]
     fn the_text_ends_with_one_newline() {
         let text = render(UidRange::new(600, 2).unwrap(), &[], &anchor());
-        assert!(text.ends_with("601\n"));
+        assert!(text.ends_with("{ 600, 601 }\n"));
         assert!(!text.ends_with("\n\n"));
     }
 }

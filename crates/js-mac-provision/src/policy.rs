@@ -12,6 +12,10 @@ pub const MIN_UID: u32 = 500;
 /// The highest uid a range may end at: `u32::MAX` is `(uid_t)-1` and the one below it is
 /// the account `nobody` has on macOS.
 pub const MAX_UID: u32 = u32::MAX - 2;
+/// The most uids a range may hold. pf's `user` takes a list and expands every rule over
+/// every listed uid, so the anchor grows with the pool; a pool is about ten uids and this
+/// leaves room for more without letting a typo write thousands of rules.
+pub const MAX_POOL_UIDS: u32 = 128;
 /// The longest anchor name, in bytes.
 pub const MAX_ANCHOR_LEN: usize = 128;
 /// The longest component of an anchor name, in bytes (pf's own limit is 63).
@@ -20,6 +24,12 @@ pub const MAX_COMPONENT_LEN: usize = 63;
 /// Why a policy was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyError {
+    /// The range holds more uids than [`MAX_POOL_UIDS`].
+    #[error("a uid range of {count} is over the {MAX_POOL_UIDS} a pool may hold")]
+    TooManyUids {
+        /// How many uids were asked for.
+        count: u32,
+    },
     /// The range holds no uid.
     #[error("the uid range is empty (a count of 0)")]
     EmptyRange,
@@ -82,6 +92,9 @@ impl UidRange {
             .checked_add(span)
             .filter(|last| *last <= MAX_UID)
             .ok_or(PolicyError::UidOverflow { start, count })?;
+        if count > MAX_POOL_UIDS {
+            return Err(PolicyError::TooManyUids { count });
+        }
         Ok(Self { start, last })
     }
 
@@ -103,14 +116,23 @@ impl UidRange {
         (self.start..=self.last).contains(&uid)
     }
 
-    /// The range as pf's `user` takes it: `600` for one uid, `600:699` (both ends
-    /// included) for more.
+    /// The range as macOS pf's `user` takes it: `600` for one uid, `{ 600, 601, 602 }`
+    /// (every uid, both ends included) for more.
+    ///
+    /// pf.conf(5) says the `:` range "does not work for user and group match", so macOS
+    /// reads `600:602` as a user name and refuses it ("unknown user"). The `uid_item`
+    /// rule in pfctl's `parse.y` (OpenBSD, which Apple's pfctl derives from) takes a
+    /// uid, a unary operator and a uid, or `uid PORTBINARY uid`, and `uids` takes a
+    /// braced list of those. The binary operators are `><` (excludes both ends: `2000 >< 2004`
+    /// is 2001 to 2003), `<>` (the "except" range: below 2000 or above 2004) and `:`
+    /// (inclusive, unusable here). A list needs no operator whose edges could be
+    /// misread, so the list is used; `UidRange` bounds it at [`MAX_POOL_UIDS`].
     pub(crate) fn pf_user(self) -> String {
         if self.start == self.last {
-            self.start.to_string()
-        } else {
-            format!("{}:{}", self.start, self.last)
+            return self.start.to_string();
         }
+        let uids: Vec<String> = (self.start..=self.last).map(|u| u.to_string()).collect();
+        format!("{{ {} }}", uids.join(", "))
     }
 }
 
@@ -251,11 +273,34 @@ mod tests {
     fn a_range_runs_count_uids_from_start() {
         let r = UidRange::new(600, 100).unwrap();
         assert_eq!((r.first(), r.last()), (600, 699));
-        assert_eq!(r.pf_user(), "600:699");
+        assert!(r.pf_user().starts_with("{ 600, 601, 602, "));
+        assert!(r.pf_user().ends_with(", 698, 699 }"));
         assert!(r.contains(600));
         assert!(r.contains(699));
         assert!(!r.contains(599));
         assert!(!r.contains(700));
+    }
+
+    #[test]
+    fn pf_user_lists_each_uid_of_a_range_and_never_uses_a_colon() {
+        assert_eq!(UidRange::new(4100, 1).unwrap().pf_user(), "4100");
+        assert_eq!(UidRange::new(4100, 2).unwrap().pf_user(), "{ 4100, 4101 }");
+        assert_eq!(
+            UidRange::new(4100, 10).unwrap().pf_user(),
+            "{ 4100, 4101, 4102, 4103, 4104, 4105, 4106, 4107, 4108, 4109 }"
+        );
+        for count in [1, 2, 10, 100] {
+            let user = UidRange::new(4100, count).unwrap().pf_user();
+            assert!(!user.contains(':'));
+            let listed = user.trim_start_matches("{ ").trim_end_matches(" }");
+            assert_eq!(listed.split(", ").count(), count as usize, "{user}");
+        }
+    }
+
+    #[test]
+    fn a_pool_is_bounded_so_the_rule_list_stays_small() {
+        assert!(UidRange::new(600, 128).is_ok());
+        assert!(UidRange::new(600, 129).is_err());
     }
 
     #[test]

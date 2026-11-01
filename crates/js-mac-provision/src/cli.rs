@@ -434,8 +434,9 @@ mod tests {
         let (r, text) = run(&c, &pf);
         assert!(r.unwrap());
         assert!(text.contains(
-            "pass out quick inet proto tcp from any to 192.0.2.10 port 443 user 600:699"
+            "pass out quick inet proto tcp from any to 192.0.2.10 port 443 user { 600, 601, 602, "
         ));
+        assert!(text.contains(", 698, 699 } keep state"));
         assert!(text.contains("to 198.51.100.7 port 8443"));
         assert!(pf.calls().is_empty());
         assert!(!dir.join("pool.pf").exists());

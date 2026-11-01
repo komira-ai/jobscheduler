@@ -179,7 +179,7 @@ fn pool_uids_reach_only_the_listed_endpoint_and_other_uids_are_not_affected() {
             "uid {uid}: loopback"
         );
     }
-    // The uids either side of the range: the rules name `user 4100:4109` and no more.
+    // The uids either side of the range: the rules name the uids 4100 to 4109 and no more.
     for uid in [POOL_FIRST - 1, POOL_FIRST + POOL_COUNT] {
         assert_eq!(
             probe_as(&program, uid, &unlisted_at),
