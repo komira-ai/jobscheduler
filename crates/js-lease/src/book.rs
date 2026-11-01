@@ -124,10 +124,8 @@ impl Record {
             SharesRow::Bad => None,
         });
         if stored.shares.is_some() && found.is_none() {
-            tracing::warn!(
-                lease = %LeaseId::new(stored.term, stored.sequence),
-                "the lease file's shares row is not valid resources; the lease is put back booking the whole host"
-            );
+            let lease = LeaseId::new(stored.term, stored.sequence);
+            tracing::warn!(%lease, "invalid shares row, lease put back booking the whole host");
         }
         found
     }
