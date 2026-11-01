@@ -23,7 +23,7 @@
 //! Running the previous release's crate itself, as a dependency, is not done: it would bring
 //! a second `js-types`, which `layers.toml` forbids (`single_source`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use js_lease::{AcquireError, Booking, Boot, LeaseState, LeaseTable, ManualClock, read_bookings};
@@ -63,9 +63,12 @@ const REWRITTEN_BY_PREVIOUS: &str =
     include_str!("cross_release/rewritten_by_previous_release.toml");
 
 /// A provider whose hosts take several leases each, as a registry with a placer books
-/// them: [`HostBook`] with the gate that admits a class that shares a host.
+/// them: [`HostBook`] with the gate that admits a class that shares a host. A stop of a
+/// lease in `unanswered` gets no answer and stops nothing, as a provider that cannot be
+/// reached.
 struct Sharing {
     book: HostBook,
+    unanswered: BTreeSet<LeaseId>,
 }
 
 impl Sharing {
@@ -77,7 +80,10 @@ impl Sharing {
         let mut book = HostBook::new();
         book.insert_host(host("h1"), shape.clone());
         book.insert_host(host("h2"), shape);
-        Self { book }
+        Self {
+            book,
+            unanswered: BTreeSet::new(),
+        }
     }
 
     /// Seats `bookings` as the server does at a restart: each with what it books, a lease
@@ -109,6 +115,9 @@ impl Provider for Sharing {
         self.book.start_where(&spec, gate, &|_, _| true)
     }
     fn stop(&mut self, lease: &LeaseId) -> StopAck {
+        if self.unanswered.contains(lease) {
+            return StopAck::Unknown;
+        }
         StopAck::Stopped {
             read_back: self.book.stop(lease),
         }
@@ -151,6 +160,16 @@ fn without_gpu() -> Resources {
         .with_disk_bytes(1 << 30)
 }
 
+/// The share of the lease that is releasing: one core, no disk.
+fn releasing_share() -> Resources {
+    Resources::new(1000, 1, 0, None).unwrap()
+}
+
+/// A share of `cpu_millis` cores and nothing else.
+fn cores(cpu_millis: u64) -> Request {
+    sharing_request(Resources::new(cpu_millis, 1, 0, None).unwrap())
+}
+
 /// Asserts that `h1` of `table` has exactly `left` bytes of disk unbooked: a share asking
 /// one byte more is refused for capacity (`h2` is held whole), and one asking `left` starts
 /// on `h1`. It catches a restored share whose disk is not booked again.
@@ -167,8 +186,9 @@ fn assert_disk_left(table: &mut LeaseTable<Sharing, ManualClock>, left: u64) {
 }
 
 /// The file this release writes for two leases that share `h1` (between them every axis,
-/// disk included) and a whole-node lease on `h2`: `lease.shares` present on the first two
-/// and absent on the third.
+/// disk included), a whole-node lease on `h2`, and a fourth lease sharing `h1` that is
+/// released while the provider does not answer its stop, so it is left releasing:
+/// `lease.shares` present on the first, second and fourth and absent on the third.
 fn shared_host_written(scratch: &Scratch) -> String {
     let boot = Boot::Initialise;
     let path = scratch.file();
@@ -176,13 +196,19 @@ fn shared_host_written(scratch: &Scratch) -> String {
     let first = table.acquire(sharing_request(with_gpu()), None).unwrap();
     let second = table.acquire(sharing_request(without_gpu()), None).unwrap();
     let whole = table.acquire(request(3600), None).unwrap();
-    let hosts = [first.host, second.host, whole.host];
-    assert_eq!(hosts, [host("h1"), host("h1"), host("h2")]);
+    let fourth = table
+        .acquire(sharing_request(releasing_share()), None)
+        .unwrap();
+    let hosts = [first.host, second.host, whole.host, fourth.host];
+    assert_eq!(hosts, [host("h1"), host("h1"), host("h2"), host("h1")]);
+    table.provider_mut().unanswered.insert(fourth.id);
+    let outcome = table.release(&fourth.id).unwrap();
+    assert_eq!(outcome, js_lease::ReleaseOutcome::Releasing);
     drop(table);
     fs::read_to_string(scratch.file()).unwrap()
 }
 
-/// The bookings of the three leases of [`shared_host_written`], as this release reads them
+/// The bookings of the four leases of [`shared_host_written`], as this release reads them
 /// from a file that kept every row.
 fn shared_host_bookings() -> Vec<Booking> {
     let held = |sequence: u64, on: &str, shares: Option<Resources>| Booking {
@@ -191,19 +217,28 @@ fn shared_host_bookings() -> Vec<Booking> {
         state: LeaseState::Held,
         shares,
     };
+    let releasing = Booking {
+        state: LeaseState::Releasing,
+        ..held(4, "h1", Some(releasing_share()))
+    };
     vec![
         held(1, "h1", Some(with_gpu())),
         held(2, "h1", Some(without_gpu())),
         held(3, "h2", None),
+        releasing,
     ]
 }
 
 /// Restarts a table over the file of `scratch` as the server does: the bookings read,
-/// seated with what they book, then the table opened over them. The table and the seats
-/// refused.
-fn restarted(scratch: &Scratch) -> (LeaseTable<Sharing, ManualClock>, Vec<SeatError>) {
+/// seated with what they book, then the table opened over them, with no answer to a stop
+/// of a lease in `unanswered`. The table and the seats refused.
+fn restarted(
+    scratch: &Scratch,
+    unanswered: &[LeaseId],
+) -> (LeaseTable<Sharing, ManualClock>, Vec<SeatError>) {
     let bookings = read_bookings(scratch.file()).unwrap();
-    let (provider, refused) = Sharing::seated(&bookings);
+    let (mut provider, refused) = Sharing::seated(&bookings);
+    provider.unanswered.extend(unanswered.iter().copied());
     let path = scratch.file();
     let table = LeaseTable::open(provider, clock(), settings(), path, Boot::Resume);
     (table.unwrap(), refused)
@@ -238,7 +273,7 @@ fn this_release_reads_the_previous_release_file() {
         .map(|booking| booking.shares.clone())
         .collect();
     assert_eq!(shares, vec![None, None]);
-    let (table, refused) = restarted(&scratch);
+    let (table, refused) = restarted(&scratch, &[]);
     assert_eq!(listed(&table), vec![LeaseId::new(1, 1), LeaseId::new(1, 2)]);
     assert!(refused.is_empty(), "{refused:?}");
     let next_term = WRITTEN_BY_PREVIOUS.replacen("term = 1\n", "term = 2\n", 1);
@@ -246,7 +281,8 @@ fn this_release_reads_the_previous_release_file() {
 }
 
 /// Asserts that the previous release reads the file this release writes with
-/// `lease.shares` present on two leases and absent on one: its reader takes every lease,
+/// `lease.shares` present on three leases (one of them releasing) and absent on one: its
+/// reader takes every lease, the releasing one as releasing,
 /// keeps each row it does not know in the lease's `extra`, and writes the file back so that
 /// this release reads the same bookings, shares included, as it wrote. The file itself is
 /// pinned, so `written_by_this_release.toml` is what this release writes.
@@ -261,7 +297,7 @@ fn the_previous_release_reads_this_release_file() {
     );
 
     let document = previous::read(&written);
-    assert_eq!(document.lease_count, 3);
+    assert_eq!(document.lease_count, 4);
     let kept: Vec<_> = document
         .lease
         .iter()
@@ -274,13 +310,15 @@ fn the_previous_release_reads_this_release_file() {
     ];
     assert_eq!(kept[..2], expected);
     assert_eq!(kept[2], (3, named("h2"), LeaseState::Held));
+    assert_eq!(kept[3], (4, named("h1"), LeaseState::Releasing));
     let unknown: Vec<Vec<&String>> = document
         .lease
         .iter()
         .map(|l| l.extra.keys().collect())
         .collect();
     let shares = "shares".to_owned();
-    assert_eq!(unknown, vec![vec![&shares], vec![&shares], vec![]]);
+    let rows = vec![vec![&shares], vec![&shares], vec![], vec![&shares]];
+    assert_eq!(unknown, rows);
     assert!(document.extra.is_empty(), "{:?}", document.extra);
 
     fs::write(scratch.file(), previous::write(&document)).unwrap();
@@ -293,10 +331,13 @@ fn the_previous_release_reads_this_release_file() {
 /// Asserts what a restart of the previous release does to this release's file, from the
 /// file that release wrote when it was restarted over `written_by_this_release.toml`:
 /// it seats every lease as booking the whole host, so the second lease of `h1` is refused
-/// as taken and dropped (that release cannot serve a class that shares a host at all), and
-/// the rows it keeps, `lease.shares` included, come back to this release unchanged: the
-/// lease that kept `h1` is seated here again with its own share, and this release's
-/// rewrite still names it. (That release writes the row's keys sorted, as a table it does
+/// as taken and dropped (that release cannot serve a class that shares a host at all). A
+/// releasing lease it keeps as releasing, its row included, though its seat is refused too:
+/// that release keeps a releasing lease until a stop of it is answered. The rows it keeps,
+/// `lease.shares` included, come back to this release unchanged: the lease that kept `h1`
+/// is seated here again with its own share, the releasing one is seated again with its
+/// share and stays releasing while its stop is not answered, and this release's rewrite
+/// still names both. (That release writes the row's keys sorted, as a table it does
 /// not know; this one reads them in any order.) It also checks the reader
 /// of [`previous`] against that release's own output: reading this release's file with it
 /// and dropping the refused lease writes the same bytes.
@@ -304,7 +345,7 @@ fn the_previous_release_reads_this_release_file() {
 fn a_restart_of_the_previous_release_keeps_the_rows_of_the_leases_it_keeps() {
     let mut document = previous::read(WRITTEN_BY_THIS);
     document.lease.retain(|lease| lease.sequence != 2);
-    document.lease_count = 2;
+    document.lease_count = 3;
     document.term = 2;
     assert_eq!(previous::write(&document), REWRITTEN_BY_PREVIOUS);
 
@@ -313,28 +354,57 @@ fn a_restart_of_the_previous_release_keeps_the_rows_of_the_leases_it_keeps() {
     let mut expected = shared_host_bookings();
     expected.remove(1);
     assert_eq!(read_bookings(scratch.file()).unwrap(), expected);
-    let (mut table, refused) = restarted(&scratch);
-    assert_eq!(listed(&table), vec![LeaseId::new(1, 1), LeaseId::new(1, 3)]);
+    let releasing = LeaseId::new(1, 4);
+    let (mut table, refused) = restarted(&scratch, &[releasing]);
+    let kept = vec![LeaseId::new(1, 1), LeaseId::new(1, 3), releasing];
+    assert_eq!(listed(&table), kept);
     assert!(refused.is_empty(), "{refused:?}");
     assert_eq!(read_bookings(scratch.file()).unwrap(), expected);
     assert_disk_left(&mut table, DISK - (3 << 30));
 }
 
 /// Asserts that this release, restarted over the file it wrote, seats every lease with
-/// what it booked, disk included: both shares of `h1` are seated beside each other, and the
-/// 4 GiB of disk they book stay booked, so `h1` has none left. It catches a share put back
-/// without its disk, which would let a restart overbook the host's scratch disk.
+/// what it booked, disk included: the shares of `h1` are seated beside each other, the
+/// releasing one stays releasing and keeps its core booked until a stop is answered, and
+/// the 4 GiB of disk the first two book stay booked, so `h1` has none left. It catches a
+/// share put back without its disk or a releasing share put back without its booking,
+/// either of which would let a restart overbook the host.
 #[test]
 fn this_release_restarts_over_its_own_file_with_every_share_booked() {
     let scratch = Scratch::new("cross_release_own_restart");
     fs::write(scratch.file(), WRITTEN_BY_THIS).unwrap();
-    let (mut table, refused) = restarted(&scratch);
-    let all = vec![LeaseId::new(1, 1), LeaseId::new(1, 2), LeaseId::new(1, 3)];
+    let releasing = LeaseId::new(1, 4);
+    let (mut table, refused) = restarted(&scratch, &[releasing]);
+    let all: Vec<LeaseId> = (1..=4).map(|n| LeaseId::new(1, n)).collect();
     assert_eq!(listed(&table), all);
     assert!(refused.is_empty(), "{refused:?}");
     assert_eq!(
         read_bookings(scratch.file()).unwrap(),
         shared_host_bookings()
     );
+
+    // The releasing lease still books its core: with 7 of `h1`'s 8 cores booked, a share
+    // of one core and a millicore is refused, and stays refused while its stop is not
+    // answered; once a stop is, the core is free.
+    let state = |table: &LeaseTable<Sharing, ManualClock>| {
+        let leases = table.list();
+        leases
+            .iter()
+            .find(|lease| lease.id == releasing)
+            .map(|lease| lease.state)
+    };
+    assert_eq!(state(&table), Some(LeaseState::Releasing));
+    let refused = AcquireError::Refused(RefusalCode::NoCapacity).to_string();
+    let over = table.acquire(cores(1001), None).unwrap_err();
+    assert_eq!(over.to_string(), refused);
+    table.tick();
+    assert_eq!(state(&table), Some(LeaseState::Releasing));
+    let over = table.acquire(cores(1001), None).unwrap_err();
+    assert_eq!(over.to_string(), refused);
+    table.provider_mut().unanswered.clear();
+    let report = table.tick();
+    assert_eq!(report.freed, vec![releasing]);
+    assert_eq!(state(&table), None);
+    assert_eq!(table.acquire(cores(1001), None).unwrap().host, host("h1"));
     assert_disk_left(&mut table, 0);
 }

@@ -1,7 +1,7 @@
 version = 1
 term = 2
-next_sequence = 4
-lease_count = 2
+next_sequence = 5
+lease_count = 3
 
 [[lease]]
 term = 1
@@ -32,3 +32,18 @@ ends_at_ms = 4600000
 whole = true
 
 [lease.labels]
+
+[[lease]]
+term = 1
+sequence = 4
+state = "releasing"
+host = "h1"
+acquired_at_ms = 1000000
+expires_at_ms = 1060000
+ends_at_ms = 4600000
+
+[lease.labels]
+
+[lease.shares]
+cpu_millis = 1000
+memory_bytes = 1
