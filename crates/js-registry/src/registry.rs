@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use js_agent_wire::refusal as refusal_code;
-use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome};
+use js_agent_wire::{
+    Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome, WireShape,
+};
 use js_caps::{BUNDLE_ROOT, EXEC, FLAG_SET, HostContract, RUN_FILES, RUNTIME, SCRATCH_QUOTA};
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
@@ -63,8 +65,11 @@ pub struct HostView {
     pub state: HostState,
     /// The phase the host last announced.
     pub phase: Phase,
-    /// The lease holding the host, if any.
+    /// The lease booked first on the host, if any.
     pub lease: Option<LeaseId>,
+    /// Every lease booked on the host, in the order they were booked; `lease` is the first
+    /// of them. Empty when the host holds none.
+    pub leases: Vec<LeaseId>,
     /// The shape the pool books for the host (not the host's own claim), with its memory
     /// cut to the pool's memory percent.
     pub shape: Shape,
@@ -199,6 +204,8 @@ struct Shared {
     state: Mutex<State>,
     /// The source of the expected life of a profile ([`Registry::set_lives`]).
     lives: OnceLock<Arc<dyn crate::ProfileLives>>,
+    /// The placer that picks the host of a start ([`Registry::set_placer`]).
+    placer: OnceLock<Arc<dyn crate::Placer>>,
 }
 
 /// The hosts of one pool that registered themselves, and the lease bookings on them.
@@ -265,6 +272,7 @@ impl Registry {
                 sessions: Box::new(sessions),
                 state: Mutex::new(state),
                 lives: OnceLock::new(),
+                placer: OnceLock::new(),
             }),
         }
     }
@@ -277,6 +285,17 @@ impl Registry {
     /// per pool. A registry with no source costs a lease by its max-wall bound alone.
     pub fn set_lives(&self, lives: Arc<dyn crate::ProfileLives>) {
         let _ = self.shared.lives.set(lives);
+    }
+
+    /// Gives the registry the placer that picks the host of a start. From then on a start
+    /// is shown every host that could take it and books the one the placer picks, and a
+    /// class that books part of a host is admitted: the leases of such a class share a
+    /// host that has room for them, and a host that still lists the runs of its first
+    /// lease takes the second. Without a placer the registry books the first host by id,
+    /// leases whole hosts only, and refuses a class that does not book one with
+    /// `UnsupportedClass`. Only the first call takes effect.
+    pub fn set_placer(&self, placer: Arc<dyn crate::Placer>) {
+        let _ = self.shared.placer.set(placer);
     }
 
     /// The provider the lease table runs on, serving the pool's class.
@@ -524,8 +543,7 @@ impl Registry {
         let kept_cordon = known.and_then(|record| record.cordon);
         let kept_exclusive =
             known.map_or(Exclusive::Free, |record| record.exclusive.after_hello(now));
-        let kept_bound = known.and_then(|record| record.bound);
-        let kept_started = known.and_then(|record| record.started_at);
+        let kept_bounds = known.map(|record| record.bounds.clone());
         let kept_leaving = known.and_then(|record| record.leaving);
         let kept_leaving = match state.ending.contains(&host) {
             true => Some(marks::Leaving::Releasing),
@@ -615,8 +633,7 @@ impl Registry {
                 hello_at: Some(now),
                 runtime: hello.capabilities.get(RUNTIME).cloned(),
                 exclusive: kept_exclusive,
-                bound: kept_bound,
-                started_at: kept_started,
+                bounds: kept_bounds.unwrap_or_default(),
                 leaving: kept_leaving,
                 claim,
                 load: load::Kept::default(),
@@ -865,6 +882,14 @@ impl Registry {
         if book.read(lease) != booked {
             return Err(RunRefusal::NotHeld);
         }
+        // A lease that shares the host runs within what it booked: one run past its share is
+        // refused as past the shape, and its runs together are held to it at admission.
+        let held = book.held(lease);
+        let share = held.filter(|held| !held.whole).map(|held| &held.resources);
+        let wire = share.map(WireShape::from_resources);
+        if wire.is_some_and(|wire| spec.fits_shape(&wire).is_err()) {
+            return Err(RunRefusal::LimitsExceedShape);
+        }
         if record.taint.is_some() {
             return Err(RunRefusal::HostTainted);
         }
@@ -886,7 +911,7 @@ impl Registry {
             host,
             lease,
             (spec, profile),
-            shape.resources(),
+            (shape.resources(), share),
             record.quota_default,
             seen,
         )
@@ -1004,6 +1029,7 @@ impl Registry {
         now: Timestamp,
     ) -> impl Fn(&HostId, &Record) -> HostView + 'a {
         let booked = book.booked();
+        let every = book.leases();
         let shape = self.shared.config.booked();
         let memory = self.shared.config.memory_headroom();
         let marks = marks.reservations();
@@ -1019,6 +1045,7 @@ impl Registry {
                     .filter(|_| record.state(now, self.grace_ms()) != HostState::Lost),
                 phase: record.phase,
                 lease: booked.get(id).copied(),
+                leases: every.get(id).cloned().unwrap_or_default(),
                 shape: shape.clone(),
                 memory,
                 claim: record.claim.clone(),

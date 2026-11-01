@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use js_conformance::{Check, Report, Subject, Verdict, run};
 use js_pool_static::StaticPool;
-use js_provider::{Call, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck};
+use js_provider::{
+    Call, Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
+};
 use js_provider_fake::{Defect, FakeProvider, Rank};
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
@@ -15,6 +17,43 @@ enum Under {
     Pool(StaticPool),
     /// A fake that cannot be made to list an unleasable class.
     Bare(FakeProvider),
+    /// A fake whose capacity listing shows a second lease on every booked host.
+    Phantom(Phantom),
+}
+
+/// A fake that lists a lease nobody started beside the lease of each booked host: the
+/// listing and the booking table disagree, as a provider that books many leases per host
+/// and keeps them out of one of the two would.
+struct Phantom(FakeProvider);
+
+impl Provider for Phantom {
+    fn id(&self) -> ProviderId {
+        self.0.id()
+    }
+    fn flavour(&self) -> Flavour {
+        self.0.flavour()
+    }
+    fn classes(&self) -> Vec<ResourceClass> {
+        self.0.classes()
+    }
+    fn start(&mut self, spec: StartSpec) -> StartAck {
+        self.0.start(spec)
+    }
+    fn stop(&mut self, lease: &LeaseId) -> StopAck {
+        self.0.stop(lease)
+    }
+    fn observe(&mut self, lease: &LeaseId) -> Observed {
+        self.0.observe(lease)
+    }
+    fn capacity(&self) -> Vec<HostCapacity> {
+        let mut listed = self.0.capacity();
+        for host in &mut listed {
+            if host.leased_to.is_some() {
+                host.leases.push(LeaseId::new(9, 9));
+            }
+        }
+        listed
+    }
 }
 
 impl Subject for Under {
@@ -22,19 +61,20 @@ impl Subject for Under {
         match self {
             Self::Fake(fake) | Self::Bare(fake) => fake,
             Self::Pool(pool) => pool,
+            Self::Phantom(phantom) => phantom,
         }
     }
 
     fn booked(&self) -> BTreeMap<HostId, LeaseId> {
         match self {
-            Self::Fake(fake) | Self::Bare(fake) => fake.booked(),
+            Self::Fake(fake) | Self::Bare(fake) | Self::Phantom(Phantom(fake)) => fake.booked(),
             Self::Pool(pool) => pool.booked(),
         }
     }
 
     fn script_unknown(&mut self, call: Call, landed: bool) -> bool {
         match self {
-            Self::Fake(fake) | Self::Bare(fake) => {
+            Self::Fake(fake) | Self::Bare(fake) | Self::Phantom(Phantom(fake)) => {
                 fake.script_unknown(call, landed);
                 true
             }
@@ -55,7 +95,7 @@ impl Subject for Under {
                 *pool = kept.with_classes(vec![ResourceClass::gpu_host(), class]);
                 true
             }
-            Self::Bare(_) => false,
+            Self::Bare(_) | Self::Phantom(_) => false,
         }
     }
 }
@@ -142,6 +182,15 @@ fn double_booking_is_caught() {
         broken(Defect::DoubleBooks).failed(),
         vec![Check::NeverDoubleBooks, Check::StartUnknownThenRetry]
     );
+}
+
+/// Asserts that a listing which shows a lease the booking table does not hold fails the
+/// double-booking check and nothing else: the check reads every lease of each host, not
+/// only the first, so a second lease listed on a host is seen.
+#[test]
+fn a_second_lease_in_the_listing_alone_is_caught() {
+    let report = run(|| Under::Phantom(Phantom(placeholder())));
+    assert_eq!(report.failed(), vec![Check::NeverDoubleBooks]);
 }
 
 /// Asserts that a fake that books again on a repeated start fails the idempotence check,

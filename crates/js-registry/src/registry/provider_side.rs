@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use js_pool_static::SeatError;
 use js_provider::{HostCapacity, Observed};
-use js_types::{Admission, HostId, LeaseId};
+use js_types::{Admission, HostId, LeaseId, Resources};
 
 use super::{HostState, Record, Registry, State};
 use crate::credential::Binding;
@@ -35,14 +35,17 @@ impl Registry {
         if let Observed::Present { host } = book.read(lease) {
             let record = records.get_mut(&host);
             record.into_iter().for_each(|record| {
-                // The lease the host started last ends: the error of its estimate, at the
-                // time of this call on the registry's clock. `bound` holds only that
-                // lease, so the stop of an earlier lease on the host counts nothing (not
-                // reachable with one lease per host; sharing classes need a bound per
-                // lease). A lease put back after a restart has no bound and no
-                // `started_at`, so its stop counts nothing.
-                let ends = record.bound.filter(|(held, _)| held == lease);
-                let estimates = lives::est_ends(source, runs, ends, record.started_at);
+                // A lease ends: the error of its estimate, at the time of this call on the
+                // registry's clock. The host keeps a bound and a start for each lease it
+                // started, so the stop of any of them counts. A lease put back after a
+                // restart has neither, so its stop counts nothing.
+                let started: Vec<(LeaseId, u64)> = record
+                    .bounds
+                    .iter()
+                    .filter(|bound| bound.lease == *lease)
+                    .map(|bound| (bound.lease, bound.started_at))
+                    .collect();
+                let estimates = lives::est_ends(source, runs, &started);
                 estimates
                     .into_iter()
                     .for_each(|estimate| tail.ended(ended_at, estimate));
@@ -91,15 +94,16 @@ impl Registry {
         host: &HostId,
         lease: LeaseId,
         binding: Option<Binding>,
+        shares: Option<Resources>,
     ) -> Result<(), SeatError> {
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
         let State { book, records, .. } = &mut *guard;
-        let seated = match book.seat(host, lease) {
+        let seated = match book.seat_as(host, lease, shares.clone()) {
             Err(SeatError::Unlisted(_)) => {
                 self.shared.config.list_in(book, host.clone());
                 records.insert(host.clone(), Record::awaiting(binding, now));
-                book.seat(host, lease)
+                book.seat_as(host, lease, shares)
             }
             settled => settled,
         };

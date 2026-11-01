@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use js_pool_static::SeatError;
 use js_provider::{Flavour, HostCapacity, Observed, Provider, StartAck, StartSpec, StopAck};
-use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
+use js_types::{HostId, LeaseId, ProviderId, ResourceClass, Resources};
 
 use crate::credential::Binding;
 use crate::registry::Registry;
@@ -26,6 +26,11 @@ use crate::registry::Registry;
 ///   id it answers `NoCapacity` and the consumer retries. A request that used up its
 ///   tries to get a host ready answers `ExclusiveNotReady` once (that start removes its
 ///   record, so the next start of the request is a fresh one).
+/// - **Placer.** With [`crate::Registry::set_placer`] a start is shown every host that could
+///   take it and books the one the placer picks. A class that books part of a host is then
+///   leasable: its leases share a host that has room, and a host running its first lease
+///   takes a second. Without a placer the first host by id is booked and such a class is
+///   refused `UnsupportedClass`.
 /// - **Stop** frees the booking at once and reads back `Absent`, as it does for a lost
 ///   host: the table asked for the end of the lease.
 /// - **Observe** says `Present` while the host is live and `Unknown` once it is lost
@@ -91,7 +96,22 @@ impl RegisteredProvider {
         lease: LeaseId,
         binding: Option<Binding>,
     ) -> Result<(), SeatError> {
-        self.registry.seat(host, lease, binding)
+        self.seat_booked(host, lease, binding, None)
+    }
+
+    /// As [`RegisteredProvider::seat`], with what the lease booked: `Some(resources)` puts
+    /// back a lease that shares its host, which books those resources and needs a host with
+    /// no whole-host lease and room for them beside the leases seated before it; `None` books
+    /// the whole shape, as [`RegisteredProvider::seat`] does. The refusals are those of
+    /// [`js_pool_static::HostBook::seat_as`] except `Unlisted`.
+    pub fn seat_booked(
+        &self,
+        host: &HostId,
+        lease: LeaseId,
+        binding: Option<Binding>,
+        shares: Option<Resources>,
+    ) -> Result<(), SeatError> {
+        self.registry.seat(host, lease, binding, shares)
     }
 }
 

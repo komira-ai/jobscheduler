@@ -5,11 +5,12 @@ use std::collections::BTreeSet;
 
 use js_elastic::Demand;
 use js_lease::Timestamp;
-use js_pool_static::HostBook;
+use js_pool_static::{Candidate, HostBook};
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
 use js_types::{Admission, HostId, LeaseId, ResourceClass, Shape};
 
-use super::{HostState, Record, Registry, State};
+use super::record::Bound;
+use super::{HostState, Registry, State};
 use crate::lives;
 use crate::whole::caps::Capability;
 use crate::whole::cost::HostLoad;
@@ -18,13 +19,6 @@ use crate::whole::placement::{self, Asking};
 use crate::whole::requests::{RequestKey, Rules, whole_settings};
 use crate::whole::reserve::{self, HostFacts, Pass};
 use crate::whole_config::WholeNodeConfig;
-
-/// The end bound the host knows among `leases`: its latest started lease's, when that
-/// lease is booked here. The record keeps one bound per host, so the other leases of a
-/// host that carries several have none: only the latest-started lease's end is known.
-fn known_end(record: &Record, leases: &[LeaseId]) -> Option<(LeaseId, Timestamp)> {
-    record.bound.filter(|(held, _)| leases.contains(held))
-}
 
 impl Registry {
     /// Every host as the reservation pass reads it, in id order. Every host is booked as
@@ -44,7 +38,17 @@ impl Registry {
             };
             let quiet = record.quiet(&state.runs, id);
             let leases = booked.get(id).map(Vec::as_slice).unwrap_or_default();
-            let ends = known_end(record, leases);
+            // Every lease booked here that the registry started has its own bound; a lease
+            // put back after a restart has none.
+            let known: Vec<&Bound> = record
+                .bounds
+                .iter()
+                .filter(|bound| leases.contains(&bound.lease))
+                .collect();
+            let started: Vec<(LeaseId, u64)> = known
+                .iter()
+                .map(|bound| (bound.lease, bound.started_at))
+                .collect();
             HostFacts {
                 id: id.clone(),
                 capability,
@@ -53,8 +57,8 @@ impl Registry {
                 load: HostLoad {
                     id: id.to_string(),
                     leases: leases.len(),
-                    end_bounds: ends.map(|(_, end)| end.millis()).into_iter().collect(),
-                    est_ends: lives::est_ends(source, &state.runs, ends, record.started_at),
+                    end_bounds: known.iter().map(|bound| bound.end.millis()).collect(),
+                    est_ends: lives::est_ends(source, &state.runs, &started),
                 },
             }
         });
@@ -127,7 +131,13 @@ impl Registry {
                 return StartAck::Refused(RefusalCode::ExclusiveNotReady);
             }
         }
-        let gate = HostBook::class_gate(classes, spec);
+        // With a placer, a class that books part of a host is leasable: leases share.
+        let placer = self.shared.placer.get();
+        let gate = match placer {
+            Some(_) => HostBook::listed_gate(classes, spec),
+            None => HostBook::class_gate(classes, spec),
+        };
+        let shares = placer.is_some() & !spec.class().admission().books_whole_host();
         let fresh = !matches!(held, Observed::Present { .. });
         // The pool's shape fits the request or no host ever will: the book answers
         // `NoFit` when no listed host fits, and every host is booked as the pool's shape,
@@ -172,6 +182,10 @@ impl Registry {
             hosts: &hosts,
         };
         let room = reserve::has_room(&state.marks, &pass, true);
+        // The hosts that carry a lease: a lease that shares one may meet the runs of the
+        // leases there, but nothing else (a run the registry does not know, or one of a
+        // lease that has ended), whose limits no admission counts.
+        let occupied = state.book.leases();
         let State {
             book,
             records,
@@ -186,12 +200,27 @@ impl Registry {
             let record = records.get(id);
             // Only a whole-node request is kept off a host its earlier tries failed on.
             let barred = whole & requests.excluded(&key, id, now);
-            let bookable =
-                record.is_some_and(|record| record.bookable(now, grace, record.quiet(runs, id)));
+            let bookable = record.is_some_and(|record| {
+                let beside = |leases: &Vec<LeaseId>| record.clear_beside(runs, id, leases);
+                let quiet = match (shares, occupied.get(id)) {
+                    (true, Some(leases)) => beside(leases),
+                    _ => record.quiet(runs, id),
+                };
+                record.bookable(now, grace, quiet)
+            });
             let allowed = reserve::may_start(marks.holder(id), whole, spec.request_id(), room);
             [bookable, !barred, allowed].into_iter().all(|ok| ok)
         };
-        let ack = book.start_where(spec, gate, &eligible);
+        // Without a placer the book books the first host that qualifies, stopping at it;
+        // with one it is shown every host that qualifies. The placer runs under this
+        // registry's lock and costs time in the hosts and leases it is shown.
+        let ack = match placer {
+            Some(placer) => {
+                let choose = |open: &[Candidate]| placer.pick(spec, open);
+                book.start_by(spec, gate, &eligible, &choose)
+            }
+            None => book.start_where(spec, gate, &eligible),
+        };
         let started = matches!(ack, StartAck::Started { .. });
         let ended = matches!(ack, StartAck::Refused(RefusalCode::LeaseEnded));
         let commit = [whole, fresh].into_iter().all(|ok| ok);
@@ -204,10 +233,15 @@ impl Registry {
         if let (StartAck::Started { host }, true) = (&ack, fresh) {
             let end = now.plus(wanted.max_wall);
             tail.started(marks.holder(host), spec.request_id());
+            let here = book.leases().remove(host).unwrap_or_default();
             let record = records.get_mut(host);
             record.into_iter().for_each(|record| {
-                record.bound = Some((lease, end));
-                record.started_at = Some(now.millis());
+                record.bounds.retain(|bound| here.contains(&bound.lease));
+                record.bounds.push(Bound {
+                    lease,
+                    end,
+                    started_at: now.millis(),
+                });
             });
         }
         if let (StartAck::Started { host }, true) = (&ack, commit) {

@@ -73,8 +73,12 @@ pub struct HostCapacity {
     /// The memory the operator configured for the host, the percent of it that is booked
     /// and what that comes to (the memory of `shape`).
     pub memory: MemoryHeadroom,
-    /// The lease holding the whole host, or `None` when it is free.
+    /// The lease booked first on the host, or `None` when it is free. A host that books
+    /// many leases has more: read [`HostCapacity::leases`] to see them all.
     pub leased_to: Option<LeaseId>,
+    /// Every lease booked on the host, in the order they were booked. Empty when the host
+    /// is free; `leased_to` is the first of them.
+    pub leases: Vec<LeaseId>,
 }
 
 #[cfg(test)]

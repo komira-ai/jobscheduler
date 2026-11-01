@@ -98,7 +98,7 @@ impl Provider for LayeredProvider {
         let lease = spec.lease();
         let holder = self.children.iter().position(|child| {
             let capacity = child.capacity();
-            capacity.iter().any(|host| host.leased_to == Some(lease))
+            capacity.iter().any(|host| host.leases.contains(&lease))
         });
         if let Some(holder) = holder {
             return self.children[holder].start(spec);
@@ -209,7 +209,13 @@ impl CapacitySource for LayeredSource {
         let registered = self.registry.provider();
         for booking in rest {
             let binding = self.bindings.get(&booking.host).cloned();
-            if let Err(refused) = registered.seat(&booking.host, booking.lease, binding) {
+            let seated = registered.seat_booked(
+                &booking.host,
+                booking.lease,
+                binding,
+                booking.shares.clone(),
+            );
+            if let Err(refused) = seated {
                 unseated.push(Unseated {
                     booking: booking.clone(),
                     reason: refused.to_string(),
@@ -415,6 +421,117 @@ mod tests {
             StopAck::Stopped {
                 read_back: Observed::Absent
             }
+        );
+    }
+
+    /// A child that lets leases share its host: the booking table alone.
+    struct Shares {
+        book: js_pool_static::HostBook,
+        classes: Vec<ResourceClass>,
+    }
+
+    impl Provider for Shares {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("shares").unwrap()
+        }
+        fn flavour(&self) -> Flavour {
+            Flavour::Delegated
+        }
+        fn classes(&self) -> Vec<ResourceClass> {
+            self.classes.clone()
+        }
+        fn start(&mut self, spec: StartSpec) -> StartAck {
+            let gate = js_pool_static::HostBook::listed_gate(&self.classes, &spec);
+            self.book.start_where(&spec, gate, &|_, _| true)
+        }
+        fn stop(&mut self, lease: &LeaseId) -> StopAck {
+            StopAck::Stopped {
+                read_back: self.book.stop(lease),
+            }
+        }
+        fn observe(&mut self, lease: &LeaseId) -> Observed {
+            self.book.read(lease)
+        }
+        fn capacity(&self) -> Vec<HostCapacity> {
+            self.book.hosts()
+        }
+    }
+
+    fn sharing() -> ResourceClass {
+        let id = ClassId::new("share").unwrap();
+        ResourceClass::new(id, Admission::Book(Default::default()), 0)
+    }
+
+    fn sharing_spec(sequence: u64) -> StartSpec {
+        let request = Request {
+            class: ClassId::new("share").unwrap(),
+            resources: Resources::new(1000, 1, 0, None).unwrap(),
+            capabilities: BTreeMap::new(),
+            max_wall: Duration::from_secs(60),
+            labels: BTreeMap::new(),
+            validation_run: None,
+        };
+        StartSpec::new(LeaseId::new(1, sequence), request, &[sharing()]).unwrap()
+    }
+
+    /// A start of a lease that a child holds goes to that child, whether the lease is the
+    /// first booked on its host or a later one. Here the second lease of host `x` is
+    /// started again behind a child with a free host: the start must reach `x`, and the
+    /// free host must book nothing. It catches a layer that finds the holder by the first
+    /// lease of each host, which sends the repeat to the free host and books the lease twice.
+    #[test]
+    fn a_lease_booked_second_on_a_host_is_found_in_its_child() {
+        let mut book = js_pool_static::HostBook::new();
+        book.insert_host(host("x"), shape(4000, 0));
+        let mut shares = Shares {
+            book,
+            classes: vec![sharing()],
+        };
+        shares.start(sharing_spec(1));
+        shares.start(sharing_spec(2));
+        assert_eq!(shares.id().as_str(), "shares");
+        assert_eq!(shares.flavour(), Flavour::Delegated);
+        assert_eq!(shares.classes(), vec![sharing()]);
+        let free = fake("a", &[("a-1", 4000, 0)]).with_class(sharing());
+        let mut provider = layer_of(vec![Box::new(free), Box::new(shares)]);
+        assert_eq!(provider.start(sharing_spec(2)), on("x"));
+        assert_eq!(leased(&provider, "a-1"), None);
+        let second = LeaseId::new(1, 2);
+        let present = Observed::Present { host: host("x") };
+        assert_eq!(provider.observe(&second), present);
+        let gone = StopAck::Stopped {
+            read_back: Observed::Absent,
+        };
+        assert_eq!(provider.stop(&second), gone);
+    }
+
+    /// The lease file's bookings of leases that share a host are seated with the resources
+    /// the file names: two leases of 2 of the host's 4 cores sit on the one host, and the
+    /// provider lists both on it. It catches a seat that books the whole host for each,
+    /// which refuses the second as taken.
+    #[test]
+    fn bookings_that_share_a_host_are_seated_with_their_resources() {
+        let floor = Shape::new(
+            Resources::new(4000, 8 << 30, 0, None).unwrap(),
+            BTreeMap::new(),
+        );
+        let name = ProviderId::new("builders").unwrap();
+        let config = js_registry::PoolConfig::new(name, sharing(), floor, 2);
+        let now = js_lease::Timestamp::from_millis(1);
+        let registry = Registry::new(config, js_lease::ManualClock::new(now));
+        let source = LayeredSource::new(None, registry, BTreeMap::new());
+        let booking = |n: u64| Booking {
+            lease: LeaseId::new(1, n),
+            host: host("a"),
+            state: js_lease::LeaseState::Held,
+            shares: Some(Resources::new(2000, 1, 0, None).unwrap()),
+        };
+        let seated = source.provider(&[booking(1), booking(2)]).unwrap();
+        assert!(seated.unseated.is_empty(), "{:?}", seated.unseated);
+        let listed = seated.provider.capacity();
+        assert_eq!(
+            listed[0].leases,
+            vec![LeaseId::new(1, 1), LeaseId::new(1, 2)]
         );
     }
 

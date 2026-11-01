@@ -67,7 +67,31 @@
 //!
 //! [lease.labels]            # the caller's labels
 //! team = "infra"
+//!
+//! [lease.shares]            # optional: only a lease of a class that books part of a host
+//! cpu_millis = 4000         # ... what it books there (gpus, gpu_class and disk_bytes
+//! memory_bytes = 8589934592 # are left out when zero); absent means the whole host
 //! ```
+//!
+//! [`read_bookings`] reports `shares` as [`Booking::shares`], so a provider that lets
+//! leases share a host puts the lease back with what it booked. The field is read
+//! leniently: a file from before it, or a row whose resources are not a valid vector,
+//! reads as a lease that books the whole host, and a field of the row that this build does
+//! not know is ignored. A row that is not a table, or lacks `cpu_millis` or `memory_bytes`,
+//! reads the same way and the rest of the file is read as usual.
+//!
+//! Rolling back: a build that predates the row keeps it in `extra` and writes it back, so
+//! the file is not broken by going back and forth, but it seats every restored lease as
+//! booking the whole host. A host's second lease is then refused as taken at the start and
+//! reported unseated (the table drops it), until the newer build is back. Only leases of a
+//! class that shares a host are lost this way, and such a build serves no such class at
+//! all (it refuses every admission that does not book a whole host), so rolling back while
+//! they run ends them; drain them (stop placing with `js-sched`) before going back. A file
+//! with no `lease.shares` row is written byte for byte as that build wrote it. A newer
+//! build restarted with `--placement registry` still seats the leases it finds with their
+//! resources: the flag chooses who places new leases, not what the file says. The test
+//! `cross_release` (in `tests/lease`) pins each of these against files the previous release
+//! wrote and against its reader.
 //!
 //! A lease of a whole-node class (admission `Whole`) waits differently while pending: its
 //! expiry is the settings' prepare timeout, not its ttl, and when the provider is first

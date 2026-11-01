@@ -144,6 +144,7 @@ fn the_registration_keys_need_an_elastic_pool_and_a_valid_value() {
         ("agent_hello_burst", "60"),
         ("agent_hello_interval", "\"1s\""),
         ("require_host_credential", "false"),
+        ("placement", "\"registry\""),
     ] {
         let scratch = Scratch::new(&format!("one_file_needs_{key}"));
         let stat = PoolText::static_pool(&scratch, "hosts");
@@ -167,6 +168,11 @@ fn the_registration_keys_need_an_elastic_pool_and_a_valid_value() {
             "require_host_credential = \"yes\"",
             "server.require_host_credential: must be true or false",
         ),
+        (
+            "placement = \"elsewhere\"",
+            "server.placement: must be registry or js-sched",
+        ),
+        ("placement = 3", "server.placement: must be a string"),
     ] {
         let scratch = Scratch::new("one_file_bad_value");
         let text = file(&server(&scratch, line), &[&pool(&scratch)]);
@@ -188,6 +194,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--boot", "resume"),
         key("--agent-hello-burst", "5"),
         key("--agent-hello-interval", "5s"),
+        key("--placement", "js-sched"),
         key("--default-ttl", "5m"),
         key("--max-ttl", "2h"),
         key("--tick", "3s"),

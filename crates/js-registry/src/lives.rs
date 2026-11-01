@@ -4,7 +4,6 @@
 //! store), not the life admission charges a lease to (`Profile.life`, which is that P90
 //! plus `expected_life_delta_minutes`).
 
-use js_lease::Timestamp;
 use js_types::LeaseId;
 use js_usage::{ProfileCurves, ProfileKey};
 
@@ -40,21 +39,18 @@ pub(crate) fn estimate_end(
     Some(started_at.saturating_add(life_ms))
 }
 
-/// The `est_ends` of a host whose booked lease has the bound `ends` (lease and latest end)
-/// and started at `started_at`: one entry, the estimate of the lease, `None` when the
-/// start is not known, no source of lives is set or no keyed run has a P90. Empty for a
-/// host with no such lease.
+/// The `est_ends` of a host, one entry for each lease in `started` (a booked lease and
+/// when it started, in the order of the host's end bounds): the estimate of the lease, or
+/// `None` when no source of lives is set or no keyed run of the lease has a P90.
 pub(crate) fn est_ends(
     lives: Option<&dyn ProfileLives>,
     runs: &Runs,
-    ends: Option<(LeaseId, Timestamp)>,
-    started_at: Option<u64>,
+    started: &[(LeaseId, u64)],
 ) -> Vec<Option<u64>> {
-    let estimate = |(lease, _): (LeaseId, Timestamp)| {
-        let (lives, started_at) = lives.zip(started_at)?;
-        estimate_end(started_at, &runs.profiles_of(&lease), lives)
+    let estimate = |(lease, started_at): &(LeaseId, u64)| {
+        estimate_end(*started_at, &runs.profiles_of(lease), lives?)
     };
-    ends.into_iter().map(estimate).collect()
+    started.iter().map(estimate).collect()
 }
 
 #[cfg(test)]

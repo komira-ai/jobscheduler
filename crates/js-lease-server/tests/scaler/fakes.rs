@@ -468,6 +468,7 @@ pub fn view(name: &str) -> HostView {
         state: HostState::Live,
         phase: WirePhase::Serving,
         lease: None,
+        leases: Vec::new(),
         shape: Shape::new(resources, BTreeMap::new()),
         memory: MemoryHeadroom::full(1 << 30),
         claim: Some(Shape::new(announced, BTreeMap::new())),

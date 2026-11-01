@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use js_types::{HostId, Labels, LeaseId};
+use js_types::{HostId, Labels, LeaseId, Resources};
 
 use crate::clock::Timestamp;
 use crate::error::{SaveError, SettingsError};
@@ -229,6 +229,10 @@ pub struct Booking {
     /// The state the file has the lease in: a host is named for a held lease and for a
     /// releasing one, whose booking stays counted until the provider confirms the stop.
     pub state: LeaseState,
+    /// What the lease books on the host when its class lets leases share one: its own
+    /// resources. `None` for a lease that books the whole host, and for a file written
+    /// before the file kept them, which a provider puts back as booking the whole host.
+    pub shares: Option<Resources>,
 }
 
 /// Until when a host is excluded for a request.
