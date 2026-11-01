@@ -426,3 +426,19 @@ fn a_previous_agent_that_is_still_starting_is_waited_for_until_it_says_hello() {
     assert_eq!(rig.world.ticks(), 3);
     assert_eq!(rig.record(), None);
 }
+
+#[test]
+fn a_host_with_no_lease_that_is_still_releasing_one_is_waited_for_before_the_agent_is_stopped() {
+    let rig = serving_new("hook-rollback-releasing");
+    rig.world.alter_host(|host| host.releasing = true);
+    let spy = Spy::new(&rig);
+    spy.on_pause(|spy, ticks| {
+        if ticks == 3 {
+            spy.world.alter_host(|host| host.releasing = false);
+        }
+    });
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(rig.world.ticks(), 3);
+    assert_eq!(spy.act_names(), [stop(), RELINK.to_owned(), start()]);
+}
