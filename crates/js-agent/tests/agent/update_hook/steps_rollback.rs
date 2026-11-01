@@ -776,3 +776,20 @@ fn a_previous_agent_seen_waiting_to_restart_while_awaited_is_a_release_failure()
     assert_eq!(done.report.class, Class::Release);
     assert_eq!(spy.act_names(), Vec::<String>::new());
 }
+
+#[test]
+fn a_server_that_restarted_and_shows_the_host_awaiting_is_no_proof_until_the_hello() {
+    let rig = link_moved("hook-rollback-awaiting");
+    let spy = Spy::new(&rig);
+    *spy.start_leaves.borrow_mut() = Some(("active", "running"));
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| match ticks - base {
+        1 => spy.world.forget_host(),
+        4 => spy.world.hello("1.3.0").unwrap(),
+        _ => {}
+    });
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(rig.world.ticks() - base, 4);
+    assert_restored(&rig);
+}
