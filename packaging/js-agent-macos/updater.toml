@@ -30,6 +30,12 @@ cordon_lease_secs = 300
 cordon_max_secs = 14400
 drain_wait_secs = 3600
 defer_retry_secs = 300
-# The link the daemons run their programs through; the cutover moves it. The key is read by
-# the cutover step, which is not on main yet.
+# The link the daemons run their programs through; the cutover moves it.
 release_link = "/usr/local/js-agent/link/current"
+# How the hook reaches the lease server and the agent's state: the values of the agent's flags
+# of the same names, as the agent's plist has them. The server is the placeholder the plist
+# ships with; enrolling the Mac sets it, here and there. The hook's `host_id` and `ca_cert`
+# are left out: the host's own id and the public roots are what the agent uses without them.
+server = "SET-THE-SERVER"
+state_root = "/var/db/js-agent/state"
+token_file = "/etc/js-agent/token"

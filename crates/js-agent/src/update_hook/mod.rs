@@ -11,9 +11,12 @@
 //! this). The verb is answered before the agent's flags are parsed and before any signal
 //! handler is installed: a hook is a short-lived root process of the updater, not an agent.
 //!
-//! `prepare`, `cutover`, `verify` and `cleanup` have their bodies in [`step`], over the ports.
-//! The machine has no lease client yet, so [`Host::system`] still answers every step with the
-//! reason `not_implemented` (exit 1), and `rollback` has no body.
+//! `prepare`, `cutover`, `verify` and `cleanup` have their bodies in [`step`], over the ports;
+//! `rollback` has none yet and answers `not_implemented`. [`Host::system`] runs them over
+//! the machine's: the unit manager, the release link, the lease server's own-host routes and the
+//! agent's state root (see [`machine`](Machine)). Where the lease server is and where the state
+//! root is come from the params table ([`ConnectParams`]); the declaration is read from
+//! [`DECLARATION_PATH`].
 //!
 //! The hook builds on Linux and macOS and differs between them in two places only: the unit
 //! manager ([`PlatformUnits`]: `systemctl` on Linux, `launchctl` on a Mac) and the runtime the
@@ -127,15 +130,9 @@ pub struct Host<'a> {
     pub step: &'a dyn Fn(&Invocation, &Params) -> Done,
 }
 
-/// A step with no body yet: exit 1, reason `not_implemented`.
-fn not_implemented(invocation: &Invocation, _params: &Params) -> Done {
-    Done {
-        outcome: Outcome::Failure,
-        report: Report::failure(
-            Reason::NotImplemented,
-            format!("{} is not implemented", invocation.step),
-        ),
-    }
+/// This machine's step: the real ports, over the declaration the updater installed.
+fn machine_step(invocation: &Invocation, params: &Params) -> Done {
+    run_step(invocation, params, &Machine::system())
 }
 
 impl Host<'static> {
@@ -143,7 +140,7 @@ impl Host<'static> {
     #[must_use]
     pub fn system() -> Self {
         Self {
-            step: &not_implemented,
+            step: &machine_step,
         }
     }
 }

@@ -31,6 +31,11 @@ pub const LAUNCH_DAEMONS_DIR: &str = "/Library/LaunchDaemons";
 pub const LOG_DIR: &str = "/Library/Logs/js-agent";
 /// The path whose existence lets the daemons run.
 pub const GATE: &str = "/etc/js-agent/token";
+/// Seconds launchd gives the agent to exit after SIGTERM before it kills it (`ExitTimeOut`): the
+/// unit's `TimeoutStopSec`, the drain the agent's default flags ask for, 10 + 10 + 30 s, with room
+/// for the engine calls. `launchctl bootout` returns when the agent has exited, so whatever stops
+/// it must wait at least this long.
+pub const AGENT_EXIT_TIMEOUT_SECS: u32 = 120;
 /// Seconds launchd waits between two starts of a daemon.
 pub const THROTTLE_SECS: u32 = 30;
 /// The `--server` of a plist nobody has configured; the agent refuses it.
@@ -54,9 +59,8 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// The agent's daemon for `server` and `pool`. The exit timeout is the unit's
-    /// `TimeoutStopSec`: the drain the agent's default flags ask for, 10 + 10 + 30 s, with
-    /// room for the engine calls.
+    /// The agent's daemon for `server` and `pool`, with the exit timeout
+    /// [`AGENT_EXIT_TIMEOUT_SECS`].
     #[must_use]
     pub fn agent(server: &str, pool: &str) -> Daemon {
         let words = [
@@ -77,7 +81,7 @@ impl Daemon {
             label: AGENT_LABEL.to_owned(),
             program: format!("{RELEASE_LINK}/js-agent"),
             args: words.iter().map(|w| (*w).to_owned()).collect(),
-            exit_timeout_secs: 120,
+            exit_timeout_secs: AGENT_EXIT_TIMEOUT_SECS,
             log_stem: "js-agent".to_owned(),
         }
     }
