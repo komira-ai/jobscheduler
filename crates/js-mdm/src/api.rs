@@ -249,16 +249,9 @@ pub struct RealApi {
     pub total: Duration,
 }
 
-impl RealApi {
-    /// A client with the usual [`TOTAL`] deadline.
-    pub fn new() -> RealApi {
-        RealApi { total: TOTAL }
-    }
-}
-
 impl Default for RealApi {
     fn default() -> RealApi {
-        RealApi::new()
+        RealApi { total: TOTAL }
     }
 }
 

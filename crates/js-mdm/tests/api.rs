@@ -327,7 +327,7 @@ fn the_real_client_speaks_http_to_a_loopback_listener() {
     let host = FakeHost::new(0);
     let svc = service(&host, &addr.to_string()).unwrap();
     let net = FakeNet::new(Default::default());
-    let real = RealApi::new();
+    let real = RealApi::default();
     let env = Env {
         host: &host,
         net: &net,
@@ -385,7 +385,7 @@ fn the_real_client_reports_a_closed_port_and_a_non_http_answer() {
     let host = FakeHost::new(0);
     let svc = service(&host, &addr.to_string()).unwrap();
     let put = Call::put("/x", Vec::new());
-    let (result, _) = run_call(&host, &RealApi::new(), &svc, &put, Mode::Apply);
+    let (result, _) = run_call(&host, &RealApi::default(), &svc, &put, Mode::Apply);
     let err = result.unwrap_err();
     assert_eq!(err.exit_code(), 1);
     assert!(
@@ -396,7 +396,7 @@ fn the_real_client_reports_a_closed_port_and_a_non_http_answer() {
 
     let (addr, thread) = serve(vec![b"not http at all".to_vec()]);
     let svc = service(&host, &addr.to_string()).unwrap();
-    let (result, _) = run_call(&host, &RealApi::new(), &svc, &put, Mode::Apply);
+    let (result, _) = run_call(&host, &RealApi::default(), &svc, &put, Mode::Apply);
     thread.join().unwrap();
     assert!(
         result

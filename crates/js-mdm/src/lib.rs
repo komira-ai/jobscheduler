@@ -121,7 +121,7 @@ pub fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let host = RealHost::new();
     let net = Net::new(true);
-    let api = RealApi::new();
+    let api = RealApi::default();
     let secs = SystemTime::now().duration_since(UNIX_EPOCH);
     let env = Env {
         host: &host,

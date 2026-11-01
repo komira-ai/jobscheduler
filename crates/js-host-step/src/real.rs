@@ -311,11 +311,13 @@ impl Host for RealHost {
         let image = File::open("/proc/self/exe")?.metadata()?;
         let canonical = fs::canonicalize("/proc/self/exe")?;
         let path = canonical.to_string_lossy();
-        check_owner_mode(&path, image.uid(), image.mode())?;
-        check_ancestry(&path, |at| {
+        // Both are judged, whatever the first says; the image's verdict comes first.
+        let image = check_owner_mode(&path, image.uid(), image.mode());
+        let ancestry = check_ancestry(&path, |at| {
             let meta = found(fs::symlink_metadata(at))?;
             Ok(meta.map(|m| (m.uid(), m.mode())))
-        })
+        });
+        image.and(ancestry)
     }
 
     // The machine's own tables, whatever the root directory this host stands on. IPv6 may be
