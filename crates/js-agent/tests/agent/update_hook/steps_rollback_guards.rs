@@ -309,6 +309,13 @@ fn outage_bound_secs(rig: &Rig) -> u64 {
     rig.declaration.timeouts.rollback - START_WAIT_SECS - ROLLBACK_HELLO_SECS - ROLLBACK_MARGIN_SECS
 }
 
+/// The end state without the cordon, which lapses while the rollback waits.
+fn untimed(rig: &Rig) -> serde_json::Value {
+    let mut state = end_state(rig);
+    state["cordon"] = serde_json::Value::Null;
+    state
+}
+
 #[test]
 fn a_lease_server_that_stays_down_before_the_first_act_is_waited_for_and_then_fails_as_environment()
 {
@@ -320,7 +327,7 @@ fn a_lease_server_that_stays_down_before_the_first_act_is_waited_for_and_then_fa
         ),
         ("verified", verified("hook-rollback-outage-verified")),
     ] {
-        let before = (rig.record_bytes(), end_state(&rig));
+        let before = (rig.record_bytes(), untimed(&rig));
         let spy = Spy::new(&rig);
         spy.fail("host");
         let ticks = rig.world.ticks();
@@ -344,7 +351,7 @@ fn a_lease_server_that_stays_down_before_the_first_act_is_waited_for_and_then_fa
         );
         assert_eq!(spy.act_names(), Vec::<String>::new(), "{label}");
         assert_eq!(
-            (rig.record_bytes(), end_state(&rig)),
+            (rig.record_bytes(), untimed(&rig)),
             before,
             "{label}: nothing half-done"
         );
