@@ -38,6 +38,7 @@
 #   --server URL --pool NAME  written into the unit in place of the placeholders (apply needs both)
 #   --scratch-mount-unit NAME the systemd mount unit of /var/lib/js-agent/scratch, a file in /etc/systemd/system
 #                             (default var-lib-js\x2dagent-scratch.mount)
+#   --dependents-limit N      units the walk of the mount's dependents may look at (default 1000); more is refused
 #   --skip-scratch-quota      leave the scratch mount as it is (a host whose scratch is not a mount unit)
 #   --root DIR                run against the tree DIR instead of /, as the user who owns DIR (for tests)
 # Configuration is these flags only; the script reads no environment variable of its own.
@@ -61,6 +62,7 @@ SYSTEMD_MIN=254
 SCRATCH=/var/lib/js-agent/scratch
 MOUNT_UNIT='var-lib-js\x2dagent-scratch.mount'
 SKIP_QUOTA=0
+DEP_LIMIT=1000      # units the walk of the mount's dependents may look at before it refuses
 QUOTA_OPTION=prjquota
 # path mode, parents first
 DIRS=("/etc/js-agent 0700" "/var/lib/js-agent 0711" "/var/lib/js-agent/state 0700" "/var/lib/js-agent/scratch 0711" "/var/lib/js-agent/scratch/runs 0711")
@@ -580,16 +582,21 @@ with_quota_option() {
   printf -v "$1" '%s' "$out"
 }
 
-# quota_dependents: refuses unless no active unit would stop with the mount unit: those that require it, are bound to it or
-# are part of it, and, the same way, the units that depend on them (a walk, not only the first level). Only local-fs.target,
+# quota_dependents: refuses unless no active unit would stop with the mount unit: those that require it, are bound to it,
+# are part of it or have their stop propagated from it, and, the same way, the units that depend on them (a walk, not only the first level). Only local-fs.target,
 # which a mount legitimately touches, is skipped; any other target counts like any unit.
 quota_dependents() {
   local -a queue=("$MOUNT_UNIT") words
-  local seen=" $MOUNT_UNIT " u out w state active=""
-  while [ "${#queue[@]}" -gt 0 ] && [ "${#seen}" -lt 100000 ]; do
+  local seen=" $MOUNT_UNIT " u out w state active="" looked=0
+  while [ "${#queue[@]}" -gt 0 ]; do
+    if [ "$looked" -ge "$DEP_LIMIT" ]; then
+      refuse "cannot tell what depends on $MOUNT_UNIT: the walk passed $DEP_LIMIT units with more to look at (--dependents-limit)"
+      return 1
+    fi
+    looked=$((looked + 1))
     u=${queue[0]}
     queue=("${queue[@]:1}")
-    if ! out=$(systemctl show -p RequiredBy,RequisiteOf,BoundBy,ConsistsOf --value -- "$u" 2>/dev/null); then
+    if ! out=$(systemctl show -p RequiredBy,RequisiteOf,BoundBy,ConsistsOf,PropagatesStopTo --value -- "$u" 2>/dev/null); then
       refuse "cannot read which units depend on $u"
       return 1
     fi
@@ -881,7 +888,7 @@ main() {
       --apply) APPLY=1 ;;
       --skip-scratch-quota) SKIP_QUOTA=1 ;;
       --help | -h) usage; exit 0 ;;
-      --job-user | --subid-start | --unit | --unit-sha256 | --tmpfiles | --tmpfiles-sha256 | --server | --pool | --scratch-mount-unit | --root)
+      --job-user | --subid-start | --unit | --unit-sha256 | --tmpfiles | --tmpfiles-sha256 | --server | --pool | --scratch-mount-unit | --root | --dependents-limit)
         [ "$#" -ge 2 ] || die "$1 needs a value"
         case $1 in
           --job-user) JOB_USER=$2 ;;
@@ -894,6 +901,7 @@ main() {
           --pool) POOL=$2 ;;
           --scratch-mount-unit) MOUNT_UNIT=$2 ;;
           --root) ROOT=${2%/} ;;
+          --dependents-limit) DEP_LIMIT=$2 ;;
         esac
         shift
         ;;
@@ -901,6 +909,7 @@ main() {
     esac
     shift
   done
+  valid_number "$DEP_LIMIT" && [ "$DEP_LIMIT" -gt 0 ] || die "--dependents-limit must be a number above 0"
   valid_name "$JOB_USER" || die "--job-user '$JOB_USER' is not a user name"
   if [ -n "$SUBID_START" ]; then
     valid_number "$SUBID_START" || die "--subid-start must be a number above 0"

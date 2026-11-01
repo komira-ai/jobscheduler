@@ -51,6 +51,7 @@ crun_host_setup.sh --apply --server https://scheduler.example.org:7300 --pool fa
 | `--tmpfiles FILE`, `--tmpfiles-sha256 HEX` | `tmpfiles-crun.conf`; an apply needs both |
 | `--server URL`, `--pool NAME` | written into the unit in place of its placeholders; an apply needs both |
 | `--scratch-mount-unit NAME` | the mount unit of `/var/lib/js-agent/scratch`, a file in `/etc/systemd/system` (default `var-lib-js\x2dagent-scratch.mount`) |
+| `--dependents-limit N` | how many units the walk of the mount's dependents may look at before it refuses (default 1000) |
 | `--skip-scratch-quota` | leave the scratch mount as it is, for a host whose scratch is not a mount unit |
 | `--root DIR` | run against the tree `DIR` instead of `/`; for tests only. The programs it runs still act on the host, and the script's root check (`id -u`) still wants euid 0 for `--apply`, while the guard against acting on the host wants the real uid (`id -ur`) not to be 0: so `--apply` with `--root` can work only with euid 0 and ruid not 0, which no ordinary login has |
 
@@ -86,8 +87,10 @@ Before the unmount it also refuses when
   take) or something is mounted below the scratch directory;
 - another active unit would stop with the mount unit: one that requires it, is bound to it or is
   part of it, or depends on one of those, followed through (`systemctl show -p
-  RequiredBy,RequisiteOf,BoundBy,ConsistsOf`). A custom target counts; only `local-fs.target` is
-  left out;
+  RequiredBy,RequisiteOf,BoundBy,ConsistsOf,PropagatesStopTo`). A custom target counts. Only
+  `local-fs.target` is left out: a mount that `local-fs.target` requires takes it down when it
+  stops, and starting the mount does not bring it back (it starts again when something requires
+  it). A walk longer than `--dependents-limit` units (default 1000) is refused, not passed;
 - `<unit>.d` exists (a drop-in can override `Options=`), or the `Options=` line is continued with a
   backslash.
 
