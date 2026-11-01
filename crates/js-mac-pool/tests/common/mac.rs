@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use js_mac_pool::seatbelt::{
-    AbsPath, Canaries, Fixture, Outcome, PinnedTree, PrivilegedScan, ReadGrant, SelfTest,
-    SlotLayout,
+    AbsPath, Canaries, Fixture, MacosMajor, Outcome, PinnedTree, PrivilegedScan, ReadGrant,
+    SelfTest, SlotLayout,
 };
 use js_mac_pool::xcode::{Catalog, HostXcode, State, XcodeFlag};
 
@@ -18,6 +18,17 @@ pub const DATA: &str = "fixture-data\n";
 
 /// The Xcode the host's tools use by default.
 pub const XCODE_APP: &str = "/Applications/Xcode.app";
+
+/// The macOS major version of this host, which must have a base set.
+pub fn host_major() -> MacosMajor {
+    let out = Command::new("/usr/bin/sw_vers")
+        .arg("-productVersion")
+        .output()
+        .expect("sw_vers");
+    let version = String::from_utf8(out.stdout).expect("utf8");
+    MacosMajor::from_product_version(&version)
+        .unwrap_or_else(|| panic!("macOS {version} has no base set"))
+}
 
 pub struct Mac {
     pub scratch: Scratch,
