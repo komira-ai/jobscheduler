@@ -15,6 +15,7 @@ use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
 use js_contain::oci::{Oci, OciConfig, stderr_path, stdout_path};
 use js_contain::running::Running;
 use js_contain::subids::{DaemonIds, IdFiles, user_ids};
+use js_testkit::spawn::install_copy;
 use js_types::Resources;
 
 /// The cgroup v2 mount.
@@ -145,8 +146,7 @@ fn busybox_rootfs(rootfs: &Path) {
         fs::write(rootfs.join("etc").join(file), "").expect("an etc file");
     }
     let busybox = rootfs.join("bin/busybox");
-    fs::copy(find_on_path("busybox"), &busybox).expect("copy busybox");
-    fs::set_permissions(&busybox, fs::Permissions::from_mode(0o755)).expect("busybox mode");
+    install_copy(&find_on_path("busybox"), &busybox, "755");
     for applet in APPLETS {
         symlink("busybox", rootfs.join("bin").join(applet)).expect("an applet link");
     }

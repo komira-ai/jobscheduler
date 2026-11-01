@@ -13,6 +13,7 @@ use js_contain::container::{
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
 use js_contain::oci::{LogLimits, Oci, OciConfig, stderr_path, stdout_path};
 use js_contain::subids::IdFiles;
+use js_testkit::spawn::install_copy;
 
 /// A source nothing is fetched from: these tests never name an image.
 #[derive(Debug)]
@@ -39,7 +40,8 @@ impl Node {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch");
         let crun = dir.join("crun");
-        std::fs::copy(env!("CARGO_BIN_EXE_js-fake-crun"), &crun).expect("copy the runtime");
+        // Made by a process of its own: see `install_copy`.
+        install_copy(Path::new(env!("CARGO_BIN_EXE_js-fake-crun")), &crun, "755");
         std::fs::write(crun.with_extension("script"), script).expect("script");
         Self { dir, crun }
     }

@@ -29,6 +29,7 @@ use js_contain::keeper::{Keeper, KeeperLauncher};
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
 use js_contain::oci::{Oci, OciConfig, OciError, stderr_path, stdout_path};
 use js_contain::subids::{IdFiles, SubidError, user_ids};
+use js_testkit::spawn::install_copy;
 
 /// Where the cgroup v2 filesystem is mounted.
 const CGROUP_MOUNT: &str = "/sys/fs/cgroup";
@@ -77,8 +78,7 @@ fn busybox_rootfs(rootfs: &Path) {
         fs::write(rootfs.join("etc").join(file), "").unwrap();
     }
     let busybox = rootfs.join("bin/busybox");
-    fs::copy(var("JS_B_BUSYBOX"), &busybox).unwrap();
-    fs::set_permissions(&busybox, fs::Permissions::from_mode(0o755)).unwrap();
+    install_copy(Path::new(&var("JS_B_BUSYBOX")), &busybox, "755");
     for applet in ["sh", "cat", "id", "grep"] {
         symlink("busybox", rootfs.join("bin").join(applet)).unwrap();
     }
@@ -357,8 +357,7 @@ async fn a_copy_of_crun_is_refused_the_user_namespace_while_the_distribution_pat
     );
     let dir = world_dir("js-b-copybin");
     let copy = dir.join("crun");
-    fs::copy(var("JS_B_CRUN"), &copy).unwrap();
-    fs::set_permissions(&copy, fs::Permissions::from_mode(0o755)).unwrap();
+    install_copy(Path::new(&var("JS_B_CRUN")), &copy, "755");
     let run = run_container("crun-copy", &copy).await;
     println!("crun copy under the restriction: {}", run.said);
     assert_ne!(run.ended, Ok(Ended::Exited(0)), "{}", run.said);
@@ -428,8 +427,7 @@ async fn counter_run_a_copy_of_crun_starts_the_container_when_the_restriction_is
     );
     let dir = world_dir("js-b-copybin-off");
     let copy = dir.join("crun");
-    fs::copy(var("JS_B_CRUN"), &copy).unwrap();
-    fs::set_permissions(&copy, fs::Permissions::from_mode(0o755)).unwrap();
+    install_copy(Path::new(&var("JS_B_CRUN")), &copy, "755");
     let run = run_container("crun-copy-off", &copy).await;
     println!("crun copy without the restriction: {}", run.said);
     assert_eq!(run.ended, Ok(Ended::Exited(0)), "{}", run.said);
@@ -449,8 +447,7 @@ async fn every_crun_command_of_a_root_daemon_runs_as_the_job_user_with_a_clean_e
     let dir = world_dir("js-b-drop");
     mkdir(&dir, 0o777);
     let crun = dir.join("crun");
-    fs::copy(env!("CARGO_BIN_EXE_js-fake-crun"), &crun).unwrap();
-    fs::set_permissions(&crun, fs::Permissions::from_mode(0o755)).unwrap();
+    install_copy(Path::new(env!("CARGO_BIN_EXE_js-fake-crun")), &crun, "755");
     let scratch = dir.join("scratch");
     mkdir(&scratch, 0o711);
     let oci = Oci::new(

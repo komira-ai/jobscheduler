@@ -658,8 +658,7 @@ fn scripted_runtime(dir: &Path, images: &Path, fail: &str) -> PathBuf {
         log = log.display(),
         images = images.display(),
     );
-    std::fs::write(&path, script).expect("runtime");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    js_testkit::spawn::install_script(&path, &script, "755");
     path
 }
 
