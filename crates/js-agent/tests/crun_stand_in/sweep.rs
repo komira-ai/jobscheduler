@@ -462,6 +462,16 @@ fn removing_an_orphan_removes_its_lease_in_the_store() {
     let id = staged(&node, &mut old, "r1-exit");
     drop(old);
     assert!(node.lease_of(&id.0).is_dir(), "the lease is in the store");
+    // The files a made cgroup has (the stand-in's `crun delete` removes them; the cgroup of a
+    // container that is gone has none).
+    for entry in std::fs::read_dir(node.cgroup_of(&id.0))
+        .expect("the cgroup")
+        .flatten()
+    {
+        if entry.path().is_file() {
+            std::fs::remove_file(entry.path()).expect("a cgroup file");
+        }
+    }
     assert!(runtime.remove_orphan("r1-exit").expect("removed"));
     assert!(
         left_of(&node, &id.0).is_empty(),
