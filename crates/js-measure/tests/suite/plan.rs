@@ -136,14 +136,30 @@ fn every_setting_and_arm_pair_is_a_cell_run_n_times() {
     assert!(counts.values().all(|n| *n == 2));
 }
 
-/// Asserts that the generator is SplitMix64: its first five draws for seed
-/// 1477776061723855037 are the values in the `reference` test of `SplitMix64` in
-/// rand_xoshiro (rust-random/rngs, `rand_xoshiro/src/splitmix64.rs`), whose comment says
-/// they were produced with the reference implementation at
-/// http://xoshiro.di.unimi.it/splitmix64.c. It catches a changed constant or shift that
-/// would still give a reproducible, but different, order.
+/// Asserts that the generator is SplitMix64 against two published vectors, each from its
+/// own source:
+/// - seed 1234567: the first five integers in the task statement of "Pseudo-random
+///   numbers/Splitmix64" on Rosetta Code
+///   (https://rosettacode.org/wiki/Pseudo-random_numbers/Splitmix64);
+/// - seed 1477776061723855037: the first five values of the `reference` test of
+///   `SplitMix64` in rand_xoshiro (rust-random/rngs, `rand_xoshiro/src/splitmix64.rs`),
+///   whose comment says they were produced with Vigna's reference implementation at
+///   http://xoshiro.di.unimi.it/splitmix64.c.
+///
+/// It catches a changed constant or shift that would still give a reproducible, but
+/// different, order.
 #[test]
 fn the_generator_is_splitmix64() {
+    assert_eq!(
+        draws(1_234_567, 5),
+        vec![
+            6_457_827_717_110_365_317,
+            3_203_168_211_198_807_973,
+            9_817_491_932_198_370_423,
+            4_593_380_528_125_082_431,
+            16_408_922_859_458_223_821,
+        ]
+    );
     assert_eq!(
         draws(1_477_776_061_723_855_037, 5),
         vec![
