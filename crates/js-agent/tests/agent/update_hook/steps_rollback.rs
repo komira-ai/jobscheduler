@@ -793,3 +793,68 @@ fn a_server_that_restarted_and_shows_the_host_awaiting_is_no_proof_until_the_hel
     assert_eq!(rig.world.ticks() - base, 4);
     assert_restored(&rig);
 }
+
+#[test]
+fn a_unit_manager_that_cannot_be_read_fails_the_rollback_before_anything_is_marked() {
+    let rig = verified("hook-rollback-show-fails");
+    let before = rig.record_bytes();
+    let spy = Spy::new(&rig);
+    spy.fail("show");
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.class, Class::Environment);
+    assert_eq!(spy.act_names(), Vec::<String>::new());
+    assert_eq!(rig.record_bytes(), before);
+}
+
+#[test]
+fn a_release_link_that_cannot_be_read_fails_the_rollback_before_anything_is_marked() {
+    let rig = link_moved("hook-rollback-link-unreadable");
+    std::fs::remove_file(rig.tmp.path().join("world/link/current")).unwrap();
+    std::fs::write(rig.tmp.path().join("world/link/current"), b"not a link").unwrap();
+    let before = rig.record_bytes();
+    let spy = Spy::new(&rig);
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::LinkFailed));
+    assert_eq!(spy.act_names(), Vec::<String>::new());
+    assert_eq!(rig.record_bytes(), before);
+}
+
+#[test]
+fn a_unit_manager_that_goes_dark_while_the_unit_stops_ends_the_rollback_as_environment() {
+    let rig = running(Rig::new("hook-rollback-dark-in-stop"));
+    let killed = Spy::new(&rig);
+    *killed.stop_leaves.borrow_mut() = Some(("deactivating", "stop-sigterm"));
+    killed.on_pause(|_, ticks| assert!(ticks < 3, "killed during the wait"));
+    assert!(killable(|| killed.cutover(&rig)).is_none());
+    rig.kill.disarm();
+    let spy = Spy::new(&rig);
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 1 {
+            spy.fail("show");
+        }
+    });
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::StopFailed));
+    assert_eq!(spy.act_names(), Vec::<String>::new());
+}
+
+#[test]
+fn a_unit_manager_that_goes_dark_while_the_previous_agent_is_awaited_ends_the_rollback() {
+    let rig = link_moved("hook-rollback-dark-in-hello");
+    let spy = Spy::new(&rig);
+    *spy.start_leaves.borrow_mut() = Some(("active", "running"));
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 1 {
+            spy.fail("show");
+        }
+    });
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::StartFailed));
+    assert_eq!(done.report.class, Class::Environment);
+}
