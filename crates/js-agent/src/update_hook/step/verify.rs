@@ -4,10 +4,14 @@
 //! the record's `verify_ok`, after the observation it names.
 //!
 //! The proof, at a look where the unit is `active`:
-//! - the lease server shows the host `live` in a session that began after the cordon was
-//!   placed (the old agent's session began before `prepare` did), so a server that still
-//!   shows the old session, or no session yet (`awaiting`, after a server restart), is no
-//!   proof;
+//! - the lease server shows the host `live` in a session other than the one it showed in the
+//!   last reading before the stop (the record's `pre_stop_session_ms`; none recorded, on a first
+//!   install or when the server showed no session, means any session is other). The two stamps
+//!   are both the server's, and equality is all that is asked of them: the host's clock is never
+//!   compared with the server's, so a skew between them cannot make a healthy session read as
+//!   old or the old one as new. A server that still shows the old session, or no session yet
+//!   (`awaiting`, after a server restart), is no proof; a session of a restarted server is
+//!   another session and is proof only with the target version, below;
 //! - the hello of that session carries the target version, and the runtime `crun` if it names
 //!   one.
 //!
@@ -77,7 +81,7 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
 
 /// What the last look of the lease server showed.
 enum Look {
-    /// No new session said hello (not yet, or the server shows the old one).
+    /// No new session said hello (not yet, or the server shows the session of before the stop).
     Silent,
     /// A new session said hello, and it is not the target.
     Wrong(String),
@@ -87,10 +91,11 @@ enum Look {
 
 /// What a reading of the host says of the new agent: `Ok` is proof.
 fn judge(host: &HostReading, record: &Record) -> Result<(), Look> {
+    // Equality with the stamp taken before the stop, never an order against the host's clock.
     let new_session = host.state == "live"
         && host
             .session_started_ms
-            .is_some_and(|began| began > record.cordon.first_ms);
+            .is_some_and(|session| Some(session) != record.pre_stop_session_ms);
     if !new_session {
         return Err(Look::Silent);
     }
