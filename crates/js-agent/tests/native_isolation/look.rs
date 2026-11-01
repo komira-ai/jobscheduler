@@ -263,11 +263,44 @@ pub fn parse_sandbox_line(line: &str) -> Option<(String, u32)> {
     Some((name.to_owned(), pid.parse().ok()?))
 }
 
+/// The failure text of a tool the job ran that exited `code`: it names the tool's pid, so a
+/// sandbox line in the log can be bound to exactly the process that tried the seed.
+pub fn tool_failure(
+    program: &str,
+    pid: u32,
+    code: Option<i32>,
+    stderr: &str,
+    stdout: &str,
+) -> String {
+    format!(
+        "{program} (pid {pid}) exited {code:?}: {} {}",
+        stderr.trim(),
+        stdout.trim()
+    )
+}
+
+/// The pid of the tool whose failure `text` is ([`tool_failure`]), or none when the seed
+/// failed in the job's own process (a file write, a shared-memory call, a spawn).
+pub fn failed_tool_pid(text: &str) -> Option<u32> {
+    let (_, rest) = text.split_once(" (pid ")?;
+    let (pid, after) = rest.split_once(')')?;
+    match after.starts_with(" exited ") {
+        true => pid.parse().ok(),
+        false => None,
+    }
+}
+
 /// Whether the unified log (`log show` lines of the sandbox) holds a denial that is this
 /// seed's: a sandbox `deny(` line with the token in it (tokens are unique), or one for the
 /// operation of the kind from a process the job ran (`job`). The operation alone is not
-/// enough: other sandboxed processes log such lines all the time.
-pub fn log_confirms_denial(kind: Kind, token: &Token, log: &str, job: &JobProcs) -> bool {
+/// enough: other sandboxed processes log such lines all the time. `text` is the seed's failure.
+pub fn log_confirms_denial(
+    kind: Kind,
+    token: &Token,
+    text: &str,
+    log: &str,
+    job: &JobProcs,
+) -> bool {
     let markers: &[&str] = match kind {
         Kind::Process => &["process-exec", "process-fork"],
         Kind::Keychain => &["com.apple.SecurityServer"],
@@ -280,6 +313,7 @@ pub fn log_confirms_denial(kind: Kind, token: &Token, log: &str, job: &JobProcs)
         Kind::PosixSem => &["ipc-posix-sem"],
         _ => &[],
     };
+    let _ = text;
     log.lines()
         .filter(|line| line.contains("Sandbox") && line.contains("deny("))
         .any(|line| {
@@ -300,7 +334,7 @@ pub fn resolve_seed(
 ) -> Verdict {
     let confirmed = || {
         is_permission_failure(text)
-            && log.is_some_and(|log| log_confirms_denial(kind, token, log, job))
+            && log.is_some_and(|log| log_confirms_denial(kind, token, text, log, job))
     };
     match classify_seed_failure(text) == SeedFailure::ProfileRefused || confirmed() {
         true => Verdict::Denied,
@@ -1028,6 +1062,14 @@ mod tests {
         }
     }
 
+    /// A bare permission failure in the job's own process: no tool named.
+    const BARE: &str = "/x: Operation not permitted (os error 1)";
+
+    /// The failure of a tool the job ran with `pid`, as `child` words it.
+    fn failed(program: &str, pid: u32) -> String {
+        tool_failure(program, pid, Some(1), "Operation not permitted", "")
+    }
+
     /// Asserts that a sandbox violation in the log confirms a seed only when it is that
     /// seed's: its token is in the denied path, or the denied operation is the kind's (the
     /// shared-memory family for shared memory), and the line is a sandbox deny. It catches a
@@ -1039,23 +1081,36 @@ mod tests {
         let path = format!(
             "Sandbox: native_isolation(412) deny(1) file-write-create /var/folders/x/T/iso-{a}\n"
         );
-        assert!(log_confirms_denial(Kind::UserTempDir, &a, &path, &job));
+        assert!(log_confirms_denial(
+            Kind::UserTempDir,
+            &a,
+            BARE,
+            &path,
+            &job
+        ));
         let posix = "Sandbox: native_isolation(412) deny(1) ipc-posix-shm-write-create /jsiaaaa\n";
-        assert!(log_confirms_denial(Kind::PosixShm, &a, posix, &job));
-        assert!(!log_confirms_denial(Kind::PosixSem, &a, posix, &job));
-        assert!(!log_confirms_denial(Kind::SysvShm, &a, posix, &job));
+        assert!(log_confirms_denial(Kind::PosixShm, &a, BARE, posix, &job));
+        assert!(!log_confirms_denial(Kind::PosixSem, &a, BARE, posix, &job));
+        assert!(!log_confirms_denial(Kind::SysvShm, &a, BARE, posix, &job));
         let exec = "Sandbox: native_isolation(412) deny(1) process-exec* /bin/sleep\n";
-        assert!(log_confirms_denial(Kind::Process, &a, exec, &job));
-        assert!(!log_confirms_denial(Kind::HomeFile, &a, exec, &job));
+        assert!(log_confirms_denial(Kind::Process, &a, BARE, exec, &job));
+        assert!(!log_confirms_denial(Kind::HomeFile, &a, BARE, exec, &job));
         let other = token(0xb2);
-        assert!(!log_confirms_denial(Kind::UserTempDir, &other, &path, &job));
+        assert!(!log_confirms_denial(
+            Kind::UserTempDir,
+            &other,
+            BARE,
+            &path,
+            &job
+        ));
         assert!(!log_confirms_denial(
             Kind::UserTempDir,
             &a,
+            BARE,
             &format!("allow file-write-create iso-{a}"),
             &job
         ));
-        assert!(!log_confirms_denial(Kind::UserTempDir, &a, "", &job));
+        assert!(!log_confirms_denial(Kind::UserTempDir, &a, BARE, "", &job));
     }
 
     /// Asserts that an operation-only sandbox line confirms a seed only when the process in
@@ -1071,33 +1126,96 @@ mod tests {
             pids: vec![412, 777, 900, 901],
         };
         let stranger = "Sandbox: mdworker(123) deny(1) ipc-posix-shm-write-create /x\n";
-        assert!(!log_confirms_denial(Kind::PosixShm, &a, stranger, &job));
+        assert!(!log_confirms_denial(
+            Kind::PosixShm,
+            &a,
+            BARE,
+            stranger,
+            &job
+        ));
         let mine = "Sandbox: native_isolation(412) deny(1) ipc-posix-shm-write-create /x\n";
-        assert!(log_confirms_denial(Kind::PosixShm, &a, mine, &job));
+        assert!(log_confirms_denial(Kind::PosixShm, &a, BARE, mine, &job));
         // The right name with a pid the job did not print is another process: a retry, a
         // parallel runner, a concurrent job on the same Mac.
         let same_name = "Sandbox: native_isolation(999) deny(1) ipc-posix-shm-write-create /x\n";
-        assert!(!log_confirms_denial(Kind::PosixShm, &a, same_name, &job));
+        assert!(!log_confirms_denial(
+            Kind::PosixShm,
+            &a,
+            BARE,
+            same_name,
+            &job
+        ));
         // The process the job left running counts by its pid, and only by its pid.
         let by_pid = "Sandbox: sleep(777) deny(1) process-exec* /bin/sleep\n";
-        assert!(log_confirms_denial(Kind::Process, &a, by_pid, &job));
+        assert!(log_confirms_denial(Kind::Process, &a, BARE, by_pid, &job));
         let other_pid = "Sandbox: sleep(778) deny(1) process-exec* /bin/sleep\n";
-        assert!(!log_confirms_denial(Kind::Process, &a, other_pid, &job));
+        assert!(!log_confirms_denial(
+            Kind::Process,
+            &a,
+            BARE,
+            other_pid,
+            &job
+        ));
         let other_tool = "Sandbox: mdworker(777) deny(1) process-exec* /bin/sleep\n";
-        assert!(log_confirms_denial(Kind::Process, &a, other_tool, &job));
+        assert!(log_confirms_denial(
+            Kind::Process,
+            &a,
+            BARE,
+            other_tool,
+            &job
+        ));
         let other_tool = "Sandbox: mdworker(778) deny(1) process-exec* /bin/sleep\n";
-        assert!(!log_confirms_denial(Kind::Process, &a, other_tool, &job));
+        assert!(!log_confirms_denial(
+            Kind::Process,
+            &a,
+            BARE,
+            other_tool,
+            &job
+        ));
         // A tool the job ran counts by the pid it printed; another `security` does not.
         let tool = "Sandbox: security(900) deny(1) mach-lookup com.apple.SecurityServer\n";
-        assert!(log_confirms_denial(Kind::Keychain, &a, tool, &job));
+        let security = failed("/usr/bin/security", 900);
+        assert!(log_confirms_denial(
+            Kind::Keychain,
+            &a,
+            &security,
+            tool,
+            &job
+        ));
         let other = "Sandbox: security(5555) deny(1) mach-lookup com.apple.SecurityServer\n";
-        assert!(!log_confirms_denial(Kind::Keychain, &a, other, &job));
+        assert!(!log_confirms_denial(
+            Kind::Keychain,
+            &a,
+            &security,
+            other,
+            &job
+        ));
         let defaults = "Sandbox: defaults(901) deny(1) user-preference-write x\n";
-        assert!(!log_confirms_denial(Kind::Keychain, &a, defaults, &job));
-        assert!(log_confirms_denial(Kind::Defaults, &a, defaults, &job));
-        // A token in the line is unique to the job and needs no process.
-        let tokened = format!("Sandbox: mdworker(123) deny(1) file-write-create /x/iso-{a}\n");
-        assert!(log_confirms_denial(Kind::HomeFile, &a, &tokened, &job));
+        let wrote = failed("/usr/bin/defaults", 901);
+        assert!(!log_confirms_denial(
+            Kind::Keychain,
+            &a,
+            &wrote,
+            defaults,
+            &job
+        ));
+        assert!(log_confirms_denial(
+            Kind::Defaults,
+            &a,
+            &wrote,
+            defaults,
+            &job
+        ));
+        // A tool's operation from the job's tool that did NOT fail is not this seed's.
+        assert!(!log_confirms_denial(
+            Kind::Keychain,
+            &a,
+            &failed("/usr/bin/security", 777),
+            tool,
+            &job
+        ));
+        // A tool's operation with no tool named (the job's own write failed) never confirms.
+        assert!(!log_confirms_denial(Kind::Keychain, &a, BARE, tool, &job));
         // And the verdict follows.
         let bare = "/x: Operation not permitted (os error 1)";
         assert_eq!(
@@ -1105,13 +1223,170 @@ mod tests {
             Verdict::Refused
         );
         assert_eq!(
-            resolve_seed(Kind::Keychain, &a, bare, Some(other), &job),
+            resolve_seed(Kind::Keychain, &a, &security, Some(other), &job),
             Verdict::Refused
         );
         assert_eq!(
             resolve_seed(Kind::PosixShm, &a, bare, Some(mine), &job),
             Verdict::Denied
         );
+    }
+
+    /// The job process (412), the `launchctl` it ran (900), the process it left running
+    /// (777); the seed's token; the failure of the job's own plist write (no tool named); and
+    /// the failure of that `launchctl`.
+    fn agent_seed() -> (Token, JobProcs, String, String) {
+        let a = token(0xa1);
+        let job = JobProcs {
+            pids: vec![412, 777, 900],
+        };
+        let write = format!("/h/iso-{a}-user.plist: Permission denied (os error 13)");
+        (a, job, write, failed("/bin/launchctl", 900))
+    }
+
+    /// Asserts that a sandbox line with the seed's token confirms the denial only when its pid
+    /// is the process that tried the seed: from a pid the job never printed (a bystander, a
+    /// retry, another run), or from a job pid that is not the tool that failed, the seed stays
+    /// `Refused`, which never covers a kind. It catches a confirmation by token from any pid.
+    #[test]
+    fn a_token_line_from_another_pid_does_not_confirm_a_denial() {
+        let (a, job, write, launchctl) = agent_seed();
+        // (1) The seed's token, but another pid: a bystander, a retry, another run.
+        let other_pid =
+            format!("Sandbox: mdworker(123) deny(1) file-read-data /h/iso-{a}-user.plist\n");
+        assert!(!log_confirms_denial(
+            Kind::LaunchAgent,
+            &a,
+            &write,
+            &other_pid,
+            &job
+        ));
+        assert!(!log_confirms_denial(
+            Kind::HomeFile,
+            &a,
+            BARE,
+            &other_pid,
+            &job
+        ));
+        assert_eq!(
+            resolve_seed(Kind::LaunchAgent, &a, &write, Some(&other_pid), &job),
+            Verdict::Refused
+        );
+        // A token line from a job pid that is not the tool that failed is not that tool's.
+        let job_tokened = format!(
+            "Sandbox: native_isolation(412) deny(1) file-read-data /h/iso-{a}-user.plist\n"
+        );
+        assert!(!log_confirms_denial(
+            Kind::LaunchAgent,
+            &a,
+            &launchctl,
+            &job_tokened,
+            &job
+        ));
+    }
+
+    /// Asserts that a line naming `launchd` confirms a launch agent's denial only from the
+    /// `launchctl` that failed: when the job's own plist write failed (no tool ran), or from
+    /// any other pid, the job's or not, the seed stays `Refused`. It catches a bare `launchd`
+    /// word upgrading a plain `EACCES` to a sandbox denial.
+    #[test]
+    fn a_bare_launchd_line_without_the_seeds_pid_does_not_confirm_a_denial() {
+        let (a, job, write, launchctl) = agent_seed();
+        // (2) A bare `launchd` line without the pid that tried the seed: the plist write
+        // failed in the job's own process, and launchd lines are the job's background noise.
+        for bare_launchd in [
+            "Sandbox: native_isolation(412) deny(1) mach-lookup com.apple.xpc.launchd.domain.system\n",
+            "Sandbox: sleep(777) deny(1) mach-lookup com.apple.xpc.launchd\n",
+            "Sandbox: launchd(1) deny(1) mach-lookup com.apple.xpc.launchd\n",
+        ] {
+            assert!(
+                !log_confirms_denial(Kind::LaunchAgent, &a, &write, bare_launchd, &job),
+                "{bare_launchd}"
+            );
+            assert!(!log_confirms_denial(
+                Kind::GuiLaunchAgent,
+                &a,
+                &write,
+                bare_launchd,
+                &job
+            ));
+            assert_eq!(
+                resolve_seed(Kind::LaunchAgent, &a, &write, Some(bare_launchd), &job),
+                Verdict::Refused
+            );
+            // Nor from a job pid that is not the `launchctl` that failed.
+            assert!(!log_confirms_denial(
+                Kind::LaunchAgent,
+                &a,
+                &launchctl,
+                bare_launchd,
+                &job
+            ));
+        }
+    }
+
+    /// Asserts that a denial line carrying the pid of the process that tried the seed still
+    /// confirms it: a token line from the job's own process when its write failed, a
+    /// `launchd` line from the `launchctl` that failed. It catches a binding so tight that no
+    /// real denial can be confirmed.
+    #[test]
+    fn a_denial_line_with_the_seeds_own_pid_confirms_it() {
+        let (a, job, write, launchctl) = agent_seed();
+        // (3) The line of the process that tried the seed still confirms it.
+        let own_token = format!(
+            "Sandbox: native_isolation(412) deny(1) file-write-create /h/iso-{a}-user.plist\n"
+        );
+        assert!(log_confirms_denial(
+            Kind::LaunchAgent,
+            &a,
+            &write,
+            &own_token,
+            &job
+        ));
+        assert_eq!(
+            resolve_seed(Kind::LaunchAgent, &a, &write, Some(&own_token), &job),
+            Verdict::Denied
+        );
+        let by_launchctl =
+            "Sandbox: launchctl(900) deny(1) mach-lookup com.apple.xpc.launchd.domain.user\n";
+        assert!(log_confirms_denial(
+            Kind::LaunchAgent,
+            &a,
+            &launchctl,
+            by_launchctl,
+            &job
+        ));
+        assert_eq!(
+            resolve_seed(
+                Kind::GuiLaunchAgent,
+                &a,
+                &launchctl,
+                Some(by_launchctl),
+                &job
+            ),
+            Verdict::Denied
+        );
+        let home = format!("Sandbox: native_isolation(412) deny(1) file-write-create /h/iso-{a}\n");
+        assert_eq!(
+            resolve_seed(Kind::HomeFile, &a, BARE, Some(&home), &job),
+            Verdict::Denied
+        );
+    }
+
+    /// Asserts that a tool's failure names its pid and the pid reads back, and that text with
+    /// no tool named (or the words in another place) gives none.
+    #[test]
+    fn a_tool_failure_names_the_pid_that_ran() {
+        let text = failed("/bin/launchctl", 900);
+        assert!(
+            text.starts_with("/bin/launchctl (pid 900) exited Some(1): "),
+            "{text}"
+        );
+        assert!(is_permission_failure(&text));
+        assert_eq!(failed_tool_pid(&text), Some(900));
+        assert_eq!(failed_tool_pid(BARE), None);
+        assert_eq!(failed_tool_pid("/x (pid 9): Permission denied"), None);
+        assert_eq!(failed_tool_pid("/bin/x (pid nine) exited Some(1): "), None);
     }
 
     /// Asserts that the log is read from the start of run A (`--start`), not from a lookback
@@ -1178,7 +1453,8 @@ mod tests {
     /// nothing) when the log does not, could not be read or the failure is something else.
     #[test]
     fn a_failed_seed_is_denied_only_on_the_sandbox_signature() {
-        let job = JobProcs::default();
+        // The log line below is from pid 1: a process the job printed.
+        let job = JobProcs { pids: vec![1] };
         let a = token(0xa1);
         let sig = "Sandbox: t(3) deny(1) file-write-create";
         assert_eq!(
