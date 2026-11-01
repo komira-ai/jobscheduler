@@ -328,8 +328,11 @@ pub struct Go {
 /// A pool's failure brake: how many boots have failed in a row, and whether the pool has been
 /// tripped to `Plan`. The count grows the cooldown; the trip is a latch that only an operator's
 /// reset ends. Kept only while it holds something.
+///
+/// Read tolerantly, unlike the rest of the file: a field a newer release adds is ignored and
+/// one it stops writing reads as empty, so this release starts on a newer records file.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default)]
 pub struct Brake {
     /// The failures since the last success or reset: a refusal of the kinds `Quota`, `Denied`
     /// and `Shape`, a boot that failed, and a spot preemption.

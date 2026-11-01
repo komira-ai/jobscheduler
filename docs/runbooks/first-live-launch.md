@@ -478,6 +478,9 @@ refuses to start on the file). It drops the key at its next save, so it forgets 
 and launches again, and the operator's reset is not served. Hold every pool in `plan` for the
 rollback, and after rolling forward check `GET /v1/pools` for `blocked` of `brake`.
 
+A trip and a reset leave the pool's go alone: `max_spend_since_go_total` keeps counting the
+spend since the go across a trip and after a reset, so a reset never re-opens that cap.
+
 Before rolling back to the reader release or any older one, remove `boot_fail_cooldown_max`,
 `boot_fail_trip_after` and `boot_fail_reset_after` from every pool in the config file: an older
 server refuses the unknown pool keys at startup.

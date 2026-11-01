@@ -17,6 +17,9 @@ const SHORTEST: Duration = Duration::from_secs(10 * 60);
 /// The shortest time a host must be heard from before the count of failures ends.
 const SHORTEST_RESET: Duration = Duration::from_secs(60);
 
+/// The longest ceiling of the cooldown, and the longest time a host must be heard from: a day.
+const LONGEST: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// The failure brake of a pool, as the plan carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrakePlan {
@@ -55,14 +58,17 @@ impl Given {
         given.into_iter().find(|(_, set)| *set).map(|(key, _)| key)
     }
 
-    /// The plan: a ceiling of 2 hours unless the file says (at least 10 minutes), a trip after
+    /// The plan: a ceiling of 2 hours unless the file says (from 10 minutes to 24 hours), a trip after
     /// 3 failures in a row unless it says (from 1 to 100), and 10 minutes of a host being
-    /// heard unless it says (at least 1 minute).
+    /// heard unless it says (from 1 minute to 24 hours).
     pub(super) fn check(&self, s: &Section) -> Result<BrakePlan, StartupError> {
         let cooldown_max = self.cooldown_max.unwrap_or(BOOT_FAIL_COOLDOWN_MAX);
         if cooldown_max < SHORTEST {
             let reason = "must be at least 10 minutes, the first cooldown";
             return Err(s.fail("boot_fail_cooldown_max", reason));
+        }
+        if cooldown_max > LONGEST {
+            return Err(s.fail("boot_fail_cooldown_max", "must be at most 24 hours"));
         }
         let trips = self.trip_after.unwrap_or(u64::from(BOOT_FAIL_TRIP_AFTER));
         if !(1..=MOST_TRIPS).contains(&trips) {
@@ -71,6 +77,9 @@ impl Given {
         let reset_after = self.reset_after.unwrap_or(BOOT_FAIL_RESET_AFTER);
         if reset_after < SHORTEST_RESET {
             return Err(s.fail("boot_fail_reset_after", "must be at least 1 minute"));
+        }
+        if reset_after > LONGEST {
+            return Err(s.fail("boot_fail_reset_after", "must be at most 24 hours"));
         }
         Ok(BrakePlan {
             cooldown_max,

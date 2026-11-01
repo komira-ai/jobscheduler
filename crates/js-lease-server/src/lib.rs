@@ -148,10 +148,10 @@
 //! Failure brake. A refused launch (quota, denied, a shape that fits nothing), a boot given up
 //! on, and a spot preemption count as failures, but a pool is struck at most once in a step
 //! (a wave of reclaims, or several launches of one step refused together, is one failure). A
-//! machine whose host has been heard from, unbroken, for `boot_fail_reset_after` (`"10m"`, at
-//! least a minute) ends the count; a host that says hello and goes quiet does not. After a boot failure or a refusal the pool launches nothing for 10 minutes, doubled
-//! for each further failure in a row up to `boot_fail_cooldown_max` (`"2h"`, at least 10
-//! minutes); after `boot_fail_trip_after` failures in a row (3, from 1 to 100) the brake trips
+//! machine whose host has been heard from, unbroken, for `boot_fail_reset_after` (`"10m"`, from
+//! a minute to 24 hours) ends the count; a host that says hello and goes quiet does not. After a boot failure or a refusal the pool launches nothing for 10 minutes, doubled
+//! for each further failure in a row up to `boot_fail_cooldown_max` (`"2h"`, from 10
+//! minutes to 24 hours); after `boot_fail_trip_after` failures in a row (3, from 1 to 100) the brake trips
 //! the pool to `plan`: it launches nothing, `GET /v1/pools` shows `launch` as `plan` and
 //! `blocked` as `brake`, and the alert `brake:<pool>` is raised. A preemption counts toward the
 //! trip but starts no cooldown. Time does not end the trip, and it survives a restart (it is in

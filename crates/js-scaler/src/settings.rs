@@ -55,10 +55,12 @@ pub struct Settings {
     /// How long the pool launches nothing after a boot failure, a quota or a refusal.
     pub boot_fail_cooldown: Duration,
     /// The longest that cooldown grows to: it doubles with each failure in a row, from
-    /// `boot_fail_cooldown`, and stops here (never below `boot_fail_cooldown` itself).
+    /// `boot_fail_cooldown`, and stops here (never below `boot_fail_cooldown` itself). The server's file allows 10
+    /// minutes to 24 hours.
     pub boot_fail_cooldown_max: Duration,
     /// How long a machine's host must be heard from, unbroken, before the machine ends the
-    /// count of failures in a row. A host that says hello and then goes quiet never does.
+    /// count of failures in a row. A host that says hello and then goes quiet never does. The
+    /// server's file allows 1 minute to 24 hours.
     pub boot_fail_reset_after: Duration,
     /// How many failures in a row trip the pool to `Plan` until an operator resets it; at
     /// least 1 (a smaller figure is read as 1).
