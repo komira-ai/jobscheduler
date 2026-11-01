@@ -34,7 +34,7 @@ use super::{Env, check, failure, lease_failure, open_state, save, success};
 const AGENT_BINARY: &str = "js-agent";
 
 /// The runtime a staged agent that names its runtimes must have: the unit is the `crun` one.
-const REQUIRED_RUNTIME: &str = "crun";
+pub(super) const REQUIRED_RUNTIME: &str = "crun";
 
 /// Runs `prepare` of the release in `params.staged_release`.
 pub fn prepare(env: &Env<'_>, params: &Params) -> Done {
