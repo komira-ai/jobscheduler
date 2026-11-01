@@ -102,7 +102,7 @@ mod tests {
         }
         c.ended(5, None);
         assert_eq!((c.ended_estimated, c.ended_unestimated), (5, 1));
-        assert_eq!(c.error_sum_ms, 30_000 - 10_000 + 0 - 400_000 + 1_000_000);
+        assert_eq!(c.error_sum_ms, 30_000 - 10_000 - 400_000 + 1_000_000);
         // 400 s early is below the first edge; 10 s early sits on -10_000; on time on 0;
         // 30 s late in (10_000, 60_000]; 1000 s late above the last edge.
         assert_eq!(c.error_buckets, [1, 0, 1, 1, 0, 1, 0, 1]);
