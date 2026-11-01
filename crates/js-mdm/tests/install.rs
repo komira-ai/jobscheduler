@@ -496,6 +496,7 @@ fn a_failing_random_source_fails_the_run_and_writes_no_secret() {
     let env = Env {
         host: &host,
         net: &net,
+        api: &common::NoApi,
         random: &broken,
         now: 0,
     };

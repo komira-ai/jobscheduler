@@ -157,9 +157,84 @@ pub trait Host {
     /// The system's error, other than "not found".
     fn remove(&self, path: &str) -> io::Result<()>;
 
+    /// Whether the running program may carry a secret to another process: its image, its
+    /// canonical path and every directory above it are owned by root and writable by neither
+    /// group nor others ([`check_owner_mode`], [`check_ancestry`]). A binary that others could
+    /// replace, or one in a directory they can write, would hand whoever replaced it the keys
+    /// it holds.
+    ///
+    /// # Errors
+    /// The program's file could not be found or is not trusted.
+    fn check_binary(&self) -> io::Result<()>;
+
+    /// The owner uid of every socket listening on TCP port `port` (any local address, IPv4 or
+    /// IPv6), so a caller can tell whether the process it is about to send a key to is the
+    /// service and not a local user's squatter.
+    ///
+    /// # Errors
+    /// The system's table of sockets could not be read.
+    fn listener_uids(&self, port: u16) -> io::Result<Vec<u32>>;
+
     /// Runs `cmd` to its end.
     ///
     /// # Errors
     /// The program could not be started (a program that ran and failed is an [`Output`]).
     fn run(&self, cmd: &Cmd) -> io::Result<Output>;
+}
+
+/// Whether the file at `path` owned by `uid` with permission bits `mode` is root's alone:
+/// owned by root and writable by neither its group nor others.
+///
+/// # Errors
+/// The file is not root's, or its group or others can write it.
+pub fn check_owner_mode(path: &str, uid: u32, mode: u32) -> io::Result<()> {
+    match (uid, mode & 0o022) {
+        (0, 0) => Ok(()),
+        (0, _) => Err(io::Error::other(format!(
+            "{path} is writable by group or others (mode {:04o})",
+            mode & 0o7777
+        ))),
+        (uid, _) => Err(io::Error::other(format!(
+            "{path} is owned by uid {uid}, not root"
+        ))),
+    }
+}
+
+/// [`check_owner_mode`] on `path` (canonical: absolute, no links) and on each directory above
+/// it, up to `/`. `lookup` gives a path's owner and mode without following a link, or `None`
+/// when nothing is there.
+///
+/// # Errors
+/// One of them is not root's alone, or cannot be read.
+pub fn check_ancestry(
+    path: &str,
+    lookup: impl Fn(&str) -> io::Result<Option<(u32, u32)>>,
+) -> io::Result<()> {
+    for at in std::path::Path::new(path).ancestors() {
+        let at = at.to_string_lossy();
+        let (uid, mode) = lookup(&at)?
+            .ok_or_else(|| io::Error::other(format!("cannot check {at}: nothing is there")))?;
+        check_owner_mode(&at, uid, mode)?;
+    }
+    Ok(())
+}
+
+/// The owner uids of the listening sockets on local port `port` in the text of
+/// `/proc/net/tcp` or `/proc/net/tcp6` (a header line, then one socket per line: `sl
+/// local_address rem_address st tx:rx tr:tm retrnsmt uid timeout inode ...`; state `0A` is
+/// listening). A line that is not a socket is skipped.
+pub fn parse_listeners(table: &str, port: u16) -> Vec<u32> {
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let local = f.get(1)?.rsplit_once(':')?.1;
+            let here = f.get(3) == Some(&"0A") && u16::from_str_radix(local, 16) == Ok(port);
+            match here {
+                true => f.get(7)?.parse().ok(),
+                false => None,
+            }
+        })
+        .collect()
 }

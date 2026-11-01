@@ -36,9 +36,20 @@
 //!   lines equal to an `--ignore LINE`, on both sides and printed (a host installed by another
 //!   tool may word one line differently). World-readable files need no root.
 //!
+//! * `js-mdm dep define-profile --config FILE [--replace] [--apply]`: as root, the ADE profile
+//!   defined at Apple through depserver on loopback and made the assigner's, recorded in
+//!   `MDM_STATE/dep-profile-uuid` and `dep-profile.sha256`, and the depsyncer enabled. A
+//!   profile with the recorded sha256 is not defined again; a recorded profile that is not
+//!   this render is refused unless `--replace`. The API key is read from the root-only
+//!   `MDM_ETC/nanodep.env`, goes only into an `Authorization` header and is used only from a
+//!   binary root owns alone.
+//! * `js-mdm dep assign --config FILE --serial SERIAL... [--apply]`: as root, the recorded
+//!   profile assigned to devices already in Apple Business Manager; exit 1 unless every device
+//!   answers `SUCCESS`.
+//!
 //! Not in this slice: `push-cert` (the APNs push certificate and the enrollment profile),
-//! `dep` (Apple Business Manager) and `erase`. The checks that dial the proxy over HTTPS are
-//! not either.
+//! `dep get-cert` and `dep upload-token`, and `erase`. The checks that dial the proxy over
+//! HTTPS are not either.
 //!
 //! # Rules every verb keeps
 //!
@@ -60,8 +71,10 @@
 //! the lexical nesting check of `MDM_STATE`, `MDM_ETC` and `MDM_BIN` does not resolve links,
 //! so `install` refuses any of the three that is a symbolic link on the host.
 
+pub mod api;
 pub mod archive;
 mod cli;
+pub mod dep;
 mod error;
 pub mod fetch;
 pub mod install;
@@ -76,6 +89,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use js_host_step::{Host, RealHost};
 
+pub use api::{Api, RealApi};
 pub use cli::{run, run_with};
 pub use error::MdmError;
 pub use net::{Download, Net};
@@ -86,6 +100,8 @@ pub struct Env<'a> {
     pub host: &'a dyn Host,
     /// Downloads.
     pub net: &'a dyn Download,
+    /// Calls to the services' loopback APIs.
+    pub api: &'a dyn Api,
     /// Fills a buffer with random bytes.
     pub random: &'a dyn Fn(&mut [u8]) -> io::Result<()>,
     /// Unix seconds now.
@@ -105,10 +121,12 @@ pub fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let host = RealHost::new();
     let net = Net::new(true);
+    let api = RealApi::default();
     let secs = SystemTime::now().duration_since(UNIX_EPOCH);
     let env = Env {
         host: &host,
         net: &net,
+        api: &api,
         random: &system_random,
         now: secs.map_or(0, |d| d.as_secs()),
     };
