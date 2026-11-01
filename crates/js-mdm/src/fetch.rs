@@ -59,11 +59,11 @@ pub fn run(
                         want: pin.sha256_hex(),
                     });
                 }
-                writeln!(
-                    out,
+                let kept = format!(
                     "kept: {file} ({} {}, sha256 is the pin)",
                     pin.tool, pin.version
-                )?;
+                );
+                writeln!(out, "{kept}")?;
             }
             None => todo.push((pin, file)),
         }
@@ -72,14 +72,14 @@ pub fn run(
         writeln!(out, "{NOTHING_TO_DO}")?;
     }
     for (pin, file) in &todo {
-        writeln!(
-            out,
+        let plan = format!(
             "fetch: {} {} from {} (pin {})",
             pin.tool,
             pin.version,
             pin.url,
             pin.sha256_hex()
-        )?;
+        );
+        writeln!(out, "{plan}")?;
         let step = format!("download {} to {file} and check its sha256", pin.url);
         match mode {
             Mode::DryRun => writeln!(out, "DRY-RUN: {step}")?,

@@ -192,11 +192,6 @@ impl<'h> Planner<'h> {
         }
     }
 
-    /// The host being planned against.
-    pub fn host(&self) -> &'h dyn Host {
-        self.host
-    }
-
     /// The plan made.
     pub fn finish(self) -> Plan {
         Plan { steps: self.steps }
@@ -374,10 +369,10 @@ pub fn execute(
             Mode::DryRun => writeln!(out, "DRY-RUN: {what}")?,
             Mode::Apply => {
                 writeln!(out, "+ {what}")?;
-                apply(host, step).map_err(|why| ExecError::Step {
+                apply(host, step).map_err(|e| ExecError::Step {
                     index: i + 1,
                     what,
-                    why,
+                    why: e.to_string(),
                 })?;
             }
         }
@@ -388,23 +383,16 @@ pub fn execute(
     Ok(())
 }
 
-fn apply(host: &dyn Host, step: &Step) -> Result<(), String> {
-    let text = |e: io::Error| e.to_string();
+fn apply(host: &dyn Host, step: &Step) -> io::Result<()> {
     match step {
-        Step::Dir { path, mode, owner } => {
-            let owner = owner_ids(host, owner)?;
-            host.mkdir(path, *mode, owner).map_err(text)
-        }
+        Step::Dir { path, mode, owner } => host.mkdir(path, *mode, owner_ids(host, owner)?),
         Step::File {
             path,
             mode,
             owner,
             bytes,
-        } => {
-            let owner = owner_ids(host, owner)?;
-            host.write(path, *mode, owner, bytes).map_err(text)
-        }
-        Step::Absent { path } => host.remove(path).map_err(text),
+        } => host.write(path, *mode, owner_ids(host, owner)?, bytes),
+        Step::Absent { path } => host.remove(path),
         Step::User { name, home } => {
             let cmd = Cmd::new(USERADD).args(&[
                 "--system",
@@ -416,23 +404,23 @@ fn apply(host: &dyn Host, step: &Step) -> Result<(), String> {
                 "/usr/sbin/nologin",
                 name,
             ]);
-            succeeded(host.run(&cmd).map_err(text)?)
+            succeeded(host.run(&cmd)?)
         }
-        Step::Unit { verb, units } => succeeded(host.run(&unit_cmd(*verb, units)).map_err(text)?),
-        Step::Run(cmd) => succeeded(host.run(cmd).map_err(text)?),
+        Step::Unit { verb, units } => succeeded(host.run(&unit_cmd(*verb, units))?),
+        Step::Run(cmd) => succeeded(host.run(cmd)?),
     }
 }
 
-fn owner_ids(host: &dyn Host, owner: &Account) -> Result<(u32, u32), String> {
-    let found = ids(host, owner).map_err(|e| e.to_string())?;
-    found.ok_or(format!("no user {} or group {}", owner.user, owner.group))
+fn owner_ids(host: &dyn Host, owner: &Account) -> io::Result<(u32, u32)> {
+    ids(host, owner)?
+        .ok_or_else(|| io::Error::other(format!("no user {} or group {}", owner.user, owner.group)))
 }
 
 /// A program's exit status as a result. Its output is not repeated: a program may print a
 /// value it should not.
-fn succeeded(out: Output) -> Result<(), String> {
+fn succeeded(out: Output) -> io::Result<()> {
     match out.code {
         0 => Ok(()),
-        code => Err(format!("exit status {code}")),
+        code => Err(io::Error::other(format!("exit status {code}"))),
     }
 }

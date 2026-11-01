@@ -202,10 +202,8 @@ pub fn plan(
         .any(|k| changed.contains(*k));
         p.service(&n.proxy, again)?;
     } else {
-        writeln!(
-            out,
-            "proxy: not started; it waits for the TLS certificate {cert}"
-        )?;
+        let waits = format!("proxy: not started; it waits for the TLS certificate {cert}");
+        writeln!(out, "{waits}")?;
     }
     Ok(p.finish())
 }
@@ -363,10 +361,10 @@ pub fn plan_uninstall(env: &Env<'_>, c: &MdmConfig, out: &mut dyn Write) -> Resu
     } else {
         p.unit(UnitVerb::DaemonReload, &[]);
     }
-    writeln!(
-        out,
+    let kept = format!(
         "kept: {} (database, SCEP CA, DEP token, TLS key and certificate), {} (secrets), {}, the user {}",
         c.state, c.etc, c.bin, c.user
-    )?;
+    );
+    writeln!(out, "{kept}")?;
     Ok(p.finish())
 }

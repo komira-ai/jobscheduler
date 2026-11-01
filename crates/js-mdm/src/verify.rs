@@ -38,6 +38,8 @@ pub const VALID_FOR_DAYS: u64 = 21;
 /// The secret files, all 0600 and root's.
 pub const SECRET_FILES: [&str; 4] = ["nanohub.env", "nanodep.env", "scep.env", "dns.env"];
 const OPENSSL: &str = "/usr/bin/openssl";
+const NOT_ROOT: &str = "NOTE: not root: the checks of root-only files fail; run it as root";
+const NO_ACME: &str = "skipped  the certificate job's units: the settings have no ACME keys";
 
 /// What `verify` checks against.
 pub struct Verify<'a> {
@@ -257,12 +259,11 @@ pub fn files(host: &dyn Host, v: &Verify<'_>) -> Result<Vec<(String, Compared)>,
         format!("{}/{}", c.etc, render::CADDYFILE_NAME),
         rendered.caddyfile,
     ));
-    for unit in v
-        .acme
-        .map(|a| render_tls(c, a))
-        .transpose()?
-        .unwrap_or_default()
-    {
+    let tls = match v.acme {
+        Some(a) => render_tls(c, a)?,
+        None => Vec::new(),
+    };
+    for unit in tls {
         wanted.push((format!("{UNITS_DIR}/{}", unit.name), unit.text));
     }
     Ok(wanted
@@ -278,10 +279,7 @@ pub fn files(host: &dyn Host, v: &Verify<'_>) -> Result<Vec<(String, Compared)>,
 pub fn run(env: &Env<'_>, v: &Verify<'_>, out: &mut dyn Write) -> Result<bool, MdmError> {
     let host = env.host;
     if host.euid() != 0 {
-        writeln!(
-            out,
-            "NOTE: not root: the checks of root-only files fail; run it as root"
-        )?;
+        writeln!(out, "{NOT_ROOT}")?;
     }
     let mut fails = 0;
     for row in checks(host, v) {
@@ -289,25 +287,22 @@ pub fn run(env: &Env<'_>, v: &Verify<'_>, out: &mut dyn Write) -> Result<bool, M
         writeln!(out, "{row}")?;
     }
     if v.acme.is_none() {
-        writeln!(
-            out,
-            "skipped  the certificate job's units: the settings have no ACME keys"
-        )?;
+        writeln!(out, "{NO_ACME}")?;
     }
     for (path, how) in files(host, v)? {
         fails += usize::from(!how.is_same());
-        match how {
-            Compared::Same => writeln!(out, "same       {path}")?,
+        let line = match how {
+            Compared::Same => format!("same       {path}"),
             Compared::Differs {
                 installed,
                 rendered,
-            } => writeln!(
-                out,
+            } => format!(
                 "differs    {path}: installed sha256 {installed}, rendered sha256 {rendered}"
-            )?,
-            Compared::Missing => writeln!(out, "missing    {path}")?,
-            Compared::Unreadable(why) => writeln!(out, "unreadable {path}: {why}")?,
-        }
+            ),
+            Compared::Missing => format!("missing    {path}"),
+            Compared::Unreadable(why) => format!("unreadable {path}: {why}"),
+        };
+        writeln!(out, "{line}")?;
     }
     match fails {
         0 => writeln!(out, "verify: all checks passed")?,

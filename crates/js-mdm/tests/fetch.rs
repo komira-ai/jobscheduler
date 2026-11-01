@@ -62,6 +62,13 @@ fn apply_downloads_checks_and_writes_then_a_rerun_keeps_them() {
     assert_eq!(net.asked.borrow().len(), 6);
     assert_eq!(shown.matches("kept: ").count(), 6);
     assert!(shown.ends_with("nothing to do\n"), "{shown}");
+    // A dry run over what is kept has nothing to do either, and no dry-run note.
+    let (result, shown) = go(&host, &net, &[], Mode::DryRun);
+    result.unwrap();
+    assert!(
+        shown.ends_with("nothing to do\n") && !shown.contains("dry run:"),
+        "{shown}"
+    );
 }
 
 /// Catches `--only` that fetches every tool, or none: only the named tool is planned.
