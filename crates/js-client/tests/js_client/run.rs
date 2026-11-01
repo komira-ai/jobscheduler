@@ -303,7 +303,7 @@ fn a_malformed_entry_error_holds_no_value_from_the_body() {
         ),
         json_reply(
             200,
-            r#"{"run_id":"r-1","state":"exited","outcome":"s3cret-outcome"}"#,
+            r#"{"run_id":"r-1","state":"exited","labels":"s3cret-labels"}"#,
         ),
     ]);
     let client = client_of(&dir, &fake.url("http"));
@@ -311,7 +311,7 @@ fn a_malformed_entry_error_holds_no_value_from_the_body() {
     for (secret, field) in [
         ("s3cret-token-value", "exit_code"),
         ("hunter2-secret", "log_tail.truncated"),
-        ("s3cret-outcome", "outcome"),
+        ("s3cret-labels", "labels"),
     ] {
         let err = client.run("1-1", "r-1").unwrap_err();
         assert!(matches!(err, RunReadError::Malformed(_)), "{err:?}");
