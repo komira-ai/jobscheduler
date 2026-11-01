@@ -47,7 +47,7 @@
 //! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start |
 //! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `250ms`, `15m`, `2h` |
 //! | `--tick` | how often the table is ticked and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
-//! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file. Both are read at start only: renew a certificate by restarting the server |
+//! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file; a symbolic link (as secret mounts are) is followed and the file it leads to is checked, so a link to a 0600 key is accepted and a link to a group-readable one is refused. Both are read at start and again on SIGHUP: a renewed pair is served from the next handshake, with no restart (connections already open keep theirs). The pair is checked whole first (key owner-only, key matches the certificate, certificate valid now by the server's clock); one that fails is refused with a logged error and the old pair stays |
 //! | `--max-connections` | connections open at once, `256` unless given; at the cap the server stops accepting |
 //! | `--handshake-timeout` | a TLS client's time to finish its handshake, `10s` |
 //! | `--header-timeout` | a client's time to send a request head, from the connection's start and after each response (so also how long a keep-alive connection may idle), `10s` |
@@ -522,6 +522,9 @@
 //! once more and exits 0. If that last tick cannot write the lease file the file is
 //! behind the table, so the server logs the cause and exits 1 instead. A second signal
 //! while it drains is not needed: the drain is bounded.
+//!
+//! SIGHUP reloads the TLS pair (`--tls-cert`, `--tls-key`) without a restart, so a
+//! renewed certificate is served while the whole-host reservations in memory stay.
 
 mod adapt;
 mod agent_api;
@@ -670,10 +673,24 @@ async fn serve_until_signal(config: Config, out: &mut dyn Write) -> Result<(), F
         .with_writer(std::io::stderr)
         .try_init();
     let ticker = IntervalTicker::new(config.tick_period());
+    // Before the address is printed, so a SIGHUP sent once it is known is not lost.
+    let mut hangup = signal(SignalKind::hangup()).map_err(Failure::Runtime)?;
     let running = start(config, SharedClock::new(SystemClock), ticker).await?;
     let _ = writeln!(out, "listening on {}", running.addr());
     let _ = out.flush();
-    termination().await.map_err(Failure::Runtime)?;
+    let mut stopping = std::pin::pin!(termination());
+    loop {
+        tokio::select! {
+            stopped = &mut stopping => {
+                stopped.map_err(Failure::Runtime)?;
+                break;
+            }
+            _ = hangup.recv() => {
+                // The refusal is logged by the reload; the old pair stays.
+                let _ = running.reload_tls();
+            }
+        }
+    }
     running.shutdown().await.map_err(Failure::Runtime)
 }
 

@@ -67,6 +67,7 @@ mod tailnet;
 mod ticks;
 mod timings;
 mod tls;
+mod tls_reload;
 mod usage;
 mod usage_keys;
 mod usage_support;

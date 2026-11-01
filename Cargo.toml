@@ -89,6 +89,9 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 webpki-roots = { version = "1.0.11", default-features = false }
+# Reads the validity of the certificate a TLS reload brings (js-lease-server); in the lock
+# already through rcgen.
+x509-parser = { version = "0.18", default-features = false }
 
 # Every public item carries a doc comment; the lint job runs clippy with `-D warnings`,
 # so a missing one fails the build.
