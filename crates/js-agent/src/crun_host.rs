@@ -561,21 +561,21 @@ fn scratch_root(path: &Path, owner: u32, ids: Option<(u32, u32)>, report: &mut R
     }
 }
 
-/// The agent's own cgroup must offer the controllers a lease's limits are made of.
+/// The agent's unit must be offered the controllers a lease's limits are made of.
 ///
-/// This is the check that can be made before the runtime exists, and it is not a proof that
-/// `cgroup.subtree_control` can be enabled: the runtime (`crun/mod.rs`) does not move the
-/// agent into a leaf cgroup and does not enable `subtree_control` on the agent's own cgroup
-/// (it writes `+cpu +memory +pids` only in the new `<actions>/helpers` and in each lease's
-/// cgroup, which needs the controllers in `<actions>`'s own `subtree_control`). A cgroup that
-/// holds the agent cannot enable controllers for children (the no-internal-process rule), so
-/// the cgroup `<actions>` the wiring names must be one the operator or the unit has set up;
-/// that is the wiring's to check, where `<actions>` is known.
+/// This is the check that can be made before the runtime exists. It reads what the unit's
+/// cgroup is *offered* (`cgroup.controllers`, its parent's `subtree_control`), not what the
+/// unit has enabled for its children: systemd does not write the unit's own
+/// `cgroup.subtree_control` for a delegated unit, so on a host with the packaged unit the
+/// agent's leaf (`<unit>/supervisor`, from `DelegateSubgroup=supervisor`) holds no controller
+/// until the agent's delegate step (`js_contain::delegate::delegate`, run by the crun wiring
+/// after this check) writes `+cpu +memory +pids` to the unit's `cgroup.subtree_control`, which
+/// is legal because the unit's cgroup holds no process. That step also moves a process out of
+/// the unit's cgroup (a unit without `DelegateSubgroup=`), retries a busy cgroup, and names the
+/// controller its parent does not offer.
 ///
-/// The packaged unit (`packaging/js-agent/js-agent-crun.service`) sets `DelegateSubgroup=supervisor`,
-/// so the agent starts in `<unit>/supervisor` and the unit's own cgroup holds no process: it is
-/// the cgroup `<actions>` and its `subtree_control` belong to (`<unit>/actions`). This check
-/// reads the leaf's `cgroup.controllers`, which holds what the unit enabled for its children.
+/// An agent in a cgroup of another name is checked in that cgroup: it is the one the delegate
+/// step makes its root.
 fn cgroups(host: &CrunHost, report: &mut Report) {
     let fix = "run the agent from a systemd unit with Delegate=yes on a host with cgroup version 2 (unified hierarchy)";
     let own = match std::fs::read_to_string(&host.self_cgroup) {
@@ -600,6 +600,14 @@ fn cgroups(host: &CrunHost, report: &mut Report) {
         );
         return;
     };
+    // The leaf `supervisor` of a unit with `DelegateSubgroup=` shows what the unit has
+    // enabled for its children, which is nothing before the delegate step: ask the unit.
+    let own = match own.rsplit_once('/') {
+        Some((unit, leaf)) if leaf == js_contain::delegate::SUPERVISOR && !unit.is_empty() => {
+            unit.to_owned()
+        }
+        _ => own,
+    };
     let dir = host.cgroup_mount.join(own.trim_start_matches('/'));
     let file = dir.join("cgroup.controllers");
     let text = match std::fs::read_to_string(&file) {
@@ -622,7 +630,7 @@ fn cgroups(host: &CrunHost, report: &mut Report) {
         report.miss(
             Piece::CgroupDelegation,
             &format!(
-                "the agent's cgroup {own} holds no {} controller (it holds: {})",
+                "the agent's cgroup {own} is not offered the {} controller (it is offered: {})",
                 lacking.join(", "),
                 held.join(" ")
             ),
