@@ -391,12 +391,6 @@ fn move_link(env: &Env<'_>, held: &Held, record: &mut Record, link: &Path) -> Re
     })
 }
 
-/// Whether the unit shows that the binary ran and died: `failed`, or waiting to restart after a
-/// crash (`auto-restart`, as under `Restart=on-failure`).
-fn crashed(state: &UnitState) -> bool {
-    state.active == "failed" || state.sub == "auto-restart"
-}
-
 /// A start that failed: the release's fault only if the unit ran and died, now or at an earlier
 /// look (`seen_crash`); a unit that is anything else says nothing of the binary.
 fn start_failure(env: &Env<'_>, unit: &str, detail: String, seen_crash: bool) -> Done {
@@ -405,7 +399,7 @@ fn start_failure(env: &Env<'_>, unit: &str, detail: String, seen_crash: bool) ->
             .ports
             .units
             .show(unit)
-            .is_ok_and(|state| crashed(&state));
+            .is_ok_and(|state| state.crashed());
     if ran {
         failure(Reason::StartFailed, detail)
     } else {
@@ -431,7 +425,7 @@ fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Re
     let mut seen_crash = false;
     loop {
         let state = show(env, &unit, Reason::StartFailed)?;
-        seen_crash |= crashed(&state);
+        seen_crash |= state.crashed();
         match life(&state) {
             Life::Up => return Ok(()),
             Life::Down | Life::Stopping => {

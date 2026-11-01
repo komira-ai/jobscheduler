@@ -24,9 +24,12 @@
 //! The program is run by its absolute path with no shell, and the label is checked before any
 //! command: it becomes part of a path and of an argument.
 
-use crate::facts::CommandRunner;
+use std::path::Path;
+use std::time::Duration;
 
-use super::ports::{PortError, UnitState, Units};
+use crate::facts::{CommandRunner, PROBE_OUTPUT_CAP, SystemCommands};
+
+use super::ports::{Clock, PortError, SystemClock, UnitState, Units};
 
 /// The launchd client, by the absolute path it has on a stock system.
 pub const LAUNCHCTL: &str = "/bin/launchctl";
@@ -37,16 +40,89 @@ const LAUNCH_DAEMONS_DIR: &str = "/Library/LaunchDaemons";
 /// How `launchctl print` ends for a service the domain does not hold ("Could not find service").
 const NOT_FOUND: &str = "exit status: 113";
 
+/// How many times `start` reads the service again to see it begin, at most.
+pub const SETTLE_READS: u32 = 10;
+
+/// How much longer than the daemon's `ExitTimeOut` the runner of `bootout` waits.
+pub const BOOTOUT_MARGIN: Duration = Duration::from_secs(30);
+
+/// The runner of `launchctl bootout`: a [`SystemCommands`] whose limit is made from the
+/// `ExitTimeOut` of the daemon being stopped, so that it outlasts it by construction.
+pub struct StopRunner {
+    runner: SystemCommands,
+    limit: Duration,
+}
+
+impl StopRunner {
+    /// A runner for the daemon whose plist says `exit_timeout`.
+    #[must_use]
+    pub fn new(exit_timeout: Duration) -> Self {
+        let limit = exit_timeout;
+        Self {
+            runner: SystemCommands::bounded(limit, PROBE_OUTPUT_CAP),
+            limit,
+        }
+    }
+
+    /// How long it waits for the output of a call, and again for its exit.
+    #[must_use]
+    pub fn limit(&self) -> Duration {
+        self.limit
+    }
+}
+
+impl CommandRunner for StopRunner {
+    fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
+        self.runner.run(program, args)
+    }
+
+    fn run_in(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
+        self.runner.run_in(program, args, env)
+    }
+}
+
 /// [`Units`] over `launchctl`.
 pub struct LaunchUnits<'a> {
     runner: &'a dyn CommandRunner,
+    #[allow(dead_code)]
+    stopper: Option<&'a dyn CommandRunner>,
+    #[allow(dead_code)]
+    clock: &'a dyn Clock,
+    #[allow(dead_code)]
+    gate: Option<&'a Path>,
 }
 
 impl<'a> LaunchUnits<'a> {
     /// Runs `launchctl` through `runner`.
     #[must_use]
     pub fn new(runner: &'a dyn CommandRunner) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            stopper: None,
+            clock: &SystemClock,
+            gate: None,
+        }
+    }
+
+    /// Runs `bootout` through `stopper` instead.
+    #[must_use]
+    pub fn with_stop_runner(mut self, stopper: &'a dyn CommandRunner) -> Self {
+        self.stopper = Some(stopper);
+        self
+    }
+
+    /// Waits for a started daemon with `clock`.
+    #[must_use]
+    pub fn with_clock(mut self, clock: &'a dyn Clock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// The file whose existence lets launchd run the daemon.
+    #[must_use]
+    pub fn with_gate(mut self, gate: &'a Path) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     fn launchctl(&self, args: &[&str]) -> Result<String, String> {
