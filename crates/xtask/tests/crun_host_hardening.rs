@@ -39,7 +39,7 @@ fn an_active_unit_that_depends_on_the_mount_is_refused() {
         "systemctl",
         &format!("{LIST} {MOUNT}"),
         0,
-        &format!("{MOUNT}\\n  other.service\\n    local-fs.target\\n"),
+        &esc(&format!("{MOUNT}\n  other.service\n    local-fs.target\n")),
         &[],
     ));
     rig.rule(show_state("other.service", "active"));
@@ -50,7 +50,7 @@ fn an_active_unit_that_depends_on_the_mount_is_refused() {
         "systemctl",
         &format!("{LIST} {MOUNT}"),
         0,
-        &format!("{MOUNT}\\n  other.service\\n    local-fs.target\\n"),
+        &esc(&format!("{MOUNT}\n  other.service\n    local-fs.target\n")),
         &[],
     ));
     rig.rule(show_state("other.service", "inactive"));

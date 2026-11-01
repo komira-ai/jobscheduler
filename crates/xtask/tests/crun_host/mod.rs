@@ -458,7 +458,10 @@ pub fn mutating(call: &str) -> bool {
         "apt-get" | "useradd" | "usermod" | "userdel" | "apparmor_parser" | "mount" | "umount" => {
             true
         }
-        "systemctl" => !matches!(words.next(), Some("--version" | "show")),
+        "systemctl" => !matches!(
+            words.next(),
+            Some("--version" | "show" | "list-dependencies")
+        ),
         _ => false,
     }
 }
