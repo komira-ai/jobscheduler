@@ -223,6 +223,11 @@ impl Rig {
             ok("apparmor_parser", "-r *", ""),
             ok(
                 "systemctl",
+                &format!("show -p RequiredBy,RequisiteOf,BoundBy,ConsistsOf --value -- {MOUNT}"),
+                "js-agent.service js-agent-crun.service\n\n\n\n",
+            ),
+            ok(
+                "systemctl",
                 &format!("list-dependencies --reverse --plain --no-pager {MOUNT}"),
                 &format!("{MOUNT}\n  local-fs.target\n"),
             ),

@@ -10,7 +10,6 @@ use std::os::unix::fs::{PermissionsExt as _, symlink};
 
 use crun_host::*;
 
-const LIST: &str = "list-dependencies --reverse --plain --no-pager";
 const TARGETS: &str = "-n -o TARGET -S /dev/loop3";
 
 fn unit_path() -> String {
@@ -29,30 +28,43 @@ fn show_state(unit: &str, state: &str) -> String {
 
 // --- before the scratch filesystem is unmounted -------------------------------------------------
 
-/// Another unit that is active and depends on the mount goes down with it and does not come back:
-/// refused, naming it. A dependent that is not active, and the targets every mount hangs from, do
+/// The units whose stop follows the mount's (what requires, binds, or is part of it), asked of the
+/// stand-in the way the script asks.
+fn stoppers(unit: &str, names: &str) -> String {
+    rule(
+        "systemctl",
+        &format!("show -p RequiredBy,RequisiteOf,BoundBy,ConsistsOf --value -- {unit}"),
+        0,
+        &esc(&format!("{names}\n\n\n\n")),
+        &[],
+    )
+}
+
+/// A unit that is active and requires the mount, directly or through other units, goes down with
+/// it and does not come back: refused, naming every one found. A custom target is no exception;
+/// a dependent that is not active, and `local-fs.target`, which a mount legitimately touches, do
 /// not matter.
 #[test]
 fn an_active_unit_that_depends_on_the_mount_is_refused() {
     let mut rig = Rig::new("dependent-active");
-    rig.rule(rule(
-        "systemctl",
-        &format!("{LIST} {MOUNT}"),
-        0,
-        &esc(&format!("{MOUNT}\n  other.service\n    local-fs.target\n")),
-        &[],
-    ));
+    rig.rule(stoppers(MOUNT, "other.service"));
     rig.rule(show_state("other.service", "active"));
     rig.expect_refused("other.service");
 
+    let mut rig = Rig::new("dependent-custom-target");
+    rig.rule(stoppers(MOUNT, "farm.target local-fs.target"));
+    rig.rule(show_state("farm.target", "active"));
+    rig.expect_refused("farm.target");
+
+    let mut rig = Rig::new("dependent-indirect");
+    rig.rule(stoppers(MOUNT, "mid.service"));
+    rig.rule(stoppers("mid.service", "far.service"));
+    rig.rule(show_state("mid.service", "inactive"));
+    rig.rule(show_state("far.service", "active"));
+    rig.expect_refused("far.service");
+
     let mut rig = Rig::new("dependent-inactive");
-    rig.rule(rule(
-        "systemctl",
-        &format!("{LIST} {MOUNT}"),
-        0,
-        &esc(&format!("{MOUNT}\n  other.service\n    local-fs.target\n")),
-        &[],
-    ));
+    rig.rule(stoppers(MOUNT, "other.service local-fs.target"));
     rig.rule(show_state("other.service", "inactive"));
     let out = rig.apply();
     assert_eq!(out.code, 0, "{}", out.text);
@@ -378,4 +390,63 @@ fn the_apparmor_profile_for_crun_is_loaded_or_the_run_is_refused() {
         rig.text("var/lib/js-crun-host-setup/manifest")
             .contains("apparmor-loaded\t")
     );
+}
+
+/// The manifest's last line of a failed run names the step that failed, also when it is not a
+/// command the script ran (here the check of the unit after the reload), and not the last command
+/// that went well.
+#[test]
+fn the_incomplete_line_names_the_step_that_failed() {
+    let mut rig = Rig::new("incomplete-step");
+    rig.rule(rule("systemd-analyze", "verify *", 1, "", &[]));
+    let out = rig.apply();
+    assert_eq!(out.code, 1, "{}", out.text);
+    let manifest = rig.text("var/lib/js-crun-host-setup/manifest");
+    let last = manifest.lines().last().expect("a line");
+    assert_eq!(last, "incomplete\t1\tstep_reload", "{manifest}");
+}
+
+/// A state directory or a manifest that is a link, an existing user with uid 0 and an effective
+/// `Options=` that only looks like it has the option are each refused or stopped.
+#[test]
+fn links_a_root_account_and_a_lookalike_option_are_not_trusted() {
+    let rig = Rig::new("state-dir-link");
+    std::fs::create_dir_all(rig.path("elsewhere")).expect("directory");
+    std::fs::set_permissions(
+        rig.path("elsewhere"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .expect("mode");
+    symlink(
+        rig.path("elsewhere"),
+        rig.path("var/lib/js-crun-host-setup"),
+    )
+    .expect("link");
+    rig.expect_refused("state directory");
+
+    let rig = Rig::new("manifest-link");
+    let dir = rig.path("var/lib/js-crun-host-setup");
+    std::fs::create_dir(&dir).expect("directory");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    symlink(rig.path("elsewhere"), dir.join("manifest")).expect("link");
+    rig.expect_refused("manifest");
+
+    let rig = Rig::new("user-uid-0");
+    rig.write(
+        "etc/passwd",
+        "root:x:0:0:root:/root:/bin/bash\njsjob:x:0:0::/nonexistent:/usr/sbin/nologin\n",
+    );
+    rig.expect_refused("never runs as root");
+
+    let mut rig = Rig::new("noprjquota");
+    rig.rule(rule(
+        "systemctl",
+        &format!("show -p Options --value -- {MOUNT}"),
+        0,
+        "loop,noprjquota\\n",
+        &[],
+    ));
+    let out = rig.apply();
+    assert_eq!(out.code, 1, "{}", out.text);
+    assert!(out.text.contains("effective"), "{}", out.text);
 }
