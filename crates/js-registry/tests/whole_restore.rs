@@ -5,10 +5,11 @@
 
 mod support;
 
+use js_agent_wire::{ExclusiveRefusal, RefusalReason};
 use js_lease::{
     Exclusion as LeaseExclusion, ExclusionEnd, Held, Queued, ReservationRecord, Timestamp,
 };
-use js_provider::{RefusalCode, StartAck};
+use js_provider::{Provider, RefusalCode, StartAck};
 use js_registry::{Exclusion, PoolConfig, Restored, WholeNodeConfig};
 use js_types::ProviderId;
 use support::world::*;
@@ -353,4 +354,53 @@ fn a_request_that_used_up_its_tries_is_still_terminal_after_a_restart() {
     assert_eq!(back.poll(2, "r-t", 600), refused);
     assert_eq!(back.fx.registry.request_record(&id("r-t")), None);
     assert_ne!(back.poll(3, "r-s", 600), refused);
+}
+
+/// Asserts that an exclusion for the rest of a request's life comes back from a restart
+/// and keeps the request off the host. Reached as production reaches it: the request,
+/// which carries an id, is committed to host `a`, and `a`'s agent refuses the lease as
+/// `unsupported`. The ledger then holds one record with one failed prepare and `a`
+/// excluded for good; a second registry given it holds the same record, and the same
+/// request, started again, is placed on `b` and never on `a`. It catches an exclusion
+/// that is kept as a timed one or not at all, which would offer the host again.
+#[test]
+fn an_exclusion_for_life_comes_back_and_keeps_the_request_off_the_host() {
+    let first = fixture_of(pool());
+    let epochs = [("a", first.join("a", "t")), ("b", first.join("b", "t"))];
+    let mut provider = first.provider.clone();
+    let spec = World::whole_spec(1, Some("r1"), 600);
+    assert_eq!(provider.start(spec), StartAck::Unknown);
+    let mut message = first.heartbeat("a", epochs[0].1);
+    message.exclusive_refused = Some(ExclusiveRefusal {
+        lease_id: "1-1".into(),
+        code: RefusalReason::Unsupported,
+        detail: "no hook".into(),
+    });
+    first.registry.heartbeat(&message, &cred("t")).unwrap();
+    let before = first.registry.request_record(&id("r1")).unwrap();
+    assert_eq!(before.exclusions.get(&host("a")), Some(&Exclusion::ForLife));
+    let ledger = first.registry.reservation_ledger();
+    assert_eq!(ledger.len(), 1);
+
+    let second = fixture_of(pool());
+    let restored = second.registry.restore_reservations(&ledger);
+    assert_eq!(
+        restored,
+        Restored {
+            resumed: 1,
+            dropped: 0
+        }
+    );
+    second.join("a", "t");
+    second.join("b", "t");
+    let kept = second.registry.request_record(&id("r1")).unwrap();
+    assert_eq!(kept.exclusions.get(&host("a")), Some(&Exclusion::ForLife));
+    assert_eq!(kept.prepare_failures, 1);
+    let mut provider = second.provider.clone();
+    assert_eq!(
+        provider.start(World::whole_spec(2, Some("r1"), 600)),
+        StartAck::Unknown
+    );
+    assert_eq!(provider.booked().get(&host("b")), Some(&lease(2)));
+    assert_eq!(provider.booked().get(&host("a")), None);
 }
