@@ -66,7 +66,7 @@ block return out quick proto { tcp, udp } from any to any user 600:699
   `flags S/SA keep state`), so the live anchor is compared with pf's own earlier readback,
   not with the rendered text. Blank lines and indentation are ignored. Being read-only, any
   number of checks may run at once and beside `install`. `pfctl -sr` opens `/dev/pf`, so it
-  needs root: the macOS agent runs as root and can call it (#465); anything else gets a
+  needs root: the macOS agent runs as root and calls it; anything else gets a
   failed `pfctl` and a refusal. A missing state file is "could not tell", also a refusal.
 - **remove** runs `pfctl -a <anchor> -F rules`, which flushes the rules of this anchor and
   of nothing else (never the main ruleset, never another anchor; a leftover `<anchor>/check`
@@ -79,13 +79,14 @@ every platform; only `SystemPfctl` starts a process.
 
 ### The gate: `enforced`
 
-This crate renders, installs and checks the anchor. It does **not** gate jobs: nothing
-stops a `Net::On` job when the anchor is missing. The gate belongs to the Mac native
-runtime (the agent side), which does not exist yet. The API it calls is
-`js_mac_provision::enforced(&Config) -> Result<(), ProvisionError>`: **call it at agent
-start and before every `Net::On` job, and refuse on any error.** `PfDisabled`,
-`NotReferenced` and `Drift` say it is not enforced; `Run`, `Failed` and `State` say it
-could not be told, which is a refusal too (the Linux agent's `egress-unchecked`).
+This crate renders, installs and checks the anchor; it does **not** gate jobs itself. The
+gate is the macOS agent's (`js-agent`, `--native-network on` with the `--native-pf-*` flags,
+which carry the anchor, the uid range, the endpoints and the `pfctl` this crate was
+given). It calls `js_mac_provision::enforced(&Config) -> Result<(), ProvisionError>` **at
+agent start and before every job that asks for the network, and refuses on any error**: the
+agent does not start, and the job is refused as `egress-unchecked` and creates nothing.
+`PfDisabled`, `NotReferenced` and `Drift` say it is not enforced; `Run`, `Failed` and `State`
+say it could not be told, which is a refusal too. The answer is never kept.
 
 ### The anchor point and the main ruleset
 

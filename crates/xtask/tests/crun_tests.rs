@@ -112,6 +112,13 @@ impl Run {
         )
     }
 
+    /// The file the unit named `unit` writes the number of tests it ran to.
+    fn count_file(&self, unit: &str) -> PathBuf {
+        self.root
+            .join("target/crun-tests")
+            .join(format!("{unit}.count"))
+    }
+
     fn log(&self, path: PathBuf) -> String {
         std::fs::read_to_string(path).unwrap_or_default()
     }
@@ -138,8 +145,10 @@ impl Run {
              --unit={name} --slice=js-agent.slice -p Delegate=yes \
              -p OOMScoreAdjust=-900 --uid={uid} --gid={gid} --working-directory={package} \
              -E HOME={HOME} -E PATH={PATH} \
-             -E JS_TEST_IMAGE=docker://docker.io/library/busybox@{manifest} {exe} \
+             -E JS_TEST_IMAGE=docker://docker.io/library/busybox@{manifest} \
+             {XTASK} count-run --count-file {count} -- {exe} \
              --include-ignored\n{after}",
+            count = self.count_file(&name).display(),
             cwd = std::env::current_dir().expect("cwd").display(),
             package = package.display(),
             manifest = this_manifest(),
@@ -308,7 +317,9 @@ fn a_job_user_runs_the_root_daemon_targets_as_root() {
                 "{cwd}: -n systemd-run --quiet --wait --pipe \
                  --unit={name} --slice=js-agent.slice -p Delegate=yes \
                  -p OOMScoreAdjust=-900 --working-directory={package} -E PATH={PATH} \
-                 -E JS_JOB_USER=js-job {exe} --include-ignored\n{after}",
+                 -E JS_JOB_USER=js-job {XTASK} count-run --count-file {count} -- {exe} \
+                 --include-ignored\n{after}",
+                count = run.count_file(&unit_name(target, run.pid.get())).display(),
                 name = unit_name(target, run.pid.get()),
                 after = run.after(&unit_name(target, run.pid.get())),
                 cwd = std::env::current_dir().expect("cwd").display(),
@@ -416,10 +427,14 @@ fn a_unit_result_that_cannot_be_read_fails_the_verb() {
 fn unit_result_reads_the_unit_a_step_started() {
     let run = Run::new("unitresult");
     let fake = run.bin.join("sudo");
+    let counted = run.root.join("runtime.count");
+    std::fs::write(&counted, "3\n").expect("count file");
     let check = |defect: Option<&str>| {
         let mut cmd = Command::new(XTASK);
         cmd.args(["unit-result", "--unit", "js-crun-runtime", "--sudo"])
-            .arg(&fake);
+            .arg(&fake)
+            .arg("--count-file")
+            .arg(&counted);
         match defect {
             Some(d) => cmd.env("XTASK_FAKE_DEFECT", d),
             None => cmd.env_remove("XTASK_FAKE_DEFECT"),
@@ -434,7 +449,10 @@ fn unit_result_reads_the_unit_a_step_started() {
     let (code, out, err) = check(None);
     assert_eq!(
         (code, out.as_str()),
-        (Some(0), "ok: unit js-crun-runtime exited 0\n"),
+        (
+            Some(0),
+            "ok: unit js-crun-runtime exited 0 and ran 3 tests\n"
+        ),
         "{err}"
     );
     let (code, _, err) = check(Some("unit-fails"));
@@ -450,4 +468,208 @@ fn unit_result_reads_the_unit_a_step_started() {
         2,
         "{sudo}"
     );
+}
+
+/// Catches a target whose test binary ran no test (a filter that matched nothing, a binary
+/// built without its tests) passing because the unit exited 0: the verb must fail, for the
+/// rootless and the root targets, naming the target and that no test ran.
+#[test]
+fn a_target_that_ran_zero_tests_fails_the_verb() {
+    for flags in [&[][..], &["--job-user", "js-job"][..]] {
+        let run = Run::new("zero");
+        let (code, _, err) = run.xtask_with(flags, Path::new(FAKE), None, Some("zero-tests"));
+        assert_eq!(code, Some(1), "{err}");
+        let target = if flags.is_empty() {
+            TARGETS[0]
+        } else {
+            ROOT_TARGETS[0]
+        };
+        assert!(
+            err.contains(&format!(
+                "the tests of -p js-contain --test {target} failed in their unit"
+            )),
+            "{err}"
+        );
+        assert!(err.contains("ran no test"), "{err}");
+    }
+}
+
+/// Catches a unit that left no count file (the wrapper never ran, or the file was not
+/// written) passing: a missing file fails the target.
+#[test]
+fn a_target_with_no_count_file_fails_the_verb() {
+    for flags in [&[][..], &["--job-user", "js-job"][..]] {
+        let run = Run::new("nocount");
+        let (code, _, err) = run.xtask_with(flags, Path::new(FAKE), None, Some("no-count"));
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains("could not read the count of tests run"),
+            "{err}"
+        );
+    }
+}
+
+/// Catches a count file that is not a number passing (or being read as 0 or as any count).
+#[test]
+fn a_target_with_a_garbled_count_file_fails_the_verb() {
+    for flags in [&[][..], &["--job-user", "js-job"][..]] {
+        let run = Run::new("garbled");
+        let (code, _, err) = run.xtask_with(flags, Path::new(FAKE), None, Some("garbled-count"));
+        assert_eq!(code, Some(1), "{err}");
+        assert!(err.contains("is not a count of tests"), "{err}");
+    }
+}
+
+/// Catches a count that is read but never shown: a run whose units ran tests says how many,
+/// so a log shows the count was read and nonzero.
+#[test]
+fn a_target_that_ran_tests_passes_and_says_how_many() {
+    for flags in [&[][..], &["--job-user", "js-job"][..]] {
+        let run = Run::new("counted");
+        let (code, out, err) = run.xtask_with(flags, Path::new(FAKE), None, None);
+        assert_eq!(code, Some(0), "{err}");
+        let target = if flags.is_empty() {
+            TARGETS[0]
+        } else {
+            ROOT_TARGETS[0]
+        };
+        assert!(out.contains(&format!("{target}: 3 tests ran\n")), "{out}");
+    }
+}
+
+/// The wrapper a unit runs, through the real binary and a fake test binary: it passes the
+/// binary's output through, writes the sum of the `test result` lines' passed counts, and
+/// exits with the binary's status; a binary that printed no summary leaves 0.
+#[test]
+fn count_run_counts_the_tests_the_binary_reports() {
+    let run = Run::new("wrapper");
+    let testbin = run.bin.join("testbin");
+    std::fs::hard_link(FAKE, &testbin).expect("link the fake test binary");
+    let cases = [
+        (
+            "running 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured\n\
+             running 2 tests\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured\n",
+            "0",
+            Some(0),
+            "5\n",
+        ),
+        (
+            "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured\n",
+            "0",
+            Some(0),
+            "0\n",
+        ),
+        ("it crashed\n", "101", Some(101), "0\n"),
+    ];
+    for (i, (output, status, want_code, want_count)) in cases.iter().enumerate() {
+        let file = run.root.join(format!("count-{i}"));
+        let out = Command::new(XTASK)
+            .arg("count-run")
+            .arg("--count-file")
+            .arg(&file)
+            .arg("--")
+            .arg(&testbin)
+            .arg("--include-ignored")
+            .env("XTASK_FAKE_TEST_OUTPUT", output)
+            .env("XTASK_FAKE_TEST_STATUS", status)
+            .output()
+            .expect("run xtask");
+        assert_eq!(out.status.code(), *want_code, "case {i}");
+        let said = if *want_code == Some(0) {
+            format!("{output}{} tests ran\n", want_count.trim())
+        } else {
+            (*output).to_owned()
+        };
+        assert_eq!(String::from_utf8_lossy(&out.stdout), said, "case {i}");
+        assert_eq!(
+            std::fs::read_to_string(&file).as_deref().ok(),
+            Some(*want_count),
+            "case {i}"
+        );
+    }
+}
+
+/// `unit-result --count-file` as a workflow step runs it: a unit that exited 0 passes only
+/// with a positive count; zero, a missing file and a garbled file each fail, and the unit is
+/// reset in every case.
+#[test]
+fn unit_result_fails_a_unit_that_ran_no_tests() {
+    let run = Run::new("unitcount");
+    let fake = run.bin.join("sudo");
+    let check = |contents: Option<&str>| {
+        let file = run.root.join("runtime.count");
+        let _ = std::fs::remove_file(&file);
+        if let Some(text) = contents {
+            std::fs::write(&file, text).expect("count file");
+        }
+        let out = Command::new(XTASK)
+            .args(["unit-result", "--unit", "js-crun-runtime", "--sudo"])
+            .arg(&fake)
+            .arg("--count-file")
+            .arg(&file)
+            .env_remove("XTASK_FAKE_DEFECT")
+            .output()
+            .expect("run xtask");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (code, out, err) = check(Some("12\n"));
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "ok: unit js-crun-runtime exited 0 and ran 12 tests\n");
+    let (code, _, err) = check(Some("0\n"));
+    assert_eq!(code, Some(1));
+    assert!(err.contains("ran no test"), "{err}");
+    let (code, _, err) = check(None);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("could not read the count of tests run"),
+        "{err}"
+    );
+    let (code, _, err) = check(Some("many\n"));
+    assert_eq!(code, Some(1));
+    assert!(err.contains("is not a count of tests"), "{err}");
+    let sudo = run.sudo_args();
+    assert_eq!(
+        sudo.matches("systemctl reset-failed js-crun-runtime")
+            .count(),
+        4,
+        "{sudo}"
+    );
+}
+
+/// The wrapper's failures through the real binary: no command after `--` is a usage error,
+/// a program that does not exist and a count file that cannot be written fail naming what
+/// failed.
+#[test]
+fn count_run_fails_loudly_when_it_cannot_run_the_binary() {
+    let run = Run::new("wrapperfail");
+    let testbin = run.bin.join("testbin");
+    std::fs::hard_link(FAKE, &testbin).expect("link the fake test binary");
+    let file = run.root.join("count");
+    let count_run = |count_file: &Path, command: &[&Path]| {
+        let out = Command::new(XTASK)
+            .arg("count-run")
+            .arg("--count-file")
+            .arg(count_file)
+            .args((!command.is_empty()).then_some("--"))
+            .args(command)
+            .output()
+            .expect("run xtask");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (code, err) = count_run(&file, &[]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("needs a command"), "{err}");
+    let (code, err) = count_run(&file, &[&run.bin.join("missing")]);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("cannot start"), "{err}");
+    let (code, err) = count_run(&run.root.join("no/such/dir/count"), &[&testbin]);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("cannot write"), "{err}");
 }

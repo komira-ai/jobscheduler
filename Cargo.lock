@@ -946,6 +946,7 @@ dependencies = [
  "js-lease",
  "js-lease-server",
  "js-mac-pool",
+ "js-mac-provision",
  "js-mac-session",
  "js-oci",
  "js-pool-static",
@@ -1233,6 +1234,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "x509-parser",
 ]
 
 [[package]]
@@ -1315,6 +1317,19 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "thiserror",
+]
+
+[[package]]
+name = "js-measure"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "js-analysis",
+ "js-client",
+ "js-testkit",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

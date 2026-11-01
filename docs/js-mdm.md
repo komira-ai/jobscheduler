@@ -48,7 +48,7 @@ stderr).
 
   Comment lines are left out of both sides before hashing. `--ignore TEXT` removes TEXT from the
   installed text first, so a host installed by another tool that words one line differently can
-  be compared (`--ignore " on the dev box"`). A file this user may not read is `unreadable`;
+  be compared (`--ignore " (local note)"`). A file this user may not read is `unreadable`;
   world-readable files need no root, the checks of root-only files do.
 
 ## Not in this slice

@@ -169,11 +169,15 @@ and to IPv4 loopback; everything else over TCP and UDP is refused at once, the w
   A LaunchDaemon runs `install` at boot and every 30 seconds. `check` also requires pf to
   be enabled and the main ruleset to evaluate the anchor, and compares the live anchor with
   the readback `install` stored; it only reads (root, for `/dev/pf`).
-- This crate does not gate jobs. `js_mac_provision::enforced` is the call the Mac agent will
-  make at start and before every `Net::On` job, refusing on any error (the Linux agent's
-  `egress-unchecked`); wiring it comes with the Mac native runtime. Until then a missing
-  anchor stops nothing. The interval does not close the window after a main-ruleset reload;
-  the per-job call does.
+- The Mac agent gates jobs with `js_mac_provision::enforced`: with `--native-network on` it
+  does not start unless the anchor is enforced, and before every job that asks for the
+  network it asks again and refuses the job (`egress-unchecked`, nothing created) on any
+  error. Jobs that ask for no network or loopback only are not concerned. The agent is
+  told the policy by `--native-pf-uid-start`, `--native-pf-uid-count`,
+  `--native-pf-endpoint`, `--native-pf-anchor`, `--native-pf-state-dir` and
+  `--native-pfctl`; the endpoints must be the ones `install` was given, or the anchor reads
+  back as different and every such job is refused. The interval does not close the window
+  after a main-ruleset reload; the per-job call does.
 - Limits: pf matches `user` on TCP and UDP only; loopback between pool users cannot be
   narrowed by the sender's uid and stays open; the node's own address is refused unless it
   is a listed endpoint; DNS through mDNSResponder (a unix socket) is outside pf; and the

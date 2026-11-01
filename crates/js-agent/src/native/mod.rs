@@ -54,6 +54,7 @@
 mod bundle;
 mod journal;
 mod logs;
+mod pf;
 mod settings;
 
 use std::collections::BTreeMap;
@@ -88,6 +89,7 @@ use crate::lifecycle::{
 };
 
 pub use journal::Journal;
+pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
 pub use settings::{
     DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS, NativeFlags,
     NativeSettings,
@@ -116,6 +118,9 @@ pub struct NativeConfig {
     /// The most processes the run's user may have: the run's `RLIMIT_NPROC`. A fork bomb
     /// stops at it, and the helper's kill (which forks as root) is not held by it.
     pub max_processes: u32,
+    /// The check that the pf anchor of the pool is in force. Required when `net` is
+    /// [`Net::On`]: the runtime does not open without it.
+    pub egress: Option<Arc<dyn Enforcer>>,
 }
 
 /// A run that started: its scratch directory (where its log files are) and what the thread
@@ -160,6 +165,28 @@ impl NativeRuntime {
     /// A configured limit is zero or above the helper's cap (nothing is sent to the helper),
     /// the helper cannot be reached or its boot reset failed.
     pub fn open(helper: Client, config: NativeConfig, term: u64) -> Result<Self, RuntimeError> {
+        if config.net == Net::On && config.egress.is_none() {
+            return Err(RuntimeError::new(
+                "--native-network: on needs the check of the pf anchor of the pool \
+                 (--native-pf-uid-start and --native-pf-uid-count)",
+            ));
+        }
+        Self::open_ungated(helper, config, term)
+    }
+
+    /// As [`NativeRuntime::open`], without refusing a cap of `on` that has no check. For
+    /// tests of the gate itself, which must refuse on its own whatever `open` let through;
+    /// an agent never calls it.
+    ///
+    /// # Errors
+    ///
+    /// As [`NativeRuntime::open`], but for the missing check.
+    #[doc(hidden)]
+    pub fn open_ungated(
+        helper: Client,
+        config: NativeConfig,
+        term: u64,
+    ) -> Result<Self, RuntimeError> {
         let limits = limits_of(&config)?;
         reset(&helper)?;
         let journal = Journal::new(&config.journal);
@@ -316,6 +343,35 @@ impl NativeRuntime {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Whether the pf anchor of the pool is in force right now, when the cap lets a run
+    /// reach the network. Asked afresh at every call: a reload of the main ruleset can drop
+    /// the anchor at any time, so no answer is kept. The text is the first line of what the
+    /// provisioner said, with the flag that makes the check necessary.
+    fn pf_in_force(&self) -> Result<(), RuntimeError> {
+        if self.config.net != Net::On {
+            return Ok(());
+        }
+        // Fails closed: `open` refuses a cap of `on` with no check, and this does not rely
+        // on it.
+        let Some(check) = &self.config.egress else {
+            return Err(fail(
+                &"--native-network",
+                &"on has no check of the pf anchor of the pool",
+            ));
+        };
+        check.enforced().map_err(|why| {
+            tracing::warn!("the pf anchor is not in force: {why}");
+            let said = why.to_string();
+            fail(
+                &"--native-network",
+                &format!(
+                    "on needs the pf anchor of the pool in force: {}",
+                    said.lines().next().unwrap_or_default()
+                ),
+            )
+        })
     }
 
     /// Ends the user of `lease` after a start that failed, so none is left behind, and says
@@ -521,6 +577,21 @@ impl Runtime for NativeRuntime {
 
     fn supports_gpus(&self) -> bool {
         false
+    }
+
+    /// At the agent's start: with a cap of `on`, the pf anchor must be in force.
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        self.pf_in_force()
+    }
+
+    /// Before every native start: a job that asks for the network (`on`) is refused unless
+    /// the pf anchor is in force now. A job that asks for less is not concerned, and a job
+    /// whose bundle lowers the network after this is still checked, which only refuses more.
+    fn check_native_egress(&self, native: &NativeSpec) -> Result<(), RuntimeError> {
+        if native.network != NetworkLevel::On {
+            return Ok(());
+        }
+        self.pf_in_force()
     }
 
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {

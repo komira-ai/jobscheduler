@@ -17,6 +17,7 @@ use js_mac_session::helper::RESET_ALREADY;
 use js_mac_session::proto::Limits;
 
 use super::fake_helper::{End, FakeHelper};
+use super::pf_gate::{Fake, Verdict};
 use super::{Rig, TERM, config, native, parse};
 use crate::support::Scratch;
 
@@ -120,7 +121,10 @@ fn a_runs_network_is_the_lower_of_its_request_and_the_agents_cap() {
         (Net::On, NetworkLevel::Off, false, true),
     ];
     for (n, (cap, asked, has_loopback, denies)) in cases.into_iter().enumerate() {
-        let mut rig = Rig::with(&format!("net{n}"), |config| config.net = cap.clone());
+        let mut rig = Rig::with(&format!("net{n}"), |config| {
+            config.net = cap.clone();
+            config.egress = Some(Fake::new(Verdict::Enforced));
+        });
         let mut body = native("/bin/true", &[]);
         body.network = asked;
         let spec = rig.spec("r1", body);

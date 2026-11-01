@@ -183,7 +183,7 @@ fn ignore_removes_text_from_the_installed_file_before_comparing() {
         .lines()
         .find(|l| l.starts_with("Description="))
         .unwrap();
-    let old = slice.text.replace(line, &format!("{line} on the dev box"));
+    let old = slice.text.replace(line, &format!("{line} (local note)"));
     host.put_file(
         &format!("{UNITS}/{}", slice.name),
         0o644,
@@ -193,7 +193,7 @@ fn ignore_removes_text_from_the_installed_file_before_comparing() {
     let (ok, shown) = go(&host, true, &[]);
     assert!(!ok);
     assert!(shown.contains("differs    /etc/systemd/system/js-mdm.slice: installed sha256 "));
-    let (ok, shown) = go(&host, true, &[" on the dev box".to_owned()]);
+    let (ok, shown) = go(&host, true, &[" (local note)".to_owned()]);
     assert!(ok, "{shown}");
     let (ok, _) = go(&host, true, &["Slice".to_owned()]);
     assert!(!ok);
