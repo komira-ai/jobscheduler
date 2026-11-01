@@ -13,6 +13,7 @@
 //! - [`drive`]: submits the jobs and watches them to the end ([`Observation`]).
 //! - [`assemble`]: the numbers of a run, from the observation and the server's readings.
 //! - [`run_plan`]: the plan end to end.
+//! - [`reported`]: the numbers a job prints about itself.
 //! - [`group`] and [`Summarise`]: the hand-off to the analysis.
 //!
 //! # Output
@@ -29,6 +30,31 @@
 //!
 //! A number is `null` when its source cannot be read. The sources, and what the
 //! server does not publish today, are listed in [`measure`].
+//!
+//! # Numbers a job reports
+//!
+//! A job may print `js-measure-result {"steady_ms":12.3}` to its standard output. After the
+//! run is over the harness reads the end of the run's output from the lease server and
+//! records the numbers as `reported_<key>` in the run's record (the rules, and what a
+//! missing or malformed line records, are in [`reported`]). The job runs as a container on
+//! a lease like any other, so what it reports is measured through the lease server.
+//!
+//! # Whole-host noise
+//!
+//! `plans/whole-host-noise.plan.json` and `plans/whole-host-noise.workload.json` compare
+//! the same benchmark cell (`tpch/q6-sf1`) on a shared node (the `shared` arm, the class
+//! the workload names) with the same cell on a whole host (the `whole-host` arm, which
+//! asks for the `whole-node` lease class), 20 runs each. Before running it, replace the
+//! image in the workload with the pinned benchmark image and set `class` to the name your
+//! pool gives its shared class. A class or image the server refuses is recorded as that
+//! job's `failure` (for example `the server answered 422 unknown-class`) in `jobs.jsonl`,
+//! and the run has no reported number. The records go to the analysis:
+//!
+//! ```text
+//! js-measure run --plan plans/whole-host-noise.plan.json \
+//!     --workload plans/whole-host-noise.workload.json --out DIR --commit SHA --live ...
+//! js-analysis DIR/records.jsonl --compare-cv shared whole-host
+//! ```
 //!
 //! # Live mode
 //!

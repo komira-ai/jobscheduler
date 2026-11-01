@@ -211,7 +211,6 @@ impl Farm for FakeFarm<'_> {
     }
 
     fn run(&self, lease: &str, run: &str) -> Result<RunStanding, FarmError> {
-        let _stub = &self.log_tail;
         let state = self.state.borrow();
         let found = state.runs.iter().find(|r| r.lease == lease && r.id == run);
         let found = found.ok_or_else(|| Self::refused(404, "unknown-run"))?;
@@ -224,7 +223,7 @@ impl Farm for FakeFarm<'_> {
             false => RunStanding {
                 state: "exited".to_owned(),
                 outcome: Some(self.outcome.clone()),
-                log_tail: None,
+                log_tail: self.log_tail.clone(),
             },
         })
     }

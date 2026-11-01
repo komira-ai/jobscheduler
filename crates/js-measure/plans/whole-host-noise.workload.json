@@ -1,0 +1,15 @@
+{
+  "jobs": [
+    {
+      "name": "bench",
+      "count": 1,
+      "image": "REPLACE-WITH-THE-PINNED-BENCH-IMAGE@sha256:REPLACE-WITH-ITS-DIGEST",
+      "args": ["--cell", "tpch/q6-sf1", "--result-line", "js-measure-result"],
+      "cpu_millis": 8000,
+      "memory_bytes": 17179869184,
+      "wall_ms": 900000,
+      "class": "shared",
+      "profile": "komira-bench-tpch-q6-sf1"
+    }
+  ]
+}

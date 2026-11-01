@@ -29,6 +29,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde_json::Value;
+
 use crate::metric::finite;
 
 /// The tag a job's result line begins with.
@@ -40,20 +42,40 @@ pub const PREFIX: &str = "reported_";
 /// The keys of the last result line of `stdout`, each a number or `None`.
 #[must_use]
 pub fn parse(stdout: &str) -> BTreeMap<String, Option<f64>> {
-    let _ = stdout;
-    BTreeMap::new()
+    stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix(TAG)?.strip_prefix(' '))
+        .and_then(|json| serde_json::from_str::<BTreeMap<String, Value>>(json).ok())
+        .map(|keys| {
+            keys.into_iter()
+                .map(|(key, value)| (key, value.as_f64()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `reported` with every key prefixed.
 #[must_use]
 pub fn prefixed(reported: &BTreeMap<String, Option<f64>>) -> BTreeMap<String, Option<f64>> {
-    let _ = reported;
-    BTreeMap::new()
+    reported
+        .iter()
+        .map(|(key, value)| (format!("{PREFIX}{key}"), *value))
+        .collect()
 }
 
 /// The record's metrics from the jobs' reports: see the module rules.
 #[must_use]
 pub fn merge(jobs: &[BTreeMap<String, Option<f64>>]) -> BTreeMap<String, Option<f64>> {
-    let _ = (jobs, BTreeSet::<()>::new(), finite(None));
-    BTreeMap::new()
+    let keys: BTreeSet<&String> = jobs.iter().flat_map(BTreeMap::keys).collect();
+    keys.into_iter()
+        .map(|key| {
+            let numbers: Option<Vec<f64>> = jobs
+                .iter()
+                .map(|job| job.get(key).copied().flatten())
+                .collect();
+            let mean = numbers.map(|all| all.iter().sum::<f64>() / all.len() as f64);
+            (format!("{PREFIX}{key}"), finite(mean))
+        })
+        .collect()
 }

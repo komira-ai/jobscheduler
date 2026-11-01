@@ -102,8 +102,20 @@ pub struct Experiment<'a> {
 }
 
 impl Experiment<'_> {
-    /// One run of the workload under `who`.
-    fn once(&self, who: &Identity) -> RunOutput {
+    /// One run of the workload under `who`, its jobs asking for `class` when the arm names
+    /// one and for the class the workload names otherwise.
+    fn once(&self, who: &Identity, class: Option<&str>) -> RunOutput {
+        let jobs: Vec<Job> = self
+            .jobs
+            .iter()
+            .cloned()
+            .map(|mut job| {
+                if let Some(class) = class {
+                    class.clone_into(&mut job.lease.class);
+                }
+                job
+            })
+            .collect();
         let mut predictions = BTreeMap::new();
         for profile in self.jobs.iter().filter_map(|job| job.run.profile.as_ref()) {
             let curve = self.farm.curve(profile).ok().flatten();
@@ -111,13 +123,7 @@ impl Experiment<'_> {
                 predictions.insert(profile.clone(), prediction);
             }
         }
-        let obs = drive(
-            self.farm,
-            self.clock,
-            self.jobs,
-            self.poll_ms,
-            self.deadline_ms,
-        );
+        let obs = drive(self.farm, self.clock, &jobs, self.poll_ms, self.deadline_ms);
         let used: BTreeSet<&String> = obs
             .jobs
             .iter()
@@ -136,7 +142,7 @@ impl Experiment<'_> {
                 (host.clone(), reading)
             })
             .collect();
-        assemble(who, &obs, self.jobs, &predictions, &hosts)
+        assemble(who, &obs, &jobs, &predictions, &hosts)
     }
 }
 
@@ -169,7 +175,7 @@ pub fn run_plan(
                 String::new()
             },
         };
-        emit(&exp.once(&who))?;
+        emit(&exp.once(&who, arm.lease_class.as_deref()))?;
     }
     Ok(slots.len())
 }

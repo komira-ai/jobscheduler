@@ -187,11 +187,10 @@ impl Farm for HttpFarm {
         let reply = self.client.get(&path).map_err(transport)?;
         let body = body_of(reply, &[200])?;
         let run: RunBody = serde_json::from_value(body).map_err(malformed)?;
-        let _stub = run.log_tail;
         Ok(RunStanding {
             state: run.state,
             outcome: run.outcome,
-            log_tail: None,
+            log_tail: run.log_tail,
         })
     }
 

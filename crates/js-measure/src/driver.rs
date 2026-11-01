@@ -135,6 +135,7 @@ impl Driver<'_> {
                 Phase::Over => {
                     live.timing.finished_ms = Some(now);
                     live.timing.outcome = standing.outcome;
+                    live.timing.log_tail = standing.log_tail;
                     self.release(live, &lease);
                 }
             },
