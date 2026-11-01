@@ -9,7 +9,8 @@ use js_pool_static::{Candidate, HostBook};
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
 use js_types::{Admission, HostId, LeaseId, ResourceClass, Shape};
 
-use super::{HostState, Record, Registry, State};
+use super::record::Bound;
+use super::{HostState, Registry, State};
 use crate::lives;
 use crate::whole::caps::Capability;
 use crate::whole::cost::HostLoad;
@@ -18,13 +19,6 @@ use crate::whole::placement::{self, Asking};
 use crate::whole::requests::{RequestKey, Rules, whole_settings};
 use crate::whole::reserve::{self, HostFacts, Pass};
 use crate::whole_config::WholeNodeConfig;
-
-/// The end bound the host knows among `leases`: its latest started lease's, when that
-/// lease is booked here. The record keeps one bound per host, so the other leases of a
-/// host that carries several have none: only the latest-started lease's end is known.
-fn known_end(record: &Record, leases: &[LeaseId]) -> Option<(LeaseId, Timestamp)> {
-    record.bound.filter(|(held, _)| leases.contains(held))
-}
 
 impl Registry {
     /// Every host as the reservation pass reads it, in id order. Every host is booked as
@@ -44,7 +38,17 @@ impl Registry {
             };
             let quiet = record.quiet(&state.runs, id);
             let leases = booked.get(id).map(Vec::as_slice).unwrap_or_default();
-            let ends = known_end(record, leases);
+            // Every lease booked here that the registry started has its own bound; a lease
+            // put back after a restart has none.
+            let known: Vec<&Bound> = record
+                .bounds
+                .iter()
+                .filter(|bound| leases.contains(&bound.lease))
+                .collect();
+            let started: Vec<(LeaseId, u64)> = known
+                .iter()
+                .map(|bound| (bound.lease, bound.started_at))
+                .collect();
             HostFacts {
                 id: id.clone(),
                 capability,
@@ -53,8 +57,8 @@ impl Registry {
                 load: HostLoad {
                     id: id.to_string(),
                     leases: leases.len(),
-                    end_bounds: ends.map(|(_, end)| end.millis()).into_iter().collect(),
-                    est_ends: lives::est_ends(source, &state.runs, ends, record.started_at),
+                    end_bounds: known.iter().map(|bound| bound.end.millis()).collect(),
+                    est_ends: lives::est_ends(source, &state.runs, &started),
                 },
             }
         });
@@ -217,10 +221,15 @@ impl Registry {
         }
         if let (StartAck::Started { host }, true) = (&ack, fresh) {
             let end = now.plus(wanted.max_wall);
+            let here = book.leases().remove(host).unwrap_or_default();
             let record = records.get_mut(host);
             record.into_iter().for_each(|record| {
-                record.bound = Some((lease, end));
-                record.started_at = Some(now.millis());
+                record.bounds.retain(|bound| here.contains(&bound.lease));
+                record.bounds.push(Bound {
+                    lease,
+                    end,
+                    started_at: now.millis(),
+                });
             });
         }
         if let (StartAck::Started { host }, true) = (&ack, commit) {

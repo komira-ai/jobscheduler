@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// A lease booked on a host, the latest it can end (its start plus its max wall time) and
+/// when it started, in milliseconds on the registry's clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Bound {
+    pub(super) lease: LeaseId,
+    pub(super) end: Timestamp,
+    pub(super) started_at: u64,
+}
+
 #[derive(Debug)]
 pub(super) struct Record {
     pub(super) binding: Option<Binding>,
@@ -51,12 +60,11 @@ pub(super) struct Record {
     pub(super) runtime: Option<String>,
     /// Where the host stands in a whole-node lease; `Free` for a host that never held one.
     pub(super) exclusive: Exclusive,
-    /// The last lease started on the host and the latest it can end: its start plus its
-    /// max wall time. A lease put back after a restart has none, and counts as ending now.
-    pub(super) bound: Option<(LeaseId, Timestamp)>,
-    /// When the lease in `bound` started, in milliseconds on the registry's clock. Set with
-    /// `bound`; `None` for a lease put back after a restart. Held in memory only, like `bound`.
-    pub(super) started_at: Option<u64>,
+    /// Every lease started on the host since the registry began, with the latest it can end
+    /// and when it started. A lease put back after a restart has none, and counts as ending
+    /// now. Held in memory only; a lease that is no longer booked on the host is dropped at
+    /// the next start.
+    pub(super) bounds: Vec<Bound>,
     /// Whether the host is being scaled away (see [`Registry::drain`]). It outlives a
     /// session and is held in memory only.
     pub(super) leaving: Option<marks::Leaving>,
@@ -95,8 +103,7 @@ impl Record {
             held: BTreeSet::new(),
             beats: 0,
             exclusive: Exclusive::Free,
-            bound: None,
-            started_at: None,
+            bounds: Vec::new(),
             leaving: None,
             claim: None,
             load: load::Kept::default(),

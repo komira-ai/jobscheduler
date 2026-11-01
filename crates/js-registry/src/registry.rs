@@ -527,8 +527,7 @@ impl Registry {
         let kept_cordon = known.and_then(|record| record.cordon);
         let kept_exclusive =
             known.map_or(Exclusive::Free, |record| record.exclusive.after_hello(now));
-        let kept_bound = known.and_then(|record| record.bound);
-        let kept_started = known.and_then(|record| record.started_at);
+        let kept_bounds = known.map(|record| record.bounds.clone());
         let kept_leaving = known.and_then(|record| record.leaving);
         let kept_leaving = match state.ending.contains(&host) {
             true => Some(marks::Leaving::Releasing),
@@ -618,8 +617,7 @@ impl Registry {
                 hello_at: Some(now),
                 runtime: hello.capabilities.get(RUNTIME).cloned(),
                 exclusive: kept_exclusive,
-                bound: kept_bound,
-                started_at: kept_started,
+                bounds: kept_bounds.unwrap_or_default(),
                 leaving: kept_leaving,
                 claim,
                 load: load::Kept::default(),

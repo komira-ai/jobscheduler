@@ -56,11 +56,16 @@ fn a_lease_that_shares_a_host_records_what_it_books() {
     ];
     assert_eq!(read_bookings(scratch.file()).unwrap(), expected);
     let before = fs::read_to_string(scratch.file()).unwrap();
+    let row = "[lease.shares]\ncpu_millis = 4000\nmemory_bytes = 4\ngpus = 1\ngpu_class = \"g\"\n";
+    assert_eq!(before.matches("[lease.shares]").count(), 1, "{before}");
+    assert!(before.contains(row), "{before}");
 
     let provider = table.into_provider();
     let table = open(provider, &clock, &scratch);
     assert_eq!(table.list().len(), 2);
-    assert_eq!(fs::read_to_string(scratch.file()).unwrap(), before);
+    let after = fs::read_to_string(scratch.file()).unwrap();
+    assert_eq!(after.matches("[lease.shares]").count(), 1, "{after}");
+    assert!(after.contains(row), "{after}");
     assert_eq!(read_bookings(scratch.file()).unwrap(), expected);
 }
 

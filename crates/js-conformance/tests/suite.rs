@@ -59,8 +59,9 @@ impl Provider for Phantom {
 impl Subject for Under {
     fn provider(&mut self) -> &mut dyn Provider {
         match self {
-            Self::Fake(fake) | Self::Bare(fake) | Self::Phantom(Phantom(fake)) => fake,
+            Self::Fake(fake) | Self::Bare(fake) => fake,
             Self::Pool(pool) => pool,
+            Self::Phantom(phantom) => phantom,
         }
     }
 
