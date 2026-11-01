@@ -1,4 +1,4 @@
-# Releasing js-lease-server, js, js-agent, js-bundle and the Mac host tools
+# Releasing js-lease-server, js, js-agent, js-bundle, js-mdm and the Mac host tools
 
 Releases are continuous. Nobody tags, and nothing is run by hand: every push to `main` that
 changes code that ships is released as the next version, after the jobs of `ci` other than `macos` have passed on it.
@@ -18,7 +18,7 @@ changes code that ships is released as the next version, after the jobs of `ci` 
 3. `plan` (`cargo xtask release plan`) decides whether to release and as which version (below).
    When there is nothing to release, the run ends there, green.
 4. `build` stamps the version into the CI checkout, builds the binaries for
-   `x86_64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`) and `aarch64-apple-darwin` (`js`, `js-agent`, `js-bundle`, `js-mac-session`, `js-mac-provision`), checks that
+   `x86_64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`) and `aarch64-apple-darwin` (`js`, `js-agent`, `js-bundle`, `js-mac-session`, `js-mac-provision`), checks that
    the Linux ones are static and that `--version` prints the release version, and packages them. `sums` writes one `SHA256SUMS` over the archives.
 5. `attest` attests every archive with build provenance (`actions/attest-build-provenance`);
    `verify` then checks the attestations the way a user does (below).
@@ -73,7 +73,7 @@ actions, no permission at the top, `id-token` write in `attest` and `gamma` only
 
 A push is released when a file that ships changed since the latest release tag. The set is computed
 from the dependency graph (`cargo metadata`), not listed: the crates of `js-lease-server`, `js-cli`
-(the `js` binary), `js-agent`, `js-bundle-cli` (the `js-bundle` binary), `js-mac-session` and `js-mac-provision`, and every workspace crate they depend on through normal or build
+(the `js` binary), `js-agent`, `js-bundle-cli` (the `js-bundle` binary), `js-mac-session`, `js-mac-provision` and `js-mdm`, and every workspace crate they depend on through normal or build
 dependencies. Every file of those crates ships (`src/**`, `Cargo.toml`, `build.rs`, a sample
 configuration compiled in with `include_str!`) except `tests/`, `benches/`, `examples/` and markdown;
 so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything under `.cargo/`.
@@ -124,11 +124,12 @@ For version `X.Y.Z`:
 | `js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-agent` binary and `LICENSE` |
 | `js-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js` binary for Apple silicon Macs and `LICENSE` |
 | `js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-agent` binary for Apple silicon Macs and `LICENSE` |
+| `js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-mdm` binary and `LICENSE` |
 | `js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-bundle` binary (packs, prints and verifies darwin bundles) and `LICENSE` |
 | `js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-bundle` binary for Apple silicon Macs and `LICENSE` |
 | `js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-session` root helper for Apple silicon Macs and `LICENSE` |
 | `js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-provision` pf anchor installer for Apple silicon Macs and `LICENSE` |
-| `SHA256SUMS` | SHA-256 of the nine archives |
+| `SHA256SUMS` | SHA-256 of the ten archives |
 
 Each archive unpacks to a directory named like the archive without `.tar.gz`.
 

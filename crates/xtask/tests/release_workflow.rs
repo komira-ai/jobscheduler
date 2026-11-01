@@ -346,6 +346,29 @@ fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
     );
 }
 
+/// Asserts that `js-mdm` is built for the Linux target only, by the same `build` entry as
+/// `js-agent` (package and binary named `js-mdm`), and that the `sums` job expects exactly its
+/// Linux archive, so a build that stops making it fails before anything is attested. There
+/// is no darwin archive.
+#[test]
+fn the_js_mdm_archive_is_built_and_expected_for_linux_only() {
+    let text = workflow();
+    let jobs = jobs(&text);
+    let build = job(&jobs, "build").join("\n");
+    let linux = build
+        .lines()
+        .find(|line| line.trim_start().starts_with("builds: ") && line.contains("js-lease-server"))
+        .expect("the linux builds line");
+    assert!(linux.contains(" js-mdm:js-mdm"), "{linux}");
+    assert_eq!(build.matches("js-mdm:js-mdm").count(), 1, "{build}");
+    let sums = job(&jobs, "sums").join("\n");
+    assert!(
+        sums.contains("js-mdm-$VERSION-x86_64-unknown-linux-musl.tar.gz"),
+        "{sums}"
+    );
+    assert_eq!(sums.matches("js-mdm-$VERSION").count(), 1, "{sums}");
+}
+
 /// Asserts that the Apple-silicon build pins the deployment target to 11.0 and that the
 /// check step fails a binary whose minimum macOS is above it, so a newer runner image's
 /// SDK cannot silently raise what the binaries need.
