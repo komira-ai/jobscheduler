@@ -60,7 +60,8 @@ pub use record::{
 pub use report::{Class, MAX_REASON_LEN, Reason, Report, is_reason_token};
 pub use validate::{
     CUTOVER_MARGIN_SECS, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, PREPARE_MARGIN_SECS,
-    START_WAIT_SECS, VERIFY_MARGIN_SECS, validate,
+    ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, ROLLBACK_STOP_MIN_SECS, START_WAIT_SECS,
+    VERIFY_MARGIN_SECS, validate,
 };
 
 /// The unit port of the platform the hook is built for.

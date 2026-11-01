@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use js_agent::update_hook::{
     CUTOVER_MARGIN_SECS, Cordon, Declaration, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, POLL_SECS,
-    PREPARE_MARGIN_SECS, Params, Record, Rollback, SCHEMA, START_WAIT_SECS, Timeouts, UpdateInfo,
-    VERIFY_MARGIN_SECS, validate,
+    PREPARE_MARGIN_SECS, Params, ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, ROLLBACK_STOP_MIN_SECS,
+    Record, Rollback, SCHEMA, START_WAIT_SECS, Timeouts, UpdateInfo, VERIFY_MARGIN_SECS, validate,
 };
 
 const UNIT: &str = "js-agent-crun.service";
@@ -800,4 +800,23 @@ fn a_record_without_the_session_before_the_stop_is_still_read_and_a_missing_one_
     assert_eq!(serde_json::from_value::<Record>(value).unwrap(), record);
     let with = serde_json::to_value(with_pre_stop(&record, 9)).unwrap();
     assert_eq!(with["pre_stop_session_ms"], serde_json::json!(9));
+}
+
+#[test]
+fn the_declared_rollback_timeout_must_leave_time_to_stop_start_and_hear_the_previous_agent() {
+    let record = good();
+    let needed = ROLLBACK_MARGIN_SECS + ROLLBACK_STOP_MIN_SECS + ROLLBACK_HELLO_SECS + POLL_SECS;
+    let mut declaration = declaration();
+    declaration.timeouts.rollback = needed + 1;
+    assert_eq!(
+        validate(&record, &declaration, &params_for(&record)),
+        Ok(())
+    );
+    declaration.timeouts.rollback = needed;
+    assert_eq!(
+        validate(&record, &declaration, &params_for(&record)),
+        Err(Invalid::RollbackTimeout { rollback: needed })
+    );
+    let text = Invalid::RollbackTimeout { rollback: needed }.to_string();
+    assert!(text.contains("rollback timeout"), "{text}");
 }

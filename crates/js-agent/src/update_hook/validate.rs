@@ -35,6 +35,17 @@ pub const START_WAIT_SECS: u64 = 120;
 /// timeout, besides the start wait, in seconds.
 pub const CUTOVER_MARGIN_SECS: u64 = 60;
 
+/// The margin `rollback` keeps between the end of its waits and the declared timeout, in
+/// seconds.
+pub const ROLLBACK_MARGIN_SECS: u64 = 60;
+
+/// The time `rollback` keeps for the previous agent to start and say hello, in seconds: the
+/// start, then the hello, in one wait.
+pub const ROLLBACK_HELLO_SECS: u64 = 240;
+
+/// The least time `rollback` gives the stop of a running agent, in seconds.
+pub const ROLLBACK_STOP_MIN_SECS: u64 = 60;
+
 /// The margin `verify` keeps between the end of its wait and the declared timeout, in seconds.
 pub const VERIFY_MARGIN_SECS: u64 = 15;
 
@@ -66,6 +77,15 @@ pub enum Invalid {
     VerifyTimeout {
         /// `[hook.timeout_secs] verify`.
         verify: u64,
+    },
+    /// The declared `rollback` timeout would end the step before the previous agent can have
+    /// been stopped, started and heard.
+    #[error(
+        "the declared rollback timeout {rollback} s is too short: it must exceed {ROLLBACK_MARGIN_SECS} s plus {ROLLBACK_STOP_MIN_SECS} s to stop plus {ROLLBACK_HELLO_SECS} s to start and be heard plus {POLL_SECS} s"
+    )]
+    RollbackTimeout {
+        /// `[hook.timeout_secs] rollback`.
+        rollback: u64,
     },
     /// The record's schema is not the one this hook writes.
     #[error("schema {found} is not {SCHEMA}")]

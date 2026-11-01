@@ -215,6 +215,12 @@ impl Rig {
         }
     }
 
+    /// The same rig with the declared `rollback` timeout set to `secs`.
+    pub fn with_rollback_timeout(mut self, secs: u64) -> Rig {
+        self.declaration.timeouts.rollback = secs;
+        self
+    }
+
     pub fn state_dir(&self) -> PathBuf {
         self.tmp.path().join("state")
     }
@@ -451,6 +457,10 @@ impl<'a> Spy<'a> {
 
     pub fn verify(&self, rig: &Rig) -> Done {
         step::verify(&self.env(rig, &as_root), &rig.params)
+    }
+
+    pub fn rollback(&self, rig: &Rig) -> Done {
+        step::rollback(&self.env(rig, &as_root), &rig.params)
     }
 }
 

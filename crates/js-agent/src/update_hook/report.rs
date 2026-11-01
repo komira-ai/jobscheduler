@@ -88,11 +88,13 @@ pub enum Reason {
     CordonUnconfirmed,
     /// `verify` waited out its bound and no new session of the target said hello.
     NoHello,
+    /// `rollback` of a first install that has begun: there is no previous release to restore.
+    NoPreviousRelease,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 18] = [
+    pub const ALL: [Reason; 19] = [
         Reason::NotImplemented,
         Reason::BadArgs,
         Reason::BadParams,
@@ -111,6 +113,7 @@ impl Reason {
         Reason::StartFailed,
         Reason::CordonUnconfirmed,
         Reason::NoHello,
+        Reason::NoPreviousRelease,
     ];
 
     /// The token in the JSON.
@@ -135,6 +138,7 @@ impl Reason {
             Reason::StartFailed => "start_failed",
             Reason::CordonUnconfirmed => "cordon_unconfirmed",
             Reason::NoHello => "no_hello",
+            Reason::NoPreviousRelease => "no_previous_release",
         }
     }
 }
