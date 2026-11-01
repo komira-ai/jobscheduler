@@ -424,6 +424,7 @@ fn help_lists_the_flags() {
         "--pool",
         "--scratch-mount-unit",
         "--skip-scratch-quota",
+        "--dependents-limit",
     ] {
         assert!(out.text.contains(flag), "{flag}: {}", out.text);
     }

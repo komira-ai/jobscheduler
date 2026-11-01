@@ -28,16 +28,67 @@ fn show_state(unit: &str, state: &str) -> String {
 
 // --- before the scratch filesystem is unmounted -------------------------------------------------
 
-/// The units whose stop follows the mount's (what requires, binds, or is part of it), asked of the
-/// stand-in the way the script asks.
-fn stoppers(unit: &str, names: &str) -> String {
-    rule(
-        "systemctl",
-        &format!("show -p RequiredBy,RequisiteOf,BoundBy,ConsistsOf --value -- {unit}"),
-        0,
-        &esc(&format!("{names}\n\n\n\n")),
-        &[],
-    )
+const OLD_PROPS: &str = "RequiredBy,RequisiteOf,BoundBy,ConsistsOf";
+const PROPS: &str = "RequiredBy,RequisiteOf,BoundBy,ConsistsOf,PropagatesStopTo";
+
+/// The units whose stop follows `unit`'s: `names` require, bind or are part of it, `propagates`
+/// have their stop propagated from it. Answered the way the script asks (also in the form it
+/// asked before it read PropagatesStopTo, which sees `names` only).
+fn stoppers(rig: &mut Rig, unit: &str, names: &str, propagates: &str) {
+    for (props, last) in [(PROPS, propagates), (OLD_PROPS, "")] {
+        let tail = if props == PROPS {
+            format!("{names}\n\n\n\n{last}\n")
+        } else {
+            format!("{names}\n\n\n\n")
+        };
+        rig.rule(rule(
+            "systemctl",
+            &format!("show -p {props} --value -- {unit}"),
+            0,
+            &esc(&tail),
+            &[],
+        ));
+    }
+}
+
+/// A unit that has its stop propagated from the mount (`StopPropagatedFrom=`) is stopped with it
+/// and is in none of the other lists: an active one is refused too.
+#[test]
+fn an_active_unit_reached_only_through_stop_propagation_is_refused() {
+    let mut rig = Rig::new("propagated");
+    stoppers(&mut rig, MOUNT, "", "watcher.service");
+    rig.rule(show_state("watcher.service", "active"));
+    rig.expect_refused("watcher.service");
+}
+
+/// A walk that would go on past its limit cannot say nothing active follows the mount: refused,
+/// not passed. (`--dependents-limit` is the limit, 1000 units by default.)
+#[test]
+fn a_walk_that_reaches_its_limit_refuses_instead_of_passing() {
+    let mut rig = Rig::new("walk-limit");
+    stoppers(&mut rig, MOUNT, "u1.service", "");
+    for (from, to) in [("u1", "u2"), ("u2", "u3"), ("u3", "u4"), ("u4", "u5")] {
+        stoppers(
+            &mut rig,
+            &format!("{from}.service"),
+            &format!("{to}.service"),
+            "",
+        );
+        rig.rule(show_state(&format!("{from}.service"), "inactive"));
+    }
+    rig.rule(show_state("u5.service", "inactive"));
+    let mut args = rig.apply_args();
+    args.extend(["--dependents-limit".to_owned(), "3".to_owned()]);
+    let before = rig.snapshot();
+    let out = rig.run(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(out.code, 2, "{}", out.text);
+    assert!(out.text.contains("cannot tell"), "{}", out.text);
+    assert_untouched(&rig, &before);
+    // Within the limit the same chain passes.
+    let mut args = rig.apply_args();
+    args.extend(["--dependents-limit".to_owned(), "10".to_owned()]);
+    let out = rig.run(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(out.code, 0, "{}", out.text);
 }
 
 /// A unit that is active and requires the mount, directly or through other units, goes down with
@@ -47,24 +98,24 @@ fn stoppers(unit: &str, names: &str) -> String {
 #[test]
 fn an_active_unit_that_depends_on_the_mount_is_refused() {
     let mut rig = Rig::new("dependent-active");
-    rig.rule(stoppers(MOUNT, "other.service"));
+    stoppers(&mut rig, MOUNT, "other.service", "");
     rig.rule(show_state("other.service", "active"));
     rig.expect_refused("other.service");
 
     let mut rig = Rig::new("dependent-custom-target");
-    rig.rule(stoppers(MOUNT, "farm.target local-fs.target"));
+    stoppers(&mut rig, MOUNT, "farm.target local-fs.target", "");
     rig.rule(show_state("farm.target", "active"));
     rig.expect_refused("farm.target");
 
     let mut rig = Rig::new("dependent-indirect");
-    rig.rule(stoppers(MOUNT, "mid.service"));
-    rig.rule(stoppers("mid.service", "far.service"));
+    stoppers(&mut rig, MOUNT, "mid.service", "");
+    stoppers(&mut rig, "mid.service", "far.service", "");
     rig.rule(show_state("mid.service", "inactive"));
     rig.rule(show_state("far.service", "active"));
     rig.expect_refused("far.service");
 
     let mut rig = Rig::new("dependent-inactive");
-    rig.rule(stoppers(MOUNT, "other.service local-fs.target"));
+    stoppers(&mut rig, MOUNT, "other.service local-fs.target", "");
     rig.rule(show_state("other.service", "inactive"));
     let out = rig.apply();
     assert_eq!(out.code, 0, "{}", out.text);
