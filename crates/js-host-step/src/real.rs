@@ -10,12 +10,14 @@
 //! the step asks for.
 
 use std::fs::{self, File, Permissions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, fchown};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use rustix::fs::{AtFlags, Mode as FileMode, OFlags, mkdirat, openat, renameat, unlinkat};
+use rustix::fs::{
+    AtFlags, FileType, Mode as FileMode, OFlags, mkdirat, openat, renameat, statat, unlinkat,
+};
 use rustix::io::Errno;
 
 use crate::{Cmd, Host, Kind, Meta, Output};
@@ -54,20 +56,18 @@ impl RealHost {
         self.root.join(path.trim_start_matches('/'))
     }
 
-    /// The directory that holds `path` as a descriptor, and the name in it. Each directory on
-    /// the way is opened without following links, made (root's, 0755) when `create` and
-    /// missing, and must be owned by a trusted user or by `owner`.
+    /// The directory that holds `path` as a descriptor, and the name in it. The root and each
+    /// directory on the way are opened without following links (the root too), made (0755) when
+    /// `create` and missing, and must be owned by a trusted user or by `owner`. A `.` or `..`
+    /// component is refused here, whatever the caller checked.
     fn parent(&self, path: &str, create: bool, owner: u32) -> io::Result<(File, String)> {
-        let mut names: Vec<&str> = path.split('/').filter(|n| !n.is_empty()).collect();
+        let mut names = components(path)?;
         let name = names.pop().ok_or_else(|| refused(path, "names no file"))?;
-        let mut dir = File::from(openat(
-            rustix::fs::CWD,
-            &self.root,
-            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
-            FileMode::empty(),
-        )?);
+        let flags = OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let anchor = openat(rustix::fs::CWD, &self.root, flags, FileMode::empty());
+        let mut dir = File::from(anchor.map_err(|e| walk_error(path, e))?);
+        self.vet(&dir, owner, path)?;
         for component in names {
-            let flags = OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
             let opened = match openat(&dir, component, flags, FileMode::empty()) {
                 Err(Errno::NOENT) if create => {
                     mkdirat(&dir, component, FileMode::from_raw_mode(0o755))?;
@@ -75,19 +75,20 @@ impl RealHost {
                 }
                 other => other,
             };
-            let next = File::from(opened.map_err(|e| match e {
-                Errno::LOOP | Errno::NOTDIR => {
-                    refused(path, "has a symbolic link or a file as a directory")
-                }
-                other => io::Error::from(other),
-            })?);
-            let uid = next.metadata()?.uid();
-            if !self.trusted.contains(&uid) && uid != owner {
-                return Err(refused(path, "has a directory owned by another user"));
-            }
+            let next = File::from(opened.map_err(|e| walk_error(path, e))?);
+            self.vet(&next, owner, path)?;
             dir = next;
         }
         Ok((dir, name.to_owned()))
+    }
+
+    /// Refuses a directory owned by a user that is neither trusted nor `owner`.
+    fn vet(&self, dir: &File, owner: u32, path: &str) -> io::Result<()> {
+        let uid = dir.metadata()?.uid();
+        match self.trusted.contains(&uid) || uid == owner {
+            true => Ok(()),
+            false => Err(refused(path, "has a directory owned by another user")),
+        }
     }
 
     /// Writes `bytes` to `temp` in `dir`, sets mode and owner on the descriptor and renames
@@ -109,13 +110,34 @@ impl RealHost {
         file.set_permissions(Permissions::from_mode(mode))?;
         fchown(&file, Some(owner.0), Some(owner.1))?;
         file.sync_all()?;
-        Ok(renameat(dir, temp, dir, name)?)
+        renameat(dir, temp, dir, name)?;
+        // The new name is on disk only once the directory is.
+        dir.sync_all()
     }
 }
 
 impl Default for RealHost {
     fn default() -> RealHost {
         RealHost::new()
+    }
+}
+
+/// The components of `path`, refusing `.` and `..`.
+fn components(path: &str) -> io::Result<Vec<&str>> {
+    let names: Vec<&str> = path.split('/').filter(|n| !n.is_empty()).collect();
+    match names.iter().any(|n| *n == "." || *n == "..") {
+        true => Err(refused(path, "has a . or .. component")),
+        false => Ok(names),
+    }
+}
+
+/// The error for a directory that could not be opened on the way to `path`.
+fn walk_error(path: &str, e: Errno) -> io::Error {
+    match e {
+        Errno::LOOP | Errno::NOTDIR => {
+            refused(path, "has a symbolic link or a file as a directory")
+        }
+        other => io::Error::from(other),
     }
 }
 
@@ -141,6 +163,9 @@ impl Host for RealHost {
         rustix::process::getegid().as_raw()
     }
 
+    // Unlike every other operation this follows links on purpose: it is for a path the user
+    // gave about their own account (`fetch --dir`), and what it is for is to see where the
+    // links lead.
     fn canonical(&self, path: &str) -> io::Result<String> {
         let root = fs::canonicalize(&self.root)?;
         let mut rest: Vec<std::ffi::OsString> = Vec::new();
@@ -163,26 +188,52 @@ impl Host for RealHost {
     }
 
     fn stat(&self, path: &str) -> io::Result<Option<Meta>> {
-        let meta = found(fs::symlink_metadata(self.at(path)))?;
-        Ok(meta.map(|m| Meta {
-            kind: match (m.is_file(), m.is_dir()) {
-                (true, _) => Kind::File,
-                (_, true) => Kind::Dir,
-                _ => Kind::Other,
-            },
-            mode: m.mode() & 0o7777,
-            uid: m.uid(),
-            gid: m.gid(),
-            size: m.len(),
+        let euid = self.euid();
+        let Some((dir, name)) = found(self.parent(path, false, euid))? else {
+            return Ok(None);
+        };
+        let seen = found(statat(&dir, &name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from))?;
+        Ok(seen.map(|st| {
+            let kind = FileType::from_raw_mode(st.st_mode);
+            Meta {
+                kind: match (kind.is_file(), kind.is_dir()) {
+                    (true, _) => Kind::File,
+                    (_, true) => Kind::Dir,
+                    _ => Kind::Other,
+                },
+                mode: st.st_mode & 0o7777,
+                uid: st.st_uid,
+                gid: st.st_gid,
+                size: u64::try_from(st.st_size).unwrap_or(0),
+            }
         }))
     }
 
     fn read(&self, path: &str) -> io::Result<Option<Vec<u8>>> {
-        found(fs::read(self.at(path)))
+        self.read_limited(path, u64::MAX)
     }
 
-    fn read_limited(&self, path: &str, _limit: u64) -> io::Result<Option<Vec<u8>>> {
-        self.read(path)
+    fn read_limited(&self, path: &str, limit: u64) -> io::Result<Option<Vec<u8>>> {
+        let euid = self.euid();
+        let Some((dir, name)) = found(self.parent(path, false, euid))? else {
+            return Ok(None);
+        };
+        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let opened = openat(&dir, &name, flags, FileMode::empty()).map_err(|e| match e {
+            Errno::LOOP => refused(path, "is a symbolic link"),
+            other => io::Error::from(other),
+        });
+        let Some(fd) = found(opened)? else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        File::from(fd)
+            .take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        match bytes.len() as u64 > limit {
+            true => Err(io::Error::from(io::ErrorKind::FileTooLarge)),
+            false => Ok(Some(bytes)),
+        }
     }
 
     fn write(&self, path: &str, mode: u32, owner: (u32, u32), bytes: &[u8]) -> io::Result<()> {
@@ -207,7 +258,9 @@ impl Host for RealHost {
             .map_err(|_| refused(path, "is a symbolic link or not a directory"))?;
         let made = File::from(opened);
         made.set_permissions(Permissions::from_mode(mode))?;
-        fchown(&made, Some(owner.0), Some(owner.1))
+        fchown(&made, Some(owner.0), Some(owner.1))?;
+        // The directory's entry is on disk only once its parent is.
+        dir.sync_all()
     }
 
     fn remove(&self, path: &str) -> io::Result<()> {
@@ -215,7 +268,9 @@ impl Host for RealHost {
         let Some((dir, name)) = found(self.parent(path, false, euid))? else {
             return Ok(());
         };
-        found(unlinkat(&dir, &name, AtFlags::empty()).map_err(io::Error::from)).map(|_| ())
+        found(unlinkat(&dir, &name, AtFlags::empty()).map_err(io::Error::from))?;
+        // The removal is on disk only once the directory is.
+        dir.sync_all()
     }
 
     fn run(&self, cmd: &Cmd) -> io::Result<Output> {
