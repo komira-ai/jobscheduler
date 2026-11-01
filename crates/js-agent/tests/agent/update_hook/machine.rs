@@ -12,14 +12,14 @@ use js_agent::lifecycle::StateRoot;
 use js_agent::own_host::{Lease, LeaseError};
 use js_agent::update_hook::{
     Class, ConnectParams, DECLARATION_PATH, Done, Invocation, Machine, MachineLease, Outcome,
-    Params, Reason, Step, run_step,
+    Params, Reason, Step, own_host_id, run_step,
 };
 use js_agent_wire::Taint;
 
 use super::step_rig::as_root;
 use crate::cordon::http::{Enrolled, enrol};
 use crate::jobs::private;
-use crate::support::Scratch;
+use crate::support::{FakeFiles, MACHINE_ID, Scratch, linux_host};
 
 const UNIT: &str = "js-agent-crun.service";
 
@@ -423,4 +423,18 @@ fn the_machine_reads_the_declaration_the_updater_installs_and_looks_at_directori
     if let Ok(id) = (Machine::system().own_host_id)() {
         assert!(id.starts_with("h-") && id.len() == 34, "{id}");
     }
+}
+
+#[test]
+fn the_machines_own_host_id_is_the_agents_from_the_machine_id_it_reads() {
+    let host = linux_host();
+    assert_eq!(
+        own_host_id(&host.platform, &host.commands, &host.files),
+        Ok(js_agent::host_id(MACHINE_ID))
+    );
+    let bare = FakeFiles::default();
+    let Err(why) = own_host_id(&host.platform, &host.commands, &bare) else {
+        panic!("a machine with no machine id has no host id");
+    };
+    assert!(why.contains("machine-id"), "{why}");
 }
