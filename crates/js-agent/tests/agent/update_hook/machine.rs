@@ -355,6 +355,7 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
         ),
         (
             ConnectParams {
+                server: Some("https://127.0.0.1:1".to_owned()),
                 token_file: Some(files.write("token", "tok-0123456789", 0o600)),
                 ca_cert: Some(ca),
                 ..full.clone()
