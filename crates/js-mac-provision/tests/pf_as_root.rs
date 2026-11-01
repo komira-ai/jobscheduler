@@ -102,6 +102,11 @@ fn own_address() -> Ipv4Addr {
 }
 
 /// What `probe` printed running as `uid`.
+///
+/// The 2000 ms connect bound is how a drop is observed as an outcome (a connect nobody
+/// answers ends in "timed out"); it is a bound, not a measurement, and nothing here
+/// asserts how long a probe took. The `probe` verb prints "timed out" for both
+/// `ErrorKind::TimedOut` and `ErrorKind::WouldBlock`.
 fn probe_as(program: &Path, uid: u32, addr: &str) -> String {
     let out = Command::new(program)
         .args(["probe", addr, "--timeout-ms", "2000"])
@@ -121,8 +126,11 @@ enum Want {
     Refused,
     /// "refused" or "timed out", for a destination that is this Mac's own address only.
     ///
-    /// A connect to an address of this Mac leaves through `lo0`, and `lo0` advertises TCP
-    /// checksum offload, so the SYN reaches pf with its TCP checksum still to be computed.
+    /// A connect to an address of this Mac leaves through `lo0`. `lo0` is set up with TCP and
+    /// UDP checksum assist (`ifnet_set_offload` in xnu `bsd/net/if_loop.c`), which
+    /// `pf_inet_hook` reads to decide whether to complete the checksum before pf runs, so
+    /// the SYN reaches pf with its TCP checksum still to be computed. (The checksum-valid
+    /// flags `lo0` sets on its own loop path come after pf's output hook and do not help.)
     /// pf builds the reset of a `block return` only after it has checked the checksum of
     /// the packet it answers (`pf_test_rule` calling `pf_check_proto_cksum`, xnu
     /// `bsd/net/pf.c`), and that check fails for such a SYN: the SYN is dropped and no reset

@@ -160,7 +160,9 @@ pf by uid is a control on the packets a pool user's sockets send, and it has lim
   address leaves through `lo0` and meets the rules as any other destination: blocked
   unless that address is a listed endpoint. It is blocked but not refused at once: macOS
   pf builds the reset of a `block return` only after it verifies the TCP checksum of the
-  packet, and a SYN going out `lo0` (which advertises checksum offload) still has its
+  packet, and a SYN going out `lo0` (`if_loop.c` sets `lo0`'s hardware-assist flags to include TCP and UDP checksum, which
+  `pf_inet_hook` reads to decide whether to complete the checksum before pf runs; the
+  checksum-valid flags `lo0` sets on its own loop path come after pf's output hook) still has its
   checksum to be computed, so no reset is sent and the connect times out. No rule changes
   this; destinations that are not the node's own address are refused at once.
 - **DNS and mDNSResponder.** The anchor lists IPv4 literals, so a pool user needs no

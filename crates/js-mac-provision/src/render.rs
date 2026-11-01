@@ -28,9 +28,10 @@ pub const LINK_LOCAL: &str = "169.254.0.0/16";
 /// A refused connection is `block return`: the pool user's `connect` fails at once with
 /// "connection refused" instead of hanging until its timeout. The exception is a connect
 /// to an address of the node itself: it leaves through `lo0`, and macOS pf sends the reset
-/// of a `block return` only for a packet whose TCP checksum it can verify, which an
-/// outbound SYN on `lo0` (checksum offload advertised) is not. That connect is dropped and
-/// times out. It is still blocked; no rule text changes that.
+/// of a `block return` only for a packet whose TCP checksum it can verify. `lo0` is set up
+/// with TCP and UDP checksum assist, so an outbound SYN reaches pf with its checksum not yet
+/// completed (the checksum-valid flags `lo0` sets itself come after pf's output hook). That
+/// connect is dropped and times out. It is still blocked; no rule text changes that.
 ///
 /// pf matches `user` on TCP and UDP only; ICMP and other protocols are not limited by this
 /// anchor.
