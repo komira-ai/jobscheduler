@@ -82,6 +82,11 @@ impl Tree {
         self.root.join("state/record.json")
     }
 
+    /// The params line that names the tree's own (private) state directory as the state root.
+    fn state_line(&self) -> String {
+        format!("state_root = \"{}\"\n", self.root.join("state").display())
+    }
+
     /// The params of an update from 1.3.0 (or a first install), plus `extra` lines.
     fn params(&self, previous: bool, extra: &str) -> Params {
         let previous = if previous {
@@ -206,7 +211,7 @@ fn a_first_install_needs_neither_a_server_nor_an_agent_state() {
 #[test]
 fn an_update_without_a_server_ends_as_a_lease_failure_of_the_environment() {
     let tree = Tree::new("hook-machine-no-server");
-    let params = tree.params(true, "");
+    let params = tree.params(true, &tree.state_line());
     let done = tree.run(Step::Prepare, &params, Err("unused"));
     assert_eq!(done.outcome, Outcome::Failure);
     assert_eq!(done.report.reason, Some(Reason::LeaseUnreachable));
@@ -261,7 +266,7 @@ fn a_declaration_that_cannot_be_read_ends_the_step_before_it_looks_at_anything()
 #[test]
 fn every_step_the_updater_can_ask_for_is_run_by_its_own_body() {
     let tree = Tree::new("hook-machine-dispatch");
-    let params = tree.params(true, "");
+    let params = tree.params(true, &tree.state_line());
     // With no record: `cutover` and `verify` have no `prepare` behind them and `cleanup` has
     // nothing to finish.
     for (step, outcome, reason) in [
@@ -293,14 +298,7 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
     let empty_state = private(&files, "empty-state");
     let ca = files.path("no-such-ca.pem");
     // A credential in a state root that others can read is not used.
-    let open_state = files.path("open-state");
-    fs::create_dir_all(&open_state).unwrap();
-    fs::write(
-        open_state.join(js_agent::CREDENTIAL_FILE),
-        "cred-0123456789abcdefghij",
-    )
-    .unwrap();
-    fs::set_permissions(&open_state, fs::Permissions::from_mode(0o755)).unwrap();
+    let open_state = open_state_root(&files);
     let full = ConnectParams {
         server: Some("http://127.0.0.1:1".to_owned()),
         state_root: Some(empty_state.clone()),
@@ -329,7 +327,7 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
                 state_root: Some(open_state),
                 ..full.clone()
             },
-            "token_file",
+            "state_root: ",
         ),
         (
             ConnectParams {
@@ -412,9 +410,12 @@ fn the_machine_reads_the_declaration_the_updater_installs_and_looks_at_directori
     let root = File::open("/").unwrap();
     let stat = (Machine::system().stat)(Path::new("/"), std::os::fd::AsFd::as_fd(&root)).unwrap();
     assert!(stat.is_dir && !stat.is_symlink);
-    // The machine's own id is a host id the way the agent makes one, or it cannot be read.
-    if let Ok(id) = (Machine::system().own_host_id)() {
-        assert!(id.starts_with("h-") && id.len() == 34, "{id}");
+    // The machine's own id is read the way the agent reads it: a host id when the machine has
+    // an id, and otherwise the error of reading it, which names the file that was missing. A
+    // host that has no id gets the second check, so the wiring is checked on every host.
+    match (Machine::system().own_host_id)() {
+        Ok(id) => assert!(id.starts_with("h-") && id.len() == 34, "{id}"),
+        Err(why) => assert!(why.contains("machine-id"), "{why}"),
     }
 }
 
@@ -448,4 +449,123 @@ fn the_machines_host_runs_rollback_as_the_real_step_over_the_files_of_a_first_in
     assert_eq!(done.report.reason, None);
     assert!(done.report.reversible);
     assert!(!tree.record().exists());
+}
+
+/// A state root that others can read, with a credential in it: not usable.
+fn open_state_root(files: &Scratch) -> PathBuf {
+    let open = files.path("open-state");
+    fs::create_dir_all(&open).unwrap();
+    fs::write(
+        open.join(js_agent::CREDENTIAL_FILE),
+        "cred-0123456789abcdefghij",
+    )
+    .unwrap();
+    fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
+    open
+}
+
+#[test]
+fn an_update_with_no_usable_state_root_to_read_fails_state_invalid_on_every_step() {
+    let enrolled = enrol("hook_machine_update_no_state");
+    let tree = Tree::new("hook-machine-update-no-state");
+    let absent = tree.root.join("no-such-state");
+    let server = format!(
+        "server = \"{}\"\ntoken_file = \"{}\"\nhost_id = \"mac-1\"\n",
+        enrolled.server.url(),
+        enrolled.server.join_file().display()
+    );
+    // A state root that is unset or does not exist is no state root of an installed agent;
+    // it must not read as "no taint, nothing owed".
+    for extra in [
+        server.clone(),
+        format!("{server}state_root = \"{}\"\n", absent.display()),
+    ] {
+        let params = tree.params(true, &extra);
+        for step in Step::ALL {
+            let done = tree.run(step, &params, Err("unused"));
+            assert_eq!(done.outcome, Outcome::Failure, "{step}: {done:?}");
+            assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{step}");
+            let detail = done.report.detail.as_deref().unwrap();
+            assert!(detail.contains("state_root"), "{step}: {detail}");
+        }
+    }
+    assert!(!tree.record().exists());
+    assert!(enrolled.server.host("mac-1").get("cordon").is_none());
+}
+
+#[test]
+fn a_first_install_with_a_lease_server_and_no_state_root_still_runs() {
+    let enrolled = enrol("hook_machine_first_no_state");
+    let tree = Tree::new("hook-machine-first-no-state");
+    let extra = format!(
+        "server = \"{}\"\ntoken_file = \"{}\"\nhost_id = \"mac-1\"\n",
+        enrolled.server.url(),
+        enrolled.server.join_file().display()
+    );
+    let done = tree.run(Step::Prepare, &tree.params(false, &extra), Err("unused"));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+}
+
+#[test]
+fn a_state_root_that_exists_and_is_unusable_is_never_replaced_by_the_join_token() {
+    let enrolled = enrol("hook_machine_unusable_root");
+    let files = Scratch::new("hook-machine-unusable-root");
+    let open = open_state_root(&files);
+    // With a token file set, the lease must not be made from it: the pool's join token on the
+    // host's own routes ends as a refusal from the server, which says nothing of the cause.
+    let lease = connect(
+        &ConnectParams {
+            server: Some(enrolled.server.url()),
+            state_root: Some(open.clone()),
+            token_file: Some(enrolled.server.join_file()),
+            host_id: Some("mac-1".to_owned()),
+            ..ConnectParams::default()
+        },
+        Err("unused"),
+    );
+    for text in [
+        unreachable(lease.host()),
+        unreachable(lease.cordon(60)),
+        unreachable(lease.uncordon()),
+    ] {
+        assert!(text.contains("state_root: "), "{text}");
+        assert!(
+            text.contains("others") || text.contains("permission"),
+            "{text}"
+        );
+    }
+    // Without a token file, the error is the state root's, not a demand for a token file.
+    let lease = connect(
+        &ConnectParams {
+            server: Some(enrolled.server.url()),
+            state_root: Some(open),
+            host_id: Some("mac-1".to_owned()),
+            ..ConnectParams::default()
+        },
+        Err("unused"),
+    );
+    let text = unreachable(lease.host());
+    assert!(text.contains("state_root: "), "{text}");
+    assert!(!text.contains("token_file"), "{text}");
+}
+
+#[test]
+fn a_step_that_never_reads_the_state_root_still_reports_it_unusable_by_the_hooks_param_name() {
+    let enrolled = enrol("hook_machine_unusable_cleanup");
+    let tree = Tree::new("hook-machine-unusable-cleanup");
+    let open = open_state_root(&tree._files);
+    let extra = format!(
+        "server = \"{}\"\nstate_root = \"{}\"\ntoken_file = \"{}\"\nhost_id = \"mac-1\"\n",
+        enrolled.server.url(),
+        open.display(),
+        enrolled.server.join_file().display()
+    );
+    let params = tree.params(true, &extra);
+    for step in [Step::Prepare, Step::Cleanup] {
+        let done = tree.run(step, &params, Err("unused"));
+        assert_eq!(done.outcome, Outcome::Failure, "{step}: {done:?}");
+        let detail = done.report.detail.as_deref().unwrap();
+        assert!(detail.contains("state_root: "), "{step}: {detail}");
+        assert!(!detail.contains("--state-root"), "{step}: {detail}");
+    }
 }

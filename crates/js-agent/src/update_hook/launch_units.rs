@@ -177,6 +177,12 @@ impl<'a> LaunchUnits<'a> {
         self
     }
 
+    /// The file the kickstart waits for, when one was given.
+    #[must_use]
+    pub fn gate(&self) -> Option<&Path> {
+        self.gate
+    }
+
     fn launchctl(&self, args: &[&str]) -> Result<String, String> {
         self.runner.run(LAUNCHCTL, args)
     }
