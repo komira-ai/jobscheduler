@@ -1172,6 +1172,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-host-step"
+version = "0.1.0"
+dependencies = [
+ "js-testkit",
+ "rustix",
+ "thiserror",
+]
+
+[[package]]
 name = "js-lease"
 version = "0.1.0"
 dependencies = [
@@ -1282,6 +1291,24 @@ dependencies = [
  "time",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "js-mdm"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "flate2",
+ "getrandom 0.2.17",
+ "hex",
+ "js-host-step",
+ "js-mdm-core",
+ "js-testkit",
+ "rustls",
+ "sha2 0.11.1",
+ "tar",
+ "thiserror",
+ "ureq",
 ]
 
 [[package]]
