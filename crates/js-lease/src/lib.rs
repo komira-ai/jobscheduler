@@ -83,9 +83,15 @@
 //! Rolling back: a build that predates the row keeps it in `extra` and writes it back, so
 //! the file is not broken by going back and forth, but it seats every restored lease as
 //! booking the whole host. A host's second lease is then refused as taken at the start and
-//! reported unseated (the table drops it), until the newer build is back. A newer build
-//! restarted with `--placement registry` still seats the leases it finds with their
-//! resources: the flag chooses who places new leases, not what the file says.
+//! reported unseated (the table drops it), until the newer build is back. Only leases of a
+//! class that shares a host are lost this way, and such a build serves no such class at
+//! all (it refuses every admission that does not book a whole host), so rolling back while
+//! they run ends them; drain them (stop placing with `js-sched`) before going back. A file
+//! with no `lease.shares` row is written byte for byte as that build wrote it. A newer
+//! build restarted with `--placement registry` still seats the leases it finds with their
+//! resources: the flag chooses who places new leases, not what the file says. The test
+//! `cross_release` (in `tests/lease`) pins each of these against files the previous release
+//! wrote and against its reader.
 //!
 //! A lease of a whole-node class (admission `Whole`) waits differently while pending: its
 //! expiry is the settings' prepare timeout, not its ttl, and when the provider is first

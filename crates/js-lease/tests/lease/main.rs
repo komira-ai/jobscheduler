@@ -4,6 +4,7 @@
 mod acquire;
 mod ceiling;
 mod crash;
+mod cross_release;
 mod expiry;
 mod ids;
 mod persistence;
