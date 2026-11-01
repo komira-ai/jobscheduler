@@ -33,8 +33,8 @@ use super::declaration::{DECLARATION_PATH, Declaration};
 use super::ports::{NoGate, Ports, StateView, SystemClock, SystemLink};
 use super::step::{self, Env};
 use super::{
-    ConnectParams, DirStat, Done, HOST_ID_KEY, Invocation, Outcome, Params, PlatformUnits,
-    PortError, Reason, Report, SERVER_KEY, Step, StopRunner, fd_stat,
+    ConnectParams, DirStat, Done, HOST_ID_KEY, Invocation, LaunchUnits, Outcome, Params,
+    PlatformUnits, PortError, Reason, Report, SERVER_KEY, Step, StopRunner, fd_stat,
 };
 
 /// How a directory of the state directory's path is looked at (see [`fd_stat`]).
@@ -215,6 +215,16 @@ fn platform_units<'a>(commands: &'a SystemCommands, stop: &'a StopRunner) -> Pla
 #[cfg(not(target_os = "macos"))]
 fn platform_units<'a>(commands: &'a SystemCommands, _stop: &'a StopRunner) -> PlatformUnits<'a> {
     super::SystemUnits::new(commands)
+}
+
+/// The units of a Mac: `launchctl` through `commands`, `bootout` through `stop` (it waits for the
+/// agent to exit), and a kickstart held back while the agent's token file is absent.
+#[must_use]
+pub fn launch_units<'a>(
+    commands: &'a dyn CommandRunner,
+    _stop: &'a dyn CommandRunner,
+) -> LaunchUnits<'a> {
+    LaunchUnits::new(commands)
 }
 
 /// Runs the step the invocation names on this machine.
