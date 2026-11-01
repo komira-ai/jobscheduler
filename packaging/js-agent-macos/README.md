@@ -42,10 +42,16 @@ restarts the agent. Nothing is loaded when the volume is not `/`.
 
 ## Signing and notarization
 
-The workflow always builds the unsigned package and its `SHA256SUMS`. It signs when the
-repository holds the secrets below, and notarizes when it also holds the notary key; without
-them those steps are skipped and the job stays green. The names, all of them secrets of the
-repository (none is in the tree):
+The workflow has two jobs. `build` runs on pull requests and by hand, builds the package
+unsigned, checks it and writes `SHA256SUMS`, and names no secret: no code of a branch can see a
+signing key. `sign` runs only by hand from main, in the environment `macos-signing`. It does
+not build: it takes the checked package and the checker from `build`, checks the package again,
+signs it with `productsign`, notarizes and staples it, checks it again and sums it. When the
+environment or its secrets are not set up it prints a notice and skips every step after the
+first, and the run succeeds.
+
+`macos-signing` is created by a repository administrator, with a rule that only main may
+deploy to it and with these secrets as environment secrets (none is in the tree):
 
 - `MACOS_INSTALLER_CERT_P12`: the "Developer ID Installer" certificate and key, a .p12 file, base64.
 - `MACOS_INSTALLER_CERT_PASSWORD`: its password.
@@ -54,8 +60,10 @@ repository (none is in the tree):
 - `MACOS_NOTARY_KEY_ID`: its key id.
 - `MACOS_NOTARY_ISSUER_ID`: its issuer id.
 
-The certificate password reaches `security import` as an argument, on a runner that exists
-for this job alone.
+Each is named only in the environment of the step that needs it. The key is imported for
+`productsign` alone. The certificate password reaches `security import` as an argument, on a
+runner that exists for this job alone. The version typed for a manual run is checked as
+MAJOR.MINOR.PATCH before it is used in a file name.
 
 ## Not done yet
 
