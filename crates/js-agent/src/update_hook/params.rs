@@ -14,6 +14,12 @@
 //! - `defer_retry_secs`: what a deferred `prepare` asks the coordinator to wait before
 //!   ordering the host again. Zero is allowed and means "retry now".
 //!
+//! The hook on a machine also reads five optional keys, the values of the agent's own flags of
+//! the same names, which say how to reach the lease server and the agent's state
+//! ([`ConnectParams`]): `server`, `state_root`, `token_file`, `ca_cert` and `host_id`. The
+//! declaration of a host names them, as the plist of its agent does. A step that never asks the
+//! lease server (a first install) does not need them.
+//!
 //! The reserved key contains a dot, so in the file it is a quoted key. Written bare, TOML makes
 //! it a table `updater`, which is not a scalar and is refused.
 
@@ -233,7 +239,13 @@ impl Params {
             target_version: string_of(&table, TARGET_VERSION_KEY)?
                 .ok_or(ParamsError::Missing(TARGET_VERSION_KEY))?,
             previous_version: string_of(&table, PREVIOUS_VERSION_KEY)?,
-            connect: ConnectParams::default(),
+            connect: ConnectParams {
+                server: string_of(&table, SERVER_KEY)?,
+                state_root: path(&table, STATE_ROOT_KEY)?,
+                token_file: path(&table, TOKEN_FILE_KEY)?,
+                ca_cert: path(&table, CA_CERT_KEY)?,
+                host_id: string_of(&table, HOST_ID_KEY)?,
+            },
         })
     }
 }
