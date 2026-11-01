@@ -22,7 +22,8 @@
 //! the target), unless the last look of the lease server failed: that is `lease_unreachable`,
 //! class environment, and says nothing of the release.
 //!
-//! A rerun with `verify_ok` set succeeds without a look; without it, it observes again.
+//! A rerun with `verify_ok` set succeeds without a look of the unit or the lease server (a
+//! taint or an `owed-*` record still halts it); without it, it observes again.
 
 use std::time::Duration;
 
@@ -46,6 +47,8 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
             "there is no record: prepare has not run",
         ));
     };
+    // A taint halts even a rerun after the mark: nothing clears it.
+    refuse_host(env)?;
     if record.verify_ok {
         return Ok(success());
     }

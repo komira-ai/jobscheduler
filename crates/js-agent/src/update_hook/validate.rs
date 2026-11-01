@@ -11,7 +11,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use super::declaration::Declaration;
-use super::params::Params;
+use super::params::{POLL_SECS, Params};
 use super::plain::is_plain;
 use super::record::{Record, SCHEMA};
 
@@ -58,6 +58,14 @@ pub enum Invalid {
     CutoverTimeout {
         /// `[hook.timeout_secs] cutover`.
         cutover: u64,
+    },
+    /// The declared `verify` timeout leaves no time for a look and a poll.
+    #[error(
+        "the declared verify timeout {verify} s is too short: it must exceed {VERIFY_MARGIN_SECS} s plus {POLL_SECS} s"
+    )]
+    VerifyTimeout {
+        /// `[hook.timeout_secs] verify`.
+        verify: u64,
     },
     /// The record's schema is not the one this hook writes.
     #[error("schema {found} is not {SCHEMA}")]
@@ -189,6 +197,12 @@ pub fn validate(
     if declaration.timeouts.cutover <= START_WAIT_SECS + CUTOVER_MARGIN_SECS {
         return Err(Invalid::CutoverTimeout {
             cutover: declaration.timeouts.cutover,
+        });
+    }
+    // Less and the wait would be a single look, with no poll after it.
+    if declaration.timeouts.verify <= VERIFY_MARGIN_SECS + POLL_SECS {
+        return Err(Invalid::VerifyTimeout {
+            verify: declaration.timeouts.verify,
         });
     }
     if record.schema != SCHEMA {
