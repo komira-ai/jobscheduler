@@ -441,38 +441,79 @@ fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// Catches a lease directory that is refused when the lifecycle made it first, and one that
-/// is accepted when it is not what the lifecycle makes: a directory that is there already is
-/// taken when it is empty (and set to `0755`), and refused when it holds something, is a file
-/// or is a link (which would put the lease where the link points).
+/// Catches a directory made over one that is there (a stale lease), and one made without its
+/// parent: `make_dir` makes a new directory of mode `0755` and refuses every other case with
+/// the system's reason.
 #[test]
-fn a_directory_made_already_is_taken_only_when_it_is_empty() {
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+fn a_directory_is_made_new_with_the_open_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
     let base = scratch_dir("make-dir");
     let fresh = base.join("fresh");
     super::make_dir(&fresh).expect("made new");
-    let early = base.join("early");
-    fs::create_dir(&early).expect("made by the lifecycle");
-    fs::set_permissions(&early, fs::Permissions::from_mode(0o711)).expect("mode");
-    super::make_dir(&early).expect("an empty directory is taken");
-    for dir in [&fresh, &early] {
-        let mode = fs::metadata(dir).expect("metadata").permissions().mode();
-        assert_eq!(mode & 0o777, 0o755);
+    let mode = fs::metadata(&fresh).expect("metadata").permissions().mode();
+    assert_eq!(mode & 0o777, 0o755);
+    let why = super::make_dir(&fresh).expect_err("there already");
+    assert_eq!(why.kind(), std::io::ErrorKind::AlreadyExists);
+    let why = super::make_dir(&base.join("no/such/parent")).expect_err("no parent");
+    assert_eq!(why.kind(), std::io::ErrorKind::NotFound);
+    let _ = fs::remove_dir_all(&base);
+}
+
+/// Catches a lease directory taken when it is not the lifecycle's bound one: it must be there,
+/// be an empty directory (not a file, a link or a directory with something in it) and have the
+/// project of the run's scratch directory, and its project is read for both, so an unreadable
+/// one refuses it too. The one taken gets mode `0755`.
+#[test]
+fn a_lease_directory_is_taken_only_when_it_is_there_empty_and_in_the_runs_project() {
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    let base = scratch_dir("take-dir");
+    let run = base.join("run");
+    let lease = base.join("lease");
+    for dir in [&run, &lease] {
+        fs::create_dir(dir).expect("a directory");
     }
+    fs::set_permissions(&lease, fs::Permissions::from_mode(0o711)).expect("mode");
+    let same = |_: &Path| Ok(7);
+    super::take_dir(&lease, &run, &same).expect("taken");
+    let mode = fs::metadata(&lease).expect("metadata").permissions().mode();
+    assert_eq!(mode & 0o777, 0o755);
+
+    let kind = |dir: &Path, project: &dyn Fn(&Path) -> std::io::Result<u32>| {
+        super::take_dir(dir, &run, project)
+            .expect_err("refused")
+            .kind()
+    };
+    assert_eq!(kind(&base.join("missing"), &same), ErrorKind::NotFound);
     let full = base.join("full");
     fs::create_dir(&full).expect("full");
     fs::write(full.join("file"), b"x").expect("a file in it");
     let file = base.join("file");
     fs::write(&file, b"x").expect("a file");
     let link = base.join("link");
-    symlink(&early, &link).expect("a link");
+    symlink(&lease, &link).expect("a link");
     for refused in [&full, &file, &link] {
-        let why = super::make_dir(refused).expect_err("refused");
-        assert_eq!(why.kind(), std::io::ErrorKind::AlreadyExists, "{refused:?}");
+        assert_eq!(kind(refused, &same), ErrorKind::InvalidInput, "{refused:?}");
     }
-    // A directory that cannot be made for another reason is refused with that reason.
-    let orphan = base.join("no/such/parent");
-    let why = super::make_dir(&orphan).expect_err("no parent");
-    assert_eq!(why.kind(), std::io::ErrorKind::NotFound);
+    // The lease is outside the run's project.
+    let apart = |dir: &Path| Ok(if dir == run { 7 } else { 0 });
+    assert_eq!(kind(&lease, &apart), ErrorKind::PermissionDenied);
+    // A project that cannot be read, of either directory.
+    let broken_lease = |dir: &Path| {
+        if dir == lease {
+            Err(Error::other("lease"))
+        } else {
+            Ok(7)
+        }
+    };
+    let broken_run = |dir: &Path| {
+        if dir == run {
+            Err(Error::other("run"))
+        } else {
+            Ok(7)
+        }
+    };
+    assert_eq!(kind(&lease, &broken_lease), ErrorKind::Other);
+    assert_eq!(kind(&lease, &broken_run), ErrorKind::Other);
     let _ = fs::remove_dir_all(&base);
 }

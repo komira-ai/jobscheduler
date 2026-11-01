@@ -215,3 +215,48 @@ fn the_usage_of_a_project_counts_scratch_work_and_root() {
         assert!(w.used <= LIMIT, "{target}: usage {} bytes", w.used);
     }
 }
+
+/// Asserts that a lease directory outside the run's project is refused: the run's directory is
+/// bound and the lease directory the lifecycle made beside it is not, so the runtime refuses to
+/// make the container, says why, and holds none. It catches a runtime that would run a job
+/// whose `/work` and `/root` lie outside the bound.
+#[test]
+#[ignore = "real crun on an XFS volume: the js-agent-crun-runtime workflow"]
+fn a_lease_directory_outside_the_runs_project_is_refused() {
+    let volume = volume();
+    let mut subject: CrunSubject = crun_subject_on("quota_outside", &volume);
+    subject.prepared();
+    let spec = spec_of(&mut subject, RUN, Program::Exit(0));
+    let quota = XfsQuota::new(subject.runs(), ProjectIds::default());
+    let project = ProjectIds::default().of_slot(40).expect("a project");
+    let lease_dir = subject
+        .runtime()
+        .borrow()
+        .lease_dir(RUN)
+        .expect("the runtime keeps its lease beside the runs");
+    let bound = Bound {
+        quota,
+        runtime: subject.runtime(),
+        run_dir: spec.scratch.clone(),
+        lease_dir: lease_dir.clone(),
+        project,
+    };
+    fs::create_dir(&lease_dir).expect("make the lease directory");
+    bound
+        .quota
+        .apply(&spec.scratch, project, LIMIT, INODES)
+        .expect("bound the run's directory");
+    let refused = subject.runtime().borrow_mut().create_and_start(&spec);
+    let why = refused.expect_err("a lease outside the project is refused");
+    assert!(
+        why.to_string().contains("not in the run's project"),
+        "{why}"
+    );
+    let held = subject
+        .runtime()
+        .borrow_mut()
+        .list_labelled()
+        .expect("list");
+    assert!(held.is_empty(), "a container was made");
+    drop(bound);
+}

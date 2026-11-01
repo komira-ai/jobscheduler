@@ -260,6 +260,18 @@ pub trait ScratchQuota: Send + Sync {
     fn clear(&self, run_dir: &Path, project: ProjectId) -> Result<(), QuotaError>;
 }
 
+/// The project id of the directory `dir`; 0 where its file system keeps none.
+///
+/// # Errors
+///
+/// `dir` cannot be opened as a directory (it is not there, is a link or is not a directory).
+#[cfg(target_os = "linux")]
+pub fn project_of(dir: &Path) -> io::Result<u32> {
+    use sys::{Kernel, Sys};
+    let open = Kernel.open_dir(dir)?;
+    Ok(Kernel.get_attr(&open).map(|attr| attr.projid).unwrap_or(0))
+}
+
 /// The quota of the scratch root `scratch_root` on this machine: XFS project quota with the
 /// agent's project ids. On a platform without one, a quota that probes to [`Mode::None`].
 #[cfg(target_os = "linux")]

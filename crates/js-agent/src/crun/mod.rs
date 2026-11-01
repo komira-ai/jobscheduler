@@ -134,7 +134,7 @@ use js_contain::running::Running;
 use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
 
-use crate::cli_runtime::{Chown, container_name};
+use crate::cli_runtime::{Chown, NAME_PREFIX, agent_tag, container_name};
 use crate::image::{ConfigError, ImageConfig, config_path};
 use crate::lifecycle::{
     Body, Exit, FilesRoot, Found, Prefetcher, Prepared, PullFuture, RunHandle, RunSpec, Runtime,
@@ -362,6 +362,8 @@ pub struct CrunRuntime {
     /// Whether the leases' directories are made beside the runs' own
     /// ([`OciConfig::leases_in`]), where [`Runtime::lease_dir`] names them.
     leases_beside: bool,
+    /// The image store, where an agent from before the leases were beside the runs kept them.
+    store: PathBuf,
     hooks: Hooks,
     runs: BTreeMap<String, Run>,
     ledger: Ledger,
@@ -449,6 +451,7 @@ impl CrunRuntime {
             configs,
             files: settings.files,
             leases_beside,
+            store: settings.scratch.clone(),
             hooks,
             runs: BTreeMap::new(),
             ledger,
@@ -487,7 +490,27 @@ impl CrunRuntime {
 
     /// [`CrunRuntime::swept`]'s sweep: every lease of this agent in the ledger.
     fn sweep(&self) -> Result<SweepReport, CrunError> {
-        Ok(self.ledger.sweep(|entry| self.tear_down(&entry.name))?)
+        let report = self.ledger.sweep(|entry| self.tear_down(&entry.name))?;
+        self.sweep_store_leases();
+        Ok(report)
+    }
+
+    /// Removes the leases of this agent that an agent from before the leases were beside the
+    /// runs left in the store (`<store>/js-<tag>-<run id>`), whatever the ledger says: the
+    /// sidecar may be gone with the directory still there. No run of this process exists yet.
+    /// One that cannot be removed stays for the next start.
+    fn sweep_store_leases(&self) {
+        if !self.leases_beside {
+            return;
+        }
+        let prefix = format!("{NAME_PREFIX}{}-", agent_tag(&self.host_id));
+        let left = std::fs::read_dir(&self.store)
+            .into_iter()
+            .flatten()
+            .flatten();
+        for entry in left.filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix)) {
+            let _ = js_contain::remove::remove_tree(&entry.path());
+        }
     }
 
     /// Removes the lease `name` of an earlier process, if the ledger holds it as this
@@ -525,6 +548,14 @@ impl CrunRuntime {
             step(
                 "remove the lease directory",
                 js_contain::remove::remove_tree(&lease.dir),
+            )?;
+        }
+        // A lease an agent from before the leases were beside the runs left in the store.
+        let legacy = self.store.join(name);
+        if self.leases_beside && legacy.exists() {
+            step(
+                "remove the lease directory in the store",
+                js_contain::remove::remove_tree(&legacy),
             )?;
         }
         Ok(())
@@ -689,8 +720,13 @@ impl CrunRuntime {
                 Owner::Job => job,
                 Owner::Container => job_id,
             };
-            make_dir(&dir)
-                .and_then(|()| chown(&dir, uid, gid))
+            // A lease directory made beside the run's is the lifecycle's: it must be there,
+            // empty and in the run's project, or it would be outside the run's bound.
+            let made = match self.leases_beside && dir == lease.dir {
+                true => take_dir(&dir, &spec.scratch, &project_of),
+                false => make_dir(&dir),
+            };
+            made.and_then(|()| chown(&dir, uid, gid))
                 .map_err(|why| Fault::step("make a lease directory", &why))?;
         }
         chown(&spec.scratch, job_id.0, job_id.1)
@@ -772,17 +808,47 @@ fn step<T>(what: &str, result: Result<T, impl std::fmt::Display>) -> Result<T, S
     result.map_err(|why| format!("{what}: {why}"))
 }
 
-/// Makes the directory `dir` with the mode `0755` whatever the umask is, setting the mode
-/// by the descriptor of what was made. A directory that is there already is accepted when it
-/// is empty and not a link: the agent makes a lease's directory itself, to put it under the
-/// run's disk quota before anything is made in it ([`Runtime::lease_dir`]).
+/// Makes the new directory `dir` with the mode `0755` whatever the umask is, setting the mode
+/// by the descriptor of what was made.
 fn make_dir(dir: &Path) -> io::Result<()> {
-    use rustix::fs::{Mode, OFlags, fchmod};
-    match std::fs::create_dir(dir) {
-        Ok(()) => {}
-        Err(why) if why.kind() == io::ErrorKind::AlreadyExists && is_empty_dir(dir) => {}
-        Err(why) => return Err(why),
+    std::fs::create_dir(dir)?;
+    set_open_mode(dir)
+}
+
+/// Takes the directory `dir` the lifecycle made for the run whose scratch directory is
+/// `reference` ([`Runtime::lease_dir`]) and sets its mode to `0755`. It must be there, be an
+/// empty directory (not a link) and have the project id `project_of` reads of `reference`:
+/// otherwise it is refused, and nothing is made, so a lease never lies outside the run's
+/// disk bound.
+fn take_dir(
+    dir: &Path,
+    reference: &Path,
+    project_of: &dyn Fn(&Path) -> io::Result<u32>,
+) -> io::Result<()> {
+    std::fs::symlink_metadata(dir)?;
+    if !is_empty_dir(dir) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not an empty directory", dir.display()),
+        ));
     }
+    if project_of(dir)? != project_of(reference)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is not in the run's project", dir.display()),
+        ));
+    }
+    set_open_mode(dir)
+}
+
+/// The project id of `dir` ([`crate::quota::project_of`]).
+fn project_of(dir: &Path) -> io::Result<u32> {
+    crate::quota::project_of(dir)
+}
+
+/// Sets the mode of the directory `dir` to `0755` by its descriptor, not following a link.
+fn set_open_mode(dir: &Path) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags, fchmod};
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     rustix::fs::open(dir, flags, Mode::empty())
         .and_then(|fd| fchmod(&fd, Mode::from_raw_mode(0o755)))
