@@ -153,7 +153,8 @@ impl Drain {
     }
 
     /// The mark `operation` has on `worker` at `now`: the one it kept, when it is on the
-    /// same worker, else a new one whose deadline follows [`reserve_deadline`].
+    /// same worker, else a new one on `worker` whose deadline follows [`reserve_deadline`]
+    /// and whose time of making is the kept mark's: a hold that moves keeps its age.
     pub(super) fn mark(
         &self,
         operation: OperationId,
@@ -163,6 +164,7 @@ impl Drain {
         cfg: &WholeNodeConfig,
         max_wall: Option<Duration>,
     ) -> WholeMark {
+        let made = kept.as_ref().map_or(now, |m| m.made);
         if let Some(kept) = kept.filter(|m| &m.worker == worker) {
             return kept;
         }
@@ -173,7 +175,7 @@ impl Drain {
         let wait = reserve_deadline(attempts, cfg, wall);
         WholeMark {
             worker: worker.clone(),
-            made: now,
+            made,
             deadline: FarmTime::from_millis(now.as_millis().saturating_add(wait)),
         }
     }
@@ -281,10 +283,9 @@ impl Scheduler {
         self.max_walls.insert(operation, max_wall);
     }
 
-    /// The registered workers by drain cost, cheapest first, when whole-node settings are
-    /// on; `None` when they are not. `placed` are this round's placements, not yet held.
-    pub(super) fn drain_order(&self, placed: &[(OperationId, Placed)]) -> Option<Vec<DrainCost>> {
-        self.whole_node.as_ref()?;
+    /// The registered workers by drain cost, cheapest first: by the least tail, whether or
+    /// not whole-node settings are on. `placed` are this round's placements, not yet held.
+    pub(super) fn drain_order(&self, placed: &[(OperationId, Placed)]) -> Vec<DrainCost> {
         let end_of = |operation: OperationId, start: u64| {
             self.max_walls.get(&operation).map_or(u64::MAX, |wall| {
                 start.saturating_add(u64::try_from(wall.as_millis()).unwrap_or(u64::MAX))
@@ -330,7 +331,7 @@ impl Scheduler {
                 }
             })
             .collect();
-        Some(drain_cost(&loads, self.now.as_millis()))
+        drain_cost(&loads, self.now.as_millis())
     }
 }
 
@@ -451,14 +452,10 @@ impl Scheduler {
         let max_wall = self.max_walls.get(&id).copied();
         let mut wait = None;
         loop {
-            let Some(name) = servable.reserve(
-                &self.workers,
-                &op.request,
-                &out,
-                &avoid,
-                kept,
-                drain.as_deref(),
-            ) else {
+            // The pick is made again every round, with no stickiness; `kept` is only the
+            // worker the mark was on, whose cap check is already made.
+            let Some(name) = servable.reserve(&self.workers, &op.request, &out, &avoid, &drain)
+            else {
                 return wait.map_or(Ok(None), Err);
             };
             if kept != Some(&name) {

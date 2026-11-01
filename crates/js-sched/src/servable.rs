@@ -556,10 +556,9 @@ impl Servable {
         })
     }
 
-    /// The worker to hold for a whole-machine `request` that fits nowhere now: `kept`
-    /// if it still could run it, else the one that could which holds the fewest leases,
-    /// then has the least booked, then comes first by name; with `drain` (the workers by
-    /// drain cost, cheapest first), the first of those that could. Never one in `reserved`,
+    /// The worker to hold for a whole-machine `request` that fits nowhere now: the first
+    /// of `drain` (the workers by drain cost, the least tail first) that could run it, with
+    /// no preference for a worker held before. Never one in `reserved`,
     /// nor one in `avoid` while [`Servable::fit`] skips it. Only a whole-machine lease or an
     /// action that owns its worker ([`Request::owns_worker`]) holds a worker (the caller
     /// asks only for one); an action at a worker's whole memory waits until some worker
@@ -570,8 +569,7 @@ impl Servable {
         request: &Request,
         reserved: &BTreeSet<WorkerId>,
         avoid: &BTreeSet<WorkerId>,
-        kept: Option<&WorkerId>,
-        drain: Option<&[DrainCost]>,
+        drain: &[DrainCost],
     ) -> Option<WorkerId> {
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, avoid);
@@ -585,22 +583,10 @@ impl Servable {
                     && workers[*name].capacity.fits(&request.demand())
             })
             .collect();
-        if let Some(kept) = kept.filter(|kept| candidates.contains(kept)) {
-            return Some(kept.clone());
-        }
-        if let Some(drain) = drain {
-            return drain
-                .iter()
-                .find_map(|cost| candidates.iter().find(|name| name.as_str() == cost.id))
-                .map(|name| (*name).clone());
-        }
-        candidates
-            .into_iter()
-            .min_by_key(|name| {
-                let w = &workers[*name];
-                (w.leases, w.booked)
-            })
-            .cloned()
+        drain
+            .iter()
+            .find_map(|cost| candidates.iter().find(|name| name.as_str() == cost.id))
+            .map(|name| (*name).clone())
     }
 
     /// The live workers placement may use that could run `request` once their bookings

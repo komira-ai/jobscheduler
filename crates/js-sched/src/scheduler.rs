@@ -730,14 +730,28 @@ impl Scheduler {
                             }
                         })
                     }
-                    _ => servable.reserve(
-                        &self.workers,
-                        request,
-                        &reserved,
-                        &op.avoid,
-                        self.reservations.get(&id),
-                        None,
-                    ),
+                    // One hold per pool, by the least tail, the first request in queue
+                    // order taking it (a blocked head shares the pool's slot below).
+                    _ => {
+                        let pool = servable.pool(&self.workers, request);
+                        let drain = self.drain_order(&placed);
+                        let open = !held_pools.contains(&pool);
+                        let name = open
+                            .then(|| {
+                                servable.reserve(
+                                    &self.workers,
+                                    request,
+                                    &reserved,
+                                    &op.avoid,
+                                    &drain,
+                                )
+                            })
+                            .flatten();
+                        if name.is_some() {
+                            held_pools.insert(pool);
+                        }
+                        name
+                    }
                 };
                 if let Some(name) = held {
                     reserved.insert(name.clone());
