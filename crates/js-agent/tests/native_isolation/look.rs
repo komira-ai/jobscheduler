@@ -407,6 +407,53 @@ pub fn sandbox_log_counts(log: &str, job: &JobProcs) -> (usize, usize) {
     (denies.len(), own)
 }
 
+/// Whether root loaded the agent: a `launchctl ... bootstrap` attempt exited 0. A successful
+/// no-op (`launchctl asuser <uid> /usr/bin/true`) is not the agent being loaded.
+pub fn agent_loaded(attempts: &[AgentAttempt]) -> bool {
+    attempts.iter().any(|attempt| attempt.code == Some(0))
+}
+
+/// What a whole run came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunVerdict {
+    /// Every one of the kinds was seeded, or denied by the sandbox (its signature or a
+    /// pid-confirmed log line), and nothing survived.
+    Pass,
+    /// The minimum set was met and nothing survived, but these kinds were neither seeded nor
+    /// denied, so they are unproven.
+    PassWithUnexercised(Vec<Kind>),
+    /// Something of run A survived (or a look could not be made).
+    Fail,
+    /// The minimum set was not met, or a control failed: the run proves nothing.
+    NoVerdict,
+}
+
+/// The verdict of a run: how many rows survived, the reasons it proves nothing, and what run A
+/// reported for each kind.
+pub fn final_verdict(seeded: &[Line], survivors: usize, unproven: &[String]) -> RunVerdict {
+    let _ = (seeded, survivors, unproven);
+    RunVerdict::Pass
+}
+
+/// `kind: reason` for each kind that was neither seeded nor denied, in kind order.
+pub fn unexercised_report(seeded: &[Line]) -> Vec<String> {
+    let _ = seeded;
+    Vec::new()
+}
+
+/// The message a passing-with-gaps run fails with, so it cannot pass silently.
+pub fn verdict_message(verdict: &RunVerdict, seeded: &[Line]) -> String {
+    let _ = (verdict, seeded);
+    String::new()
+}
+
+/// Why a run stopped: the error that ended it, if any, and every reason it already proved
+/// nothing; none of them is dropped.
+pub fn reasons_message(error: Option<&str>, unproven: &[String]) -> String {
+    let _ = (error, unproven);
+    String::new()
+}
+
 /// Why run A could not seed an item: the sandbox of the product profile said no (so the job
 /// could not create the state and nothing can carry over), or anything else (a full disk, a
 /// missing tool, a crash), which proves nothing.
@@ -1312,6 +1359,127 @@ mod tests {
         other[2] = unavailable(Kind::Keychain);
         other.push(seeded(Kind::LaunchAgent));
         assert_eq!(missing_minimum(&other), ["keychain-item"]);
+    }
+
+    /// Asserts that the agent is loaded only by a bootstrap that exited 0, and not by the
+    /// successful no-op of the real four-step plan (`asuser <uid> /usr/bin/true`). It catches
+    /// a classifier that sees that success and can never call an agent unloaded.
+    #[test]
+    fn a_no_op_that_worked_is_not_the_agent_loaded() {
+        let eio = "Bootstrap failed: 5: Input/output error";
+        let boot = "launchctl bootstrap user/1 /p";
+        let asuser = "launchctl asuser 1 /bin/launchctl bootstrap user/1 /p";
+        let noop = "launchctl asuser 1 /usr/bin/true";
+        let plan = [
+            attempt(boot, Some(5), eio),
+            attempt(asuser, Some(5), eio),
+            attempt(noop, Some(0), ""),
+            attempt(asuser, Some(5), eio),
+        ];
+        assert!(!agent_loaded(&plan));
+        let mut worked = plan.to_vec();
+        worked[3] = attempt(asuser, Some(0), "");
+        assert!(agent_loaded(&worked));
+        assert!(agent_loaded(&[attempt(boot, Some(0), "")]));
+        assert!(!agent_loaded(&[]));
+    }
+
+    fn all_seeded() -> Vec<Line> {
+        Kind::ALL.into_iter().map(seeded).collect()
+    }
+
+    /// Asserts the four outcomes of a run: PASS when every kind was seeded or denied and
+    /// nothing survived (an agent loaded by root counts as exercised); PASS-WITH-UNEXERCISED
+    /// when something was refused for another reason or not reported, naming the kinds; FAIL
+    /// whenever anything survived, whatever else is unproven; and NO VERDICT when the run
+    /// proves nothing and nothing survived.
+    #[test]
+    fn a_run_comes_to_one_of_four_verdicts() {
+        let reasons = vec!["run A did not seed keychain-item".to_owned()];
+        assert_eq!(final_verdict(&all_seeded(), 0, &[]), RunVerdict::Pass);
+        let mut lines = all_seeded();
+        lines[3] = Line::new(
+            Verdict::Denied,
+            lines[3].kind,
+            token(2),
+            "Sandbox: x(1) deny(1)",
+        );
+        let by_root = Line::new(
+            Verdict::Seeded,
+            Kind::LaunchAgent,
+            token(5),
+            &format!("com.x ({LOADED_BY_ROOT} into user/1)"),
+        );
+        let at = lines
+            .iter()
+            .position(|l| l.kind == Kind::LaunchAgent)
+            .unwrap();
+        lines[at] = by_root;
+        assert_eq!(final_verdict(&lines, 0, &[]), RunVerdict::Pass);
+        let mut gaps = all_seeded();
+        let refused = |kind| Line::new(Verdict::Refused, kind, token(3), "Operation not permitted");
+        gaps[2] = refused(gaps[2].kind);
+        gaps[13] = refused(gaps[13].kind);
+        assert_eq!(
+            final_verdict(&gaps, 0, &[]),
+            RunVerdict::PassWithUnexercised(vec![Kind::ALL[2], Kind::ALL[13]])
+        );
+        // A kind run A did not report at all is unexercised too.
+        let short = &all_seeded()[..15];
+        assert_eq!(
+            final_verdict(short, 0, &[]),
+            RunVerdict::PassWithUnexercised(vec![Kind::ALL[15]])
+        );
+        assert_eq!(final_verdict(&all_seeded(), 1, &[]), RunVerdict::Fail);
+        assert_eq!(final_verdict(&gaps, 2, &reasons), RunVerdict::Fail);
+        assert_eq!(
+            final_verdict(&all_seeded(), 0, &reasons),
+            RunVerdict::NoVerdict
+        );
+        assert_eq!(final_verdict(&gaps, 0, &reasons), RunVerdict::NoVerdict);
+    }
+
+    /// Asserts that the unexercised kinds are reported with their reasons, and that the
+    /// message of a pass-with-gaps run names the verdict, each kind and each reason, so it
+    /// cannot pass silently. A clean run has nothing to report.
+    #[test]
+    fn the_unexercised_kinds_are_reported_with_their_reasons() {
+        assert!(unexercised_report(&all_seeded()).is_empty());
+        let mut lines = all_seeded();
+        lines[13] = Line::new(
+            Verdict::Refused,
+            lines[13].kind,
+            token(3),
+            "/private/tmp/x: Operation not permitted (os error 1)",
+        );
+        let report = unexercised_report(&lines);
+        assert_eq!(report.len(), 1);
+        assert!(report[0].starts_with(Kind::ALL[13].label()), "{report:?}");
+        assert!(report[0].contains("Operation not permitted"), "{report:?}");
+        let verdict = final_verdict(&lines, 0, &[]);
+        let message = verdict_message(&verdict, &lines);
+        assert!(message.starts_with("PASS-WITH-UNEXERCISED"), "{message}");
+        assert!(message.contains(Kind::ALL[13].label()), "{message}");
+        assert!(message.contains("Operation not permitted"), "{message}");
+        assert!(verdict_message(&RunVerdict::Pass, &all_seeded()).starts_with("PASS"));
+        assert!(!verdict_message(&RunVerdict::Pass, &all_seeded()).contains("UNEXERCISED"));
+    }
+
+    /// Asserts that the reasons a run proved nothing are kept when a later error ends it.
+    #[test]
+    fn an_error_after_an_unproven_row_keeps_the_reasons() {
+        let reasons = vec!["a: no keychain".to_owned(), "b: control failed".to_owned()];
+        let message = reasons_message(Some("run B ended Exited(1)"), &reasons);
+        for part in [
+            "run B ended Exited(1)",
+            "a: no keychain",
+            "b: control failed",
+        ] {
+            assert!(message.contains(part), "{message}");
+        }
+        assert!(reasons_message(None, &reasons).contains("b: control failed"));
+        assert_eq!(reasons_message(None, &[]), "");
+        assert_eq!(reasons_message(Some("e"), &[]), "e");
     }
 
     /// Asserts that the uid line round-trips among other output, that the first one is
