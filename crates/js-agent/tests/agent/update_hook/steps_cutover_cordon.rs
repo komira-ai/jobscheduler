@@ -257,21 +257,53 @@ fn a_lease_server_that_cannot_be_asked_fails_the_cutover_before_anything_is_stop
     }
 }
 
-#[test]
-fn a_lease_server_that_cannot_lift_the_cordon_fails_the_deferral_and_stops_nothing() {
-    let rig = running(Rig::new("hook-cutover-busy-uncordon-fails"));
+/// The cutover that finds a lease under a cordon of ours while the uncordon fails.
+fn blipped(rig: &Rig) -> (Done, Spy<'_>) {
     rig.set_leases(1);
-    let spy = Spy::new(&rig);
+    let spy = Spy::new(rig);
     spy.fail("uncordon");
+    let done = spy.cutover(rig);
+    (done, spy)
+}
+
+#[test]
+fn a_blip_on_the_uncordon_of_the_busy_path_still_defers_with_the_failure_in_the_detail() {
+    let rig = running(Rig::new("hook-cutover-busy-blip"));
+    let (done, spy) = blipped(&rig);
+    deferred_untouched(&done, &spy, &rig, Reason::DrainBound);
+    let detail = done.report.detail.unwrap();
+    assert!(detail.contains("uncordon is down"), "{detail}");
+}
+
+#[test]
+fn a_blip_on_the_uncordon_of_the_busy_path_keeps_the_recorded_cordon_as_prepare_does() {
+    let rig = running(Rig::new("hook-cutover-busy-blip-record"));
+    let before = rig.record().unwrap().cordon;
+    assert!(before.placed && !before.provisional);
+    blipped(&rig);
+    assert_eq!(rig.record().unwrap().cordon, before);
+    assert_eq!(rig.cordon_expiry(), Some(before.expires_ms));
+}
+
+#[test]
+fn a_blip_on_the_uncordon_after_a_lost_cordon_was_put_back_keeps_that_cordon_recorded() {
+    let rig = lost("hook-cutover-busy-blip-lost");
+    let (done, spy) = blipped(&rig);
+    deferred_untouched(&done, &spy, &rig, Reason::DrainBound);
+    let cordon = rig.record().unwrap().cordon;
+    assert!(cordon.placed && !cordon.provisional);
+    assert_eq!(Some(cordon.expires_ms), rig.cordon_expiry());
+}
+
+#[test]
+fn a_rerun_after_a_blip_on_the_uncordon_of_the_busy_path_goes_on_under_its_own_cordon() {
+    let rig = running(Rig::new("hook-cutover-busy-blip-rerun"));
+    blipped(&rig);
+    rig.set_leases(0);
+    let spy = Spy::new(&rig);
     let done = spy.cutover(&rig);
-    assert_eq!(done.outcome, Outcome::Failure);
-    assert_eq!(done.report.reason, Some(Reason::LeaseUnreachable));
-    assert!(done.report.reversible);
-    assert_eq!(spy.act_names(), Vec::<String>::new());
-    assert!(
-        rig.record().unwrap().cordon.placed,
-        "a rerun still knows it is ours"
-    );
+    assert_eq!(done.outcome, Outcome::Success);
+    assert_eq!(cordon_calls(&spy), Vec::<String>::new());
 }
 
 #[test]
