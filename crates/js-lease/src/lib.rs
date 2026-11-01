@@ -188,6 +188,6 @@ pub use state::LeaseState;
 pub use table::{LeaseTable, read_bookings};
 pub use timings::{Timer, Timings};
 pub use types::{
-    Booking, Boot, Exclusion, ExclusionEnd, Held, Lease, LeaseInfo, ReleaseOutcome,
+    Booking, Boot, Exclusion, ExclusionEnd, Held, Lease, LeaseInfo, Queued, ReleaseOutcome,
     ReservationRecord, Settings, TickReport,
 };

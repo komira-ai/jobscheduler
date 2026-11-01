@@ -259,6 +259,19 @@ pub struct Held {
     /// When the reservation lapses. After an open, the stored deadline plus the boot
     /// grace.
     pub deadline: Timestamp,
+    /// Whether the host was quiet when it was set aside: it drains nothing and waits for
+    /// the request's next start, and does not count toward the draining limit.
+    pub assigned: bool,
+}
+
+/// A request's place on the wait list when the ledger was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Queued {
+    /// Where the request waited from the front (zero is next). An open returns the
+    /// records as written; the caller restores them in this order.
+    pub place: u32,
+    /// When the request was first presented, which its wait is counted from.
+    pub since: Timestamp,
 }
 
 /// One row of the reservation ledger, kept in the lease file. The table stores and
@@ -271,6 +284,9 @@ pub struct ReservationRecord {
     /// The reservation, or `None` for a request between reservations, which keeps only
     /// its counters and exclusions.
     pub held: Option<Held>,
+    /// The request's place on the wait list, or `None` for a request that is not waiting
+    /// (it keeps only its counters and exclusions).
+    pub queued: Option<Queued>,
     /// How many reservations of the request were given up.
     pub give_ups: u32,
     /// How many prepares of the request failed.

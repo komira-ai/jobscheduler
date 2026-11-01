@@ -691,7 +691,11 @@ impl Config {
 /// made them.
 fn with_pool_settings(settings: Settings, hosts: &Hosts) -> Result<Settings, StartupError> {
     match hosts {
-        Hosts::Layered { agents, .. } => with_whole_node(settings, agents.pool.whole_node()),
+        Hosts::Layered { agents, .. } => {
+            let whole = agents.pool.whole_node();
+            let settings = with_whole_node(settings, whole)?;
+            Ok(crate::reservations::with_restart_grace(settings, whole))
+        }
         Hosts::Static(_) => Ok(settings),
     }
 }

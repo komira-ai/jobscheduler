@@ -28,6 +28,7 @@ use crate::whole::reserve::{Marks, Reservation};
 
 mod cordon;
 mod demand;
+mod ledger;
 mod marks;
 mod provider_side;
 mod record;
@@ -38,6 +39,7 @@ use record::Record;
 pub use cordon::{Cordoned, NotHeld, OwnHost, Uncordoned};
 use demand::waiting_rows;
 pub use demand::{Launchable, Waiting};
+pub use ledger::Restored;
 pub use marks::Busy;
 
 /// Where a host's session stands.

@@ -67,6 +67,7 @@ fn restore(
                 host,
                 reserved_at: Timestamp::from_millis(reserved_at),
                 deadline: Timestamp::from_millis(deadline).max(boot.plus(settings.boot_grace())),
+                assigned: false,
             })
         }
         _ => {
@@ -80,6 +81,7 @@ fn restore(
     Ok(ReservationRecord {
         request_id: stored.request_id.clone(),
         held,
+        queued: None,
         give_ups: stored.give_ups,
         prepare_failures: stored.prepare_failures,
         exclusions: exclusions.collect::<Result<_, _>>()?,
@@ -111,6 +113,9 @@ pub(crate) fn stored(
         host: held.map(|held| held.host.as_str().to_owned()),
         reserved_at_ms: held.map(|held| held.reserved_at.millis()),
         deadline_ms: held.map(|held| held.deadline.millis()),
+        assigned: false,
+        queue_place: None,
+        queued_since_ms: None,
         give_ups: record.give_ups,
         prepare_failures: record.prepare_failures,
         exclusion: record.exclusions.iter().map(stored_exclusion).collect(),

@@ -58,6 +58,16 @@ pub(crate) struct StoredReservation {
     pub reserved_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u64>,
+    /// Whether the held host was quiet when it was set aside. Absent is not; a build that
+    /// predates the field reads the row without it and keeps it on rewrite.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub assigned: bool,
+    /// The place on the wait list and when the request was first presented, both or
+    /// neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_place: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_since_ms: Option<u64>,
     #[serde(default)]
     pub give_ups: u32,
     #[serde(default)]
