@@ -110,6 +110,9 @@ pub const SHELL: &str = "/usr/bin/bash";
 pub struct Host {
     /// The effective user id of the process.
     pub euid: u32,
+    /// The user id that must own the setup script, the shell, their directories and the
+    /// files that are already there: root's, 0.
+    pub owner: u32,
     /// Whether standard input is a terminal.
     pub stdin_is_terminal: bool,
     /// Where the instance file is.
@@ -128,6 +131,7 @@ impl Host {
     pub fn system() -> Self {
         Self {
             euid: rustix::process::geteuid().as_raw(),
+            owner: 0,
             stdin_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stdin()),
             instance_file: PathBuf::from(INSTANCE_FILE),
             token_file: PathBuf::from(TOKEN_FILE),

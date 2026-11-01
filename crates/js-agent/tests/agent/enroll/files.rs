@@ -2,7 +2,7 @@
 //! the setup runs or anything is written.
 
 use std::fs;
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
 use super::rig::{LINE, OTHER, Rig, TOKEN, sha, status};
 
@@ -186,15 +186,108 @@ fn a_token_file_others_can_read_is_refused() {
     assert!(ran.err.contains("symbolic links"), "{ran:?}");
 }
 
-/// Asserts that a staged file left by an interrupted run (`.token.new`, holding a token) does
-/// not stop the next run and is gone after it. It catches a leftover that blocks the retry or
-/// keeps a secret on disk.
+/// Asserts that a file at the name an older version staged under (`.token.new`) neither
+/// blocks the run nor is touched: the staging name is not fixed. It catches a staging name
+/// another user can plant a file or a link at.
 #[test]
-fn a_staged_file_left_by_an_earlier_run_is_replaced() {
-    let rig = Rig::new("enroll_stale_stage");
-    rig.put(".token.new", "old", 0o600);
+fn a_file_at_a_guessable_staging_name_does_not_matter() {
+    let rig = Rig::new("enroll_guessable_stage");
+    rig.put(".token.new", "planted", 0o644);
     let ran = rig.go(&["--apply"], TOKEN);
     assert_eq!(ran.status, status(0), "{ran:?}");
-    assert_eq!(rig.names(), ["instance", "token"]);
+    assert_eq!(rig.names(), [".token.new", "instance", "token"]);
+    assert_eq!(rig.read(".token.new"), "planted");
     assert_eq!(rig.read("token"), format!("{TOKEN}\n"));
+}
+
+/// Asserts that a directory that group or others can write, a link in its place, and one that
+/// is not the user's are refused (status 2) before the setup runs, naming the directory: a
+/// secret is staged there and a writer could swap it. A directory that is not there yet is
+/// fine (the setup makes it). It catches a staged token a stranger can replace, and a refusal
+/// that comes after the setup has run.
+#[test]
+fn a_directory_others_can_write_is_refused() {
+    let rig = Rig::new("enroll_dir_modes");
+    fs::set_permissions(rig.etc(), fs::Permissions::from_mode(0o775)).unwrap();
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(2), "{ran:?}");
+    let etc = rig.etc().display().to_string();
+    assert!(
+        ran.err.contains(&etc) && ran.err.contains("writable by group or others"),
+        "{ran:?}"
+    );
+    assert_eq!(rig.setup_args(), None);
+    fs::set_permissions(rig.etc(), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut other = Rig::new("enroll_dir_owner");
+    other.host.owner += 1;
+    let ran = other.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(2), "{ran:?}");
+    assert!(ran.err.contains("is not owned by uid"), "{ran:?}");
+    assert_eq!(other.setup_args(), None);
+
+    let mut linked = Rig::new("enroll_dir_link");
+    let real = linked.dir.path().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+    symlink(&real, linked.dir.path().join("etc-link")).unwrap();
+    linked.host.instance_file = linked.dir.path().join("etc-link").join("instance");
+    let ran = linked.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(2), "{ran:?}");
+    assert!(ran.err.contains("is not a directory"), "{ran:?}");
+
+    let mut under_file = Rig::new("enroll_dir_file");
+    under_file.put("plain", "x", 0o644);
+    under_file.host.token_file = under_file.etc().join("plain").join("token");
+    let ran = under_file.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(2), "{ran:?}");
+    assert_eq!(under_file.setup_args(), None);
+}
+
+/// Asserts that a dangling link at the token path is refused like any link (status 2). It
+/// catches a link that is followed to wherever it points, or taken for an absent file.
+#[test]
+fn a_dangling_link_at_the_token_path_is_refused() {
+    let rig = Rig::new("enroll_token_dangling");
+    symlink(rig.etc().join("nowhere"), rig.etc().join("token")).unwrap();
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(2), "{ran:?}");
+    assert!(ran.err.contains("symbolic links"), "{ran:?}");
+    assert_eq!(rig.setup_args(), None);
+}
+
+/// Asserts that a file that appears between the look and the write (the setup script makes
+/// one) is not replaced and is reported as a failure of a step (status 1, the setup having
+/// run), not as a refusal that changed nothing. It catches a race that overwrites, and a
+/// failure that claims nothing was done.
+#[test]
+fn a_file_that_appears_before_the_write_is_kept_and_reported_as_a_failure() {
+    let rig = Rig::new("enroll_raced");
+    let theirs = rig.etc().join("instance");
+    rig.script_with(&format!(
+        "echo 'burst:other' > '{}'\nexit 0",
+        theirs.display()
+    ));
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(1), "{ran:?}");
+    assert!(
+        ran.err.contains("cannot write") && ran.err.contains("exists"),
+        "{ran:?}"
+    );
+    assert_eq!(rig.read("instance"), "burst:other\n");
+    assert_eq!(rig.names(), ["instance"]);
+}
+
+/// Asserts that the staged copy of the token is gone when the link fails (a directory is at
+/// the token path by then), so a failed run leaves no secret under a name of its own. It
+/// catches a staged file left behind on the error path.
+#[test]
+fn a_failed_write_leaves_no_staged_secret() {
+    let rig = Rig::new("enroll_staged_gone");
+    let theirs = rig.etc().join("token");
+    rig.script_with(&format!("mkdir '{}'\nexit 0", theirs.display()));
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(1), "{ran:?}");
+    assert_eq!(rig.names(), ["instance", "token"]);
+    assert!(rig.etc().join("token").is_dir());
 }

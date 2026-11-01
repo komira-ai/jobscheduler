@@ -54,8 +54,14 @@ impl Rig {
         );
         let etc = dir.path().join("etc");
         fs::create_dir(&etc).unwrap();
+        // The verb refuses a directory that group or others can write; the umask of the
+        // machine running the test must not decide that.
+        for path in [dir.path(), etc.as_path()] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let host = Host {
             euid: 0,
+            owner: rustix::process::geteuid().as_raw(),
             stdin_is_terminal: false,
             instance_file: etc.join("instance"),
             token_file: etc.join("token"),
@@ -80,13 +86,22 @@ impl Rig {
 
     /// The stand-in script with `last` as its last command.
     pub fn script_with(&self, last: &str) {
+        // The verb runs the script as `/proc/self/fd/N`, so `$0` names nothing: the paths
+        // the script writes to are in its text.
+        let me = self.host.setup_script.display();
+        let dir = self.dir.path().display();
         let text = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nls \"$(dirname \"$0\")/etc\" > \"$0.seen\"\n\
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{me}.args'\nls '{dir}/etc' > '{me}.seen'\n\
              echo 'stand-in setup output'\necho 'stand-in setup complaint' >&2\n{last}\n"
         );
         let path = &self.host.setup_script;
         fs::write(path, text).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The path the stand-in script can write the file `suffix` to, beside itself.
+    pub fn beside_script(&self, suffix: &str) -> String {
+        format!("{}.{suffix}", self.host.setup_script.display())
     }
 
     /// The arguments the stand-in script was last called with; `None` if it never ran.

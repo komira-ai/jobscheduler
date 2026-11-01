@@ -36,6 +36,12 @@ type Seen = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// A server that answers every request with `reply` and records what it read.
 fn recording(reply: String) -> (String, Seen) {
+    recording_with(reply, || {})
+}
+
+/// [`recording`] that also runs `on_request` when a request has been read, before the reply:
+/// a test changes the world while the mint is in flight.
+fn recording_with(reply: String, on_request: impl Fn() + Send + 'static) -> (String, Seen) {
     let seen: Seen = Arc::default();
     let log = Arc::clone(&seen);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -45,6 +51,7 @@ fn recording(reply: String) -> (String, Seen) {
             let mut stream = stream.unwrap();
             let (head, body) = read(&mut stream);
             log.lock().unwrap().push((head, body));
+            on_request();
             let _ = stream.write_all(reply.as_bytes());
         }
     });
@@ -371,7 +378,7 @@ impl Write for Closed {
 #[test]
 fn a_minted_token_that_cannot_be_delivered_is_reported_lost() {
     let scratch = Scratch::new("mint_undelivered");
-    let (server, seen) = recording(created());
+    let (server, _) = recording(created());
     let js = against(&server, &scratch);
 
     let (mut err, mut closed) = (Vec::new(), Closed);
@@ -392,9 +399,18 @@ fn a_minted_token_that_cannot_be_delivered_is_reported_lost() {
     );
     assert!(!err.contains(MINTED));
 
-    fs::create_dir(scratch.path(".minted.new")).unwrap();
-    let out = scratch.path("minted");
+    let outdir = scratch.path("outdir");
+    fs::create_dir(&outdir).unwrap();
+    let (server, seen) = {
+        let locked = outdir.clone();
+        recording_with(created(), move || {
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+        })
+    };
+    let js = against(&server, &scratch);
+    let out = outdir.join("minted");
     let got = js.go(&words(&["--out", out.to_str().unwrap()]));
+    fs::set_permissions(&outdir, fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(got.code, 1, "{}", got.err);
     assert!(
         got.err.contains("could not be written to")
@@ -404,7 +420,65 @@ fn a_minted_token_that_cannot_be_delivered_is_reported_lost() {
         got.err
     );
     assert!(!out.exists());
-    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+/// Asserts that a directory the token cannot be made in (read-only) is refused (exit 2)
+/// before any request, so no token is minted for it; and that a directory that can be written
+/// and searched but not read (0300), where only the sync of the directory fails, still gets
+/// the file and exit 0. It catches a token minted for a destination that was never usable,
+/// and a good token file reported as lost.
+#[test]
+fn the_out_directory_is_probed_before_the_request_and_a_sync_failure_is_not_a_loss() {
+    let scratch = Scratch::new("mint_out_dirs");
+    let (server, seen) = recording(created());
+    let js = against(&server, &scratch);
+    for (name, mode) in [("readonly", 0o500), ("unreadable", 0o300)] {
+        fs::create_dir(scratch.path(name)).unwrap();
+        fs::set_permissions(scratch.path(name), fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let refused = scratch.path("readonly").join("minted");
+    let got = js.go(&words(&["--out", refused.to_str().unwrap()]));
+    assert_eq!(got.code, 2, "{}", got.err);
+    assert!(
+        got.err.contains("--out") && got.err.contains("directory"),
+        "{}",
+        got.err
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "a token was minted for a read-only directory"
+    );
+
+    let kept = scratch.path("unreadable").join("minted");
+    let got = js.go(&words(&["--out", kept.to_str().unwrap()]));
+    for name in ["readonly", "unreadable"] {
+        fs::set_permissions(scratch.path(name), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    assert_eq!((got.code, got.out.as_str()), (0, ""), "{}", got.err);
+    assert_eq!(got.err, facts());
+    assert_eq!(fs::read_to_string(kept).unwrap(), format!("{MINTED}\n"));
+}
+
+/// Asserts that the help says where the JSON and the token go with `--json`, and that the
+/// server is what refuses a ttl over a day. It catches a help that leaves a user to find out
+/// by losing a token.
+#[test]
+fn the_help_says_where_things_go_and_who_limits_the_ttl() {
+    let scratch = Scratch::new("mint_help");
+    let (server, _) = recording(created());
+    let js = against(&server, &scratch);
+    let got = js.go(&["lease", "join-token", "mint", "--help"]);
+    assert_eq!(got.code, 0, "{}", got.err);
+    // The help is wrapped to the width of the terminal: compare it as words.
+    let words = got.out.split_whitespace().collect::<Vec<_>>().join(" ");
+    for want in [
+        "JSON object on standard error",
+        "token stays on standard output",
+        "refuses more than a day",
+    ] {
+        assert!(words.contains(want), "{want}: {}", got.out);
+    }
 }
 
 /// Asserts that `--json` prints the facts as one JSON object on standard error and leaves

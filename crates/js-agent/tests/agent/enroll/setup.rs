@@ -75,16 +75,49 @@ fn a_dry_run_shows_the_setups_refusal() {
     assert_eq!(ran.out, "");
 }
 
-/// Asserts that a shell that cannot be started is a failure (status 1) that names the shell.
-/// It catches a spawn error that is swallowed as a success.
+/// Asserts that a shell that is not there is refused (status 2, nothing run or written), and
+/// that one that passes the checks and still cannot be started (a file that is not
+/// executable) is a failure (status 1) that names it. It catches a spawn error swallowed as
+/// a success, and a shell that was not looked at.
 #[test]
-fn a_shell_that_cannot_start_is_a_failure() {
+fn a_shell_that_is_missing_or_cannot_start_is_not_run() {
     let mut rig = Rig::new("enroll_no_shell");
     rig.host.shell = PathBuf::from("/nonexistent/bash");
     let ran = rig.go(&["--apply"], TOKEN);
-    assert_eq!(ran.status, status(1), "{ran:?}");
+    assert_eq!(ran.status, status(2), "{ran:?}");
     assert!(ran.err.contains("/nonexistent/bash"), "{ran:?}");
+    assert_eq!(rig.setup_args(), None);
     assert_eq!(rig.names(), Vec::<String>::new());
+
+    let plain = rig.dir.path().join("not-a-program");
+    fs::write(&plain, "x").unwrap();
+    fs::set_permissions(&plain, fs::Permissions::from_mode(0o644)).unwrap();
+    rig.host.shell = plain.clone();
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(1), "{ran:?}");
+    assert!(ran.err.contains("cannot run"), "{ran:?}");
+    assert_eq!(rig.names(), Vec::<String>::new());
+}
+
+/// Asserts that a shell that others can write, or that is in a directory they can write, or
+/// that is not root's, is refused (status 2) like the script. It catches a root process that
+/// starts whatever program is at the shell's path.
+#[test]
+fn a_shell_others_can_replace_is_refused() {
+    let mut rig = Rig::new("enroll_unfit_shell");
+    let shell = rig.dir.path().join("shell");
+    fs::copy("/usr/bin/true", &shell).unwrap();
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o757)).unwrap();
+    rig.host.shell = shell.clone();
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(2), "{ran:?}");
+    assert!(ran.err.contains("writable by group or others"), "{ran:?}");
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o755)).unwrap();
+    rig.host.owner += 1;
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(2), "{ran:?}");
+    assert!(ran.err.contains("is not owned by uid"), "{ran:?}");
+    assert_eq!(rig.setup_args(), None);
 }
 
 /// Asserts that a script that is not there is refused (status 2) with its path and the
@@ -129,8 +162,105 @@ fn a_script_that_is_not_fit_to_run_as_root_is_refused() {
     std::os::unix::fs::symlink("/usr/bin/true", &path).unwrap();
     let ran = rig.go(&["--apply"], TOKEN);
     assert_eq!(ran.status, status(2), "{ran:?}");
-    assert!(ran.err.contains("not a regular file"), "{ran:?}");
+    assert!(ran.err.contains("symbolic link"), "{ran:?}");
     assert_eq!(rig.names(), Vec::<String>::new());
+}
+
+/// Asserts that a script others can write (0757), a script in a directory others can write,
+/// and a script that is not owned by the user the verb treats as root are refused (status 2)
+/// and not run. It catches a script that can be swapped between the check and the run, and
+/// an ownership check that only the real root could ever fail.
+#[test]
+fn a_script_others_can_replace_is_refused() {
+    let mut rig = Rig::new("enroll_replaceable_script");
+    let path = rig.host.setup_script.clone();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o757)).unwrap();
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(2), "{ran:?}");
+    assert!(ran.err.contains("writable by group or others"), "{ran:?}");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+    fs::set_permissions(rig.dir.path(), fs::Permissions::from_mode(0o775)).unwrap();
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(2), "{ran:?}");
+    let dir = rig.dir.path().display().to_string();
+    assert!(
+        ran.err.contains(&dir) && ran.err.contains("writable by group or others"),
+        "{ran:?}"
+    );
+    fs::set_permissions(rig.dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+    rig.host.owner += 1;
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(2), "{ran:?}");
+    assert!(ran.err.contains("is not owned by uid"), "{ran:?}");
+    assert_eq!(rig.setup_args(), None, "an unfit script was run");
+    assert_eq!(rig.names(), Vec::<String>::new());
+}
+
+/// Asserts that the script that is run is the file that was checked: it is started as
+/// `/proc/self/fd/N` of the open, checked file, not by its path. It catches a check by path
+/// followed by a run by path, which a swap in between defeats.
+#[test]
+fn the_script_runs_from_the_file_that_was_checked() {
+    let rig = Rig::new("enroll_script_fd");
+    rig.script_with(&format!(
+        "printf '%s' \"$0\" > '{}'\nexit 0",
+        rig.beside_script("zero")
+    ));
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(0), "{ran:?}");
+    let zero = fs::read_to_string(rig.beside_script("zero")).unwrap();
+    assert!(zero.starts_with("/proc/self/fd/"), "{zero}");
+}
+
+/// Asserts that the script runs with umask 022 whatever the operator's was. (The test
+/// process has the umask of the machine, usually the same; this pins the value the script
+/// sees, not the cause.)
+#[test]
+fn the_script_runs_with_umask_022() {
+    let rig = Rig::new("enroll_script_umask");
+    rig.script_with(&format!("umask > '{}'\nexit 0", rig.beside_script("umask")));
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(0), "{ran:?}");
+    assert_eq!(
+        fs::read_to_string(rig.beside_script("umask"))
+            .unwrap()
+            .trim(),
+        "0022"
+    );
+}
+
+/// Asserts that what the script prints reaches standard error as one stream in the order it
+/// was printed (standard output and standard error of the script interleaved), and not the
+/// whole of one after the whole of the other. It catches a buffer that is shown at the end.
+#[test]
+fn the_scripts_words_come_in_the_order_it_printed_them() {
+    let rig = Rig::new("enroll_script_order");
+    rig.script_with("echo third\nexit 0");
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(0), "{ran:?}");
+    assert_eq!(
+        ran.err, "stand-in setup output\nstand-in setup complaint\nthird\n",
+        "{ran:?}"
+    );
+}
+
+/// Asserts that a script interrupted (exit 130 and 143, as the script exits on SIGINT and
+/// SIGTERM) is a failure with status 1 that names the manifest.
+#[test]
+fn an_interrupted_script_is_a_failure() {
+    for code in [130, 143] {
+        let rig = Rig::new("enroll_script_interrupted");
+        rig.script(code);
+        let ran = rig.go(&["--apply"], TOKEN);
+        assert_eq!(ran.status, status(1), "{code}: {ran:?}");
+        assert!(
+            ran.err.contains(&format!("exit status Some({code})")),
+            "{ran:?}"
+        );
+        assert_eq!(rig.names(), Vec::<String>::new());
+    }
 }
 
 /// Asserts that the script runs as a root process should: with an empty environment but a
@@ -139,10 +269,10 @@ fn a_script_that_is_not_fit_to_run_as_root_is_refused() {
 #[test]
 fn the_script_runs_with_a_clean_environment() {
     let rig = Rig::new("enroll_env");
-    rig.script_with("env > \"$0.env\"\nexit 0");
+    rig.script_with(&format!("env > '{}'\nexit 0", rig.beside_script("env")));
     let ran = rig.go(&["--apply"], TOKEN);
     assert_eq!(ran.status, status(0), "{ran:?}");
-    let text = fs::read_to_string(format!("{}.env", rig.host.setup_script.display())).unwrap();
+    let text = fs::read_to_string(rig.beside_script("env")).unwrap();
     let names: Vec<&str> = text
         .lines()
         .filter_map(|line| line.split_once('='))

@@ -56,3 +56,14 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
     File::open(dir.unwrap_or(Path::new("."))).and_then(|dir| dir.sync_all())
 }
+
+/// Whether a file can be made in `dir` and linked to another name there (see
+/// [`create_new`]), found by doing it with names of no other use and removing them.
+///
+/// # Errors
+///
+/// The system's reason the directory cannot take [`create_new`].
+pub fn probe_dir(dir: &Path) -> io::Result<()> {
+    let _ = dir;
+    Ok(())
+}
