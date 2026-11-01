@@ -35,7 +35,12 @@ impl Registry {
         if let Observed::Present { host } = book.read(lease) {
             let record = records.get_mut(&host);
             record.into_iter().for_each(|record| {
-                // The lease the host started last ends: the error of its estimate.
+                // The lease the host started last ends: the error of its estimate, at the
+                // time of this call on the registry's clock. `bound` holds only that
+                // lease, so the stop of an earlier lease on the host counts nothing (not
+                // reachable with one lease per host; sharing classes need a bound per
+                // lease). A lease put back after a restart has no bound and no
+                // `started_at`, so its stop counts nothing.
                 let ends = record.bound.filter(|(held, _)| held == lease);
                 let estimates = lives::est_ends(source, runs, ends, record.started_at);
                 estimates

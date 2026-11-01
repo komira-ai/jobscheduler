@@ -5,6 +5,15 @@
 //! The repository has no histogram type, so the error is kept as a count, a signed sum in
 //! milliseconds and signed buckets with fixed upper edges ([`ERROR_EDGES_MS`]), which is
 //! what a histogram is made of. The counters live in memory and start at zero.
+//!
+//! Two limits of what is counted. A host keeps the bound of the last lease started on it
+//! (`Record::bound`) and nothing for an earlier one, so the stop of an earlier lease on a
+//! host that has started another counts nothing, neither estimated nor unestimated; with
+//! one lease per host that cannot happen, and when sharing classes put many leases on a
+//! host, each lease needs its own start and bound for the counters to count every one.
+//! And the end of a lease is the time `stop` is called, on the registry's clock, not
+//! when the work exited; a lease put back after a restart has no bound and no start, so
+//! its stop counts nothing.
 
 use js_types::RequestId;
 
