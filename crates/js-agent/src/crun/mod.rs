@@ -120,7 +120,9 @@ pub use wire::{
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::fs::File;
 use std::io;
+use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -534,7 +536,10 @@ impl CrunRuntime {
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
         let lease = self.oci.lease_dirs(name);
         // A lease an agent from before the leases were beside the runs left in the store.
-        let legacy = self.leases_beside.then(|| self.store.join(name));
+        let legacy = self
+            .leases_beside
+            .then(|| legacy_lease(&self.store, name))
+            .flatten();
         let (has_cgroup, has_dir) = (
             cgroup.dir().exists(),
             lease.dir.exists() || legacy.as_ref().is_some_and(|dir| dir.exists()),
@@ -818,48 +823,70 @@ fn make_dir(dir: &Path) -> io::Result<()> {
 
 /// Takes the directory `dir` the lifecycle made for the run whose scratch directory is
 /// `reference` ([`Runtime::lease_dir`]) and sets its mode to `0755`. It must be there, be an
-/// empty directory (not a link) and have the project id `project_of` reads of `reference`:
-/// otherwise it is refused, and nothing is made, so a lease never lies outside the run's
-/// disk bound.
+/// empty directory (not a link) and have the project id `project` reads of `reference`
+/// (`None` on both sides, a file system with no project ids, where no quota can be on, is the
+/// same project; a read that failed on either side refuses): otherwise it is refused and
+/// nothing is made, so a lease never lies outside the run's disk bound. Both directories
+/// are opened once, without following a link, and what is checked and set is what was opened.
 fn take_dir(
     dir: &Path,
     reference: &Path,
-    project_of: &dyn Fn(&Path) -> io::Result<u32>,
+    project: &dyn Fn(&File) -> io::Result<Option<u32>>,
 ) -> io::Result<()> {
-    std::fs::symlink_metadata(dir)?;
-    if !is_empty_dir(dir) {
+    let open = open_nofollow(dir)?;
+    let held = open_nofollow(reference)?;
+    // The listing through the descriptor's own `/proc` link; an entry or a listing that cannot
+    // be read counts as something in it.
+    let empty = std::fs::read_dir(format!("/proc/self/fd/{}", open.as_raw_fd()))
+        .is_ok_and(|mut entries| entries.next().is_none());
+    if !empty {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{} is not an empty directory", dir.display()),
         ));
     }
-    if project_of(dir)? != project_of(reference)? {
+    if project(&open)? != project(&held)? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("{} is not in the run's project", dir.display()),
         ));
     }
-    set_open_mode(dir)
+    fchmod_open(&open)
 }
 
-/// The project id of `dir` ([`crate::quota::project_of`]).
-fn project_of(dir: &Path) -> io::Result<u32> {
+/// The project id of an open directory ([`crate::quota::project_of`]).
+fn project_of(dir: &File) -> io::Result<Option<u32>> {
     crate::quota::project_of(dir)
+}
+
+/// Opens the directory `dir` without following a link.
+fn open_nofollow(dir: &Path) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    rustix::fs::open(dir, flags, Mode::empty())
+        .map(File::from)
+        .map_err(io::Error::from)
+}
+
+/// Where an older agent kept the lease `name` in `store`; `None` for a name that is not
+/// exactly one ordinary path component (empty, with a `/`, `.` or `..`), which names no lease
+/// and must never reach a path.
+fn legacy_lease(store: &Path, name: &str) -> Option<PathBuf> {
+    let mut parts = Path::new(name).components();
+    match (parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(part)), None) if part == name => Some(store.join(name)),
+        _ => None,
+    }
+}
+
+/// Sets the mode of the open directory to `0755`.
+fn fchmod_open(dir: &File) -> io::Result<()> {
+    rustix::fs::fchmod(dir, rustix::fs::Mode::from_raw_mode(0o755)).map_err(io::Error::from)
 }
 
 /// Sets the mode of the directory `dir` to `0755` by its descriptor, not following a link.
 fn set_open_mode(dir: &Path) -> io::Result<()> {
-    use rustix::fs::{Mode, OFlags, fchmod};
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    rustix::fs::open(dir, flags, Mode::empty())
-        .and_then(|fd| fchmod(&fd, Mode::from_raw_mode(0o755)))
-        .map_err(io::Error::from)
-}
-
-/// Whether `dir` is a directory (not a link) with nothing in it.
-fn is_empty_dir(dir: &Path) -> bool {
-    std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir())
-        && std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
+    open_nofollow(dir).and_then(|fd| fchmod_open(&fd))
 }
 
 /// The path of `file` of the cgroup `dir` in [`JOB_OWNED_FILES`], where the empty name is the

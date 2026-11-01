@@ -479,3 +479,29 @@ fn removing_an_orphan_removes_its_lease_in_the_store() {
         left_of(&node, &id.0)
     );
 }
+
+/// Proves the store sweep takes only `js-<own tag>-` and not what merely starts like it:
+/// another agent's lease, an entry named by this agent's tag with no dash after it, and one
+/// that has the tag inside another string stay, while this agent's lease goes. Catches a
+/// prefix match that reaches into a neighbour's name.
+#[test]
+fn the_store_sweep_does_not_take_names_that_only_start_like_its_own() {
+    let node = Node::new("sweep-legacy-prefix");
+    let runs = node.dir.join("leases-beside");
+    std::fs::create_dir(&runs).expect("runs");
+    let mine = {
+        let probe = open_beside(&node, "node-1", &runs);
+        store_name(&probe, "old")
+    };
+    let tag = mine.strip_suffix("-old").expect("a run suffix").to_owned();
+    let longer = format!("{tag}0-old");
+    let inside = format!("x{mine}");
+    for name in [&mine, &tag, &longer, &inside] {
+        std::fs::create_dir_all(node.lease_of(name)).expect("an entry");
+    }
+    let _runtime = open_beside(&node, "node-1", &runs);
+    assert!(!node.lease_of(&mine).exists(), "the own lease is removed");
+    for kept in [&tag, &longer, &inside] {
+        assert!(node.lease_of(kept).is_dir(), "{kept} stays");
+    }
+}
