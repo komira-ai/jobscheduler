@@ -81,6 +81,7 @@ PLANNED=0
 REFUSALS=0
 FAILED=0
 FILES_CHANGED=0
+ABORT=0             # set when a step fails in a way that makes the steps after it unsafe
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'STOP: %s\n' "$*" >&2; exit 2; }
@@ -321,16 +322,26 @@ record() {
   [ "$RUN_MODE" = apply ] || return 0
   local line
   line=$(manifest_line "$@") || { say "  FAILED: manifest line for $1"; FAILED=1; return 1; }
-  printf '%s\n' "$line" >>"$MANIFEST"
+  printf '%s\n' "$line" >>"$MANIFEST" || { say "  FAILED: writing $MANIFEST"; FAILED=1; return 1; }
 }
 
 # write_file DST MODE CONTENT: atomic.
 write_file() {
   local dst=$1 mode=$2 content=$3 tmp
   tmp=$dst.new.$$
-  (umask 077; printf '%s' "$content" >"$tmp")
-  chmod "$mode" "$tmp"
-  mv -- "$tmp" "$dst"
+  # errexit is off here (the callers run in || lists): every command is checked, and a half-written copy is removed.
+  if ! (umask 077; printf '%s' "$content" >"$tmp"); then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! chmod "$mode" "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -- "$tmp" "$dst"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -583,12 +594,18 @@ step_scratch_quota() {
     with_quota_option new "$text"
     act "set Options=${MU_OPTIONS:+$MU_OPTIONS,}$QUOTA_OPTION in $MOUNT_UNIT_FILE (was Options=$MU_OPTIONS)" \
       write_file "$MOUNT_UNIT_FILE" "$(stat -c %a "$MOUNT_UNIT_FILE")" "$new" \
-      && record mount-options "$MOUNT_UNIT_FILE" "$MU_OPTIONS" "$(sha256_str "$new")"
+      && record mount-options "$MOUNT_UNIT_FILE" "$MU_OPTIONS" "$(sha256_str "$new")" \
+      || { ABORT=1; return 0; }
   fi
-  act "systemctl daemon-reload" systemctl daemon-reload || return 0
+  act "systemctl daemon-reload" systemctl daemon-reload || { ABORT=1; return 0; }
   [ "$remount" = 1 ] || return 0
-  act "unmount $SCRATCH (systemctl stop $MOUNT_UNIT)" systemctl stop "$MOUNT_UNIT" || return 0
-  act "mount it again with $QUOTA_OPTION (systemctl start $MOUNT_UNIT)" systemctl start "$MOUNT_UNIT" || return 0
+  act "unmount $SCRATCH (systemctl stop $MOUNT_UNIT)" systemctl stop "$MOUNT_UNIT" || { ABORT=1; return 0; }
+  if ! act "mount it again with $QUOTA_OPTION (systemctl start $MOUNT_UNIT)" systemctl start "$MOUNT_UNIT"; then
+    ABORT=1
+    say "  STOP: $SCRATCH is unmounted and the host is left drained, with nothing after this step done."
+    say "  Recover: systemctl start $MOUNT_UNIT   (then read the manifest, and run this script again)"
+    return 0
+  fi
   if [ "$RUN_MODE" = apply ]; then
     mounted=$(scratch_options)
     if options_has "$mounted" "$QUOTA_OPTION"; then
@@ -596,6 +613,7 @@ step_scratch_quota() {
     else
       say "  FAILED: $QUOTA_OPTION is not active on $SCRATCH after the mount (findmnt shows '${mounted:-not mounted}')"
       FAILED=1
+      ABORT=1
     fi
   fi
 }
@@ -717,15 +735,14 @@ step_reload() {
 # below it are made on the mounted filesystem.
 setup_pass() {
   REFUSALS=0
-  step_preflight || true
-  step_packages || true
-  step_user || true
-  step_subids || true
-  step_scratch_quota || true
-  step_dirs || true
-  step_apparmor || true
-  step_files || true
-  step_reload || true
+  local step
+  for step in step_preflight step_packages step_user step_subids step_scratch_quota step_dirs step_apparmor step_files step_reload; do
+    "$step" || true
+    if [ "$ABORT" = 1 ]; then
+      say "aborted after $step: the steps after it did not run"
+      break
+    fi
+  done
 }
 
 # ---------------------------------------------------------------------------------------------------------------

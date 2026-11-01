@@ -37,13 +37,14 @@ const GUARDED: [&str; 14] = [
 ];
 
 /// The real programs the script may run: plain file tools.
-const TOOLS: [&str; 9] = [
+const TOOLS: [&str; 10] = [
     "cat",
     "chmod",
     "dirname",
     "install",
     "mkdir",
     "mv",
+    "rm",
     "sed",
     "sha256sum",
     "stat",
