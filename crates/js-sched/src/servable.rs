@@ -581,9 +581,45 @@ impl Servable {
         })
     }
 
-    /// The worker to hold for a whole-machine `request` that fits nowhere now: the first
-    /// of `drain` (the workers by drain cost, the least tail first) that could run it, with
-    /// no preference for a worker held before. Never one in `reserved`,
+    /// The worker to hold for a request that fits nowhere now when no whole-node settings
+    /// are on, as it always was: `kept` if it still could run it, else the one that could
+    /// which holds the fewest leases, then has the least booked, then comes first by name.
+    /// Never one in `reserved`, nor one in `avoid` while [`Servable::fit`] skips it.
+    pub(crate) fn reserve_by_leases(
+        &mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        request: &Request,
+        reserved: &BTreeSet<WorkerId>,
+        avoid: &BTreeSet<WorkerId>,
+        kept: Option<&WorkerId>,
+    ) -> Option<WorkerId> {
+        let at = self.matching(workers, request);
+        let skip = self.avoided(at, workers, request, avoid);
+        let candidates: Vec<&WorkerId> = self.memo[at]
+            .1
+            .iter()
+            .map(|&i| &self.live[i])
+            .filter(|name| {
+                !reserved.contains(*name)
+                    && !skip.contains(*name)
+                    && workers[*name].capacity.fits(&request.demand())
+            })
+            .collect();
+        if let Some(kept) = kept.filter(|kept| candidates.contains(kept)) {
+            return Some(kept.clone());
+        }
+        candidates
+            .into_iter()
+            .min_by_key(|name| {
+                let w = &workers[*name];
+                (w.leases, w.booked)
+            })
+            .cloned()
+    }
+
+    /// The worker to hold for a request that fits nowhere now, with whole-node settings on:
+    /// the first of `drain` (the workers by drain cost, the least tail first) that could
+    /// run it, with no preference for a worker held before. Never one in `reserved`,
     /// nor one in `avoid` while [`Servable::fit`] skips it. Only a whole-machine lease or an
     /// action that owns its worker ([`Request::owns_worker`]) holds a worker (the caller
     /// asks only for one); an action at a worker's whole memory waits until some worker

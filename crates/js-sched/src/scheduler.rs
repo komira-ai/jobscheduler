@@ -730,9 +730,20 @@ impl Scheduler {
                             }
                         })
                     }
-                    // One hold per pool, by the least tail, the first request in queue
-                    // order taking it (a blocked head shares the pool's slot below).
-                    _ => {
+                    // Without whole-node settings: as it always was, the worker with the
+                    // fewest leases, kept while it could run the request, and no limit
+                    // on how many requests hold a worker.
+                    None => servable.reserve_by_leases(
+                        &self.workers,
+                        request,
+                        &reserved,
+                        &op.avoid,
+                        self.reservations.get(&id),
+                    ),
+                    // With settings, an action that owns its worker holds one worker per
+                    // pool, by the least tail, the first request in queue order taking it
+                    // (a blocked head shares the pool's slot below).
+                    Some(_) => {
                         let pool = servable.pool(&self.workers, request);
                         let drain = self.drain_order(&placed);
                         let open = !held_pools.contains(&pool);
