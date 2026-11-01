@@ -32,23 +32,29 @@ pub struct DrainCost {
     pub tail_end: Option<u64>,
 }
 
-/// The hosts ordered by drain cost, smallest first: the latest end bound of the work on
-/// the host minus `now`, then the fewest leases, then the lowest host id.
+/// The hosts ordered by drain cost, smallest first: the host's tail (see [`tail`]) minus
+/// `now`, then the fewest leases, then the lowest host id. A host with an unknown tail
+/// (a lease with neither an estimate nor a max-wall bound) ranks after every host with
+/// a known one; among those the order is the fewest leases, then the lowest host id.
+/// With no estimates given, a lease's end is its max-wall bound, so the order is that of
+/// the latest end bound.
 pub fn drain_cost(hosts: &[HostLoad], now: u64) -> Vec<DrainCost> {
     let mut out: Vec<DrainCost> = hosts
         .iter()
-        .map(|h| DrainCost {
-            id: h.id.clone(),
-            wait_ms: h
-                .end_bounds
-                .iter()
-                .max()
-                .map_or(0, |end| end.saturating_sub(now)),
-            leases: h.leases,
-            tail_end: None,
+        .map(|h| {
+            let tail_end = tail(h);
+            DrainCost {
+                id: h.id.clone(),
+                wait_ms: tail_end.unwrap_or(u64::MAX).saturating_sub(now),
+                leases: h.leases,
+                tail_end,
+            }
         })
         .collect();
-    out.sort_by(|a, b| (a.wait_ms, a.leases, &a.id).cmp(&(b.wait_ms, b.leases, &b.id)));
+    out.sort_by(|a, b| {
+        let key = |c: &DrainCost| (c.tail_end.is_none(), c.wait_ms, c.leases, c.id.clone());
+        key(a).cmp(&key(b))
+    });
     out
 }
 
@@ -56,21 +62,47 @@ pub fn drain_cost(hosts: &[HostLoad], now: u64) -> Vec<DrainCost> {
 /// tail: one minute.
 pub const DEFAULT_BACKFILL_MARGIN_MS: u64 = 60_000;
 
-/// The tail of `load`: the latest estimated end of its leases, as an absolute time.
+/// The end of one lease: its estimate cut to its max-wall bound when it has one, else the
+/// bound, else unknown. `u64::MAX` is the bound of a lease with no max wall.
+fn lease_end(bound: u64, estimate: Option<u64>) -> Option<u64> {
+    match (estimate, bound == u64::MAX) {
+        (Some(est), false) => Some(est.min(bound)),
+        (Some(est), true) => Some(est),
+        (None, false) => Some(bound),
+        (None, true) => None,
+    }
+}
+
+/// The tail of `load`: the latest end of its leases as an absolute time, each end being
+/// the lease's estimate cut to its max-wall bound ([`HostLoad::est_ends`]), or the bound
+/// when the lease has no estimate. A host with no lease has tail zero. `None` when some
+/// lease has neither an estimate nor a bound.
+///
+/// A caller that reserves a host takes the tail once, when it sets the mark, and keeps
+/// that value: work admitted later cannot extend it.
 pub fn tail(load: &HostLoad) -> Option<u64> {
-    load.end_bounds.iter().max().copied()
+    let mut ends = load.end_bounds.iter().enumerate().map(|(i, bound)| {
+        let estimate = load.est_ends.get(i).copied().flatten();
+        lease_end(*bound, estimate)
+    });
+    ends.try_fold(0, |latest: u64, end| end.map(|end| latest.max(end)))
 }
 
 /// Whether work estimated to take `estimated_duration` may start at `now` on a reserved
-/// host whose tail ends at `tail_end`.
+/// host whose tail ends at `tail_end`: it must end, with `margin` to spare, no later
+/// than the tail. Work with no estimate never fits, and nothing fits a host whose tail is
+/// unknown: the check fails closed.
 pub fn fits_in_tail(
     now: u64,
     estimated_duration: Option<u64>,
     tail_end: Option<u64>,
     margin: u64,
 ) -> bool {
-    let _ = (now, estimated_duration, tail_end, margin);
-    false
+    estimated_duration
+        .zip(tail_end)
+        .is_some_and(|(duration, tail_end)| {
+            now.saturating_add(duration).saturating_add(margin) <= tail_end
+        })
 }
 
 /// How long a reservation may drain before it is given up. After `attempts_given_up`
