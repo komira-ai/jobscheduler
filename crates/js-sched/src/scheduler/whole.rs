@@ -354,7 +354,7 @@ impl Scheduler {
         });
         let now = self.now.as_millis();
         let this_round = (0u64..).zip(placed).map(|(i, (operation, _))| {
-            let lease = LeaseId::new(self.term, self.next_seq + i);
+            let lease = LeaseId::new(self.term, self.next_seq.saturating_add(i));
             (lease, end(self.end_times(*operation, now)))
         });
         held.chain(this_round).collect()

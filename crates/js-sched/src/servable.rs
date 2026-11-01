@@ -575,9 +575,10 @@ impl Servable {
     /// use the binding ratio, which keeps the order the hold had before start times. And
     /// the start time is projected against the flat predicate (CPU and memory caps), not
     /// the horizon curves, the flat-memory guard or the cold cap: those can only make the
-    /// real start later, so the projected start is a lower bound, and a backfill gate that
-    /// admits only work ending by it admits only work that also ends before the real
-    /// start. It costs some backfill and never starves the head.
+    /// real start later, so the projection is a lower bound in the cap dimension only. The
+    /// measured load is held constant: if the real measured load falls, the real start can
+    /// come earlier than projected, and backfill that fits the projected tail can then
+    /// delay the head by up to that gap. The delay is bounded and is not starvation.
     pub(crate) fn hold_for_head_by_start(
         &mut self,
         workers: &BTreeMap<WorkerId, Worker>,

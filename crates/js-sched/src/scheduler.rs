@@ -41,6 +41,7 @@ use js_types::sched::{
 };
 
 use js_whole::WholeNodeConfig;
+use js_whole::cost::DrainCost;
 
 use crate::admission::{Admission, Blocked, LoadConfig, Profile};
 use crate::cordon::Cordons;
@@ -646,6 +647,9 @@ impl Scheduler {
         let mut whole = self.whole_round();
         let mut head_holds = BTreeMap::new();
         let mut held_pools = BTreeSet::new();
+        // The drain order depends on the placements so far: it is computed once and again
+        // only after a placement, not for every blocked action.
+        let mut drain_cache: Option<(usize, Vec<DrainCost>)> = None;
         for (position, &(_, id)) in (0u64..).zip(&self.queue) {
             let op = &self.ops[&id];
             let request = &op.request;
@@ -745,16 +749,19 @@ impl Scheduler {
                     // (a blocked head shares the pool's slot below).
                     Some(_) => {
                         let pool = servable.pool(&self.workers, request);
-                        let drain = self.drain_order(&placed);
                         let open = !held_pools.contains(&pool);
                         let name = open
                             .then(|| {
+                                if drain_cache.as_ref().is_none_or(|(n, _)| *n != placed.len()) {
+                                    drain_cache = Some((placed.len(), self.drain_order(&placed)));
+                                }
+                                let drain = drain_cache.as_ref().map_or(&[][..], |(_, d)| d);
                                 servable.reserve(
                                     &self.workers,
                                     request,
                                     &reserved,
                                     &op.avoid,
-                                    &drain,
+                                    drain,
                                 )
                             })
                             .flatten();

@@ -94,12 +94,14 @@ pub(crate) fn pick<'a>(
 /// with an end is released.
 ///
 /// The fit is the flat predicate: the CPU and memory caps against the left side. It does
-/// not model the horizon curves, the flat-memory guard or the cold cap. That is safe in
-/// the direction that matters: those limits can only make the real start later, so the
-/// start time here is a lower bound of the start the full predicate allows, and a
-/// backfill gate that admits work only if it ends before this start (`fits_in_tail`:
-/// end no later than the start) admits only work that also ends before the real start.
-/// It costs some backfill and never starves the head.
+/// not model the horizon curves, the flat-memory guard or the cold cap. Those limits can
+/// only make the real start later, so in the cap dimension the start time here is a lower
+/// bound of the start the full predicate allows. It is a lower bound in that dimension
+/// only: the measured load and working set are held constant, so if the real measured
+/// load falls, the real start can come earlier than projected. Backfill that fits the
+/// projected tail (`fits_in_tail`: end no later than the start) can then delay the head
+/// by up to that gap. The delay is bounded by the gap and is not starvation: the work
+/// admitted ends by the projected start.
 ///
 /// Among heads whose start time is unknown or equal, the caller ranks by the binding
 /// ratio, which keeps the order the hold had before start times.

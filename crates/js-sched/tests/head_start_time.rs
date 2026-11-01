@@ -152,6 +152,25 @@ fn an_overdue_lease_counts_as_released_now() {
     assert_eq!(r.s.head_hold(op), Some(&w("b")));
 }
 
+/// Catches: the start time read from the end bound alone when a lease has an earlier
+/// estimate: every lease on `a` ends by its bound at 200 s; on `b` two leases have an
+/// estimate of a minute (their bounds are 900 s) and two end at 900 s. By bounds alone `b`
+/// frees the head's 6 cores only at 900 s and `a` wins at 200 s; with the lesser of
+/// estimate and bound `b` frees them at 60 s. The head holds `b`.
+#[test]
+fn the_start_time_uses_the_estimate_when_it_is_earlier_than_the_bound() {
+    let curves = Curves::new("load");
+    for n in 4..6 {
+        curves.set_life(&format!("k{n}"), 1);
+    }
+    let mut r = two_loaded(Some(curves), 1_000, 1_000);
+    walls(&mut r, 0, [Some(200); 4]);
+    walls(&mut r, 4, [Some(900); 4]);
+    let op = head(&mut r, 6_000);
+    r.round(1_000);
+    assert_eq!(r.s.head_hold(op), Some(&w("b")));
+}
+
 /// Catches: the measured load released with the leases: `a` is measured at 7 cores with
 /// small leases, so whatever ends, the head's 3 cores never fit and `a` has no start time;
 /// `b` is charged for its leases and frees enough at 100 s. The head holds `b`, though
