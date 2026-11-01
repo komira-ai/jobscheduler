@@ -633,3 +633,17 @@ fn a_secret_file_with_other_lines_and_no_value_is_not_overwritten() {
         b"EXTRA_SETTING=1\nNANOHUB_API_KEY=\n"
     );
 }
+
+/// Catches an archive that cannot be read passing as a missing one, or as fine: a read error
+/// is a failure (exit 1) that names nothing it should not, and nothing is planned.
+#[test]
+fn an_archive_that_cannot_be_read_fails_the_run() {
+    let kit = kit();
+    let host = ready_host(&kit);
+    host.deny_read("/srv/fetch/caddy-v1.0.0.tar.gz");
+    let (result, _) = install(&host, &kit, Mode::Apply);
+    let err = result.unwrap_err();
+    assert!(matches!(err, MdmError::Io(_)), "{err}");
+    assert_eq!(err.exit_code(), 1);
+    assert!(host.node(&format!("{ETC}/nanohub.env")).is_none());
+}

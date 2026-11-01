@@ -99,7 +99,7 @@ fn run_executes_without_a_shell_or_environment() {
     assert_eq!(host.euid(), std::fs::metadata("/proc/self").unwrap().uid());
     assert_eq!(host.egid(), std::fs::metadata("/proc/self").unwrap().gid());
     assert_eq!(
-        RealHost::default().stat("/").unwrap().unwrap().kind,
+        RealHost::default().stat("/proc").unwrap().unwrap().kind,
         Kind::Dir
     );
 }
@@ -245,4 +245,119 @@ fn system_errors_on_the_last_component_are_returned() {
     let long = format!("/{}", "n".repeat(300));
     assert!(host.mkdir(&long, 0o700, owner).is_err());
     assert!(host.write(&long, 0o600, owner, b"x").is_err());
+}
+
+/// Catches a read or a stat that follows a link planted on the way: root would read (and
+/// report on) whatever the service user points it at. Both are refused, for every way of
+/// reading, and what is behind the link is untouched.
+#[test]
+fn stat_and_read_refuse_a_link_on_the_way() {
+    let (dir, host) = scratch("readlink");
+    let owner = me(&dir);
+    let victim = dir.path().join("victim");
+    std::fs::create_dir(&victim).unwrap();
+    std::fs::write(victim.join("f"), b"behind the link").unwrap();
+    host.mkdir("/state", 0o700, owner).unwrap();
+    symlink(&victim, dir.path().join("state/sub")).unwrap();
+
+    for path in ["/state/sub/f", "/state/sub/missing", "/state/sub/deeper/f"] {
+        let err = host.stat(path).unwrap_err();
+        assert!(err.to_string().contains("refused"), "{path}: {err}");
+        assert!(
+            host.read(path).unwrap_err().to_string().contains("refused"),
+            "{path}"
+        );
+        assert!(
+            host.read_limited(path, 100)
+                .unwrap_err()
+                .to_string()
+                .contains("refused"),
+            "{path}"
+        );
+    }
+    assert_eq!(std::fs::read(victim.join("f")).unwrap(), b"behind the link");
+}
+
+/// Catches a read that follows a link as the file itself, and a stat that reports what the
+/// link points at: a read of a final link is refused, and stat says the name is a link.
+#[test]
+fn a_final_link_is_not_read_and_stat_reports_it_as_a_link() {
+    let (dir, host) = scratch("finallink");
+    let owner = me(&dir);
+    host.mkdir("/state", 0o700, owner).unwrap();
+    std::fs::write(dir.path().join("state/real"), b"real").unwrap();
+    symlink(dir.path().join("state/real"), dir.path().join("state/lnk")).unwrap();
+    symlink(dir.path().join("state"), dir.path().join("state/dirlnk")).unwrap();
+
+    let err = host.read("/state/lnk").unwrap_err();
+    assert!(err.to_string().contains("refused"), "{err}");
+    assert_eq!(host.stat("/state/lnk").unwrap().unwrap().kind, Kind::Other);
+    assert_eq!(
+        host.stat("/state/dirlnk").unwrap().unwrap().kind,
+        Kind::Other
+    );
+    assert_eq!(host.stat("/state/real").unwrap().unwrap().kind, Kind::File);
+    assert_eq!(host.stat("/state").unwrap().unwrap().kind, Kind::Dir);
+    assert_eq!(host.read("/state/real").unwrap().unwrap(), b"real");
+    // Nothing there, and no directory there, are both "nothing".
+    assert_eq!(host.stat("/state/none").unwrap(), None);
+    assert_eq!(host.stat("/nodir/none").unwrap(), None);
+    assert_eq!(host.read("/nodir/none").unwrap(), None);
+    assert_eq!(host.read_limited("/state/none", 5).unwrap(), None);
+}
+
+/// Catches a read with no bound: a file above the limit is an error of kind `FileTooLarge`
+/// after at most limit + 1 bytes, one exactly at the limit is read whole.
+#[test]
+fn read_limited_stops_above_the_limit() {
+    let (dir, host) = scratch("limit");
+    std::fs::write(dir.path().join("f"), b"0123456789").unwrap();
+    assert_eq!(host.read_limited("/f", 10).unwrap().unwrap(), b"0123456789");
+    let err = host.read_limited("/f", 9).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
+}
+
+/// Catches a path the host layer lets through with a `.` or `..` component, whatever the
+/// caller checked: each operation refuses it before touching anything.
+#[test]
+fn dot_and_dotdot_components_are_refused_by_every_operation() {
+    let (dir, host) = scratch("dots");
+    let owner = me(&dir);
+    host.mkdir("/d", 0o700, owner).unwrap();
+    std::fs::write(dir.path().join("outside"), b"x").unwrap();
+    for path in ["/d/../outside", "/d/./f", "/../outside", "/d/.."] {
+        for err in [
+            host.stat(path).unwrap_err(),
+            host.read(path).unwrap_err(),
+            host.write(path, 0o600, owner, b"y").unwrap_err(),
+            host.mkdir(path, 0o700, owner).unwrap_err(),
+            host.remove(path).unwrap_err(),
+        ] {
+            assert!(
+                err.to_string().contains("refused") && err.to_string().contains(". or .."),
+                "{path}: {err}"
+            );
+        }
+    }
+    assert!(dir.path().join("outside").exists());
+}
+
+/// Catches a root anchor that is followed: a host rooted at a link is refused for every
+/// operation (the link is the thing a planted directory would be), and nothing is made
+/// behind it.
+#[test]
+fn a_link_as_the_root_anchor_is_refused() {
+    let (dir, _) = scratch("anchor");
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let anchor = dir.path().join("anchor");
+    symlink(&real, &anchor).unwrap();
+    let host = RealHost::under(&anchor);
+    let owner = me(&dir);
+    assert!(host.stat("/x").unwrap_err().to_string().contains("refused"));
+    assert!(host.read("/x").is_err());
+    assert!(host.write("/x", 0o600, owner, b"y").is_err());
+    assert!(host.mkdir("/x", 0o700, owner).is_err());
+    assert!(host.remove("/x").is_err());
+    assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
 }

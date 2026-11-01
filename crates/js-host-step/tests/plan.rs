@@ -489,3 +489,29 @@ fn the_fake_resolves_symbolic_links() {
     host.put_symlink("/loop/b", "/loop/a");
     assert!(host.canonical("/loop/a").is_err());
 }
+
+/// Catches a fake that prints file contents in `Debug`, and one that reads a link or a file
+/// above a limit as fine, which the real host refuses.
+#[test]
+fn the_fake_node_hides_contents_and_reads_like_the_real_host() {
+    let host = FakeHost::new(0);
+    host.put_file("/s", 0o600, (0, 0), b"TOPSECRET");
+    let shown = format!("{:?}", host.node("/s").unwrap());
+    assert!(
+        !shown.contains("TOPSECRET") && shown.contains("9 bytes") && shown.contains("0600"),
+        "{shown}"
+    );
+    assert_eq!(host.read_limited("/s", 9).unwrap().unwrap(), b"TOPSECRET");
+    assert_eq!(
+        host.read_limited("/s", 8).unwrap_err().kind(),
+        std::io::ErrorKind::FileTooLarge
+    );
+    assert_eq!(host.read_limited("/none", 8).unwrap(), None);
+    host.put_link("/l");
+    assert!(host.read("/l").unwrap_err().to_string().contains("refused"));
+    host.deny_read("/s");
+    assert_eq!(
+        host.read("/s").unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+}

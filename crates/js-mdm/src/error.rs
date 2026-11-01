@@ -106,12 +106,10 @@ pub enum MdmError {
     #[error("{0} is a symbolic link: name the real directory")]
     IsLink(String),
     /// An archive is larger than the cap.
-    #[error("{path} is {size} bytes, more than the {max} an archive may be")]
+    #[error("{path} is larger than the {max} bytes an archive may be")]
     ArchiveTooBig {
         /// The file.
         path: String,
-        /// Its size.
-        size: u64,
         /// The cap.
         max: u64,
     },

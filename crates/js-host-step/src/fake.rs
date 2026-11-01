@@ -7,12 +7,14 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io;
 
 use crate::{Cmd, GETENT, Host, Kind, Meta, Output};
 
-/// A file or directory in the fake tree.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A file or directory in the fake tree. `Debug` prints the length of the content, not the
+/// content: a failed assertion on a tree that holds a secret does not print it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Node {
     /// File or directory.
     pub kind: Kind,
@@ -24,6 +26,18 @@ pub struct Node {
     pub gid: u32,
     /// The content (empty for a directory).
     pub bytes: Vec<u8>,
+}
+
+impl fmt::Debug for Node {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Node")
+            .field("kind", &self.kind)
+            .field("mode", &format_args!("{:04o}", self.mode))
+            .field("uid", &self.uid)
+            .field("gid", &self.gid)
+            .field("bytes", &format_args!("{} bytes", self.bytes.len()))
+            .finish()
+    }
 }
 
 #[derive(Default)]
@@ -227,11 +241,21 @@ impl Host for FakeHost {
     }
 
     fn read(&self, path: &str) -> io::Result<Option<Vec<u8>>> {
+        self.read_limited(path, u64::MAX)
+    }
+
+    fn read_limited(&self, path: &str, limit: u64) -> io::Result<Option<Vec<u8>>> {
         let denied = self.state.borrow().unreadable.iter().any(|p| p == path);
-        let node = self.node(path).map(|n| n.bytes);
-        match denied {
-            true => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
-            false => Ok(node),
+        match (denied, self.node(path)) {
+            (true, _) => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            (false, Some(n)) if n.kind == Kind::Other => {
+                Err(io::Error::other("fake host: refused: a symbolic link"))
+            }
+            (false, Some(n)) if n.bytes.len() as u64 > limit => {
+                Err(io::Error::from(io::ErrorKind::FileTooLarge))
+            }
+            (false, Some(n)) => Ok(Some(n.bytes)),
+            (false, None) => Ok(None),
         }
     }
 

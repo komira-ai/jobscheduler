@@ -31,7 +31,7 @@
 //! key and certificate), the secrets, the binaries and the user stay.
 
 use std::collections::BTreeSet;
-use std::io::Write;
+use std::io::{self, Write};
 
 use js_host_step::{Account, Cmd, Host, Kind, Plan, Planner, UnitVerb, execute};
 use js_mdm_core::commands::scep_ca_init_args;
@@ -267,13 +267,15 @@ fn binaries(
     let mut out = Vec::new();
     for pin in pins.all() {
         let path = format!("{dir}/{}", pin.archive());
-        let size = host.stat(&path)?.map_or(0, |m| m.size);
-        if size > max {
-            return Err(MdmError::ArchiveTooBig { path, size, max });
-        }
-        let bytes = host
-            .read(&path)?
-            .ok_or_else(|| MdmError::NoArchive(path.clone()))?;
+        // One bounded read of one open file: a name swapped for a link cannot get past the cap.
+        let read = host.read_limited(&path, max).map_err(|e| match e.kind() {
+            io::ErrorKind::FileTooLarge => MdmError::ArchiveTooBig {
+                path: path.clone(),
+                max,
+            },
+            _ => MdmError::Io(e),
+        });
+        let bytes = read?.ok_or_else(|| MdmError::NoArchive(path.clone()))?;
         let got = hex::encode(Sha256::digest(&bytes));
         if got != pin.sha256_hex() {
             return Err(MdmError::ArchiveDiffers {

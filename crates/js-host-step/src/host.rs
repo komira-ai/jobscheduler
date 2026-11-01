@@ -115,17 +115,27 @@ pub trait Host {
     /// The system's error, other than "not found"; too many links.
     fn canonical(&self, path: &str) -> io::Result<String>;
 
-    /// `lstat` of `path`; `None` when there is nothing there.
+    /// `lstat` of `path` (a link on the way is refused, a link at the end is reported as
+    /// such); `None` when there is nothing there.
     ///
     /// # Errors
     /// The system's error, other than "not found".
     fn stat(&self, path: &str) -> io::Result<Option<Meta>>;
 
-    /// The bytes of the file at `path`; `None` when there is nothing there.
+    /// The bytes of the file at `path`; `None` when there is nothing there. The real host
+    /// follows no link: not one on the way, and not the file itself.
     ///
     /// # Errors
     /// The system's error, other than "not found" (a permission error included).
     fn read(&self, path: &str) -> io::Result<Option<Vec<u8>>>;
+
+    /// Like [`Host::read`], but a file longer than `limit` bytes is an error of kind
+    /// `FileTooLarge`; no more than `limit + 1` bytes are read. The real host opens the file
+    /// once and reads that descriptor, so a swapped name cannot slip past the limit.
+    ///
+    /// # Errors
+    /// As [`Host::read`]; the file is too large.
+    fn read_limited(&self, path: &str, limit: u64) -> io::Result<Option<Vec<u8>>>;
 
     /// Writes `bytes` to `path` with exactly `mode`, owned by `owner` (uid, gid), replacing
     /// any file there in one step.

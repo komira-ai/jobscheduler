@@ -181,6 +181,10 @@ impl Host for RealHost {
         found(fs::read(self.at(path)))
     }
 
+    fn read_limited(&self, path: &str, _limit: u64) -> io::Result<Option<Vec<u8>>> {
+        self.read(path)
+    }
+
     fn write(&self, path: &str, mode: u32, owner: (u32, u32), bytes: &[u8]) -> io::Result<()> {
         let (dir, name) = self.parent(path, false, owner.0)?;
         let temp = format!("{name}.js-host.tmp");
