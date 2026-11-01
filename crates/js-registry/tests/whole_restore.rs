@@ -404,3 +404,76 @@ fn an_exclusion_for_life_comes_back_and_keeps_the_request_off_the_host() {
     assert_eq!(provider.booked().get(&host("b")), Some(&lease(2)));
     assert_eq!(provider.booked().get(&host("a")), None);
 }
+
+/// Asserts the wait list's size cap at a restore. A ledger of 1026 records, each with a
+/// place, is given: the first 1024 by place are put back in order, the last two are
+/// dropped and counted, and the registry's own cap on the list is the same constant. It
+/// catches a restore that loads a list the live path would never hold.
+#[test]
+fn a_ledger_past_the_wait_list_cap_is_trimmed_and_counted() {
+    let w = World::of(pool(), &[]);
+    let over = js_registry::MAX_WAITING_REQUESTS + 2;
+    let ledger: Vec<ReservationRecord> = (0..over)
+        .map(|n| ReservationRecord {
+            queued: queued(u32::try_from(n).unwrap()),
+            ..record(&format!("q{n:04}"))
+        })
+        .collect();
+    let (back, restored) = restarted(&w, &ledger, false);
+    assert_eq!(
+        restored,
+        Restored {
+            resumed: js_registry::MAX_WAITING_REQUESTS,
+            dropped: 2
+        }
+    );
+    let last = js_registry::MAX_WAITING_REQUESTS - 1;
+    let kept = id(&format!("q{last:04}"));
+    assert_eq!(back.fx.registry.queue_position(&kept), Some(last));
+    let first_over = id(&format!("q{:04}", last + 1));
+    assert_eq!(back.fx.registry.queue_position(&first_over), None);
+    assert_eq!(back.fx.registry.whole_counts().queued, last + 1);
+    assert_eq!(back.fx.registry.dropped_reservations(), 2);
+}
+
+/// Asserts the bound on exclusions per record: a request is kept off a host at most
+/// once, so the pool's machine limit (four here) is the bound. A record with six hosts
+/// keeps the first four by id, is counted as one drop, and its give-up count is kept; a
+/// record with exactly four is untouched. It catches an unbounded list loaded from an
+/// edited file.
+#[test]
+fn exclusions_past_the_pool_size_are_trimmed_and_counted() {
+    let w = World::of(pool(), &[]);
+    let barred = |names: &[&str]| -> Vec<LeaseExclusion> {
+        let hosts = names.iter().map(|name| LeaseExclusion {
+            host: host(name),
+            until: ExclusionEnd::Forever,
+        });
+        hosts.collect()
+    };
+    let many = ReservationRecord {
+        give_ups: 1,
+        exclusions: barred(&["h1", "h2", "h3", "h4", "h5", "h6"]),
+        ..record("r-many")
+    };
+    let exact = ReservationRecord {
+        give_ups: 1,
+        exclusions: barred(&["h1", "h2", "h3", "h4"]),
+        ..record("r-exact")
+    };
+    let (back, restored) = restarted(&w, &[many, exact], false);
+    assert_eq!(
+        restored,
+        Restored {
+            resumed: 2,
+            dropped: 1
+        }
+    );
+    let kept = back.fx.registry.request_record(&id("r-many")).unwrap();
+    let hosts: Vec<String> = kept.exclusions.keys().map(|h| h.to_string()).collect();
+    assert_eq!(hosts, ["h1", "h2", "h3", "h4"]);
+    assert_eq!(kept.give_ups, 1);
+    let exact = back.fx.registry.request_record(&id("r-exact")).unwrap();
+    assert_eq!(exact.exclusions.len(), 4);
+    assert_eq!(back.fx.registry.dropped_reservations(), 1);
+}

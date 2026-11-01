@@ -164,14 +164,6 @@
 //! `claim_by`, the boot plus [`Settings::regain_grace`]. A file without the rows loads
 //! an empty ledger; fields of a later version in a row are kept on rewrite.
 //!
-//! A row can also carry the request's place on the wait list (`queue_place` and
-//! `queued_since_ms`, both or neither, [`Queued`]) and whether its host was quiet when it
-//! was set aside (`assigned`). Both are additive: a row without them loads as not queued
-//! and not assigned, and a build that does not know them reads past them (they are among
-//! the fields of a later version it keeps and writes back), so an older server opens a
-//! file that has them. The table writes the keys for a record that has them and nothing
-//! for one that has not.
-//!
 //! # Id limits
 //!
 //! A term and a sequence are written as TOML integers, so each stops at `i64::MAX`. The

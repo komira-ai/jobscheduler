@@ -10,7 +10,7 @@ use js_types::HostId;
 use crate::clock::Timestamp;
 use crate::error::OpenError;
 use crate::store::{self, Document, StoredExclusion, StoredReservation};
-use crate::types::{Exclusion, ExclusionEnd, Held, Queued, ReservationRecord, Settings};
+use crate::types::{Exclusion, ExclusionEnd, Held, ReservationRecord, Settings};
 
 /// The records of `document`, checked, with the restart grace applied at `boot`: the
 /// count matches, no request twice, every row valid. Each held deadline becomes the
@@ -67,7 +67,7 @@ fn restore(
                 host,
                 reserved_at: Timestamp::from_millis(reserved_at),
                 deadline: Timestamp::from_millis(deadline).max(boot.plus(settings.boot_grace())),
-                assigned: stored.assigned,
+                assigned: false,
             })
         }
         _ => {
@@ -77,27 +77,11 @@ fn restore(
             ));
         }
     };
-    let id = &stored.request_id;
-    if stored.assigned && held.is_none() {
-        return Err(format!("reservation {id} is assigned but holds no host"));
-    }
-    let queued = match (stored.queue_place, stored.queued_since_ms) {
-        (None, None) => None,
-        (Some(place), Some(since)) => Some(Queued {
-            place,
-            since: Timestamp::from_millis(since),
-        }),
-        _ => {
-            return Err(format!(
-                "reservation {id} must name queue_place and queued_since_ms together"
-            ));
-        }
-    };
     let exclusions = stored.exclusion.iter().map(restore_exclusion);
     Ok(ReservationRecord {
         request_id: stored.request_id.clone(),
         held,
-        queued,
+        queued: None,
         give_ups: stored.give_ups,
         prepare_failures: stored.prepare_failures,
         exclusions: exclusions.collect::<Result<_, _>>()?,
@@ -129,9 +113,9 @@ pub(crate) fn stored(
         host: held.map(|held| held.host.as_str().to_owned()),
         reserved_at_ms: held.map(|held| held.reserved_at.millis()),
         deadline_ms: held.map(|held| held.deadline.millis()),
-        assigned: held.is_some_and(|held| held.assigned),
-        queue_place: record.queued.map(|queued| queued.place),
-        queued_since_ms: record.queued.map(|queued| queued.since.millis()),
+        assigned: false,
+        queue_place: None,
+        queued_since_ms: None,
         give_ups: record.give_ups,
         prepare_failures: record.prepare_failures,
         exclusion: record.exclusions.iter().map(stored_exclusion).collect(),

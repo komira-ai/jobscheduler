@@ -103,11 +103,7 @@
 //!   reaches its deadline with the host still busy is given up, the host is left out for
 //!   the request for `reserve_backoff`, and after `max_reserve_attempts` give-ups the
 //!   next deadline is the wall time and the reservation commits. Cancelling the request
-//!   or letting it expire drops the reservation at once. The marks, the wait list's order,
-//!   the give-up and failed-prepare counts and the exclusions of requests that carry an id
-//!   are handed out as a ledger ([`Registry::reservation_ledger`]) for the caller to keep
-//!   and are put back at a start ([`Registry::restore_reservations`]); see the `ledger`
-//!   module of the registry for what is kept and what is dropped at a restore.
+//!   or letting it expire drops the reservation at once. Reservations are in memory only.
 //! - **Scale-down marks.** A scaler that gives hosts back marks them in two steps,
 //!   [`Registry::drain`] and then [`Registry::release_host`] ([`HostMark::Draining`],
 //!   [`HostMark::Releasing`]). A marked host takes no start of any kind: no lease, no

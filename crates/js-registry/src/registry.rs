@@ -160,10 +160,6 @@ struct State {
     waiting: WaitList,
     /// The hosts set aside for waiting requests.
     marks: Marks,
-    /// How many restored reservations were dropped: a request not presented again within
-    /// the regain grace, a mark on a host that never came back, a record that could not
-    /// stand ([`Registry::dropped_reservations`]).
-    dropped: u64,
     /// Whether a request that finds no host could be served by a launch.
     launchable: Option<Launchable>,
     /// Hosts that are being given back and are to be marked releasing from their first
@@ -249,7 +245,6 @@ impl Registry {
             requests: Requests::default(),
             waiting: WaitList::default(),
             marks: Marks::default(),
-            dropped: 0,
             launchable: None,
             ending: BTreeSet::new(),
         };
@@ -281,8 +276,7 @@ impl Registry {
         state.forget_lost(now, config.grace_ms(), config.lost_retention_ms());
         let horizon = Rules::of(config).idle_horizon_ms();
         state.requests.sweep(now, horizon);
-        let unclaimed = state.waiting.expire(now, Rules::of(config).regain_grace_ms);
-        state.dropped += unclaimed;
+        state.waiting.expire(now, Rules::of(config).regain_grace_ms);
         let State { marks, waiting, .. } = &mut *state;
         marks.retain_waiting(waiting);
         state
@@ -350,9 +344,7 @@ impl Registry {
     /// been delivered to a start (the record is then removed, see the `requests` module)
     /// or the record has gone idle. A start of such a request answers
     /// `Refused(ExclusiveNotReady)`, which the consumer sees as the typed
-    /// `exclusive-not-ready` refusal (wire 409). A restart puts the counts back from the ledger
-    /// ([`Registry::restore_reservations`]) but not this text, so `max_replace` holds
-    /// across restarts and a restored terminal request reads `None` here. Ask as
+    /// `exclusive-not-ready` refusal (wire 409). A restart forgets the record and resets `max_replace`. Ask as
     /// [`Registry::request_record`] does.
     pub fn not_ready(&self, key: impl Into<RequestKey>) -> Option<NotReady> {
         let record = self.request_record(key);
@@ -411,7 +403,7 @@ impl Registry {
         WholeCounts {
             reserved: state.marks.reservations().len(),
             held: held.count(),
-            queued: state.waiting.len(),
+            queued: state.waiting.waiting().count(),
         }
     }
 

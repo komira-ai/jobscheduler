@@ -39,18 +39,14 @@
 //!
 //! # Restart
 //!
-//! The marks, with the wait list and the give-up counts, are kept in the lease file as
-//! the registry's reservation ledger (`Registry::reservation_ledger`) and put back at a
-//! start (`Registry::restore_reservations`). A restored mark keeps its host, its request
-//! and the instant it was made; its deadline is what the lease table returns, which
-//! raises it to at least the boot plus the boot grace, so a reservation does not fire
-//! the moment the server is back; whether it drains or waits for a start is as it was.
-//! It is *capped* when the request's give-ups have reached `max_reserve_attempts`, as it
-//! was when it was made. Until the request is presented again the pass does not step it
-//! (see the wait list), and a restored mark stands while its host has not yet said
-//! hello: `claim_by`, the start plus `regain_grace`, ends that wait, after which a mark
-//! on a host the registry does not know is dropped and counted. Nothing is persisted
-//! about what a host costs to drain: the cost is read from the table each pass.
+//! The marks, the wait list and the give-up counts are held in memory only. A restart
+//! loses them: a waiting request presents itself again, waits again and is set a host
+//! again, and a request that had given up hosts starts counting from none. The design
+//! says reservations survive a restart; persisting them is a later change. The lease
+//! file already records the whole-node reservation of a lease it holds
+//! (`js-lease`), so what remains is to write the marks beside it and read them back.
+//! Until then a restart costs a waiting request its place and its progress, and
+//! touches no lease and no run.
 //!
 //! The pass reads the table as [`HostFacts`], which the registry builds under its lock, so
 //! it holds no clock and no lock of its own.
@@ -76,22 +72,6 @@ pub(crate) struct Mark {
     deadline: Timestamp,
     assigned: bool,
     capped: bool,
-    /// For a mark put back from the ledger: until when it stands while its host is
-    /// unknown to the registry. Cleared when the host is seen.
-    claim_by: Option<Timestamp>,
-}
-
-/// A mark put back from the ledger ([`Marks::revive`]).
-pub(crate) struct Revived {
-    pub(crate) request: RequestId,
-    pub(crate) host: HostId,
-    pub(crate) at: Timestamp,
-    pub(crate) deadline: Timestamp,
-    pub(crate) assigned: bool,
-    /// The request had given up `max_reserve_attempts` hosts or more when the mark was
-    /// made.
-    pub(crate) capped: bool,
-    pub(crate) claim_by: Timestamp,
 }
 
 /// A host set aside for a request, as an operator sees it
@@ -138,45 +118,6 @@ impl Marks {
     fn place(&mut self, host: HostId, mark: Mark) {
         self.drop_request(&mark.request);
         self.0.entry(host).or_insert(mark);
-    }
-
-    /// Puts back a mark from the ledger on its host: whether it was, which it is not when
-    /// the host carries a mark already. The request's earlier mark goes, so it holds one.
-    pub(crate) fn revive(&mut self, mark: Revived) -> bool {
-        if self.0.contains_key(&mark.host) {
-            return false;
-        }
-        self.drop_request(&mark.request);
-        let revived = Mark {
-            request: mark.request,
-            at: mark.at,
-            deadline: mark.deadline,
-            assigned: mark.assigned,
-            capped: mark.capped,
-            claim_by: Some(mark.claim_by),
-        };
-        self.0.insert(mark.host, revived);
-        true
-    }
-
-    /// Drops the marks that cannot stand on the hosts as the pass reads them: a mark on a
-    /// tainted host, and one on a host the registry does not know, unless it was put back
-    /// from the ledger and its host still has until `claim_by` to say hello. A host that
-    /// is known clears the wait. How many put-back marks were dropped for their host
-    /// never coming back.
-    fn stand(&mut self, pass: &Pass<'_>) -> u64 {
-        let mut gone = 0;
-        self.0.retain(|host, mark| {
-            let fact = pass.hosts.iter().find(|fact| fact.id == *host);
-            let Some(fact) = fact else {
-                let waiting = mark.claim_by.is_some_and(|by| pass.now < by);
-                gone += u64::from(mark.claim_by.is_some() & !waiting);
-                return waiting;
-            };
-            mark.claim_by = None;
-            fact.capability != Capability::Tainted
-        });
-        gone
     }
 
     /// Drops the mark of request `id`, if it has one.
@@ -244,15 +185,17 @@ pub(crate) struct Pass<'a> {
 }
 
 /// Runs one pass: drops the marks that cannot stand, then walks the wait list in queue
-/// order, as the module documentation says. How many put-back marks were dropped because
-/// their host never said hello.
+/// order, as the module documentation says.
 pub(crate) fn advance(
     marks: &mut Marks,
     waiting: &WaitList,
     requests: &mut Requests,
     pass: Pass<'_>,
-) -> u64 {
-    let gone = marks.stand(&pass);
+) {
+    marks.0.retain(|host, _| {
+        let fact = pass.hosts.iter().find(|fact| fact.id == *host);
+        fact.is_some_and(|fact| fact.capability != Capability::Tainted)
+    });
     let mut ctx = Ctx {
         marks,
         requests,
@@ -262,7 +205,6 @@ pub(crate) fn advance(
     waiting
         .waiting()
         .for_each(|(id, request, since)| ctx.step(id, request, since));
-    gone
 }
 
 fn capable_hosts(pass: &Pass<'_>) -> usize {
@@ -376,7 +318,6 @@ impl Ctx<'_> {
             deadline: self.pass.now.plus(Duration::from_millis(deadline)),
             assigned: false,
             capped: given_up >= settings.max_reserve_attempts,
-            claim_by: None,
         }
     }
 

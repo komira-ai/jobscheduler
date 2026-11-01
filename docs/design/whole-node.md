@@ -87,18 +87,18 @@ the host it has and does not switch to a cheaper one later (no thrash). Two requ
 picks the cheapest host that no reservation holds. A request that is cancelled by its consumer, or whose wait ends, drops its reservation
 at once and the host returns to `serving`.
 
-**Reservations survive a restart (D55).** *In the lease server, the registry's marks, the wait list's order and the give-up and failed-prepare counts are persisted as below, in the reservation ledger of the lease file. The js-sched copy of the state machine (`scheduler/whole.rs`) keeps its state in memory only and is not what the lease server runs.* A reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
+**Reservations survive a restart (D55).** *Today's registry keeps its marks, wait list and give-up counts in memory only, so a restart loses them: a waiting request presents again, waits again and is set a host again, and no lease or run is touched. Persisting them beside the reservation records of the lease file is a later change.* A reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
 atomic write as the leases and under the same single-writer, fsync and lock rules, before the scheduler acts on it (commit before act). A
 *reservation record* holds: the request id, the host, the time reserved, the deadline, the request's two counters (`max_reserve_attempts`
-give-ups and `max_replace` prepare failures) and its host exclusions with their end times; in the registry's ledger it also holds the request's place on the wait list and the instant it was first presented, and whether the host was quiet when it was set aside (an assigned mark drains nothing). The record outlives the reservation only
+give-ups and `max_replace` prepare failures) and its host exclusions with their end times. The record outlives the reservation only
 while the request lives (it carries the counters of a request between reservations) and is deleted when the request is granted, refused,
-cancelled or unclaimed. The queue's order is persisted (the place and the first-seen instant) but not what each request asks for (the table holds leases, not requests); a consumer presents the same request id
-again after a restart, as it re-presents any request, and the registry binds it to its record and its place, so the drain in progress continues with its
-original deadline (raised to at least boot plus the boot grace, `RESERVATION_BOOT_GRACE`, two minutes in the lease server; never the stored deadline plus the grace; the lease-side grace is a separate setting, not yet wired) and the counters keep the bounds of sections 4 and 5 across any number of
+cancelled or unclaimed. The queue itself is not persisted (the table holds leases, not requests); a consumer presents the same request id
+again after a restart, as it re-presents any request, and the scheduler binds it to its record, so the drain in progress continues with its
+original deadline (raised to at least boot plus the boot grace, never the stored deadline plus the grace; the lease-side grace is a separate setting, not yet wired) and the counters keep the bounds of sections 4 and 5 across any number of
 restarts. A record not claimed within `regain_grace` of the boot is dropped, and the host returns to `serving`. Why persisted: the drain
 is the expensive step (up to a max wall time of idle host), and a restart that dropped it would restart every drain and let a restart loop
 defeat `max_reserve_attempts`. A restore from a snapshot reads the records as they were then; a record naming a host or request that no longer
-exists is dropped at boot, and counted (a request id listed twice, a host being given back, a host two records name, and a mark with no place on the wait list are dropped at once; a request not presented again, and a mark whose host does not say hello, within `regain_grace`). The file is one tick behind the registry at most, and the final tick of a shutdown brings it level. Estimates are not persisted: they are recomputed. The file format is additive; a build that does not know the keys reads past them. Cost: a few small rows, written with the same rewrite as the leases.
+exists is dropped at boot. Cost: a few small rows, written with the same rewrite as the leases.
 
 ## 4. Draining
 
