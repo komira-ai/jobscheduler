@@ -9,9 +9,11 @@
 # macro, xtask) can see one. `sign` runs only by hand from main, in the environment
 # `macos-signing`, which a repository administrator creates with its secrets and a rule that
 # only main may deploy to it. It does not build: it takes the checked unsigned package and the
-# checker from `build`, checks the package again, signs and notarizes it, checks it again and
-# sums it. It runs no cargo. A secret is named only in the environment of the step that needs
-# it. When the environment or the secrets are not set up, `sign` says so in a notice, skips
+# checker from `build`, checks that the package is the one `build` summed, signs and notarizes
+# it, then checks the signed package with the checker and sums it. Nothing built from the
+# repository runs before the signing steps, and the system tools it calls are called by
+# absolute path. It runs no cargo. A secret is named only in the environment of the step that
+# needs it. When the environment or the secrets are not set up, `sign` says so in a notice, skips
 # every step after the first and the run succeeds.
 #
 # No command expands an expression: a script reads its environment. The version, which goes
@@ -177,13 +179,12 @@ jobs:
         with:
           name: js-agent-macos-checker
           path: tools
-      - name: The unsigned package is the one that was checked
+      - name: The downloaded package is the one that was summed
         if: ${{ steps.signing.outputs.state == 'present' }}
         run: |
           set -euo pipefail
-          chmod +x tools/xtask
-          (cd dist && shasum -a 256 --check SHA256SUMS)
-          tools/xtask pkg check-macos --pkg "dist/js-agent-$VERSION-aarch64-apple-darwin.pkg" --version "$VERSION"
+          cd dist
+          /usr/bin/shasum -a 256 --check SHA256SUMS
       - name: Sign the package
         if: ${{ steps.signing.outputs.state == 'present' }}
         env:
@@ -195,18 +196,18 @@ jobs:
           keychain="$RUNNER_TEMP/js-agent-signing.keychain-db"
           password="$(uuidgen)"
           cleanup() {
-            security delete-keychain "$keychain" || true
+            /usr/bin/security delete-keychain "$keychain" || true
             rm -f "$RUNNER_TEMP/installer.p12"
           }
           trap cleanup EXIT
-          security create-keychain -p "$password" "$keychain"
-          security set-keychain-settings -lut 3600 "$keychain"
-          security unlock-keychain -p "$password" "$keychain"
+          /usr/bin/security create-keychain -p "$password" "$keychain"
+          /usr/bin/security set-keychain-settings -lut 3600 "$keychain"
+          /usr/bin/security unlock-keychain -p "$password" "$keychain"
           printf '%s' "$MACOS_INSTALLER_CERT_P12" | base64 --decode > "$RUNNER_TEMP/installer.p12"
-          security import "$RUNNER_TEMP/installer.p12" -P "$MACOS_INSTALLER_CERT_PASSWORD" -T /usr/bin/productsign -t cert -f pkcs12 -k "$keychain"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          /usr/bin/security import "$RUNNER_TEMP/installer.p12" -P "$MACOS_INSTALLER_CERT_PASSWORD" -T /usr/bin/productsign -t cert -f pkcs12 -k "$keychain"
+          /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
           pkg="dist/js-agent-$VERSION-aarch64-apple-darwin.pkg"
-          productsign --sign "$MACOS_INSTALLER_IDENTITY" --keychain "$keychain" "$pkg" "$pkg.signed"
+          /usr/bin/productsign --sign "$MACOS_INSTALLER_IDENTITY" --keychain "$keychain" "$pkg" "$pkg.signed"
           mv "$pkg.signed" "$pkg"
           pkgutil --check-signature "$pkg"
       - name: Notarize the package
@@ -221,19 +222,22 @@ jobs:
           trap 'rm -f "$key"' EXIT
           printf '%s' "$MACOS_NOTARY_KEY_P8" > "$key"
           pkg="dist/js-agent-$VERSION-aarch64-apple-darwin.pkg"
-          xcrun notarytool submit "$pkg" --key "$key" --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER_ID" --wait
-          xcrun stapler staple "$pkg"
-          xcrun stapler validate "$pkg"
+          /usr/bin/xcrun notarytool submit "$pkg" --key "$key" --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER_ID" --wait
+          /usr/bin/xcrun stapler staple "$pkg"
+          /usr/bin/xcrun stapler validate "$pkg"
       - name: The final package is the package
         if: ${{ steps.signing.outputs.state == 'present' }}
-        run: tools/xtask pkg check-macos --pkg "dist/js-agent-$VERSION-aarch64-apple-darwin.pkg" --version "$VERSION"
+        run: |
+          set -euo pipefail
+          chmod +x tools/xtask
+          tools/xtask pkg check-macos --pkg "dist/js-agent-$VERSION-aarch64-apple-darwin.pkg" --version "$VERSION"
       - name: Sum the final package
         if: ${{ steps.signing.outputs.state == 'present' }}
         run: |
           set -euo pipefail
           cd dist
-          shasum -a 256 "js-agent-$VERSION-aarch64-apple-darwin.pkg" > SHA256SUMS
-          shasum -a 256 --check SHA256SUMS
+          /usr/bin/shasum -a 256 "js-agent-$VERSION-aarch64-apple-darwin.pkg" > SHA256SUMS
+          /usr/bin/shasum -a 256 --check SHA256SUMS
           cat SHA256SUMS
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ steps.signing.outputs.state == 'present' }}
