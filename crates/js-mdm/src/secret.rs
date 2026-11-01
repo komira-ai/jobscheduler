@@ -50,7 +50,8 @@ pub fn holds_other_lines(bytes: &[u8], key: &str) -> bool {
     let prefix = format!("{key}=");
     String::from_utf8_lossy(bytes)
         .lines()
-        .any(|l| !l.trim().is_empty() && !l.starts_with(&prefix))
+        .filter(|l| !l.trim().is_empty())
+        .any(|l| !l.starts_with(&prefix))
 }
 
 /// The value of `key` in the secret file at `path`: refused unless the file is a 0600 file of

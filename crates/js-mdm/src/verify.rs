@@ -363,10 +363,8 @@ pub fn run(env: &Env<'_>, v: &Verify<'_>, out: &mut dyn Write) -> Result<bool, M
         if line.is_empty() || line.contains(['\n', '\r']) {
             return Err(MdmError::BadIgnore(line.clone()));
         }
-        writeln!(
-            out,
-            "ignoring   every line equal to {line:?}, on both sides"
-        )?;
+        let note = format!("ignoring   every line equal to {line:?}, on both sides");
+        writeln!(out, "{note}")?;
     }
     if host.euid() != 0 {
         writeln!(out, "{NOT_ROOT}")?;
