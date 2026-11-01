@@ -26,13 +26,19 @@
 //! that read both say so. Units are not collected on exit ([`unit_name`] makes each run's
 //! name unique), so a failed one stays loaded to be read; the verb resets it afterwards.
 //!
+//! A unit that exits 0 having run no test is a failure too: the unit runs its binary through
+//! `xtask count-run` ([`crate::count_run`]), which writes the number of tests the binary
+//! reported to a file ([`count_file`]), and a target passes only if that file holds a count of
+//! at least one (a filter that matches nothing, or a binary built without its tests, exits 0).
+//!
 //! Every target runs even when one before it failed; the verb fails if any did.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
+use crate::count_run::read_count;
 use crate::test_build::{self, Built, Error};
 
 /// The busybox image the tests run, without its digest.
@@ -241,10 +247,16 @@ fn reset_unit(sudo: &dyn Sudo, unit: &str, shown: &Result<String, Error>) {
     }
 }
 
-/// Runs the `systemd-run` command `args` for `unit`, then reads and resets the unit: `Ok`
-/// only when `systemd-run` exited 0 and the unit's own result is a clean exit. Every
-/// reason it is not, joined.
-fn run_unit(sudo: &dyn Sudo, unit: &str, args: &[OsString]) -> Result<(), String> {
+/// Runs the `systemd-run` command `args` for `unit`, then reads and resets the unit: the
+/// number of tests it ran (from `count_file`, which its `count-run` wrote) only when
+/// `systemd-run` exited 0, the unit's own result is a clean exit and at least one test ran.
+/// Every reason it is not, joined.
+fn run_unit(
+    sudo: &dyn Sudo,
+    unit: &str,
+    args: &[OsString],
+    count_file: &Path,
+) -> Result<u64, String> {
     let ran = sudo.run(args);
     let shown = sudo.read(&show_args(unit));
     reset_unit(sudo, unit, &shown);
@@ -259,24 +271,27 @@ fn run_unit(sudo: &dyn Sudo, unit: &str, args: &[OsString]) -> Result<(), String
         Err(e) => why.push(format!("could not read the result of unit {unit}: {e}")),
     }
     if why.is_empty() {
-        Ok(())
-    } else {
-        Err(why.join("; "))
+        return read_count(count_file);
     }
+    Err(why.join("; "))
 }
 
 /// Reads and resets `unit`, which a step started with `systemd-run --wait` (without
-/// `--collect`): the line to print when it exited 0.
+/// `--collect`) around `count-run --count-file <count_file>`: the line to print when it
+/// exited 0 having run tests.
 ///
 /// # Errors
-/// The unit's result could not be read or is not a clean exit.
-pub fn check_unit(sudo: &dyn Sudo, unit: &str) -> Result<String, Error> {
+/// The unit's result could not be read or is not a clean exit, or `count_file` does not
+/// hold a count of at least one test.
+pub fn check_unit(sudo: &dyn Sudo, unit: &str, count_file: &Path) -> Result<String, Error> {
     let shown = sudo.read(&show_args(unit));
     reset_unit(sudo, unit, &shown);
     let text = shown
         .map_err(|e| Error::Failed(format!("could not read the result of unit {unit}: {e}")))?;
     unit_verdict(&text).map_err(|why| Error::Failed(format!("unit {unit}: {why}")))?;
-    Ok(format!("ok: unit {unit} exited 0"))
+    let count =
+        read_count(count_file).map_err(|why| Error::Failed(format!("unit {unit}: {why}")))?;
+    Ok(format!("ok: unit {unit} exited 0 and ran {count} tests"))
 }
 
 /// What one target's unit is given.
@@ -297,6 +312,10 @@ pub struct Unit<'a> {
     pub path: &'a OsStr,
     /// The digest of this architecture's busybox manifest ([`manifest_for`]).
     pub manifest: &'a str,
+    /// The `xtask` program, which wraps the binary ([`crate::count_run`]).
+    pub xtask: &'a Path,
+    /// The file the wrapper writes the count of tests run to ([`count_file`]).
+    pub count_file: &'a Path,
 }
 
 /// `<prefix><value>`, for a value that need not be UTF-8.
@@ -334,8 +353,7 @@ pub fn systemd_run_args(u: &Unit<'_>) -> Vec<OsString> {
         args.push("-E".into());
         args.push(e);
     }
-    args.push(u.built.executable.clone().into());
-    args.push("--include-ignored".into());
+    args.extend(counted_command(u.xtask, u.count_file, &u.built.executable));
     args
 }
 
@@ -351,6 +369,30 @@ pub struct RootUnit<'a> {
     pub job_user: &'a str,
     /// The `PATH` the tests find `crun`, `busybox` and the id tools on.
     pub path: &'a OsStr,
+    /// The `xtask` program, which wraps the binary ([`crate::count_run`]).
+    pub xtask: &'a Path,
+    /// The file the wrapper writes the count of tests run to ([`count_file`]).
+    pub count_file: &'a Path,
+}
+
+/// The file the unit named `unit` writes the count of tests it ran to, under `root`'s
+/// `target/` (the runner user's, writable by a unit of either user).
+pub fn count_file(root: &Path, unit: &str) -> PathBuf {
+    root.join("target/crun-tests").join(format!("{unit}.count"))
+}
+
+/// The tail of a unit's command: the binary, run through `count-run` so its test count is
+/// written to `count_file`, with its ignored tests included.
+fn counted_command(xtask: &Path, count_file: &Path, binary: &Path) -> Vec<OsString> {
+    vec![
+        xtask.into(),
+        "count-run".into(),
+        "--count-file".into(),
+        count_file.into(),
+        "--".into(),
+        binary.into(),
+        "--include-ignored".into(),
+    ]
 }
 
 /// [`systemd_run_args`] for a target whose tests run as root: the same unit (in [`SLICE`],
@@ -373,8 +415,7 @@ pub fn root_systemd_run_args(u: &RootUnit<'_>) -> Vec<OsString> {
         args.push("-E".into());
         args.push(e);
     }
-    args.push(u.built.executable.clone().into());
-    args.push("--include-ignored".into());
+    args.extend(counted_command(u.xtask, u.count_file, &u.built.executable));
     args
 }
 
@@ -423,9 +464,18 @@ pub fn run(p: &CrunTests<'_>) -> Result<String, Error> {
 
     let home = std::env::var_os("HOME").unwrap_or_default();
     let path = std::env::var_os("PATH").unwrap_or_default();
+    let xtask = std::env::current_exe()
+        .map_err(|e| Error::Failed(format!("cannot find the xtask program: {e}")))?;
+    let root = std::path::absolute(p.root)
+        .map_err(|e| Error::Failed(format!("{}: {e}", p.root.display())))?;
     let mut failed = Vec::new();
     for (target, built) in targets.iter().zip(&built) {
         let unit = unit_name(target, std::process::id());
+        let count = count_file(&root, &unit);
+        // A stale file of an earlier run must not be read for this one's.
+        let _ = std::fs::remove_file(&count);
+        std::fs::create_dir_all(count.parent().expect("a parent"))
+            .map_err(|e| Error::Failed(format!("{}: {e}", count.display())))?;
         let args = match p.job_user {
             Some(job_user) => root_systemd_run_args(&RootUnit {
                 target,
@@ -433,6 +483,8 @@ pub fn run(p: &CrunTests<'_>) -> Result<String, Error> {
                 built,
                 job_user,
                 path: &path,
+                xtask: &xtask,
+                count_file: &count,
             }),
             None => systemd_run_args(&Unit {
                 target,
@@ -443,13 +495,16 @@ pub fn run(p: &CrunTests<'_>) -> Result<String, Error> {
                 home: &home,
                 path: &path,
                 manifest,
+                xtask: &xtask,
+                count_file: &count,
             }),
         };
-        if let Err(why) = run_unit(p.sudo, &unit, &args) {
-            failed.push(format!(
+        match run_unit(p.sudo, &unit, &args, &count) {
+            Ok(ran) => println!("{target}: {ran} tests ran"),
+            Err(why) => failed.push(format!(
                 "the tests of -p {PACKAGE} --test {target} failed in their unit ({}): {why}",
                 built.executable.display()
-            ));
+            )),
         }
     }
     if failed.is_empty() {

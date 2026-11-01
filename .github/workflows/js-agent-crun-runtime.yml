@@ -65,6 +65,7 @@ jobs:
       - name: Build the tests as the runner user
         run: |
           set -euo pipefail
+          cargo build -p xtask --locked
           cargo test -p js-agent --test crun_runtime --locked --no-run --message-format json > "$RUNNER_TEMP/build.json"
           exe=$(jq -r 'select(.executable != null and .target.name == "crun_runtime") | .executable' "$RUNNER_TEMP/build.json" | tail -n 1)
           test -x "$exe"
@@ -84,8 +85,12 @@ jobs:
             --working-directory="$GITHUB_WORKSPACE/crates/js-agent" \
             -E "PATH=$PATH" -E JS_JOB_USER=js-job \
             -E "JS_TEST_IMAGE=docker://docker.io/library/busybox@$manifest" \
+            "$GITHUB_WORKSPACE/target/debug/xtask" count-run \
+            --count-file "$RUNNER_TEMP/crun-runtime.count" -- \
             "$EXE" --include-ignored --test-threads=2 || rc=$?
           # systemd-run's exit status is not trusted (it exited 0 after a unit's binary
           # failed): the unit's own result is read whatever it said, and the unit is reset.
-          cargo xtask unit-result --unit js-crun-runtime
+          # The count of tests the wrapper wrote must also be at least one.
+          cargo xtask unit-result --unit js-crun-runtime \
+            --count-file "$RUNNER_TEMP/crun-runtime.count"
           exit "$rc"

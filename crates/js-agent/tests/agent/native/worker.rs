@@ -5,7 +5,7 @@
 use std::fs;
 use std::sync::Arc;
 
-use js_agent::native::{NativeFlags, NativeSettings};
+use js_agent::native::{NativeFlags, NativeSettings, PfFlags};
 use js_agent::usage::Outbox;
 use js_agent::{Backend, Delivery, Platform, Rescue, Snapshot, Worker};
 use js_agent_wire::{Command, HeartbeatReply, HeldState, Outcome};
@@ -40,6 +40,7 @@ fn a_native_result_stays_published_until_it_is_acknowledged() {
         deny_read: &[],
         max_file_mib: None,
         max_processes: None,
+        pf: PfFlags::default(),
     };
     let settings = NativeSettings::from_flags(
         &flags,
@@ -121,6 +122,7 @@ fn leases_an_earlier_process_left_are_ended_at_start_and_by_the_rescue() {
         deny_read: &[],
         max_file_mib: None,
         max_processes: None,
+        pf: PfFlags::default(),
     };
     let journal = dir.path("native-leases");
     let found = [state.as_path(), scratch.as_path()];

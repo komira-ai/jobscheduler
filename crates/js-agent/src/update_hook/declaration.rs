@@ -6,11 +6,14 @@
 //!
 //! [hook]
 //! units       = ["js-agent-crun.service"]
-//! write_paths = ["/opt/js-agent", "/opt/js-agent-link", "/var/lib/js-agent-update"]
+//! write_paths = ["/opt/js-agent", "/var/lib/js-agent-update"]
 //!
 //! [hook.timeout_secs]
 //! prepare = 3900
 //! # cutover, verify, rollback, cleanup likewise
+//!
+//! [hook.params]
+//! release_link = "/opt/js-agent/current"   # inside a write path, never one itself
 //! ```
 //!
 //! Keys the hook does not read are ignored: the file is the updater's, and it adds keys.

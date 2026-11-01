@@ -171,6 +171,7 @@ fn runtime_with(fixture: &Fixture, adjust: impl FnOnce(&mut NativeConfig)) -> Na
         journal: fixture.root.join("native-leases"),
         max_file_bytes: 1 << 30,
         max_processes: 512,
+        egress: None,
     };
     adjust(&mut config);
     let term = TERMS.fetch_add(1, Ordering::SeqCst);

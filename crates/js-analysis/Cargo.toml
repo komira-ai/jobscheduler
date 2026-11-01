@@ -1,0 +1,25 @@
+[package]
+name = "js-analysis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# `js-analysis`: the statistics of the benchmark arms. Measurement crates emit one JSON
+# line per run (`RunRecord`); this crate groups them by setting and arm and reports the
+# summaries, the comparisons and the run counts that resolve a given effect. The rules are
+# in docs/design/bench-analysis.md.
+[[bin]]
+name = "js-analysis"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

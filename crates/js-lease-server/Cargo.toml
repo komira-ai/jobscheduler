@@ -39,6 +39,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 # The Tailscale API client (a blocking client, as the Lambda provider's).
 ureq.workspace = true
+# The validity of the TLS certificate a reload brings (src/tls.rs).
+x509-parser.workspace = true
 
 [dev-dependencies]
 js-agent = { path = "../js-agent" }

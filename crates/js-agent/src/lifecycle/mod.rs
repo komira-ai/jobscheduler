@@ -196,7 +196,7 @@ use crate::FileReader;
 use crate::bundle::Admission;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
-use crate::native::{NativeFlags, NativeSettings};
+use crate::native::{NativeFlags, NativeSettings, PfFlags};
 use crate::quota::ScratchQuota;
 
 pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, RunningLease, SLOTS, Slots};
@@ -766,6 +766,14 @@ impl Local {
                 deny_read: &cli.native_deny_read,
                 max_file_mib: cli.native_max_file_mib,
                 max_processes: cli.native_max_processes,
+                pf: PfFlags {
+                    pfctl: cli.native_pfctl.as_deref(),
+                    anchor: cli.native_pf_anchor.as_deref(),
+                    state_dir: cli.native_pf_state_dir.as_deref(),
+                    uid_start: cli.native_pf_uid_start,
+                    uid_count: cli.native_pf_uid_count,
+                    endpoints: &cli.native_pf_endpoints,
+                },
             },
             &denied,
             &journal,

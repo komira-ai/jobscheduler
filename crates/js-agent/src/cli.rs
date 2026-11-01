@@ -234,10 +234,12 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub native_homes: Option<PathBuf>,
     /// The most network a native run gets: `off` (the default), `loopback` or `on`. A start
-    /// that asks for more is held to this. `on` has no egress control: a run can reach the
-    /// scheduler, the cloud metadata address and the rest of the network, until a packet
-    /// filter keyed on the lease users exists; keep `off` (or `loopback`, which every run
-    /// of the Mac shares). Needs `--native-helper-socket`.
+    /// that asks for more is held to this. `on` is limited by the pf anchor of
+    /// `js-mac-provision` (see `--native-pf-uid-start`): without it a run could reach the
+    /// scheduler, the cloud metadata address and the rest of the network, so the agent does
+    /// not start with `on` unless the anchor is in force, and refuses each job that asks for
+    /// the network (`egress-unchecked`) while it is not. `loopback` is shared by every run
+    /// of the Mac. Needs `--native-helper-socket`.
     #[arg(long, value_name = "off|loopback|on")]
     pub native_network: Option<String>,
     /// A path no native run may read, in addition to the agent's own roots, its token,
@@ -259,6 +261,34 @@ pub struct Cli {
     /// `/bin`, `/usr/sbin` and `/sbin`. Needs `--native-helper-socket`.
     #[arg(long = "native-tool-root", value_name = "PATH")]
     pub native_tool_roots: Vec<PathBuf>,
+    /// The first uid of the pool whose egress the pf anchor limits: the helper's
+    /// `--uid-range` start. With `--native-network on` the agent refuses to start, and
+    /// refuses every job that asks for the network (`egress-unchecked`), unless the anchor
+    /// `js-mac-provision` installed is in force (pf enabled, the main ruleset reaches the
+    /// anchor, the loaded rules are the ones these flags render); required then, and
+    /// refused otherwise. Needs `--native-network on`.
+    #[arg(long, value_name = "UID")]
+    pub native_pf_uid_start: Option<u32>,
+    /// How many uids the pool holds: the helper's `--uid-range` count. Required with
+    /// `--native-network on`; see `--native-pf-uid-start`.
+    #[arg(long, value_name = "N")]
+    pub native_pf_uid_count: Option<u32>,
+    /// An endpoint the pool may reach over TCP, as `192.0.2.10:443`; repeatable. These must
+    /// be the `--endpoint` flags `js-mac-provision install` was given, or the anchor reads
+    /// back as different and every job is refused. Needs `--native-network on`.
+    #[arg(long = "native-pf-endpoint", value_name = "IPV4:PORT")]
+    pub native_pf_endpoints: Vec<String>,
+    /// The pf anchor the rules are loaded under (the `--anchor` of `js-mac-provision`); by
+    /// default `com.apple/com.komira.js.pool`. Needs `--native-network on`.
+    #[arg(long, value_name = "NAME")]
+    pub native_pf_anchor: Option<String>,
+    /// The state directory of `js-mac-provision` (its `--state-dir`); by default
+    /// `/var/db/com.komira.js-pf`. Needs `--native-network on`.
+    #[arg(long, value_name = "PATH")]
+    pub native_pf_state_dir: Option<PathBuf>,
+    /// The `pfctl` program to ask (by default `/sbin/pfctl`). Needs `--native-network on`.
+    #[arg(long, value_name = "PATH")]
+    pub native_pfctl: Option<PathBuf>,
     /// The absolute path of the `docker` or `podman` program that runs container jobs.
     /// It is started by exactly this path, never looked up on the `PATH`, with an
     /// environment of its own (a fixed `PATH` and `--container-host`, nothing the agent
@@ -539,6 +569,36 @@ pub struct Cli {
     /// available yet: the agent refuses it at start.
     #[arg(long, value_name = "open|allow")]
     pub read_model: Option<String>,
+}
+
+impl Cli {
+    /// Every `--native-*` flag with whether it was given, kept beside the fields so that a
+    /// runtime that takes none of them refuses them all; a test walks the flags clap knows
+    /// and fails when one is missing here.
+    #[must_use]
+    pub fn native_flags(&self) -> [(&'static str, bool); 13] {
+        [
+            (
+                "--native-helper-socket",
+                self.native_helper_socket.is_some(),
+            ),
+            ("--native-homes", self.native_homes.is_some()),
+            ("--native-network", self.native_network.is_some()),
+            ("--native-deny-read", !self.native_deny_read.is_empty()),
+            ("--native-max-file-mib", self.native_max_file_mib.is_some()),
+            (
+                "--native-max-processes",
+                self.native_max_processes.is_some(),
+            ),
+            ("--native-tool-root", !self.native_tool_roots.is_empty()),
+            ("--native-pf-uid-start", self.native_pf_uid_start.is_some()),
+            ("--native-pf-uid-count", self.native_pf_uid_count.is_some()),
+            ("--native-pf-endpoint", !self.native_pf_endpoints.is_empty()),
+            ("--native-pf-anchor", self.native_pf_anchor.is_some()),
+            ("--native-pf-state-dir", self.native_pf_state_dir.is_some()),
+            ("--native-pfctl", self.native_pfctl.is_some()),
+        ]
+    }
 }
 
 /// `name=path` split at the first `=`.

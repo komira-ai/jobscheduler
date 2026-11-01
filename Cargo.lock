@@ -946,6 +946,7 @@ dependencies = [
  "js-lease",
  "js-lease-server",
  "js-mac-pool",
+ "js-mac-provision",
  "js-mac-session",
  "js-oci",
  "js-pool-static",
@@ -991,6 +992,16 @@ dependencies = [
  "thiserror",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "js-analysis"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -1214,6 +1225,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "x509-parser",
 ]
 
 [[package]]
@@ -1267,6 +1279,18 @@ dependencies = [
  "time",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "js-mdm-core"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "plist",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
 ]
 
 [[package]]
