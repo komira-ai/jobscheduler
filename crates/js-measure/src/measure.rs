@@ -425,7 +425,22 @@ fn run_metrics(
         .iter()
         .filter(|j| j.outcome.as_deref() == Some("out_of_memory"))
         .count();
-    let mut out = reported::merge(reports);
+    // Only a job that succeeded speaks for the run: a wrong answer's numbers are not the
+    // benchmark's. What a failed job printed is counted, and stays in its own row.
+    let (kept, dropped): (Vec<_>, Vec<_>) = obs
+        .jobs
+        .iter()
+        .zip(reports)
+        .filter(|(_, report)| !report.is_empty())
+        .partition(|(job, _)| is_ok(job.outcome.as_ref()));
+    let kept: Vec<_> = kept.into_iter().map(|(_, report)| report.clone()).collect();
+    let mut out = reported::merge(&kept);
+    if !dropped.is_empty() {
+        out.insert(
+            format!("{}dropped", reported::PREFIX),
+            Some(dropped.len() as f64),
+        );
+    }
     let mut put = |key: &str, value: Option<f64>| {
         out.insert(key.to_owned(), finite(value));
     };

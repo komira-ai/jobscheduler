@@ -9,7 +9,7 @@
         "--cache-dir", "REPLACE-WITH-THE-DATASET-CACHE-DIR",
         "--out-dir", "/tmp/out",
         "--dataset", "tpch",
-        "--scale", "1",
+        "--scale", "sf1",
         "--suite", "tpch",
         "--query", "q6",
         "--sql-file", "REPLACE-WITH-THE-Q6-SQL-FILE-IN-THE-IMAGE",

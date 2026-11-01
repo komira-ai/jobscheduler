@@ -6,8 +6,8 @@
 //! js-measure-result {"steady_ms":12.3,"first_run_ms":45.6,"cache_hit":null}
 //! ```
 //!
-//! The line is the tag [`TAG`], one space, and a JSON object whose values are numbers or
-//! `null`. The harness reads the end of the run's output from the lease server after the
+//! The line is the tag [`TAG`], one space, and a JSON object whose values are numbers (any
+//! other value is ignored, see below). The harness reads the end of the run's output from the lease server after the
 //! run is over (the log tail, at most 8 KiB of each stream) and takes the numbers from it.
 //!
 //! # The rules
@@ -15,8 +15,8 @@
 //! - Only standard output is read. The last line that begins with the tag decides; the
 //!   lines before it are ignored, so a job may print the line again as it improves it.
 //! - A key whose value is a number is recorded as that number. A key whose value is
-//!   anything else (a string, a boolean, an array, an object) or `null` is recorded as
-//!   `null`.
+//!   anything else (a string such as a verdict, a boolean, an array, an object) or `null`
+//!   is skipped: no key is recorded, so the analysis never sees an always-missing metric.
 //! - No line, a line that is not a JSON object, or a tail that holds no complete line
 //!   (the output was cut, or the server holds no tail for the run) records no key at all.
 //!   The harness cannot know a key it never read, so the analysis counts the run as having
@@ -24,8 +24,13 @@
 //! - Every key is recorded under the name [`PREFIX`] followed by the key, so a job can
 //!   never overwrite a number the harness measured itself (`makespan_ms`,
 //!   `request_to_token_ms_mean`, ...). A key `steady_ms` is `reported_steady_ms`.
-//! - A workload of several jobs records, for each key any job reported, the mean of the
-//!   jobs' numbers, and `null` when any job has none for that key.
+//! - A workload of several jobs records, for each key, the mean of the numbers of the jobs
+//!   that succeeded, and no key when any of those jobs has no number for it.
+//! - Only a job whose outcome is `succeeded` speaks for the run. The report of any other
+//!   job (it answered wrongly, ran out of memory, was killed) is left out of the record's
+//!   numbers and counted: `reported_dropped` in the record is the number of such jobs that
+//!   printed a result line, and is absent when there are none. The job's own row in
+//!   `jobs.jsonl` still shows what it printed, with its outcome.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -49,7 +54,7 @@ pub fn parse(stdout: &str) -> BTreeMap<String, Option<f64>> {
         .and_then(|json| serde_json::from_str::<BTreeMap<String, Value>>(json).ok())
         .map(|keys| {
             keys.into_iter()
-                .map(|(key, value)| (key, value.as_f64()))
+                .filter_map(|(key, value)| Some((key, Some(value.as_f64()?))))
                 .collect()
         })
         .unwrap_or_default()
@@ -75,7 +80,7 @@ pub fn merge(jobs: &[BTreeMap<String, Option<f64>>]) -> BTreeMap<String, Option<
                 .map(|job| job.get(key).copied().flatten())
                 .collect();
             let mean = numbers.map(|all| all.iter().sum::<f64>() / all.len() as f64);
-            (format!("{PREFIX}{key}"), finite(mean))
+            Some((format!("{PREFIX}{key}"), finite(Some(mean?))))
         })
         .collect()
 }

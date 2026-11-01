@@ -42,15 +42,16 @@
 //! # Whole-host noise
 //!
 //! `plans/whole-host-noise.plan.json` and `plans/whole-host-noise.workload.json` compare
-//! the same benchmark cell (TPC-H q6 at scale 1, run by `komira_bench_runner_main`) on a
+//! the same benchmark cell (TPC-H q6 at scale sf1, run by `komira_bench_runner_main`) on a
 //! shared node (the `shared` arm, the `action` class the workload names) with the same cell
 //! on a whole host (the `whole-host` arm, which asks for the `whole-node` lease class), 20
 //! runs each. The runner takes every value as a flag; with `--js-measure-result` its last
 //! standard-output line is `js-measure-result {"steady_ms":..,"first_run_ms":..,
 //! "duckdb_steady_ms":..,"verdict":"PASS|..."}`. The numbers are recorded as
 //! `reported_steady_ms`, `reported_first_run_ms` and `reported_duckdb_steady_ms`; `verdict`
-//! is a string, so it is recorded as `null`. A run whose verdict is not PASS is seen from
-//! the job's exit code (a failure in `jobs.jsonl`), not from that key.
+//! is a string, so no key is recorded for it. A run whose verdict is not PASS is seen from
+//! the job's exit code (its outcome is not `succeeded`), not from that key, and the numbers
+//! of such a job are left out of the run's record and counted in `reported_dropped`.
 //!
 //! The workload cannot be run as shipped. The image is a placeholder because no pinned
 //! benchmark image exists yet: it has to be built, with the runner, a pinned duckdb and a
