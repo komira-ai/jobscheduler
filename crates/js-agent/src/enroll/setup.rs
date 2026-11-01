@@ -1,7 +1,7 @@
 //! The host setup script the deb installs: whether it may be run, and how it is run.
 //!
 //! The script is run by root, so what is run is what was checked. The file is opened without
-//! following a link, checked on the open descriptor (a regular file, the owner's, not
+//! following a link, checked on the open descriptor (a regular file, the owner's or root's, not
 //! writable by group or others), and every directory above it is checked the same way (the
 //! owner's or root's, not writable by group or others). The shell is checked the same way
 //! by its path (the shell itself is the system's `/usr/bin/bash`, in directories only root
@@ -29,7 +29,7 @@ const PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 pub const MANIFEST: &str = "/var/lib/js-crun-host-setup/manifest";
 
 /// Opens `path` for a root process to run or start: not through a link, and a regular file
-/// that `owner` owns and group and others cannot write, in directories that root or `owner`
+/// that `owner` or root owns and group and others cannot write, in directories that root or `owner`
 /// owns and group and others cannot write. `hint` follows the system's words when the file
 /// cannot be opened. The returned file is the checked one.
 pub(super) fn open_checked(path: &Path, owner: u32, hint: &str) -> Result<File, Failure> {
@@ -42,7 +42,10 @@ pub(super) fn open_checked(path: &Path, owner: u32, hint: &str) -> Result<File, 
         .map_err(|why| refuse(format!("{why}; {hint}")))?;
     let problems = [
         (!meta.is_file(), "is not a regular file".to_owned()),
-        (meta.uid() != owner, format!("is not owned by uid {owner}")),
+        (
+            ![0, owner].contains(&meta.uid()),
+            format!("is not owned by uid {owner} or root"),
+        ),
         (
             meta.mode() & 0o022 != 0,
             "is writable by group or others".to_owned(),
