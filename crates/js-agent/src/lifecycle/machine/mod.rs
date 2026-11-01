@@ -719,7 +719,7 @@ impl Lifecycle {
                 .map(|dir| self.config.scratch.create_lease(&dir))
                 .transpose()
                 .map_err(failed)?;
-            for dir in std::iter::once(&scratch).chain(lease.as_ref().filter(|_| false)) {
+            for dir in std::iter::once(&scratch).chain(lease.as_ref()) {
                 self.bind(dir, slot, booked, events)
                     .map_err(|why| failed(why.into()))?;
             }

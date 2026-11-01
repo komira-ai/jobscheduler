@@ -125,7 +125,7 @@ fn write_to(target: &str, mib: u64, slot: u32) -> Written {
     };
     // The lifecycle's order: both directories empty, both bound, then the container.
     fs::create_dir(&lease_dir).expect("make the lease directory");
-    for dir in [&spec.scratch] {
+    for dir in [&spec.scratch, &lease_dir] {
         bound
             .quota
             .apply(dir, project, LIMIT, INODES)
