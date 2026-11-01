@@ -84,6 +84,10 @@ jobs:
           exe=$(jq -r 'select(.executable != null and .target.name == "crun_runtime") | .executable' "$RUNNER_TEMP/build.json" | tail -n 1)
           test -x "$exe"
           echo "EXE=$exe" >> "$GITHUB_ENV"
+          cargo test -p js-agent --test crun_supervisor --locked --no-run --message-format json > "$RUNNER_TEMP/build-supervisor.json"
+          exe=$(jq -r 'select(.executable != null and .target.name == "crun_supervisor") | .executable' "$RUNNER_TEMP/build-supervisor.json" | tail -n 1)
+          test -x "$exe"
+          echo "EXE_SUPERVISOR=$exe" >> "$GITHUB_ENV"
       - name: Run the conformance suite over CrunRuntime in a Delegate=yes unit, as root
         run: |
           set -euo pipefail
@@ -122,8 +126,7 @@ jobs:
             -E "PATH=$PATH" -E JS_JOB_USER=js-job \
             "$GITHUB_WORKSPACE/target/debug/xtask" count-run \
             --count-file "$RUNNER_TEMP/crun-supervisor.count" -- \
-            "$EXE" --include-ignored --exact \
-            the_start_check_passes_in_a_unit_with_a_supervisor_leaf_and_delegate_enables_the_controllers || rc=$?
+            "$EXE_SUPERVISOR" --include-ignored --test-threads=1 || rc=$?
           cargo xtask unit-result --unit js-crun-supervisor \
             --count-file "$RUNNER_TEMP/crun-supervisor.count"
           exit "$rc"
