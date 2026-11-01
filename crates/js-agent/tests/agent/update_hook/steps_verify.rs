@@ -349,7 +349,11 @@ fn a_unit_still_starting_is_no_proof_even_when_the_server_shows_a_hello() {
     });
     let done = spy.verify(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert_eq!(rig.world.ticks() - base, 2, "it waited for the unit, not the hello");
+    assert_eq!(
+        rig.world.ticks() - base,
+        2,
+        "it waited for the unit, not the hello"
+    );
     assert!(rig.record().unwrap().verify_ok);
     only_looked(&spy);
 }
