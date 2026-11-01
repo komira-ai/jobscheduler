@@ -188,6 +188,11 @@ impl HostBook {
         held.collect()
     }
 
+    /// Every lease booked on each booked host, in the order they were booked.
+    pub fn leases(&self) -> BTreeMap<HostId, Vec<LeaseId>> {
+        self.booked().into_iter().map(|(host, lease)| (host, vec![lease])).collect()
+    }
+
     /// Every listed host, in id order, with its shape and the lease holding it.
     pub fn hosts(&self) -> Vec<HostCapacity> {
         let listed = self.hosts.iter();
