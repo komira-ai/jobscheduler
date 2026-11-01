@@ -359,14 +359,21 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
                 ca_cert: Some(ca),
                 ..full.clone()
             },
-            "ca",
+            "--ca-cert",
         ),
         (
             ConnectParams {
                 host_id: None,
-                ..full
+                ..full.clone()
             },
             "no id",
+        ),
+        (
+            ConnectParams {
+                host_id: Some("Not:A:Host".to_owned()),
+                ..full
+            },
+            "host_id",
         ),
     ];
     for (params, word) in cases {
