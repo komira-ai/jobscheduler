@@ -347,20 +347,64 @@ pub struct AgentAttempt {
 /// Anything else (another code, other words, no `asuser` attempt) is not unavailable and
 /// proves nothing.
 pub fn classify_agent_unavailable(kind: Kind, attempts: &[AgentAttempt]) -> bool {
-    let _ = (kind, attempts);
-    false
+    if attempts.iter().any(|attempt| attempt.code == Some(0)) {
+        return false;
+    }
+    match kind {
+        Kind::GuiLaunchAgent => attempts.first().is_some_and(|first| {
+            first.code == Some(125)
+                && first
+                    .text
+                    .contains("Domain does not support specified action")
+        }),
+        Kind::LaunchAgent => {
+            let asuser = attempts.iter().rev().find(|attempt| {
+                attempt.command.starts_with("launchctl asuser")
+                    && attempt.command.contains(" bootstrap ")
+            });
+            asuser.is_some_and(|last| {
+                last.code == Some(5) && last.text.contains("Input/output error")
+            }) && attempts.iter().any(|attempt| {
+                attempt.command.starts_with("launchctl bootstrap ") && attempt.code == Some(5)
+            })
+        }
+        _ => false,
+    }
 }
 
 /// The PROBE line for one attempt: the exact command, its status and its text.
 pub fn attempt_probe(kind: Kind, attempt: &AgentAttempt) -> String {
-    let _ = (kind, attempt);
-    String::new()
+    let text: String = attempt
+        .text
+        .trim()
+        .chars()
+        .map(|c| {
+            if c == '\n' || c == '\r' || c == '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    format!(
+        "PROBE agent-attempt {} cmd={} status={:?} {text}",
+        kind.label(),
+        attempt.command,
+        attempt.code
+    )
 }
 
 /// The sandbox `deny(` lines in the log read, and how many of them name a pid the job ran.
 pub fn sandbox_log_counts(log: &str, job: &JobProcs) -> (usize, usize) {
-    let _ = (log, job);
-    (0, 0)
+    let denies: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("Sandbox") && line.contains("deny("))
+        .collect();
+    let own = denies
+        .iter()
+        .filter(|line| parse_sandbox_line(line).is_some_and(|(_, pid)| job.owns(pid)))
+        .count();
+    (denies.len(), own)
 }
 
 /// Why run A could not seed an item: the sandbox of the product profile said no (so the job
@@ -406,9 +450,13 @@ fn has_sandbox_signature(text: &str) -> bool {
 /// seeded or denied by the profile. What is missing, by name; a run where these were refused
 /// for another reason proves nothing.
 pub fn missing_minimum(lines: &[Line]) -> Vec<&'static str> {
+    // A launch agent launchd cannot host for the uid (root's own attempts failed with the
+    // no-domain errors) covers that kind too, and no other.
     let seeded = |kind: Kind| {
         lines.iter().any(|line| {
-            line.kind == kind && matches!(line.verdict, Verdict::Seeded | Verdict::Denied)
+            line.kind == kind
+                && (matches!(line.verdict, Verdict::Seeded | Verdict::Denied)
+                    || (kind == Kind::LaunchAgent && line.verdict == Verdict::Unavailable))
         })
     };
     let mut missing = Vec::new();

@@ -23,7 +23,14 @@
 //!    seed failure, a bare EPERM/EACCES included, proves nothing. A run that did not cover at
 //!    least a file, a process, a keychain item, a launchd agent and shared memory, or seeded
 //!    nothing itself, fails. A launch agent that root loaded is labelled "loaded by root" and
-//!    is no sandbox claim.
+//!    is no sandbox claim. A pool uid has no login session, so launchd may have no
+//!    domain for it: root then tries `launchctl bootstrap` and `launchctl asuser`, every attempt
+//!    is printed as a `PROBE agent-attempt` line, and only the specific no-domain errors
+//!    (`gui/<uid>`: 125 "Domain does not support specified action"; `user/<uid>`: 5
+//!    "Input/output error" from both the plain and the `asuser` bootstrap) make the agent
+//!    "unavailable to the uid", which covers the launch-agent kind. That rule needs the security
+//!    verifier's agreement. When the minimum is not met the run still goes to its end and prints
+//!    every table, so one Mac run gives all the facts even without a verdict.
 //! 2. Between the runs the test does what the agent does when a run ends and the next
 //!    begins: `NativeRuntime::remove` (the helper's `kill-uid`, then `user-delete`), and
 //!    the next start makes the user again (`user-create`).
@@ -396,7 +403,10 @@ fn row(kind: Kind, place: impl Into<String>, detail: impl Into<String>) -> Row {
 
 impl Trial {
     /// The two runs and the views; the table of survivors, empty when the pool user is clean.
-    fn body(&mut self) -> Result<Vec<Row>, String> {
+    fn body(&mut self) -> Result<(Vec<Row>, Vec<String>), String> {
+        // Reasons the result would prove nothing: the run goes on to its end all the same, so one
+        // Mac run shows every fact even when it cannot reach a verdict.
+        let mut unproven: Vec<String> = Vec::new();
         let uid = self.fixture.uid;
         let exe = self.exe.clone();
 
@@ -431,12 +441,14 @@ impl Trial {
         println!("{}", self.seeded_table());
         let missing = look::missing_minimum(&self.seeded);
         if !missing.is_empty() {
-            return Err(format!(
+            unproven.push(format!(
                 "run A neither seeded nor had the profile deny {}: the result would prove nothing",
                 missing.join(", ")
             ));
         }
-        self.control(uid)?;
+        if let Err(why) = self.control(uid) {
+            unproven.push(why);
+        }
 
         // Between the runs: what the agent does when a run ends.
         self.rt
@@ -488,7 +500,7 @@ impl Trial {
             })
             .collect();
         survivors.extend(self.system_views(uid, &user_of(&b))?);
-        Ok(survivors)
+        Ok((survivors, unproven))
     }
 
     fn tokens(&self) -> Vec<Token> {
@@ -508,6 +520,9 @@ impl Trial {
                         }
                         Verdict::Seeded => "seeded".to_owned(),
                         Verdict::Denied => "refused by the profile".to_owned(),
+                        Verdict::Unavailable => {
+                            "unavailable to the uid (launchd has no domain for it)".to_owned()
+                        }
                         _ => "refused (proves nothing)".to_owned(),
                     },
                     line.text.clone(),
@@ -531,11 +546,27 @@ impl Trial {
             return;
         }
         let predicate = "eventMessage CONTAINS \"Sandbox\" AND eventMessage CONTAINS \"deny(\"";
-        let args = look::log_show_args(since, predicate);
+        let mut args = look::log_show_args(since, predicate);
+        // Every level: a denial may be logged below the default one.
+        args.extend(["--info".to_owned(), "--debug".to_owned()]);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let shown = view("/usr/bin/log", &args);
         let log = match shown {
-            Ok(text) => Some(text),
+            Ok(text) => {
+                let (denies, own) = look::sandbox_log_counts(&text, job);
+                println!(
+                    "PROBE note unified log since {since}: {denies} sandbox deny line(s), {own} naming a pid of the job {:?}",
+                    job.pids
+                );
+                for line in text
+                    .lines()
+                    .filter(|l| l.contains("Sandbox") && l.contains("deny("))
+                    .take(5)
+                {
+                    println!("PROBE note log sample: {line}");
+                }
+                Some(text)
+            }
             Err(why) => {
                 println!("PROBE note the unified log could not be read: {why}");
                 None
@@ -556,7 +587,12 @@ impl Trial {
 
     /// A launch agent run A could not load (a user cannot load into its own domain on
     /// every macOS) is loaded by root into the user's domain: the item is still the run's
-    /// to leave, and the domain is the one the helper's delete does not end.
+    /// to leave, and the domain is the one the helper's delete does not end. A pool uid has
+    /// no login session, so launchd may have no domain for it: root then tries the documented
+    /// ways to reach one (`launchctl asuser`), every attempt is printed with its exact command,
+    /// status and text, and only the specific no-domain errors make the agent "unavailable to
+    /// the uid" (see `look::classify_agent_unavailable`; that rule needs the security
+    /// verifier's agreement).
     fn bootstrap_agents_as_root(&mut self, uid: u32) {
         for (kind, domain) in [(Kind::LaunchAgent, "user"), (Kind::GuiLaunchAgent, "gui")] {
             let Some(line) = self.seeded.iter_mut().find(|line| {
@@ -569,15 +605,87 @@ impl Trial {
             let body = format!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{label}</string>\n<key>ProgramArguments</key><array><string>/bin/sleep</string><string>600</string></array>\n<key>RunAtLoad</key><true/>\n</dict></plist>\n"
             );
-            if fs::write(&plist, body).is_err() {
+            if let Err(why) = fs::write(&plist, body) {
+                println!(
+                    "PROBE note agent plist for {} not written: {why}",
+                    kind.label()
+                );
                 continue;
             }
             let target = format!("{domain}/{uid}");
-            let loaded = tool_output(
-                "/bin/launchctl",
-                &["bootstrap", &target, &plist.display().to_string()],
-            );
-            if matches!(loaded, Ok((true, _))) {
+            let plist = plist.display().to_string();
+            let uid_text = uid.to_string();
+            // The attempts, in order; the first that works ends them.
+            let mut plan: Vec<(String, Vec<String>)> = vec![(
+                format!("launchctl bootstrap {target} {plist}"),
+                vec!["bootstrap".into(), target.clone(), plist.clone()],
+            )];
+            if domain == "user" {
+                // As the uid: a bootstrap through `asuser`; `asuser` of a no-op first, which
+                // is how a session for the uid is made when launchd can make one.
+                plan.push((
+                    format!(
+                        "launchctl asuser {uid_text} /bin/launchctl bootstrap {target} {plist}"
+                    ),
+                    vec![
+                        "asuser".into(),
+                        uid_text.clone(),
+                        "/bin/launchctl".into(),
+                        "bootstrap".into(),
+                        target.clone(),
+                        plist.clone(),
+                    ],
+                ));
+                plan.push((
+                    format!("launchctl asuser {uid_text} /usr/bin/true"),
+                    vec!["asuser".into(), uid_text.clone(), "/usr/bin/true".into()],
+                ));
+                plan.push((
+                    format!(
+                        "launchctl asuser {uid_text} /bin/launchctl bootstrap {target} {plist}"
+                    ),
+                    vec![
+                        "asuser".into(),
+                        uid_text.clone(),
+                        "/bin/launchctl".into(),
+                        "bootstrap".into(),
+                        target.clone(),
+                        plist.clone(),
+                    ],
+                ));
+            }
+            let mut attempts: Vec<look::AgentAttempt> = Vec::new();
+            for (command, args) in plan {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                let attempt = match run_bounded("/bin/launchctl", &args) {
+                    Ok((code, stdout, stderr)) => look::AgentAttempt {
+                        command,
+                        code,
+                        text: format!(
+                            "{} {}",
+                            String::from_utf8_lossy(&stdout).trim(),
+                            stderr.trim()
+                        ),
+                    },
+                    Err(why) => look::AgentAttempt {
+                        command,
+                        code: None,
+                        text: why,
+                    },
+                };
+                println!("{}", look::attempt_probe(kind, &attempt));
+                let worked = attempt.code == Some(0);
+                // A no-op `asuser true` that works is not the agent being loaded.
+                let loaded = worked && attempt.command.contains(" bootstrap ");
+                attempts.push(attempt);
+                if loaded {
+                    break;
+                }
+            }
+            let loaded = attempts
+                .iter()
+                .any(|a| a.code == Some(0) && a.command.contains(" bootstrap "));
+            if loaded {
                 *line = Line::new(
                     Verdict::Seeded,
                     kind,
@@ -585,6 +693,20 @@ impl Trial {
                     &format!(
                         "{label} ({} into {target}: run A could not)",
                         look::LOADED_BY_ROOT
+                    ),
+                );
+            } else if look::classify_agent_unavailable(kind, &attempts) {
+                let last = attempts
+                    .last()
+                    .map(|a| a.text.trim().to_owned())
+                    .unwrap_or_default();
+                *line = Line::new(
+                    Verdict::Unavailable,
+                    kind,
+                    line.token.clone(),
+                    &format!(
+                        "launchd has no {target} domain to host an agent; root's {} attempt(s) failed, the last with: {last}",
+                        attempts.len()
                     ),
                 );
             }
@@ -958,10 +1080,21 @@ fn a_second_run_on_the_same_uid_finds_nothing_the_first_left() {
     drop(trial);
     match result {
         Err(why) => panic!("the test could not run: {why}"),
-        Ok(rows) if rows.is_empty() => {
+        Ok((rows, unproven)) if !unproven.is_empty() => {
+            for row in &rows {
+                println!("PROBE survived {} {} {}", row[0], row[1], row[2]);
+            }
+            panic!(
+                "the test could not reach a verdict: {}\nwhat survived meanwhile ({} item(s)):\n{}",
+                unproven.join("; "),
+                rows.len(),
+                report::table(["KIND", "WHERE", "DETAIL"], &rows)
+            );
+        }
+        Ok((rows, _)) if rows.is_empty() => {
             println!("PROBE clean: nothing of run A survived for uid {uid}")
         }
-        Ok(rows) => {
+        Ok((rows, _)) => {
             for row in &rows {
                 println!("PROBE survived {} {} {}", row[0], row[1], row[2]);
             }
