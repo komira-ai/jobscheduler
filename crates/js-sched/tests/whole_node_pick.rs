@@ -1,7 +1,9 @@
-//! The one pick for a request that holds a worker while it waits: the least tail, made
-//! again every round, for a whole-machine request with or without whole-node settings and
-//! for an action that owns its worker; one such hold per pool where there are no
-//! whole-node settings. Every time is farm time fed to the scheduler.
+//! Which worker a request that waits for a worker to empty holds. With whole-node
+//! settings the pick is the least tail, made again every round, and an action that owns its
+//! worker takes one hold per pool; a moved whole-machine hold keeps the time it was made.
+//! Without settings nothing is changed: the worker with the fewest leases, kept while it
+//! could run the request, and no limit on how many requests hold a worker. Every time is
+//! farm time fed to the scheduler.
 
 #[macro_use]
 #[path = "booked/mod.rs"]
@@ -48,23 +50,26 @@ fn owner(f: &mut Farm) -> OperationId {
     operation
 }
 
-/// Catches: the pick without settings still by the fewest leases: `a` holds two leases
-/// that end within a minute and `b` one that runs an hour, so `a` empties first and is
-/// held, though `b` has fewer leases.
-#[test]
-fn without_settings_the_worker_that_empties_first_is_held() {
-    let mut f = plain();
+/// `a` holds two leases that end within a minute, `b` one that runs an hour.
+fn one_long_two_short(f: &mut Farm) {
     f.worker("a");
     f.lease_on("a", secs(60));
     f.lease_on("a", secs(60));
     f.worker("b");
     f.lease_on("b", secs(3_600));
-    let whole = f.whole();
-    assert_eq!(f.held_for(whole), Some(&w("a")));
 }
 
-/// Catches: the fallback lost when no lease has a wall time: every tail is unknown, so the
-/// order is the fewest leases, then the name, as before.
+/// Catches (off is main): the pick without settings changed from the fewest leases: `b`
+/// has one lease that runs an hour, `a` two that end within a minute, and `b` is held.
+#[test]
+fn without_settings_the_fewest_leases_worker_is_held() {
+    let mut f = plain();
+    one_long_two_short(&mut f);
+    let whole = f.whole();
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+}
+
+/// Catches (off is main): the fewest-leases fallback lost when no lease has a wall time.
 #[test]
 fn with_no_wall_times_known_the_fewest_leases_is_held() {
     let mut f = plain();
@@ -77,18 +82,85 @@ fn with_no_wall_times_known_the_fewest_leases_is_held() {
     assert_eq!(f.held_for(whole), Some(&w("b")));
 }
 
-/// Catches: an action that owns its worker still picked by the fewest leases: the same
-/// layout holds `a`, the worker that empties first.
+/// Catches (off is main): an action that owns its worker picked by tail without settings:
+/// it holds the worker with the fewest leases, `b`.
 #[test]
-fn an_action_that_owns_its_worker_holds_the_worker_that_empties_first() {
+fn without_settings_an_owner_action_holds_the_fewest_leases_worker() {
+    let mut f = plain();
+    one_long_two_short(&mut f);
+    let op = owner(&mut f);
+    assert_eq!(f.held_for(op), Some(&w("b")));
+}
+
+/// Catches (off is main): a hold that moves without settings: `b` is held for having the
+/// fewest leases; when `a` is down to one lease too, `b` is still held (kept), though `a`
+/// would now empty first.
+#[test]
+fn without_settings_the_hold_is_kept() {
     let mut f = plain();
     f.worker("a");
-    f.lease_on("a", secs(60));
+    let first = f.lease_on("a", secs(60));
     f.lease_on("a", secs(60));
     f.worker("b");
-    f.lease_on("b", secs(3_600));
+    f.lease_on("b", secs(600));
+    let whole = f.whole();
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+    f.finish(&first);
+    assert!(f.grants().is_empty());
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+}
+
+/// Catches (off is main): a limit of one hold per pool without settings: four owner
+/// actions in one pool each hold a worker.
+#[test]
+fn without_settings_four_owner_actions_each_hold_a_worker() {
+    let mut f = plain();
+    for name in ["a", "b", "c", "d"] {
+        f.worker(name);
+        f.lease_on(name, secs(600));
+    }
+    let ops: Vec<OperationId> = (0..4).map(|_| owner(&mut f)).collect();
+    let held: Vec<bool> = ops.iter().map(|op| f.held_for(*op).is_some()).collect();
+    assert_eq!(held, [true, true, true, true]);
+}
+
+/// Catches (off is main): a limit of one hold per pool without settings: a second
+/// whole-machine request holds the next worker.
+#[test]
+fn without_settings_two_whole_machine_requests_each_hold_a_worker() {
+    let mut f = plain();
+    for name in ["a", "b"] {
+        f.worker(name);
+        f.lease_on(name, secs(600));
+    }
+    let first = f.whole();
+    let second = f.whole();
+    assert_eq!(f.held_for(first), Some(&w("a")));
+    assert_eq!(f.held_for(second), Some(&w("b")));
+}
+
+/// Catches: with settings, an action that owns its worker still picked by the fewest
+/// leases: it holds the worker that empties first, `a`.
+#[test]
+fn with_settings_an_owner_action_holds_the_worker_that_empties_first() {
+    let mut f = with_settings(4);
+    one_long_two_short(&mut f);
     let op = owner(&mut f);
     assert_eq!(f.held_for(op), Some(&w("a")));
+}
+
+/// Catches: with settings, four owner actions in one pool each holding a worker: one
+/// hold per pool, the first in queue order.
+#[test]
+fn with_settings_four_owner_actions_in_one_pool_hold_one_worker() {
+    let mut f = with_settings(4);
+    for name in ["a", "b", "c", "d"] {
+        f.worker(name);
+        f.lease_on(name, secs(600));
+    }
+    let ops: Vec<OperationId> = (0..4).map(|_| owner(&mut f)).collect();
+    let held: Vec<bool> = ops.iter().map(|op| f.held_for(*op).is_some()).collect();
+    assert_eq!(held, [true, false, false, false]);
 }
 
 /// Catches: a hold that stays where it was put: `a` holds two leases of a minute, `b` an
@@ -149,34 +221,4 @@ fn at_max_draining_one_the_hold_survives_every_round() {
         assert_eq!(f.held_for(whole), Some(&w("a")));
         assert!(f.s.whole_mark(whole).is_some());
     }
-}
-
-/// Catches: four queued owner-worker actions each holding a worker: one hold per pool,
-/// the first in queue order.
-#[test]
-fn four_owner_actions_in_one_pool_hold_one_worker() {
-    let mut f = plain();
-    for name in ["a", "b", "c", "d"] {
-        f.worker(name);
-        f.lease_on(name, secs(600));
-    }
-    let ops: Vec<OperationId> = (0..4).map(|_| owner(&mut f)).collect();
-    let held: Vec<bool> = ops.iter().map(|op| f.held_for(*op).is_some()).collect();
-    assert_eq!(held, [true, false, false, false]);
-}
-
-/// Catches: two whole-machine requests without settings each holding a worker in one
-/// pool: the first holds one, the second waits for the next round after the first is
-/// placed.
-#[test]
-fn two_whole_machine_requests_without_settings_hold_one_worker() {
-    let mut f = plain();
-    for name in ["a", "b"] {
-        f.worker(name);
-        f.lease_on(name, secs(600));
-    }
-    let first = f.whole();
-    let second = f.whole();
-    assert_eq!(f.held_for(first), Some(&w("a")));
-    assert_eq!(f.held_for(second), None);
 }

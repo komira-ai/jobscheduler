@@ -40,13 +40,13 @@ fn one_long_two_short(s: Scheduler) -> Farm {
 }
 
 both_rules! {
-/// Catches: the choice of the held worker still by the lease count for a scheduler
-/// without whole-node settings: it holds the one that empties first (`a`, two leases of a
-/// minute), not the one with the fewest leases (`b`, one that runs an hour).
-fn without_settings_the_worker_that_empties_first_is_held() {
+/// Catches: the choice of the held worker changed for a scheduler without whole-node
+/// settings: it holds the one with the fewest leases (`b`, one lease), whatever its
+/// leases are still to run.
+fn without_settings_the_worker_with_fewest_leases_is_held() {
     let mut f = one_long_two_short(Scheduler::new(1).with_load_config(booked::current()));
     let whole = f.whole();
-    assert_eq!(f.held_for(whole), Some(&w("a")));
+    assert_eq!(f.held_for(whole), Some(&w("b")));
 }
 }
 

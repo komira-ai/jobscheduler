@@ -40,10 +40,22 @@ fn place_four(r: &mut Rig, worker: &str, others: &[&str], booked: u64, charge: u
 /// Two 8-core workers, each with four leases (`a`'s operations are 0 to 3, `b`'s 4 to 7),
 /// charged by prediction.
 fn two_loaded(curves: Option<std::sync::Arc<Curves>>, booked: u64, charge: u64) -> Rig {
-    let mut r = match curves {
+    let r = match curves {
         Some(curves) => Rig::with_curves(LoadConfig::default(), curves),
         None => Rig::on(),
     };
+    fill(r, booked, charge)
+}
+
+/// As [`two_loaded`], with whole-node settings on.
+fn two_loaded_with_settings(booked: u64, charge: u64) -> Rig {
+    let mut r = Rig::on();
+    let off = std::mem::replace(&mut r.s, js_sched::Scheduler::new(1));
+    r.s = off.with_whole_node(js_whole::WholeNodeConfig::dedicated(4));
+    fill(r, booked, charge)
+}
+
+fn fill(mut r: Rig, booked: u64, charge: u64) -> Rig {
     r.up("a", node());
     r.up("b", node());
     r.baseline("a");
@@ -169,11 +181,12 @@ fn owner(r: &mut Rig) -> OperationId {
     r.submit(request)
 }
 
-/// Catches: an owner-worker action and a blocked head both holding a worker of one pool:
-/// the owner-worker action, earlier in queue order, holds; the head holds nothing.
+/// Catches (with whole-node settings): an owner-worker action and a blocked head both
+/// holding a worker of one pool: the owner-worker action, earlier in queue order, holds;
+/// the head holds nothing.
 #[test]
-fn an_owner_action_ahead_of_a_head_takes_the_pools_hold() {
-    let mut r = two_loaded(None, 1_000, 1_000);
+fn with_settings_an_owner_action_ahead_of_a_head_takes_the_pools_hold() {
+    let mut r = two_loaded_with_settings(1_000, 1_000);
     let own = owner(&mut r);
     let op = head(&mut r, 6_000);
     r.round(1_000);
@@ -181,14 +194,26 @@ fn an_owner_action_ahead_of_a_head_takes_the_pools_hold() {
     assert_eq!(r.s.head_hold(op), None);
 }
 
-/// Catches: as above in the other order: the head, earlier, holds; the owner-worker action
-/// holds nothing.
+/// Catches (with whole-node settings): as above in the other order: the head, earlier,
+/// holds; the owner-worker action holds nothing.
 #[test]
-fn a_head_ahead_of_an_owner_action_takes_the_pools_hold() {
-    let mut r = two_loaded(None, 1_000, 1_000);
+fn with_settings_a_head_ahead_of_an_owner_action_takes_the_pools_hold() {
+    let mut r = two_loaded_with_settings(1_000, 1_000);
     let op = head(&mut r, 6_000);
     let own = owner(&mut r);
     r.round(1_000);
     assert!(r.s.head_hold(op).is_some());
     assert_eq!(r.s.reservation(own), None);
+}
+
+/// Catches (off is main): a shared slot without settings: an owner-worker action and a
+/// blocked head each hold a worker, as before.
+#[test]
+fn without_settings_an_owner_action_and_a_head_each_hold_a_worker() {
+    let mut r = two_loaded(None, 1_000, 1_000);
+    let own = owner(&mut r);
+    let op = head(&mut r, 6_000);
+    r.round(1_000);
+    assert!(r.s.reservation(own).is_some());
+    assert!(r.s.head_hold(op).is_some());
 }
