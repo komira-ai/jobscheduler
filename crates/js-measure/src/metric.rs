@@ -19,10 +19,10 @@ pub mod name {
     /// Jobs whose outcome was `out_of_memory`.
     pub const MEMORY_KILLS: &str = "memory_kills";
     /// Jobs that did not succeed but printed a result line: their numbers are left out of the
-    /// `reported_` metrics. Absent when there are none.
+    /// `reported_` metrics. 0 when there are none.
     pub const REPORTS_DROPPED: &str = "reports_dropped";
     /// Jobs that succeeded but printed no result line: no `reported_` metric is recorded for
-    /// the run. Absent when there are none.
+    /// the run. 0 when there are none.
     pub const REPORTS_MISSING: &str = "reports_missing";
     /// Mean over jobs of the wait from the job's planned submit time to the first poll that
     /// saw its run running (good to two poll intervals).

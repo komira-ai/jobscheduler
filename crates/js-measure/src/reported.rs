@@ -35,7 +35,8 @@
 //! - The harness counts both cases outside the job's `reported_` namespace, so a job's own
 //!   key can never collide: `reports_dropped` is the number of jobs that did not succeed
 //!   but printed a line, `reports_missing` the number of jobs that succeeded and printed
-//!   none. Each is absent when it is 0.
+//!   none. Each is always recorded, 0 when there are none (a measured count, not
+//!   missing data).
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -445,9 +445,7 @@ fn run_metrics(
         (name::REPORTS_DROPPED, dropped),
         (name::REPORTS_MISSING, missing),
     ] {
-        if count > 0 {
-            out.insert(key.to_owned(), Some(count as f64));
-        }
+        out.insert(key.to_owned(), Some(count as f64));
     }
     let mut put = |key: &str, value: Option<f64>| {
         out.insert(key.to_owned(), finite(value));
