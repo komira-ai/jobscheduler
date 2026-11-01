@@ -1214,6 +1214,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "x509-parser",
 ]
 
 [[package]]

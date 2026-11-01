@@ -131,7 +131,11 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         scaler.set_sink(sink, config.alert_repeat);
     }
     let Seated { provider, unseated } = source.provider(&bookings)?;
-    let tls = config.tls.as_ref().map(tls::Tls::open).transpose()?;
+    let tls = config
+        .tls
+        .as_ref()
+        .map(|files| tls::Tls::open(files, clock.clone()))
+        .transpose()?;
     let acceptor = tls.as_ref().map(tls::Tls::acceptor);
     let (listener, addr) = bind(config.listen, config.listen_flag, config.bound.take()).await?;
     let agent_listener = match config.agent_listen {
