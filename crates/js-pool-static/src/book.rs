@@ -35,6 +35,8 @@ pub enum SeatError {
 struct Booked {
     lease: LeaseId,
     resources: Resources,
+    /// Whether the lease books the whole host, whatever its resources add up to.
+    whole: bool,
 }
 
 #[derive(Debug)]
@@ -51,11 +53,15 @@ impl Host {
     }
 
     /// Whether a lease asking `wanted` can be booked here now. A lease that books a
-    /// whole host needs a host with no lease; a lease that shares needs what the leases
-    /// already here leave, and no whole-host lease here (which books all of the shape).
+    /// whole host needs a host with no lease. A lease that shares needs a host with no
+    /// whole-host lease, and room in every dimension (count of GPUs and their class
+    /// included) beside the leases already here.
     fn has_room(&self, wanted: &Resources, whole: bool) -> bool {
         if whole {
             return self.leases.is_empty();
+        }
+        if self.leases.iter().any(|booked| booked.whole) {
+            return false;
         }
         let sum = self.leases.iter().try_fold(wanted.clone(), |sum, booked| {
             sum.checked_add(&booked.resources)
@@ -69,8 +75,9 @@ impl Host {
 ///
 /// It owns the rules the static pool and the registry of self-registered hosts share, so
 /// neither copies them: a start is idempotent on the lease id, a stopped lease id never
-/// starts again (`LeaseEnded`), a host books many leases (a whole-host lease takes the host, a lease that shares takes its
-/// resources from what is left), the first fitting host with room by id wins, and a booking can be put back without a start ([`seat`]).
+/// starts again (`LeaseEnded`), a host books many leases (a whole-host lease takes the
+/// host, a lease that shares takes its resources from what is left), the first fitting
+/// host with room by id wins, and a booking can be put back without a start ([`seat`]).
 /// What makes a host *eligible* to be booked beyond fitting and being free is the
 /// caller's: it passes a predicate to [`start_where`].
 ///
@@ -184,6 +191,7 @@ impl HostBook {
                 host.leases.push(Booked {
                     lease: spec.lease(),
                     resources,
+                    whole,
                 });
                 return StartAck::Started { host: id.clone() };
             }
@@ -252,7 +260,8 @@ impl HostBook {
     /// Books `host` for `lease` without a start: the way to put back a booking the
     /// provider lost with its process. The booking is what a start would have made, so
     /// the lease then reads `Present` on `host` and a stop frees it. Seating a lease on
-    /// the host it already holds changes nothing.
+    /// the host it already holds changes nothing. The booking is of the whole shape, for
+    /// any class: putting back a lease that shares is owed to the step that starts one.
     ///
     /// Books nothing when `host` is not listed, when another lease holds it, when
     /// `lease` holds another host, or when `lease` was stopped.
@@ -275,7 +284,11 @@ impl HostBook {
             }),
             None => {
                 let resources = listed.shape.resources().clone();
-                listed.leases.push(Booked { lease, resources });
+                listed.leases.push(Booked {
+                    lease,
+                    resources,
+                    whole: true,
+                });
                 Ok(())
             }
         }

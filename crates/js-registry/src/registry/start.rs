@@ -19,7 +19,8 @@ use crate::whole::reserve::{self, HostFacts, Pass};
 use crate::whole_config::WholeNodeConfig;
 
 /// The end bound the host knows among `leases`: its latest started lease's, when that
-/// lease is booked here. The other leases of a host that carries several have none.
+/// lease is booked here. The record keeps one bound per host, so the other leases of a
+/// host that carries several have none: only the latest-started lease's end is known.
 fn known_end(record: &Record, leases: &[LeaseId]) -> Option<(LeaseId, Timestamp)> {
     record.bound.filter(|(held, _)| leases.contains(held))
 }
