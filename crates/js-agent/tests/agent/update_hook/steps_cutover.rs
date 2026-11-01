@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use js_agent::update_hook::{Class, Link, Outcome, Reason, Units};
 use serde_json::json;
 
-use super::step_rig::{Rig, Spy, UNIT, end_state, killable, line, marks, running};
+use super::step_rig::{Rig, Spy, UNIT, end_state, killable, line, marks, pre_stop, running};
 
 fn stop() -> String {
     format!("units.stop({UNIT})")
@@ -601,4 +601,89 @@ fn a_first_install_is_reversible_until_the_link_moves_and_not_after() {
 #[test]
 fn a_first_install_killed_at_any_point_and_run_again_still_finishes() {
     sweep("hook-cutover-sweep-first", first);
+}
+
+#[test]
+fn cutover_records_the_session_the_host_had_before_the_stop_in_the_write_of_the_stop_mark() {
+    let rig = running(Rig::new("hook-cutover-pre-stop"));
+    let session = rig.host().session_started_ms;
+    assert!(session.is_some());
+    // Killed just before the stop itself: the stop mark is on disk, and the session with it.
+    let baseline = running(Rig::new("hook-cutover-pre-stop-base"));
+    let spy = Spy::new(&baseline);
+    assert_eq!(spy.cutover(&baseline).outcome, Outcome::Success);
+    let before_stop = spy.acts.borrow()[0].points;
+    rig.kill.arm(before_stop);
+    assert!(killable(|| Spy::new(&rig).cutover(&rig)).is_none());
+    rig.kill.disarm();
+    assert_eq!(marks(&rig), [true, false, false]);
+    assert_eq!(pre_stop(&rig), session);
+    assert_eq!(unit_state(&rig), "active running", "nothing is stopped yet");
+    // A finished cutover keeps it.
+    assert_eq!(Spy::new(&rig).cutover(&rig).outcome, Outcome::Success);
+    assert_eq!(pre_stop(&rig), session);
+}
+
+#[test]
+fn the_session_and_the_stop_mark_are_never_on_disk_apart_at_any_kill_point() {
+    let baseline = running(Rig::new("hook-cutover-pre-stop-pairs-base"));
+    assert_eq!(
+        Spy::new(&baseline).cutover(&baseline).outcome,
+        Outcome::Success
+    );
+    let points = baseline.kill.points();
+    for k in 1..=points {
+        let rig = running(Rig::new(&format!("hook-cutover-pre-stop-pairs-{k}")));
+        rig.kill.arm(k);
+        assert!(killable(|| Spy::new(&rig).cutover(&rig)).is_none());
+        rig.kill.disarm();
+        let [stop_begun, ..] = marks(&rig);
+        assert_eq!(
+            pre_stop(&rig).is_some(),
+            stop_begun,
+            "killed at point {k} of {points}"
+        );
+    }
+}
+
+#[test]
+fn a_cutover_rerun_after_the_stop_keeps_the_session_it_recorded_before_it() {
+    let rig = running(Rig::new("hook-cutover-pre-stop-rerun"));
+    let before = rig.host().session_started_ms;
+    let baseline = running(Rig::new("hook-cutover-pre-stop-rerun-base"));
+    let spy = Spy::new(&baseline);
+    assert_eq!(spy.cutover(&baseline).outcome, Outcome::Success);
+    // Killed before the move of the link: the unit is stopped, the stop mark is on disk.
+    rig.kill.arm(spy.acts.borrow()[1].points);
+    assert!(killable(|| Spy::new(&rig).cutover(&rig)).is_none());
+    rig.kill.disarm();
+    assert_eq!(marks(&rig), [true, false, false]);
+    assert_eq!(pre_stop(&rig), before);
+    // The server now shows another session (the stopped agent's successor, say).
+    rig.world
+        .alter_host(|host| host.session_started_ms = Some(before.unwrap() + 777));
+    assert_eq!(Spy::new(&rig).cutover(&rig).outcome, Outcome::Success);
+    assert_eq!(
+        pre_stop(&rig),
+        before,
+        "the reading after the stop is not recorded"
+    );
+}
+
+#[test]
+fn a_cutover_when_the_server_shows_no_session_records_none() {
+    let rig = running(Rig::new("hook-cutover-pre-stop-none"));
+    // The server restarted since the agent's hello: the host is awaiting, with no session.
+    rig.world.forget_host();
+    assert_eq!(rig.host().session_started_ms, None);
+    assert_eq!(Spy::new(&rig).cutover(&rig).outcome, Outcome::Success);
+    assert_eq!(marks(&rig), [true, true, true]);
+    assert_eq!(pre_stop(&rig), None);
+}
+
+#[test]
+fn a_first_install_records_no_session() {
+    let rig = first("hook-cutover-pre-stop-first");
+    assert_eq!(Spy::new(&rig).cutover(&rig).outcome, Outcome::Success);
+    assert_eq!(pre_stop(&rig), None);
 }

@@ -720,3 +720,83 @@ fn the_declared_verify_timeout_must_outlast_the_margin_and_one_poll() {
         assert!(error.to_string().contains(&refused.to_string()), "{error}");
     }
 }
+
+/// `record` with the session the server showed before the stop. Built through the record's
+/// JSON, so that the field's name is what is pinned.
+fn with_pre_stop(record: &Record, session_ms: u64) -> Record {
+    let mut value = serde_json::to_value(record).unwrap();
+    value["pre_stop_session_ms"] = serde_json::json!(session_ms);
+    serde_json::from_value(value).expect("a record with the field is a record")
+}
+
+#[test]
+fn the_session_before_the_stop_is_allowed_with_the_stop_mark_and_after_it() {
+    let begun = good();
+    assert!(begun.stop_begun);
+    assert_eq!(check(&with_pre_stop(&begun, 7)), Ok(()));
+    let mut moved = good();
+    moved.link_moved = true;
+    assert_eq!(check(&with_pre_stop(&moved, 7)), Ok(()));
+    let mut done = good();
+    done.link_moved = true;
+    done.start_issued = true;
+    done.verify_ok = true;
+    assert_eq!(check(&with_pre_stop(&done, 0)), Ok(()));
+    // Absent is allowed anywhere: the server may have shown no session.
+    assert_eq!(check(&good()), Ok(()));
+}
+
+#[test]
+fn the_session_before_the_stop_needs_the_stop_mark() {
+    let mut record = good();
+    record.stop_begun = false;
+    assert_eq!(
+        check(&with_pre_stop(&record, 7)),
+        Err(Invalid::Marks {
+            mark: "pre_stop_session_ms",
+            needs: "stop_begun"
+        })
+    );
+}
+
+#[test]
+fn a_first_install_has_no_session_before_the_stop() {
+    let mut record = good();
+    record.update.previous = None;
+    record.update.previous_target = None;
+    record.stop_begun = false;
+    record.cordon = Cordon::default();
+    assert_eq!(check(&record), Ok(()));
+    let with = with_pre_stop(&record, 7);
+    assert_eq!(
+        check(&with),
+        Err(Invalid::Marks {
+            mark: "pre_stop_session_ms",
+            needs: "stop_begun"
+        })
+    );
+    // Even with a stop mark, which a first install never writes.
+    let mut marked = with;
+    marked.stop_begun = true;
+    assert_eq!(
+        check(&marked),
+        Err(Invalid::Marks {
+            mark: "pre_stop_session_ms",
+            needs: "a previous release"
+        })
+    );
+}
+
+#[test]
+fn a_record_without_the_session_before_the_stop_is_still_read_and_a_missing_one_is_not_written() {
+    let record = good();
+    let mut value = serde_json::to_value(&record).unwrap();
+    assert!(
+        value.get("pre_stop_session_ms").is_none(),
+        "a record without a session is written as an older hook wrote it"
+    );
+    value.as_object_mut().unwrap().remove("pre_stop_session_ms");
+    assert_eq!(serde_json::from_value::<Record>(value).unwrap(), record);
+    let with = serde_json::to_value(with_pre_stop(&record, 9)).unwrap();
+    assert_eq!(with["pre_stop_session_ms"], serde_json::json!(9));
+}

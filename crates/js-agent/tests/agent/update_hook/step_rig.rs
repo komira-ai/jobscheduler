@@ -567,6 +567,17 @@ pub fn end_state(rig: &Rig) -> serde_json::Value {
     serde_json::from_str(&state.to_string().replace(&root, "<root>")).unwrap()
 }
 
+/// The session of the host as the server showed it just before the stop, as the record on disk
+/// holds it (`None`: absent or null). Read from the JSON so that the field's name is what is
+/// pinned.
+pub fn pre_stop(rig: &Rig) -> Option<u64> {
+    let bytes = rig.record_bytes().expect("a record");
+    let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    record
+        .get("pre_stop_session_ms")
+        .and_then(serde_json::Value::as_u64)
+}
+
 /// The `stop_begun`, `link_moved` and `start_issued` marks on disk.
 pub fn marks(rig: &Rig) -> [bool; 3] {
     let record = rig.record().unwrap();
