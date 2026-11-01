@@ -86,11 +86,13 @@ pub enum Reason {
     /// A cordon is in force but the record's mark of it was never confirmed: it may lapse
     /// during the stop, and nothing renews it.
     CordonUnconfirmed,
+    /// `verify` waited out its bound and no new session of the target said hello.
+    NoHello,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 17] = [
+    pub const ALL: [Reason; 18] = [
         Reason::NotImplemented,
         Reason::BadArgs,
         Reason::BadParams,
@@ -108,6 +110,7 @@ impl Reason {
         Reason::LinkFailed,
         Reason::StartFailed,
         Reason::CordonUnconfirmed,
+        Reason::NoHello,
     ];
 
     /// The token in the JSON.
@@ -131,6 +134,7 @@ impl Reason {
             Reason::LinkFailed => "link_failed",
             Reason::StartFailed => "start_failed",
             Reason::CordonUnconfirmed => "cordon_unconfirmed",
+            Reason::NoHello => "no_hello",
         }
     }
 }

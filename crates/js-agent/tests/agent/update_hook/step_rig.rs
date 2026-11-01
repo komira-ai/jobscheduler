@@ -412,6 +412,10 @@ impl<'a> Spy<'a> {
     pub fn cutover(&self, rig: &Rig) -> Done {
         step::cutover(&self.env(rig, &as_root), &rig.params)
     }
+
+    pub fn verify(&self, rig: &Rig) -> Done {
+        step::verify(&self.env(rig, &as_root), &rig.params)
+    }
 }
 
 impl Units for Spy<'_> {
