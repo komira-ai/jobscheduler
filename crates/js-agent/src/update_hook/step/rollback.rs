@@ -31,32 +31,43 @@
 //!    back to the previous release (`rb.link_restored` first), the start (`rb.start_issued`
 //!    first) and the wait for the previous agent's hello, and then `rb.hello_ok`, after it;
 //! 7. the cordon is lifted if this update placed it and it has not lapsed or been left
-//!    unconfirmed, and the record is deleted.
+//!    unconfirmed, and the record is deleted. A lease server that does not answer the lift
+//!    does not hold the step: the cordon is ours and nothing renews it any more, so it lapses
+//!    within one lease; the step ends in success and says `cordon left to lapse`.
 //!
 //! The hello that proves the previous agent is a live session other than the one the server
 //! showed in the last reading before this step's first act (recorded with the mark of that act
 //! as `rb_pre_stop_session_ms`, and compared by equality: both are the server's stamps), of the
-//! previous version, on the execution mode the declared runtime names (`Declaration::hello_runtime`). A step that makes no act (the previous agent
-//! already runs on the previous release) asks for no other session.
+//! previous version, on the execution mode the declared runtime names
+//! (`Declaration::hello_runtime`). A step that makes no act (the previous agent already runs on
+//! the previous release) asks for no other session.
+//!
+//! A hello that names no runtime is accepted by version alone. Only a previous agent from before
+//! the hello carried the runtime can send one, and neither the record (which holds the previous
+//! version as a string) nor the declaration says which versions report it; requiring it would
+//! refuse exactly the old agents a rollback exists to bring back. A hello that names one must
+//! name the declared mode.
 //!
 //! Whose cordon it lifts is `cutover`'s rule: only one marked as placed by this update, not
 //! left unconfirmed, and not past its expiry; an operator's, and one that may be anyone's, are
 //! never touched, renewed or placed again.
 //!
 //! The ending: the record is deleted (no `cleanup` follows a rollback), so a rerun finds none
-//! and says so. It succeeds with `reversible: true` although the stop was begun, which the
-//! updater does not decide with; a tombstone would have to be cleared by the next `prepare`,
-//! which cannot tell it from the record of an update that was abandoned.
+//! and says so (`reversible: true`: it knows nothing, and the updater does not decide with the
+//! flag on a success). A tombstone would have to be cleared by the next `prepare`, which
+//! cannot tell it from the record of an update that was abandoned.
 //!
-//! Exit codes: 0; 1 (every ending after the stop says `reversible: false`); 75 when the lease
-//! server does not answer before the first act of this step, or when only the cordon is left to
-//! lift (class environment, nothing is half-done: the marks say how far it got); 76 on a taint
-//! or an owed check.
+//! Exit codes: 0; 1 (every ending after the stop says `reversible: false`); 76 on a taint or an
+//! owed check. Never 75: the declared contract gives a rollback no deferral. A lease server that
+//! does not answer before the first act is waited for inside the step, up to the declared bound
+//! less the waits still to come, and then the step fails with `lease_unreachable` (class
+//! environment) having changed nothing.
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::update_hook::{
-    Class, Cordon, Done, Held, HostReading, LeaseError, Outcome, Params, ROLLBACK_HELLO_SECS,
+    Cordon, Done, Held, HostReading, LeaseError, POLL_SECS, Params, ROLLBACK_HELLO_SECS,
     ROLLBACK_MARGIN_SECS, Reason, Record, Report, START_WAIT_SECS,
 };
 
@@ -99,7 +110,7 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
 fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Result<Done, Done> {
     refuse_host(env)?;
     if !begun(record) {
-        return finish(env, params, held, record);
+        return finish(env, held, record);
     }
     let Some(previous) = record.update.previous_target.clone() else {
         return Err(failure(
@@ -111,22 +122,7 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         let link = release_link(env, params)?;
         restore(env, params, held, record, &link, &previous)?;
     }
-    finish(env, params, held, record)
-}
-
-/// The nothing-to-do answer of the lease server being down, before this step has changed
-/// anything it could not repeat.
-fn lease_deferred(params: &Params, why: LeaseError) -> Done {
-    Done {
-        outcome: Outcome::Deferred,
-        report: Report {
-            reason: Some(Reason::LeaseUnreachable),
-            class: Class::Environment,
-            retry_after_secs: Some(params.defer_retry_secs),
-            detail: Some(why.to_string()),
-            ..Report::default()
-        },
-    }
+    finish(env, held, record)
 }
 
 /// Where the release link points, among the two releases of the update.
@@ -181,10 +177,10 @@ fn restore(
         }
     }
     refuse_host(env)?;
-    relink(env, params, held, record, link, previous)?;
+    relink(env, held, record, link, previous)?;
     refuse_host(env)?;
     if !record.rb.start_issued {
-        mark_act(env, params, held, record, set_start_issued)?;
+        mark_act(env, held, record, set_start_issued)?;
     }
     bring_up(env, held, record, params)?;
     await_hello(env, params, held, record)
@@ -210,12 +206,30 @@ fn set_hello_ok(record: &mut Record) {
     record.rb.hello_ok = true;
 }
 
-/// The host as the lease server shows it, or the step deferred: nothing it could not repeat has
-/// been done when this is asked.
-fn read_host(env: &Env<'_>, params: &Params) -> Result<HostReading, Done> {
-    match env.ports.lease.host() {
-        Ok(host) => Ok(host),
-        Err(why) => Err(lease_deferred(params, why)),
+/// The host as the lease server shows it. A server that does not answer is waited for, up to the
+/// declared bound less the waits still to come, and then the step fails as an environment matter
+/// (`lease_unreachable`): asked only before this step's first act, so nothing is half-done.
+fn read_host(env: &Env<'_>) -> Result<HostReading, Done> {
+    // What is left of the declared bound for the other waits: the start, the hello and a margin.
+    let bound_ms = env
+        .declaration
+        .timeouts
+        .rollback
+        .saturating_sub(START_WAIT_SECS)
+        .saturating_sub(ROLLBACK_HELLO_SECS)
+        .saturating_sub(ROLLBACK_MARGIN_SECS)
+        .saturating_mul(1000);
+    let began = env.ports.clock.now_ms();
+    loop {
+        match env.ports.lease.host() {
+            Ok(host) => return Ok(host),
+            Err(why) => {
+                if env.ports.clock.now_ms().saturating_sub(began) >= bound_ms {
+                    return Err(lease_failure(why));
+                }
+            }
+        }
+        env.ports.clock.pause(Duration::from_secs(POLL_SECS));
     }
 }
 
@@ -224,7 +238,6 @@ fn read_host(env: &Env<'_>, params: &Params) -> Result<HostReading, Done> {
 /// from. A server that does not answer ends the step here, deferred, with nothing begun.
 fn mark_act(
     env: &Env<'_>,
-    params: &Params,
     held: &Held,
     record: &mut Record,
     set: fn(&mut Record),
@@ -233,7 +246,7 @@ fn mark_act(
     let acted = rb.stop_begun || rb.link_restored || rb.start_issued;
     let mut next = record.clone();
     if !acted {
-        let host = read_host(env, params)?;
+        let host = read_host(env)?;
         next.rb_pre_stop_session_ms = host.session_started_ms;
     }
     set(&mut next);
@@ -272,7 +285,7 @@ fn drain(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Re
     let began = env.ports.clock.now_ms();
     loop {
         refuse_host(env)?;
-        let host = read_host(env, params)?;
+        let host = read_host(env)?;
         keep_out(env, params, held, record, &host)?;
         if host.leases == 0 && !host.releasing {
             break;
@@ -315,7 +328,7 @@ fn stop(
 ) -> Result<(), Done> {
     refuse_host(env)?;
     if !record.rb.stop_begun {
-        mark_act(env, params, held, record, set_stop_begun)?;
+        mark_act(env, held, record, set_stop_begun)?;
     }
     env.ports.point();
     env.ports
@@ -357,7 +370,6 @@ fn wait_down(
 /// Marks the link as restored, and moves it unless it is on the previous release already.
 fn relink(
     env: &Env<'_>,
-    params: &Params,
     held: &Held,
     record: &mut Record,
     link: &Path,
@@ -366,7 +378,7 @@ fn relink(
     // Read before the mark: a read that fails leaves nothing begun.
     let on_previous = linked(env, link, previous)?;
     if !record.rb.link_restored {
-        mark_act(env, params, held, record, set_link_restored)?;
+        mark_act(env, held, record, set_link_restored)?;
     }
     if on_previous {
         return Ok(());
@@ -489,17 +501,27 @@ fn await_hello(
 }
 
 /// Lifts the cordon if this update placed it and it is still ours, and deletes the record.
-fn finish(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Result<Done, Done> {
+fn finish(env: &Env<'_>, held: &Held, record: &mut Record) -> Result<Done, Done> {
+    let mut note = None;
     if ours(record, env.ports.clock.now_ms()) {
         env.ports.point();
-        if let Err(why) = env.ports.lease.uncordon() {
-            return Err(lease_deferred(params, why));
+        match env.ports.lease.uncordon() {
+            Ok(_) => {
+                // So that a kill before the delete does not lift, on a rerun, a cordon placed since.
+                record.cordon = Cordon::default();
+                save(env, held, record)?;
+            }
+            // Nothing renews it any more: it lapses within one lease.
+            Err(why) => note = Some(format!("cordon left to lapse (could not be lifted: {why})")),
         }
-        // So that a kill before the delete does not lift, on a rerun, a cordon placed since.
-        record.cordon = Cordon::default();
-        save(env, held, record)?;
     }
     env.ports.point();
     held.delete().map_err(state_failure)?;
-    Ok(success())
+    Ok(Done {
+        report: Report {
+            detail: note,
+            ..Report::default()
+        },
+        ..success()
+    })
 }

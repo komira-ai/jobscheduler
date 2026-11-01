@@ -109,7 +109,6 @@ pub struct Timeouts {
 #[derive(Deserialize)]
 struct Wire {
     state_dir: PathBuf,
-    #[allow(dead_code)]
     verify_deadline_secs: Option<u64>,
     hook: WireHook,
 }
@@ -165,6 +164,18 @@ impl Declaration {
     /// [`DeclarationError`]: see [`Declaration::read`].
     pub fn parse(text: &str) -> Result<Declaration, DeclarationError> {
         let wire: Wire = toml::from_str(text)?;
+        let timeouts = wire.hook.timeout_secs;
+        // The updater rolls back a verify that has not succeeded by the deadline: it must not
+        // do that to one that is still allowed to run, and the rollback needs its own bound.
+        if let Some(deadline) = wire.verify_deadline_secs
+            && deadline < timeouts.verify.saturating_add(timeouts.rollback)
+        {
+            return Err(DeclarationError::VerifyDeadline {
+                deadline,
+                verify: timeouts.verify,
+                rollback: timeouts.rollback,
+            });
+        }
         let declaration = Declaration {
             state_dir: wire.state_dir,
             units: wire.hook.units,
