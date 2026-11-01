@@ -99,3 +99,35 @@ fn the_field_is_read_leniently_and_kept_as_read() {
     assert_eq!(shares, vec![None, None, Some(one)]);
     assert_eq!(got[2].host, host("h3"));
 }
+
+/// Asserts that a row that cannot be read as resources does not fail the file: a row
+/// missing `cpu_millis`, a `shares` that is not a table, and a row with a text count each
+/// read as a lease that books the whole host, and the leases around them are read as
+/// before. The server must start on such a file.
+#[test]
+fn a_malformed_row_reads_as_no_shares_and_does_not_fail_the_file() {
+    let scratch = Scratch::new("shares_malformed");
+    let head = "version = 1\nterm = 3\nnext_sequence = 5\nlease_count = 4\n";
+    let lease = |n: u64, tail: &str| {
+        format!(
+            "\n[[lease]]\nterm = 1\nsequence = {n}\nstate = \"held\"\nhost = \"h{n}\"\n\
+             acquired_at_ms = 1\nexpires_at_ms = 2\nends_at_ms = 3\n{tail}"
+        )
+    };
+    let missing = lease(1, "\n[lease.shares]\nmemory_bytes = 1\n");
+    let scalar = lease(2, "shares = 3\n");
+    let text = lease(
+        3,
+        "\n[lease.shares]\ncpu_millis = \"many\"\nmemory_bytes = 1\n",
+    );
+    let fine = lease(4, "\n[lease.shares]\ncpu_millis = 500\nmemory_bytes = 1\n");
+    fs::write(
+        scratch.file(),
+        format!("{head}{missing}{scalar}{text}{fine}"),
+    )
+    .unwrap();
+    let got = read_bookings(scratch.file()).unwrap();
+    let shares: Vec<_> = got.iter().map(|booking| booking.shares.clone()).collect();
+    let half = Resources::new(500, 1, 0, None).unwrap();
+    assert_eq!(shares, vec![None, None, None, Some(half)]);
+}

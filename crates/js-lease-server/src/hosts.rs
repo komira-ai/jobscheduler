@@ -70,6 +70,10 @@ struct HostEntry {
     phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     lease: Option<String>,
+    /// Every lease on the host, when it carries more than one (`lease` is the first of
+    /// them); absent for a host with none or one, so those bodies are as they were.
+    #[serde(skip_serializing_if = "at_most_one")]
+    leases: Vec<String>,
     shape: ShapeView,
     memory: MemoryView,
     capabilities: BTreeMap<String, String>,
@@ -200,6 +204,10 @@ fn shape_view(shape: &Shape) -> ShapeView {
     }
 }
 
+fn at_most_one(leases: &[String]) -> bool {
+    leases.len() <= 1
+}
+
 fn lease_text(lease: Option<LeaseId>) -> Option<String> {
     lease.map(|lease| lease.to_string())
 }
@@ -232,6 +240,7 @@ impl HostEntry {
             lost: None,
             phase: None,
             lease: lease_text(host.leased_to),
+            leases: Vec::new(),
             shape: shape_view(&host.shape),
             memory: MemoryView::of(host.memory),
             capabilities: host.shape.capabilities().clone(),
@@ -256,6 +265,7 @@ impl HostEntry {
             lost: Some(host.state == HostState::Lost),
             phase: Some(String::from(host.phase)),
             lease: lease_text(host.lease),
+            leases: Vec::new(),
             shape: shape_view(&host.shape),
             memory: MemoryView::of(host.memory),
             capabilities: host.shape.capabilities().clone(),
@@ -312,6 +322,7 @@ mod tests {
             state: HostState::Live,
             phase: Phase::Serving,
             lease: None,
+            leases: Vec::new(),
             shape: Shape::new(resources, BTreeMap::new()),
             memory: MemoryHeadroom::full(1 << 20),
             claim: None,
@@ -326,6 +337,47 @@ mod tests {
             drain_deadline: None,
             cordon_until: None,
             load: None,
+        }
+    }
+
+    /// A host that carries several leases lists them all beside `lease` (the first), for a
+    /// registered host and a static one; a host with one or none has no `leases` key, so its
+    /// body is as it was. It catches a listing that shows only the first lease.
+    #[test]
+    fn a_host_with_several_leases_lists_them_all() {
+        let ids = [LeaseId::new(1, 1), LeaseId::new(1, 2)];
+        let mut many = view(None);
+        many.lease = Some(ids[0]);
+        many.leases = ids.to_vec();
+        let mut one = view(None);
+        one.id = HostId::new("b").unwrap();
+        one.lease = Some(ids[0]);
+        one.leases = vec![ids[0]];
+        let resources = Resources::new(1000, 1 << 20, 0, None).unwrap();
+        let capacity = |name: &str, leases: Vec<LeaseId>| HostCapacity {
+            host: HostId::new(name).unwrap(),
+            shape: Shape::new(resources.clone(), BTreeMap::new()),
+            memory: MemoryHeadroom::full(1 << 20),
+            leased_to: leases.first().copied(),
+            leases,
+        };
+        let statics = vec![
+            capacity("s2", ids.to_vec()),
+            capacity("s1", ids[..1].to_vec()),
+        ];
+        let list = HostList::of(statics, vec![many, one], None);
+        let body = serde_json::to_value(&list).unwrap();
+        let by_id = |id: &str| {
+            let hosts = body["hosts"].as_array().unwrap();
+            hosts.iter().find(|host| host["id"] == id).unwrap().clone()
+        };
+        for id in ["a", "s2"] {
+            assert_eq!(by_id(id)["lease"], "1-1");
+            assert_eq!(by_id(id)["leases"], serde_json::json!(["1-1", "1-2"]));
+        }
+        for id in ["b", "s1"] {
+            assert_eq!(by_id(id)["lease"], "1-1");
+            assert!(by_id(id).get("leases").is_none());
         }
     }
 

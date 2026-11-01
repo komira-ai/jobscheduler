@@ -250,3 +250,19 @@ fn stopping_an_earlier_lease_on_a_shared_host_is_counted() {
     p.provider.stop(&lease(2));
     assert_eq!(p.fx.registry.tail_counters().ended_unestimated, 2);
 }
+
+/// Guard: a lease put back after a restart has no bound and no start, so its stop counts
+/// nothing in the tail counters, estimated or not.
+#[test]
+fn stopping_a_restored_lease_counts_nothing() {
+    let mut p = pool(&[]);
+    p.fx.registry.set_placer(Arc::new(Last::default()));
+    let two = Some(Resources::new(2000, 1, 0, None).unwrap());
+    p.provider
+        .seat_booked(&host("a"), lease(1), None, two)
+        .unwrap();
+    p.fx.join("a", "t");
+    p.provider.stop(&lease(1));
+    let counted = p.fx.registry.tail_counters();
+    assert_eq!((counted.ended_estimated, counted.ended_unestimated), (0, 0));
+}

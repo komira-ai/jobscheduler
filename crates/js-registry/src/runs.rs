@@ -851,14 +851,13 @@ mod tests {
         );
     }
 
-    /// Asserts the restart case of the estimate feed: a booked lease with a keyed run
-    /// whose profile has a known P90, but with no recorded start (as a lease put back
-    /// after a restart has none, and so has no entry among the host's bounds), is fed
-    /// nothing, so the drain cost counts it as ending now; with the start known the same
-    /// run is fed start plus P90. It catches an estimate counted from a start that is not
-    /// known.
+    /// Asserts the estimate feed: a booked lease with a keyed run
+    /// whose profile has a known P90 is fed its start plus that P90 (a lease put back after
+    /// a restart has no recorded start and so no entry among the host's bounds; the
+    /// registry-level test in `tests/sharing.rs` covers it). It catches an estimate counted
+    /// from a start that is not the lease's.
     #[test]
-    fn a_lease_with_no_recorded_start_is_fed_no_estimate() {
+    fn a_lease_is_fed_its_start_plus_the_p90() {
         use crate::lives::{ProfileLives, est_ends};
         struct Known;
         impl ProfileLives for Known {
@@ -874,7 +873,6 @@ mod tests {
         runs.admit(&host, &lease, (job(), Some(key)), &shape, None, (0, 0))
             .unwrap();
         let lives: &dyn ProfileLives = &Known;
-        assert_eq!(est_ends(Some(lives), &runs, &[]), Vec::<Option<u64>>::new());
         assert_eq!(
             est_ends(Some(lives), &runs, &[(lease, 1_000)]),
             [Some(1_000 + 120_000)]

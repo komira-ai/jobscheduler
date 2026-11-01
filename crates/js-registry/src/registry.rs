@@ -63,8 +63,11 @@ pub struct HostView {
     pub state: HostState,
     /// The phase the host last announced.
     pub phase: Phase,
-    /// The lease holding the host, if any.
+    /// The lease booked first on the host, if any.
     pub lease: Option<LeaseId>,
+    /// Every lease booked on the host, in the order they were booked; `lease` is the first
+    /// of them. Empty when the host holds none.
+    pub leases: Vec<LeaseId>,
     /// The shape the pool books for the host (not the host's own claim), with its memory
     /// cut to the pool's memory percent.
     pub shape: Shape,
@@ -1016,6 +1019,7 @@ impl Registry {
         now: Timestamp,
     ) -> impl Fn(&HostId, &Record) -> HostView + 'a {
         let booked = book.booked();
+        let every = book.leases();
         let shape = self.shared.config.booked();
         let memory = self.shared.config.memory_headroom();
         let marks = marks.reservations();
@@ -1031,6 +1035,7 @@ impl Registry {
                     .filter(|_| record.state(now, self.grace_ms()) != HostState::Lost),
                 phase: record.phase,
                 lease: booked.get(id).copied(),
+                leases: every.get(id).cloned().unwrap_or_default(),
                 shape: shape.clone(),
                 memory,
                 claim: record.claim.clone(),

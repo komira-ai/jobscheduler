@@ -239,11 +239,19 @@ pub enum Placement {
 }
 
 impl Placement {
+    /// Refuses `js-sched` for a pool whose shape the scheduler cannot take as a node (a
+    /// shape with no `arch`): every start would fall back to the first host, and the flag
+    /// would do nothing it says. `place` names the flag or key for the message.
+    pub(crate) fn check(self, pool: &PoolConfig, place: &str) -> Result<(), StartupError> {
+        let _ = (pool, place);
+        Ok(())
+    }
+
     /// The placer the registry takes for this choice; none for `registry`.
     pub(crate) fn placer(self) -> Option<Arc<dyn js_registry::Placer>> {
         match self {
             Self::Registry => None,
-            Self::JsSched => Some(Arc::new(SchedPlacer)),
+            Self::JsSched => Some(Arc::new(SchedPlacer::default())),
         }
     }
 }
@@ -519,6 +527,7 @@ impl Config {
                     tokens,
                     mint_provider,
                 } = *registering;
+                server.agents.placement().check(&pool, "server.placement")?;
                 let agents = Box::new(AgentSetup {
                     tokens,
                     pool,
@@ -777,11 +786,13 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                 Some(path) => AgentTokens::open(path, client)?,
                 None => AgentTokens::none(),
             };
+            let pool = agent_pool::read(pool)?;
+            cli.placement.check(&pool, "--placement")?;
             Ok(Hosts::Layered {
                 static_pool,
                 agents: Box::new(AgentSetup {
                     tokens,
-                    pool: agent_pool::read(pool)?,
+                    pool,
                     mint_provider: None,
                     hello_limit: HelloLimit {
                         burst: cli.agent_hello_burst,

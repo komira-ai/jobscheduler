@@ -13,7 +13,7 @@ use js_types::{Admission, ClassId, HostId, LeaseId, Request, ResourceClass, Reso
 use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, post, session};
-use crate::config_support::{PoolText, file, load, quote, quoted, server};
+use crate::config_support::{PoolText, file, load, quote, quoted, refusal, server};
 use crate::support::{Harness, Scratch, base_args, config};
 
 /// A pool of up to two machines with a node report: the scheduler describes a host by
@@ -198,28 +198,50 @@ fn pool(scratch: &Scratch) -> PoolText {
         .set("join_token_file", &quoted(&joins))
 }
 
-/// Asserts the file's key: `server.placement` is the registry when left out, and `js-sched`
-/// when the file says so.
+/// Asserts the file's key: `server.placement` is the registry when left out or named, and a
+/// bad value is refused naming the key (the values of the key are tested in `config_one_file`).
 #[test]
 fn the_key_is_read_from_the_file() {
-    for (name, extra, expected) in [
-        ("placement_key_off", "", Placement::Registry),
-        (
-            "placement_key_on",
-            "placement = \"js-sched\"",
-            Placement::JsSched,
-        ),
-        (
-            "placement_key_reg",
-            "placement = \"registry\"",
-            Placement::Registry,
-        ),
+    for (name, extra) in [
+        ("placement_key_off", ""),
+        ("placement_key_reg", "placement = \"registry\""),
     ] {
         let scratch = Scratch::new(name);
         let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
         let table = server(&scratch, &format!("{listeners}\n{extra}"));
         let text = file(&table, &[&pool(&scratch)]);
         let config = load(&scratch, &text).unwrap();
-        assert_eq!(config.placement(), expected);
+        assert_eq!(config.placement(), Placement::Registry);
     }
+}
+
+/// Asserts that `js-sched` is refused at start for a pool whose shape the scheduler cannot
+/// take as a node (no `arch`), by the flag and by the key, naming the flag or key and the
+/// missing `arch`; and that the same pool is accepted by the registry. Without the refusal
+/// every start would fall back to the first host and the flag would do nothing.
+#[test]
+fn js_sched_is_refused_for_a_pool_with_no_arch() {
+    let scratch = Scratch::new("placement_no_arch");
+    let mut flags = args(&scratch, &["--placement", "js-sched"]);
+    let at = flags
+        .iter()
+        .position(|arg| arg == "--agent-pool-config")
+        .unwrap();
+    let bare = POOL.replace("arch = \"x86_64\"", "isa = \"x86-64-v3\"");
+    flags[at + 1] = scratch
+        .write("bare-pool.toml", &bare, 0o644)
+        .into_os_string();
+    let said = parsed(flags.clone()).err().unwrap();
+    assert!(said.starts_with("--placement: "), "{said}");
+    assert!(said.contains("arch"), "{said}");
+    let at = flags.iter().position(|arg| arg == "--placement").unwrap();
+    flags[at + 1] = "registry".into();
+    assert!(parsed(flags).is_ok());
+
+    let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
+    let table = server(&scratch, &format!("{listeners}\nplacement = \"js-sched\""));
+    let text = file(&table, &[&pool(&scratch)]);
+    let said = refusal(&scratch, &text);
+    assert!(said.starts_with("server.placement: "), "{said}");
+    assert!(said.contains("arch"), "{said}");
 }

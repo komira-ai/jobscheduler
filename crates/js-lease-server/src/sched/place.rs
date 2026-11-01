@@ -9,6 +9,8 @@
 //! a placer, and the scheduler only ranks the hosts that have room, by its own score (the
 //! host the lease fits most tightly; equal hosts by a hash of the lease and the host).
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use js_pool_static::Candidate;
 use js_provider::StartSpec;
 use js_registry::Placer;
@@ -24,9 +26,34 @@ use super::map::{self, MapError};
 /// differ from the leases it recovers, which are numbered in term 0.
 const TERM: u64 = 1;
 
-/// Places the starts of a registry with `js-sched`.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct SchedPlacer;
+/// Places the starts of a registry with `js-sched`, and counts the starts it could not.
+#[derive(Debug, Default)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct SchedPlacer {
+    unmappable: AtomicU64,
+    declined: AtomicU64,
+}
+
+/// How many starts fell back to the registry's first host, by cause.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Fallbacks {
+    /// The scheduler could not be built over the hosts or the request.
+    pub(crate) unmappable: u64,
+    /// The scheduler was built and placed the start nowhere.
+    pub(crate) declined: u64,
+}
+
+impl SchedPlacer {
+    /// The fallbacks so far.
+    #[cfg(test)]
+    pub(crate) fn fallbacks(&self) -> Fallbacks {
+        Fallbacks {
+            unmappable: self.unmappable.load(Ordering::Relaxed),
+            declined: self.declined.load(Ordering::Relaxed),
+        }
+    }
+}
 
 impl Placer for SchedPlacer {
     /// The host the scheduler gives the start, as an index of `open`. When the scheduler
@@ -192,13 +219,13 @@ mod tests {
             host("b", x86(), &[1000]),
             host("c", x86(), &[3000]),
         ];
-        assert_eq!(SchedPlacer.pick(&spec(), &open), Some(2));
+        assert_eq!(SchedPlacer::default().pick(&spec(), &open), Some(2));
         let open = [
             host("a", x86(), &[1000]),
             host("b", x86(), &[1000, 1000]),
             host("c", x86(), &[]),
         ];
-        assert_eq!(SchedPlacer.pick(&spec(), &open), Some(1));
+        assert_eq!(SchedPlacer::default().pick(&spec(), &open), Some(1));
     }
 
     /// Catches: equal hosts always broken the same way (the first by name, or the lease
@@ -208,39 +235,65 @@ mod tests {
     #[test]
     fn equal_hosts_are_told_apart_by_the_lease() {
         let open = [host("a", x86(), &[]), host("b", x86(), &[])];
-        assert_eq!(SchedPlacer.pick(&spec_of(&sharing(), 1), &open), Some(1));
-        assert_eq!(SchedPlacer.pick(&spec_of(&sharing(), 3), &open), Some(0));
+        assert_eq!(
+            SchedPlacer::default().pick(&spec_of(&sharing(), 1), &open),
+            Some(1)
+        );
+        assert_eq!(
+            SchedPlacer::default().pick(&spec_of(&sharing(), 3), &open),
+            Some(0)
+        );
         let id = ClassId::new("box").unwrap();
         let whole = ResourceClass::new(id, Admission::BookAll, 0);
-        assert_eq!(SchedPlacer.pick(&spec_of(&whole, 1), &open), Some(0));
+        assert_eq!(
+            SchedPlacer::default().pick(&spec_of(&whole, 1), &open),
+            Some(0)
+        );
     }
 
     /// Catches: a host the scheduler cannot describe (no `arch`) failing the start or being
-    /// skipped silently: the registry's first host is booked, as without a placer.
+    /// skipped silently: the registry's first host is booked, as without a placer, and the
+    /// fallback is counted as unmappable. With no host there is nothing to book or count.
     #[test]
-    fn hosts_that_do_not_describe_a_node_fall_back_to_the_first() {
+    fn hosts_that_do_not_describe_a_node_fall_back_to_the_first_and_are_counted() {
+        let placer = SchedPlacer::default();
         let open = [host("a", shape(&[]), &[3000]), host("b", x86(), &[])];
-        assert_eq!(SchedPlacer.pick(&spec(), &open), Some(0));
-        assert_eq!(SchedPlacer.pick(&spec(), &[]), None);
+        assert_eq!(placer.pick(&spec(), &open), Some(0));
+        assert_eq!(placer.pick(&spec(), &[]), None);
+        let counted = Fallbacks {
+            unmappable: 1,
+            declined: 0,
+        };
+        assert_eq!(placer.fallbacks(), counted);
     }
 
     /// Catches: a request the scheduler cannot describe (a capability that is not a
     /// platform requirement) failing the start or being placed nowhere: the first host is
-    /// booked, where the scheduler would have taken `b`, which carries the more.
+    /// booked, where the scheduler would have taken `b`, which carries the more, and the
+    /// fallback is counted.
     #[test]
     fn a_request_that_is_not_a_platform_requirement_falls_back_to_the_first() {
+        let placer = SchedPlacer::default();
         let open = [host("a", x86(), &[]), host("b", x86(), &[3000])];
-        assert_eq!(SchedPlacer.pick(&spec(), &open), Some(1));
+        assert_eq!(placer.pick(&spec(), &open), Some(1));
         let odd = spec_with(&sharing(), 1, &[("colour", "red")]);
-        assert_eq!(SchedPlacer.pick(&odd, &open), Some(0));
+        assert_eq!(placer.pick(&odd, &open), Some(0));
+        assert_eq!(placer.fallbacks().unmappable, 1);
     }
 
-    /// Catches: a start placed on a host the scheduler has no room on: the one host here is
-    /// booked in full by a lease, so the scheduler places the start nowhere and none is
-    /// picked.
+    /// Catches: a start the registry found room for becoming `no-capacity` because the
+    /// scheduler disagrees (here its one host is booked in full by a lease, which the
+    /// candidate lists though the registry offered it): the registry's first host is booked
+    /// and the fallback is counted as declined, not as unmappable.
     #[test]
-    fn a_start_the_scheduler_cannot_place_is_placed_nowhere() {
+    fn a_start_the_scheduler_declines_falls_back_to_the_first_and_is_counted() {
+        let placer = SchedPlacer::default();
         let open = [host("a", x86(), &[8000])];
-        assert_eq!(SchedPlacer.pick(&spec(), &open), None);
+        assert_eq!(placer.pick(&spec(), &open), Some(0));
+        let counted = Fallbacks {
+            unmappable: 0,
+            declined: 1,
+        };
+        assert_eq!(placer.fallbacks(), counted);
     }
 }
