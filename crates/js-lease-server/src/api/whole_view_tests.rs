@@ -163,15 +163,19 @@ impl Rig {
             accepts_host_credential: false,
         };
         let classes = vec![share_class(), ResourceClass::whole_node()];
-        let asker = registry.provider().with_classes(classes.clone());
-        let provider = registry.provider().with_classes(classes);
+        let mut asker = registry.provider().with_classes(classes.clone());
+        let provider = registry.provider().with_classes(classes.clone());
         let file = dir.join("leases.toml");
-        if boot == Boot::Resume && host_back {
-            // As the program does before it opens the table: the bookings of the file are
-            // put back on the hosts that held them, awaiting their agents.
+        // After a restart the host that held a lease says hello before the table is
+        // opened, and the lease it held is booked on it again, as an ordinary one (a
+        // `seat` would book it as a committed whole-node lease, the class of the pool,
+        // which with a reservation on the same host is over the pool's ceiling).
+        let early = host_back && boot == Boot::Resume;
+        if early {
+            registry.hello(&hello, &Credential::of_token("t")).unwrap();
             for booking in read_bookings(&file).unwrap() {
-                let seat = provider.seat(&booking.host, booking.lease, None);
-                seat.unwrap();
+                let spec = StartSpec::new(booking.lease, request("share", 600), &classes);
+                asker.start(spec.unwrap());
             }
         }
         let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
@@ -188,7 +192,7 @@ impl Rig {
         let token = parse_token(&[b'c'; 40]).unwrap();
         let shared = Shared::new(table, token, Some(Arc::new(agents)));
         // The agent's hello comes after the server is up, as it does in the program.
-        if host_back {
+        if host_back && !early {
             registry.hello(&hello, &Credential::of_token("t")).unwrap();
         }
         let served = status.then(|| {

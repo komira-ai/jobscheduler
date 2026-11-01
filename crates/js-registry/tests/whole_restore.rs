@@ -5,8 +5,6 @@
 
 mod support;
 
-use std::time::Duration;
-
 use js_lease::{
     Exclusion as LeaseExclusion, ExclusionEnd, Held, Queued, ReservationRecord, Timestamp,
 };
@@ -49,19 +47,20 @@ fn two_waiting() -> World {
     w
 }
 
-/// A new registry on the clock of `old`, given `ledger`, with no host yet.
-fn restarted(old: &World, ledger: &[ReservationRecord]) -> (World, Restored) {
-    let back = World::of(pool(), &[]);
-    let late = old.now().millis() - back.now().millis();
-    back.fx.clock.advance(Duration::from_millis(late));
+/// A new registry on the clock of `old`, given `ledger`. With `host_a` the host `a` is up
+/// and busy with an ordinary lease before the ledger is given (a start on a host a mark
+/// holds is refused, and a seat would book the lease as a committed whole-node one, which
+/// with a reservation on the same host is over the pool's ceiling); without it no host is
+/// up.
+fn restarted(old: &World, ledger: &[ReservationRecord], host_a: bool) -> (World, Restored) {
+    let hosts: &[&str] = if host_a { &["a"] } else { &[] };
+    let mut back = World::of(pool(), hosts);
+    if host_a {
+        back.share(1, HOUR_S);
+    }
+    back.step(old.now().millis() - back.now().millis());
     let restored = back.fx.registry.restore_reservations(ledger);
     (back, restored)
-}
-
-/// The host `a` says hello again holding the lease it held before the restart.
-fn host_returns(back: &mut World) {
-    back.provider.seat(&host("a"), lease(1), None).unwrap();
-    back.join("a");
 }
 
 fn held(name: &str, reserved: u64, deadline: u64) -> Held {
@@ -133,7 +132,7 @@ fn a_restart_puts_back_the_mark_the_places_and_the_counters() {
     assert_eq!(names(&marks), [("r2".to_string(), "a".to_string())]);
     let ledger = w.fx.registry.reservation_ledger();
 
-    let (mut back, restored) = restarted(&w, &ledger);
+    let (mut back, restored) = restarted(&w, &ledger, true);
     assert_eq!(
         restored,
         Restored {
@@ -141,9 +140,6 @@ fn a_restart_puts_back_the_mark_the_places_and_the_counters() {
             dropped: 0
         }
     );
-    back.fx.registry.advance();
-    assert_eq!(back.reservations(), marks, "kept while its host is unheard");
-    host_returns(&mut back);
     assert_eq!(back.reservations(), marks);
     assert_eq!(back.fx.registry.queue_position(&id("r1")), Some(0));
     assert_eq!(back.fx.registry.queue_position(&id("r2")), Some(1));
@@ -179,8 +175,7 @@ fn a_restart_puts_back_the_mark_the_places_and_the_counters() {
 fn a_request_that_is_not_presented_again_is_dropped_and_counted() {
     let w = two_waiting();
     let ledger = w.fx.registry.reservation_ledger();
-    let (mut back, _) = restarted(&w, &ledger);
-    host_returns(&mut back);
+    let (mut back, _) = restarted(&w, &ledger, true);
 
     back.step(14_999);
     assert_eq!(back.fx.registry.queue_position(&id("r1")), Some(0));
@@ -204,7 +199,7 @@ fn a_request_that_is_not_presented_again_is_dropped_and_counted() {
 fn a_mark_on_a_host_that_never_returns_is_dropped_and_counted() {
     let w = two_waiting();
     let ledger = w.fx.registry.reservation_ledger();
-    let (mut back, _) = restarted(&w, &ledger);
+    let (mut back, _) = restarted(&w, &ledger, false);
     back.join("b");
     back.share(10, HOUR_S);
     back.ask(2, "r1");
@@ -229,7 +224,7 @@ fn a_mark_on_a_host_that_never_returns_is_dropped_and_counted() {
 #[test]
 fn records_that_cannot_stand_are_dropped_at_restore() {
     let w = two_waiting();
-    let (back, _) = restarted(&w, &[]);
+    let (back, _) = restarted(&w, &[], false);
     back.fx.registry.mark_ending(&host("e"));
     let good = ReservationRecord {
         held: Some(Held {
@@ -303,9 +298,8 @@ fn a_capped_reservation_is_not_given_up_at_its_deadline_after_a_restart() {
         give_ups: 2,
         ..record("r1")
     };
-    let (mut back, restored) = restarted(&w, &[capped]);
+    let (mut back, restored) = restarted(&w, &[capped], true);
     assert_eq!(restored.dropped, 0);
-    host_returns(&mut back);
     back.ask(2, "r1");
     back.step(20_000);
     assert_eq!(back.reserved_host("r1"), Some("a".to_string()));
@@ -331,7 +325,7 @@ fn a_request_that_used_up_its_tries_is_still_terminal_after_a_restart() {
         prepare_failures: 2,
         ..record("r-s")
     };
-    let (mut back, restored) = restarted(&w, &[used, short]);
+    let (mut back, restored) = restarted(&w, &[used, short], false);
     assert_eq!(
         restored,
         Restored {
