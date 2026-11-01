@@ -46,9 +46,21 @@ pub fn member(
     bytes: &[u8],
     member: &str,
 ) -> Result<Vec<u8>, ArchiveError> {
+    member_with_limit(archive, packing, bytes, member, MAX_MEMBER)
+}
+
+/// [`member`] with a member of at most `limit` bytes: a larger one is an error, never a
+/// truncated read.
+pub fn member_with_limit(
+    archive: &str,
+    packing: Packing,
+    bytes: &[u8],
+    member: &str,
+    limit: u64,
+) -> Result<Vec<u8>, ArchiveError> {
     let found = match packing {
-        Packing::Zip => zip_member(bytes, member),
-        Packing::TarGz => tar_member(bytes, member),
+        Packing::Zip => zip_member(bytes, member, limit),
+        Packing::TarGz => tar_member(bytes, member, limit),
     };
     let found = found.map_err(|why| ArchiveError::Unreadable {
         archive: archive.to_owned(),
@@ -63,22 +75,11 @@ pub fn member(
         })
 }
 
-/// [`member`] with a member of at most `limit` bytes.
-pub fn member_with_limit(
-    archive: &str,
-    packing: Packing,
-    bytes: &[u8],
-    name: &str,
-    _limit: u64,
-) -> Result<Vec<u8>, ArchiveError> {
-    member(archive, packing, bytes, name)
-}
-
 fn why(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-fn zip_member(bytes: &[u8], member: &str) -> Result<Option<Vec<u8>>, String> {
+fn zip_member(bytes: &[u8], member: &str, limit: u64) -> Result<Option<Vec<u8>>, String> {
     let bad = || "malformed zip".to_owned();
     // A little-endian number of `n` bytes at `at`.
     let num = |at: usize, n: usize| -> Result<usize, String> {
@@ -109,16 +110,16 @@ fn zip_member(bytes: &[u8], member: &str) -> Result<Option<Vec<u8>>, String> {
             }
             let data = local + 30 + num(local + 26, 2)? + num(local + 28, 2)?;
             let packed = bytes.get(data..data + packed).ok_or_else(bad)?;
-            return inflate(method, packed, plain).map(Some);
+            return inflate(method, packed, plain, limit).map(Some);
         }
         at += 46 + name + extra + comment;
     }
     Ok(None)
 }
 
-fn inflate(method: usize, packed: &[u8], plain: usize) -> Result<Vec<u8>, String> {
+fn inflate(method: usize, packed: &[u8], plain: usize, limit: u64) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
-    let cap = MAX_MEMBER.min(plain as u64) + 1;
+    let cap = limit.min(plain as u64) + 1;
     match method {
         0 => out.extend_from_slice(packed),
         8 => {
@@ -129,7 +130,7 @@ fn inflate(method: usize, packed: &[u8], plain: usize) -> Result<Vec<u8>, String
         }
         other => return Err(format!("compression method {other} is not supported")),
     }
-    if out.len() != plain.min(MAX_MEMBER as usize) {
+    if out.len() != plain.min(limit as usize) {
         return Err(format!(
             "member is {} bytes, not the {plain} the zip lists",
             out.len()
@@ -138,14 +139,18 @@ fn inflate(method: usize, packed: &[u8], plain: usize) -> Result<Vec<u8>, String
     Ok(out)
 }
 
-fn tar_member(bytes: &[u8], member: &str) -> Result<Option<Vec<u8>>, String> {
+fn tar_member(bytes: &[u8], member: &str, limit: u64) -> Result<Option<Vec<u8>>, String> {
     let mut tar = tar::Archive::new(GzDecoder::new(bytes));
     for entry in tar.entries().map_err(why)? {
         let entry = entry.map_err(why)?;
         let named = entry.path().map_err(why)?.to_str() == Some(member);
         if named {
             let mut out = Vec::new();
-            entry.take(MAX_MEMBER).read_to_end(&mut out).map_err(why)?;
+            entry.take(limit + 1).read_to_end(&mut out).map_err(why)?;
+            // One byte more than the limit was asked for: a member that long is cut off.
+            if out.len() as u64 > limit {
+                return Err(format!("member is larger than {limit} bytes"));
+            }
             return Ok(Some(out));
         }
     }

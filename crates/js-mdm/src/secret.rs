@@ -46,8 +46,11 @@ pub fn has_value(bytes: &[u8], key: &str) -> bool {
 }
 
 /// Whether `bytes` holds a line other than `KEY=` lines of `key` and blank ones.
-pub fn holds_other_lines(_bytes: &[u8], _key: &str) -> bool {
-    false
+pub fn holds_other_lines(bytes: &[u8], key: &str) -> bool {
+    let prefix = format!("{key}=");
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .any(|l| !l.trim().is_empty() && !l.starts_with(&prefix))
 }
 
 /// The value of `key` in the secret file at `path`: refused unless the file is a 0600 file of

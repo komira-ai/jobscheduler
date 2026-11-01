@@ -180,7 +180,36 @@ impl Host for FakeHost {
     }
 
     fn canonical(&self, path: &str) -> io::Result<String> {
-        Ok(path.to_owned())
+        // The components still to walk, the next one last; targets are absolute.
+        let mut todo: Vec<String> = path
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .map(str::to_owned)
+            .collect();
+        todo.reverse();
+        let mut done: Vec<String> = Vec::new();
+        let mut hops = 0;
+        while let Some(component) = todo.pop() {
+            done.push(component);
+            let here = format!("/{}", done.join("/"));
+            let link = self.node(&here).filter(|n| n.kind == Kind::Other);
+            if let Some(link) = link {
+                hops += 1;
+                if hops > 40 {
+                    return Err(io::Error::other("fake host: too many symbolic links"));
+                }
+                done.clear();
+                let target = String::from_utf8_lossy(&link.bytes).into_owned();
+                todo.extend(
+                    target
+                        .split('/')
+                        .filter(|c| !c.is_empty())
+                        .rev()
+                        .map(str::to_owned),
+                );
+            }
+        }
+        Ok(format!("/{}", done.join("/")))
     }
 
     fn stat(&self, path: &str) -> io::Result<Option<Meta>> {

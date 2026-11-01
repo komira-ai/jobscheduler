@@ -245,25 +245,58 @@ fn sha(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
 }
 
-/// Compare the file `want` names with what is installed.
+/// `text` without comment lines and without the lines equal to one of `ignore`; the lines
+/// left out (the second part).
+fn plain(text: &str, side: &str, ignore: &[String]) -> (String, Vec<String>) {
+    let mut kept = String::new();
+    let mut dropped = Vec::new();
+    for line in strip_comments(text).lines() {
+        match ignore.iter().any(|i| i == line) {
+            true => dropped.push(format!("{side}: {line}")),
+            false => kept.push_str(&format!("{line}\n")),
+        }
+    }
+    (kept, dropped)
+}
+
+/// Compare the file `want` names with what is installed: it must be a regular file with its
+/// mode and owner (a link is not followed), and its text must equal the rendered text. Comment
+/// lines are left out of both, and so is every line equal to one of `ignore`; the lines left
+/// out are the second part.
 pub fn compare(host: &dyn Host, want: &Want, ignore: &[String]) -> (Compared, Vec<String>) {
-    let how = match host.read(&want.path) {
-        Ok(Some(bytes)) => {
-            let plain = strip_comments(&String::from_utf8_lossy(&bytes));
-            let installed = sha(&ignore.iter().fold(plain, |t, i| t.replace(i.as_str(), "")));
-            let rendered = sha(&strip_comments(&want.text));
-            match installed == rendered {
+    let meta = match host.stat(&want.path) {
+        Ok(Some(meta)) => meta,
+        Ok(None) => return (Compared::Missing, Vec::new()),
+        Err(e) => return (Compared::Unreadable(e.to_string()), Vec::new()),
+    };
+    let known = ids(host, &want.owner).ok().flatten();
+    let owner = known.unwrap_or((u32::MAX, u32::MAX));
+    let have = (meta.kind, meta.mode, (meta.uid, meta.gid));
+    if have != (Kind::File, want.mode, owner) {
+        let why = format!(
+            "is {:?} {:04o} owner {}:{}, not File {:04o} owner {}:{}",
+            have.0, have.1, meta.uid, meta.gid, want.mode, want.owner.user, want.owner.group
+        );
+        return (Compared::Wrong(why), Vec::new());
+    }
+    match host.read(&want.path) {
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes.unwrap_or_default()).into_owned();
+            let (installed, mut dropped) = plain(&text, "installed", ignore);
+            let (rendered, more) = plain(&want.text, "rendered", ignore);
+            dropped.extend(more);
+            let (installed, rendered) = (sha(&installed), sha(&rendered));
+            let how = match installed == rendered {
                 true => Compared::Same,
                 false => Compared::Differs {
                     installed,
                     rendered,
                 },
-            }
+            };
+            (how, dropped)
         }
-        Ok(None) => Compared::Missing,
-        Err(e) => Compared::Unreadable(e.to_string()),
-    };
-    (how, Vec::new())
+        Err(e) => (Compared::Unreadable(e.to_string()), Vec::new()),
+    }
 }
 
 /// Every installed file compared with the render, in install order: the path, how it
@@ -326,6 +359,15 @@ pub fn files(
 /// An `--ignore` value that is empty or holds a line break; the output could not be written.
 pub fn run(env: &Env<'_>, v: &Verify<'_>, out: &mut dyn Write) -> Result<bool, MdmError> {
     let host = env.host;
+    for line in v.ignore {
+        if line.is_empty() || line.contains(['\n', '\r']) {
+            return Err(MdmError::BadIgnore(line.clone()));
+        }
+        writeln!(
+            out,
+            "ignoring   every line equal to {line:?}, on both sides"
+        )?;
+    }
     if host.euid() != 0 {
         writeln!(out, "{NOT_ROOT}")?;
     }

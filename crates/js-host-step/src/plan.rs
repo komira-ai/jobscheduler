@@ -1,5 +1,6 @@
 //! The planner and the executor.
 
+use std::fmt;
 use std::io::{self, Write};
 
 use crate::{Cmd, DRY_RUN_NOTE, GETENT, Host, Kind, NOTHING_TO_DO, Output, SYSTEMCTL, USERADD};
@@ -65,8 +66,9 @@ impl UnitVerb {
     }
 }
 
-/// One change to a host.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One change to a host. `Debug` prints the length of a file's bytes, never the bytes: a
+/// plan that is formatted by an assertion, a panic or a log line cannot show a secret.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Step {
     /// A directory with this mode and owner.
     Dir {
@@ -109,6 +111,43 @@ pub enum Step {
     },
     /// A program.
     Run(Cmd),
+}
+
+impl fmt::Debug for Step {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Step::Dir { path, mode, owner } => f
+                .debug_struct("Dir")
+                .field("path", path)
+                .field("mode", &format_args!("{mode:04o}"))
+                .field("owner", owner)
+                .finish(),
+            Step::File {
+                path,
+                mode,
+                owner,
+                bytes,
+            } => f
+                .debug_struct("File")
+                .field("path", path)
+                .field("mode", &format_args!("{mode:04o}"))
+                .field("owner", owner)
+                .field("bytes", &format_args!("{} bytes", bytes.len()))
+                .finish(),
+            Step::Absent { path } => f.debug_struct("Absent").field("path", path).finish(),
+            Step::User { name, home } => f
+                .debug_struct("User")
+                .field("name", name)
+                .field("home", home)
+                .finish(),
+            Step::Unit { verb, units } => f
+                .debug_struct("Unit")
+                .field("verb", verb)
+                .field("units", units)
+                .finish(),
+            Step::Run(cmd) => f.debug_tuple("Run").field(cmd).finish(),
+        }
+    }
 }
 
 impl Step {

@@ -27,7 +27,7 @@
 //!    depsyncer is left alone (it is enabled once an Apple token exists).
 //!
 //! `--uninstall` stops and disables every unit of the kit that is installed and moves the unit
-//! files to `MDM_STATE/removed/<unix seconds>/`. The state (database, SCEP CA, DEP token, TLS
+//! files to `MDM_STATE/removed/<unix seconds>/` (a 0700 directory of `MDM_USER`'s). The state (database, SCEP CA, DEP token, TLS
 //! key and certificate), the secrets, the binaries and the user stay.
 
 use std::collections::BTreeSet;
@@ -124,7 +124,7 @@ pub fn plan(
 ) -> Result<Plan, MdmError> {
     let (c, host) = (&a.config, env.host);
     preflight(host, c, out)?;
-    let binaries = binaries(host, &a.bin_dir, pins)?;
+    let binaries = binaries(host, &a.bin_dir, pins, a.max_archive)?;
     writeln!(out, "archives: every one matches its pin")?;
 
     let (state, etc, bin) = (c.state.as_str(), c.etc.as_str(), c.bin.as_str());
@@ -262,10 +262,15 @@ fn binaries(
     host: &dyn Host,
     dir: &str,
     pins: &Pins,
+    max: u64,
 ) -> Result<Vec<(&'static str, Vec<u8>)>, MdmError> {
     let mut out = Vec::new();
     for pin in pins.all() {
         let path = format!("{dir}/{}", pin.archive());
+        let size = host.stat(&path)?.map_or(0, |m| m.size);
+        if size > max {
+            return Err(MdmError::ArchiveTooBig { path, size, max });
+        }
         let bytes = host
             .read(&path)?
             .ok_or_else(|| MdmError::NoArchive(path.clone()))?;
@@ -297,11 +302,19 @@ fn secret_file(
     out: &mut dyn Write,
 ) -> Result<bool, MdmError> {
     let host = env.host;
-    if host.read(path)?.is_some_and(|b| secret::has_value(&b, key)) {
+    let existing = host.read(path)?.unwrap_or_default();
+    if secret::has_value(&existing, key) {
         let (mode, uid) = host.stat(path)?.map_or((0, 0), |m| (m.mode, m.uid));
         secret::check_mode(path, mode, uid)?;
         writeln!(out, "secret {key}: kept ({path})")?;
         return Ok(false);
+    }
+    // A file with the key empty is made again; one that holds anything else would lose it.
+    if secret::holds_other_lines(&existing, key) {
+        return Err(MdmError::SecretOther {
+            path: path.to_owned(),
+            key: key.to_owned(),
+        });
     }
     let mut value = [0u8; 32];
     (env.random)(&mut value)?;
@@ -348,14 +361,16 @@ pub fn plan_uninstall(env: &Env<'_>, c: &MdmConfig, out: &mut dyn Write) -> Resu
         p.unit(UnitVerb::DisableNow, &stop);
     }
     let to = format!("{}/removed/{}", c.state, env.now);
-    let root = Account::root();
+    // The copies are the service user's, in a 0700 directory of its own: every directory on
+    // the way is then root's or the service user's, which the host layer insists on.
+    let mine = Account::new(&c.user, &c.user);
     if !there.is_empty() {
-        p.dir(&to, 0o700, &root)?;
+        p.dir(&to, 0o700, &mine)?;
     }
     for unit in &there {
         let path = format!("{UNITS_DIR}/{unit}");
         let bytes = host.read(&path)?.unwrap_or_default();
-        p.file(&format!("{to}/{unit}"), 0o644, &root, &bytes)?;
+        p.file(&format!("{to}/{unit}"), 0o644, &mine, &bytes)?;
         p.absent(&path)?;
     }
     if there.is_empty() {

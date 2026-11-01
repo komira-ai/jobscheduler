@@ -1,10 +1,22 @@
 //! The machine.
+//!
+//! Every change to the file system walks from the root directory one component at a time with
+//! `openat(O_NOFOLLOW | O_DIRECTORY)`, so a symbolic link in any directory on the way (a
+//! directory the service user owns can be made one at any time) is refused instead of followed.
+//! Directories are made with `mkdirat`, and mode and owner are set on the open descriptor
+//! (`fchmod`, `fchown`), never on a path. A file is written to a temporary name in its
+//! directory through the parent's descriptor and renamed over the target with `renameat`.
+//! Every directory on the way must be owned by root, by the effective user or by the owner
+//! the step asks for.
 
-use std::fs::{self, OpenOptions, Permissions};
+use std::fs::{self, File, Permissions};
 use std::io::{self, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, chown};
-use std::path::PathBuf;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, fchown};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use rustix::fs::{AtFlags, Mode as FileMode, OFlags, mkdirat, openat, renameat, unlinkat};
+use rustix::io::Errno;
 
 use crate::{Cmd, Host, Kind, Meta, Output};
 
@@ -12,6 +24,7 @@ use crate::{Cmd, Host, Kind, Meta, Output};
 #[derive(Clone, Debug)]
 pub struct RealHost {
     root: PathBuf,
+    trusted: Vec<u32>,
 }
 
 impl RealHost {
@@ -21,18 +34,82 @@ impl RealHost {
     }
 
     /// The machine with every path taken below `root` (a directory standing in for `/`).
-    /// Programs still run on the machine.
+    /// Programs still run on the machine. Directories owned by root or by the effective user
+    /// are trusted on the way to a path.
     pub fn under(root: impl Into<PathBuf>) -> RealHost {
-        RealHost { root: root.into() }
+        let euid = rustix::process::geteuid().as_raw();
+        RealHost::trusting(root, &[0, euid])
     }
 
-    /// Like [`RealHost::under`], trusting directories owned by `uids`.
-    pub fn trusting(root: impl Into<PathBuf>, _uids: &[u32]) -> RealHost {
-        RealHost::under(root)
+    /// Like [`RealHost::under`], trusting directories owned by `uids` (and by the owner a
+    /// step asks for) on the way to a path.
+    pub fn trusting(root: impl Into<PathBuf>, uids: &[u32]) -> RealHost {
+        RealHost {
+            root: root.into(),
+            trusted: uids.to_vec(),
+        }
     }
 
     fn at(&self, path: &str) -> PathBuf {
         self.root.join(path.trim_start_matches('/'))
+    }
+
+    /// The directory that holds `path` as a descriptor, and the name in it. Each directory on
+    /// the way is opened without following links, made (root's, 0755) when `create` and
+    /// missing, and must be owned by a trusted user or by `owner`.
+    fn parent(&self, path: &str, create: bool, owner: u32) -> io::Result<(File, String)> {
+        let mut names: Vec<&str> = path.split('/').filter(|n| !n.is_empty()).collect();
+        let name = names.pop().ok_or_else(|| refused(path, "names no file"))?;
+        let mut dir = File::from(openat(
+            rustix::fs::CWD,
+            &self.root,
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            FileMode::empty(),
+        )?);
+        for component in names {
+            let flags = OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let opened = match openat(&dir, component, flags, FileMode::empty()) {
+                Err(Errno::NOENT) if create => {
+                    mkdirat(&dir, component, FileMode::from_raw_mode(0o755))?;
+                    openat(&dir, component, flags, FileMode::empty())
+                }
+                other => other,
+            };
+            let next = File::from(opened.map_err(|e| match e {
+                Errno::LOOP | Errno::NOTDIR => {
+                    refused(path, "has a symbolic link or a file as a directory")
+                }
+                other => io::Error::from(other),
+            })?);
+            let uid = next.metadata()?.uid();
+            if !self.trusted.contains(&uid) && uid != owner {
+                return Err(refused(path, "has a directory owned by another user"));
+            }
+            dir = next;
+        }
+        Ok((dir, name.to_owned()))
+    }
+
+    /// Writes `bytes` to `temp` in `dir`, sets mode and owner on the descriptor and renames
+    /// it to `name`.
+    fn put(
+        dir: &File,
+        temp: &str,
+        name: &str,
+        mode: u32,
+        owner: (u32, u32),
+        bytes: &[u8],
+    ) -> io::Result<()> {
+        found(unlinkat(dir, temp, AtFlags::empty()).map_err(io::Error::from))?;
+        // Created 0600 so the bytes are never readable wider than the mode asked for.
+        let flags =
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut file = File::from(openat(dir, temp, flags, FileMode::from_raw_mode(0o600))?);
+        file.write_all(bytes)?;
+        file.set_permissions(Permissions::from_mode(mode))?;
+        fchown(&file, Some(owner.0), Some(owner.1))?;
+        file.sync_all()?;
+        Ok(renameat(dir, temp, dir, name)?)
     }
 }
 
@@ -40,6 +117,10 @@ impl Default for RealHost {
     fn default() -> RealHost {
         RealHost::new()
     }
+}
+
+fn refused(path: &str, why: &str) -> io::Error {
+    io::Error::other(format!("refused: {path} {why}"))
 }
 
 /// `result`, or `None` when the error is "not found".
@@ -61,7 +142,24 @@ impl Host for RealHost {
     }
 
     fn canonical(&self, path: &str) -> io::Result<String> {
-        Ok(path.to_owned())
+        let root = fs::canonicalize(&self.root)?;
+        let mut rest: Vec<std::ffi::OsString> = Vec::new();
+        let mut near = self.at(path);
+        // The longest part that exists is resolved; the part that does not stays as given.
+        let real = loop {
+            match fs::canonicalize(&near) {
+                Ok(real) => break real,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    rest.extend(near.file_name().map(ToOwned::to_owned));
+                    near.pop();
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        let mut full = real;
+        full.extend(rest.iter().rev());
+        let below = full.strip_prefix(&root).unwrap_or(Path::new(""));
+        Ok(format!("/{}", below.display()))
     }
 
     fn stat(&self, path: &str) -> io::Result<Option<Meta>> {
@@ -84,33 +182,36 @@ impl Host for RealHost {
     }
 
     fn write(&self, path: &str, mode: u32, owner: (u32, u32), bytes: &[u8]) -> io::Result<()> {
-        let target = self.at(path);
-        let mut temp = target.clone().into_os_string();
-        temp.push(".js-host.tmp");
-        let temp = PathBuf::from(temp);
-        found(fs::remove_file(&temp))?;
-        // Created 0600 so the bytes are never readable wider than the mode asked for.
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)?;
-        file.write_all(bytes)?;
-        file.set_permissions(Permissions::from_mode(mode))?;
-        chown(&temp, Some(owner.0), Some(owner.1))?;
-        file.sync_all()?;
-        fs::rename(&temp, &target)
+        let (dir, name) = self.parent(path, false, owner.0)?;
+        let temp = format!("{name}.js-host.tmp");
+        let done = RealHost::put(&dir, &temp, &name, mode, owner, bytes);
+        if done.is_err() {
+            // A failed write leaves no temporary file behind.
+            let _ = unlinkat(&dir, &temp, AtFlags::empty());
+        }
+        done
     }
 
     fn mkdir(&self, path: &str, mode: u32, owner: (u32, u32)) -> io::Result<()> {
-        let dir = self.at(path);
-        fs::create_dir_all(&dir)?;
-        fs::set_permissions(&dir, Permissions::from_mode(mode))?;
-        chown(&dir, Some(owner.0), Some(owner.1))
+        let (dir, name) = self.parent(path, true, owner.0)?;
+        match mkdirat(&dir, &name, FileMode::from_raw_mode(0o700)) {
+            Ok(()) | Err(Errno::EXIST) => {}
+            Err(e) => return Err(e.into()),
+        }
+        let flags = OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let opened = openat(&dir, &name, flags, FileMode::empty())
+            .map_err(|_| refused(path, "is a symbolic link or not a directory"))?;
+        let made = File::from(opened);
+        made.set_permissions(Permissions::from_mode(mode))?;
+        fchown(&made, Some(owner.0), Some(owner.1))
     }
 
     fn remove(&self, path: &str) -> io::Result<()> {
-        found(fs::remove_file(self.at(path))).map(|_| ())
+        let euid = self.euid();
+        let Some((dir, name)) = found(self.parent(path, false, euid))? else {
+            return Ok(());
+        };
+        found(unlinkat(&dir, &name, AtFlags::empty()).map_err(io::Error::from)).map(|_| ())
     }
 
     fn run(&self, cmd: &Cmd) -> io::Result<Output> {

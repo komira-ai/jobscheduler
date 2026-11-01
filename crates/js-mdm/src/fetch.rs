@@ -1,9 +1,11 @@
 //! `js-mdm fetch`: download the pinned archives into a directory, as the operator's own user,
 //! checking each against its pin.
 //!
-//! It refuses to run as root (a download is never root's) and a directory inside a git work
-//! tree. An archive already in the directory is kept when its sha256 is the pin and refused
-//! when it is not (delete it and re-run). A missing one is printed as a `DRY-RUN:` line, or
+//! It refuses to run as root: it does not drop privileges, so run it as your own user (a
+//! download is never root's). It also refuses a directory inside a git work tree, found after
+//! every symbolic link in `--dir` is resolved, so a link into a repository does not hide it.
+//! An archive already in the directory is kept when its sha256 is the pin and refused when it
+//! is not (delete it and re-run). A missing one is printed as a `DRY-RUN:` line, or
 //! with `--apply` downloaded, checked, and written to its name; a download whose sha256 is not
 //! the pin is written to `<file>.rejected` for inspection and fails the run.
 
@@ -40,8 +42,9 @@ pub fn run(
     if host.euid() == 0 {
         return Err(MdmError::FetchAsRoot);
     }
-    let dir = AbsPath::new(&f.dir)?;
-    outside_git(env, &f.dir)?;
+    AbsPath::new(&f.dir)?;
+    let dir = AbsPath::new(&host.canonical(&f.dir)?)?;
+    outside_git(env, dir.as_str(), &f.dir)?;
     let mut todo = Vec::new();
     for pin in pins.all() {
         let wanted = f.only.is_empty() || f.only.contains(&pin.tool);
@@ -98,13 +101,13 @@ pub fn run(
 
 /// Refuse `dir` when it or a directory above it holds `.git`: archives and keys are never kept
 /// where they could be committed.
-fn outside_git(env: &Env<'_>, dir: &str) -> Result<(), MdmError> {
+fn outside_git(env: &Env<'_>, dir: &str, given: &str) -> Result<(), MdmError> {
     for above in Path::new(dir).ancestors() {
         let root = above.to_str().unwrap_or_default().trim_end_matches('/');
         let git = format!("{root}/.git");
         if env.host.stat(&git)?.is_some() {
             return Err(MdmError::InGitTree {
-                dir: dir.to_owned(),
+                dir: given.to_owned(),
                 git,
             });
         }
