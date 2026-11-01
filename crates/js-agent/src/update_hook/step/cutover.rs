@@ -10,7 +10,8 @@
 //!    must be cordoned and hold no lease. `prepare` can end with no cordon held (it was killed
 //!    between the placing and the confirming), so a cordon of ours that is gone is put back
 //!    within the cap, and a cap that is spent or a lease that came in defers (75, class
-//!    environment) with nothing stopped. A cordon that is not ours (an operator's) is neither
+//!    environment) with nothing stopped (a failed lift of the cordon on the way is no reason to
+//!    fail: the cordon stays as recorded, as in `prepare`). A cordon that is not ours (an operator's) is neither
 //!    renewed nor lifted. A cordon in force under a mark that was never confirmed may be ours or
 //!    not, and nothing would renew it through the stop: that defers too, the mark left as it is;
 //! 3. the unit and the link are read, so that a read that fails leaves nothing begun; then the
@@ -250,6 +251,10 @@ fn replace(
 
 /// The host holds a lease under the cordon (or in its absence): lift the cordon if it is ours
 /// and defer. Nothing was stopped.
+///
+/// A cordon that cannot be lifted is left as recorded (placed, with its expiry), as `prepare`'s
+/// deferral leaves it: the next prepare, cleanup or rollback handles it, and it lapses on its
+/// own within one lease. The deferral stands; the failure goes in the detail.
 fn busy(
     env: &Env<'_>,
     held: &Held,
@@ -257,20 +262,27 @@ fn busy(
     params: &Params,
     host: &HostReading,
 ) -> Result<Done, Done> {
+    let mut left = None;
     if ours(record, env.ports.clock.now_ms()) {
         env.ports.point();
-        env.ports.lease.uncordon().map_err(lease_failure)?;
-        record.cordon = Cordon::default();
-        save(env, held, record)?;
+        match env.ports.lease.uncordon() {
+            Ok(_) => {
+                record.cordon = Cordon::default();
+                save(env, held, record)?;
+            }
+            Err(error) => left = Some(error),
+        }
     }
-    Ok(deferred(
-        params,
-        Reason::DrainBound,
-        format!(
-            "the host is not idle: {} lease(s), releasing: {}",
-            host.leases, host.releasing
-        ),
-    ))
+    let mut detail = format!(
+        "the host is not idle: {} lease(s), releasing: {}",
+        host.leases, host.releasing
+    );
+    if let Some(error) = left {
+        detail.push_str(&format!(
+            "; the cordon could not be lifted and is left to lapse: {error}"
+        ));
+    }
+    Ok(deferred(params, Reason::DrainBound, detail))
 }
 
 /// What the unit manager says of a unit, in the three ways that matter here.
