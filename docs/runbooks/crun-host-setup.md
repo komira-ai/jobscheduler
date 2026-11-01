@@ -51,10 +51,12 @@ by hand and run again`): nothing is ever overwritten. Run it again with the same
 enrolled host to see `status=already-enrolled`. The token is one-time, so a host that has
 already joined needs a new token and its old token file removed by hand.
 
-`enroll` does not enable or start the unit, and does not add `--instance-file` to it: the
-agent names its instance in its hello only when it is started with
-`--instance-file /etc/js-agent/instance`, which a join token minted for an instance requires.
-Add the flag to `ExecStart` with `systemctl edit js-agent-crun` before the first start.
+`enroll` does not enable or start the unit, and does not add `--instance-file` to it. The agent
+names its instance in its hello only when it is started with `--instance-file`, which a join
+token minted for an instance requires. A follow-up change makes the agent read
+`/etc/js-agent/instance` by default when the file exists (`--instance-file` overrides the path
+and `--no-instance-file` turns it off). Until that lands, add the flag to `ExecStart` with
+`systemctl edit js-agent-crun` (`--instance-file /etc/js-agent/instance`) before the first start.
 
 Exit statuses: 0 enrolled, nothing to do, or a plan; 1 a step failed after the checks; 2 refused
 with nothing changed (not root, a terminal on standard input, a token that is not 64 lower-case

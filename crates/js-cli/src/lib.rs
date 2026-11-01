@@ -54,7 +54,13 @@
 //! (bad-request)`), never its body: a 400 is exit 4, a 404 or 429 exit 3, anything else
 //! exit 1. A token that was minted and could not be written (exit 1) is lost: the message
 //! says when the server drops it, and the answer is to mint another. The request is sent
-//! once.
+//! once. Before it, `--out`'s directory is probed (a file is made in it and linked, and both
+//! are removed), so a read-only directory, or a filesystem without hard links, is refused
+//! before a token exists; what the probe cannot know (a full disk, a directory changed since)
+//! is the lost token above. Once the file is linked the command has succeeded, even if the
+//! directory cannot then be synced. The token is held in ordinary memory and is not wiped
+//! when dropped: it is one-time and short-lived, and the HTTP stack and the parsed JSON hold
+//! copies this program cannot reach.
 //!
 //! `native` queues a native job (a program run on the host, no image) on a held lease and
 //! prints `run <id> <state>`. The server refuses it (exit 3) when the lease's host does not

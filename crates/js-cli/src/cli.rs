@@ -118,7 +118,8 @@ pub(crate) enum JoinTokenAction {
     /// output is not a terminal, to standard output, so that it can be piped to
     /// `js-agent enroll`; it is never printed to a terminal and never taken from or put on a
     /// command line. The sha256 of the token and its expiry (the server's clock in
-    /// milliseconds) go to standard error.
+    /// milliseconds) go to standard error; with --json they are a JSON object on standard
+    /// error, and the token stays on standard output.
     Mint(MintArgs),
 }
 
@@ -131,8 +132,8 @@ pub(crate) struct MintArgs {
     /// The instance the token is bound to: the id the host's instance file names.
     #[arg(long, value_name = "ID")]
     pub(crate) instance: String,
-    /// How long the token can be used to join (the server's default when absent; at most a
-    /// day).
+    /// How long the token can be used to join (the server's default when absent). The server
+    /// refuses more than a day.
     #[arg(long, value_parser = parse_duration)]
     pub(crate) ttl: Option<Duration>,
     /// Write the token to this new file (mode 0600) instead of standard output. The file

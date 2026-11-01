@@ -238,7 +238,7 @@ fn a_directory_others_can_write_is_refused() {
 
     let mut under_file = Rig::new("enroll_dir_file");
     under_file.put("plain", "x", 0o644);
-    under_file.host.token_file = under_file.etc().join("plain").join("token");
+    under_file.host.token_file = under_file.etc().join("plain").join("sub").join("token");
     let ran = under_file.go(&["--apply"], TOKEN);
     assert_eq!(ran.status, status(2), "{ran:?}");
     assert_eq!(under_file.setup_args(), None);

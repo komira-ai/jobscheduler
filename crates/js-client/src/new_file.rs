@@ -6,38 +6,69 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Makes the file `path` with `bytes` in it and permission bits `mode`, if nothing is at
-/// `path` yet. The bytes are written to a file beside it (`.<name>.new`, mode `mode`),
-/// synced, and hard-linked to `path`; the link fails if anything is there, a dangling
-/// symbolic link included, so no reader ever sees a part of the content and an existing
-/// file is never replaced. The directory is synced at the end. A file left by an earlier
-/// interrupted call under the staging name is removed first.
+/// `path` yet. The bytes are written to a file beside it under a name made for this call
+/// (`.<name>.<16 hex digits>.new`, made with `O_EXCL`, so a name another user planted is
+/// an error and not a file written through), synced, and hard-linked to `path`; the link
+/// fails if anything is there, a dangling symbolic link included, so no reader ever sees a
+/// part of the content and an existing file is never replaced. The staged name is removed
+/// whether or not the link was made. The staged file is made with `mode` (the umask can only
+/// take bits off it), so it is never more open than the file will be.
+///
+/// Once the link is made the call has succeeded: the sync of the directory that follows is
+/// best effort, because a directory that cannot be read cannot be synced and the file is in
+/// place all the same.
 ///
 /// # Errors
 ///
-/// Any step failed; nothing is then at `path` that this call made. The error is
-/// [`io::ErrorKind::AlreadyExists`] when something is already at `path`. The text of an
-/// error is the system's and never holds `bytes`.
+/// Any step up to the link failed; nothing is then at `path` that this call made. The error
+/// is [`io::ErrorKind::AlreadyExists`] when something is already at `path`. The text of an
+/// error is the system's and never holds `bytes`. A crash between the staging and the
+/// removal leaves the staged file, under its own name.
 pub fn create_new(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-    let staged = staging_name(path);
-    let made = stage(&staged, bytes, mode)
-        .and_then(|()| fs::hard_link(&staged, path))
-        .and_then(|()| sync_parent(path));
-    // The staged name is not wanted whether or not the link was made.
+    let staged = staging_name(path)?;
+    let made = stage(&staged, bytes, mode).and_then(|()| fs::hard_link(&staged, path));
     let _ = fs::remove_file(&staged);
+    made.inspect(|()| {
+        let _ = sync_parent(path);
+    })
+}
+
+/// Whether a file can be made in `dir` and linked to another name there, which is all
+/// [`create_new`] asks of a directory: found by doing it, under names made for the probe, and
+/// removing them. What it cannot tell is a failure later (a full disk, a directory changed in
+/// between).
+///
+/// # Errors
+///
+/// The system's reason the directory cannot take [`create_new`].
+pub fn probe_dir(dir: &Path) -> io::Result<()> {
+    let (first, second) = (dir.join(unique(".probe")?), dir.join(unique(".probe")?));
+    let made = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&first)
+        .and_then(|_| fs::hard_link(&first, &second));
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
     made
 }
 
-/// `<dir>/.<name>.new`.
-fn staging_name(path: &Path) -> PathBuf {
-    let mut name = std::ffi::OsString::from(".");
-    name.push(path.file_name().unwrap_or_default());
-    name.push(".new");
-    path.with_file_name(name)
+/// `<prefix>.<16 random hex digits>`.
+fn unique(prefix: &str) -> io::Result<String> {
+    let mut bits = [0u8; 8];
+    getrandom::getrandom(&mut bits).map_err(io::Error::from)?;
+    Ok(format!("{prefix}.{:016x}", u64::from_le_bytes(bits)))
 }
 
-/// Writes `bytes` to `staged`, which is made new (a leftover is removed first), and syncs it.
+/// `<dir>/.<name>.<16 hex digits>.new`.
+fn staging_name(path: &Path) -> io::Result<PathBuf> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    Ok(path.with_file_name(unique(&format!(".{name}"))? + ".new"))
+}
+
+/// Writes `bytes` to `staged`, which is made new, and syncs it.
 fn stage(staged: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-    let _ = fs::remove_file(staged);
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -55,15 +86,4 @@ fn stage(staged: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
 fn sync_parent(path: &Path) -> io::Result<()> {
     let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
     File::open(dir.unwrap_or(Path::new("."))).and_then(|dir| dir.sync_all())
-}
-
-/// Whether a file can be made in `dir` and linked to another name there (see
-/// [`create_new`]), found by doing it with names of no other use and removing them.
-///
-/// # Errors
-///
-/// The system's reason the directory cannot take [`create_new`].
-pub fn probe_dir(dir: &Path) -> io::Result<()> {
-    let _ = dir;
-    Ok(())
 }

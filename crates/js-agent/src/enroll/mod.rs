@@ -10,9 +10,14 @@
 //! 1. **The host setup.** It runs the script the deb installs,
 //!    `/usr/share/js-agent/crun_host_setup.sh` (crun, the job user, subordinate ids, the
 //!    scratch quota, the directories, AppArmor, the unit), with the flags below. The script is
-//!    reviewed and pinned; the verb reads its exit status and does not repeat its work. A
-//!    script that is missing, is not a regular file, is not root's or is writable by group or
-//!    others is not run.
+//!    reviewed and pinned; the verb reads its exit status and does not repeat its work. What
+//!    is run is what was checked: the script is opened without following a link and checked
+//!    on the open file (a regular file, root's, not writable by group or others), so are
+//!    the directories above it and the shell (`/usr/bin/bash`), and the shell is started on
+//!    `/proc/self/fd/N` of that open file, not on its path. A script that is missing or
+//!    fails a check is not run. The script's standard output and standard error both go to
+//!    this verb's standard error as it prints them; it runs with umask 022, an empty
+//!    environment but `PATH` and `LC_ALL=C`, and no standard input.
 //! 2. **The instance file**, `/etc/js-agent/instance`: the line `PROVIDER:INSTANCE\n`, owned by
 //!    root, mode 0644, which the agent reads with `--instance-file` and names in its hello.
 //! 3. **The token file**, `/etc/js-agent/token`: the join token from standard input and a line
@@ -23,6 +28,20 @@
 //! digits, one line). It is printed nowhere; the verb prints its sha256, which names it for
 //! the operator and the server's log without being usable as it.
 //!
+//! # Root, even for a dry run
+//!
+//! The verb refuses a user who is not root, a dry run included. The script's own dry run
+//! works without root but shows what only root can read as unknown, and every file and
+//! directory check here is "root's", which a plan by anyone else could not make.
+//!
+//! # The token in memory
+//!
+//! The token is held in ordinary memory for the length of the run and is not wiped when it
+//! is dropped: the buffers are plain `Vec` and `String`. That is accepted: the token is
+//! one-time and expires within a day of minting (30 minutes by default), the run is short,
+//! nothing is logged or printed of it, and the host's other copies of it (the pipe it came
+//! through, the file it is written to) are no better protected than this one.
+//!
 //! # Dry run and apply
 //!
 //! Without `--apply` nothing is changed. The script is run without `--apply`, which is its
@@ -30,9 +49,12 @@
 //! are only looked at. With `--apply` every refusal comes before the first change: the root
 //! check, the token, the ids, the script, and the two files that are already there. Then the
 //! setup is applied, then the instance file is written, then the token file, and each is read
-//! back. A file is made whole in a staged file beside it and linked to its name (js_client's
-//! `create_new`), so a crash leaves nothing but the staged file, and nothing is ever
-//! replaced.
+//! back. A file is made whole in a staged file beside it, under a name no one can guess, and
+//! linked to its name (js_client's `create_new`), so a crash leaves nothing but the staged
+//! file, and nothing is ever replaced. The directory the staged file is in (`/etc/js-agent`)
+//! must be a real directory, root's, that group and others cannot write, or the verb refuses
+//! (exit 2 before the setup, exit 1 if it is that way after it); a directory that is not
+//! there yet is the setup's to make.
 //!
 //! # Files that are already there
 //!
@@ -69,11 +91,10 @@
 //! | status | meaning |
 //! |---|---|
 //! | 0 | enrolled; or nothing to do (`already-enrolled`); or, without `--apply`, a plan (`planned`) |
-//! | 1 | a step failed after the checks: the setup script failed (its manifest says what it did), or a file could not be written. What was done stays; a rerun carries on |
-//! | 2 | refused, nothing changed: not root, a terminal on standard input, a token or ids that are not valid, a script that is missing or unfit, a file that is there and differs, or the setup script refused (its exit 2); also what clap refuses |
+//! | 1 | a step failed after the checks: the setup script failed or was interrupted (any status but 0, 2 and 3: 130 and 143 are an interrupt, and a signal that ended it counts too; its manifest says what it did), or a file could not be written or read back. What was done stays; a rerun carries on |
+//! | 2 | refused, nothing changed: not root, a terminal on standard input, a token or ids that are not valid, a script or shell that is missing or unfit, a file that is there and differs, or the setup script refused (its exit 2); also what clap refuses |
 //!
-//! The verb reads no environment variable. It runs the script by `/usr/bin/bash`, with an empty
-//! environment but `PATH`, and with no standard input.
+//! The verb reads no environment variable.
 
 mod files;
 mod setup;
@@ -354,25 +375,34 @@ fn enroll(
     }
     .validate()
     .map_err(bad_ids)?;
-    setup::fit(&host.setup_script)?;
+    let script = setup::open_checked(
+        &host.setup_script,
+        host.owner,
+        "the js-agent deb installs the host setup script",
+    )?;
+    setup::open_checked(
+        &host.shell,
+        host.owner,
+        "the setup script is run with this shell",
+    )?;
     let line = format!("{}:{}\n", args.provider, args.instance);
-    let have_instance = files::inspect(&host.instance_file, Kind::Instance, line.as_bytes())?;
     let token_line = token.line();
-    let have_token = files::inspect(&host.token_file, Kind::Token, token_line.as_bytes())?;
+    let who = host.owner;
+    for file in [&host.instance_file, &host.token_file] {
+        files::check_dir(file, who).map_err(Failure::Usage)?;
+    }
+    let have_instance = files::inspect(&host.instance_file, Kind::Instance, line.as_bytes(), who)
+        .map_err(Failure::Usage)?;
+    let have_token = files::inspect(&host.token_file, Kind::Token, token_line.as_bytes(), who)
+        .map_err(Failure::Usage)?;
 
     let apply = args.apply;
-    let setup = setup::run(
-        &host.shell,
-        &host.setup_script,
-        &args.setup_flags(),
-        apply,
-        err,
-    )?;
+    let setup = setup::run(&host.shell, &script, &args.setup_flags(), apply, err)?;
     if apply && !have_instance {
-        files::write_new(&host.instance_file, Kind::Instance, line.as_bytes())?;
+        files::write_new(&host.instance_file, Kind::Instance, line.as_bytes(), who)?;
     }
     if apply && !have_token {
-        files::write_new(&host.token_file, Kind::Token, token_line.as_bytes())?;
+        files::write_new(&host.token_file, Kind::Token, token_line.as_bytes(), who)?;
     }
 
     let word = |present: bool| match (present, apply) {
@@ -380,9 +410,7 @@ fn enroll(
         (false, true) => "written",
         (false, false) => "planned",
     };
-    let pending = [setup != "nothing-to-do", !have_instance, !have_token]
-        .into_iter()
-        .any(|pending| pending);
+    let pending = setup != "nothing-to-do" || !have_instance || !have_token;
     let status = match (pending, apply) {
         (false, _) => "already-enrolled",
         (true, true) => "enrolled",

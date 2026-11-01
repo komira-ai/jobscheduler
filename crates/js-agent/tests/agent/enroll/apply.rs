@@ -150,3 +150,20 @@ fn the_report_names_the_host() {
         format!("enroll: status=planned provider={PROVIDER} instance={INSTANCE}")
     );
 }
+
+/// Asserts that when only the instance file is missing (the token is right and the setup is
+/// done) an apply writes the instance file alone and says `enrolled`. It catches a host that
+/// is reported enrolled because its token is there.
+#[test]
+fn a_missing_instance_file_alone_is_written() {
+    let rig = Rig::new("enroll_half_instance");
+    rig.put("token", &format!("{TOKEN}\n"), 0o600);
+    rig.script(3);
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(0), "{ran:?}");
+    assert_eq!(
+        ran.out,
+        rig.report(["nothing-to-do", "written", "present"], "enrolled", TOKEN)
+    );
+    assert_eq!(rig.read("instance"), LINE);
+}
