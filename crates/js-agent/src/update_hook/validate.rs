@@ -225,6 +225,14 @@ pub fn validate(
             verify: declaration.timeouts.verify,
         });
     }
+    // The stop, the start and the hello each need room after the margin.
+    let rollback_needed =
+        ROLLBACK_MARGIN_SECS + ROLLBACK_STOP_MIN_SECS + ROLLBACK_HELLO_SECS + POLL_SECS;
+    if declaration.timeouts.rollback <= rollback_needed {
+        return Err(Invalid::RollbackTimeout {
+            rollback: declaration.timeouts.rollback,
+        });
+    }
     if record.schema != SCHEMA {
         return Err(Invalid::Schema {
             found: record.schema,

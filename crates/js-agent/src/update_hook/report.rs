@@ -51,7 +51,8 @@ impl Class {
 /// misspelt or too long; a test checks every one against [`is_reason_token`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
-    /// The step exists on the command line and has no body yet.
+    /// A step with no body: no step of this hook answers it any more; the test binary that stands
+    /// in for the machine does.
     NotImplemented,
     /// The command line was refused.
     BadArgs,

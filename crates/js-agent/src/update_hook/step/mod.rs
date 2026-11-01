@@ -1,4 +1,4 @@
-//! The steps of the hook that have a body: `prepare`, `cutover`, `verify` and `cleanup`
+//! The steps of the hook: `prepare`, `cutover`, `verify`, `rollback` and `cleanup`
 //! (host-updates design, 4.2).
 //!
 //! A step is a function of an [`Env`] and the params table, and ends as a [`Done`]: the status

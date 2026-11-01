@@ -81,7 +81,7 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
 }
 
 /// What the last look of the lease server showed.
-enum Look {
+pub(super) enum Look {
     /// No new session said hello (not yet, or the server shows the session of before the stop).
     Silent,
     /// A new session said hello, and it is not the target.
@@ -90,8 +90,14 @@ enum Look {
     Unreachable(LeaseError),
 }
 
-/// What a reading of the host says of the new agent: `Ok` is proof.
-fn judge(host: &HostReading, record: &Record, runtime: &str) -> Result<(), Look> {
+/// What a reading of the host says of an agent that is to be `version`: `Ok` is proof. The
+/// session must be another than the one the server showed before the stop.
+pub(super) fn judge(
+    host: &HostReading,
+    record: &Record,
+    version: &str,
+    runtime: &str,
+) -> Result<(), Look> {
     // Equality with the stamp taken before the stop, never an order against the host's clock.
     let new_session = host.state == "live"
         && host
@@ -100,8 +106,7 @@ fn judge(host: &HostReading, record: &Record, runtime: &str) -> Result<(), Look>
     if !new_session {
         return Err(Look::Silent);
     }
-    let target = record.update.target.as_str();
-    let version_ok = host.agent_version.as_deref() == Some(target);
+    let version_ok = host.agent_version.as_deref() == Some(version);
     let runtime_ok = host
         .runtime
         .as_deref()
@@ -110,7 +115,7 @@ fn judge(host: &HostReading, record: &Record, runtime: &str) -> Result<(), Look>
         Ok(())
     } else {
         Err(Look::Wrong(format!(
-            "the new session is {} on {}, not {target} on {runtime}",
+            "the new session is {} on {}, not {version} on {runtime}",
             host.agent_version.as_deref().unwrap_or("of no version"),
             host.runtime.as_deref().unwrap_or("no runtime"),
         )))
@@ -150,7 +155,12 @@ fn wait(env: &Env<'_>, record: &Record) -> Result<(), Done> {
         }
         if state.active == "active" {
             last = match env.ports.lease.host() {
-                Ok(host) => match judge(&host, record, env.declaration.hello_runtime()) {
+                Ok(host) => match judge(
+                    &host,
+                    record,
+                    &record.update.target,
+                    env.declaration.hello_runtime(),
+                ) {
                     Ok(()) => return Ok(()),
                     Err(look) => look,
                 },
