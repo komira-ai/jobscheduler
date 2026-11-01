@@ -64,7 +64,10 @@ impl Kind {
             Kind::SysvMsg => "sysv-message-queue",
             Kind::PosixShm => "posix-shared-memory",
             Kind::PosixSem => "posix-semaphore",
-            Kind::UserTempDir | Kind::UserCacheDir | Kind::SharedFile | Kind::GuiLaunchAgent => "",
+            Kind::UserTempDir => "user-temp-dir-file",
+            Kind::UserCacheDir => "user-cache-dir-file",
+            Kind::SharedFile => "users-shared-file",
+            Kind::GuiLaunchAgent => "gui-launch-agent",
         }
     }
 
@@ -91,7 +94,7 @@ impl Verdict {
             Verdict::Seeded => "seeded",
             Verdict::Refused => "refused",
             Verdict::Found => "found",
-            Verdict::Unlooked => "",
+            Verdict::Unlooked => "unlooked",
         }
     }
 

@@ -35,33 +35,57 @@ pub enum Outcome {
 
 /// A `stat` of `path` (links not followed): there, or `ENOENT`, or a failed look.
 pub fn classify_path(path: &Path, stat: Result<(), io::Error>) -> Outcome {
-    let _ = (path, stat);
-    Outcome::Absent
+    match stat {
+        Ok(()) => Outcome::Found(path.display().to_string()),
+        Err(why) if why.raw_os_error() == Some(libc::ENOENT) => Outcome::Absent,
+        Err(why) => Outcome::CouldNotLook(format!("{}: {why}", path.display())),
+    }
 }
 
 /// A System V or POSIX call that returned an error with `errno`.
 pub fn classify_errno(what: &str, errno: Option<i32>) -> Outcome {
-    let _ = (what, errno);
-    Outcome::Absent
+    match errno {
+        Some(code) if code == libc::ENOENT => Outcome::Absent,
+        Some(code) => {
+            Outcome::CouldNotLook(format!("{what}: {}", io::Error::from_raw_os_error(code)))
+        }
+        None => Outcome::CouldNotLook(format!("{what}: failed with no errno")),
+    }
 }
 
 /// `security find-generic-password -s <token>` (exit status `code`, `None` when a signal
 /// ended it).
 pub fn classify_security(code: Option<i32>, stderr: &str) -> Outcome {
-    let _ = (code, stderr);
-    Outcome::Absent
+    if code == Some(0) {
+        return Outcome::Found(
+            "a generic password with the token is in the keychain search list".to_owned(),
+        );
+    }
+    if stderr.contains("default keychain could not be found") {
+        return Outcome::Absent;
+    }
+    if code == Some(44) && stderr.contains("could not be found") {
+        return Outcome::Absent;
+    }
+    Outcome::CouldNotLook(format!("security exited {code:?}: {}", stderr.trim()))
 }
 
 /// `defaults read <domain> <key>`.
 pub fn classify_defaults(code: Option<i32>, stdout: &str, stderr: &str) -> Outcome {
-    let _ = (code, stdout, stderr);
-    Outcome::Absent
+    match code {
+        Some(0) => Outcome::Found(format!("the key reads back as {:?}", stdout.trim())),
+        Some(1) if stderr.contains("does not exist") => Outcome::Absent,
+        _ => Outcome::CouldNotLook(format!("defaults exited {code:?}: {}", stderr.trim())),
+    }
 }
 
 /// `launchctl print <domain>`: the text of the domain, or its documented absence.
 pub fn classify_launchctl_print(code: Option<i32>, stdout: &str, stderr: &str) -> Outcome {
-    let _ = (code, stdout, stderr);
-    Outcome::Absent
+    match code {
+        Some(0) => Outcome::Found(stdout.to_owned()),
+        Some(113) if stderr.contains("Could not find domain") => Outcome::Absent,
+        _ => Outcome::CouldNotLook(format!("launchctl exited {code:?}: {}", stderr.trim())),
+    }
 }
 
 /// The standard output of a tool that has no not-found answer (`ps`, `ipcs`, `find`), or
@@ -75,8 +99,10 @@ pub fn view_output(
     stdout: &str,
     stderr: &str,
 ) -> Result<String, String> {
-    let _ = (program, code, stderr);
-    Ok(stdout.to_owned())
+    match code {
+        Some(0) => Ok(stdout.to_owned()),
+        _ => Err(format!("{program} exited {code:?}: {}", stderr.trim())),
+    }
 }
 
 /// The paths a bounded `find -uid` printed: those with a token in them, which are left
@@ -88,28 +114,55 @@ pub fn split_found_files(
     tokens: &[Token],
     limit: usize,
 ) -> (Vec<String>, Vec<String>, bool) {
-    let _ = (output, tokens, limit);
-    (Vec::new(), Vec::new(), false)
+    let paths: Vec<&str> = output.lines().filter(|line| !line.is_empty()).collect();
+    let cut = paths.len() > limit;
+    let mut with = Vec::new();
+    let mut without = Vec::new();
+    for path in paths.into_iter().take(limit) {
+        if tokens.iter().any(|token| path.contains(token.as_str())) {
+            with.push(path.to_owned());
+        } else {
+            without.push(path.to_owned());
+        }
+    }
+    (with, without, cut)
 }
 
 /// The kinds a run A must have seeded for the result to mean anything: a file, a process,
 /// a keychain item, a launchd agent and some shared memory. What is missing, by name. A run
 /// where these were refused proves nothing.
 pub fn missing_minimum(lines: &[Line]) -> Vec<&'static str> {
-    let _ = lines;
-    Vec::new()
+    let seeded = |kind: Kind| {
+        lines
+            .iter()
+            .any(|line| line.kind == kind && line.verdict == Verdict::Seeded)
+    };
+    let mut missing = Vec::new();
+    for (kind, name) in [
+        (Kind::HomeFile, "home-file"),
+        (Kind::Process, "process"),
+        (Kind::Keychain, "keychain-item"),
+        (Kind::LaunchAgent, "launch-agent"),
+    ] {
+        if !seeded(kind) {
+            missing.push(name);
+        }
+    }
+    if !seeded(Kind::SysvShm) && !seeded(Kind::PosixShm) {
+        missing.push("shared memory (System V or POSIX)");
+    }
+    missing
 }
 
 /// The line a run prints for its own `getuid()`.
 pub fn uid_line(uid: u32) -> String {
-    let _ = uid;
-    String::new()
+    format!("ISOUID {uid}")
 }
 
 /// The uid a run printed with [`uid_line`], if it printed one.
 pub fn parse_uid(text: &str) -> Option<u32> {
-    let _ = text;
-    None
+    text.lines()
+        .find_map(|line| line.strip_prefix("ISOUID ")?.trim().parse().ok())
 }
 
 /// Run A, run B and the configuration agree on the uid.
@@ -117,8 +170,13 @@ pub fn parse_uid(text: &str) -> Option<u32> {
 /// # Errors
 /// A run printed no uid, or the three differ.
 pub fn uids_agree(a: Option<u32>, b: Option<u32>, configured: u32) -> Result<(), String> {
-    let _ = (a, b, configured);
-    Ok(())
+    match (a, b) {
+        (Some(a), Some(b)) if a == configured && b == configured => Ok(()),
+        (Some(a), Some(b)) => Err(format!(
+            "run A ran as uid {a}, run B as uid {b}, and {configured} was asked for: the uid was not reused, so this run proves nothing"
+        )),
+        _ => Err("a run did not print the uid it ran as".to_owned()),
+    }
 }
 
 #[cfg(test)]
