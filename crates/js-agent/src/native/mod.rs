@@ -171,6 +171,22 @@ impl NativeRuntime {
                  (--native-pf-uid-start and --native-pf-uid-count)",
             ));
         }
+        Self::open_ungated(helper, config, term)
+    }
+
+    /// As [`NativeRuntime::open`], without refusing a cap of `on` that has no check. For
+    /// tests of the gate itself, which must refuse on its own whatever `open` let through;
+    /// an agent never calls it.
+    ///
+    /// # Errors
+    ///
+    /// As [`NativeRuntime::open`], but for the missing check.
+    #[doc(hidden)]
+    pub fn open_ungated(
+        helper: Client,
+        config: NativeConfig,
+        term: u64,
+    ) -> Result<Self, RuntimeError> {
         let limits = limits_of(&config)?;
         reset(&helper)?;
         let journal = Journal::new(&config.journal);

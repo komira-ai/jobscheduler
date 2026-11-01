@@ -299,11 +299,40 @@ fn the_runtime_asks_only_when_its_cap_is_on() {
     assert_eq!(check.calls(), 2);
 }
 
-/// Asserts that a runtime with nothing to check passes a job that asks for the network. It
-/// catches a default that refuses every runtime that never learned of the check.
+/// Asserts that a runtime with nothing to check refuses a job that asks for the network and
+/// passes one that asks for none. It catches a default that lets a runtime that never learned
+/// of the check run a job with the network on.
 #[test]
-fn a_runtime_with_nothing_to_check_passes_a_network_job() {
+fn a_runtime_with_nothing_to_check_refuses_a_network_job() {
     let runtime = FakeRuntime::new(&Log::default(), &ManualClock::default());
     let asks = job_at("r1", NetworkLevel::On).native.unwrap();
-    assert!(runtime.check_native_egress(&asks).is_ok());
+    assert!(runtime.check_native_egress(&asks).is_err());
+    let none = job_at("r2", NetworkLevel::Off).native.unwrap();
+    assert!(runtime.check_native_egress(&none).is_ok());
+}
+
+/// Asserts that the gate refuses by itself when it is missing its check: a runtime with a cap
+/// of `on` that `open` would have refused (opened here without that refusal) refuses the
+/// start-up check and a job that asks for the network as `egress-unchecked`, creating
+/// nothing, and still starts a job that asks for none. It catches a gate that is safe only
+/// because `open` stands in front of it.
+#[test]
+fn a_gate_with_no_check_refuses_a_network_job_by_itself() {
+    let mut h = Native::ungated("pf-nocheck", |config| config.net = Net::On);
+    assert_eq!(
+        h.start(job_at("r1", NetworkLevel::On)),
+        ["refused r1 egress-unchecked"]
+    );
+    assert_eq!(h.fake.verbs(), ["boot-reset"]);
+    let scratch = fs::canonicalize(h.dir.path("scratch")).unwrap();
+    assert!(!scratch.join("r1").exists());
+    assert_eq!(h.life.free().cpu_millis, 4000);
+    assert_eq!(h.start(job_at("r2", NetworkLevel::Off)), ["started r2"]);
+
+    let dir = Scratch::new("native-pf-nocheck-rt");
+    let fake = FakeHelper::start(&dir);
+    let mut cfg = config(&fake);
+    cfg.net = Net::On;
+    let runtime = NativeRuntime::open_ungated(fake.client(), cfg, TERM).unwrap();
+    assert!(runtime.check_egress().is_err());
 }
