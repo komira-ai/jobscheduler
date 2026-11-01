@@ -184,12 +184,39 @@ fn restore(
     relink(env, params, held, record, link, previous)?;
     refuse_host(env)?;
     if !record.rb.start_issued {
-        mark_act(env, params, held, record, |record| {
-            record.rb.start_issued = true;
-        })?;
+        mark_act(env, params, held, record, set_start_issued)?;
     }
     bring_up(env, held, record, params)?;
     await_hello(env, params, held, record)
+}
+
+fn set_start_issued(record: &mut Record) {
+    record.rb.start_issued = true;
+}
+
+fn set_stop_begun(record: &mut Record) {
+    record.rb.stop_begun = true;
+}
+
+fn set_link_restored(record: &mut Record) {
+    record.rb.link_restored = true;
+}
+
+fn set_drained(record: &mut Record) {
+    record.rb.drained = true;
+}
+
+fn set_hello_ok(record: &mut Record) {
+    record.rb.hello_ok = true;
+}
+
+/// The host as the lease server shows it, or the step deferred: nothing it could not repeat has
+/// been done when this is asked.
+fn read_host(env: &Env<'_>, params: &Params) -> Result<HostReading, Done> {
+    match env.ports.lease.host() {
+        Ok(host) => Ok(host),
+        Err(why) => Err(lease_deferred(params, why)),
+    }
 }
 
 /// Sets a mark of an act in the record, durably, before the act it names. The first of them is
@@ -206,11 +233,7 @@ fn mark_act(
     let acted = rb.stop_begun || rb.link_restored || rb.start_issued;
     let mut next = record.clone();
     if !acted {
-        let host = env
-            .ports
-            .lease
-            .host()
-            .map_err(|why| lease_deferred(params, why))?;
+        let host = read_host(env, params)?;
         next.rb_pre_stop_session_ms = host.session_started_ms;
     }
     set(&mut next);
@@ -249,11 +272,7 @@ fn drain(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Re
     let began = env.ports.clock.now_ms();
     loop {
         refuse_host(env)?;
-        let host = env
-            .ports
-            .lease
-            .host()
-            .map_err(|why| lease_deferred(params, why))?;
+        let host = read_host(env, params)?;
         keep_out(env, params, held, record, &host)?;
         if host.leases == 0 && !host.releasing {
             break;
@@ -270,7 +289,7 @@ fn drain(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Re
         pause(env, held, record, params)?;
     }
     // After the observation, so that a mark means it was made.
-    mark(env, held, record, |record| record.rb.drained = true)
+    mark(env, held, record, set_drained)
 }
 
 /// The longest the wait for the unit to stop may be: what the declared bound leaves after the
@@ -296,9 +315,7 @@ fn stop(
 ) -> Result<(), Done> {
     refuse_host(env)?;
     if !record.rb.stop_begun {
-        mark_act(env, params, held, record, |record| {
-            record.rb.stop_begun = true;
-        })?;
+        mark_act(env, params, held, record, set_stop_begun)?;
     }
     env.ports.point();
     env.ports
@@ -349,9 +366,7 @@ fn relink(
     // Read before the mark: a read that fails leaves nothing begun.
     let on_previous = linked(env, link, previous)?;
     if !record.rb.link_restored {
-        mark_act(env, params, held, record, |record| {
-            record.rb.link_restored = true;
-        })?;
+        mark_act(env, params, held, record, set_link_restored)?;
     }
     if on_previous {
         return Ok(());
@@ -386,18 +401,19 @@ enum Look {
 fn judge(host: &HostReading, record: &Record, previous: &str, runtime: &str) -> Result<(), Look> {
     let rb = &record.rb;
     let acted = rb.stop_begun || rb.link_restored || rb.start_issued;
-    let new_session = host.state == "live"
-        && host
-            .session_started_ms
-            .is_some_and(|session| !acted || Some(session) != record.rb_pre_stop_session_ms);
+    let other_session = match host.session_started_ms {
+        None => false,
+        Some(session) => !acted || Some(session) != record.rb_pre_stop_session_ms,
+    };
+    let new_session = host.state == "live" && other_session;
     if !new_session {
         return Err(Look::Silent);
     }
     let version_ok = host.agent_version.as_deref() == Some(previous);
-    let runtime_ok = host
-        .runtime
-        .as_deref()
-        .is_none_or(|reported| reported == runtime);
+    let runtime_ok = match host.runtime.as_deref() {
+        None => true,
+        Some(reported) => reported == runtime,
+    };
     if version_ok && runtime_ok {
         Ok(())
     } else {
@@ -467,7 +483,7 @@ fn await_hello(
     // not come here). A step that made no act has nothing to follow: the rules let
     // `rb.hello_ok` follow `rb.start_issued` only.
     if record.rb.start_issued {
-        mark(env, held, record, |record| record.rb.hello_ok = true)?;
+        mark(env, held, record, set_hello_ok)?;
     }
     Ok(())
 }
@@ -476,10 +492,9 @@ fn await_hello(
 fn finish(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Result<Done, Done> {
     if ours(record, env.ports.clock.now_ms()) {
         env.ports.point();
-        env.ports
-            .lease
-            .uncordon()
-            .map_err(|why| lease_deferred(params, why))?;
+        if let Err(why) = env.ports.lease.uncordon() {
+            return Err(lease_deferred(params, why));
+        }
         // So that a kill before the delete does not lift, on a rerun, a cordon placed since.
         record.cordon = Cordon::default();
         save(env, held, record)?;
