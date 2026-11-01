@@ -96,6 +96,9 @@ pub(crate) fn assemble(
             let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
             let registry = Registry::new(pool, clock.clone());
             let usage = usage.build(clock, limits, &registry)?;
+            // The learned lives of the profiles cost a lease's end in the drain order.
+            let curves = usage.iter().filter_map(|usage| usage.curves());
+            curves.for_each(|curves| registry.set_lives(curves));
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());
             }

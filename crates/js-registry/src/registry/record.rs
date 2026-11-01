@@ -54,6 +54,9 @@ pub(super) struct Record {
     /// The last lease started on the host and the latest it can end: its start plus its
     /// max wall time. A lease put back after a restart has none, and counts as ending now.
     pub(super) bound: Option<(LeaseId, Timestamp)>,
+    /// When the lease in `bound` started, in milliseconds on the registry's clock. Set with
+    /// `bound`; `None` for a lease put back after a restart. Held in memory only, like `bound`.
+    pub(super) started_at: Option<u64>,
     /// Whether the host is being scaled away (see [`Registry::drain`]). It outlives a
     /// session and is held in memory only.
     pub(super) leaving: Option<marks::Leaving>,
@@ -93,6 +96,7 @@ impl Record {
             beats: 0,
             exclusive: Exclusive::Free,
             bound: None,
+            started_at: None,
             leaving: None,
             claim: None,
             load: load::Kept::default(),

@@ -170,7 +170,9 @@
 //! and not assigned, and a build that does not know them reads past them (they are among
 //! the fields of a later version it keeps and writes back), so an older server opens a
 //! file that has them. The table writes the keys for a record that has them and nothing
-//! for one that has not.
+//! for one that has not. A held row can carry `tail_end_ms`, the end of the host's tail
+//! when it was set aside ([`Held::tail_end`]), the same way: absent loads as unknown, an
+//! older build reads past it, and a row with it and no host is refused.
 //!
 //! # Id limits
 //!

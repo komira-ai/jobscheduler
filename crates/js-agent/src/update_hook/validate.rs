@@ -38,6 +38,14 @@ pub const CUTOVER_MARGIN_SECS: u64 = 60;
 /// The margin `verify` keeps between the end of its wait and the declared timeout, in seconds.
 pub const VERIFY_MARGIN_SECS: u64 = 15;
 
+/// How long `rollback` waits for the previous agent's hello once the unit is active, in
+/// seconds.
+pub const ROLLBACK_HELLO_SECS: u64 = 300;
+
+/// The margin `rollback` keeps between the end of its waits and the declared timeout, in
+/// seconds.
+pub const ROLLBACK_MARGIN_SECS: u64 = 60;
+
 /// The rule a record broke.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Invalid {
@@ -66,6 +74,16 @@ pub enum Invalid {
     VerifyTimeout {
         /// `[hook.timeout_secs] verify`.
         verify: u64,
+    },
+    /// The declared `rollback` timeout would end the step in the middle of its waits.
+    #[error(
+        "the declared rollback timeout {rollback} s is too short: it must exceed drain_wait_secs {wait} s plus {START_WAIT_SECS} s, {ROLLBACK_HELLO_SECS} s and {ROLLBACK_MARGIN_SECS} s"
+    )]
+    RollbackTimeout {
+        /// `[hook.timeout_secs] rollback`.
+        rollback: u64,
+        /// `drain_wait_secs`.
+        wait: u64,
     },
     /// The record's schema is not the one this hook writes.
     #[error("schema {found} is not {SCHEMA}")]
@@ -203,6 +221,18 @@ pub fn validate(
     if declaration.timeouts.verify <= VERIFY_MARGIN_SECS + POLL_SECS {
         return Err(Invalid::VerifyTimeout {
             verify: declaration.timeouts.verify,
+        });
+    }
+    // The waits of `rollback`: the drain, the stop, the start and the hello, and a margin.
+    let rollback_needed = params
+        .drain_wait_secs
+        .saturating_add(START_WAIT_SECS)
+        .saturating_add(ROLLBACK_HELLO_SECS)
+        .saturating_add(ROLLBACK_MARGIN_SECS);
+    if declaration.timeouts.rollback <= rollback_needed {
+        return Err(Invalid::RollbackTimeout {
+            rollback: declaration.timeouts.rollback,
+            wait: params.drain_wait_secs,
         });
     }
     if record.schema != SCHEMA {
@@ -355,12 +385,33 @@ fn marks(record: &Record) -> Result<(), Invalid> {
         record.stop_begun,
         record.update.previous.is_some(),
     ) {
+        (Some(_), false, _) => {
+            return Err(Invalid::Marks {
+                mark: "pre_stop_session_ms",
+                needs: "stop_begun",
+            });
+        }
+        (Some(_), true, false) => {
+            return Err(Invalid::Marks {
+                mark: "pre_stop_session_ms",
+                needs: "a previous release",
+            });
+        }
+        _ => {}
+    }
+    // The session before the rollback's first act is written with the first of its act marks.
+    let acted = rb.stop_begun || rb.link_restored || rb.start_issued;
+    match (
+        record.rb_pre_stop_session_ms,
+        acted,
+        record.update.previous.is_some(),
+    ) {
         (Some(_), false, _) => Err(Invalid::Marks {
-            mark: "pre_stop_session_ms",
-            needs: "stop_begun",
+            mark: "rb_pre_stop_session_ms",
+            needs: "an rb act mark",
         }),
         (Some(_), true, false) => Err(Invalid::Marks {
-            mark: "pre_stop_session_ms",
+            mark: "rb_pre_stop_session_ms",
             needs: "a previous release",
         }),
         _ => Ok(()),

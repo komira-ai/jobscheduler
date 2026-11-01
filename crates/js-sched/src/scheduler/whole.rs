@@ -16,13 +16,13 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_types::sched::{FarmTime, LeaseKind, NodePhase, OperationId, WorkerId};
+use js_types::sched::{FarmTime, LeaseId, LeaseKind, NodePhase, OperationId, WorkerId};
 use js_whole::WholeNodeConfig;
 use js_whole::caps::{
     Blocked, Capability, Counts, Limits, Mark, OrdinaryRequest, capable_hosts, ceiling,
     ceiling_excess, last_capable_blocks, may_reserve,
 };
-use js_whole::cost::{DrainCost, HostLoad, drain_cost, reserve_deadline};
+use js_whole::cost::{DrainCost, HostLoad, drain_cost, reserve_deadline, tail};
 
 use super::{Scheduler, Worker};
 use crate::servable::{Placed, Servable, serves};
@@ -153,7 +153,8 @@ impl Drain {
     }
 
     /// The mark `operation` has on `worker` at `now`: the one it kept, when it is on the
-    /// same worker, else a new one whose deadline follows [`reserve_deadline`].
+    /// same worker, else a new one on `worker` whose deadline follows [`reserve_deadline`]
+    /// and whose time of making is the kept mark's: a hold that moves keeps its age.
     pub(super) fn mark(
         &self,
         operation: OperationId,
@@ -163,6 +164,7 @@ impl Drain {
         cfg: &WholeNodeConfig,
         max_wall: Option<Duration>,
     ) -> WholeMark {
+        let made = kept.as_ref().map_or(now, |m| m.made);
         if let Some(kept) = kept.filter(|m| &m.worker == worker) {
             return kept;
         }
@@ -173,7 +175,7 @@ impl Drain {
         let wait = reserve_deadline(attempts, cfg, wall);
         WholeMark {
             worker: worker.clone(),
-            made: now,
+            made,
             deadline: FarmTime::from_millis(now.as_millis().saturating_add(wait)),
         }
     }
@@ -281,40 +283,81 @@ impl Scheduler {
         self.max_walls.insert(operation, max_wall);
     }
 
-    /// The registered workers by drain cost, cheapest first, when whole-node settings are
-    /// on; `None` when they are not. `placed` are this round's placements, not yet held.
-    pub(super) fn drain_order(&self, placed: &[(OperationId, Placed)]) -> Option<Vec<DrainCost>> {
-        self.whole_node.as_ref()?;
-        let end_of = |operation: OperationId, start: u64| {
-            self.max_walls.get(&operation).map_or(u64::MAX, |wall| {
-                start.saturating_add(u64::try_from(wall.as_millis()).unwrap_or(u64::MAX))
-            })
-        };
-        // Every held lease belongs to an operation that holds it.
-        let mut ends: BTreeMap<&WorkerId, Vec<u64>> = BTreeMap::new();
+    /// The registered workers by drain cost, cheapest first: by the least tail, whether or
+    /// not whole-node settings are on. `placed` are this round's placements, not yet held.
+    pub(super) fn drain_order(&self, placed: &[(OperationId, Placed)]) -> Vec<DrainCost> {
+        // Every held lease belongs to an operation that holds it. Each entry is the end
+        // bound of a lease and its estimated end.
+        let mut ends: BTreeMap<&WorkerId, Vec<(u64, Option<u64>)>> = BTreeMap::new();
         for held in self.held.values() {
             let start = held.started_at.unwrap_or(held.granted_at).as_millis();
-            let end = end_of(held.operation, start);
+            let end = self.end_times(held.operation, start);
             let holding = self.ops[&held.operation].state.holding();
             holding
                 .into_iter()
                 .for_each(|(_, worker)| ends.entry(worker).or_default().push(end));
         }
         for (operation, placed) in placed {
-            let end = end_of(*operation, self.now.as_millis());
+            let end = self.end_times(*operation, self.now.as_millis());
             ends.entry(&placed.worker).or_default().push(end);
         }
         let loads: Vec<HostLoad> = self
             .workers
             .iter()
-            .map(|(name, w)| HostLoad {
-                id: name.as_str().to_owned(),
-                leases: w.leases,
-                end_bounds: ends.remove(name).unwrap_or_default(),
-                est_ends: Vec::new(),
+            .map(|(name, w)| {
+                let (end_bounds, est_ends) =
+                    ends.remove(name).unwrap_or_default().into_iter().unzip();
+                HostLoad {
+                    id: name.as_str().to_owned(),
+                    leases: w.leases,
+                    end_bounds,
+                    est_ends,
+                }
             })
             .collect();
-        Some(drain_cost(&loads, self.now.as_millis()))
+        drain_cost(&loads, self.now.as_millis())
+    }
+
+    /// The end bound (start plus max wall time, the latest time there is for a lease with
+    /// none) and the estimated end (start plus the P90 of the wall minutes of its key, raw;
+    /// unknown when the key has none) of a lease of `operation` started at `start`.
+    fn end_times(&self, operation: OperationId, start: u64) -> (u64, Option<u64>) {
+        let bound = self.max_walls.get(&operation).map_or(u64::MAX, |wall| {
+            start.saturating_add(u64::try_from(wall.as_millis()).unwrap_or(u64::MAX))
+        });
+        let key = &self.ops[&operation].request.key;
+        let estimate = self
+            .admission
+            .wall_minutes_p90(key)
+            .map(|minutes| start.saturating_add(u64::from(minutes).saturating_mul(60_000)));
+        (bound, estimate)
+    }
+
+    /// The end of each lease held or placed this round, as farm milliseconds: its estimate
+    /// cut to its bound, else its bound; `None` for a lease with neither. A lease placed
+    /// this round starts now.
+    pub(super) fn lease_ends(
+        &self,
+        placed: &[(OperationId, Placed)],
+    ) -> BTreeMap<LeaseId, Option<u64>> {
+        let end = |(bound, estimate): (u64, Option<u64>)| {
+            tail(&HostLoad {
+                id: String::new(),
+                leases: 1,
+                end_bounds: vec![bound],
+                est_ends: vec![estimate],
+            })
+        };
+        let held = self.held.iter().map(|(lease, held)| {
+            let start = held.started_at.unwrap_or(held.granted_at).as_millis();
+            (*lease, end(self.end_times(held.operation, start)))
+        });
+        let now = self.now.as_millis();
+        let this_round = (0u64..).zip(placed).map(|(i, (operation, _))| {
+            let lease = LeaseId::new(self.term, self.next_seq.saturating_add(i));
+            (lease, end(self.end_times(*operation, now)))
+        });
+        held.chain(this_round).collect()
     }
 }
 
@@ -435,14 +478,10 @@ impl Scheduler {
         let max_wall = self.max_walls.get(&id).copied();
         let mut wait = None;
         loop {
-            let Some(name) = servable.reserve(
-                &self.workers,
-                &op.request,
-                &out,
-                &avoid,
-                kept,
-                drain.as_deref(),
-            ) else {
+            // The pick is made again every round, with no stickiness; `kept` is only the
+            // worker the mark was on, whose cap check is already made.
+            let Some(name) = servable.reserve(&self.workers, &op.request, &out, &avoid, &drain)
+            else {
                 return wait.map_or(Ok(None), Err);
             };
             if kept != Some(&name) {
@@ -584,5 +623,49 @@ mod tests {
         assert!(!drain.give_ups.contains_key(&op));
         assert!(!drain.backoff.contains_key(&op));
         assert!(drain.marks.contains_key(&other));
+    }
+
+    /// Catches: a lease placed in the round being left out of the lease ends, or numbered
+    /// wrongly: the one placed this round takes the next sequence of the term and ends its
+    /// max wall time after now, cut to nothing else; with no estimate its end is its bound.
+    #[test]
+    fn a_lease_placed_this_round_ends_at_now_plus_its_wall_time() {
+        use crate::{Event, Input, Request};
+        use js_types::sched::usage::LeaseCost;
+        use js_types::sched::{Qos, Resources, StateMachine, WaiterId, WorkKey};
+        let mut s = Scheduler::new(1);
+        let op = s.next_operation();
+        let request = Request {
+            key: WorkKey::new("c", "k"),
+            qos: Qos::Ci,
+            kind: LeaseKind::Action,
+            resources: Resources::new(1_000, 1 << 30),
+            hermetic: true,
+            do_not_cache: false,
+            whole_worker: false,
+            needs: js_caps::Request::default(),
+        };
+        let waiter = WaiterId(1);
+        s.apply(Input::new(
+            FarmTime::from_millis(5_000),
+            Event::Submit { waiter, request },
+        ));
+        s.set_max_wall(op, Duration::from_secs(100));
+        let placed = Placed {
+            worker: WorkerId::new("a"),
+            booked: Resources::new(1_000, 1 << 30),
+            device: None,
+            cost: LeaseCost {
+                cpu_millis: 1_000,
+                memory_bytes: 0,
+                limit_bytes: 0,
+                cold: false,
+                retry: false,
+                key_hash: 0,
+            },
+        };
+        let ends = s.lease_ends(&[(op, placed)]);
+        let expected = BTreeMap::from([(LeaseId::new(1, 0), Some(105_000))]);
+        assert_eq!(ends, expected);
     }
 }

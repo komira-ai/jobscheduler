@@ -62,6 +62,11 @@ pub(crate) struct StoredReservation {
     /// predates the field reads the row without it and keeps it on rewrite.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub assigned: bool,
+    /// The end of the held host's tail when it was set aside; only on a row that holds a
+    /// host. Absent is unknown; a build that predates the field reads the row without it
+    /// and keeps it on rewrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_end_ms: Option<u64>,
     /// The place on the wait list and when the request was first presented, both or
     /// neither.
     #[serde(default, skip_serializing_if = "Option::is_none")]

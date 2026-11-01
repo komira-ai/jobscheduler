@@ -130,12 +130,14 @@
 
 mod config;
 mod credential;
+mod lives;
 mod load;
 mod provider;
 mod refusal;
 mod registry;
 mod runs;
 mod session;
+mod tail_counters;
 mod whole;
 use js_whole::config as whole_config;
 
@@ -148,6 +150,7 @@ pub use js_whole::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_REGAIN_GRACE_MS, DEFAULT_RESERVE_BACKOFF_MS,
     WholeNodeConfig,
 };
+pub use lives::ProfileLives;
 pub use load::{BadLease, node_load};
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
@@ -157,6 +160,7 @@ pub use registry::{
 };
 pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};
+pub use tail_counters::{ERROR_EDGES_MS, TailCounters};
 pub use whole::queue::MAX_WAITING_REQUESTS;
 pub use whole::requests::{Exclusion, NotReady, RequestKey, RequestRecord};
 pub use whole::reserve::Reservation;

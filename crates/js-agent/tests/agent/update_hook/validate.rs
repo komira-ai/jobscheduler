@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use js_agent::update_hook::{
     CUTOVER_MARGIN_SECS, Cordon, Declaration, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, POLL_SECS,
-    PREPARE_MARGIN_SECS, Params, Record, Rollback, SCHEMA, START_WAIT_SECS, Timeouts, UpdateInfo,
-    VERIFY_MARGIN_SECS, validate,
+    PREPARE_MARGIN_SECS, Params, ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, Record, Rollback,
+    SCHEMA, START_WAIT_SECS, Timeouts, UpdateInfo, VERIFY_MARGIN_SECS, validate,
 };
 
 const UNIT: &str = "js-agent-crun.service";
@@ -800,4 +800,130 @@ fn a_record_without_the_session_before_the_stop_is_still_read_and_a_missing_one_
     assert_eq!(serde_json::from_value::<Record>(value).unwrap(), record);
     let with = serde_json::to_value(with_pre_stop(&record, 9)).unwrap();
     assert_eq!(with["pre_stop_session_ms"], serde_json::json!(9));
+}
+
+#[test]
+fn the_declared_rollback_timeout_must_outlast_the_drain_the_start_the_hello_and_a_margin() {
+    let record = good();
+    let mut declaration = declaration();
+    let params = params_for(&record);
+    let needed =
+        params.drain_wait_secs + START_WAIT_SECS + ROLLBACK_HELLO_SECS + ROLLBACK_MARGIN_SECS + 1;
+    declaration.timeouts.rollback = needed;
+    assert_eq!(validate(&record, &declaration, &params), Ok(()));
+    for refused in [needed - 1, params.drain_wait_secs, 1, 0] {
+        declaration.timeouts.rollback = refused;
+        let error = validate(&record, &declaration, &params).unwrap_err();
+        assert_eq!(
+            error,
+            Invalid::RollbackTimeout {
+                rollback: refused,
+                wait: params.drain_wait_secs
+            }
+        );
+        assert!(
+            error.to_string().contains("rollback timeout"),
+            "{refused}: {error}"
+        );
+        assert!(error.to_string().contains(&refused.to_string()), "{error}");
+    }
+}
+
+/// `record` with the session the server showed before the rollback's first act.
+fn with_rb_session(record: &Record, session_ms: u64) -> Record {
+    let mut record = record.clone();
+    record.rb_pre_stop_session_ms = Some(session_ms);
+    record
+}
+
+#[test]
+fn the_session_before_the_rollbacks_first_act_needs_an_act_mark_of_the_rollback() {
+    let mut drained = good();
+    drained.rb.drained = true;
+    // The drain is an observation, not an act: no session is taken for it.
+    assert_eq!(
+        check(&with_rb_session(&drained, 7)),
+        Err(Invalid::Marks {
+            mark: "rb_pre_stop_session_ms",
+            needs: "an rb act mark"
+        })
+    );
+    assert_eq!(
+        check(&with_rb_session(&good(), 7)),
+        Err(Invalid::Marks {
+            mark: "rb_pre_stop_session_ms",
+            needs: "an rb act mark"
+        })
+    );
+    let acts: [fn(&mut Rollback); 3] = [
+        |rb| {
+            rb.drained = true;
+            rb.stop_begun = true;
+        },
+        |rb| rb.link_restored = true,
+        |rb| {
+            rb.link_restored = true;
+            rb.start_issued = true;
+        },
+    ];
+    for act in acts {
+        let mut record = good();
+        act(&mut record.rb);
+        assert_eq!(check(&with_rb_session(&record, 7)), Ok(()));
+        // Absent is allowed too: the server may have shown no session.
+        assert_eq!(check(&record), Ok(()));
+    }
+}
+
+#[test]
+fn a_first_install_has_no_rollback_marks_and_no_session_before_one() {
+    let mut record = good();
+    record.update.previous = None;
+    record.update.previous_target = None;
+    record.stop_begun = false;
+    record.cordon = Cordon::default();
+    record.link_moved = true;
+    assert_eq!(check(&record), Ok(()));
+    // A first install never writes a stop, and the rollback marks need one: the rule that
+    // `cutover` relaxed for `link_moved` is deliberately not relaxed for them, because the
+    // rollback of a first install makes no act.
+    for set in [
+        (|rb: &mut Rollback| rb.drained = true) as fn(&mut Rollback),
+        |rb| rb.link_restored = true,
+    ] {
+        let mut marked = record.clone();
+        set(&mut marked.rb);
+        assert!(matches!(
+            check(&marked),
+            Err(Invalid::Marks {
+                needs: "stop_begun",
+                ..
+            })
+        ));
+    }
+    let mut marked = record.clone();
+    marked.stop_begun = true;
+    marked.rb.link_restored = true;
+    assert_eq!(
+        check(&with_rb_session(&marked, 7)),
+        Err(Invalid::Marks {
+            mark: "rb_pre_stop_session_ms",
+            needs: "a previous release"
+        })
+    );
+}
+
+#[test]
+fn the_session_before_the_rollbacks_first_act_is_left_out_of_the_file_when_absent() {
+    let record = good();
+    let value = serde_json::to_value(&record).unwrap();
+    assert!(value.get("rb_pre_stop_session_ms").is_none());
+    let mut older = value;
+    older
+        .as_object_mut()
+        .unwrap()
+        .remove("rb_pre_stop_session_ms");
+    assert_eq!(serde_json::from_value::<Record>(older).unwrap(), record);
+    let with = serde_json::to_value(with_rb_session(&record, 9)).unwrap();
+    assert_eq!(with["rb_pre_stop_session_ms"], serde_json::json!(9));
 }

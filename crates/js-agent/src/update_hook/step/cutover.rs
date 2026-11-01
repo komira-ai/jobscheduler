@@ -70,7 +70,7 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
 
 /// Whether the first irreversible act is begun: the stop, or for a first install (nothing to
 /// stop) the move of the link.
-fn begun(record: &Record) -> bool {
+pub(super) fn begun(record: &Record) -> bool {
     if record.update.previous.is_none() {
         record.link_moved
     } else {
@@ -78,7 +78,7 @@ fn begun(record: &Record) -> bool {
     }
 }
 
-fn irreversible(mut done: Done) -> Done {
+pub(super) fn irreversible(mut done: Done) -> Done {
     done.report.reversible = false;
     done
 }
@@ -114,7 +114,7 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
 }
 
 /// A failure of something remote or shared: not the release's doing.
-fn environment(reason: Reason, detail: impl Into<String>) -> Done {
+pub(super) fn environment(reason: Reason, detail: impl Into<String>) -> Done {
     let mut done = failure(reason, detail);
     done.report.class = Class::Environment;
     done
@@ -137,7 +137,7 @@ fn deferred(params: &Params, reason: Reason, detail: impl Into<String>) -> Done 
 /// The release link the declaration names, held to the rules the record's paths are held to:
 /// plain, inside a declared directory other than the state directory (never one of them
 /// itself: the swap writes the link's parent), and in neither release.
-fn release_link(env: &Env<'_>, params: &Params) -> Result<std::path::PathBuf, Done> {
+pub(super) fn release_link(env: &Env<'_>, params: &Params) -> Result<std::path::PathBuf, Done> {
     let declaration = env.declaration;
     let link = params.release_link.clone().ok_or_else(|| {
         failure(
@@ -169,12 +169,17 @@ fn release_link(env: &Env<'_>, params: &Params) -> Result<std::path::PathBuf, Do
 }
 
 /// Whether the cordon is one this update placed and confirmed, and has not lapsed.
-fn ours(record: &Record, now_ms: u64) -> bool {
+pub(super) fn ours(record: &Record, now_ms: u64) -> bool {
     record.cordon.placed && !record.cordon.provisional && now_ms < record.cordon.expires_ms
 }
 
 /// Sets a mark in the record, durably, before the act it names.
-fn mark(env: &Env<'_>, held: &Held, record: &mut Record, set: fn(&mut Record)) -> Result<(), Done> {
+pub(super) fn mark(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    set: fn(&mut Record),
+) -> Result<(), Done> {
     let mut next = record.clone();
     set(&mut next);
     save(env, held, &next)?;
@@ -269,7 +274,7 @@ fn busy(
 }
 
 /// What the unit manager says of a unit, in the three ways that matter here.
-enum Life {
+pub(super) enum Life {
     /// `active`.
     Up,
     /// `activating`, `reloading` and the like: on its way up, or waiting to restart.
@@ -280,7 +285,7 @@ enum Life {
     Down,
 }
 
-fn life(state: &UnitState) -> Life {
+pub(super) fn life(state: &UnitState) -> Life {
     match state.active.as_str() {
         "active" => Life::Up,
         "inactive" | "failed" => Life::Down,
@@ -289,7 +294,7 @@ fn life(state: &UnitState) -> Life {
     }
 }
 
-fn show(env: &Env<'_>, unit: &str, reason: Reason) -> Result<UnitState, Done> {
+pub(super) fn show(env: &Env<'_>, unit: &str, reason: Reason) -> Result<UnitState, Done> {
     env.ports
         .units
         .show(unit)
@@ -297,7 +302,7 @@ fn show(env: &Env<'_>, unit: &str, reason: Reason) -> Result<UnitState, Done> {
 }
 
 /// Whether the link points at the staged release.
-fn linked(env: &Env<'_>, link: &Path, staged: &Path) -> Result<bool, Done> {
+pub(super) fn linked(env: &Env<'_>, link: &Path, staged: &Path) -> Result<bool, Done> {
     let target = env.ports.link.target(link).map_err(|why| {
         environment(
             Reason::LinkFailed,
@@ -308,7 +313,12 @@ fn linked(env: &Env<'_>, link: &Path, staged: &Path) -> Result<bool, Done> {
 }
 
 /// Waits one poll and renews the cordon if it is ours.
-fn pause(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Result<(), Done> {
+pub(super) fn pause(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    params: &Params,
+) -> Result<(), Done> {
     env.ports.clock.pause(Duration::from_secs(POLL_SECS));
     if ours(record, env.ports.clock.now_ms()) {
         renew(env, held, record, params)?;
@@ -407,12 +417,24 @@ fn start_failure(env: &Env<'_>, unit: &str, detail: String, seen_crash: bool) ->
     }
 }
 
-/// Starts the unit and waits for it to be active.
+/// Marks the start, then starts the unit and waits for it to be active.
 fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Result<(), Done> {
-    let unit = record.update.unit.clone();
     if !record.start_issued {
         mark(env, held, record, |record| record.start_issued = true)?;
     }
+    bring_up(env, held, record, params)
+}
+
+/// Starts the unit if it is down and waits for it to be active, for at most the start wait. A
+/// start that fails is the release's fault only if the unit ran and died. The mark of the
+/// start is the caller's: `cutover`'s and `rollback`'s are not the same.
+pub(super) fn bring_up(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    params: &Params,
+) -> Result<(), Done> {
+    let unit = record.update.unit.clone();
     let state = show(env, &unit, Reason::StartFailed)?;
     if matches!(life(&state), Life::Down | Life::Stopping) {
         env.ports.point();

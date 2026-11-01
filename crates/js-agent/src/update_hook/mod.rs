@@ -11,8 +11,7 @@
 //! this). The verb is answered before the agent's flags are parsed and before any signal
 //! handler is installed: a hook is a short-lived root process of the updater, not an agent.
 //!
-//! `prepare`, `cutover`, `verify` and `cleanup` have their bodies in [`step`], over the ports;
-//! `rollback` has none yet and answers `not_implemented`. [`Host::system`] runs them over
+//! The five steps have their bodies in [`step`], over the ports. [`Host::system`] runs them over
 //! the machine's: the unit manager, the release link, the lease server's own-host routes and the
 //! agent's state root (see [`machine`](Machine)). Where the lease server is and where the state
 //! root is come from the params table ([`ConnectParams`]); the declaration is read from
@@ -63,7 +62,7 @@ pub use record::{
 pub use report::{Class, MAX_REASON_LEN, Reason, Report, is_reason_token};
 pub use validate::{
     CUTOVER_MARGIN_SECS, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, PREPARE_MARGIN_SECS,
-    START_WAIT_SECS, VERIFY_MARGIN_SECS, validate,
+    ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, START_WAIT_SECS, VERIFY_MARGIN_SECS, validate,
 };
 
 /// The unit port of the platform the hook is built for.

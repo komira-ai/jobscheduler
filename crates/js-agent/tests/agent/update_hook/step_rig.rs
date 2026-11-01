@@ -317,6 +317,8 @@ type PauseHook<'a> = Box<dyn FnMut(&Spy<'a>, usize) + 'a>;
 pub struct Act {
     pub call: String,
     pub marks: [bool; 3],
+    /// `rb.drained`, `rb.stop_begun`, `rb.link_restored`, `rb.start_issued`, `rb.hello_ok`.
+    pub rb: [bool; 5],
     pub points: u32,
 }
 
@@ -383,13 +385,26 @@ impl<'a> Spy<'a> {
 
     /// Logs a change to the unit or the link, with the marks on disk at this moment.
     fn act(&self, call: String) {
-        let marks = fs::read(&self.record_path)
+        let record = fs::read(&self.record_path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+            .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok());
+        let marks = record
+            .as_ref()
             .map_or([false; 3], |r| [r.stop_begun, r.link_moved, r.start_issued]);
+        let rb = record.as_ref().map_or([false; 5], |r| {
+            let rb = r.rb;
+            [
+                rb.drained,
+                rb.stop_begun,
+                rb.link_restored,
+                rb.start_issued,
+                rb.hello_ok,
+            ]
+        });
         self.acts.borrow_mut().push(Act {
             call: call.clone(),
             marks,
+            rb,
             points: self.kill.points(),
         });
         self.push(call);
@@ -451,6 +466,10 @@ impl<'a> Spy<'a> {
 
     pub fn verify(&self, rig: &Rig) -> Done {
         step::verify(&self.env(rig, &as_root), &rig.params)
+    }
+
+    pub fn rollback(&self, rig: &Rig) -> Done {
+        step::rollback(&self.env(rig, &as_root), &rig.params)
     }
 }
 

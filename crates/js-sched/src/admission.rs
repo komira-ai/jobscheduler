@@ -72,7 +72,7 @@ use js_types::sched::{FarmTime, LeaseKind, OperationId, Resources, WorkKey};
 
 pub use config::{FlagError, LoadConfig, MAX_CPU_SLACK_PERMILLE, PlacementLoad};
 pub(crate) use config::{scale, scale_up};
-pub(crate) use head::{Ratio, binding, pick};
+pub(crate) use head::{Ratio, binding, pick, start_time};
 pub(crate) use horizon::new_charge;
 pub(crate) use ledger::{Ended, Left, Refusal, WorkerLoad, clamped};
 pub use profile::HORIZON_MINUTES;
@@ -262,6 +262,14 @@ impl Admission {
 
     pub(crate) fn use_curves(&mut self, curves: Arc<dyn CurveSource + Send + Sync>) {
         self.curves = Curves(curves);
+    }
+
+    /// The P90 of the wall minutes the runs of `key` lasted, when the curve source knows
+    /// it. Read whatever the load settings are: the drain cost uses it for the tail. It is
+    /// the raw P90 (`Fit.wall_minutes_p90`), not `Profile.life`, which adds
+    /// `expected_life_delta_minutes`.
+    pub(crate) fn wall_minutes_p90(&self, key: &WorkKey) -> Option<u32> {
+        self.curves.0.wall_minutes_p90(key)
     }
 
     /// Whether placement is decided by the predicate.
