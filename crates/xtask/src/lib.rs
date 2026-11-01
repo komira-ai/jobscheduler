@@ -17,8 +17,12 @@
 //!   each test target built as this user and run in a `Delegate=yes` system unit of its own;
 //!   with `--job-user`, the targets of a root daemon, run as root, which start every
 //!   container as that user.
-//! - `unit-result --unit <name> [--sudo <path>]` ([`crun_tests::check_unit`]): fails unless a
-//!   system unit a step ran with `systemd-run --wait` exited 0, by the unit's own result.
+//! - `unit-result --unit <name> --count-file <path> [--sudo <path>]` ([`crun_tests::check_unit`]): fails unless a
+//!   system unit a step ran with `systemd-run --wait` exited 0, by the unit's own result, and
+//!   ran at least one test, by the `--count-file` its `count-run` wrote.
+//!   Each unit runs its binary through `count-run --count-file <path> -- <binary> <args>...`
+//!   ([`count_run`]), which writes the number of tests the binary ran; a target fails unless
+//!   that count is at least one.
 //! - `pkg check-deb --deb F --version X.Y.Z --binary B --packaging DIR --license F` ([`pkg`]):
 //!   refuses a js-agent deb that is not exactly the package `packaging/js-agent` describes, or
 //!   whose binary is not a static x86-64 Linux executable.
@@ -34,6 +38,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+pub mod count_run;
 pub mod crun_tests;
 pub mod deploy;
 pub mod fetch;
@@ -57,6 +62,9 @@ pub enum Error {
     /// A package check failed.
     #[error(transparent)]
     Pkg(#[from] pkg::Error),
+    /// A program `count-run` ran ended with a failure status, which is also this one's.
+    #[error("the program ended with status {0}")]
+    Child(u8),
     /// The real-crun tests, or the build of their targets, failed.
     #[error(transparent)]
     CrunTests(#[from] test_build::Error),
@@ -121,6 +129,20 @@ enum Verb {
         /// The unit's name (`--unit` of the `systemd-run`).
         #[arg(long)]
         unit: String,
+        /// The file the unit's `count-run` wrote the number of tests it ran to: the unit
+        /// fails unless it holds a count of at least one.
+        #[arg(long)]
+        count_file: PathBuf,
+    },
+    /// Run a test binary and write the number of tests it ran to a file (what a `crun-tests`
+    /// unit runs; the exit status is the binary's).
+    CountRun {
+        /// Where to write the count.
+        #[arg(long)]
+        count_file: PathBuf,
+        /// The test binary and its arguments.
+        #[arg(last = true)]
+        command: Vec<std::ffi::OsString>,
     },
     /// The js-agent Linux package.
     Pkg {
@@ -181,10 +203,19 @@ fn run(cli: Cli) -> Result<String, Error> {
                 job_user: job_user.as_deref(),
             })?)
         }
-        Verb::UnitResult { sudo, unit } => Ok(crun_tests::check_unit(
+        Verb::UnitResult {
+            sudo,
+            unit,
+            count_file,
+        } => Ok(crun_tests::check_unit(
             &crun_tests::SudoProgram(&sudo),
             &unit,
+            &count_file,
         )?),
+        Verb::CountRun {
+            count_file,
+            command,
+        } => count_run::run(&count_file, &command),
         Verb::Pkg { verb } => Ok(match verb {
             PkgVerb::CheckDeb(args) => pkg::check(&args)?,
         }),
@@ -202,6 +233,7 @@ pub fn report(result: Result<String, Error>, out: &mut dyn Write, err: &mut dyn 
             let _ = writeln!(out, "{line}");
             ExitCode::SUCCESS
         }
+        Err(Error::Child(code)) => ExitCode::from(code),
         Err(Error::Usage(why)) => {
             let _ = writeln!(err, "xtask: {why}");
             ExitCode::from(2)

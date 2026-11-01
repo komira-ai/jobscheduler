@@ -101,6 +101,8 @@ fn args_of(name: &str, home: &OsStr) -> Vec<OsString> {
         home,
         path: OsStr::new("/usr/bin:/bin"),
         manifest: BUSYBOX_AMD64,
+        xtask: Path::new("/w/target/debug/xtask"),
+        count_file: Path::new("/w/target/crun-tests/u.count"),
     })
 }
 
@@ -133,6 +135,11 @@ fn every_target_s_unit_is_delegated_with_the_agent_s_settings() {
             "PATH=/usr/bin:/bin",
             "-E",
             &format!("JS_TEST_IMAGE=docker://docker.io/library/busybox@{BUSYBOX_AMD64}"),
+            "/w/target/debug/xtask",
+            "count-run",
+            "--count-file",
+            "/w/target/crun-tests/u.count",
+            "--",
             &format!("/w/target/debug/deps/{target}-0f1e"),
             "--include-ignored",
         ];
@@ -185,6 +192,8 @@ fn a_root_target_s_unit_is_delegated_and_runs_as_root_for_the_job_user() {
         built: &built,
         job_user: "js-job",
         path: OsStr::new("/usr/bin:/bin"),
+        xtask: Path::new("/w/target/debug/xtask"),
+        count_file: Path::new("/w/target/crun-tests/u.count"),
     })
     .iter()
     .map(|a| a.to_str().expect("utf-8").to_owned())
@@ -205,6 +214,11 @@ fn a_root_target_s_unit_is_delegated_and_runs_as_root_for_the_job_user() {
         "PATH=/usr/bin:/bin",
         "-E",
         "JS_JOB_USER=js-job",
+        "/w/target/debug/xtask",
+        "count-run",
+        "--count-file",
+        "/w/target/crun-tests/u.count",
+        "--",
         "/w/target/debug/deps/crun_root-0f1e",
         "--include-ignored",
     ];
@@ -267,13 +281,62 @@ impl Sudo for FakeSudo {
 const EXITED_0: &str = "Result=success\nExecMainCode=1\nExecMainStatus=0\nLoadState=loaded\n";
 const EXITED_101: &str = "Result=exit-code\nExecMainCode=1\nExecMainStatus=101\nLoadState=loaded\n";
 
-/// `run_unit` for a fake sudo, with the command the real verb would build.
+/// A count file holding `text` (none: no file), in a scratch directory of its own.
+fn counted(name: &str, text: Option<&str>) -> std::path::PathBuf {
+    // Tests run in parallel: each call gets a directory of its own.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = scratch(&format!("{name}-{n}")).join("u.count");
+    if let Some(text) = text {
+        std::fs::write(&file, text).expect("count file");
+    }
+    file
+}
+
+/// `run_unit` for a fake sudo, with the command the real verb would build and a unit that
+/// ran 5 tests.
 fn judged(sudo: &FakeSudo) -> Result<(), String> {
+    judged_with(sudo, &counted("judged", Some("5\n"))).map(|_| ())
+}
+
+/// `run_unit` for a fake sudo and the count file `file`.
+fn judged_with(sudo: &FakeSudo, file: &Path) -> Result<u64, String> {
     run_unit(
         sudo,
         "js-crun-tests-crun-7",
         &[OsString::from("systemd-run")],
+        file,
     )
+}
+
+/// The bug of this module's second half: a unit that exited 0 having run no test. Catches a
+/// zero count, a missing file and a garbled one passing, and a count that is read but not
+/// returned; a unit that failed is reported for how it ended, not for its count.
+#[test]
+fn a_clean_unit_passes_only_with_a_positive_count_of_tests() {
+    let ok = || FakeSudo::new(0, Ok(EXITED_0));
+    assert_eq!(judged_with(&ok(), &counted("pos", Some("5\n"))), Ok(5));
+    let zero = judged_with(&ok(), &counted("zero", Some("0\n"))).expect_err("no test ran");
+    assert!(zero.contains("ran no test"), "{zero}");
+    let missing = judged_with(&ok(), &counted("missing", None)).expect_err("no file");
+    assert!(
+        missing.contains("could not read the count of tests run"),
+        "{missing}"
+    );
+    for garbage in ["", "many\n", "-1\n", "3 4\n", "2.5\n"] {
+        let why = judged_with(&ok(), &counted("garbage", Some(garbage))).expect_err(garbage);
+        assert!(
+            why.contains("is not a count of tests"),
+            "{garbage:?}: {why}"
+        );
+    }
+    let failed = judged_with(
+        &FakeSudo::new(0, Ok(EXITED_101)),
+        &counted("failed", Some("5\n")),
+    )
+    .expect_err("the unit failed");
+    assert!(failed.contains("ExecMainStatus=101"), "{failed}");
+    assert!(!failed.contains("count"), "{failed}");
 }
 
 /// The bug: `systemd-run` exited 0 while the test binary in the unit exited 101. Catches a
@@ -374,7 +437,7 @@ fn a_collected_unit_is_not_reset() {
         ["systemd-run", "systemctl show js-crun-tests-crun-7"]
     );
     let sudo = FakeSudo::new(0, Ok(gone));
-    assert!(check_unit(&sudo, "js-crun-runtime").is_ok());
+    assert!(check_unit(&sudo, "js-crun-runtime", &counted("gone", Some("2\n"))).is_ok());
     assert_eq!(*sudo.calls.borrow(), ["systemctl show js-crun-runtime"]);
 }
 
@@ -383,9 +446,10 @@ fn a_collected_unit_is_not_reset() {
 #[test]
 fn checking_a_unit_a_step_started_reads_its_result() {
     let sudo = FakeSudo::new(0, Ok(EXITED_0));
+    let file = counted("check", Some("7\n"));
     assert_eq!(
-        check_unit(&sudo, "js-crun-runtime"),
-        Ok("ok: unit js-crun-runtime exited 0".to_owned())
+        check_unit(&sudo, "js-crun-runtime", &file),
+        Ok("ok: unit js-crun-runtime exited 0 and ran 7 tests".to_owned())
     );
     assert_eq!(
         *sudo.calls.borrow(),
@@ -394,12 +458,14 @@ fn checking_a_unit_a_step_started_reads_its_result() {
             "systemctl reset-failed js-crun-runtime"
         ]
     );
-    let failed = check_unit(&FakeSudo::new(0, Ok(EXITED_101)), "js-crun-runtime");
+    let failed = check_unit(&FakeSudo::new(0, Ok(EXITED_101)), "js-crun-runtime", &file);
     assert!(
         matches!(&failed, Err(Error::Failed(why)) if why.contains("ExecMainStatus=101")),
         "{failed:?}"
     );
-    assert!(check_unit(&FakeSudo::new(0, Err("no")), "js-crun-runtime").is_err());
+    assert!(check_unit(&FakeSudo::new(0, Err("no")), "js-crun-runtime", &file).is_err());
+    let none = counted("check-none", Some("0\n"));
+    assert!(check_unit(&FakeSudo::new(0, Ok(EXITED_0)), "js-crun-runtime", &none).is_err());
 }
 
 /// Catches two runs' units sharing a name (a read could be about another run's unit), and
