@@ -125,10 +125,10 @@ pub(crate) struct StoredLease {
     /// that books the whole host and in a file written before the field existed.
     #[serde(
         default,
-        skip_serializing_if = "Option::is_none",
+        skip_serializing_if = "unwritten",
         deserialize_with = "lenient_shares"
     )]
-    pub shares: Option<StoredShares>,
+    pub shares: Option<SharesRow>,
     /// Fields of a later version, kept as read.
     #[serde(flatten)]
     pub extra: toml::Table,
@@ -148,15 +148,33 @@ pub(crate) struct StoredShares {
     pub disk_bytes: u64,
 }
 
-/// Reads a `shares` value as the row it should be, or as none when it is not one (not a
-/// table, a missing or mistyped count): a bad row must not fail the whole file, and the
-/// lease it belongs to is then put back as booking the whole host.
-fn lenient_shares<'de, D>(deserializer: D) -> Result<Option<StoredShares>, D::Error>
+/// A `shares` value as read: a row, or something that is not one.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum SharesRow {
+    /// A table with the counts.
+    Good(StoredShares),
+    /// Anything else (not a table, a missing or mistyped count). It is never written back.
+    Bad,
+}
+
+/// Whether a `shares` row is left out of the file: all but a good row.
+fn unwritten(row: &Option<SharesRow>) -> bool {
+    !matches!(row, Some(SharesRow::Good(_)))
+}
+
+/// Reads a `shares` value as a row, or as [`SharesRow::Bad`] when it is not one: a bad row
+/// must not fail the whole file, and the lease it belongs to is then put back as booking
+/// the whole host (with a warning that names it, see `Record::restore`).
+fn lenient_shares<'de, D>(deserializer: D) -> Result<Option<SharesRow>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = Option::<toml::Value>::deserialize(deserializer)?;
-    Ok(value.and_then(|value| value.try_into().ok()))
+    Ok(value.map(|value| match value.try_into() {
+        Ok(row) => SharesRow::Good(row),
+        Err(_) => SharesRow::Bad,
+    }))
 }
 
 impl StoredShares {

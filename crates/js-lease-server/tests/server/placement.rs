@@ -213,20 +213,32 @@ fn pool(scratch: &Scratch) -> PoolText {
         .set("join_token_file", &quoted(&joins))
 }
 
-/// Asserts the file's key: `server.placement` is the registry when left out or named, and a
-/// bad value is refused naming the key (the values of the key are tested in `config_one_file`).
+/// Asserts the file's key: `server.placement` is the registry when left out or named, and
+/// `js-sched` when the file says so, for a pool whose capabilities name an `arch` (a joined
+/// pool here); the refusal of one that names none is tested below, and the bad values in
+/// `config_one_file`.
 #[test]
 fn the_key_is_read_from_the_file() {
-    for (name, extra) in [
-        ("placement_key_off", ""),
-        ("placement_key_reg", "placement = \"registry\""),
+    let arch = |_: &Scratch| PoolText::joined("burst").set("capabilities", "{ arch = \"x86_64\" }");
+    for (name, extra, expected) in [
+        ("placement_key_off", "", Placement::Registry),
+        (
+            "placement_key_reg",
+            "placement = \"registry\"",
+            Placement::Registry,
+        ),
+        (
+            "placement_key_sched",
+            "placement = \"js-sched\"",
+            Placement::JsSched,
+        ),
     ] {
         let scratch = Scratch::new(name);
         let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
         let table = server(&scratch, &format!("{listeners}\n{extra}"));
-        let text = file(&table, &[&pool(&scratch)]);
+        let text = file(&table, &[&arch(&scratch)]);
         let config = load(&scratch, &text).unwrap();
-        assert_eq!(config.placement(), Placement::Registry);
+        assert_eq!(config.placement(), expected);
     }
 }
 

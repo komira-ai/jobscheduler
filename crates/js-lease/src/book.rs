@@ -13,7 +13,7 @@ use crate::clock::{Monotonic, SystemMonotonic, Timestamp};
 use crate::error::{AcquireError, OpenError, RenewError, SaveError};
 use crate::reservations;
 use crate::state::LeaseState;
-use crate::store::{self, Document, FORMAT_VERSION, StoredLease, StoredShares};
+use crate::store::{self, Document, FORMAT_VERSION, SharesRow, StoredLease, StoredShares};
 use crate::timings::Timings;
 use crate::types::{Booking, Boot, Lease, LeaseInfo, ReservationRecord, Settings};
 
@@ -110,9 +110,26 @@ impl Record {
             request_labels: stored.labels.clone(),
             validation_run: stored.validation_run.clone(),
             labels,
-            shares: stored.shares.as_ref().and_then(StoredShares::resources),
+            shares: Self::restore_shares(stored),
             extra: stored.extra.clone(),
         })
+    }
+
+    /// What the stored lease books when its class lets leases share a host. A row that is
+    /// not valid resources (it is not a table, lacks a count, or names GPUs without a class)
+    /// reads as none, so the lease is put back booking the whole host, and is warned about.
+    fn restore_shares(stored: &StoredLease) -> Option<Resources> {
+        let found = stored.shares.as_ref().and_then(|row| match row {
+            SharesRow::Good(row) => row.resources(),
+            SharesRow::Bad => None,
+        });
+        if stored.shares.is_some() && found.is_none() {
+            tracing::warn!(
+                lease = %LeaseId::new(stored.term, stored.sequence),
+                "the lease file's shares row is not valid resources; the lease is put back booking the whole host"
+            );
+        }
+        found
     }
 
     /// The token of a pending whole lease: both of its fields are required, because a
@@ -160,7 +177,10 @@ impl Record {
             wall_ms: self.token.map(|token| millis_of(token.wall)),
             validation_run: self.validation_run.clone(),
             labels: self.request_labels.clone(),
-            shares: self.shares.as_ref().map(StoredShares::of),
+            shares: self
+                .shares
+                .as_ref()
+                .map(|shares| SharesRow::Good(StoredShares::of(shares))),
             extra: self.extra.clone(),
         }
     }
