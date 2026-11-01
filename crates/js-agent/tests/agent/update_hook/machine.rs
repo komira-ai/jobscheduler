@@ -435,3 +435,21 @@ fn the_machines_own_host_id_is_the_agents_from_the_machine_id_it_reads() {
     };
     assert!(why.contains("machine-id"), "{why}");
 }
+
+#[test]
+fn the_machines_host_runs_rollback_as_the_real_step_over_the_files_of_a_first_install() {
+    let tree = Tree::new("hook-machine-rollback-real");
+    // A first install that has written its record and moved nothing: a real rollback deletes
+    // the record and succeeds, reversibly. It asks no lease server and no unit manager.
+    let params = tree.params(false, "");
+    assert_eq!(
+        tree.run(Step::Prepare, &params, Err("unused")).outcome,
+        Outcome::Success
+    );
+    assert!(tree.record().exists());
+    let done = tree.run(Step::Rollback, &params, Err("unused"));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(done.report.reason, None);
+    assert!(done.report.reversible);
+    assert!(!tree.record().exists());
+}
