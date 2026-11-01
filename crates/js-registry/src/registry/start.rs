@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use js_elastic::Demand;
 use js_lease::Timestamp;
-use js_pool_static::HostBook;
+use js_pool_static::{Candidate, HostBook};
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
 use js_types::{Admission, HostId, LeaseId, ResourceClass, Shape};
 
@@ -127,7 +127,13 @@ impl Registry {
                 return StartAck::Refused(RefusalCode::ExclusiveNotReady);
             }
         }
-        let gate = HostBook::class_gate(classes, spec);
+        // With a placer, a class that books part of a host is leasable: leases share.
+        let placer = self.shared.placer.get();
+        let gate = match placer {
+            Some(_) => HostBook::listed_gate(classes, spec),
+            None => HostBook::class_gate(classes, spec),
+        };
+        let shares = placer.is_some() & !spec.class().admission().books_whole_host();
         let fresh = !matches!(held, Observed::Present { .. });
         // The pool's shape fits the request or no host ever will: the book answers
         // `NoFit` when no listed host fits, and every host is booked as the pool's shape,
@@ -172,6 +178,9 @@ impl Registry {
             hosts: &hosts,
         };
         let room = reserve::has_room(&state.marks, &pass, true);
+        // The hosts that carry a lease: a lease that shares one meets the runs of the
+        // leases there, which are not left over from a lease that has ended.
+        let occupied = state.book.leases();
         let State {
             book,
             records,
@@ -185,12 +194,18 @@ impl Registry {
             let record = records.get(id);
             // Only a whole-node request is kept off a host its earlier tries failed on.
             let barred = whole & requests.excluded(&key, id, now);
-            let bookable =
-                record.is_some_and(|record| record.bookable(now, grace, record.quiet(runs, id)));
+            let bookable = record.is_some_and(|record| {
+                let quiet = record.quiet(runs, id) | (shares & occupied.contains_key(id));
+                record.bookable(now, grace, quiet)
+            });
             let allowed = reserve::may_start(marks.holder(id), whole, spec.request_id(), room);
             [bookable, !barred, allowed].into_iter().all(|ok| ok)
         };
-        let ack = book.start_where(spec, gate, &eligible);
+        let choose = |open: &[Candidate]| match placer {
+            Some(placer) => placer.pick(spec, open),
+            None => (!open.is_empty()).then_some(0),
+        };
+        let ack = book.start_by(spec, gate, &eligible, &choose);
         let started = matches!(ack, StartAck::Started { .. });
         let ended = matches!(ack, StartAck::Refused(RefusalCode::LeaseEnded));
         let commit = [whole, fresh].into_iter().all(|ok| ok);

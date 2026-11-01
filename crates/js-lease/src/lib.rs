@@ -67,7 +67,17 @@
 //!
 //! [lease.labels]            # the caller's labels
 //! team = "infra"
+//!
+//! [lease.shares]            # optional: only a lease of a class that books part of a host
+//! cpu_millis = 4000         # ... what it books there (gpus, gpu_class and disk_bytes
+//! memory_bytes = 8589934592 # are left out when zero); absent means the whole host
 //! ```
+//!
+//! [`read_bookings`] reports `shares` as [`Booking::shares`], so a provider that lets
+//! leases share a host puts the lease back with what it booked. The field is read
+//! leniently: a file from before it, or a row whose resources are not a valid vector,
+//! reads as a lease that books the whole host, and a field of the row that this build does
+//! not know is ignored.
 //!
 //! A lease of a whole-node class (admission `Whole`) waits differently while pending: its
 //! expiry is the settings' prepare timeout, not its ttl, and when the provider is first

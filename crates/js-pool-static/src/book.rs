@@ -166,7 +166,7 @@ impl HostBook {
     /// whether the class books a whole host or part of one: the gate of a provider that
     /// lets leases share a host.
     pub fn listed_gate(classes: &[ResourceClass], spec: &StartSpec) -> Option<RefusalCode> {
-        Self::class_gate(classes, spec)
+        (!classes.contains(spec.class())).then_some(RefusalCode::UnsupportedClass)
     }
 
     /// Books `spec`'s lease on a host, in this order of answers:
@@ -239,8 +239,11 @@ impl HostBook {
                 leases: host.leases.clone(),
             })
             .collect();
-        let _ = choose;
-        let picked = open.first();
+        let chosen = match open.is_empty() {
+            true => None,
+            false => choose(&open),
+        };
+        let picked = chosen.and_then(|at| open.get(at));
         let Some(picked) = picked else {
             return match fits_somewhere {
                 true => StartAck::Refused(RefusalCode::NoCapacity),
@@ -362,9 +365,8 @@ impl HostBook {
         }
         let listed = self.hosts.get_mut(host);
         let listed = listed.ok_or_else(|| SeatError::Unlisted(host.clone()))?;
-        let _ = shares;
-        let whole = true;
-        let resources = listed.shape.resources().clone();
+        let whole = shares.is_none();
+        let resources = shares.unwrap_or_else(|| listed.shape.resources().clone());
         if !listed.has_room(&resources, whole) {
             return Err(match listed.leases.first() {
                 Some(holder) => SeatError::Taken {

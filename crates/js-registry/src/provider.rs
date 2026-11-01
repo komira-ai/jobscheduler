@@ -26,6 +26,11 @@ use crate::registry::Registry;
 ///   id it answers `NoCapacity` and the consumer retries. A request that used up its
 ///   tries to get a host ready answers `ExclusiveNotReady` once (that start removes its
 ///   record, so the next start of the request is a fresh one).
+/// - **Placer.** With [`crate::Registry::set_placer`] a start is shown every host that could
+///   take it and books the one the placer picks. A class that books part of a host is then
+///   leasable: its leases share a host that has room, and a host running its first lease
+///   takes a second. Without a placer the first host by id is booked and such a class is
+///   refused `UnsupportedClass`.
 /// - **Stop** frees the booking at once and reads back `Absent`, as it does for a lost
 ///   host: the table asked for the end of the lease.
 /// - **Observe** says `Present` while the host is live and `Unknown` once it is lost

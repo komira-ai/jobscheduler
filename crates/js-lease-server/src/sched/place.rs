@@ -6,8 +6,8 @@
 //! submitted request. One placement round later the scheduler has named a worker, and that
 //! is the host. The scheduler is built for the one start and dropped, so the registry stays
 //! the only place that books: it checks the room and makes the booking, as it does without
-//! a placer, and the scheduler only ranks the hosts that have room (the least charged
-//! first, as its spread rule orders workers).
+//! a placer, and the scheduler only ranks the hosts that have room, by its own score (the
+//! host the lease fits most tightly; equal hosts by a hash of the lease and the host).
 
 use js_pool_static::Candidate;
 use js_provider::StartSpec;
@@ -34,8 +34,10 @@ impl Placer for SchedPlacer {
     /// node, a capability that is not a platform requirement) the first host is booked, as
     /// a registry with no placer does; when it is built and places the start nowhere, none.
     fn pick(&self, spec: &StartSpec, open: &[Candidate]) -> Option<usize> {
-        let _ = grant(spec, open);
-        open.first().map(|_| 0)
+        match grant(spec, open) {
+            Ok(chosen) => chosen,
+            Err(_) => open.first().map(|_| 0),
+        }
     }
 }
 
@@ -82,7 +84,9 @@ fn grant(spec: &StartSpec, open: &[Candidate]) -> Result<Option<usize>, MapError
         .map(|(number, (candidate, held))| recovered(number, candidate, held))
         .collect();
     let next = OperationId(u64::try_from(operations.len()).unwrap_or(u64::MAX));
-    sched.recover(TERM, next, 0, operations);
+    // The lease the scheduler grants is numbered as the registry's lease is, so the
+    // tie-break between equal hosts (a hash of the lease and the host) varies by lease.
+    sched.recover(TERM, next, spec.lease().sequence(), operations);
     for candidate in open {
         let (capacity, caps) = map::host(&candidate.shape)?;
         let up = Event::WorkerUp {
@@ -155,20 +159,23 @@ mod tests {
     }
 
     fn spec_of(class: &ResourceClass, sequence: u64) -> StartSpec {
+        spec_with(class, sequence, &[])
+    }
+
+    fn spec_with(class: &ResourceClass, sequence: u64, caps: &[(&str, &str)]) -> StartSpec {
         let request = HostRequest {
             class: class.id().clone(),
             resources: Resources::new(1000, 1 << 20, 0, None).unwrap(),
-            capabilities: BTreeMap::new(),
+            capabilities: caps
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
             max_wall: Duration::from_secs(60),
             labels: BTreeMap::new(),
             validation_run: None,
         };
-        StartSpec::new(
-            LeaseId::new(2, sequence),
-            request,
-            std::slice::from_ref(class),
-        )
-        .unwrap()
+        let known = std::slice::from_ref(class);
+        StartSpec::new(LeaseId::new(2, sequence), request, known).unwrap()
     }
 
     fn spec() -> StartSpec {
@@ -176,33 +183,36 @@ mod tests {
     }
 
     /// Catches: the first host by name taken in place of the scheduler's rank, or the
-    /// leases on a host left out of it: `b` carries the least of three hosts, so it is
-    /// picked, and when `c` carries nothing it is.
+    /// leases on a host left out of it. The scheduler's score prefers the host the lease
+    /// fits most tightly, which here is the one that carries most: `c`, then `b`.
     #[test]
-    fn the_host_with_the_least_booked_is_picked() {
+    fn the_host_the_lease_fits_most_tightly_is_picked() {
         let open = [
             host("a", x86(), &[2000]),
             host("b", x86(), &[1000]),
             host("c", x86(), &[3000]),
         ];
-        assert_eq!(SchedPlacer.pick(&spec(), &open), Some(1));
+        assert_eq!(SchedPlacer.pick(&spec(), &open), Some(2));
         let open = [
             host("a", x86(), &[1000]),
             host("b", x86(), &[1000, 1000]),
             host("c", x86(), &[]),
         ];
-        assert_eq!(SchedPlacer.pick(&spec(), &open), Some(2));
+        assert_eq!(SchedPlacer.pick(&spec(), &open), Some(1));
     }
 
-    /// Catches: a tie broken any way but the first host by name (the registry's own order),
-    /// for a lease that shares and for one that books the whole host.
+    /// Catches: equal hosts always broken the same way (the first by name, or the lease
+    /// number left out of the scheduler's tie-break hash): the scheduler breaks a tie by a
+    /// hash of the lease and the host, which prefers `b` for lease 1 and `a` for lease 3.
+    /// A lease that books the whole host takes the first by name.
     #[test]
-    fn equal_hosts_go_to_the_first_by_name() {
+    fn equal_hosts_are_told_apart_by_the_lease() {
         let open = [host("a", x86(), &[]), host("b", x86(), &[])];
-        assert_eq!(SchedPlacer.pick(&spec(), &open), Some(0));
+        assert_eq!(SchedPlacer.pick(&spec_of(&sharing(), 1), &open), Some(1));
+        assert_eq!(SchedPlacer.pick(&spec_of(&sharing(), 3), &open), Some(0));
         let id = ClassId::new("box").unwrap();
         let whole = ResourceClass::new(id, Admission::BookAll, 0);
-        assert_eq!(SchedPlacer.pick(&spec_of(&whole, 3), &open), Some(0));
+        assert_eq!(SchedPlacer.pick(&spec_of(&whole, 1), &open), Some(0));
     }
 
     /// Catches: a host the scheduler cannot describe (no `arch`) failing the start or being
@@ -212,6 +222,17 @@ mod tests {
         let open = [host("a", shape(&[]), &[3000]), host("b", x86(), &[])];
         assert_eq!(SchedPlacer.pick(&spec(), &open), Some(0));
         assert_eq!(SchedPlacer.pick(&spec(), &[]), None);
+    }
+
+    /// Catches: a request the scheduler cannot describe (a capability that is not a
+    /// platform requirement) failing the start or being placed nowhere: the first host is
+    /// booked, where the scheduler would have taken `b`, which carries the more.
+    #[test]
+    fn a_request_that_is_not_a_platform_requirement_falls_back_to_the_first() {
+        let open = [host("a", x86(), &[]), host("b", x86(), &[3000])];
+        assert_eq!(SchedPlacer.pick(&spec(), &open), Some(1));
+        let odd = spec_with(&sharing(), 1, &[("colour", "red")]);
+        assert_eq!(SchedPlacer.pick(&odd, &open), Some(0));
     }
 
     /// Catches: a start placed on a host the scheduler has no room on: the one host here is

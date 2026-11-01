@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use js_types::Resources;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{OpenError, SaveError};
@@ -115,9 +116,53 @@ pub(crate) struct StoredLease {
     /// The maximum wall time of the request, kept while a whole lease is pending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_ms: Option<u64>,
+    /// What the lease books when its class lets leases share a host; absent for a lease
+    /// that books the whole host and in a file written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares: Option<StoredShares>,
     /// Fields of a later version, kept as read.
     #[serde(flatten)]
     pub extra: toml::Table,
+}
+
+/// The resources a lease that shares its host books, as written. A field this build does
+/// not know is ignored.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct StoredShares {
+    pub cpu_millis: u64,
+    pub memory_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub gpus: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_class: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub disk_bytes: u64,
+}
+
+impl StoredShares {
+    /// The row that writes `resources`.
+    pub fn of(resources: &Resources) -> Self {
+        Self {
+            cpu_millis: resources.cpu_millis(),
+            memory_bytes: resources.memory_bytes(),
+            gpus: resources.gpus(),
+            gpu_class: resources.gpu_class().map(str::to_owned),
+            disk_bytes: resources.disk_bytes(),
+        }
+    }
+
+    /// The resources the row says, or `None` when they are not a valid vector (GPUs
+    /// without a class, a class without GPUs): the lease then reads as booking the whole
+    /// host, as a file from before the field does.
+    pub fn resources(&self) -> Option<Resources> {
+        let counted = Resources::new(
+            self.cpu_millis,
+            self.memory_bytes,
+            self.gpus,
+            self.gpu_class.clone(),
+        );
+        Some(counted.ok()?.with_disk_bytes(self.disk_bytes))
+    }
 }
 
 /// The exclusive lock of a table's file, released when this is dropped.

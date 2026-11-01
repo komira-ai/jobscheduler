@@ -24,8 +24,9 @@ fn asking(resources: Resources) -> Request {
     }
 }
 
+/// Half a host's cores and memory and its GPU: every axis of the booking is set.
 fn half() -> Resources {
-    Resources::new(4000, 4, 0, None).unwrap()
+    Resources::new(4000, 4, 1, Some("g".into())).unwrap()
 }
 
 /// Asserts that the bookings of a file name what a lease that shares its host books, and
@@ -36,8 +37,7 @@ fn a_lease_that_shares_a_host_records_what_it_books() {
     let scratch = Scratch::new("shares_recorded");
     let clock = clock();
     let mut table = open(fake().with_class(sharing()), &clock, &scratch);
-    let disk = half().with_disk_bytes(7 << 20);
-    let shared = table.acquire(asking(disk.clone()), None).unwrap();
+    let shared = table.acquire(asking(half()), None).unwrap();
     let whole = table.acquire(request(3600), None).unwrap();
 
     let expected = vec![
@@ -45,7 +45,7 @@ fn a_lease_that_shares_a_host_records_what_it_books() {
             lease: shared.id,
             host: shared.host.clone(),
             state: LeaseState::Held,
-            shares: Some(disk),
+            shares: Some(half()),
         },
         Booking {
             lease: whole.id,

@@ -44,6 +44,7 @@
 //! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]` (`cpu_millis`, `memory_bytes`, `gpus?`, `gpu_class?`, `disk_bytes?`: the scratch disk the pool books for every host and the floor a hello must meet; zero or absent books none; required above zero when `[capabilities]` names `scratch-quota`, or the file is refused; a pool that books disk and does not name `scratch-quota` refuses every agent that does not report disk, which no current agent does; a pool that names `scratch-quota` refuses a host whose `scratch-quota` is not `project`, whose `scratch-default-gib` is absent, zero or above the wire maximum, or whose default is more than `disk_bytes`, with `shape-not-accepted`), `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `memory_schedulable_percent` (1 to 100, default 100: the share of `[shape]` `memory_bytes` the pool books, rounded down; a hello is still held to the whole shape; write it before `[shape]`), `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on |
 //! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
 //! | `--require-host-credential` | off by default: turn it on once every agent is new. The first hello of a one-time join token must then say the agent keeps a host credential, or it is refused `join-token-credential-required` (403) and the token stays unused; so the token of every launched host is dead after its first hello. Pool join tokens are not affected. Needs `--agent-pool-config` |
+//! | `--placement registry\|js-sched` | who picks the host of a lease on a host that registered itself, `registry` unless given. `registry` books the first free host by id: a lease holds a whole host, and a class that books part of a host is refused `unsupported-class`. `js-sched` builds a `js-sched` scheduler over the hosts that could take the lease (they fit it, have room beside the leases already there, and are bookable) and books the one it names, the least booked first and ties by name; a class that books part of a host is then leasable, and its leases share a host that has room, a host running its first lease taking a second. The registry still checks the room and makes the booking, and a host or request the scheduler cannot describe (a shape with no `arch`) is booked first-by-id as before. Needs `--agent-pool-config` |
 //! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start |
 //! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `250ms`, `15m`, `2h` |
 //! | `--tick` | how often the table is ticked and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
@@ -60,7 +61,7 @@
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
-//! hello limit flags and `--require-host-credential` need `--agent-pool-config`, and are
+//! hello limit flags, `--require-host-credential` and `--placement` need `--agent-pool-config`, and are
 //! refused without it.
 //!
 //! # The configuration file
@@ -94,6 +95,7 @@
 //! # max_lease_wall: the most a lease's max_wall_seconds may ask for; none by default, and
 //! # required by a pool with accelerators (a floor of one GPU or more); a lease asking for
 //! # more is refused 422 `wall-time-above-ceiling`; config file only, there is no flag
+//! # placement ("registry", or "js-sched"): the flag's name and values; refused unless a pool registers agents
 //! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456):
 //! # the flags' names, defaults and rules; usage_db is refused beside usage_off = true
 //! # alert_webhook_url, alert_webhook_token_file, alert_repeat_after (1h): every alert of the

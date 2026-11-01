@@ -685,7 +685,10 @@ impl Config {
     /// Who places a lease on a registered host (`--placement`, or `server.placement`):
     /// `registry` for a server with no agent registration.
     pub fn placement(&self) -> Placement {
-        Placement::Registry
+        match &self.hosts {
+            Hosts::Layered { agents, .. } => agents.placement,
+            Hosts::Static(_) => Placement::Registry,
+        }
     }
 
     /// The most bytes the learned cost curves may take (`--profile-store-bytes`).

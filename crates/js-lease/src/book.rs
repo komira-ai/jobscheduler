@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_provider::{Observed, StartAck, StartSpec, StopAck};
-use js_types::{Admission, HostId, LabelError, Labels, LeaseId, ReservedKey};
+use js_types::{Admission, HostId, LabelError, Labels, LeaseId, ReservedKey, Resources};
 
 use crate::clock::{Monotonic, SystemMonotonic, Timestamp};
 use crate::error::{AcquireError, OpenError, RenewError, SaveError};
 use crate::reservations;
 use crate::state::LeaseState;
-use crate::store::{self, Document, FORMAT_VERSION, StoredLease};
+use crate::store::{self, Document, FORMAT_VERSION, StoredLease, StoredShares};
 use crate::timings::Timings;
 use crate::types::{Booking, Boot, Lease, LeaseInfo, ReservationRecord, Settings};
 
@@ -73,6 +73,8 @@ pub(crate) struct Record {
     request_labels: BTreeMap<String, String>,
     validation_run: Option<String>,
     labels: Labels,
+    /// What the lease books on its host when its class lets leases share one.
+    shares: Option<Resources>,
     extra: toml::Table,
 }
 
@@ -108,6 +110,7 @@ impl Record {
             request_labels: stored.labels.clone(),
             validation_run: stored.validation_run.clone(),
             labels,
+            shares: stored.shares.as_ref().and_then(StoredShares::resources),
             extra: stored.extra.clone(),
         })
     }
@@ -157,6 +160,7 @@ impl Record {
             wall_ms: self.token.map(|token| millis_of(token.wall)),
             validation_run: self.validation_run.clone(),
             labels: self.request_labels.clone(),
+            shares: self.shares.as_ref().map(StoredShares::of),
             extra: self.extra.clone(),
         }
     }
@@ -242,7 +246,7 @@ pub(crate) fn bookings(path: &Path) -> Result<Vec<Booking>, OpenError> {
             lease: record.id,
             host: record.host.clone()?,
             state: record.state,
-            shares: None,
+            shares: record.shares.clone(),
         })
     });
     Ok(named.collect())
@@ -430,6 +434,8 @@ impl Book {
             request_labels: request.labels.clone(),
             validation_run: request.validation_run.clone(),
             labels: spec.labels().clone(),
+            shares: (!spec.class().admission().books_whole_host())
+                .then(|| request.resources.clone()),
             extra: toml::Table::new(),
         };
         self.leases.insert(record.id, record.clone());

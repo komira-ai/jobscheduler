@@ -84,7 +84,7 @@ hello in message metadata, never in a log line.
   one more per interval, counted per credential, refusals included. `server.require_host_credential` (false) refuses the first hello of a
   one-time token that does not say the agent keeps a host credential. The pool that registers hosts is a `[[pool]]` table, its shared
   tokens the pool's `join_token_file`, and the three server keys are refused when no pool registers agents. They have the flags'
-  names and defaults (`--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`), and the flags work as before when
+  names and defaults (`--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`; `--placement` and `server.placement` choose who picks the host of a lease, the registry or `js-sched`), and the flags work as before when
   `--config` is absent.
 - *Source.* The `DefaultProvider` (providers.md) is served by a `RegisteredAgentSource` of `CapacitySource` (5.9), which answers from admitted agents and ignores the bookings it is given: the lease
   file records leases and agents re-announce them.

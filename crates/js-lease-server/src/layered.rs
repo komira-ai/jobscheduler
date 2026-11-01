@@ -98,7 +98,7 @@ impl Provider for LayeredProvider {
         let lease = spec.lease();
         let holder = self.children.iter().position(|child| {
             let capacity = child.capacity();
-            capacity.iter().any(|host| host.leased_to == Some(lease))
+            capacity.iter().any(|host| host.leases.contains(&lease))
         });
         if let Some(holder) = holder {
             return self.children[holder].start(spec);
@@ -209,7 +209,13 @@ impl CapacitySource for LayeredSource {
         let registered = self.registry.provider();
         for booking in rest {
             let binding = self.bindings.get(&booking.host).cloned();
-            if let Err(refused) = registered.seat(&booking.host, booking.lease, binding) {
+            let seated = registered.seat_booked(
+                &booking.host,
+                booking.lease,
+                binding,
+                booking.shares.clone(),
+            );
+            if let Err(refused) = seated {
                 unseated.push(Unseated {
                     booking: booking.clone(),
                     reason: refused.to_string(),
@@ -487,6 +493,36 @@ mod tests {
         let mut provider = layer_of(vec![Box::new(free), Box::new(shares)]);
         assert_eq!(provider.start(sharing_spec(2)), on("x"));
         assert_eq!(leased(&provider, "a-1"), None);
+    }
+
+    /// The lease file's bookings of leases that share a host are seated with the resources
+    /// the file names: two leases of 2 of the host's 4 cores sit on the one host, and the
+    /// provider lists both on it. It catches a seat that books the whole host for each,
+    /// which refuses the second as taken.
+    #[test]
+    fn bookings_that_share_a_host_are_seated_with_their_resources() {
+        let floor = Shape::new(
+            Resources::new(4000, 8 << 30, 0, None).unwrap(),
+            BTreeMap::new(),
+        );
+        let name = ProviderId::new("builders").unwrap();
+        let config = js_registry::PoolConfig::new(name, sharing(), floor, 2);
+        let now = js_lease::Timestamp::from_millis(1);
+        let registry = Registry::new(config, js_lease::ManualClock::new(now));
+        let source = LayeredSource::new(None, registry, BTreeMap::new());
+        let booking = |n: u64| Booking {
+            lease: LeaseId::new(1, n),
+            host: host("a"),
+            state: js_lease::LeaseState::Held,
+            shares: Some(Resources::new(2000, 1, 0, None).unwrap()),
+        };
+        let seated = source.provider(&[booking(1), booking(2)]).unwrap();
+        assert!(seated.unseated.is_empty(), "{:?}", seated.unseated);
+        let listed = seated.provider.capacity();
+        assert_eq!(
+            listed[0].leases,
+            vec![LeaseId::new(1, 1), LeaseId::new(1, 2)]
+        );
     }
 
     fn leased(provider: &LayeredProvider, name: &str) -> Option<LeaseId> {

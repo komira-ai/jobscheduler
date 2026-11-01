@@ -36,7 +36,7 @@ fn hello(host: &str) -> Value {
         "host_id": host,
         "pool": "burst",
         "agent_version": "0.1.0",
-        "shape": { "cpu_millis": 8000, "memory_bytes": 17179869184u64 },
+        "shape": { "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 0 },
         "capabilities": { "arch": "x86_64" },
         "labels": {},
         "phase": "serving",
@@ -116,48 +116,44 @@ async fn by_default_the_registry_places_and_a_sharing_class_is_refused() {
     }
 }
 
-/// Asserts that with `--placement js-sched` a run is placed by the scheduler: the first
-/// lease lands on `h1` (a tie goes to the first by name), and the second on `h2`, which
-/// carries nothing, where the registry's first-host-by-id would have put it beside the
-/// first. Both read back on those hosts from the capacity listing.
+/// Asserts that with `--placement js-sched` a run is placed by the scheduler and not by the
+/// registry's first-host-by-id: the scheduler breaks the tie between the two empty hosts by
+/// a hash of the lease and the host, which gives lease 1 to `h2`, where the registry would
+/// have booked `h1`. The second lease is placed beside the first on `h2`, which has room
+/// and which the lease fits more tightly than the empty `h1`. The capacity listing reads
+/// both back.
 #[tokio::test]
-async fn with_the_flag_the_scheduler_spreads_the_leases() {
+async fn with_the_flag_the_scheduler_places_the_leases() {
     let (_h, mut provider) = serving("placement_sched", &["--placement", "js-sched"]).await;
     let first = provider.start(sharing_spec(1));
     let second = provider.start(sharing_spec(2));
     assert_eq!(
         (host_of(&first), host_of(&second)),
-        (Some("h1"), Some("h2"))
+        (Some("h2"), Some("h2"))
     );
     let listed: BTreeMap<HostId, Vec<LeaseId>> = provider
         .capacity()
         .into_iter()
         .map(|host| (host.host, host.leases))
         .collect();
-    assert_eq!(
-        listed[&HostId::new("h1").unwrap()],
-        vec![LeaseId::new(1, 1)]
-    );
-    assert_eq!(
-        listed[&HostId::new("h2").unwrap()],
-        vec![LeaseId::new(1, 2)]
-    );
+    let held = vec![LeaseId::new(1, 1), LeaseId::new(1, 2)];
+    assert_eq!(listed[&HostId::new("h2").unwrap()], held);
+    assert!(listed[&HostId::new("h1").unwrap()].is_empty());
 }
 
-/// Asserts that with the flag a second lease is placed beside a first on a host with
-/// room: after one lease on each host, the third and fourth land on the hosts that are
-/// least booked, so each host carries two.
+/// Asserts that a host with room takes a second lease and a full one takes none: eight
+/// leases of one core land on `h2` (the lease fits the loaded host more tightly than the
+/// empty one), and the ninth, with `h2`'s eight cores booked, goes to `h1`.
 #[tokio::test]
-async fn with_the_flag_a_host_with_room_takes_a_second_lease() {
-    let (_h, mut provider) = serving("placement_second", &["--placement", "js-sched"]).await;
-    let hosts: Vec<Option<String>> = (1..=4)
+async fn with_the_flag_a_host_with_room_takes_a_second_lease_and_a_full_one_none() {
+    let (_h, mut provider) = serving("placement_full", &["--placement", "js-sched"]).await;
+    let hosts: Vec<Option<String>> = (1..=9)
         .map(|n| host_of(&provider.start(sharing_spec(n))).map(str::to_owned))
         .collect();
     let named = |host: &str| Some(host.to_owned());
-    assert_eq!(
-        hosts,
-        vec![named("h1"), named("h2"), named("h1"), named("h2")]
-    );
+    let mut expected = vec![named("h2"); 8];
+    expected.push(named("h1"));
+    assert_eq!(hosts, expected);
 }
 
 fn parsed(args: Vec<OsString>) -> Result<Config, String> {

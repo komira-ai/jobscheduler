@@ -282,6 +282,9 @@ fn a_stopped_lease_never_restarts_on_a_many_lease_host() {
     assert_eq!(book.leases().get(&host("a")), Some(&vec![lease(2)]));
 }
 
+/// A chooser, as `start_by` takes it.
+type Choose = dyn Fn(&[Candidate]) -> Option<usize>;
+
 fn two_hosts() -> HostBook {
     let mut book = HostBook::new();
     book.insert_host(host("a"), shape());
@@ -322,7 +325,7 @@ fn a_chooser_that_declines_leaves_the_start_at_no_capacity() {
     let class = sharing();
     let none = |_: &[Candidate]| None;
     let past = |open: &[Candidate]| Some(open.len());
-    let chooses: [&dyn Fn(&[Candidate]) -> Option<usize>; 2] = [&none, &past];
+    let chooses: [&Choose; 2] = [&none, &past];
     for (seq, choose) in (1..).zip(chooses) {
         assert_eq!(
             book.start_by(&spec(&class, seq, 500), None, ANY, choose),
