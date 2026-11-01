@@ -14,8 +14,9 @@
 //!   old or the old one as new. A server that still shows the old session, or no session yet
 //!   (`awaiting`, after a server restart), is no proof; a session of a restarted server is
 //!   another session and is proof only with the target version, below;
-//! - the hello of that session carries the target version, and the runtime `crun` if it names
-//!   one.
+//! - the hello of that session carries the target version, and the execution mode of the
+//!   declared runtime if it names one (`container` for `crun` and `docker`, `sandbox-exec` for
+//!   `native`).
 //!
 //! Before it starts: a record with `start_issued` and the release link on the staged release
 //! (`state_invalid` otherwise, nothing read of the lease server). A taint or an `owed-*`
@@ -37,7 +38,7 @@ use crate::update_hook::{
     Class, Done, HostReading, LeaseError, POLL_SECS, Params, Reason, Record, VERIFY_MARGIN_SECS,
 };
 
-use super::prepare::{REQUIRED_RUNTIME, refuse_host};
+use super::prepare::refuse_host;
 use super::{Env, failure, lease_failure, open_state, save, success};
 
 /// Runs `verify`.
@@ -92,7 +93,7 @@ enum Look {
 }
 
 /// What a reading of the host says of the new agent: `Ok` is proof.
-fn judge(host: &HostReading, record: &Record) -> Result<(), Look> {
+fn judge(host: &HostReading, record: &Record, runtime: &str) -> Result<(), Look> {
     // Equality with the stamp taken before the stop, never an order against the host's clock.
     let new_session = host.state == "live"
         && host
@@ -106,12 +107,12 @@ fn judge(host: &HostReading, record: &Record) -> Result<(), Look> {
     let runtime_ok = host
         .runtime
         .as_deref()
-        .is_none_or(|runtime| runtime == REQUIRED_RUNTIME);
+        .is_none_or(|reported| reported == runtime);
     if version_ok && runtime_ok {
         Ok(())
     } else {
         Err(Look::Wrong(format!(
-            "the new session is {} on {}, not {target} on {REQUIRED_RUNTIME}",
+            "the new session is {} on {}, not {target} on {runtime}",
             host.agent_version.as_deref().unwrap_or("of no version"),
             host.runtime.as_deref().unwrap_or("no runtime"),
         )))
@@ -151,7 +152,7 @@ fn wait(env: &Env<'_>, record: &Record) -> Result<(), Done> {
         }
         if state.active == "active" {
             last = match env.ports.lease.host() {
-                Ok(host) => match judge(&host, record) {
+                Ok(host) => match judge(&host, record, env.declaration.hello_runtime()) {
                     Ok(()) => return Ok(()),
                     Err(look) => look,
                 },

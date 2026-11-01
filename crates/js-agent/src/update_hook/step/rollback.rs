@@ -36,7 +36,7 @@
 //! The hello that proves the previous agent is a live session other than the one the server
 //! showed in the last reading before this step's first act (recorded with the mark of that act
 //! as `rb_pre_stop_session_ms`, and compared by equality: both are the server's stamps), of the
-//! previous version, on the runtime the unit's is. A step that makes no act (the previous agent
+//! previous version, on the execution mode the declared runtime names (`Declaration::hello_runtime`). A step that makes no act (the previous agent
 //! already runs on the previous release) asks for no other session.
 //!
 //! Whose cordon it lifts is `cutover`'s rule: only one marked as placed by this update, not
@@ -64,7 +64,7 @@ use super::cutover::{
     Life, begun, bring_up, environment, irreversible, life, linked, mark, ours, pause,
     release_link, show,
 };
-use super::prepare::{REQUIRED_RUNTIME, place, refuse_host, renew};
+use super::prepare::{place, refuse_host, renew};
 use super::{Env, failure, lease_failure, open_state, save, state_failure, success};
 
 /// Runs `rollback`.
@@ -381,7 +381,7 @@ enum Look {
 /// step the session must differ from the one recorded before it, by equality (both are the
 /// server's stamps, never compared with the host's clock); with no act made the agent that
 /// runs is the one that always did, and no other session is asked for.
-fn judge(host: &HostReading, record: &Record, previous: &str) -> Result<(), Look> {
+fn judge(host: &HostReading, record: &Record, previous: &str, runtime: &str) -> Result<(), Look> {
     let rb = &record.rb;
     let acted = rb.stop_begun || rb.link_restored || rb.start_issued;
     let new_session = host.state == "live"
@@ -395,12 +395,12 @@ fn judge(host: &HostReading, record: &Record, previous: &str) -> Result<(), Look
     let runtime_ok = host
         .runtime
         .as_deref()
-        .is_none_or(|runtime| runtime == REQUIRED_RUNTIME);
+        .is_none_or(|reported| reported == runtime);
     if version_ok && runtime_ok {
         Ok(())
     } else {
         Err(Look::Wrong(format!(
-            "the session is {} on {}, not {previous} on {REQUIRED_RUNTIME}",
+            "the session is {} on {}, not {previous} on {runtime}",
             host.agent_version.as_deref().unwrap_or("of no version"),
             host.runtime.as_deref().unwrap_or("no runtime"),
         )))
@@ -437,10 +437,12 @@ fn await_hello(
         }
         if state.active == "active" {
             last = match env.ports.lease.host() {
-                Ok(host) => match judge(&host, record, &previous) {
-                    Ok(()) => break,
-                    Err(look) => look,
-                },
+                Ok(host) => {
+                    match judge(&host, record, &previous, env.declaration.hello_runtime()) {
+                        Ok(()) => break,
+                        Err(look) => look,
+                    }
+                }
                 Err(why) => Look::Unreachable(why),
             };
         }

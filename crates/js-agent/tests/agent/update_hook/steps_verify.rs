@@ -19,7 +19,12 @@ fn cut_over(name: &str, hello: bool) -> Rig {
 
 /// The same, with `before` run on the host after `prepare` and before `cutover`.
 fn cut_over_after(name: &str, hello: bool, before: impl FnOnce(&Rig)) -> Rig {
-    let rig = running(Rig::new(name));
+    cut_over_rig(Rig::new(name), hello, before)
+}
+
+/// The same, on the host `rig` describes.
+fn cut_over_rig(rig: Rig, hello: bool, before: impl FnOnce(&Rig)) -> Rig {
+    let rig = running(rig);
     before(&rig);
     // Time passes between the placing of the cordon and the start of the new agent.
     rig.world.pause(Duration::from_secs(5));
@@ -145,6 +150,37 @@ fn a_new_session_on_another_runtime_is_not_proof() {
     release_failure(&done, Reason::VersionMismatch);
     assert!(!rig.record().unwrap().verify_ok);
     only_looked(&spy);
+}
+
+#[test]
+fn a_mac_agent_that_says_hello_on_the_native_runtime_is_proof_under_a_native_declaration() {
+    let rig = cut_over_rig(Rig::mac("hook-verify-mac"), true, |_| {});
+    assert_eq!(rig.host().runtime.as_deref(), Some("sandbox-exec"));
+    let spy = Spy::new(&rig);
+    let done = spy.verify(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(rig.record().unwrap().verify_ok);
+    only_looked(&spy);
+}
+
+#[test]
+fn a_native_declaration_takes_no_container_agent_for_proof() {
+    let rig = cut_over_rig(Rig::mac("hook-verify-mac-container"), true, |_| {});
+    rig.world
+        .alter_host(|host| host.runtime = Some("container".to_owned()));
+    let spy = Spy::new(&rig);
+    let done = spy.verify(&rig);
+    release_failure(&done, Reason::VersionMismatch);
+    assert!(!rig.record().unwrap().verify_ok);
+}
+
+#[test]
+fn a_crun_declaration_takes_no_native_agent_for_proof() {
+    let rig = cut_over("hook-verify-crun-native", true);
+    rig.world
+        .alter_host(|host| host.runtime = Some("sandbox-exec".to_owned()));
+    let spy = Spy::new(&rig);
+    release_failure(&spy.verify(&rig), Reason::VersionMismatch);
 }
 
 #[test]

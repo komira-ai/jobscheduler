@@ -353,3 +353,73 @@ fn a_retry_of_zero_defers_with_retry_after_zero() {
     assert_eq!(done.report.retry_after_secs, Some(0));
     assert_eq!(line(&done)["retry_after_secs"], 0);
 }
+
+/// What a Mac build's `--version` prints (the second line is `cli::LONG_VERSION`'s).
+const MAC_VERSION: &str = "js-agent 1.4.0\nruntimes: docker native\n";
+
+#[test]
+fn a_staged_mac_agent_passes_prepare_under_a_declaration_that_names_the_native_runtime() {
+    let rig = Rig::mac("hook-prepare-mac");
+    let spy = Spy::new(&rig);
+    *spy.version.borrow_mut() = Ok(MAC_VERSION.to_owned());
+    let done = spy.prepare(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(done.report.reason, None);
+    let record = rig.record().expect("the record is written");
+    assert_eq!(record.update.unit, "com.komira.js-agent");
+}
+
+#[test]
+fn the_first_install_of_a_mac_agent_passes_prepare_too() {
+    let rig = Rig::mac_first_install("hook-prepare-mac-first");
+    let spy = Spy::new(&rig);
+    *spy.version.borrow_mut() = Ok(MAC_VERSION.to_owned());
+    let done = spy.prepare(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+}
+
+#[test]
+fn a_native_declaration_refuses_a_staged_agent_that_lists_no_native_runtime() {
+    for (n, printed) in [
+        "js-agent 1.4.0\nruntimes: docker crun\n",
+        "js-agent 1.4.0\nruntimes: docker\n",
+        "js-agent 1.4.0\nruntimes: natives\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rig = Rig::mac(&format!("hook-prepare-mac-refused-{n}"));
+        let spy = Spy::new(&rig);
+        *spy.version.borrow_mut() = Ok(printed.to_owned());
+        let done = spy.prepare(&rig);
+        assert_eq!(done.outcome, Outcome::Failure, "{printed:?}");
+        assert_eq!(
+            done.report.reason,
+            Some(Reason::VersionMismatch),
+            "{printed:?}"
+        );
+        assert!(
+            done.report.detail.as_deref().unwrap().contains("native"),
+            "{done:?}"
+        );
+        nothing_changed(&rig, &spy);
+    }
+}
+
+#[test]
+fn a_native_declaration_takes_an_agent_that_names_no_runtimes_as_a_crun_one_does() {
+    let rig = Rig::mac("hook-prepare-mac-no-line");
+    let spy = Spy::new(&rig);
+    *spy.version.borrow_mut() = Ok("js-agent 1.4.0\n".to_owned());
+    assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
+}
+
+#[test]
+fn a_crun_declaration_still_refuses_the_agent_of_a_mac_build() {
+    let rig = Rig::new("hook-prepare-crun-refuses-mac-agent");
+    let spy = Spy::new(&rig);
+    *spy.version.borrow_mut() = Ok(MAC_VERSION.to_owned());
+    let done = spy.prepare(&rig);
+    assert_eq!(done.report.reason, Some(Reason::VersionMismatch));
+    nothing_changed(&rig, &spy);
+}

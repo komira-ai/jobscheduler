@@ -232,7 +232,7 @@ fn the_epoch_goes_up_at_each_hello_with_the_new_session_version_and_runtime() {
     let second = rig.again().host().unwrap();
     assert_eq!(second.epoch, 2);
     assert_eq!(second.agent_version.as_deref(), Some("1.1"));
-    assert_eq!(second.runtime.as_deref(), Some("crun"));
+    assert_eq!(second.runtime.as_deref(), Some("container"));
     assert_eq!(second.session_started_ms, Some(START_MS + 5_000));
     assert!(second.session_started_ms > first.session_started_ms);
 }

@@ -26,6 +26,8 @@ use sha2::{Digest, Sha256};
 use super::fakes::{START_MS, World};
 
 pub const UNIT: &str = "js-agent-crun.service";
+/// The launchd label of the agent on a Mac, and what the Mac declaration says it runs.
+pub const MAC_UNIT: &str = "com.komira.js-agent";
 pub const HOST: &str = "burst-1";
 pub const LEASE_SECS: u64 = 300;
 pub const MAX_SECS: u64 = 17_355;
@@ -98,6 +100,8 @@ pub struct Rig {
     pub declaration: Declaration,
     pub params: Params,
     pub link: PathBuf,
+    /// The unit the declaration names.
+    pub unit: String,
 }
 
 impl Rig {
@@ -116,22 +120,50 @@ impl Rig {
         Rig::build(name, true, lease_secs, max_secs)
     }
 
+    /// The same update on a Mac: the launchd label for the unit, the declaration naming the
+    /// `native` runtime, and an agent whose hello says `sandbox-exec`.
+    pub fn mac(name: &str) -> Rig {
+        Rig::build_for(name, true, LEASE_SECS, MAX_SECS, Some(MAC_UNIT))
+    }
+
+    /// The first install on a Mac.
+    pub fn mac_first_install(name: &str) -> Rig {
+        Rig::build_for(name, false, LEASE_SECS, MAX_SECS, Some(MAC_UNIT))
+    }
+
     fn build(name: &str, previous: bool, lease_secs: u64, max_secs: u64) -> Rig {
+        Rig::build_for(name, previous, lease_secs, max_secs, None)
+    }
+
+    fn build_for(
+        name: &str,
+        previous: bool,
+        lease_secs: u64,
+        max_secs: u64,
+        mac: Option<&str>,
+    ) -> Rig {
         let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
         let root = tmp.path().to_owned();
         let (staged, old) = (root.join("releases/1.4.0"), root.join("releases/1.3.0"));
         fs::create_dir_all(&staged).unwrap();
         fs::write(staged.join("js-agent"), BINARY).unwrap();
         fs::create_dir_all(root.join("state")).unwrap();
+        let unit = mac.unwrap_or(UNIT);
+        let runtime = if mac.is_some() {
+            "runtime = \"native\"\n"
+        } else {
+            ""
+        };
         let declaration = Declaration::parse(&format!(
             concat!(
-                "state_dir = \"{root}/state\"\n[hook]\nunits = [\"{unit}\"]\n",
+                "state_dir = \"{root}/state\"\n[hook]\nunits = [\"{unit}\"]\n{runtime}",
                 "write_paths = [\"{root}/releases\", \"{root}/link\", \"{root}/state\"]\n",
                 "[hook.timeout_secs]\nprepare = 3900\ncutover = 4320\nverify = 615\n",
                 "rollback = 8220\ncleanup = 120\n"
             ),
             root = root.display(),
-            unit = UNIT,
+            unit = unit,
+            runtime = runtime,
         ))
         .unwrap();
         let previous = if previous {
@@ -168,6 +200,9 @@ impl Rig {
             &root.join("control"),
             Box::new(Shared(Rc::clone(&kill))),
         );
+        if mac.is_some() {
+            world.set_exec_mode("sandbox-exec");
+        }
         world.seed_update(&link, HOST, &params);
         Rig {
             tmp,
@@ -176,6 +211,7 @@ impl Rig {
             declaration,
             params,
             link,
+            unit: unit.to_owned(),
         }
     }
 
@@ -213,7 +249,7 @@ impl Rig {
             previous: self.params.previous_version.clone(),
             staged: self.params.staged_release.clone(),
             previous_target: self.params.previous_release.clone(),
-            unit: UNIT.to_owned(),
+            unit: self.unit.clone(),
             artifact_digest: self.params.artifact_digest.clone(),
         })
     }
@@ -561,7 +597,7 @@ pub const START: u64 = START_MS;
 /// The host as `prepare` leaves it for `cutover`: the agent running on the previous release,
 /// the cordon ours and the record written.
 pub fn running(rig: Rig) -> Rig {
-    rig.world.seed_unit(UNIT, "active", "running");
+    rig.world.seed_unit(&rig.unit, "active", "running");
     let done = Spy::new(&rig).prepare(&rig);
     assert!(
         done.report.reason.is_none(),
@@ -575,7 +611,7 @@ pub fn running(rig: Rig) -> Rig {
 /// Everything a `cutover` leaves behind, without the directories of the rig: the record, the
 /// link, the unit and the cordon.
 pub fn end_state(rig: &Rig) -> serde_json::Value {
-    let unit = rig.world.show(UNIT).unwrap();
+    let unit = rig.world.show(&rig.unit).unwrap();
     let state = serde_json::json!({
         "record": rig.record(),
         "link": rig.world.target(&rig.link).unwrap(),

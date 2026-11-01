@@ -223,3 +223,38 @@ fn the_state_directory_and_the_other_write_paths_do_not_nest() {
     );
     assert!(Declaration::parse(&text).is_ok());
 }
+
+const UNITS_LINE: &str = r#"units = ["js-agent-crun.service"]"#;
+
+fn with_runtime(line: &str) -> String {
+    GOOD.replace(UNITS_LINE, &format!("{UNITS_LINE}\n{line}"))
+}
+
+#[test]
+fn the_runtime_defaults_to_the_one_of_the_platform_the_hook_is_built_for() {
+    let want = if cfg!(target_os = "macos") {
+        "native"
+    } else {
+        "crun"
+    };
+    assert_eq!(Declaration::parse(GOOD).unwrap().runtime, want);
+}
+
+#[test]
+fn a_declared_runtime_is_read() {
+    for runtime in ["crun", "docker", "native"] {
+        let text = with_runtime(&format!("runtime = \"{runtime}\""));
+        assert_eq!(Declaration::parse(&text).unwrap().runtime, runtime);
+    }
+}
+
+#[test]
+fn a_runtime_the_agent_does_not_have_is_refused() {
+    for runtime in ["", "Crun", "crun native", "podman", " native"] {
+        let text = with_runtime(&format!("runtime = \"{runtime}\""));
+        let why = refused(&text).to_string();
+        assert!(why.contains("runtime"), "{runtime:?}: {why}");
+    }
+    let wrong_type = with_runtime("runtime = 3");
+    assert!(Declaration::parse(&wrong_type).is_err());
+}

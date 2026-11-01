@@ -11,6 +11,9 @@ state_dir = "/var/db/js-agent-update"
 
 [hook]
 units = ["com.komira.js-agent"]
+# The staged agent must list this runtime on the second line of `--version`. A Mac's js-agent
+# runs jobs natively; the Linux declaration says nothing and gets `crun`.
+runtime = "native"
 write_paths = ["/usr/local/js-agent/releases", "/usr/local/js-agent/link", "/var/db/js-agent-update"]
 
 [hook.timeout_secs]

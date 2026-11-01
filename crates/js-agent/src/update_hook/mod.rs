@@ -14,9 +14,15 @@
 //! The five steps have their bodies in [`step`], over the ports. The machine has no lease
 //! client yet, so [`Host::system`] still answers every step with the reason `not_implemented`
 //! (exit 1).
+//!
+//! The hook builds on Linux and macOS and differs between them in two places only: the unit
+//! manager ([`PlatformUnits`]: `systemctl` on Linux, `launchctl` on a Mac) and the runtime the
+//! staged agent must list on `--version` ([`Declaration::runtime`], which the declaration names
+//! or the platform's [`DEFAULT_RUNTIME`] stands for).
 
 mod args;
 mod declaration;
+mod launch_units;
 mod params;
 mod plain;
 mod ports;
@@ -31,7 +37,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 pub use args::{ArgsError, Invocation, Step};
-pub use declaration::{DECLARATION_PATH, Declaration, DeclarationError, Timeouts};
+pub use declaration::{DECLARATION_PATH, DEFAULT_RUNTIME, Declaration, DeclarationError, Timeouts};
+pub use launch_units::{LAUNCHCTL, LaunchUnits};
 pub use params::{
     ARTIFACT_DIGEST_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY, DEFER_RETRY_KEY, DRAIN_WAIT_KEY,
     MIN_CORDON_LEASE_SECS, POLL_SECS, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY,
@@ -52,6 +59,14 @@ pub use validate::{
     CUTOVER_MARGIN_SECS, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, PREPARE_MARGIN_SECS,
     ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, START_WAIT_SECS, VERIFY_MARGIN_SECS, validate,
 };
+
+/// The unit port of the platform the hook is built for.
+#[cfg(target_os = "macos")]
+pub type PlatformUnits<'a> = LaunchUnits<'a>;
+
+/// The unit port of the platform the hook is built for.
+#[cfg(not(target_os = "macos"))]
+pub type PlatformUnits<'a> = SystemUnits<'a>;
 
 /// The first argument that selects the verb.
 pub const VERB: &str = "update-hook";
