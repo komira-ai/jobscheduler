@@ -9,7 +9,9 @@
 //! a placer, and the scheduler only ranks the hosts that have room, by its own score (the
 //! host the lease fits most tightly; equal hosts by a hash of the lease and the host).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 use js_pool_static::Candidate;
 use js_provider::StartSpec;
