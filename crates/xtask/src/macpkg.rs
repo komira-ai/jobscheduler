@@ -180,9 +180,14 @@ fn io(path: &Path, why: impl std::fmt::Display) -> Error {
     Error::Io(format!("{}: {why}", path.display()))
 }
 
+/// The error of a failed operation on `path`, for `map_err`.
+fn failure(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
+    move |why| io(path, why)
+}
+
 fn set_mode(path: &Path, mode: u32) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|e| io(path, e))
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(failure(path))
 }
 
 /// Lays the payload and the scripts down in `args.out`: the line to print.
@@ -218,7 +223,7 @@ pub fn stage(args: &StageArgs) -> Result<String, Error> {
     ];
     let mut bytes = BTreeMap::new();
     for (dest, source) in sources {
-        bytes.insert(dest, std::fs::read(&source).map_err(|e| io(&source, e))?);
+        bytes.insert(dest, std::fs::read(&source).map_err(failure(&source))?);
     }
     if args.out.exists() {
         return Err(io(
@@ -231,15 +236,15 @@ pub fn stage(args: &StageArgs) -> Result<String, Error> {
     for e in &all {
         let at = root.join(&e.path);
         match e.kind {
-            Kind::Dir => std::fs::create_dir_all(&at).map_err(|x| io(&at, x))?,
-            Kind::File => std::fs::write(&at, &bytes[&e.path]).map_err(|x| io(&at, x))?,
+            Kind::Dir => std::fs::create_dir_all(&at).map_err(failure(&at))?,
+            Kind::File => std::fs::write(&at, &bytes[&e.path]).map_err(failure(&at))?,
         }
         set_mode(&at, e.mode)?;
     }
     let scripts = args.out.join("scripts");
-    std::fs::create_dir_all(&scripts).map_err(|e| io(&scripts, e))?;
+    std::fs::create_dir_all(&scripts).map_err(failure(&scripts))?;
     let script = scripts.join("postinstall");
-    std::fs::write(&script, postinstall_script(&version)).map_err(|e| io(&script, e))?;
+    std::fs::write(&script, postinstall_script(&version)).map_err(failure(&script))?;
     set_mode(&script, 0o755)?;
     Ok(format!(
         "staged js-agent {version} with {} files and {} directories in {}",
