@@ -188,8 +188,16 @@ pub trait Host {
 /// # Errors
 /// The file is not root's, or its group or others can write it.
 pub fn check_owner_mode(path: &str, uid: u32, mode: u32) -> io::Result<()> {
-    let _ = (path, uid, mode);
-    Ok(())
+    match (uid, mode & 0o022) {
+        (0, 0) => Ok(()),
+        (0, _) => Err(io::Error::other(format!(
+            "{path} is writable by group or others (mode {:04o})",
+            mode & 0o7777
+        ))),
+        (uid, _) => Err(io::Error::other(format!(
+            "{path} is owned by uid {uid}, not root"
+        ))),
+    }
 }
 
 /// [`check_owner_mode`] on `path` (canonical: absolute, no links) and on each directory above
@@ -202,7 +210,12 @@ pub fn check_ancestry(
     path: &str,
     lookup: impl Fn(&str) -> io::Result<Option<(u32, u32)>>,
 ) -> io::Result<()> {
-    let _ = (path, lookup);
+    for at in std::path::Path::new(path).ancestors() {
+        let at = at.to_string_lossy();
+        let (uid, mode) = lookup(&at)?
+            .ok_or_else(|| io::Error::other(format!("cannot check {at}: nothing is there")))?;
+        check_owner_mode(&at, uid, mode)?;
+    }
     Ok(())
 }
 
@@ -211,6 +224,17 @@ pub fn check_ancestry(
 /// local_address rem_address st tx:rx tr:tm retrnsmt uid timeout inode ...`; state `0A` is
 /// listening). A line that is not a socket is skipped.
 pub fn parse_listeners(table: &str, port: u16) -> Vec<u32> {
-    let _ = (table, port);
-    Vec::new()
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let local = f.get(1)?.rsplit_once(':')?.1;
+            let here = f.get(3) == Some(&"0A") && u16::from_str_radix(local, 16) == Ok(port);
+            match here {
+                true => f.get(7)?.parse().ok(),
+                false => None,
+            }
+        })
+        .collect()
 }

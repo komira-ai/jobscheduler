@@ -84,15 +84,32 @@ stderr).
   * a profile is recorded with another sha256 (or none): refused, exit 2, before any call. The
     `MDM_ADE_*`, `MDM_LANGUAGE` or `MDM_REGION` settings changed, or another tool defined the
     profile with other values. `--replace` defines a second profile (Apple keeps the old one)
-    and moves the assigner to it; with no record the first define needs no flag.
+    and moves the assigner to it; with no record the first define needs no flag, and with a
+    recorded profile that is this render `--replace` changes nothing.
 
-  The API key `NANODEP_API` is read from `MDM_ETC/nanodep.env` (0600, root). It travels only as
-  the `Authorization` header of calls to `127.0.0.1:MDM_DEP_PORT`; the calls are made only by
-  a binary that root owns and nobody else can write (`REFUSED` otherwise), and are printed
-  with their size, never their body.
+  The API key `NANODEP_API` is read from `MDM_ETC/nanodep.env` (0600, root; surrounding quotes
+  and trailing blanks are removed, as systemd does for the service). It travels only as the
+  `Authorization` header of calls to `127.0.0.1:MDM_DEP_PORT`, and a call is made only when:
 
-  A call that succeeded followed by a failed record write leaves Apple ahead of the record; the
-  rerun then defines the profile again.
+  * the running binary, its canonical path and every directory above it are owned by root and
+    writable by neither group nor others (`REFUSED` otherwise): a binary a user could swap
+    would be run by the next root run;
+  * every socket listening on `MDM_DEP_PORT` (IPv4 or IPv6, read from `/proc/net/tcp` and
+    `tcp6`) is owned by root or by `MDM_USER`: a local user who holds the port while depserver
+    is down gets no key and cannot hand back a profile uuid. The check is made just before each
+    call, so a user who takes the port in the instant between the check and the connect is not
+    caught (the port is taken, or depserver, which holds it, is not).
+  * the whole call, from the connect to the last byte of the answer, takes at most 120 s, so a
+    server that sends a byte at a time ends the call.
+
+  Calls are printed with their size, never their body. Text of an answer quoted in an error
+  (300 characters at most) has the key, its base64 forms and every line naming an
+  `Authorization` header replaced, and control characters written out.
+
+  The define is two calls, the profile and then the assigner, and the records are written after
+  both. If the assigner call fails, Apple holds a profile this host did not record; the next run
+  defines it again (a second profile at Apple), so set the assigner by hand or delete the stray
+  profile in Apple Business Manager. A define followed by a failed record write is the same.
 
   Compatibility with `kbf-deploy mdm dep define-profile`: it writes the same two files in the
   same formats, so a box it ran on is adopted: the render hashes the same as kbf-deploy's only
@@ -106,7 +123,9 @@ stderr).
   /proxy/<MDM_DEP_NAME>/profile/devices`; the depsyncer covers devices that sync in later). A
   serial is 8 to 14 upper-case letters and digits. One line `SERIAL: STATUS` per device; exit 1
   unless Apple answers `SUCCESS` for each (a serial missing from the answer is `no answer`).
-  Refused (exit 2) when no profile is recorded: run `dep define-profile --apply` first.
+  Refused (exit 2) when no profile is recorded, or when the recorded uuid is not 16 to 64 hex
+  digits: run `dep define-profile --apply` first. Apple's status text is printed with control
+  characters written out.
 
 Neither `dep` verb touches `www/enroll.mobileconfig`, and `install` does not write it: an
 enrollment profile written by another tool stays as it is. (Its payload UUIDs are derived from

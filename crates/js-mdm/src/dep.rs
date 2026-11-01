@@ -190,7 +190,7 @@ pub fn assign(
         .read(&uuid_file)?
         .ok_or_else(|| MdmError::NoProfile(uuid_file.clone()))?;
     let uuid = String::from_utf8_lossy(&uuid).trim().to_owned();
-    if std::hint::black_box(false) && !is_uuid(&uuid) {
+    if !is_uuid(&uuid) {
         return Err(MdmError::BadRecord(uuid_file));
     }
     let service = service(env, c)?;

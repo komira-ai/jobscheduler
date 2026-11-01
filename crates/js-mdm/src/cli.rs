@@ -93,7 +93,8 @@ enum DepVerb {
         /// The settings file.
         #[arg(long)]
         config: String,
-        /// Define a second profile when the recorded one is not this render.
+        /// Define a second profile when the recorded one is not this render. With a recorded
+        /// profile that is this render it changes nothing.
         #[arg(long)]
         replace: bool,
         /// Act; without it the plan is printed and no call is made.

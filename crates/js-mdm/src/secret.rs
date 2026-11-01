@@ -58,7 +58,11 @@ pub fn holds_other_lines(bytes: &[u8], key: &str) -> bool {
 /// carriage return of a file with DOS line ends included) and without one pair of surrounding
 /// single or double quotes.
 fn unquoted(value: &str) -> &str {
-    value
+    let value = value.trim_end();
+    ['"', '\'']
+        .iter()
+        .find_map(|q| value.strip_prefix(*q)?.strip_suffix(*q))
+        .unwrap_or(value)
 }
 
 /// The value of `key` in the secret file at `path`: refused unless the file is a 0600 file of

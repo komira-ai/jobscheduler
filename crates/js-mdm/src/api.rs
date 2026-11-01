@@ -18,7 +18,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use base64::Engine as _;
-#[allow(unused_imports)]
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use js_host_step::Mode;
 use js_mdm_core::config::MdmConfig;
@@ -105,7 +104,29 @@ impl Service {
     /// `text` with the key, its base64 forms (alone and as `user:key`) and every line that names
     /// an `Authorization` header replaced: a server may reflect the request it was sent.
     pub fn redact(&self, text: &str) -> String {
-        text.to_owned()
+        let (key, pair) = (
+            self.key.expose(),
+            format!("{}:{}", self.user, self.key.expose()),
+        );
+        let mut needles = vec![key.to_owned(), pair.clone()];
+        for engine in [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD] {
+            needles.push(engine.encode(key));
+            needles.push(engine.encode(&pair));
+        }
+        // The longest first: the pair holds the key, a padded form holds its unpadded one.
+        needles.sort_by_key(|n| std::cmp::Reverse(n.len()));
+        let mut text = text.to_owned();
+        for needle in needles {
+            text = text.replace(&needle, "[redacted]");
+        }
+        let lines: Vec<&str> = text
+            .lines()
+            .map(|l| match l.to_ascii_lowercase().contains("authorization") {
+                true => "[redacted]",
+                false => l,
+            })
+            .collect();
+        lines.join("\n")
     }
 
     /// At most [`QUOTED`] characters of `body`, redacted, trimmed and with control characters
@@ -119,7 +140,12 @@ impl Service {
 /// `text` with every control character written out (`\n`, `\u{1b}`): text from a server is
 /// never put on a terminal as it came.
 pub fn printable(text: &str) -> String {
-    text.to_owned()
+    text.chars()
+        .map(|c| match c.is_control() {
+            true => c.escape_default().to_string(),
+            false => c.to_string(),
+        })
+        .collect()
 }
 
 impl fmt::Debug for Service {
@@ -243,13 +269,15 @@ impl Api for RealApi {
         // What is left of the deadline, at most one step's timeout and at least a millisecond (a
         // zero timeout is refused): past the deadline every read waits a millisecond, so a
         // server that only trickles bytes fails at the next gap.
-        let _ = end;
-        let left = || TIMEOUT;
+        let left = || {
+            let left = end.saturating_duration_since(Instant::now());
+            left.clamp(Duration::from_millis(1), TIMEOUT)
+        };
         let mut tcp = TcpStream::connect_timeout(&service.addr, left()).map_err(io)?;
         tcp.set_write_timeout(Some(TIMEOUT)).map_err(io)?;
         tcp.write_all(&request(service, call)).map_err(io)?;
         let (mut raw, mut chunk) = (Vec::new(), [0u8; 8192]);
-        let mut capped = (&tcp).take(MAX_REPLY.min(64));
+        let mut capped = (&tcp).take(MAX_REPLY);
         loop {
             tcp.set_read_timeout(Some(left())).map_err(io)?;
             let n = capped.read(&mut chunk).map_err(io)?;
@@ -379,7 +407,7 @@ pub fn call(
     let owners = env.host.listener_uids(service.addr.port())?;
     if let Some(uid) = owners
         .into_iter()
-        .find(|uid| std::hint::black_box(false) && *uid != 0 && !service.owners.contains(uid))
+        .find(|uid| *uid != 0 && !service.owners.contains(uid))
     {
         return Err(MdmError::Squatter {
             port: service.addr.port(),
