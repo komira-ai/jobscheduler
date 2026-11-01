@@ -47,6 +47,7 @@ pub mod http;
 pub mod measure;
 pub mod metric;
 pub mod plan;
+pub mod reported;
 pub mod summary;
 pub mod workload;
 

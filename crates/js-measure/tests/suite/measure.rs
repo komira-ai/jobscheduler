@@ -30,6 +30,7 @@ fn timing(name: &str, host: &str) -> JobTiming {
         host: Some(host.to_owned()),
         outcome: Some("succeeded".to_owned()),
         failure: None,
+        log_tail: None,
     }
 }
 
@@ -114,6 +115,7 @@ fn known_timing() -> JobTiming {
         host: Some("h".to_owned()),
         outcome: Some("succeeded".to_owned()),
         failure: None,
+        log_tail: None,
     }
 }
 

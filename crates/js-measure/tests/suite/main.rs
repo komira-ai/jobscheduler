@@ -12,6 +12,7 @@ mod http;
 mod measure;
 mod plan;
 mod record;
+mod reported;
 mod stub;
 mod summary;
 mod support;

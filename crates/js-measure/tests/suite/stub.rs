@@ -29,6 +29,7 @@ pub fn running(state: &str) -> RunStanding {
     RunStanding {
         state: state.to_owned(),
         outcome: None,
+        log_tail: None,
     }
 }
 

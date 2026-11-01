@@ -153,6 +153,7 @@ fn a_run_never_seen_running_has_no_start() {
         run: Ok(RunStanding {
             state: "exited".to_owned(),
             outcome: Some("failed".to_owned()),
+            log_tail: None,
         }),
         ..Stub::held()
     };
@@ -228,6 +229,7 @@ fn a_failed_release_is_noted_on_the_job() {
         run: Ok(RunStanding {
             state: "exited".to_owned(),
             outcome: Some("succeeded".to_owned()),
+            log_tail: None,
         }),
         release_fails: true,
         ..Stub::held()

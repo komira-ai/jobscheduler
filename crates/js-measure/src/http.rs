@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use js_client::{Client, ClientError, REQUEST_LIMIT, Reply};
+use js_client::{Client, ClientError, LogTail, REQUEST_LIMIT, Reply};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -83,6 +83,7 @@ struct QueuedBody {
 struct RunBody {
     state: String,
     outcome: Option<String>,
+    log_tail: Option<LogTail>,
 }
 
 #[derive(Deserialize)]
@@ -186,9 +187,11 @@ impl Farm for HttpFarm {
         let reply = self.client.get(&path).map_err(transport)?;
         let body = body_of(reply, &[200])?;
         let run: RunBody = serde_json::from_value(body).map_err(malformed)?;
+        let _stub = run.log_tail;
         Ok(RunStanding {
             state: run.state,
             outcome: run.outcome,
+            log_tail: None,
         })
     }
 

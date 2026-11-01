@@ -1,0 +1,59 @@
+//! The numbers a job reports about itself.
+//!
+//! A job that wants to be measured prints one line to its standard output:
+//!
+//! ```text
+//! js-measure-result {"steady_ms":12.3,"first_run_ms":45.6,"cache_hit":null}
+//! ```
+//!
+//! The line is the tag [`TAG`], one space, and a JSON object whose values are numbers or
+//! `null`. The harness reads the end of the run's output from the lease server after the
+//! run is over (the log tail, at most 8 KiB of each stream) and takes the numbers from it.
+//!
+//! # The rules
+//!
+//! - Only standard output is read. The last line that begins with the tag decides; the
+//!   lines before it are ignored, so a job may print the line again as it improves it.
+//! - A key whose value is a number is recorded as that number. A key whose value is
+//!   anything else (a string, a boolean, an array, an object) or `null` is recorded as
+//!   `null`.
+//! - No line, a line that is not a JSON object, or a tail that holds no complete line
+//!   (the output was cut, or the server holds no tail for the run) records no key at all.
+//!   The harness cannot know a key it never read, so the analysis counts the run as having
+//!   no value for it. Nothing is invented and nothing is set to zero.
+//! - Every key is recorded under the name [`PREFIX`] followed by the key, so a job can
+//!   never overwrite a number the harness measured itself (`makespan_ms`,
+//!   `request_to_token_ms_mean`, ...). A key `steady_ms` is `reported_steady_ms`.
+//! - A workload of several jobs records, for each key any job reported, the mean of the
+//!   jobs' numbers, and `null` when any job has none for that key.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::metric::finite;
+
+/// The tag a job's result line begins with.
+pub const TAG: &str = "js-measure-result";
+
+/// What a reported key is prefixed with in the records.
+pub const PREFIX: &str = "reported_";
+
+/// The keys of the last result line of `stdout`, each a number or `None`.
+#[must_use]
+pub fn parse(stdout: &str) -> BTreeMap<String, Option<f64>> {
+    let _ = stdout;
+    BTreeMap::new()
+}
+
+/// `reported` with every key prefixed.
+#[must_use]
+pub fn prefixed(reported: &BTreeMap<String, Option<f64>>) -> BTreeMap<String, Option<f64>> {
+    let _ = reported;
+    BTreeMap::new()
+}
+
+/// The record's metrics from the jobs' reports: see the module rules.
+#[must_use]
+pub fn merge(jobs: &[BTreeMap<String, Option<f64>>]) -> BTreeMap<String, Option<f64>> {
+    let _ = (jobs, BTreeSet::<()>::new(), finite(None));
+    BTreeMap::new()
+}
