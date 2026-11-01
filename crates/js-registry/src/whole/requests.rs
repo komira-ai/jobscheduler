@@ -17,8 +17,12 @@
 //!   (`ForLife` ones included): the consumer is gone, and the records stay bounded by the
 //!   requests in flight rather than by every request that ever failed.
 //!
-//! Records and exclusions are in memory only, so a restart forgets them and resets
-//! `max_replace` for every request; keeping them in the lease file is a later change.
+//! The failed-prepare and give-up counts and the exclusions of a request that carries an
+//! id are kept in the lease file (the registry's reservation ledger) and put back at a
+//! start by [`Requests::restore`], so a restart does not reset `max_replace` or
+//! `max_reserve_attempts`. What is not kept: the last failure's text (a restored record
+//! has none) and the records of requests without an id, which are told apart by their
+//! content and forgotten by a restart.
 //!
 //! [`Registry::not_ready`]: crate::Registry::not_ready
 
@@ -189,6 +193,25 @@ impl Requests {
             let committed = placed.values().any(|key| *key == entry.key);
             committed || idle < horizon_ms
         });
+    }
+
+    /// Puts back the record of the request under `key` from the ledger, touched at `now`
+    /// so the idle horizon counts from the start. Called once per request, at a start,
+    /// before the request has a record of its own.
+    pub(crate) fn restore(&mut self, key: RequestKey, record: RequestRecord, now: Timestamp) {
+        self.records.push(Entry {
+            key,
+            record,
+            touched: now,
+        });
+    }
+
+    /// The records of the requests that carry an id, for the ledger.
+    pub(crate) fn recorded(&self) -> impl Iterator<Item = (&RequestId, &RequestRecord)> {
+        self.records.iter().filter_map(|entry| match &entry.key {
+            RequestKey::Id(id) => Some((id, &entry.record)),
+            RequestKey::Content(_) => None,
+        })
     }
 
     /// The record of the request under `key`, if a prepare of it failed.
