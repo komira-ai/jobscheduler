@@ -158,6 +158,8 @@ fn start_bootstraps_the_plist_of_the_label_when_nothing_is_loaded() {
         [
             print_line(LABEL),
             format!("{LAUNCHCTL} bootstrap system {}", plist_of(LABEL)),
+            // The read that sees the service has begun.
+            print_line(LABEL),
         ]
     );
 }
@@ -172,6 +174,7 @@ fn start_kicks_a_loaded_service_that_is_not_running_and_leaves_a_running_one() {
         [
             print_line(LABEL),
             format!("{LAUNCHCTL} kickstart -k system/{LABEL}"),
+            print_line(LABEL),
         ]
     );
     let tool = world();
