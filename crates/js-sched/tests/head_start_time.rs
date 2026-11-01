@@ -37,22 +37,26 @@ fn place_four(r: &mut Rig, worker: &str, others: &[&str], booked: u64, charge: u
     assert_eq!(r.held(worker).len(), 4);
 }
 
+/// `r` with whole-node settings on, keeping what the scheduler was given.
+fn configured(mut r: Rig) -> Rig {
+    let off = std::mem::replace(&mut r.s, js_sched::Scheduler::new(1));
+    r.s = off.with_whole_node(js_whole::WholeNodeConfig::dedicated(4));
+    r
+}
+
 /// Two 8-core workers, each with four leases (`a`'s operations are 0 to 3, `b`'s 4 to 7),
-/// charged by prediction.
+/// charged by prediction, with whole-node settings on: the head is held by start time.
 fn two_loaded(curves: Option<std::sync::Arc<Curves>>, booked: u64, charge: u64) -> Rig {
     let r = match curves {
         Some(curves) => Rig::with_curves(LoadConfig::default(), curves),
         None => Rig::on(),
     };
-    fill(r, booked, charge)
+    fill(configured(r), booked, charge)
 }
 
-/// As [`two_loaded`], with whole-node settings on.
-fn two_loaded_with_settings(booked: u64, charge: u64) -> Rig {
-    let mut r = Rig::on();
-    let off = std::mem::replace(&mut r.s, js_sched::Scheduler::new(1));
-    r.s = off.with_whole_node(js_whole::WholeNodeConfig::dedicated(4));
-    fill(r, booked, charge)
+/// As [`two_loaded`], with no whole-node settings: the head is held as it always was.
+fn two_loaded_off(booked: u64, charge: u64) -> Rig {
+    fill(Rig::on(), booked, charge)
 }
 
 fn fill(mut r: Rig, booked: u64, charge: u64) -> Rig {
@@ -154,7 +158,7 @@ fn an_overdue_lease_counts_as_released_now() {
 /// the load ratio of `a` is the smaller.
 #[test]
 fn a_worker_bound_by_measured_load_has_no_start_time() {
-    let mut r = Rig::on();
+    let mut r = configured(Rig::on());
     r.up("a", node());
     r.up("b", node());
     r.baseline("a");
@@ -186,7 +190,7 @@ fn owner(r: &mut Rig) -> OperationId {
 /// the head holds nothing.
 #[test]
 fn with_settings_an_owner_action_ahead_of_a_head_takes_the_pools_hold() {
-    let mut r = two_loaded_with_settings(1_000, 1_000);
+    let mut r = two_loaded(None, 1_000, 1_000);
     let own = owner(&mut r);
     let op = head(&mut r, 6_000);
     r.round(1_000);
@@ -198,7 +202,7 @@ fn with_settings_an_owner_action_ahead_of_a_head_takes_the_pools_hold() {
 /// holds; the owner-worker action holds nothing.
 #[test]
 fn with_settings_a_head_ahead_of_an_owner_action_takes_the_pools_hold() {
-    let mut r = two_loaded_with_settings(1_000, 1_000);
+    let mut r = two_loaded(None, 1_000, 1_000);
     let op = head(&mut r, 6_000);
     let own = owner(&mut r);
     r.round(1_000);
@@ -210,10 +214,63 @@ fn with_settings_a_head_ahead_of_an_owner_action_takes_the_pools_hold() {
 /// blocked head each hold a worker, as before.
 #[test]
 fn without_settings_an_owner_action_and_a_head_each_hold_a_worker() {
-    let mut r = two_loaded(None, 1_000, 1_000);
+    let mut r = two_loaded_off(1_000, 1_000);
     let own = owner(&mut r);
     let op = head(&mut r, 6_000);
     r.round(1_000);
     assert!(r.s.reservation(own).is_some());
     assert!(r.s.head_hold(op).is_some());
+}
+
+/// Eight actions of 4 cores each, placed on `worker` alone; their starts.
+fn eight_on(r: &mut Rig, worker: &str, others: &[&str]) -> Vec<js_types::sched::StartLease> {
+    for other in others {
+        r.feed(Event::Cordon { worker: w(other) });
+    }
+    for _ in 0..8 {
+        r.action(4_000, 4 * GIB, Some(warm(4_000, 0)));
+    }
+    let starts = r.tick();
+    assert_eq!(starts.len(), 8);
+    for other in others {
+        r.feed(Event::Uncordon { worker: w(other) });
+    }
+    assert!(starts.iter().all(|s| s.worker == w(worker)));
+    starts
+}
+
+/// Catches (the #169 shape, with whole-node settings): a head needing 24 of 32 cores held
+/// by when its cores free up, and not starved. Both 32-core workers hold eight 4-core
+/// leases; `a` empties first (all end at 200 s) but `b` frees 24 cores at 100 s, when six
+/// of its eight end. The head holds `b`, and starts there as the six end, ahead of `a`,
+/// which empties earlier than `b` does.
+#[test]
+fn with_settings_a_head_needing_24_of_32_cores_starts_when_they_free_up() {
+    let mut r = configured(Rig::on());
+    let big = js_types::sched::Resources::new(32_000, 128 * GIB);
+    r.up("a", big);
+    r.up("b", big);
+    r.baseline("a");
+    r.baseline("b");
+    let on_a = eight_on(&mut r, "a", &["b"]);
+    let on_b = eight_on(&mut r, "b", &["a"]);
+    assert_eq!(on_a.len() + on_b.len(), 16);
+    walls(&mut r, 0, [Some(200); 4]);
+    walls(&mut r, 4, [Some(200); 4]);
+    let wall_b = [Some(100), Some(100), Some(100), Some(100)];
+    walls(&mut r, 8, wall_b);
+    walls(&mut r, 12, [Some(100), Some(100), Some(900), Some(900)]);
+    let op = head(&mut r, 24_000);
+    r.round(1_000);
+    assert_eq!(r.s.head_hold(op), Some(&w("b")));
+    // At 100 s six of `b`'s leases end.
+    r.ms = 100_000;
+    r.beat("a", None);
+    r.beat("b", None);
+    for start in on_b.iter().take(6) {
+        r.finish(start);
+    }
+    let starts = r.tick();
+    let started = starts.iter().find(|s| s.operation == op);
+    assert_eq!(started.map(|s| s.worker.clone()), Some(w("b")));
 }

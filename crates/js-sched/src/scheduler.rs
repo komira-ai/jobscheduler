@@ -754,6 +754,7 @@ impl Scheduler {
                                     request,
                                     &reserved,
                                     &op.avoid,
+                                    None,
                                     &drain,
                                 )
                             })
@@ -790,10 +791,21 @@ impl Scheduler {
                     fit_minutes,
                 };
                 let kept = self.head_holds.get(&id);
-                let ends = self.lease_ends(&placed);
-                if let Some(name) =
-                    servable.hold_for_head(&self.workers, &self.admission, &attempt, &ends)
-                {
+                // Without whole-node settings the hold is what it always was, by the
+                // binding ratio; with them, by the start time.
+                let held = match &self.whole_node {
+                    None => servable.hold_for_head(&self.workers, &self.admission, &attempt, kept),
+                    Some(_) => {
+                        let ends = self.lease_ends(&placed);
+                        servable.hold_for_head_by_start(
+                            &self.workers,
+                            &self.admission,
+                            &attempt,
+                            &ends,
+                        )
+                    }
+                };
+                if let Some(name) = held {
                     self.admission.counters.reservations += u64::from(kept != Some(&name));
                     reserved.insert(name.clone());
                     head_holds.insert(id, name);

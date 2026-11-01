@@ -336,12 +336,13 @@ fn a_blocked_head_does_not_delay_another_pool() {
     assert_eq!(f.r.s.load_counters().reservations, 2);
 }
 
-/// Catches: a hold that stays where it was put, or one that is not the lesser load when
-/// no end is known: both workers measured at 6000 m, the head holds `a`; `b` falling to
-/// 5500 m (the four leases' predicted 4000 m is the floor, so the readings are above it)
-/// moves the hold to `b` at once, and it stays there at 4500 m.
+/// Catches: a hold that wanders (moving at every wobble of the loads) or one that never
+/// moves: both workers measured at 6000 m, the head holds `a`; `b` falling to 5500 m
+/// (within a tenth of the head's ratio; the four leases' predicted 4000 m is the
+/// floor, so the readings are above it) leaves the hold, and falling to 4500 m moves it
+/// to `b`.
 #[test]
-fn with_no_end_known_the_hold_follows_the_lesser_load_every_round() {
+fn the_hold_moves_only_when_the_kept_worker_is_a_tenth_worse() {
     let mut f = Blocked::new();
     let (held_a, held_b) = (f.held_a.clone(), f.held_b.clone());
     for (name, held) in [("a", &held_a), ("b", &held_b)] {
@@ -357,14 +358,14 @@ fn with_no_end_known_the_hold_follows_the_lesser_load_every_round() {
         f.r.window("b", 5_500, 0, &held_b);
     }
     f.r.round(0);
-    assert_eq!(f.r.s.head_hold(head), Some(&w("b")), "the lesser load");
+    assert_eq!(f.r.s.head_hold(head), Some(&w("a")), "4% worse is kept");
     for _ in 0..2 {
         // `a` keeps reporting, or its reading goes stale and it is charged its prediction.
         f.r.window("a", 6_000, 0, &held_a);
         f.r.window("b", 4_500, 0, &held_b);
     }
     f.r.round(0);
-    assert_eq!(f.r.s.head_hold(head), Some(&w("b")), "still the lesser");
+    assert_eq!(f.r.s.head_hold(head), Some(&w("b")), "14% worse moves");
     assert_eq!(f.r.s.load_counters().reservations, 2);
 }
 

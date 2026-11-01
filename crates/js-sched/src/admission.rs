@@ -72,7 +72,7 @@ use js_types::sched::{FarmTime, LeaseKind, OperationId, Resources, WorkKey};
 
 pub use config::{FlagError, LoadConfig, MAX_CPU_SLACK_PERMILLE, PlacementLoad};
 pub(crate) use config::{scale, scale_up};
-pub(crate) use head::{Ratio, binding, start_time};
+pub(crate) use head::{Ratio, binding, pick, start_time};
 pub(crate) use horizon::new_charge;
 pub(crate) use ledger::{Ended, Left, Refusal, WorkerLoad, clamped};
 pub use profile::HORIZON_MINUTES;
