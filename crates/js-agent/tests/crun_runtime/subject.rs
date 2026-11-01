@@ -30,7 +30,7 @@ const MOUNT: &str = "/sys/fs/cgroup";
 const BUSY_NODE_LIMIT: u64 = 192 << 20;
 
 /// The value of the variable `name`, which `cargo xtask crun-tests` sets.
-fn var(name: &str) -> String {
+pub fn var(name: &str) -> String {
     std::env::var(name)
         .unwrap_or_else(|_| panic!("{name} is not set: run through cargo xtask crun-tests"))
 }
@@ -108,11 +108,25 @@ pub struct CrunSubject {
 
 /// A subject for the test `name`.
 pub fn crun_subject(name: &str) -> CrunSubject {
+    subject_in(name, Path::new("/tmp"), false)
+}
+
+/// A subject for the test `name` whose directories are below `volume`, with the leases'
+/// directories made in the directory `runs` of it, beside the runs' own, as the agent
+/// makes them. It is searchable by the job's ids.
+pub fn crun_subject_on(name: &str, volume: &Path) -> CrunSubject {
+    subject_in(name, volume, true)
+}
+
+fn subject_in(name: &str, parent: &Path, beside: bool) -> CrunSubject {
     let (uid, gid) = job_user();
     let tag = format!("{}-{}", &name[..name.len().min(24)], std::process::id());
-    let base = PathBuf::from(format!("/tmp/js-crun-runtime-{tag}"));
+    let base = parent.join(format!("js-crun-runtime-{tag}"));
     let _ = fs::remove_dir_all(&base);
     mkdir(&base, 0o711);
+    if beside {
+        mkdir(&base.join("runs"), 0o711);
+    }
     // The leases' cgroup must be named `actions` (the runtime refuses another name), so
     // each test has a cgroup of its own with an `actions` below it.
     let own = format!("{}/{tag}", delegation().actions);
@@ -137,6 +151,7 @@ pub fn crun_subject(name: &str) -> CrunSubject {
             id_tool_path: Some("/usr/bin:/bin".into()),
             daemon: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
             job_user: Some((uid, gid)),
+            leases_in: beside.then(|| base.join("runs")),
             ..OciConfig::default()
         },
         scratch: scratch.clone(),
@@ -174,6 +189,12 @@ impl CrunSubject {
     /// The directory of the lease `name`.
     pub fn lease_dir(&self, name: &str) -> PathBuf {
         self.settings.scratch.join(name)
+    }
+
+    /// The directory the runs' scratch directories, and the leases' with them, are made in
+    /// (a subject made with [`crun_subject_on`]).
+    pub fn runs(&self) -> PathBuf {
+        self.base.join("runs")
     }
 
     /// The cgroup of the lease `name`.

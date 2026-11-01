@@ -183,6 +183,9 @@ pub fn open(
     oci.id_files = seams.ids.files.clone();
     oci.id_tool_path = Some(seams.ids.tool_path.clone());
     oci.check_search = seams.ids.check_search;
+    // A lease's `/work` and home are made beside the run's directory in the scratch root, so
+    // the run's disk quota bounds them with `/scratch`.
+    oci.leases_in = Some(plan.scratch_root.clone());
     let settings = CrunSettings {
         oci,
         scratch: plan.store.clone(),

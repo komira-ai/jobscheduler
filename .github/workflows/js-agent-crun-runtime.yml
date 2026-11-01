@@ -3,6 +3,9 @@
 # dedicated non-root job user, in a `Delegate=yes` system unit. The tests are
 # crates/js-agent/tests/crun_runtime (every one `#[ignore]`, so no other job runs them).
 #
+# One XFS volume with project quota is mounted for the quota tests (a job's writes to /scratch,
+# /work and /root share one bound).
+#
 # The job stands alone, so a failure here blocks no other job. A hosted runner's kernel and
 # AppArmor policy are not a node's: the node canary stays the gate. The AppArmor restriction
 # on unprivileged user namespaces stays at the runner's default (on): the distribution's
@@ -55,6 +58,17 @@ jobs:
       - run: rustup toolchain install
       - run: sudo apt-get update
       - run: sudo apt-get install -y --no-install-recommends crun uidmap apparmor jq
+      # The quota tests (crates/js-agent/tests/crun_runtime/quota.rs) need a file system that
+      # enforces project quota: a loop image of XFS, mounted with prjquota.
+      - name: Make and mount a project-quota XFS volume on a loop device
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends xfsprogs
+          truncate -s 512M "$RUNNER_TEMP/js-crun-xfs.img"
+          sudo mkfs.xfs -q "$RUNNER_TEMP/js-crun-xfs.img"
+          sudo mkdir -p /mnt/js-crun-xfs
+          sudo mount -o loop,prjquota "$RUNNER_TEMP/js-crun-xfs.img" /mnt/js-crun-xfs
+          findmnt /mnt/js-crun-xfs
       - name: Make the job user
         run: |
           set -euo pipefail
@@ -83,7 +97,7 @@ jobs:
             --unit=js-crun-runtime --slice=js-agent.slice \
             -p Delegate=yes -p OOMScoreAdjust=-900 \
             --working-directory="$GITHUB_WORKSPACE/crates/js-agent" \
-            -E "PATH=$PATH" -E JS_JOB_USER=js-job \
+            -E "PATH=$PATH" -E JS_JOB_USER=js-job -E JS_XFS_ROOT=/mnt/js-crun-xfs \
             -E "JS_TEST_IMAGE=docker://docker.io/library/busybox@$manifest" \
             "$GITHUB_WORKSPACE/target/debug/xtask" count-run \
             --count-file "$RUNNER_TEMP/crun-runtime.count" -- \

@@ -4,9 +4,9 @@
 use std::path::PathBuf;
 
 use js_agent::update_hook::{
-    CUTOVER_MARGIN_SECS, Cordon, Declaration, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN,
+    CUTOVER_MARGIN_SECS, Cordon, Declaration, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, POLL_SECS,
     PREPARE_MARGIN_SECS, Params, Record, Rollback, SCHEMA, START_WAIT_SECS, Timeouts, UpdateInfo,
-    validate,
+    VERIFY_MARGIN_SECS, validate,
 };
 
 const UNIT: &str = "js-agent-crun.service";
@@ -700,4 +700,23 @@ fn an_update_with_a_previous_release_may_not_move_the_link_without_a_stop() {
             needs: "stop_begun"
         })
     );
+}
+
+#[test]
+fn the_declared_verify_timeout_must_outlast_the_margin_and_one_poll() {
+    let record = good();
+    let mut declaration = declaration();
+    let params = params_for(&record);
+    let needed = VERIFY_MARGIN_SECS + POLL_SECS + 1;
+    declaration.timeouts.verify = needed;
+    assert_eq!(validate(&record, &declaration, &params), Ok(()));
+    for refused in [needed - 1, VERIFY_MARGIN_SECS, 1, 0] {
+        declaration.timeouts.verify = refused;
+        let error = validate(&record, &declaration, &params).unwrap_err();
+        assert!(
+            error.to_string().contains("verify timeout"),
+            "{refused}: {error}"
+        );
+        assert!(error.to_string().contains(&refused.to_string()), "{error}");
+    }
 }

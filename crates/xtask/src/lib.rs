@@ -26,6 +26,9 @@
 //! - `pkg check-deb --deb F --version X.Y.Z --binary B --packaging DIR --license F` ([`pkg`]):
 //!   refuses a js-agent deb that is not exactly the package `packaging/js-agent` describes, or
 //!   whose binary is not a static x86-64 Linux executable.
+//! - `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): the macOS installer package's
+//!   payload and scripts, laid down for `pkgbuild`, and the built package read back with
+//!   `pkgutil` and `lsbom` and refused unless it is exactly that.
 //! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
 //!
@@ -43,6 +46,7 @@ pub mod crun_tests;
 pub mod deploy;
 pub mod fetch;
 pub mod layering;
+pub mod macpkg;
 pub mod pkg;
 pub mod release;
 pub mod test_build;
@@ -62,6 +66,9 @@ pub enum Error {
     /// A package check failed.
     #[error(transparent)]
     Pkg(#[from] pkg::Error),
+    /// The macOS package could not be staged or checked.
+    #[error(transparent)]
+    MacPkg(#[from] macpkg::Error),
     /// A program `count-run` ran ended with a failure status, which is also this one's.
     #[error("the program ended with status {0}")]
     Child(u8),
@@ -163,6 +170,10 @@ enum Verb {
 enum PkgVerb {
     /// Refuse a deb that is not exactly the js-agent package.
     CheckDeb(pkg::CheckArgs),
+    /// Lay the macOS package's payload and scripts down, ready for `pkgbuild`.
+    StageMacos(macpkg::StageArgs),
+    /// Refuse a macOS package that is not exactly the js-agent package (a Mac only).
+    CheckMacos(macpkg::CheckArgs),
 }
 
 /// The `release` verbs.
@@ -218,6 +229,8 @@ fn run(cli: Cli) -> Result<String, Error> {
         } => count_run::run(&count_file, &command),
         Verb::Pkg { verb } => Ok(match verb {
             PkgVerb::CheckDeb(args) => pkg::check(&args)?,
+            PkgVerb::StageMacos(args) => macpkg::stage(&args)?,
+            PkgVerb::CheckMacos(args) => macpkg::check(&args)?,
         }),
         Verb::Release { verb } => Ok(match verb {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,

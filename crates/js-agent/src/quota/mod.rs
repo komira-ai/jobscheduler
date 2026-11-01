@@ -260,6 +260,38 @@ pub trait ScratchQuota: Send + Sync {
     fn clear(&self, run_dir: &Path, project: ProjectId) -> Result<(), QuotaError>;
 }
 
+/// The project id of the open directory `dir`, or `None` where its file system keeps no
+/// project ids (the kernel does not know the call). Any other failure is an error: a read
+/// that failed says nothing about the directory's project.
+///
+/// # Errors
+///
+/// The system's reason, when the read failed for another reason than the file system having
+/// no project ids.
+#[cfg(target_os = "linux")]
+pub fn project_of(dir: &std::fs::File) -> io::Result<Option<u32>> {
+    use sys::{Kernel, Sys};
+    projid_of(Kernel.get_attr(dir))
+}
+
+/// What a read of a directory's attributes says of its project id (see [`project_of`]).
+#[cfg(target_os = "linux")]
+fn projid_of(read: io::Result<sys::Fsx>) -> io::Result<Option<u32>> {
+    match read {
+        Ok(attr) => Ok(Some(attr.projid)),
+        // The kernel does not know the call: this file system keeps no project ids.
+        Err(why)
+            if matches!(
+                why.raw_os_error(),
+                Some(libc::ENOTTY | libc::EOPNOTSUPP | libc::ENOSYS)
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(why) => Err(why),
+    }
+}
+
 /// The quota of the scratch root `scratch_root` on this machine: XFS project quota with the
 /// agent's project ids. On a platform without one, a quota that probes to [`Mode::None`].
 #[cfg(target_os = "linux")]
@@ -289,4 +321,34 @@ pub fn probe(scratch_root: &Path) -> Probe {
 #[cfg(not(target_os = "linux"))]
 pub fn probe(_scratch_root: &Path) -> Probe {
     Probe::none("no project quota on this platform")
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod project_tests {
+    use std::io;
+
+    use super::projid_of;
+    use super::sys::Fsx;
+
+    /// Catches a project id read that fails open: a read that failed for a reason of its own is
+    /// an error (it says nothing of the directory, and two failed reads must never compare
+    /// equal), a file system that does not know the call is the explicit `None`, and a read
+    /// that worked is the id it gave.
+    #[test]
+    fn a_failed_read_is_an_error_and_only_an_unknown_call_is_no_project() {
+        let attr = Fsx {
+            projid: 7,
+            ..Fsx::default()
+        };
+        assert_eq!(projid_of(Ok(attr)).unwrap(), Some(7));
+        for errno in [libc::ENOTTY, libc::EOPNOTSUPP, libc::ENOSYS] {
+            let read = Err(io::Error::from_raw_os_error(errno));
+            assert_eq!(projid_of(read).unwrap(), None, "errno {errno}");
+        }
+        for errno in [libc::EIO, libc::EACCES, libc::EBADF] {
+            let read = Err(io::Error::from_raw_os_error(errno));
+            let why = projid_of(read).expect_err("a failed read is an error");
+            assert_eq!(why.raw_os_error(), Some(errno));
+        }
+    }
 }

@@ -13,6 +13,7 @@ pub mod fake;
 mod files;
 mod flags;
 mod layout;
+mod lease_dir;
 mod logs;
 mod mounts;
 mod owed;

@@ -1,0 +1,32 @@
+# The host updater's declaration for js-agent on a Mac (host-updates design, 2.4 and 4.2). The
+# package carries it in /usr/local/js-agent/share/updater.d/js-agent.toml; it is the updater's
+# file once it is in /etc/updater.d/js-agent.toml, and installing it there is part of
+# enrolling the Mac, not of this package.
+#
+# The unit is the launchd label of the agent's LaunchDaemon (crates/js-mac-provision/src/daemon.rs).
+# The three write paths do not lie inside one another: the releases the updater stages, the
+# directory of the release link (the hook swaps the link by writing next to it, so the link
+# cannot be a write path itself) and the hook's own state directory (root's, mode 0700).
+state_dir = "/var/db/js-agent-update"
+
+[hook]
+units = ["com.komira.js-agent"]
+write_paths = ["/usr/local/js-agent/releases", "/usr/local/js-agent/link", "/var/db/js-agent-update"]
+
+[hook.timeout_secs]
+# At least drain_wait_secs + 60.
+prepare = 3900
+cutover = 300
+verify = 600
+rollback = 600
+cleanup = 300
+
+# The table the updater hands the hook as --params (the updater adds its own reserved keys).
+[hook.params]
+cordon_lease_secs = 300
+cordon_max_secs = 14400
+drain_wait_secs = 3600
+defer_retry_secs = 300
+# The link the daemons run their programs through; the cutover moves it. The key is read by
+# the cutover step, which is not on main yet.
+release_link = "/usr/local/js-agent/link/current"

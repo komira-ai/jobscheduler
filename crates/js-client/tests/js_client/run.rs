@@ -227,3 +227,98 @@ fn an_unreachable_server_is_a_client_error() {
     );
     assert!(!said.contains("tok-123"), "{said}");
 }
+
+/// The reply of a run that has not started, for the tests that must show whether a
+/// request reached the server.
+fn queued_reply() -> Vec<u8> {
+    json_reply(200, r#"{"run_id":"run-3-1","state":"queued"}"#)
+}
+
+/// Asserts that a `lease_id` holding `/`, `?`, `#`, `..`, `%` or nothing is refused as
+/// `BadId("lease_id")` before any request is made: the fake has one reply, a refused id
+/// that sent a request would use it up, and the one request the fake saw at the end is the
+/// good call's. It catches an id put into the path unchecked, where it would turn the
+/// GET into another route carrying the token.
+#[test]
+fn a_lease_id_outside_the_minted_form_sends_nothing() {
+    let dir = Scratch::new("run_bad_lease");
+    let fake = Fake::plain(vec![queued_reply()]);
+    let client = client_of(&dir, &fake.url("http"));
+
+    for bad in ["1/2", "1?x", "1#x", "..", "1%2f1", ""] {
+        let err = client.run(bad, "run-3-1").unwrap_err();
+        assert!(
+            matches!(err, RunReadError::BadId("lease_id")),
+            "{bad:?}: {err:?}"
+        );
+    }
+    client.run("12-345", "run-3-1").unwrap();
+    let seen = fake.requests();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(
+        seen[0].starts_with("GET /v1/leases/12-345/runs/run-3-1 HTTP/1.1"),
+        "{seen:?}"
+    );
+}
+
+/// Asserts the same for `run_id`: each of `/`, `?`, `#`, `..`, `%` and the empty string is
+/// `BadId("run_id")` and no request reaches the fake.
+#[test]
+fn a_run_id_outside_the_minted_form_sends_nothing() {
+    let dir = Scratch::new("run_bad_run");
+    let fake = Fake::plain(vec![queued_reply()]);
+    let client = client_of(&dir, &fake.url("http"));
+
+    for bad in ["run/1", "run?x", "run#x", "..", "run%2f1", ""] {
+        let err = client.run("12-345", bad).unwrap_err();
+        assert!(
+            matches!(err, RunReadError::BadId("run_id")),
+            "{bad:?}: {err:?}"
+        );
+    }
+    client.run("12-345", "run-3-1").unwrap();
+    let seen = fake.requests();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(
+        seen[0].starts_with("GET /v1/leases/12-345/runs/run-3-1 HTTP/1.1"),
+        "{seen:?}"
+    );
+}
+
+/// Asserts that an error for a mistyped field names the field and holds none of the
+/// value: a secret-looking string in `exit_code` and one in `log_tail.truncated` appear
+/// neither in the error's text nor in its debug form. It catches the parser's own message
+/// being carried, which quotes the value it found.
+#[test]
+fn a_malformed_entry_error_holds_no_value_from_the_body() {
+    let dir = Scratch::new("run_malformed_secret");
+    let fake = Fake::plain(vec![
+        json_reply(
+            200,
+            r#"{"run_id":"r-1","state":"exited","exit_code":"s3cret-token-value"}"#,
+        ),
+        json_reply(
+            200,
+            r#"{"run_id":"r-1","state":"exited","log_tail":{"stdout":"x","stderr":"y","truncated":"hunter2-secret"}}"#,
+        ),
+        json_reply(
+            200,
+            r#"{"run_id":"r-1","state":"exited","labels":"s3cret-labels"}"#,
+        ),
+    ]);
+    let client = client_of(&dir, &fake.url("http"));
+
+    for (secret, field) in [
+        ("s3cret-token-value", "exit_code"),
+        ("hunter2-secret", "log_tail.truncated"),
+        ("s3cret-labels", "labels"),
+    ] {
+        let err = client.run("1-1", "r-1").unwrap_err();
+        assert!(matches!(err, RunReadError::Malformed(_)), "{err:?}");
+        for text in [err.to_string(), format!("{err:?}")] {
+            assert!(!text.contains(secret), "{text}");
+            assert!(text.contains(field), "{field}: {text}");
+        }
+    }
+    fake.requests();
+}

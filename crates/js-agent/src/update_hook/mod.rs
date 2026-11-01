@@ -11,9 +11,9 @@
 //! this). The verb is answered before the agent's flags are parsed and before any signal
 //! handler is installed: a hook is a short-lived root process of the updater, not an agent.
 //!
-//! `prepare`, `cutover` and `cleanup` have their bodies in [`step`], over the ports. The machine
-//! has no lease client yet, so [`Host::system`] still answers every step with the reason
-//! `not_implemented` (exit 1), and `verify` and `rollback` have no body.
+//! `prepare`, `cutover`, `verify` and `cleanup` have their bodies in [`step`], over the ports.
+//! The machine has no lease client yet, so [`Host::system`] still answers every step with the
+//! reason `not_implemented` (exit 1), and `rollback` has no body.
 
 mod args;
 mod declaration;
@@ -50,7 +50,7 @@ pub use record::{
 pub use report::{Class, MAX_REASON_LEN, Reason, Report, is_reason_token};
 pub use validate::{
     CUTOVER_MARGIN_SECS, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, PREPARE_MARGIN_SECS,
-    START_WAIT_SECS, validate,
+    START_WAIT_SECS, VERIFY_MARGIN_SECS, validate,
 };
 
 /// The first argument that selects the verb.

@@ -432,3 +432,129 @@ fn a_container_that_did_not_run_gives_its_words_in_the_standard_error() {
     let tail = log_tail_of(&lined, Some("exited 1"));
     assert_eq!(tail.stderr, "partial\ncrun: exited 1\n");
 }
+
+/// A directory of one test, below the system's temporary directory.
+fn scratch_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("js-crun-dir-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("make the test's directory");
+    dir
+}
+
+/// Catches a directory made over one that is there (a stale lease), and one made without its
+/// parent: `make_dir` makes a new directory of mode `0755` and refuses every other case with
+/// the system's reason.
+#[test]
+fn a_directory_is_made_new_with_the_open_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let base = scratch_dir("make-dir");
+    let fresh = base.join("fresh");
+    super::make_dir(&fresh).expect("made new");
+    let mode = fs::metadata(&fresh).expect("metadata").permissions().mode();
+    assert_eq!(mode & 0o777, 0o755);
+    let why = super::make_dir(&fresh).expect_err("there already");
+    assert_eq!(why.kind(), std::io::ErrorKind::AlreadyExists);
+    let why = super::make_dir(&base.join("no/such/parent")).expect_err("no parent");
+    assert_eq!(why.kind(), std::io::ErrorKind::NotFound);
+    let _ = fs::remove_dir_all(&base);
+}
+
+/// Catches a lease directory taken when it is not the lifecycle's bound one: it must be there,
+/// be an empty directory (not a file, a link or a directory with something in it) and have the
+/// project of the run's scratch directory. A project that cannot be read, of either directory
+/// or of both (two failed reads must not compare equal), refuses it; a file system with no
+/// project ids on both sides is the same project, and one on a single side is not. The one
+/// taken gets mode `0755`.
+#[test]
+fn a_lease_directory_is_taken_only_when_it_is_there_empty_and_in_the_runs_project() {
+    use std::fs::File;
+    use std::io::{Error, ErrorKind, Result};
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    let base = scratch_dir("take-dir");
+    let run = base.join("run");
+    let lease = base.join("lease");
+    for dir in [&run, &lease] {
+        fs::create_dir(dir).expect("a directory");
+    }
+    fs::set_permissions(&lease, fs::Permissions::from_mode(0o711)).expect("mode");
+    let same = |_: &File| Ok(Some(7_u32));
+    super::take_dir(&lease, &run, &same).expect("taken");
+    let mode = fs::metadata(&lease).expect("metadata").permissions().mode();
+    assert_eq!(mode & 0o777, 0o755);
+
+    let kind = |dir: &Path, project: &dyn Fn(&File) -> Result<Option<u32>>| {
+        super::take_dir(dir, &run, project)
+            .expect_err("refused")
+            .kind()
+    };
+    assert_eq!(kind(&base.join("missing"), &same), ErrorKind::NotFound);
+    let full = base.join("full");
+    fs::create_dir(&full).expect("full");
+    fs::write(full.join("file"), b"x").expect("a file in it");
+    assert_eq!(kind(&full, &same), ErrorKind::InvalidInput);
+    let file = base.join("file");
+    fs::write(&file, b"x").expect("a file");
+    let link = base.join("link");
+    symlink(&lease, &link).expect("a link");
+    for refused in [&file, &link] {
+        assert!(
+            super::take_dir(refused, &run, &same).is_err(),
+            "{refused:?}"
+        );
+    }
+    // Which directory a descriptor holds, by its link in `/proc`.
+    let is = |fd: &File, dir: &Path| {
+        fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+            .ok()
+            .as_deref()
+            == Some(dir)
+    };
+    let leased = |fd: &File| is(fd, &lease);
+    // The lease is outside the run's project, or only one side has project ids.
+    let apart = |fd: &File| Ok(Some(if leased(fd) { 0 } else { 7 }));
+    assert_eq!(kind(&lease, &apart), ErrorKind::PermissionDenied);
+    let one_side = |fd: &File| Ok(if leased(fd) { None } else { Some(0) });
+    assert_eq!(kind(&lease, &one_side), ErrorKind::PermissionDenied);
+    // No project ids on either side: the same state.
+    let none = |_: &File| Ok(None::<u32>);
+    super::take_dir(&lease, &run, &none).expect("no project ids anywhere");
+    // A project that cannot be read, of either directory, or of both.
+    let broken_lease = |fd: &File| {
+        if leased(fd) {
+            Err(Error::other("lease"))
+        } else {
+            Ok(Some(7_u32))
+        }
+    };
+    let broken_run = |fd: &File| {
+        if leased(fd) {
+            Ok(Some(7_u32))
+        } else {
+            Err(Error::other("run"))
+        }
+    };
+    let broken_both = |_: &File| -> Result<Option<u32>> { Err(Error::other("both")) };
+    for project in [
+        &broken_lease as &dyn Fn(&File) -> _,
+        &broken_run,
+        &broken_both,
+    ] {
+        assert_eq!(kind(&lease, project), ErrorKind::Other);
+    }
+    let _ = fs::remove_dir_all(&base);
+}
+
+/// Catches a legacy lease path built from a name that is not one path component: only a plain
+/// name joins the store, so a name from a damaged sidecar cannot point removal elsewhere.
+#[test]
+fn a_legacy_lease_path_is_made_only_from_one_plain_name() {
+    let store = Path::new("/s");
+    assert_eq!(
+        super::legacy_lease(store, "js-x-r1.a..b"),
+        Some(PathBuf::from("/s/js-x-r1.a..b"))
+    );
+    for bad in ["", ".", "..", "../x", "a/b", "/abs", "x/", "x/.."] {
+        assert_eq!(super::legacy_lease(store, bad), None, "{bad:?}");
+    }
+}

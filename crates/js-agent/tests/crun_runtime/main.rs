@@ -13,6 +13,7 @@
 //! must have ended is waited for by the runtime.
 #![cfg(target_os = "linux")]
 
+mod quota;
 #[path = "../runtime_suite/mod.rs"]
 mod runtime_suite;
 mod subject;
