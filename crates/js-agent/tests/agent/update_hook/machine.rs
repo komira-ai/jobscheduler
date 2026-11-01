@@ -165,6 +165,21 @@ fn the_machine_cordons_the_host_on_prepare_and_lifts_the_cordon_on_cleanup_over_
 }
 
 #[test]
+fn the_machine_lifts_the_cordon_on_rollback_over_a_real_server() {
+    let enrolled = enrol("hook_machine_rollback");
+    let tree = Tree::new("hook-machine-rollback");
+    let params = tree.params(true, &reaching(&enrolled));
+    let done = tree.run(Step::Prepare, &params, Err("unused"));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(enrolled.server.host("mac-1")["cordon"].is_object());
+    // The agent was never stopped: the rollback has the cordon to lift and the record to delete.
+    let done = tree.run(Step::Rollback, &params, Err("unused"));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(enrolled.server.host("mac-1").get("cordon").is_none());
+    assert!(!tree.record().exists());
+}
+
+#[test]
 fn the_host_the_params_do_not_name_is_the_machines_own() {
     let enrolled = enrol("hook_machine_own_id");
     let tree = Tree::new("hook-machine-own-id");
@@ -262,16 +277,12 @@ fn a_declaration_that_cannot_be_read_ends_the_step_before_it_looks_at_anything()
 fn every_step_the_updater_can_ask_for_is_run_by_its_own_body() {
     let tree = Tree::new("hook-machine-dispatch");
     let params = tree.params(true, "");
-    // With no record: `cutover` and `verify` have no `prepare` behind them and `cleanup` has
-    // nothing to finish. `rollback` has no body yet.
+    // With no record: `cutover` and `verify` have no `prepare` behind them, `rollback` and
+    // `cleanup` have nothing to finish.
     for (step, outcome, reason) in [
         (Step::Cutover, Outcome::Failure, Some(Reason::StateInvalid)),
         (Step::Verify, Outcome::Failure, Some(Reason::StateInvalid)),
-        (
-            Step::Rollback,
-            Outcome::Failure,
-            Some(Reason::NotImplemented),
-        ),
+        (Step::Rollback, Outcome::Success, None),
         (Step::Cleanup, Outcome::Success, None),
     ] {
         let done = tree.run(step, &params, Err("unused"));

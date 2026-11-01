@@ -241,11 +241,7 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
         Step::Prepare => step::prepare(&env, params),
         Step::Cutover => step::cutover(&env, params),
         Step::Verify => step::verify(&env, params),
-        // `rollback` has no body yet.
-        Step::Rollback => Done {
-            outcome: Outcome::Failure,
-            report: Report::failure(Reason::NotImplemented, "rollback is not implemented"),
-        },
+        Step::Rollback => step::rollback(&env, params),
         Step::Cleanup => step::cleanup(&env, params),
     }
 }
