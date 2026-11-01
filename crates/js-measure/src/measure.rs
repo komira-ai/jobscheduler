@@ -426,20 +426,28 @@ fn run_metrics(
         .filter(|j| j.outcome.as_deref() == Some("out_of_memory"))
         .count();
     // Only a job that succeeded speaks for the run: a wrong answer's numbers are not the
-    // benchmark's. What a failed job printed is counted, and stays in its own row.
-    let (kept, dropped): (Vec<_>, Vec<_>) = obs
+    // benchmark's. What a failed job printed is counted, and stays in its own row. A job
+    // that succeeded and printed no line stays in the merge, so it lacks every key and no
+    // reported number is recorded; it is counted too.
+    let (ok, failed_jobs): (Vec<_>, Vec<_>) = obs
         .jobs
         .iter()
         .zip(reports)
-        .filter(|(_, report)| !report.is_empty())
         .partition(|(job, _)| is_ok(job.outcome.as_ref()));
-    let kept: Vec<_> = kept.into_iter().map(|(_, report)| report.clone()).collect();
+    let kept: Vec<_> = ok.iter().map(|(_, report)| (*report).clone()).collect();
+    let missing = ok.iter().filter(|(_, report)| report.is_empty()).count();
+    let dropped = failed_jobs
+        .iter()
+        .filter(|(_, report)| !report.is_empty())
+        .count();
     let mut out = reported::merge(&kept);
-    if !dropped.is_empty() {
-        out.insert(
-            format!("{}dropped", reported::PREFIX),
-            Some(dropped.len() as f64),
-        );
+    for (key, count) in [
+        (name::REPORTS_DROPPED, dropped),
+        (name::REPORTS_MISSING, missing),
+    ] {
+        if count > 0 {
+            out.insert(key.to_owned(), Some(count as f64));
+        }
     }
     let mut put = |key: &str, value: Option<f64>| {
         out.insert(key.to_owned(), finite(value));

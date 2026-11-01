@@ -51,11 +51,13 @@
 //! `reported_steady_ms`, `reported_first_run_ms` and `reported_duckdb_steady_ms`; `verdict`
 //! is a string, so no key is recorded for it. A run whose verdict is not PASS is seen from
 //! the job's exit code (its outcome is not `succeeded`), not from that key, and the numbers
-//! of such a job are left out of the run's record and counted in `reported_dropped`.
+//! of such a job are left out of the run's record and counted in `reports_dropped`;
+//! a job that succeeded but printed no line leaves the run with no `reported_` key and is
+//! counted in `reports_missing`.
 //!
-//! The workload cannot be run as shipped. The image is a placeholder because no pinned
-//! benchmark image exists yet: it has to be built, with the runner, a pinned duckdb and a
-//! verified dataset cache, and pushed before a live run. The flags whose values depend on
+//! NOT RUNNABLE until the pinned benchmark image exists: the workload cannot be run as
+//! shipped. The image is a placeholder because no pinned benchmark image exists yet: it has
+//! to be built, with the runner, a pinned duckdb and a verified dataset cache, and pushed before a live run. The flags whose values depend on
 //! that image's layout (the duckdb path, the cache dir, the sql file) and on the host (the
 //! host class, cpu model, os, core count, memory bytes, version) are `REPLACE-WITH-...`
 //! placeholders; the workload format has no lease environment to take the host facts from.

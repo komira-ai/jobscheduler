@@ -25,12 +25,17 @@
 //!   never overwrite a number the harness measured itself (`makespan_ms`,
 //!   `request_to_token_ms_mean`, ...). A key `steady_ms` is `reported_steady_ms`.
 //! - A workload of several jobs records, for each key, the mean of the numbers of the jobs
-//!   that succeeded, and no key when any of those jobs has no number for it.
+//!   that succeeded, and no key when any of those jobs has no number for it. A job that
+//!   succeeded and printed no line (a cut tail, a forgotten run, a runner that crashed
+//!   after exit 0) lacks every key, so the run records no `reported_` key at all.
 //! - Only a job whose outcome is `succeeded` speaks for the run. The report of any other
 //!   job (it answered wrongly, ran out of memory, was killed) is left out of the record's
-//!   numbers and counted: `reported_dropped` in the record is the number of such jobs that
-//!   printed a result line, and is absent when there are none. The job's own row in
-//!   `jobs.jsonl` still shows what it printed, with its outcome.
+//!   numbers. The job's own row in `jobs.jsonl` still shows what it printed, with its
+//!   outcome.
+//! - The harness counts both cases outside the job's `reported_` namespace, so a job's own
+//!   key can never collide: `reports_dropped` is the number of jobs that did not succeed
+//!   but printed a line, `reports_missing` the number of jobs that succeeded and printed
+//!   none. Each is absent when it is 0.
 
 use std::collections::{BTreeMap, BTreeSet};
 
