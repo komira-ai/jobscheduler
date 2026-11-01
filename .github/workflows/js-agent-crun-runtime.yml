@@ -108,3 +108,22 @@ jobs:
           cargo xtask unit-result --unit js-crun-runtime \
             --count-file "$RUNNER_TEMP/crun-runtime.count"
           exit "$rc"
+      - name: Start check and delegate step in a unit started as the packaged unit is, as root
+        # The packaged unit has Delegate=yes and DelegateSubgroup=supervisor: the agent starts in
+        # <unit>/supervisor and systemd enables no controller in the unit's own
+        # cgroup.subtree_control. Nothing here writes it: the agent's own delegate step must.
+        run: |
+          set -euo pipefail
+          rc=0
+          sudo -n systemd-run --quiet --wait --pipe \
+            --unit=js-crun-supervisor --slice=js-agent.slice \
+            -p Delegate=yes -p DelegateSubgroup=supervisor \
+            --working-directory="$GITHUB_WORKSPACE/crates/js-agent" \
+            -E "PATH=$PATH" -E JS_JOB_USER=js-job \
+            "$GITHUB_WORKSPACE/target/debug/xtask" count-run \
+            --count-file "$RUNNER_TEMP/crun-supervisor.count" -- \
+            "$EXE" --include-ignored --exact \
+            the_start_check_passes_in_a_unit_with_a_supervisor_leaf_and_delegate_enables_the_controllers || rc=$?
+          cargo xtask unit-result --unit js-crun-supervisor \
+            --count-file "$RUNNER_TEMP/crun-supervisor.count"
+          exit "$rc"
