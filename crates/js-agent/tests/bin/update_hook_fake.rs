@@ -6,7 +6,7 @@
 //! flag the variables `UPDATE_HOOK_FAKE_WORLD` and `UPDATE_HOOK_FAKE_CONTROL` name them. Only
 //! this test binary reads the environment; the agent reads none.
 //!
-//! The steps are still stubs: it ends `not_implemented`, exit 1.
+//! The steps are still stubs here: it ends `not_implemented`, exit 1.
 
 #![allow(dead_code)]
 
@@ -18,11 +18,24 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
-use js_agent::update_hook::{Gate, Host, run};
+use js_agent::update_hook::{Done, Gate, Host, Invocation, Outcome, Params, Reason, Report, run};
 
 #[cfg(target_os = "linux")]
 #[path = "../update_hook_fakes/mod.rs"]
 mod fakes;
+
+/// A step with no body: exit 1, reason `not_implemented`. The machine's host runs the steps for
+/// real; this binary stands in for it until the harness drives the steps over the fakes.
+#[cfg(target_os = "linux")]
+fn not_implemented(invocation: &Invocation, _params: &Params) -> Done {
+    Done {
+        outcome: Outcome::Failure,
+        report: Report::failure(
+            Reason::NotImplemented,
+            format!("{} is not implemented", invocation.step),
+        ),
+    }
+}
 
 /// The kill points of the conformance harness.
 // TODO(slice 9): map this to `update_hook::conformance::gate::point()` once the kbf
@@ -60,7 +73,14 @@ fn main() -> ExitCode {
     let _world = fakes::World::new(&world, &control, Box::new(HarnessGate));
     // TODO(slice 5): build `Ports` over `_world` and run the steps with it.
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
-    run(&args, &mut out, &mut err, &Host::system())
+    run(
+        &args,
+        &mut out,
+        &mut err,
+        &Host {
+            step: &not_implemented,
+        },
+    )
 }
 
 /// The hook is Linux code (`js_agent::update_hook`); on any other target this test binary

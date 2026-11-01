@@ -7,5 +7,5 @@
 mod binary;
 mod fakes;
 mod hold;
-mod http;
+pub(crate) mod http;
 mod verb;

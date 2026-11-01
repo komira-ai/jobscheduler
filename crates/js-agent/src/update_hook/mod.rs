@@ -23,6 +23,7 @@
 mod args;
 mod declaration;
 mod launch_units;
+mod machine;
 mod params;
 mod plain;
 mod ports;
@@ -39,11 +40,13 @@ use std::process::ExitCode;
 pub use args::{ArgsError, Invocation, Step};
 pub use declaration::{DECLARATION_PATH, DEFAULT_RUNTIME, Declaration, DeclarationError, Timeouts};
 pub use launch_units::{BOOTOUT_MARGIN, LAUNCHCTL, LaunchUnits, SETTLE_READS, StopRunner};
+pub use machine::{Machine, MachineLease, StatFn, run_step};
 pub use params::{
-    ARTIFACT_DIGEST_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY, DEFER_RETRY_KEY, DRAIN_WAIT_KEY,
-    MIN_CORDON_LEASE_SECS, POLL_SECS, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY,
-    PROMOTION_CEILING_KEY, Params, ParamsError, RELEASE_LINK_KEY, STAGED_RELEASE_KEY,
-    TARGET_VERSION_KEY,
+    ARTIFACT_DIGEST_KEY, CA_CERT_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY, ConnectParams,
+    DEFER_RETRY_KEY, DRAIN_WAIT_KEY, HOST_ID_KEY, MIN_CORDON_LEASE_SECS, POLL_SECS,
+    PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, Params, ParamsError,
+    RELEASE_LINK_KEY, SERVER_KEY, STAGED_RELEASE_KEY, STATE_ROOT_KEY, TARGET_VERSION_KEY,
+    TOKEN_FILE_KEY,
 };
 pub use ports::{
     Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,
@@ -57,7 +60,8 @@ pub use record::{
 pub use report::{Class, MAX_REASON_LEN, Reason, Report, is_reason_token};
 pub use validate::{
     CUTOVER_MARGIN_SECS, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, PREPARE_MARGIN_SECS,
-    START_WAIT_SECS, VERIFY_MARGIN_SECS, validate,
+    ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, ROLLBACK_STOP_MIN_SECS, START_WAIT_SECS,
+    VERIFY_MARGIN_SECS, validate,
 };
 
 /// The unit port of the platform the hook is built for.

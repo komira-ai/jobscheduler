@@ -66,6 +66,21 @@ pub const TARGET_VERSION_KEY: &str = "updater.target_version";
 /// The reserved key: the version that runs now. Absent on a first install.
 pub const PREVIOUS_VERSION_KEY: &str = "updater.previous_version";
 
+/// The key of the lease server, as the agent's `--server`.
+pub const SERVER_KEY: &str = "server";
+
+/// The key of the agent's state root, as the agent's `--state-root`.
+pub const STATE_ROOT_KEY: &str = "state_root";
+
+/// The key of the file holding the host's join token, as the agent's `--token-file`.
+pub const TOKEN_FILE_KEY: &str = "token_file";
+
+/// The key of the PEM file to trust for `https://`, as the agent's `--ca-cert`.
+pub const CA_CERT_KEY: &str = "ca_cert";
+
+/// The key of the host's id, as the agent's `--host-id`.
+pub const HOST_ID_KEY: &str = "host_id";
+
 /// Why a params file was refused.
 #[derive(Debug, thiserror::Error)]
 pub enum ParamsError {
@@ -114,6 +129,23 @@ pub enum ParamsError {
     NotSeconds(String),
 }
 
+/// How the hook on a machine reaches the lease server and the agent's state: the values of the
+/// agent's own flags of the same names, in the declaration's `[hook.params]`. None is needed
+/// by the parse; the machine's host needs `server` and `state_root`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConnectParams {
+    /// The lease server (`server`).
+    pub server: Option<String>,
+    /// The agent's state root (`state_root`), where the host credential and the taint are.
+    pub state_root: Option<PathBuf>,
+    /// The join token file (`token_file`), used when the state root holds no credential.
+    pub token_file: Option<PathBuf>,
+    /// The certificate to trust (`ca_cert`).
+    pub ca_cert: Option<PathBuf>,
+    /// The host's id (`host_id`); the machine's own id when absent.
+    pub host_id: Option<String>,
+}
+
 /// What the hook reads of its params file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Params {
@@ -141,6 +173,8 @@ pub struct Params {
     pub target_version: String,
     /// The version that runs now (`updater.previous_version`); `None` on a first install.
     pub previous_version: Option<String>,
+    /// How to reach the lease server and the agent's state.
+    pub connect: ConnectParams,
 }
 
 impl Params {
@@ -199,6 +233,7 @@ impl Params {
             target_version: string_of(&table, TARGET_VERSION_KEY)?
                 .ok_or(ParamsError::Missing(TARGET_VERSION_KEY))?,
             previous_version: string_of(&table, PREVIOUS_VERSION_KEY)?,
+            connect: ConnectParams::default(),
         })
     }
 }
