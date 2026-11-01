@@ -11,9 +11,9 @@ use std::time::Duration;
 use js_agent::CommandRunner;
 use js_agent::update_hook::{
     BOOTOUT_MARGIN, Clock, LAUNCHCTL, LaunchUnits, PortError, SETTLE_READS, StopRunner, UnitState,
-    Units,
+    Units, launch_units,
 };
-use js_mac_provision::daemon::Daemon;
+use js_mac_provision::daemon::{Daemon, GATE};
 use js_testkit::dir::TestDir;
 
 use super::unit_conformance::{Exit, Launchctl, Service, Then, plist_of};
@@ -480,6 +480,22 @@ fn bootout_is_run_by_the_stop_runner_and_nothing_else_is() {
     units.start(LABEL).unwrap();
     assert_eq!(stopper.seen.borrow().len(), 1);
     assert!(tool.calls().contains(&print_line(LABEL)));
+}
+
+#[test]
+fn the_units_of_a_mac_stop_through_the_stop_runner_and_wait_on_the_agents_token_file() {
+    let tool = launchd_with(Service::running());
+    let stopper = Recording {
+        world: &tool,
+        seen: RefCell::default(),
+    };
+    let units = launch_units(&tool, &stopper);
+    units.stop_no_block(LABEL).unwrap();
+    assert_eq!(
+        *stopper.seen.borrow(),
+        [format!("{LAUNCHCTL} bootout system/{LABEL}")]
+    );
+    assert_eq!(units.gate(), Some(Path::new(GATE)));
 }
 
 #[test]
