@@ -497,3 +497,46 @@ fn a_reset_in_the_step_of_a_failure_counts_the_failure_from_one() {
     assert!((9 * MINUTE..=10 * MINUTE).contains(&wait), "{wait}");
     assert_eq!(sim.acquires(), 3);
 }
+
+/// Asserts that a scaler starts from a records file whose brake was written by a newer
+/// release (an unknown field in place of `failures`): the trip it holds is kept and the pool
+/// stays tripped. It catches a restart that refuses the file.
+#[test]
+fn a_scaler_starts_from_a_brake_with_an_unknown_field() {
+    let mut sim = refused(pool(3, minutes(120)), RefusalCode::Quota);
+    learn(&mut sim, 3);
+    assert!(sim.rig.state.records.tripped(POOL));
+    let text = sim.saved.encode().unwrap();
+    assert!(text.contains("\"failures\": 3"), "{text}");
+    let newer = text.replacen("\"failures\": 3", "\"future\": 7", 1);
+    sim.saved = Records::decode(&newer).unwrap();
+    sim.restart();
+    sim.run(2 * 60);
+    assert!(sim.rig.state.records.tripped(POOL));
+    assert_eq!(sim.acquires(), 3);
+    assert_eq!(sim.blocked(), Some(Blocked::Tripped));
+}
+
+/// Asserts that a trip and a reset leave the pool's go alone: the same go (its first launch
+/// and what it had settled) stands before the trip, while tripped and after the reset, so
+/// the spend since the go keeps counting and a reset never re-opens a cap on it. It catches a
+/// trip or a reset that ends or restarts the go.
+#[test]
+fn a_trip_and_a_reset_keep_the_go() {
+    let mut sim = Sim::new(pool(1, minutes(120)), Billing::Lambda);
+    sim.waiting = 1;
+    sim.run(6);
+    let go = sim.rig.state.records.go[POOL];
+    let first = sim.fake.running()[0].clone();
+    sim.fake.preempt(&first);
+    sim.run(60);
+    assert!(sim.rig.state.records.tripped(POOL));
+    assert_eq!(sim.rig.state.records.go[POOL], go);
+    sim.rig.input.brake_resets = vec![POOL.to_owned()];
+    sim.tick(None);
+    sim.rig.input.brake_resets.clear();
+    sim.run(10);
+    assert!(!sim.rig.state.records.tripped(POOL));
+    assert_eq!(sim.rig.state.records.go[POOL].at, go.at);
+    assert!(sim.rig.state.records.go[POOL].settled >= go.settled);
+}

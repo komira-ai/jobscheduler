@@ -37,7 +37,8 @@ fn the_brake_keys_default_and_reach_the_plan() {
 
 /// Asserts the refusals, each naming the pool and the key: a trip count of 0, above 100, not
 /// an integer or negative; a ceiling below the first cooldown of 10 minutes, a zero and a
-/// word. The edges (1, 100, exactly 10 minutes) load. It catches a brake that can be
+/// word; a ceiling or a reset time over 24 hours. The edges (1, 100, exactly 10 minutes,
+/// exactly 1 minute, exactly 24 hours) load. It catches a brake that can be
 /// configured away (a trip of 0) and a comparison off by one.
 #[test]
 fn a_bad_brake_value_is_refused_by_name() {
@@ -57,6 +58,16 @@ fn a_bad_brake_value_is_refused_by_name() {
             "boot_fail_reset_after",
             "\"59s\"",
             "must be at least 1 minute",
+        ),
+        (
+            "boot_fail_cooldown_max",
+            "\"25h\"",
+            "must be at most 24 hours",
+        ),
+        (
+            "boot_fail_reset_after",
+            "\"25h\"",
+            "must be at most 24 hours",
         ),
         (
             "boot_fail_cooldown_max",
@@ -84,6 +95,8 @@ fn a_bad_brake_value_is_refused_by_name() {
         ("boot_fail_trip_after", "100"),
         ("boot_fail_cooldown_max", "\"10m\""),
         ("boot_fail_reset_after", "\"1m\""),
+        ("boot_fail_cooldown_max", "\"24h\""),
+        ("boot_fail_reset_after", "\"24h\""),
     ] {
         let pool = PoolText::elastic(&scratch).set(key, value);
         assert!(load(&scratch, &file(&server, &[&pool])).is_ok(), "{key}");

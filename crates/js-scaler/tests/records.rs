@@ -393,3 +393,19 @@ fn the_failure_brake_round_trips_and_an_older_file_reads_without_it() {
     assert_eq!(read.brake["gpu"].failures, 1);
     assert_eq!(read.brake["gpu"].tripped_at, None);
 }
+
+/// Asserts that a brake written by a newer release reads: an extra field is ignored and a
+/// missing `failures` reads as zero, with the fields it does have kept. It catches a reader
+/// that refuses a records file because a later release added a field to the brake or
+/// stopped writing one.
+#[test]
+fn a_brake_with_an_unknown_field_and_no_failures_reads() {
+    let brake = format!(
+        "\"brake\": {{\"gpu\": {{\"future\": 7, \"tripped_at\": {}}}}},\n  \"last_step\"",
+        at(7 * MINUTE).as_millis()
+    );
+    let text = GOLDEN.replacen("\"last_step\"", &brake, 1);
+    let read = Records::decode(&text).unwrap();
+    assert_eq!(read.brake["gpu"].failures, 0);
+    assert_eq!(read.brake["gpu"].tripped_at, Some(at(7 * MINUTE)));
+}
