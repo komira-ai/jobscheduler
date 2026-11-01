@@ -80,8 +80,9 @@ fn a_clean_verify_marks_verify_ok_after_it_saw_the_new_agent_and_changes_nothing
 fn verify_waits_for_the_hello_of_an_agent_that_started_without_one() {
     let rig = cut_over("hook-verify-late-hello", false);
     let spy = Spy::new(&rig);
-    spy.on_pause(|spy, ticks| {
-        if ticks == 3 {
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 3 {
             spy.world.hello("1.4.0").unwrap();
         }
     });
@@ -115,8 +116,9 @@ fn a_session_that_began_before_the_cordon_is_not_proof_even_with_the_target_vers
 fn a_new_session_of_another_version_is_not_proof() {
     let rig = cut_over("hook-verify-wrong-version", false);
     let spy = Spy::new(&rig);
-    spy.on_pause(|spy, ticks| {
-        if ticks == 2 {
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 2 {
             spy.world.hello("1.9.0").unwrap();
         }
     });
@@ -145,8 +147,9 @@ fn a_server_that_restarted_shows_no_session_until_the_agent_says_hello_again() {
     rig.world.forget_host();
     assert_eq!(rig.host().state, "awaiting");
     let spy = Spy::new(&rig);
-    spy.on_pause(|spy, ticks| {
-        if ticks == 2 {
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 2 {
             spy.world.hello("1.4.0").unwrap();
         }
     });
@@ -170,8 +173,9 @@ fn a_unit_that_dies_or_restarts_during_verify_ends_it_as_the_releases_failure() 
     {
         let rig = cut_over(&format!("hook-verify-crash-{n}"), false);
         let spy = Spy::new(&rig);
+        let base = rig.world.ticks();
         spy.on_pause(move |spy, ticks| {
-            if ticks == 2 {
+            if ticks == base + 2 {
                 spy.world.seed_unit(UNIT, active, sub);
             }
         });
@@ -208,8 +212,9 @@ fn a_lease_server_that_answers_again_in_time_is_not_a_failure() {
     let rig = cut_over("hook-verify-lease-blip", true);
     let spy = Spy::new(&rig);
     spy.fail("host");
-    spy.on_pause(|spy, ticks| {
-        if ticks == 4 {
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 4 {
             spy.heal("host");
         }
     });
