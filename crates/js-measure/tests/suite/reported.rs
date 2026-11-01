@@ -453,16 +453,17 @@ fn only_failed_jobs_that_reported_are_counted() {
     ]);
     assert_eq!(reported_of(&out), BTreeMap::new());
     assert_eq!(out.record.metrics["reports_dropped"], Some(2.0));
-    assert!(!out.record.metrics.contains_key("reports_missing"));
+    assert_eq!(out.record.metrics["reports_missing"], Some(0.0));
 }
 
-/// Asserts that a run in which every job succeeded and reported has neither harness count.
+/// Asserts that a run in which every job succeeded and reported records both harness
+/// counts as 0: a measured zero, not missing data.
 #[test]
-fn a_clean_run_has_no_dropped_or_missing_count() {
+fn a_clean_run_counts_zero_dropped_and_zero_missing() {
     let line = "js-measure-result {\"x\":9}\n";
     let out = assembled(vec![Some(tail(line, "", false))]);
-    assert!(!out.record.metrics.contains_key("reports_dropped"));
-    assert!(!out.record.metrics.contains_key("reports_missing"));
+    assert_eq!(out.record.metrics["reports_dropped"], Some(0.0));
+    assert_eq!(out.record.metrics["reports_missing"], Some(0.0));
 }
 
 /// Asserts that a job that prints a key named `dropped` gets `reported_dropped` from its
@@ -494,7 +495,7 @@ fn a_silent_succeeded_job_empties_the_reported_keys_and_is_counted() {
     ]);
     assert_eq!(reported_of(&out), BTreeMap::new());
     assert_eq!(out.record.metrics["reports_missing"], Some(1.0));
-    assert!(!out.record.metrics.contains_key("reports_dropped"));
+    assert_eq!(out.record.metrics["reports_dropped"], Some(0.0));
 }
 
 /// Asserts that every way a succeeded job can be silent counts as missing (no tail, a cut
@@ -515,7 +516,7 @@ fn missing_counts_succeeded_jobs_without_a_line_and_not_failed_ones() {
     ]);
     assert_eq!(reported_of(&out), BTreeMap::new());
     assert_eq!(out.record.metrics["reports_missing"], Some(3.0));
-    assert!(!out.record.metrics.contains_key("reports_dropped"));
+    assert_eq!(out.record.metrics["reports_dropped"], Some(0.0));
     assert_eq!(out.record.metrics["jobs_failed"], Some(1.0));
 }
 
