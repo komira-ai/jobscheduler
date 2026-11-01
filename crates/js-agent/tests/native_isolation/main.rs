@@ -12,15 +12,25 @@
 //!    random token: a file in its home and in its scratch, a file in the system temp
 //!    directory, a process left running (detached), a keychain item, a defaults key, a
 //!    launchd agent in its user domain, System V shared memory, semaphore and message
-//!    queue, and POSIX shared memory and a POSIX semaphore. What the profile or the machine
-//!    refuses is printed as refused, with the reason.
+//!    queue, and POSIX shared memory and a POSIX semaphore; and the things that outlive a home:
+//!    a file in `DARWIN_USER_TEMP_DIR` and in `DARWIN_USER_CACHE_DIR` (the uid-keyed
+//!    directories under `/var/folders`, whose exact paths run A reports), a file in
+//!    `/Users/Shared`, and a launchd agent in the `gui/<uid>` domain. What the profile or the
+//!    machine refuses is printed as refused, with the reason. A run that did not seed at least
+//!    a file, a process, a keychain item, a launchd agent and shared memory proves nothing
+//!    and fails.
 //! 2. Between the runs the test does what the agent does when a run ends and the next
 //!    begins: `NativeRuntime::remove` (the helper's `kill-uid`, then `user-delete`), and
 //!    the next start makes the user again (`user-create`).
 //! 3. Run B (the same program, another role, the same uid) looks for every token. The test
 //!    also reads the system-wide views: `ipcs` for objects owned by the uid, `ps` for
-//!    processes of the uid, and `launchctl print user/<uid>`.
-//! 4. Anything found fails the test with a table of what survived. Nothing here asserts
+//!    processes of the uid, `launchctl print` of `user/<uid>` and `gui/<uid>`, and a bounded
+//!    `find -uid` over `/private/var/folders`, `/private/tmp`, `/Users/Shared` and
+//!    `/Library/Caches` (a path with a token in it fails; other files of the uid are reported).
+//!    Each run prints its own `getuid()`; A, B and the configured uid must be equal.
+//! 4. Every look has three answers: found, absent (only by the documented not-found answer
+//!    of the call or tool, see `look.rs`) or could-not-look, which fails the test with its
+//!    reason. Anything found fails the test with a table of what survived. Nothing here asserts
 //!    anything about time.
 //!
 //! It lives in js-agent because the question is about what the agent's runtime leaves: the
@@ -31,8 +41,12 @@
 //! and it makes a user. Run the binary as root with `JS_NATIVE_ISO_ROOT` naming a new
 //! directory, owned by root and mode 0755, that every user can search down to, and
 //! `JS_NATIVE_ISO_UID` naming a uid in 500 to 60000 that nothing uses, with `--ignored
-//! --test-threads=1 --nocapture`. See the `js-agent-native-privileged-tests` workflow. Never
+//! --test-threads=1 --nocapture`. See the `js-agent-native-isolation-test` workflow. Never
 //! run it on a production host.
+//!
+//! One difference from production: the runtime here has the directory of this test binary as
+//! an extra tool root (the runs execute the binary), a read/exec allowance the agent
+//! does not have. Not tested here: cron/at jobs and extended attributes.
 //!
 //! The file builds on every platform, so clippy reads it on Linux; the parsers and the
 //! report are tested there. Run anywhere but macOS, the ignored test stops at its first
@@ -40,6 +54,7 @@
 
 mod child;
 mod lines;
+mod look;
 mod report;
 mod token;
 mod views;
@@ -57,6 +72,7 @@ use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
 use js_mac_session::client::Client;
 
 use lines::{Kind, Line, Verdict, parse_lines};
+use look::Outcome;
 use token::Token;
 
 /// The variable naming the directory the test works in.
@@ -83,6 +99,7 @@ fn child_of_the_runs() {
     let Ok(role) = std::env::var(ROLE) else {
         return;
     };
+    println!("{}", look::uid_line(rustix::process::getuid().as_raw()));
     match role.as_str() {
         "seed" => {
             let tmp = PathBuf::from(std::env::var("TMPDIR").expect("the agent sets TMPDIR"));
@@ -299,6 +316,13 @@ fn tool_output(program: &str, args: &[&str]) -> Result<(bool, String), String> {
     Ok((out.status.success(), text))
 }
 
+/// What one run of the child printed, and the handle of the run.
+struct Ran {
+    id: RunHandle,
+    lines: Vec<Line>,
+    uid: Option<u32>,
+}
+
 /// Starts one run of the child in `role`, waits for it and returns its handle and what it
 /// printed. The child must exit 0.
 fn child_run(
@@ -307,7 +331,7 @@ fn child_run(
     exe: &Path,
     name: &str,
     env: &[(&str, &str)],
-) -> Result<(RunHandle, Vec<Line>), String> {
+) -> Result<Ran, String> {
     let id = rt
         .create_and_start(&spec(fixture, name, exe, env))
         .map_err(|why| format!("start run {name}: {}", why.0))?;
@@ -321,10 +345,15 @@ fn child_run(
             "run {name} ended {status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
         ));
     }
-    Ok((id, parse_lines(&stdout)?))
+    Ok(Ran {
+        id,
+        lines: parse_lines(&stdout)?,
+        uid: look::parse_uid(&stdout),
+    })
 }
 
-/// Everything a trial needs to clean up after itself.
+/// Everything a trial needs to clean up after itself. Dropping it cleans up, so a panic
+/// anywhere in the body leaves no user, launchd domain or IPC object behind.
 struct Trial {
     rt: NativeRuntime,
     fixture: Fixture,
@@ -333,14 +362,28 @@ struct Trial {
     seeded: Vec<Line>,
 }
 
+impl Drop for Trial {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+/// One row of the table of survivors.
+type Row = [String; 3];
+
+fn row(kind: Kind, place: impl Into<String>, detail: impl Into<String>) -> Row {
+    [kind.label().to_owned(), place.into(), detail.into()]
+}
+
 impl Trial {
     /// The two runs and the views; the table of survivors, empty when the pool user is clean.
-    fn body(&mut self) -> Result<Vec<[String; 3]>, String> {
+    fn body(&mut self) -> Result<Vec<Row>, String> {
         let uid = self.fixture.uid;
         let exe = self.exe.clone();
 
         // Run A.
-        let (a, lines) = child_run(&mut self.rt, &self.fixture, &exe, "a", &[(ROLE, "seed")])?;
+        let ran_a = child_run(&mut self.rt, &self.fixture, &exe, "a", &[(ROLE, "seed")])?;
+        let a = ran_a.id.clone();
         self.runs.push(a.clone());
         let owner = fs::metadata(self.fixture.homes.join(user_of(&a)))
             .map_err(|why| format!("the home of run A: {why}"))?
@@ -350,9 +393,16 @@ impl Trial {
                 "run A ran as uid {owner}, not the uid {uid} asked for"
             ));
         }
-        self.seeded = lines;
-        self.bootstrap_agent_as_root(uid);
+        self.seeded = ran_a.lines;
+        self.bootstrap_agents_as_root(uid);
         println!("{}", self.seeded_table());
+        let missing = look::missing_minimum(&self.seeded);
+        if !missing.is_empty() {
+            return Err(format!(
+                "run A did not seed {}: the result would prove nothing",
+                missing.join(", ")
+            ));
+        }
         self.control(uid)?;
 
         // Between the runs: what the agent does when a run ends.
@@ -366,13 +416,14 @@ impl Trial {
         let text: Vec<String> = self.seeded.iter().map(Line::encode).collect();
         fs::write(&handoff, text.join("\n")).map_err(|why| format!("the seeded list: {why}"))?;
         let handoff_text = handoff.display().to_string();
-        let (b, found) = child_run(
+        let ran_b = child_run(
             &mut self.rt,
             &self.fixture,
             &exe,
             "b",
             &[(ROLE, "look"), (HANDOFF, &handoff_text)],
         )?;
+        let b = ran_b.id.clone();
         self.runs.push(b.clone());
         let owner = fs::metadata(self.fixture.homes.join(user_of(&b)))
             .map_err(|why| format!("the home of run B: {why}"))?
@@ -382,16 +433,23 @@ impl Trial {
                 "run B got uid {owner}, not run A's uid {uid}: the helper did not reuse it, so this run proves nothing"
             ));
         }
+        look::uids_agree(ran_a.uid, ran_b.uid, uid)?;
 
-        let mut survivors: Vec<[String; 3]> = found
+        let mut survivors: Vec<Row> = ran_b
+            .lines
             .iter()
-            .filter(|line| line.verdict == Verdict::Found)
-            .map(|line| {
-                [
-                    line.kind.label().to_owned(),
+            .filter_map(|line| match line.verdict {
+                Verdict::Found => Some(row(
+                    line.kind,
                     line.text.clone(),
                     format!("run B found it (token {})", line.token),
-                ]
+                )),
+                Verdict::Unlooked => Some(row(
+                    line.kind,
+                    "COULD NOT LOOK",
+                    format!("{} (token {})", line.text, line.token),
+                )),
+                _ => None,
             })
             .collect();
         survivors.extend(self.system_views(uid, &user_of(&b))?);
@@ -403,7 +461,7 @@ impl Trial {
     }
 
     fn seeded_table(&self) -> String {
-        let rows: Vec<[String; 3]> = self
+        let rows: Vec<Row> = self
             .seeded
             .iter()
             .map(|line| {
@@ -426,43 +484,46 @@ impl Trial {
     /// A launch agent run A could not load (a user cannot load into its own domain on
     /// every macOS) is loaded by root into the user's domain: the item is still the run's
     /// to leave, and the domain is the one the helper's delete does not end.
-    fn bootstrap_agent_as_root(&mut self, uid: u32) {
-        let Some(line) = self
-            .seeded
-            .iter_mut()
-            .find(|line| line.kind == Kind::LaunchAgent && line.verdict == Verdict::Refused)
-        else {
-            return;
-        };
-        let label = format!("com.komira.iso.{}", line.token);
-        let plist = self.fixture.root.join(format!("{label}.plist"));
-        let body = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{label}</string>\n<key>ProgramArguments</key><array><string>/bin/sleep</string><string>600</string></array>\n<key>RunAtLoad</key><true/>\n</dict></plist>\n"
-        );
-        if fs::write(&plist, body).is_err() {
-            return;
-        }
-        let domain = format!("user/{uid}");
-        let loaded = tool_output(
-            "/bin/launchctl",
-            &["bootstrap", &domain, &plist.display().to_string()],
-        );
-        if matches!(loaded, Ok((true, _))) {
-            *line = Line::new(
-                Verdict::Seeded,
-                Kind::LaunchAgent,
-                line.token.clone(),
-                &format!("{label} (loaded by root into {domain}: run A could not)"),
+    fn bootstrap_agents_as_root(&mut self, uid: u32) {
+        for (kind, domain) in [(Kind::LaunchAgent, "user"), (Kind::GuiLaunchAgent, "gui")] {
+            let Some(line) = self
+                .seeded
+                .iter_mut()
+                .find(|line| line.kind == kind && line.verdict == Verdict::Refused)
+            else {
+                continue;
+            };
+            let label = format!("com.komira.iso.{}", line.token);
+            let plist = self.fixture.root.join(format!("{label}-{domain}.plist"));
+            let body = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{label}</string>\n<key>ProgramArguments</key><array><string>/bin/sleep</string><string>600</string></array>\n<key>RunAtLoad</key><true/>\n</dict></plist>\n"
             );
+            if fs::write(&plist, body).is_err() {
+                continue;
+            }
+            let target = format!("{domain}/{uid}");
+            let loaded = tool_output(
+                "/bin/launchctl",
+                &["bootstrap", &target, &plist.display().to_string()],
+            );
+            if matches!(loaded, Ok((true, _))) {
+                *line = Line::new(
+                    Verdict::Seeded,
+                    kind,
+                    line.token.clone(),
+                    &format!("{label} (loaded by root into {target}: run A could not)"),
+                );
+            }
         }
     }
 
     /// Before the runs change over: every item that can be seen from root is seen, and
     /// the process is running, so that "run B found nothing" cannot mean "nothing was
-    /// ever there". A seeded item that is not seen fails the test: it proves nothing.
+    /// ever there". A seeded item that is not seen, or not possible to look at, fails the
+    /// test: it proves nothing.
     fn control(&self, uid: u32) -> Result<(), String> {
         let tokens = self.tokens();
-        let (_, ps) = tool_output("/bin/ps", &["-A", "-o", "uid=,pid=,command="])?;
+        let ps = view("/bin/ps", &["-A", "-o", "uid=,pid=,command="])?;
         let procs = views::parse_ps(&ps);
         let running = views::procs_with_token(&procs, uid, &tokens);
         let mut missing = Vec::new();
@@ -474,14 +535,19 @@ impl Trial {
                 Kind::HomeFile
                 | Kind::ScratchFile
                 | Kind::SystemTempFile
+                | Kind::UserTempDir
+                | Kind::UserCacheDir
+                | Kind::SharedFile
                 | Kind::SysvShm
                 | Kind::SysvSem
                 | Kind::SysvMsg
                 | Kind::PosixShm
-                | Kind::PosixSem => child::probe(line, Path::new("/")).is_some(),
+                | Kind::PosixSem => {
+                    matches!(child::probe(line, Path::new("/")), Outcome::Found(_))
+                }
                 // Not visible to root as the user's own: the keychain and the defaults
-                // key are in the user's home, the agent in its launchd domain.
-                Kind::Keychain | Kind::Defaults | Kind::LaunchAgent => true,
+                // key are in the user's home, the agents in their launchd domains.
+                Kind::Keychain | Kind::Defaults | Kind::LaunchAgent | Kind::GuiLaunchAgent => true,
             };
             if !seen {
                 missing.push(format!("{} {}", line.kind.label(), line.text));
@@ -497,12 +563,13 @@ impl Trial {
     }
 
     /// The system-wide views, read as root after run B ended: SysV objects by owner,
-    /// processes by uid, the user's launchd domain.
-    fn system_views(&self, uid: u32, user: &str) -> Result<Vec<[String; 3]>, String> {
+    /// processes by uid, the user's launchd domains, and the files of the uid outside its
+    /// home. A view that fails is an error, not an empty view.
+    fn system_views(&self, uid: u32, user: &str) -> Result<Vec<Row>, String> {
         let tokens = self.tokens();
         let mut rows = Vec::new();
 
-        let (_, ipcs) = tool_output("/usr/bin/ipcs", &["-a"])?;
+        let ipcs = view("/usr/bin/ipcs", &["-a"])?;
         let objects = views::parse_ipcs(&ipcs);
         for object in views::ipc_owned_by(&objects, uid, &[user]) {
             let kind = match object.kind {
@@ -510,21 +577,21 @@ impl Trial {
                 views::IpcKind::Shared => Kind::SysvShm,
                 views::IpcKind::Semaphore => Kind::SysvSem,
             };
-            rows.push([
-                kind.label().to_owned(),
+            rows.push(row(
+                kind,
                 format!("key={} id={}", object.key, object.id),
                 format!("ipcs lists it as owned by {}", object.owner),
-            ]);
+            ));
         }
 
-        let (_, ps) = tool_output("/bin/ps", &["-A", "-o", "uid=,pid=,command="])?;
+        let ps = view("/bin/ps", &["-A", "-o", "uid=,pid=,command="])?;
         let procs = views::parse_ps(&ps);
         for proc in views::procs_with_token(&procs, uid, &tokens) {
-            rows.push([
-                Kind::Process.label().to_owned(),
+            rows.push(row(
+                Kind::Process,
                 format!("pid={}", proc.pid),
                 format!("ps lists it for uid {uid}: {}", proc.command),
-            ]);
+            ));
         }
         // Other processes of the uid carry no token and are not a failure (the user's
         // launchd domain runs its own agents); they are printed for the reader.
@@ -535,41 +602,126 @@ impl Trial {
             );
         }
 
-        let domain = format!("user/{uid}");
-        let (ok, print) = tool_output("/bin/launchctl", &["print", &domain])?;
-        println!("PROBE note launchctl print {domain} succeeded={ok}");
-        for line in views::lines_with_token(&print, &tokens) {
-            rows.push([
-                Kind::LaunchAgent.label().to_owned(),
-                domain.clone(),
-                format!("launchctl print: {line}"),
-            ]);
+        for (domain, kind) in [("user", Kind::LaunchAgent), ("gui", Kind::GuiLaunchAgent)] {
+            let target = format!("{domain}/{uid}");
+            let out = Command::new("/bin/launchctl")
+                .args(["print", &target])
+                .output()
+                .map_err(|why| format!("launchctl: {why}"))?;
+            let look = look::classify_launchctl_print(
+                out.status.code(),
+                &String::from_utf8_lossy(&out.stdout),
+                &String::from_utf8_lossy(&out.stderr),
+            );
+            match look {
+                Outcome::Found(text) => {
+                    println!("PROBE note launchctl print {target}: the domain exists");
+                    for line in views::lines_with_token(&text, &tokens) {
+                        rows.push(row(
+                            kind,
+                            target.clone(),
+                            format!("launchctl print: {line}"),
+                        ));
+                    }
+                }
+                Outcome::Absent => println!("PROBE note launchctl print {target}: no such domain"),
+                Outcome::CouldNotLook(why) => {
+                    rows.push(row(kind, "COULD NOT LOOK", format!("{target}: {why}")))
+                }
+            }
+        }
+
+        for root in FIND_ROOTS {
+            let found = view(
+                "/usr/bin/find",
+                &[
+                    root,
+                    "-maxdepth",
+                    "6",
+                    "-uid",
+                    &uid.to_string(),
+                    "-type",
+                    "f",
+                ],
+            );
+            match found {
+                Ok(text) => {
+                    let (with, without, cut) = look::split_found_files(&text, &tokens, FIND_LIMIT);
+                    for path in with {
+                        rows.push(row(
+                            Kind::SharedFile,
+                            path,
+                            format!(
+                                "find -uid {uid} under {root}: a file with a token in its path"
+                            ),
+                        ));
+                    }
+                    for path in without {
+                        println!("PROBE note file of uid {uid} under {root}: {path}");
+                    }
+                    if cut {
+                        println!(
+                            "PROBE note more than {FIND_LIMIT} files of uid {uid} under {root}; the rest are not listed"
+                        );
+                    }
+                }
+                Err(why) => rows.push(row(Kind::SharedFile, "COULD NOT LOOK", why)),
+            }
         }
         Ok(rows)
     }
 
-    /// Takes down what the trial made, whatever happened: the users, the objects the runs
-    /// left, the user's launchd domain. Best effort.
+    /// Takes down what the trial made, whatever happened (it runs from `Drop`, so also on a
+    /// panic): the launchd domains, the users, the objects the runs left. Best effort, and
+    /// no wider than that.
     fn cleanup(&mut self) {
-        // The domain goes out before the user is deleted: deleting a user does not end
+        // The domains go out before the user is deleted: deleting a user does not end
         // its launchd domain, and one left makes the next run on the uid refuse.
-        let domain = format!("user/{}", self.fixture.uid);
-        let _ = tool_output("/bin/launchctl", &["bootout", &domain]);
+        for domain in ["user", "gui"] {
+            let target = format!("{domain}/{}", self.fixture.uid);
+            let _ = tool_output("/bin/launchctl", &["bootout", &target]);
+        }
         for id in std::mem::take(&mut self.runs) {
             let _ = self.rt.remove(&id);
         }
-        for line in &self.seeded {
-            child::remove(line);
+        for line in std::mem::take(&mut self.seeded) {
+            child::remove(&line);
         }
     }
 }
 
+/// The directories the bounded `find -uid` reads, as root, for files the uid owns outside
+/// its home.
+const FIND_ROOTS: [&str; 4] = [
+    "/private/var/folders",
+    "/private/tmp",
+    "/Users/Shared",
+    "/Library/Caches",
+];
+/// The most paths of one `find` that are looked at.
+const FIND_LIMIT: usize = 500;
+
+/// A tool run as root whose exit status matters: its output, or why the look failed.
+fn view(program: &str, args: &[&str]) -> Result<String, String> {
+    let out = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|why| format!("{program}: {why}"))?;
+    look::view_output(
+        program,
+        out.status.code(),
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+    )
+}
+
 /// Asserts that run B, on the uid run A had, finds nothing A left behind, and that the
-/// system's views (`ipcs`, `ps`, `launchctl print`) show nothing of A's either, after the
-/// agent's own end-of-run calls and no other cleanup. It catches a user delete that
-/// leaves the home's content, a keychain or defaults item, a process, a launchd agent or a
-/// System V or POSIX object behind for the next run that gets the uid. It fails with the
-/// table of what survived.
+/// system's views (`ipcs`, `ps`, `launchctl print`, `find -uid`) show nothing of A's either,
+/// after the agent's own end-of-run calls and no other cleanup. It catches a user delete
+/// that leaves the home's content, a keychain or defaults item, a process, a launchd agent,
+/// the uid-keyed temp and cache directories, or a System V or POSIX object behind for the
+/// next run that gets the uid. It fails with the table of what survived, and also when a
+/// look could not be made or run A seeded too little to mean anything.
 #[test]
 #[ignore = "needs root and a Mac; creates a user"]
 fn a_second_run_on_the_same_uid_finds_nothing_the_first_left() {
@@ -577,6 +729,7 @@ fn a_second_run_on_the_same_uid_finds_nothing_the_first_left() {
     let exe = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
     let rt = runtime(&fixture, &exe);
     let uid = fixture.uid;
+    // The guard cleans up when it goes out of scope, on a panic too.
     let mut trial = Trial {
         rt,
         fixture,
@@ -585,7 +738,7 @@ fn a_second_run_on_the_same_uid_finds_nothing_the_first_left() {
         seeded: Vec::new(),
     };
     let result = trial.body();
-    trial.cleanup();
+    drop(trial);
     match result {
         Err(why) => panic!("the test could not run: {why}"),
         Ok(rows) if rows.is_empty() => {

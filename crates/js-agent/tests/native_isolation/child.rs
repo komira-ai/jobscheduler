@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::lines::{Kind, Line, Verdict};
+use super::look::{Outcome, classify_defaults, classify_errno, classify_path, classify_security};
 use super::token::Token;
 
 // The calls libc has no declaration of on macOS. All take C strings or plain integers.
@@ -38,22 +39,36 @@ pub struct Spot {
     pub uid: u32,
 }
 
-/// The tool's standard output, or why it failed.
-fn tool(program: &str, args: &[&str], home: &Path) -> Result<String, String> {
+/// A tool run to the end: its exit status (`None` when a signal ended it), standard output and
+/// standard error.
+fn tool_raw(
+    program: &str,
+    args: &[&str],
+    home: &Path,
+) -> Result<(Option<i32>, String, String), String> {
     let out = Command::new(program)
         .args(args)
         .env("HOME", home)
         .output()
         .map_err(|why| format!("{program}: {why}"))?;
-    if !out.status.success() {
+    Ok((
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    ))
+}
+
+/// The tool's standard output, or why it failed.
+fn tool(program: &str, args: &[&str], home: &Path) -> Result<String, String> {
+    let (code, stdout, stderr) = tool_raw(program, args, home)?;
+    if code != Some(0) {
         return Err(format!(
-            "{program} {}: {} {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim(),
-            String::from_utf8_lossy(&out.stdout).trim()
+            "{program} exited {code:?}: {} {}",
+            stderr.trim(),
+            stdout.trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(stdout)
 }
 
 fn errno(what: &str) -> String {
@@ -84,9 +99,12 @@ fn seed(kind: Kind, token: &Token, spot: &Spot) -> Result<String, String> {
         }
         Kind::Process => {
             // Detached: its own session, no terminal, the token in its command line.
-            let mut command = Command::new("/bin/sh");
+            // `sleep` itself, with the token as its own argv[0]: no shell that could exec away
+            // and lose it.
+            let mut command = Command::new("/bin/sleep");
             command
-                .args(["-c", "/bin/sleep 600", tok])
+                .arg0(format!("sleep-{tok}"))
+                .arg("600")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
@@ -97,7 +115,9 @@ fn seed(kind: Kind, token: &Token, spot: &Spot) -> Result<String, String> {
                     Ok(())
                 });
             }
-            let child = command.spawn().map_err(|why| format!("/bin/sh: {why}"))?;
+            let child = command
+                .spawn()
+                .map_err(|why| format!("/bin/sleep: {why}"))?;
             Ok(format!("pid={}", child.id()))
         }
         Kind::Keychain => {
@@ -133,19 +153,20 @@ fn seed(kind: Kind, token: &Token, spot: &Spot) -> Result<String, String> {
             )?;
             Ok(domain)
         }
-        Kind::LaunchAgent => {
-            let label = format!("com.komira.iso.{tok}");
-            let path = spot.home.join(format!("iso-{tok}.plist"));
-            std::fs::write(&path, agent_plist(&label))
-                .map_err(|why| format!("{}: {why}", path.display()))?;
-            let domain = format!("user/{}", spot.uid);
-            tool(
-                "/bin/launchctl",
-                &["bootstrap", &domain, &path.display().to_string()],
-                &spot.home,
-            )?;
-            Ok(label)
+        Kind::LaunchAgent => seed_agent(token, spot, "user"),
+        Kind::GuiLaunchAgent => seed_agent(token, spot, "gui"),
+        Kind::UserTempDir => {
+            let dir = tool("/usr/bin/getconf", &["DARWIN_USER_TEMP_DIR"], &spot.home)?;
+            file_at(&Path::new(dir.trim()).join(format!("iso-{tok}")), token)
         }
+        Kind::UserCacheDir => {
+            let dir = tool("/usr/bin/getconf", &["DARWIN_USER_CACHE_DIR"], &spot.home)?;
+            file_at(&Path::new(dir.trim()).join(format!("iso-{tok}")), token)
+        }
+        Kind::SharedFile => file_at(
+            &Path::new("/Users/Shared").join(format!("iso-{tok}")),
+            token,
+        ),
         Kind::SysvShm => {
             // SAFETY: plain integers; nothing of ours is touched.
             let id = unsafe { libc::shmget(token.sysv_key(), 4096, IPC_CREAT | IPC_EXCL | 0o600) };
@@ -212,6 +233,22 @@ fn seed(kind: Kind, token: &Token, spot: &Spot) -> Result<String, String> {
     }
 }
 
+/// A launch agent loaded into `<domain>/<uid>` (`user` or `gui`); its label.
+fn seed_agent(token: &Token, spot: &Spot, domain: &str) -> Result<String, String> {
+    let tok = token.as_str();
+    let label = format!("com.komira.iso.{tok}");
+    let path = spot.home.join(format!("iso-{tok}-{domain}.plist"));
+    std::fs::write(&path, agent_plist(&label))
+        .map_err(|why| format!("{}: {why}", path.display()))?;
+    let target = format!("{domain}/{}", spot.uid);
+    tool(
+        "/bin/launchctl",
+        &["bootstrap", &target, &path.display().to_string()],
+        &spot.home,
+    )?;
+    Ok(label)
+}
+
 fn agent_plist(label: &str) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -238,89 +275,116 @@ pub fn seed_all(spot: &Spot) -> Vec<Line> {
         .collect()
 }
 
-/// Run B's look for one seeded item, as the same user (with `home` as its HOME): where it
-/// is, if it is. A process
-/// and a launch agent are looked for by the test, in `ps` and `launchctl print`.
-pub fn probe(seeded: &Line, home: &Path) -> Option<String> {
+/// A System V lookup that returned `id` (negative on error) for the call `what`.
+fn sysv_look(what: &str, locator: &str, id: c_int) -> Outcome {
+    if id >= 0 {
+        return Outcome::Found(format!("{locator} id={id}"));
+    }
+    classify_errno(what, std::io::Error::last_os_error().raw_os_error())
+}
+
+fn path_look(path: &str) -> Outcome {
+    let path = Path::new(path);
+    classify_path(path, std::fs::symlink_metadata(path).map(|_| ()))
+}
+
+/// Run B's look for one seeded item, as the same user (with `home` as its HOME): there,
+/// absent by the documented answer of the call or tool, or not possible to tell (see
+/// `look.rs`). A process and a launch agent are looked for by the test, in `ps` and
+/// `launchctl print`.
+pub fn probe(seeded: &Line, home: &Path) -> Outcome {
     let locator = seeded.text.as_str();
     let tok = seeded.token.as_str();
     match seeded.kind {
-        Kind::HomeFile | Kind::ScratchFile | Kind::SystemTempFile => {
-            Path::new(locator).exists().then(|| locator.to_owned())
-        }
-        Kind::Process | Kind::LaunchAgent => None,
-        Kind::Keychain => {
-            if Path::new(locator).exists() {
-                return Some(locator.to_owned());
+        Kind::HomeFile
+        | Kind::ScratchFile
+        | Kind::SystemTempFile
+        | Kind::UserTempDir
+        | Kind::UserCacheDir
+        | Kind::SharedFile => path_look(locator),
+        Kind::Process | Kind::LaunchAgent | Kind::GuiLaunchAgent => Outcome::Absent,
+        Kind::Keychain => match path_look(locator) {
+            Outcome::Absent => {
+                match tool_raw(
+                    "/usr/bin/security",
+                    &["find-generic-password", "-s", tok],
+                    home,
+                ) {
+                    Ok((code, _, stderr)) => classify_security(code, &stderr),
+                    Err(why) => Outcome::CouldNotLook(why),
+                }
             }
-            tool(
-                "/usr/bin/security",
-                &["find-generic-password", "-s", tok],
-                home,
-            )
-            .ok()
-            .map(|_| format!("a generic password for {tok} is in the keychain search list"))
+            other => other,
+        },
+        Kind::Defaults => {
+            match tool_raw("/usr/bin/defaults", &["read", locator, DEFAULTS_KEY], home) {
+                Ok((code, stdout, stderr)) => classify_defaults(code, &stdout, &stderr),
+                Err(why) => Outcome::CouldNotLook(why),
+            }
         }
-        Kind::Defaults => tool("/usr/bin/defaults", &["read", locator, DEFAULTS_KEY], home)
-            .ok()
-            .filter(|value| value.trim() == tok)
-            .map(|_| format!("{locator} {DEFAULTS_KEY} reads back")),
-        Kind::SysvShm => {
-            let key = key_of(locator)?;
+        Kind::SysvShm | Kind::SysvSem | Kind::SysvMsg => {
+            let Some(key) = key_of(locator) else {
+                return Outcome::CouldNotLook(format!("the locator {locator:?} is not a key"));
+            };
             // SAFETY: plain integers; size 0 and no flags only look.
-            let id = unsafe { libc::shmget(key, 0, 0) };
-            (id >= 0).then(|| format!("{locator} id={id}"))
-        }
-        Kind::SysvSem => {
-            let key = key_of(locator)?;
-            // SAFETY: plain integers.
-            let id = unsafe { libc::semget(key, 0, 0) };
-            (id >= 0).then(|| format!("{locator} id={id}"))
-        }
-        Kind::SysvMsg => {
-            let key = key_of(locator)?;
-            // SAFETY: plain integers.
-            let id = unsafe { msgget(key, 0) };
-            (id >= 0).then(|| format!("{locator} id={id}"))
+            match seeded.kind {
+                Kind::SysvShm => sysv_look("shmget", locator, unsafe { libc::shmget(key, 0, 0) }),
+                Kind::SysvSem => sysv_look("semget", locator, unsafe { libc::semget(key, 0, 0) }),
+                _ => sysv_look("msgget", locator, unsafe { msgget(key, 0) }),
+            }
         }
         Kind::PosixShm => {
             let c = cstring(locator);
             // SAFETY: `c` is a NUL-terminated string that outlives the call.
             let fd = unsafe { libc::shm_open(c.as_ptr(), libc::O_RDONLY, 0 as c_uint) };
             if fd < 0 {
-                return None;
+                return classify_errno("shm_open", std::io::Error::last_os_error().raw_os_error());
             }
             // SAFETY: `fd` was just opened.
             unsafe { libc::close(fd) };
-            Some(locator.to_owned())
+            Outcome::Found(locator.to_owned())
         }
         Kind::PosixSem => {
             let c = cstring(locator);
             // SAFETY: `c` is a NUL-terminated string; without `O_CREAT` no more arguments.
             let sem = unsafe { sem_open(c.as_ptr(), 0) };
             if sem == SEM_FAILED {
-                return None;
+                return classify_errno("sem_open", std::io::Error::last_os_error().raw_os_error());
             }
             // SAFETY: `sem` was just returned by `sem_open`.
             unsafe { sem_close(sem) };
-            Some(locator.to_owned())
+            Outcome::Found(locator.to_owned())
         }
     }
 }
 
-/// Run B: every seeded item looked for, a `Found` line for each that is there.
+/// Run B: every seeded item looked for. A `Found` line for each that is there, an
+/// `Unlooked` line (with the reason) for each that could not be looked at. Nothing for an
+/// item that is absent by the documented answer.
 pub fn look_all(seeded: &[Line], home: &Path) -> Vec<Line> {
     seeded
         .iter()
         .filter(|line| line.verdict == Verdict::Seeded)
-        .filter_map(|line| {
-            let place = probe(line, home)?;
-            Some(Line::new(
+        .filter(|line| {
+            !matches!(
+                line.kind,
+                Kind::Process | Kind::LaunchAgent | Kind::GuiLaunchAgent
+            )
+        })
+        .filter_map(|line| match probe(line, home) {
+            Outcome::Found(place) => Some(Line::new(
                 Verdict::Found,
                 line.kind,
                 line.token.clone(),
                 &place,
-            ))
+            )),
+            Outcome::Absent => None,
+            Outcome::CouldNotLook(why) => Some(Line::new(
+                Verdict::Unlooked,
+                line.kind,
+                line.token.clone(),
+                &why,
+            )),
         })
         .collect()
 }
@@ -331,10 +395,16 @@ pub fn look_all(seeded: &[Line], home: &Path) -> Vec<Line> {
 pub fn remove(seeded: &Line) {
     let locator = seeded.text.as_str();
     match seeded.kind {
-        Kind::HomeFile | Kind::ScratchFile | Kind::SystemTempFile | Kind::Keychain => {
+        Kind::HomeFile
+        | Kind::ScratchFile
+        | Kind::SystemTempFile
+        | Kind::Keychain
+        | Kind::UserTempDir
+        | Kind::UserCacheDir
+        | Kind::SharedFile => {
             let _ = std::fs::remove_file(locator);
         }
-        Kind::Process | Kind::LaunchAgent | Kind::Defaults => {}
+        Kind::Process | Kind::LaunchAgent | Kind::GuiLaunchAgent | Kind::Defaults => {}
         Kind::SysvShm => {
             if let Some(key) = key_of(locator) {
                 // SAFETY: plain integers; `IPC_RMID` takes no buffer.

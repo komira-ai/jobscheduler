@@ -19,10 +19,19 @@ pub enum Kind {
     SysvMsg,
     PosixShm,
     PosixSem,
+    /// A file in `DARWIN_USER_TEMP_DIR`, the per-user directory under `/var/folders` that is
+    /// keyed by the uid and not by the home.
+    UserTempDir,
+    /// A file in `DARWIN_USER_CACHE_DIR`, its sibling.
+    UserCacheDir,
+    /// A file in `/Users/Shared`.
+    SharedFile,
+    /// A launchd agent in the `gui/<uid>` domain.
+    GuiLaunchAgent,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 12] = [
+    pub const ALL: [Kind; 16] = [
         Kind::HomeFile,
         Kind::ScratchFile,
         Kind::SystemTempFile,
@@ -35,6 +44,10 @@ impl Kind {
         Kind::SysvMsg,
         Kind::PosixShm,
         Kind::PosixSem,
+        Kind::UserTempDir,
+        Kind::UserCacheDir,
+        Kind::SharedFile,
+        Kind::GuiLaunchAgent,
     ];
 
     pub fn label(self) -> &'static str {
@@ -51,6 +64,7 @@ impl Kind {
             Kind::SysvMsg => "sysv-message-queue",
             Kind::PosixShm => "posix-shared-memory",
             Kind::PosixSem => "posix-semaphore",
+            Kind::UserTempDir | Kind::UserCacheDir | Kind::SharedFile | Kind::GuiLaunchAgent => "",
         }
     }
 
@@ -67,6 +81,8 @@ pub enum Verdict {
     Refused,
     /// Run B found the item; the text says where.
     Found,
+    /// Run B could not tell whether the item is there; the text says why. Never a pass.
+    Unlooked,
 }
 
 impl Verdict {
@@ -75,13 +91,19 @@ impl Verdict {
             Verdict::Seeded => "seeded",
             Verdict::Refused => "refused",
             Verdict::Found => "found",
+            Verdict::Unlooked => "",
         }
     }
 
     fn from_word(word: &str) -> Option<Verdict> {
-        [Verdict::Seeded, Verdict::Refused, Verdict::Found]
-            .into_iter()
-            .find(|verdict| verdict.word() == word)
+        [
+            Verdict::Seeded,
+            Verdict::Refused,
+            Verdict::Found,
+            Verdict::Unlooked,
+        ]
+        .into_iter()
+        .find(|verdict| verdict.word() == word)
     }
 }
 
@@ -176,7 +198,7 @@ mod tests {
             seen.push(label);
         }
         assert_eq!(Kind::from_label("nothing"), None);
-        assert_eq!(seen.len(), 12);
+        assert_eq!(seen.len(), 16);
     }
 
     /// Asserts that a line survives encode and parse, with a text that holds spaces, and
@@ -195,6 +217,13 @@ mod tests {
         );
         assert_eq!(messy.text, "security: no keychain found");
         assert_eq!(parse_lines(&messy.encode()).unwrap(), vec![messy]);
+        let unlooked = Line::new(
+            Verdict::Unlooked,
+            Kind::Keychain,
+            token(4),
+            "security exited 51",
+        );
+        assert_eq!(parse_lines(&unlooked.encode()).unwrap(), vec![unlooked]);
     }
 
     /// Asserts that lines the harness prints around ours are skipped, in order, and that
