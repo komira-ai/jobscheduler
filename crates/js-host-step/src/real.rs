@@ -11,6 +11,7 @@
 
 use std::fs::{self, File, Permissions};
 use std::io::{self, Read, Write};
+use std::os::fd::AsFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, fchown};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -65,8 +66,10 @@ impl RealHost {
         let name = names.pop().ok_or_else(|| refused(path, "names no file"))?;
         let flags = OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let anchor = openat(rustix::fs::CWD, &self.root, flags, FileMode::empty());
-        let mut dir =
-            File::from(anchor.map_err(|e| walk_error(path, &self.root.display().to_string(), e))?);
+        let mut dir = File::from(anchor.map_err(|e| {
+            let linked = is_link(rustix::fs::CWD, &self.root);
+            walk_error(path, &self.root.display().to_string(), linked, e)
+        })?);
         self.vet(&dir, owner, path, &self.root.display().to_string())?;
         for component in names {
             let opened = match openat(&dir, component, flags, FileMode::empty()) {
@@ -76,7 +79,9 @@ impl RealHost {
                 }
                 other => other,
             };
-            let next = File::from(opened.map_err(|e| walk_error(path, component, e))?);
+            let next = File::from(
+                opened.map_err(|e| walk_error(path, component, is_link(&dir, component), e))?,
+            );
             self.vet(&next, owner, path, component)?;
             dir = next;
         }
@@ -135,15 +140,23 @@ fn components(path: &str) -> io::Result<Vec<&str>> {
     }
 }
 
-/// The error for the directory `component` that could not be opened on the way to `path`.
-fn walk_error(path: &str, component: &str, e: Errno) -> io::Error {
-    match e {
-        Errno::LOOP => refused_at(
+/// Whether `name` in `at` is a symbolic link (not followed). The system says "not a directory"
+/// for a link opened as one, so this is how a link is told from a file.
+fn is_link(at: impl AsFd, name: impl rustix::path::Arg) -> bool {
+    statat(at, name, AtFlags::SYMLINK_NOFOLLOW)
+        .is_ok_and(|st| FileType::from_raw_mode(st.st_mode).is_symlink())
+}
+
+/// The error for the directory `component` that could not be opened on the way to `path`;
+/// `linked` is whether it is a symbolic link.
+fn walk_error(path: &str, component: &str, linked: bool, e: Errno) -> io::Error {
+    match (e, linked) {
+        (Errno::LOOP | Errno::NOTDIR, true) => refused_at(
             path,
             &format!("{component} is a symbolic link; give the real path"),
         ),
-        Errno::NOTDIR => refused_at(path, &format!("{component} is not a directory")),
-        other => io::Error::from(other),
+        (Errno::NOTDIR, false) => refused_at(path, &format!("{component} is not a directory")),
+        (other, _) => io::Error::from(other),
     }
 }
 

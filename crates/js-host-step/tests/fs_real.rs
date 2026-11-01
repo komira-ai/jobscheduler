@@ -374,3 +374,14 @@ fn a_link_as_the_root_anchor_is_refused() {
     assert!(host.remove("/x").is_err());
     assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
 }
+
+/// Catches a file named as a directory being called a link, or the other way round: the
+/// message says "is not a directory" for a file and for the system's own error otherwise.
+#[test]
+fn a_file_where_a_directory_should_be_is_named_as_such() {
+    let (dir, host) = scratch("notdir");
+    std::fs::write(dir.path().join("file"), b"x").unwrap();
+    let err = host.stat("/file/x").unwrap_err();
+    assert_eq!(err.to_string(), "refused: /file/x: file is not a directory");
+    assert!(host.read("/file/x").is_err());
+}
