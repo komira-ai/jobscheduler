@@ -490,6 +490,7 @@ fn a_trickling_server_ends_at_the_total_deadline() {
     let err = result.unwrap_err();
     assert_eq!(err.exit_code(), 1);
     assert!(err.to_string().contains("(NanoDEP API): "), "{err}");
+    assert!(!err.to_string().contains("no end of headers"), "{err}");
     assert!(took < std::time::Duration::from_secs(10), "{took:?}");
     thread.join().unwrap();
 }

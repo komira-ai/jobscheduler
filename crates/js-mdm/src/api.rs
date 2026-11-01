@@ -249,7 +249,7 @@ impl Api for RealApi {
         tcp.set_write_timeout(Some(TIMEOUT)).map_err(io)?;
         tcp.write_all(&request(service, call)).map_err(io)?;
         let (mut raw, mut chunk) = (Vec::new(), [0u8; 8192]);
-        let mut capped = (&tcp).take(MAX_REPLY);
+        let mut capped = (&tcp).take(64);
         loop {
             tcp.set_read_timeout(Some(left())).map_err(io)?;
             let n = capped.read(&mut chunk).map_err(io)?;
