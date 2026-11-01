@@ -311,6 +311,7 @@ impl Scheduler {
                 id: name.as_str().to_owned(),
                 leases: w.leases,
                 end_bounds: ends.remove(name).unwrap_or_default(),
+                est_ends: Vec::new(),
             })
             .collect();
         Some(drain_cost(&loads, self.now.as_millis()))

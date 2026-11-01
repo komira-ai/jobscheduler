@@ -45,6 +45,7 @@ impl Registry {
                     id: id.to_string(),
                     leases: usize::from(lease.is_some()),
                     end_bounds: ends.map(|(_, end)| end.millis()).into_iter().collect(),
+                    est_ends: Vec::new(),
                 },
             }
         });
