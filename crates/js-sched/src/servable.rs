@@ -88,6 +88,17 @@ pub(crate) struct Placed {
     pub(crate) cost: LeaseCost,
 }
 
+/// A worker a blocked head could hold ([`Servable::head_candidates`]).
+struct HeadCandidate<'a> {
+    name: &'a WorkerId,
+    /// What the worker is charged before the head.
+    left: Left,
+    /// The cores and memory the head is charged on the worker at the present minute.
+    need: (u64, u64),
+    /// The binding ratio the worker would be at with the head on it.
+    ratio: Ratio,
+}
+
 /// The outcome of [`Servable::fit`].
 pub(crate) struct Fit {
     pub(crate) placed: Option<Placed>,
@@ -492,11 +503,27 @@ impl Servable {
         attempt: &Attempt<'_>,
         kept: Option<&WorkerId>,
     ) -> Option<WorkerId> {
+        let candidates = self.head_candidates(workers, adm, attempt);
+        let ratios: Vec<(&WorkerId, Ratio)> =
+            candidates.iter().map(|c| (c.name, c.ratio)).collect();
+        pick(&ratios, kept).cloned()
+    }
+
+    /// The workers a blocked head could hold, in name order: those `attempt`'s request could
+    /// run on but for the load, not in `reserved` or skipped for `avoid` and not owned whole
+    /// by the request, each with its left side, the charge of the new lease at the present
+    /// minute and the binding ratio it would be at.
+    fn head_candidates<'s>(
+        &'s mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        adm: &Admission,
+        attempt: &Attempt<'_>,
+    ) -> Vec<HeadCandidate<'s>> {
         let request = attempt.request;
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, attempt.avoid);
         let now = self.now;
-        let ratios: Vec<(&WorkerId, Ratio)> = self.memo[at]
+        self.memo[at]
             .1
             .iter()
             .map(|&i| &self.live[i])
@@ -526,10 +553,14 @@ impl Servable {
                     (left.cpu.saturating_add(new_cpu), w.capacity.cpu_millis),
                     (left.mem.saturating_add(new_mem), w.capacity.memory_bytes),
                 );
-                (name, ratio)
+                HeadCandidate {
+                    name,
+                    left,
+                    need: (new_cpu, new_mem),
+                    ratio,
+                }
             })
-            .collect();
-        pick(&ratios, kept).cloned()
+            .collect()
     }
 
     /// The worker a blocked head of the queue holds when whole-node settings are on: of the
@@ -554,58 +585,20 @@ impl Servable {
         attempt: &Attempt<'_>,
         ends: &BTreeMap<LeaseId, Option<u64>>,
     ) -> Option<WorkerId> {
-        let request = attempt.request;
-        let at = self.matching(workers, request);
-        let skip = self.avoided(at, workers, request, attempt.avoid);
-        let now = self.now;
-        let held: Vec<(&WorkerId, (Option<u64>, Ratio))> = self.memo[at]
-            .1
-            .iter()
-            .map(|&i| &self.live[i])
-            .filter(|name| {
-                let w = &workers[*name];
-                !attempt.reserved.contains(*name)
-                    && !skip.contains(*name)
-                    && !w.exclusive(request)
-                    && w.has_room(request, true)
-            })
-            .map(|name| {
-                let w = &workers[name];
-                let cost = clamped(attempt.cost, &w.capacity);
-                let left = w.load_state.left(now, &w.capacity, &adm.cfg);
-                // The charge of the new lease at the present minute.
-                let profile = Self::profile_on(w, attempt);
-                let (new_cpu, new_mem) = profile.map_or_else(
-                    || (left.charged_cpu(&cost), cost.memory_bytes),
-                    |p| {
-                        (
-                            p.new_cpu(0).min(w.capacity.cpu_millis),
-                            p.new_mem(0).min(w.capacity.memory_bytes),
-                        )
-                    },
-                );
-                let ratio = binding(
-                    (left.cpu.saturating_add(new_cpu), w.capacity.cpu_millis),
-                    (left.mem.saturating_add(new_mem), w.capacity.memory_bytes),
-                );
-                let charges = w.load_state.charges(&left);
-                let limits = (
-                    adm.cfg.cpu_limit(&w.capacity),
-                    adm.cfg.mem_limit(&w.capacity),
-                );
-                let start = start_time(
-                    &left,
-                    &charges,
-                    ends,
-                    limits,
-                    (new_cpu, new_mem),
-                    now.as_millis(),
-                );
-                (name, (start, ratio))
-            })
-            .collect();
-        // The first of the least: `held` is in name order.
-        held.into_iter()
+        let now = self.now.as_millis();
+        let candidates = self.head_candidates(workers, adm, attempt);
+        let timed = candidates.into_iter().map(|c| {
+            let w = &workers[c.name];
+            let limits = (
+                adm.cfg.cpu_limit(&w.capacity),
+                adm.cfg.mem_limit(&w.capacity),
+            );
+            let charges = w.load_state.charges(&c.left);
+            let start = start_time(&c.left, &charges, ends, limits, c.need, now);
+            (c.name, (start, c.ratio))
+        });
+        // The first of the least: the candidates are in name order.
+        timed
             .min_by_key(|(_, (start, ratio))| (start.is_none(), *start, *ratio))
             .map(|(name, _)| name.clone())
     }
@@ -647,18 +640,7 @@ impl Servable {
         avoid: &BTreeSet<WorkerId>,
         kept: Option<&WorkerId>,
     ) -> Option<WorkerId> {
-        let at = self.matching(workers, request);
-        let skip = self.avoided(at, workers, request, avoid);
-        let candidates: Vec<&WorkerId> = self.memo[at]
-            .1
-            .iter()
-            .map(|&i| &self.live[i])
-            .filter(|name| {
-                !reserved.contains(*name)
-                    && !skip.contains(*name)
-                    && workers[*name].capacity.fits(&request.demand())
-            })
-            .collect();
+        let candidates = self.holdable(workers, request, reserved, avoid);
         if let Some(kept) = kept.filter(|kept| candidates.contains(kept)) {
             return Some(kept.clone());
         }
@@ -686,9 +668,25 @@ impl Servable {
         avoid: &BTreeSet<WorkerId>,
         drain: &[DrainCost],
     ) -> Option<WorkerId> {
+        let candidates = self.holdable(workers, request, reserved, avoid);
+        drain
+            .iter()
+            .find_map(|cost| candidates.iter().find(|name| name.as_str() == cost.id))
+            .map(|name| (*name).clone())
+    }
+
+    /// The live workers a request that waits for a worker to empty could hold: not in
+    /// `reserved`, not skipped for `avoid`, and big enough for the request's demand.
+    fn holdable(
+        &mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        request: &Request,
+        reserved: &BTreeSet<WorkerId>,
+        avoid: &BTreeSet<WorkerId>,
+    ) -> Vec<&WorkerId> {
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, avoid);
-        let candidates: Vec<&WorkerId> = self.memo[at]
+        self.memo[at]
             .1
             .iter()
             .map(|&i| &self.live[i])
@@ -697,11 +695,7 @@ impl Servable {
                     && !skip.contains(*name)
                     && workers[*name].capacity.fits(&request.demand())
             })
-            .collect();
-        drain
-            .iter()
-            .find_map(|cost| candidates.iter().find(|name| name.as_str() == cost.id))
-            .map(|name| (*name).clone())
+            .collect()
     }
 
     /// The live workers placement may use that could run `request` once their bookings

@@ -624,4 +624,48 @@ mod tests {
         assert!(!drain.backoff.contains_key(&op));
         assert!(drain.marks.contains_key(&other));
     }
+
+    /// Catches: a lease placed in the round being left out of the lease ends, or numbered
+    /// wrongly: the one placed this round takes the next sequence of the term and ends its
+    /// max wall time after now, cut to nothing else; with no estimate its end is its bound.
+    #[test]
+    fn a_lease_placed_this_round_ends_at_now_plus_its_wall_time() {
+        use crate::{Event, Input, Request};
+        use js_types::sched::usage::LeaseCost;
+        use js_types::sched::{Qos, Resources, StateMachine, WaiterId, WorkKey};
+        let mut s = Scheduler::new(1);
+        let op = s.next_operation();
+        let request = Request {
+            key: WorkKey::new("c", "k"),
+            qos: Qos::Ci,
+            kind: LeaseKind::Action,
+            resources: Resources::new(1_000, 1 << 30),
+            hermetic: true,
+            do_not_cache: false,
+            whole_worker: false,
+            needs: js_caps::Request::default(),
+        };
+        let waiter = WaiterId(1);
+        s.apply(Input::new(
+            FarmTime::from_millis(5_000),
+            Event::Submit { waiter, request },
+        ));
+        s.set_max_wall(op, Duration::from_secs(100));
+        let placed = Placed {
+            worker: WorkerId::new("a"),
+            booked: Resources::new(1_000, 1 << 30),
+            device: None,
+            cost: LeaseCost {
+                cpu_millis: 1_000,
+                memory_bytes: 0,
+                limit_bytes: 0,
+                cold: false,
+                retry: false,
+                key_hash: 0,
+            },
+        };
+        let ends = s.lease_ends(&[(op, placed)]);
+        let expected = BTreeMap::from([(LeaseId::new(1, 0), Some(105_000))]);
+        assert_eq!(ends, expected);
+    }
 }
