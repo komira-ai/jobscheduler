@@ -116,10 +116,11 @@ pub struct Cli {
     /// How often the table is ticked (expiries, retries, pending starts).
     #[arg(long, default_value = "5s", value_parser = parse_duration)]
     pub tick: Duration,
-    /// The PEM certificate chain to serve over TLS.
+    /// The PEM certificate chain to serve over TLS. SIGHUP reads it and the key again.
     #[arg(long)]
     pub tls_cert: Option<PathBuf>,
-    /// The PEM private key of the certificate.
+    /// The PEM private key of the certificate: owner-only (0600 or 0400); a symbolic link is
+    /// followed and the file it leads to is checked. SIGHUP reads it again.
     #[arg(long)]
     pub tls_key: Option<PathBuf>,
     /// The most connections held open at once, handshaking, idle or busy. At the cap
