@@ -25,13 +25,15 @@ pub const LINK_LOCAL: &str = "169.254.0.0/16";
 /// 4. IPv6 refused;
 /// 5. everything else over TCP and UDP refused.
 ///
-/// A refused connection is `block return`: the pool user's `connect` fails at once with
-/// "connection refused" instead of hanging until its timeout. The exception is a connect
-/// to an address of the node itself: it leaves through `lo0`, and macOS pf sends the reset
-/// of a `block return` only for a packet whose TCP checksum it can verify. `lo0` is set up
-/// with TCP and UDP checksum assist, so an outbound SYN reaches pf with its checksum not yet
-/// completed (the checksum-valid flags `lo0` sets itself come after pf's output hook). That
-/// connect is dropped and times out. It is still blocked; no rule text changes that.
+/// The blocked connections are `block return`, but on macOS a blocked TCP connect is not
+/// refused: it is dropped silently and the pool user's `connect` waits until its own timeout.
+/// pf builds the reset of a `block return` only after `pf_check_proto_cksum` accepts the
+/// packet (xnu `bsd/net/pf.c`, in `pf_test_rule`), and an outbound SYN on an interface set up
+/// with TCP checksum assist reaches pf with its checksum not yet completed (`pf_inet_hook`
+/// in `bsd/net/pf_ioctl.c` completes it only for interfaces without that assist). A first
+/// run on a Mac showed no reset off the host either. The connection is still blocked; what
+/// shows that is the blocking rule's packet counter (`pfctl -a <anchor> -s rules -vv`),
+/// not the error the client gets. No rule text changes this.
 ///
 /// pf matches `user` on TCP and UDP only; ICMP and other protocols are not limited by this
 /// anchor.

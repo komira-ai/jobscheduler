@@ -109,11 +109,33 @@ fn number(word: &str) -> Option<u32> {
 /// [`CountersError::NoCounters`], [`CountersError::Orphan`] or [`CountersError::BadField`]
 /// when the text is not in the shape described in the module docs.
 pub fn parse(text: &str) -> Result<Vec<RuleCounters>, CountersError> {
-    let _ = text;
-    Ok(Vec::new())
+    let mut rules = Vec::new();
+    let mut pending: Option<String> = None;
+    for line in text.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix('@') {
+            if let Some(rule) = pending.take() {
+                return Err(CountersError::NoCounters(rule));
+            }
+            let rule = rest.split_once(' ').map_or("", |(_, r)| r);
+            pending = Some(rule.trim().to_owned());
+        } else if line.starts_with("[ Evaluations:") {
+            let Some(rule) = pending.take() else {
+                return Err(CountersError::Orphan(line.to_owned()));
+            };
+            rules.push(RuleCounters {
+                rule,
+                evaluations: field(line, "Evaluations:")?,
+                packets: field(line, "Packets:")?,
+                bytes: field(line, "Bytes:")?,
+            });
+        }
+    }
+    match pending {
+        Some(rule) => Err(CountersError::NoCounters(rule)),
+        None => Ok(rules),
+    }
 }
 
-#[allow(dead_code)]
 fn field(line: &str, name: &'static str) -> Result<u64, CountersError> {
     let bad = || CountersError::BadField {
         field: name,

@@ -173,12 +173,23 @@ struct Row {
 
 impl Row {
     fn verdict(&self) -> Verdict {
-        let _ = (&self.got, self.want, &self.counter);
-        Verdict::Fail
+        let got = self.got.as_str();
+        match self.want {
+            Want::Connected => verdict_of(got == "connected"),
+            Want::NotRefused => verdict_of(got != "refused"),
+            Want::Blocked(_) => {
+                if got != "refused" && got != "timed out" {
+                    return Verdict::Fail;
+                }
+                match self.counter {
+                    Counter::Rose(n) => verdict_of(n >= 1),
+                    Counter::NotMeasured | Counter::Unread(_) => Verdict::Unproven,
+                }
+            }
+        }
     }
 }
 
-#[allow(dead_code)]
 fn verdict_of(ok: bool) -> Verdict {
     if ok { Verdict::Ok } else { Verdict::Fail }
 }

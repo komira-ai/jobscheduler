@@ -38,10 +38,16 @@ block return out quick proto { tcp, udp } from any to any user { 600, 601, 602 }
   it. An endpoint inside it is refused when the policy is read, so no later edit opens it.
 - `keep state` lets the answers of an allowed connection come back.
 - IPv6 is refused for the range, `::1` included.
-- A refused connection is `block return`: the pool user's `connect` fails at once with
-  "connection refused" instead of hanging to its timeout, and a test can tell pf's refusal
-  from a host that is simply not there. A connect to the node's own address is the
-  exception (below).
+- The blocking rules are `block return`, but on macOS a blocked TCP connect is **not
+  refused**: it is dropped silently, so a job's `connect` to an unlisted address waits for
+  its own timeout (a probe prints "timed out"). pf builds the reset only after
+  `pf_check_proto_cksum` accepts the packet (xnu `bsd/net/pf.c`, `pf_test_rule`), and an
+  outbound SYN on an interface set up with TCP checksum assist has not had its checksum
+  completed when pf sees it (`pf_inet_hook`, `bsd/net/pf_ioctl.c`). A first run on a Mac
+  showed this off the host as well as on the node's own address. Because a timeout looks
+  like a host that is not there, the root test proves a block by the blocking rule's packet
+  counter (`pfctl -a <anchor> -s rules -vv`), not by the error. The source suggests UDP gets
+  an ICMP unreachable (`pf_send_icmp`); no run has shown it.
 - The policy is refused (nothing is rendered) for an empty range, a range that starts
   below uid 500 (system accounts) or ends past the last uid, an endpoint that is not an
   IPv4 literal with a port (a name would need DNS; IPv6 is denied), port 0, and an endpoint
@@ -158,13 +164,8 @@ pf by uid is a control on the packets a pool user's sockets send, and it has lim
   with file modes, or check the peer uid).
 - **The node's own address.** A connection from a pool user to the node's own non-loopback
   address leaves through `lo0` and meets the rules as any other destination: blocked
-  unless that address is a listed endpoint. It is blocked but not refused at once: macOS
-  pf builds the reset of a `block return` only after it verifies the TCP checksum of the
-  packet, and a SYN going out `lo0` (`if_loop.c` sets `lo0`'s hardware-assist flags to include TCP and UDP checksum, which
-  `pf_inet_hook` reads to decide whether to complete the checksum before pf runs; the
-  checksum-valid flags `lo0` sets on its own loop path come after pf's output hook) still has its
-  checksum to be computed, so no reset is sent and the connect times out. No rule changes
-  this; destinations that are not the node's own address are refused at once.
+  unless that address is a listed endpoint (and dropped, not refused, like every blocked
+  TCP connect).
 - **DNS and mDNSResponder.** The anchor lists IPv4 literals, so a pool user needs no
   resolver, but the unix socket to mDNSResponder is not a packet and is outside pf:
   a pool user can ask the system resolver, which sends the query as its own uid
@@ -176,8 +177,8 @@ pf by uid is a control on the packets a pool user's sockets send, and it has lim
 - **Order in the main ruleset.** A `quick` rule before the `anchor` line that passes the
   pool's traffic is evaluated first.
 - **Not verified on a Mac yet.** The rules' text and the logic are tested against a fake.
-  What pf does with them (the `user` range, the reset a `block return` sends to the local
-  socket, the readback and its stability, the output of `pfctl -E` and `-s info`) is shown
+  What pf does with them (the `user` range, whether a `block return` answers a TCP connect
+  at all, the readback and its stability, the output of `pfctl -E` and `-s info`) is shown
   by `tests/pf_as_root.rs`, which a farm Mac runs through a held script.
 
 ## The root test
@@ -185,8 +186,11 @@ pf by uid is a control on the packets a pool user's sockets send, and it has lim
 `tests/pf_as_root.rs`, `#[ignore]`d (root, loads pf rules under its own anchor
 `com.apple/js-mac-provision-test`). As pool uids it connects, through the program's `probe`
 verb, to a listed endpoint (this Mac's own address and a port of a listener the test
-opens): connected; to `169.254.169.254:80` and to a documentation address: refused; to
-loopback: connected; to another port of this Mac's own address: refused or timed out,
-never connected (see above). The probes are all recorded
-and printed as a table before the test judges them. The uids on each side of the
-range and a control uid are not refused by anything. After `remove` the pool uid connects again.
+opens): connected; to loopback: connected. To another port of this Mac's own address, to
+`169.254.169.254:80` and to a documentation address it must be blocked: the packet counter
+of the blocking rule (`pfctl -a <anchor> -s rules -vv`, read before and after) rises and the
+connect ends "refused" or "timed out", never "connected" and never another error; a probe
+whose counters could not be read is reported `UNPROVEN` and fails. Each row of the printed
+table also shows the control uid's outcome to the same target. The uids on each side of the
+range and a control uid are not refused by anything. After `remove` the pool uid connects
+again.
