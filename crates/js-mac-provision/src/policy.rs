@@ -85,9 +85,6 @@ impl UidRange {
     /// [`MAX_UID`].
     pub fn new(start: u32, count: u32) -> Result<Self, PolicyError> {
         let span = count.checked_sub(1).ok_or(PolicyError::EmptyRange)?;
-        if count > MAX_POOL_UIDS {
-            return Err(PolicyError::TooManyUids { count });
-        }
         if start < MIN_UID {
             return Err(PolicyError::SystemUids { start });
         }
@@ -95,6 +92,9 @@ impl UidRange {
             .checked_add(span)
             .filter(|last| *last <= MAX_UID)
             .ok_or(PolicyError::UidOverflow { start, count })?;
+        if count > MAX_POOL_UIDS {
+            return Err(PolicyError::TooManyUids { count });
+        }
         Ok(Self { start, last })
     }
 
