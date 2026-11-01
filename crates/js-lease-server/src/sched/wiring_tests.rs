@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +13,7 @@ use js_agent_wire::Hello;
 use js_lease::{ManualClock, Timestamp};
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, RegisteredProvider};
+use js_testkit::dir::TestDir;
 use js_types::{Admission, ClassId, HostId, LeaseId, Request, ResourceClass, Resources};
 use serde_json::{Value, json};
 
@@ -39,14 +40,12 @@ memory_bytes = 17179869184
 arch = "x86_64"
 "#;
 
-/// An empty directory of the test's own under the target directory.
-fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/placement_wiring")
-        .join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// An empty directory of the test's own under the target directory, removed when the
+/// guard is dropped. Its path carries the process id and a counter beside `name`, so two
+/// runs of one test at once (two test binaries, or a test run twice) never share it.
+fn scratch(name: &str) -> TestDir {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/placement_wiring");
+    TestDir::under(root, name)
 }
 
 fn write(dir: &Path, name: &str, text: &str, mode: u32) -> OsString {
@@ -99,12 +98,20 @@ fn hello(host: &str) -> Hello {
     serde_json::from_value(body).unwrap()
 }
 
+/// The agent side of a server, the provider of its registry, and the directory of their
+/// files. The fields drop in order, so the directory goes after what writes into it.
+struct Served {
+    agents: Arc<Agents>,
+    provider: RegisteredProvider,
+    _dir: TestDir,
+}
+
 /// The agent side of a server over [`POOL`] with `extra` flags, assembled as the server
 /// assembles it, with hosts `h1` and `h2` registered, and the provider of its registry
 /// serving the class `share`.
-fn serving(name: &str, extra: &[&str]) -> (Arc<Agents>, RegisteredProvider) {
+fn serving(name: &str, extra: &[&str]) -> Served {
     let dir = scratch(name);
-    let config = config(&dir, extra);
+    let config = config(dir.path(), extra);
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(1_000_000)));
     let (_source, agents) =
         assemble(config.hosts, config.usage, &clock, &config.state_file).unwrap();
@@ -114,7 +121,34 @@ fn serving(name: &str, extra: &[&str]) -> (Arc<Agents>, RegisteredProvider) {
         agents.registry.hello(&hello(host), &credential).unwrap();
     }
     let provider = agents.registry.provider().with_classes(vec![sharing()]);
-    (agents, provider)
+    Served {
+        agents,
+        provider,
+        _dir: dir,
+    }
+}
+
+/// Asserts that two fixtures made under one name at once have two directories, and that
+/// dropping one leaves the other's files. It catches a scratch path made of the name alone,
+/// which two runs of one test would share and remove under each other.
+#[test]
+fn fixtures_of_one_name_have_their_own_directories() {
+    let first = scratch("same");
+    let second = scratch("same");
+    assert_ne!(first.path(), second.path());
+    let file = write(first.path(), "kept", "x", 0o600);
+    drop(second);
+    assert!(Path::new(&file).is_file());
+    let one = serving("same_served", &[]);
+    let two = serving("same_served", &[]);
+    assert_ne!(one._dir.path(), two._dir.path());
+    let state = one._dir.path().join("leases.toml");
+    drop(two);
+    assert!(
+        one._dir.path().join("agent-tokens").is_file(),
+        "{}",
+        state.display()
+    );
 }
 
 fn sharing() -> ResourceClass {
@@ -151,10 +185,10 @@ fn by_default_the_registry_places_and_a_sharing_class_is_refused() {
         ("default", vec![]),
         ("registry", vec!["--placement", "registry"]),
     ] {
-        let (_agents, mut provider) = serving(name, &extra);
-        let ack = provider.start(sharing_spec(1));
+        let mut served = serving(name, &extra);
+        let ack = served.provider.start(sharing_spec(1));
         assert_eq!(ack, StartAck::Refused(RefusalCode::UnsupportedClass));
-        assert!(provider.booked().is_empty());
+        assert!(served.provider.booked().is_empty());
     }
 }
 
@@ -167,7 +201,11 @@ fn by_default_the_registry_places_and_a_sharing_class_is_refused() {
 /// order; a guard, it fails if a listing shows only the first lease.
 #[test]
 fn with_the_flag_the_scheduler_places_the_leases() {
-    let (agents, mut provider) = serving("sched", &["--placement", "js-sched"]);
+    let Served {
+        agents,
+        mut provider,
+        _dir,
+    } = serving("sched", &["--placement", "js-sched"]);
     let first = provider.start(sharing_spec(1));
     let second = provider.start(sharing_spec(2));
     assert_eq!(
@@ -203,9 +241,9 @@ fn with_the_flag_the_scheduler_places_the_leases() {
 /// empty one), and the ninth, with `h2`'s eight cores booked, goes to `h1`.
 #[test]
 fn with_the_flag_a_host_with_room_takes_a_second_lease_and_a_full_one_none() {
-    let (_agents, mut provider) = serving("full", &["--placement", "js-sched"]);
+    let mut served = serving("full", &["--placement", "js-sched"]);
     let hosts: Vec<Option<String>> = (1..=9)
-        .map(|n| host_of(&provider.start(sharing_spec(n))).map(str::to_owned))
+        .map(|n| host_of(&served.provider.start(sharing_spec(n))).map(str::to_owned))
         .collect();
     let named = |host: &str| Some(host.to_owned());
     let mut expected = vec![named("h2"); 8];
