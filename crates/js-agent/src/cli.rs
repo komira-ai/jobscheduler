@@ -118,7 +118,10 @@ pub struct Cli {
     /// enforces project quota; then it advertises `scratch-quota=project` and
     /// `scratch-default-gib`, books `--scratch-default-gib` for a run that names no
     /// `disk_bytes`, and gives each run's scratch directory a block limit of the bytes it
-    /// books and an inode limit of `--scratch-max-inodes`. It also refuses to start when a
+    /// books and an inode limit of `--scratch-max-inodes`. With `--runtime crun` the same
+    /// project covers the run's lease directory, made beside the run's directory in the
+    /// scratch root, so one bound holds what a job writes to `/scratch`, `/work` and
+    /// `/root`. It also refuses to start when a
     /// `--mount-root` is on the same file system as the scratch root (a read-write mount
     /// there would be an unbounded path to its disk); `--mount-root-ro` roots may be there.
     /// Needs `--scratch-root`.

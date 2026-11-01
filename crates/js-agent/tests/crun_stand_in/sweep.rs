@@ -402,3 +402,106 @@ fn a_removal_that_cannot_remove_the_sidecar_fails() {
     );
     assert_eq!(runtime.list_labelled().expect("lists").len(), 1);
 }
+
+/// A runtime on `node` that makes its leases in `runs`, registered as `host_id`.
+fn open_beside(node: &Node, host_id: &str, runs: &std::path::Path) -> CrunRuntime {
+    let mut settings = node.settings("/root");
+    settings.host_id = host_id.to_owned();
+    settings.oci.leases_in = Some(runs.to_owned());
+    CrunRuntime::open_with(settings, Arc::new(NoImages), Node::hooks(LONG, LONG)).expect("opens")
+}
+
+/// The directory name a lease of `run` has in the store for the agent `runtime` is: the
+/// leaf of the lease directory it names, less the prefix.
+fn store_name(runtime: &CrunRuntime, run: &str) -> String {
+    let lease = runtime.lease_dir(run).expect("a lease directory");
+    let leaf = lease.file_name().and_then(|n| n.to_str()).expect("a name");
+    leaf.strip_prefix(".lease-").expect("the prefix").to_owned()
+}
+
+/// Proves an upgrade leaves nothing in the store: a runtime that makes its leases beside the
+/// runs removes, as it opens, the leases of its own agent that an agent from before left in the
+/// store (`js-<tag>-<run>`, whatever the ledger says of them), and leaves another agent's
+/// lease and the store's own directories. Catches a lease of the old layout that stays in the
+/// store for ever, unswept and uncounted, and a sweep that takes another agent's lease.
+#[test]
+fn the_start_up_sweep_removes_the_own_leases_an_older_agent_left_in_the_store() {
+    let node = Node::new("sweep-legacy");
+    let runs = node.dir.join("leases-beside");
+    std::fs::create_dir(&runs).expect("runs");
+    let (mine, theirs) = {
+        let probe = open_beside(&node, "node-1", &runs);
+        let other = open_beside(&node, OTHER, &runs);
+        (store_name(&probe, "old"), store_name(&other, "old"))
+    };
+    for name in [&mine, &theirs] {
+        let dir = node.lease_of(name);
+        std::fs::create_dir_all(dir.join("upper")).expect("a lease");
+        std::fs::write(dir.join("upper/file"), b"left").expect("a file");
+    }
+    let _runtime = open_beside(&node, "node-1", &runs);
+    assert!(!node.lease_of(&mine).exists(), "the own lease is removed");
+    assert!(node.lease_of(&theirs).is_dir(), "another agent's stays");
+    assert!(
+        node.scratch.join("oci-images").is_dir(),
+        "so does the store"
+    );
+}
+
+/// Proves the removal of one lease takes the store's copy of it too: a lease of the old layout
+/// that the ledger names is removed with its cgroup when the runtime removes it as an orphan.
+/// Catches a lease whose sidecar is dropped while its directory stays in the store.
+#[test]
+fn removing_an_orphan_removes_its_lease_in_the_store() {
+    let node = Node::new("sweep-legacy-orphan");
+    let runs = node.dir.join("leases-beside");
+    std::fs::create_dir(&runs).expect("runs");
+    let mut runtime = open_beside(&node, "node-1", &runs);
+    // The old layout: the lease is made in the store, with its sidecar.
+    let mut old = node.open();
+    let id = staged(&node, &mut old, "r1-exit");
+    drop(old);
+    assert!(node.lease_of(&id.0).is_dir(), "the lease is in the store");
+    // The files a made cgroup has (the stand-in's `crun delete` removes them; the cgroup of a
+    // container that is gone has none).
+    for entry in std::fs::read_dir(node.cgroup_of(&id.0))
+        .expect("the cgroup")
+        .flatten()
+    {
+        if entry.path().is_file() {
+            std::fs::remove_file(entry.path()).expect("a cgroup file");
+        }
+    }
+    assert!(runtime.remove_orphan("r1-exit").expect("removed"));
+    assert!(
+        left_of(&node, &id.0).is_empty(),
+        "{:?}",
+        left_of(&node, &id.0)
+    );
+}
+
+/// Proves the store sweep takes only `js-<own tag>-` and not what merely starts like it:
+/// another agent's lease, an entry named by this agent's tag with no dash after it, and one
+/// that has the tag inside another string stay, while this agent's lease goes. Catches a
+/// prefix match that reaches into a neighbour's name.
+#[test]
+fn the_store_sweep_does_not_take_names_that_only_start_like_its_own() {
+    let node = Node::new("sweep-legacy-prefix");
+    let runs = node.dir.join("leases-beside");
+    std::fs::create_dir(&runs).expect("runs");
+    let mine = {
+        let probe = open_beside(&node, "node-1", &runs);
+        store_name(&probe, "old")
+    };
+    let tag = mine.strip_suffix("-old").expect("a run suffix").to_owned();
+    let longer = format!("{tag}0-old");
+    let inside = format!("x{mine}");
+    for name in [&mine, &tag, &longer, &inside] {
+        std::fs::create_dir_all(node.lease_of(name)).expect("an entry");
+    }
+    let _runtime = open_beside(&node, "node-1", &runs);
+    assert!(!node.lease_of(&mine).exists(), "the own lease is removed");
+    for kept in [&tag, &longer, &inside] {
+        assert!(node.lease_of(kept).is_dir(), "{kept} stays");
+    }
+}

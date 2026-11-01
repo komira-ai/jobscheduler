@@ -198,8 +198,35 @@ impl ScratchRoot {
     ///
     /// The stale directory cannot be removed or the new one cannot be made.
     pub fn create(&self, run_id: &str) -> io::Result<PathBuf> {
-        self.remove(run_id)?;
-        let dir = self.of(run_id);
+        self.make_entry(run_id)
+    }
+
+    /// Makes the empty directory of the runtime beside the run's directory that `lease` names
+    /// (the last component of the path [`Runtime::lease_dir`](super::Runtime::lease_dir)
+    /// gives), the way [`ScratchRoot::create`] makes the run's, and returns its path in this
+    /// root. One left by an earlier agent is removed first.
+    ///
+    /// # Errors
+    ///
+    /// The path has no name that is one ordinary path component, the stale directory cannot
+    /// be removed, or the new one cannot be made.
+    pub fn create_lease(&self, lease: &Path) -> io::Result<PathBuf> {
+        self.make_entry(lease_name(lease)?)
+    }
+
+    /// Removes the directory [`ScratchRoot::create_lease`] makes for `lease`, with everything
+    /// in it, as [`ScratchRoot::remove`] does; one that is not there is not an error.
+    ///
+    /// # Errors
+    ///
+    /// As [`ScratchRoot::remove`].
+    pub fn remove_lease(&self, lease: &Path) -> io::Result<()> {
+        remove_entry(&self.path, lease_name(lease)?)
+    }
+
+    fn make_entry(&self, name: &str) -> io::Result<PathBuf> {
+        remove_entry(&self.path, name)?;
+        let dir = self.path.join(name);
         let mode = self.layout.dir_mode();
         fs::DirBuilder::new().mode(mode).create(&dir)?;
         fs::set_permissions(&dir, fs::Permissions::from_mode(mode))?;
@@ -244,6 +271,14 @@ impl ScratchRoot {
             name == Self::LOCK_FILE.as_bytes() || kept.iter().any(|run| run.as_bytes() == name)
         })
     }
+}
+
+/// The name of the directory `lease` as an entry of the scratch root.
+fn lease_name(lease: &Path) -> io::Result<&str> {
+    lease
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::ErrorKind::InvalidInput.into())
 }
 
 fn open_root(path: &Path) -> io::Result<OwnedFd> {

@@ -712,8 +712,20 @@ impl Lifecycle {
         // file made earlier would carry no project and escape the count. A failure leaves
         // the directory to the cleanup, which removes it and clears the project.
         let started = started.and_then(|scratch| {
-            let bound = self.bind(&scratch, slot, booked, events);
-            bound.map(|()| scratch).map_err(|why| failed(why.into()))
+            // What the runtime keeps beside the run's directory (a container's `/work` overlay
+            // and home) is made empty and put under the same project: one bound, one usage,
+            // for everything the job writes.
+            let lease = self
+                .runtime
+                .lease_dir(run_id)
+                .map(|dir| self.config.scratch.create_lease(&dir))
+                .transpose()
+                .map_err(failed)?;
+            for dir in std::iter::once(&scratch).chain(lease.as_ref()) {
+                self.bind(dir, slot, booked, events)
+                    .map_err(|why| failed(why.into()))?;
+            }
+            Ok(scratch)
         });
         // The files are written before the container exists, and only here: a start that
         // is sent again finds its job above and never reaches this point. `admit` has

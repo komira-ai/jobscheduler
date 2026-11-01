@@ -133,6 +133,7 @@ impl Lifecycle {
         } = self;
         let job = &mut jobs[index];
         let run_id = job.run_id.clone();
+        let lease = runtime.lease_dir(&run_id);
         loop {
             let stage = job.stage.clone();
             // The checks are owed from before the first step of the cleanup until they have
@@ -163,7 +164,7 @@ impl Lifecycle {
                         return;
                     }
                 },
-                Stage::Scratch => match remove_run_dirs(config, &run_id) {
+                Stage::Scratch => match remove_run_dirs(config, &run_id, lease.as_deref()) {
                     Ok(()) => {
                         // The tree is gone; now the bound comes off its project, and the
                         // slot stays held until the project reads no usage (the file system
@@ -307,8 +308,15 @@ impl Lifecycle {
 
 /// Removes the run's scratch directory and its files directory; both are tried, and the
 /// first failure is the one reported.
-fn remove_run_dirs(config: &Config, run_id: &str) -> std::io::Result<()> {
-    let scratch = config.scratch.remove(run_id);
+fn remove_run_dirs(
+    config: &Config,
+    run_id: &str,
+    lease: Option<&std::path::Path>,
+) -> std::io::Result<()> {
+    // The runtime removes its own directory with the container; one it left (a start that
+    // failed after the directory was made) goes with the run's.
+    let lease = lease.map_or(Ok(()), |dir| config.scratch.remove_lease(dir));
+    let scratch = config.scratch.remove(run_id).and(lease);
     let files = config
         .files
         .as_ref()

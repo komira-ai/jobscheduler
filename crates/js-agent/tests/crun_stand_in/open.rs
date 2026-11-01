@@ -208,3 +208,35 @@ fn the_leases_cgroup_must_be_named_actions() {
     }
     open(node.settings("/root")).expect("actions opens");
 }
+
+/// Proves a runtime opened to make its leases beside the runs' directories names the lease
+/// directory of a run id in that directory (`.lease-` and the container's name), one that
+/// cannot name a container has none, and a runtime opened without that names none. Catches a
+/// lifecycle that is told a lease directory for a runtime that keeps its leases in the store,
+/// and a name that could be a run's own directory.
+#[test]
+fn a_runtime_with_leases_beside_the_runs_names_a_lease_directory_for_a_run() {
+    let node = Node::new("open-lease-dir");
+    let runs = node.dir.join("runs");
+    std::fs::create_dir(&runs).expect("the runs directory");
+    let open = |settings| {
+        CrunRuntime::open_with(settings, Arc::new(NoImages), Node::hooks(LONG, LONG))
+            .expect("opens")
+    };
+    let mut beside = node.settings("/root");
+    beside.oci.leases_in = Some(runs.clone());
+    let beside = open(beside);
+    let lease = beside.lease_dir("r1").expect("a lease directory");
+    let leaf = lease
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("a name");
+    assert_eq!(lease.parent(), Some(runs.as_path()));
+    assert!(
+        leaf.starts_with(".lease-js-") && leaf.ends_with("-r1"),
+        "{leaf}"
+    );
+    assert_eq!(beside.lease_dir("a/b"), None);
+    drop(beside);
+    assert_eq!(open(node.settings("/root")).lease_dir("r1"), None);
+}

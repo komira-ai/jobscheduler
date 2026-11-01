@@ -130,7 +130,20 @@ impl Lifecycle {
         // slots they sit on is read before the sweep, as usage, and their projects are
         // cleared after the trees are gone.
         let leftover = this.leftover_slots(&mut events);
-        this.config.scratch.sweep(owned.iter().copied());
+        // A runtime that keeps a directory of its own beside a run's keeps it with the run's.
+        let leases: Vec<String> = owned
+            .iter()
+            .filter_map(|run| this.runtime.lease_dir(run))
+            .filter_map(|dir| {
+                dir.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .collect();
+        let kept = owned
+            .iter()
+            .copied()
+            .chain(leases.iter().map(String::as_str));
+        this.config.scratch.sweep(kept);
         if let Some(files) = &this.config.files {
             // A root that cannot be listed leaves earlier runs' secrets in place; say so.
             if let Err(why) = files.sweep(owned.iter().copied()) {
