@@ -17,11 +17,13 @@ fn cut_over(name: &str, hello: bool) -> Rig {
     let rig = running(Rig::new(name));
     // Time passes between the placing of the cordon and the start of the new agent.
     rig.world.pause(Duration::from_secs(5));
-    let spy = Spy::new(&rig);
-    if !hello {
-        *spy.start_leaves.borrow_mut() = Some(("active", "running"));
-    }
-    let done = spy.cutover(&rig);
+    let done = {
+        let spy = Spy::new(&rig);
+        if !hello {
+            *spy.start_leaves.borrow_mut() = Some(("active", "running"));
+        }
+        spy.cutover(&rig)
+    };
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     rig.kill.disarm();
     rig
