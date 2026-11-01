@@ -115,21 +115,11 @@ impl Client {
 
 /// What is wrong with an entry, without a value from it: serde's own text quotes the value
 /// it found (`invalid type: string "..."`), and the body may hold the job's output. A
-/// missing field is named, since that text holds only the field's name.
+/// missing field is named, since that text holds only the field's name from the schema.
 fn describe(why: &serde_path_to_error::Error<serde_json::Error>) -> String {
     let inner = why.inner().to_string();
-    let missing = inner
-        .strip_prefix("missing field `")
-        .and_then(|rest| rest.strip_suffix('`'));
-    match missing {
-        Some(name) if name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') => {
-            format!("missing field `{name}`")
-        }
-        _ => match why.inner().classify() {
-            serde_json::error::Category::Data => {
-                format!("wrong type or value at `{}`", why.path())
-            }
-            _ => "not valid JSON".to_owned(),
-        },
+    match inner.strip_prefix("missing field `") {
+        Some(rest) => format!("missing field `{}`", rest.trim_end_matches('`')),
+        None => format!("wrong type or value at `{}`", why.path()),
     }
 }
