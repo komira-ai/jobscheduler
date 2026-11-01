@@ -76,6 +76,9 @@ pub(crate) struct Mark {
     deadline: Timestamp,
     assigned: bool,
     capped: bool,
+    /// The end of the host's tail when the mark was made ([`cost::DrainCost::tail_end`]);
+    /// `None` for an assigned mark.
+    tail_end: Option<u64>,
     /// For a mark put back from the ledger: until when it stands while its host is
     /// unknown to the registry. Cleared when the host is seen.
     claim_by: Option<Timestamp>,
@@ -91,6 +94,7 @@ pub(crate) struct Revived {
     /// The request had given up `max_reserve_attempts` hosts or more when the mark was
     /// made.
     pub(crate) capped: bool,
+    pub(crate) tail_end: Option<u64>,
     pub(crate) claim_by: Timestamp,
 }
 
@@ -157,6 +161,7 @@ impl Marks {
             deadline: mark.deadline,
             assigned: mark.assigned,
             capped: mark.capped,
+            tail_end: mark.tail_end,
             claim_by: Some(mark.claim_by),
         };
         self.0.insert(mark.host, revived);
@@ -208,7 +213,7 @@ impl Marks {
             at: mark.at,
             deadline: mark.deadline,
             assigned: mark.assigned,
-            tail_end: None,
+            tail_end: mark.tail_end,
         });
         view.collect()
     }
@@ -367,8 +372,15 @@ impl Ctx<'_> {
         })
     }
 
-    /// A mark for `id` made now, on a host that waits `wait_ms` to empty.
-    fn mark(&self, id: &RequestId, request: &Request, wait_ms: u64, at: Timestamp) -> Mark {
+    /// A mark for `id` made now, on a host that waits `wait_ms` to empty and whose tail
+    /// ends at `tail_end`.
+    fn mark(
+        &self,
+        id: &RequestId,
+        request: &Request,
+        (wait_ms, tail_end): (u64, Option<u64>),
+        at: Timestamp,
+    ) -> Mark {
         let settings = self.pass.settings;
         let key = RequestKey::from(id);
         let given_up = self.requests.give_ups(&key);
@@ -381,6 +393,7 @@ impl Ctx<'_> {
             deadline: self.pass.now.plus(Duration::from_millis(deadline)),
             assigned: false,
             capped: given_up >= settings.max_reserve_attempts,
+            tail_end,
             claim_by: None,
         }
     }
@@ -389,7 +402,7 @@ impl Ctx<'_> {
     fn assign(&mut self, host: &HostId, id: &RequestId, request: &Request, at: Timestamp) {
         let mark = Mark {
             assigned: true,
-            ..self.mark(id, request, 0, at)
+            ..self.mark(id, request, (0, None), at)
         };
         self.marks.place(host.clone(), mark);
     }
@@ -467,10 +480,10 @@ impl Ctx<'_> {
         let cheapest = cost::drain_cost(&loads, now.millis()).into_iter().next();
         let chosen = cheapest.and_then(|cost| {
             let fact = live.iter().find(|fact| fact.id.as_str() == cost.id);
-            fact.map(|fact| (fact.id.clone(), cost.wait_ms))
+            fact.map(|fact| (fact.id.clone(), (cost.wait_ms, cost.tail_end)))
         });
-        if let Some((host, wait_ms)) = chosen {
-            let mark = self.mark(id, request, wait_ms, now);
+        if let Some((host, tail)) = chosen {
+            let mark = self.mark(id, request, tail, now);
             self.marks.place(host, mark);
         }
     }

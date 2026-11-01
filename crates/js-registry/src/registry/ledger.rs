@@ -111,7 +111,7 @@ fn export(state: &State) -> Vec<ReservationRecord> {
             reserved_at: mark.at,
             deadline: mark.deadline,
             assigned: mark.assigned,
-            tail_end: None,
+            tail_end: mark.tail_end,
         });
         let queued = Queued {
             place: u32::try_from(place).unwrap_or(u32::MAX),
@@ -236,6 +236,7 @@ fn revive(
             deadline: held.deadline,
             assigned: held.assigned,
             capped: record.give_ups >= ctx.max_reserve_attempts,
+            tail_end: held.tail_end,
             claim_by: ctx.claim_by,
         };
         marked = standing && state.marks.revive(revived);

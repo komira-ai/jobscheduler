@@ -36,13 +36,28 @@ impl TailCounters {
     /// Counts a lease started by `starter` on a host whose mark is held by `holder`
     /// (`None` for a host with no mark, which counts nothing).
     pub(crate) fn started(&mut self, holder: Option<&RequestId>, starter: Option<&RequestId>) {
-        let _ = (holder, starter);
+        let Some(holder) = holder else {
+            return;
+        };
+        self.started_on_marked += 1;
+        self.backfilled += u64::from(starter != Some(holder));
     }
 
     /// Counts a lease that ended at `ended_at` (milliseconds on the registry's clock)
     /// with the estimated end `estimate`, if the feed had one.
     pub(crate) fn ended(&mut self, ended_at: u64, estimate: Option<u64>) {
-        let _ = (ended_at, estimate);
+        let Some(estimate) = estimate else {
+            self.ended_unestimated += 1;
+            return;
+        };
+        self.ended_estimated += 1;
+        let error = i128::from(ended_at) - i128::from(estimate);
+        let error = error.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+        // The clamp keeps it in range.
+        let error = i64::try_from(error).unwrap_or_default();
+        self.error_sum_ms = self.error_sum_ms.saturating_add(error);
+        let bucket = ERROR_EDGES_MS.partition_point(|edge| *edge < error);
+        self.error_buckets[bucket] += 1;
     }
 }
 

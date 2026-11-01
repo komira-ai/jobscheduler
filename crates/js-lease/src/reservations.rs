@@ -68,7 +68,7 @@ fn restore(
                 reserved_at: Timestamp::from_millis(reserved_at),
                 deadline: Timestamp::from_millis(deadline).max(boot.plus(settings.boot_grace())),
                 assigned: stored.assigned,
-                tail_end: None,
+                tail_end: stored.tail_end_ms,
             })
         }
         _ => {
@@ -81,6 +81,9 @@ fn restore(
     let id = &stored.request_id;
     if stored.assigned && held.is_none() {
         return Err(format!("reservation {id} is assigned but holds no host"));
+    }
+    if stored.tail_end_ms.is_some() && held.is_none() {
+        return Err(format!("reservation {id} has a tail end but holds no host"));
     }
     let queued = match (stored.queue_place, stored.queued_since_ms) {
         (None, None) => None,
@@ -131,7 +134,7 @@ pub(crate) fn stored(
         reserved_at_ms: held.map(|held| held.reserved_at.millis()),
         deadline_ms: held.map(|held| held.deadline.millis()),
         assigned: held.is_some_and(|held| held.assigned),
-        tail_end_ms: None,
+        tail_end_ms: held.and_then(|held| held.tail_end),
         queue_place: record.queued.map(|queued| queued.place),
         queued_since_ms: record.queued.map(|queued| queued.since.millis()),
         give_ups: record.give_ups,

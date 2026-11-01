@@ -9,6 +9,7 @@ use js_types::{Admission, HostId, LeaseId};
 
 use super::{HostState, Record, Registry, State};
 use crate::credential::Binding;
+use crate::lives;
 use crate::whole::exclusive::Exclusive;
 
 impl Registry {
@@ -18,12 +19,15 @@ impl Registry {
     /// stop (the first may have crossed it) and the last one shows it serving with
     /// nothing held (design `whole-node.md` section 8).
     pub(crate) fn stop(&self, lease: &LeaseId) -> Observed {
+        let ended_at = self.shared.clock.now().millis();
+        let source = self.shared.lives.get().map(|lives| &**lives);
         let mut guard = self.lock();
         let State {
             book,
             records,
             runs,
             requests,
+            tail,
             ..
         } = &mut *guard;
         runs.stop_lease(lease);
@@ -31,6 +35,12 @@ impl Registry {
         if let Observed::Present { host } = book.read(lease) {
             let record = records.get_mut(&host);
             record.into_iter().for_each(|record| {
+                // The lease the host started last ends: the error of its estimate.
+                let ends = record.bound.filter(|(held, _)| held == lease);
+                let estimates = lives::est_ends(source, runs, ends, record.started_at);
+                estimates
+                    .into_iter()
+                    .for_each(|estimate| tail.ended(ended_at, estimate));
                 record.exclusive = record.exclusive.stopped();
             });
         }
