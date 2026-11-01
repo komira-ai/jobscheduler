@@ -1,6 +1,7 @@
 //! The hello a host sends: what was detected, lowered by the operator's flags.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use js_agent_wire::limits::MAX_DISK_BYTES;
 use js_agent_wire::{Hello, InstanceIdentity, Phase, ProtocolRange, WireShape};
@@ -70,6 +71,22 @@ fn capabilities(
     }
 }
 
+/// The bytes of the work volume to offer, as [`disk`] and the gauge ([`crate::disk`]) say
+/// them: the free space of `root` less `kept_back` less the low-water mark.
+///
+/// # Errors
+///
+/// `df` cannot be run or printed no free space.
+pub(crate) fn offered_on(
+    runner: &dyn CommandRunner,
+    root: &Path,
+    kept_back: u64,
+    low_water_gib: Option<u64>,
+) -> Result<u64, String> {
+    free_bytes(runner, root)
+        .map(|free| offered_disk_bytes(free.saturating_sub(kept_back), low_water_gib))
+}
+
 /// The bytes of disk to offer: `free` minus the low-water mark of `low_water_gib` GiB,
 /// at least 0 and at most what the wire takes.
 pub fn offered_disk_bytes(free: u64, low_water_gib: Option<u64>) -> u64 {
@@ -85,7 +102,7 @@ pub fn offered_disk_bytes(free: u64, low_water_gib: Option<u64>) -> u64 {
 /// are never two numbers. Without the flag there is no work volume to speak of and nothing
 /// is offered or reported. A volume that cannot be read is a warning, and nothing is
 /// offered or reported, so a job that needs disk is not placed on a guess. It is read when
-/// the hello is made, not again.
+/// the hello is made; [`crate::disk`] reads it again.
 fn disk(
     cli: &Cli,
     runner: &dyn CommandRunner,
@@ -94,10 +111,8 @@ fn disk(
     let Some(root) = &cli.scratch_root else {
         return (0, None, None);
     };
-    match free_bytes(runner, root) {
-        Ok(free) => {
-            let offered =
-                offered_disk_bytes(free.saturating_sub(kept_back), cli.scratch_low_water_gib);
+    match offered_on(runner, root, kept_back, cli.scratch_low_water_gib) {
+        Ok(offered) => {
             let gib = (DISK_GIB.to_owned(), (offered / GIB).to_string());
             (offered, Some(gib), None)
         }

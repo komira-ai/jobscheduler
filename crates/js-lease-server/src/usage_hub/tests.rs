@@ -194,6 +194,7 @@ fn beat(host: &str, results: Vec<RunResult>) -> Heartbeat {
         exclusive_ready: None,
         exclusive_refused: None,
         load: None,
+        disk_gib: None,
     }
 }
 

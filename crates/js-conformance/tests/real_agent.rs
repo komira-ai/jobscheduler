@@ -256,6 +256,7 @@ impl Agent {
             exclusive_ready: self.prepared.take(),
             exclusive_refused: None,
             load: None,
+            disk_gib: None,
         };
         let reply = registry.heartbeat(&message, &credential()).unwrap();
         self.prepared = reply.exclusive.clone();

@@ -244,6 +244,13 @@ pub struct Heartbeat {
         deserialize_with = "crate::load::lenient_load"
     )]
     pub load: Option<NodeLoad>,
+    /// The whole GiB of free scratch disk the host offers now (the hello's `disk-gib`,
+    /// read again), at most [`limits::MAX_DISK_GIB`]. Absent means unchanged since the last
+    /// value the server took (the hello's, to begin with): the agent sends it only when it
+    /// differs, and again until a heartbeat that carried it is answered. A server from before
+    /// the field ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_gib: Option<u64>,
 }
 
 /// The server's verdict on a [`RunResult`].
@@ -388,6 +395,7 @@ impl fmt::Debug for Heartbeat {
             .field("exclusive_ready", &self.exclusive_ready)
             .field("exclusive_refused", &self.exclusive_refused)
             .field("load", &self.load)
+            .field("disk_gib", &self.disk_gib)
             .finish()
     }
 }
@@ -415,6 +423,9 @@ impl Heartbeat {
         )?;
         if let Some(taint) = &self.taint {
             taint.check(at)?;
+        }
+        if let Some(gib) = self.disk_gib {
+            check::range(at.field("disk_gib"), gib, 0, limits::MAX_DISK_GIB)?;
         }
         self.check_exclusive(at)
     }

@@ -247,6 +247,7 @@ mod credential;
 pub mod crun;
 #[cfg(target_os = "linux")]
 pub mod crun_host;
+pub mod disk;
 pub mod egress;
 mod exclusive;
 mod facts;
@@ -751,6 +752,16 @@ fn execute(
             SUGGESTED_WATCH_DIRS.join(", ")
         );
     }
+    // The scratch disk is read again for the heartbeats, over the same volume and store as
+    // the hello's.
+    let reserve = bundle.as_ref().map(|settings| disk::Reserve {
+        settings: settings.clone(),
+        host: host.clone(),
+    });
+    let gauge = cli.scratch_root.clone().map(|root| {
+        let clock = services.machine.clock();
+        disk::ScratchDisk::new(root, cli.scratch_low_water_gib, commands, reserve, clock)
+    });
     let seams = Seams {
         machine: &services.machine,
         hook: services.worker_hook,
@@ -776,6 +787,9 @@ fn execute(
     }
     if let Some(file) = &credentials {
         session = session.with_credential_store(file);
+    }
+    if let Some(gauge) = &gauge {
+        session = session.with_disk(gauge);
     }
     match drive(&mut session, &mut *services.sleeper, err) {
         Exit::Stopped => Ok(()),
