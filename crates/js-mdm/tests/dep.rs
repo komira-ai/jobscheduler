@@ -860,7 +860,7 @@ fn the_replace_flag_is_documented_as_a_no_op_for_a_recorded_render() {
     assert_eq!(code, 0);
     let flat = out.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        flat.contains("With a recorded profile that is this render it changes nothing."),
+        flat.contains("With a recorded profile that is this render it changes nothing"),
         "{out}"
     );
 }
