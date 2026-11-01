@@ -8,6 +8,7 @@ mod support;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use js_agent_wire::{Heartbeat, HeldRun, HeldState, Hello};
 use js_pool_static::Candidate;
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
 use js_registry::{Placer, PoolConfig};
@@ -177,6 +178,53 @@ fn a_restored_sharing_lease_keeps_its_resources() {
     p.provider.stop(&lease(1));
     assert_eq!(on(&p.provider.start(sharing_spec(3, 600))), Some("a"));
     assert_eq!(p.provider.capacity()[0].leases, vec![lease(2), lease(3)]);
+}
+
+/// Catches: a lease that shares a host admitted beside runs that no admission counts. A
+/// share is restored on `a` and the host comes back listing a run the registry does not
+/// know (an orphan of the run before the restart): a second share is refused, though the
+/// host has room, until a heartbeat lists nothing. A run of the booked lease, queued and
+/// then listed by the host, does not keep the next share out; a live run of a lease that
+/// is no longer booked does, until it is gone.
+#[test]
+fn a_share_is_kept_off_a_host_that_holds_runs_of_no_booked_lease() {
+    let mut p = pool(&[]);
+    p.fx.registry.set_placer(Arc::new(Last::default()));
+    let one = Some(Resources::new(1000, 1, 0, None).unwrap());
+    let seated = p.provider.seat_booked(&host("a"), lease(1), None, one);
+    assert_eq!(seated, Ok(()));
+    let orphan = HeldRun {
+        run_id: "orphan".into(),
+        state: HeldState::Running,
+    };
+    let back = Hello {
+        held: vec![orphan],
+        ..hello("a")
+    };
+    let epoch = p.fx.hello(&back, &cred("t")).unwrap().epoch;
+    let refused = StartAck::Refused(RefusalCode::NoCapacity);
+    assert_eq!(p.provider.start(sharing_spec(2, 600)), refused);
+    p.fx.beat("a", epoch);
+    assert_eq!(on(&p.provider.start(sharing_spec(2, 600))), Some("a"));
+
+    // A run of a booked lease, listed by the host, is one the share may meet.
+    p.fx.registry
+        .queue_run(&host("a"), &lease(1), job("r1"))
+        .unwrap();
+    let listing = Heartbeat {
+        held: vec![HeldRun {
+            run_id: "r1".into(),
+            state: HeldState::Running,
+        }],
+        ..p.fx.heartbeat("a", epoch)
+    };
+    p.fx.registry.heartbeat(&listing, &cred("t")).unwrap();
+    assert_eq!(on(&p.provider.start(sharing_spec(3, 600))), Some("a"));
+
+    // Once lease 1 is no longer booked, its run still live keeps the next share out.
+    p.provider.stop(&lease(1));
+    p.fx.registry.heartbeat(&listing, &cred("t")).unwrap();
+    assert_eq!(p.provider.start(sharing_spec(4, 600)), refused);
 }
 
 /// The world of the reservation tests with `book` leases beside its whole-node requests:

@@ -392,6 +392,29 @@ impl Runs {
         self.on(host).any(Run::live)
     }
 
+    /// Whether everything `host` holds belongs to `leases`, the leases booked on it now:
+    /// every run the host lists (`listed`, its ids) is one this registry knows, of `host`
+    /// and of one of `leases`, and every run kept live for `host` is of one of them. A run
+    /// the host lists that the registry does not know (an orphan after a restart) or a live
+    /// run of a lease that is no longer booked here holds limits that no admission counts,
+    /// so the host is not treated as clear for a lease that shares it until it is gone.
+    pub(crate) fn only_of(
+        &self,
+        host: &HostId,
+        listed: &BTreeSet<String>,
+        leases: &[LeaseId],
+    ) -> bool {
+        let known = |id: &String| {
+            let run = self.map.get(id);
+            run.is_some_and(|run| run.host == *host && leases.contains(&run.lease))
+        };
+        let live = self.on(host).filter(|run| run.live());
+        listed.iter().all(known)
+            && live
+                .map(|run| run.lease)
+                .all(|lease| leases.contains(&lease))
+    }
+
     /// Forgets every run of `host`.
     pub(crate) fn forget(&mut self, host: &HostId) {
         self.map.retain(|_, run| run.host != *host);

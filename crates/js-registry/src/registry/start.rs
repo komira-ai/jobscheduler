@@ -182,8 +182,9 @@ impl Registry {
             hosts: &hosts,
         };
         let room = reserve::has_room(&state.marks, &pass, true);
-        // The hosts that carry a lease: a lease that shares one meets the runs of the
-        // leases there, which are not left over from a lease that has ended.
+        // The hosts that carry a lease: a lease that shares one may meet the runs of the
+        // leases there, but nothing else (a run the registry does not know, or one of a
+        // lease that has ended), whose limits no admission counts.
         let occupied = state.book.leases();
         let State {
             book,
@@ -200,7 +201,11 @@ impl Registry {
             // Only a whole-node request is kept off a host its earlier tries failed on.
             let barred = whole & requests.excluded(&key, id, now);
             let bookable = record.is_some_and(|record| {
-                let quiet = record.quiet(runs, id) | (shares & occupied.contains_key(id));
+                let beside = |leases: &Vec<LeaseId>| record.clear_beside(runs, id, leases);
+                let quiet = match (shares, occupied.get(id)) {
+                    (true, Some(leases)) => beside(leases),
+                    _ => record.quiet(runs, id),
+                };
                 record.bookable(now, grace, quiet)
             });
             let allowed = reserve::may_start(marks.holder(id), whole, spec.request_id(), room);

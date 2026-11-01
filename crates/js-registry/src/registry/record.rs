@@ -118,6 +118,13 @@ impl Record {
             .all(|ok| ok)
     }
 
+    /// Whether a lease that shares the host may meet what the host holds: it is quiet, or
+    /// everything it holds, listed by the host or kept live by `runs`, belongs to `leases`,
+    /// the leases booked on it now ([`Runs::only_of`]).
+    pub(super) fn clear_beside(&self, runs: &Runs, host: &HostId, leases: &[LeaseId]) -> bool {
+        self.quiet(runs, host) || runs.only_of(host, &self.held, leases)
+    }
+
     /// Whether the host is cordoned at `now`: its cordon has not lapsed.
     pub(super) fn cordoned(&self, now: Timestamp) -> bool {
         self.cordon.is_some_and(|until| until > now)
