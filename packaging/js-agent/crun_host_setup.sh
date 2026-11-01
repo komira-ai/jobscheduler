@@ -81,12 +81,15 @@ PLANNED=0
 REFUSALS=0
 FAILED=0
 FILES_CHANGED=0
-LAST_ACT=""
+STEP=""              # the step running now; FAIL_WHAT names the first thing that failed (a command, or its step)
+FAIL_WHAT=""
 ABORT=0             # set when a step fails in a way that makes the steps after it unsafe
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'STOP: %s\n' "$*" >&2; exit 2; }
-refuse() { REFUSALS=$((REFUSALS + 1)); say "  REFUSE: $*"; }
+refuse() { REFUSALS=$((REFUSALS + 1)); [ -n "$FAIL_WHAT" ] || FAIL_WHAT=$STEP; say "  REFUSE: $*"; }
+# mark_failed [WHAT]: the run will end with exit 1; WHAT (default: the step running) is kept for the manifest if it is the first.
+mark_failed() { FAILED=1; [ -n "$FAIL_WHAT" ] || FAIL_WHAT=${1:-$STEP}; }
 
 # ---------------------------------------------------------------------------------------------------------------
 # Pure functions (no I/O)
@@ -312,8 +315,7 @@ act() {
       ;;
     apply)
       say "  doing: $what"
-      LAST_ACT=$what
-      "$@" || { say "  FAILED: $what"; FAILED=1; return 1; }
+      "$@" || { say "  FAILED: $what"; mark_failed "$what"; return 1; }
       ;;
   esac
 }
@@ -322,8 +324,8 @@ act() {
 record() {
   [ "$RUN_MODE" = apply ] || return 0
   local line
-  line=$(manifest_line "$@") || { say "  FAILED: manifest line for $1"; FAILED=1; return 1; }
-  printf '%s\n' "$line" >>"$MANIFEST" || { say "  FAILED: writing $MANIFEST"; FAILED=1; return 1; }
+  line=$(manifest_line "$@") || { say "  FAILED: manifest line for $1"; mark_failed; return 1; }
+  printf '%s\n' "$line" >>"$MANIFEST" || { say "  FAILED: writing $MANIFEST"; mark_failed; return 1; }
 }
 
 # write_file DST MODE CONTENT: atomic.
@@ -482,7 +484,7 @@ step_packages() {
     if [ "$RUN_MODE" = apply ]; then
       v=$("$ROOT$CRUN" --version 2>/dev/null) || v=""
       v=$(crun_version_of "$v") || v=""
-      if [ -n "$v" ] && version_ge "$v" "$CRUN_MIN"; then say "  crun $v: ok"; else say "  FAILED: the installed crun is '$v', not $CRUN_MIN or newer"; FAILED=1; fi
+      if [ -n "$v" ] && version_ge "$v" "$CRUN_MIN"; then say "  crun $v: ok"; else say "  FAILED: the installed crun is '$v', not $CRUN_MIN or newer"; mark_failed; fi
     fi
   fi
 }
@@ -578,11 +580,40 @@ with_quota_option() {
   printf -v "$1" '%s' "$out"
 }
 
+# quota_dependents: refuses unless no active unit would stop with the mount unit: those that require it, are bound to it or
+# are part of it, and, the same way, the units that depend on them (a walk, not only the first level). Only local-fs.target,
+# which a mount legitimately touches, is skipped; any other target counts like any unit.
+quota_dependents() {
+  local -a queue=("$MOUNT_UNIT") words
+  local seen=" $MOUNT_UNIT " u out w state active=""
+  while [ "${#queue[@]}" -gt 0 ] && [ "${#seen}" -lt 100000 ]; do
+    u=${queue[0]}
+    queue=("${queue[@]:1}")
+    if ! out=$(systemctl show -p RequiredBy,RequisiteOf,BoundBy,ConsistsOf --value -- "$u" 2>/dev/null); then
+      refuse "cannot read which units depend on $u"
+      return 1
+    fi
+    IFS=' ' read -r -a words <<<"${out//$'\n'/ }"
+    for w in "${words[@]}"; do
+      case $seen in *" $w "*) continue ;; esac
+      seen+="$w "
+      [ "$w" != local-fs.target ] || continue
+      state=$(systemctl show -p ActiveState --value -- "$w" 2>/dev/null) || state=""
+      case $state in inactive | failed) ;; *) active+=" $w (${state:-unknown})" ;; esac
+      queue+=("$w")
+    done
+  done
+  if [ -n "$active" ]; then
+    refuse "these units depend on $MOUNT_UNIT and would stop with it, and nothing starts them again:$active"
+    return 1
+  fi
+}
+
 # quota_remount_checks: refuses (and fails) unless unmounting the scratch filesystem and mounting it again is safe:
 # nothing holds it (a clean answer of fuser, not an error), no other mount of the same filesystem keeps it alive, none
 # is mounted below it, and no other active unit depends on its mount unit.
 quota_remount_checks() {
-  local out rc=0 src targets children dep line state
+  local out rc=0 src targets children
   if ! command -v fuser >/dev/null 2>&1; then
     refuse "no fuser (package psmisc): cannot tell whether anything holds $SCRATCH open"
     return 1
@@ -610,19 +641,7 @@ quota_remount_checks() {
     refuse "mounts below $SCRATCH (${children//$'\n'/ }) would be unmounted with it and not mounted again"
     return 1
   fi
-  if ! dep=$(systemctl list-dependencies --reverse --plain --no-pager "$MOUNT_UNIT" 2>/dev/null); then
-    refuse "cannot list the units that depend on $MOUNT_UNIT"
-    return 1
-  fi
-  while IFS= read -r line; do
-    line=${line#"${line%%[![:space:]]*}"}
-    case $line in "" | "$MOUNT_UNIT" | *.target) continue ;; esac
-    state=$(systemctl show -p ActiveState --value -- "$line" 2>/dev/null) || state=""
-    case $state in
-      inactive | failed) ;;
-      *) refuse "$line is '${state:-unknown}' and depends on $MOUNT_UNIT: stopping the mount stops it and nothing starts it again"; return 1 ;;
-    esac
-  done <<<"$dep"
+  quota_dependents || return 1
 }
 
 step_scratch_quota() {
@@ -685,7 +704,7 @@ step_scratch_quota() {
     effective=$(systemctl show -p Options --value -- "$MOUNT_UNIT" 2>/dev/null) || effective=""
     if ! options_has "$effective" "$QUOTA_OPTION"; then
       say "  FAILED: the effective Options= of $MOUNT_UNIT is '$effective', without $QUOTA_OPTION (a file the edit missed): nothing was unmounted"
-      FAILED=1
+      mark_failed
       ABORT=1
       return 0
     fi
@@ -704,7 +723,7 @@ step_scratch_quota() {
       say "  findmnt: $QUOTA_OPTION is active on $SCRATCH: ok"
     else
       say "  FAILED: $QUOTA_OPTION is not active on $SCRATCH after the mount (findmnt shows '${mounted:-not mounted}')"
-      FAILED=1
+      mark_failed
       ABORT=1
     fi
   fi
@@ -821,7 +840,7 @@ step_reload() {
   say "systemd"
   if act "systemctl daemon-reload" systemctl daemon-reload; then
     record reload 1
-    if systemd-analyze verify "$UNIT_DST" >/dev/null 2>&1; then say "  systemd-analyze verify $UNIT_DST: ok"; else say "  FAILED: systemd-analyze verify $UNIT_DST"; FAILED=1; fi
+    if systemd-analyze verify "$UNIT_DST" >/dev/null 2>&1; then say "  systemd-analyze verify $UNIT_DST: ok"; else say "  FAILED: systemd-analyze verify $UNIT_DST"; mark_failed; fi
   fi
 }
 
@@ -831,6 +850,7 @@ setup_pass() {
   REFUSALS=0
   local step
   for step in step_preflight step_packages step_user step_subids step_scratch_quota step_dirs step_apparmor step_files step_reload; do
+    STEP=$step
     "$step" || true
     if [ "$ABORT" = 1 ]; then
       say "aborted after $step: the steps after it did not run"
@@ -848,7 +868,7 @@ on_exit() {
   local rc=$?
   trap - EXIT
   if [ "$rc" != 0 ] && [ "$rc" != 3 ] && [ -f "$MANIFEST" ]; then
-    manifest_line incomplete "$rc" "${LAST_ACT:-}" >>"$MANIFEST" || true
+    manifest_line incomplete "$rc" "${FAIL_WHAT:-$STEP}" >>"$MANIFEST" || true
   fi
   exit "$rc"
 }

@@ -52,7 +52,7 @@ crun_host_setup.sh --apply --server https://scheduler.example.org:7300 --pool fa
 | `--server URL`, `--pool NAME` | written into the unit in place of its placeholders; an apply needs both |
 | `--scratch-mount-unit NAME` | the mount unit of `/var/lib/js-agent/scratch`, a file in `/etc/systemd/system` (default `var-lib-js\x2dagent-scratch.mount`) |
 | `--skip-scratch-quota` | leave the scratch mount as it is, for a host whose scratch is not a mount unit |
-| `--root DIR` | run against the tree `DIR` instead of `/` (for tests; the programs it runs still act on the host, so an apply with it refuses to run as root) |
+| `--root DIR` | run against the tree `DIR` instead of `/`; for tests only. The programs it runs still act on the host, and the script's root check (`id -u`) still wants euid 0 for `--apply`, while the guard against acting on the host wants the real uid (`id -ur`) not to be 0: so `--apply` with `--root` can work only with euid 0 and ruid not 0, which no ordinary login has |
 
 The script reads no environment variable. Exit codes: 0 done, or a plan; 1 a step failed; 2 refused or
 bad usage, with nothing changed; 3 nothing to do.
@@ -84,7 +84,10 @@ Before the unmount it also refuses when
 - `fuser` fails or complains (only a clean "nothing holds it" counts);
 - the filesystem is mounted anywhere else (a bind mount keeps it alive, so prjquota would not
   take) or something is mounted below the scratch directory;
-- another active unit depends on the mount unit (`systemctl list-dependencies --reverse`);
+- another active unit would stop with the mount unit: one that requires it, is bound to it or is
+  part of it, or depends on one of those, followed through (`systemctl show -p
+  RequiredBy,RequisiteOf,BoundBy,ConsistsOf`). A custom target counts; only `local-fs.target` is
+  left out;
 - `<unit>.d` exists (a drop-in can override `Options=`), or the `Options=` line is continued with a
   backslash.
 
@@ -102,7 +105,7 @@ applies at its next mount.
 apply created or changed: `pkg`, `user`, `subuid`, `subgid`, `mount-options` (the file, the
 `Options=` it had, the sha256 of what the script wrote), `dir-created`, `dir-mode` (the old mode),
 `apparmor-loaded`, `file` and `reload`; a run that ends in a failure or a signal adds
-`incomplete`, the exit status and the step it was in. The state directory must be 0700 and the
+`incomplete`, the exit status and what failed first (the command, or the step when no command failed). The state directory must be 0700 and the
 caller's, or the run is refused. The script has no rollback verb; each line says what to undo
 by hand. Undoing `mount-options` means putting the old `Options=` back and mounting the filesystem
 again.

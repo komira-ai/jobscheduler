@@ -228,6 +228,11 @@ impl Rig {
             ),
             ok(
                 "systemctl",
+                "show -p RequiredBy,RequisiteOf,BoundBy,ConsistsOf --value -- *",
+                "\n\n\n\n",
+            ),
+            ok(
+                "systemctl",
                 &format!("list-dependencies --reverse --plain --no-pager {MOUNT}"),
                 &format!("{MOUNT}\n  local-fs.target\n"),
             ),
