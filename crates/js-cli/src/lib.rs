@@ -51,9 +51,10 @@
 //! with `--json`, `{"sha256": ..., "expires_at_ms": ...}`), the one thing to compare with the
 //! server's log and with what `js-agent enroll` prints. The server's refusals print the
 //! status and its error code only (`join token not minted: the server answered 400
-//! (bad-request)`), never its body: a 400 is exit 4, a 404 or 429 exit 3, anything else exit
-//! 1. A token that was minted and could not be written (exit 1) is lost: the message says
-//! when the server drops it, and the answer is to mint another. The request is sent once.
+//! (bad-request)`), never its body: a 400 is exit 4, a 404 or 429 exit 3, anything else
+//! exit 1. A token that was minted and could not be written (exit 1) is lost: the message
+//! says when the server drops it, and the answer is to mint another. The request is sent
+//! once.
 //!
 //! `native` queues a native job (a program run on the host, no image) on a held lease and
 //! prints `run <id> <state>`. The server refuses it (exit 3) when the lease's host does not
