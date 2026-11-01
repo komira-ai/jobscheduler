@@ -213,22 +213,48 @@ pub struct JobProcs {
     pub pids: Vec<u32>,
 }
 
+impl JobProcs {
+    /// Whether the process `name` (pid `pid`) is one the job ran for `kind`: a pid a run printed,
+    /// or the name of an executable the job used for that kind. The kernel cuts a name to 16
+    /// characters.
+    fn owns(&self, kind: Kind, name: &str, pid: u32) -> bool {
+        let tool = match kind {
+            Kind::Keychain => "security",
+            Kind::Defaults => "defaults",
+            Kind::LaunchAgent | Kind::GuiLaunchAgent => "launchctl",
+            Kind::Process => "sleep",
+            _ => "",
+        };
+        let named = |own: &str| {
+            !own.is_empty() && (own == name || (name.len() >= 16 && own.starts_with(name)))
+        };
+        self.pids.contains(&pid) || named(&self.exe) || named(tool)
+    }
+}
+
 /// The pids a run printed with `ISOPID <n>` lines.
 pub fn parse_pids(text: &str) -> Vec<u32> {
-    let _ = text;
-    Vec::new()
+    text.lines()
+        .filter_map(|line| line.strip_prefix("ISOPID ")?.trim().parse().ok())
+        .collect()
 }
 
 /// `(process name, pid)` of a kernel sandbox line, `Sandbox: <name>(<pid>) deny(1) <op> ...`.
 pub fn parse_sandbox_line(line: &str) -> Option<(String, u32)> {
-    let _ = line;
-    None
+    let rest = &line[line.find("Sandbox: ")? + "Sandbox: ".len()..];
+    let (name, rest) = rest.split_once('(')?;
+    let (pid, _) = rest.split_once(')')?;
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((name.to_owned(), pid.parse().ok()?))
 }
 
 /// Whether the unified log (`log show` lines of the sandbox) holds a denial that is this
-/// seed's: a sandbox `deny(` line with the token in it, or the operation of the kind.
+/// seed's: a sandbox `deny(` line with the token in it (tokens are unique), or one for the
+/// operation of the kind from a process the job ran (`job`). The operation alone is not
+/// enough: other sandboxed processes log such lines all the time.
 pub fn log_confirms_denial(kind: Kind, token: &Token, log: &str, job: &JobProcs) -> bool {
-    let _ = job;
     let markers: &[&str] = match kind {
         Kind::Process => &["process-exec", "process-fork"],
         Kind::Keychain => &["com.apple.SecurityServer"],
@@ -243,7 +269,12 @@ pub fn log_confirms_denial(kind: Kind, token: &Token, log: &str, job: &JobProcs)
     };
     log.lines()
         .filter(|line| line.contains("Sandbox") && line.contains("deny("))
-        .any(|line| line.contains(token.as_str()) || markers.iter().any(|m| line.contains(m)))
+        .any(|line| {
+            line.contains(token.as_str())
+                || (markers.iter().any(|m| line.contains(m))
+                    && parse_sandbox_line(line)
+                        .is_some_and(|(name, pid)| job.owns(kind, &name, pid)))
+        })
 }
 
 /// The verdict of a failed seed. `log` is the sandbox lines of the unified log for run A's

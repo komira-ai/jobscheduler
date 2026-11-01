@@ -123,6 +123,9 @@ fn seed(kind: Kind, token: &Token, spot: &Spot) -> Result<String, String> {
             let child = command
                 .spawn()
                 .map_err(|why| format!("/bin/sleep: {why}"))?;
+            // The pid is printed so the test can tell this process's sandbox lines from a
+            // bystander's.
+            println!("ISOPID {}", child.id());
             Ok(format!("pid={}", child.id()))
         }
         Kind::Keychain => {

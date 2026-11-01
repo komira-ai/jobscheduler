@@ -109,6 +109,7 @@ fn child_of_the_runs() {
         return;
     };
     println!("{}", look::uid_line(rustix::process::getuid().as_raw()));
+    println!("ISOPID {}", std::process::id());
     match role.as_str() {
         "seed" => {
             let tmp = PathBuf::from(std::env::var("TMPDIR").expect("the agent sets TMPDIR"));
@@ -330,6 +331,7 @@ struct Ran {
     id: RunHandle,
     lines: Vec<Line>,
     uid: Option<u32>,
+    pids: Vec<u32>,
 }
 
 /// Starts one run of the child in `role`, waits for it and returns its handle and what it
@@ -365,6 +367,7 @@ fn child_run(
             id: id.clone(),
             lines: parse_lines(&stdout)?,
             uid: look::parse_uid(&stdout),
+            pids: look::parse_pids(&stdout),
         })
     })
 }
@@ -418,7 +421,15 @@ impl Trial {
                 "run A ran as uid {owner}, not the uid {uid} asked for"
             ));
         }
-        self.confirm_denials_by_log(started);
+        let job = look::JobProcs {
+            exe: self
+                .exe
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            pids: ran_a.pids.clone(),
+        };
+        self.confirm_denials_by_log(started, &job);
         self.bootstrap_agents_as_root(uid);
         println!("{}", self.seeded_table());
         let missing = look::missing_minimum(&self.seeded);
@@ -515,14 +526,13 @@ impl Trial {
     /// A seed that failed with a bare permission error is the profile's only if the unified
     /// log, read for run A's window, holds a sandbox denial that is that seed's; the log is
     /// not read when nothing failed that way. A log that cannot be read leaves them refused.
-    fn confirm_denials_by_log(&mut self, since: Instant) {
+    fn confirm_denials_by_log(&mut self, since: Instant, job: &look::JobProcs) {
         let candidates = self.seeded.iter().any(|line| {
             line.verdict == Verdict::Refused && look::is_permission_failure(&line.text)
         });
         if !candidates {
             return;
         }
-        let job = look::JobProcs::default();
         let secs = since.elapsed().as_secs() + 60;
         let predicate = "eventMessage CONTAINS \"Sandbox\" AND eventMessage CONTAINS \"deny(\"";
         let shown = view(
@@ -549,7 +559,7 @@ impl Trial {
                 continue;
             }
             let verdict =
-                look::resolve_seed(line.kind, &line.token, &line.text, log.as_deref(), &job);
+                look::resolve_seed(line.kind, &line.token, &line.text, log.as_deref(), job);
             if verdict == Verdict::Denied {
                 line.verdict = Verdict::Denied;
                 line.text = format!("confirmed in the unified log: {}", line.text);
