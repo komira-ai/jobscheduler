@@ -755,6 +755,17 @@ mod tests {
             ),
             SeedFailure::Other
         );
+        // A bare word is not the signature: it needs the kernel's `Sandbox: <proc>(<pid>) deny(`.
+        for text in [
+            "x: deny(1) file-write-create",
+            "sandbox: bare",
+            "Sandbox: only words",
+            "Sandbox: x(abc) deny(1)",
+            "Sandbox: x(1) allow file-read",
+            "tool said Sandbox: nothing (1) deny(1)",
+        ] {
+            assert_eq!(classify_seed_failure(text), SeedFailure::Other, "{text}");
+        }
         for text in [
             "launchctl exited Some(1): Bootstrap failed: Sandbox: launchctl(55) deny(1) mach-lookup com.apple.xpc.launchd",
             "Sandbox: sleep(123) deny(1) process-exec /bin/sleep",
