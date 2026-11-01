@@ -40,19 +40,15 @@ fn the_tag_and_the_prefix_are_the_documented_ones() {
     assert_eq!(PREFIX, "reported_");
 }
 
-/// Asserts that a result line is read into its keys, numbers as numbers and `null` as
-/// none, from among other output. Catches a parser that reads nothing, or that turns a
-/// null into zero.
+/// Asserts that a result line is read into its numeric keys from among other output, and
+/// that a `null` key is absent. Catches a parser that reads nothing, or that turns a null
+/// into zero or keeps it as a key.
 #[test]
 fn a_result_line_among_other_output_is_read() {
     let out = "starting\njs-measure-result {\"steady_ms\":12.5,\"first_run_ms\":45,\"warm\":null}\ndone\n";
     assert_eq!(
         parse(out),
-        report(&[
-            ("steady_ms", Some(12.5)),
-            ("first_run_ms", Some(45.0)),
-            ("warm", None)
-        ])
+        report(&[("steady_ms", Some(12.5)), ("first_run_ms", Some(45.0)),])
     );
 }
 
@@ -97,22 +93,14 @@ fn a_malformed_last_line_reports_nothing() {
     }
 }
 
-/// Asserts that a value that is not a number is none for its key and does not spoil its
-/// neighbours: a string (even a numeric one), a boolean, an array and an object.
+/// Asserts that a value that is not a number leaves its key out and does not spoil its
+/// neighbours: a string (even a numeric one), a boolean, an array, an object and null.
 #[test]
-fn a_value_that_is_not_a_number_is_none() {
+fn a_value_that_is_not_a_number_is_absent() {
     let out = "js-measure-result {\"n\":1.5,\"s\":\"7\",\"b\":true,\"a\":[1],\"o\":{\"x\":1},\"z\":null,\"neg\":-2}";
     assert_eq!(
         parse(out),
-        report(&[
-            ("n", Some(1.5)),
-            ("s", None),
-            ("b", None),
-            ("a", None),
-            ("o", None),
-            ("z", None),
-            ("neg", Some(-2.0)),
-        ])
+        report(&[("n", Some(1.5)), ("neg", Some(-2.0)),])
     );
 }
 
@@ -143,32 +131,28 @@ fn line_endings_do_not_matter() {
 #[test]
 fn keys_are_prefixed() {
     assert_eq!(
-        prefixed(&report(&[("steady_ms", Some(1.5)), ("warm", None)])),
-        report(&[("reported_steady_ms", Some(1.5)), ("reported_warm", None)])
+        prefixed(&report(&[("steady_ms", Some(1.5)), ("warm_ms", Some(2.5))])),
+        report(&[
+            ("reported_steady_ms", Some(1.5)),
+            ("reported_warm_ms", Some(2.5))
+        ])
     );
 }
 
 /// Asserts the merge of several jobs: one job's numbers are copied exactly, two jobs'
-/// are averaged, a key some job lacks or reports as none is none, and a key only one job
-/// reports is none (not that job's number alone). No key, no metric.
+/// are averaged, and a key some job lacks is absent (not that job's number alone, not
+/// null). No key, no metric.
 #[test]
-fn jobs_merge_by_mean_and_a_gap_is_none() {
-    let one = [report(&[("a", Some(0.1)), ("b", None)])];
-    assert_eq!(
-        merge(&one),
-        report(&[("reported_a", Some(0.1)), ("reported_b", None)])
-    );
+fn jobs_merge_by_mean_and_a_gap_is_absent() {
+    let one = [report(&[("a", Some(0.1))])];
+    assert_eq!(merge(&one), report(&[("reported_a", Some(0.1))]));
     let two = [
         report(&[("a", Some(2.0)), ("b", Some(1.0)), ("c", Some(5.0))]),
-        report(&[("a", Some(4.0)), ("b", None)]),
+        report(&[("a", Some(4.0)), ("b", Some(3.0))]),
     ];
     assert_eq!(
         merge(&two),
-        report(&[
-            ("reported_a", Some(3.0)),
-            ("reported_b", None),
-            ("reported_c", None)
-        ])
+        report(&[("reported_a", Some(3.0)), ("reported_b", Some(2.0))])
     );
     assert_eq!(merge(&[]), BTreeMap::new());
     assert_eq!(merge(&[BTreeMap::new(), BTreeMap::new()]), BTreeMap::new());
@@ -288,7 +272,7 @@ fn who() -> Identity {
     }
 }
 
-fn timing(name: &str, log_tail: Option<LogTail>) -> JobTiming {
+fn timing(name: &str, log_tail: Option<LogTail>, outcome: &str) -> JobTiming {
     JobTiming {
         name: name.to_owned(),
         submit_at_ms: T0,
@@ -297,13 +281,17 @@ fn timing(name: &str, log_tail: Option<LogTail>) -> JobTiming {
         started_ms: Some(T0),
         finished_ms: Some(T0 + 60_000),
         host: Some("h1".to_owned()),
-        outcome: Some("succeeded".to_owned()),
+        outcome: Some(outcome.to_owned()),
         failure: None,
         log_tail,
     }
 }
 
 fn assembled(tails: Vec<Option<LogTail>>) -> RunOutput {
+    assembled_with(tails.into_iter().map(|tail| (tail, "succeeded")).collect())
+}
+
+fn assembled_with(tails: Vec<(Option<LogTail>, &str)>) -> RunOutput {
     let jobs: Vec<_> = tails
         .iter()
         .enumerate()
@@ -315,7 +303,7 @@ fn assembled(tails: Vec<Option<LogTail>>) -> RunOutput {
         jobs: tails
             .into_iter()
             .enumerate()
-            .map(|(n, tail)| timing(&format!("j{n}"), tail))
+            .map(|(n, (tail, outcome))| timing(&format!("j{n}"), tail, outcome))
             .collect(),
     };
     let hosts = BTreeMap::from([(
@@ -414,17 +402,68 @@ fn a_truncated_tail_with_a_whole_last_line_is_read() {
     assert_eq!(reported_of(&out), report(&[("reported_a", Some(7.0))]));
 }
 
-/// Asserts the record of two jobs: the mean of their numbers, none when one of them has
-/// no number for the key.
+/// Asserts the record of two jobs: the mean of their numbers, and a key only one of them
+/// has is absent.
 #[test]
-fn two_jobs_record_the_mean_and_a_gap_is_none() {
+fn two_jobs_record_the_mean_and_a_gap_is_absent() {
     let a = tail("js-measure-result {\"x\":2,\"y\":1}\n", "", false);
     let b = tail("js-measure-result {\"x\":4}\n", "", false);
     let out = assembled(vec![Some(a), Some(b)]);
+    assert_eq!(reported_of(&out), report(&[("reported_x", Some(3.0))]));
+}
+
+/// Asserts that a string value (a verdict) leaves no key in the record or the job's row,
+/// while its numeric neighbour is recorded.
+#[test]
+fn a_string_value_is_not_recorded() {
+    let line = "js-measure-result {\"steady_ms\":1.5,\"verdict\":\"PASS\"}\n";
+    let out = assembled(vec![Some(tail(line, "", false))]);
     assert_eq!(
         reported_of(&out),
-        report(&[("reported_x", Some(3.0)), ("reported_y", None)])
+        report(&[("reported_steady_ms", Some(1.5))])
     );
+    assert!(!out.jobs[0].metrics.contains_key("reported_verdict"));
+}
+
+/// Asserts that a job that did not succeed adds nothing to the run's reported mean, and
+/// that the dropped report is counted in the record as `reported_dropped`; the job's own
+/// row still shows what it printed. Catches a merge that averages in a wrong job's numbers.
+#[test]
+fn a_failed_jobs_report_is_excluded_and_counted() {
+    let good = tail("js-measure-result {\"x\":2}\n", "", false);
+    let bad = tail("js-measure-result {\"x\":100}\n", "", false);
+    let out = assembled_with(vec![(Some(good), "succeeded"), (Some(bad), "failed")]);
+    assert_eq!(
+        reported_of(&out),
+        report(&[("reported_x", Some(2.0)), ("reported_dropped", Some(1.0))])
+    );
+    assert_eq!(out.jobs[1].metrics["reported_x"], Some(100.0));
+}
+
+/// Asserts that when every job failed no reported key is recorded, and the count of
+/// dropped reports is the number of failed jobs that printed a result line; a failed job
+/// that printed none, whatever its outcome, is not counted.
+#[test]
+fn only_failed_jobs_that_reported_are_counted() {
+    let line = "js-measure-result {\"x\":9}\n";
+    let out = assembled_with(vec![
+        (Some(tail(line, "", false)), "failed"),
+        (Some(tail(line, "", false)), "out_of_memory"),
+        (Some(tail("crashed\n", "", false)), "failed"),
+        (None, "failed"),
+    ]);
+    assert_eq!(
+        reported_of(&out),
+        report(&[("reported_dropped", Some(2.0))])
+    );
+}
+
+/// Asserts that a run in which every job succeeded has no `reported_dropped` key.
+#[test]
+fn a_clean_run_has_no_dropped_count() {
+    let line = "js-measure-result {\"x\":9}\n";
+    let out = assembled(vec![Some(tail(line, "", false))]);
+    assert!(!out.record.metrics.contains_key("reported_dropped"));
 }
 
 // ---- the plan ---------------------------------------------------------------------
@@ -593,7 +632,7 @@ fn the_whole_host_noise_workload_runs_the_cell() {
         args[at + 1].as_str()
     };
     assert_eq!(value_of("--query"), "q6");
-    assert_eq!(value_of("--scale"), "1");
+    assert_eq!(value_of("--scale"), "sf1");
     assert_eq!(value_of("--dataset"), "tpch");
     assert_eq!(value_of("--suite"), "tpch");
     assert_eq!(args.last().map(String::as_str), Some("--js-measure-result"));
@@ -633,7 +672,7 @@ fn the_shipped_plan_feeds_the_analysis_compare_cv() {
     assert_eq!(m["reported_steady_ms"], Some(12.3));
     assert_eq!(m["reported_first_run_ms"], Some(45.6));
     assert_eq!(m["reported_duckdb_steady_ms"], Some(10.1));
-    assert_eq!(m["reported_verdict"], None);
+    assert!(!m.contains_key("reported_verdict"));
     let text: String = outputs
         .iter()
         .map(|o| serde_json::to_string(&o.record).unwrap() + "\n")
