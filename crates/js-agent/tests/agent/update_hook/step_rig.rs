@@ -142,9 +142,11 @@ impl Rig {
         } else {
             String::new()
         };
+        let link = root.join("link/current");
+        let release_link = format!("\"release_link\" = \"{}\"\n", link.display());
         let params = Params::parse(&format!(
             concat!(
-                "cordon_lease_secs = {lease}\ncordon_max_secs = {max}\n",
+                "cordon_lease_secs = {lease}\ncordon_max_secs = {max}\n{release_link}",
                 "drain_wait_secs = {wait}\ndefer_retry_secs = {retry}\n",
                 "\"updater.artifact_digest\" = \"{digest}\"\n",
                 "\"updater.staged_release\" = \"{staged}\"\n",
@@ -157,6 +159,7 @@ impl Rig {
             digest = digest(),
             staged = staged.display(),
             previous = previous,
+            release_link = release_link,
         ))
         .unwrap();
         let kill = Rc::new(Kill::default());
@@ -165,7 +168,6 @@ impl Rig {
             &root.join("control"),
             Box::new(Shared(Rc::clone(&kill))),
         );
-        let link = root.join("link/current");
         world.seed_update(&link, HOST, &params);
         Rig {
             tmp,
@@ -272,6 +274,16 @@ pub fn line(done: &Done) -> serde_json::Value {
 
 type PauseHook<'a> = Box<dyn FnMut(&Spy<'a>, usize) + 'a>;
 
+/// A change to the unit or the link, with the record's marks (`stop_begun`, `link_moved`,
+/// `start_issued`) as they were on disk when the step reached it and the kill points it had
+/// passed: killing at `points` ends the step just before the act.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Act {
+    pub call: String,
+    pub marks: [bool; 3],
+    pub points: u32,
+}
+
 /// Every port at once, over the fakes, with the log of what was done.
 pub struct Spy<'a> {
     pub world: &'a World,
@@ -285,6 +297,13 @@ pub struct Spy<'a> {
     pub operator_races: Cell<bool>,
     /// What the staged agent prints to `--version`.
     pub version: RefCell<Result<String, String>>,
+    /// The changes made to the unit and the link, in order.
+    pub acts: RefCell<Vec<Act>>,
+    /// The unit state a stop leaves behind instead of `inactive`, `(ActiveState, SubState)`.
+    pub stop_leaves: RefCell<Option<(&'static str, &'static str)>>,
+    /// The unit state a start leaves behind instead of `active`.
+    pub start_leaves: RefCell<Option<(&'static str, &'static str)>>,
+    record_path: PathBuf,
 }
 
 impl<'a> Spy<'a> {
@@ -298,6 +317,10 @@ impl<'a> Spy<'a> {
             fail: RefCell::new(BTreeSet::new()),
             operator_races: Cell::new(false),
             version: RefCell::new(Ok(format!("js-agent {}\n", rig.params.target_version))),
+            acts: RefCell::new(Vec::new()),
+            stop_leaves: RefCell::new(None),
+            start_leaves: RefCell::new(None),
+            record_path: rig.record_path(),
         }
     }
 
@@ -320,6 +343,34 @@ impl<'a> Spy<'a> {
 
     fn push(&self, entry: impl Into<String>) {
         self.log.borrow_mut().push(entry.into());
+    }
+
+    /// Logs a change to the unit or the link, with the marks on disk at this moment.
+    fn act(&self, call: String) {
+        let marks = fs::read(&self.record_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+            .map_or([false; 3], |r| [r.stop_begun, r.link_moved, r.start_issued]);
+        self.acts.borrow_mut().push(Act {
+            call: call.clone(),
+            marks,
+            points: self.kill.points(),
+        });
+        self.push(call);
+    }
+
+    /// The acts made so far, by name.
+    pub fn act_names(&self) -> Vec<String> {
+        self.acts.borrow().iter().map(|a| a.call.clone()).collect()
+    }
+
+    /// Fails a call of the unit manager or the link that is set to fail.
+    fn port_check(&self, call: &'static str) -> Result<(), PortError> {
+        if self.fail.borrow().contains(call) {
+            Err(PortError::Command(format!("{call} is down")))
+        } else {
+            Ok(())
+        }
     }
 
     fn check(&self, call: &'static str) -> Result<(), LeaseError> {
@@ -357,22 +408,42 @@ impl<'a> Spy<'a> {
     pub fn cleanup(&self, rig: &Rig) -> Done {
         step::cleanup(&self.env(rig, &as_root), &rig.params)
     }
+
+    pub fn cutover(&self, rig: &Rig) -> Done {
+        step::cutover(&self.env(rig, &as_root), &rig.params)
+    }
 }
 
 impl Units for Spy<'_> {
     fn show(&self, unit: &str) -> Result<UnitState, PortError> {
         self.push(format!("units.show({unit})"));
+        self.port_check("show")?;
         self.world.show(unit)
     }
 
     fn stop_no_block(&self, unit: &str) -> Result<(), PortError> {
-        self.push(format!("units.stop({unit})"));
-        self.world.stop_no_block(unit)
+        self.act(format!("units.stop({unit})"));
+        self.port_check("stop")?;
+        match *self.stop_leaves.borrow() {
+            Some((active, sub)) => {
+                self.world.seed_unit(unit, active, sub);
+                Ok(())
+            }
+            None => self.world.stop_no_block(unit),
+        }
     }
 
     fn start(&self, unit: &str) -> Result<(), PortError> {
-        self.push(format!("units.start({unit})"));
-        self.world.start(unit)
+        self.act(format!("units.start({unit})"));
+        let leaves = *self.start_leaves.borrow();
+        if let Some((active, sub)) = leaves {
+            self.world.seed_unit(unit, active, sub);
+        }
+        self.port_check("start")?;
+        match leaves {
+            Some(_) => Ok(()),
+            None => self.world.start(unit),
+        }
     }
 
     fn is_active(&self, unit: &str) -> Result<bool, PortError> {
@@ -387,7 +458,8 @@ impl Link for Spy<'_> {
     }
 
     fn relink(&self, link: &Path, target: &Path) -> Result<(), PortError> {
-        self.push("link.relink");
+        self.act("link.relink".to_owned());
+        self.port_check("relink")?;
         self.world.relink(link, target)
     }
 }
@@ -462,3 +534,37 @@ pub fn killable<T>(work: impl FnOnce() -> T) -> Option<T> {
 
 /// The time the fakes' world starts at.
 pub const START: u64 = START_MS;
+
+/// The host as `prepare` leaves it for `cutover`: the agent running on the previous release,
+/// the cordon ours and the record written.
+pub fn running(rig: Rig) -> Rig {
+    rig.world.seed_unit(UNIT, "active", "running");
+    let done = Spy::new(&rig).prepare(&rig);
+    assert!(
+        done.report.reason.is_none(),
+        "prepare of the setup: {done:?}"
+    );
+    // The setup passed kill points; the count is of the step's.
+    rig.kill.disarm();
+    rig
+}
+
+/// Everything a `cutover` leaves behind, without the directories of the rig: the record, the
+/// link, the unit and the cordon.
+pub fn end_state(rig: &Rig) -> serde_json::Value {
+    let unit = rig.world.show(UNIT).unwrap();
+    let state = serde_json::json!({
+        "record": rig.record(),
+        "link": rig.world.target(&rig.link).unwrap(),
+        "unit": format!("{} {}", unit.active, unit.sub),
+        "cordon": rig.cordon_expiry(),
+    });
+    let root = rig.tmp.path().display().to_string();
+    serde_json::from_str(&state.to_string().replace(&root, "<root>")).unwrap()
+}
+
+/// The `stop_begun`, `link_moved` and `start_issued` marks on disk.
+pub fn marks(rig: &Rig) -> [bool; 3] {
+    let record = rig.record().unwrap();
+    [record.stop_begun, record.link_moved, record.start_issued]
+}

@@ -1,4 +1,5 @@
-//! The steps of the hook that have a body: `prepare` and `cleanup` (host-updates design, 4.2).
+//! The steps of the hook that have a body: `prepare`, `cutover` and `cleanup` (host-updates
+//! design, 4.2).
 //!
 //! A step is a function of an [`Env`] and the params table, and ends as a [`Done`]: the status
 //! and the last line. It takes the state directory's lock first, loads and validates the
@@ -7,6 +8,7 @@
 //! the conformance harness, can end the step at any of them and run it again.
 
 mod cleanup;
+mod cutover;
 mod prepare;
 
 use std::io;
@@ -21,6 +23,7 @@ use super::{
 };
 
 pub use cleanup::cleanup;
+pub use cutover::cutover;
 pub use prepare::prepare;
 
 /// Everything a step touches.
