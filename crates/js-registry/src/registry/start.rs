@@ -7,9 +7,9 @@ use js_elastic::Demand;
 use js_lease::Timestamp;
 use js_pool_static::HostBook;
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
-use js_types::{Admission, HostId, ResourceClass, Shape};
+use js_types::{Admission, HostId, LeaseId, ResourceClass, Shape};
 
-use super::{HostState, Registry, State};
+use super::{HostState, Record, Registry, State};
 use crate::whole::caps::Capability;
 use crate::whole::cost::HostLoad;
 use crate::whole::exclusive::Exclusive;
@@ -18,11 +18,17 @@ use crate::whole::requests::{RequestKey, Rules, whole_settings};
 use crate::whole::reserve::{self, HostFacts, Pass};
 use crate::whole_config::WholeNodeConfig;
 
+/// The end bound the host knows among `leases`: its latest started lease's, when that
+/// lease is booked here. The other leases of a host that carries several have none.
+fn known_end(record: &Record, leases: &[LeaseId]) -> Option<(LeaseId, Timestamp)> {
+    record.bound.filter(|(held, _)| leases.contains(held))
+}
+
 impl Registry {
     /// Every host as the reservation pass reads it, in id order. Every host is booked as
     /// the pool's shape.
     pub(super) fn host_facts(&self, state: &State, now: Timestamp) -> Vec<HostFacts> {
-        let booked = state.book.booked();
+        let booked = state.book.leases();
         let grace_ms = self.grace_ms();
         let facts = state.records.iter().map(|(id, record)| {
             let live = record.state(now, grace_ms) == HostState::Live;
@@ -34,16 +40,16 @@ impl Registry {
                 (false, false, false) => Capability::Lost,
             };
             let quiet = record.quiet(&state.runs, id);
-            let lease = booked.get(id);
-            let ends = lease.and_then(|lease| record.bound.filter(|(held, _)| held == lease));
+            let leases = booked.get(id).map(Vec::as_slice).unwrap_or_default();
+            let ends = known_end(record, leases);
             HostFacts {
                 id: id.clone(),
                 capability,
-                open: record.bookable(now, grace_ms, quiet) & lease.is_none(),
+                open: record.bookable(now, grace_ms, quiet) & leases.is_empty(),
                 held: record.exclusive.held_since(),
                 load: HostLoad {
                     id: id.to_string(),
-                    leases: usize::from(lease.is_some()),
+                    leases: leases.len(),
                     end_bounds: ends.map(|(_, end)| end.millis()).into_iter().collect(),
                     est_ends: Vec::new(),
                 },

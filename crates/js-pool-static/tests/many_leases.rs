@@ -79,10 +79,7 @@ fn a_full_host_refuses_a_third_lease_until_one_stops() {
         book.start_where(&spec(&class, 3, 1000), None, ANY),
         StartAck::Refused(RefusalCode::NoCapacity)
     );
-    assert_eq!(
-        book.stop(&LeaseId::new(1, 1)),
-        Observed::Absent
-    );
+    assert_eq!(book.stop(&LeaseId::new(1, 1)), Observed::Absent);
     assert_eq!(
         book.start_where(&spec(&class, 3, 1000), None, ANY),
         StartAck::Started { host: host("a") }
