@@ -78,6 +78,15 @@ fn the_payload_holds_the_release_the_plists_the_declaration_and_three_directorie
 }
 
 #[test]
+fn the_payload_list_and_the_errors_can_be_copied_compared_and_printed() {
+    let all = entries(VERSION);
+    assert_eq!(all.clone(), all);
+    assert_eq!(format!("{:?}", all[0].kind), "Dir");
+    assert!(format!("{:?}", all[0]).starts_with("Entry { path: \"Library\""));
+    assert_eq!(format!("{:?}", Error::NeedsMac), "NeedsMac");
+}
+
+#[test]
 fn programs_are_0755_data_is_0644_and_the_hooks_state_directory_is_0700() {
     let all = entries(VERSION);
     let release = "usr/local/js-agent/releases/1.2.3";
