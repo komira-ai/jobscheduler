@@ -10,6 +10,7 @@
 mod cleanup;
 mod cutover;
 mod prepare;
+mod rollback;
 mod verify;
 
 use std::io;
@@ -26,6 +27,7 @@ use super::{
 pub use cleanup::cleanup;
 pub use cutover::cutover;
 pub use prepare::prepare;
+pub use rollback::rollback;
 pub use verify::verify;
 
 /// Everything a step touches.

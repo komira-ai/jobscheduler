@@ -38,6 +38,14 @@ pub const CUTOVER_MARGIN_SECS: u64 = 60;
 /// The margin `verify` keeps between the end of its wait and the declared timeout, in seconds.
 pub const VERIFY_MARGIN_SECS: u64 = 15;
 
+/// How long `rollback` waits for the previous agent's hello once the unit is active, in
+/// seconds.
+pub const ROLLBACK_HELLO_SECS: u64 = 300;
+
+/// The margin `rollback` keeps between the end of its waits and the declared timeout, in
+/// seconds.
+pub const ROLLBACK_MARGIN_SECS: u64 = 60;
+
 /// The rule a record broke.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Invalid {
@@ -66,6 +74,16 @@ pub enum Invalid {
     VerifyTimeout {
         /// `[hook.timeout_secs] verify`.
         verify: u64,
+    },
+    /// The declared `rollback` timeout would end the step in the middle of its waits.
+    #[error(
+        "the declared rollback timeout {rollback} s is too short: it must exceed drain_wait_secs {wait} s plus {START_WAIT_SECS} s, {ROLLBACK_HELLO_SECS} s and {ROLLBACK_MARGIN_SECS} s"
+    )]
+    RollbackTimeout {
+        /// `[hook.timeout_secs] rollback`.
+        rollback: u64,
+        /// `drain_wait_secs`.
+        wait: u64,
     },
     /// The record's schema is not the one this hook writes.
     #[error("schema {found} is not {SCHEMA}")]
