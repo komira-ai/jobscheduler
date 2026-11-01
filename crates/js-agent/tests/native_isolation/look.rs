@@ -28,7 +28,7 @@
 //! missing tool, a crash) proves nothing. The minimum set (a file, a process, a keychain item,
 //! a launchd agent, shared memory) is met when each kind is covered.
 
-use std::io;
+use std::io::{self, Read as _};
 use std::path::Path;
 
 use super::lines::{Kind, Line, Verdict};
@@ -182,6 +182,46 @@ pub fn content_with_token(bytes: &[u8], tokens: &[Token]) -> bool {
         let needle = token.as_str().as_bytes();
         bytes.windows(needle.len()).any(|window| window == needle)
     })
+}
+
+/// The text `child` puts in a launch agent's row when root loaded it: not the job's doing.
+pub const LOADED_BY_ROOT: &str = "loaded by root";
+
+/// Whether a seed failure could be a sandbox denial that the unified log may confirm: a
+/// permission failure (`EPERM`, `EACCES`). Anything else never is.
+pub fn is_permission_failure(text: &str) -> bool {
+    let _ = text;
+    false
+}
+
+/// Whether the unified log (`log show` lines of the sandbox) holds a denial that is this
+/// seed's: a sandbox `deny(` line with the token in it, or the operation of the kind.
+pub fn log_confirms_denial(kind: Kind, token: &Token, log: &str) -> bool {
+    let _ = (kind, token, log);
+    false
+}
+
+/// The verdict of a failed seed. `log` is the sandbox lines of the unified log for run A's
+/// window, or none when it could not be read.
+pub fn resolve_seed(kind: Kind, token: &Token, text: &str, log: Option<&str>) -> Verdict {
+    let _ = (kind, token, text, log);
+    Verdict::Refused
+}
+
+/// Reads at most `limit` bytes and says whether the reader had more.
+///
+/// # Errors
+/// The read failed.
+pub fn read_bounded(reader: impl io::Read, limit: u64) -> io::Result<(Vec<u8>, bool)> {
+    let mut bytes = Vec::new();
+    reader.take(limit).read_to_end(&mut bytes)?;
+    Ok((bytes, false))
+}
+
+/// The children whose device differs from the root's (`find -x` skips them).
+pub fn other_volume_children(root_dev: u64, children: &[(String, u64)]) -> Vec<String> {
+    let _ = (root_dev, children);
+    Vec::new()
 }
 
 /// Why run A could not seed an item: the sandbox of the product profile said no (so the job
@@ -425,7 +465,7 @@ mod tests {
     fn found_files_are_split_by_token_and_cut_at_the_limit() {
         let a = token(0xa1);
         let text = format!(
-            "/private/tmp/iso-{a}\n/private/var/folders/x/y/T/com.apple.something\n\n/Users/Shared/{a}.txt\n/private/tmp/other\n"
+            "/private/tmp/iso-{a}\0/private/var/folders/x/y/T/com.apple.something\0\0/Users/Shared/{a}.txt\0/private/tmp/other\0"
         );
         let (with, without, cut) = split_found_files(&text, std::slice::from_ref(&a), 10);
         assert_eq!(
@@ -458,9 +498,9 @@ mod tests {
         let a = token(0xb2);
         let mut text = String::new();
         for n in 0..599 {
-            text.push_str(&format!("/private/var/folders/x/y/T/file{n}\n"));
+            text.push_str(&format!("/private/var/folders/x/y/T/file{n}\0"));
         }
-        text.push_str(&format!("/private/var/folders/x/y/C/iso-{a}\n"));
+        text.push_str(&format!("/private/var/folders/x/y/C/iso-{a}\0"));
         let (with, without, cut) = split_found_files(&text, std::slice::from_ref(&a), 500);
         assert_eq!(with, [format!("/private/var/folders/x/y/C/iso-{a}")]);
         assert_eq!(without.len(), 500);
@@ -559,7 +599,7 @@ mod tests {
         let mut with_sysv = all.to_vec();
         with_sysv[4] = seeded(Kind::SysvShm);
         assert!(missing_minimum(&with_sysv).is_empty());
-        assert_eq!(missing_minimum(&[]).len(), 5);
+        assert_eq!(missing_minimum(&[]).len(), 6);
         let mut refused = all.to_vec();
         refused[2] = Line::new(Verdict::Refused, Kind::Keychain, token(2), "denied");
         assert_eq!(missing_minimum(&refused), ["keychain-item"]);
@@ -579,19 +619,22 @@ mod tests {
     /// turn a broken seed into a pass.
     #[test]
     fn only_a_sandbox_denial_excuses_a_seed() {
+        // A bare EPERM or EACCES is an ordinary permission failure (a home with the wrong
+        // owner, a tool that is not executable): it proves nothing.
         for code in [libc::EPERM, libc::EACCES] {
             let text = format!("/x/y: {}", io::Error::from_raw_os_error(code));
-            assert_eq!(
-                classify_seed_failure(&text),
-                SeedFailure::ProfileRefused,
-                "{text}"
-            );
+            assert_eq!(classify_seed_failure(&text), SeedFailure::Other, "{text}");
         }
+        assert_eq!(
+            classify_seed_failure(
+                "/usr/bin/security exited Some(1):  security: Operation not permitted"
+            ),
+            SeedFailure::Other
+        );
         for text in [
-            "/usr/bin/security exited Some(1):  security: Operation not permitted",
             "launchctl exited Some(1): Bootstrap failed: deny(1) mach-lookup com.apple.xpc.launchd",
             "Sandbox: sleep(123) deny(1) process-exec /bin/sleep",
-            "defaults exited Some(1): sandbox violation: cfprefsd",
+            "/x/y: deny(1) file-write-create",
         ] {
             assert_eq!(
                 classify_seed_failure(text),
@@ -648,8 +691,153 @@ mod tests {
         .collect();
         assert_eq!(
             missing_minimum(&all_denied),
-            ["shared memory (System V or POSIX)"]
+            [
+                "shared memory (System V or POSIX)",
+                "an item seeded by the job"
+            ]
         );
+    }
+
+    /// Asserts that a run where every minimum kind is denied by the profile and nothing was
+    /// seeded by the job proves nothing, and that an item loaded by root does not count as
+    /// seeded by the job. It catches a fixture bug that leaves everything "covered".
+    #[test]
+    fn a_run_must_have_really_seeded_something() {
+        let denied = |kind| Line::new(Verdict::Denied, kind, token(3), "deny(1) file-write-create");
+        let all_denied: Vec<Line> = [
+            Kind::HomeFile,
+            Kind::Process,
+            Kind::Keychain,
+            Kind::LaunchAgent,
+            Kind::SysvShm,
+        ]
+        .into_iter()
+        .map(denied)
+        .collect();
+        assert_eq!(missing_minimum(&all_denied), ["an item seeded by the job"]);
+        let by_root = Line::new(
+            Verdict::Seeded,
+            Kind::LaunchAgent,
+            token(4),
+            &format!("com.x ({LOADED_BY_ROOT} into user/1: run A could not)"),
+        );
+        let mut with_root = all_denied.to_vec();
+        with_root[3] = by_root;
+        assert_eq!(missing_minimum(&with_root), ["an item seeded by the job"]);
+        with_root[0] = seeded(Kind::HomeFile);
+        assert!(missing_minimum(&with_root).is_empty());
+    }
+
+    /// Asserts which failures could be a sandbox denial that the unified log may confirm
+    /// (`EPERM`, `EACCES`, "Operation not permitted", "Permission denied") and which never
+    /// are (`ENOSPC`, a missing tool, a crash).
+    #[test]
+    fn only_a_permission_failure_may_be_confirmed_by_the_log() {
+        for code in [libc::EPERM, libc::EACCES] {
+            let text = format!("/x/y: {}", io::Error::from_raw_os_error(code));
+            assert!(is_permission_failure(&text), "{text}");
+        }
+        assert!(is_permission_failure(
+            "security exited Some(1): Operation not permitted"
+        ));
+        for text in [
+            "/x: No space left on device (os error 28)",
+            "security exited None: ",
+            "",
+        ] {
+            assert!(!is_permission_failure(text), "{text}");
+        }
+    }
+
+    /// Asserts that a sandbox violation in the log confirms a seed only when it is that
+    /// seed's: its token is in the denied path, or the denied operation is the kind's (the
+    /// shared-memory family for shared memory), and the line is a sandbox deny. It catches a
+    /// log match that excuses any denial for any kind.
+    #[test]
+    fn the_log_confirms_a_denial_of_the_same_seed_only() {
+        let a = token(0xa1);
+        let path = format!(
+            "Sandbox: native_isolation(412) deny(1) file-write-create /var/folders/x/T/iso-{a}\n"
+        );
+        assert!(log_confirms_denial(Kind::UserTempDir, &a, &path));
+        let posix = "Sandbox: native_isolation(412) deny(1) ipc-posix-shm-write-create /jsiaaaa\n";
+        assert!(log_confirms_denial(Kind::PosixShm, &a, posix));
+        assert!(!log_confirms_denial(Kind::PosixSem, &a, posix));
+        assert!(!log_confirms_denial(Kind::SysvShm, &a, posix));
+        let exec = "Sandbox: sh(9) deny(1) process-exec* /bin/sleep\n";
+        assert!(log_confirms_denial(Kind::Process, &a, exec));
+        assert!(!log_confirms_denial(Kind::HomeFile, &a, exec));
+        let other = token(0xb2);
+        assert!(!log_confirms_denial(Kind::UserTempDir, &other, &path));
+        assert!(!log_confirms_denial(
+            Kind::UserTempDir,
+            &a,
+            &format!("allow file-write-create iso-{a}")
+        ));
+        assert!(!log_confirms_denial(Kind::UserTempDir, &a, ""));
+    }
+
+    /// Asserts the verdict of a failed seed: the sandbox's own words are Denied; a bare
+    /// permission failure is Denied only when the log confirms it, and Refused (proves
+    /// nothing) when the log does not, could not be read or the failure is something else.
+    #[test]
+    fn a_failed_seed_is_denied_only_on_the_sandbox_signature() {
+        let a = token(0xa1);
+        let sig = "x: deny(1) file-write-create";
+        assert_eq!(resolve_seed(Kind::HomeFile, &a, sig, None), Verdict::Denied);
+        let bare = "/x/y: Permission denied (os error 13)";
+        assert_eq!(
+            resolve_seed(Kind::HomeFile, &a, bare, None),
+            Verdict::Refused
+        );
+        assert_eq!(
+            resolve_seed(Kind::HomeFile, &a, bare, Some("")),
+            Verdict::Refused
+        );
+        let log = format!("Sandbox: t(1) deny(1) file-write-create /h/iso-{a}\n");
+        assert_eq!(
+            resolve_seed(Kind::HomeFile, &a, bare, Some(&log)),
+            Verdict::Denied
+        );
+        let full = "/x: No space left on device (os error 28)";
+        assert_eq!(
+            resolve_seed(Kind::HomeFile, &a, full, Some(&log)),
+            Verdict::Refused
+        );
+    }
+
+    /// Asserts that a read of a file stops at the limit and says whether there was more: a
+    /// file of exactly the limit is whole, a file of the limit plus a token is not, and the
+    /// token past the limit is not in the bytes returned. It catches a scan that reads a
+    /// prefix and calls the file clean.
+    #[test]
+    fn a_read_says_when_the_file_was_longer_than_the_limit() {
+        let a = token(0xd4);
+        let limit = 1 << 20;
+        let whole = vec![7u8; limit];
+        let (bytes, more) = read_bounded(&whole[..], limit as u64).unwrap();
+        assert_eq!((bytes.len(), more), (limit, false));
+        let mut longer = whole.clone();
+        longer.extend_from_slice(a.as_str().as_bytes());
+        let (bytes, more) = read_bounded(&longer[..], limit as u64).unwrap();
+        assert_eq!(bytes.len(), limit);
+        assert!(more);
+        assert!(!content_with_token(&bytes, std::slice::from_ref(&a)));
+        let (bytes, more) = read_bounded(&b""[..], 8).unwrap();
+        assert_eq!((bytes.len(), more), (0, false));
+    }
+
+    /// Asserts that the children of a root on another volume are the ones named (`find -x`
+    /// does not enter them).
+    #[test]
+    fn a_child_on_another_volume_is_named() {
+        let children = [
+            ("/Users/Shared/a".to_owned(), 5),
+            ("/Users/Shared/mnt".to_owned(), 9),
+            ("/Users/Shared/b".to_owned(), 5),
+        ];
+        assert_eq!(other_volume_children(5, &children), ["/Users/Shared/mnt"]);
+        assert!(other_volume_children(5, &children[..1]).is_empty());
     }
 
     /// Asserts that the uid line round-trips among other output, that the first one is
