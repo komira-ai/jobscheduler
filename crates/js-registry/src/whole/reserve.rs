@@ -110,6 +110,10 @@ pub struct Reservation {
     /// Whether the host was quiet when it was set aside: it drains nothing and waits for
     /// the request's next start.
     pub assigned: bool,
+    /// The end of the host's tail when it was set aside, in milliseconds on the registry's
+    /// clock: its leases' latest end, each cut to its bound. `None` for an `assigned`
+    /// reservation, and for a host with a lease that had neither an estimate nor a bound.
+    pub tail_end: Option<u64>,
 }
 
 /// The marks of a pool: host to mark.
@@ -204,6 +208,7 @@ impl Marks {
             at: mark.at,
             deadline: mark.deadline,
             assigned: mark.assigned,
+            tail_end: None,
         });
         view.collect()
     }

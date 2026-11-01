@@ -413,6 +413,13 @@ impl Registry {
         }
     }
 
+    /// What the tail rule is measured by since the registry started: leases started on
+    /// marked hosts, the share of them that were backfill, and the error of the end
+    /// estimated for each lease that ended. In memory only.
+    pub fn tail_counters(&self) -> crate::TailCounters {
+        crate::TailCounters::default()
+    }
+
     /// The hosts reserved and held, and the requests waiting, now.
     pub fn whole_counts(&self) -> WholeCounts {
         let state = self.lock();

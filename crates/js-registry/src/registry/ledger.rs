@@ -111,6 +111,7 @@ fn export(state: &State) -> Vec<ReservationRecord> {
             reserved_at: mark.at,
             deadline: mark.deadline,
             assigned: mark.assigned,
+            tail_end: None,
         });
         let queued = Queued {
             place: u32::try_from(place).unwrap_or(u32::MAX),

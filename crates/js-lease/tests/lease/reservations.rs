@@ -19,6 +19,7 @@ fn held(name: &str, reserved: u64, deadline: u64) -> Held {
         reserved_at: at(reserved),
         deadline: at(deadline),
         assigned: false,
+        tail_end: None,
     }
 }
 
@@ -110,8 +111,8 @@ fn leases_and_reservations_are_one_write() {
 /// Asserts that a file that counts two reservations but holds one is refused as corrupt
 /// naming the path, and so are the rows that are not valid: a held part cut short, a
 /// bad host, an exclusion with neither or both ends, a request twice, a queue place
-/// without the instant it was first presented (and the reverse), and `assigned` on a
-/// row that holds no host.
+/// without the instant it was first presented (and the reverse), and `assigned` or
+/// `tail_end_ms` on a row that holds no host.
 #[test]
 fn corrupt_reservation_rows_are_refused() {
     let scratch = Scratch::new("res_corrupt");
@@ -137,6 +138,7 @@ fn corrupt_reservation_rows_are_refused() {
         head(1) + row + "queue_place = 0\n",
         head(1) + row + "queued_since_ms = 5\n",
         head(1) + row + "assigned = true\n",
+        head(1) + row + "tail_end_ms = 5\n",
     ];
     for text in cases {
         fs::write(&path, &text).unwrap();
@@ -351,11 +353,47 @@ fn a_row_from_before_the_queue_fields_loads_unqueued_and_unassigned() {
     let restored = table.reservations();
     assert_eq!(restored[0].queued, None);
     assert_eq!(restored[0].held.as_ref().map(|h| h.assigned), Some(false));
+    assert_eq!(restored[0].held.as_ref().map(|h| h.tail_end), Some(None));
     assert_eq!(restored[0].give_ups, 3);
     table.set_reservations(restored);
     assert!(table.tick().save_error.is_none());
     let rewritten = fs::read_to_string(scratch.file()).unwrap();
-    for key in ["queue_place", "queued_since_ms", "assigned"] {
+    for key in ["queue_place", "queued_since_ms", "assigned", "tail_end_ms"] {
         assert!(!rewritten.contains(key), "{key}\n{rewritten}");
     }
+}
+
+/// Asserts that the end of the tail a mark was made with is in the file as `tail_end_ms`
+/// and comes back field for field, for a mark that has one, and that a mark without one
+/// writes no key. It catches a tail lost on a restart, and an unknown tail written as zero.
+#[test]
+fn the_tail_end_of_a_mark_survives_a_reopen() {
+    let (mut table, clock, scratch) = fresh("res_tail");
+    let with = ReservationRecord {
+        held: Some(Held {
+            tail_end: Some(T0 + 300_000),
+            ..held("h1", T0, T0 + 600_000)
+        }),
+        ..record("req-a")
+    };
+    let without = ReservationRecord {
+        held: Some(held("h2", T0, T0 + 600_000)),
+        ..record("req-b")
+    };
+    table.set_reservations(vec![with.clone(), without.clone()]);
+    assert!(table.tick().save_error.is_none());
+    let text = fs::read_to_string(scratch.file()).unwrap();
+    assert_eq!(text.matches("tail_end_ms").count(), 1, "{text}");
+    assert!(
+        text.contains(&format!("tail_end_ms = {}", T0 + 300_000)),
+        "{text}"
+    );
+    let table = reopen(table, &clock, &scratch);
+    let back = unclaimed(table.reservations());
+    assert_eq!(
+        back.iter()
+            .map(|r| r.held.as_ref().map(|h| h.tail_end))
+            .collect::<Vec<_>>(),
+        [Some(Some(T0 + 300_000)), Some(None)]
+    );
 }

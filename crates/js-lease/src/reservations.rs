@@ -68,6 +68,7 @@ fn restore(
                 reserved_at: Timestamp::from_millis(reserved_at),
                 deadline: Timestamp::from_millis(deadline).max(boot.plus(settings.boot_grace())),
                 assigned: stored.assigned,
+                tail_end: None,
             })
         }
         _ => {
@@ -130,6 +131,7 @@ pub(crate) fn stored(
         reserved_at_ms: held.map(|held| held.reserved_at.millis()),
         deadline_ms: held.map(|held| held.deadline.millis()),
         assigned: held.is_some_and(|held| held.assigned),
+        tail_end_ms: None,
         queue_place: record.queued.map(|queued| queued.place),
         queued_since_ms: record.queued.map(|queued| queued.since.millis()),
         give_ups: record.give_ups,
