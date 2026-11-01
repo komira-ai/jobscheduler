@@ -646,6 +646,48 @@ fn the_declaration_is_one_the_hook_takes_for_the_unit_the_plist_labels() {
     assert!(declaration.timeouts.prepare >= parsed.drain_wait_secs + PREPARE_MARGIN_SECS);
 }
 
+// The hook reaches the lease server and the agent's state by the values of the agent's own
+// flags: the declaration must say what the plist of the agent says.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_declaration_reaches_the_server_and_the_state_the_agents_plist_names() {
+    use js_agent::update_hook::Params;
+    use js_mac_provision::daemon::{GATE, UNSET_SERVER};
+    let table: toml::Table = read(&format!("{DIR}/updater.toml")).parse().unwrap();
+    let params = table["hook"]["params"].as_table().unwrap();
+    let agent = Daemon::agent(UNSET_SERVER, "pool");
+    let flag = |name: &str| {
+        let at = agent.args.iter().position(|arg| arg == name).unwrap();
+        agent.args[at + 1].clone()
+    };
+    assert_eq!(params["server"].as_str(), Some(flag("--server").as_str()));
+    assert_eq!(
+        params["state_root"].as_str(),
+        Some(flag("--state-root").as_str())
+    );
+    assert_eq!(
+        params["token_file"].as_str(),
+        Some(flag("--token-file").as_str())
+    );
+    assert_eq!(flag("--token-file"), GATE);
+    // And the hook reads them as it reads any other table.
+    let mut text: String = params
+        .iter()
+        .filter_map(|(key, value)| value.as_str().map(|v| format!("\"{key}\" = \"{v}\"\n")))
+        .collect();
+    text.push_str(&format!(
+        "cordon_lease_secs = 300\ncordon_max_secs = 17355\ndrain_wait_secs = 3600\ndefer_retry_secs = 300\n\"updater.artifact_digest\" = \"sha256:{}\"\n\"updater.staged_release\" = \"/staged\"\n\"updater.target_version\" = \"1.4.0\"\n",
+        "a".repeat(64)
+    ));
+    let read = Params::parse(&text).unwrap().connect;
+    assert_eq!(read.server.as_deref(), Some(UNSET_SERVER));
+    assert_eq!(
+        read.state_root.as_deref(),
+        Some(Path::new("/var/db/js-agent/state"))
+    );
+    assert_eq!(read.token_file.as_deref(), Some(Path::new(GATE)));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn the_declaration_names_the_native_runtime_for_the_unit_the_plist_labels() {

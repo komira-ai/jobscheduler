@@ -11,9 +11,11 @@
 //! this). The verb is answered before the agent's flags are parsed and before any signal
 //! handler is installed: a hook is a short-lived root process of the updater, not an agent.
 //!
-//! The five steps have their bodies in [`step`], over the ports. The machine has no lease
-//! client yet, so [`Host::system`] still answers every step with the reason `not_implemented`
-//! (exit 1).
+//! The five steps have their bodies in [`step`], over the ports. [`Host::system`] runs them over
+//! the machine's: the unit manager, the release link, the lease server's own-host routes and the
+//! agent's state root (see [`machine`](Machine)). Where the lease server is and where the state
+//! root is come from the params table ([`ConnectParams`]); the declaration is read from
+//! [`DECLARATION_PATH`].
 //!
 //! The hook builds on Linux and macOS and differs between them in two places only: the unit
 //! manager ([`PlatformUnits`]: `systemctl` on Linux, `launchctl` on a Mac) and the runtime the
@@ -23,6 +25,7 @@
 mod args;
 mod declaration;
 mod launch_units;
+mod machine;
 mod params;
 mod plain;
 mod ports;
@@ -39,11 +42,13 @@ use std::process::ExitCode;
 pub use args::{ArgsError, Invocation, Step};
 pub use declaration::{DECLARATION_PATH, DEFAULT_RUNTIME, Declaration, DeclarationError, Timeouts};
 pub use launch_units::{BOOTOUT_MARGIN, LAUNCHCTL, LaunchUnits, SETTLE_READS, StopRunner};
+pub use machine::{Machine, MachineLease, StatFn, own_host_id, run_step};
 pub use params::{
-    ARTIFACT_DIGEST_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY, DEFER_RETRY_KEY, DRAIN_WAIT_KEY,
-    MIN_CORDON_LEASE_SECS, POLL_SECS, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY,
-    PROMOTION_CEILING_KEY, Params, ParamsError, RELEASE_LINK_KEY, STAGED_RELEASE_KEY,
-    TARGET_VERSION_KEY,
+    ARTIFACT_DIGEST_KEY, CA_CERT_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY, ConnectParams,
+    DEFER_RETRY_KEY, DRAIN_WAIT_KEY, HOST_ID_KEY, MIN_CORDON_LEASE_SECS, POLL_SECS,
+    PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, Params, ParamsError,
+    RELEASE_LINK_KEY, SERVER_KEY, STAGED_RELEASE_KEY, STATE_ROOT_KEY, TARGET_VERSION_KEY,
+    TOKEN_FILE_KEY,
 };
 pub use ports::{
     Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,
@@ -123,15 +128,9 @@ pub struct Host<'a> {
     pub step: &'a dyn Fn(&Invocation, &Params) -> Done,
 }
 
-/// A step with no body yet: exit 1, reason `not_implemented`.
-fn not_implemented(invocation: &Invocation, _params: &Params) -> Done {
-    Done {
-        outcome: Outcome::Failure,
-        report: Report::failure(
-            Reason::NotImplemented,
-            format!("{} is not implemented", invocation.step),
-        ),
-    }
+/// This machine's step: the real ports, over the declaration the updater installed.
+fn machine_step(invocation: &Invocation, params: &Params) -> Done {
+    run_step(invocation, params, &Machine::system())
 }
 
 impl Host<'static> {
@@ -139,7 +138,7 @@ impl Host<'static> {
     #[must_use]
     pub fn system() -> Self {
         Self {
-            step: &not_implemented,
+            step: &machine_step,
         }
     }
 }

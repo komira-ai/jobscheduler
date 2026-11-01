@@ -12,6 +12,7 @@ mod fake_bin;
 mod fakes;
 mod fakes_tests;
 mod launchd;
+mod machine;
 mod params;
 mod ports;
 mod record;
