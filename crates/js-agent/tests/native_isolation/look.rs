@@ -339,39 +339,6 @@ pub struct AgentAttempt {
     pub text: String,
 }
 
-/// Whether root's attempts show that launchd cannot host an agent for the uid at all: no
-/// attempt worked, and the deciding attempt failed with the specific no-domain error seen on
-/// macOS for a uid without a session. For the `gui/<uid>` domain, the first attempt exited 125
-/// "Domain does not support specified action". For `user/<uid>`, the last `launchctl asuser`
-/// bootstrap exited 5 "Input/output error" (after the plain root bootstrap failed too).
-/// Anything else (another code, other words, no `asuser` attempt) is not unavailable and
-/// proves nothing.
-pub fn classify_agent_unavailable(kind: Kind, attempts: &[AgentAttempt]) -> bool {
-    if attempts.iter().any(|attempt| attempt.code == Some(0)) {
-        return false;
-    }
-    match kind {
-        Kind::GuiLaunchAgent => attempts.first().is_some_and(|first| {
-            first.code == Some(125)
-                && first
-                    .text
-                    .contains("Domain does not support specified action")
-        }),
-        Kind::LaunchAgent => {
-            let asuser = attempts.iter().rev().find(|attempt| {
-                attempt.command.starts_with("launchctl asuser")
-                    && attempt.command.contains(" bootstrap ")
-            });
-            asuser.is_some_and(|last| {
-                last.code == Some(5) && last.text.contains("Input/output error")
-            }) && attempts.iter().any(|attempt| {
-                attempt.command.starts_with("launchctl bootstrap ") && attempt.code == Some(5)
-            })
-        }
-        _ => false,
-    }
-}
-
 /// The PROBE line for one attempt: the exact command, its status and its text.
 pub fn attempt_probe(kind: Kind, attempt: &AgentAttempt) -> String {
     let text: String = attempt
@@ -410,7 +377,9 @@ pub fn sandbox_log_counts(log: &str, job: &JobProcs) -> (usize, usize) {
 /// Whether root loaded the agent: a `launchctl ... bootstrap` attempt exited 0. A successful
 /// no-op (`launchctl asuser <uid> /usr/bin/true`) is not the agent being loaded.
 pub fn agent_loaded(attempts: &[AgentAttempt]) -> bool {
-    attempts.iter().any(|attempt| attempt.code == Some(0))
+    attempts
+        .iter()
+        .any(|attempt| attempt.code == Some(0) && attempt.command.contains(" bootstrap "))
 }
 
 /// What a whole run came to.
@@ -431,27 +400,78 @@ pub enum RunVerdict {
 /// The verdict of a run: how many rows survived, the reasons it proves nothing, and what run A
 /// reported for each kind.
 pub fn final_verdict(seeded: &[Line], survivors: usize, unproven: &[String]) -> RunVerdict {
-    let _ = (seeded, survivors, unproven);
-    RunVerdict::Pass
+    if survivors > 0 {
+        return RunVerdict::Fail;
+    }
+    if !unproven.is_empty() {
+        return RunVerdict::NoVerdict;
+    }
+    let gaps = unexercised_kinds(seeded);
+    match gaps.is_empty() {
+        true => RunVerdict::Pass,
+        false => RunVerdict::PassWithUnexercised(gaps),
+    }
+}
+
+/// The kinds run A neither seeded nor had denied by the sandbox (refused otherwise, or not
+/// reported at all), in kind order.
+fn unexercised_kinds(seeded: &[Line]) -> Vec<Kind> {
+    Kind::ALL
+        .into_iter()
+        .filter(|kind| {
+            !seeded.iter().any(|line| {
+                line.kind == *kind && matches!(line.verdict, Verdict::Seeded | Verdict::Denied)
+            })
+        })
+        .collect()
 }
 
 /// `kind: reason` for each kind that was neither seeded nor denied, in kind order.
 pub fn unexercised_report(seeded: &[Line]) -> Vec<String> {
-    let _ = seeded;
-    Vec::new()
+    unexercised_kinds(seeded)
+        .into_iter()
+        .map(|kind| {
+            let reason = seeded
+                .iter()
+                .rev()
+                .find(|line| line.kind == kind)
+                .map_or("not reported by run A", |line| line.text.as_str());
+            format!("{}: {reason}", kind.label())
+        })
+        .collect()
 }
 
 /// The message a passing-with-gaps run fails with, so it cannot pass silently.
 pub fn verdict_message(verdict: &RunVerdict, seeded: &[Line]) -> String {
-    let _ = (verdict, seeded);
-    String::new()
+    match verdict {
+        RunVerdict::Pass => {
+            "PASS: every kind was seeded or denied by the sandbox, and nothing of run A survived"
+                .to_owned()
+        }
+        RunVerdict::PassWithUnexercised(kinds) => {
+            let labels: Vec<&str> = kinds.iter().map(|kind| kind.label()).collect();
+            format!(
+                "PASS-WITH-UNEXERCISED {}: the minimum set was met and nothing of run A survived, but these kinds were neither seeded nor denied by the sandbox and are unproven (the test makes no claim about them):\n{}",
+                labels.join(", "),
+                unexercised_report(seeded).join("\n")
+            )
+        }
+        RunVerdict::Fail => "FAIL: something of run A survived".to_owned(),
+        RunVerdict::NoVerdict => {
+            "COULD-NOT-REACH-A-VERDICT: the minimum set was not met or a control failed".to_owned()
+        }
+    }
 }
 
 /// Why a run stopped: the error that ended it, if any, and every reason it already proved
 /// nothing; none of them is dropped.
 pub fn reasons_message(error: Option<&str>, unproven: &[String]) -> String {
-    let _ = (error, unproven);
-    String::new()
+    error
+        .into_iter()
+        .map(str::to_owned)
+        .chain(unproven.iter().cloned())
+        .collect::<Vec<String>>()
+        .join("; ")
 }
 
 /// Why run A could not seed an item: the sandbox of the product profile said no (so the job
@@ -497,13 +517,9 @@ fn has_sandbox_signature(text: &str) -> bool {
 /// seeded or denied by the profile. What is missing, by name; a run where these were refused
 /// for another reason proves nothing.
 pub fn missing_minimum(lines: &[Line]) -> Vec<&'static str> {
-    // A launch agent launchd cannot host for the uid (root's own attempts failed with the
-    // no-domain errors) covers that kind too, and no other.
     let seeded = |kind: Kind| {
         lines.iter().any(|line| {
-            line.kind == kind
-                && (matches!(line.verdict, Verdict::Seeded | Verdict::Denied)
-                    || (kind == Kind::LaunchAgent && line.verdict == Verdict::Unavailable))
+            line.kind == kind && matches!(line.verdict, Verdict::Seeded | Verdict::Denied)
         })
     };
     let mut missing = Vec::new();
@@ -1232,73 +1248,6 @@ mod tests {
         }
     }
 
-    /// Asserts when root's failed attempts show the uid has no launchd domain to host an agent:
-    /// `gui/<uid>` exits 125 "Domain does not support specified action"; `user/<uid>` fails
-    /// the plain bootstrap AND the `asuser` bootstrap with 5 "Input/output error". A success
-    /// anywhere, another code or text, no `asuser` attempt and no attempts are not. It catches
-    /// an "unavailable" that excuses any launchd failure.
-    #[test]
-    fn launchd_has_no_domain_for_the_uid_only_on_the_specific_errors() {
-        let gui = [attempt(
-            "launchctl bootstrap gui/59123 /p",
-            Some(125),
-            "Bootstrap failed: 125: Domain does not support specified action",
-        )];
-        assert!(classify_agent_unavailable(Kind::GuiLaunchAgent, &gui));
-        let eio = "Bootstrap failed: 5: Input/output error";
-        let user = [
-            attempt("launchctl bootstrap user/59123 /p", Some(5), eio),
-            attempt(
-                "launchctl asuser 59123 /bin/launchctl bootstrap user/59123 /p",
-                Some(5),
-                eio,
-            ),
-        ];
-        assert!(classify_agent_unavailable(Kind::LaunchAgent, &user));
-        // The plain root bootstrap alone is not enough for the user domain.
-        assert!(!classify_agent_unavailable(Kind::LaunchAgent, &user[..1]));
-        // The wrong words or code on the deciding attempt.
-        for (code, text) in [
-            (Some(1), eio),
-            (Some(5), "Bootstrap failed: 5: something else"),
-            (Some(113), "Could not find domain"),
-            (None, ""),
-        ] {
-            let mut tried = user.to_vec();
-            tried[1] = attempt(
-                "launchctl asuser 59123 /bin/launchctl bootstrap user/59123 /p",
-                code,
-                text,
-            );
-            assert!(
-                !classify_agent_unavailable(Kind::LaunchAgent, &tried),
-                "{code:?} {text:?}"
-            );
-        }
-        let mut worked = user.to_vec();
-        worked.push(attempt(
-            "launchctl asuser 59123 /bin/launchctl bootstrap user/59123 /p",
-            Some(0),
-            "",
-        ));
-        assert!(!classify_agent_unavailable(Kind::LaunchAgent, &worked));
-        let wrong_gui = [attempt(
-            "launchctl bootstrap gui/1 /p",
-            Some(125),
-            "Input/output error",
-        )];
-        assert!(!classify_agent_unavailable(
-            Kind::GuiLaunchAgent,
-            &wrong_gui
-        ));
-        assert!(!classify_agent_unavailable(Kind::GuiLaunchAgent, &[]));
-        // The user-domain errors do not excuse the gui domain, nor the reverse.
-        assert!(!classify_agent_unavailable(Kind::GuiLaunchAgent, &user));
-        assert!(!classify_agent_unavailable(Kind::LaunchAgent, &gui));
-        // No other kind has this outcome.
-        assert!(!classify_agent_unavailable(Kind::Keychain, &user));
-    }
-
     /// Asserts that an attempt is printed with its exact command, status and text on one line.
     #[test]
     fn an_attempt_is_printed_with_its_command_status_and_text() {
@@ -1332,33 +1281,6 @@ mod tests {
                    Sandbox: x(9) allow file-read\n";
         assert_eq!(sandbox_log_counts(log, &job), (3, 2));
         assert_eq!(sandbox_log_counts("", &job), (0, 0));
-    }
-
-    /// Asserts that a launch agent launchd cannot host for the uid covers the launch-agent
-    /// kind, and covers no other kind.
-    #[test]
-    fn an_unavailable_launch_agent_covers_only_its_kind() {
-        let unavailable = |kind| {
-            Line::new(
-                Verdict::Unavailable,
-                kind,
-                token(3),
-                "5: Input/output error",
-            )
-        };
-        let rest = [
-            seeded(Kind::HomeFile),
-            seeded(Kind::Process),
-            seeded(Kind::Keychain),
-            seeded(Kind::SysvShm),
-        ];
-        let mut lines = rest.to_vec();
-        lines.push(unavailable(Kind::LaunchAgent));
-        assert!(missing_minimum(&lines).is_empty());
-        let mut other = rest.to_vec();
-        other[2] = unavailable(Kind::Keychain);
-        other.push(seeded(Kind::LaunchAgent));
-        assert_eq!(missing_minimum(&other), ["keychain-item"]);
     }
 
     /// Asserts that the agent is loaded only by a bootstrap that exited 0, and not by the

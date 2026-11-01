@@ -85,9 +85,6 @@ pub enum Verdict {
     /// Run A could not leave it because the product profile (the sandbox) denied it; the text
     /// says how. The job could not create the state, so nothing can carry over.
     Denied,
-    /// Run A could not leave it because launchd has no domain for the uid to host it, shown by
-    /// root's own attempts failing with the specific no-domain errors; the text has every attempt.
-    Unavailable,
     /// Run B found the item; the text says where.
     Found,
     /// Run B could not tell whether the item is there; the text says why. Never a pass.
@@ -100,7 +97,6 @@ impl Verdict {
             Verdict::Seeded => "seeded",
             Verdict::Refused => "refused",
             Verdict::Denied => "denied",
-            Verdict::Unavailable => "unavailable",
             Verdict::Found => "found",
             Verdict::Unlooked => "unlooked",
         }
@@ -111,7 +107,6 @@ impl Verdict {
             Verdict::Seeded,
             Verdict::Refused,
             Verdict::Denied,
-            Verdict::Unavailable,
             Verdict::Found,
             Verdict::Unlooked,
         ]
@@ -246,16 +241,6 @@ mod tests {
             "refused by the profile",
         );
         assert_eq!(parse_lines(&denied.encode()).unwrap(), vec![denied]);
-        let unavailable = Line::new(
-            Verdict::Unavailable,
-            Kind::LaunchAgent,
-            token(8),
-            "5: Input/output error",
-        );
-        assert_eq!(
-            parse_lines(&unavailable.encode()).unwrap(),
-            vec![unavailable]
-        );
         let unlooked = Line::new(
             Verdict::Unlooked,
             Kind::Keychain,
