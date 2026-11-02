@@ -25,7 +25,7 @@ const ROWS: readonly Row[] = [
   ['index', 'jobscheduler is a generic scheduler for jobs and compute', 'README.md', 'A generic job and compute scheduler'],
   ['index', 'tells the server what the host offers', 'crates/js-agent/src/lib.rs', 'tells a lease server what the machine offers'],
   ['index', 'through Docker, Podman or crun', 'crates/js-agent/src/lib.rs', '`--runtime <docker\\|crun>`'],
-  ['index', 'native jobs on a Mac', 'crates/js-agent/src/lib.rs', 'with it a Mac agent runs native jobs'],
+  ['index', '(through Docker, Podman or crun) and native jobs on a Mac', 'crates/js-agent/src/lib.rs', 'with it a Mac agent runs native jobs'],
   ['index', 'The lease server calls it only under <code>--placement js-sched</code>', 'crates/js-lease-server/src/lib.rs', '`--placement registry\\|js-sched`'],
   ['index', 'to pick among the hosts with room by how tightly a lease fits, and not by load', 'docs/design/placement-by-load.md', 'the host the lease fits most tightly is chosen, not the first by id'],
   ['index', 'to pick among the hosts with room by how tightly a lease fits, and not by load', 'docs/design/placement-by-load.md', 'no measurements and no curves'],
@@ -35,7 +35,83 @@ const ROWS: readonly Row[] = [
   ['index', 'not yet reached through the lease server', 'crates/js-lease-server/src/lib.rs', 'so no reservation is made through the HTTP routes'],
   ['index', 'the Debian and macOS packages are built, and not published', '.github/workflows/js-agent-deb.yml', 'no release, no package repository, no registry'],
   ['index', 'the Debian and macOS packages are built, and not published', '.github/workflows/js-agent-macos-pkg.yml', 'It publishes nothing: the packages and their SHA256SUMS are workflow artifacts for seven days'],
+  ['index', 'Leases on whole hosts, placement by CPU and memory', 'crates/js-lease-server/src/lib.rs', 'can hold a whole GPU host for as long as it renews'],
+  ['index', 'Leases on whole hosts, placement by CPU and memory', 'crates/js-sched/src/lib.rs', 'placement of a CPU, memory and GPU request onto worker capacity'],
+  ['index', 'jobscheduler is a scheduler for jobs and compute', 'README.md', 'A generic job and compute scheduler'],
+  ['index', 'a lease server, an agent on each host, and a pure placement core', 'crates/js-lease-server/src/lib.rs', 'A lease server: a [`js_lease::LeaseTable`] behind an authenticated HTTP JSON API'],
+  ['index', 'a lease server, an agent on each host, and a pure placement core', 'crates/js-agent/src/lib.rs', 'runs on a machine, tells a lease server what the machine offers'],
+  ['index', 'a lease server, an agent on each host, and a pure placement core', 'crates/js-sched/src/lib.rs', 'This is a pure crate'],
+  ['index', 'Open source, Apache 2.0', 'LICENSE', 'Apache License Version 2.0, January 2004'],
+  ['index', 'Open source, Apache 2.0', 'Cargo.toml', 'license = "Apache-2.0"'],
+  ['index', 'open source, Apache 2.0', 'LICENSE', 'Apache License Version 2.0, January 2004'],
+  ['index', 'open source, Apache 2.0', 'Cargo.toml', 'license = "Apache-2.0"'],
+  ['index', 'Leases on <em>whole hosts</em>, and a core that places work by load.', 'crates/js-lease-server/src/lib.rs', 'can hold a whole GPU host for as long as it renews'],
+  ['index', 'Leases on <em>whole hosts</em>, and a core that places work by load.', 'crates/js-sched/src/lib.rs', 'admission by measured and predicted load'],
+  ['index', 'A client leases a host from a lease server for a bounded time and renews the lease while it needs it.', 'crates/js-lease-server/src/lib.rs', 'can hold a whole GPU host for as long as it renews'],
+  ['index', 'Linux x86_64 and Apple silicon, from a release', 'docs/release.md', '`x86_64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`)'],
+  ['index', 'Linux x86_64 and Apple silicon, from a release', 'docs/release.md', 'the `js` binary for Apple silicon Macs'],
+  ['index', 'Linux x86_64 and Apple silicon, from a release', 'docs/release.md', '`publish` creates the GitHub release for `vX.Y.Z`'],
+  ['index', 'Every push to <code>main</code> that changes code that ships is released, with a checksum file and a build attestation', 'docs/release.md', 'every push to `main` that changes code that ships is released as the next version'],
+  ['index', 'Every push to <code>main</code> that changes code that ships is released, with a checksum file and a build attestation', 'docs/release.md', '`sums` writes one `SHA256SUMS` over the archives'],
+  ['index', 'Every push to <code>main</code> that changes code that ships is released, with a checksum file and a build attestation', 'docs/release.md', '`attest` attests every archive with build provenance'],
+  ['index', 'This is a recording of one run on one machine: the lease server started from a file that lists one host, and the <code>js</code> client leasing that host, listing the lease and releasing it', 'site/tools/demo.sh', 'builds the lease server and the client, leases a host from a static host file on this machine, lists the lease and releases it'],
+  ['index', 'There is no agent, so the host is held at once', 'crates/js-pool-static/src/lib.rs', 'A static pool has no agent, so a `Whole` lease is held at once'],
+  ['index', 'The lease id and the expiry are as they were recorded', 'site/tools/demo.sh', 'Lease ids and times differ on every run, so a new recording differs from the committed one in those'],
+  ['index', '<code>site/tools/demo.sh</code> in the repository builds both programs and runs these commands again; the recording is <code>site/test/demo.transcript</code>', 'site/tools/demo.sh', 'Reproduces site/test/demo.transcript: builds the lease server and the client'],
+  ['index', 'Lease API: acquire, renew, release, list', 'crates/js-cli/src/lib.rs', 'It acquires, renews and releases leases on whole GPU hosts'],
+  ['index', 'Lease API: acquire, renew, release, list', 'crates/js-cli/src/lib.rs', 'js lease list'],
+  ['index', 'Lease API: acquire, renew, release, list', 'crates/js-lease-server/src/lib.rs', '| `GET /v1/leases` |'],
+  ['index', 'release, list; the <code>js</code> client', 'crates/js-cli/src/lib.rs', '`js`: the command-line client of `js-lease-server`'],
+  ['index', '; TLS', 'crates/js-lease-server/src/lib.rs', '`--tls-cert`, `--tls-key` | PEM files; both or neither'],
+  ['index', 'Agents that register with a join token', 'crates/js-agent/src/lib.rs', 'the pool\'s join token'],
+  ['index', 'container jobs on Linux or native jobs on a Mac', 'crates/js-agent/src/lib.rs', 'the `docker` or `podman` program that runs container jobs'],
+  ['index', 'container jobs on Linux or native jobs on a Mac', 'crates/js-agent/src/lib.rs', 'with it a Mac agent runs native jobs'],
+  ['index', 'Pools of class <code>whole-node</code> or <code>gpu-host</code>', 'crates/js-pool-static/src/lib.rs', 'The pool serves `gpu-host`'],
+  ['index', 'Pools of class <code>whole-node</code> or <code>gpu-host</code>', 'crates/js-pool-static/src/lib.rs', 'such as `whole-node`'],
+  ['index', 'launches nothing until the pool file says <code>live</code>', 'crates/js-lease-server/src/lib.rs', '`launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing'],
+  ['index', '<code>js-sched</code> picking the host of a lease', 'crates/js-lease-server/src/lib.rs', 'who picks the host of a lease on a host that registered itself'],
+  ['index', 'Placement by load, in the <code>js-sched</code> crate', 'crates/js-sched/src/lib.rs', 'admission by measured and predicted load'],
+  ['index', 'not used by the lease server: it places by fit', 'crates/js-pool-static/src/lib.rs', 'There is no load term'],
+  ['index', 'not used by the lease server: it places by fit', 'crates/js-pool-static/src/lib.rs', 'A host fits when its shape offers at least the requested resources'],
+  ['index', 'A pool that books part of a host', 'crates/js-lease-server/src/agent_pool.rs', 'a mixed pool (a class that books part of a host) is not served by this server yet'],
+  ['index', 'not built: refused when the pool file loads', 'crates/js-lease-server/src/file.rs', 'Refuses a class that books part of a host: this server serves whole hosts only.'],
+  ['index', 'One token for each tenant', 'crates/js-lease-server/src/lib.rs', 'Per-tenant leases (each tenant with a token of its own'],
+  ['index', 'not built: one shared token', 'crates/js-lease-server/src/lib.rs', 'The server is single-tenant: there is one token'],
+  ['index', 'not built: one shared token', 'crates/js-lease-server/src/lib.rs', 'the design document lists the shared token as a risk) are a follow-up and not built here'],
+  ['index', 'An idempotency key on acquire', 'crates/js-lease-server/src/lib.rs', 'An idempotency key, so that a repeated acquire returns the lease it made, is a follow-up and not built here.'],
+  ['index', 'tag-planned">not built</span>', 'crates/js-lease-server/src/lib.rs', 'is a follow-up and not built here'],
+  ['index', 'A lease server for macOS', 'docs/release.md', 'there is no macOS `js-lease-server`'],
+  ['index', 'none: Linux x86_64 only', 'docs/release.md', '`x86_64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`)'],
+  ['index', 'A published package or image of the agent', '.github/workflows/js-agent-deb.yml', 'no release, no package repository, no registry'],
+  ['index', 'kbf running its actions on the agent', 'docs/design/kbf-on-js-agent.md', 'Status: design only'],
+  ['index', 'design only', 'docs/design/kbf-on-js-agent.md', 'Status: design only'],
+  ['index', 'A lease is a host for a bounded time', 'crates/js-lease/src/lib.rs', 'A lease is never renewed past its acquisition plus the request\'s maximum wall time.'],
+  ['index', 'A client posts to <code>/v1/leases</code> with a class and a maximum wall time', 'crates/js-cli/src/lib.rs', 'js lease acquire --class gpu-host [--gpus N --gpu-class X --cpu-millis N --memory-bytes N] --max-wall <dur>'],
+  ['index', 'A client posts to <code>/v1/leases</code> with a class and a maximum wall time', 'crates/js-lease-server/src/lib.rs', '| `POST /v1/leases` |'],
+  ['index', 'renews the lease before its TTL lapses, and releases it', 'crates/js-lease/src/lib.rs', 'keeps alive by renewing, and gives back by releasing or letting them lapse'],
+  ['index', 'A client that disappears loses the lease at the end of its TTL', 'crates/js-lease/src/lib.rs', 'gives back by releasing or letting them lapse'],
+  ['index', 'An agent on every host', 'crates/js-agent/src/lib.rs', 'runs on a machine, tells a lease server what the machine offers'],
+  ['index', '<code>js-agent</code> offers the host\'s CPU, memory and GPUs', 'crates/js-agent/src/lib.rs', 'tells a lease server what the machine offers'],
+  ['index', '<code>js-agent</code> offers the host\'s CPU, memory and GPUs', 'crates/js-agent/src/lib.rs', 'The CPU count (`getconf _NPROCESSORS_ONLN`), memory (`/proc/meminfo`, or `sysctl -n hw.memsize` on a Mac)'],
+  ['index', 'heartbeats, and runs container jobs on Linux', 'crates/js-agent/src/lib.rs', 'keeps telling it that the machine is alive'],
+  ['index', 'heartbeats, and runs container jobs on Linux', 'crates/js-agent/src/lib.rs', 'the absolute path of the `docker` or `podman` program that runs container jobs'],
+  ['index', 'A whole node, quiet, when asked', 'crates/js-types/src/class.rs', 'A whole host: `BookAll` plus a reservation, a quiet gate and caps.'],
+  ['index', 'A <code>whole-node</code> lease books every dimension of one host', 'crates/js-types/src/class.rs', 'Book every dimension of the host, so the lease holds the whole host with no overcommit.'],
+  ['index', 'A <code>whole-node</code> lease books every dimension of one host', 'crates/js-pool-static/src/lib.rs', 'such as `whole-node`'],
+  ['index', 'Placement by measured and predicted load', 'crates/js-sched/src/lib.rs', 'admission by measured and predicted load'],
+  ['index', 'The <code>js-sched</code> crate admits a lease to a worker when measured load plus predicted cost stays within the worker\'s CPU and memory.', 'crates/js-sched/src/lib.rs', 'an action is admitted to a worker when what the worker\'s readings measure, plus the predicted cost of the leases no reading covers yet, plus the cost of the new lease, stays within its CPU and its memory'],
+  ['index', '<span class="pill">Early development</span>', 'Cargo.toml', 'version = "0.1.0"'],
+  ['index', 'An elastic pool on Lambda Labs', 'crates/js-provider-lambdalabs/src/lib.rs', 'launching and terminating GPU instances under a cost guard'],
+  ['index', 'An elastic pool on Lambda Labs', 'crates/js-lease-server/src/lib.rs', 'A pool whose provider launches machines (an elastic pool)'],
+  ['index', 'a bearer token', 'crates/js-lease-server/src/api.rs', 'Refuses a request that lacks `Authorization: Bearer <token>`'],
+  ['index', 'heartbeats, and runs container jobs on Linux', 'crates/js-agent/src/lib.rs', 'Container jobs are Linux-only (the checks read `/proc`)'],
+  ['index', '<code>js-agent</code> offers the host\'s CPU, memory and GPUs', 'crates/js-agent/src/lib.rs', 'the GPUs: `nvidia-smi` on Linux'],
   ['concepts', '<code>600s</code> by default, at most <code>3600s</code>', 'crates/js-lease-server/src/lib.rs', '`--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given'],
+  ['concepts', 'The lease and host routes need the client\'s bearer token', 'crates/js-lease-server/src/api.rs', '.route("/v1/hosts", get(hosts)) .fallback(no_route) .layer(DefaultBodyLimit::max(BODY_LIMIT)) .layer(from_fn_with_state(shared.clone(), authenticate))'],
+  ['concepts', '<code>/healthz</code> needs none, and neither do <code>/v1/pools</code> and <code>/status</code>', 'crates/js-lease-server/src/api.rs', 'let open = Router::new() .route("/healthz", get(healthz)) .route("/v1/pools", get(pools)) .route("/status", get(status_page))'],
+  ['concepts', 'which are served only when the server listens on a private address, and only to a private peer', 'crates/js-lease-server/src/lib.rs', 'no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address'],
+  ['concepts', 'which are served only when the server listens on a private address, and only to a private peer', 'crates/js-lease-server/src/api/status_gate_tests.rs', 'a status route served over the router answers a private peer with 200 and a public peer'],
+  ['concepts', 'An agent\'s routes take a join token instead', 'crates/js-lease-server/src/lib.rs', 'machine\'s agent calls two routes with a join token'],
   ['concepts', 'a renewal never extends the lease past its acquisition plus that time', 'docs/design/lease-limits.md', 'a renewal never extends it past its acquisition plus the max wall time'],
   ['concepts', 'loses the lease at the end of its TTL, never later than its maximum wall time', 'docs/design/lease-limits.md', 'loses its lease at the end of its TTL, never later than its max wall time'],
   ['concepts', 'finds its own by the labels it sent before it asks again', 'crates/js-lease-server/src/lib.rs', 'without first listing (`GET /v1/leases`) and finding its lease by the labels it sent'],
@@ -49,7 +125,7 @@ const ROWS: readonly Row[] = [
   ['concepts', 'is not served by this server yet', 'crates/js-lease-server/src/agent_pool.rs', 'a mixed pool (a class that books part of a host) is not served by this server yet'],
   ['concepts', 'The shipped classes are <code>whole-node</code> and <code>gpu-host</code>, which stays as an alias', 'crates/js-lease-server/src/agent_pool.rs', 'a shipped class (`whole-node`, or `gpu-host`, kept as an alias)'],
   ['concepts', 'It books every dimension of the host (CPU, memory, disk, all GPUs, all VM slots)', 'docs/design/whole-node.md', 'It books every dimension of the host (CPU, memory, disk, all GPUs, all `vms`)'],
-  ['concepts', 'the post-job checks are clean and the host is not tainted', 'crates/js-agent/src/exclusive.rs', 'no run held, the post-job checks clean once more, the host not tainted'],
+  ['concepts', 'the host has no run, no VM and no leftover of an earlier job, the post-job checks are clean and the host is not tainted.', 'crates/js-agent/src/exclusive.rs', 'no run held, the post-job checks clean once more, the host not tainted'],
   ['concepts', 'A queued request is given exactly one host, by draining it', 'docs/design/whole-node.md', 'A queued whole-node request is given exactly one host by draining it'],
   ['concepts', 'then the fewest leases, then the lowest host id', 'crates/js-whole/src/cost.rs', 'then the fewest leases, then the lowest host id'],
   ['concepts', 'A lease of this class is always answered 202', 'crates/js-lease-server/src/lib.rs', 'a `whole-node` lease is always 202'],
@@ -81,6 +157,55 @@ const ROWS: readonly Row[] = [
   ['concepts', 'A host that goes silent keeps its lease and reads <code>Unknown</code> until it is heard again', 'crates/js-lease-server/src/lib.rs', 'A host that goes silent keeps its lease and reads `Unknown` until it is heard again'],
   ['concepts', 'The lease table frees a lease only when the provider is observed without it', 'docs/design/lease-limits.md', 'freeing a lease only when the provider is observed without it'],
   ['concepts', '<code>JS_LEASE_ID</code> and <code>JS_LEASE_HOST</code>', 'crates/js-cli/src/lib.rs', '`JS_LEASE_ID` and `JS_LEASE_HOST`'],
+  ['concepts', 'A lease holds a host for a bounded time', 'docs/design/lease-limits.md', 'These bound how long and how large one lease can be'],
+  ['concepts', 'A client asks <code>POST /v1/leases</code> for a class and resources', 'crates/js-lease-server/src/wire.rs', 'pub(crate) struct AcquireBody { class: String, resources: ResourcesBody,'],
+  ['concepts', 'The server answers 201 with the host, or 202 <code>pending</code> when the provider has not confirmed the start', 'crates/js-lease-server/src/lib.rs', '`POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start'],
+  ['concepts', 'The client keeps the lease with <code>POST /v1/leases/{id}/renew</code>', 'crates/js-lease-server/src/lib.rs', '`POST /v1/leases/{id}/renew` | 200 `{expires_at_ms, host_reserved?}`'],
+  ['concepts', 'ends it with <code>DELETE /v1/leases/{id}</code>', 'crates/js-lease-server/src/lib.rs', '`DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`'],
+  ['concepts', 'Two limits end a lease', 'docs/design/lease-limits.md', 'A held lease also has a TTL: the client renews it before it lapses, and a renewal never extends it past its acquisition plus the max wall time'],
+  ['concepts', 'The <strong>TTL</strong> is what the client renews', 'docs/design/lease-limits.md', 'the client renews it before it lapses'],
+  ['concepts', '<code>js lease run</code> acquires, starts the command with <code>JS_LEASE_ID</code> and <code>JS_LEASE_HOST</code> set in its environment', 'crates/js-cli/src/lib.rs', '`run` acquires like `acquire`, with one more label, `js-run=<128 random bits in hex>`, and starts the command as a child process with `JS_LEASE_ID` and `JS_LEASE_HOST` set in its environment'],
+  ['concepts', 'and renews while the command runs', 'crates/js-cli/src/lib.rs', 'A renewal is tried when a third of the time left has passed'],
+  ['concepts', '<strong>An acquire is not safe to retry blindly.</strong>', 'crates/js-lease-server/src/lib.rs', 'An acquire is not safe to retry blindly.'],
+  ['concepts', 'the server may hold a lease the client has no id for', 'crates/js-lease-server/src/lib.rs', 'the server may hold a lease, and a host, that the client has no id for'],
+  ['concepts', 'Capacity comes in pools', 'crates/js-lease-server/src/lib.rs', '`--config <path>` reads a `[server]` table and `[[pool]]` tables'],
+  ['concepts', 'A pool has a name, a class, a shape and <code>max_machines</code>', 'crates/js-lease-server/src/lib.rs', 'the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]`'],
+  ['concepts', 'The shape is what the pool books for every host', 'crates/js-lease-server/src/agent_pool.rs', 'The `[shape]` table: what the pool promises and books for every host.'],
+  ['concepts', '<code>cpu_millis</code> and <code>memory_bytes</code>, and optionally <code>gpus</code>, <code>gpu_class</code> and <code>disk_bytes</code>', 'crates/js-lease-server/src/lib.rs', '`[shape]` (`cpu_millis`, `memory_bytes`, `gpus?`, `gpu_class?`, `disk_bytes?`:'],
+  ['concepts', 'the operator lists the hosts in a file', 'crates/js-lease-server/src/lib.rs', '[`StaticPoolSource`] reads the operator\'s pool file.'],
+  ['concepts', 'an agent says hello with a join token', 'crates/js-lease-server/src/lib.rs', 'machine\'s agent calls two routes with a join token'],
+  ['concepts', 'offers its CPU, memory and GPUs, and heartbeats', 'crates/js-agent/src/lib.rs', 'tells a lease server what the machine offers, and keeps telling it that the machine is alive'],
+  ['concepts', 'The pool file for them is <code>--agent-pool-config</code>', 'crates/js-lease-server/src/lib.rs', '`--agent-pool-config <path>` | the pool agents join, as TOML'],
+  ['concepts', 'a provider launches machines', 'crates/js-lease-server/src/lib.rs', 'A pool whose provider launches machines (an elastic pool)'],
+  ['concepts', 'for requests that wait', 'crates/js-lease-server/src/lib.rs', 'launches machines for requests that wait'],
+  ['concepts', 'A pool\'s <code>launch</code> is <code>plan</code>', 'crates/js-lease-server/src/lib.rs', '`launch` is `plan` unless the file says `live`'],
+  ['concepts', 'a live pool also has caps on instances and on spend per hour and per day', 'crates/js-lease-server/src/lib.rs', 'launches machines for requests that wait, within `max_instances`, `max_spend_per_hour` and `max_spend_per_day`'],
+  ['concepts', '<code>memory_schedulable_percent</code> is a whole number from 1 to 100, 100 by default', 'crates/js-lease-server/src/lib.rs', '`memory_schedulable_percent`, a whole number from 1 to 100 (default 100)'],
+  ['concepts', 'A pool file names a class', 'crates/js-lease-server/src/lib.rs', '`--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`,'],
+  ['concepts', 'Under <code>--placement js-sched</code>', 'crates/js-lease-server/src/lib.rs', '`--placement registry\\|js-sched` | who picks the host of a lease on a host that registered itself'],
+  ['concepts', 'A <code>whole-node</code> lease is a class of its own', 'docs/design/whole-node.md', 'Giving a whole node is a lease class of its own, `whole-node`.'],
+  ['concepts', 'not a large request', 'docs/design/whole-node.md', 'It is not a large resource request.'],
+  ['concepts', 'It promises four things that a big share does not', 'docs/design/whole-node.md', 'promises four things a big share does not'],
+  ['concepts', 'and nothing else is placed on the host until it is released', 'docs/design/whole-node.md', 'nothing else is placed on the host'],
+  ['concepts', 'the host has no run, no VM and no leftover of an earlier job, the post-job checks are clean and the host is not tainted.', 'docs/design/whole-node.md', 'the host has no run, no VM and no leftover of an earlier job, the post-job checks are clean and the host is not tainted.'],
+  ['concepts', 'so a stream of small requests cannot starve it', 'docs/design/whole-node.md', 'so a stream of small requests cannot starve it'],
+  ['concepts', 'Pool limits bound how many hosts are reserved or held whole', 'docs/design/whole-node.md', 'bound how many hosts are reserved or held whole'],
+  ['concepts', 'A lease of this class is always answered 202 <code>pending</code>', 'crates/js-lease-server/src/lib.rs', 'a `whole-node` lease is always 202: it is listed `pending`'],
+  ['concepts', 'it is listed <code>pending</code> until its host\'s agent reports it ready, then <code>held</code>', 'crates/js-lease-server/src/lib.rs', 'it is listed `pending` until its host\'s agent reports it ready, then `held`'],
+  ['concepts', 'it is dropped if that takes longer than the pool\'s <code>prepare_timeout</code>', 'crates/js-lease-server/src/lib.rs', 'is dropped if that takes longer than the pool\'s `prepare_timeout`'],
+  ['concepts', 'The pool file\'s whole-node keys are <code>max_whole_node</code>, <code>max_draining</code>, <code>max_whole_node_per_consumer</code>, <code>keep_for_ordinary</code>, <code>allow_last_capable</code>, <code>drain_after</code>, <code>drain_deadline</code>, <code>reserve_backoff</code>, <code>max_reserve_attempts</code>, <code>prepare_timeout</code>, <code>max_replace</code> and <code>regain_grace</code>', 'crates/js-lease-server/src/agent_pool.rs', 'Every key is optional. max_whole_node: Option<usize>, max_draining: Option<usize>, max_whole_node_per_consumer: Option<usize>, keep_for_ordinary: Option<usize>, allow_last_capable: Option<bool>, drain_after: Option<String>, drain_deadline: Option<String>, reserve_backoff: Option<String>, max_reserve_attempts: Option<u32>, prepare_timeout: Option<String>, max_replace: Option<u32>, regain_grace: Option<String>'],
+  ['concepts', 'The placement core is <code>js-sched</code>, a pure state machine', 'crates/js-sched/src/lib.rs', 'and assignment of actions to workers, as a pure state machine.'],
+  ['concepts', 'it takes time as an input', 'crates/js-sched/src/lib.rs', 'each carrying the farm time'],
+  ['concepts', 'and reads no clock', 'crates/js-sched/src/lib.rs', 'This is a pure crate: no async runtime, network, clock, randomness or hashed collections'],
+  ['concepts', 'It admits an action to a worker when what the worker\'s readings measure, plus the predicted cost of the leases no reading covers yet', 'crates/js-sched/src/lib.rs', 'is admitted to a worker when what the worker\'s readings measure, plus the predicted cost of the leases no reading covers yet'],
+  ['concepts', 'plus the predicted cost of the new lease', 'crates/js-sched/src/lib.rs', 'plus the cost of the new lease'],
+  ['concepts', 'stays within the worker\'s CPU and its memory', 'crates/js-sched/src/lib.rs', 'stays within its CPU and its memory'],
+  ['concepts', 'each charged at a cost the lease keeps from its grant to its result', 'crates/js-sched/src/lib.rs', 'each charged at a cost the lease keeps from its grant to its result'],
+  ['concepts', 'The cost comes from earlier runs of similar actions (<code>js-sizing</code>)', 'crates/js-sizing/src/lib.rs', 'predicts the CPU and memory an action will use from what earlier runs of similar actions used.'],
+  ['concepts', 'where <code>M</code> is the largest uncensored sample of the last 256 or more runs', 'crates/js-sizing/src/lib.rs', 'where `M` is the maximum uncensored sample over the last 256 or more runs'],
+  ['concepts', '; 2000 m for a key with no CPU sample', 'crates/js-sizing/src/summary.rs', 'pub const COLD_CPU_MILLIS: u32 = 2000;'],
+  ['concepts', 'Under <code>js-sched</code> it builds a scheduler', 'crates/js-lease-server/src/lib.rs', '`js-sched` builds a `js-sched` scheduler over the hosts that could take the lease'],
+  ['concepts', 'Mode <code>off</code> of the load rule is a rollback switch to the booked rule', 'crates/js-sched/src/lib.rs', 'is the rollback switch to the booked rule'],
   ['install', 'There is no lease server for macOS', 'docs/release.md', 'there is no macOS `js-lease-server`'],
   ['install', 'not codesigned or notarized', 'docs/release.md', 'are not codesigned or notarized'],
   ['install', 'That the macOS archives come out byte-identical when a partly published release is re-run', 'docs/release.md', 'Not yet proven: that the Mac archives come out byte-identical'],
@@ -114,6 +239,70 @@ const ROWS: readonly Row[] = [
   ['install', '<code>--wait-pending</code>, 60 seconds by default', 'crates/js-cli/src/lib.rs', 'for at most `--wait-pending` (default 60s)'],
   ['install', 'the client looks at the list every two seconds', 'crates/js-cli/src/lib.rs', 'is looked at in the list every two seconds'],
   ['install', '<code>acquire</code> prints <code>lease &lt;id&gt; host &lt;host&gt; expires &lt;ms&gt;</code>', 'crates/js-cli/src/lib.rs', '`acquire` prints `lease <id> host <host> expires <ms>`'],
+  ['install', '<code>js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>', 'docs/release.md', '`js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary and `LICENSE`'],
+  ['install', '<code>js-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>', 'docs/release.md', '`js-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js` binary and `LICENSE`'],
+  ['install', '<code>js-X.Y.Z-aarch64-apple-darwin.tar.gz</code>', 'docs/release.md', '`js-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js` binary for Apple silicon Macs and `LICENSE`'],
+  ['install', '<code>js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>', 'docs/release.md', '`js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-agent` binary and `LICENSE`'],
+  ['install', '<code>js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz</code>', 'docs/release.md', '`js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-agent` binary for Apple silicon Macs and `LICENSE`'],
+  ['install', '<code>js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>', 'docs/release.md', '`js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-bundle` binary (packs, prints and verifies darwin bundles) and `LICENSE`'],
+  ['install', '<code>js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz</code>', 'docs/release.md', '`js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-bundle` binary for Apple silicon Macs and `LICENSE`'],
+  ['install', '<code>js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>', 'docs/release.md', '`js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-mdm` binary and `LICENSE`'],
+  ['install', '<code>js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz</code>', 'docs/release.md', '`js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-session` root helper for Apple silicon Macs and `LICENSE`'],
+  ['install', '<code>js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz</code>', 'docs/release.md', '`js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-provision` pf anchor installer for Apple silicon Macs and `LICENSE`'],
+  ['install', '<code>SHA256SUMS</code>', 'docs/release.md', '`SHA256SUMS` | SHA-256 of the ten archives'],
+  ['install', 'The lease server, the <code>js</code> client and the agent are Rust binaries built by the repository\'s release workflow', 'docs/release.md', 'builds the binaries for `x86_64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`'],
+  ['install', 'The Linux binaries are static (musl, x86_64)', 'docs/release.md', 'The Linux binaries are statically linked against musl'],
+  ['install', '(musl, x86_64)', 'docs/release.md', 'builds the binaries for `x86_64-unknown-linux-musl`'],
+  ['install', 'A host gets the agent from the release archive and the unit in <code>packaging/js-agent</code>', 'packaging/js-agent/nfpm.yaml', 'src: packaging/js-agent/js-agent.service dst: /usr/lib/systemd/system/js-agent.service'],
+  ['install', '<code>systemctl edit js-agent</code>: clear <code>ExecStart=</code> and set the whole line again with this host\'s <code>--server</code> and <code>--pool</code>', 'packaging/js-agent/js-agent.service', 'systemctl edit js-agent: clear ExecStart= and set the whole line again with this host\'s --server and --pool'],
+  ['install', '<code>systemctl enable --now js-agent</code>', 'packaging/js-agent/js-agent.service', 'systemctl enable --now js-agent'],
+  ['install', 'With the mount of step 3 absent, step 5 exits 0 and starts nothing', 'packaging/js-agent/js-agent.service', 'With the mount of step 3 missing this exits 0 and starts nothing'],
+  ['install', '<code>systemctl status js-agent</code> shows the unmet <code>ConditionPathIsMountPoint</code>', 'packaging/js-agent/js-agent.service', '`systemctl status js-agent` shows the unmet ConditionPathIsMountPoint'],
+  ['install', 'The agent reads no environment variable and no configuration file: its flags are the <code>ExecStart</code> line', 'packaging/js-agent/js-agent.service', '(it reads no environment variable and no config file), so the host\'s values are the flags of ExecStart'],
+  ['install', '<code>--server</code> is <code>https://host:port</code>', 'crates/js-agent/src/lib.rs', '`--server <url>` | required: `https://host:port`'],
+  ['install', 'The unit\'s <code>--runtime docker</code> runs jobs', 'packaging/js-agent/js-agent.service', '--runtime docker --container-bin /usr/bin/docker'],
+  ['install', 'runs jobs through the engine at <code>--container-bin</code>', 'crates/js-agent/src/lib.rs', '`docker` (the engine program of `--container-bin`'],
+  ['install', 'A second unit, <code>js-agent-crun.service</code>, runs jobs with <code>crun</code> on a farm node', 'packaging/js-agent/js-agent-crun.service', 'js-agent on a Linux farm node that runs jobs with crun'],
+  ['install', '<code>packaging/js-agent/crun_host_setup.sh</code> sets a host up for it', 'packaging/js-agent/crun_host_setup.sh', 'sets up a Linux host to run js-agent with `--runtime crun`'],
+  ['install', 'A published package', '.github/workflows/js-agent-deb.yml', 'It publishes nothing: no release, no package repository, no registry'],
+  ['install', 'A lease server for macOS', 'docs/release.md', 'there is no macOS `js-lease-server`'],
+  ['install', 'The agent flag <code>--allow-host-jobs</code>: it is refused at start', 'crates/js-agent/src/lib.rs', '`--allow-host-jobs` | not available yet: refused at start'],
+  ['install', 'Take the archives <span class="tag tag-ok">works today</span>', 'docs/release.md', '`publish` creates the GitHub release for `vX.Y.Z`'],
+  ['install', '<code>ci</code> other than the macOS job have passed', 'docs/release.md', 'after the jobs of `ci` other than `macos` have passed on it'],
+  ['install', 'A <a href="https://github.com/komira-ai/jobscheduler/releases">release</a> for version <code>X.Y.Z</code> carries:', 'docs/release.md', 'For version `X.Y.Z`:'],
+  ['install', 'Each archive unpacks to a directory named like the archive without <code>.tar.gz</code>', 'docs/release.md', 'Each archive unpacks to a directory named like the archive without `.tar.gz`.'],
+  ['install', 'and holds the binary and <code>LICENSE</code>', 'docs/release.md', '| the `js-lease-server` binary and `LICENSE` |'],
+  ['install', 'Verify them <span class="tag tag-ok">works today</span>', 'docs/release.md', 'gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R komira-ai/jobscheduler'],
+  ['install', 'This needs the GitHub CLI (<code>gh</code>), signed in.', 'docs/release.md', 'Needs the GitHub CLI (`gh`), signed in.'],
+  ['install', 'The checksum proves the download is intact', 'docs/release.md', 'The checksum check proves the download is intact.'],
+  ['install', 'the attestation proves the file was built from this repository by the <code>release</code> workflow, from <code>main</code>', 'docs/release.md', 'The attestation check proves the file was built from this repository by the `release` workflow, from `main`'],
+  ['install', 'at the commit the tag names', 'docs/release.md', 'which is the commit the tag `vX.Y.Z` names'],
+  ['install', '<code>-p \'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz\'</code>', 'docs/release.md', 'For the client, use `-p \'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz\'` instead'],
+  ['install', 'for the agent <code>-p \'js-agent-*-x86_64-unknown-linux-musl.tar.gz\'</code>', 'docs/release.md', 'and for the agent `-p \'js-agent-*-x86_64-unknown-linux-musl.tar.gz\'`'],
+  ['install', 'Start the lease server <span class="tag tag-ok">works today</span>', 'crates/js-lease-server/src/lib.rs', 'A lease server: a [`js_lease::LeaseTable`] behind an authenticated HTTP JSON API'],
+  ['install', '<code>--boot resume</code>, which refuses a missing one', 'crates/js-lease-server/src/lib.rs', '`resume` needs it'],
+  ['install', '<code>--agent-token-file</code>', 'crates/js-lease-server/src/lib.rs', '`--agent-token-file <path>` | the pool\'s shared join tokens'],
+  ['install', '<code>--tls-cert</code>', 'crates/js-lease-server/src/lib.rs', '`--tls-cert`, `--tls-key` | PEM files; both or neither'],
+  ['install', '<code>--tls-key</code>', 'crates/js-lease-server/src/lib.rs', '`--tls-cert`, `--tls-key` | PEM files; both or neither'],
+  ['install', 'There is one client token and so one trust domain: share it only with parties that trust each other with every host of the pool.', 'crates/js-lease-server/src/lib.rs', 'there is one token, and so one trust domain.'],
+  ['install', 'There is one client token and so one trust domain: share it only with parties that trust each other with every host of the pool.', 'crates/js-lease-server/src/lib.rs', 'Share the token only with parties that trust each other with every host of the pool.'],
+  ['install', 'Install the agent on a Linux host <span class="tag tag-ok">works today</span>', 'packaging/js-agent/js-agent.service', 'js-agent on a Linux host, installed by the js-agent deb (packaging/js-agent).'],
+  ['install', 'reads <code>/usr/lib/tmpfiles.d/js-agent.conf</code>', 'packaging/js-agent/js-agent.service', 'ExecStartPre=+systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf'],
+  ['install', 'Put the binary at the first path, <code>js-agent.service</code> in <code>/usr/lib/systemd/system</code> and <code>tmpfiles.conf</code> from <code>packaging/js-agent</code> at the second', 'packaging/js-agent/nfpm.yaml', 'src: packaging/js-agent/js-agent.service dst: /usr/lib/systemd/system/js-agent.service'],
+  ['install', 'Put the binary at the first path, <code>js-agent.service</code> in <code>/usr/lib/systemd/system</code> and <code>tmpfiles.conf</code> from <code>packaging/js-agent</code> at the second', 'packaging/js-agent/nfpm.yaml', 'src: packaging/js-agent/tmpfiles.conf dst: /usr/lib/tmpfiles.d/js-agent.conf'],
+  ['install', 'where the Debian package puts them', 'packaging/js-agent/nfpm.yaml', 'src: target/x86_64-unknown-linux-musl/release/js-agent dst: /usr/bin/js-agent'],
+  ['install', 'A host gets the agent from the release archive and the unit in <code>packaging/js-agent</code>', 'docs/release.md', '`js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-agent` binary and `LICENSE`'],
+  ['install', 'Then, as root:', 'packaging/js-agent/js-agent.service', 'The sequence, as root:'],
+  ['install', 'make the directories:', 'packaging/js-agent/js-agent.service', 'makes the directories below'],
+  ['install', '<code>systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf</code>;', 'packaging/js-agent/js-agent.service', '1. systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf'],
+  ['install', 'Lease a host <span class="tag tag-ok">works today</span>', 'crates/js-cli/src/lib.rs', 'It acquires, renews and releases leases on whole GPU hosts'],
+  ['install', 'With the agent heard by the server, a client leases the host:', 'crates/js-cli/src/lib.rs', 'It acquires, renews and releases leases on whole GPU hosts'],
+  ['install', 'A whole-node lease is answered <code>pending</code> until the host\'s agent reports it ready', 'crates/js-lease-server/src/lib.rs', 'it is listed `pending` until its host\'s agent reports it ready'],
+  ['install', 'then releases a lease that is still pending', 'crates/js-cli/src/lib.rs', 'A lease still pending then is released'],
+  ['install', 'The token file is a regular file owned by you, mode 0600 or 0400.', 'crates/js-cli/src/lib.rs', 'required: a regular file owned by you, mode 0600 or 0400'],
+  ['install', 'container image of the agent, the lease server or the client', 'docs/release.md', 'uploads the archives and `SHA256SUMS` to it'],
+  ['install', 'A published package', '.github/workflows/js-agent-macos-pkg.yml', 'It publishes nothing: the packages and their SHA256SUMS are workflow artifacts for seven days'],
+  ['install', 'the macOS ones are for Apple silicon', 'docs/release.md', 'The macOS assets (`aarch64-apple-darwin`)'],
   ['kbf', 'kbf is the first user of jobscheduler', 'docs/design.md', 'First user: kbf'],
   ['kbf', 'it names every <code>js-*</code> crate once, in its root <code>[workspace.dependencies]</code>, all at the same revision of this repository', 'docs/layering.md', 'names every `js-*` crate once, in its root `[workspace.dependencies]`, all at the same revision of this repository'],
   ['kbf', 'a bump is a deliberate pull request there', 'docs/layering.md', 'a bump is a deliberate pull request there'],
@@ -122,17 +311,94 @@ const ROWS: readonly Row[] = [
   ['kbf', '<code>deny.toml</code> bans kbf\'s crates by name', 'docs/layering.md', '`deny.toml` also bans kbf\'s crates by name'],
   ['kbf', 'several frontends may share one store', 'crates/js-server-core/src/lib.rs', 'several frontends may share one store'],
   ['kbf', 'a record is committed before anything that depends on it happens', 'crates/js-server-core/src/lib.rs', 'a record is committed, and fed back as committed, before anything that depends on it happens'],
-  ['kbf', 'generic half of the kbf daemon', 'docs/design.md', '`js-agent` is the generic half of the kbf daemon'],
+  ['kbf', '<code>js-agent</code>, which the design documents call the generic half of the kbf daemon', 'docs/design.md', '`js-agent` is the generic half of the kbf daemon'],
   ['kbf', 'only the <code>legacy</code> one is built into a running server', 'docs/design/kbf-today.md', 'only `legacy` is built into a running server'],
   ['kbf', 'nothing in kbf runs <code>js-agent</code>', 'docs/design/kbf-today.md', 'Nothing in kbf runs `js-agent`'],
   ['kbf', 'no lease client of jobscheduler was in use', 'docs/design/kbf-today.md', 'no lease client of js is on the farm'],
-  ['kbf', 'marked "design only"', 'docs/design/kbf-on-js-agent.md', 'Status: design only'],
+  ['kbf', '<code>docs/design/kbf-on-js-agent.md</code> is marked "design only"', 'docs/design/kbf-on-js-agent.md', 'Status: design only'],
   ['kbf', 'nothing in it is built or approved to run', 'docs/design/kbf-on-js-agent.md', 'Nothing here is built or approved to run'],
   ['kbf', '<code>--executor</code>', 'docs/design/kbf-on-js-agent.md', '`--executor` (`js-agent` or `kbf-daemon`, default `kbf-daemon`) as the rollback switch'],
   ['kbf', '<code>/v1/leases/{id}/runs</code>', 'docs/design/kbf-on-js-agent.md', '`POST/GET/DELETE /v1/leases/{id}/runs`'],
   ['kbf', 'runs are in memory only: a restart forgets them', 'crates/js-lease-server/src/run_api.rs', 'Runs are in memory only. A restart forgets them'],
   ['kbf', 'jobscheduler gets only generic fields', 'docs/design/kbf-on-js-agent.md', 'js gets only generic fields'],
+  ['kbf', 'kbf depends on the <code>js-*</code> crates by git revision', 'docs/layering.md', '(kbf, the first one) depends on the crates by git revision'],
+  ['kbf', 'kbf depends on the <code>js-*</code> crates by git revision', 'docs/design/kbf-today.md', 'The jobscheduler libraries are git dependencies at one revision'],
+  ['kbf', 'kbf\'s running server uses the <code>js</code> scheduler core', 'docs/design/kbf-today.md', 'only `legacy` is built into a running server'],
+  ['kbf', 'kbf runs <code>js-agent</code> on its hosts', 'docs/design/kbf-today.md', 'Nothing in kbf runs `js-agent`'],
+  ['kbf', 'A lease server is deployed; kbf leases whole hosts from it', 'docs/design/kbf-on-js-agent.md', 'A js-lease-server is deployed on the farm. kbf-server leases whole hosts from it'],
+  ['kbf', 'the lease API exists', 'crates/js-lease-server/src/lib.rs', 'A lease server: a [`js_lease::LeaseTable`] behind an authenticated HTTP JSON API'],
+  ['kbf', 'kbf\'s client: not built', 'docs/design/kbf-today.md', 'no lease client of js is on the farm'],
+  ['kbf', 'kbf submits each action as a run on its lease, through <code>POST</code>, <code>GET</code> and <code>DELETE</code> on <code>/v1/leases/{id}/runs</code>', 'docs/design/kbf-on-js-agent.md', 'submits each action as a run through its run API (`POST/GET/DELETE /v1/leases/{id}/runs`)'],
+  ['kbf', 'the interim run API exists', 'crates/js-lease-server/src/run_api.rs', 'The interim run API: a client that holds a lease on a registered host queues container runs on it'],
+  ['kbf', '<code>js-agent</code> stands alone on every host, with no kbf process beside it', 'docs/design/kbf-on-js-agent.md', '`js-agent` is standalone on every host: no kbf process beside it'],
+  ['kbf', 'kbf on it: design only', 'docs/design/kbf-on-js-agent.md', 'Status: design only'],
+  ['kbf', 'Each action runs in its own digest-pinned image', 'docs/design/kbf-on-js-agent.md', 'the action runs in its own digest-pinned image'],
+  ['kbf', 'the agent returns the container\'s exit code', 'docs/design/kbf-on-js-agent.md', 'js-agent returns only the container\'s exit code'],
+  ['kbf', 'kbf\'s frontend verifies what it reads back', 'docs/design/kbf-on-js-agent.md', 'The frontend verifies every byte and adopts in place'],
+  ['kbf', 'the design for running kbf actions on the agent, which is not built', 'docs/design/kbf-on-js-agent.md', 'Nothing here is built or approved to run'],
+  ['kbf', 'the design for running kbf\'s actions on the agent, which is not built', 'docs/design/kbf-on-js-agent.md', 'Nothing here is built or approved to run'],
+  ['kbf', 'a test refuses a <code>kbf-*</code> dependency', 'crates/xtask/tests/layering.rs', 'Asserts that a dependency on a `kbf-*` crate is refused'],
+  ['kbf', '<code>js-sched</code>, the pure scheduler core', 'crates/js-sched/src/lib.rs', 'The scheduler core: operation states, leases and fencing, result acceptance, and assignment of actions to workers, as a pure state machine.'],
+  ['kbf', 'including admission by load', 'crates/js-sched/src/lib.rs', 'admission by measured and predicted load'],
+  ['kbf', '<code>js-server-core</code>, the loop around it that carries its effects out', 'crates/js-server-core/src/lib.rs', 'the loop around [`js_sched::Scheduler`] that carries its effects out'],
+  ['kbf', '<code>js-sizing</code>, the estimator that predicts an action\'s CPU and memory from earlier runs', 'crates/js-sizing/src/lib.rs', 'The size estimator: predicts the CPU and memory an action will use from what earlier runs of similar actions used.'],
+  ['kbf', '<code>js-agent</code>, which the design documents call the generic half of the kbf daemon', 'docs/design.md', '`js-agent` is the generic half of the kbf daemon'],
+  ['kbf', 'According to <code>docs/design/kbf-today.md</code>, checked against the kbf revision it names', 'docs/design/kbf-today.md', 'These points were checked against kbf `89af8f2ef`'],
+  ['kbf', 'kbf has two scheduler cores selected by <code>--scheduler-core</code>', 'docs/design/kbf-today.md', '`--scheduler-core` selects `legacy` or `js`'],
+  ['kbf', '<code>js</code> is refused at start unless a test-only feature is built', 'docs/design/kbf-today.md', '`js` is refused at start unless the test-only `farm-core-js` feature is built'],
+  ['kbf', '<code>docs/design/kbf-on-js-agent.md</code> is marked "design only"', 'docs/design/kbf-on-js-agent.md', 'Status: design only'],
+  ['kbf', 'the agent is standalone', 'crates/js-agent/src/lib.rs', 'runs on a machine, tells a lease server what the machine offers'],
+  ['kbf', 'The task writes its outputs with one presigned upload', 'docs/design/kbf-on-js-agent.md', 'one standard SigV4 presigned PUT for one key the frontend chose'],
+  ['kbf', 'written against a kbf revision those documents name', 'docs/design.md', 'at commit 45e420656, the commit this document was written against'],
+  ['kbf', 'This repository does not contain kbf', 'docs/layering.md', 'how another repository (kbf, the first one) depends on the crates by git revision'],
+  ['kbf', 'The code here was written for kbf and lifted out of it', 'deny.toml', 'the one its crates were lifted out of (kbf depends on'],
 ];
+
+/**
+ * Units of the pages that claim nothing a source could hold: framing, navigation and the steps' own wording. Each entry
+ * is a unit exactly as claimUnits gives it; a reworded entry fails until it is registered again or held by a row.
+ */
+const PROSE: Readonly<Record<string, readonly string[]>> = {
+  index: [
+    '<a class="button button-primary" href="install.html">Install</a> <a class="button" href="concepts.html">Concepts</a> <a class="button" href="kbf.html">kbf on jobscheduler</a>',
+    'The <a href="install.html">install page</a> has the steps, including how to verify the download.',
+    'A real run',
+    'Lease a host on one machine',
+    'The <a href="install.html">install page</a> has the steps for a pool of agents.',
+    'What it does',
+    'A lease, an agent, a placement core',
+    '<a href="concepts.html">The concepts page</a> says how each of these works and where it stops.',
+    'Status',
+    'What is built, and what is not',
+  ],
+  concepts: [
+    'Concepts',
+    'Leases, whole-node leases and placement by CPU and memory, as the code has them.',
+    'What a lease is, how hosts get into a pool, what a whole-node lease promises, and how the placement core decides.',
+    'Each section says where the code or the document that backs it is, and marks what is not built;',
+    '<a href="index.html#status">the status table</a> on the home page lists it in one place.',
+    'Hosts and pools',
+    'Hosts reach a pool in these ways:',
+    'A whole node: exclusive, quiet, reserved, capped',
+    'Placement by CPU and memory',
+    'A silent host',
+  ],
+  install: [
+    'The paths below are examples.',
+    'Install',
+    'Get the lease server, the client and the agent from a release, and what the agent needs on a host.',
+    'What is not shipped',
+  ],
+  kbf: [
+    'kbf on jobscheduler',
+    'What kbf takes from this repository',
+    'What kbf runs today',
+    'The design for kbf on the agent',
+    'Check kbf\'s tree before you rely on a statement about it.',
+    'The pieces a scheduler server is built from are here:',
+    'It proposes the following, and the right-hand column is the state of each part in this repository.',
+  ],
+};
 
 /** What a source says: comment markers (`//!`, `///`, `//`, `#`) dropped from the start of each line, whitespace collapsed. */
 export function flat(text: string): string {
@@ -143,7 +409,11 @@ export function flat(text: string): string {
     .replace(/\s+/g, ' ');
 }
 
-const page = (name: string): string => read(SITE, 'content', `${name}.html`);
+/** What a page says: its copy (content/<name>.html), and its title and description, which are in tools/pages.ts. */
+const page = (name: string): string => {
+  const p = PAGES.find((x) => x.source === name);
+  return `${read(SITE, 'content', `${name}.html`)}\n<title>${p?.title ?? ''}</title>\n<description>${p?.description ?? ''}</description>`;
+};
 const source = (file: string): string => read(REPO, file);
 
 /** The rows that no longer hold: the page lost its phrase, or the source lost its own. Each problem names the page to change. */
@@ -160,6 +430,131 @@ test('every statement of a page is still what its source says', () => {
   assert.deepEqual(unheld(ROWS, source, page), []);
 });
 
+/**
+ * The units of a page that can carry a claim: each heading, each sentence of a paragraph or list item, each row of a
+ * table (its cells joined by " | "), and the page's title and description. Left out: code blocks (<pre>, held by the
+ * tests that name them), the copy buttons' commands, the source notes (they are checked to name real files) and the
+ * table of contents (links to headings, checked by the link test). Markup stays in, because the rows quote it.
+ */
+export function claimUnits(html: string): string[] {
+  const text = html
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<pre\b[\s\S]*?<\/pre>/g, '')
+    .replace(/<p class="(?:source-note|toc)">[\s\S]*?<\/p>/g, '')
+    .replace(/<thead>[\s\S]*?<\/thead>/g, '');
+  const norm = (s: string): string => s.replace(/\s+/g, ' ').trim();
+  const units: string[] = [];
+  for (const m of text.matchAll(/<tr>([\s\S]*?)<\/tr>/g)) units.push(norm([...m[1].matchAll(/<td>([\s\S]*?)<\/td>/g)].map((c) => c[1]).join(' | ')));
+  const rest = text.replace(/<table\b[\s\S]*?<\/table>/g, '');
+  for (const m of rest.matchAll(/<(title|description)>([\s\S]*?)<\/\1>/g)) if (norm(m[2]) !== '') units.push(norm(m[2]));
+  // Innermost blocks only: a block whose inside opens another block is skipped where it starts, and its children are
+  // then found as the scan goes on inside it.
+  for (const m of rest.matchAll(/<(h[1-6]|p|li)\b[^>]*>((?:(?!<(?:p|li|ul|ol|div|h[1-6]|table)\b)[\s\S])*?)<\/\1>/g)) {
+    const inner = m[2];
+    const sentences = /^h/.test(m[1]) ? [inner] : inner.split(/(?<=[.;:!?])\s+(?=[A-Z<])/);
+    for (const s of sentences) if (norm(s) !== '') units.push(norm(s));
+  }
+  return units;
+}
+
+/** Every place `needle` starts in `hay`. */
+function positions(hay: string, needle: string): number[] {
+  const at: number[] = [];
+  for (let i = hay.indexOf(needle); i >= 0; i = hay.indexOf(needle, i + 1)) at.push(i);
+  return at;
+}
+
+/**
+ * What the claims table leaves unchecked on the pages, as problems naming the page and the text:
+ * - a row whose page phrase or source phrase is empty or too short to anchor anything, or names a page that is not one;
+ * - a row whose page phrase occurs more than once on its page (an occurrence no row pins can drift unnoticed);
+ * - a unit of a page that no row holds and that is not registered in `prose` as framing that claims nothing;
+ * - a <code> span or a number in a held unit that lies outside every row phrase in it (a qualifier or a number that can
+ *   change while the row's phrase stays);
+ * - an entry of `prose` that is no longer a unit of its page, or that a row holds (it is a claim, not framing).
+ */
+export function uncovered(rows: readonly Row[], html: (name: string) => string, prose: Readonly<Record<string, readonly string[]>>, pages: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const [name, shown, file, says] of rows) {
+    if (!pages.includes(name)) out.push(`a row names a page that is not one: ${name}`);
+    if (shown.trim().length < 3) out.push(`content/${name}.html: a row has an empty page phrase ("${shown}", ${file})`);
+    if (says.trim().length < 3) out.push(`${file}: a row has an empty source phrase ("${says}", for content/${name}.html)`);
+  }
+  for (const name of pages) {
+    const text = html(name);
+    const phrases = [...new Set(rows.filter((r) => r[0] === name && r[1].trim().length >= 3).map((r) => r[1]))];
+    for (const shown of phrases) {
+      const n = positions(text, shown).length;
+      if (n > 1) out.push(`content/${name}.html says "${shown}" ${n} times: lengthen the row's phrase so that it pins one`);
+    }
+    const units = claimUnits(text);
+    const registered = prose[name] ?? [];
+    for (const unit of units) {
+      const held = phrases.filter((p) => unit.includes(p));
+      if (held.length === 0) {
+        if (!registered.includes(unit)) out.push(`content/${name}.html: no row holds "${unit}" (add a row, or register it as prose if it claims nothing)`);
+        continue;
+      }
+      const spans = held.flatMap((p) => positions(unit, p).map((i) => [i, i + p.length] as const));
+      for (const m of unit.matchAll(/<code>[\s\S]*?<\/code>|\d+(?:[.,]\d+)*/g)) {
+        const [a, b] = [m.index, m.index + m[0].length];
+        if (!spans.some(([s, e]) => s <= a && b <= e)) out.push(`content/${name}.html: ${m[0]} in "${unit}" is outside every row phrase`);
+      }
+    }
+    for (const entry of registered) {
+      if (!units.includes(entry)) out.push(`content/${name}.html: the prose entry "${entry}" is no longer a unit of the page`);
+      else if (phrases.some((p) => entry.includes(p))) out.push(`content/${name}.html: the prose entry "${entry}" is held by a row, so it is a claim`);
+    }
+  }
+  return out;
+}
+
+const CLAIM_PAGES = PAGES.filter((x) => x.source !== '404').map((x) => x.source);
+
+test('every claim of every page is held by a row, whole: its numbers and code included, each occurrence pinned', () => {
+  assert.deepEqual(uncovered(ROWS, page, PROSE, CLAIM_PAGES), []);
+});
+
+test('an omitted claim, a changed qualifier, a repeated phrase and an empty row are each reported (the check can fail)', () => {
+  const report = (html: (n: string) => string, rows: readonly Row[] = ROWS): string => uncovered(rows, html, PROSE, CLAIM_PAGES).join('\n');
+  // A new sentence no row holds.
+  const added = (n: string): string => (n === 'concepts' ? page(n).replace('Capacity comes in pools.', 'Capacity comes in pools. Pools are free.') : page(n));
+  assert.match(report(added), /content\/concepts\.html: no row holds "Pools are free\."/);
+  // A number beside a row's phrase changes: the row would still match, the coverage check does not.
+  const numbered = (n: string): string => (n === 'concepts' ? page(n).replace('Two limits end a lease.', 'Two limits end a lease, 3 in all.') : page(n));
+  assert.match(report(numbered), /content\/concepts\.html: 3 in "Two limits end a lease, 3 in all\." is outside every row phrase/);
+  // A phrase a row pins, said a second time.
+  const shown = ROWS.find((r) => r[0] === 'install')![1];
+  const twice = (n: string): string => (n === 'install' ? page(n).replace('</h1>', `</h1>\n<p>${shown}</p>`) : page(n));
+  assert.match(report(twice), /content\/install\.html says ".*" 2 times/);
+  // Rows that anchor nothing, and a row for a page that is not one.
+  assert.match(report(page, [...ROWS, ['kbf', '', 'README.md', 'A generic job and compute scheduler']]), /content\/kbf\.html: a row has an empty page phrase/);
+  assert.match(report(page, [...ROWS, ['kbf', 'kbf is the first user of jobscheduler', 'README.md', ' ']]), /README\.md: a row has an empty source phrase/);
+  assert.match(report(page, [...ROWS, ['nope', 'x y z', 'README.md', 'A generic job']]), /a row names a page that is not one: nope/);
+});
+
+test('a prose entry that is gone from its page, or that a row holds, is reported (the check can fail)', () => {
+  const name = Object.keys(PROSE).find((n) => (PROSE[n] ?? []).length > 0)!;
+  const entry = PROSE[name]![0]!;
+  const gone = (n: string): string => (n === name ? page(n).split(entry).join('') : page(n));
+  assert.match(uncovered(ROWS, gone, PROSE, CLAIM_PAGES).join('\n'), /is no longer a unit of the page/);
+  const held = uncovered([...ROWS, [name, entry, 'README.md', 'A generic job and compute scheduler']], page, PROSE, CLAIM_PAGES).join('\n');
+  assert.match(held, /is held by a row, so it is a claim/);
+});
+
+test('claimUnits splits sentences, joins table cells and leaves out code blocks and source notes', () => {
+  const html = '<h2 id="a">Head</h2><p>One. Two <code>x</code>; three.</p><pre>$ ignored</pre><p class="source-note">Sources: <code>a.rs</code>.</p><table><thead><tr><th>H</th></tr></thead><tbody><tr><td>A</td><td><span>b</span></td></tr></tbody></table><ul><li><p>Inner.</p></li></ul>';
+  assert.deepEqual(claimUnits(html), ['A | <span>b</span>', 'Head', 'One.', 'Two <code>x</code>; three.', 'Inner.']);
+  // A paragraph inside a list item is a unit (the list item that holds it is not), and so is a list item's own text.
+  assert.deepEqual(claimUnits('<ol><li><h3>Step</h3><p>Do it. Then this.</p></li><li>Plain.</li></ol>'), ['Step', 'Do it.', 'Then this.', 'Plain.']);
+});
+
+test('the claims table reports its size: rows, and rows for each page', (ctx) => {
+  const per = CLAIM_PAGES.map((n) => `${n} ${ROWS.filter((r) => r[0] === n).length}`).join(', ');
+  ctx.diagnostic(`claims rows: ${ROWS.length} (${per}); prose entries: ${Object.values(PROSE).flat().length}`);
+  assert.equal(ROWS.length, CLAIM_PAGES.reduce((a, n) => a + ROWS.filter((r) => r[0] === n).length, 0), 'every row names a page with claims');
+});
+
 test('every page but the 404 has rows, so the table cannot go empty unnoticed', () => {
   for (const p of PAGES.filter((x) => x.source !== '404')) {
     assert.ok(ROWS.filter((r) => r[0] === p.source).length >= 3, `${p.source} has fewer than 3 rows`);
@@ -171,7 +566,7 @@ test('the check can fail: a changed source phrase and a reworded page are each r
   const changedSource = (f: string): string => (f === 'docs/release.md' ? real(f).replace('are not codesigned or notarized', 'are signed') : real(f));
   assert.match(unheld(ROWS, changedSource, page).join('\n'), /docs\/release\.md no longer says "are not codesigned or notarized": revisit content\/install\.html/);
   const rewordedPage = (n: string): string => (n === 'kbf' ? page(n).replace('marked "design only"', 'marked "in progress"') : page(n));
-  assert.match(unheld(ROWS, real, rewordedPage).join('\n'), /content\/kbf\.html no longer says: marked "design only"/);
+  assert.match(unheld(ROWS, real, rewordedPage).join('\n'), /content\/kbf\.html no longer says: .*marked "design only"/);
 });
 
 test('flat() drops comment markers, joins wrapped lines and collapses spaces', () => {
@@ -290,23 +685,99 @@ test('the host setup script the install page names is in the repository', () => 
   assert.deepEqual(repoFiles().filter((f) => f.endsWith('crun_host_setup.sh')), ['packaging/js-agent/crun_host_setup.sh']);
 });
 
-test('every page but the 404 has a source note, and every file a source note names exists', () => {
+/** What the source notes of `pages` get wrong, as problems naming the page and the file: a page with no source note, or a note naming a file that `exists` does not find. Also returns the files it checked. */
+export function sourceNoteGaps(pages: readonly string[], html: (name: string) => string, exists: (file: string) => boolean): { problems: string[]; checked: string[] } {
+  const problems: string[] = [];
   const checked: string[] = [];
-  for (const p of PAGES.filter((x) => x.source !== '404')) {
-    const notes = [...page(p.source).matchAll(/<p class="source-note">([\s\S]*?)<\/p>/g)].map((m) => m[1]);
-    assert.ok(notes.length >= 1, `${p.source} has no source note`);
+  for (const name of pages) {
+    const notes = [...html(name).matchAll(/<p class="source-note">([\s\S]*?)<\/p>/g)].map((m) => m[1]);
+    if (notes.length === 0) problems.push(`${name} has no source note`);
     for (const note of notes) {
       for (const m of note.matchAll(/<code>([^<]+)<\/code>/g)) {
         const token = m[1];
         if (!/\/|\.(?:md|rs|toml|ya?ml|service|conf)$/.test(token)) continue;
-        assert.ok(existsSync(join(REPO, token)), `${p.source}: the source note names ${token}, which is not in the repository`);
+        if (!exists(token)) problems.push(`${name}: the source note names ${token}, which is not in the repository`);
         checked.push(token);
       }
     }
   }
+  return { problems, checked };
+}
+
+const inRepo = (file: string): boolean => existsSync(join(REPO, file));
+
+test('every page but the 404 has a source note, and every file a source note names exists', () => {
+  const { problems, checked } = sourceNoteGaps(CLAIM_PAGES, page, inRepo);
+  assert.deepEqual(problems, []);
   assert.ok(checked.length >= 20, `${checked.length} files checked`);
 });
 
-test('a source note naming a missing file would be reported (the check can fail)', () => {
-  assert.equal(existsSync(join(REPO, 'crates/js-lease-server/src/nope.rs')), false);
+test('a source note naming a missing file, and a page with no source note, are reported with the page (the check can fail)', () => {
+  const missing = (n: string): string => (n === 'concepts' ? page(n).replace('<code>crates/js-cli/src/lib.rs</code> (the commands)', '<code>crates/js-cli/src/nope.rs</code> (the commands)') : page(n));
+  assert.deepEqual(sourceNoteGaps(CLAIM_PAGES, missing, inRepo).problems, ['concepts: the source note names crates/js-cli/src/nope.rs, which is not in the repository']);
+  const noNote = (n: string): string => (n === 'kbf' ? page(n).replace(/<p class="source-note">[\s\S]*?<\/p>/g, '') : page(n));
+  assert.deepEqual(sourceNoteGaps(CLAIM_PAGES, noNote, inRepo).problems, ['kbf has no source note']);
+});
+
+/** The `paths:` filters of one trigger (`pull_request` or `push`) of a workflow, as written. */
+export function triggerPaths(yml: string, trigger: 'pull_request' | 'push'): string[] {
+  const lines = yml.split('\n');
+  const start = lines.findIndex((l) => l === `  ${trigger}:`);
+  if (start < 0) return [];
+  const out: string[] = [];
+  let inPaths = false;
+  for (const l of lines.slice(start + 1)) {
+    if (/^ {0,2}\S/.test(l)) break; // the next trigger, or the end of `on:`
+    if (/^ {4}paths:\s*$/.test(l)) { inPaths = true; continue; }
+    if (/^ {4}\S/.test(l)) { inPaths = false; continue; }
+    const m = /^ {6}- (\S+)\s*$/.exec(l);
+    if (inPaths && m) out.push(m[1]);
+  }
+  return out;
+}
+
+/** Whether a workflow path filter matches a '/'-separated file path: `**` is any run of characters, `*` any run without a slash. */
+export function pathMatches(filter: string, file: string): boolean {
+  const re = filter.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '.*');
+  return new RegExp(`^${re}$`).test(file);
+}
+
+/** The repository files the claims of this test read: the rows' sources, the files read by name above, and the files the pages' source notes name. */
+function claimInputs(): string[] {
+  const own = read(SITE, 'test', 'claims.test.ts');
+  const named = [...own.matchAll(/\bsource\('([^']+)'\)/g)].map((m) => m[1]);
+  const notes = PAGES.filter((x) => x.source !== '404').flatMap((p) =>
+    [...page(p.source).matchAll(/<p class="source-note">([\s\S]*?)<\/p>/g)].flatMap((n) =>
+      [...n[1].matchAll(/<code>([^<]+)<\/code>/g)].map((m) => m[1]).filter((t) => /\/|\.(?:md|rs|toml|ya?ml|service|conf|sh)$/.test(t) && existsSync(join(REPO, t)))));
+  return [...new Set([...ROWS.map((r) => r[2]), ...named, ...notes])].sort();
+}
+
+/** The inputs of `files` that a trigger's filters do not match, as problems naming the trigger and the file. */
+export function unwatched(files: readonly string[], yml: string): string[] {
+  const out: string[] = [];
+  for (const trigger of ['pull_request', 'push'] as const) {
+    const filters = triggerPaths(yml, trigger);
+    if (filters.length === 0) out.push(`${trigger}: no path filters found`);
+    for (const f of files) if (!filters.some((p) => pathMatches(p, f))) out.push(`${trigger}: a change to ${f} does not run the site workflow, and a claim reads it`);
+  }
+  return out;
+}
+
+test('a change to any file a claim reads runs the site workflow, on pull requests and on pushes to main', () => {
+  const inputs = claimInputs();
+  assert.ok(inputs.length >= 20, `${inputs.length} inputs`);
+  assert.deepEqual(unwatched(inputs, read(REPO, '.github', 'workflows', 'jobscheduler-site.yml')), []);
+});
+
+test('a claim input outside the filters is reported for each trigger (the check can fail)', () => {
+  const yml = read(REPO, '.github', 'workflows', 'jobscheduler-site.yml');
+  assert.deepEqual(unwatched(['crates/nope/src/lib.rs'], yml), [
+    'pull_request: a change to crates/nope/src/lib.rs does not run the site workflow, and a claim reads it',
+    'push: a change to crates/nope/src/lib.rs does not run the site workflow, and a claim reads it',
+  ]);
+  const prOnly = yml.replace(/(  push:[\s\S]*?)      - docs\/\*\*\n/, '$1');
+  assert.deepEqual(unwatched(['docs/release.md'], prOnly), ['push: a change to docs/release.md does not run the site workflow, and a claim reads it']);
+  assert.equal(pathMatches('crates/js-agent/src/**', 'crates/js-agent/src/a/b.rs'), true);
+  assert.equal(pathMatches('docs/*', 'docs/design/x.md'), false);
+  assert.equal(pathMatches('README.md', 'README.mdx'), false);
 });
