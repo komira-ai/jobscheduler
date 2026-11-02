@@ -34,8 +34,44 @@ pub(crate) fn sha(text: &str) -> String {
 /// each request.
 pub(crate) type Seen = Arc<Mutex<Vec<(String, Value)>>>;
 
-/// A server that answers every request with `reply` and records what it read.
-pub(crate) fn recording(reply: String) -> (String, Seen) {
+/// A recording server for one test: the URL to reach it by, and its thread, which is stopped
+/// and joined when the server is dropped at the end of the test, so no test leaves a listener
+/// behind. It derefs to its URL.
+pub(crate) struct Server {
+    url: String,
+    addr: std::net::SocketAddr,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl std::ops::Deref for Server {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.url
+    }
+}
+
+impl std::fmt::Display for Server {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(&self.url)
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Wakes the accept: the thread sees the flag and ends.
+        let _ = std::net::TcpStream::connect(self.addr);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+/// A server on an ephemeral port of the loopback interface that answers every request with
+/// `reply` and records what it read.
+pub(crate) fn recording(reply: String) -> (Server, Seen) {
     recording_with(reply, || {})
 }
 
@@ -44,13 +80,18 @@ pub(crate) fn recording(reply: String) -> (String, Seen) {
 pub(crate) fn recording_with(
     reply: String,
     on_request: impl Fn() + Send + 'static,
-) -> (String, Seen) {
+) -> (Server, Seen) {
     let seen: Seen = Arc::default();
     let log = Arc::clone(&seen);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = Arc::clone(&stop);
+    let thread = std::thread::spawn(move || {
         for stream in listener.incoming() {
+            if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
             let mut stream = stream.unwrap();
             let (head, body) = read(&mut stream);
             log.lock().unwrap().push((head, body));
@@ -58,7 +99,13 @@ pub(crate) fn recording_with(
             let _ = stream.write_all(reply.as_bytes());
         }
     });
-    (format!("http://{addr}"), seen)
+    let server = Server {
+        url: format!("http://{addr}"),
+        addr,
+        stop,
+        thread: Some(thread),
+    };
+    (server, seen)
 }
 
 /// Reads one request: its head and its body as JSON.

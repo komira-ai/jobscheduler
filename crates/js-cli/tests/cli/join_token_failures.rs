@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::join_token::{EXPIRES, MINTED, created, facts, lost, recording, words};
+use crate::join_token::{EXPIRES, MINTED, created, facts, lost, recording, recording_with, words};
 use crate::support::{Never, Scratch, against, http, services};
 
 /// The sorted names in `dir`.
@@ -189,8 +189,8 @@ fn a_request_without_an_answer_is_not_repeated_and_says_a_token_may_exist() {
     ));
     let cases = [
         ("refused", gone, None),
-        ("closed", closes, Some(closed_seen)),
-        ("cut", cuts, Some(cut_seen)),
+        ("closed", closes.to_string(), Some(closed_seen)),
+        ("cut", cuts.to_string(), Some(cut_seen)),
     ];
     for (name, server, seen) in cases {
         let scratch = Scratch::new("mint_no_answer");
@@ -414,4 +414,45 @@ fn a_directory_others_can_write_is_refused_before_any_request_unless_sticky() {
     );
     assert_eq!(listing(&dir), [OsString::from("minted")]);
     assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+/// Asserts that a directory swapped in for the `--out` directory while the mint is in flight
+/// is judged again and nothing is published in it: `--out` is reached through a link to a
+/// private directory, which passes the check before the request; while the server holds the
+/// request the link is pointed at a directory others can write, without the sticky bit.
+/// The mint then fails (exit 1, the token said to be lost, the directory and the reason
+/// named), no file is in either directory, and the token is on no stream. It catches a
+/// delivery that trusts the check made before the request and writes the secret where
+/// another user could swap the staged file for one of their own.
+#[test]
+fn a_directory_swapped_in_after_the_check_is_judged_again_and_gets_nothing() {
+    let scratch = Scratch::new("mint_swapped_dir");
+    let private = scratch.path("private");
+    let open = scratch.path("open");
+    mkdir(&private, 0o700);
+    mkdir(&open, 0o777);
+    let link = scratch.path("out-dir");
+    std::os::unix::fs::symlink(&private, &link).unwrap();
+    let (repoint, target) = (link.clone(), open.clone());
+    let (server, seen) = recording_with(created(), move || {
+        fs::remove_file(&repoint).unwrap();
+        std::os::unix::fs::symlink(&target, &repoint).unwrap();
+    });
+    let js = against(&server, &scratch);
+    let out = link.join("minted");
+    let got = js.go(&words(&["--out", out.to_str().unwrap()]));
+    assert_eq!((got.code, got.out.as_str()), (1, ""), "{}", got.err);
+    assert!(
+        got.err.contains("the token is lost")
+            && got.err.contains(&format!("\"{}\"", link.display()))
+            && got
+                .err
+                .contains("lets group or others write there and it is not sticky"),
+        "{}",
+        got.err
+    );
+    assert!(!got.err.contains(MINTED));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert!(listing(&private).is_empty());
+    assert!(listing(&open).is_empty());
 }

@@ -102,8 +102,9 @@ fn the_staging_name_cannot_be_guessed() {
 }
 
 /// Asserts that a directory where the staged file cannot be created (read-only) and one that
-/// is not there are errors at the staging step (`PermissionDenied`, `NotFound`) with the
-/// listing unchanged, and that a missing directory makes nothing. It catches an error of
+/// is not there are errors (the staging step with `PermissionDenied`; the examine step with
+/// `NotFound`, since the directory is opened first) with the listing unchanged, and that a
+/// missing directory makes nothing. It catches an error of
 /// another step, a half-made file and a directory made on the way.
 #[test]
 fn a_directory_that_cannot_take_the_file_is_an_error_and_makes_nothing() {
@@ -123,7 +124,7 @@ fn a_directory_that_cannot_take_the_file_is_an_error_and_makes_nothing() {
     let err = create_new(&dir.path("absent").join("f"), b"x", 0o600).unwrap_err();
     assert_eq!(
         (err.step(), err.kind()),
-        (NewFileStep::Stage, ErrorKind::NotFound)
+        (NewFileStep::Inspect, ErrorKind::NotFound)
     );
     assert_eq!(listing(&dir.path("")), outer);
 }
