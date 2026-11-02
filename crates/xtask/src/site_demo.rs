@@ -339,20 +339,26 @@ impl Clock for SystemClock {
 
 /// Asks `probe` until it says `Some(ready)`, `interval` apart, for at most `timeout` by `clock`, and
 /// returns what it said; `None` when the time ran out. A probe that says `Err` ends the wait with it.
-fn wait_ready<T, E>(
-    mut probe: impl FnMut() -> Result<Option<T>, E>,
-    clock: &mut impl Clock,
+///
+/// Each round waits `interval` first (a server just started has not answered yet), notes whether the
+/// deadline has passed, then asks: so every round asks the clock both things, and the probe asked at the
+/// deadline is the last. The probe and the clock are trait objects, so the verb's wait and the tests'
+/// are one compiled function.
+fn wait_ready(
+    probe: &mut dyn FnMut() -> Result<Option<SocketAddr>, Error>,
+    clock: &mut dyn Clock,
     timeout: Duration,
     interval: Duration,
-) -> Result<Option<T>, E> {
+) -> Result<Option<SocketAddr>, Error> {
     loop {
+        clock.sleep(interval);
+        let late = clock.elapsed() >= timeout;
         if let Some(ready) = probe()? {
             return Ok(Some(ready));
         }
-        if clock.elapsed() >= timeout {
+        if late {
             return Ok(None);
         }
-        clock.sleep(interval);
     }
 }
 
@@ -401,7 +407,7 @@ fn look(
     log: std::io::Result<String>,
     log_path: &Path,
     listening: &mut Option<SocketAddr>,
-    probe: impl FnOnce(SocketAddr) -> std::io::Result<String>,
+    probe: &dyn Fn(SocketAddr) -> std::io::Result<String>,
 ) -> Result<Option<SocketAddr>, Error> {
     // `ended` is asked first: a server that has ended has written all it will, so the log read after
     // it is whole.
@@ -576,18 +582,18 @@ pub fn run(demo: &SiteDemo<'_>) -> Result<String, Error> {
 
     let log_path = dir.join("server.log");
     let mut listening = None;
-    let probe = || {
+    let mut probe = || {
         let ended = server.try_wait();
         look(
             ended,
             std::fs::read_to_string(&log_path),
             &log_path,
             &mut listening,
-            probe_healthz,
+            &probe_healthz,
         )
     };
     let mut clock = SystemClock(Instant::now());
-    let ready = wait_ready(probe, &mut clock, demo.ready_timeout, READY_INTERVAL)?;
+    let ready = wait_ready(&mut probe, &mut clock, demo.ready_timeout, READY_INTERVAL)?;
     let addr = settle(ready, listening, demo.port, demo.ready_timeout)?;
 
     // The port the server really holds (the one asked for, unless that was 0): the recording shows the

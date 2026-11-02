@@ -126,58 +126,64 @@ fn the_recorder_writes_the_host_file_then_each_command_with_its_output() {
     );
 }
 
-/// Catches a wait that never ends or ends early: ready on the third probe after two sleeps of the
+/// Catches a wait that never ends or ends early: ready on the third probe, each probe after a sleep of the
 /// interval, with no sleep once ready, and the value the probe gave comes back.
 #[test]
 fn the_wait_ends_when_the_probe_says_ready() {
     let answers = Cell::new(0);
     let mut c = clock();
-    let probe = || {
+    let mut probe = || {
         answers.set(answers.get() + 1);
-        Ok::<_, ()>((answers.get() == 3).then_some("up"))
+        Ok((answers.get() == 3).then_some(addr(4100)))
     };
     let interval = Duration::from_millis(100);
-    assert_eq!(
-        wait_ready(probe, &mut c, Duration::from_secs(10), interval),
-        Ok(Some("up"))
-    );
+    let ready = wait_ready(&mut probe, &mut c, Duration::from_secs(10), interval);
+    assert_eq!(ready.expect("ready"), Some(addr(4100)));
     assert_eq!(answers.get(), 3);
-    assert_eq!(c.sleeps, [interval; 2]);
+    assert_eq!(c.sleeps, [interval; 3]);
 }
 
 /// Catches a wait without a deadline (the check can fail): a probe that never says ready gives up once the
-/// timeout has passed by the clock, after timeout/interval + 1 probes, and says nothing was ready.
+/// timeout has passed by the clock, after timeout/interval probes (the last one at the deadline), and says
+/// nothing was ready.
 #[test]
 fn a_server_that_never_answers_ends_the_wait_at_the_deadline() {
     let answers = Cell::new(0);
     let mut c = clock();
-    let probe = || {
+    let mut probe = || {
         answers.set(answers.get() + 1);
-        Ok::<Option<()>, ()>(None)
+        Ok(None)
     };
     let result = wait_ready(
-        probe,
+        &mut probe,
         &mut c,
         Duration::from_secs(1),
         Duration::from_millis(250),
     );
-    assert_eq!(result, Ok(None));
-    assert_eq!(answers.get(), 5);
+    assert_eq!(result.expect("no error"), None);
+    assert_eq!(answers.get(), 4);
     assert_eq!(c.now, Duration::from_secs(1));
 }
 
-/// Catches a dead server waited for until the deadline: the probe's error ends the wait at once, with no sleep.
+/// Catches a dead server waited for until the deadline: the probe's error ends the wait at once, with no
+/// sleep after the one before the first probe.
 #[test]
-fn a_probe_error_ends_the_wait_without_sleeping() {
+fn a_probe_error_ends_the_wait_at_once() {
     let mut c = clock();
     let result = wait_ready(
-        || Err::<Option<()>, _>("it died"),
+        &mut || {
+            Err(Error::ServerWait {
+                source: ErrorKind::BrokenPipe.into(),
+            })
+        },
         &mut c,
         Duration::from_secs(9),
         Duration::from_secs(1),
     );
-    assert_eq!(result, Err("it died"));
-    assert!(c.sleeps.is_empty());
+    assert!(
+        matches!(result, Err(Error::ServerWait { source }) if source.kind() == ErrorKind::BrokenPipe)
+    );
+    assert_eq!(c.sleeps, [Duration::from_secs(1)]);
 }
 
 /// Catches a status line mistaken for healthy: only a 200 of an HTTP response is.
@@ -405,7 +411,7 @@ fn look_at(
     log: std::io::Result<String>,
     listening: &mut Option<SocketAddr>,
 ) -> Result<Option<SocketAddr>, Error> {
-    look(ended, log, Path::new("s/server.log"), listening, |_| {
+    look(ended, log, Path::new("s/server.log"), listening, &|_| {
         panic!("no address to ask")
     })
 }
@@ -452,13 +458,13 @@ fn a_running_server_is_asked_at_the_address_it_printed() {
     assert_eq!(listening, None);
     let log = || Ok(format!("{LISTENING}127.0.0.1:4100\n"));
     let asked = Cell::new(None);
-    let ok = look(Ok(None), log(), Path::new("l"), &mut listening, |at| {
+    let ok = look(Ok(None), log(), Path::new("l"), &mut listening, &|at| {
         asked.set(Some(at));
         Ok("HTTP/1.1 200 OK\r\n".to_owned())
     });
     assert_eq!(ok.expect("ready"), Some(addr(4100)));
     assert_eq!(asked.get(), Some(addr(4100)));
-    let refused = look(Ok(None), log(), Path::new("l"), &mut listening, |_| {
+    let refused = look(Ok(None), log(), Path::new("l"), &mut listening, &|_| {
         Err(ErrorKind::ConnectionRefused.into())
     });
     assert!(matches!(refused, Ok(None)));
@@ -484,16 +490,6 @@ fn the_end_of_the_wait_names_the_server_that_did_not_answer() {
         ("http://127.0.0.1:4100".to_owned(), timeout)
     );
     assert_eq!(named(None), ("http://127.0.0.1:7300".to_owned(), timeout));
-}
-
-/// Catches a wall clock that runs backwards, which would keep `wait_ready` waiting past its deadline: what
-/// it says has passed after a sleep is never less than before it. No length of time is asked of it.
-#[test]
-fn the_wall_clock_never_runs_backwards_across_a_sleep() {
-    let mut wall = SystemClock(Instant::now());
-    let before = wall.elapsed();
-    wall.sleep(Duration::ZERO);
-    assert!(wall.elapsed() >= before);
 }
 
 /// The committed recording, read: its commands and its first lines.

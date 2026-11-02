@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The event whose changed files decide; every other event runs the site steps.
-pub const PULL_REQUEST: &str = "pull_request";
+const PULL_REQUEST: &str = "pull_request";
 
 /// The arguments of `site-changed`.
 #[derive(clap::Args)]
@@ -47,21 +47,22 @@ pub struct Args {
 }
 
 /// Why the answer could not be written.
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The output file could not be appended to.
-    #[error("cannot write {path}: {why}")]
+    #[error("cannot write {}: {source}", path.display())]
     Write {
         /// The output file.
-        path: String,
-        /// The operating system's reason.
-        why: String,
+        path: PathBuf,
+        /// Why it could not be written.
+        #[source]
+        source: std::io::Error,
     },
 }
 
 /// The entries of a list: its lines without comments and blank lines, trimmed.
 #[must_use]
-pub fn parse_list(text: &str) -> Vec<String> {
+fn parse_list(text: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
@@ -72,7 +73,7 @@ pub fn parse_list(text: &str) -> Vec<String> {
 /// Whether `entry` matches the `/`-separated `file`: a directory prefix ending in `/` matches
 /// every file under it, anything else matches that file only.
 #[must_use]
-pub fn matches(entry: &str, file: &str) -> bool {
+fn matches(entry: &str, file: &str) -> bool {
     if entry.ends_with('/') {
         file.starts_with(entry)
     } else {
@@ -84,7 +85,7 @@ pub fn matches(entry: &str, file: &str) -> bool {
 /// is unavailable (`entries` empty, `changed` `None`: fail closed) or a changed file matches
 /// an entry.
 #[must_use]
-pub fn decide(event: &str, entries: &[String], changed: Option<&[String]>) -> bool {
+fn decide(event: &str, entries: &[String], changed: Option<&[String]>) -> bool {
     if event != PULL_REQUEST || entries.is_empty() {
         return true;
     }
@@ -136,9 +137,9 @@ pub fn run(args: &Args) -> Result<String, Error> {
         .append(true)
         .open(&args.github_output)
         .and_then(|mut file| writeln!(file, "{line}"));
-    write.map_err(|e| Error::Write {
-        path: args.github_output.display().to_string(),
-        why: e.to_string(),
+    write.map_err(|source| Error::Write {
+        path: args.github_output.clone(),
+        source,
     })?;
     Ok(line)
 }

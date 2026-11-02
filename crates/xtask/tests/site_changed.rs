@@ -238,19 +238,33 @@ fn changed_files_lists_unquoted_names_since_the_merge_base() {
     );
 }
 
-/// Asserts that an output file that cannot be appended to is an error naming it.
+/// Asserts that an output file that cannot be appended to is an error naming it, that keeps the operating
+/// system's error as its source, and whose message names both.
 #[test]
 fn an_output_file_that_cannot_be_written_is_an_error() {
+    use std::error::Error as _;
     let repo = Repo::new("sc-bad-output", Some(REAL));
     let mut args = repo.args("push", "main");
     args.github_output = repo.dir.to_path_buf();
-    match run(&args) {
-        Err(Error::Write { path, why }) => {
-            assert_eq!(path, repo.dir.display().to_string());
-            assert!(!why.is_empty());
+    let error = run(&args).expect_err("a directory is not an output file");
+    let message = error.to_string();
+    match &error {
+        Error::Write { path, source } => {
+            assert_eq!(path, &repo.dir.to_path_buf());
+            assert_eq!(source.kind(), std::io::ErrorKind::IsADirectory);
+            assert_eq!(
+                message,
+                format!("cannot write {}: {source}", repo.dir.display())
+            );
         }
-        other => panic!("{other:?}"),
     }
+    let cause = error.source().expect("the cause stays reachable");
+    assert_eq!(
+        cause
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::IsADirectory)
+    );
 }
 
 fn xtask(repo: &Repo, args: &[&str]) -> Output {
