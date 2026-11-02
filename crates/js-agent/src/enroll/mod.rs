@@ -25,8 +25,10 @@
 //!
 //! The token is read from standard input and nowhere else: a terminal is refused, and no flag
 //! takes it, so it is on no command line. A token put on the command line by mistake is
-//! refused, and the refusal does not repeat it: an unexpected word is not shown, and of an
-//! unexpected flag only the part before any `=` is. It must be what the server mints (64 lower-case hex
+//! refused, and the refusal does not repeat it: an unexpected word is not shown, of an
+//! unexpected flag only its name is, and in any other refusal of the command line every
+//! value typed (a word, the part after `=`, or what follows a short flag) of eight bytes or
+//! more is shown as `<not shown>`. It must be what the server mints (64 lower-case hex
 //! digits, one line). It is printed nowhere; the verb prints its sha256, which names it for
 //! the operator and the server's log without being usable as it.
 //!
@@ -56,8 +58,8 @@
 //! change. Then the setup is applied; then each of the two files is looked at again, since
 //! the setup ran in between, and written if it is not there (a file that the setup left
 //! there but no longer right is a failure, exit 1); and each file written is read back, and
-//! one that is not there or not right then is a failure too. A file is made whole in a staged file beside it, under a name no one can guess, and
-//! linked to its name (js_client's `create_new`), so a crash leaves nothing but the staged
+//! one that is not there or not right then is a failure too. A file is made whole in a
+//! staged file beside it, under a name no one can guess, and linked to its name (js_client's `create_new`), so a crash leaves nothing but the staged
 //! file, and nothing is ever replaced. The directory the staged file is in (`/etc/js-agent`)
 //! must be a real directory, root's, that group and others cannot write, or the verb refuses
 //! (exit 2 before the setup, exit 1 if it is that way after it); a directory that is not
@@ -343,26 +345,56 @@ fn bad_ids(why: ValidationError) -> Failure {
     ))
 }
 
-/// The words of clap's refusal, without what was typed when it is a word the verb does not
-/// take: that may be the join token put on the command line by mistake, and the refusal goes
-/// to a terminal and to logs. Of an unexpected flag only its name (before any `=`) is shown.
-fn clap_refusal(e: &clap::Error) -> String {
+/// The words of clap's refusal of `args`, without what was typed: a value may be the join
+/// token put on the command line by mistake, and the refusal goes to a terminal and to logs.
+/// An unexpected word is not shown and of an unexpected flag only its name (before any `=`)
+/// is; any other refusal is clap's. In either, every typed value of [`SHOWN_UP_TO`] bytes or
+/// more is then replaced (see [`typed_values`]).
+fn clap_refusal(e: &clap::Error, args: &[OsString]) -> String {
     use clap::error::{ContextKind, ContextValue, ErrorKind};
-    let typed = match e.get(ContextKind::InvalidArg) {
-        Some(ContextValue::String(typed)) if e.kind() == ErrorKind::UnknownArgument => typed,
-        _ => return e.to_string(),
+    let text = match e.get(ContextKind::InvalidArg) {
+        Some(ContextValue::String(typed)) if e.kind() == ErrorKind::UnknownArgument => {
+            let shown = match typed.strip_prefix('-') {
+                Some(_) => format!(
+                    "unexpected argument '{}' (a value given with it is not shown",
+                    typed.split('=').next().unwrap_or_default()
+                ),
+                None => "unexpected argument (the word is not shown".to_owned(),
+            };
+            format!(
+                "error: {shown}: the join token is read from standard input only)\n\n\
+                 For more information, try '--help'.\n"
+            )
+        }
+        _ => e.to_string(),
     };
-    let shown = match typed.strip_prefix('-') {
-        Some(_) => format!(
-            "unexpected argument '{}' (a value given with it is not shown",
-            typed.split('=').next().unwrap_or_default()
-        ),
-        None => "unexpected argument (the word is not shown".to_owned(),
-    };
-    format!(
-        "error: {shown}: the join token is read from standard input only)\n\n\
-         For more information, try '--help'.\n"
-    )
+    typed_values(args).iter().fold(text, |text, value| {
+        text.replace(value.as_str(), "<not shown>")
+    })
+}
+
+/// Typed values shorter than this are shown in a refusal: no join token is that short, and
+/// the ids and small numbers a refusal is about stay readable.
+const SHOWN_UP_TO: usize = 8;
+
+/// What was typed in `args` that may be a value, of [`SHOWN_UP_TO`] bytes or more, longest
+/// first (so a value is replaced before a part of it): each word that is not a flag, the
+/// part of a long flag after `=`, and what follows a short flag's letter.
+fn typed_values(args: &[OsString]) -> Vec<String> {
+    let mut values: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .filter_map(|word| match word.strip_prefix("--") {
+            Some(long) => long.split_once('=').map(|(_, value)| value.to_owned()),
+            None => match word.strip_prefix('-') {
+                Some(short) => short.get(1..).map(str::to_owned),
+                None => Some(word),
+            },
+        })
+        .filter(|value| value.len() >= SHOWN_UP_TO)
+        .collect();
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values
 }
 
 /// Runs the verb on `args` (the program name and the verb first). The report goes to `out`,
@@ -405,7 +437,7 @@ fn enroll(
 ) -> Result<String, Failure> {
     let args = match Args::try_parse_from(args.iter().skip(1)) {
         Ok(args) => args,
-        Err(e) if e.use_stderr() => return Err(Failure::Usage(clap_refusal(&e))),
+        Err(e) if e.use_stderr() => return Err(Failure::Usage(clap_refusal(&e, args))),
         Err(help) => return Ok(help.to_string()),
     };
     let Runtime::Crun = args.runtime;

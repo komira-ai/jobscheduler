@@ -223,3 +223,47 @@ fn a_token_on_the_command_line_is_refused_without_being_shown() {
     }
     assert_eq!(rig.setup_args(), None);
 }
+
+/// Asserts that a token given as the value of a flag the verb has, or glued to a short flag,
+/// is not repeated by the refusal either: `--runtime <token>`, `--runtime=<token>`,
+/// `--subid-start <token>` and `-t<token>` are status 2 with nothing run, standard error
+/// holds no part of the token that a person could use, and the place of the value is marked
+/// `<not shown>` where clap would have quoted it. A short value (`--runtime docker`) is
+/// still shown, so a typo stays readable. It catches clap's messages for a bad value, which
+/// quote what was typed.
+#[test]
+fn a_token_as_a_flags_value_is_not_repeated() {
+    let rig = Rig::new("enroll_argv_value");
+    let ids = ["--provider", PROVIDER, "--instance", INSTANCE];
+    let runtime = format!("--runtime={TOKEN}");
+    let short = format!("-t{TOKEN}");
+    let cases: [&[&str]; 4] = [
+        &["--runtime", TOKEN],
+        &[&runtime],
+        &["--subid-start", TOKEN],
+        &[&short],
+    ];
+    for extra in cases {
+        let mut words = ids.to_vec();
+        words.extend(extra);
+        let ran = rig.run(&words, TOKEN);
+        assert_eq!(ran.status, status(2), "{extra:?}: {ran:?}");
+        assert_eq!(ran.out, "");
+        assert!(!ran.err.contains(&TOKEN[..8]), "{extra:?}: {}", ran.err);
+        assert!(
+            ran.err.starts_with("js-agent enroll: error: "),
+            "{}",
+            ran.err
+        );
+    }
+    let mut words = ids.to_vec();
+    words.extend(["--runtime", TOKEN]);
+    let ran = rig.run(&words, TOKEN);
+    assert!(ran.err.contains("'<not shown>'"), "{}", ran.err);
+    let mut words = ids.to_vec();
+    words.extend(["--runtime", "docker"]);
+    let ran = rig.run(&words, TOKEN);
+    assert_eq!(ran.status, status(2), "{ran:?}");
+    assert!(ran.err.contains("'docker'"), "{}", ran.err);
+    assert_eq!(rig.setup_args(), None);
+}
