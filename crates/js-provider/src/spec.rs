@@ -258,7 +258,8 @@ mod tests {
         assert_eq!(make(r), Err(RefusalCode::WallTimeNotPositive));
     }
 
-    /// Asserts that every code has a distinct constant string.
+    /// Asserts that every code has a distinct constant string, and the probe codes the
+    /// wire answers.
     #[test]
     fn codes_are_distinct_constants() {
         let codes = [
@@ -273,6 +274,13 @@ mod tests {
             RefusalCode::LeaseEnded,
             RefusalCode::NoCapableHost,
             RefusalCode::ExclusiveNotReady,
+            RefusalCode::ProbeUnsupported,
+            RefusalCode::ProbeHostUnknown,
+            RefusalCode::ProbeHostNotServing,
+            RefusalCode::ProbeHostNotCordoned,
+            RefusalCode::ProbeHostDraining,
+            RefusalCode::ProbeHostMismatch,
+            RefusalCode::ProbeHostTooSmall,
         ];
         let names: std::collections::BTreeSet<_> = codes.iter().map(|c| c.as_str()).collect();
         assert_eq!(names.len(), codes.len());
@@ -282,6 +290,19 @@ mod tests {
         assert_eq!(
             RefusalCode::ExclusiveNotReady.as_str(),
             "exclusive-not-ready"
+        );
+        let probes = codes[11..].iter().map(|c| c.as_str()).collect::<Vec<_>>();
+        assert_eq!(
+            probes,
+            [
+                "probe-unsupported",
+                "probe-host-unknown",
+                "probe-host-not-serving",
+                "probe-host-not-cordoned",
+                "probe-host-draining",
+                "probe-host-mismatch",
+                "probe-host-too-small",
+            ]
         );
     }
 

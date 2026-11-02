@@ -619,8 +619,9 @@ impl Scheduler {
     /// instead, and refused in the round if the rule refuses it. One the rule admits is
     /// fitted to the worker it names alone, past that worker's cordon, by the same room
     /// and load predicate as any request; it waits while they say no. It holds no worker,
-    /// no reservation or held head keeps it off its own (none is ever on a cordoned
-    /// worker), and it counts in no whole-node pool.
+    /// and no reservation or held head keeps it off its own (none is ever on a cordoned
+    /// worker). A whole-machine probe is held to the whole-node caps and counts as a
+    /// whole worker in the round, as any whole-machine request.
     /// What operation `id`, asking `request`, is charged if placed now: its cost and how
     /// that is charged over time (`None`: flat).
     fn charging(&self, id: OperationId, request: &Request) -> (LeaseCost, Option<Arc<Profile>>) {
@@ -683,16 +684,25 @@ impl Scheduler {
                 fit_minutes,
             };
             // A probe is placed by the probe rule and its worker's room alone: it never
-            // looks at another worker, holds none and is held by none, and the pools'
-            // whole-node counts are not its. One the rule refuses is refused at once.
+            // looks at another worker and holds none. A whole-machine probe is held to the
+            // whole-node caps and counts as a whole worker, as any whole-machine request.
+            // One the rule refuses is refused at once.
             if let Some(pin) = &request.pin {
+                let whole_kind = request.kind == LeaseKind::WholeMachine;
                 match Servable::probe(&self.workers, &self.cordons, now, pin, request) {
                     Err(refusal) => {
                         verdicts.push((id, Verdict::Unservable(Unservable::Probe(refusal))));
                     }
-                    Ok(()) if placed.len() < round => {
+                    Ok(())
+                        if placed.len() < round && (!whole_kind || self.quiet_take(&whole, id)) =>
+                    {
                         let fit = servable.fit(&mut self.workers, &mut self.admission, &attempt);
-                        placed.extend(fit.placed.map(|p| (id, p)));
+                        if let Some(p) = fit.placed {
+                            if whole_kind {
+                                whole.placed_whole();
+                            }
+                            placed.push((id, p));
+                        }
                     }
                     Ok(()) => {}
                 }

@@ -319,10 +319,10 @@ mod tests {
         StartAck::Started { host: host(name) }
     }
 
-    /// A child that answers every start with `code` and is a fake in every other call.
+    /// A child that answers every start with `ack` and is a fake in every other call.
     struct Refuses {
         inner: FakeProvider,
-        code: RefusalCode,
+        ack: StartAck,
     }
 
     impl Provider for Refuses {
@@ -336,7 +336,7 @@ mod tests {
             self.inner.classes()
         }
         fn start(&mut self, _: StartSpec) -> StartAck {
-            StartAck::Refused(self.code)
+            self.ack.clone()
         }
         fn stop(&mut self, lease: &LeaseId) -> StopAck {
             self.inner.stop(lease)
@@ -350,8 +350,12 @@ mod tests {
     }
 
     fn refusing(name: &str, code: RefusalCode) -> Box<dyn Provider + Send> {
+        answering(name, StartAck::Refused(code))
+    }
+
+    fn answering(name: &str, ack: StartAck) -> Box<dyn Provider + Send> {
         let inner = fake(name, &[(name, 1000, 1)]);
-        Box::new(Refuses { inner, code })
+        Box::new(Refuses { inner, ack })
     }
 
     fn layer_of(children: Vec<Box<dyn Provider + Send>>) -> LayeredProvider {
@@ -407,33 +411,53 @@ mod tests {
         assert_eq!(ack, StartAck::Refused(RefusalCode::NoCapableHost));
     }
 
-    /// A child that places no probe is passed over, and a child's probe refusal for its
-    /// host is final: no later child (a free static host here) is asked. When every child
-    /// places no probe, the layer says so, which outranks an unsupported class but not a
-    /// fit refusal. It catches a probe placed by a child that never judged its host, and a
-    /// probe refusal swallowed into a lower-hope answer.
+    /// `spec` `sequence`, a probe pinned to `pin`.
+    fn probe(sequence: u64, pin: &str) -> StartSpec {
+        let mut request = spec(sequence, 1, 1).request().clone();
+        request.probe_host = Some(host(pin));
+        StartSpec::new(
+            LeaseId::new(1, sequence),
+            request,
+            &[ResourceClass::gpu_host()],
+        )
+        .unwrap()
+    }
+
+    /// A probe passes a static child that places no probe (a real fake pool with a free
+    /// host, which refuses it `ProbeUnsupported` and books nothing) and reaches the next,
+    /// the stand-in of the registry: its placement on the probe's host stands, its refusal
+    /// for the host is final (a later free child is not asked), and on its `no-capacity`
+    /// no other child's free host is booked. When every child places no probe the
+    /// layer says so, which outranks an unsupported class but not a fit refusal. It catches
+    /// a probe booked on the static pool's free host, a probe refusal swallowed into a
+    /// lower-hope answer, and a probe tried on a child after the one that judged its host.
     #[test]
-    fn a_probe_passes_a_child_that_places_none_and_stops_at_its_hosts_refusal() {
+    fn a_probe_passes_a_child_that_places_none_and_stops_at_its_hosts_answer() {
+        let statics = || fake("s", &[("s-1", 1000, 1)]);
+        let placed = StartAck::Started { host: host("r-7") };
+        let mut provider = layer_of(vec![Box::new(statics()), answering("r", placed.clone())]);
+        assert_eq!(provider.start(probe(1, "r-7")), placed);
+        assert_eq!(leased(&provider, "s-1"), None);
+        for code in [RefusalCode::ProbeHostNotCordoned, RefusalCode::NoCapacity] {
+            let mut provider = layer_of(vec![
+                Box::new(statics()),
+                refusing("r", code),
+                Box::new(fake("t", &[("t-1", 1000, 1)])),
+            ]);
+            assert_eq!(provider.start(probe(2, "r-7")), StartAck::Refused(code));
+            assert_eq!(leased(&provider, "s-1"), None);
+            assert_eq!(leased(&provider, "t-1"), None);
+        }
         let mut provider = layer_of(vec![
-            refusing("s", RefusalCode::ProbeUnsupported),
-            refusing("r", RefusalCode::ProbeHostNotCordoned),
-            Box::new(fake("t", &[("t-1", 1000, 1)])),
-        ]);
-        let ack = provider.start(spec(1, 1, 1));
-        assert_eq!(ack, StartAck::Refused(RefusalCode::ProbeHostNotCordoned));
-        assert_eq!(leased(&provider, "t-1"), None);
-        let mut provider = layer_of(vec![
-            refusing("s", RefusalCode::ProbeUnsupported),
+            Box::new(statics()),
             refusing("r", RefusalCode::UnsupportedClass),
         ]);
-        let ack = provider.start(spec(2, 1, 1));
+        let ack = provider.start(probe(3, "r-7"));
         assert_eq!(ack, StartAck::Refused(RefusalCode::ProbeUnsupported));
-        let mut provider = layer_of(vec![
-            refusing("s", RefusalCode::ProbeUnsupported),
-            refusing("r", RefusalCode::NoFit),
-        ]);
-        let ack = provider.start(spec(3, 1, 1));
+        let mut provider = layer_of(vec![Box::new(statics()), refusing("r", RefusalCode::NoFit)]);
+        let ack = provider.start(probe(4, "r-7"));
         assert_eq!(ack, StartAck::Refused(RefusalCode::NoFit));
+        assert_eq!(leased(&provider, "s-1"), None);
     }
 
     /// A request that used up its tries is refused as such and no other child is asked,

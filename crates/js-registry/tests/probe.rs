@@ -264,8 +264,10 @@ fn the_placer_is_told_the_taint_phase_and_leaving_of_the_probes_host() {
 }
 
 /// Asserts that a probe of a whole-node class is not placed, and the placer is not asked:
-/// a whole-node lease is prepared and held as the queue of whole-node requests decides.
-/// It catches a whole-node probe sent down that path.
+/// a whole-node lease is prepared and held as the queue of whole-node requests decides;
+/// and that an ended lease and the class gate still answer before that refusal. It
+/// catches a whole-node probe sent down that path, and a probe answer put before the
+/// book's own. (A whole-node probe is never booked, so it is never pending or held.)
 #[test]
 fn a_probe_of_a_whole_node_class_is_not_placed() {
     let whole = ResourceClass::whole_node();
@@ -277,6 +279,9 @@ fn a_probe_of_a_whole_node_class_is_not_placed() {
     );
     let mut fx = fixture_of(config);
     fx.join("a", "t");
+    // With no placer, as with one.
+    let refused = fx.provider.start(probe_of(9, "a", &whole));
+    assert_eq!(refused, StartAck::Refused(RefusalCode::ProbeUnsupported));
     let placer = Scripted::answering(Ok(()));
     fx.registry.set_placer(placer.clone());
     fx.registry
@@ -285,4 +290,35 @@ fn a_probe_of_a_whole_node_class_is_not_placed() {
     let refused = fx.provider.start(probe_of(1, "a", &whole));
     assert_eq!(refused, StartAck::Refused(RefusalCode::ProbeUnsupported));
     assert_eq!(placer.told(), []);
+    assert!(fx.provider.booked().is_empty());
+    // An ended lease and the class gate answer first, as for any start.
+    fx.provider.stop(&lease(2));
+    let ended = fx.provider.start(probe_of(2, "a", &whole));
+    assert_eq!(ended, StartAck::Refused(RefusalCode::LeaseEnded));
+    let mut other = fx.registry.provider().with_classes(vec![class()]);
+    let gated = other.start(probe_of(3, "a", &whole));
+    assert_eq!(gated, StartAck::Refused(RefusalCode::UnsupportedClass));
+    assert_eq!(placer.told(), []);
+}
+
+/// Asserts that the cordon the placer is told of is the one in force at the start: one
+/// millisecond before the cordon lapses the host is cordoned, at the moment it lapses it
+/// is not. It catches a lapsed cordon still reported (a probe would pass a cordon that is
+/// over, onto a host open to ordinary work), and a cordon reported over early.
+#[test]
+fn the_placer_is_told_the_cordon_in_force_up_to_its_lapse() {
+    let mut fx = fixture(2);
+    let epoch = fx.join("a", "t");
+    let placer = Scripted::answering(Err(RefusalCode::ProbeHostNotCordoned));
+    fx.registry.set_placer(placer.clone());
+    fx.registry
+        .cordon(&host("a"), Duration::from_secs(10))
+        .unwrap();
+    fx.clock.advance(Duration::from_millis(9_999));
+    fx.beat("a", epoch);
+    fx.provider.start(probe_spec(1, "a"));
+    fx.clock.advance(Duration::from_millis(1));
+    fx.beat("a", epoch);
+    fx.provider.start(probe_spec(2, "a"));
+    assert_eq!(placer.told(), [Some(facts(true)), Some(facts(false))]);
 }

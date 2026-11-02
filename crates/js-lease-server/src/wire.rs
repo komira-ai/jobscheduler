@@ -358,8 +358,10 @@ mod tests {
     }
 
     /// Asserts that `probe_host` reaches the request as the host it names, that a body
-    /// without it (or with null) is no probe, and that a name that is not a host id is a
-    /// 400 naming the field. It catches a field that is read and dropped (the probe would
+    /// without it (or with null) is no probe, that the longest host id (63 characters) is
+    /// taken, and that a name that is not a host id (empty, 64 characters, out of the
+    /// alphabet) is a 400 naming the field and a value that is not a string the parser's
+    /// 400. It catches a field that is read and dropped (the probe would
     /// be placed as ordinary work, anywhere), and one that is required.
     #[test]
     fn probe_host_reaches_the_request_and_is_optional() {
@@ -373,12 +375,101 @@ mod tests {
         assert_eq!(request.probe_host, Some(HostId::new("mac-07").unwrap()));
         assert_eq!(probe("").unwrap().0.probe_host, None);
         assert_eq!(probe(r#","probe_host":null"#).unwrap().0.probe_host, None);
-        let refused = probe(r#","probe_host":"Not A Host""#).unwrap_err();
+        // The longest host id is 63 characters; one more, an empty name and a name out
+        // of the alphabet are each the 400 that names the field.
+        let longest = "h".repeat(63);
+        let (request, _) = probe(&format!(r#","probe_host":"{longest}""#)).unwrap();
+        assert_eq!(request.probe_host, Some(HostId::new(&longest).unwrap()));
         let expected = ApiError::bad_request("probe_host is not a valid host id");
+        let too_long = format!(r#","probe_host":"{}""#, "h".repeat(64));
+        let empty = r#","probe_host":"""#.to_owned();
+        let spaced = r#","probe_host":"Not A Host""#.to_owned();
+        for bad in [spaced, empty, too_long] {
+            let refused = probe(&bad).unwrap_err();
+            assert_eq!(
+                (refused.status, refused.code, &refused.reason),
+                (expected.status, expected.code, &expected.reason),
+                "{bad}"
+            );
+        }
+        // A value that is not a string is not this body at all: the parser's 400.
+        let text = r#"{"class":"c","resources":{},"max_wall_seconds":60,"probe_host":7}"#;
+        let refused = parse::<AcquireBody>(text.as_bytes()).unwrap_err();
         assert_eq!(
-            (refused.status, refused.code, refused.reason),
-            (expected.status, expected.code, expected.reason)
+            (refused.status, refused.code),
+            (StatusCode::BAD_REQUEST, "bad-request")
         );
+        assert_eq!(
+            refused.reason.as_deref(),
+            Some("the body is JSON, but not what this route takes (line 1, column 64)")
+        );
+    }
+
+    /// The body of `POST /v1/leases` as the release before `probe_host` parsed it: the
+    /// same keys and the same refusal of a key it does not know.
+    #[allow(dead_code, reason = "parsed only to see whether a body is taken")]
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PreviousAcquireBody {
+        class: String,
+        resources: PreviousResourcesBody,
+        #[serde(default)]
+        capabilities: BTreeMap<String, String>,
+        max_wall_seconds: u64,
+        #[serde(default)]
+        labels: BTreeMap<String, String>,
+        #[serde(default)]
+        validation_run: Option<String>,
+        #[serde(default)]
+        ttl_seconds: Option<u64>,
+    }
+
+    #[allow(dead_code, reason = "parsed only to see whether a body is taken")]
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PreviousResourcesBody {
+        #[serde(default)]
+        cpu_millis: u64,
+        #[serde(default)]
+        memory_bytes: u64,
+        #[serde(default)]
+        gpus: u64,
+        #[serde(default)]
+        gpu_class: Option<String>,
+        #[serde(default)]
+        disk_bytes: Option<u64>,
+    }
+
+    /// Asserts the field across one release in each direction. A start of a client that
+    /// predates the field (no `probe_host`) is taken by this server as before, as no
+    /// probe. A start of this release's client without a probe (the CLI leaves the key
+    /// out) is taken by the previous server, and a probe is refused by it as a body it does
+    /// not take (a 400), so a probe is never placed as ordinary work by a server that
+    /// cannot judge it. It catches a field that became required, and a client that sends
+    /// the key when unset.
+    #[test]
+    fn probe_host_across_one_release_each_way() {
+        let unpinned = r#"{"class":"c","resources":{"cpu_millis":1000,"memory_bytes":0,"gpus":0,"gpu_class":null},"max_wall_seconds":60,"labels":{},"validation_run":null,"ttl_seconds":null}"#;
+        let pinned = format!(
+            r#"{},"probe_host":"mac-07"}}"#,
+            &unpinned[..unpinned.len() - 1]
+        );
+        let (request, _) = parse::<AcquireBody>(unpinned.as_bytes())
+            .unwrap()
+            .into_parts()
+            .unwrap();
+        assert_eq!(request.probe_host, None);
+        assert!(parse::<PreviousAcquireBody>(unpinned.as_bytes()).is_ok());
+        let refused = parse::<PreviousAcquireBody>(pinned.as_bytes()).unwrap_err();
+        assert_eq!(
+            (refused.status, refused.code),
+            (StatusCode::BAD_REQUEST, "bad-request")
+        );
+        let (request, _) = parse::<AcquireBody>(pinned.as_bytes())
+            .unwrap()
+            .into_parts()
+            .unwrap();
+        assert_eq!(request.probe_host, Some(HostId::new("mac-07").unwrap()));
     }
 
     fn body_with_resources(resources: &str) -> AcquireBody {

@@ -109,12 +109,7 @@ impl Registry {
         let lease = spec.lease();
         let key = RequestKey::of(spec);
         let whole = matches!(spec.class().admission(), Admission::Whole);
-        // A probe of a whole-node class is not placed: its host would be prepared and
-        // held as the queue of whole-node requests decides, which no probe rule judges.
         let probe = spec.request().probe_host.as_ref();
-        if whole & probe.is_some() {
-            return StartAck::Refused(RefusalCode::ProbeUnsupported);
-        }
         let held = state.book.read(&lease);
         let pending = match &held {
             Observed::Present { host } => state
@@ -125,6 +120,17 @@ impl Registry {
         };
         if pending {
             return StartAck::Unknown;
+        }
+        // A probe of a whole-node class is not placed: its host would be prepared and
+        // held as the queue of whole-node requests decides, which no probe rule judges.
+        // The book answers it, so an ended lease, a held one and the class gate come
+        // first, as for any start, and it books nothing (`ProbeUnsupported`).
+        if whole & probe.is_some() {
+            let gate = match self.shared.placer.get() {
+                Some(_) => HostBook::listed_gate(classes, spec),
+                None => HostBook::class_gate(classes, spec),
+            };
+            return state.book.start_where(spec, gate, &|_, _| false);
         }
         if whole {
             // One request id holds at most one whole host: a start of it under another
