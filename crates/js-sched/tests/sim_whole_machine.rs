@@ -197,6 +197,7 @@ impl World {
             hermetic: true,
             do_not_cache: false,
             whole_worker: false,
+            pin: None,
             needs: js_caps::Request::default(),
         };
         self.feed(Event::Submit {

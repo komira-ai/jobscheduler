@@ -433,6 +433,7 @@ fn request(n: u64) -> Request {
         hermetic: !n.is_multiple_of(4),
         do_not_cache: false,
         whole_worker: false,
+        pin: None,
         needs: js_caps::Request::default(),
     }
 }

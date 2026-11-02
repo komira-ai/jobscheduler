@@ -8,6 +8,19 @@ use js_lease::{Monotonic, Timings};
 
 use crate::support::{fresh, request};
 
+/// A subscriber that discards what it is given, the default of this thread for as long as
+/// the guard lives. A test whose steps are slow logs the slow-step warning; the first log
+/// of that callsite registers it, and a registration seen by no subscriber that wants it
+/// is cached as never enabled, which drops the first warning `slow_save` captures on its
+/// own thread at the same time. Under this subscriber it is cached as enabled sometimes,
+/// so each thread's subscriber decides.
+fn subscribed() -> tracing::subscriber::DefaultGuard {
+    let discard = tracing_subscriber::fmt()
+        .with_writer(std::io::sink)
+        .finish();
+    tracing::subscriber::set_default(discard)
+}
+
 /// A clock that answers with the readings it was given, in order.
 #[derive(Debug, Clone)]
 struct Script(Arc<Mutex<VecDeque<Duration>>>);
@@ -44,6 +57,7 @@ impl Monotonic for Step {
 /// the longest.
 #[test]
 fn the_record_keeps_count_slow_and_longest_per_operation() {
+    let _log = subscribed();
     let timings = Timings::new(Script::of(&[0, 1500, 1500, 2000, 2000, 3000, 3000, 3020]));
     assert_eq!(timings.report(), "no lease steps timed");
     let again = timings.clone();
@@ -95,6 +109,7 @@ fn the_open_save_is_recorded_as_open() {
 /// one that counts a cancelled step as in flight for ever.
 #[test]
 fn a_step_that_has_begun_is_in_flight_until_it_finishes_or_is_dropped() {
+    let _log = subscribed();
     let timings = Timings::new(Script::of(&[0, 1500, 1500, 1500]));
     let waiting = timings.begin("wait-renew");
     assert_eq!(

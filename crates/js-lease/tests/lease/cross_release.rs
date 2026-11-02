@@ -26,7 +26,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-use js_lease::{AcquireError, Booking, Boot, LeaseState, LeaseTable, ManualClock, read_bookings};
+use js_lease::{
+    AcquireError, Booking, Boot, LeaseState, LeaseTable, ManualClock, Timestamp, read_bookings,
+};
 use js_pool_static::{HostBook, SeatError};
 use js_provider::{
     Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
@@ -216,6 +218,9 @@ fn shared_host_bookings() -> Vec<Booking> {
         host: host(on),
         state: LeaseState::Held,
         shares,
+        // Every lease of the scenario is acquired at the clock's start and runs an hour.
+        started_at: Timestamp::from_millis(1_000_000),
+        ends_at: Timestamp::from_millis(4_600_000),
     };
     let releasing = Booking {
         state: LeaseState::Releasing,
@@ -407,4 +412,25 @@ fn this_release_restarts_over_its_own_file_with_every_share_booked() {
     assert_eq!(state(&table), None);
     assert_eq!(table.acquire(cores(1001), None).unwrap().host, host("h1"));
     assert_disk_left(&mut table, 0);
+}
+
+/// Asserts that the previous release keeps the start of a whole-node lease that was ready
+/// after its acquire: its reader takes `started_at_ms` into the lease's `extra`, its writer
+/// writes it back, and this release reads the same booking from that rewrite, start and end
+/// included. It catches a field the previous release would refuse or drop.
+#[test]
+fn the_previous_release_keeps_the_start_of_a_lease_ready_after_its_acquire() {
+    let scratch = Scratch::new("cross_release_started");
+    let clock = clock();
+    drop(crate::started::ready_later(&scratch, &clock));
+    let written = fs::read_to_string(scratch.file()).unwrap();
+    let bookings = read_bookings(scratch.file()).unwrap();
+    let ready = crate::support::T0 + crate::started::READY_AFTER_MS;
+    assert_eq!(bookings[0].started_at, Timestamp::from_millis(ready));
+
+    let document = previous::read(&written);
+    let kept: Vec<&String> = document.lease[0].extra.keys().collect();
+    assert_eq!(kept, [&"started_at_ms".to_owned()]);
+    fs::write(scratch.file(), previous::write(&document)).unwrap();
+    assert_eq!(read_bookings(scratch.file()).unwrap(), bookings);
 }

@@ -166,6 +166,7 @@ fn spec() -> StartSpec {
         max_wall: Duration::from_secs(3600),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     };
     StartSpec::new(lease(), request, &[ResourceClass::gpu_host()]).unwrap()
 }

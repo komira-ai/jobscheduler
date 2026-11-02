@@ -14,19 +14,19 @@ use js_agent_wire::{Heartbeat, HeldRun, HeldState, Hello, JobSpec};
 use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
 use js_pool_static::Candidate;
 use js_provider::{StartAck, StartSpec};
-use js_registry::{Placer, PoolConfig, RunRefusal};
+use js_registry::{MarkedTails, Placer, PoolConfig, RunRefusal};
 use js_types::{Admission, ClassId, Dims, ProviderId, Request, ResourceClass, Resources, Shape};
 use support::world::job;
 use support::*;
 
 const GIB: u64 = 1 << 30;
 
-/// A placer that books the first host it is shown.
+/// A placer that books the first host it is shown that no whole-node request has set aside.
 struct First;
 
 impl Placer for First {
-    fn pick(&self, _: &StartSpec, _: &[Candidate]) -> Option<usize> {
-        Some(0)
+    fn pick(&self, _: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize> {
+        open.iter().position(|c| !marked.contains_key(&c.host))
     }
 }
 
@@ -96,7 +96,7 @@ fn host_with_two_leases(came: Came) -> (Fixture, u64) {
     let mut provider = fx.registry.provider().with_classes(vec![book()]);
     if let Came::Restored = came {
         for n in 1..=2 {
-            let seated = provider.seat_booked(&host("a"), lease(n), None, Some(half()));
+            let seated = provider.seat_booked(&booking("a", n, Some(half())), None);
             assert_eq!(seated, Ok(()));
         }
     }

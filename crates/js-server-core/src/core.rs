@@ -321,6 +321,12 @@ pub enum NotQueued {
     /// work.
     #[error("this scheduler was superseded by a newer writer of the state store")]
     Superseded,
+    /// The request is a probe ([`js_sched::Request::pin`]). This core queues none: the
+    /// rows of its state store do not keep the pin, so a probe taken up after a restart or
+    /// by another frontend would be ordinary work, and the cordon of a closed intake is a
+    /// plain cordon a probe would pass. Nothing is written; the lease server places probes.
+    #[error("this scheduler queues no probe pinned to a host")]
+    Probe,
 }
 
 /// An operator action named a node that never registered.
@@ -509,7 +515,8 @@ impl<A: Adapter> Core<A> {
     /// ([`Core::intake`]). A core with no store ignores `parcel`.
     ///
     /// # Errors
-    /// The core is fenced, or the store did not take the request: nothing is queued.
+    /// The core is fenced, the request is a probe ([`NotQueued::Probe`]), or the store did
+    /// not take the request: nothing is queued.
     pub fn submit(
         &self,
         now: FarmTime,

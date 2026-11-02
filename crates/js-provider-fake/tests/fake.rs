@@ -28,6 +28,7 @@ fn spec(seq: u64, cpu_millis: u64) -> StartSpec {
         max_wall: Duration::from_secs(60),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     };
     StartSpec::new(LeaseId::new(1, seq), request, &[ResourceClass::gpu_host()]).unwrap()
 }
@@ -203,7 +204,29 @@ fn an_added_class_is_listed_and_leased() {
         max_wall: Duration::from_secs(60),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     };
     let spec = StartSpec::new(lease(1), request, &provider.classes()).unwrap();
     assert_eq!(provider.start(spec), StartAck::Started { host: host("h1") });
+}
+
+/// Asserts that the fake places no probe (it has no cordon and no probe rule): a start
+/// with `probe_host` is refused `ProbeUnsupported` and books nothing, though both hosts
+/// are free, while the same start without it books. It catches a reference provider that
+/// places a probe on whichever host is free.
+#[test]
+fn a_probe_is_refused_and_books_nothing() {
+    let mut f = fake();
+    let mut request = spec(1, 1000).request().clone();
+    request.probe_host = Some(host("h2"));
+    let probe = StartSpec::new(lease(1), request, &[ResourceClass::gpu_host()]).unwrap();
+    assert_eq!(
+        f.start(probe),
+        StartAck::Refused(RefusalCode::ProbeUnsupported)
+    );
+    assert_eq!(f.observe(&lease(1)), Observed::Absent);
+    assert_eq!(
+        f.start(spec(2, 1000)),
+        StartAck::Started { host: host("h1") }
+    );
 }

@@ -525,6 +525,7 @@ pub fn request(n: u64) -> Request {
         hermetic: true,
         do_not_cache: false,
         whole_worker: false,
+        pin: None,
     }
 }
 

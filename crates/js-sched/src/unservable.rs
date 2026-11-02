@@ -11,11 +11,14 @@ use std::fmt;
 
 use js_types::sched::{LeaseKind, NodePhase, Resources, WorkerId};
 
+use crate::probe::ProbeRefusal;
+
 /// Why no live worker can run a request, ignoring what is booked.
 ///
-/// Every variant but [`Self::Cordoned`] is a reason the request is refused for if it
-/// lasts [`UNSERVABLE_WAIT`](crate::UNSERVABLE_WAIT). [`Self::Cordoned`] is temporary by
-/// intent: the work waits for the cordon to end and is never refused for it.
+/// Every variant but [`Self::Cordoned`] and [`Self::Probe`] is a reason the request is
+/// refused for if it lasts [`UNSERVABLE_WAIT`](crate::UNSERVABLE_WAIT). [`Self::Cordoned`]
+/// is temporary by intent: the work waits for the cordon to end and is never refused for
+/// it. [`Self::Probe`] is refused at once.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Unservable {
@@ -59,6 +62,9 @@ pub enum Unservable {
         /// Those workers, in name order, with their phase.
         workers: Vec<(WorkerId, NodePhase)>,
     },
+    /// A probe ([`crate::Request::pin`]) that may not run on the worker it names. Unlike
+    /// the other reasons it is refused at once, not after the unservable wait.
+    Probe(ProbeRefusal),
 }
 
 impl fmt::Display for Unservable {
@@ -129,6 +135,7 @@ impl fmt::Display for Unservable {
                     named.join(", ")
                 )
             }
+            Self::Probe(refusal) => refusal.fmt(f),
         }
     }
 }

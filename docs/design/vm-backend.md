@@ -245,7 +245,7 @@ of the steps): a VM is destroyed before the slot is freed, and a failed destroy 
 fake counts VM ids per run id and fails on a repeat, and a lease with two runs sees two VM ids); VMs count in `vms` and in the offer, with
 the order of 5.15 (the offer is never above total less booked at any step of a seeded run); a container job is refused when VM memory
 leaves too little; the whole-node sequence: no VM is running at `preparing`, a VM found there is a finding, the token is not minted before
-`exclusive_ready`, a timeout gives the lease up and the re-place is capped, a reserved host places nothing new and its reservation ends at its deadline (whole-node.md); restart
+`exclusive_ready`, a timeout gives the lease up and the re-place is capped, a reserved host places nothing new but backfill that ends by its tail (whole-node.md section 4) and its reservation ends at its deadline (whole-node.md); restart
 sweeps every clone; a `host` VM job and a GPU VM job are
 refused; mounts are copied in and out and the guest never holds a writable host path; a hostile frame corpus ends the run and never
 taints. No test asserts elapsed time (R2): boots, ages and timeouts are counted on the injected clock.

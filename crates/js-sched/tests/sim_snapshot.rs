@@ -216,6 +216,7 @@ impl World {
                 hermetic: true,
                 do_not_cache: false,
                 whole_worker: false,
+                pin: None,
                 needs,
             };
             self.feed(Event::Submit {

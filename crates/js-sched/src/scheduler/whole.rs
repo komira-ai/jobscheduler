@@ -448,8 +448,9 @@ impl Scheduler {
         }
     }
 
-    /// The worker whole-machine `id`, at queue `position`, holds this round and its mark,
-    /// when it holds one: `kept` stays on its worker without a check (that mark is
+    /// The worker whole-machine `id`, at queue `position`, holds this round, its mark and
+    /// the end of the worker's tail (when the request is expected to start there; `None`:
+    /// not known), when it holds one: `kept` stays on its worker without a check (that mark is
     /// already counted); a new mark is made only if the caps allow it ([`may_reserve`])
     /// and the worker is not the last capable one of an older ordinary request, in which
     /// case the next worker by drain cost is tried. `Err` is the reason it holds none.
@@ -465,7 +466,7 @@ impl Scheduler {
         reserved: &BTreeSet<WorkerId>,
         placed: &[(OperationId, Placed)],
         turn: Turn,
-    ) -> Result<Option<(WorkerId, WholeMark)>, WholeWait> {
+    ) -> Result<Option<(WorkerId, WholeMark, Option<u64>)>, WholeWait> {
         let cfg = self
             .whole_node
             .as_ref()
@@ -495,7 +496,8 @@ impl Scheduler {
             let mark = self
                 .drain
                 .mark(id, &name, turn.kept, self.now, cfg, max_wall);
-            return Ok(Some((name, mark)));
+            let tail = super::gate::tail_of(&drain, &name);
+            return Ok(Some((name, mark, tail)));
         }
     }
 
@@ -643,6 +645,7 @@ mod tests {
             hermetic: true,
             do_not_cache: false,
             whole_worker: false,
+            pin: None,
             needs: js_caps::Request::default(),
         };
         let waiter = WaiterId(1);

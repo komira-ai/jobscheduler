@@ -9,6 +9,7 @@
 //! `js-client`, held there, and sent in the `Authorization` header only.
 
 use std::path::Path;
+use std::time::Duration;
 
 use js_agent_wire::Taint;
 use js_client::{Client, ClientError, Reply};
@@ -19,6 +20,43 @@ use crate::transport::REQUEST_LIMIT;
 
 /// The longest cordon the lease server grants in one request; a longer ask is cut to it.
 pub const MAX_CORDON_SECS: u64 = 3600;
+
+/// The longest a [`RequestLimit`] may be: an hour, longer than any one call is waited for.
+pub const MAX_REQUEST_LIMIT: Duration = Duration::from_secs(3600);
+
+/// How long one call to the lease server may take, connect to last byte (TLS included): more
+/// than zero and at most [`MAX_REQUEST_LIMIT`]. A value outside that range is refused when the
+/// limit is made, by [`RequestLimitOutOfRange`]; it never reaches the client, whose deadline
+/// arithmetic would overflow on a huge one, and a zero limit would fail every call unsent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestLimit(Duration);
+
+/// A request limit of zero, or longer than [`MAX_REQUEST_LIMIT`]: the value given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a request limit must be more than zero and at most {MAX_REQUEST_LIMIT:?}, not {0:?}")]
+pub struct RequestLimitOutOfRange(pub Duration);
+
+impl RequestLimit {
+    /// What the agent and its verbs wait for one answer: [`REQUEST_LIMIT`].
+    pub const DEFAULT: RequestLimit = RequestLimit(REQUEST_LIMIT);
+
+    /// `limit`, when it is more than zero and at most [`MAX_REQUEST_LIMIT`].
+    ///
+    /// # Errors
+    /// [`RequestLimitOutOfRange`] with `limit` otherwise.
+    pub fn new(limit: Duration) -> Result<Self, RequestLimitOutOfRange> {
+        match !limit.is_zero() && limit <= MAX_REQUEST_LIMIT {
+            true => Ok(Self(limit)),
+            false => Err(RequestLimitOutOfRange(limit)),
+        }
+    }
+
+    /// The limit.
+    #[must_use]
+    pub const fn get(self) -> Duration {
+        self.0
+    }
+}
 
 /// When a cordon lapses, on the lease server's clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,9 +129,11 @@ pub struct Uncordoned {
 /// Why the lease server did not answer as asked.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LeaseError {
-    /// The server holds no host by this id (`unknown-host`): it has not said hello since the
-    /// server started.
-    #[error("unknown host")]
+    /// The server holds no host by this id (409 `unknown-host`): it has not said hello since
+    /// the server started. A refusal: the server was reached and nothing was done.
+    #[error(
+        "unknown host (409 unknown-host): the lease server has not heard this host say hello since it started"
+    )]
     UnknownHost,
     /// The server refused the request (`invalid-cordon`, `join-token-not-admitted`, ...), by
     /// its code, or by `http-<status>` when it sent none.
@@ -137,7 +177,9 @@ pub struct HttpLease {
 impl HttpLease {
     /// Connects to `server` as `host`, with the credential in the owner-only file
     /// `credential`, trusting `ca_cert` for `https://` (or the bundled public roots without
-    /// it). `host` is a valid host id: it has no colon and nothing to escape.
+    /// it). `host` is a valid host id: it has no colon and nothing to escape. Every call
+    /// ends within `limit`, connect and TLS included: a server that does not answer in time
+    /// is [`LeaseError::Unreachable`], and the same client may be called again after it.
     ///
     /// # Errors
     ///
@@ -148,8 +190,9 @@ impl HttpLease {
         credential: &Path,
         ca_cert: Option<&Path>,
         host: &str,
+        limit: RequestLimit,
     ) -> Result<Self, ClientError> {
-        Client::connect(server, credential, ca_cert, REQUEST_LIMIT).map(|client| Self {
+        Client::connect(server, credential, ca_cert, limit.get()).map(|client| Self {
             client,
             host: host.to_owned(),
         })
