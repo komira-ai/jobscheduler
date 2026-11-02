@@ -179,9 +179,11 @@ impl Routes for Client {
     }
 
     fn mint_join_token(&self, body: &Value) -> Result<Minted, Failure> {
-        let reply = self.post("/v1/agent/join-tokens", body)?;
+        let reply = self
+            .post("/v1/agent/join-tokens", body)
+            .map_err(|err| mint_unconfirmed(err.into()))?;
         match reply.status {
-            201 => minted(&reply.body),
+            201 => minted(&reply.body).map_err(mint_unconfirmed),
             status => Err(Failure::Mint {
                 status,
                 code: printable(reply.body["error"].as_str().unwrap_or("none"))
@@ -266,6 +268,12 @@ fn held(body: &Value) -> Result<Lease, Failure> {
 /// lease.
 fn unconfirmed(failure: Failure) -> Failure {
     Failure::Unconfirmed(failure.to_string())
+}
+
+/// A failure of the answer to a mint, as the one that says the server may have minted a
+/// token that was lost.
+fn mint_unconfirmed(failure: Failure) -> Failure {
+    Failure::MintUnconfirmed(failure.to_string())
 }
 
 /// Text the server sent, as it may be printed: without control characters, which a

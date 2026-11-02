@@ -2,10 +2,10 @@
 //! caller said, never on a terminal.
 
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 
-use js_client::Client;
+use js_client::{Client, NewFileStep};
 use sha2::{Digest, Sha256};
 
 use crate::api::Routes;
@@ -54,40 +54,40 @@ fn check_destination(out: Option<&Path>, stdout_is_terminal: bool) -> Result<(),
     }
 }
 
-/// Whether `path` can be made: nothing is there (a link, even to nothing, is something), its
-/// directory is, and a file can be made in that directory and linked (found by doing it
-/// with a probe). That leaves a full disk or a directory changed since, which are reported
-/// after the mint as a token lost.
+/// Whether `path` can be made: it names a file (it is not empty and has no trailing
+/// separator), nothing is there (a link, even to nothing, is something), its directory is,
+/// no other user could swap a file in that directory, and a file can be made in it and linked
+/// (found by doing it with a probe). That leaves a full disk or a directory changed since,
+/// which are reported after the mint as a token lost.
 fn free(path: &Path) -> Result<(), Failure> {
+    let refuse = |why: String| Failure::flag("--out", format!("{} {why}", path.display()));
+    js_client::check_file_path(path).map_err(|why| Failure::flag("--out", why))?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            return Err(refuse(
+                "exists; a token is never written over a file".to_owned(),
+            ));
+        }
+        Err(why) if why.kind() != ErrorKind::NotFound => {
+            return Err(refuse(format!("cannot be examined ({why})")));
+        }
+        Err(_) => {}
+    }
     let dir = path
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let probe = js_client::probe_dir(dir);
-    let problems = [
-        (
-            fs::symlink_metadata(path).is_ok(),
-            "exists; a token is never written over a file".to_owned(),
-        ),
-        (
-            !dir.is_dir(),
-            "is in a directory that does not exist".to_owned(),
-        ),
-        (
-            probe.is_err(),
-            format!(
-                "is in a directory where a file cannot be made and linked ({})",
-                probe
-                    .as_ref()
-                    .err()
-                    .map_or_else(String::new, ToString::to_string)
-            ),
-        ),
-    ];
-    match problems.iter().find(|(bad, _)| *bad) {
-        Some((_, why)) => Err(Failure::flag("--out", format!("{} {why}", path.display()))),
-        None => Ok(()),
+    if !dir.is_dir() {
+        return Err(refuse("is in a directory that does not exist".to_owned()));
     }
+    js_client::probe_dir(dir).map_err(|why| match why.step() {
+        NewFileStep::Unsafe => refuse(format!(
+            "is in a directory that others could change files in ({why})"
+        )),
+        _ => refuse(format!(
+            "is in a directory where a file cannot be made and linked ({why})"
+        )),
+    })
 }
 
 /// Writes `line` to the new file `path` (mode 0600, made whole and never over a file), or

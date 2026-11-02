@@ -55,6 +55,9 @@ pub struct Scratch {
 impl Scratch {
     pub fn new(name: &str) -> Self {
         let owner = TestDir::under(Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-cli"), name);
+        // Only the owner writes it, whatever the umask: a group-writable directory is one
+        // that `--out` and `probe_dir` refuse.
+        fs::set_permissions(owner.path(), fs::Permissions::from_mode(0o700)).unwrap();
         Self {
             dir: owner.path().to_path_buf(),
             _owner: owner,

@@ -82,6 +82,14 @@ pub(crate) enum Failure {
         /// The server's error code, without control characters and cut short.
         code: String,
     },
+    /// The answer to a mint was lost or unusable (the connection failed, the answer was cut
+    /// short, or a 201 lacks a usable token or expiry), so the server may have minted a token
+    /// that nobody holds. It is not repeated.
+    #[error(
+        "{0}; a join token may have been minted and lost: nothing was written, and an unused \
+         token expires on the server by itself"
+    )]
+    MintUnconfirmed(String),
     /// A join token was minted and could not be put where it was asked for. The server has
     /// it and nobody else does.
     #[error(
@@ -138,6 +146,7 @@ impl Failure {
                 404 | 429 => (exit::REFUSED, "refused"),
                 _ => (exit::SERVER, "server"),
             },
+            Self::MintUnconfirmed(_) => (exit::SERVER, "mint-unconfirmed"),
             Self::Undelivered { .. } => (exit::SERVER, "undelivered"),
             Self::LeaseLost(_) | Self::LeaseUnrenewed(_) => (exit::LEASE_LOST, "lease-lost"),
             Self::Interrupted(signal) => (128 + signal.number(), "interrupted"),

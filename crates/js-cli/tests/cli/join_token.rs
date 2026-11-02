@@ -14,34 +14,37 @@ use sha2::{Digest, Sha256};
 use crate::support::{Never, Scratch, TOKEN, against, http, services};
 
 /// A token as the server mints it.
-const MINTED: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const EXPIRES: u64 = 1_700_000_000_000;
+pub(crate) const MINTED: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+pub(crate) const EXPIRES: u64 = 1_800_000_000_000;
 
 /// The 201 the server answers with.
-fn created() -> String {
+pub(crate) fn created() -> String {
     created_with(&json!({ "token": MINTED, "expires_at_ms": EXPIRES }))
 }
 
-fn created_with(body: &Value) -> String {
+pub(crate) fn created_with(body: &Value) -> String {
     http("201 Created", &body.to_string())
 }
 
-fn sha(text: &str) -> String {
+pub(crate) fn sha(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
 }
 
 /// What the recording server read: the head (request line and headers) and the body of
 /// each request.
-type Seen = Arc<Mutex<Vec<(String, Value)>>>;
+pub(crate) type Seen = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// A server that answers every request with `reply` and records what it read.
-fn recording(reply: String) -> (String, Seen) {
+pub(crate) fn recording(reply: String) -> (String, Seen) {
     recording_with(reply, || {})
 }
 
 /// [`recording`] that also runs `on_request` when a request has been read, before the reply:
 /// a test changes the world while the mint is in flight.
-fn recording_with(reply: String, on_request: impl Fn() + Send + 'static) -> (String, Seen) {
+pub(crate) fn recording_with(
+    reply: String,
+    on_request: impl Fn() + Send + 'static,
+) -> (String, Seen) {
     let seen: Seen = Arc::default();
     let log = Arc::clone(&seen);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -81,7 +84,7 @@ fn read(stream: &mut impl Read) -> (String, Value) {
 }
 
 /// The words of a mint for `burst:i-0abc` plus `extra`.
-fn words<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+pub(crate) fn words<'a>(extra: &[&'a str]) -> Vec<&'a str> {
     let mut words = vec![
         "lease",
         "join-token",
@@ -96,7 +99,7 @@ fn words<'a>(extra: &[&'a str]) -> Vec<&'a str> {
 }
 
 /// The facts line on standard error.
-fn facts() -> String {
+pub(crate) fn facts() -> String {
     format!("join token sha256 {} expires {EXPIRES}\n", sha(MINTED))
 }
 
@@ -263,43 +266,43 @@ fn an_out_that_cannot_be_made_is_refused_before_any_request() {
 #[test]
 fn a_refusal_prints_the_status_and_the_code_only() {
     let long = "c".repeat(300);
-    let cases: [(&str, String, u8, &str); 6] = [
+    let cases: [(&str, String, u8, String); 6] = [
         (
             "400 Bad Request",
             r#"{"error":"bad-request","reason":"provider must be the pool's name, SECRET-REASON"}"#
                 .to_owned(),
             4,
-            "400 (bad-request)",
+            "400 (bad-request)".to_owned(),
         ),
         (
             "401 Unauthorized",
             r#"{"error":"unauthorized"}"#.to_owned(),
             1,
-            "401 (unauthorized)",
+            "401 (unauthorized)".to_owned(),
         ),
         (
             "429 Too Many Requests",
             r#"{"error":"too-many-join-tokens"}"#.to_owned(),
             3,
-            "429 (too-many-join-tokens)",
+            "429 (too-many-join-tokens)".to_owned(),
         ),
         (
             "404 Not Found",
             r#"{"error":"not-found"}"#.to_owned(),
             3,
-            "404 (not-found)",
+            "404 (not-found)".to_owned(),
         ),
         (
             "503 Service Unavailable",
             "<html>SECRET-PAGE</html>".to_owned(),
             1,
-            "503 (none)",
+            "503 (none)".to_owned(),
         ),
         (
             "500 Internal Server Error",
             format!(r#"{{"error":"\u001b[31m{long}"}}"#),
             1,
-            "500 ([31m",
+            format!("500 ([31m{})", "c".repeat(60)),
         ),
     ];
     for (status, body, code, said) in cases {
@@ -310,53 +313,14 @@ fn a_refusal_prints_the_status_and_the_code_only() {
         let got = js.go(&words(&["--out", out.to_str().unwrap()]));
         assert_eq!(got.code, code, "{status}: {}", got.err);
         assert_eq!(got.out, "");
-        assert!(
-            got.err
-                .starts_with("js: join token not minted: the server answered "),
-            "{}",
-            got.err
-        );
-        assert!(got.err.contains(said), "{status}: {}", got.err);
-        assert!(!got.err.contains("SECRET"), "{status}: {}", got.err);
-        assert!(
-            !got.err.contains(&"c".repeat(65)) && !got.err.contains('\u{1b}'),
-            "{status}"
-        );
+        let want = format!("js: join token not minted: the server answered {said}\n");
+        assert_eq!(got.err, want, "{status}");
         assert!(!out.exists());
     }
 }
 
-/// Asserts that a 201 whose body has no usable token or expiry is a failure (exit 1) that
-/// writes nothing and does not print the odd token. It catches a file written with whatever
-/// the server said.
-#[test]
-fn a_201_without_a_usable_token_is_a_failure() {
-    let upper = MINTED.to_uppercase();
-    let bodies = [
-        json!({ "expires_at_ms": EXPIRES }),
-        json!({ "token": "short", "expires_at_ms": EXPIRES }),
-        json!({ "token": upper, "expires_at_ms": EXPIRES }),
-        json!({ "token": MINTED }),
-        json!({ "token": 7, "expires_at_ms": EXPIRES }),
-    ];
-    for body in bodies {
-        let scratch = Scratch::new("mint_unusable");
-        let (server, _) = recording(created_with(&body));
-        let js = against(&server, &scratch);
-        let out = scratch.path("minted");
-        let got = js.go(&words(&["--out", out.to_str().unwrap()]));
-        assert_eq!(got.code, 1, "{body}: {}", got.err);
-        assert!(got.err.contains("no usable"), "{body}: {}", got.err);
-        assert!(
-            !got.err.contains("short") && !got.err.contains(&upper),
-            "{body}"
-        );
-        assert!(!out.exists(), "{body}");
-    }
-}
-
 /// A standard output that fails.
-struct Closed;
+pub(crate) struct Closed;
 
 impl Write for Closed {
     fn write(&mut self, _: &[u8]) -> io::Result<usize> {
@@ -371,8 +335,17 @@ impl Write for Closed {
     }
 }
 
+/// What is said when the token was minted and could not be written to standard output for
+/// `why`.
+pub(crate) fn lost(why: &str) -> String {
+    format!(
+        "js: the token was minted but could not be written to standard output: {why}; the \
+         token is lost (it expires {EXPIRES} on the server's clock): mint another\n"
+    )
+}
+
 /// Asserts that a token that was minted and cannot be delivered (standard output closed; the
-/// `--out` staging name taken by a directory) is a failure (exit 1) that says the token is
+/// `--out` directory made read-only after the request) is a failure (exit 1) that says the token is
 /// lost and when it expires, and shows no token. It catches a silent loss that leaves the
 /// operator waiting for a host that can never join.
 #[test]
@@ -390,17 +363,11 @@ fn a_minted_token_that_cannot_be_delivered_is_reported_lost() {
     );
     let err = String::from_utf8(err).unwrap();
     assert_eq!(code, 1, "{err}");
-    assert!(
-        err.contains("could not be written to standard output")
-            && err.contains(&format!("expires {EXPIRES}"))
-            && err.contains("lost")
-            && err.contains("the pipe is closed"),
-        "{err}"
-    );
-    assert!(!err.contains(MINTED));
+    assert_eq!(err, lost("the pipe is closed"));
 
     let outdir = scratch.path("outdir");
     fs::create_dir(&outdir).unwrap();
+    fs::set_permissions(&outdir, fs::Permissions::from_mode(0o700)).unwrap();
     let (server, seen) = {
         let locked = outdir.clone();
         recording_with(created(), move || {
