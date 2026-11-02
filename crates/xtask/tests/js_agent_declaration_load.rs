@@ -1,13 +1,15 @@
 //! The js-agent declaration through the host updater's own load and launch code (kbf's
-//! `update-rights`, at the revision the root manifest pins): `load_dir` over a directory that
-//! holds the shipped file, with the trust rules on the directory and the file, and the
-//! `systemd-run` command `Launch::of` and `command` make of it, whose properties are the rights
-//! the hook runs with and whose words the hook itself parses.
+//! `update-rights`, at the revision the root manifest pins): the `systemd-run` command
+//! `Launch::of` and `command` make of the shipped file, whose properties are the rights the hook
+//! runs with and whose words the hook itself parses; and `load_dir`'s rules on the directory,
+//! the file, its name and the accounts.
 //!
-//! The directory is the test's own, so the trusted account is the test's (its owner), not root.
-//! The loader's rules for a hook that runs as root also look at what the declared paths are on
-//! this machine (the directories above them, read only): on a host where they are root's and
-//! closed to group and others, as on every CI runner and the farm, nothing is refused for them.
+//! Nothing here reads the machine's own `/opt`, `/etc` or `/var/lib`. The loader's last rule for a
+//! hook that runs as root (`check_targets`) looks at what the declared paths are on the host it
+//! runs on, and update-rights takes no other view of the filesystem; so the launch is made from
+//! the declaration as `Declared::by_hand` builds it (update-rights' `test-support`: the hook's
+//! uid 0 and the host's one service), and every `load_dir` case here is one the loader refuses
+//! before it gets to the paths. The text rules on the paths are in js_agent_declaration.rs.
 #![cfg(target_os = "linux")]
 
 use std::ffi::OsString;
@@ -17,7 +19,9 @@ use std::path::{Path, PathBuf};
 use js_agent::update_hook::{Invocation, Step as HookStep};
 use js_testkit::dir::TestDir;
 use update_hook::Step;
-use update_rights::{EtcAccounts, Launch, Loaded, Policy, command, load_dir};
+use update_rights::{
+    Declaration, Declared, EtcAccounts, Launch, Loaded, Policy, command, load_dir,
+};
 use xtask::release::stage::DECLARATION_SOURCE;
 
 const RELEASE: &str = "/opt/js-agent/releases/1.4.0";
@@ -72,20 +76,18 @@ fn refusals(dir: &Path, trusted_uid: u32) -> Vec<String> {
         .collect()
 }
 
-/// The loader takes the shipped file, and the step it launches runs as root with no capability,
+/// The step the updater launches from the shipped file runs as root with no capability,
 /// no environment, exactly the three write paths and the hook record, the three read paths, the
 /// address families of dbus and the lease server, and the step's bound; the command runs the
 /// release's `js-agent` with the declaration's flags, which the hook parses into the release
-/// link and the connect values. Catches a declaration the loader refuses, or one that grants
+/// link and the connect values. Catches a declaration that grants
 /// more than the update needs.
 #[test]
-fn the_loader_takes_the_shipped_declaration_and_launches_each_step_with_exactly_its_rights() {
-    let (_tmp, dir) = updater_d("decl-load", "js-agent.toml", &shipped());
-    let loaded = load(&dir, owner(&dir));
-    assert!(loaded.refused.is_empty(), "{:?}", loaded.refused);
-    let declared = &loaded.services["js-agent"];
+fn each_step_of_the_shipped_declaration_launches_with_exactly_its_rights() {
+    let text = String::from_utf8(shipped()).expect("utf-8");
+    let declaration = Declaration::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+    let declared = &Declared::by_hand(declaration, 0, &["js-agent"]);
     assert_eq!(declared.hook().uid, 0);
-    assert_eq!(declared.service().uid, 0);
     for (step, hook_step, bound) in [
         (Step::Prepare, HookStep::Prepare, 3900),
         (Step::Cutover, HookStep::Cutover, 4320),
@@ -201,6 +203,24 @@ fn the_loader_refuses_the_declaration_in_an_untrusted_place_or_under_another_nam
         found[0].contains(&format!("not the trusted uid {other}")),
         "{found:?}"
     );
+
+    // An account table without root: the hook's and the service's account are unknown.
+    let (_tmp, dir) = updater_d("decl-load-accounts", "js-agent.toml", &bytes);
+    let none = EtcAccounts::new("", "");
+    let loaded = load_dir(
+        &dir,
+        &Policy {
+            trusted_uid: owner(&dir),
+            accounts: &none,
+        },
+    )
+    .expect("the directory lists");
+    let reasons: Vec<String> = loaded
+        .refused
+        .iter()
+        .map(|r| r.reason.to_string())
+        .collect();
+    assert_eq!(reasons, ["uid \"root\" is not an account of this host"]);
 
     let (_tmp, dir) = updater_d("decl-load-name", "js-agent-crun.toml", &bytes);
     assert_eq!(

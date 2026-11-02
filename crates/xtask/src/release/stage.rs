@@ -86,17 +86,34 @@ fn is_name(word: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// Puts the file `from` at `to`: what `release stage` does with each member.
+pub type Put<'a> = &'a dyn Fn(&Path, &Path) -> std::io::Result<()>;
+
+/// The copy [`run`] puts each member with.
+fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::copy(from, to).map(|_| ())
+}
+
 /// Runs `release stage`.
 ///
 /// Nothing is written unless `--bin` and `--target` are names ([`is_name`]). The archive's
 /// directory must be new; one that exists is left as it is. When a later file cannot be put
 /// in, the directory this run made is removed again, so a retry after the cause is fixed
-/// starts clean.
+/// starts clean; when it cannot be removed either, the error says so and names it.
 ///
 /// # Errors
 /// [`Error::BadName`] for `--bin` or `--target`; [`Error::Io`] naming the path: the archive's
-/// directory exists already, a directory cannot be made, or a file cannot be copied.
+/// directory exists already, a directory cannot be made, or a file cannot be copied;
+/// [`Error::Incomplete`] when the directory of a run that failed could not be removed.
 pub fn run(a: &StageArgs) -> Result<String, Error> {
+    run_with(a, &copy)
+}
+
+/// [`run`], with `put` putting each file in place: the seam the tests fail a write through.
+///
+/// # Errors
+/// As [`run`].
+pub fn run_with(a: &StageArgs, put: Put<'_>) -> Result<String, Error> {
     for (flag, word) in [("--bin", &a.bin), ("--target", &a.target)] {
         if !is_name(word) {
             return Err(Error::BadName {
@@ -110,24 +127,33 @@ pub fn run(a: &StageArgs) -> Result<String, Error> {
     let top = a.out.join(&name);
     std::fs::create_dir(&top).map_err(|e| io_error(&top, &e))?;
     let list = members(&a.bin, &a.target);
-    let filled = fill(&top, &a.repo_dir, &list);
-    if filled.is_err() {
+    if let Err(failed) = fill(&top, &a.repo_dir, &list, put) {
         // What this run put there is incomplete; the directory was new, so it is all ours.
-        let _ = std::fs::remove_dir_all(&top);
+        return Err(match std::fs::remove_dir_all(&top) {
+            Ok(()) => failed,
+            Err(e) => Error::Incomplete {
+                path: top.display().to_string(),
+                why: failed.to_string(),
+                cleanup: e.to_string(),
+            },
+        });
     }
-    filled?;
     let paths: Vec<&str> = list.iter().map(|member| member.path.as_str()).collect();
     Ok(format!("staged {}: {}", top.display(), paths.join(", ")))
 }
 
-/// Copies each member into `top`, making the directory it lies in.
-fn fill(top: &Path, repo: &Path, list: &[Member]) -> Result<(), Error> {
+/// Puts each member into `top`, making the directory it lies in. A failure names the source,
+/// and the destination in its reason.
+fn fill(top: &Path, repo: &Path, list: &[Member], put: Put<'_>) -> Result<(), Error> {
     for member in list {
         let (from, to) = (repo.join(&member.source), top.join(&member.path));
         let dir = to.parent().unwrap_or(top);
         std::fs::create_dir_all(dir)
-            .and_then(|()| std::fs::copy(&from, &to))
-            .map_err(|e| io_error(&from, &e))?;
+            .and_then(|()| put(&from, &to))
+            .map_err(|e| Error::Io {
+                path: from.display().to_string(),
+                why: format!("to {}: {e}", to.display()),
+            })?;
     }
     Ok(())
 }

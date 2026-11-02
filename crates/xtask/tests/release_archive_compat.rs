@@ -1,74 +1,84 @@
 //! The Linux js-agent archive gains one member, `updater.d/js-agent.toml`, and keeps its name,
-//! its top directory and its other members. Read across versions both ways:
+//! its top directory and its other members. Both archives here are made the way a release makes
+//! them, and both are read by the program a host reads them with:
 //!
-//! - an archive of this change, read as a previous release is read (docs/release.md: unpack, take
-//!   `<archive name>/js-agent` and `LICENSE` by name), gives the same binary and license, and
-//!   the new member is one more file that reader passes over;
-//! - an archive of a previous release (the binary and `LICENSE` only), read as this change reads
-//!   it (the binary by name, and the declaration by `updater.d/js-agent.toml`), gives its binary,
-//!   and no declaration: the absence is said as such, not taken for another file or an error.
+//! - the archive of a previous release: the step that release ran (`mkdir`, `cp` of the binary
+//!   and `LICENSE`, then GNU `tar` with the workflow's options and `gzip -n`);
+//! - the archive of this change: `cargo xtask release stage`, then the same `tar` and `gzip`;
+//! - the reader: GNU `tar -xzf`, as docs/release.md has a host unpack an archive, after which
+//!   the host runs `<archive name>/js-agent`; and, for the declaration, the file
+//!   `<archive name>/updater.d/js-agent.toml`, which this change adds and a previous release
+//!   lacks.
+//!
+//! So a host that follows the previous release's steps unpacks a new archive to the same binary
+//! and license, and a host that looks for the declaration finds none in a previous archive.
 
-use std::collections::BTreeMap;
-use std::io::Read;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use js_testkit::dir::TestDir;
 use xtask::release::stage::{DECLARATION_MEMBER, DECLARATION_SOURCE, StageArgs, run};
 
 const TARGET: &str = "x86_64-unknown-linux-musl";
 
-/// A `.tar.gz` of the directory `top` under `parent`, its members named `top/...`.
-fn archive(parent: &Path, top: &str) -> Vec<u8> {
-    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    let mut tar = tar::Builder::new(gz);
-    tar.append_dir_all(top, parent.join(top)).expect("archive");
-    tar.into_inner().expect("tar").finish().expect("gzip")
+/// `tar -C <stage> --sort=name --mtime=@<t> --owner=0 --group=0 --numeric-owner -cf - <name> |
+/// gzip -n`, as the release workflow's build step runs it (gzip with no name or time is what
+/// flate2 writes).
+fn archive(stage: &Path, name: &str, out: &Path) -> PathBuf {
+    let tarred = Command::new("tar")
+        .arg("-C")
+        .arg(stage)
+        .args([
+            "--sort=name",
+            "--mtime=@1790000000",
+            "--owner=0",
+            "--group=0",
+            "--numeric-owner",
+            "-cf",
+            "-",
+            name,
+        ])
+        .output()
+        .expect("tar");
+    assert!(tarred.status.success(), "{tarred:?}");
+    let file = out.join(format!("{name}.tar.gz"));
+    let mut gz = flate2::write::GzEncoder::new(
+        std::fs::File::create(&file).expect("archive file"),
+        flate2::Compression::default(),
+    );
+    gz.write_all(&tarred.stdout).expect("gzip");
+    gz.finish().expect("gzip");
+    file
 }
 
-/// Every regular file of an archive, by its name in the archive.
-fn files(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
-    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
-    let mut found = BTreeMap::new();
-    for entry in tar.entries().expect("entries") {
-        let mut entry = entry.expect("entry");
-        if entry.header().entry_type().is_file() {
-            let name = entry
-                .path()
-                .expect("name")
-                .to_str()
-                .expect("utf-8")
-                .to_owned();
-            let mut body = Vec::new();
-            entry.read_to_end(&mut body).expect("body");
-            found.insert(name, body);
-        }
-    }
-    found
+/// `tar -xzf <archive> -C <dir>`: what a host runs; the directory it unpacked to.
+fn unpack(archive: &Path, into: &Path) -> PathBuf {
+    std::fs::create_dir_all(into).expect("into");
+    let out = Command::new("tar")
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(into)
+        .output()
+        .expect("tar");
+    assert!(out.status.success(), "{out:?}");
+    into.to_owned()
 }
 
-/// What a previous release's reader takes: the binary and the license, by name; it fails
-/// without either and passes over anything else.
-fn read_as_before(bytes: &[u8], name: &str) -> (Vec<u8>, Vec<u8>) {
-    let all = files(bytes);
-    let take = |member: &str| {
-        all.get(&format!("{name}/{member}"))
-            .cloned()
-            .unwrap_or_else(|| panic!("{name}/{member} is missing: {:?}", all.keys()))
-    };
-    (take("js-agent"), take("LICENSE"))
-}
-
-/// What this change reads: the binary by name, and the declaration when the archive has one.
-fn read_now(bytes: &[u8], name: &str) -> (Vec<u8>, Option<Vec<u8>>) {
-    let all = files(bytes);
-    let binary = all
-        .get(&format!("{name}/js-agent"))
-        .cloned()
-        .expect("the binary");
-    (
-        binary,
-        all.get(&format!("{name}/{DECLARATION_MEMBER}")).cloned(),
-    )
+/// What `tar -tzf` lists.
+fn listed(archive: &Path) -> Vec<String> {
+    let out = Command::new("tar")
+        .arg("-tzf")
+        .arg(archive)
+        .output()
+        .expect("tar");
+    assert!(out.status.success(), "{out:?}");
+    String::from_utf8(out.stdout)
+        .expect("utf-8")
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// A checkout with the agent built and the files an archive takes.
@@ -84,56 +94,83 @@ fn checkout(tmp: &TestDir) -> &Path {
     dir
 }
 
-/// A new archive read the previous way gives the binary and license it always did; the new
-/// member is the only other file. Catches a layout change (a renamed top directory, a moved
-/// binary) that a host following the documented steps would trip on.
+/// A new archive unpacked as a host following a previous release's steps does gives the same
+/// binary and license at the same paths; the declaration is the one member more. Catches a
+/// layout change (a renamed top directory, a moved binary) that host would trip on.
 #[test]
-fn a_new_archive_read_as_a_previous_release_reads_it_gives_the_same_files() {
+fn a_new_archive_unpacked_by_a_previous_releases_steps_gives_the_same_files() {
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "archive-new-read-old");
     let repo = checkout(&tmp);
+    let stage = repo.join("stage");
     run(&StageArgs {
         bin: "js-agent".to_owned(),
         target: TARGET.to_owned(),
         version: "1.4.0".parse().expect("version"),
-        out: repo.join("stage"),
+        out: stage.clone(),
         repo_dir: repo.to_owned(),
     })
     .expect("staged");
     let name = format!("js-agent-1.4.0-{TARGET}");
-    let bytes = archive(&repo.join("stage"), &name);
+    let file = archive(&stage, &name, repo);
     assert_eq!(
-        read_as_before(&bytes, &name),
-        (b"the agent".to_vec(), b"license".to_vec())
-    );
-    assert_eq!(
-        files(&bytes).keys().cloned().collect::<Vec<_>>(),
+        listed(&file),
         [
+            format!("{name}/"),
             format!("{name}/LICENSE"),
             format!("{name}/js-agent"),
+            format!("{name}/updater.d/"),
             format!("{name}/updater.d/js-agent.toml"),
         ]
     );
-    let (binary, declaration) = read_now(&bytes, &name);
-    assert_eq!(binary, b"the agent");
-    assert_eq!(declaration.as_deref(), Some(&b"name = \"js-agent\"\n"[..]));
+    let host = unpack(&file, &repo.join("host")).join(&name);
+    assert_eq!(
+        std::fs::read(host.join("js-agent")).expect("binary"),
+        b"the agent"
+    );
+    assert_eq!(
+        std::fs::read(host.join("LICENSE")).expect("license"),
+        b"license"
+    );
+    assert_eq!(
+        std::fs::read(host.join(DECLARATION_MEMBER)).expect("declaration"),
+        b"name = \"js-agent\"\n"
+    );
 }
 
-/// A previous release's archive (laid down as the release workflow did before this change: the
-/// binary and the license in the named directory) read the new way gives its binary and no
-/// declaration. Catches a reader that would take another file for the declaration or refuse
-/// an archive without one.
+/// A previous release's archive, made by that release's own step, unpacks to its binary and
+/// license, and holds no declaration: a host or an updater that looks for
+/// `updater.d/js-agent.toml` finds the path absent, not another file. Catches a reader that
+/// would need the declaration in every archive.
 #[test]
-fn a_previous_archive_read_the_new_way_has_its_binary_and_no_declaration() {
+fn a_previous_releases_archive_unpacks_to_its_binary_and_no_declaration() {
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "archive-old-read-new");
+    let repo = checkout(&tmp);
     let name = format!("js-agent-1.3.0-{TARGET}");
-    let top = tmp.path().join(&name);
-    std::fs::create_dir_all(&top).expect("top");
-    std::fs::write(top.join("js-agent"), "the old agent").expect("binary");
-    std::fs::write(top.join("LICENSE"), "license").expect("license");
-    let bytes = archive(tmp.path(), &name);
-    assert_eq!(read_now(&bytes, &name), (b"the old agent".to_vec(), None));
+    // The previous release's step: mkdir "stage-$bin/$name"; cp "target/$TARGET/release/$bin"
+    // LICENSE "stage-$bin/$name/".
+    let stage = repo.join("stage-js-agent");
+    std::fs::create_dir_all(stage.join(&name)).expect("mkdir");
+    for source in [
+        format!("target/{TARGET}/release/js-agent"),
+        "LICENSE".to_owned(),
+    ] {
+        let base = Path::new(&source).file_name().expect("a name");
+        std::fs::copy(repo.join(&source), stage.join(&name).join(base)).expect("cp");
+    }
+    let file = archive(&stage, &name, repo);
     assert_eq!(
-        read_as_before(&bytes, &name),
-        (b"the old agent".to_vec(), b"license".to_vec())
+        listed(&file),
+        [
+            format!("{name}/"),
+            format!("{name}/LICENSE"),
+            format!("{name}/js-agent"),
+        ]
     );
+    let host = unpack(&file, &repo.join("host")).join(&name);
+    assert_eq!(
+        std::fs::read(host.join("js-agent")).expect("binary"),
+        b"the agent"
+    );
+    assert!(!host.join(DECLARATION_MEMBER).exists());
+    assert!(!host.join("updater.d").exists());
 }

@@ -76,6 +76,18 @@ pub enum Error {
         /// The operating system's reason.
         why: String,
     },
+    /// `release stage` failed, and the archive's directory it made could not be removed.
+    #[error(
+        "{why}; the incomplete {path} could not be removed ({cleanup}): remove it before a retry"
+    )]
+    Incomplete {
+        /// The archive's directory.
+        path: String,
+        /// Why the stage failed.
+        why: String,
+        /// Why the directory was not removed.
+        cleanup: String,
+    },
     /// A name `release stage` puts in a path is not a plain name.
     #[error(
         "{flag} {value:?} is not a name: ASCII letters, digits, `.`, `_` and `-`, starting with a letter or digit"

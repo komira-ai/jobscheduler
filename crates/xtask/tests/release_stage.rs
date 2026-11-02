@@ -11,7 +11,7 @@ use std::process::Command;
 use js_testkit::dir::TestDir;
 use xtask::release::Error;
 use xtask::release::stage::{
-    DECLARATION_MEMBER, DECLARATION_SOURCE, Member, StageArgs, members, run,
+    DECLARATION_MEMBER, DECLARATION_SOURCE, Member, StageArgs, members, run, run_with,
 };
 
 const LINUX: &str = "x86_64-unknown-linux-musl";
@@ -291,4 +291,105 @@ fn the_command_line_runs_stage() {
     );
     let out = xtask("1.2");
     assert_eq!(out.status.code(), Some(2), "{out:?}");
+}
+
+/// The real copy, and a refusal for the destination `fail_at` names, after the members before
+/// it were put in for real.
+fn put_failing_at(fail_at: &'static str) -> impl Fn(&Path, &Path) -> std::io::Result<()> {
+    move |from, to| {
+        if to.ends_with(fail_at) {
+            Err(std::io::Error::other("no space left on the device"))
+        } else {
+            std::fs::copy(from, to).map(|_| ())
+        }
+    }
+}
+
+/// A write of the destination that fails after the binary and the license were copied: the
+/// error names the file and its destination, the archive's directory is removed with what was
+/// in it, and a retry with a write that works stages the whole archive.
+#[test]
+fn a_destination_write_that_fails_after_two_files_leaves_nothing_and_a_retry_succeeds() {
+    let tmp = checkout("stage-dest-fails");
+    let repo = tmp.path();
+    let a = args(repo, "js-agent", LINUX);
+    let top = repo.join(format!("stage/js-agent-1.2.3-{LINUX}"));
+    let put = put_failing_at(DECLARATION_MEMBER);
+    match run_with(&a, &put) {
+        Err(Error::Io { path, why }) => {
+            assert_eq!(path, repo.join(DECLARATION_SOURCE).display().to_string());
+            assert_eq!(
+                why,
+                format!(
+                    "to {}: no space left on the device",
+                    top.join(DECLARATION_MEMBER).display()
+                )
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(tree(&repo.join("stage")), Vec::<String>::new());
+    run(&a).expect("the retry");
+    assert_eq!(tree(&repo.join("stage")).len(), 5);
+}
+
+/// When the failed run's directory cannot be removed either (here `--out` is made read-only
+/// before the failing write), the error says both, names the directory and says to remove it;
+/// the directory is left, a retry is refused by it, and once it is removed the retry succeeds.
+/// (A test run as root can remove it whatever the mode: then the directory is gone and the
+/// failure is the write's alone, which the test checks instead.)
+#[test]
+fn a_cleanup_that_fails_is_reported_with_the_directory_to_remove() {
+    let tmp = checkout("stage-cleanup-fails");
+    let repo = tmp.path();
+    let out = repo.join("stage");
+    let a = args(repo, "js-agent", LINUX);
+    let top = out.join(format!("js-agent-1.2.3-{LINUX}"));
+    let lock_out = {
+        let out = out.clone();
+        move |from: &Path, to: &Path| {
+            if to.ends_with(DECLARATION_MEMBER) {
+                std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o555))
+                    .expect("read-only");
+                Err(std::io::Error::other("no space left on the device"))
+            } else {
+                std::fs::copy(from, to).map(|_| ())
+            }
+        }
+    };
+    let failed = run_with(&a, &lock_out);
+    let can_write = std::fs::create_dir(out.join("probe")).is_ok();
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755)).expect("writable");
+    let write = format!(
+        "{}: to {}: no space left on the device",
+        repo.join(DECLARATION_SOURCE).display(),
+        top.join(DECLARATION_MEMBER).display()
+    );
+    if can_write {
+        assert!(matches!(failed, Err(Error::Io { .. })), "{failed:?}");
+        assert!(!top.exists());
+        return;
+    }
+    match failed {
+        Err(e @ Error::Incomplete { .. }) => {
+            let text = e.to_string();
+            assert!(
+                text.starts_with(&format!(
+                    "{write}; the incomplete {} could not be removed (",
+                    top.display()
+                )),
+                "{text}"
+            );
+            assert!(text.ends_with("): remove it before a retry"), "{text}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(top.is_dir(), "the directory is left");
+    match run(&a) {
+        Err(Error::Io { path, .. }) => assert_eq!(path, top.display().to_string()),
+        other => panic!("{other:?}"),
+    }
+    std::fs::remove_dir_all(&top).expect("removed by hand");
+    run(&a).expect("the retry");
+    assert_eq!(tree(&out).len(), 5);
 }
