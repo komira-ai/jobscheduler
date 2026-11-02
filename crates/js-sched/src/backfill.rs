@@ -110,11 +110,13 @@ mod tests {
         assert_eq!(on(600).duration(wall, p90), Some(MIN));
         assert_eq!(reads.get(), 1);
         assert_eq!(Backfill::default().duration(wall, || None), None);
-        assert_eq!(Backfill::default().duration(wall, || Some(1)), None);
+        // A bound that does not count reads no P90: the counting probe is passed and not called.
+        assert_eq!(Backfill::default().duration(wall, p90), None);
         assert_eq!(on(600).duration(wall, || None), Some(10 * MIN));
         assert_eq!(on(599).duration(wall, || None), None);
-        assert_eq!(on(599).duration(wall, || Some(1)), None);
-        assert_eq!(on(600).duration(None, || Some(1)), None);
+        assert_eq!(on(599).duration(wall, p90), None);
+        assert_eq!(on(600).duration(None, p90), None);
+        assert_eq!(reads.get(), 1);
         let unbounded = Backfill::enforced(Duration::MAX);
         let year = Some(Duration::from_secs(365 * 86_400));
         assert_eq!(unbounded.duration(year, || None), Some(365 * 86_400_000));
