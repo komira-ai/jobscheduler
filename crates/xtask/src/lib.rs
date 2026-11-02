@@ -32,6 +32,9 @@
 //! - `site-demo [--out <path>] [--bin-dir <dir>] [--port <n>] [--ready-timeout <s>]` ([`site_demo`]): records the demonstration on
 //!   the landing page of jobscheduler.dev, `site/test/demo.transcript`: builds the lease server and the
 //!   client, leases a host from a static host file, lists the lease and releases it.
+//! - `site-changed --event <name> --base <ref> --paths <file> --github-output <file>`
+//!   ([`site_changed`]): whether the site steps of the `lint` job run, from the event and the
+//!   files a pull request changes against the entries of `site/ci-paths`.
 //! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
 //!
@@ -52,6 +55,7 @@ pub mod layering;
 pub mod macpkg;
 pub mod pkg;
 pub mod release;
+pub mod site_changed;
 pub mod site_demo;
 pub mod test_build;
 
@@ -79,6 +83,9 @@ pub enum Error {
     /// The site demonstration could not be recorded.
     #[error("site-demo: {0}")]
     SiteDemo(#[from] site_demo::Error),
+    /// The site decision could not be written.
+    #[error(transparent)]
+    SiteChanged(#[from] site_changed::Error),
     /// The real-crun tests, or the build of their targets, failed.
     #[error(transparent)]
     CrunTests(#[from] test_build::Error),
@@ -177,6 +184,9 @@ enum Verb {
         #[arg(long, default_value_t = site_demo::READY_TIMEOUT.as_secs())]
         ready_timeout: u64,
     },
+    /// Whether the site steps of the `lint` job run: always off a pull request, and on one when a
+    /// changed file matches `site/ci-paths` (writes `run=true` or `run=false`).
+    SiteChanged(site_changed::Args),
     /// The js-agent Linux package.
     Pkg {
         /// Which step.
@@ -272,6 +282,7 @@ fn run(cli: Cli) -> Result<String, Error> {
                 ready_timeout: std::time::Duration::from_secs(ready_timeout),
             })?)
         }
+        Verb::SiteChanged(args) => Ok(site_changed::run(&args)?),
         Verb::Pkg { verb } => Ok(match verb {
             PkgVerb::CheckDeb(args) => pkg::check(&args)?,
             PkgVerb::StageMacos(args) => macpkg::stage(&args)?,

@@ -27,6 +27,7 @@ crates/js-sizing/src/
 crates/js-types/src/
 crates/js-whole/src/
 crates/xtask/src/lib.rs
+crates/xtask/src/site_changed.rs
 crates/xtask/src/site_demo.rs
 crates/xtask/tests/layering.rs
 crates/xtask/tests/site_demo.rs

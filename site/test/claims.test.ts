@@ -16,7 +16,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { PAGES } from '../tools/pages';
-import { ciPaths, ciWorkflow, pathMatches, siteScript, siteSteps } from './ci-site';
+import { ciPaths, ciWorkflow, pathMatches, siteRuns, siteSteps } from './ci-site';
 import { read, REPO, SITE } from './support';
 
 type Row = readonly [page: string, shown: string, file: string, says: string];
@@ -759,7 +759,7 @@ function claimInputs(): string[] {
 export function unwatched(files: readonly string[], entries: readonly string[], yml: string): string[] {
   const out: string[] = [];
   if (entries.length === 0) out.push('site/ci-paths: no entries found');
-  if (!siteScript(yml).includes('site/ci-paths')) out.push('ci.yml: the site step does not read site/ci-paths');
+  if (!siteRuns(yml).some((r) => r.includes('--paths site/ci-paths '))) out.push('ci.yml: the site step does not read site/ci-paths');
   if (!siteSteps(yml).includes("if: ${{ steps.site.outputs.run == 'true' }}")) out.push('ci.yml: the site steps do not wait for the decision');
   for (const f of files) if (!entries.some((p) => pathMatches(p, f))) out.push(`a change to ${f} does not run the site steps of ci.yml, and a claim reads it`);
   return out;

@@ -1,4 +1,4 @@
-// Shared by the tests that look at how ci.yml runs the site: the `lint` job's site steps, their decision script, and
+// Shared by the tests that look at how ci.yml runs the site: the `lint` job's site steps, their decision command, and
 // site/ci-paths, the one list of the paths whose change runs them.
 
 import { readFileSync } from 'fs';
@@ -26,19 +26,20 @@ export function siteSteps(yml: string): string {
   return at < 0 ? '' : lint.slice(at);
 }
 
-/** The `run: |` script of the step `id: site`, with its indentation removed. */
-export function siteScript(yml: string): string {
+/** The step `id: site` of the `lint` job: from its `- id: site` line to the line before the next step. */
+export function siteStep(yml: string): string {
   const lines = siteSteps(yml).split('\n');
-  const at = lines.findIndex((l) => l.trim() === 'run: |');
-  if (at < 0) return '';
-  const pad = lines[at].length - lines[at].trimStart().length + 2;
-  const body: string[] = [];
-  for (const l of lines.slice(at + 1)) {
-    if (l !== '' && !l.startsWith(' '.repeat(pad))) break;
-    body.push(l.slice(pad));
-  }
-  return body.join('\n').trimEnd() + '\n';
+  const end = lines.findIndex((l, i) => i > 0 && l.startsWith('      - '));
+  return lines.slice(0, end < 0 ? undefined : end).join('\n').trimEnd() + '\n';
 }
+
+/** The `run:` lines of the step `id: site`, each with its text after `run: `. */
+export function siteRuns(yml: string): string[] {
+  return siteStep(yml).split('\n').filter((l) => l.trim().startsWith('run:')).map((l) => l.trim().slice('run:'.length).trim());
+}
+
+/** The one command the step `id: site` runs: the decision is `cargo xtask site-changed` (crates/xtask/src/site_changed.rs), which reads site/ci-paths. */
+export const SITE_COMMAND = 'cargo xtask site-changed --event "$EVENT" --base "$BASE" --paths site/ci-paths --github-output "$GITHUB_OUTPUT"';
 
 /** The entries of a ci-paths file: its lines without comments and blanks, trimmed. */
 export function ciPathEntries(text: string): string[] {

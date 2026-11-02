@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { ciWorkflow, jobText, siteScript, siteSteps } from './ci-site';
+import { ciWorkflow, jobText, SITE_COMMAND, siteRuns, siteStep, siteSteps } from './ci-site';
 import { read, REPO, SITE, SITE_REL } from './support';
 
 interface Lock {
@@ -100,6 +100,35 @@ test('the site-step checks can fail', () => {
   assert.match(siteStepProblems(steps.replace('working-directory: site\n        run: npm test', 'run: npm test')).join(), /3 of 4 npm steps/);
 });
 
+/** What is wrong with the step `id: site`: it is the one `cargo xtask site-changed` command reading site/ci-paths, fed the event and the base branch, with no shell of its own. */
+function siteDecisionProblems(step: string, runs: readonly string[]): string[] {
+  const out: string[] = [];
+  if (runs.length !== 1 || runs[0] !== SITE_COMMAND) out.push(`runs ${JSON.stringify(runs)}, not the one command ${SITE_COMMAND}`);
+  if (/^\s*run: [|>]/m.test(step)) out.push('has a multi-line script');
+  if (!step.includes('EVENT: ${{ github.event_name }}\n')) out.push('does not pass the event name');
+  if (!step.includes('BASE: ${{ github.base_ref }}\n')) out.push('does not pass the base branch');
+  return out;
+}
+
+test('the step that decides whether the site steps run is the one cargo xtask command reading site/ci-paths', () => {
+  const yml = ciWorkflow();
+  assert.deepEqual(siteDecisionProblems(siteStep(yml), siteRuns(yml)), []);
+  assert.ok(existsSync(join(REPO, 'crates', 'xtask', 'src', 'site_changed.rs')), 'the verb exists');
+  assert.ok(read(REPO, 'crates', 'xtask', 'src', 'lib.rs').includes('SiteChanged(site_changed::Args)'), 'the verb is wired');
+});
+
+test('the decision-step checks can fail', () => {
+  const yml = ciWorkflow();
+  const step = siteStep(yml);
+  const runs = siteRuns(yml);
+  assert.match(siteDecisionProblems('', []).join(), /^runs \[\]/);
+  assert.match(siteDecisionProblems(step, [runs[0].replace('site/ci-paths', 'site/other')]).join(), /not the one command/);
+  assert.match(siteDecisionProblems(step, [...runs, 'echo run=true']).join(), /not the one command/);
+  assert.match(siteDecisionProblems(step.replace(/run: .*/, 'run: |\n          bash x'), runs).join(), /multi-line script/);
+  assert.match(siteDecisionProblems(step.replace('github.event_name', 'x'), runs).join(), /event name/);
+  assert.match(siteDecisionProblems(step.replace('github.base_ref', 'x'), runs).join(), /base branch/);
+});
+
 test('the site steps follow the repository\'s rules: no permission at the top or added, pinned actions, no deploy', () => {
   const wf = ciWorkflow();
   assert.match(wf, /^permissions: \{\}$/m);
@@ -119,7 +148,8 @@ test('the site workflow is gone: its steps are in ci.yml and nothing else runs t
   assert.equal(existsSync(join(REPO, '.github', 'workflows', 'jobscheduler-site.yml')), false);
   assert.equal(jobText(ciWorkflow(), 'nope'), '');
   assert.equal(siteSteps('jobs:\n  lint:\n    steps:\n      - run: x\n'), '');
-  assert.equal(siteScript('jobs:\n  lint:\n    steps:\n      - id: site\n        if: x\n'), '');
+  assert.deepEqual(siteRuns('jobs:\n  lint:\n    steps:\n      - id: site\n        if: x\n'), []);
+  assert.equal(siteStep('jobs:\n  lint:\n    steps:\n      - run: x\n'), '\n');
 });
 
 /** What is wrong with the test script: coverage is measured on the compiled tools and sources, and fails the run below 99%. */
