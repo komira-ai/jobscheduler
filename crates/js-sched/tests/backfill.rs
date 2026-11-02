@@ -394,9 +394,12 @@ fn a_job_that_fits_the_tail_still_needs_room_and_a_platform_match() {
 }
 
 /// Catches: an action that owns its worker delayed past its start by backfill. It holds
-/// `a`, whose lease ends at 600 s; jobs of 120 s are submitted every 100 s and end at
-/// their bound; those that fit the tail run on `a` and the one at 500 s waits; the owner
-/// action is placed on `a` at 600 s when the lease ends, ahead of the waiting job.
+/// `a`, whose lease ends at 600 s; a job of 120 s is submitted every 100 s, in time order,
+/// and each ends at its bound, so two run at once on `a` at times: those at 100, 200, 300
+/// and 400 s end with a minute to spare and run there, the one at 500 s would end at
+/// 620 s and waits.
+/// The owner action is placed on `a` at 600 s, when the lease ends, ahead of the waiting
+/// job.
 #[test]
 fn an_owner_action_starts_at_its_tail_through_a_stream_of_backfill() {
     let mut f = enforced();
@@ -409,22 +412,35 @@ fn an_owner_action_starts_at_its_tail_through_a_stream_of_backfill() {
         ..request(f.next_n, LeaseKind::Action)
     });
     assert!(f.grants().is_empty());
+    assert_eq!(f.held_for(owner), Some(&w("a")));
+    // Submissions, and the ends of what runs, in time order.
+    let mut running: Vec<(u64, LeaseGrant)> = Vec::new();
     let mut placed = Vec::new();
     for at in [100_000, 200_000, 300_000, 400_000, 500_000] {
+        running.sort_by_key(|(end, _)| *end);
+        while running.first().is_some_and(|(end, _)| *end <= at) {
+            let (end, grant) = running.remove(0);
+            assert!(f.advance(end).is_empty());
+            f.finish(&grant);
+        }
         assert!(f.advance(at).is_empty());
         if let (_, Some(grant)) = job_of(&mut f, Qos::Ci, Some(secs(120))) {
+            assert_eq!(grant.worker, w("a"));
             placed.push(at);
-            f.at(at + 120_000);
-            f.finish(&grant);
-            f.at(at);
+            running.push((at + 120_000, grant));
         }
     }
     assert_eq!(placed, [100_000, 200_000, 300_000, 400_000]);
+    assert_eq!(running.len(), 1);
+    running.sort_by_key(|(end, _)| *end);
+    for (end, grant) in running {
+        assert!(f.advance(end).is_empty());
+        f.finish(&grant);
+    }
     assert!(f.advance(599_000).is_empty());
     f.at(600_000);
     f.finish(&lease);
-    let grants = f.grants();
-    let ops: Vec<OperationId> = grants.iter().map(|g| g.operation).collect();
+    let ops: Vec<OperationId> = f.grants().iter().map(|g| g.operation).collect();
     assert_eq!(ops, [owner]);
 }
 
@@ -482,6 +498,54 @@ fn a_lease_that_outlives_its_p90_stops_backfill_and_the_request_waits_for_it() {
     assert!(f.advance(199_000).is_empty());
     f.at(200_000);
     f.finish(&lease);
+    let ops: Vec<OperationId> = f.grants().iter().map(|g| g.operation).collect();
+    assert_eq!(ops, [whole]);
+}
+
+/// A curve source that knows the P90 of one key alone, and no curve.
+struct OneP90(js_types::sched::WorkKey, u32);
+
+impl js_types::sched::usage::CurveSource for OneP90 {
+    fn curve(&self, _: &js_types::sched::WorkKey) -> Option<js_types::sched::usage::Curve> {
+        None
+    }
+
+    fn wall_minutes_p90(&self, key: &js_types::sched::WorkKey) -> Option<u32> {
+        (*key == self.0).then_some(self.1)
+    }
+}
+
+/// Catches: backfill that outlives its estimate let more in, or the request started on a
+/// busy worker. The request holds `a` until 600 s; at 10 s a job whose key's P90 is a
+/// minute, though it may run an hour, is admitted (it ends at 70 s by its P90). It runs on
+/// past that and past 600 s, when the lease the tail was made of ends: from then the tail
+/// is past, a job of a second is not placed, and the request waits until the job ends at
+/// 900 s, then starts on `a`.
+#[test]
+fn backfill_that_outlives_its_p90_admits_no_more_and_the_request_waits_for_it() {
+    // In `marked`, the lease is the first request and the whole-machine one the second.
+    let third = request(3, LeaseKind::Action).key;
+    let s = Scheduler::new(1)
+        .with_load_config(booked::booked())
+        .with_whole_node(WholeNodeConfig::dedicated(4))
+        .with_curves(std::sync::Arc::new(OneP90(third, 1)))
+        .with_backfill(Backfill::enforced(DAY));
+    let mut f = Farm::new(s);
+    let (lease, whole) = marked(&mut f);
+    f.at(10_000);
+    f.beat();
+    let (_, long) = job_of(&mut f, Qos::Ci, Some(secs(3_600)));
+    let long = long.expect("admitted by its P90");
+    assert_eq!(long.worker, w("a"));
+    assert!(f.advance(599_000).is_empty());
+    f.at(600_000);
+    f.finish(&lease);
+    assert!(f.grants().is_empty());
+    assert!(f.advance(650_000).is_empty());
+    assert_eq!(job(&mut f, Some(secs(1))), None);
+    assert!(f.advance(899_000).is_empty());
+    f.at(900_000);
+    f.finish(&long);
     let ops: Vec<OperationId> = f.grants().iter().map(|g| g.operation).collect();
     assert_eq!(ops, [whole]);
 }

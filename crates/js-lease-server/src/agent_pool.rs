@@ -275,9 +275,17 @@ fn class(name: &str) -> Result<ResourceClass, String> {
 }
 
 /// The class a pool's `share_class` names: one that books part of a host, gated on no
-/// dimension beyond what the host's room holds.
+/// dimension beyond what the host's room holds. A shipped class (`whole-node`, `gpu-host`)
+/// keeps its meaning and is refused: served as a sharing class, its leases would lose the
+/// whole host, the quiet gate and the reservation they are shipped with.
 pub(crate) fn share_class(name: &str) -> Result<ResourceClass, String> {
     let id = ClassId::new(name).map_err(|err| err.to_string())?;
+    let shipped = [ResourceClass::whole_node(), ResourceClass::gpu_host()];
+    if shipped.iter().any(|class| *class.id() == id) {
+        return Err(format!(
+            "{name:?} is a shipped class that books a whole host"
+        ));
+    }
     Ok(ResourceClass::new(id, Admission::Book(Dims::new()), 0))
 }
 
@@ -815,10 +823,28 @@ mod tests {
         assert!(matches!(share.admission(), Admission::Book(_)));
         assert!(parse(&whole("")).unwrap().share_class().is_none());
         assert_eq!(
-            parse(&whole("share_class = \"whole-node\"")).unwrap_err(),
+            parse(&with("share_class = \"mac-host\"")).unwrap_err(),
             "share_class: must name a class that books part of a host, other than the pool's class"
         );
         let bad = parse(&whole("share_class = \"Not An Id\"")).unwrap_err();
         assert!(bad.starts_with("share_class: "), "{bad}");
+    }
+
+    /// A `share_class` that names a shipped class is refused naming the key, whatever the
+    /// pool's own class: `whole-node` and `gpu-host` keep their whole-host meaning. It
+    /// catches a shipped name served as a class that shares a host.
+    #[test]
+    fn a_share_class_may_not_name_a_shipped_class() {
+        for (pool, shipped) in [
+            ("mac-host", "whole-node"),
+            ("mac-host", "gpu-host"),
+            ("whole-node", "gpu-host"),
+        ] {
+            let text = with(&format!("share_class = \"{shipped}\"")).replace("mac-host", pool);
+            let refused = parse(&text).unwrap_err();
+            let want =
+                format!("share_class: \"{shipped}\" is a shipped class that books a whole host");
+            assert_eq!(refused, want, "class {pool}");
+        }
     }
 }

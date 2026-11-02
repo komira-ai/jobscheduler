@@ -586,12 +586,20 @@ mod tests {
         assert_eq!(pool.share_class.as_deref(), Some("share"));
         let built = pool.validate().unwrap();
         assert_eq!(built.share_class().unwrap().id().as_str(), "share");
-        let own = refused(with("share_class = \"whole-node\""));
+        let own = with("share_class = \"box\"");
+        let own = refused(table(
+            &toml::to_string(&own).unwrap().replace("whole-node", "box"),
+        ));
         assert_eq!(
             own,
             "pool \"nodes\": share_class: must name a class that books part of a host, other than the pool's class"
         );
         let bad = refused(with("share_class = \"Not An Id\""));
         assert!(bad.starts_with("pool \"nodes\": share_class: "), "{bad}");
+        let gpu = refused(with("share_class = \"gpu-host\""));
+        assert_eq!(
+            gpu,
+            "pool \"nodes\": share_class: \"gpu-host\" is a shipped class that books a whole host"
+        );
     }
 }

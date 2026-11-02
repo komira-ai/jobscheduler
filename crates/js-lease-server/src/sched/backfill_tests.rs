@@ -641,3 +641,60 @@ fn with_the_flag_a_marked_host_that_is_not_bookable_takes_no_backfill() {
     assert_eq!(l.on("h1"), [LeaseId::new(1, 1)]);
     assert_eq!(l.agents.registry.tail_counters().backfilled, 0);
 }
+
+/// [`live`] with `--placement js-sched` over `h1` alone, carrying lease 1 of 600 s from
+/// [`T0`], with request `q`'s reservation of `h1` put back from a ledger whose tail is
+/// `tail_end`, as a restart puts it back; the clock at 10 s.
+fn restored(name: &str, tail_end: Option<u64>) -> Live {
+    let mut l = live(name, &["h1"], &["--placement", "js-sched"]);
+    assert_eq!(l.share(1, 600).as_deref(), Ok("h1"));
+    let record = js_lease::ReservationRecord {
+        request_id: "q".to_owned(),
+        held: Some(js_lease::Held {
+            host: HostId::new("h1").unwrap(),
+            reserved_at: Timestamp::from_millis(T0),
+            deadline: Timestamp::from_millis(T0 + 3_600_000),
+            assigned: false,
+            tail_end,
+        }),
+        queued: Some(js_lease::Queued {
+            place: 0,
+            since: Timestamp::from_millis(T0),
+        }),
+        give_ups: 0,
+        prepare_failures: 0,
+        exclusions: Vec::new(),
+        claim_by: None,
+    };
+    let back = l.agents.registry.restore_reservations(&[record]);
+    assert_eq!(back.resumed, 1);
+    assert_eq!(l.mark("q"), Some(("h1".to_owned(), tail_end)));
+    l.at(10_000);
+    l
+}
+
+/// Asserts, through the server's placer, backfill against a reservation put back from the
+/// ledger: with its tail at 600 s, a lease of 300 s is booked on `h1` and counted as
+/// backfill, and a lease of 600 s is refused; the reservation keeps its tail. It catches a
+/// restored mark that takes no backfill, or any.
+#[test]
+fn with_the_flag_a_restored_reservation_takes_backfill_by_its_persisted_tail() {
+    let mut l = restored("backfill_restored", Some(T0 + 600_000));
+    assert_eq!(l.share(3, 300).as_deref(), Ok("h1"));
+    assert_eq!(l.agents.registry.tail_counters().backfilled, 1);
+    let late = l.share(4, 600);
+    assert_eq!(late, Err(StartAck::Refused(RefusalCode::NoCapacity)));
+    assert_eq!(l.mark("q"), Some(("h1".to_owned(), Some(T0 + 600_000))));
+}
+
+/// Asserts, through the server's placer, that a reservation put back from a ledger written
+/// without a tail takes no backfill: even a lease of a second is refused. It catches a
+/// missing tail read as a far one.
+#[test]
+fn with_the_flag_a_restored_reservation_without_a_tail_takes_no_backfill() {
+    let mut l = restored("backfill_restored_legacy", None);
+    let refused = l.share(3, 1);
+    assert_eq!(refused, Err(StartAck::Refused(RefusalCode::NoCapacity)));
+    assert_eq!(l.on("h1"), [LeaseId::new(1, 1)]);
+    assert_eq!(l.agents.registry.tail_counters().backfilled, 0);
+}
