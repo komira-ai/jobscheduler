@@ -59,7 +59,10 @@ fn the_wrapper_reports_what_it_could_not_do() {
         matches!(&unwritable, Err(e) if e.to_string().contains("cannot write")),
         "{unwritable:?}"
     );
-    assert_eq!(run(&file, &list), Ok("0 tests ran".to_owned()));
+    assert!(
+        matches!(run(&file, &list), Ok(line) if line == "0 tests ran"),
+        "the count run of an empty list"
+    );
     assert_eq!(std::fs::read_to_string(&file).expect("count"), "0\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
