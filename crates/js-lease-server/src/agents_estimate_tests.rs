@@ -225,6 +225,7 @@ fn request(class: &ResourceClass, wall: Duration) -> Request {
         max_wall: wall,
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     }
 }
 
