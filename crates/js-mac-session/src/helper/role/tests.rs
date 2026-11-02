@@ -366,7 +366,9 @@ fn role_kill_uid_ends_the_vm_user_s_processes_and_no_one_else_s() {
         let mut state = rig.host.state();
         state.procs.insert(uid, 5);
         state.procs.insert(me(), 2);
-        // The VM user is logged in: launchd has both of its domains.
+        // The VM user is logged in (its login window runs): launchd has both of its
+        // domains.
+        state.gui.insert(uid);
         state.domains.insert(format!("gui/{uid}"));
         state.domains.insert(format!("user/{uid}"));
     }

@@ -205,6 +205,7 @@ fn the_boot_reset_clears_a_stale_intent_and_deletes_its_user() {
     // Power is lost; at boot the lease user is logged in again by the login window.
     let booted = rebooted(&rig, "reset-stale");
     booted.host.state().procs.insert(me(), 3);
+    booted.host.state().gui.insert(me());
     booted.host.state().domains.insert(format!("gui/{}", me()));
     let reset = booted.helper.boot_reset(&["7.7".to_owned()]).unwrap();
     assert_eq!(

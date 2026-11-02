@@ -9,17 +9,19 @@ How `js-mac-session` ends a lease user on macOS (`kill-uid`, then `user-delete`)
 
 ## `kill-uid`
 
-1. Kill every process of the uid.
-2. Ask launchd (`launchctl print`) for `gui/<uid>` and `user/<uid>`, and boot out each one it has. A pool user never logs in, so it has no `gui/<uid>`, and once its agents are gone no `user/<uid>`: a domain launchd does not have is not booted out, and that is not an error.
-3. Look:
-   - A process of the uid is left: go to 1.
-   - Neither a process nor a domain is left: done.
-   - A domain is left: go to 1.
+The verdict is the outcome, never what a `launchctl` call answered: no process of the uid is left, and the uid's launchd domains no longer print.
 
-   The loop runs at most `KILL_ROUNDS` (10) rounds. The bound is a count, never a time.
-4. Remove the crontab and `at` jobs, then run 1–3 again.
+1. Look once, before anything is killed, whether the uid has a GUI login session: it owns a `loginwindow` process (the login window runs as the user of each GUI session). A pool user never logs in, so it has none, and its `gui/<uid>` is never asked about. A whole-machine lease's user or the VM user, logged in, has one; the kill in step 2 ends it, which is why the look comes first.
+2. Kill every process of the uid.
+3. Boot out `user/<uid>` (and `gui/<uid>`, only with a session). The bootout's own exit status is not a verdict: it fails for a domain that is not there, and can fail after it ended the domain. A failure is logged.
+4. Look at the outcome:
+   - a process of the uid is left, or a domain still prints: go to 2;
+   - neither: done.
 
-A domain counts as gone only on launchd's not-found answer to `launchctl print`: exit 112 or 113 together with "Could not find domain" on standard error. On macOS 26, `launchctl print gui/<uid>` for a user that never logged in exits 112 and prints "Bad request." and "Could not find domain for user gui: <uid>". Any other answer (another exit status, or 112 or 113 without those words) is an error naming the domain, never absence.
+   The loop runs at most `KILL_ROUNDS` (10) attempts. The bound is a count, never a time. If the outcome still does not hold after the last attempt, `kill-uid` fails naming what remains (the processes, the domains, and why each domain was not told gone), and the uid is quarantined (see below).
+5. Remove the crontab and `at` jobs, then run 2–4 again.
+
+A domain prints when `launchctl print` exits 0. Any other exit status is a domain launchd does not print. No exit status is matched as "not found": launchd's answer for a domain it does not have varies (on macOS 26, `launchctl print gui/<uid>` for a user that never logged in has exited 112 and 113, "Could not find domain", and 125, "Domain does not support specified action", from run to run). A `launchctl` that a signal ended, or that could not be run, gave no answer: the domain is not taken as gone, and the next attempt looks again.
 
 ## `user-delete`
 
@@ -28,7 +30,7 @@ A domain counts as gone only on launchd's not-found answer to `launchctl print`:
    - If the record is already gone (a delete repeated after it went), there is no `DARWIN_USER_DIR` of the uid's own. Use every directory two levels down in the per-user folders that the uid owns. An `<xx>`, or such a directory, on another filesystem (something mounted there) refuses the delete: the sweep never crosses a filesystem, so what is behind the mount is never taken as clean.
 2. **Settle.**
    - No process may remain.
-   - Boot out each of the two domains that launchd has, as in `kill-uid`; one that stays refuses the delete.
+   - Boot out `user/<uid>`, as in `kill-uid` (its failure logged); if it still prints, or `launchctl print` gave no answer, the delete is refused. `gui/<uid>` is not asked about: with no process of the uid left there is no login session, and `kill-uid` judged its domain.
    - Look for processes again, once, without waiting: a job launchd started before the bootout ended its domain is found here, and any process seen refuses the delete at once. Such a job may have written again what the sweep removed before exiting, so it is never waited out; the repeated delete sweeps everything again.
 3. Remove the crontab and `at` jobs. No process may remain.
 4. Sweep the home and the other places. Remove the entry whole, and only if the uid owns it:
@@ -40,7 +42,7 @@ A domain counts as gone only on launchd's not-found answer to `launchctl print`:
 
 ## Failure: the uid is held
 
-A step that fails leaves the lease live in the helper's ledger. A live lease's uid is never handed to another lease. The ledger is a file and survives a restart. A boot reset that cannot end the user fails and keeps it. The refusal names the step, and the helper logs that the uid is held. The native runtime keeps the lease in its journal and repeats the delete at the next start. The uid is free again only once a delete completes.
+A step that fails leaves the lease live in the helper's ledger: the uid is quarantined. A live lease's uid is never handed to another lease. The ledger is a file and survives a restart. A boot reset that cannot end the user fails and keeps it. The refusal names the step, and the helper logs that the uid is held. The native runtime keeps the lease in its journal and repeats the delete at the next start. The uid is free again only once a delete completes.
 
 ## The isolation test's `no-path` verdict
 

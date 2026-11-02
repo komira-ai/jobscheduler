@@ -16,14 +16,18 @@
 //!   switch's intent record names (the one `session-login` logged in); `run` there is
 //!   refused until launchd has the user's `gui/<uid>` domain, which exists once the
 //!   login has completed. `session-ready` answers whether it does.
-//! - `kill-uid` kills, then boots out those of the uid's `gui/<uid>` and `user/<uid>`
-//!   launchd domains that launchd has (a pool user never logs in, so it has no
-//!   `gui/<uid>`: a domain launchd answers it does not have is skipped, never an
-//!   error), and repeats both until no process of the uid and neither domain is left
-//!   (at most [`KILL_ROUNDS`] rounds): launchd restarts a per-user agent such as
-//!   `distnoted` for as long as the domain exists, and a live process of the uid makes
-//!   the domain again. It then removes the user's crontab and `at` jobs, and does it all
-//!   again, so no scheduled job of the user starts after it returns.
+//! - `kill-uid` is judged by its outcome, never by what a `launchctl` call answered. It
+//!   looks once, before the kill, whether the uid has a GUI login session (it owns a
+//!   `loginwindow` process; a pool user never logs in, so its `gui/<uid>` is never asked
+//!   about). Then, for at most [`KILL_ROUNDS`] attempts, it kills every process of the
+//!   uid and boots out `user/<uid>` (and `gui/<uid>`, only with the session), the
+//!   bootout's own failure only logged, and looks again: done once no process of the
+//!   uid is left and none of those domains prints (`launchctl print` exits non-zero).
+//!   launchd restarts a per-user agent such as `distnoted` for as long as the domain
+//!   exists, and a live process of the uid makes the domain again. It then removes the
+//!   user's crontab and `at` jobs, and does it all again, so no scheduled job of the
+//!   user starts after it returns. An outcome that does not hold after the last attempt
+//!   fails, naming what remains, and the lease stays live: its uid is quarantined.
 //! - `user-delete` refuses while any process of the uid remains. It first asks for the
 //!   uid's `DARWIN_USER_DIR` (in a short-lived process of the uid, while its record is
 //!   there) and takes the uid's own entry under the per-user folders from it, refusing
@@ -87,8 +91,8 @@ mod vmrun;
 pub use image::{CHFLAGS, ImageSettings};
 pub use switch::Reset;
 
-/// How many times `kill-uid` kills, boots out the uid's launchd domains and looks again
-/// before it gives up.
+/// How many attempts `kill-uid` makes (kill, boot out the uid's launchd domains, look at
+/// the outcome) before it gives up.
 pub const KILL_ROUNDS: usize = 10;
 
 /// How many times each of `user-delete`'s looks lists the uid's processes, a
@@ -142,15 +146,15 @@ pub trait Host: Send + Sync {
     /// The record could not be deleted.
     fn delete_user(&self, name: &str) -> io::Result<bool>;
     /// How `launchctl print <domain>` ended: its exit code and its standard error. The
-    /// helper reads from it whether launchd has the domain; only launchd's answer for a
-    /// missing domain is absence.
+    /// helper reads exit 0 as a domain launchd has and any other exit status as one it
+    /// does not print; it matches no exit status.
     ///
     /// # Errors
     /// `launchctl` could not be run.
     fn launchctl_print(&self, domain: &str) -> io::Result<PrintAnswer>;
-    /// `launchctl bootout <domain>`: ends the domain and every job in it. Asked only for
-    /// a domain `launchctl print` showed; one that went in between fails, and the
-    /// caller asks `launchctl print` again afterwards.
+    /// `launchctl bootout <domain>`: ends the domain and every job in it. Its failure is
+    /// no verdict (it fails for a domain that is not there, and can fail after ending
+    /// one): the caller logs it and asks `launchctl print` afterwards.
     ///
     /// # Errors
     /// The domain could not be booted out.
