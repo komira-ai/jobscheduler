@@ -179,15 +179,17 @@ enum Root {
     Open(StateRoot),
 }
 
-/// The state root at `path`: [`Root::Absent`] when `path` is `None` or names nothing. One that
-/// is there and is not usable (a link, a file, another owner, open to others) is an error,
-/// whose text starts with [`STATE_ROOT_KEY`]: nothing can be said of a taint in it.
+/// The state root at `path`: [`Root::Absent`] when `path` is `None` or nothing is at it. One
+/// that is there and is not usable (a link, a dangling one included, a file, another owner,
+/// open to others) or that cannot be looked at is an error, whose text starts with
+/// [`STATE_ROOT_KEY`]: nothing can be said of a taint in it.
 fn find_root(path: Option<&Path>) -> Result<Root, String> {
     let Some(path) = path else {
         return Ok(Root::Absent);
     };
-    match path.try_exists() {
-        Ok(false) => Ok(Root::Absent),
+    // The path itself, not what a link at it points to: a link is refused by the open.
+    match std::fs::symlink_metadata(path) {
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(Root::Absent),
         _ => StateRoot::open_named(path, STATE_ROOT_KEY).map(Root::Open),
     }
 }

@@ -599,18 +599,30 @@ fn bootout_is_run_by_the_stop_runner_and_nothing_else_is() {
 }
 
 #[test]
-fn the_units_of_a_mac_stop_through_the_stop_runner_and_wait_on_the_agents_token_file() {
+fn the_units_of_a_mac_read_through_the_commands_stop_through_the_stop_runner_and_wait_on_the_token()
+{
     let tool = launchd_with(Service::running());
+    let commands = Recording {
+        world: &tool,
+        seen: RefCell::default(),
+    };
     let stopper = Recording {
         world: &tool,
         seen: RefCell::default(),
     };
-    let units = launch_units(&tool, &stopper);
+    let units = launch_units(&commands, &stopper);
+    // Reads, and a start of a running service, go through the commands; only the bootout goes
+    // through the stop runner (the runners swapped, or one runner for both, is seen here).
+    assert_eq!(units.show(LABEL).unwrap().active, "active");
+    assert!(units.is_active(LABEL).unwrap());
+    units.start(LABEL).unwrap();
+    assert!(stopper.seen.borrow().is_empty());
     units.stop_no_block(LABEL).unwrap();
     assert_eq!(
         *stopper.seen.borrow(),
         [format!("{LAUNCHCTL} bootout system/{LABEL}")]
     );
+    assert_eq!(*commands.seen.borrow(), vec![print_line(LABEL); 4]);
     assert_eq!(units.gate(), Some(Path::new(GATE)));
 }
 

@@ -138,14 +138,16 @@ pub enum ParamsError {
 
 /// How the hook on a machine reaches the lease server and the agent's state: the values of the
 /// agent's own flags of the same names, in the declaration's `[hook.params]`. None is needed
-/// by the parse; the machine's host needs `server` and `state_root`.
+/// by the parse; on the machine's host a first install needs none of them, every step of an
+/// update needs `state_root`, and a step that asks the lease server needs `server`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConnectParams {
     /// The lease server (`server`).
     pub server: Option<String>,
     /// The agent's state root (`state_root`), where the host credential and the taint are.
     pub state_root: Option<PathBuf>,
-    /// The join token file (`token_file`), used when the state root holds no credential.
+    /// The join token file (`token_file`), used when no state root is there or a private one
+    /// holds no credential; never in place of a state root that is there and not private.
     pub token_file: Option<PathBuf>,
     /// The certificate to trust (`ca_cert`).
     pub ca_cert: Option<PathBuf>,

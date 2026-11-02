@@ -278,6 +278,9 @@ fn every_step_the_updater_can_ask_for_is_run_by_its_own_body() {
         let done = tree.run(step, &params, Err("unused"));
         assert_eq!(done.outcome, outcome, "{step}");
         assert_eq!(done.report.reason, reason, "{step}");
+        // The step's own body answered, not the check of the state root before it.
+        let detail = done.report.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("there is no record"), "{step}: {detail}");
     }
 }
 
@@ -331,6 +334,15 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
         ),
         (
             ConnectParams {
+                token_file: Some(files.path("no-such-token")),
+                ..full.clone()
+            },
+            "--token-file",
+        ),
+        // A state root that is not there holds no credential: the token file is read.
+        (
+            ConnectParams {
+                state_root: Some(files.path("no-such-state")),
                 token_file: Some(files.path("no-such-token")),
                 ..full.clone()
             },
@@ -410,13 +422,16 @@ fn the_machine_reads_the_declaration_the_updater_installs_and_looks_at_directori
     let root = File::open("/").unwrap();
     let stat = (Machine::system().stat)(Path::new("/"), std::os::fd::AsFd::as_fd(&root)).unwrap();
     assert!(stat.is_dir && !stat.is_symlink);
-    // The machine's own id is read the way the agent reads it: a host id when the machine has
-    // an id, and otherwise the error of reading it, which names the file that was missing. A
-    // host that has no id gets the second check, so the wiring is checked on every host.
-    match (Machine::system().own_host_id)() {
-        Ok(id) => assert!(id.starts_with("h-") && id.len() == 34, "{id}"),
-        Err(why) => assert!(why.contains("machine-id"), "{why}"),
-    }
+    // The machine's own id is read the way the agent reads it, on this platform: the same id,
+    // or the same error when this host has none.
+    assert_eq!(
+        (Machine::system().own_host_id)(),
+        own_host_id(
+            &js_agent::Platform::current(),
+            &js_agent::SystemCommands::default(),
+            &js_agent::SystemFiles
+        )
+    );
 }
 
 #[test]
@@ -476,9 +491,12 @@ fn an_update_with_no_usable_state_root_to_read_fails_state_invalid_on_every_step
     );
     // A state root that is unset or does not exist is no state root of an installed agent;
     // it must not read as "no taint, nothing owed".
-    for extra in [
-        server.clone(),
-        format!("{server}state_root = \"{}\"\n", absent.display()),
+    for (extra, said) in [
+        (server.clone(), "the params name none".to_owned()),
+        (
+            format!("{server}state_root = \"{}\"\n", absent.display()),
+            format!("{} is not there", absent.display()),
+        ),
     ] {
         let params = tree.params(true, &extra);
         for step in Step::ALL {
@@ -486,7 +504,8 @@ fn an_update_with_no_usable_state_root_to_read_fails_state_invalid_on_every_step
             assert_eq!(done.outcome, Outcome::Failure, "{step}: {done:?}");
             assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{step}");
             let detail = done.report.detail.as_deref().unwrap();
-            assert!(detail.contains("state_root"), "{step}: {detail}");
+            assert!(detail.starts_with("state_root: "), "{step}: {detail}");
+            assert!(detail.contains(&said), "{step}: {detail}");
         }
     }
     assert!(!tree.record().exists());
@@ -550,7 +569,7 @@ fn a_state_root_that_exists_and_is_unusable_is_never_replaced_by_the_join_token(
 }
 
 #[test]
-fn a_step_that_never_reads_the_state_root_still_reports_it_unusable_by_the_hooks_param_name() {
+fn an_unusable_state_root_fails_every_step_of_an_update_by_the_hooks_param_name_before_the_lease() {
     let enrolled = enrol("hook_machine_unusable_cleanup");
     let tree = Tree::new("hook-machine-unusable-cleanup");
     let open = open_state_root(&tree._files);
@@ -561,33 +580,46 @@ fn a_step_that_never_reads_the_state_root_still_reports_it_unusable_by_the_hooks
         enrolled.server.join_file().display()
     );
     let params = tree.params(true, &extra);
-    for step in [Step::Prepare, Step::Cleanup] {
+    // Cleanup and rollback with no record, and cutover and verify, never read the state root in
+    // their own bodies; prepare reads it after the lock. Each is refused before any of that.
+    for step in Step::ALL {
         let done = tree.run(step, &params, Err("unused"));
         assert_eq!(done.outcome, Outcome::Failure, "{step}: {done:?}");
+        assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{step}");
         let detail = done.report.detail.as_deref().unwrap();
-        assert!(detail.contains("state_root: "), "{step}: {detail}");
+        assert!(detail.starts_with("state_root: "), "{step}: {detail}");
         assert!(!detail.contains("--state-root"), "{step}: {detail}");
     }
+    assert!(!tree.record().exists());
+    assert!(enrolled.server.host("mac-1").get("cordon").is_none());
 }
 
 #[test]
-fn a_state_root_that_is_there_and_unusable_fails_every_step_of_a_first_install_too() {
+fn a_state_root_that_is_there_and_unusable_fails_every_step_of_a_first_install_or_an_update() {
     let tree = Tree::new("hook-machine-unusable-first");
     let open = open_state_root(&tree._files);
-    // A link to a private directory, and a file, are no state root either.
+    // A link to a private directory, a link to nothing, and a file are no state root either,
+    // nor a path that cannot be looked at (below a file).
     let target = private(&tree._files, "private-state");
     let link = tree._files.path("linked-state");
     std::os::unix::fs::symlink(&target, &link).unwrap();
+    let dangling = tree._files.path("dangling-state");
+    std::os::unix::fs::symlink(tree._files.path("nothing-here"), &dangling).unwrap();
     let file = tree._files.write("file-state", "x", 0o600);
-    for root in [open, link, file] {
-        let params = tree.params(false, &format!("state_root = \"{}\"\n", root.display()));
-        for step in Step::ALL {
-            let done = tree.run(step, &params, Err("unused"));
-            assert_eq!(done.outcome, Outcome::Failure, "{step}: {done:?}");
-            assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{step}");
-            let detail = done.report.detail.as_deref().unwrap();
-            assert!(detail.starts_with("state_root: "), "{step}: {detail}");
+    let below_file = file.join("state");
+    for root in [open, link, dangling, file, below_file] {
+        for previous in [false, true] {
+            let line = format!("state_root = \"{}\"\n", root.display());
+            let params = tree.params(previous, &line);
+            for step in Step::ALL {
+                let done = tree.run(step, &params, Err("unused"));
+                let what = format!("{step}, update {previous}, {}", root.display());
+                assert_eq!(done.outcome, Outcome::Failure, "{what}: {done:?}");
+                assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{what}");
+                let detail = done.report.detail.as_deref().unwrap();
+                assert!(detail.starts_with("state_root: "), "{what}: {detail}");
+            }
+            assert!(!tree.record().exists());
         }
-        assert!(!tree.record().exists());
     }
 }
