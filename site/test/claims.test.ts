@@ -117,6 +117,7 @@ const ROWS: readonly Row[] = [
   ['concepts', 'finds its own by the labels it sent before it asks again', 'crates/js-lease-server/src/lib.rs', 'without first listing (`GET /v1/leases`) and finding its lease by the labels it sent'],
   ['concepts', 'An idempotency key, which would make a repeated acquire return the lease it made, is not built', 'crates/js-lease-server/src/lib.rs', 'An idempotency key, so that a repeated acquire returns the lease it made, is a follow-up and not built here'],
   ['concepts', 'there is one client token and so one trust domain', 'crates/js-lease-server/src/lib.rs', 'The server is single-tenant: there is one token'],
+  ['concepts', 'and whoever holds it can list, renew or release any lease', 'crates/js-lease-server/src/lib.rs', 'Whoever holds the token can list every lease, and renew or release any of them, whichever client acquired it'],
   ['concepts', 'A token for each tenant is not built', 'crates/js-lease-server/src/lib.rs', 'Per-tenant leases'],
   ['concepts', 'A token for each tenant is not built', 'crates/js-lease-server/src/lib.rs', 'are a follow-up and not built here'],
   ['concepts', 'The provider kinds compiled in are <code>static</code> and <code>lambdalabs</code>', 'crates/js-lease-server/src/lib.rs', 'the provider kinds a `[[pool]]` of the configuration file may name, compiled in (`static` and `lambdalabs`)'],
@@ -432,7 +433,7 @@ test('every statement of a page is still what its source says', () => {
 
 /**
  * The units of a page that can carry a claim: each heading, each sentence of a paragraph or list item, each row of a
- * table (its cells joined by " | "), and the page's title and description. Left out: code blocks (<pre>, held by the
+ * table (its cells with their <td> markup, so one phrase can hold a row: the thing and its state), and the page's title and description. Left out: code blocks (<pre>, held by the
  * tests that name them), the copy buttons' commands, the source notes (they are checked to name real files) and the
  * table of contents (links to headings, checked by the link test). Markup stays in, because the rows quote it.
  */
@@ -444,7 +445,7 @@ export function claimUnits(html: string): string[] {
     .replace(/<thead>[\s\S]*?<\/thead>/g, '');
   const norm = (s: string): string => s.replace(/\s+/g, ' ').trim();
   const units: string[] = [];
-  for (const m of text.matchAll(/<tr>([\s\S]*?)<\/tr>/g)) units.push(norm([...m[1].matchAll(/<td>([\s\S]*?)<\/td>/g)].map((c) => c[1]).join(' | ')));
+  for (const m of text.matchAll(/<tr>([\s\S]*?)<\/tr>/g)) units.push(norm(m[1]));
   const rest = text.replace(/<table\b[\s\S]*?<\/table>/g, '');
   for (const m of rest.matchAll(/<(title|description)>([\s\S]*?)<\/\1>/g)) if (norm(m[2]) !== '') units.push(norm(m[2]));
   // Innermost blocks only: a block whose inside opens another block is skipped where it starts, and its children are
@@ -455,6 +456,22 @@ export function claimUnits(html: string): string[] {
     for (const s of sentences) if (norm(s) !== '') units.push(norm(s));
   }
   return units;
+}
+
+/**
+ * The words of `unit` that no span covers: each run of letters and digits outside markup (a tag's name and attributes,
+ * or a character reference) of which at least one character lies outside every span. A held unit must have none, so
+ * no word of a claim (a "not", a number, a code name) can change while a row's phrase beside it stays.
+ */
+export function unanchored(unit: string, spans: readonly (readonly [number, number])[]): string[] {
+  const markup = new Array<boolean>(unit.length).fill(false);
+  for (const m of unit.matchAll(/<[^>]*>|&#?[A-Za-z0-9]+;/g)) for (let i = m.index; i < m.index + m[0].length; i++) markup[i] = true;
+  const words: string[] = [];
+  for (const m of unit.matchAll(/[\p{L}\p{N}]+/gu)) {
+    const chars = [...Array(m[0].length).keys()].map((k) => m.index + k).filter((i) => !markup[i]);
+    if (chars.some((i) => !spans.some(([s, e]) => s <= i && i < e))) words.push(m[0]);
+  }
+  return words;
 }
 
 /** Every place `needle` starts in `hay`. */
@@ -496,10 +513,7 @@ export function uncovered(rows: readonly Row[], html: (name: string) => string, 
         continue;
       }
       const spans = held.flatMap((p) => positions(unit, p).map((i) => [i, i + p.length] as const));
-      for (const m of unit.matchAll(/<code>[\s\S]*?<\/code>|\d+(?:[.,]\d+)*/g)) {
-        const [a, b] = [m.index, m.index + m[0].length];
-        if (!spans.some(([s, e]) => s <= a && b <= e)) out.push(`content/${name}.html: ${m[0]} in "${unit}" is outside every row phrase`);
-      }
+      for (const word of unanchored(unit, spans)) out.push(`content/${name}.html: ${word} in "${unit}" is outside every row phrase`);
     }
     for (const entry of registered) {
       if (!units.includes(entry)) out.push(`content/${name}.html: the prose entry "${entry}" is no longer a unit of the page`);
@@ -520,6 +534,9 @@ test('an omitted claim, a changed qualifier, a repeated phrase and an empty row 
   // A new sentence no row holds.
   const added = (n: string): string => (n === 'concepts' ? page(n).replace('Capacity comes in pools.', 'Capacity comes in pools. Pools are free.') : page(n));
   assert.match(report(added), /content\/concepts\.html: no row holds "Pools are free\."/);
+  // A permission reversed beside a row's phrase: the row's phrase still matches, the word check does not.
+  const reversed = (n: string): string => (n === 'concepts' ? page(n).replace('whoever holds it can list, renew or release any lease', 'whoever holds it cannot list, renew or release any lease') : page(n));
+  assert.match(report(reversed), /content\/concepts\.html: (?:cannot|no row holds) /);
   // A number beside a row's phrase changes: the row would still match, the coverage check does not.
   const numbered = (n: string): string => (n === 'concepts' ? page(n).replace('Two limits end a lease.', 'Two limits end a lease, 3 in all.') : page(n));
   assert.match(report(numbered), /content\/concepts\.html: 3 in "Two limits end a lease, 3 in all\." is outside every row phrase/);
@@ -542,9 +559,17 @@ test('a prose entry that is gone from its page, or that a row holds, is reported
   assert.match(held, /is held by a row, so it is a claim/);
 });
 
-test('claimUnits splits sentences, joins table cells and leaves out code blocks and source notes', () => {
+test('unanchored names each word with a character outside every span, and skips markup and character references', () => {
+  const unit = 'a <code>x</code> may not &amp; be';
+  assert.deepEqual(unanchored(unit, [[0, unit.length]]), []);
+  assert.deepEqual(unanchored(unit, []), ['a', 'x', 'may', 'not', 'be']);
+  assert.deepEqual(unanchored(unit, [[0, 22]]), ['not', 'be']); // 'may no' covered: a word cut short is not anchored
+  assert.deepEqual(unanchored('<span class="tag">ok</span>', [[18, 20]]), []);
+});
+
+test('claimUnits splits sentences, keeps a table row whole and leaves out code blocks and source notes', () => {
   const html = '<h2 id="a">Head</h2><p>One. Two <code>x</code>; three.</p><pre>$ ignored</pre><p class="source-note">Sources: <code>a.rs</code>.</p><table><thead><tr><th>H</th></tr></thead><tbody><tr><td>A</td><td><span>b</span></td></tr></tbody></table><ul><li><p>Inner.</p></li></ul>';
-  assert.deepEqual(claimUnits(html), ['A | <span>b</span>', 'Head', 'One.', 'Two <code>x</code>; three.', 'Inner.']);
+  assert.deepEqual(claimUnits(html), ['<td>A</td><td><span>b</span></td>', 'Head', 'One.', 'Two <code>x</code>; three.', 'Inner.']);
   // A paragraph inside a list item is a unit (the list item that holds it is not), and so is a list item's own text.
   assert.deepEqual(claimUnits('<ol><li><h3>Step</h3><p>Do it. Then this.</p></li><li>Plain.</li></ol>'), ['Step', 'Do it.', 'Then this.', 'Plain.']);
 });
