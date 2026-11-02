@@ -205,26 +205,6 @@ fn a_server_that_exits_fails_the_verb_with_its_log_and_leaves_no_scratch() {
     assert_eq!(s.scratch_left(), Vec::<PathBuf>::new());
 }
 
-/// Catches a server that never says where it listens hanging the verb: with a one-second deadline it fails
-/// naming the address it was asked for, and the server it started is stopped and the scratch directory
-/// removed. The server answers, but its address is never announced, so the outcome does not depend on how
-/// fast it starts.
-#[test]
-fn a_server_that_never_says_where_it_listens_fails_the_verb_at_the_deadline() {
-    let s = Setup::new("server-unannounced");
-    s.defect("server-unannounced");
-    let mut demo = s.demo();
-    demo.ready_timeout = Duration::from_secs(1);
-    match run(&demo) {
-        Err(Error::NotReady { url, timeout }) => {
-            assert_eq!(url, "http://127.0.0.1:0");
-            assert_eq!(timeout, Duration::from_secs(1));
-        }
-        other => panic!("{other:?}"),
-    }
-    assert_eq!(s.scratch_left(), Vec::<PathBuf>::new());
-}
-
 /// Catches a server started without the files the recording shows (the check can fail): the fake server
 /// refuses a start without the host file and an owner-only token, so a token file written 0644 fails here.
 /// The fake is the real server's checks in miniature; this shows the verb's files pass them.
@@ -385,8 +365,9 @@ fn a_transcript_that_cannot_be_written_is_named() {
 
 /// Catches the flags not reaching the verb, and the text it prints: through the `xtask` binary in a
 /// repository root, a relative `--root`, the default `--out` under it, the cargo named by `CARGO`,
-/// `--port` and `--ready-timeout` build, run and record, and the verb says where; with `--bin-dir` and a
-/// bare `--out` file name the transcript lands in the working directory without a build.
+/// `--port`, `--ready-timeout` and `--scratch` build, run and record, and the verb says where; with
+/// `--bin-dir` and a bare `--out` file name the transcript lands in the working directory without a build,
+/// and without `--scratch` the run's directory is made under the root's `target` and removed.
 #[test]
 fn the_xtask_binary_records_with_its_flags() {
     let s = Setup::new("cli");
@@ -396,7 +377,8 @@ fn the_xtask_binary_records_with_its_flags() {
             .args(flags)
             .args(["--port", "0"])
             .current_dir(&s.root)
-            .env("TMPDIR", &s.scratch)
+            .arg("--scratch")
+            .arg(&s.scratch)
             .env("CARGO", s.fakes.join("cargo"))
             .output()
             .expect("run xtask")
@@ -437,7 +419,6 @@ fn the_xtask_binary_records_with_its_flags() {
         ])
         .args(["--port", "0"])
         .current_dir(&s.root)
-        .env("TMPDIR", &s.scratch)
         .env_remove("CARGO")
         .output()
         .expect("run xtask");
@@ -447,7 +428,13 @@ fn the_xtask_binary_records_with_its_flags() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(s.root.join("u.transcript").is_file());
-    assert_eq!(s.scratch_left(), Vec::<PathBuf>::new());
+    // Without --scratch the run's directory is made in `target` under the root, and removed from it.
+    let left: Vec<_> = std::fs::read_dir(s.root.join("target"))
+        .expect("target")
+        .map(|e| e.expect("entry").file_name())
+        .filter(|n| n.to_string_lossy().starts_with("xtask-site-demo"))
+        .collect();
+    assert_eq!(left, Vec::<std::ffi::OsString>::new());
 }
 
 /// Catches a failure shown wrong at the command line: exit status 1 and the whole reason, prefixed with
@@ -461,7 +448,8 @@ fn the_xtask_binary_prints_a_failure_as_one_line_and_exits_1() {
         .args(["site-demo", "--root"])
         .arg(&s.root)
         .env("CARGO", &cargo)
-        .env("TMPDIR", &s.scratch)
+        .arg("--scratch")
+        .arg(&s.scratch)
         .output()
         .expect("run xtask");
     assert_eq!(out.status.code(), Some(1));

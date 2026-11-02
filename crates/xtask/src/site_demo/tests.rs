@@ -363,6 +363,17 @@ fn each_error_says_what_failed_and_with_what() {
             },
             "cannot write out/demo.transcript: permission denied",
         ),
+        (
+            Error::ServerWait { source: denied() },
+            "cannot ask whether js-lease-server is running: permission denied",
+        ),
+        (
+            Error::ServerLog {
+                path: PathBuf::from("scratch/server.log"),
+                source: denied(),
+            },
+            "cannot read the server log scratch/server.log: permission denied",
+        ),
     ];
     for (error, message) in cases {
         assert_eq!(error.to_string(), message);
@@ -386,6 +397,103 @@ fn an_io_error_stays_the_source_of_its_variant() {
         .source()
         .is_none()
     );
+}
+
+/// One look at a server, with the try_wait answer and log given, and a probe that must not be called.
+fn look_at(
+    ended: std::io::Result<Option<ExitStatus>>,
+    log: std::io::Result<String>,
+    listening: &mut Option<SocketAddr>,
+) -> Result<Option<SocketAddr>, Error> {
+    look(ended, log, Path::new("s/server.log"), listening, |_| {
+        panic!("no address to ask")
+    })
+}
+
+/// Catches a failure of the look at a starting server going unnoticed: a try_wait that fails and a log
+/// that cannot be read are each their own error, and a server that has ended is reported with its log,
+/// before any address is asked.
+#[test]
+fn a_look_that_cannot_be_taken_or_finds_the_server_gone_is_an_error() {
+    let mut listening = None;
+    let wait = look_at(
+        Err(ErrorKind::PermissionDenied.into()),
+        Ok(String::new()),
+        &mut listening,
+    );
+    assert!(
+        matches!(wait, Err(Error::ServerWait { source }) if source.kind() == ErrorKind::PermissionDenied)
+    );
+    let log = look_at(Ok(None), Err(ErrorKind::InvalidData.into()), &mut listening);
+    assert!(
+        matches!(log, Err(Error::ServerLog { path, source }) if path == Path::new("s/server.log") && source.kind() == ErrorKind::InvalidData)
+    );
+    let gone = look_at(
+        Ok(Some(ExitStatus::from_raw(3 << 8))),
+        Ok(format!("{LISTENING}127.0.0.1:9\nbye\n")),
+        &mut listening,
+    );
+    assert!(
+        matches!(gone, Err(Error::ServerExited { status, log }) if status.code() == Some(3) && log == "listening on 127.0.0.1:9\nbye")
+    );
+    assert_eq!(listening, None);
+}
+
+/// Catches the address of a running server lost or asked too early: with no address printed yet the
+/// look is not ready and asks nothing; once printed, the address is kept and asked, and its answer
+/// decides (a 200 is ready, a refused connection is not yet).
+#[test]
+fn a_running_server_is_asked_at_the_address_it_printed() {
+    let mut listening = None;
+    assert!(matches!(
+        look_at(Ok(None), Ok("starting\n".to_owned()), &mut listening),
+        Ok(None)
+    ));
+    assert_eq!(listening, None);
+    let log = || Ok(format!("{LISTENING}127.0.0.1:4100\n"));
+    let asked = Cell::new(None);
+    let ok = look(Ok(None), log(), Path::new("l"), &mut listening, |at| {
+        asked.set(Some(at));
+        Ok("HTTP/1.1 200 OK\r\n".to_owned())
+    });
+    assert_eq!(ok.expect("ready"), Some(addr(4100)));
+    assert_eq!(asked.get(), Some(addr(4100)));
+    let refused = look(Ok(None), log(), Path::new("l"), &mut listening, |_| {
+        Err(ErrorKind::ConnectionRefused.into())
+    });
+    assert!(matches!(refused, Ok(None)));
+    assert_eq!(listening, Some(addr(4100)));
+}
+
+/// Catches a deadline that names the wrong server: the wait's answer is the address that answered;
+/// with none, the error names the address the server printed, or, when it printed none, the port asked
+/// for, with the deadline.
+#[test]
+fn the_end_of_the_wait_names_the_server_that_did_not_answer() {
+    let timeout = Duration::from_secs(7);
+    assert_eq!(
+        settle(Some(addr(5)), Some(addr(6)), 7300, timeout).expect("ready"),
+        addr(5)
+    );
+    let named = |listening| match settle(None, listening, 7300, timeout) {
+        Err(Error::NotReady { url, timeout }) => (url, timeout),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        named(Some(addr(4100))),
+        ("http://127.0.0.1:4100".to_owned(), timeout)
+    );
+    assert_eq!(named(None), ("http://127.0.0.1:7300".to_owned(), timeout));
+}
+
+/// Catches a wall clock that runs backwards, which would keep `wait_ready` waiting past its deadline: what
+/// it says has passed after a sleep is never less than before it. No length of time is asked of it.
+#[test]
+fn the_wall_clock_never_runs_backwards_across_a_sleep() {
+    let mut wall = SystemClock(Instant::now());
+    let before = wall.elapsed();
+    wall.sleep(Duration::ZERO);
+    assert!(wall.elapsed() >= before);
 }
 
 /// The committed recording, read: its commands and its first lines.

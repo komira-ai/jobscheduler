@@ -183,6 +183,10 @@ enum Verb {
         /// How many seconds to wait for the server to answer.
         #[arg(long, default_value_t = site_demo::READY_TIMEOUT.as_secs())]
         ready_timeout: u64,
+        /// The directory the run's scratch directory is made in, and removed from after (default:
+        /// `target` under `--root`, cargo's own directory of the workspace).
+        #[arg(long)]
+        scratch: Option<PathBuf>,
     },
     /// Whether the site steps of the `lint` job run: always off a pull request, and on one when a
     /// changed file matches `site/ci-paths` (writes `run=true` or `run=false`).
@@ -269,15 +273,17 @@ fn run(cli: Cli) -> Result<String, Error> {
             bin_dir,
             port,
             ready_timeout,
+            scratch,
         } => {
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
             let out = out.unwrap_or_else(|| root.join(site_demo::DEFAULT_OUT));
+            let scratch = scratch.unwrap_or_else(|| root.join("target"));
             Ok(site_demo::run(&site_demo::SiteDemo {
                 cargo: &cargo,
                 root: &root,
                 bin_dir: bin_dir.as_deref(),
                 out: &out,
-                scratch: &std::env::temp_dir(),
+                scratch: &scratch,
                 port,
                 ready_timeout: std::time::Duration::from_secs(ready_timeout),
             })?)

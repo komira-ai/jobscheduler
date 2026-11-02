@@ -113,6 +113,22 @@ pub enum Error {
         /// What it printed.
         log: String,
     },
+    /// Whether the server is still running could not be asked.
+    #[error("cannot ask whether js-lease-server is running: {source}")]
+    ServerWait {
+        /// Why.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The server's log could not be read.
+    #[error("cannot read the server log {path}: {source}")]
+    ServerLog {
+        /// The log file.
+        path: PathBuf,
+        /// Why.
+        #[source]
+        source: std::io::Error,
+    },
     /// The server did not answer 200 in time.
     #[error("{url} did not answer 200 within {timeout:?}")]
     NotReady {
@@ -376,6 +392,55 @@ fn judge(addr: SocketAddr, answer: std::io::Result<String>) -> Result<Option<Soc
     }
 }
 
+/// One look at the starting server: `ended` is whether it has exited, `log` what it has printed so far,
+/// and `probe` asks the address the log names. `Some(addr)` once that address answers 200; `None` while
+/// the server is still on its way (no address printed yet, or not answering yet). The address the log
+/// names is kept in `listening`, for [`settle`] to name when the time runs out.
+fn look(
+    ended: std::io::Result<Option<ExitStatus>>,
+    log: std::io::Result<String>,
+    log_path: &Path,
+    listening: &mut Option<SocketAddr>,
+    probe: impl FnOnce(SocketAddr) -> std::io::Result<String>,
+) -> Result<Option<SocketAddr>, Error> {
+    // `ended` is asked first: a server that has ended has written all it will, so the log read after
+    // it is whole.
+    let ended = ended.map_err(|source| Error::ServerWait { source })?;
+    let log = log.map_err(|source| Error::ServerLog {
+        path: log_path.to_path_buf(),
+        source,
+    })?;
+    if let Some(status) = ended {
+        return Err(Error::ServerExited {
+            status,
+            log: log.trim().to_owned(),
+        });
+    }
+    // The log only grows, so the first line to say where the server listens stays the same.
+    *listening = listening_addr(&log);
+    match *listening {
+        Some(addr) => judge(addr, probe(addr)),
+        None => Ok(None),
+    }
+}
+
+/// What the wait came to: the address that answered, or [`Error::NotReady`] naming the address the
+/// server said it listens on (or, when it never said, the one asked for with `port`).
+fn settle(
+    ready: Option<SocketAddr>,
+    listening: Option<SocketAddr>,
+    port: u16,
+    timeout: Duration,
+) -> Result<SocketAddr, Error> {
+    ready.ok_or_else(|| {
+        let at = listening.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], port)));
+        Error::NotReady {
+            url: format!("http://{at}"),
+            timeout,
+        }
+    })
+}
+
 /// One `GET /healthz` against `addr`: the first line of the answer.
 fn probe_healthz(addr: SocketAddr) -> std::io::Result<String> {
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500))?;
@@ -512,31 +577,18 @@ pub fn run(demo: &SiteDemo<'_>) -> Result<String, Error> {
     let log_path = dir.join("server.log");
     let mut listening = None;
     let probe = || {
-        // Asked first: a server that has ended has written all it will, so the log read next is whole.
         let ended = server.try_wait();
-        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-        if let Ok(Some(status)) = ended {
-            return Err(Error::ServerExited {
-                status,
-                log: log.trim().to_owned(),
-            });
-        }
-        // The log only grows, so the first line to say where the server listens stays the same.
-        listening = listening_addr(&log);
-        match listening {
-            Some(addr) => judge(addr, probe_healthz(addr)),
-            None => Ok(None),
-        }
+        look(
+            ended,
+            std::fs::read_to_string(&log_path),
+            &log_path,
+            &mut listening,
+            probe_healthz,
+        )
     };
     let mut clock = SystemClock(Instant::now());
     let ready = wait_ready(probe, &mut clock, demo.ready_timeout, READY_INTERVAL)?;
-    let Some(addr) = ready else {
-        let at = listening.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], demo.port)));
-        return Err(Error::NotReady {
-            url: format!("http://{at}"),
-            timeout: demo.ready_timeout,
-        });
-    };
+    let addr = settle(ready, listening, demo.port, demo.ready_timeout)?;
 
     // The port the server really holds (the one asked for, unless that was 0): the recording shows the
     // commands as typed for that port, as if it had been asked for.
