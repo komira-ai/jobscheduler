@@ -278,3 +278,21 @@ fn a_mount_in_the_folders_is_an_error() {
     pretend_mounted(&[]);
     assert_eq!(got.unwrap(), Vec::<PathBuf>::new());
 }
+
+/// Asserts the mount check itself, with no pretended mount: an entry's metadata on the
+/// folders' own device is not elsewhere, and the same metadata with another device id
+/// is. It catches a check that compares nothing (or compares the wrong field), which the
+/// pretended mounts of the other tests would not reveal.
+#[test]
+fn a_different_device_id_is_another_filesystem() {
+    let dir = scratch("device");
+    let path = dir.join("ab");
+    fs::create_dir_all(&path).unwrap();
+    let stat = rustix::fs::stat(&path).unwrap();
+    assert!(!elsewhere(&stat, stat.st_dev, &path));
+    let mut other = stat;
+    other.st_dev = stat.st_dev ^ 1;
+    assert!(elsewhere(&other, stat.st_dev, &path));
+    // Seen from the other side: the folders on another device than the entry.
+    assert!(elsewhere(&stat, other.st_dev, &path));
+}
