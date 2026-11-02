@@ -15,4 +15,6 @@ pub(crate) mod place;
 mod probe;
 
 #[cfg(test)]
+mod backfill_tests;
+#[cfg(test)]
 mod wiring_tests;

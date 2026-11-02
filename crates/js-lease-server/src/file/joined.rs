@@ -11,6 +11,7 @@
 //! exec  = "container"                    # optional; absent or "none": no host contract
 //! max_machines = 6                       # required; from 1 to 262144
 //! join_token_file = "/etc/js/join-token" # optional shared pool token
+//! share_class = "share"                  # optional; leases that share a host, js-sched only
 //! heartbeat_interval = "10s"             # optional
 //! grace              = "1m"              # optional
 //! lost_retention     = "24h"             # optional
@@ -47,7 +48,7 @@ use js_types::{
 };
 
 use super::{Pool, Read, Registering, Section, registry_pool};
-use crate::agent_pool::{MAX_MACHINES, capabilities_fit, shipped_class};
+use crate::agent_pool::{MAX_MACHINES, capabilities_fit, share_class, shipped_class};
 use crate::agent_tokens::AgentTokens;
 use crate::config::Token;
 use crate::error::StartupError;
@@ -65,6 +66,7 @@ const KEYS: &[&str] = &[
     "grace",
     "lost_retention",
     "join_token_file",
+    "share_class",
 ];
 
 const SHAPE_KEYS: &[&str] = &["cpu_millis", "memory_bytes", "gpus", "gpu_class"];
@@ -125,6 +127,9 @@ pub struct JoinedPool {
     pub lost_retention: Duration,
     /// The file of the shared pool token, when the pool has one.
     pub join_token_file: Option<PathBuf>,
+    /// A class that books part of a host, served beside `class` so that its leases share a
+    /// host with room (`server.placement = "js-sched"` only), when the pool has one.
+    pub share_class: Option<String>,
 }
 
 impl JoinedPool {
@@ -201,6 +206,7 @@ impl JoinedPool {
                 Duration::from_millis(DEFAULT_LOST_RETENTION_MS),
             )?,
             join_token_file: s.path("join_token_file")?,
+            share_class: s.string("share_class")?,
         };
         pool.validate()?;
         Ok(pool)
@@ -261,6 +267,14 @@ impl JoinedPool {
             self.exec,
             self.memory_percent,
         )?;
+        let pool = match &self.share_class {
+            Some(name) => match share_class(name) {
+                Ok(share) => pool.with_share_class(share).map_err(|err| err.to_string()),
+                Err(err) => Err(err),
+            },
+            None => Ok(pool),
+        };
+        let pool = pool.map_err(|reason| place.fail("share_class", &reason))?;
         let pool = match pool.with_timing(millis(self.heartbeat_interval), millis(self.grace)) {
             Ok(pool) => pool,
             Err(err) => return Err(place.fail("grace", &format!("with heartbeat_interval: {err}"))),
@@ -561,5 +575,23 @@ mod tests {
             let got = refused(table(&format!("{head}{tail}")));
             assert!(got.starts_with(said), "{head}{tail}: {got}");
         }
+    }
+
+    /// A joined pool's `share_class` is carried to the registry's pool as a class that
+    /// books part of a host; one with the pool's own name is refused naming the pool and
+    /// the key. It catches the key read and dropped on the way to the registry.
+    #[test]
+    fn a_joined_pools_share_class_reaches_the_registry() {
+        let pool = JoinedPool::from_table(with("share_class = \"share\"")).unwrap();
+        assert_eq!(pool.share_class.as_deref(), Some("share"));
+        let built = pool.validate().unwrap();
+        assert_eq!(built.share_class().unwrap().id().as_str(), "share");
+        let own = refused(with("share_class = \"whole-node\""));
+        assert_eq!(
+            own,
+            "pool \"nodes\": share_class: must name a class that books part of a host, other than the pool's class"
+        );
+        let bad = refused(with("share_class = \"Not An Id\""));
+        assert!(bad.starts_with("pool \"nodes\": share_class: "), "{bad}");
     }
 }

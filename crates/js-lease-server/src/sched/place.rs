@@ -503,4 +503,94 @@ mod tests {
         let unknown = Err(RefusalCode::ProbeHostUnknown);
         assert_eq!(placer.admit_probe(&probe, &a, None), unknown);
     }
+
+    /// A placer that backfills, trusting any wall time.
+    fn backfilling() -> SchedPlacer {
+        SchedPlacer::new(Backfill::enforced(Duration::MAX))
+    }
+
+    /// `hosts` marked, each with the time left until its tail ends in seconds (`None`: not
+    /// known).
+    fn marks(hosts: &[(&str, Option<u64>)]) -> MarkedTails {
+        let left = |s: &Option<u64>| s.map(Duration::from_secs);
+        let named = hosts
+            .iter()
+            .map(|(h, s)| (HostId::new(h).unwrap(), left(s)));
+        named.collect()
+    }
+
+    /// Catches: a start the scheduler cannot build (a host with no `arch`) falling back
+    /// onto a marked host. With the marked `a` first and the unmarked `b` after it, `b` is
+    /// booked and counted; with every host marked, none is booked and nothing is counted.
+    #[test]
+    fn an_unmappable_start_falls_back_to_the_first_unmarked_host_only() {
+        let placer = backfilling();
+        let open = [host("a", x86(), &[]), host("b", shape(&[]), &[])];
+        let a_marked = marks(&[("a", Some(600))]);
+        assert_eq!(placer.pick(&spec(), &open, &a_marked), Some(1));
+        let both = marks(&[("a", Some(600)), ("b", Some(600))]);
+        assert_eq!(placer.pick(&spec(), &open, &both), None);
+        let counted = Fallbacks {
+            unmappable: 1,
+            declined: 0,
+        };
+        assert_eq!(placer.fallbacks(), counted);
+    }
+
+    /// Catches: a start the scheduler declines falling back onto a marked host. `a` is
+    /// marked with a tail too short for the 60 s lease and `b` is full in the scheduler's
+    /// eyes: the scheduler places it nowhere, and the registry's `b` is booked and counted;
+    /// with `b` marked too, none is booked and nothing more is counted.
+    #[test]
+    fn a_declined_start_falls_back_to_the_first_unmarked_host_only() {
+        let placer = backfilling();
+        let open = [host("a", x86(), &[1000]), host("b", x86(), &[8000])];
+        let short = marks(&[("a", Some(100))]);
+        assert_eq!(placer.pick(&spec(), &open, &short), Some(1));
+        let both = marks(&[("a", Some(100)), ("b", Some(600))]);
+        assert_eq!(placer.pick(&spec(), &open, &both), None);
+        let counted = Fallbacks {
+            unmappable: 0,
+            declined: 1,
+        };
+        assert_eq!(placer.fallbacks(), counted);
+    }
+
+    /// Catches: one marked host's tail read for another. Four marked hosts, each with a
+    /// lease: `a`'s tail has 100 s left (too short for a 60 s lease and its minute), `b`'s
+    /// is unknown, `c`'s is past, and `d`'s has 600 s left. In every order they are offered
+    /// in, the lease goes to `d`; with `d` unmarked and full it goes nowhere.
+    #[test]
+    fn each_marked_host_is_held_to_its_own_tail() {
+        let tails = marks(&[
+            ("a", Some(100)),
+            ("b", None),
+            ("c", Some(0)),
+            ("d", Some(600)),
+        ]);
+        let orders = [
+            ["a", "b", "c", "d"],
+            ["d", "c", "b", "a"],
+            ["c", "a", "d", "b"],
+        ];
+        for names in orders {
+            let open: Vec<Candidate> = names.iter().map(|n| host(n, x86(), &[1000])).collect();
+            let picked = backfilling().pick(&spec(), &open, &tails).unwrap();
+            assert_eq!(names[picked], "d", "{names:?}");
+        }
+        let open = [host("a", x86(), &[1000]), host("b", x86(), &[1000])];
+        let none_fit = marks(&[("a", Some(100)), ("b", Some(119))]);
+        assert_eq!(backfilling().pick(&spec(), &open, &none_fit), None);
+        let fits = marks(&[("a", Some(100)), ("b", Some(120))]);
+        assert_eq!(backfilling().pick(&spec(), &open, &fits), Some(1));
+    }
+
+    /// Catches: the default placer backfilling: it books no marked host, whatever its
+    /// tail.
+    #[test]
+    fn the_default_placer_books_no_marked_host() {
+        let open = [host("a", x86(), &[1000]), host("b", x86(), &[1000])];
+        let tails = marks(&[("a", Some(3_600)), ("b", Some(3_600))]);
+        assert_eq!(SchedPlacer::default().pick(&spec(), &open, &tails), None);
+    }
 }

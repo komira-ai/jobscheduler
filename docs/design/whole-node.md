@@ -112,7 +112,7 @@ exist. (The scheduler-side mark is `reserved`; the agent-announced phase `draini
   and counts only where the max wall is enforced, up to a ceiling; work with no known end, a host with an unknown tail and a tail already
   past take none. In `js-sched` this is `Scheduler::with_backfill` (off unless the caller says its bounds are enforced, with the ceiling
   it enforces) and applies to every held worker, a blocked head's too; the kept start never moves later. On the lease server it applies
-  under `--placement js-sched`, to a lease of a class that books part of a host and is not a probe, with `server.max_lease_wall` as the
+  under `--placement js-sched`, to a lease of the pool's `share_class` that is not a probe, with `server.max_lease_wall` as the
   ceiling (the lease table ends every lease at its wall); without it, and for every other start, a reserved host takes nothing new.
 
 - A lease ends by release, by TTL, or by its max wall time, whichever is first. The renewal answer of a lease on a reserved host carries

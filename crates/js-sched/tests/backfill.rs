@@ -15,6 +15,9 @@ mod digest;
 #[path = "whole_rig/mod.rs"]
 mod whole_rig;
 
+#[path = "load_curves/mod.rs"]
+mod load_curves;
+
 use std::time::Duration;
 
 use crate::whole_rig::{Farm, request, secs, w};
@@ -358,4 +361,127 @@ fn a_probe_on_a_worker_held_outside_is_placed_only_as_backfill() {
     };
     assert!(probe(&mut f, secs(600)).is_none());
     assert_eq!(probe(&mut f, secs(300)).map(|g| g.worker), Some(w("a")));
+}
+
+/// Catches: a job that fits the tail placed on the held worker whatever its room or
+/// platform. At 10 s a job of 300 s fits `a`'s tail, but one asking 7.5 of `a`'s 8 cores
+/// (one is booked) has no room there and one that needs macOS does not match `a`; neither
+/// is placed. The same job with one core and no platform is.
+#[test]
+fn a_job_that_fits_the_tail_still_needs_room_and_a_platform_match() {
+    let mut f = enforced();
+    marked(&mut f);
+    f.at(10_000);
+    f.beat();
+    let ask = |f: &mut Farm, change: &dyn Fn(&mut Request)| {
+        f.next_n += 1;
+        let operation = f.s.next_operation();
+        f.s.set_max_wall(operation, secs(300));
+        let mut job = request(f.next_n, LeaseKind::Action);
+        change(&mut job);
+        f.submit(job);
+        f.grants().into_iter().find(|g| g.operation == operation)
+    };
+    let big =
+        |r: &mut Request| r.resources = js_types::sched::Resources::new(7_500, whole_rig::GIB);
+    assert!(ask(&mut f, &big).is_none());
+    let mac = |r: &mut Request| {
+        r.needs = js_caps::Request::from_platform([("OSFamily", "macos")]).unwrap();
+    };
+    assert!(ask(&mut f, &mac).is_none());
+    let plain = ask(&mut f, &|_| {});
+    assert_eq!(plain.map(|g| g.worker), Some(w("a")));
+}
+
+/// Catches: an action that owns its worker delayed past its start by backfill. It holds
+/// `a`, whose lease ends at 600 s; jobs of 120 s are submitted every 100 s and end at
+/// their bound; those that fit the tail run on `a` and the one at 500 s waits; the owner
+/// action is placed on `a` at 600 s when the lease ends, ahead of the waiting job.
+#[test]
+fn an_owner_action_starts_at_its_tail_through_a_stream_of_backfill() {
+    let mut f = enforced();
+    f.worker("a");
+    let lease = f.lease_on("a", secs(600));
+    f.next_n += 1;
+    let owner = f.s.next_operation();
+    f.submit(Request {
+        whole_worker: true,
+        ..request(f.next_n, LeaseKind::Action)
+    });
+    assert!(f.grants().is_empty());
+    let mut placed = Vec::new();
+    for at in [100_000, 200_000, 300_000, 400_000, 500_000] {
+        assert!(f.advance(at).is_empty());
+        if let (_, Some(grant)) = job_of(&mut f, Qos::Ci, Some(secs(120))) {
+            placed.push(at);
+            f.at(at + 120_000);
+            f.finish(&grant);
+            f.at(at);
+        }
+    }
+    assert_eq!(placed, [100_000, 200_000, 300_000, 400_000]);
+    assert!(f.advance(599_000).is_empty());
+    f.at(600_000);
+    f.finish(&lease);
+    let grants = f.grants();
+    let ops: Vec<OperationId> = grants.iter().map(|g| g.operation).collect();
+    assert_eq!(ops, [owner]);
+}
+
+/// Catches: a moved hold keeping the start time of the worker it left, or the worker it
+/// left still held. `a` carries a lease of 600 s and `b` one of 900 s, so the request
+/// holds `a` with its start at 600 s. A job of an hour ahead of the request in queue
+/// order lands on `a`, whose tail is now an hour away, so the hold moves to `b` and takes
+/// `b`'s start, 900 s. At 20 s a job of 700 s fits that start (but not 600 s) and is placed
+/// on `b`, the less loaded worker; with the old start kept it would go to `a`.
+#[test]
+fn a_moved_hold_takes_its_new_workers_start_and_frees_the_old_one() {
+    let mut f = enforced();
+    f.worker("a");
+    f.worker("b");
+    f.lease_on("a", secs(600));
+    f.lease_on("b", secs(900));
+    let whole = f.whole();
+    assert_eq!(f.held_for(whole), Some(&w("a")));
+    f.at(10_000);
+    f.beat();
+    let (_, ahead) = job_of(&mut f, Qos::Interactive, Some(secs(3_600)));
+    assert_eq!(ahead.map(|g| g.worker), Some(w("a")));
+    assert!(f.grants().is_empty());
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+    f.at(20_000);
+    f.beat();
+    assert_eq!(job(&mut f, Some(secs(700))), Some(w("b")));
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+}
+
+/// Catches: an underestimated tail read as still to come, or as a free worker. Every key's
+/// P90 is a minute: `a`'s lease may run an hour but is estimated to end at 60 s, which is
+/// the tail the request holds `a` by. At 30 s a job (a minute by its P90) does not fit; at
+/// 90 s the lease still runs past its estimate, the tail is past, and not even a job of a
+/// second is placed, nor is the request; it is placed when the lease ends, at 200 s.
+#[test]
+fn a_lease_that_outlives_its_p90_stops_backfill_and_the_request_waits_for_it() {
+    let curves = load_curves::Curves::new("main");
+    curves.set_life_all(1);
+    let s = Scheduler::new(1)
+        .with_load_config(booked::booked())
+        .with_whole_node(WholeNodeConfig::dedicated(4))
+        .with_curves(curves)
+        .with_backfill(Backfill::enforced(DAY));
+    let mut f = Farm::new(s);
+    f.worker("a");
+    let lease = f.lease_on("a", secs(3_600));
+    let whole = f.whole();
+    assert_eq!(f.held_for(whole), Some(&w("a")));
+    f.at(30_000);
+    f.beat();
+    assert_eq!(job(&mut f, Some(secs(3_600))), None);
+    assert!(f.advance(90_000).is_empty());
+    assert_eq!(job(&mut f, Some(secs(1))), None);
+    assert!(f.advance(199_000).is_empty());
+    f.at(200_000);
+    f.finish(&lease);
+    let ops: Vec<OperationId> = f.grants().iter().map(|g| g.operation).collect();
+    assert_eq!(ops, [whole]);
 }

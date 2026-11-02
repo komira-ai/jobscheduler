@@ -66,7 +66,8 @@ impl Backfill {
 
 /// Whether work that counts `duration` ([`Backfill::duration`]) may start at `now` on a
 /// worker held until `start`: it ends, with the margin to spare, no later than `start`.
-/// Fails closed when either is unknown, and for a start already past.
+/// Fails closed when either is unknown, for a start already past, and when the end with
+/// the margin is past the end of time.
 pub(crate) fn fits(now: u64, duration: Option<u64>, start: Option<u64>) -> bool {
     fits_in_tail(now, duration, start, DEFAULT_BACKFILL_MARGIN_MS)
 }
@@ -141,6 +142,11 @@ mod tests {
         assert!(!fits(now, Some(0), Some(now - 1)));
         assert!(!fits(now, None, Some(u64::MAX)));
         assert!(!fits(now, Some(1), None));
+        // A start at the end of time: 30 s left is less than the margin, and a start
+        // equal to now leaves nothing.
+        assert!(!fits(u64::MAX - 30_000, Some(1), Some(u64::MAX)));
+        assert!(!fits(u64::MAX, Some(0), Some(u64::MAX)));
+        assert!(fits(u64::MAX - MIN - 1, Some(1), Some(u64::MAX)));
     }
 
     /// Catches: a hold made again taking a later start (work placed since would extend

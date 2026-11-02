@@ -14,7 +14,7 @@ use std::path::Path;
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, limits};
 use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig, WholeNodeConfig};
 use js_types::{
-    Admission, ClassId, ExecMode, MemoryPercent, ProviderId, ResourceClass, Resources, Shape,
+    Admission, ClassId, Dims, ExecMode, MemoryPercent, ProviderId, ResourceClass, Resources, Shape,
 };
 use serde::Deserialize;
 use tracing::warn;
@@ -57,6 +57,8 @@ struct RawPool {
     prepare_timeout: Option<String>,
     max_replace: Option<u32>,
     regain_grace: Option<String>,
+    // A class that books part of a host, served beside `class` (`--placement js-sched`).
+    share_class: Option<String>,
 }
 
 impl RawPool {
@@ -195,6 +197,12 @@ fn parse_with(
         Some(exec) => pool.with_exec(exec),
         None => pool,
     };
+    let pool = match raw.share_class.as_deref() {
+        Some(name) => pool
+            .with_share_class(share_class(name).map_err(|err| format!("share_class: {err}"))?)
+            .map_err(|err| format!("share_class: {err}"))?,
+        None => pool,
+    };
     match admission {
         Admission::Book(_) => Err(MIXED_UNSERVED.to_string()),
         _ => Ok(pool),
@@ -264,6 +272,13 @@ fn millis_or_zero(field: &str, text: &Option<String>, default: u64) -> Result<u6
 fn class(name: &str) -> Result<ResourceClass, String> {
     let id = ClassId::new(name).map_err(|err| format!("class: {err}"))?;
     Ok(shipped_class(id))
+}
+
+/// The class a pool's `share_class` names: one that books part of a host, gated on no
+/// dimension beyond what the host's room holds.
+pub(crate) fn share_class(name: &str) -> Result<ResourceClass, String> {
+    let id = ClassId::new(name).map_err(|err| err.to_string())?;
+    Ok(ResourceClass::new(id, Admission::Book(Dims::new()), 0))
 }
 
 /// The class `id` names: a shipped class, else one that books a whole host (see [`class`]).
@@ -787,5 +802,23 @@ mod tests {
             MIXED_UNSERVED,
             "a mixed pool (a class that books part of a host) is not served by this server yet"
         );
+    }
+
+    /// A pool's `share_class` is read as a class that books part of a host, served beside
+    /// the pool's class; one with the pool's own name, and one that is not a class id, are
+    /// refused naming the key. It catches the key dropped, or read as a whole-host class.
+    #[test]
+    fn a_share_class_is_read_beside_the_pools_class() {
+        let pool = parse(&whole("share_class = \"share\"")).unwrap();
+        let share = pool.share_class().unwrap();
+        assert_eq!(share.id().as_str(), "share");
+        assert!(matches!(share.admission(), Admission::Book(_)));
+        assert!(parse(&whole("")).unwrap().share_class().is_none());
+        assert_eq!(
+            parse(&whole("share_class = \"whole-node\"")).unwrap_err(),
+            "share_class: must name a class that books part of a host, other than the pool's class"
+        );
+        let bad = parse(&whole("share_class = \"Not An Id\"")).unwrap_err();
+        assert!(bad.starts_with("share_class: "), "{bad}");
     }
 }

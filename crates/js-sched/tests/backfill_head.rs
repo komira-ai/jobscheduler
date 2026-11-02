@@ -36,8 +36,14 @@ fn backfilling(mut r: Rig, whole_node: bool) -> Rig {
 }
 
 /// Places four actions of a core on `worker`, each charged a core, with `walls` as their
-/// max wall times in seconds, the other workers cordoned for the round.
-fn place_four(r: &mut Rig, worker: &str, others: &[&str], walls: [u64; 4]) {
+/// max wall times in seconds, the other workers cordoned for the round: their starts, in
+/// the order of `walls`.
+fn place_four(
+    r: &mut Rig,
+    worker: &str,
+    others: &[&str],
+    walls: [u64; 4],
+) -> Vec<js_types::sched::StartLease> {
     for other in others {
         r.feed(Event::Cordon { worker: w(other) });
     }
@@ -47,24 +53,28 @@ fn place_four(r: &mut Rig, worker: &str, others: &[&str], walls: [u64; 4]) {
     for (op, wall) in ops.iter().zip(walls) {
         r.s.set_max_wall(*op, Duration::from_secs(wall));
     }
-    assert_eq!(r.tick().len(), 4);
+    let mut starts = r.tick();
+    assert_eq!(starts.len(), 4);
     for other in others {
         r.feed(Event::Uncordon { worker: w(other) });
     }
     assert_eq!(r.held(worker).len(), 4);
+    starts.sort_by_key(|s| ops.iter().position(|op| *op == s.operation));
+    starts
 }
 
 /// Workers `a` (four leases ending at 200 s) and `b` (two ending at 100 s, two at 900 s),
 /// and a head needing 6 cores that holds `b`: where they free up first, at 100 s, or the
 /// only worker left when `a` is cordoned `early`, before the head. `a` is cordoned after,
-/// if not before, so later work can go to `b` or nowhere. The head.
-fn head_on_b(r: &mut Rig, early: bool) -> OperationId {
+/// if not before, so later work can go to `b` or nowhere. The head, and `b`'s four starts
+/// (the two of 100 s first).
+fn head_on_b(r: &mut Rig, early: bool) -> (OperationId, Vec<js_types::sched::StartLease>) {
     r.up("a", node());
     r.up("b", node());
     r.baseline("a");
     r.baseline("b");
     place_four(r, "a", &["b"], [200; 4]);
-    place_four(r, "b", &["a"], [100, 100, 900, 900]);
+    let on_b = place_four(r, "b", &["a"], [100, 100, 900, 900]);
     if early {
         r.feed(Event::Cordon { worker: w("a") });
     }
@@ -74,7 +84,7 @@ fn head_on_b(r: &mut Rig, early: bool) -> OperationId {
     if !early {
         r.feed(Event::Cordon { worker: w("a") });
     }
-    head
+    (head, on_b)
 }
 
 /// Submits an action of a core that may run `wall_s`, and runs a round at the time now:
@@ -95,7 +105,7 @@ fn small(r: &mut Rig, wall_s: u64) -> Option<String> {
 #[test]
 fn a_job_ending_before_the_heads_start_backfills_and_one_ending_after_does_not() {
     let mut r = backfilling(Rig::on(), true);
-    let head = head_on_b(&mut r, false);
+    let (head, _) = head_on_b(&mut r, false);
     assert_eq!(small(&mut r, 40), None);
     assert_eq!(small(&mut r, 30).as_deref(), Some("b"));
     assert_eq!(r.s.head_hold(head), Some(&w("b")));
@@ -106,7 +116,7 @@ fn a_job_ending_before_the_heads_start_backfills_and_one_ending_after_does_not()
 #[test]
 fn without_whole_node_settings_a_heads_hold_takes_no_backfill() {
     let mut r = backfilling(Rig::on(), false);
-    let head = head_on_b(&mut r, true);
+    let (head, _) = head_on_b(&mut r, true);
     assert_eq!(small(&mut r, 30), None);
     assert_eq!(r.s.head_hold(head), Some(&w("b")));
 }
@@ -144,4 +154,57 @@ fn the_estimate_of_a_job_is_the_p90_of_its_key_not_its_life() {
     };
     assert!(keyed(&mut r, 240_000));
     assert!(!keyed(&mut r, 240_001));
+}
+
+/// Catches: a job that fits the head's start placed whatever the load. At 1 s a job of
+/// 30 s fits the start (100 s), but one charged 5 cores would take `b` (4 cores charged)
+/// past its 8.8 and is refused by the predicate; a job of a core is placed.
+#[test]
+fn a_job_that_fits_the_heads_start_is_still_held_to_the_load() {
+    let mut r = backfilling(Rig::on(), true);
+    head_on_b(&mut r, false);
+    let heavy = r.action(5_000, GIB, Some(warm(5_000, 0)));
+    r.s.set_max_wall(heavy, Duration::from_secs(30));
+    assert!(r.tick().iter().all(|s| s.operation != heavy));
+    assert_eq!(small(&mut r, 30).as_deref(), Some("b"));
+}
+
+/// Catches: a head delayed past its start by backfill. The head holds `b` until 100 s;
+/// jobs of 30 s at 1, 5 and 9 s end by 39 s and are placed on `b`, one at 11 s would end at
+/// 41 s and is not; each ends at its bound, and at 100 s, when `b`'s two leases of 100 s
+/// end, the head starts on `b`.
+#[test]
+fn a_head_starts_at_its_start_through_a_stream_of_backfill() {
+    let mut r = backfilling(Rig::on(), true);
+    let (head, on_b) = head_on_b(&mut r, false);
+    let mut ran = Vec::new();
+    for at in [1_000, 5_000, 9_000] {
+        r.ms = at;
+        let op = r.action(1_000, GIB, Some(warm(1_000, 0)));
+        r.s.set_max_wall(op, Duration::from_secs(30));
+        let start = r
+            .tick()
+            .into_iter()
+            .find(|s| s.operation == op)
+            .expect("backfilled");
+        assert_eq!(start.worker, w("b"));
+        ran.push(start);
+    }
+    r.ms = 11_000;
+    assert_eq!(small(&mut r, 30), None);
+    for (start, end) in ran.iter().zip([31_000, 35_000, 39_000]) {
+        r.ms = end;
+        r.beat("a", None);
+        r.beat("b", None);
+        r.finish(start);
+        assert!(r.tick().iter().all(|s| s.operation != head));
+    }
+    r.ms = 100_000;
+    r.beat("a", None);
+    r.beat("b", None);
+    for start in &on_b[..2] {
+        r.finish(start);
+    }
+    let started = r.tick().into_iter().find(|s| s.operation == head);
+    assert_eq!(started.map(|s| s.worker), Some(w("b")));
 }
