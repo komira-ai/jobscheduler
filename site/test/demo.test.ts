@@ -4,12 +4,16 @@
 // recording replaced and the page not), a demo in the wrong place (it follows the install block and comes before "What
 // it does"), a demo with no link to the install page, a client command in the recording that `js` does not take (a verb,
 // a flag or an argument that crates/js-cli/src/lib.rs does not document, or a flag it requires and the command leaves
-// out), a server flag that crates/js-lease-server/src/lib.rs does not document, and a script that does not reproduce
-// the recording. The recording itself is the output of site/tools/demo.sh; no test runs it, because it builds the
-// workspace.
+// out), a server flag that crates/js-lease-server/src/lib.rs does not document, and a recording whose commands are no
+// longer the ones `cargo xtask site-demo` (crates/xtask/src/site_demo.rs) runs. The recording itself is the output of
+// that command; no site test runs it, because it builds the workspace. The Rust test
+// `committed_transcript_shows_the_commands_this_verb_runs` (crates/xtask/tests/site_demo.rs) reads this transcript and
+// compares every `$` line with the commands the Rust code builds, so a command changed in one place and not the other
+// fails there; the tests here hold the other side: that the Rust source still has every word of every recorded command,
+// and that the Rust test is still there and still reads this file.
 
 import assert from 'node:assert/strict';
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { REPO, SITE } from './support';
@@ -18,6 +22,9 @@ const transcript = readFileSync(join(SITE, 'test', 'demo.transcript'), 'utf8');
 const indexHtml = readFileSync(join(SITE, 'content', 'index.html'), 'utf8');
 const cliDocs = readFileSync(join(REPO, 'crates', 'js-cli', 'src', 'lib.rs'), 'utf8');
 const serverDocs = readFileSync(join(REPO, 'crates', 'js-lease-server', 'src', 'lib.rs'), 'utf8');
+const demoSource = readFileSync(join(REPO, 'crates', 'xtask', 'src', 'site_demo.rs'), 'utf8');
+const demoRustTest = readFileSync(join(REPO, 'crates', 'xtask', 'tests', 'site_demo.rs'), 'utf8');
+const xtaskDocs = readFileSync(join(REPO, 'crates', 'xtask', 'src', 'lib.rs'), 'utf8');
 
 /** The text of the demo block of a page: the <pre> inside the section with id "demo", markup removed and entities read. */
 function demoText(html: string): string {
@@ -199,12 +206,50 @@ test('the recording keeps to the address 127.0.0.1 and to relative paths', () =>
   assert.doesNotMatch(transcript, /(^|[\s=])\/(home|Users|root|tmp|var)\//);
 });
 
-test('site/tools/demo.sh is executable, builds the two programs, and runs each client verb of the recording', () => {
-  const path = join(SITE, 'tools', 'demo.sh');
-  assert.ok((statSync(path).mode & 0o111) !== 0, 'demo.sh is executable');
-  const script = readFileSync(path, 'utf8');
-  assert.match(script, /cargo build --release -p js-lease-server -p js-cli/);
-  assert.match(script, /--boot initialise/);
-  for (const verb of ['acquire', 'list', 'release']) assert.match(script, new RegExp(`lease ${verb}`), verb);
-  assert.match(script, /kill "\$server_pid"/);
+/** Comment text of a Rust file: the `//`, `//!` and `///` prefixes dropped and white space collapsed. */
+const prose = (source: string): string => source.replace(/^\s*\/\/[!/]? ?/gm, '').replace(/\s+/g, ' ');
+
+/** The words of a recorded `js` or `js-lease-server` command that the Rust source does not spell out as a string literal. */
+function wordsMissingFromSource(command: string, source: string): string[] {
+  const missing: string[] = [];
+  for (const word of command.split(/\s+/).slice(1).filter((w) => w !== '' && w !== '&')) {
+    if (source.includes(`"${word}"`)) continue;
+    // The address is the default port; a lease id is what the client printed.
+    if (word === 'http://127.0.0.1:7300' && /DEFAULT_PORT: u16 = 7300/.test(source)) continue;
+    if (/^\d+-\d+$/.test(word)) continue;
+    missing.push(word);
+  }
+  return missing;
+}
+
+test('crates/xtask/src/site_demo.rs spells out every word of every command in the recording', () => {
+  const programs = commandsOf(transcript).filter((c) => /^js(-lease-server)? /.test(c));
+  assert.equal(programs.length, 5);
+  for (const c of programs) assert.deepEqual(wordsMissingFromSource(c, demoSource), [], c);
+  for (const program of ['js-lease-server', 'js']) assert.match(demoSource, new RegExp(`"${program}"`), program);
+  assert.match(demoSource, /DEFAULT_PORT: u16 = 7300/);
+  // The command that writes the token file is built from the token and the file name the source holds.
+  const token = commandsOf(transcript).find((c) => c.startsWith('printf '))!;
+  assert.match(token, /a-local-token-of-at-least-32-bytes/);
+  assert.match(demoSource, /TOKEN: &str = "a-local-token-of-at-least-32-bytes"/);
+});
+
+test('a recorded command with a word the Rust source does not have is found (the check can fail)', () => {
+  assert.deepEqual(wordsMissingFromSource('js lease acquire --class gpu-host --gpus 1 --turbo', demoSource), ['--turbo']);
+  assert.deepEqual(wordsMissingFromSource('js lease list', 'no such source'), ['lease', 'list']);
+});
+
+test('the command the page names is a verb of xtask, and the Rust test that holds the commands to this recording is there', () => {
+  assert.match(prose(demoSource), /It builds the lease server and the client, leases a host from a static host file/);
+  assert.match(prose(xtaskDocs), /`site-demo \[--out <path>\]/);
+  assert.match(demoRustTest, /fn committed_transcript_shows_the_commands_this_verb_runs\(\)/);
+  assert.match(demoRustTest, /site\/test\/demo\.transcript/);
+  assert.match(demoRustTest, /assert_eq!\(shown, commands\(7300, id\)\)/);
+  const section = /<section class="band" id="demo">([\s\S]*?)<\/section>/.exec(indexHtml)![1];
+  assert.match(section, /<code>cargo xtask site-demo<\/code>/);
+  assert.doesNotMatch(section, /demo\.sh/);
+});
+
+test('site/tools/demo.sh is gone: no shell script holds the recording logic', () => {
+  assert.equal(existsSync(join(SITE, 'tools', 'demo.sh')), false);
 });

@@ -26,7 +26,10 @@ crates/js-server-core/src/
 crates/js-sizing/src/
 crates/js-types/src/
 crates/js-whole/src/
+crates/xtask/src/lib.rs
+crates/xtask/src/site_demo.rs
 crates/xtask/tests/layering.rs
+crates/xtask/tests/site_demo.rs
 .github/workflows/ci.yml
 .github/workflows/js-agent-deb.yml
 .github/workflows/js-agent-macos-pkg.yml

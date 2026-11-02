@@ -42,7 +42,7 @@ lease 1-1 host gpu-01 expires 1793614960284
 <span class="p">$</span> js --server http://127.0.0.1:7300 --token-file client-token lease release 1-1
 lease 1-1 freed
 <span class="p">$</span> js --server http://127.0.0.1:7300 --token-file client-token lease list</pre></div>
-    <p><code>site/tools/demo.sh</code> in the repository builds both programs and runs these commands again; the recording is <code>site/test/demo.transcript</code>. The <a href="install.html">install page</a> has the steps for a pool of agents.</p>
+    <p><code>cargo xtask site-demo</code> in the repository builds both programs and runs these commands again; the recording is <code>site/test/demo.transcript</code>. The <a href="install.html">install page</a> has the steps for a pool of agents.</p>
   </div>
 </section>
 
