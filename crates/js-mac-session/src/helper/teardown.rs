@@ -2,8 +2,9 @@
 //! fail with ([`TeardownError`], worded for the refusal at the protocol boundary).
 //!
 //! The order the helper's header describes: `kill-uid` kills, then boots out those of
-//! the uid's launchd domains that launchd has, until neither a process nor a domain is left; `user-delete` asks for
-//! the uid's `DARWIN_USER_DIR` while the record is there, settles (no process, no
+//! the uid's launchd domains that launchd has, until neither a process nor a domain is
+//! left; `user-delete` asks for the uid's `DARWIN_USER_DIR` while the record is there,
+//! settles (no process, no
 //! domain, and still no process after the bootout), sweeps, removes the uid's entry
 //! under the per-user folders, settles again, and only then deletes the record. A step
 //! that fails leaves the lease live in the ledger, so its uid is held.
