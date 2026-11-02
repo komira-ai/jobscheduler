@@ -16,6 +16,7 @@ mod lease_port;
 mod lease_port_transport;
 mod lease_stub;
 mod machine;
+mod machine_root;
 mod params;
 mod ports;
 mod record;

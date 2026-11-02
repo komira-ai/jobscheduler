@@ -360,6 +360,22 @@ fn a_negative_exit_code_is_a_bad_end() {
 }
 
 #[test]
+fn a_spawning_service_reads_as_a_start_however_it_last_ended() {
+    // launchd is starting the program now: a start under way, not the throttle wait after a
+    // crash (`spawn scheduled` is that), so how the last run ended does not make it a restart.
+    for extra in [
+        "\truns = 2\n\tlast exit code = 1\n",
+        "\truns = 2\n\tlast exit code = (never exited)\n\tlast terminating signal = Killed: 9\n",
+        "\truns = 2\n\tlast exit code = -9\n",
+        "\truns = 1\n\tlast exit code = 0\n",
+        "\truns = 0\n\tlast exit code = (never exited)\n",
+    ] {
+        assert_reads("spawning", extra, "activating", "start");
+        assert!(!read("spawning", extra).crashed(), "{extra:?}");
+    }
+}
+
+#[test]
 fn only_the_exact_exit_status_113_means_the_service_is_not_loaded() {
     // Every operation takes 113 as "not loaded"...
     let gone =

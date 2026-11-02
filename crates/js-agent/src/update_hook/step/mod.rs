@@ -21,7 +21,7 @@ use crate::facts::CommandRunner;
 
 use super::{
     Class, Declaration, DirStat, Done, Held, LeaseError, Outcome, Params, Ports, Reason, Record,
-    Report, StateError, validate,
+    Report, StateError, Step, validate,
 };
 
 pub use cleanup::cleanup;
@@ -42,6 +42,13 @@ pub struct Env<'a> {
     /// How a directory of the state directory's path is looked at (see
     /// [`fd_stat`](super::fd_stat)).
     pub stat: &'a dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
+}
+
+/// Whether `step` on a host whose record is `record` is past its commit, so that every ending
+/// of it says `reversible: false`: `cutover` and `rollback` once the first irreversible act is
+/// begun (the stop, or a first install's move of the link; see `cutover`).
+pub(crate) fn committed(step: Step, record: &Record) -> bool {
+    matches!(step, Step::Cutover | Step::Rollback) && cutover::begun(record)
 }
 
 /// A step that ended without a body of its own to say more: success, nothing to tell.

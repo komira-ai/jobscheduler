@@ -177,6 +177,12 @@ impl<'a> LaunchUnits<'a> {
         self
     }
 
+    /// The file the kickstart waits for, when one was given: for the test of the Mac's wiring.
+    #[cfg(test)]
+    pub(super) fn gate(&self) -> Option<&Path> {
+        self.gate
+    }
+
     fn launchctl(&self, args: &[&str]) -> Result<String, String> {
         self.runner.run(LAUNCHCTL, args)
     }
