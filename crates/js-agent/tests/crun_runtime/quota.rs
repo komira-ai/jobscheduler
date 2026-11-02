@@ -11,12 +11,12 @@
 //! An XFS project quota that is hit answers `ENOSPC`, not `EDQUOT`, so a refusal is read from
 //! the job's own words ("No space left on device"), its exit status, and the project's usage.
 //!
-//! What escaped the project is measured on the run's own directories ([`escaped`]), which back
-//! the job's `/scratch`, `/work` and `/root`: the bytes of every entry there that is not in the
-//! run's project. (The suite's read-write sync mount is outside the bound by design and is
-//! not walked; these jobs do not write to it.) The volume's free space is not that measure. Other tests on the volume, the
-//! image store and the file system's own reservations move it too, so it is kept only as a
-//! backstop that the volume did not lose all that a refused job tried to write.
+//! What escaped the project is measured on the run's own directories
+//! ([`escape::escaped`]), which back the job's `/scratch`, `/work` and `/root`: the bytes of
+//! every entry there that is not in the run's project, which must be 0. The suite's read-write
+//! sync mount is outside the bound by design and is not walked; these jobs do not write to it.
+//! The volume's free space is not read at all: other tests on the volume, the image store and
+//! the file system's own reservations move it, and a correct run must not fail for that.
 
 use std::fs;
 use std::io::Write as _;
@@ -25,9 +25,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_agent::lifecycle::{Body, Status};
-use js_agent::quota::{Mode, ProjectId, ProjectIds, ScratchQuota, XfsQuota, project_of};
+use js_agent::quota::{Mode, ProjectId, ProjectIds, ScratchQuota, XfsQuota};
 use js_contain::oci::LEASE_PREFIX;
 
+use crate::escape::{self, Disk};
 use crate::runtime_suite::{Program, Shared, Subject, spec_of};
 use crate::subject::{CrunSubject, crun_subject_on, var};
 
@@ -37,85 +38,32 @@ const LIMIT: u64 = 8 << 20;
 /// The inode limit of a run's project.
 const INODES: u64 = 10_000;
 
-/// What a job that must be refused tries to write, far above [`LIMIT`] and far above what the
-/// volume's free space moves by for reasons of its own while a test runs.
-const ATTEMPT_MIB: u64 = 256;
+/// What a job that must be refused tries to write, far above [`LIMIT`].
+const ATTEMPT_MIB: u64 = 96;
 
-/// What a neighbour writes to the volume outside the run, while the run is held: more than
-/// a bound on the volume's free space that took the room of other writers for an escape would
-/// allow (48 MiB), and well below [`ATTEMPT_MIB`].
-const NEIGHBOUR: u64 = 64 << 20;
+/// What a neighbour writes to the volume outside the run, while the run is held: as much as
+/// the job tries to write, so any bound on the volume's free space that would catch a whole
+/// escape is reached by the neighbour alone.
+const NEIGHBOUR: u64 = ATTEMPT_MIB << 20;
 
 /// The id of the run every test starts.
 const RUN: &str = "w1";
 
 /// The mount point of the XFS volume the workflow made.
-fn volume() -> PathBuf {
+pub fn volume() -> PathBuf {
     let root = PathBuf::from(var("JS_XFS_ROOT"));
     fs::canonicalize(&root).unwrap_or_else(|e| panic!("JS_XFS_ROOT {}: {e}", root.display()))
 }
 
-/// The room left on the volume, in bytes.
-fn free_bytes(volume: &Path) -> u64 {
-    let stat = rustix::fs::statvfs(volume).expect("statvfs the volume");
-    stat.f_bavail.saturating_mul(stat.f_frsize)
+/// The device of the volume.
+fn dev_of(volume: &Path) -> u64 {
+    fs::metadata(volume).expect("stat the volume").dev()
 }
 
-/// The project of the entry `path`, opened without following a link, or `None` where it is
-/// not a regular file or a directory (a link, a pipe, a device), which is not opened.
-fn project_of_entry(path: &Path, kind: fs::FileType) -> Option<u32> {
-    use rustix::fs::OFlags;
-    if !(kind.is_file() || kind.is_dir()) {
-        return None;
-    }
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let open = rustix::fs::open(path, flags, rustix::fs::Mode::empty())
-        .unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
-    let project = project_of(&fs::File::from(open))
-        .unwrap_or_else(|e| panic!("read the project of {}: {e}", path.display()));
-    Some(project.unwrap_or_else(|| panic!("{} has no project id", path.display())))
-}
-
-/// The bytes on the volume `dev` of `path` and everything below it that are not in the
-/// project `project`, where `path` lies in a directory of the project `parent`. A tree on
-/// another device (a mount) holds nothing of the volume and is not entered.
-///
-/// An entry that is not opened (see [`project_of_entry`]) is counted in its directory's
-/// project: XFS gives a new entry the project of a directory marked to pass its project on,
-/// and refuses to link or move one in from another project, so that is the project it has.
-fn escaped_below(path: &Path, dev: u64, parent: u32, project: u32) -> u64 {
-    let meta =
-        fs::symlink_metadata(path).unwrap_or_else(|e| panic!("lstat {}: {e}", path.display()));
-    if meta.dev() != dev {
-        return 0;
-    }
-    let own = project_of_entry(path, meta.file_type()).unwrap_or(parent);
-    let here = match own == project {
-        true => 0,
-        false => meta.blocks() * 512,
-    };
-    let below = match meta.is_dir() {
-        false => 0,
-        true => fs::read_dir(path)
-            .unwrap_or_else(|e| panic!("list {}: {e}", path.display()))
-            .map(|entry| {
-                let entry = entry.unwrap_or_else(|e| panic!("list {}: {e}", path.display()));
-                escaped_below(&entry.path(), dev, own, project)
-            })
-            .sum(),
-    };
-    here + below
-}
-
-/// The bytes of the run's directories `dirs` on the volume `volume`, and of everything below
-/// them, that are not in the run's project `project`: what the job wrote that the quota does
-/// not count in the places that back `/scratch`, `/work` and `/root`. Every other test, and
-/// the image store, writes elsewhere, so it is not moved by them. The directories themselves are read for their project.
+/// What the run's directories `dirs` hold outside the project `project`, read on disk.
 fn escaped(volume: &Path, dirs: &[&Path], project: ProjectId) -> u64 {
-    let dev = fs::metadata(volume).expect("stat the volume").dev();
-    dirs.iter()
-        .map(|dir| escaped_below(dir, dev, 0, project.get()))
-        .sum()
+    escape::escaped(&Disk, dev_of(volume), dirs, project.get())
+        .unwrap_or_else(|e| panic!("walk the run's directories: {e}"))
 }
 
 /// Writes `bytes` of zeros to the new file `path` and syncs it, so the volume holds them.
@@ -180,8 +128,6 @@ struct Written {
     used: u64,
     /// The bytes of the run's directories that are not in its project ([`escaped`]).
     escaped: u64,
-    /// The room the whole volume lost while the run was held.
-    volume_lost: u64,
     /// The bytes the neighbour's file holds on the volume (0 with no neighbour).
     neighbour: u64,
     /// Whether the lease is in the image store (it must not be: only the scratch root).
@@ -242,7 +188,6 @@ fn write_to(target: &str, mib: u64, slot: u32, around: Around) -> Written {
         }
     }
 
-    let before = free_bytes(&volume);
     let id = subject
         .runtime()
         .borrow_mut()
@@ -268,7 +213,6 @@ fn write_to(target: &str, mib: u64, slot: u32, around: Around) -> Written {
         stderr: tail.stderr,
         used,
         escaped: escaped(&volume, &[&spec.scratch, &lease_dir], project),
-        volume_lost: before.saturating_sub(free_bytes(&volume)),
         neighbour: fs::symlink_metadata(&neighbour).map_or(0, |m| m.blocks() * 512),
         lease_in_store: subject.lease_dir(&lease_name).exists(),
     };
@@ -278,9 +222,8 @@ fn write_to(target: &str, mib: u64, slot: u32, around: Around) -> Written {
 
 /// Asserts, for one place, that a job writing far past the limit is refused: it exits with the
 /// failure of its `dd`, says the disk is full, what it wrote is held to the limit, and none of
-/// it escaped the project; the volume did not lose what the job tried to write. It catches a
-/// lease directory outside the project, where `/work` and `/root` are written until the volume
-/// is full.
+/// it escaped the project. It catches a lease directory outside the project, where `/work`
+/// and `/root` are written until the volume is full.
 fn refused(target: &str, slot: u32, around: Around) -> Written {
     let w = write_to(target, ATTEMPT_MIB, slot, around);
     assert_eq!(w.exit, 7, "the write was not refused: {}", w.stderr);
@@ -292,11 +235,6 @@ fn refused(target: &str, slot: u32, around: Around) -> Written {
     assert!(w.used > LIMIT / 2, "the bytes were not counted: {}", w.used);
     assert!(w.used <= LIMIT, "the limit was passed: {}", w.used);
     assert_eq!(w.escaped, 0, "bytes escaped the run's project");
-    assert!(
-        w.volume_lost < ATTEMPT_MIB << 20,
-        "the volume lost {} bytes",
-        w.volume_lost
-    );
     assert!(!w.lease_in_store, "the lease is in the image store");
     w
 }
@@ -320,11 +258,11 @@ fn a_job_writing_past_the_quota_into_scratch_is_refused() {
 }
 
 /// Asserts that room the volume loses outside the run is not taken for an escape: while a
-/// refused job runs, a neighbour writes [`NEIGHBOUR`] bytes to the volume outside the run's
-/// directories, and its file holds at least that much of the volume (more than a bound of 48
-/// MiB on the volume's free space allowed), while the run still passes every check of
-/// [`refused`], with nothing escaped. It catches an escape check that reads the volume's free
-/// space, which fails a run for what other writers on the volume did.
+/// refused job's run is held, a neighbour writes [`NEIGHBOUR`] bytes, as much as the job tries
+/// to write, to the volume outside the run's directories, and its file holds at least that
+/// much of the volume, while the run still passes every check of [`refused`], with nothing
+/// escaped. It catches an escape check that reads the volume's free space, which a neighbour's
+/// write reaches whatever bound it sets for a whole escape.
 #[test]
 #[ignore = "real crun on an XFS volume: the js-agent-crun-runtime workflow"]
 fn room_the_volume_loses_outside_the_run_is_not_an_escape() {
