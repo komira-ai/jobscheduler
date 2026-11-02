@@ -9,7 +9,6 @@ mod binary;
 mod failures;
 mod flags;
 mod join_token;
-mod join_token_failures;
 mod lost_reply;
 mod native;
 mod ops;

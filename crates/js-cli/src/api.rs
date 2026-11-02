@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use js_client::{Client, Reply};
+use js_client::{Client, ClientError, Reply};
 
 use crate::failure::Failure;
 
@@ -107,11 +107,6 @@ pub(crate) trait Routes {
     /// `POST /v1/leases/{id}/runs`: 202 with the run's id and state, anything else a
     /// failure.
     fn queue_run(&self, id: &str, body: &Value) -> Result<Queued, Failure>;
-
-    /// `POST /v1/agent/join-tokens`: 201 with the token and its expiry, anything else a
-    /// failure that holds the status and the error code and nothing more of the answer. The
-    /// request is sent once: a token minted and lost is dropped by the server at its expiry.
-    fn mint_join_token(&self, body: &Value) -> Result<Minted, Failure>;
 }
 
 /// The answer to a queued run.
@@ -123,9 +118,7 @@ pub(crate) struct Queued {
 
 impl Routes for Client {
     fn acquire(&self, body: &Value) -> Result<Granted, Failure> {
-        let reply = self
-            .post("/v1/leases", body)
-            .map_err(|err| unconfirmed(err.into()))?;
+        let reply = Post::post(self, "/v1/leases", body).map_err(|err| unconfirmed(err.into()))?;
         match reply.status {
             201 => held(&reply.body).map(Granted::Held).map_err(unconfirmed),
             202 => text(&reply.body, "id")
@@ -178,24 +171,8 @@ impl Routes for Client {
         Ok(found.map_or(Standing::Gone, Entry::standing))
     }
 
-    fn mint_join_token(&self, body: &Value) -> Result<Minted, Failure> {
-        let reply = self
-            .post("/v1/agent/join-tokens", body)
-            .map_err(|err| mint_unconfirmed(err.into()))?;
-        match reply.status {
-            201 => minted(&reply.body).map_err(mint_unconfirmed),
-            status => Err(Failure::Mint {
-                status,
-                code: printable(reply.body["error"].as_str().unwrap_or("none"))
-                    .chars()
-                    .take(CODE_LIMIT)
-                    .collect(),
-            }),
-        }
-    }
-
     fn queue_run(&self, id: &str, body: &Value) -> Result<Queued, Failure> {
-        let reply = self.post(&format!("/v1/leases/{id}/runs"), body)?;
+        let reply = Post::post(self, &format!("/v1/leases/{id}/runs"), body)?;
         match reply.status {
             202 => Ok(Queued {
                 run_id: text(&reply.body, "run_id")?,
@@ -203,6 +180,45 @@ impl Routes for Client {
             }),
             _ => Err(refusal(&reply)),
         }
+    }
+}
+
+/// The POST of the lease server, the one call a join-token mint makes, so that a test can
+/// stand in for the server without a socket.
+pub(crate) trait Post {
+    /// `POST path` with a JSON body, as [`Client::post`].
+    fn post(&self, path: &str, body: &Value) -> Result<Reply, ClientError>;
+}
+
+impl Post for Client {
+    fn post(&self, path: &str, body: &Value) -> Result<Reply, ClientError> {
+        Client::post(self, path, body)
+    }
+}
+
+/// The route that mints a join token.
+const MINT_ROUTE: &str = "/v1/agent/join-tokens";
+
+/// `POST /v1/agent/join-tokens`: 201 with the token and its expiry, anything else a failure
+/// that holds the status and the error code and nothing more of the answer. The request is
+/// sent once: a token minted and lost is dropped by the server at its expiry.
+pub(crate) fn mint_join_token(server: &dyn Post, body: &Value) -> Result<Minted, Failure> {
+    mint_answer(server.post(MINT_ROUTE, body))
+}
+
+/// What the answer to a mint means: the token, a refusal that holds the status and the code
+/// only, or, when the answer was lost or unusable, a failure that says a token may exist.
+fn mint_answer(sent: Result<Reply, ClientError>) -> Result<Minted, Failure> {
+    let reply = sent.map_err(|err| mint_unconfirmed(err.into()))?;
+    match reply.status {
+        201 => minted(&reply.body).map_err(mint_unconfirmed),
+        status => Err(Failure::Mint {
+            status,
+            code: printable(reply.body["error"].as_str().unwrap_or("none"))
+                .chars()
+                .take(CODE_LIMIT)
+                .collect(),
+        }),
     }
 }
 
@@ -315,3 +331,6 @@ fn refusal(reply: &Reply) -> Failure {
         _ => Failure::Server(unexpected(reply)),
     }
 }
+
+#[cfg(test)]
+pub(crate) mod mint_tests;

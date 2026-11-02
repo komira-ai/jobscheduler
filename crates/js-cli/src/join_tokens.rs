@@ -5,10 +5,10 @@ use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::Path;
 
-use js_client::{Client, NewFileStep};
+use js_client::NewFileStep;
 use sha2::{Digest, Sha256};
 
-use crate::api::Routes;
+use crate::api::{Post, mint_join_token};
 use crate::cli::MintArgs;
 use crate::failure::{Failure, exit};
 use crate::render::Render;
@@ -20,7 +20,7 @@ const FILE_MODE: u32 = 0o600;
 /// request is sent, so no token is minted to be thrown away; mints; writes the token to the
 /// file or to standard output; and prints the sha256 and the expiry to `err`.
 pub(crate) fn mint(
-    client: &Client,
+    server: &dyn Post,
     render: Render,
     args: &MintArgs,
     stdout_is_terminal: bool,
@@ -28,7 +28,7 @@ pub(crate) fn mint(
     err: &mut dyn Write,
 ) -> Result<u8, Failure> {
     check_destination(args.out.as_deref(), stdout_is_terminal)?;
-    let minted = client.mint_join_token(&args.body())?;
+    let minted = mint_join_token(server, &args.body())?;
     let line = format!("{}\n", minted.token);
     deliver(args.out.as_deref(), &line, out).map_err(|(dest, why)| Failure::Undelivered {
         dest,
@@ -102,3 +102,6 @@ fn deliver(path: Option<&Path>, line: &str, out: &mut dyn Write) -> Result<(), (
             .map_err(|why| ("standard output".to_owned(), why.to_string())),
     }
 }
+
+#[cfg(test)]
+mod tests;

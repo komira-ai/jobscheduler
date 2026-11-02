@@ -153,3 +153,103 @@ impl Failure {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts the exit status and machine-readable kind of every failure, and that a mint
+    /// is judged by its status (400 rejected, 404 and 429 refused, anything else a server
+    /// failure). It catches a failure given another failure's status, which a script that
+    /// tells a refusal from an outage would act on.
+    #[test]
+    fn every_failure_has_its_exit_status_and_kind() {
+        let mint = |status| Failure::Mint {
+            status,
+            code: "x".to_owned(),
+        };
+        let cases = [
+            (Failure::Usage(String::new()), exit::USAGE, "usage"),
+            (Failure::Server(String::new()), exit::SERVER, "server"),
+            (
+                Failure::Unconfirmed(String::new()),
+                exit::SERVER,
+                "acquire-unconfirmed",
+            ),
+            (Failure::Refused(String::new()), exit::REFUSED, "refused"),
+            (Failure::Contract(String::new()), exit::CONTRACT, "rejected"),
+            (
+                Failure::Unresolved {
+                    id: String::new(),
+                    waited: 1,
+                },
+                exit::UNRESOLVED,
+                "unresolved",
+            ),
+            (
+                Failure::NotStarted {
+                    program: String::new(),
+                    why: String::new(),
+                },
+                exit::NOT_STARTED,
+                "not-started",
+            ),
+            (mint(400), exit::CONTRACT, "rejected"),
+            (mint(404), exit::REFUSED, "refused"),
+            (mint(429), exit::REFUSED, "refused"),
+            (mint(500), exit::SERVER, "server"),
+            (
+                Failure::MintUnconfirmed(String::new()),
+                exit::SERVER,
+                "mint-unconfirmed",
+            ),
+            (
+                Failure::Undelivered {
+                    dest: String::new(),
+                    why: String::new(),
+                    expires_at_ms: 1,
+                },
+                exit::SERVER,
+                "undelivered",
+            ),
+            (
+                Failure::LeaseLost(String::new()),
+                exit::LEASE_LOST,
+                "lease-lost",
+            ),
+            (
+                Failure::LeaseUnrenewed(String::new()),
+                exit::LEASE_LOST,
+                "lease-lost",
+            ),
+            (
+                Failure::Interrupted(ForwardedSignal::Interrupt),
+                130,
+                "interrupted",
+            ),
+        ];
+        for (failure, code, kind) in cases {
+            assert_eq!(failure.parts(), (code, kind), "{failure}");
+        }
+    }
+
+    /// Asserts that a client error becomes the failure of its kind with its text: a flag
+    /// names the flag, a server error is a server failure. It catches a client error that
+    /// loses its flag or is taken for a usage error.
+    #[test]
+    fn a_client_error_keeps_its_kind_and_text() {
+        let flag = Failure::from(ClientError::Flag {
+            flag: "--server",
+            why: "is not a URL".to_owned(),
+        });
+        assert_eq!(
+            (flag.parts().1, flag.to_string()),
+            ("usage", "--server: is not a URL".to_owned())
+        );
+        let server = Failure::from(ClientError::Server("cannot talk".to_owned()));
+        assert_eq!(
+            (server.parts().1, server.to_string()),
+            ("server", "cannot talk".to_owned())
+        );
+    }
+}
