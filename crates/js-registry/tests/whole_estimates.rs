@@ -139,20 +139,48 @@ fn with_no_source_of_lives_a_keyed_run_changes_nothing() {
 const NO_WALL_S: u64 = u64::MAX / 1000;
 
 /// Catches: a lease with no keyed run and no bound ranked by what is known of its host, or
-/// first. `a`'s lease may run for ever and has no keyed run, so `a`'s tail is unknown and
-/// ranks after `b`, whose lease is bound to end in ten hours; once a keyed run gives `a`'s
-/// lease a one minute estimate, `a` is known and empties first.
+/// first, or its saturated end taken for a far but known bound. `a`'s lease may run for
+/// ever (its end saturates) and has no keyed run, so with the feed on its tail is unknown:
+/// `a` ranks after `b`, whose lease is bound to end in ten hours, and alone it is reserved
+/// with no tail. Once a keyed run gives the lease a one minute estimate, `a` is known, ends
+/// a minute after the lease's start and empties first.
 #[test]
 fn a_lease_with_no_keyed_run_and_no_bound_is_unknown_and_ranks_after_every_known_tail() {
     let mut w = world();
+    let start = w.now().millis();
     w.share(1, NO_WALL_S);
     w.share(2, 36_000);
     w.ask(3, "q");
     assert_eq!(w.reserved_host("q"), Some("b".to_string()));
+    assert_eq!(tail_of(&w, "q"), Some(start + 36_000_000));
     w.cancel("q");
     keyed(&w, "a", 1, "r1", "fast");
     w.ask(4, "q2");
     assert_eq!(w.reserved_host("q2"), Some("a".to_string()));
+    assert_eq!(tail_of(&w, "q2"), Some(start + 60_000));
+
+    let mut alone = World::new(&["a"], plain);
+    alone.fx.registry.set_lives(table());
+    alone.share(1, NO_WALL_S);
+    alone.ask(3, "q");
+    assert_eq!(alone.reserved_host("q"), Some("a".to_string()));
+    assert_eq!(tail_of(&alone, "q"), None);
+}
+
+/// Catches: the flag-off state changing for a lease whose end saturates. With no source of
+/// lives such a lease keeps its saturated end as a far, known bound, as before the feed.
+#[test]
+fn without_a_source_of_lives_a_saturated_end_stays_a_far_bound() {
+    let mut w = World::new(&["a"], plain);
+    w.share(1, NO_WALL_S);
+    w.ask(3, "q");
+    assert_eq!(w.reserved_host("q"), Some("a".to_string()));
+    assert_eq!(tail_of(&w, "q"), Some(js_lease::Timestamp::MAX.millis()));
+}
+
+/// The tail request `name` was reserved with.
+fn tail_of(w: &World, name: &str) -> Option<u64> {
+    w.reservation(name).and_then(|r| r.tail_end)
 }
 
 /// Hosts `a` and `b` in a pool that books whole hosts, so a lease put back is a plain

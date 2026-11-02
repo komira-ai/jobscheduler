@@ -8,9 +8,9 @@ use std::ffi::OsString;
 
 use js_lease_server::{Cli, Config};
 
-use crate::agents_support::{JOIN, POOL};
+use crate::agents_support::{JOIN, POOL, agent_args, join};
 use crate::config_support::{PoolText, file, load, refusal, server};
-use crate::support::{Scratch, base_args, config};
+use crate::support::{Harness, Scratch, base_args, config, ids, lease_body, replace};
 
 /// The flags of a server with agent registration over the agents' test pool, and `extra`
 /// after them.
@@ -94,4 +94,48 @@ fn the_key_is_read_from_the_file_and_refused_beside_usage_off() {
         refusal(&scratch, &text),
         "server.estimate_feed: not allowed with server.usage_off"
     );
+}
+
+/// Asserts the start-up path of a server with the flag, over the files a real start uses:
+/// with agent registration and its usage file, a lease granted on a registered host is
+/// put back held on that host by a restart that also has the flag (the lease file's
+/// booking seated with its start and bound), and the host takes the lease again once it
+/// says hello; the same holds with a usage sink that keeps no curves. It catches a start
+/// that fails or drops a restored lease when the feed is on.
+#[tokio::test]
+async fn a_server_with_the_flag_puts_back_a_held_lease_after_a_restart() {
+    for curves in [true, false] {
+        let name = format!("estimate_feed_restart_{curves}");
+        let scratch = Scratch::new(&name);
+        let mut flags = agent_args(&scratch, false);
+        flags.push("--estimate-feed".into());
+        let first = start(scratch, flags.clone(), curves).await;
+        join(&first, "burst-1").await;
+        let granted = first.call("POST", "/v1/leases", Some(&lease_body())).await;
+        assert_eq!(granted.json()["host"], "burst-1", "{name}");
+        let Harness {
+            running, scratch, ..
+        } = first;
+        running.shutdown().await.unwrap();
+
+        let h = start(scratch, replace(flags, "--boot", "resume"), curves).await;
+        let leases = h.call("GET", "/v1/leases", None).await.json();
+        assert_eq!(leases["leases"][0]["id"], "1-1", "{name}");
+        assert_eq!(leases["leases"][0]["state"], "held", "{name}");
+        assert_eq!(leases["leases"][0]["host"], "burst-1", "{name}");
+        join(&h, "burst-1").await;
+        h.ticks.step().await;
+        assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), ["1-1"]);
+    }
+}
+
+/// A server over `scratch` with `flags`: over its own usage file when `curves`, else over a
+/// usage sink that keeps no curves.
+async fn start(scratch: Scratch, flags: Vec<OsString>, curves: bool) -> Harness {
+    let config = config(flags).unwrap();
+    let config = match curves {
+        true => config,
+        false => config.with_usage_sink(std::sync::Arc::new(js_usage::NoUsage)),
+    };
+    Harness::over(scratch, config).await
 }

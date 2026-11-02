@@ -11,14 +11,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{Hello, Isolation, JobSpec, Limits};
-use js_lease::{Booking, LeaseState, ManualClock, Timestamp};
+use js_lease::{Booking, LeaseState, ManualClock, Timestamp, read_bookings};
 use js_provider::{Provider, StartSpec};
 use js_registry::{Credential, RegisteredProvider};
 use js_state::SystemClock;
 use js_state::sqlite::{Options, SqliteStore};
 use js_testkit::dir::TestDir;
 use js_types::{Admission, ClassId, HostId, LeaseId, Request, RequestId, ResourceClass, Resources};
-use js_usage::{ProfileCurves, ProfileKey, ProfileStore, RunMinute, RunSeries};
+use js_usage::{NoUsage, ProfileCurves, ProfileKey, ProfileStore, RunMinute, RunSeries, UsageSink};
 use serde_json::json;
 
 use crate::adapt::SharedClock;
@@ -32,9 +32,13 @@ const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 /// fresh.
 const T0: u64 = 1_000_000;
 
-/// The profile the usage file has learned: three runs of one minute, so its P90 is one
+/// A profile the usage file has learned: three runs of one minute, so its P90 is one
 /// minute.
 const FAST: &str = "est.fast";
+
+/// A profile the usage file has learned: three runs of three minutes, so its P90 is three
+/// minutes.
+const THREE: &str = "est.three";
 
 /// A pool of up to two machines whose class books a whole host, so a lease put back is a
 /// plain booking. The provider of the tests serves the whole-node class beside it, so a
@@ -93,28 +97,31 @@ fn config(dir: &Path, extra: &[&str]) -> Config {
     Config::from_cli(Cli::try_parse_from(args).unwrap()).unwrap()
 }
 
-/// Writes into the usage file at `db` three clean one-minute runs of [`FAST`], on day 0,
-/// as the server's profile store writes them when runs end; the server opening the file
-/// then holds a curve for it with a P90 of one minute.
-fn learn_fast(db: &Path) {
+/// Writes into the usage file at `db` three clean runs of one minute of [`FAST`] and three
+/// of three minutes of [`THREE`], on day 0, as the server's profile store writes them when
+/// runs end; the server opening the file then holds their curves, with P90s of one and
+/// three minutes.
+fn learn(db: &Path) {
     let store = SqliteStore::open(db, Arc::new(SystemClock::default()), Options::default());
     let store = Arc::new(store.unwrap());
     let curves = Arc::new(ProfileCurves::new(Box::new(|_| None)));
     let mut profiles = ProfileStore::open(store, curves.clone(), 1 << 20, 0).unwrap();
-    let minute = RunMinute {
-        minute: 0,
-        cores_milli: 1000,
-        ws_bytes: 1 << 20,
-    };
-    let series = RunSeries {
-        minutes: vec![minute],
-        flags: 0,
-    };
-    let key = ProfileKey::parse(FAST).unwrap();
-    for _ in 0..3 {
-        profiles.run_ended(&key, &series, 0).unwrap();
+    for (name, minutes) in [(FAST, 1), (THREE, 3)] {
+        let minute = |minute| RunMinute {
+            minute,
+            cores_milli: 1000,
+            ws_bytes: 1 << 20,
+        };
+        let series = RunSeries {
+            minutes: (0..minutes).map(minute).collect(),
+            flags: 0,
+        };
+        let key = ProfileKey::parse(name).unwrap();
+        for _ in 0..3 {
+            profiles.run_ended(&key, &series, 0).unwrap();
+        }
+        assert_eq!(curves.wall_minutes_p90_of(&key), Some(minutes));
     }
-    assert_eq!(curves.wall_minutes_p90_of(&key), Some(1));
 }
 
 fn hello(host: &str) -> Hello {
@@ -139,18 +146,47 @@ struct Served {
 }
 
 /// The agent side of a server over [`POOL`] with `extra` flags, assembled as the server
-/// assembles it over a usage file that has learned [`FAST`], with the bookings `restored`
-/// put back as the server puts back those of its lease file, hosts `a` and `b` registered,
-/// and the provider of its registry serving a class that books a whole host and the
-/// whole-node class.
+/// assembles it over a usage file that has learned [`FAST`] and [`THREE`], with the
+/// bookings `restored` put back as the server puts back those of its lease file, hosts `a`
+/// and `b` registered, and the provider of its registry serving a class that books a whole
+/// host and the whole-node class.
 fn serving(name: &str, extra: &[&str], restored: &[Booking]) -> Served {
+    serving_with(name, extra, Restored::Given(restored), None)
+}
+
+/// What a fixture puts back: bookings as given, or the bookings of a lease file it writes
+/// with this text.
+enum Restored<'a> {
+    Given(&'a [Booking]),
+    File(&'a str),
+}
+
+/// As [`serving`], measuring usage with `sink` when one is given, and putting back what
+/// `restored` says.
+fn serving_with(
+    name: &str,
+    extra: &[&str],
+    restored: Restored<'_>,
+    sink: Option<Arc<dyn UsageSink>>,
+) -> Served {
     let dir = scratch(name);
     let config = config(dir.path(), extra);
-    learn_fast(&dir.path().join("usage.db"));
+    let config = match sink {
+        Some(sink) => config.with_usage_sink(sink),
+        None => config,
+    };
+    learn(&dir.path().join("usage.db"));
+    let restored = match restored {
+        Restored::Given(bookings) => bookings.to_vec(),
+        Restored::File(text) => {
+            std::fs::write(&config.state_file, text).unwrap();
+            read_bookings(&config.state_file).unwrap()
+        }
+    };
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
     let (source, agents) =
         assemble(config.hosts, config.usage, &clock, &config.state_file).unwrap();
-    let seated = source.provider(restored).unwrap();
+    let seated = source.provider(&restored).unwrap();
     assert!(seated.unseated.is_empty(), "{:?}", seated.unseated);
     let agents = agents.unwrap();
     let credential = Credential::of_token(JOIN);
@@ -202,6 +238,11 @@ fn lease_for(served: &mut Served, sequence: u64, wall: Duration) -> String {
 
 /// Queues run `run` of lease `sequence` on `on`, named by the profile [`FAST`].
 fn keyed_run(served: &Served, on: &str, sequence: u64, run: &str) {
+    keyed_run_of(served, on, sequence, run, FAST);
+}
+
+/// Queues run `run` of lease `sequence` on `on`, named by the profile `name`.
+fn keyed_run_of(served: &Served, on: &str, sequence: u64, run: &str, name: &str) {
     let spec = JobSpec {
         run_id: run.into(),
         lease_id: String::new(),
@@ -225,7 +266,7 @@ fn keyed_run(served: &Served, on: &str, sequence: u64, run: &str) {
         bundle: None,
         native: None,
     };
-    let profile = Some(ProfileKey::parse(FAST).unwrap());
+    let profile = Some(ProfileKey::parse(name).unwrap());
     let lease = LeaseId::new(1, sequence);
     let registry = &served.agents.registry;
     registry
@@ -236,6 +277,11 @@ fn keyed_run(served: &Served, on: &str, sequence: u64, run: &str) {
 /// Asks for a whole node as request `q` under lease `sequence` and returns the host
 /// reserved for it.
 fn reserved_for_whole_node(served: &mut Served, sequence: u64) -> Option<String> {
+    reserved_with_tail(served, sequence).0
+}
+
+/// As [`reserved_for_whole_node`], with the tail the host was reserved with.
+fn reserved_with_tail(served: &mut Served, sequence: u64) -> (Option<String>, Option<u64>) {
     let id = RequestId::new("q").unwrap();
     let wanted = request(&whole(), Duration::from_secs(600));
     let spec = StartSpec::new(LeaseId::new(1, sequence), wanted, &[whole()]);
@@ -244,7 +290,8 @@ fn reserved_for_whole_node(served: &mut Served, sequence: u64) -> Option<String>
         .start(spec.unwrap().with_request_id(id.clone()));
     let reservations = served.agents.registry.reservations();
     let mark = reservations.into_iter().find(|mark| mark.request == id);
-    mark.map(|mark| mark.host.to_string())
+    let host = mark.as_ref().map(|mark| mark.host.to_string());
+    (host, mark.and_then(|mark| mark.tail_end))
 }
 
 /// Asserts the A/B case of the feed. Host `a` carries a lease of the longer max wall (an
@@ -270,17 +317,25 @@ fn with_the_flag_the_shorter_estimated_tail_is_reserved_and_without_it_the_short
 }
 
 /// Asserts the unknown case through the server, with the flag on: `a`'s lease may run for
-/// ever (its bound saturates) and has no keyed run, so its tail is unknown and ranks after
-/// `b`'s, which is bound to end in ten hours. It catches an unknown tail ranked by what is
-/// known of its host, or first.
+/// ever (its end saturates, which with the feed on is no bound) and has no keyed run, so its
+/// tail is unknown and ranks after `b`'s, which is bound to end in ten hours: `b` is reserved
+/// with that tail. Once a keyed run with a learned P90 of one minute is queued on `a`'s
+/// lease, `a` is known, ends a minute after its start and is reserved with that tail. It
+/// catches an unknown tail ranked by what is known of its host, or first. (That the tail is
+/// unknown, not a far bound, is asserted by the registry's tests, where one host is alone.)
 #[test]
 fn a_lease_with_no_keyed_run_and_no_bound_is_unknown_and_ranks_after_a_known_tail() {
     let mut served = serving("feed_unknown", &["--estimate-feed"], &[]);
     let forever = Duration::from_millis(u64::MAX);
     assert_eq!(lease_for(&mut served, 1, forever), "a");
     assert_eq!(lease_for(&mut served, 2, Duration::from_secs(36_000)), "b");
-    let reserved = reserved_for_whole_node(&mut served, 3);
-    assert_eq!(reserved.as_deref(), Some("b"));
+    let reserved = reserved_with_tail(&mut served, 3);
+    assert_eq!(reserved, (Some("b".to_string()), Some(T0 + 36_000_000)));
+    let q = RequestId::new("q").unwrap();
+    assert!(served.agents.registry.cancel_request(&q));
+    keyed_run(&served, "a", 1, "r1");
+    let reserved = reserved_with_tail(&mut served, 4);
+    assert_eq!(reserved, (Some("a".to_string()), Some(T0 + 60_000)));
 }
 
 /// Asserts that a lease put back from the lease file keeps its recorded start and bound
@@ -308,5 +363,58 @@ fn a_restored_lease_keeps_its_recorded_bound_only_with_the_flag() {
         assert_eq!(lease_for(&mut served, 2, Duration::from_secs(600)), "b");
         let reserved = reserved_for_whole_node(&mut served, 3);
         assert_eq!(reserved.as_deref(), Some(expected), "{name}");
+    }
+}
+
+/// Asserts the feed with a usage sink that keeps no curves (a sink the caller supplies):
+/// with the flag on the registry still gets a source, which knows no profile, so a lease
+/// restored with an hour left keeps that bound and `b` (ten minutes) is reserved, with its
+/// own bound as the tail; and a keyed run changes nothing. Without a source the restored
+/// lease would count as ending now and `a` would be reserved. It catches an enabled feed
+/// that silently drops the restored bounds when the sink has no curves.
+#[test]
+fn with_the_flag_and_a_sink_with_no_curves_a_restored_lease_keeps_its_bound() {
+    let restored = Booking {
+        lease: LeaseId::new(1, 1),
+        host: host("a"),
+        state: LeaseState::Held,
+        shares: None,
+        started_at: Timestamp::from_millis(T0),
+        ends_at: Timestamp::from_millis(T0 + 3_600_000),
+    };
+    let given = Restored::Given(std::slice::from_ref(&restored));
+    let sink: Arc<dyn UsageSink> = Arc::new(NoUsage);
+    let mut served = serving_with("feed_no_curves", &["--estimate-feed"], given, Some(sink));
+    assert_eq!(lease_for(&mut served, 2, Duration::from_secs(600)), "b");
+    keyed_run(&served, "a", 1, "r1");
+    let reserved = reserved_with_tail(&mut served, 3);
+    assert_eq!(reserved, (Some("b".to_string()), Some(T0 + 600_000)));
+}
+
+/// A lease file that holds lease 1, held on `a`, acquired two minutes before [`T0`] and
+/// bound to end 15 minutes after that.
+const FILE: &str = "version = 1\nterm = 1\nnext_sequence = 2\nlease_count = 1\n\n\
+    [[lease]]\nterm = 1\nsequence = 1\nstate = \"held\"\nhost = \"a\"\n\
+    acquired_at_ms = 880000\nexpires_at_ms = 940000\nends_at_ms = 1780000\n";
+
+/// Asserts that a start read from an actual lease file reaches the drain cost through the
+/// server's startup path (`read_bookings`, the layered source, the registry). Lease 1 on
+/// `a` started two minutes before the restart and its keyed run takes three, so it ends a
+/// minute after now, before lease 2 on `b` (two minutes): `a` is reserved with that tail.
+/// Counted from the restart it would end three minutes after now and `b` would be reserved.
+/// Without the flag the restored lease counts as ending now, so `a` is reserved with no
+/// wait. It catches a restored start replaced by the time of the restart on the way from
+/// the file.
+#[test]
+fn a_start_read_from_the_lease_file_reaches_the_drain_cost() {
+    for (name, extra, expected) in [
+        ("file_on", vec!["--estimate-feed"], Some(T0 + 60_000)),
+        ("file_off", vec![], Some(0)),
+    ] {
+        let mut served = serving_with(name, &extra, Restored::File(FILE), None);
+        assert_eq!(lease_for(&mut served, 2, Duration::from_secs(120)), "b");
+        keyed_run_of(&served, "a", 1, "r1", THREE);
+        let reserved = reserved_with_tail(&mut served, 3);
+        assert_eq!(reserved, (Some("a".to_string()), expected), "{name}");
     }
 }
