@@ -16,8 +16,10 @@
 //!   switch's intent record names (the one `session-login` logged in); `run` there is
 //!   refused until launchd has the user's `gui/<uid>` domain, which exists once the
 //!   login has completed. `session-ready` answers whether it does.
-//! - `kill-uid` kills, then boots out the uid's `gui/<uid>` and `user/<uid>` launchd
-//!   domains, and repeats both until no process of the uid and neither domain is left
+//! - `kill-uid` kills, then boots out those of the uid's `gui/<uid>` and `user/<uid>`
+//!   launchd domains that launchd has (a pool user never logs in, so it has no
+//!   `gui/<uid>`: a domain launchd answers it does not have is skipped, never an
+//!   error), and repeats both until no process of the uid and neither domain is left
 //!   (at most [`KILL_ROUNDS`] rounds): launchd restarts a per-user agent such as
 //!   `distnoted` for as long as the domain exists, and a live process of the uid makes
 //!   the domain again. It then removes the user's crontab and `at` jobs, and does it all
@@ -84,9 +86,6 @@ mod vmrun;
 
 pub use image::{CHFLAGS, ImageSettings};
 pub use switch::Reset;
-// Only `MacHost` asks launchd; off macOS the tests read it.
-#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
-pub(crate) use teardown::launchctl_print_answer;
 
 /// How many times `kill-uid` kills, boots out the uid's launchd domains and looks again
 /// before it gives up.
@@ -107,6 +106,15 @@ pub const RESET_ALREADY: &str = "the boot reset ran already; it runs once per st
 
 /// How many processes a refusal names; it counts the rest.
 const NAMED: usize = 8;
+
+/// How `launchctl print <domain>` ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrintAnswer {
+    /// Its exit code; `None` when a signal ended it.
+    pub code: Option<i32>,
+    /// What it wrote to standard error.
+    pub stderr: String,
+}
 
 /// What the OS does for the helper. The macOS implementation is in `crate::macos`.
 pub trait Host: Send + Sync {
@@ -133,14 +141,16 @@ pub trait Host: Send + Sync {
     /// # Errors
     /// The record could not be deleted.
     fn delete_user(&self, name: &str) -> io::Result<bool>;
-    /// Whether launchd has `domain` (`launchctl print <domain>` succeeds).
+    /// How `launchctl print <domain>` ended: its exit code and its standard error. The
+    /// helper reads from it whether launchd has the domain; only launchd's answer for a
+    /// missing domain is absence.
     ///
     /// # Errors
-    /// launchd could not be asked.
-    fn domain_exists(&self, domain: &str) -> io::Result<bool>;
-    /// `launchctl bootout <domain>`: ends the domain and every job in it. A domain that
-    /// does not exist is an error the caller expects; it asks [`Self::domain_exists`]
-    /// afterwards.
+    /// `launchctl` could not be run.
+    fn launchctl_print(&self, domain: &str) -> io::Result<PrintAnswer>;
+    /// `launchctl bootout <domain>`: ends the domain and every job in it. Asked only for
+    /// a domain `launchctl print` showed; one that went in between fails, and the
+    /// caller asks `launchctl print` again afterwards.
     ///
     /// # Errors
     /// The domain could not be booted out.
@@ -617,8 +627,7 @@ impl Helper {
             ));
         }
         let domain = format!("gui/{uid}");
-        self.host
-            .domain_exists(&domain)
+        self.domain_exists(&domain)
             .map_err(|why| format!("asking launchd for {domain}: {why}"))
     }
 }

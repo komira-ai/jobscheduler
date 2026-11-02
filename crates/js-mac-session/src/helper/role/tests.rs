@@ -182,7 +182,7 @@ fn the_role_session_is_ready_when_its_gui_domain_is_up_and_no_lease_holds_it() {
         log(&rig),
         [
             "account kbf-vm".to_owned(),
-            format!("domain_exists gui/{}", vm_uid())
+            format!("launchctl print gui/{}", vm_uid())
         ]
     );
     gui_up(&rig);
@@ -200,7 +200,7 @@ fn the_role_session_is_ready_when_its_gui_domain_is_up_and_no_lease_holds_it() {
     rig.host.state().domains.clear();
     assert_eq!(rig.helper.role_session_ready(), Ok(false));
     // launchd and the record failing are errors, not "not ready".
-    rig.host.state().fail.insert("domain_exists");
+    rig.host.state().fail.insert("launchctl print");
     let error = rig.helper.role_session_ready().unwrap_err();
     assert!(error.contains("asking launchd for gui/"), "{error}");
     rig.host.state().fail.clear();
@@ -366,6 +366,9 @@ fn role_kill_uid_ends_the_vm_user_s_processes_and_no_one_else_s() {
         let mut state = rig.host.state();
         state.procs.insert(uid, 5);
         state.procs.insert(me(), 2);
+        // The VM user is logged in: launchd has both of its domains.
+        state.domains.insert(format!("gui/{uid}"));
+        state.domains.insert(format!("user/{uid}"));
     }
     log(&rig);
     rig.helper.role_kill_uid().unwrap();

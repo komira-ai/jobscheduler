@@ -1,9 +1,10 @@
 //! `kill-uid` and `user-delete`: the end of a lease user, and the errors their steps
 //! fail with ([`TeardownError`], worded for the refusal at the protocol boundary).
 //!
-//! The order the helper's header describes: `kill-uid` kills, then boots out the uid's
-//! launchd domains, until neither a process nor a domain is left; `user-delete` asks for
-//! the uid's `DARWIN_USER_DIR` while the record is there, settles (no process, no
+//! The order the helper's header describes: `kill-uid` kills, then boots out those of
+//! the uid's launchd domains that launchd has, until neither a process nor a domain is
+//! left; `user-delete` asks for the uid's `DARWIN_USER_DIR` while the record is there,
+//! settles (no process, no
 //! domain, and still no process after the bootout), sweeps, removes the uid's entry
 //! under the per-user folders, settles again, and only then deletes the record. A step
 //! that fails leaves the lease live in the ledger, so its uid is held.
@@ -14,7 +15,7 @@ use std::path::PathBuf;
 use js_types::LeaseId;
 
 use super::folders::{self, NotAnEntry};
-use super::{EXIT_LOOKS, Helper, KILL_ROUNDS, LiveProcess, NAMED};
+use super::{EXIT_LOOKS, Helper, KILL_ROUNDS, LiveProcess, NAMED, PrintAnswer};
 use crate::autologin::{Intent, read_intent};
 use crate::lease::{Dotted, parse_lease, user_name};
 use crate::ledger::Ledger;
@@ -106,27 +107,38 @@ fn remaining(uid: u32, when: &str, left: &[LiveProcess]) -> String {
     )
 }
 
-/// The answer of `launchctl print <domain>` (its exit code, `None` when a signal ended
-/// it, and its standard error): whether launchd has the domain. Only launchd's
-/// documented answer for a missing domain (exit 113, "Could not find domain") is
-/// absence; any other failure (refused, killed, launchd not answering) is an error, so
-/// it is never read as a domain that is gone.
+/// The words `launchctl print` writes to standard error for a domain launchd does not
+/// have.
+const NO_DOMAIN_TEXT: &str = "Could not find domain";
+
+/// The exit statuses of `launchctl print` that, with [`NO_DOMAIN_TEXT`], mean launchd
+/// does not have the domain. 112 is launchd's "Could not find specified domain": on
+/// macOS 26 `launchctl print gui/<uid>` for a pool user, which never logs in and so has
+/// no GUI domain, exits 112 and writes "Bad request." and "Could not find domain for
+/// user gui: <uid>". 113 with the same words is read as absence too.
+const NO_DOMAIN_CODES: [i32; 2] = [112, 113];
+
+/// What `answer` (how `launchctl print <domain>` ended) says: whether launchd has the
+/// domain. Exit 0 is a domain that exists; only launchd's answer for a missing domain
+/// (an exit status in [`NO_DOMAIN_CODES`] together with [`NO_DOMAIN_TEXT`] on standard
+/// error, never the words alone) is absence. Any other failure (refused, another exit,
+/// killed, launchd not answering) is an error, so it is never read as a domain that is
+/// gone.
 ///
 /// # Errors
 /// `launchctl` failed in any other way.
-// Only `MacHost` asks launchd; off macOS the tests do.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn launchctl_print_answer(code: Option<i32>, stderr: &str) -> io::Result<bool> {
-    match code {
+fn launchctl_print_answer(answer: &PrintAnswer) -> io::Result<bool> {
+    let stderr = answer.stderr.trim();
+    match answer.code {
         Some(0) => Ok(true),
-        Some(113) if stderr.contains("Could not find domain") => Ok(false),
+        Some(code) if NO_DOMAIN_CODES.contains(&code) && stderr.contains(NO_DOMAIN_TEXT) => {
+            Ok(false)
+        }
         Some(code) => Err(io::Error::other(format!(
-            "launchctl print exited {code}: {}",
-            stderr.trim()
+            "launchctl print exited {code}: {stderr}"
         ))),
         None => Err(io::Error::other(format!(
-            "launchctl print was ended by a signal: {}",
-            stderr.trim()
+            "launchctl print was ended by a signal: {stderr}"
         ))),
     }
 }
@@ -148,16 +160,19 @@ fn kept(lease: LeaseId, uid: u32, why: &TeardownError) {
 }
 
 impl Helper {
-    /// `kill-uid <lease>`: kills every process of the uid, then boots out its GUI and
-    /// user launchd domains (so launchd restarts none of its agents, such as
-    /// `distnoted`), and repeats both until no process and neither domain is left; then
+    /// `kill-uid <lease>`: kills every process of the uid, then boots out those of its
+    /// GUI and user launchd domains that launchd has (so launchd restarts none of its
+    /// agents, such as `distnoted`; a domain launchd does not have, such as the GUI
+    /// domain of a user that never logged in, is skipped), and repeats both until no
+    /// process and neither domain is left; then
     /// removes the user's crontab and `at` jobs (so no job of the user starts after
     /// kill-uid returns: one would start a process `user-delete` refuses), and kills and
     /// boots out again, for a job that fired before they went.
     ///
     /// # Errors
     /// Why it was refused, processes or a domain that survived [`KILL_ROUNDS`] rounds,
-    /// or a crontab or `at` job that could not be removed (after the second kill).
+    /// launchd failing to say whether it has a domain, or a crontab or `at` job that
+    /// could not be removed (after the second kill).
     pub fn kill_uid(&self, lease: &str) -> Result<(), String> {
         let lease = parse_lease(lease)?;
         let ledger = self.lock();
@@ -185,8 +200,9 @@ impl Helper {
         schedules.map(drop)
     }
 
-    /// Kills every process of `uid`, then boots out its GUI and user domains, until no
-    /// process and neither domain is left, for at most [`KILL_ROUNDS`] rounds.
+    /// Kills every process of `uid`, then boots out those of its GUI and user domains
+    /// that launchd has, until no process and neither domain is left, for at most
+    /// [`KILL_ROUNDS`] rounds.
     fn kill_rounds(&self, uid: u32) -> Result<(), TeardownError> {
         let mut left = Vec::new();
         let mut stayed = Vec::new();
@@ -194,7 +210,7 @@ impl Helper {
             self.host
                 .kill_all(uid)
                 .map_err(|source| TeardownError::Kill { uid, source })?;
-            let refused = self.boot_out(uid);
+            let refused = self.boot_out(uid)?;
             left = self.processes(uid)?;
             if left.is_empty() {
                 stayed = self.domains_left(uid, &refused)?;
@@ -217,20 +233,43 @@ impl Helper {
             .map_err(|source| TeardownError::Listing { uid, source })
     }
 
-    /// `launchctl bootout` of the GUI and the user domain of `uid`; why each one that
-    /// failed did (a domain that does not exist fails too, which [`Self::domains_left`]
-    /// tells apart).
-    fn boot_out(&self, uid: u32) -> Vec<(String, String)> {
-        domains(uid)
-            .into_iter()
-            .filter_map(|domain| match self.host.bootout(&domain) {
-                Ok(()) => None,
-                Err(why) => {
-                    tracing::debug!("launchctl bootout {domain}: {why}");
-                    Some((domain, why.to_string()))
-                }
+    /// Whether launchd has `domain`, from `launchctl print` ([`launchctl_print_answer`]).
+    ///
+    /// # Errors
+    /// `launchctl` could not be run, or failed other than by saying the domain is not
+    /// there.
+    pub(super) fn domain_exists(&self, domain: &str) -> io::Result<bool> {
+        launchctl_print_answer(&self.host.launchctl_print(domain)?)
+    }
+
+    /// [`Self::domain_exists`], its error naming the domain.
+    fn has_domain(&self, domain: &str) -> Result<bool, TeardownError> {
+        self.domain_exists(domain)
+            .map_err(|source| TeardownError::Launchd {
+                domain: domain.to_owned(),
+                source,
             })
-            .collect()
+    }
+
+    /// `launchctl bootout` of each of the GUI and the user domain of `uid` that launchd
+    /// has; a domain it does not have is not booted out. Returns why each bootout that
+    /// failed did (one that went between the look and the bootout fails too, which
+    /// [`Self::domains_left`] tells apart).
+    ///
+    /// # Errors
+    /// launchd could not say whether it has a domain.
+    fn boot_out(&self, uid: u32) -> Result<Vec<(String, String)>, TeardownError> {
+        let mut refused = Vec::new();
+        for domain in domains(uid) {
+            if !self.has_domain(&domain)? {
+                continue;
+            }
+            if let Err(why) = self.host.bootout(&domain) {
+                tracing::debug!("launchctl bootout {domain}: {why}");
+                refused.push((domain, why.to_string()));
+            }
+        }
+        Ok(refused)
     }
 
     /// The domains of `uid` that launchd still has, each with why its bootout failed
@@ -242,14 +281,7 @@ impl Helper {
     ) -> Result<Vec<String>, TeardownError> {
         let mut left = Vec::new();
         for domain in domains(uid) {
-            let exists =
-                self.host
-                    .domain_exists(&domain)
-                    .map_err(|source| TeardownError::Launchd {
-                        domain: domain.clone(),
-                        source,
-                    })?;
-            if exists {
+            if self.has_domain(&domain)? {
                 left.push(match refused.iter().find(|(d, _)| *d == domain) {
                     Some((_, why)) => format!("{domain} (bootout: {why})"),
                     None => domain,
@@ -392,7 +424,7 @@ impl Helper {
     /// the repeated delete sweeps everything again.
     fn settled(&self, uid: u32) -> Result<(), TeardownError> {
         self.none_left(uid)?;
-        let refused = self.boot_out(uid);
+        let refused = self.boot_out(uid)?;
         let stayed = self.domains_left(uid, &refused)?;
         if !stayed.is_empty() {
             return Err(TeardownError::DomainsLeft { uid, stayed });
