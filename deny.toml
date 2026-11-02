@@ -120,3 +120,5 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The update-hook crate (a dev-dependency of js-agent), pinned by revision in Cargo.toml.
+allow-git = ["https://github.com/komira-ai/kbf"]

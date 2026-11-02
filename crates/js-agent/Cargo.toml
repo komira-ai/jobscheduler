@@ -66,6 +66,9 @@ rustix = { workspace = true, features = ["process", "thread"] }
 tar.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing-subscriber.workspace = true
+# The hook contract's conformance harness, run against `js-update-hook-fake`
+# (tests/agent/update_hook/conformance.rs).
+update-hook.workspace = true
 
 [lints]
 workspace = true

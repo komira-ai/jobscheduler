@@ -25,6 +25,8 @@ use js_agent::update_hook::{
 use js_agent_wire::Taint;
 use serde::{Deserialize, Serialize};
 
+pub mod harness;
+
 /// Where the fake clock starts, in milliseconds.
 pub const START_MS: u64 = 1_000_000;
 
@@ -75,6 +77,12 @@ impl World {
 
     fn gate(&self) {
         self.gate.point();
+    }
+
+    /// A kill point of the world's, for a change made through a world without one (see
+    /// `harness::Faulted`).
+    pub fn point(&self) {
+        self.gate();
     }
 
     fn unit_file(&self, unit: &str) -> PathBuf {
@@ -164,6 +172,44 @@ impl World {
         let mut text = fs::read_to_string(self.control.join("releases")).unwrap_or_default();
         text.push_str(&format!("{}\t{version}\n", path.display()));
         fs::write(self.control.join("releases"), text).unwrap();
+    }
+
+    /// Tells the fakes which version each release of `params` holds, as [`World::seed_update`]
+    /// does, replacing what they knew: the binary the harness runs says so on every run.
+    ///
+    /// # Panics
+    /// The file cannot be written.
+    pub fn set_releases(&self, params: &Params) {
+        let mut text = format!(
+            "{}\t{}\n",
+            params.staged_release.display(),
+            params.target_version
+        );
+        if let (Some(release), Some(version)) = (&params.previous_release, &params.previous_version)
+        {
+            text.push_str(&format!("{}\t{version}\n", release.display()));
+        }
+        fs::write(self.control.join("releases"), text).unwrap();
+    }
+
+    /// The agent of `unit` is started and dies at once: the unit is `failed`, and no hello
+    /// comes. A crashed unit is started again by the next start.
+    ///
+    /// # Errors
+    /// The unit's file cannot be written.
+    pub fn crash(&self, unit: &str) -> Result<(), PortError> {
+        self.put_unit(unit, "failed", "failed")
+    }
+
+    /// Starts `unit` as [`Units::start`] does, but the agent that starts never says hello.
+    ///
+    /// # Errors
+    /// The unit's file cannot be read or written.
+    pub fn start_silent(&self, unit: &str) -> Result<(), PortError> {
+        if self.show(unit)?.active == "active" {
+            return Ok(());
+        }
+        self.put_unit(unit, "active", "running")
     }
 
     /// The server restarts: it forgets the host's session, and the next hello makes it live
@@ -271,7 +317,10 @@ impl World {
     }
 
     /// The agent says hello: the server makes the host if it knows none (epoch 1), else one more
-    /// epoch; a new session, the version and the runtime either way.
+    /// epoch; a new session, the version and the runtime either way. The session is stamped
+    /// with the server's clock, or one millisecond later when that is the stamp of the session it
+    /// replaces (the fake clock moves only when a step pauses): the server never stamps two
+    /// sessions alike.
     ///
     /// # Errors
     /// The server's file cannot be read or written.
@@ -295,7 +344,13 @@ impl World {
         };
         host.epoch += 1;
         host.state = "live".to_owned();
-        host.session_started_ms = Some(self.server_now_ms());
+        let now = self.server_now_ms();
+        let stamp = if host.session_started_ms == Some(now) {
+            now.saturating_add(1)
+        } else {
+            now
+        };
+        host.session_started_ms = Some(stamp);
         host.agent_version = Some(agent_version.to_owned());
         host.runtime = Some(self.exec_mode());
         self.save(&host)
@@ -341,12 +396,13 @@ impl World {
         let Some(target) = read_link(link).map_err(|why| io_err(&why))? else {
             return Ok(None);
         };
+        let resolved = resolve(link, &target);
         let table = fs::read_to_string(self.control.join("releases")).unwrap_or_default();
         table
             .lines()
             .filter_map(|line| line.split_once('\t'))
             .rev()
-            .find(|(path, _)| Path::new(path) == target)
+            .find(|(path, _)| Path::new(path) == target || Path::new(path) == resolved)
             .map(|(_, version)| Some(version.to_owned()))
             .ok_or_else(|| {
                 PortError::Io(format!(
@@ -360,6 +416,71 @@ impl World {
         link.file_name()
             .map(|name| self.world.join("link").join(name))
             .ok_or_else(|| PortError::Io(format!("{}: no file name", link.display())))
+    }
+}
+
+/// Where the link `file` points: its target, or a relative one read from the link's directory,
+/// with `.` and `..` taken away by name (the fake's targets are directories it knows, never
+/// links of their own).
+#[must_use]
+pub fn resolve(file: &Path, target: &Path) -> PathBuf {
+    if target.is_absolute() {
+        return target.to_owned();
+    }
+    let mut path = file.parent().map(Path::to_path_buf).unwrap_or_default();
+    for part in target.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                path.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => path.push(other),
+        }
+    }
+    path
+}
+
+/// `target` as a path relative to the directory of the link `file`, so that two worlds in two
+/// directories hold the same link to the same place in each.
+#[must_use]
+pub fn relative_to_link(file: &Path, target: &Path) -> PathBuf {
+    let from: Vec<_> = file.parent().unwrap_or(file).components().collect();
+    let to: Vec<_> = target.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut path = PathBuf::new();
+    for _ in common..from.len() {
+        path.push("..");
+    }
+    for part in &to[common..] {
+        path.push(part);
+    }
+    path
+}
+
+impl World {
+    /// Where the link of `link` points, a relative target read from the link's directory.
+    ///
+    /// # Errors
+    /// The link exists and is not a readable symbolic link.
+    pub fn resolved_target(&self, link: &Path) -> Result<Option<PathBuf>, PortError> {
+        let file = self.link_file(link)?;
+        let target = read_link(&file).map_err(|why| io_err(&why))?;
+        Ok(target.map(|target| resolve(&file, &target)))
+    }
+
+    /// Points the link of `link` at `target` by a path relative to the world, as
+    /// [`Link::relink`] does by an absolute one: the conformance harness compares the worlds of
+    /// two sandboxes, and an absolute target would name the sandbox.
+    ///
+    /// # Errors
+    /// The link could not be made.
+    pub fn relink_relative(&self, link: &Path, target: &Path) -> Result<(), PortError> {
+        let file = self.link_file(link)?;
+        if self.resolved_target(link)?.as_deref() == Some(target) {
+            return Ok(());
+        }
+        self.gate();
+        swap_link(&file, &relative_to_link(&file, target)).map_err(|why| io_err(&why))
     }
 }
 

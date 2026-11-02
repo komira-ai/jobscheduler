@@ -88,6 +88,10 @@ toml = { version = "1.1.8", default-features = false, features = ["std", "parse"
 tower = { version = "0.5.3", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
+# The host updater's hook contract and its conformance harness, from kbf at a pinned revision
+# (the crate depends on nothing else of kbf). A dev-dependency of js-agent only: the harness
+# drives `js-agent update-hook` in its tests (tests/agent/update_hook/conformance.rs).
+update-hook = { git = "https://github.com/komira-ai/kbf", rev = "b374d03f4431c42a09740c846f94063623da4ff5" }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 webpki-roots = { version = "1.0.11", default-features = false }
 # Reads the validity of the certificate a TLS reload brings (js-lease-server); in the lock

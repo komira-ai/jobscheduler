@@ -5,6 +5,7 @@
 //! the rules the record is held to are pure of the steps and tested here on their own.
 
 mod args;
+mod conformance;
 mod declaration;
 mod fake_bin;
 #[allow(dead_code)]

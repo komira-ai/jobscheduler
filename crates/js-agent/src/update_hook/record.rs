@@ -2,9 +2,11 @@
 //! finds it, and the lock that keeps two steps apart (host-updates design, 4.2, "The hook
 //! record" and "The record directory is not the service's").
 //!
-//! The record is `state_dir/record.json`; the lock is `state_dir/lock`, an exclusive `flock`
-//! taken without waiting and held for the whole step, so a second copy refuses (exit 1,
-//! reason `locked`) having changed nothing. The directory must be `root:root`, mode 0700 and
+//! The record is `state_dir/record.json`; the lock is an exclusive `flock` on `state_dir`
+//! itself, as the hook contract has it, and on `state_dir/lock`, which hooks of before the
+//! directory lock take: both are taken without waiting and held for the whole step, the
+//! directory's first, so a second copy, or anything that holds the directory, makes the step
+//! refuse (exit 1, reason `locked`) having changed nothing. The directory must be `root:root`, mode 0700 and
 //! not a symlink, and every directory above it must be owned by root and not writable by its
 //! group or by others, or the step refuses (`state_invalid`) before it opens anything in it.
 //!
@@ -487,15 +489,31 @@ impl Held {
         stat: &dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
     ) -> Result<Held, StateError> {
         let fd = open_checked(dir, stat)?;
-        let path = dir.join(LOCK_FILE);
-        let lock = open_regular(fd.as_fd(), LOCK_FILE, OFlags::WRONLY | OFlags::CREATE)
-            .map_err(at(&path))?;
-        flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|errno| {
-            StateError::Lock {
-                path,
-                source: errno.into(),
-            }
+        // The directory first: a holder of it (the updater, another step) is refused before
+        // anything is made in it.
+        flock(&fd, FlockOperation::NonBlockingLockExclusive).map_err(|errno| StateError::Lock {
+            path: dir.to_owned(),
+            source: errno.into(),
         })?;
+        let path = dir.join(LOCK_FILE);
+        let locked = open_regular(fd.as_fd(), LOCK_FILE, OFlags::WRONLY | OFlags::CREATE)
+            .map_err(at(&path))
+            .and_then(|lock| {
+                flock(&lock, FlockOperation::NonBlockingLockExclusive)
+                    .map(|()| lock)
+                    .map_err(|errno| StateError::Lock {
+                        path,
+                        source: errno.into(),
+                    })
+            });
+        let lock = match locked {
+            Ok(lock) => lock,
+            Err(error) => {
+                // Released explicitly, as `drop` does (see above).
+                let _ = flock(&fd, FlockOperation::Unlock);
+                return Err(error);
+            }
+        };
         Ok(Held {
             dir: dir.to_owned(),
             fd,
@@ -620,5 +638,6 @@ impl Held {
 impl Drop for Held {
     fn drop(&mut self) {
         let _ = flock(&self.lock, FlockOperation::Unlock);
+        let _ = flock(&self.fd, FlockOperation::Unlock);
     }
 }
