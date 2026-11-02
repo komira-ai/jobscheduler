@@ -209,6 +209,24 @@ fn a_pin_that_cannot_be_read_keeps_the_image() {
     assert_eq!(collect(&p.a).removed, [digest('c')]);
 }
 
+/// Catches an entry of `leases` that is not a regular file hanging the collection (a FIFO
+/// opened for reading waits for a writer, here forever, while the digest's lock is held)
+/// or being taken for no pin: with a FIFO among the pins, X is kept at once; with it gone,
+/// X goes.
+#[test]
+fn a_pin_entry_that_is_not_a_regular_file_keeps_the_image_without_waiting() {
+    let p = pair("pin-fifo-entry");
+    image(&p.images, 'c');
+    p.b.unpin_image("none").expect("the pins are made");
+    let fifo = p.pins.join(LEASES_DIR).join("odd");
+    let kind = rustix::fs::FileType::Fifo;
+    rustix::fs::mknodat(rustix::fs::CWD, &fifo, kind, rustix::fs::Mode::RUSR, 0).expect("fifo");
+    kept(&collect(&p.a), 1);
+    assert!(whole(&p.images, 'c'));
+    std::fs::remove_file(&fifo).expect("removed");
+    assert_eq!(collect(&p.a).removed, [digest('c')]);
+}
+
 /// Compatibility, older store to newer agent. Catches the pins needing anything an agent
 /// from before them did not leave: on a store with images and no pins' directory, a
 /// collection removes the unpinned images as before (making the pins as it goes), and a pin
@@ -233,10 +251,14 @@ fn the_pins_need_nothing_from_a_store_from_before_them() {
 /// an agent from before them reads (the store `oci-images`, whose layout and published
 /// roots it relies on): after pins, unpins, a claim, a collection and a removal, the store
 /// holds only digest directories, the pins are all in their own directory beside it, and
-/// an image's published root is where it was.
+/// an image's published root is where it was. The one new name in the scratch directory is
+/// none an agent from before the pins acts on there: its only scan of that directory takes
+/// the names starting `js-` (leases it left), and it lists only digest names and `.stage-`
+/// names in the store.
 #[tokio::test]
 async fn the_pins_write_nothing_into_the_store_an_older_agent_reads() {
     let p = pair("pin-new-store");
+    let before = names(&p.scratch);
     image(&p.images, 'c');
     image(&p.images, 'd');
     image(&p.images, 'e');
@@ -253,4 +275,8 @@ async fn the_pins_write_nothing_into_the_store_an_older_agent_reads() {
     );
     assert!(whole(&p.images, 'c'));
     assert_eq!(names(&p.pins), [hexn('c'), LEASES_DIR.to_owned()]);
+    let mut added = names(&p.scratch);
+    added.retain(|name| !before.contains(name));
+    assert_eq!(added, [PINS_DIR]);
+    assert!(!PINS_DIR.starts_with("js-") && !PINS_DIR.starts_with(".stage-"));
 }

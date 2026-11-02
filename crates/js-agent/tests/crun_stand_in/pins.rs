@@ -11,7 +11,7 @@ use std::sync::Arc;
 use js_agent::crun::{CrunRuntime, config_dir};
 use js_agent::lifecycle::{Runtime, Status};
 
-use crate::node::{LONG, NoImages, Node};
+use crate::node::{Endless, LONG, NoImages, Node};
 
 /// The second agent's runtime on `node`.
 fn second(node: &Node) -> CrunRuntime {
@@ -233,4 +233,29 @@ fn an_image_another_agents_run_holds_is_not_removed_to_fetch_its_config() {
     assert_eq!(stored(&node), [hex.to_owned()]);
     assert_eq!(pins(&node).len(), 1, "only the other run's pin");
     second.remove(&held).expect("removed");
+}
+
+/// Catches a creation abandoned in the middle of its pull (the pull limit spent, the fetch
+/// dropped) keeping its pin: the run fails, no pin is left, and a later collection removes
+/// the node's image, which nothing else pins.
+#[test]
+fn a_run_whose_pull_is_cut_off_leaves_no_pin() {
+    let node = Node::new("pin-pull-cut");
+    let first = node.open();
+    let hooks = Node::hooks(LONG, std::time::Duration::ZERO);
+    let mut cut = node.open_with(hooks, Arc::new(Endless));
+    let mut spec = node.spec("r1-exit");
+    spec.body = js_agent::lifecycle::Body::Container {
+        image: format!("registry.example/job:1@sha256:{}", "cd".repeat(32)),
+        args: Vec::new(),
+    };
+    let why = cut
+        .create_and_start(&spec)
+        .expect_err("cut off")
+        .to_string();
+    assert!(why.contains("took longer than"), "{why}");
+    assert!(pins(&node).is_empty(), "{:?}", pins(&node));
+    // The cut unpack's stage stays for the start sweep; the stored image goes.
+    let report = first.collect_images(&[]).expect("collected");
+    assert_eq!(report.removed, std::slice::from_ref(&node.digest));
 }

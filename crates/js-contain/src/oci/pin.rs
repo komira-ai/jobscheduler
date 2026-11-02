@@ -91,20 +91,23 @@ impl Images {
     /// The digest or the lease name is not one, or a directory or file of the pins could not
     /// be made or opened, or is not as required.
     pub(crate) fn pin(&self, hex: &str, lease: &str) -> std::io::Result<()> {
-        self.pin_with(hex, lease, &mut || {})
+        self.pin_with(hex, lease, &mut || {}, &mut || {})
     }
 
     /// [`Images::pin`], calling `between` after each open of the lock file and before its
-    /// lock: where a test puts another backend's step.
+    /// lock, and `locked` once the lock is held and before the pin is written: where a test
+    /// puts another backend's step.
     pub(super) fn pin_with(
         &self,
         hex: &str,
         lease: &str,
         between: &mut dyn FnMut(),
+        locked: &mut dyn FnMut(),
     ) -> std::io::Result<()> {
         lease_name(lease)?;
         let dir = private_dir(CWD, self.pins())?;
         let _held = lock(&dir, hex, Op::LockShared, between)?;
+        locked();
         let leases = private_dir(&dir, Path::new(LEASES_DIR))?;
         let tmp = format!(".{lease}.tmp");
         let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW;
@@ -209,8 +212,8 @@ fn lease_name(name: &str) -> std::io::Result<()> {
     ))
 }
 
-/// Whether a pin file in `leases` names the digest `hex`. A pin file that cannot be read
-/// counts as naming it: the digest is kept.
+/// Whether a pin file in `leases` names the digest `hex`. An entry that is not a regular
+/// file, or cannot be read, counts as naming it: the digest is kept.
 fn pinned(leases: &OwnedFd, hex: &str) -> std::io::Result<bool> {
     for entry in Dir::read_from(leases)? {
         let entry = entry?;
@@ -226,11 +229,16 @@ fn pinned(leases: &OwnedFd, hex: &str) -> std::io::Result<bool> {
     Ok(false)
 }
 
-/// The text of the file `name` of `dir`, a link not followed.
+/// The text of the regular file `name` of `dir`, a link not followed. Anything else (a
+/// FIFO, a device, a directory) is opened without waiting and refused, unread.
 fn read_at(dir: &OwnedFd, name: &std::ffi::CStr) -> std::io::Result<String> {
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let mut file = File::from(rustix::fs::openat(dir, name, flags, Mode::empty())?);
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
     let mut text = String::new();
-    File::from(rustix::fs::openat(dir, name, flags, Mode::empty())?).read_to_string(&mut text)?;
+    file.read_to_string(&mut text)?;
     Ok(text)
 }
 

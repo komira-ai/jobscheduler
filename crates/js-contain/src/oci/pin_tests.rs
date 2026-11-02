@@ -5,6 +5,7 @@
 //! by its source until the test lets it go.
 
 use std::collections::VecDeque;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -192,16 +193,19 @@ fn an_image_pinned_by_two_leases_stays_until_both_are_unpinned() {
 }
 
 /// The environment variable naming the directory [`pin_child`] works in.
-const CHILD_DIR: &str = "JS_CONTAIN_PIN_CHILD_DIR";
-
-/// Run as a process of its own by
-/// [`a_pin_outlives_the_process_that_wrote_it`]: starts a backend on the parent's scratch
-/// directory, pins C for the lease `child-lease`, and exits without unpinning and without
-/// running a destructor, as an agent killed with its container still running does.
+/// Run as a process of its own by [`a_pin_outlives_the_process_that_wrote_it`], which
+/// writes the directory to work in on its standard input: starts a backend on the
+/// parent's scratch directory, pins C for the lease `child-lease`, and exits without
+/// unpinning and without running a destructor, as an agent killed with its container
+/// still running does.
 #[test]
 #[ignore = "a process of its own of a_pin_outlives_the_process_that_wrote_it"]
 fn pin_child() {
-    let dir = PathBuf::from(std::env::var_os(CHILD_DIR).expect("run by its parent test"));
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .expect("the parent's directory");
+    let dir = PathBuf::from(line.trim_end());
     let source: Arc<dyn ImageSource> = Arc::new(Steps::default());
     let scratch = dir.join("scratch");
     let oci = Oci::on(&config(&dir, true), source, &scratch, "/actions", "x86_64");
@@ -219,11 +223,17 @@ fn a_pin_outlives_the_process_that_wrote_it() {
     let p = pair("pin-child");
     image(&p.images, 'c');
     let exe = std::env::current_exe().expect("the test binary");
-    let ran = std::process::Command::new(exe)
+    let mut child = std::process::Command::new(exe)
         .args(["--exact", "oci::pin_tests::pin_child", "--ignored"])
-        .env(CHILD_DIR, p.dir.as_os_str())
-        .output()
-        .expect("the child ran");
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the child started");
+    let mut input = child.stdin.take().expect("its input");
+    writeln!(input, "{}", p.dir.display()).expect("the directory");
+    drop(input);
+    let ran = child.wait_with_output().expect("the child ran");
     assert!(ran.status.success(), "{ran:?}");
     assert_eq!(names(&p.pins.join(LEASES_DIR)), ["child-lease"]);
     kept(&collect(&p.a), 1);
@@ -272,7 +282,7 @@ async fn a_pin_after_a_removal_protects_the_image_its_check_fetches_again() {
         }
     };
     p.b.images
-        .pin_with(&hexn('c'), "lease-b", &mut collect_now)
+        .pin_with(&hexn('c'), "lease-b", &mut collect_now, &mut || {})
         .expect("pinned");
     assert_eq!(collected.expect("the hook ran").removed, [digest('c')]);
     assert!(names(&p.images).is_empty(), "the image went");
@@ -338,7 +348,8 @@ fn a_pin_that_may_wait_for_a_removal_protects_the_image_after_it() {
                 tx.send(()).expect("the test waits");
             }
         };
-        b.images.pin_with(&hexn('c'), "lease-b", &mut opened)
+        b.images
+            .pin_with(&hexn('c'), "lease-b", &mut opened, &mut || {})
     });
     opened.recv().expect("b opened the lock file");
     p.a.images.set_aside(&hexn('c')).expect("set aside");
@@ -482,4 +493,67 @@ async fn an_image_another_backend_removed_is_fetched_again() {
         "served from a stale flight"
     );
     assert!(p.images.join(hexn('c')).is_dir());
+}
+
+/// Catches a removal that runs between a lease taking the digest's lock and its pin being
+/// written: there `a`'s collection keeps X (it cannot take the lock) and `a`'s removal of X
+/// is refused as busy; once the pin is written and the lock let go, X stays protected,
+/// and goes after the unpin.
+#[test]
+fn a_removal_while_a_pin_is_being_written_keeps_the_image() {
+    let p = pair("pin-being-written");
+    image(&p.images, 'c');
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime");
+    let mut during = None;
+    let mut remove_now = || {
+        let report = collect(&p.a);
+        let removal = rt.block_on(p.a.remove_image(&pinned('c')));
+        during = Some((report, removal));
+    };
+    p.b.images
+        .pin_with(&hexn('c'), "lease-b", &mut || {}, &mut remove_now)
+        .expect("pinned");
+    let (report, removal) = during.expect("the hook ran");
+    kept(&report, 1);
+    let busy = removal.expect_err("being pinned");
+    assert_eq!(busy.kind(), std::io::ErrorKind::ResourceBusy);
+    assert!(whole(&p.images, 'c'));
+    kept(&collect(&p.a), 1);
+    let refused = rt.block_on(p.a.remove_image(&pinned('c')));
+    assert_eq!(
+        refused.expect_err("pinned").kind(),
+        std::io::ErrorKind::ResourceBusy
+    );
+    p.b.unpin_image("lease-b").expect("unpinned");
+    assert_eq!(collect(&p.a).removed, [digest('c')]);
+}
+
+/// Catches a fetch cancelled under a pin (a lease whose pull ran out of time) losing the
+/// pin or leaving the store unusable: `b` pins X and its fetch is dropped once its source
+/// says it began. A collection then removes nothing (X never arrived); the retry fetches X,
+/// which the next collection keeps; after the unpin, X goes.
+#[tokio::test]
+async fn a_cancelled_fetch_under_a_pin_is_retried_and_its_image_kept() {
+    let source = Arc::new(Steps::default());
+    let p = pair_with("pin-refetch-cancelled", &source);
+    p.b.pin_image(&pinned('c'), "lease-b").expect("pinned");
+    let (began_tx, began) = oneshot::channel();
+    let (_go, go) = oneshot::channel();
+    source.then(Step::Hold {
+        began: began_tx,
+        go,
+    });
+    let b = Arc::clone(&p.b);
+    let fetch = tokio::spawn(async move { b.check_pinned(&pinned('c')).await });
+    began.await.expect("the fetch began");
+    fetch.abort();
+    assert!(fetch.await.expect_err("cancelled").is_cancelled());
+    kept(&collect(&p.a), 0);
+    p.b.check_pinned(&pinned('c')).await.expect("fetched");
+    assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    kept(&collect(&p.a), 1);
+    p.b.unpin_image("lease-b").expect("unpinned");
+    assert_eq!(collect(&p.a).removed, [digest('c')]);
 }
