@@ -177,9 +177,9 @@ impl<'a> LaunchUnits<'a> {
         self
     }
 
-    /// The file the kickstart waits for, when one was given.
-    #[must_use]
-    pub fn gate(&self) -> Option<&Path> {
+    /// The file the kickstart waits for, when one was given: for the test of the Mac's wiring.
+    #[cfg(test)]
+    pub(super) fn gate(&self) -> Option<&Path> {
         self.gate
     }
 

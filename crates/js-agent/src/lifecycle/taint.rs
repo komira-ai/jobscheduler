@@ -121,13 +121,7 @@ impl StateRoot {
     /// The path is not an existing directory, is a link, is owned by another user, or
     /// grants group or others any permission. The text names the flag.
     pub fn open(path: &Path) -> Result<Self, String> {
-        Self::open_named(path, "--state-root")
-    }
-
-    /// [`StateRoot::open`], with the error text starting with `name` (the update hook names
-    /// its param, not the agent's flag).
-    pub(crate) fn open_named(path: &Path, name: &str) -> Result<Self, String> {
-        private_dir(path, name).map(|path| Self { path })
+        private_dir(path, "--state-root").map(|path| Self { path })
     }
 
     /// The canonical path of the directory.

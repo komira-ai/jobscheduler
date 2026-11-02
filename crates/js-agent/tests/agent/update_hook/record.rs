@@ -529,6 +529,81 @@ fn an_ancestor_swapped_for_a_link_between_two_steps_redirects_nothing_and_the_ne
     assert_eq!(fs::read_dir(other.join("state")).unwrap().count(), 0);
 }
 
+/// Asserts what a swap of an ancestor for a link does while `Held::open` walks down to the
+/// state directory, made from inside the walk (the `stat` of a directory it has just opened):
+/// swapped once the walk holds the parent open, the walk goes on in the parent it opened, and
+/// the lock, a save and a delete all land in the original tree; swapped while the walk is one
+/// directory above the parent, the walk is refused at the link (`Ancestor`, `Symlink`). Either
+/// way the replacement tree, which holds a state directory of the right shape with a record of
+/// its own, is left byte for byte as it was. It catches a walk that opens a later component by
+/// its path, or checks a directory other than the one it then goes into.
+#[test]
+fn an_ancestor_swapped_for_a_link_during_the_walk_redirects_nothing() {
+    for swap_at_parent in [true, false] {
+        let name = format!("hook-record-swap-walk-{swap_at_parent}");
+        let (dir, parent, state) = tree(&name, 0o755);
+        let moved = dir.path().join("moved");
+        let other = dir.path().join("other");
+        fs::create_dir_all(other.join("state")).unwrap();
+        fs::set_permissions(other.join("state"), fs::Permissions::from_mode(0o700)).unwrap();
+        let theirs = serde_json::to_vec(&record("9.9.9")).unwrap();
+        fs::write(other.join("state").join(RECORD_FILE), &theirs).unwrap();
+        let listing = || {
+            let mut names: Vec<_> = fs::read_dir(other.join("state"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing();
+
+        // The swap is made the first time the walk looks at `at`, a directory it holds open.
+        let at = if swap_at_parent {
+            parent.clone()
+        } else {
+            dir.path().to_owned()
+        };
+        let swapped = std::cell::Cell::new(false);
+        let real = rooted(dir.path());
+        let stat = |path: &Path, fd: BorrowedFd<'_>| {
+            if path == at && !swapped.replace(true) {
+                fs::rename(&parent, &moved).unwrap();
+                symlink(&other, &parent).unwrap();
+            }
+            real(path, fd)
+        };
+        let opened = Held::open(&state, &stat);
+        assert!(swapped.get(), "{swap_at_parent}: the walk looked at {at:?}");
+        if swap_at_parent {
+            let held = opened.unwrap();
+            held.save(&record("1.4.0")).unwrap();
+            let kept: Record =
+                serde_json::from_slice(&fs::read(moved.join("state").join(RECORD_FILE)).unwrap())
+                    .unwrap();
+            assert_eq!(kept, record("1.4.0"));
+            assert_eq!(held.load().unwrap(), Some(record("1.4.0")));
+            held.delete().unwrap();
+            assert!(!moved.join("state").join(RECORD_FILE).exists());
+        } else {
+            match opened {
+                Err(StateError::Ancestor { path, problem }) => {
+                    assert_eq!(path, parent);
+                    assert_eq!(problem, DirProblem::Symlink);
+                }
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(fs::read_dir(moved.join("state")).unwrap().count(), 0);
+        }
+        assert_eq!(listing(), before, "{swap_at_parent}");
+        assert_eq!(
+            fs::read(other.join("state").join(RECORD_FILE)).unwrap(),
+            theirs,
+            "{swap_at_parent}"
+        );
+    }
+}
+
 #[test]
 fn the_lock_is_exclusive_and_a_second_holder_changes_nothing() {
     let dir = cell("hook-record-lock");

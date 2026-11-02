@@ -515,37 +515,7 @@ impl Held {
     /// [`StateError::Newer`] for a newer schema, [`StateError::Corrupt`] for anything that is
     /// not a record of this one, [`StateError::Io`] if the file cannot be read.
     pub fn load(&self) -> Result<Option<Record>, StateError> {
-        let path = self.record_path();
-        let mut bytes = Vec::new();
-        // Without following a link and without waiting for a writer: a pipe put in the
-        // record's place is refused below, not waited on.
-        match open_in(self.fd.as_fd(), RECORD_FILE, OFlags::RDONLY) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(at(&path)(source)),
-            Ok(file) => {
-                regular(&file).map_err(|e| StateError::Corrupt(e.to_string()))?;
-                file.take(RECORD_MAX + 1)
-                    .read_to_end(&mut bytes)
-                    .map_err(at(&path))?
-            }
-        };
-        if bytes.len() as u64 > RECORD_MAX {
-            return Err(StateError::Corrupt(format!("more than {RECORD_MAX} bytes")));
-        }
-        let header: Header =
-            serde_json::from_slice(&bytes).map_err(|e| StateError::Corrupt(e.to_string()))?;
-        match header.schema.cmp(&SCHEMA) {
-            std::cmp::Ordering::Greater => Err(StateError::Newer {
-                found: header.schema,
-            }),
-            std::cmp::Ordering::Less => Err(StateError::Corrupt(format!(
-                "schema {} is not one this hook wrote",
-                header.schema
-            ))),
-            std::cmp::Ordering::Equal => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| StateError::Corrupt(e.to_string())),
-        }
+        load_in(self.fd.as_fd(), &self.record_path())
     }
 
     /// Makes `record` the record: written, synced, renamed over the old one, the directory
@@ -615,6 +585,58 @@ impl Held {
             .map_err(io::Error::from)
             .map_err(at(&self.dir))
     }
+}
+
+/// The record in the directory `dir`, reported as `path`; `None` if there is none (see
+/// [`Held::load`]).
+fn load_in(dir: BorrowedFd<'_>, path: &Path) -> Result<Option<Record>, StateError> {
+    let mut bytes = Vec::new();
+    // Without following a link and without waiting for a writer: a pipe put in the
+    // record's place is refused below, not waited on.
+    match open_in(dir, RECORD_FILE, OFlags::RDONLY) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(at(path)(source)),
+        Ok(file) => {
+            regular(&file).map_err(|e| StateError::Corrupt(e.to_string()))?;
+            file.take(RECORD_MAX + 1)
+                .read_to_end(&mut bytes)
+                .map_err(at(path))?
+        }
+    };
+    if bytes.len() as u64 > RECORD_MAX {
+        return Err(StateError::Corrupt(format!("more than {RECORD_MAX} bytes")));
+    }
+    let header: Header =
+        serde_json::from_slice(&bytes).map_err(|e| StateError::Corrupt(e.to_string()))?;
+    match header.schema.cmp(&SCHEMA) {
+        std::cmp::Ordering::Greater => Err(StateError::Newer {
+            found: header.schema,
+        }),
+        std::cmp::Ordering::Less => Err(StateError::Corrupt(format!(
+            "schema {} is not one this hook wrote",
+            header.schema
+        ))),
+        std::cmp::Ordering::Equal => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| StateError::Corrupt(e.to_string())),
+    }
+}
+
+/// The record in `dir` as it is now, `None` if there is none, read without the lock and
+/// without creating or changing anything: the directory is opened and held to the rules as
+/// [`Held::open`] does, and the record read as [`Held::load`] does. A save replaces the record
+/// by a rename, so what is read is a whole record, the one before a save that runs meanwhile
+/// or the one after it. It tells a step that will not run what the record says it has done.
+///
+/// # Errors
+/// What [`Held::open`] says of the directory (except [`StateError::Lock`]: no lock is taken)
+/// and what [`Held::load`] says of the record.
+pub(crate) fn peek(
+    dir: &Path,
+    stat: &dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
+) -> Result<Option<Record>, StateError> {
+    let fd = open_checked(dir, stat)?;
+    load_in(fd.as_fd(), &dir.join(RECORD_FILE))
 }
 
 impl Drop for Held {

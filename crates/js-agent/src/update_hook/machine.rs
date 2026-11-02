@@ -18,7 +18,11 @@
 //! step `state_invalid`: an absent root would otherwise read as "no taint, nothing owed". A
 //! state root that is there and is not private (a link, a file, another owner, open to others)
 //! ends every step `state_invalid` too, a first install's included. Only a first install may
-//! have none. Either error starts with the param's name, `state_root`.
+//! have none. Either error starts with the param's name, `state_root`. The check comes before
+//! the step's lock and changes nothing; a `cutover` or `rollback` whose record says it is past
+//! its commit still says `reversible: false` (the record is read without the lock). The state
+//! root is looked up once per step: the lease's credential and the step's taint and owed
+//! checks come from the same [`StateRoot`].
 
 use std::io;
 use std::os::fd::BorrowedFd;
@@ -41,11 +45,12 @@ use crate::own_host::{
 
 use super::declaration::{DECLARATION_PATH, Declaration};
 use super::ports::{NoGate, Ports, StateView, SystemClock, SystemLink};
+use super::record::peek;
 use super::step::{self, Env};
 use super::{
-    CA_CERT_KEY, ConnectParams, DirStat, Done, HOST_ID_KEY, Invocation, LaunchUnits, Outcome,
-    Params, PlatformUnits, PortError, Reason, Report, SERVER_KEY, STATE_ROOT_KEY, Step,
-    StopRunner, TOKEN_FILE_KEY, fd_stat,
+    CA_CERT_KEY, ConnectParams, DirStat, Done, HOST_ID_KEY, Invocation, Outcome, Params,
+    PlatformUnits, PortError, Reason, Report, SERVER_KEY, STATE_ROOT_KEY, Step, StopRunner,
+    TOKEN_FILE_KEY, fd_stat,
 };
 
 /// How a directory of the state directory's path is looked at (see [`fd_stat`]).
@@ -106,8 +111,12 @@ impl Machine<'static> {
 /// would refuse it on the host's own routes, which says nothing of the cause). A credential file
 /// that is there and cannot be read, or holds no credential, is refused by the key
 /// `state_root`, and the token file is not used in its place either: the agent would not use it.
-fn credential(params: &ConnectParams) -> Result<(PathBuf, &'static str), String> {
-    let kept = match find_root(params.state_root.as_deref())? {
+/// `root` is what the hook found at `state_root`.
+fn credential(
+    params: &ConnectParams,
+    root: Result<&Root, &RootError>,
+) -> Result<(PathBuf, &'static str), String> {
+    let kept = match root.map_err(RootError::to_string)? {
         Root::Open(root) => {
             let file = CredentialFile::in_dir(root.path());
             let loaded = file
@@ -160,13 +169,26 @@ impl MachineLease {
         own_host_id: &dyn Fn() -> Result<String, String>,
         limit: RequestLimit,
     ) -> Self {
+        let root = find_root(params.state_root.as_deref());
+        Self::with_root(params, root.as_ref(), own_host_id, limit)
+    }
+
+    /// [`MachineLease::connect`] with the state root already looked up: `run_step` gives the
+    /// one its checks found, so the credential is read from the state root the step reads.
+    fn with_root(
+        params: &ConnectParams,
+        root: Result<&Root, &RootError>,
+        own_host_id: &dyn Fn() -> Result<String, String>,
+        limit: RequestLimit,
+    ) -> Self {
         Self {
-            client: Self::open(params, own_host_id, limit),
+            client: Self::open(params, root, own_host_id, limit),
         }
     }
 
     fn open(
         params: &ConnectParams,
+        root: Result<&Root, &RootError>,
         own_host_id: &dyn Fn() -> Result<String, String>,
         limit: RequestLimit,
     ) -> Result<HttpLease, String> {
@@ -179,7 +201,7 @@ impl MachineLease {
             None => own_host_id()?,
         };
         HostId::new(&id).map_err(|why| format!("{HOST_ID_KEY}: {why}"))?;
-        let (credential, key) = credential(params)?;
+        let (credential, key) = credential(params, root)?;
         HttpLease::connect(server, &credential, params.ca_cert.as_deref(), &id, limit)
             .map_err(|why| named(&why, key))
     }
@@ -214,18 +236,56 @@ enum Root {
     Open(StateRoot),
 }
 
-/// The state root at `path`: [`Root::Absent`] when `path` is `None` or nothing is at it. One
-/// that is there and is not usable (a link, a dangling one included, a file, another owner,
-/// open to others) or that cannot be looked at is an error, whose text starts with
-/// [`STATE_ROOT_KEY`]: nothing can be said of a taint in it.
-fn find_root(path: Option<&Path>) -> Result<Root, String> {
+/// Why the hook will not read the agent's state root: every step ends `state_invalid` with it,
+/// before it takes its lock. The text starts with the params key, [`STATE_ROOT_KEY`].
+#[derive(Debug, thiserror::Error)]
+enum RootError {
+    /// An update, and the params name no state root.
+    #[error(
+        "{key}: an update needs the state root of the agent that runs, and the params name none",
+        key = STATE_ROOT_KEY
+    )]
+    NotNamed,
+    /// An update, and nothing is at the path the params name.
+    #[error(
+        "{key}: {} is not there, and an update needs the state root of the agent that runs",
+        .0.display(),
+        key = STATE_ROOT_KEY
+    )]
+    NotThere(PathBuf),
+    /// Something is at `path`, and it is not a private directory of the user the hook runs
+    /// as (a link, a dangling one included, a file, another owner, open to others), or it
+    /// cannot be looked at. `why` is the agent's own check's, as [`StateRoot::open`] says it.
+    #[error("{key}: {}: {why}", path.display(), key = STATE_ROOT_KEY)]
+    Unusable {
+        /// The path the params name.
+        path: PathBuf,
+        /// Why it is not a state root.
+        why: String,
+    },
+}
+
+/// The prefix of [`StateRoot::open`]'s errors: the agent's flag, which the hook does not have.
+const AGENT_FLAG: &str = "--state-root: ";
+
+/// The state root at `path`: [`Root::Absent`] when `path` is `None` or nothing is at it.
+///
+/// # Errors
+/// [`RootError::Unusable`]: something is at `path` and it is not usable, or the path cannot be
+/// looked at. Nothing can be said of a taint in it.
+fn find_root(path: Option<&Path>) -> Result<Root, RootError> {
     let Some(path) = path else {
         return Ok(Root::Absent);
     };
     // The path itself, not what a link at it points to: a link is refused by the open.
     match std::fs::symlink_metadata(path) {
-        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(Root::Absent),
-        _ => StateRoot::open_named(path, STATE_ROOT_KEY).map(Root::Open),
+        Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(Root::Absent),
+        _ => StateRoot::open(path)
+            .map(Root::Open)
+            .map_err(|text| RootError::Unusable {
+                path: path.to_owned(),
+                why: text.strip_prefix(AGENT_FLAG).unwrap_or(&text).to_owned(),
+            }),
     }
 }
 
@@ -233,25 +293,36 @@ fn find_root(path: Option<&Path>) -> Result<Root, String> {
 /// runs; a first install may find none.
 ///
 /// # Errors
-/// The state root is there and not usable, or it is an update's and the params name none or
-/// name one that is not there. The text starts with [`STATE_ROOT_KEY`].
-fn agent_state(params: &Params) -> Result<Root, String> {
+/// What [`find_root`] says; for an update, [`RootError::NotNamed`] or [`RootError::NotThere`]
+/// when it finds none.
+fn agent_state(params: &Params) -> Result<Root, RootError> {
     let named = params.connect.state_root.as_deref();
     let root = find_root(named)?;
     if !matches!(root, Root::Absent) || params.previous_version.is_none() {
         return Ok(root);
     }
-    Err(match named {
-        None => format!(
-            "{STATE_ROOT_KEY}: an update needs the state root of the agent that runs, and the \
-             params name none"
-        ),
-        Some(path) => format!(
-            "{STATE_ROOT_KEY}: {} is not there, and an update needs the state root of the agent \
-             that runs",
-            path.display()
-        ),
-    })
+    Err(named.map_or(RootError::NotNamed, |path| {
+        RootError::NotThere(path.to_owned())
+    }))
+}
+
+/// The ending of a step whose state root the hook will not read: `state_invalid` with `why`,
+/// before the lock is taken and with nothing changed. A `cutover` or `rollback` whose record
+/// says it is past its commit ([`step::committed`]) says `reversible: false`, as its body would;
+/// the record is read without the lock ([`peek`]). A record that cannot be read says nothing of a
+/// commit, as for a step that cannot read its record under the lock.
+fn refused(step: Step, declaration: &Declaration, stat: &StatFn, why: &RootError) -> Done {
+    let committed = peek(&declaration.state_dir, stat)
+        .ok()
+        .flatten()
+        .is_some_and(|record| step::committed(step, &record));
+    Done {
+        outcome: Outcome::Failure,
+        report: Report {
+            reversible: !committed,
+            ..Report::failure(Reason::StateInvalid, why.to_string())
+        },
+    }
 }
 
 impl StateView for Root {
@@ -284,14 +355,14 @@ fn platform_units<'a>(commands: &'a SystemCommands, _stop: &'a StopRunner) -> Pl
 /// The units of a Mac: `launchctl` through `commands`, `bootout` through `stop` (it waits for the
 /// agent to exit, which its plist allows [`AGENT_EXIT_TIMEOUT_SECS`], so `stop` must wait
 /// longer: see [`StopRunner`]), and a kickstart held back while the agent's token file
-/// ([`GATE`](js_mac_provision::daemon::GATE)) is absent. Built on every platform, so that a test
-/// off a Mac checks the wiring the Mac's hook runs with.
-#[must_use]
-pub fn launch_units<'a>(
+/// ([`GATE`](js_mac_provision::daemon::GATE)) is absent. Built for the tests on every platform,
+/// so that a test off a Mac checks the wiring the Mac's hook runs with.
+#[cfg(any(target_os = "macos", test))]
+fn launch_units<'a>(
     commands: &'a dyn CommandRunner,
     stop: &'a dyn CommandRunner,
-) -> LaunchUnits<'a> {
-    LaunchUnits::new(commands)
+) -> super::LaunchUnits<'a> {
+    super::LaunchUnits::new(commands)
         .with_stop_runner(stop)
         .with_gate(Path::new(js_mac_provision::daemon::GATE))
 }
@@ -313,17 +384,17 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     };
     let state = match agent_state(params) {
         Ok(state) => state,
-        Err(why) => {
-            return Done {
-                outcome: Outcome::Failure,
-                report: Report::failure(Reason::StateInvalid, why),
-            };
-        }
+        Err(why) => return refused(invocation.step, &declaration, machine.stat, &why),
     };
     let commands = SystemCommands::default();
     let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
     let units = platform_units(&commands, &stop);
-    let lease = MachineLease::connect(&params.connect, machine.own_host_id, RequestLimit::DEFAULT);
+    let lease = MachineLease::with_root(
+        &params.connect,
+        Ok(&state),
+        machine.own_host_id,
+        RequestLimit::DEFAULT,
+    );
     let env = Env {
         ports: Ports {
             units: &units,
@@ -348,9 +419,70 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
 
 #[cfg(test)]
 mod tests {
-    use js_client::ClientError;
+    use std::cell::RefCell;
+    use std::path::Path;
 
-    use super::named;
+    use js_client::ClientError;
+    use js_mac_provision::daemon::GATE;
+
+    use super::{CommandRunner, launch_units, named};
+    use crate::update_hook::{LAUNCHCTL, Units};
+
+    /// A `launchctl` that shows every service running, and notes each command it is given.
+    #[derive(Default)]
+    struct Noting {
+        seen: RefCell<Vec<String>>,
+    }
+
+    impl CommandRunner for Noting {
+        fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
+            self.seen
+                .borrow_mut()
+                .push(format!("{program} {}", args.join(" ")));
+            Ok("\tstate = running\n".to_owned())
+        }
+
+        fn run_in(
+            &self,
+            program: &str,
+            args: &[&str],
+            _: &[(&str, &str)],
+        ) -> Result<String, String> {
+            self.run(program, args)
+        }
+    }
+
+    /// Asserts the wiring of a Mac's units: a read, an `is_active` and the start of a running
+    /// service each print the service through the commands; a stop prints it through the
+    /// commands and boots it out through the stop runner, which runs nothing else; and the
+    /// kickstart waits on the agent's token file. It catches units built without the stop
+    /// runner or the gate, or with the two runners swapped or one runner for both.
+    #[test]
+    fn the_units_of_a_mac_read_through_the_commands_stop_through_the_stop_runner_and_wait_on_the_token()
+     {
+        let label = "com.example.agent";
+        let print = format!("{LAUNCHCTL} print system/{label}");
+        let commands = Noting::default();
+        let stop = Noting::default();
+        let units = launch_units(&commands, &stop);
+        assert_eq!(units.show(label).unwrap().active, "active");
+        assert!(units.is_active(label).unwrap());
+        units.start(label).unwrap();
+        assert!(stop.seen.borrow().is_empty());
+        units.stop_no_block(label).unwrap();
+        assert_eq!(
+            *stop.seen.borrow(),
+            [format!("{LAUNCHCTL} bootout system/{label}")]
+        );
+        assert_eq!(*commands.seen.borrow(), vec![print; 4]);
+        assert_eq!(units.gate(), Some(Path::new(GATE)));
+        // The fake's other entry, which the units never use, answers as `run` does.
+        let other = Noting::default();
+        assert_eq!(
+            other.run_in(LAUNCHCTL, &["list"], &[]),
+            other.run(LAUNCHCTL, &["list"])
+        );
+    }
 
     /// Asserts that a client error the hook has no params key for keeps the client's own
     /// text: an error that names no flag (today only a request gives one, never the building
