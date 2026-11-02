@@ -10,6 +10,10 @@
 //! of its own, so the step and anything it started die, every pipe it held closes, and the
 //! harness reaps it and reports a step that died of a signal.
 //!
+//! It bounds the steps run through `js-update-hook-fake`, the hook's own step code over the
+//! fakes; it is no bound on an arbitrary hook binary the harness might start, whose waits the
+//! harness itself does not bound.
+//!
 //! What a window is, is injected ([`watch`]'s `wait`): the binary waits a span of real time,
 //! and only ever to end a step that has stopped making progress. A test of the watchdog itself
 //! gives it windows that end when the test says.

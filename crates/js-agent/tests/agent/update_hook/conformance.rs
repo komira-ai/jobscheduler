@@ -17,7 +17,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use js_agent::update_hook::{Lease, NoGate, Report as AgentReport, swap_link};
+use js_agent::update_hook::{NoGate, Report as AgentReport, swap_link};
 use js_testkit::dir::TestDir;
 use update_hook::conformance::{
     Allowances, Conformance, FakeService, Fault, HookCommand, LapsingCordon, Sandbox, Violation,
@@ -37,9 +37,11 @@ pub(super) const BIN: &str = env!("CARGO_BIN_EXE_js-update-hook-fake");
 /// agent that runs when the update begins says hello with it.
 pub(super) const PREVIOUS_VERSION: &str = "1.0.0";
 
-/// How long the operator's cordon of [`AgentHost::operator_cordoned`] is asked for: longer than
-/// the hook's lease, so the hook's own cordon call leaves its expiry as it is.
-const OPERATOR_CORDON_SECS: u64 = 900;
+/// How far ahead the operator's cordon of [`AgentHost::operator_cordoned`] lapses, from the fake
+/// clock's start: a week, as an operator who renewed it would leave it. Longer than the hook's
+/// lease (so the hook's own cordon call leaves its expiry as it is) and than every wait of an
+/// update (so it is in force when the update is rolled back).
+const OPERATOR_CORDON_MS: u64 = 7 * 24 * 3600 * 1000;
 
 /// The js-agent host the harness acts on: the agent of the previous release runs on the unit,
 /// the release link points at it, the lease server knows the host and holds no lease, and the
@@ -133,9 +135,12 @@ impl FakeService for AgentHost {
             swap_link(&link, &relative_to_link(&link, &sandbox.previous()))?;
             world.seed_host(HOST, PREVIOUS_VERSION);
             if self.operator_cordon {
-                world
-                    .cordon(OPERATOR_CORDON_SECS)
-                    .map_err(|why| io::Error::other(why.to_string()))?;
+                world.alter_host(|host| {
+                    host.cordon = Some(js_agent::update_hook::CordonView {
+                        expires_at_ms: super::fakes::START_MS + OPERATOR_CORDON_MS,
+                        expires_in_ms: None,
+                    });
+                });
                 fs::copy(
                     sandbox.world().join("cordon.json"),
                     Self::operator_file(sandbox),
@@ -478,19 +483,41 @@ fn a_kill_point_that_cannot_be_counted_fails_the_run_visibly() {
 
 /// A step that blocks without ever pausing (a call that never returns) is ended by the
 /// watchdog thread: the step's whole process group is killed, the harness reaps it and refuses
-/// a step that died of a signal, whatever the step. The window is short so the test does not
-/// wait long; the result does not depend on it, since the step never makes progress.
+/// the stalled step, `verify`, as one that died of a signal. The window is two seconds, far longer
+/// than any step of the fakes takes between two progress events, so the steps before `verify`
+/// are never cut; `verify` never makes progress, so it dies whatever the window.
 #[test]
 fn a_step_that_blocks_without_pausing_is_killed_by_the_watchdog_and_refused() {
     let host = AgentHost {
-        window_ms: Some(200),
+        window_ms: Some(2000),
         ..AgentHost::with_defect(Defect::Stall)
     };
     let refused = run("hook-conf-stall", host, |harness| harness.idempotence()).unwrap_err();
     assert!(
-        matches!(refused, Violation::DiedBySignal { .. }),
+        matches!(refused, Violation::DiedBySignal { step: Step::Verify }),
         "{refused}"
     );
+}
+
+/// With the allowances declared, a hook that lifts an operator's cordon is refused: after a
+/// deferred `prepare`, the rollback says it was reversible, and the world is not as it was before
+/// the update (the operator's cordon is gone).
+#[test]
+fn a_rollback_that_lifts_an_operators_cordon_is_refused_with_the_allowances_declared() {
+    let host = AgentHost {
+        defect: Some(Defect::LiftsAnyCordon),
+        ..AgentHost::operator_cordoned()
+    };
+    let refused = run("hook-conf-lifts-op", host, |harness| {
+        harness.scenario(&[(Step::Prepare, Fault::Defer)])
+    })
+    .unwrap_err();
+    match &refused {
+        Violation::RollbackClaimsReversible { changes } => {
+            assert_eq!(changes, &["removed cordon.json"]);
+        }
+        other => panic!("{other}"),
+    }
 }
 
 /// With the allowances declared, a cordon the hook recorded as its own and then did not lift is

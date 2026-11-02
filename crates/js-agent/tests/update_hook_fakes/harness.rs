@@ -348,6 +348,8 @@ pub enum Defect {
     ForgetsCordon,
     /// The kill-point count file is put out of reach after the first point.
     BrokenCount,
+    /// `rollback` lifts any cordon the host holds when it ends, an operator's as well.
+    LiftsAnyCordon,
 }
 
 impl Defect {
@@ -361,17 +363,19 @@ impl Defect {
             Defect::Stall => "stall",
             Defect::ForgetsCordon => "forgets-cordon",
             Defect::BrokenCount => "broken-count",
+            Defect::LiftsAnyCordon => "lifts-any-cordon",
         }
     }
 
     /// Every defect.
-    pub const ALL: [Defect; 6] = [
+    pub const ALL: [Defect; 7] = [
         Defect::NoLastLine,
         Defect::CutoverRestarts,
         Defect::Hang,
         Defect::Stall,
         Defect::ForgetsCordon,
         Defect::BrokenCount,
+        Defect::LiftsAnyCordon,
     ];
 
     /// The defect a value names; `None` for none or a word no defect has.

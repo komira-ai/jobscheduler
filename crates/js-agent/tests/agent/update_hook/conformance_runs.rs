@@ -498,3 +498,34 @@ fn on_a_renewing_host_only_the_point_after_the_placing_shows_a_cordon_not_owned(
     assert_eq!(unowned.len(), 1, "{unowned:?} of {gates}");
     assert!(owned > 1, "the renewals: {owned} owned points of {gates}");
 }
+
+/// A `rollback` that fails while the lease server does not answer fails the same way when run
+/// again, changing nothing more; once the server answers, it runs to the end the uninterrupted
+/// rollback reaches.
+#[test]
+fn a_rollback_that_fails_repeats_then_resumes_once_the_fault_is_gone() {
+    let whole = Bed::update("hook-runs-rb-clear-whole");
+    whole.ok(Step::Prepare);
+    whole.ok(Step::Cutover);
+    whole.ok(Step::Rollback);
+    let want = without_stamps(whole.state());
+    let bed = Bed::update("hook-runs-rb-clear");
+    bed.ok(Step::Prepare);
+    bed.ok(Step::Cutover);
+    bed.arrange(Step::Rollback, harness::Fault::Fail);
+    let first = bed.run(Step::Rollback, 0);
+    assert_eq!(first.outcome(), Outcome::Failure, "{first:?}");
+    let report = first.report.as_ref().unwrap();
+    assert_eq!(report.reason.as_deref(), Some("lease_unreachable"));
+    let after_first = bed.state();
+    let again = bed.run(Step::Rollback, 0);
+    assert_eq!(again.outcome(), Outcome::Failure);
+    assert_eq!(
+        again.report.as_ref().map(|r| (&r.reason, r.reversible)),
+        Some((&report.reason, report.reversible))
+    );
+    same(&after_first, &bed.state(), "a failed rollback run again");
+    bed.clear(Step::Rollback);
+    bed.ok(Step::Rollback);
+    same(&want, &without_stamps(bed.state()), "rollback resumed");
+}

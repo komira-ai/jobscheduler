@@ -116,6 +116,32 @@ pub enum Violation {
         /// The package.
         package: String,
     },
+    /// A dependency from kbf's repository other than the one it allows: [`KBF_CONTRACT`],
+    /// as a dev-dependency.
+    FromKbf {
+        /// The manifest.
+        manifest: String,
+        /// The package.
+        package: String,
+    },
+}
+
+/// The one crate this repository may take from kbf's repository, and only as a
+/// dev-dependency: kbf's update-hook contract crate, whose conformance harness the js-agent
+/// hook's tests run. It depends on no other crate of kbf (kbf's own layering test keeps it
+/// so), and it is pinned by revision. Anything else from kbf's repository is refused, by any
+/// name.
+pub const KBF_CONTRACT: &str = "update-hook";
+
+/// Whether a dependency's declaration names kbf's repository as its git source.
+fn from_kbf_repo(dep: &toml::Value) -> bool {
+    dep.get("git")
+        .and_then(toml::Value::as_str)
+        .is_some_and(|url| {
+            url.trim_end_matches('/')
+                .trim_end_matches(".git")
+                .ends_with("github.com/komira-ai/kbf")
+        })
 }
 
 impl fmt::Display for Violation {
@@ -154,6 +180,10 @@ impl fmt::Display for Violation {
             Violation::OutsideSource { manifest, package } => write!(
                 f,
                 "{manifest} depends on {package} by something other than a path or the workspace"
+            ),
+            Violation::FromKbf { manifest, package } => write!(
+                f,
+                "{manifest} takes {package} from kbf's repository; only {KBF_CONTRACT}, as a dev-dependency, may come from there"
             ),
         }
     }
@@ -511,6 +541,47 @@ pub fn check(root: &Path) -> Result<Vec<Violation>, Error> {
                         attribute,
                     });
                 }
+            }
+        }
+    }
+
+    // From kbf's repository: only the contract crate, declared once at the root and taken
+    // by members as a dev-dependency.
+    let root_deps = root_manifest
+        .get("workspace")
+        .and_then(|w| w.get("dependencies"))
+        .and_then(toml::Value::as_table);
+    let kbf_at_root: BTreeSet<String> = root_deps
+        .into_iter()
+        .flatten()
+        .filter(|(_, dep)| from_kbf_repo(dep))
+        .map(|(key, dep)| {
+            let real = dep.get("package").and_then(toml::Value::as_str);
+            real.unwrap_or(key).to_owned()
+        })
+        .collect();
+    for package in kbf_at_root.iter().filter(|p| *p != KBF_CONTRACT) {
+        violations.insert(Violation::FromKbf {
+            manifest: "Cargo.toml".to_owned(),
+            package: package.clone(),
+        });
+    }
+    for m in members.values() {
+        let manifest = m
+            .dir
+            .strip_prefix(root)
+            .unwrap_or(&m.dir)
+            .join("Cargo.toml")
+            .display()
+            .to_string();
+        for (dep, value, dev) in &m.deps {
+            let via_root = value.get("workspace").and_then(toml::Value::as_bool) == Some(true)
+                && kbf_at_root.contains(dep);
+            if (from_kbf_repo(value) || via_root) && (!dev || dep != KBF_CONTRACT) {
+                violations.insert(Violation::FromKbf {
+                    manifest: manifest.clone(),
+                    package: dep.clone(),
+                });
             }
         }
     }

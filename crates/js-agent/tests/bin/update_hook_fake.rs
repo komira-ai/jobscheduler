@@ -27,8 +27,8 @@ use std::time::Duration;
 use js_agent::update_hook::step::{self, Env};
 #[cfg(target_os = "linux")]
 use js_agent::update_hook::{
-    Clock, DirStat, Done, Host, Invocation, NoGate, Outcome, Params, Ports, Reason, Report, Step,
-    run,
+    Clock, DirStat, Done, Host, Invocation, Lease, NoGate, Outcome, Params, Ports, Reason, Report,
+    Step, run,
 };
 
 #[cfg(target_os = "linux")]
@@ -190,6 +190,9 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
     {
         // Starts the agent again although it runs: a new session on every run.
         let _ = world.hello(&params.target_version);
+    }
+    if step_now == Step::Rollback && setup.defect == Some(Defect::LiftsAnyCordon) {
+        let _ = world.uncordon();
     }
     // The step's last change to the record is after its last kill point.
     mirror_ownership(&setup.world, &setup.state_dir);
