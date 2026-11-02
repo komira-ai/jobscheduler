@@ -119,8 +119,10 @@ fn links_and_pipes_take_their_directorys_project_and_are_not_followed() {
     let outside = base.join("outside");
     fs::create_dir(&outside).expect("make the directory a link leads to");
     write(&outside.join("big"), 2 << 20);
-    // A target long enough that XFS keeps it in a block rather than in the inode.
-    let far = format!("{}{}", outside.display(), "/.".repeat(1000));
+    // A target long enough that XFS keeps it in a block rather than in the inode (more than
+    // the inode's few hundred bytes), and within XFS's limit of 1024 bytes for a link.
+    let far = format!("{}{}", outside.display(), "/.".repeat(300));
+    assert!(far.len() < 1024, "the link's target is {} bytes", far.len());
     let (run, project) = fx.bound_dir(&base, "run", 62);
     let loose = base.join("loose");
     fs::create_dir(&loose).expect("make a directory that is not bound");
