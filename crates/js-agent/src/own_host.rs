@@ -9,13 +9,12 @@
 //! `js-client`, held there, and sent in the `Authorization` header only.
 
 use std::path::Path;
+use std::time::Duration;
 
 use js_agent_wire::Taint;
 use js_client::{Client, ClientError, Reply};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-
-use crate::transport::REQUEST_LIMIT;
 
 /// The longest cordon the lease server grants in one request; a longer ask is cut to it.
 pub const MAX_CORDON_SECS: u64 = 3600;
@@ -91,9 +90,11 @@ pub struct Uncordoned {
 /// Why the lease server did not answer as asked.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LeaseError {
-    /// The server holds no host by this id (`unknown-host`): it has not said hello since the
-    /// server started.
-    #[error("unknown host")]
+    /// The server holds no host by this id (409 `unknown-host`): it has not said hello since
+    /// the server started. A refusal: the server was reached and nothing was done.
+    #[error(
+        "unknown host (409 unknown-host): the lease server has not heard this host say hello since it started"
+    )]
     UnknownHost,
     /// The server refused the request (`invalid-cordon`, `join-token-not-admitted`, ...), by
     /// its code, or by `http-<status>` when it sent none.
@@ -137,7 +138,9 @@ pub struct HttpLease {
 impl HttpLease {
     /// Connects to `server` as `host`, with the credential in the owner-only file
     /// `credential`, trusting `ca_cert` for `https://` (or the bundled public roots without
-    /// it). `host` is a valid host id: it has no colon and nothing to escape.
+    /// it). `host` is a valid host id: it has no colon and nothing to escape. Every call
+    /// ends within `limit`, connect included: a server that does not answer in time is
+    /// [`LeaseError::Unreachable`].
     ///
     /// # Errors
     ///
@@ -148,8 +151,9 @@ impl HttpLease {
         credential: &Path,
         ca_cert: Option<&Path>,
         host: &str,
+        limit: Duration,
     ) -> Result<Self, ClientError> {
-        Client::connect(server, credential, ca_cert, REQUEST_LIMIT).map(|client| Self {
+        Client::connect(server, credential, ca_cert, limit).map(|client| Self {
             client,
             host: host.to_owned(),
         })

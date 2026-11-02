@@ -25,13 +25,13 @@ const UNIT: &str = "js-agent-crun.service";
 
 /// A tree of one test: the declaration, the state directory of the hook, the staged release
 /// (an agent that prints its version), and a place for the params files.
-struct Tree {
+pub(super) struct Tree {
     _files: Scratch,
     root: PathBuf,
 }
 
 impl Tree {
-    fn new(name: &str) -> Tree {
+    pub(super) fn new(name: &str) -> Tree {
         let files = Scratch::new(name);
         let root = files.path("tree");
         fs::create_dir_all(root.join("releases/1.4.0")).unwrap();
@@ -70,20 +70,20 @@ impl Tree {
         tree
     }
 
-    fn declaration(&self) -> PathBuf {
+    pub(super) fn declaration(&self) -> PathBuf {
         self.root.join("declaration.toml")
     }
 
-    fn staged(&self) -> PathBuf {
+    pub(super) fn staged(&self) -> PathBuf {
         self.root.join("releases/1.4.0")
     }
 
-    fn record(&self) -> PathBuf {
+    pub(super) fn record(&self) -> PathBuf {
         self.root.join("state/record.json")
     }
 
     /// The params of an update from 1.3.0 (or a first install), plus `extra` lines.
-    fn params(&self, previous: bool, extra: &str) -> Params {
+    pub(super) fn params(&self, previous: bool, extra: &str) -> Params {
         let previous = if previous {
             format!(
                 "\"updater.previous_release\" = \"{}/releases/1.3.0\"\n\"updater.previous_version\" = \"1.3.0\"\n",
@@ -110,7 +110,7 @@ impl Tree {
     }
 
     /// Runs `step` on a machine whose id is `own`, with the declaration of the tree.
-    fn run(&self, step: Step, params: &Params, own: Result<&str, &str>) -> Done {
+    pub(super) fn run(&self, step: Step, params: &Params, own: Result<&str, &str>) -> Done {
         let invocation = Invocation {
             step,
             artifact: (step == Step::Prepare).then(|| self.staged()),
@@ -128,7 +128,7 @@ impl Tree {
 }
 
 /// The params lines that reach the enrolled server as its host `mac-1`.
-fn reaching(enrolled: &Enrolled) -> String {
+pub(super) fn reaching(enrolled: &Enrolled) -> String {
     format!(
         "server = \"{}\"\nstate_root = \"{}\"\nhost_id = \"mac-1\"\n",
         enrolled.server.url(),
@@ -277,7 +277,11 @@ fn every_step_the_updater_can_ask_for_is_run_by_its_own_body() {
 }
 
 fn connect(params: &ConnectParams, own: Result<&str, &str>) -> MachineLease {
-    MachineLease::connect(params, &|| own.map(str::to_owned).map_err(str::to_owned))
+    MachineLease::connect(
+        params,
+        &|| own.map(str::to_owned).map_err(str::to_owned),
+        js_agent::REQUEST_LIMIT,
+    )
 }
 
 fn unreachable(why: Result<impl std::fmt::Debug, LeaseError>) -> String {
@@ -336,7 +340,7 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
                 token_file: Some(files.path("no-such-token")),
                 ..full.clone()
             },
-            "--token-file",
+            "token_file: ",
         ),
         (
             ConnectParams {
@@ -345,7 +349,7 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
                 ca_cert: Some(ca),
                 ..full.clone()
             },
-            "--ca-cert",
+            "ca_cert: ",
         ),
         (
             ConnectParams {

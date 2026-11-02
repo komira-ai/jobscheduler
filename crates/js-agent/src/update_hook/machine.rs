@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_agent_wire::Taint;
+use js_client::ClientError;
 use js_mac_provision::daemon::AGENT_EXIT_TIMEOUT_SECS;
 use js_types::HostId;
 
@@ -28,13 +29,15 @@ use crate::facts::{
 };
 use crate::lifecycle::StateRoot;
 use crate::own_host::{Cordoned, HostReading, HttpLease, Lease, LeaseError, Uncordoned};
+use crate::transport::REQUEST_LIMIT;
 
 use super::declaration::{DECLARATION_PATH, Declaration};
 use super::ports::{NoGate, Ports, StateView, SystemClock, SystemLink};
 use super::step::{self, Env};
 use super::{
-    ConnectParams, DirStat, Done, HOST_ID_KEY, Invocation, Outcome, Params, PlatformUnits,
-    PortError, Reason, Report, SERVER_KEY, Step, StopRunner, fd_stat,
+    CA_CERT_KEY, ConnectParams, DirStat, Done, HOST_ID_KEY, Invocation, Outcome, Params,
+    PlatformUnits, PortError, Reason, Report, SERVER_KEY, STATE_ROOT_KEY, Step, StopRunner,
+    TOKEN_FILE_KEY, fd_stat,
 };
 
 /// How a directory of the state directory's path is looked at (see [`fd_stat`]).
@@ -88,19 +91,42 @@ impl Machine<'static> {
     }
 }
 
-/// The file the bearer is read from: the host credential of the state root when it holds one,
-/// which is what the agent sends once it has one, and otherwise the token file. A state root
-/// that is not private is not trusted with a credential.
-fn credential(params: &ConnectParams) -> Result<PathBuf, String> {
+/// The file the bearer is read from, with the params key that led to it: the host credential
+/// of the state root when it holds one, which is what the agent sends once it has one, and
+/// otherwise the token file. A state root that is not private is not trusted with a
+/// credential.
+fn credential(params: &ConnectParams) -> Result<(PathBuf, &'static str), String> {
     let kept = match Root::find(params.state_root.as_deref()) {
         Root::Open(root) => {
             let file = CredentialFile::in_dir(root.path());
-            file.load()?.map(|_| file.path())
+            file.load()?.map(|_| (file.path(), STATE_ROOT_KEY))
         }
         Root::Absent | Root::Unusable(_) => None,
     };
-    kept.or_else(|| params.token_file.clone())
-        .ok_or_else(|| "token_file: required unless state_root holds a host credential".to_owned())
+    kept.or_else(|| params.token_file.clone().map(|file| (file, TOKEN_FILE_KEY)))
+        .ok_or_else(|| {
+            format!("{TOKEN_FILE_KEY}: required unless {STATE_ROOT_KEY} holds a host credential")
+        })
+}
+
+/// Why the client could not be built, named by the params key whose value is wrong. The
+/// client names the command-line flags of the programs it serves (`--server`, `--token-file`,
+/// `--ca-cert`); the hook has none of them, only its params table, and the credential may be
+/// the state root's rather than a token file's (`credential_key` says which). A flag the hook
+/// has no key for is told as the client names it.
+fn named(error: ClientError, credential_key: &str) -> String {
+    match error {
+        ClientError::Flag { flag, why } => {
+            let key = match flag {
+                "--server" => SERVER_KEY,
+                "--ca-cert" => CA_CERT_KEY,
+                "--token-file" => credential_key,
+                other => other,
+            };
+            format!("{key}: {why}")
+        }
+        ClientError::Server(why) => why,
+    }
 }
 
 /// The lease server's own-host routes for the host the params name; a connection that could not
@@ -110,20 +136,25 @@ pub struct MachineLease {
 }
 
 impl MachineLease {
-    /// Connects as the params say; `own_host_id` is asked when they name no host.
+    /// Connects as the params say; `own_host_id` is asked when they name no host. Every call
+    /// ends within `limit` (the machine's is [`REQUEST_LIMIT`]): a server that is down or
+    /// does not answer is [`LeaseError::Unreachable`], and the steps that wait on the server
+    /// bound their waits by their own clock.
     #[must_use]
     pub fn connect(
         params: &ConnectParams,
         own_host_id: &dyn Fn() -> Result<String, String>,
+        limit: Duration,
     ) -> Self {
         Self {
-            client: Self::open(params, own_host_id),
+            client: Self::open(params, own_host_id, limit),
         }
     }
 
     fn open(
         params: &ConnectParams,
         own_host_id: &dyn Fn() -> Result<String, String>,
+        limit: Duration,
     ) -> Result<HttpLease, String> {
         let server = params
             .server
@@ -134,9 +165,9 @@ impl MachineLease {
             None => own_host_id()?,
         };
         HostId::new(&id).map_err(|why| format!("{HOST_ID_KEY}: {why}"))?;
-        let credential = credential(params)?;
-        HttpLease::connect(server, &credential, params.ca_cert.as_deref(), &id)
-            .map_err(|why| format!("the lease client: {why}"))
+        let (credential, key) = credential(params)?;
+        HttpLease::connect(server, &credential, params.ca_cert.as_deref(), &id, limit)
+            .map_err(|why| named(why, key))
     }
 
     fn client(&self) -> Result<&HttpLease, LeaseError> {
@@ -235,7 +266,7 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     let commands = SystemCommands::default();
     let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
     let units = platform_units(&commands, &stop);
-    let lease = MachineLease::connect(&params.connect, machine.own_host_id);
+    let lease = MachineLease::connect(&params.connect, machine.own_host_id, REQUEST_LIMIT);
     let state = Root::find(params.connect.state_root.as_deref());
     let env = Env {
         ports: Ports {
@@ -256,5 +287,31 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
         Step::Verify => step::verify(&env, params),
         Step::Rollback => step::rollback(&env, params),
         Step::Cleanup => step::cleanup(&env, params),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use js_client::ClientError;
+
+    use super::named;
+
+    /// Asserts that a client error the hook has no params key for keeps the client's own
+    /// text: an error that names no flag (today only a request gives one, never the building
+    /// of a client), and a flag other than the three the hook maps. It catches a mapping that
+    /// would blame the token file, or put any params key, in front of a text that is not about
+    /// it. The tests of the mapped keys are in `tests/agent/update_hook/lease_port.rs`.
+    #[test]
+    fn a_client_error_the_hook_has_no_key_for_is_told_as_it_is() {
+        let error = ClientError::Server("cannot talk to http://127.0.0.1:1".to_owned());
+        assert_eq!(
+            named(error, "token_file"),
+            "cannot talk to http://127.0.0.1:1"
+        );
+        let error = ClientError::Flag {
+            flag: "--other",
+            why: "is wrong".to_owned(),
+        };
+        assert_eq!(named(error, "token_file"), "--other: is wrong");
     }
 }
