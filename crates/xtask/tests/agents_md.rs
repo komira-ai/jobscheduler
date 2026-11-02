@@ -141,13 +141,20 @@ fn hash_matches(copy: &str, record: &str) -> Result<(), Fault> {
 
 /// Whether `claude` holds the import line outside every fenced code block.
 fn imports(claude: &str) -> Result<(), Fault> {
-    let mut fenced = false;
+    // The open fence's character and length: only a run of the same character, at
+    // least as long, closes it (CommonMark).
+    let mut open: Option<(char, usize)> = None;
     for line in claude.lines() {
         let start = line.trim_start();
-        if start.starts_with("```") || start.starts_with("~~~") {
-            fenced = !fenced;
-        } else if !fenced && line.trim_end() == IMPORT {
-            return Ok(());
+        let fence = ['`', '~'].into_iter().find_map(|c| {
+            let run = start.chars().take_while(|&x| x == c).count();
+            (run >= 3).then_some((c, run))
+        });
+        match (open, fence) {
+            (None, Some(f)) => open = Some(f),
+            (Some((c, n)), Some((d, m))) if c == d && m >= n => open = None,
+            (None, None) if line.trim_end() == IMPORT => return Ok(()),
+            _ => {}
         }
     }
     Err(Fault::NoImport)
@@ -164,7 +171,14 @@ fn record_of(copy: &str) -> String {
 #[test]
 fn the_shared_core_of_agents_md_equals_its_canonical_copy() {
     let core = section(&read("AGENTS.md")).expect("AGENTS.md has one shared core");
-    assert!(core.contains("## Shared core\n"), "{core}");
+    for heading in [
+        "## Shared core\n",
+        "\n- T1 BLOCK. ",
+        "\n- P4 SHOULD. ",
+        "\n- S4 SHOULD. ",
+    ] {
+        assert!(core.contains(heading), "{heading:?} in {core}");
+    }
     assert_eq!(drift(&core, &read("docs/agents/shared-core.md")), Ok(()));
 }
 
@@ -382,6 +396,16 @@ fn the_import_after_a_closed_fence_counts() {
 fn an_import_inside_a_fenced_block_does_not_count() {
     assert_eq!(imports("```\n@AGENTS.md\n```\n"), Err(Fault::NoImport));
     assert_eq!(imports("~~~md\n@AGENTS.md\n"), Err(Fault::NoImport));
+}
+
+#[test]
+fn only_a_matching_fence_closes_a_fenced_block() {
+    // A tilde line does not close a backtick fence, nor a shorter run a longer one.
+    assert_eq!(imports("```\n~~~\n@AGENTS.md\n"), Err(Fault::NoImport));
+    assert_eq!(imports("````\n```\n@AGENTS.md\n"), Err(Fault::NoImport));
+    assert_eq!(imports("```\n````\n@AGENTS.md\n"), Ok(()));
+    // Two backticks are not a fence.
+    assert_eq!(imports("``\n@AGENTS.md\n"), Ok(()));
 }
 
 #[test]

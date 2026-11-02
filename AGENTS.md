@@ -65,13 +65,13 @@ The shared core is the text between the two `shared-core` markers below. `docs/a
 ## Rust
 
 - R1 BLOCK. `cargo fmt --all --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings` are green. No new `#[allow(...)]`/`#![allow(...)]` without a stated reason.
-- R2 BLOCK. No `unsafe` outside the platform bindings (system calls, Objective-C and C interfaces) that cannot be written without it, and every `unsafe` block there carries a `// SAFETY:` comment saying why it is sound. Check: grep the diff.
+- R2 BLOCK. No `unsafe` outside the platform bindings (system calls, Objective-C and C interfaces) that cannot be written without it, and every `unsafe` block there carries a `// SAFETY:` comment saying why it is sound (or, at a C call, an `// FFI-BOUNDARY:` comment saying who owns and frees each pointer). Check: grep the diff.
 - R3 BLOCK. No new `.unwrap()` or `.expect(` in production paths. Libraries use `thiserror` enums with context; `anyhow` only in binaries; no `Box<dyn Error>` in library signatures.
 - R6 BLOCK. Dependencies come from crates.io (or pinned sibling-repo revisions) with a permissive licence; `cargo deny` licences, bans, and sources pass. Advisories (RUSTSEC) never block a PR.
 - R7 BLOCK. Manifests parse after the merge: no duplicate keys or merge artifacts in changed `Cargo.toml`.
 - R8 BLOCK. Crate drift: if main changed anything under a crate this PR touches (`crates/<crate>/`, including src, tests, Cargo files) since CI ran, require main merged and a fresh CI run. Check: `git diff head...main -- crates/<crate>`.
 - R9 SHOULD. Minimal public API: small trait bounds, ownership visible in signatures, newtypes, no trait with a single implementation, no speculative abstraction.
-- R12 SHOULD. Files stay under 1000 lines.
+- R12 SHOULD. Files stay under 1000 lines; a file already over 1000 lines does not grow.
 - T17 SHOULD. Rust coverage: do not rely on tests the PR profile skips; arms of one function covered only by different test binaries or generic instantiations count as missed.
 
 ## This repository
@@ -82,4 +82,6 @@ The shared core is the text between the two `shared-core` markers below. `docs/a
 - R10 BLOCK. Every public item is documented (`missing_docs`, which the workspace sets and clippy's `-D warnings` makes an error).
 - B17 SHOULD. Host updates use one generic updater with per-service update-hook subcommands declared in a root-owned file; no per-roll scripts or per-service logic in the updater.
 
-Coverage here is the ratchet in `coverage-baseline` (see the README's Coverage section): the coverage job fails a crate that misses more lines or branches than its line records, or fewer, and every crate records 0. It is stricter than T1, and T1's 99% does not loosen it.
+Coverage here is the ratchet in `coverage-baseline` (see the README's Coverage section): the coverage job fails a crate that misses more lines or branches than its line records, or misses fewer (so the file never keeps slack), and every crate records 0, or `-` where it has nothing of that kind to measure. It is stricter than T1, and T1's 99% does not loosen it.
+
+Two existing jobs predate B9 and are not yet changed to meet it: `release.yml` runs a release dry-run on a pull request that changes `release.yml`, and `ci.yml` runs the `macos` job on a pull request that changes macOS code or carries the `macos` label. A pull request adds no job of either kind.
