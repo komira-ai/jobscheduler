@@ -58,6 +58,7 @@ fn action(tag: u8) -> Request {
         hermetic: true,
         do_not_cache: false,
         whole_worker: false,
+        pin: None,
     }
 }
 

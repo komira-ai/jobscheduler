@@ -200,6 +200,10 @@ impl FakeProvider {
         if [lists_it, refuses_it].into_iter().all(|yes| yes) {
             return StartAck::Refused(RefusalCode::UnsupportedClass);
         }
+        // The fake has no cordon and no probe rule: it places no probe, as the static pool.
+        if spec.request().probe_host.is_some() {
+            return StartAck::Refused(RefusalCode::ProbeUnsupported);
+        }
         let wanted = spec.request();
         let double_books = self.defect_is(Defect::DoubleBooks);
         let ignores_shape = self.defect_is(Defect::IgnoresShape);

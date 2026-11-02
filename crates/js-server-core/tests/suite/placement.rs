@@ -237,3 +237,29 @@ fn a_core_places_by_load_unless_the_off_switch_is_set() {
         "by the booked rule"
     );
 }
+
+/// Catches: a probe queued by a core whose state-store rows drop the pin (taken up after a
+/// restart, or by another frontend, it would run as ordinary work anywhere), and a probe
+/// placed past the plain cordon a closed intake puts on its nodes.
+#[test]
+fn a_core_queues_no_probe_and_says_so() {
+    let core = core();
+    up(&core, 0, "node-a", "d1");
+    core.place(at(1), &worker("node-a"), NodeAction::Cordon)
+        .expect("placed");
+    let mut probe = request(1);
+    probe.pin = Some(worker("node-a"));
+    let refused = submit_request(&core, 2, probe);
+    assert_eq!(refused, Err(NotQueued::Probe));
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        "this scheduler queues no probe pinned to a host"
+    );
+    let queued = core.with(|view, _| view.sched().unfinished().count());
+    assert_eq!(queued, 0, "nothing is queued");
+    assert_eq!(started(&core), [], "nothing is started");
+    // The same request unpinned is queued as before.
+    submit(&core, 3, 1);
+    let queued = core.with(|view, _| view.sched().unfinished().count());
+    assert_eq!(queued, 1);
+}

@@ -170,6 +170,7 @@ pub fn request() -> Request {
         max_wall: Duration::from_secs(600),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     }
 }
 

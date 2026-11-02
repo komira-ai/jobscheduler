@@ -25,10 +25,14 @@ use crate::error::StartupError;
 ///   everywhere, an unanswered start must not be repeated on another child, and
 ///   [`RefusalCode::ExclusiveNotReady`] is about this request alone (it used up its
 ///   tries to get a host ready and is not placed again), so another child must not
-///   place it. When every child declines, the answer is the most hopeful of the
+///   place it. A child that places no probe at all ([`RefusalCode::ProbeUnsupported`])
+///   is passed over too, so a probe reaches the registry; every other refusal of a probe
+///   is final, so a probe is never placed by a child other than the one that refused it
+///   for its host. When every child declines, the answer is the most hopeful of the
 ///   declines: no capacity (a host could free up), else no capable host, else no fit,
-///   else unsupported class. So the answer is no capable host only when every child
-///   says it can never serve the request, and no capacity while any child could later.
+///   else probe unsupported, else unsupported class. So the answer is no capable host
+///   only when every child says it can never serve the request, and no capacity while
+///   any child could later.
 /// - **Stop** goes to every child, since each remembers the ended lease.
 /// - **Observe** and the read-back of a stop are `Present` if any child says so, else
 ///   `Unknown` if any does, else `Absent`.
@@ -53,9 +57,10 @@ impl LayeredProvider {
 /// How hopeful a decline is; the layered answer is the highest of the children's.
 fn hope(code: RefusalCode) -> u8 {
     match code {
-        RefusalCode::NoCapacity => 3,
-        RefusalCode::NoCapableHost => 2,
-        RefusalCode::NoFit => 1,
+        RefusalCode::NoCapacity => 4,
+        RefusalCode::NoCapableHost => 3,
+        RefusalCode::NoFit => 2,
+        RefusalCode::ProbeUnsupported => 1,
         _ => 0,
     }
 }
@@ -110,7 +115,8 @@ impl Provider for LayeredProvider {
                     code @ (RefusalCode::NoCapacity
                     | RefusalCode::NoCapableHost
                     | RefusalCode::NoFit
-                    | RefusalCode::UnsupportedClass),
+                    | RefusalCode::UnsupportedClass
+                    | RefusalCode::ProbeUnsupported),
                 ) => {
                     if hope(code) > hope(declined) {
                         declined = code;
@@ -285,6 +291,7 @@ mod tests {
             max_wall: Duration::from_secs(60),
             labels: BTreeMap::new(),
             validation_run: None,
+            probe_host: None,
         };
         StartSpec::new(
             LeaseId::new(1, sequence),
@@ -302,6 +309,7 @@ mod tests {
             max_wall: Duration::from_secs(60),
             labels: BTreeMap::new(),
             validation_run: None,
+            probe_host: None,
         };
         StartSpec::new(LeaseId::new(1, sequence), request, &[mac()]).unwrap()
     }
@@ -399,6 +407,35 @@ mod tests {
         assert_eq!(ack, StartAck::Refused(RefusalCode::NoCapableHost));
     }
 
+    /// A child that places no probe is passed over, and a child's probe refusal for its
+    /// host is final: no later child (a free static host here) is asked. When every child
+    /// places no probe, the layer says so, which outranks an unsupported class but not a
+    /// fit refusal. It catches a probe placed by a child that never judged its host, and a
+    /// probe refusal swallowed into a lower-hope answer.
+    #[test]
+    fn a_probe_passes_a_child_that_places_none_and_stops_at_its_hosts_refusal() {
+        let mut provider = layer_of(vec![
+            refusing("s", RefusalCode::ProbeUnsupported),
+            refusing("r", RefusalCode::ProbeHostNotCordoned),
+            Box::new(fake("t", &[("t-1", 1000, 1)])),
+        ]);
+        let ack = provider.start(spec(1, 1, 1));
+        assert_eq!(ack, StartAck::Refused(RefusalCode::ProbeHostNotCordoned));
+        assert_eq!(leased(&provider, "t-1"), None);
+        let mut provider = layer_of(vec![
+            refusing("s", RefusalCode::ProbeUnsupported),
+            refusing("r", RefusalCode::UnsupportedClass),
+        ]);
+        let ack = provider.start(spec(2, 1, 1));
+        assert_eq!(ack, StartAck::Refused(RefusalCode::ProbeUnsupported));
+        let mut provider = layer_of(vec![
+            refusing("s", RefusalCode::ProbeUnsupported),
+            refusing("r", RefusalCode::NoFit),
+        ]);
+        let ack = provider.start(spec(3, 1, 1));
+        assert_eq!(ack, StartAck::Refused(RefusalCode::NoFit));
+    }
+
     /// A request that used up its tries is refused as such and no other child is asked,
     /// where a free static host would place it. It catches a layer that retries it.
     #[test]
@@ -470,6 +507,7 @@ mod tests {
             max_wall: Duration::from_secs(60),
             labels: BTreeMap::new(),
             validation_run: None,
+            probe_host: None,
         };
         StartSpec::new(LeaseId::new(1, sequence), request, &[sharing()]).unwrap()
     }

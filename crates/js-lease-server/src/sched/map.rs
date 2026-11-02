@@ -126,7 +126,8 @@ pub(crate) fn needs(request: &Request) -> Result<js_caps::Request, MapError> {
 ///
 /// The work key is the request's class and `dedup`. The request is an `action` lease at
 /// `batch` urgency, not hermetic (a job may use the network, so a silent host
-/// self-fences it) and not cacheable or joinable.
+/// self-fences it) and not cacheable or joinable; a probe's is pinned to the worker of its
+/// host.
 ///
 /// # Errors
 /// As [`needs`].
@@ -140,6 +141,7 @@ pub(crate) fn job(request: &Request, dedup: &str) -> Result<SchedRequest, MapErr
         hermetic: false,
         do_not_cache: true,
         whole_worker: false,
+        pin: request.probe_host.as_ref().map(worker),
     })
 }
 
@@ -201,6 +203,7 @@ mod tests {
             max_wall: Duration::from_secs(600),
             labels: BTreeMap::new(),
             validation_run: None,
+            probe_host: None,
         }
     }
 

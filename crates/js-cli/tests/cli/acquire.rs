@@ -105,6 +105,28 @@ fn refusals_have_their_exit_status() {
     }
 }
 
+/// Asserts that `--probe-host` reaches the server as the lease's probe host: the static
+/// pool this server places with places no probe, so the start is refused
+/// `probe-unsupported` (exit 3) where the same start without the flag is granted, and a
+/// host name that is not a host id is the server's 400 (exit 4). It catches a flag that is
+/// parsed and dropped, which would place a probe as ordinary work on any host.
+#[test]
+fn acquire_sends_the_probe_host() {
+    let h = Harness::new("acquire_probe");
+    let refused = h.js.go(&acquire_words(&["--probe-host", "gpu-01"]));
+    assert_eq!((refused.code, refused.out.as_str()), (3, ""));
+    assert_eq!(refused.err, "js: refused: probe-unsupported\n");
+    let malformed = h.js.go(&acquire_words(&["--probe-host", "GPU 01"]));
+    assert_eq!(malformed.code, 4, "{}", malformed.err);
+    assert_eq!(
+        malformed.err,
+        "js: rejected: bad-request: probe_host is not a valid host id\n"
+    );
+    let listed = h.js.go(&["--json", "lease", "list"]).json();
+    assert_eq!(listed["leases"], json!([]));
+    assert_eq!(h.js.go(&acquire_words(&[])).code, 0);
+}
+
 /// Asserts that with `--json` a refusal is one JSON object on stderr naming its kind and
 /// message, and stdout stays empty.
 #[test]

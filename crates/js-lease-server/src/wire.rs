@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use js_agent_wire::limits;
 use js_lease::{AcquireError, LeaseInfo, ReleaseError, RenewError};
 use js_provider::RefusalCode;
-use js_types::{ClassId, LeaseId, Request, Requirements, RequirementsError, Resources};
+use js_types::{ClassId, HostId, LeaseId, Request, Requirements, RequirementsError, Resources};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::error::Category;
@@ -30,6 +30,10 @@ pub(crate) struct AcquireBody {
     validation_run: Option<String>,
     #[serde(default)]
     ttl_seconds: Option<u64>,
+    /// A probe: the one host the lease may be placed on, past that host's cordon. Left out
+    /// (or null), the lease is placed as before.
+    #[serde(default)]
+    probe_host: Option<String>,
 }
 
 /// The resources of an [`AcquireBody`]; a dimension left out is zero.
@@ -58,6 +62,12 @@ impl AcquireBody {
     pub(crate) fn into_parts(self) -> Result<(Request, Option<Duration>), ApiError> {
         let class = ClassId::new(&self.class)
             .map_err(|_| ApiError::bad_request("class is not a valid class id"))?;
+        let probe_host = self
+            .probe_host
+            .as_deref()
+            .map(HostId::new)
+            .transpose()
+            .map_err(|_| ApiError::bad_request("probe_host is not a valid host id"))?;
         let resources = &self.resources;
         let (cpu, memory, gpus) = (resources.cpu_millis, resources.memory_bytes, resources.gpus);
         let resources =
@@ -82,6 +92,7 @@ impl AcquireBody {
             max_wall: Duration::from_secs(self.max_wall_seconds),
             labels: self.labels,
             validation_run: self.validation_run,
+            probe_host,
         };
         Requirements::try_from_request(&request).map_err(|why| {
             ApiError::bad_request(match why {
@@ -243,6 +254,13 @@ pub(crate) fn refusal_status(code: RefusalCode) -> StatusCode {
             | RefusalCode::LeaseEnded
             | RefusalCode::NoCapableHost
             | RefusalCode::ExclusiveNotReady
+            | RefusalCode::ProbeUnsupported
+            | RefusalCode::ProbeHostUnknown
+            | RefusalCode::ProbeHostNotServing
+            | RefusalCode::ProbeHostNotCordoned
+            | RefusalCode::ProbeHostDraining
+            | RefusalCode::ProbeHostMismatch
+            | RefusalCode::ProbeHostTooSmall
     );
     match conflict {
         true => StatusCode::CONFLICT,
@@ -337,6 +355,30 @@ mod tests {
         let (request, _) = body(r#"{"os":"macos"}"#).into_parts().unwrap();
         let wanted = Requirements::from_request(&request);
         assert_eq!((wanted.disk_bytes, wanted.exec), (None, None));
+    }
+
+    /// Asserts that `probe_host` reaches the request as the host it names, that a body
+    /// without it (or with null) is no probe, and that a name that is not a host id is a
+    /// 400 naming the field. It catches a field that is read and dropped (the probe would
+    /// be placed as ordinary work, anywhere), and one that is required.
+    #[test]
+    fn probe_host_reaches_the_request_and_is_optional() {
+        let probe = |extra: &str| {
+            let text = format!(
+                r#"{{"class":"c","resources":{{"cpu_millis":1000}},"max_wall_seconds":60{extra}}}"#
+            );
+            parse::<AcquireBody>(text.as_bytes()).unwrap().into_parts()
+        };
+        let (request, _) = probe(r#","probe_host":"mac-07""#).unwrap();
+        assert_eq!(request.probe_host, Some(HostId::new("mac-07").unwrap()));
+        assert_eq!(probe("").unwrap().0.probe_host, None);
+        assert_eq!(probe(r#","probe_host":null"#).unwrap().0.probe_host, None);
+        let refused = probe(r#","probe_host":"Not A Host""#).unwrap_err();
+        let expected = ApiError::bad_request("probe_host is not a valid host id");
+        assert_eq!(
+            (refused.status, refused.code, refused.reason),
+            (expected.status, expected.code, expected.reason)
+        );
     }
 
     fn body_with_resources(resources: &str) -> AcquireBody {
@@ -451,8 +493,8 @@ mod tests {
     }
 
     /// Asserts that each refusal code has the status the API documents: 409 for the
-    /// provider's own refusals and an ended lease, 422 for a broken start contract or
-    /// class rule.
+    /// provider's own refusals (a probe's among them) and an ended lease, 422 for a broken
+    /// start contract or class rule.
     #[test]
     fn refusals_have_their_status() {
         let conflict = [
@@ -462,6 +504,13 @@ mod tests {
             RefusalCode::LeaseEnded,
             RefusalCode::NoCapableHost,
             RefusalCode::ExclusiveNotReady,
+            RefusalCode::ProbeUnsupported,
+            RefusalCode::ProbeHostUnknown,
+            RefusalCode::ProbeHostNotServing,
+            RefusalCode::ProbeHostNotCordoned,
+            RefusalCode::ProbeHostDraining,
+            RefusalCode::ProbeHostMismatch,
+            RefusalCode::ProbeHostTooSmall,
         ];
         let unprocessable = [
             RefusalCode::WallTimeNotPositive,

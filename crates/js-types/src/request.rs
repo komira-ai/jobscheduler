@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::{
-    Capabilities, ClassId, LabelError, Labels, Requirements, RequirementsError, ReservedKey,
-    Resources,
+    Capabilities, ClassId, HostId, LabelError, Labels, Requirements, RequirementsError,
+    ReservedKey, Resources,
 };
 
 /// A request broke a rule that holds for every class and provider (design 5.2).
@@ -36,6 +36,10 @@ pub struct Request {
     pub labels: BTreeMap<String, String>,
     /// The validation run id the caller minted, if the run belongs to a validation.
     pub validation_run: Option<String>,
+    /// A probe: the one host the run may be placed on, past that host's cordon
+    /// (`docs/design/placement.md`, 6.7). A provider that cannot place a probe refuses it
+    /// by name; none places it on another host. `None` for every other run.
+    pub probe_host: Option<HostId>,
 }
 
 impl Request {
@@ -68,6 +72,7 @@ mod tests {
             max_wall: Duration::from_secs(60),
             labels: BTreeMap::new(),
             validation_run: None,
+            probe_host: None,
         }
     }
 

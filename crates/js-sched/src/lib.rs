@@ -71,6 +71,11 @@
 //!   on; a drain waits for them until a deadline, then pauses, and never kills. Work
 //!   only cordoned workers could run waits, naming them, and is not refused for it; an
 //!   uncordon places queued work at once;
+//! - probes ([`Request::pin`]): a request that names one worker runs there and nowhere
+//!   else, and is the only new work a worker cordoned without a drain takes; the rule
+//!   ([`admit_probe`]) refuses it at once, by name, on an unknown, not serving, open,
+//!   draining, mismatched or too small worker, and room and the load predicate apply to
+//!   it as to any request;
 //! - a finished operation is kept for [`FINISHED_RETENTION`] after its waiters are
 //!   answered, then dropped;
 //! - memory kills (failure classes, 6.1): an action that passed its own memory limit
@@ -111,11 +116,13 @@ pub mod harness;
 mod headroom;
 mod input;
 mod load;
+mod probe;
 pub use load::{
     Charge, Choice, DecidedBy, EVALUATIONS_PER_WORKER, FitShape, H_PLUS, HORIZON, HostFacts,
     LeaseFacts, Load, MAX_BALANCE, PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer,
     least_loaded,
 };
+pub use probe::{ProbeHost, ProbeRefusal, admit_probe};
 mod requeue;
 mod scheduler;
 mod servable;

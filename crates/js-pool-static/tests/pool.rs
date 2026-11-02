@@ -26,6 +26,7 @@ fn request(gpu_class: &str, cpu_millis: u64) -> Request {
         max_wall: Duration::from_secs(600),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     }
 }
 

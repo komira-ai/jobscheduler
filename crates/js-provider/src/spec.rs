@@ -31,6 +31,23 @@ pub enum RefusalCode {
     /// A whole-node request that used up its tries to get a host ready: it will not be
     /// placed again.
     ExclusiveNotReady,
+    /// A probe ([`js_types::Request::probe_host`]) the provider cannot place: it places no
+    /// probe at all (a static pool, whose hosts are never cordoned, or a registry with no
+    /// placer to judge one).
+    ProbeUnsupported,
+    /// A probe whose host the provider does not hold live.
+    ProbeHostUnknown,
+    /// A probe whose host is not serving.
+    ProbeHostNotServing,
+    /// A probe whose host is not cordoned: it takes ordinary work, and a probe is only for
+    /// a host kept from it.
+    ProbeHostNotCordoned,
+    /// A probe whose host is being drained, or was.
+    ProbeHostDraining,
+    /// A probe whose host cannot run its platform or its kind of lease.
+    ProbeHostMismatch,
+    /// A probe larger than its host's whole bookable capacity.
+    ProbeHostTooSmall,
 }
 
 impl RefusalCode {
@@ -58,6 +75,13 @@ impl RefusalCode {
             Self::LeaseEnded => "lease-ended",
             Self::NoCapableHost => "no-capable-host",
             Self::ExclusiveNotReady => "exclusive-not-ready",
+            Self::ProbeUnsupported => "probe-unsupported",
+            Self::ProbeHostUnknown => "probe-host-unknown",
+            Self::ProbeHostNotServing => "probe-host-not-serving",
+            Self::ProbeHostNotCordoned => "probe-host-not-cordoned",
+            Self::ProbeHostDraining => "probe-host-draining",
+            Self::ProbeHostMismatch => "probe-host-mismatch",
+            Self::ProbeHostTooSmall => "probe-host-too-small",
         }
     }
 }
@@ -167,6 +191,7 @@ mod tests {
             max_wall: Duration::from_secs(60),
             labels: BTreeMap::new(),
             validation_run: Some("val-1".into()),
+            probe_host: None,
         }
     }
 

@@ -135,13 +135,20 @@ pub(crate) struct AcquireArgs {
     /// The validation run the lease serves.
     #[arg(long, value_name = "ID")]
     pub(crate) validation_run: Option<String>,
+    /// A probe: place the lease on this host alone, past its cordon (the server refuses it
+    /// by name when the host is unknown, not cordoned, not serving, too small or not one
+    /// the server can probe).
+    #[arg(long, value_name = "HOST")]
+    pub(crate) probe_host: Option<String>,
     /// How long to wait for a start the provider has not confirmed (202) to settle.
     #[arg(long, default_value = WAIT_PENDING, value_parser = parse_duration)]
     pub(crate) wait_pending: Duration,
 }
 
 impl AcquireArgs {
-    /// The body of `POST /v1/leases`; `lease run` adds its tag to the labels.
+    /// The body of `POST /v1/leases`; `lease run` adds its tag to the labels. A probe
+    /// host is sent only when asked for, so a server that predates the field takes the
+    /// body of every other start.
     pub(crate) fn body(&self, tag: Option<&RunTag>) -> Value {
         let mut labels: serde_json::Map<String, Value> = self
             .labels
@@ -149,7 +156,7 @@ impl AcquireArgs {
             .map(|(key, value)| (key.clone(), json!(value)))
             .collect();
         labels.extend(tag.map(|tag| (tag::KEY.to_owned(), json!(tag.value()))));
-        json!({
+        let mut body = json!({
             "class": self.class,
             "resources": {
                 "cpu_millis": self.cpu_millis,
@@ -161,7 +168,11 @@ impl AcquireArgs {
             "labels": labels,
             "validation_run": self.validation_run,
             "ttl_seconds": self.ttl.map(|ttl| ttl.as_secs()),
-        })
+        });
+        if let Some(host) = &self.probe_host {
+            body["probe_host"] = json!(host);
+        }
+        body
     }
 }
 

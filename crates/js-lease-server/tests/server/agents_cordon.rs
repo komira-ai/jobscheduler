@@ -758,3 +758,32 @@ async fn a_host_that_is_set_aside_reads_the_mark_the_listing_shows() {
     assert!(held["mark"].is_string(), "{held}");
     assert_eq!(held.get("mark"), listed.get("mark"), "{held} {listed}");
 }
+
+/// Asserts what `POST /v1/leases` answers a probe (`probe_host`) on a server that places
+/// with the registry (the default): 409 `probe-unsupported`, though its host is free and
+/// cordoned, and nothing is booked; a `probe_host` that is not a host id is a 400 naming
+/// the field. The same body without the field is granted once the cordon is lifted. It
+/// catches a probe placed by the registry's first-host rule, which no probe rule judges.
+#[tokio::test]
+async fn a_probe_on_a_server_that_places_with_the_registry_is_refused_by_name() {
+    let h = start_agents("cordon_probe_unsupported", false).await;
+    let me = enrolled(&h, "burst-1", "i-1").await;
+    assert_eq!(cordon(&h, "burst-1", &me, 600).await.status, 200);
+    let mut probe = lease_body();
+    probe["probe_host"] = json!("burst-1");
+    let refused = h.call("POST", "/v1/leases", Some(&probe)).await;
+    assert_eq!(
+        (refused.status, refused.json()),
+        (409, json!({ "error": "probe-unsupported" }))
+    );
+    probe["probe_host"] = json!("Burst 1");
+    let malformed = h.call("POST", "/v1/leases", Some(&probe)).await;
+    assert_eq!(malformed.status, 400, "{}", malformed.body);
+    assert_eq!(
+        malformed.json()["reason"],
+        "probe_host is not a valid host id"
+    );
+    assert_eq!(show(&h, "burst-1", &me).await["leases"], json!(0));
+    assert_eq!(uncordon(&h, "burst-1", &me).await.status, 200);
+    assert_eq!(lease(&h).await.json()["host"], "burst-1");
+}

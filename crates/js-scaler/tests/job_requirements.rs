@@ -24,6 +24,7 @@ fn asking(id: &str, pairs: &[(&str, &str)]) -> Waiting {
         max_wall: Duration::from_secs(60),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     };
     Waiting {
         id: RequestId::new(id).unwrap(),

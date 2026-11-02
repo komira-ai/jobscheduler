@@ -614,6 +614,13 @@ impl Scheduler {
     /// does, waits with a reason ([`Effect::Waiting`] when the reason changes), and is
     /// refused once it has waited so for the unservable wait. Its refusal is committed
     /// first and leaves the queue at once, so nothing places it meanwhile.
+    ///
+    /// A probe ([`Request::pin`]) is judged by the probe rule ([`crate::admit_probe`])
+    /// instead, and refused in the round if the rule refuses it. One the rule admits is
+    /// fitted to the worker it names alone, past that worker's cordon, by the same room
+    /// and load predicate as any request; it waits while they say no. It holds no worker,
+    /// no reservation or held head keeps it off its own (none is ever on a cordoned
+    /// worker), and it counts in no whole-node pool.
     /// What operation `id`, asking `request`, is charged if placed now: its cost and how
     /// that is charged over time (`None`: flat).
     fn charging(&self, id: OperationId, request: &Request) -> (LeaseCost, Option<Arc<Profile>>) {
@@ -675,6 +682,22 @@ impl Scheduler {
                 lease,
                 fit_minutes,
             };
+            // A probe is placed by the probe rule and its worker's room alone: it never
+            // looks at another worker, holds none and is held by none, and the pools'
+            // whole-node counts are not its. One the rule refuses is refused at once.
+            if let Some(pin) = &request.pin {
+                match Servable::probe(&self.workers, &self.cordons, now, pin, request) {
+                    Err(refusal) => {
+                        verdicts.push((id, Verdict::Unservable(Unservable::Probe(refusal))));
+                    }
+                    Ok(()) if placed.len() < round => {
+                        let fit = servable.fit(&mut self.workers, &mut self.admission, &attempt);
+                        placed.extend(fit.placed.map(|p| (id, p)));
+                    }
+                    Ok(()) => {}
+                }
+                continue;
+            }
             let mut blocked = None;
             // A whole-machine request over a cap takes no quiet worker; it waits as any
             // request that cannot be placed does.
@@ -879,10 +902,17 @@ impl Scheduler {
     /// Records this round's verdict on queued operation `id`: tells its waiters when
     /// the reason it waits changes, and proposes its refusal once no worker, cordoned or
     /// not, could run it for the unservable wait. Time spent waiting only for a cordon
-    /// does not count: the wait starts again when the work becomes unservable.
+    /// does not count: the wait starts again when the work becomes unservable. A probe
+    /// the probe rule refuses ([`Unservable::Probe`]) is refused in the same round, its
+    /// reason the rule's sentence alone.
     fn note(&mut self, id: OperationId, verdict: Verdict, effects: &mut Vec<Effect>) {
         let now = self.now;
-        let wait = self.unservable_wait;
+        // A probe the probe rule refuses is refused at once: waiting changes none of it.
+        let probe = matches!(verdict, Verdict::Unservable(Unservable::Probe(_)));
+        let wait = match probe {
+            true => Duration::ZERO,
+            false => self.unservable_wait,
+        };
         let op = self.ops.get_mut(&id).expect("queued operations exist");
         let (reason, refusable) = match verdict {
             Verdict::Servable => {
@@ -918,11 +948,14 @@ impl Scheduler {
             }
         };
         if unservable.refusable && now >= unservable.since.saturating_add(wait) {
-            let reason = format!(
-                "{} (waited {} s for a worker that can run it)",
-                unservable.text,
-                wait.as_secs()
-            );
+            let reason = match probe {
+                true => unservable.text.clone(),
+                false => format!(
+                    "{} (waited {} s for a worker that can run it)",
+                    unservable.text,
+                    wait.as_secs()
+                ),
+            };
             self.queue.remove(&(Reverse(op.request.qos.clone()), id));
             effects.push(Effect::Commit(ControlRecord::Refusal(RefusalRecord {
                 operation: id,
