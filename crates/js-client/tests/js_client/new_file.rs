@@ -87,7 +87,7 @@ fn what_is_there_is_never_replaced() {
 /// the new files only. It catches a staging name that another user can guess and plant.
 #[test]
 fn the_staging_name_cannot_be_guessed() {
-    let dir = Scratch::new("create_new_planted");
+    let dir = Scratch::new("create_new_guessed");
     fs::create_dir(dir.path(".f.new")).unwrap();
     dir.write(".g.new", b"theirs", 0o644);
     create_new(&dir.path("f"), b"new", 0o600).unwrap();
