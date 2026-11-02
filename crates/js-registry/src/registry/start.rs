@@ -20,6 +20,13 @@ use crate::whole::requests::{RequestKey, Rules, whole_settings};
 use crate::whole::reserve::{self, HostFacts, Pass};
 use crate::whole_config::WholeNodeConfig;
 
+/// The latest instant a [`Timestamp`] holds: where the end of a lease with an endless max
+/// wall saturates.
+const ENDLESS: Timestamp = Timestamp::MAX;
+
+/// The bound [`js_whole::cost::tail`] reads as none.
+const NO_BOUND: u64 = u64::MAX;
+
 impl Registry {
     /// Every host as the reservation pass reads it, in id order. Every host is booked as
     /// the pool's shape.
@@ -49,6 +56,13 @@ impl Registry {
                 .iter()
                 .map(|bound| (bound.lease, bound.started_at))
                 .collect();
+            // With the estimate feed on, a bound at the end of time (a max wall so long that
+            // the end saturates) is no bound: the lease's end is its estimate, or unknown.
+            // Off, it is kept as the far bound it always was.
+            let end_bound = |bound: &&Bound| match (source.is_some(), bound.end == ENDLESS) {
+                (true, true) => NO_BOUND,
+                _ => bound.end.millis(),
+            };
             HostFacts {
                 id: id.clone(),
                 capability,
@@ -57,7 +71,7 @@ impl Registry {
                 load: HostLoad {
                     id: id.to_string(),
                     leases: leases.len(),
-                    end_bounds: known.iter().map(|bound| bound.end.millis()).collect(),
+                    end_bounds: known.iter().map(end_bound).collect(),
                     est_ends: lives::est_ends(source, &state.runs, &started),
                 },
             }

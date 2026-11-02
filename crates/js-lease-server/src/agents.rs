@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use js_agent_wire::InstanceIdentity;
 use js_elastic::HostName;
-use js_registry::{Credential, OsSessions, Registry};
+use js_registry::{Credential, OsSessions, ProfileLives, Registry};
 use js_types::ProviderId;
+use js_usage::ProfileKey;
 use tracing::{error, warn};
 
 use crate::adapt::SharedClock;
@@ -25,6 +26,15 @@ use crate::usage_hub::Usage;
 use crate::usage_map::limits_of;
 use crate::usage_setup::UsageSetup;
 use crate::util::blocking;
+
+/// The source of lives of a usage sink that keeps no curves: no profile has a known life.
+struct NoLives;
+
+impl ProfileLives for NoLives {
+    fn wall_minutes_p90(&self, _: &ProfileKey) -> Option<u32> {
+        None
+    }
+}
 
 /// What the agent routes and the tick share. Agent handlers take the registry's lock and
 /// nothing else of the server's: the lease table's lock is taken before the registry's
@@ -105,11 +115,18 @@ pub(crate) fn assemble(
             let usage = usage.build(clock, limits, &registry)?;
             // `--estimate-feed`: the learned lives of the profiles cost a lease's end in the
             // drain order. Set before the bookings are put back, so a lease restored from
-            // the lease file keeps the start and the bound it records. Off, no estimate is
+            // the lease file keeps the start and the bound it records. A sink that keeps
+            // no curves gives a source that knows no profile: every lease is then costed
+            // at its bound, restored ones included. Off, no source is set, no estimate is
             // passed and every lease is costed at its bound.
-            let curves = usage.iter().filter_map(|usage| usage.curves());
-            let fed = curves.filter(|_| estimate_feed);
-            fed.for_each(|curves| registry.set_lives(curves));
+            if estimate_feed {
+                let curves = usage.iter().find_map(|usage| usage.curves());
+                let lives: Arc<dyn ProfileLives> = match curves {
+                    Some(curves) => curves,
+                    None => Arc::new(NoLives),
+                };
+                registry.set_lives(lives);
+            }
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());
             }
