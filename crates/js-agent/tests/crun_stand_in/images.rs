@@ -1,12 +1,8 @@
-//! Collecting the image store beside the runs this runtime, and another agent's runtime on
-//! the same store, hold.
+//! Collecting the image store beside the runs this runtime holds.
 
-use std::sync::Arc;
-
-use js_agent::crun::{CrunRuntime, config_dir};
 use js_agent::lifecycle::{Prepared, Runtime};
 
-use crate::node::{LONG, NoImages, Node};
+use crate::node::Node;
 
 /// The digest `c` repeated, as a stored image of the node.
 fn store(node: &Node, c: char) -> String {
@@ -64,71 +60,4 @@ fn a_collected_image_is_not_ready_afterwards() {
         matches!(runtime.wait_prepared(&image), Prepared::Failed(_)),
         "answered from before the removal"
     );
-}
-
-/// The issue's case: two agents on one store, the second holding a run on the node's image,
-/// which the first agent knows nothing of. Catches the first agent's collection removing an
-/// image another agent's run uses as its root: the image stays while that run is held, and
-/// goes at the first agent's next collection once the run is removed.
-#[test]
-fn an_image_another_agents_run_holds_stays_until_that_run_is_removed() {
-    let node = Node::new("gc-two-agents");
-    let mut first = node.open();
-    let mut settings = node.settings("/root");
-    settings.host_id = "node-2".to_owned();
-    let hooks = Node::hooks(LONG, LONG);
-    let mut second = CrunRuntime::open_with(settings, Arc::new(NoImages), hooks).expect("opens");
-    let id = second
-        .create_and_start(&node.spec("r1-exit"))
-        .expect("started");
-    let report = first.collect_images(&[]).expect("collected");
-    assert!(report.removed.is_empty(), "{report:?}");
-    assert_eq!(stored(&node), [node.digest[7..].to_owned()]);
-    second.remove(&id).expect("removed");
-    let report = first.collect_images(&[]).expect("collected");
-    assert_eq!(report.removed, std::slice::from_ref(&node.digest));
-    assert!(stored(&node).is_empty());
-    assert!(first.list_labelled().expect("lists").is_empty());
-}
-
-/// Catches a run made without its image pinned: when the pin cannot be taken (here the pin
-/// directory's name is a file), the run is refused, says why, and leaves no container.
-#[test]
-fn a_run_whose_image_cannot_be_pinned_is_refused() {
-    let node = Node::new("gc-no-pin");
-    std::fs::write(node.scratch.join("oci-image-pins"), b"").expect("a file");
-    let mut runtime = node.open();
-    let why = runtime
-        .create_and_start(&node.spec("r1-exit"))
-        .expect_err("no pin")
-        .to_string();
-    assert!(why.starts_with("pin the image: "), "{why}");
-    assert!(why.contains("oci-image-pins"), "{why}");
-    assert!(runtime.list_labelled().expect("lists").is_empty());
-}
-
-/// Catches a run of one agent whose image has no kept config removing that image (to fetch
-/// it again with its config) from under another agent's run: the removal is refused, the
-/// run with it, and the other run's image stays.
-#[test]
-fn an_image_another_agents_run_holds_is_not_removed_to_fetch_its_config() {
-    let node = Node::new("gc-no-config");
-    let mut settings = node.settings("/root");
-    settings.host_id = "node-2".to_owned();
-    let hooks = Node::hooks(LONG, LONG);
-    let mut second = CrunRuntime::open_with(settings, Arc::new(NoImages), hooks).expect("opens");
-    let held = second
-        .create_and_start(&node.spec("r1-exit"))
-        .expect("started");
-    let hex = &node.digest[7..];
-    std::fs::remove_file(config_dir(&node.scratch).join(format!("{hex}.json"))).expect("config");
-    let mut first = node.open();
-    let why = first
-        .create_and_start(&node.spec("r2-exit"))
-        .expect_err("pinned by the other run")
-        .to_string();
-    assert!(why.contains("is pinned by a lease on this store"), "{why}");
-    assert!(first.list_labelled().expect("lists").is_empty());
-    assert_eq!(stored(&node), [hex.to_owned()]);
-    second.remove(&held).expect("removed");
 }

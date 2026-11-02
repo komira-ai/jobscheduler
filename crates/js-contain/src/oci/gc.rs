@@ -11,9 +11,10 @@
 //! live lease of its own, as two explicit slices to [`Oci::collect_images`]. And a digest
 //! that a lease of *any* backend on the store pins ([`Oci::pin_image`], [`super::pin`]) is
 //! kept, listed or not: several agents share one store, and the leases of the others are on
-//! no list of this one. A digest is removed only while the collection holds the exclusive
-//! lock of its pin file, which it cannot get while any lease pins the digest, and which a
-//! lease that comes to pin the digest waits for.
+//! no list of this one, and may outlive the process that made it. A digest is removed only
+//! while the collection holds the exclusive lock of the digest's lock file with no pin naming
+//! the digest; a lease writes its pin under the same lock, shared, and waits for a removal
+//! that holds it.
 //!
 //! **Against another backend's collection.** A digest that another backend's collection
 //! removed after this one listed it is skipped: neither removed nor kept nor failed here.
@@ -61,6 +62,7 @@ use std::path::Path;
 use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode};
 
 use super::image::{Images, ROOTFS};
+use super::pin::is_digest_name;
 use super::{JobError, Oci};
 use crate::walk::{DIRECTORY, Identity, back_to_parent, identity};
 
@@ -117,7 +119,7 @@ impl Images {
         self.collect_with(keep, remove, &mut || {})
     }
 
-    /// [`Images::collect`], calling `between` after each open of a digest's pin file and
+    /// [`Images::collect`], calling `between` after each open of a digest's lock file and
     /// before its lock: where a test puts another backend's step.
     pub(super) fn collect_with(
         &self,
@@ -166,14 +168,16 @@ impl Images {
                     continue;
                 }
                 Err(e) => {
-                    report.failed.push(format!("sha256:{hex}: pinning it: {e}"));
+                    report
+                        .failed
+                        .push(format!("sha256:{hex}: reading its pins: {e}"));
                     report.kept_bytes += bytes;
                     continue;
                 }
             };
             // Set aside first: the image is gone at once, and a removal that fails
             // midway leaves a `.stage-` leftover (the start sweep takes it), not an image
-            // that still looks complete. Then the pin file goes and the claim with it:
+            // that still looks complete. Then the lock file goes and the claim with it:
             // a lease that pins the digest from here on finds no image and fetches it.
             let result = match self.set_aside(&hex) {
                 Ok(aside) => {
@@ -182,7 +186,7 @@ impl Images {
                     remove(&aside)
                 }
                 // Another backend's collection removed it after this one listed it; the
-                // pin file this claim made again goes too.
+                // lock file this claim made again goes too.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     claim.retire();
                     continue;
@@ -218,7 +222,8 @@ impl Oci {
     /// first, so it no longer answers as an image, and the start sweep takes what is left.
     ///
     /// A digest being fetched or unpacked is kept; the second call after a collection
-    /// removes nothing. A digest whose pin file cannot be opened is kept and is in
+    /// removes nothing. A digest whose pins cannot be read (a directory or lock file of the
+    /// pins that cannot be opened or is not as required) is kept and is in
     /// [`GcReport::failed`].
     ///
     /// # Errors
@@ -255,11 +260,6 @@ impl Oci {
                 .map_err(|e: JobError| e.to_string())
         })
     }
-}
-
-/// Whether `name` is the name of a digest directory: 64 lowercase hex digits.
-fn is_digest_name(name: &str) -> bool {
-    name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Whether `dir` is a directory (not a link) with a `rootfs` directory (not a link) in it.

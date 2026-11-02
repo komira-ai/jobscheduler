@@ -14,6 +14,7 @@ mod blind;
 mod images;
 mod node;
 mod open;
+mod pins;
 mod runs;
 mod stop;
 mod sweep;

@@ -10,7 +10,7 @@ use super::crun::{RunEnd, log_path};
 use super::image::{ImageCheckError, PinnedImage, hex_of};
 use super::logs::{self, Capture, Launch};
 use super::words::{crun_words, init_words};
-use super::{ImagePin, JobError, Mapping, Oci, at, helper, init, mounts, spec};
+use super::{JobError, Mapping, Oci, at, helper, init, mounts, spec};
 use crate::container::{CONTAINER_OWNER, ContainerSpec, Dirs, Ended, own_nproc_hard_limit};
 use crate::running::Running;
 
@@ -198,29 +198,43 @@ impl Oci {
         self.images.ensure(self, image).await
     }
 
-    /// Pins `image` for a lease ([`ImagePin`]): while the pin is held, no collection of the
-    /// store ([`Oci::collect_images`]) removes the image, in this backend or in any other on
-    /// the same scratch directory. A lease takes it before [`Oci::check_pinned`] and holds it
-    /// until its container is removed: an image a collection removed before the pin was
-    /// taken is fetched again by that check, and one that is there once the check returns
-    /// stays. It waits while a collection is setting the digest aside (a rename).
+    /// Pins `image` for the lease `name` (the name [`Oci::lease_dirs`] and [`Oci::remove`]
+    /// take): until [`Oci::unpin_image`] of the same name, no removal of the store
+    /// ([`Oci::collect_images`], [`Oci::remove_image`]) takes the image, in this backend or
+    /// in any other on the same scratch directory, and whether or not the process that
+    /// pinned it still lives. A lease pins before [`Oci::check_pinned`]: an image removed
+    /// before the pin is fetched again by that check, and one that is there once the check
+    /// returns stays. It waits while a removal is setting the digest aside (a rename). A
+    /// second pin of the same name replaces the first.
     ///
     /// # Errors
-    /// [`JobError::Io`], naming the pin file: it could not be made or opened (its directory
-    /// is not a directory, or the name is a link or not a regular file of the running user).
-    pub fn pin_image(&self, image: &PinnedImage) -> Result<ImagePin, JobError> {
-        let hex = hex_of(image);
-        at(&self.images.pins().join(&hex), self.images.pin(&hex))
+    /// [`JobError::Io`], naming the pins' directory: the digest is not `sha256:` and 64
+    /// lowercase hex digits, the name is not `[A-Za-z0-9._-]` (not empty, not starting with
+    /// `.`), or a directory or file of the pins could not be made or opened or is not the
+    /// running user's alone.
+    pub fn pin_image(&self, image: &PinnedImage, name: &str) -> Result<(), JobError> {
+        at(self.images.pins(), self.images.pin(&hex_of(image), name))
+    }
+
+    /// Removes the pin of the lease `name` ([`Oci::pin_image`]): only once its container is
+    /// gone (removed, or never made). A lease with no pin has nothing to remove.
+    ///
+    /// # Errors
+    /// [`JobError::Io`], naming the pins' directory: the name is not a lease name, or the pin
+    /// could not be removed (it stays, and the image with it).
+    pub fn unpin_image(&self, name: &str) -> Result<(), JobError> {
+        at(self.images.pins(), self.images.unpin(name))
     }
 
     /// Removes `image` from the store (a root daemon removes the files of any owner) so that
     /// the next [`Oci::check_pinned`] fetches it again, waiting for a fetch of it under way.
     /// No container may run on it: its root is the lower layer of the mounts of one. An image
     /// a lease of any backend on the store pins ([`Oci::pin_image`]) is kept and the removal
-    /// refused: a caller drops its own lease's pin before it removes the image.
+    /// refused: a caller unpins its own lease before it removes the image.
     ///
     /// # Errors
-    /// A lease pins the image (`ResourceBusy`), or the directory could not be removed.
+    /// A lease pins the image or another removal holds it (`ResourceBusy`), the digest is not
+    /// one, or the directory could not be removed.
     pub async fn remove_image(&self, image: &PinnedImage) -> std::io::Result<()> {
         self.images.remove(image).await
     }

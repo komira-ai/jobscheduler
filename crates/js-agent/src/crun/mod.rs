@@ -47,8 +47,9 @@
 //! # Labels, the sweep and the lost run
 //!
 //! What a dead process leaves is files, and the runtime keeps a ledger of them: before a
-//! lease's first directory is made, a sidecar file in `<scratch>/oci-labels` records the
-//! agent's id, the run id, the lease's name and the container's labels (see
+//! lease's image is pinned ([`Oci::pin_image`]) or its first directory is made, a sidecar
+//! file in `<scratch>/oci-labels` records the agent's id, the run id, the lease's name and
+//! the container's labels (see
 //! [`SweepReport`] and the module `ledger`), and it is removed after the last of the lease
 //! is. [`CrunRuntime::open`] sweeps: it removes every lease whose sidecar names this
 //! agent (the container's state, the cgroup, the directories, then the sidecar) and keeps
@@ -132,7 +133,7 @@ use js_agent_wire::LogTail;
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
-use js_contain::oci::{GcReport, ImagePin, LeaseDirs, Oci, OciConfig, OciError, Owner};
+use js_contain::oci::{GcReport, JobError, LeaseDirs, Oci, OciConfig, OciError, Owner};
 use js_contain::running::Running;
 use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
@@ -317,6 +318,8 @@ enum Fault {
     Book(#[from] js_types::TypeError),
     #[error("remove an image that has no config: {0}")]
     Evict(#[from] io::Error),
+    #[error("the image's pin: {0}")]
+    Pin(#[from] JobError),
     #[error("{what}: {why}")]
     Step { what: &'static str, why: String },
 }
@@ -351,8 +354,6 @@ struct Run {
     /// The OOM count of the cgroup above, when the lease started.
     backstop: Option<u64>,
     state: State,
-    /// The pin of the run's image: no agent on the store collects it while the run is held.
-    _pin: ImagePin,
 }
 
 /// A container runtime over `crun`.
@@ -567,7 +568,8 @@ impl CrunRuntime {
                 }
             }
         }
-        Ok(())
+        // Last: the image may go only once nothing of the lease can use it.
+        step("remove the image's pin", self.oci.unpin_image(name))
     }
 
     /// [`Runtime::prepare`], waiting for the fetch to end: `Ready` or `Failed`. For a
@@ -666,47 +668,30 @@ impl CrunRuntime {
         if self.runs.contains_key(&name) {
             return Err(Fault::InUse(spec.run_id.clone()));
         }
-        // Before the image is made sure of: no agent on the store removes it from then on.
-        let mut pin = pin_image(&self.oci, &image)?;
-        let limit = self.hooks.pull_limit;
-        self.rt
-            .block_on(ensure_image(&self.oci, &image, limit))
-            .map_err(Fault::Image)?;
-        if !config_path(&self.configs, &image.digest).exists() {
-            // An image an earlier daemon (or a source that keeps no configs) unpacked has
-            // no config to run it by: it is fetched again, and the source keeps the config
-            // this time. The prefetcher is told, as it is for any image taken out. A run of
-            // another agent on the image pins it, and the removal is refused.
-            drop(pin);
-            self.rt.block_on(self.oci.remove_image(&image))?;
-            self.pulls.forget(given);
-            pin = pin_image(&self.oci, &image)?;
-            self.rt
-                .block_on(ensure_image(&self.oci, &image, limit))
-                .map_err(Fault::Image)?;
-        }
-        let config = ImageConfig::kept(&self.configs, &image.digest)?;
-        let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, &name);
-        let lease = self.oci.lease_dirs(&name);
-        let mut container = container_spec(&name, spec, &image, &lease, cgroup.name());
-        config.apply(args, &mut container)?;
         let now = (self.hooks.now_ms)();
         let mut labels = spec.labels.clone();
         labels.insert(label::AGENT.to_owned(), self.host_id.clone());
         labels.insert(label::CREATED_MS.to_owned(), now.to_string());
-        // Before the first thing the sidecar names is made (see the module `ledger`).
+        // Before the first thing the sidecar names is made (see the module `ledger`), the
+        // image's pin among them: the sweep of a later start removes a pin a dead process
+        // left, once it has removed the lease's container.
         let entry = Entry::new(&self.host_id, &spec.run_id, &name, &labels);
         self.ledger
             .record(&entry)
             .map_err(|why| Fault::step("record the lease's labels", &why))?;
-        if let Err(fault) = self.make_resources(spec, &container, &lease, &cgroup) {
-            // What the failed step left; none of it is a container. The sidecar goes with
-            // it, or stays for the next sweep when some of it cannot be removed.
-            let _ = self
-                .ledger
-                .discard(&entry, |entry| self.tear_down(&entry.name));
-            return Err(fault);
-        }
+        let (container, lease, cgroup) =
+            match self.make_recorded(spec, (given, &image), args, &name) {
+                Ok(made) => made,
+                Err(fault) => {
+                    // What the failed step left; none of it is a container. The sidecar goes with
+                    // it (the pin last), or stays for the next sweep when some of it cannot be
+                    // removed.
+                    let _ = self
+                        .ledger
+                        .discard(&entry, |entry| self.tear_down(&entry.name));
+                    return Err(fault);
+                }
+            };
         self.runs.insert(
             name.clone(),
             Run {
@@ -717,10 +702,47 @@ impl CrunRuntime {
                 cap: js_contain::hard_memory_max(spec.memory_bytes),
                 backstop: None,
                 state: State::Created,
-                _pin: pin,
             },
         );
         Ok(name)
+    }
+
+    /// The pinned image (`given`, parsed as `image`), the container spec with `args` and the
+    /// resources of the lease `name`, whose sidecar is recorded.
+    fn make_recorded(
+        &self,
+        spec: &RunSpec,
+        (given, image): (&str, &PinnedImage),
+        args: &[String],
+        name: &str,
+    ) -> Result<(ContainerSpec, LeaseDirs, LeaseCgroup), Fault> {
+        // Before the image is made sure of: from then on no agent on the store removes it
+        // until the lease is torn down.
+        self.oci.pin_image(image, name)?;
+        let limit = self.hooks.pull_limit;
+        self.rt
+            .block_on(ensure_image(&self.oci, image, limit))
+            .map_err(Fault::Image)?;
+        if !config_path(&self.configs, &image.digest).exists() {
+            // An image an earlier daemon (or a source that keeps no configs) unpacked has
+            // no config to run it by: it is fetched again, and the source keeps the config
+            // this time. The prefetcher is told, as it is for any image taken out. A run of
+            // another agent on the image pins it, and the removal is refused.
+            self.oci.unpin_image(name)?;
+            self.rt.block_on(self.oci.remove_image(image))?;
+            self.pulls.forget(given);
+            self.oci.pin_image(image, name)?;
+            self.rt
+                .block_on(ensure_image(&self.oci, image, limit))
+                .map_err(Fault::Image)?;
+        }
+        let config = ImageConfig::kept(&self.configs, &image.digest)?;
+        let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
+        let lease = self.oci.lease_dirs(name);
+        let mut container = container_spec(name, spec, image, &lease, cgroup.name());
+        config.apply(args, &mut container)?;
+        self.make_resources(spec, &container, &lease, &cgroup)?;
+        Ok((container, lease, cgroup))
     }
 
     /// The directories, hand-overs, cgroup and bundle of one lease.
@@ -864,12 +886,6 @@ fn cgroup_dir(mount: &Path, name: &str) -> PathBuf {
     mount.join(name.trim_start_matches('/'))
 }
 
-/// The pin of `image` for a run ([`Oci::pin_image`]), a failure named as a step.
-fn pin_image(oci: &Oci, image: &PinnedImage) -> Result<ImagePin, Fault> {
-    oci.pin_image(image)
-        .map_err(|why| Fault::step("pin the image", &why))
-}
-
 /// `image` in the store, fetched and unpacked if it is not, within `limit` for the whole.
 async fn ensure_image(oci: &Oci, image: &PinnedImage, limit: Duration) -> Result<(), String> {
     let ensured = tokio::time::timeout(limit, oci.check_pinned(image)).await;
@@ -978,6 +994,8 @@ impl Runtime for CrunRuntime {
         {
             return Err(failed("remove the lease directory", &why));
         }
+        oci.unpin_image(&id.0)
+            .map_err(|why| failed("remove the image's pin", &why))?;
         self.ledger
             .forget(&id.0)
             .map_err(|why| failed("remove the lease's sidecar", &why))?;

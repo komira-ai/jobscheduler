@@ -16,7 +16,7 @@
 //! (and a daemon started later on the same data directory, once the first is gone) finds
 //! the directory and fetches nothing. Daemons share a directory, and only one
 //! that has it to itself sweeps stages ([`super::lock`]); a lease of any of them pins its
-//! image against the collection of every other ([`ImagePin`](super::ImagePin)).
+//! image against the collection of every other ([`Oci::pin_image`]).
 //!
 //! The unpack runs in a user namespace with the daemon user unmapped, the stage directory
 //! the only writable path and the downloaded blobs read-only, so a hostile tar can write
@@ -139,7 +139,7 @@ pub const STAGE_PREFIX: &str = ".stage-";
 #[derive(Debug)]
 pub(crate) struct Images {
     dir: PathBuf,
-    /// The pin files of the leases of every backend on the store, beside it
+    /// The pins of the leases of every backend on the store, beside it
     /// ([`super::pin`]).
     pins: PathBuf,
     /// One gate for each digest: whether the image was fetched and unpacked by this
@@ -229,7 +229,7 @@ impl Images {
         &self.dir
     }
 
-    /// The directory of the pin files.
+    /// The directory of the pins.
     pub(super) fn pins(&self) -> &Path {
         &self.pins
     }
@@ -256,11 +256,11 @@ impl Images {
     /// ([`Images::set_aside`]), so a removal that fails midway leaves no image that still
     /// looks complete. An image a lease of any backend on the store pins ([`super::pin`]) is
     /// not removed: the removal is refused, so a caller removing it for a lease of its own
-    /// drops that lease's pin first.
+    /// removes that lease's pin first.
     ///
     /// # Errors
-    /// A lease pins the image (`ResourceBusy`; the image is kept), the pin file could not be
-    /// opened, the directory could not be set aside (the image is kept), or what was set
+    /// A lease pins the image or another removal holds it (`ResourceBusy`; the image is
+    /// kept), the digest is not one or a file of the pins could not be opened, the directory could not be set aside (the image is kept), or what was set
     /// aside could not be removed (the image is gone; the start sweep takes the rest).
     pub(crate) async fn remove(&self, image: &PinnedImage) -> std::io::Result<()> {
         let hex = hex_of(image);
@@ -269,7 +269,7 @@ impl Images {
         let claim = self.claim(&hex, &mut || {})?.ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::ResourceBusy,
-                format!("image {image} is pinned by a lease on this store"),
+                format!("image {image} is pinned by a lease, or being removed, on this store"),
             )
         })?;
         *fetched = false;

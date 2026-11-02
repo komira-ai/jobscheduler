@@ -233,8 +233,8 @@ A is therefore a one-time migration: the unit's `StateDirectory=` (which hands t
 unit's user) or a held script does the chown, and a rollback from A to B hands it back. The scratch
 root, run-files root and image store are the same: owned by the agent's user, with the layout above.
 The image store (`<scratch>/oci-images`) is made by the daemon user either way, and so is the
-directory of its leases' pins (`<scratch>/oci-image-pins`, `0700`), which every agent sharing the
-store locks.
+directory of its leases' pins (`<scratch>/oci-image-pins` and its `leases`, `0700`, refused if
+another user could write them), which every agent sharing the store reads and locks.
 
 ### Duty 6. Egress
 
