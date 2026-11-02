@@ -4,7 +4,8 @@
 use std::path::PathBuf;
 
 use js_agent::update_hook::{
-    MIN_CORDON_LEASE_SECS, POLL_SECS, Params, ParamsError, RELEASE_LINK_KEY,
+    CA_CERT_KEY, ConnectParams, HOST_ID_KEY, MIN_CORDON_LEASE_SECS, POLL_SECS, Params, ParamsError,
+    RELEASE_LINK_KEY, SERVER_KEY, STATE_ROOT_KEY, TOKEN_FILE_KEY,
 };
 use js_testkit::dir::TestDir;
 
@@ -68,6 +69,7 @@ fn the_cordon_keys_and_the_reserved_release_keys_are_read() {
             release_link: None,
             target_version: "1.4.0".to_owned(),
             previous_version: Some("1.3.2".to_owned()),
+            connect: ConnectParams::default(),
         }
     );
 }
@@ -374,4 +376,69 @@ fn a_retry_of_zero_seconds_means_try_again_at_once() {
         "cordon_lease_secs = 300\ncordon_max_secs = 17355\ndrain_wait_secs = 3600\ndefer_retry_secs = 0\n{RELEASES}"
     );
     assert_eq!(Params::parse(&text).unwrap().defer_retry_secs, 0);
+}
+
+#[test]
+fn the_keys_that_reach_the_lease_server_and_the_state_are_the_agents_flags_by_name() {
+    assert_eq!(
+        [
+            SERVER_KEY,
+            STATE_ROOT_KEY,
+            TOKEN_FILE_KEY,
+            CA_CERT_KEY,
+            HOST_ID_KEY
+        ],
+        ["server", "state_root", "token_file", "ca_cert", "host_id"]
+    );
+}
+
+#[test]
+fn how_to_reach_the_server_and_the_state_is_read_when_the_declaration_names_it() {
+    assert_eq!(
+        Params::parse(&good()).unwrap().connect,
+        ConnectParams::default()
+    );
+    let named = format!(
+        concat!(
+            "{}server = \"https://leases.example:7300\"\nstate_root = \"/var/db/js-agent/state\"\n",
+            "token_file = \"/etc/js-agent/token\"\nca_cert = \"/etc/js-agent/ca.pem\"\n",
+            "host_id = \"h-0123\"\n"
+        ),
+        good()
+    );
+    assert_eq!(
+        Params::parse(&named).unwrap().connect,
+        ConnectParams {
+            server: Some("https://leases.example:7300".to_owned()),
+            state_root: Some(PathBuf::from("/var/db/js-agent/state")),
+            token_file: Some(PathBuf::from("/etc/js-agent/token")),
+            ca_cert: Some(PathBuf::from("/etc/js-agent/ca.pem")),
+            host_id: Some("h-0123".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn a_server_or_host_id_that_is_not_text_and_a_path_that_is_not_absolute_are_refused() {
+    for (extra, key) in [
+        ("server = 7\n", SERVER_KEY),
+        ("host_id = true\n", HOST_ID_KEY),
+    ] {
+        let error = refused(&format!("{}{extra}", good()));
+        assert!(
+            matches!(&error, ParamsError::NotText(k) if k == key),
+            "{error}"
+        );
+    }
+    for (extra, key) in [
+        ("state_root = \"state\"\n", STATE_ROOT_KEY),
+        ("token_file = \"token\"\n", TOKEN_FILE_KEY),
+        ("ca_cert = \"ca.pem\"\n", CA_CERT_KEY),
+    ] {
+        let error = refused(&format!("{}{extra}", good()));
+        assert!(
+            matches!(&error, ParamsError::Relative(k) if k == key),
+            "{error}"
+        );
+    }
 }

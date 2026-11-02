@@ -1,0 +1,49 @@
+version = 1
+term = 2
+next_sequence = 5
+lease_count = 3
+
+[[lease]]
+term = 1
+sequence = 1
+state = "held"
+host = "h1"
+acquired_at_ms = 1000000
+expires_at_ms = 1060000
+ends_at_ms = 4600000
+
+[lease.labels]
+
+[lease.shares]
+cpu_millis = 4000
+disk_bytes = 3221225472
+gpu_class = "g"
+gpus = 1
+memory_bytes = 4
+
+[[lease]]
+term = 1
+sequence = 3
+state = "held"
+host = "h2"
+acquired_at_ms = 1000000
+expires_at_ms = 1060000
+ends_at_ms = 4600000
+whole = true
+
+[lease.labels]
+
+[[lease]]
+term = 1
+sequence = 4
+state = "releasing"
+host = "h1"
+acquired_at_ms = 1000000
+expires_at_ms = 1060000
+ends_at_ms = 4600000
+
+[lease.labels]
+
+[lease.shares]
+cpu_millis = 1000
+memory_bytes = 1

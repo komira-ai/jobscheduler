@@ -16,6 +16,7 @@
 --max-connections default=256 required=false
 --max-requests default=100 required=false
 --max-ttl default=3600s required=false
+--placement default=registry required=false values=registry|js-sched
 --pool-config default=none required=false
 --profile-store-bytes default=268435456 required=false
 --read-timeout default=30s required=false

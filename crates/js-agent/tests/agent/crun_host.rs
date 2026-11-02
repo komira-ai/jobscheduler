@@ -398,6 +398,44 @@ fn the_cgroup_controllers_of_the_agents_own_cgroup_are_named_when_missing() {
     assert_eq!(pieces(&fx.check()), vec![Piece::CgroupDelegation]);
 }
 
+/// The packaged unit starts the agent in the leaf `<unit>/supervisor` (`DelegateSubgroup=`). The
+/// leaf's `cgroup.controllers` is what the unit has enabled for its children, which systemd does
+/// not write for a delegated unit and the agent's delegate step writes after this check: the
+/// check must ask what the unit is offered, and so pass a host whose leaf shows no controller.
+/// Catches a check that refuses a stock systemd 255 host before the agent could enable them.
+#[test]
+fn an_agent_in_the_supervisor_leaf_is_checked_by_what_its_unit_is_offered() {
+    let fx = Fixture::new("crun-host-supervisor");
+    let unit = "cgroup/system.slice/js-agent-crun.service";
+    write(
+        &fx.path(&format!("{unit}/cgroup.controllers")),
+        "cpuset cpu io memory pids\n",
+    );
+    // The leaf shows nothing: the unit has not enabled anything for its children yet.
+    write(
+        &fx.path(&format!("{unit}/supervisor/cgroup.controllers")),
+        "\n",
+    );
+    write(
+        &fx.host.self_cgroup,
+        "0::/system.slice/js-agent-crun.service/supervisor\n",
+    );
+    assert_eq!(pieces(&fx.check()), vec![]);
+    // A unit that is not offered `memory` is refused, naming it and the unit.
+    write(
+        &fx.path(&format!("{unit}/cgroup.controllers")),
+        "cpu io pids\n",
+    );
+    let report = fx.check();
+    assert_eq!(pieces(&report), vec![Piece::CgroupDelegation]);
+    let what = &report.missing[0].what;
+    assert!(
+        what.contains("system.slice/js-agent-crun.service is not offered the memory"),
+        "{what}"
+    );
+    assert!(!what.contains("cpu,"), "{what}");
+}
+
 /// Where the kernel restricts unprivileged user namespaces, a loaded AppArmor profile must cover
 /// crun: none loaded, or a profile of another program, is named; a profile named `crun` covers
 /// only `/usr/bin/crun`, and one named by the path covers that path; with the restriction off,

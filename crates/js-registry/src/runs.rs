@@ -392,6 +392,29 @@ impl Runs {
         self.on(host).any(Run::live)
     }
 
+    /// Whether everything `host` holds belongs to `leases`, the leases booked on it now:
+    /// every run the host lists (`listed`, its ids) is one this registry knows, of `host`
+    /// and of one of `leases`, and every run kept live for `host` is of one of them. A run
+    /// the host lists that the registry does not know (an orphan after a restart) or a live
+    /// run of a lease that is no longer booked here holds limits that no admission counts,
+    /// so the host is not treated as clear for a lease that shares it until it is gone.
+    pub(crate) fn only_of(
+        &self,
+        host: &HostId,
+        listed: &BTreeSet<String>,
+        leases: &[LeaseId],
+    ) -> bool {
+        let known = |id: &String| {
+            let run = self.map.get(id);
+            run.is_some_and(|run| run.host == *host && leases.contains(&run.lease))
+        };
+        let live = self.on(host).filter(|run| run.live());
+        listed.iter().all(known)
+            && live
+                .map(|run| run.lease)
+                .all(|lease| leases.contains(&lease))
+    }
+
     /// Forgets every run of `host`.
     pub(crate) fn forget(&mut self, host: &HostId) {
         self.map.retain(|_, run| run.host != *host);
@@ -401,8 +424,11 @@ impl Runs {
     /// its session, at `now`. The caller has vetted the job and checked the host and the
     /// lease; this checks what is left of the lease's budget: the live runs of the host,
     /// their limits, their booked disk and their GPU indices together with this run's must
-    /// fit `shape`. `quota_default` is the quota the host enforces on a run that sets no
-    /// `disk_bytes`, when it reported one.
+    /// fit `shape`. A lease that shares the host (`share`, what it booked) is also held to
+    /// its own share: the limits, disk and GPUs of its live runs together with this run's
+    /// must fit `share`, so one lease cannot take what another lease on the host booked.
+    /// `quota_default` is the quota the host enforces on a run that sets no `disk_bytes`,
+    /// when it reported one.
     ///
     /// A `spec.valid_for_ms` above zero is the time the lease has left: the run ends its
     /// bound that long after `now`. `profile` is the name the lease holder supplied for the
@@ -412,7 +438,7 @@ impl Runs {
         host: &HostId,
         lease: &LeaseId,
         (mut spec, profile): (JobSpec, Option<ProfileKey>),
-        shape: &Resources,
+        (shape, share): (&Resources, Option<&Resources>),
         quota_default: Option<u64>,
         (beats, now): (u64, u64),
     ) -> Result<RunView, RunRefusal> {
@@ -440,12 +466,39 @@ impl Runs {
         let taken = live.iter().flat_map(|run| run.spec.gpu_indices.iter());
         let taken = taken.collect::<BTreeSet<_>>();
         let clash = spec.gpu_indices.iter().any(|index| taken.contains(index));
+        // What this lease's live runs hold with this run's, against its own share: cores,
+        // memory, booked disk and the number of GPUs their indices name.
+        let gpus = |spec: &JobSpec| spec.gpu_indices.len() as u64;
+        let own = live.iter().filter(|run| run.lease == *lease);
+        let (own_cpu, own_memory, own_disk, own_gpus) = own.fold(
+            (limits.cpu_millis, limits.memory_bytes, disk, gpus(&spec)),
+            |(cpu, memory, disk, count), run| {
+                let held = &run.spec.limits;
+                (
+                    cpu.saturating_add(held.cpu_millis),
+                    memory.saturating_add(held.memory_bytes),
+                    disk.saturating_add(run.disk),
+                    count.saturating_add(gpus(&run.spec)),
+                )
+            },
+        );
+        let within_share = share.is_none_or(|share| {
+            [
+                own_cpu <= share.cpu_millis(),
+                own_memory <= share.memory_bytes(),
+                own_disk <= share.disk_bytes(),
+                own_gpus <= share.gpus(),
+            ]
+            .into_iter()
+            .all(|ok| ok)
+        });
         let room = [
             live.len() < MAX_LIVE_RUNS,
             cpu <= shape.cpu_millis(),
             memory <= shape.memory_bytes(),
             disk_sum <= shape.disk_bytes(),
             !clash,
+            within_share,
         ];
         if !room.into_iter().all(|ok| ok) {
             return Err(RunRefusal::NoCapacity);
@@ -733,6 +786,25 @@ mod tests {
         }
     }
 
+    /// Asserts what `only_of` takes for runs of booked leases: a run the host lists, of a
+    /// booked lease, on that host is one; the same run listed by another host is not (the
+    /// registry knows it on `a`), nor is a listed id it does not know, nor a live run of a
+    /// lease not among those booked. It catches a listed run counted for a host by its id
+    /// alone.
+    #[test]
+    fn only_runs_of_this_host_and_its_booked_leases_count() {
+        let (a, b) = (HostId::new("a").unwrap(), HostId::new("b").unwrap());
+        let shape = Resources::new(4000, 8 << 30, 0, None).unwrap();
+        let lease = LeaseId::new(1, 1);
+        let mut runs = Runs::default();
+        let queued = runs.admit(&a, &lease, (job(), None), (&shape, None), None, (0, 0));
+        let run_id = queued.unwrap().run_id;
+        let listed = BTreeSet::from([run_id]);
+        assert!(runs.only_of(&a, &listed, &[lease]));
+        assert!(!runs.only_of(&b, &listed, &[lease]));
+        assert!(!runs.only_of(&a, &BTreeSet::from(["ghost".to_owned()]), &[lease]));
+        assert!(!runs.only_of(&a, &BTreeSet::new(), &[LeaseId::new(1, 2)]));
+    }
     /// Asserts the starts gate on its own, whatever the registry lets into the queue: a
     /// queued run of a host whose exclusive lease is not ready is sent no start, and the
     /// same run is started once the host is. It catches a start sent to a host that is
@@ -747,7 +819,7 @@ mod tests {
             &host,
             &LeaseId::new(1, 1),
             (job(), None),
-            &shape,
+            (&shape, None),
             None,
             (0, 0),
         )
@@ -786,7 +858,7 @@ mod tests {
             &host,
             &LeaseId::new(1, 1),
             (spec.clone(), None),
-            &shape,
+            (&shape, None),
             None,
             (0, 0),
         )
@@ -831,7 +903,7 @@ mod tests {
         }];
         let lease = LeaseId::new(1, 1);
         let mut runs = Runs::default();
-        runs.admit(&host, &lease, (spec, None), &shape, None, (0, 0))
+        runs.admit(&host, &lease, (spec, None), (&shape, None), None, (0, 0))
             .unwrap();
         runs.stop_run(&lease, "r1").unwrap();
         assert!(runs.map["r1"].spec.files.is_empty());
@@ -851,15 +923,14 @@ mod tests {
         );
     }
 
-    /// Asserts the restart case of the estimate feed: a booked lease with a keyed run
-    /// whose profile has a known P90, but with no recorded start (as a lease put back
-    /// after a restart has none), is fed as one lease with no estimate, so the drain cost
-    /// falls back to its bound; with the start known the same run is fed start plus P90.
-    /// It catches an estimate counted from a start that is not known.
+    /// Asserts the estimate feed: a booked lease with a keyed run
+    /// whose profile has a known P90 is fed its start plus that P90 (a lease put back after
+    /// a restart has no recorded start and so no entry among the host's bounds; the
+    /// registry-level test in `tests/sharing.rs` covers it). It catches an estimate counted
+    /// from a start that is not the lease's.
     #[test]
-    fn a_lease_with_no_recorded_start_is_fed_no_estimate() {
+    fn a_lease_is_fed_its_start_plus_the_p90() {
         use crate::lives::{ProfileLives, est_ends};
-        use js_lease::Timestamp;
         struct Known;
         impl ProfileLives for Known {
             fn wall_minutes_p90(&self, _: &ProfileKey) -> Option<u32> {
@@ -871,13 +942,18 @@ mod tests {
         let shape = Resources::new(4000, 8 << 30, 0, None).unwrap();
         let key = ProfileKey::parse("known").unwrap();
         let mut runs = Runs::default();
-        runs.admit(&host, &lease, (job(), Some(key)), &shape, None, (0, 0))
-            .unwrap();
-        let bound = Some((lease, Timestamp::from_millis(900_000)));
+        runs.admit(
+            &host,
+            &lease,
+            (job(), Some(key)),
+            (&shape, None),
+            None,
+            (0, 0),
+        )
+        .unwrap();
         let lives: &dyn ProfileLives = &Known;
-        assert_eq!(est_ends(Some(lives), &runs, bound, None), [None]);
         assert_eq!(
-            est_ends(Some(lives), &runs, bound, Some(1_000)),
+            est_ends(Some(lives), &runs, &[(lease, 1_000)]),
             [Some(1_000 + 120_000)]
         );
     }

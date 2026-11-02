@@ -26,6 +26,7 @@ use js_types::sched::usage::LeaseCost;
 
 use crate::admission::{
     Admission, Blocked, Left, Profile, Ratio, Refusal, binding, clamped, new_charge, pick,
+    start_time,
 };
 use crate::cordon::Cordons;
 use crate::input::Request;
@@ -85,6 +86,17 @@ pub(crate) struct Placed {
     pub(crate) device: Option<String>,
     /// What the lease is charged.
     pub(crate) cost: LeaseCost,
+}
+
+/// A worker a blocked head could hold ([`Servable::head_candidates`]).
+struct HeadCandidate<'a> {
+    name: &'a WorkerId,
+    /// What the worker is charged before the head.
+    left: Left,
+    /// The cores and memory the head is charged on the worker at the present minute.
+    need: (u64, u64),
+    /// The binding ratio the worker would be at with the head on it.
+    ratio: Ratio,
 }
 
 /// The outcome of [`Servable::fit`].
@@ -479,11 +491,11 @@ impl Servable {
         (cost, left)
     }
 
-    /// The worker a blocked head of the queue holds: of the workers `request` could run
-    /// on but for the load, not in `reserved` or skipped for `avoid` and not owned whole
-    /// by the request, the one with the smallest binding ratio, keeping `kept` while its
-    /// ratio is within a tenth of the best ([`pick`]). `None` when no worker could take
-    /// it at all.
+    /// The worker a blocked head of the queue holds when no whole-node settings are on, as
+    /// it always was: of the workers `request` could run on but for the load, not in
+    /// `reserved` or skipped for `avoid` and not owned whole by the request, the one with
+    /// the smallest binding ratio, keeping `kept` while its ratio is within a tenth of the
+    /// best ([`pick`]). `None` when no worker could take it at all.
     pub(crate) fn hold_for_head(
         &mut self,
         workers: &BTreeMap<WorkerId, Worker>,
@@ -491,11 +503,27 @@ impl Servable {
         attempt: &Attempt<'_>,
         kept: Option<&WorkerId>,
     ) -> Option<WorkerId> {
+        let candidates = self.head_candidates(workers, adm, attempt);
+        let ratios: Vec<(&WorkerId, Ratio)> =
+            candidates.iter().map(|c| (c.name, c.ratio)).collect();
+        pick(&ratios, kept).cloned()
+    }
+
+    /// The workers a blocked head could hold, in name order: those `attempt`'s request could
+    /// run on but for the load, not in `reserved` or skipped for `avoid` and not owned whole
+    /// by the request, each with its left side, the charge of the new lease at the present
+    /// minute and the binding ratio it would be at.
+    fn head_candidates<'s>(
+        &'s mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        adm: &Admission,
+        attempt: &Attempt<'_>,
+    ) -> Vec<HeadCandidate<'s>> {
         let request = attempt.request;
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, attempt.avoid);
         let now = self.now;
-        let ratios: Vec<(&WorkerId, Ratio)> = self.memo[at]
+        self.memo[at]
             .1
             .iter()
             .map(|&i| &self.live[i])
@@ -525,10 +553,55 @@ impl Servable {
                     (left.cpu.saturating_add(new_cpu), w.capacity.cpu_millis),
                     (left.mem.saturating_add(new_mem), w.capacity.memory_bytes),
                 );
-                (name, ratio)
+                HeadCandidate {
+                    name,
+                    left,
+                    need: (new_cpu, new_mem),
+                    ratio,
+                }
             })
-            .collect();
-        pick(&ratios, kept).cloned()
+            .collect()
+    }
+
+    /// The worker a blocked head of the queue holds when whole-node settings are on: of the
+    /// workers `request` could run on but for the load, not in `reserved` or skipped for
+    /// `avoid` and not owned whole by the request, the one it can start on first
+    /// ([`start_time`], with the lease ends in `ends`), a worker with no start time after
+    /// every worker with one; among equals the smallest binding ratio, then the first by
+    /// name. Nothing is kept from the last round. `None` when no worker could take it at
+    /// all.
+    ///
+    /// Two choices are deliberate. Ties among workers whose start time is unknown or equal
+    /// use the binding ratio, which keeps the order the hold had before start times. And
+    /// the start time is projected against the flat predicate (CPU and memory caps), not
+    /// the horizon curves, the flat-memory guard or the cold cap: those can only make the
+    /// real start later, so the projection is a lower bound in the cap dimension only. The
+    /// measured load is held constant: if the real measured load falls, the real start can
+    /// come earlier than projected, and backfill that fits the projected tail can then
+    /// delay the head by up to that gap. The delay is bounded and is not starvation.
+    pub(crate) fn hold_for_head_by_start(
+        &mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        adm: &Admission,
+        attempt: &Attempt<'_>,
+        ends: &BTreeMap<LeaseId, Option<u64>>,
+    ) -> Option<WorkerId> {
+        let now = self.now.as_millis();
+        let candidates = self.head_candidates(workers, adm, attempt);
+        let timed = candidates.into_iter().map(|c| {
+            let w = &workers[c.name];
+            let limits = (
+                adm.cfg.cpu_limit(&w.capacity),
+                adm.cfg.mem_limit(&w.capacity),
+            );
+            let charges = w.load_state.charges(&c.left);
+            let start = start_time(&c.left, &charges, ends, limits, c.need, now);
+            (c.name, (start, c.ratio))
+        });
+        // The first of the least: the candidates are in name order.
+        timed
+            .min_by_key(|(_, (start, ratio))| (start.is_none(), *start, *ratio))
+            .map(|(name, _)| name.clone())
     }
 
     /// The pool `request` is run from: the platform and kind it needs, shared by every
@@ -556,10 +629,34 @@ impl Servable {
         })
     }
 
-    /// The worker to hold for a whole-machine `request` that fits nowhere now: `kept`
-    /// if it still could run it, else the one that could which holds the fewest leases,
-    /// then has the least booked, then comes first by name; with `drain` (the workers by
-    /// drain cost, cheapest first), the first of those that could. Never one in `reserved`,
+    /// The worker to hold for a request that fits nowhere now when no whole-node settings
+    /// are on, as it always was: `kept` if it still could run it, else the one that could
+    /// which holds the fewest leases, then has the least booked, then comes first by name.
+    /// Never one in `reserved`, nor one in `avoid` while [`Servable::fit`] skips it.
+    pub(crate) fn reserve_by_leases(
+        &mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        request: &Request,
+        reserved: &BTreeSet<WorkerId>,
+        avoid: &BTreeSet<WorkerId>,
+        kept: Option<&WorkerId>,
+    ) -> Option<WorkerId> {
+        let candidates = self.holdable(workers, request, reserved, avoid);
+        if let Some(kept) = kept.filter(|kept| candidates.contains(kept)) {
+            return Some(kept.clone());
+        }
+        candidates
+            .into_iter()
+            .min_by_key(|name| {
+                let w = &workers[*name];
+                (w.leases, w.booked)
+            })
+            .cloned()
+    }
+
+    /// The worker to hold for a request that fits nowhere now, with whole-node settings on:
+    /// the first of `drain` (the workers by drain cost, the least tail first) that could
+    /// run it, with no preference for a worker held before. Never one in `reserved`,
     /// nor one in `avoid` while [`Servable::fit`] skips it. Only a whole-machine lease or an
     /// action that owns its worker ([`Request::owns_worker`]) holds a worker (the caller
     /// asks only for one); an action at a worker's whole memory waits until some worker
@@ -570,12 +667,27 @@ impl Servable {
         request: &Request,
         reserved: &BTreeSet<WorkerId>,
         avoid: &BTreeSet<WorkerId>,
-        kept: Option<&WorkerId>,
-        drain: Option<&[DrainCost]>,
+        drain: &[DrainCost],
     ) -> Option<WorkerId> {
+        let candidates = self.holdable(workers, request, reserved, avoid);
+        drain
+            .iter()
+            .find_map(|cost| candidates.iter().find(|name| name.as_str() == cost.id))
+            .map(|name| (*name).clone())
+    }
+
+    /// The live workers a request that waits for a worker to empty could hold: not in
+    /// `reserved`, not skipped for `avoid`, and big enough for the request's demand.
+    fn holdable(
+        &mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        request: &Request,
+        reserved: &BTreeSet<WorkerId>,
+        avoid: &BTreeSet<WorkerId>,
+    ) -> Vec<&WorkerId> {
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, avoid);
-        let candidates: Vec<&WorkerId> = self.memo[at]
+        self.memo[at]
             .1
             .iter()
             .map(|&i| &self.live[i])
@@ -584,23 +696,7 @@ impl Servable {
                     && !skip.contains(*name)
                     && workers[*name].capacity.fits(&request.demand())
             })
-            .collect();
-        if let Some(kept) = kept.filter(|kept| candidates.contains(kept)) {
-            return Some(kept.clone());
-        }
-        if let Some(drain) = drain {
-            return drain
-                .iter()
-                .find_map(|cost| candidates.iter().find(|name| name.as_str() == cost.id))
-                .map(|name| (*name).clone());
-        }
-        candidates
-            .into_iter()
-            .min_by_key(|name| {
-                let w = &workers[*name];
-                (w.leases, w.booked)
-            })
-            .cloned()
+            .collect()
     }
 
     /// The live workers placement may use that could run `request` once their bookings

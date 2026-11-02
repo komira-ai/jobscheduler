@@ -290,6 +290,7 @@ impl Provider for FakeProvider {
             shape: host.shape.clone(),
             memory: MemoryHeadroom::full(host.shape.resources().memory_bytes()),
             leased_to: host.lease,
+            leases: host.lease.into_iter().collect(),
         });
         listed.collect()
     }

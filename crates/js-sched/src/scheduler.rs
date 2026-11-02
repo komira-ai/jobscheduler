@@ -730,14 +730,39 @@ impl Scheduler {
                             }
                         })
                     }
-                    _ => servable.reserve(
+                    // Without whole-node settings: as it always was, the worker with the
+                    // fewest leases, kept while it could run the request, and no limit
+                    // on how many requests hold a worker.
+                    None => servable.reserve_by_leases(
                         &self.workers,
                         request,
                         &reserved,
                         &op.avoid,
                         self.reservations.get(&id),
-                        None,
                     ),
+                    // With settings, an action that owns its worker holds one worker per
+                    // pool, by the least tail, the first request in queue order taking it
+                    // (a blocked head shares the pool's slot below).
+                    Some(_) => {
+                        let pool = servable.pool(&self.workers, request);
+                        let drain = self.drain_order(&placed);
+                        let open = !held_pools.contains(&pool);
+                        let name = open
+                            .then(|| {
+                                servable.reserve(
+                                    &self.workers,
+                                    request,
+                                    &reserved,
+                                    &op.avoid,
+                                    &drain,
+                                )
+                            })
+                            .flatten();
+                        if name.is_some() {
+                            held_pools.insert(pool);
+                        }
+                        name
+                    }
                 };
                 if let Some(name) = held {
                     reserved.insert(name.clone());
@@ -765,9 +790,21 @@ impl Scheduler {
                     fit_minutes,
                 };
                 let kept = self.head_holds.get(&id);
-                if let Some(name) =
-                    servable.hold_for_head(&self.workers, &self.admission, &attempt, kept)
-                {
+                // Without whole-node settings the hold is what it always was, by the
+                // binding ratio; with them, by the start time.
+                let held = match &self.whole_node {
+                    None => servable.hold_for_head(&self.workers, &self.admission, &attempt, kept),
+                    Some(_) => {
+                        let ends = self.lease_ends(&placed);
+                        servable.hold_for_head_by_start(
+                            &self.workers,
+                            &self.admission,
+                            &attempt,
+                            &ends,
+                        )
+                    }
+                };
+                if let Some(name) = held {
                     self.admission.counters.reservations += u64::from(kept != Some(&name));
                     reserved.insert(name.clone());
                     head_holds.insert(id, name);

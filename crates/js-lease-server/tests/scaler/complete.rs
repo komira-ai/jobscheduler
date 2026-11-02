@@ -44,6 +44,7 @@ fn restart_capped(rig: &Rig, records: Records, leased: &[&str], cap: Option<Dura
             lease: LeaseId::new(1, n as u64 + 1),
             host: HostId::new(host).unwrap(),
             state: LeaseState::Held,
+            shares: None,
         })
         .collect();
     scaler.listening(cap, &booked);

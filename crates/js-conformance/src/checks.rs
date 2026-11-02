@@ -335,7 +335,7 @@ fn never_double_books<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
         .provider()
         .capacity()
         .into_iter()
-        .filter_map(|capacity| capacity.leased_to);
+        .flat_map(|capacity| capacity.leases);
     let mut listed: Vec<_> = listed.collect();
     listed.sort();
     let observed = (

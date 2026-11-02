@@ -1,0 +1,42 @@
+//! Scratch only: restarts v0.1.120 over this branch's file as its server does:
+//! read_bookings, seat each booking in a HostBook (HostBook::seat), open the table.
+use std::collections::BTreeMap;
+use std::fs;
+use js_lease::{Boot, LeaseTable, read_bookings};
+use js_pool_static::HostBook;
+use js_provider::{Flavour, HostCapacity, Observed, Provider, StartAck, StartSpec, StopAck};
+use js_types::{LeaseId, ProviderId, ResourceClass, Resources, Shape};
+use crate::support::{Scratch, clock, host, settings};
+
+struct Old { book: HostBook }
+impl Provider for Old {
+    fn id(&self) -> ProviderId { ProviderId::new("old").unwrap() }
+    fn flavour(&self) -> Flavour { Flavour::Delegated }
+    fn classes(&self) -> Vec<ResourceClass> { vec![ResourceClass::whole_node()] }
+    fn start(&mut self, spec: StartSpec) -> StartAck {
+        let gate = HostBook::class_gate(&self.classes(), &spec);
+        self.book.start_where(&spec, gate, &|_, _| true)
+    }
+    fn stop(&mut self, lease: &LeaseId) -> StopAck { StopAck::Stopped { read_back: self.book.stop(lease) } }
+    fn observe(&mut self, lease: &LeaseId) -> Observed { self.book.read(lease) }
+    fn capacity(&self) -> Vec<HostCapacity> { self.book.hosts() }
+}
+
+#[test]
+fn gen_rewritten_by_previous_release() {
+    let scratch = Scratch::new("gen_rewrite");
+    fs::write(scratch.file(), fs::read_to_string("OUT/written_by_this_release.toml").unwrap()).unwrap();
+    let bookings = read_bookings(scratch.file()).unwrap();
+    let resources = Resources::new(8000, 8, 1, Some("g".into())).unwrap().with_disk_bytes(4 << 30);
+    let shape = Shape::new(resources, BTreeMap::new());
+    let mut book = HostBook::new();
+    book.insert_host(host("h1"), shape.clone());
+    book.insert_host(host("h2"), shape);
+    for b in &bookings {
+        println!("seat {}: {:?}", b.lease, book.seat(&b.host, b.lease));
+    }
+    let table = LeaseTable::open(Old { book }, clock(), settings(), scratch.file(), Boot::Resume).unwrap();
+    println!("listed: {:?}", table.list().iter().map(|l| l.id).collect::<Vec<_>>());
+    drop(table);
+    fs::copy(scratch.file(), "OUT/rewritten_by_previous_release.toml").unwrap();
+}

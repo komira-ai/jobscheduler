@@ -32,6 +32,9 @@ use crate::rate::HelloLimit;
 use crate::usage::{KeySource, ProfileKey, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
 
+mod placement;
+pub use placement::Placement;
+
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
 #[derive(Debug, Parser)]
@@ -107,6 +110,16 @@ pub struct Cli {
     /// pool join tokens are not affected. Needs `--agent-pool-config`.
     #[arg(long)]
     pub require_host_credential: bool,
+    /// Who picks the host of a lease on a host that registered itself: `registry` (the
+    /// default) books the first free host by id, one lease to a host, and refuses a class
+    /// that books part of a host; `js-sched` has the scheduler choose among the hosts with
+    /// room, and lets leases of a class that books part of a host share one. A lease of
+    /// such a class goes to the host it fits most tightly, so the most booked first, equal
+    /// hosts by a hash of the lease and the host; a lease that books a whole host is not
+    /// scored and takes the first free host by id, as with `registry`. Needs `--agent-pool-config`, and a pool whose capabilities name an
+    /// `arch`.
+    #[arg(long, value_enum, default_value = "registry")]
+    pub placement: Placement,
     /// The ttl of a lease whose client names none, such as `600s`, `10m` or `1h`.
     #[arg(long, default_value = "600s", value_parser = parse_duration)]
     pub default_ttl: Duration,
@@ -394,6 +407,8 @@ pub(crate) struct AgentSetup {
     pub(crate) hello_limit: HelloLimit,
     /// `--require-host-credential`.
     pub(crate) require_host_credential: bool,
+    /// `--placement`.
+    pub(crate) placement: Placement,
 }
 
 impl Config {
@@ -489,12 +504,14 @@ impl Config {
                     tokens,
                     mint_provider,
                 } = *registering;
+                server.agents.placement().check(&pool, "server.placement")?;
                 let agents = Box::new(AgentSetup {
                     tokens,
                     pool,
                     mint_provider,
                     hello_limit: server.agents.hello_limit(),
                     require_host_credential: server.agents.require_host_credential(),
+                    placement: server.agents.placement(),
                 });
                 (
                     Hosts::Layered {
@@ -651,6 +668,15 @@ impl Config {
         self.usage.db.as_deref()
     }
 
+    /// Who places a lease on a registered host (`--placement`, or `server.placement`):
+    /// `registry` for a server with no agent registration.
+    pub fn placement(&self) -> Placement {
+        match &self.hosts {
+            Hosts::Layered { agents, .. } => agents.placement,
+            Hosts::Static(_) => Placement::Registry,
+        }
+    }
+
     /// The most bytes the learned cost curves may take (`--profile-store-bytes`).
     pub fn profile_store_bytes(&self) -> u64 {
         self.usage.profile_store_bytes
@@ -737,17 +763,20 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                 Some(path) => AgentTokens::open(path, client)?,
                 None => AgentTokens::none(),
             };
+            let pool = agent_pool::read(pool)?;
+            cli.placement.check(&pool, "--placement")?;
             Ok(Hosts::Layered {
                 static_pool,
                 agents: Box::new(AgentSetup {
                     tokens,
-                    pool: agent_pool::read(pool)?,
+                    pool,
                     mint_provider: None,
                     hello_limit: HelloLimit {
                         burst: cli.agent_hello_burst,
                         interval: cli.agent_hello_interval,
                     },
                     require_host_credential: cli.require_host_credential,
+                    placement: cli.placement,
                 }),
             })
         }
@@ -865,105 +894,4 @@ fn read_token(path: &Path) -> Result<Token, StartupError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Asserts that a token compares equal only to itself and prints without its bytes.
-    #[test]
-    fn a_token_matches_itself_and_hides_itself() {
-        let token = Token(b"s3cret".to_vec());
-        assert!(token.matches(b"s3cret"));
-        assert!(!token.matches(b"s3creT"));
-        assert!(!token.matches(b"s3cret!"));
-        assert!(!token.matches(b""));
-        assert_eq!(format!("{token:?}"), "Token(..)");
-    }
-
-    /// Asserts that a token file is trusted only when it is a regular file, owner-only
-    /// in mode, and owned by the user running the server: each condition alone refuses.
-    #[test]
-    fn a_token_file_must_be_the_servers_own_private_file() {
-        assert!(trusted_private_file(true, 0o600, 1000, 1000));
-        assert!(trusted_private_file(true, 0o400, 1000, 1000));
-        assert!(!trusted_private_file(false, 0o600, 1000, 1000));
-        assert!(!trusted_private_file(true, 0o640, 1000, 1000));
-        assert!(!trusted_private_file(true, 0o600, 0, 1000));
-        assert!(!trusted_private_file(true, 0o600, 1000, 0));
-    }
-
-    /// Asserts that a token is the content without trailing whitespace, and that empty
-    /// content and any space, line break, control or non-ASCII byte inside the token
-    /// is refused: no header value could ever equal such a token.
-    #[test]
-    fn a_token_is_one_run_of_printable_ascii() {
-        let good = "abcdefghijklmnopqrstuvwxyz-0123456789";
-        let trailing = format!("{good}\r\n");
-        assert!(
-            parse_token(trailing.as_bytes())
-                .unwrap()
-                .matches(good.as_bytes())
-        );
-        assert_eq!(parse_token(b" \r\n").err().as_deref(), Some("is empty"));
-        for bad in [
-            &b"two\nlines\n"[..],
-            b"has space",
-            b" leading",
-            b"tab\tinside",
-            b"nul\0byte",
-            "caf\u{e9}".as_bytes(),
-        ] {
-            let reason = parse_token(bad).err().unwrap();
-            assert!(reason.contains("printable ASCII"), "{bad:?}");
-        }
-    }
-
-    /// Asserts that a token of 31 bytes is refused and one of 32 is accepted, counting
-    /// the bytes without the trailing whitespace, and that the refusal says how long
-    /// the token was and how long it must be.
-    #[test]
-    fn a_token_must_have_at_least_32_bytes() {
-        let short = "x".repeat(MIN_TOKEN_BYTES - 1);
-        let reason = parse_token(format!("{short}\n\n").as_bytes())
-            .err()
-            .unwrap();
-        assert!(reason.contains("31 bytes"), "{reason}");
-        assert!(reason.contains("at least 32"), "{reason}");
-        let enough = "x".repeat(MIN_TOKEN_BYTES);
-        assert!(parse_token(enough.as_bytes()).is_ok());
-    }
-
-    /// Asserts that the default limits are what the flags default to, so the two
-    /// cannot drift apart.
-    #[test]
-    fn the_default_limits_are_the_flag_defaults() {
-        let cli = Cli::try_parse_from([
-            "js-lease-server",
-            "--state-file=a",
-            "--boot=resume",
-            "--pool-config=b",
-            "--token-file=c",
-        ])
-        .unwrap();
-        assert_eq!(Limits::from(&cli), Limits::default());
-    }
-
-    /// Asserts how a pool's whole-node settings reach the lease table's settings: none
-    /// leaves the flags' settings untouched (every figure), a pool's `prepare_timeout`
-    /// replaces only the prepare timeout, and a zero one is a startup error naming the
-    /// pool flag. It catches a pool key that is dropped on the way, and one that also
-    /// disturbs the ttls.
-    #[test]
-    fn a_pools_prepare_timeout_replaces_only_the_prepare_timeout() {
-        let secs = Duration::from_secs;
-        let flags = Settings::new(secs(60), secs(3600)).unwrap();
-        assert_eq!(with_whole_node(flags, None).unwrap(), flags);
-        let mut whole = WholeNodeConfig::dedicated(2);
-        whole.prepare_timeout_ms = 1_200_000;
-        let set = with_whole_node(flags, Some(&whole)).unwrap();
-        assert_eq!(set.prepare_timeout(), secs(1200));
-        assert_eq!((set.default_ttl(), set.max_ttl()), (secs(60), secs(3600)));
-        whole.prepare_timeout_ms = 0;
-        let err = with_whole_node(flags, Some(&whole)).err().unwrap();
-        assert!(err.to_string().contains("--agent-pool-config"), "{err}");
-    }
-}
+mod tests;

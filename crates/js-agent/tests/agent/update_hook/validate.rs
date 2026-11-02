@@ -45,6 +45,7 @@ fn params_for(record: &Record) -> Params {
         release_link: None,
         target_version: record.update.target.clone(),
         previous_version: record.update.previous.clone(),
+        connect: Default::default(),
     }
 }
 

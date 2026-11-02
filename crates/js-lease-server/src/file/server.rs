@@ -8,7 +8,7 @@ use js_elastic::SchedulerId;
 use js_lease::Settings;
 
 use super::{Load, Section};
-use crate::config::{BootMode, Limits, TlsFiles, Token, parse_token};
+use crate::config::{BootMode, Limits, Placement, TlsFiles, Token, parse_token};
 use crate::error::StartupError;
 use crate::rate::HelloLimit;
 use crate::usage_setup::DEFAULT_PROFILE_STORE_BYTES;
@@ -37,6 +37,7 @@ const SERVER_KEYS: &[&str] = &[
     "agent_hello_burst",
     "agent_hello_interval",
     "require_host_credential",
+    "placement",
     "usage_db",
     "usage_off",
     "profile_store_bytes",
@@ -93,6 +94,7 @@ pub(crate) struct AgentKeys {
     burst: Option<u32>,
     interval: Option<Duration>,
     require_host_credential: Option<bool>,
+    placement: Option<Placement>,
 }
 
 impl AgentKeys {
@@ -105,6 +107,7 @@ impl AgentKeys {
                 "require_host_credential",
                 self.require_host_credential.is_some(),
             ),
+            ("placement", self.placement.is_some()),
         ];
         given.into_iter().find(|(_, set)| *set).map(|(key, _)| key)
     }
@@ -122,6 +125,11 @@ impl AgentKeys {
     /// credential; off unless the file says so.
     pub(crate) fn require_host_credential(&self) -> bool {
         self.require_host_credential.unwrap_or(false)
+    }
+
+    /// Who places a lease on a registered host; the registry unless the file says so.
+    pub(crate) fn placement(&self) -> Placement {
+        self.placement.unwrap_or_default()
     }
 }
 
@@ -172,6 +180,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         burst: burst.map(|burst| u32::try_from(burst).unwrap_or(u32::MAX)),
         interval: s.duration("agent_hello_interval")?,
         require_host_credential: s.boolean("require_host_credential")?,
+        placement: read_placement(&mut s)?,
     };
     let usage = read_usage(&mut s)?;
     let totals = super::budget::read_totals(&mut s)?;
@@ -238,6 +247,17 @@ fn with_ceiling(s: &Section, settings: Settings, wall: Duration) -> Result<Setti
     settings
         .with_max_wall(wall)
         .map_err(|err| s.fail("max_lease_wall", &err.to_string()))
+}
+
+/// `placement`, the key of `--placement`: `registry` or `js-sched`.
+fn read_placement(s: &mut Section) -> Result<Option<Placement>, StartupError> {
+    let text = s.string("placement")?;
+    let named = |text: String| match text.as_str() {
+        "registry" => Ok(Placement::Registry),
+        "js-sched" => Ok(Placement::JsSched),
+        _ => Err(s.fail("placement", "must be registry or js-sched")),
+    };
+    text.map(named).transpose()
 }
 
 /// The usage keys. The rules are the flags': a budget of at least 1, and no `usage_db`

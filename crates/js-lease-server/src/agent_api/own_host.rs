@@ -91,7 +91,7 @@ struct Reading {
     /// not for `live`. Absent until the host says hello after a server restart.
     #[serde(skip_serializing_if = "Option::is_none")]
     session_started_ms: Option<u64>,
-    /// The leases the host holds: 0 or 1.
+    /// The leases the host holds, all of them (more than one only for a class that shares).
     leases: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     lease: Option<String>,
@@ -127,7 +127,7 @@ impl Reading {
             state: state_text(host.state),
             epoch: host.epoch,
             session_started_ms: own.session_started.map(|at| at.millis()),
-            leases: usize::from(host.lease.is_some()),
+            leases: host.leases.len(),
             lease: host.lease.map(|lease| lease.to_string()),
             releasing: host.releasing,
             mark: host.mark.map(mark_text),

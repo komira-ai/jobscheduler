@@ -299,6 +299,19 @@ impl WorkerLoad {
         &self.totals
     }
 
+    /// What taking each lease off the ledger takes off the left side `left`: the lease, its
+    /// cores (at least the floor `left` holds for an action lease) and its memory.
+    pub(crate) fn charges(&self, left: &Left) -> Vec<(LeaseId, u64, u64)> {
+        self.ledger
+            .iter()
+            .map(|(lease, entry)| {
+                let c = charge(&entry.cost);
+                let floor = left.floor_cpu * u64::from(!entry.vm);
+                (*lease, c.cpu_millis.max(floor), c.memory_bytes)
+            })
+            .collect()
+    }
+
     /// A new session: readings of the old one say nothing about the new. The leases
     /// stay charged, uncovered, and what the old session said of their working sets is
     /// forgotten.

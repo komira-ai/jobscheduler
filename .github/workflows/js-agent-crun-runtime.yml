@@ -84,6 +84,10 @@ jobs:
           exe=$(jq -r 'select(.executable != null and .target.name == "crun_runtime") | .executable' "$RUNNER_TEMP/build.json" | tail -n 1)
           test -x "$exe"
           echo "EXE=$exe" >> "$GITHUB_ENV"
+          cargo test -p js-agent --test crun_supervisor --locked --no-run --message-format json > "$RUNNER_TEMP/build-supervisor.json"
+          exe=$(jq -r 'select(.executable != null and .target.name == "crun_supervisor") | .executable' "$RUNNER_TEMP/build-supervisor.json" | tail -n 1)
+          test -x "$exe"
+          echo "EXE_SUPERVISOR=$exe" >> "$GITHUB_ENV"
       - name: Run the conformance suite over CrunRuntime in a Delegate=yes unit, as root
         run: |
           set -euo pipefail
@@ -107,4 +111,22 @@ jobs:
           # The count of tests the wrapper wrote must also be at least one.
           cargo xtask unit-result --unit js-crun-runtime \
             --count-file "$RUNNER_TEMP/crun-runtime.count"
+          exit "$rc"
+      - name: Start check and delegate step in a unit started as the packaged unit is, as root
+        # The packaged unit has Delegate=yes and DelegateSubgroup=supervisor: the agent starts in
+        # <unit>/supervisor and systemd enables no controller in the unit's own
+        # cgroup.subtree_control. Nothing here writes it: the agent's own delegate step must.
+        run: |
+          set -euo pipefail
+          rc=0
+          sudo -n systemd-run --quiet --wait --pipe \
+            --unit=js-crun-supervisor --slice=js-agent.slice \
+            -p Delegate=yes -p DelegateSubgroup=supervisor \
+            --working-directory="$GITHUB_WORKSPACE/crates/js-agent" \
+            -E "PATH=$PATH" -E JS_JOB_USER=js-job \
+            "$GITHUB_WORKSPACE/target/debug/xtask" count-run \
+            --count-file "$RUNNER_TEMP/crun-supervisor.count" -- \
+            "$EXE_SUPERVISOR" --include-ignored --test-threads=1 || rc=$?
+          cargo xtask unit-result --unit js-crun-supervisor \
+            --count-file "$RUNNER_TEMP/crun-supervisor.count"
           exit "$rc"

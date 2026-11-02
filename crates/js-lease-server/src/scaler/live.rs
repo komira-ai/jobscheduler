@@ -358,7 +358,7 @@ mod tests {
         let (live, dir) = live("save");
         assert_eq!(live.save(&Records::default()), Ok(()));
         assert!(dir.join("records").is_file());
-        let (broken, _) = live_at_missing_dir();
+        let (broken, _) = live_at_missing_dir("save_missing");
         assert!(broken.save(&Records::default()).is_err());
     }
 
@@ -375,12 +375,14 @@ mod tests {
             UnremovedFile::new(dir.join("unremoved")).load().unwrap(),
             hosts
         );
-        let (broken, _) = live_at_missing_dir();
+        let (broken, _) = live_at_missing_dir("save_unremoved_missing");
         assert!(broken.save_unremoved(&hosts).is_err());
     }
 
-    fn live_at_missing_dir() -> (Live, PathBuf) {
-        let (mut live, dir) = live("save_missing");
+    /// A live scheduler whose files are in a directory that is not there. `name` is the
+    /// test's own: two tests sharing one scratch directory would remove it under each other.
+    fn live_at_missing_dir(name: &str) -> (Live, PathBuf) {
+        let (mut live, dir) = live(name);
         live.file = RecordsFile::new(dir.join("absent").join("records"));
         live.unremoved = UnremovedFile::new(dir.join("absent").join("unremoved"));
         (live, dir)

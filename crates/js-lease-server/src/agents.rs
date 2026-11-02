@@ -83,6 +83,7 @@ pub(crate) fn assemble(
                 mint_provider,
                 hello_limit,
                 require_host_credential,
+                placement,
             } = *agents;
             let path = state_path(state_file, ".agents");
             let joins = JoinTokens::open(
@@ -95,6 +96,11 @@ pub(crate) fn assemble(
             let booked = pool.shape().resources();
             let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
             let registry = Registry::new(pool, clock.clone());
+            // `--placement js-sched`: the scheduler picks the host of a start.
+            let placers = placement.placer();
+            placers
+                .into_iter()
+                .for_each(|placer| registry.set_placer(placer));
             let usage = usage.build(clock, limits, &registry)?;
             // The learned lives of the profiles cost a lease's end in the drain order.
             let curves = usage.iter().filter_map(|usage| usage.curves());

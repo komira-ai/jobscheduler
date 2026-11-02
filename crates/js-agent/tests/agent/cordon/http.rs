@@ -34,9 +34,9 @@ fn launched() -> Host {
 
 /// A lease server, and the host `mac-1` admitted to it with a one-time token that its agent
 /// swapped for a host credential kept in `state`.
-pub(super) struct Enrolled {
-    pub(super) server: Server,
-    pub(super) state: PathBuf,
+pub(crate) struct Enrolled {
+    pub(crate) server: Server,
+    pub(crate) state: PathBuf,
     _files: Scratch,
     _agent: Agent,
 }
@@ -56,7 +56,7 @@ impl Enrolled {
 
 /// Starts a server and enrols `mac-1` on it: the agent's hello is answered with a host
 /// credential, which it saves in the state root before its next call.
-pub(super) fn enrol(name: &str) -> Enrolled {
+pub(crate) fn enrol(name: &str) -> Enrolled {
     let server = Server::start(name, &[]);
     let files = Scratch::new(&format!("{name}-files"));
     let instance = json!({ "provider": "lambdalabs", "instance_id": "i-1" });

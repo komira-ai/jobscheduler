@@ -1,0 +1,29 @@
+version = 1
+term = 1
+next_sequence = 3
+lease_count = 2
+
+[[lease]]
+term = 1
+sequence = 1
+state = "held"
+host = "h1"
+acquired_at_ms = 1000000
+expires_at_ms = 1060000
+ends_at_ms = 4600000
+validation_run = "v-1"
+whole = true
+
+[lease.labels]
+team = "infra"
+
+[[lease]]
+term = 1
+sequence = 2
+state = "held"
+host = "h2"
+acquired_at_ms = 1000000
+expires_at_ms = 1070000
+ends_at_ms = 4600000
+
+[lease.labels]
