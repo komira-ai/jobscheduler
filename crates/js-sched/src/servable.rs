@@ -1,6 +1,7 @@
 //! Which live workers can run a request, for one placement round.
 //!
-//! A cordoned worker is not one of them: placement skips it, and work only it could
+//! A cordoned worker is not one of them: placement skips it (a probe pinned to it aside,
+//! which [`Servable::fit`] places there alone), and work only it could
 //! run waits with that reason for as long as the cordon lasts; it is never refused for
 //! it (a cordon is temporary by intent). A worker whose phase is not `serving`
 //! ([`NodePhase`]: switching its GUI session, or quarantined) is held back the
@@ -31,6 +32,7 @@ use crate::admission::{
 use crate::cordon::Cordons;
 use crate::input::Request;
 use crate::load::{Charge, HostFacts, LeaseFacts, Load, SLOTS, SlotHost, SlotLoad, least_loaded};
+use crate::probe::{ProbeHost, ProbeRefusal, admit_probe};
 use crate::scheduler::Worker;
 use crate::unservable::Unservable;
 
@@ -233,21 +235,17 @@ impl Servable {
         attempt: &Attempt<'_>,
     ) -> Fit {
         let request = attempt.request;
-        let at = self.matching(workers, request);
-        let skip = self.avoided(at, workers, request, attempt.avoid);
+        let now = self.now;
+        let pool = self.pool_of(workers, request, attempt.avoid);
         let by_load = adm.by_load() && request.kind == LeaseKind::Action;
         // A VM is placed by its booking, and under load admission also held to the
         // flat-memory guard.
         let vm_by_load = adm.by_load() && request.kind == LeaseKind::Vm;
-        let now = self.now;
         // The workers that pass everything but the load predicate.
-        let candidates: Vec<&WorkerId> = self.memo[at]
-            .1
-            .iter()
-            .map(|&i| &self.live[i])
+        let candidates: Vec<&WorkerId> = pool
+            .into_iter()
             .filter(|name| {
                 !attempt.reserved.contains(*name)
-                    && !skip.contains(*name)
                     && workers[*name].has_room(request, by_load)
                     && (!attempt.not_whole || !workers[*name].exclusive(request))
                     && (!vm_by_load || Self::vm_within_flat_memory(adm, &workers[*name], attempt))
@@ -310,6 +308,52 @@ impl Servable {
             }),
             blocked: None,
         }
+    }
+
+    /// The workers [`Servable::fit`] looks at for `request`, in name order: for a probe
+    /// ([`Request::pin`]) the worker it names alone, which the caller has admitted
+    /// ([`Servable::probe`]); else the live workers that serve its kind and satisfy its
+    /// platform, less those of `avoid` that placement skips ([`Servable::avoided`]).
+    fn pool_of<'s>(
+        &'s mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        request: &'s Request,
+        avoid: &BTreeSet<WorkerId>,
+    ) -> Vec<&'s WorkerId> {
+        if let Some(pin) = &request.pin {
+            return vec![pin];
+        }
+        let at = self.matching(workers, request);
+        let skip = self.avoided(at, workers, request, avoid);
+        self.memo[at]
+            .1
+            .iter()
+            .map(|&i| &self.live[i])
+            .filter(|name| !skip.contains(*name))
+            .collect()
+    }
+
+    /// Whether the probe `request`, which names `pin`, may run there ([`admit_probe`]), by
+    /// what the scheduler knows of the worker at `now`: its cordon, phase, capacity (after
+    /// the memory_schedulable_percent cut) and capabilities. A worker that is not live is
+    /// not known.
+    pub(crate) fn probe(
+        workers: &BTreeMap<WorkerId, Worker>,
+        cordons: &Cordons,
+        now: FarmTime,
+        pin: &WorkerId,
+        request: &Request,
+    ) -> Result<(), ProbeRefusal> {
+        let known = workers
+            .get(pin)
+            .filter(|w| w.alive(now))
+            .map(|w| ProbeHost {
+                cordon: cordons.get(pin),
+                phase: &w.phase,
+                capacity: &w.capacity,
+                caps: &w.caps,
+            });
+        admit_probe(pin, known, request)
     }
 
     /// Whether a VM of `attempt` passes the flat-memory guard on `worker`: its booked

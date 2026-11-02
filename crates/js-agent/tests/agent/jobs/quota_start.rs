@@ -257,6 +257,7 @@ fn server_admits(hello: &Hello) -> usize {
         max_wall: Duration::from_secs(600),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     };
     let lease = LeaseId::new(1, 1);
     let spec = StartSpec::new(lease, request, &[class]).unwrap();

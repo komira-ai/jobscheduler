@@ -26,10 +26,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use js_pool_static::Candidate;
-use js_provider::StartSpec;
-use js_registry::Placer;
+use js_provider::{RefusalCode, StartSpec};
+use js_registry::{Placer, ProbeHost};
 use js_sched::harness::feed;
 use js_sched::{DaemonInstance, Event, Recovered, RecoveredLease, Request, Scheduler};
+use js_types::HostId;
 use js_types::sched::{
     Effect, FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, WaiterId, WorkKey,
 };
@@ -83,7 +84,14 @@ impl Placer for SchedPlacer {
     /// The scheduler is built afresh for each start over every open host and every lease on
     /// them, so a start costs time in their number (hosts plus leases), and the registry's
     /// lock is held for it. Nothing is cached between starts.
+    ///
+    /// A probe never falls back: the scheduler places it on its host, or the start books
+    /// none (`NoCapacity`). Its host is cordoned in the scheduler, as the registry found it
+    /// when the probe was admitted there ([`Placer::admit_probe`]).
     fn pick(&self, spec: &StartSpec, open: &[Candidate]) -> Option<usize> {
+        if spec.request().probe_host.is_some() {
+            return grant(spec, open).ok().flatten();
+        }
         let (counter, cause) = match grant(spec, open) {
             Ok(Some(at)) => return Some(at),
             Ok(None) => (
@@ -97,6 +105,17 @@ impl Placer for SchedPlacer {
             warn!(lease = %spec.lease(), %cause, count, "placement fell back to the first host");
             0
         })
+    }
+
+    /// The probe rule of the scheduler ([`js_sched::admit_probe`]) over what the registry
+    /// knows of the probe's host ([`super::probe::admit`]).
+    fn admit_probe(
+        &self,
+        spec: &StartSpec,
+        pin: &HostId,
+        host: Option<&ProbeHost>,
+    ) -> Result<(), RefusalCode> {
+        super::probe::admit(spec, pin, host)
     }
 }
 
@@ -112,6 +131,7 @@ fn recovered(number: u64, candidate: &Candidate, held: &js_pool_static::Held) ->
         hermetic: false,
         do_not_cache: true,
         whole_worker: held.whole,
+        pin: None,
     };
     Recovered {
         operation: OperationId(number),
@@ -159,6 +179,16 @@ fn grant(spec: &StartSpec, open: &[Candidate]) -> Result<Option<usize>, MapError
     }
     let mut request = map::job(spec.request(), &spec.lease().to_string())?;
     request.whole_worker = spec.class().admission().books_whole_host();
+    // A probe's host is shown only once it was admitted there: it is cordoned.
+    if let Some(pin) = &request.pin {
+        feed(
+            &mut sched,
+            now,
+            Event::Cordon {
+                worker: pin.clone(),
+            },
+        );
+    }
     let submit = Event::Submit {
         waiter: WaiterId(u64::MAX),
         request,
@@ -232,6 +262,7 @@ mod tests {
             max_wall: Duration::from_secs(60),
             labels: BTreeMap::new(),
             validation_run: None,
+            probe_host: None,
         };
         let known = std::slice::from_ref(class);
         StartSpec::new(LeaseId::new(2, sequence), request, known).unwrap()
@@ -356,5 +387,58 @@ mod tests {
             declined: 1,
         };
         assert_eq!(placer.fallbacks(), counted);
+    }
+
+    /// `spec_with` numbered `sequence` with `caps`, a probe pinned to `pin`.
+    fn probe_with(sequence: u64, pin: &str, caps: &[(&str, &str)]) -> StartSpec {
+        let mut request = spec_with(&sharing(), sequence, caps).request().clone();
+        request.probe_host = Some(HostId::new(pin).unwrap());
+        StartSpec::new(LeaseId::new(2, sequence), request, &[sharing()]).unwrap()
+    }
+
+    /// Catches: a probe that falls back to the first host when the scheduler places it
+    /// nowhere (its host full), which would oversubscribe the host, and a probe the
+    /// scheduler refuses because its host is not cordoned in the scheduler (it would never
+    /// be placed). Neither is counted as a fallback.
+    #[test]
+    fn a_probe_is_placed_on_its_cordoned_host_or_nowhere_and_never_falls_back() {
+        let placer = SchedPlacer::default();
+        let probe = probe_with(1, "a", &[]);
+        assert_eq!(placer.pick(&probe, &[host("a", x86(), &[3000])]), Some(0));
+        assert_eq!(placer.pick(&probe, &[host("a", x86(), &[8000])]), None);
+        let odd = probe_with(2, "a", &[("colour", "red")]);
+        assert_eq!(placer.pick(&odd, &[host("a", x86(), &[])]), None);
+        let none = Fallbacks {
+            unmappable: 0,
+            declined: 0,
+        };
+        assert_eq!(placer.fallbacks(), none);
+    }
+
+    /// Catches: a probe whose request or host the scheduler cannot describe judged by
+    /// some other rule, or admitted: it is refused as a probe the server cannot place.
+    #[test]
+    fn a_probe_with_no_scheduler_form_is_refused_as_unsupported() {
+        let placer = SchedPlacer::default();
+        let a = HostId::new("a").unwrap();
+        let known = |shape| ProbeHost {
+            shape,
+            cordoned: true,
+            phase: js_agent_wire::Phase::Serving,
+            taint: None,
+            leaving: false,
+        };
+        let probe = probe_with(1, "a", &[]);
+        assert_eq!(placer.admit_probe(&probe, &a, Some(&known(x86()))), Ok(()));
+        let unsupported = Err(RefusalCode::ProbeUnsupported);
+        let no_arch = known(shape(&[]));
+        assert_eq!(placer.admit_probe(&probe, &a, Some(&no_arch)), unsupported);
+        let odd = probe_with(2, "a", &[("colour", "red")]);
+        assert_eq!(
+            placer.admit_probe(&odd, &a, Some(&known(x86()))),
+            unsupported
+        );
+        let unknown = Err(RefusalCode::ProbeHostUnknown);
+        assert_eq!(placer.admit_probe(&probe, &a, None), unknown);
     }
 }

@@ -44,6 +44,7 @@ fn request(n: u8, memory: u64) -> Request {
         hermetic: true,
         do_not_cache: false,
         whole_worker: false,
+        pin: None,
         needs: js_caps::Request::from_platform([("OSFamily", "linux")]).unwrap(),
     }
 }

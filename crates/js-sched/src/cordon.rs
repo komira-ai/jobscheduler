@@ -1,7 +1,8 @@
 //! Cordon and drain: an operator takes a worker out of placement without stopping its
 //! work (`docs/design/fleet-updates.md` sections 3.3 and 4.2, steps 3 and 4).
 //!
-//! A **cordoned** worker is offered no new lease; the leases it holds run on. A
+//! A **cordoned** worker is offered no new lease but a probe pinned to it
+//! ([`crate::Request::pin`]); the leases it holds run on. A
 //! **drain** cordons the worker and waits, until a deadline, for those leases to end:
 //! it is **drained** once the worker holds none, and **paused** if the deadline passes
 //! first. A drain never kills or gives up a lease. A paused drain stays paused even

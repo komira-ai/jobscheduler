@@ -12,6 +12,7 @@ use js_types::{Admission, HostId, LeaseId, ResourceClass, Shape};
 use super::record::Bound;
 use super::{HostState, Registry, State};
 use crate::lives;
+use crate::placer::ProbeHost;
 use crate::whole::caps::Capability;
 use crate::whole::cost::HostLoad;
 use crate::whole::exclusive::Exclusive;
@@ -122,6 +123,7 @@ impl Registry {
         let lease = spec.lease();
         let key = RequestKey::of(spec);
         let whole = matches!(spec.class().admission(), Admission::Whole);
+        let probe = spec.request().probe_host.as_ref();
         let held = state.book.read(&lease);
         let pending = match &held {
             Observed::Present { host } => state
@@ -132,6 +134,17 @@ impl Registry {
         };
         if pending {
             return StartAck::Unknown;
+        }
+        // A probe of a whole-node class is not placed: its host would be prepared and
+        // held as the queue of whole-node requests decides, which no probe rule judges.
+        // The book answers it, so an ended lease, a held one and the class gate come
+        // first, as for any start, and it books nothing (`ProbeUnsupported`).
+        if whole & probe.is_some() {
+            let gate = match self.shared.placer.get() {
+                Some(_) => HostBook::listed_gate(classes, spec),
+                None => HostBook::class_gate(classes, spec),
+            };
+            return state.book.start_where(spec, gate, &|_, _| false);
         }
         if whole {
             // One request id holds at most one whole host: a start of it under another
@@ -196,6 +209,23 @@ impl Registry {
             hosts: &hosts,
         };
         let room = reserve::has_room(&state.marks, &pass, true);
+        // A probe is judged by the placer, over what is known of its host: the rule is not
+        // the registry's. A host it is admitted to is eligible past its cordon.
+        let judged = probe.zip(placer).map(|(pin, placer)| {
+            let listed = listed.iter().find(|host| host.host == *pin);
+            let record = state.records.get(pin);
+            let live = record.filter(|record| record.state(now, grace) == HostState::Live);
+            let known = live.zip(listed).map(|(record, listed)| ProbeHost {
+                shape: listed.shape.clone(),
+                cordoned: record.cordoned(now),
+                phase: record.phase,
+                taint: record.taint.as_ref().map(|taint| taint.reason.clone()),
+                leaving: record.leaving.is_some(),
+            });
+            placer.admit_probe(spec, pin, known.as_ref())
+        });
+        let admitted = judged == Some(Ok(()));
+        let unjudged = judged.is_none_or(|judged| judged.is_ok());
         // The hosts that carry a lease: a lease that shares one may meet the runs of the
         // leases there, but nothing else (a run the registry does not know, or one of a
         // lease that has ended), whose limits no admission counts.
@@ -220,10 +250,12 @@ impl Registry {
                     (true, Some(leases)) => beside(leases),
                     _ => record.quiet(runs, id),
                 };
-                record.bookable(now, grace, quiet)
+                record.bookable_as(now, grace, quiet, admitted)
             });
             let allowed = reserve::may_start(marks.holder(id), whole, spec.request_id(), room);
-            [bookable, !barred, allowed].into_iter().all(|ok| ok)
+            [bookable, !barred, allowed, unjudged]
+                .into_iter()
+                .all(|ok| ok)
         };
         // Without a placer the book books the first host that qualifies, stopping at it;
         // with one it is shown every host that qualifies. The placer runs under this
@@ -234,6 +266,14 @@ impl Registry {
                 book.start_by(spec, gate, &eligible, &choose)
             }
             None => book.start_where(spec, gate, &eligible),
+        };
+        // A probe no host took for the placer's refusal is answered that refusal; any
+        // other answer (an ended lease, a held one, the class gate) stands.
+        let ack = match (judged, ack) {
+            (Some(Err(code)), StartAck::Refused(RefusalCode::NoCapacity | RefusalCode::NoFit)) => {
+                StartAck::Refused(code)
+            }
+            (_, ack) => ack,
         };
         let started = matches!(ack, StartAck::Started { .. });
         let ended = matches!(ack, StartAck::Refused(RefusalCode::LeaseEnded));

@@ -47,6 +47,7 @@ fn request(n: u8, memory: u64) -> Request {
         hermetic: true,
         do_not_cache: false,
         whole_worker: false,
+        pin: None,
         needs: js_caps::Request::from_platform([("OSFamily", "linux")]).unwrap(),
     }
 }
@@ -207,6 +208,7 @@ fn a_whole_worker_request_takes_no_key_floor() {
     let mut f = farm_with_floor_16();
     let request = Request {
         whole_worker: true,
+        pin: None,
         ..request(2, 4 * GIB)
     };
     f.submit_keyed(2, request, KEY);

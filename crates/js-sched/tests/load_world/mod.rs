@@ -290,6 +290,7 @@ impl World {
             hermetic: true,
             do_not_cache: false,
             whole_worker: false,
+            pin: None,
         };
         let op = self.s.next_operation();
         feed(

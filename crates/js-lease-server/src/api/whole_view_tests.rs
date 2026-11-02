@@ -47,6 +47,7 @@ fn request(class: &str, wall_s: u64) -> Request {
         max_wall: Duration::from_secs(wall_s),
         labels: Default::default(),
         validation_run: None,
+        probe_host: None,
     }
 }
 

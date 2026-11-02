@@ -328,3 +328,51 @@ fn max_draining_does_not_stop_a_quiet_take() {
     assert_eq!(grants[0].worker, w("mac"));
 }
 }
+
+/// `request` `n` of `kind`, a probe pinned to `host`.
+fn probe(n: u8, kind: LeaseKind, host: &str) -> Request {
+    Request {
+        pin: Some(w(host)),
+        ..request(n, kind)
+    }
+}
+
+both_rules! {
+/// Catches: a whole-machine probe that skips `max_whole_node`: with one as the cap and `a`
+/// already held whole, a probe pinned to the cordoned, quiet `b` is not granted and stays
+/// queued; once `a`'s lease ends it is granted `b`.
+fn a_whole_machine_probe_is_held_to_max_whole_node() {
+    let mut f = quiet(cfg(|c| c.max_whole_node = 1), &["a", "b"]);
+    f.submit_whole(Some(secs(600)));
+    let held = f.grants().pop().expect("a is taken whole");
+    assert_eq!(held.worker, w("a"));
+    f.start(&held);
+    f.feed(Event::Cordon { worker: w("b") });
+    let op = f.s.next_operation();
+    f.submit(probe(90, LeaseKind::WholeMachine, "b"));
+    assert!(f.grants().is_empty());
+    assert_eq!(f.s.state(op), Some(&js_sched::OpState::Queued));
+    f.finish(&held);
+    let grants = f.grants();
+    assert_eq!(grants.len(), 1);
+    assert_eq!((grants[0].operation, &grants[0].worker), (op, &w("b")));
+}
+}
+
+both_rules! {
+/// Catches: a whole-machine probe placed in a round not counted against the requests
+/// after it: with one as the cap, a probe pinned to the cordoned `a` and an ordinary
+/// whole-machine request queued behind it in one round yield one grant, the probe's, and
+/// the other waits with the ceiling as its reason.
+fn a_whole_machine_probe_counts_against_the_cap_in_its_round() {
+    let mut f = quiet(cfg(|c| c.max_whole_node = 1), &["a", "b"]);
+    f.feed(Event::Cordon { worker: w("a") });
+    let probing = f.s.next_operation();
+    f.submit(probe(90, LeaseKind::WholeMachine, "a"));
+    let other = f.submit_whole(Some(secs(600)));
+    let grants = f.grants();
+    assert_eq!(grants.len(), 1);
+    assert_eq!((grants[0].operation, &grants[0].worker), (probing, &w("a")));
+    assert_eq!(f.s.whole_wait(other), Some(WholeWait::Cap(Blocked::Ceiling)));
+}
+}

@@ -1,7 +1,26 @@
 //! Choosing the host a start books, when more than one could take it.
 
+use js_agent_wire::Phase;
 use js_pool_static::Candidate;
-use js_provider::StartSpec;
+use js_provider::{RefusalCode, StartSpec};
+use js_types::{HostId, Shape};
+
+/// What the registry knows of the host a probe ([`js_types::Request::probe_host`]) names,
+/// for [`Placer::admit_probe`]. Facts only: the rule that judges them is the placer's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeHost {
+    /// The shape the host is booked as: its memory after the memory_schedulable_percent
+    /// cut.
+    pub shape: Shape,
+    /// Whether the host is cordoned now: its own cordon has not lapsed.
+    pub cordoned: bool,
+    /// The host's phase.
+    pub phase: Phase,
+    /// The reason of the host's taint, if it is tainted.
+    pub taint: Option<String>,
+    /// Whether the host is being scaled away.
+    pub leaving: bool,
+}
 
 /// Picks the host a start books among the hosts that could take it.
 ///
@@ -24,5 +43,29 @@ pub trait Placer: Send + Sync {
     /// The index in `open` of the candidate to book for `spec`, or `None` to book none (the
     /// start then answers `NoCapacity`). `open` is in host id order and is never empty: with
     /// no candidate the placer is not asked. An index past `open` books none either.
+    ///
+    /// For a probe, `open` holds the probe's host alone, and the placer is asked only once
+    /// [`Placer::admit_probe`] has admitted the probe there: the host is then cordoned.
     fn pick(&self, spec: &StartSpec, open: &[Candidate]) -> Option<usize>;
+
+    /// Whether the probe `spec` may be booked on `pin`, the host it names, given what the
+    /// registry knows of that host (`None`: the registry lists no live host of that name).
+    /// Asked under the registry's lock before the book is, for a start not yet booked. On
+    /// `Ok` the host is a candidate though it is cordoned, and is booked if it has room
+    /// ([`Placer::pick`]); on `Err` it is not, and a start no host took answers that code.
+    /// Room is not part of this answer.
+    ///
+    /// The default places no probe: [`RefusalCode::ProbeUnsupported`].
+    ///
+    /// # Errors
+    /// The code of the refusal.
+    fn admit_probe(
+        &self,
+        spec: &StartSpec,
+        pin: &HostId,
+        host: Option<&ProbeHost>,
+    ) -> Result<(), RefusalCode> {
+        let _ = (spec, pin, host);
+        Err(RefusalCode::ProbeUnsupported)
+    }
 }

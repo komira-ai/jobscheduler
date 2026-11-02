@@ -41,6 +41,7 @@ fn spec_of(class: &ResourceClass, seq: u64, resources: Resources) -> StartSpec {
         max_wall: Duration::from_secs(60),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     };
     StartSpec::new(LeaseId::new(1, seq), request, std::slice::from_ref(class)).unwrap()
 }

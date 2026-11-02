@@ -146,10 +146,23 @@ impl Record {
     /// clear of a whole-node lease (not held, not restoring) and not being scaled away. Every
     /// other phase takes no new lease. A lease already on a tainted host is untouched.
     pub(super) fn bookable(&self, now: Timestamp, grace_ms: u64, quiet: bool) -> bool {
+        self.bookable_as(now, grace_ms, quiet, false)
+    }
+
+    /// [`Record::bookable`], with the cordon left out when `probe` says so: a probe the
+    /// placer admitted to this host ([`crate::Placer::admit_probe`]) passes its cordon, and
+    /// nothing else.
+    pub(super) fn bookable_as(
+        &self,
+        now: Timestamp,
+        grace_ms: u64,
+        quiet: bool,
+        probe: bool,
+    ) -> bool {
         let live = self.state(now, grace_ms) == HostState::Live;
         let serving = self.phase == Phase::Serving;
         let clean = self.taint.is_none();
-        let open = !self.cordoned(now);
+        let open = probe || !self.cordoned(now);
         let clear = self.exclusive.is_free();
         let staying = self.leaving.is_none();
         [live, serving, quiet, clean, open, clear, staying]

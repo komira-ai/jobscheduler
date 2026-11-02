@@ -38,6 +38,7 @@ fn request(tag: u8) -> Request {
         hermetic: true,
         do_not_cache: false,
         whole_worker: false,
+        pin: None,
         needs: js_caps::Request::default(),
     }
 }
@@ -327,6 +328,7 @@ fn an_exclusive_recovered_lease_keeps_its_node_to_itself() {
 fn a_recovered_whole_worker_lease_books_its_whole_node() {
     let held = Request {
         whole_worker: true,
+        pin: None,
         resources: Resources::new(1_000, GIB),
         ..request(3)
     };

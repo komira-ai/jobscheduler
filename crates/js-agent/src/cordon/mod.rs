@@ -59,7 +59,7 @@ use clap::Parser;
 use js_client::ClientError;
 use js_types::HostId;
 
-use crate::own_host::{HttpLease, Lease};
+use crate::own_host::{HttpLease, Lease, RequestLimit};
 
 use crate::{
     CommandRunner, FileReader, Platform, Sleeper, SystemCommands, SystemFiles, SystemSleeper, Wake,
@@ -239,8 +239,14 @@ pub fn run_system(
     };
     let mut pace = SystemPace::new(sleeper);
     let connect = |at: &Connection<'_>| {
-        HttpLease::connect(at.server, at.credential, at.ca_cert, at.host)
-            .map(|lease| Box::new(lease) as Box<dyn Lease>)
+        HttpLease::connect(
+            at.server,
+            at.credential,
+            at.ca_cert,
+            at.host,
+            RequestLimit::DEFAULT,
+        )
+        .map(|lease| Box::new(lease) as Box<dyn Lease>)
     };
     let mut host = Host {
         platform: Platform::current(),
