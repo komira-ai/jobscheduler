@@ -224,19 +224,16 @@ mod tests {
     #[test]
     fn a_file_gone_after_its_write_is_a_failure() {
         let path = Path::new("/etc/js-agent/token");
-        let words = |got: Result<(), Failure>| match got {
-            Ok(()) => "ok".to_owned(),
-            Err(Failure::Failed(text)) => format!("failed: {text}"),
-            Err(Failure::Usage(text)) => format!("usage: {text}"),
-        };
-        assert_eq!(words(read_back(path, Ok(true))), "ok");
+        let words = |got: Result<(), Failure>| got.map_err(|f| (f.code(), f.text().to_owned()));
+        let failed = |text: &str| Err((crate::exit::FAILED, text.to_owned()));
+        assert_eq!(words(read_back(path, Ok(true))), Ok(()));
         assert_eq!(
             words(read_back(path, Ok(false))),
-            "failed: /etc/js-agent/token: was written and is gone again"
+            failed("/etc/js-agent/token: was written and is gone again")
         );
         assert_eq!(
             words(read_back(path, Err("it differs".to_owned()))),
-            "failed: it differs"
+            failed("it differs")
         );
     }
 

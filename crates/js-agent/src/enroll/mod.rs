@@ -16,7 +16,8 @@
 //!    the directories above it and the shell (`/usr/bin/bash`), and the shell is started on
 //!    `/proc/self/fd/N` of that open file, not on its path. A script that is missing or
 //!    fails a check is not run. The script's standard output and standard error both go to
-//!    this verb's standard error as it prints them; it runs with umask 022, an empty
+//!    this verb's standard error as it prints them; it runs with the caller's umask (as
+//!    when it is run by hand; it sets the mode of what it makes itself), an empty
 //!    environment but `PATH` and `LC_ALL=C`, and no standard input.
 //! 2. **The instance file**, `/etc/js-agent/instance`: the line `PROVIDER:INSTANCE\n`, owned by
 //!    root, mode 0644, which the agent reads with `--instance-file` and names in its hello.

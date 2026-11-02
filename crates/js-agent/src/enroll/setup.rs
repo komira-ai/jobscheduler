@@ -11,9 +11,10 @@
 //! Both files are opened without blocking, so a named pipe at either path is refused as not
 //! a regular file instead of hanging the verb. The script's descriptor is opened without
 //! close-on-exec, so the shell inherits it; nothing else is done in the child, and no
-//! `unsafe` code is needed. The umask the script runs with is set in this process around
-//! the start of the shell and put back right after: an exec keeps the umask, and a
-//! one-shot verb has no other thread making files in that moment.
+//! `unsafe` code is needed. The script runs with the caller's umask, as it does when it is
+//! run by hand: it gives every file and directory it makes its mode itself (`install -m`,
+//! `chmod`, `mkdir -m`), and the verb changes nothing that the process shares with other
+//! threads.
 
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -113,9 +114,8 @@ impl Write for Lenient<'_> {
 
 /// Starts `shell` on the open `script` with `flags`, with an empty environment but `PATH`
 /// and `LC_ALL`, no standard input, and standard output and standard error as one pipe that
-/// is copied to `err` as it fills. The shell starts with umask 022 whatever this process's is
-/// (the script sets its own where it needs more). The child is always waited for, also when
-/// its output cannot be read. Returns the exit status, `None` when a signal ended it.
+/// is copied to `err` as it fills. The child is always waited for, also when its output
+/// cannot be read. Returns the exit status, `None` when a signal ended it.
 fn start(
     shell: &Path,
     script: &File,
@@ -133,14 +133,13 @@ fn start(
         .stdin(Stdio::null())
         .stdout(writer.try_clone()?)
         .stderr(writer);
-    let before = rustix::process::umask(Mode::from_bits_truncate(0o022));
-    let spawned = command.spawn();
-    rustix::process::umask(before);
-    let mut child = spawned?;
+    let mut child = command.spawn()?;
     // The command holds the write end; the pipe ends when the script and its children do.
     drop(command);
     let mut sink = Lenient(err);
     let copied = io::copy(&mut reader, &mut sink);
+    // Never fails: a closed standard error does not stop the script.
+    let _ = sink.flush();
     // A script that still writes after a failed read gets a broken pipe, not a block.
     drop(reader);
     let status = child.wait()?;
@@ -190,21 +189,17 @@ mod tests {
         let shell = dir.path().join("shell");
         fs::write(&shell, "").unwrap();
         fs::set_permissions(&shell, fs::Permissions::from_mode(0o755)).unwrap();
-        let mine = rustix::process::geteuid().as_raw();
-        if mine == 0 {
-            eprintln!("skipped: as root every file made here is root's, which the check accepts");
-            return;
-        }
-        let other = mine + 1;
-        let refused = open_checked(&shell, other, "hint").err().map(|f| match f {
-            Failure::Usage(text) => text,
-            Failure::Failed(text) => format!("failed: {text}"),
-        });
+        // The test runs as a user other than root, as the whole suite does: a file root
+        // made would pass the check whoever the owner is.
+        let other = rustix::process::geteuid().as_raw() + 1;
+        let refused = open_checked(&shell, other, "hint")
+            .err()
+            .map(|f| (f.code(), f.text().to_owned()));
         assert_eq!(
             refused,
-            Some(format!(
-                "{}: is not owned by uid {other} or root",
-                shell.display()
+            Some((
+                crate::exit::USAGE,
+                format!("{}: is not owned by uid {other} or root", shell.display())
             ))
         );
     }
@@ -219,14 +214,8 @@ mod tests {
         let inner = dir.path().join("bin");
         fs::create_dir(&inner).unwrap();
         fs::set_permissions(&inner, fs::Permissions::from_mode(0o755)).unwrap();
-        let mine = rustix::process::geteuid().as_raw();
-        if mine == 0 {
-            eprintln!(
-                "skipped: as root every directory made here is root's, which the walk accepts"
-            );
-            return;
-        }
-        let other = mine + 1;
+        // As in the test above, the test runs as a user other than root.
+        let other = rustix::process::geteuid().as_raw() + 1;
         assert_eq!(
             check_ancestors(&inner.join("shell"), other),
             Err(format!(

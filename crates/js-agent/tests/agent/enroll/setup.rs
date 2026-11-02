@@ -214,20 +214,35 @@ fn the_script_runs_from_the_file_that_was_checked() {
     assert!(zero.starts_with("/proc/self/fd/"), "{zero}");
 }
 
-/// Asserts that the script runs with umask 022 whatever the operator's was. (The test
-/// process has the umask of the machine, usually the same; this pins the value the script
-/// sees, not the cause.)
+/// The umask of this process, read without setting it (setting it would change it for every
+/// thread of the test binary).
+fn umask_now() -> String {
+    let status = fs::read_to_string("/proc/self/status").unwrap();
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("Umask:"))
+        .unwrap();
+    line["Umask:".len()..].trim().to_owned()
+}
+
+/// Asserts that the script runs with the umask of the process that runs the verb, as it does
+/// when it is run by hand, and that the verb leaves that umask as it was: the umask is read
+/// from `/proc/self/status` before and after, never set by the test. It catches a verb that
+/// sets the umask of the whole process to give the script another, which every other thread
+/// of the process would see too.
 #[test]
-fn the_script_runs_with_umask_022() {
+fn the_script_runs_with_the_callers_umask_and_the_callers_is_kept() {
     let rig = Rig::new("enroll_script_umask");
     rig.script_with(&format!("umask > '{}'\nexit 0", rig.beside_script("umask")));
+    let before = umask_now();
     let ran = rig.go(&["--apply"], TOKEN);
     assert_eq!(ran.status, status(0), "{ran:?}");
+    assert_eq!(umask_now(), before);
     assert_eq!(
         fs::read_to_string(rig.beside_script("umask"))
             .unwrap()
             .trim(),
-        "0022"
+        before
     );
 }
 
