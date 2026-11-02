@@ -23,7 +23,10 @@
 //!    seed failure, a bare EPERM/EACCES included, proves nothing. A run that did not cover at
 //!    least a file, a process, a keychain item, a launchd agent and shared memory, or seeded
 //!    nothing itself, fails. A launch agent that root loaded is labelled "loaded by root" and
-//!    is no sandbox claim.
+//!    is no sandbox claim. A launch agent that neither the job nor root can load
+//!    (a pool uid has no login session, so launchd may have no domain for it) is NOT
+//!    EXERCISED: it covers nothing, root's every attempt is printed as a `PROBE agent-attempt`
+//!    line, and the run cannot reach a verdict.
 //! 2. Between the runs the test does what the agent does when a run ends and the next
 //!    begins: `NativeRuntime::remove` (the helper's `kill-uid`, then `user-delete`), and
 //!    the next start makes the user again (`user-create`).
@@ -36,7 +39,15 @@
 //!    other files of the uid are printed as notes. A run that fails midway is still cleaned up:
 //!    its handle and what it printed are recorded as soon as it exists.
 //!    Each run prints its own `getuid()`; A, B and the configured uid must be equal.
-//! 4. Every look has three answers: found, absent (only by the documented not-found answer
+//! 4. The verdict has four outcomes: PASS (every kind was seeded, or denied by the sandbox, and
+//!    nothing survived); PASS-WITH-UNEXERCISED <kinds> (the minimum set was met and nothing
+//!    survived, but some kinds could not be seeded and are unproven: the message names them
+//!    with their reasons and the process exits non-zero, so it cannot pass silently); FAIL
+//!    (anything survived, or a look could not be made); COULD-NOT-REACH-A-VERDICT (the minimum
+//!    set was not met or a control failed). The run always goes to its end and prints every
+//!    table.
+//!
+//! 5. Every look has three answers: found, absent (only by the documented not-found answer
 //!    of the call or tool, see `look.rs`) or could-not-look, which fails the test with its
 //!    reason. Anything found fails the test with a table of what survived. Nothing here asserts
 //!    anything about time.
@@ -60,6 +71,7 @@
 //! report are tested there. Run anywhere but macOS, the ignored test stops at its first
 //! line.
 
+mod after_seed;
 mod child;
 mod lines;
 mod look;
@@ -379,6 +391,8 @@ struct Trial {
     exe: PathBuf,
     runs: Vec<RunHandle>,
     seeded: Vec<Line>,
+    /// Why the result would prove nothing; kept whatever ends the run.
+    unproven: Vec<String>,
 }
 
 impl Drop for Trial {
@@ -431,12 +445,14 @@ impl Trial {
         println!("{}", self.seeded_table());
         let missing = look::missing_minimum(&self.seeded);
         if !missing.is_empty() {
-            return Err(format!(
+            self.unproven.push(format!(
                 "run A neither seeded nor had the profile deny {}: the result would prove nothing",
                 missing.join(", ")
             ));
         }
-        self.control(uid)?;
+        if let Err(why) = self.control(uid) {
+            self.unproven.push(why);
+        }
 
         // Between the runs: what the agent does when a run ends.
         self.rt
@@ -518,77 +534,6 @@ impl Trial {
             println!("PROBE {} {} {}", row[0], row[1], row[2]);
         }
         report::table(["KIND", "RUN A", "WHERE OR WHY"], &rows)
-    }
-
-    /// A seed that failed with a bare permission error is the profile's only if the unified
-    /// log, read from the start of run A, holds a sandbox denial that is that seed's; the log is
-    /// not read when nothing failed that way. A log that cannot be read leaves them refused.
-    fn confirm_denials_by_log(&mut self, since: &str, job: &look::JobProcs) {
-        let candidates = self.seeded.iter().any(|line| {
-            line.verdict == Verdict::Refused && look::is_permission_failure(&line.text)
-        });
-        if !candidates {
-            return;
-        }
-        let predicate = "eventMessage CONTAINS \"Sandbox\" AND eventMessage CONTAINS \"deny(\"";
-        let args = look::log_show_args(since, predicate);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let shown = view("/usr/bin/log", &args);
-        let log = match shown {
-            Ok(text) => Some(text),
-            Err(why) => {
-                println!("PROBE note the unified log could not be read: {why}");
-                None
-            }
-        };
-        for line in &mut self.seeded {
-            if line.verdict != Verdict::Refused {
-                continue;
-            }
-            let verdict =
-                look::resolve_seed(line.kind, &line.token, &line.text, log.as_deref(), job);
-            if verdict == Verdict::Denied {
-                line.verdict = Verdict::Denied;
-                line.text = format!("confirmed in the unified log: {}", line.text);
-            }
-        }
-    }
-
-    /// A launch agent run A could not load (a user cannot load into its own domain on
-    /// every macOS) is loaded by root into the user's domain: the item is still the run's
-    /// to leave, and the domain is the one the helper's delete does not end.
-    fn bootstrap_agents_as_root(&mut self, uid: u32) {
-        for (kind, domain) in [(Kind::LaunchAgent, "user"), (Kind::GuiLaunchAgent, "gui")] {
-            let Some(line) = self.seeded.iter_mut().find(|line| {
-                line.kind == kind && matches!(line.verdict, Verdict::Refused | Verdict::Denied)
-            }) else {
-                continue;
-            };
-            let label = format!("com.komira.iso.{}", line.token);
-            let plist = self.fixture.root.join(format!("{label}-{domain}.plist"));
-            let body = format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{label}</string>\n<key>ProgramArguments</key><array><string>/bin/sleep</string><string>600</string></array>\n<key>RunAtLoad</key><true/>\n</dict></plist>\n"
-            );
-            if fs::write(&plist, body).is_err() {
-                continue;
-            }
-            let target = format!("{domain}/{uid}");
-            let loaded = tool_output(
-                "/bin/launchctl",
-                &["bootstrap", &target, &plist.display().to_string()],
-            );
-            if matches!(loaded, Ok((true, _))) {
-                *line = Line::new(
-                    Verdict::Seeded,
-                    kind,
-                    line.token.clone(),
-                    &format!(
-                        "{label} ({} into {target}: run A could not)",
-                        look::LOADED_BY_ROOT
-                    ),
-                );
-            }
-        }
     }
 
     /// Before the runs change over: every item that can be seen from root is seen, and
@@ -953,23 +898,45 @@ fn a_second_run_on_the_same_uid_finds_nothing_the_first_left() {
         exe,
         runs: Vec::new(),
         seeded: Vec::new(),
+        unproven: Vec::new(),
     };
     let result = trial.body();
+    let unproven = std::mem::take(&mut trial.unproven);
+    let seeded = trial.seeded.clone();
     drop(trial);
-    match result {
-        Err(why) => panic!("the test could not run: {why}"),
-        Ok(rows) if rows.is_empty() => {
-            println!("PROBE clean: nothing of run A survived for uid {uid}")
-        }
-        Ok(rows) => {
-            for row in &rows {
-                println!("PROBE survived {} {} {}", row[0], row[1], row[2]);
-            }
-            panic!(
-                "{} item(s) survived between two runs of uid {uid}:\n{}",
-                rows.len(),
-                report::table(["KIND", "WHERE", "DETAIL"], &rows)
+    let rows = match result {
+        Ok(rows) => rows,
+        Err(why) => panic!(
+            "the test could not run: {}",
+            look::reasons_message(Some(&why), &unproven)
+        ),
+    };
+    for row in &rows {
+        println!("PROBE survived {} {} {}", row[0], row[1], row[2]);
+    }
+    let verdict = look::final_verdict(&seeded, rows.len(), &unproven);
+    println!("PROBE verdict {verdict:?}");
+    let table = report::table(["KIND", "WHERE", "DETAIL"], &rows);
+    match &verdict {
+        look::RunVerdict::Pass => {
+            println!(
+                "PROBE clean: nothing of run A survived for uid {uid}; every kind was exercised"
             );
+            println!("{}", look::verdict_message(&verdict, &seeded));
         }
+        look::RunVerdict::PassWithUnexercised(_) => {
+            // Not a silent pass: the process exits non-zero with this message.
+            panic!("{}", look::verdict_message(&verdict, &seeded));
+        }
+        look::RunVerdict::Fail => panic!(
+            "{} item(s) survived between two runs of uid {uid}:\n{table}\n{}",
+            rows.len(),
+            look::reasons_message(None, &unproven)
+        ),
+        look::RunVerdict::NoVerdict => panic!(
+            "{}: {}",
+            look::verdict_message(&verdict, &seeded),
+            look::reasons_message(None, &unproven)
+        ),
     }
 }
