@@ -386,11 +386,9 @@ mod tests {
         let spaced = r#","probe_host":"Not A Host""#.to_owned();
         for bad in [spaced, empty, too_long] {
             let refused = probe(&bad).unwrap_err();
-            assert_eq!(
-                (refused.status, refused.code, &refused.reason),
-                (expected.status, expected.code, &expected.reason),
-                "{bad}"
-            );
+            let got = (refused.status, refused.code, &refused.reason);
+            let want = (expected.status, expected.code, &expected.reason);
+            assert_eq!(got, want, "{bad}");
         }
         // A value that is not a string is not this body at all: the parser's 400.
         let text = r#"{"class":"c","resources":{},"max_wall_seconds":60,"probe_host":7}"#;
@@ -408,7 +406,7 @@ mod tests {
     /// The body of `POST /v1/leases` as the release before `probe_host` parsed it: the
     /// same keys and the same refusal of a key it does not know.
     #[allow(dead_code, reason = "parsed only to see whether a body is taken")]
-    #[derive(Debug, Deserialize)]
+    #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct PreviousAcquireBody {
         class: String,
@@ -425,7 +423,7 @@ mod tests {
     }
 
     #[allow(dead_code, reason = "parsed only to see whether a body is taken")]
-    #[derive(Debug, Deserialize)]
+    #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct PreviousResourcesBody {
         #[serde(default)]
@@ -460,7 +458,9 @@ mod tests {
             .unwrap();
         assert_eq!(request.probe_host, None);
         assert!(parse::<PreviousAcquireBody>(unpinned.as_bytes()).is_ok());
-        let refused = parse::<PreviousAcquireBody>(pinned.as_bytes()).unwrap_err();
+        let refused = parse::<PreviousAcquireBody>(pinned.as_bytes())
+            .err()
+            .unwrap();
         assert_eq!(
             (refused.status, refused.code),
             (StatusCode::BAD_REQUEST, "bad-request")

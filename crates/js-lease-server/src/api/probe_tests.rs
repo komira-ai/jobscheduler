@@ -20,6 +20,7 @@ use crate::adapt::{BoxedProvider, SharedClock};
 use crate::agents::Agents;
 use crate::config::parse_token;
 use crate::sched::place::SchedPlacer;
+use js_testkit::dir::TestDir;
 
 /// The client token of the rig's server.
 const CLIENT: [u8; 40] = [b'c'; 40];
@@ -68,15 +69,17 @@ fn hello(host: &str) -> Hello {
 struct Rig {
     shared: Arc<Shared>,
     registry: Registry,
+    /// The rig's own directory (lease and agent state), removed when the rig is dropped.
+    /// Last, so it goes after what writes into it.
+    dir: TestDir,
 }
 
 impl Rig {
     fn new(name: &str) -> Self {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/probe_unit")
-            .join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        // A directory of this rig's own: its path carries the process id and a counter
+        // beside `name`, so two rigs of one name at once never share or remove it.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/probe_unit");
+        let dir = TestDir::under(root, name);
         let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
         let shared_clock = SharedClock::new(clock.clone());
         let resources = Resources::new(4000, 8 << 30, 0, None).unwrap();
@@ -99,14 +102,18 @@ impl Rig {
             BoxedProvider(Box::new(provider)),
             shared_clock.clone(),
             settings,
-            dir.join("leases.toml"),
+            dir.path().join("leases.toml"),
             Boot::Initialise,
         )
         .unwrap();
-        let agents = Agents::over(registry.clone(), &shared_clock, &dir);
+        let agents = Agents::over(registry.clone(), &shared_clock, dir.path());
         let token = parse_token(&CLIENT).unwrap();
         let shared = Arc::new(Shared::new(table, token, Some(Arc::new(agents))));
-        Self { shared, registry }
+        Self {
+            shared,
+            registry,
+            dir,
+        }
     }
 
     fn cordon(&self, host: &str) {
@@ -244,4 +251,25 @@ async fn only_the_client_token_may_ask_for_a_probe() {
         (status, &granted["host"]),
         (StatusCode::CREATED, &json!("a"))
     );
+}
+
+/// Asserts that two rigs of one name at once have their own directories and their own
+/// leases: a lease taken on one is not listed on the other, and dropping one leaves the
+/// other's lease file. It catches a fixture path made of the name alone, which two runs of
+/// one test would share and remove under each other.
+#[tokio::test]
+async fn rigs_of_one_name_have_their_own_directories_and_state() {
+    let first = Rig::new("same");
+    let second = Rig::new("same");
+    assert_ne!(first.dir.path(), second.dir.path());
+    let (status, _) = first.acquire(None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let client = String::from_utf8(CLIENT.to_vec()).unwrap();
+    let (_, listed) = second.call("GET", "/v1/leases", Some(&client), None).await;
+    assert_eq!(listed, json!({ "leases": [] }));
+    let file = first.dir.path().join("leases.toml");
+    drop(second);
+    assert!(file.is_file(), "{}", file.display());
+    let (_, listed) = first.call("GET", "/v1/leases", Some(&client), None).await;
+    assert_eq!(listed["leases"].as_array().map(Vec::len), Some(1));
 }
