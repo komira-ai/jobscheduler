@@ -457,6 +457,25 @@ fn the_incomplete_line_names_the_step_that_failed() {
     assert_eq!(last, "incomplete\t1\tstep_reload", "{manifest}");
 }
 
+/// A tmpfiles run that fails stops the reload step before the verify, and the manifest names it.
+#[test]
+fn a_failed_tmpfiles_run_stops_the_reload_step_before_the_verify() {
+    let mut rig = Rig::new("tmpfiles-failed");
+    rig.rule(rule("systemd-tmpfiles", "--create *", 1, "", &[]));
+    let out = rig.apply();
+    assert_eq!(out.code, 1, "{}", out.text);
+    assert!(
+        !rig.calls()
+            .iter()
+            .any(|c| c.starts_with("systemd-analyze verify")),
+        "{:?}",
+        rig.calls()
+    );
+    let manifest = rig.text("var/lib/js-crun-host-setup/manifest");
+    let last = manifest.lines().last().expect("a line");
+    assert!(last.starts_with("incomplete\t1\t"), "{manifest}");
+}
+
 /// A state directory or a manifest that is a link, an existing user with uid 0 and an effective
 /// `Options=` that only looks like it has the option are each refused or stopped.
 #[test]

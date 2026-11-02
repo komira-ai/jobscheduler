@@ -109,6 +109,17 @@ fn an_unknown_word_before_the_step_is_refused_by_name() {
 }
 
 #[test]
+fn a_flag_that_is_not_utf8_is_refused_and_never_changed_to_fit() {
+    use std::os::unix::ffi::OsStringExt;
+    let word = OsString::from_vec(b"--state-root=/a\xff".to_vec());
+    let words = [word, "verify".into(), "--params".into(), "/p".into()];
+    assert_eq!(
+        Invocation::parse(words),
+        Err(ArgsError::UnknownFlag("--state-root=/a\u{fffd}".to_owned()))
+    );
+}
+
+#[test]
 fn a_flag_with_no_value_or_an_empty_one_is_refused() {
     for (flag, _, _) in EACH {
         for word in [flag.to_owned(), format!("{flag}=")] {

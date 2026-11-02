@@ -139,6 +139,10 @@ impl Invocation {
             if !text.starts_with("--") {
                 break text.into_owned();
             }
+            // A value is taken as the bytes given or not at all, never changed to fit text.
+            if word.to_str().is_none() {
+                return Err(ArgsError::UnknownFlag(text.into_owned()));
+            }
             flags.take(&text)?;
         };
         let step: Step = first.parse()?;

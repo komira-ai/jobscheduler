@@ -15,8 +15,8 @@
 #   --token-file    the join token, used while the state root holds no host credential
 #
 # Top-level keys come first: in TOML a key after a table header belongs to that table.
-# crates/js-agent/tests/agent/update_hook/shipped_declaration.rs loads this file with the updater's
-# own validator and with the hook's, and pins the rules said here.
+# crates/xtask/tests/js_agent_declaration.rs loads this file with the updater's own validator and
+# with the hook's, and pins the rules said here.
 name   = "js-agent"
 binary = "js-agent"
 hook_args = ["update-hook", "--release-link=/opt/js-agent/link/current", "--server=SET-THE-SERVER", "--state-root=/var/lib/js-agent/state", "--token-file=/etc/js-agent/token"]

@@ -72,7 +72,8 @@ impl Flags {
     /// value that is not empty.
     ///
     /// # Errors
-    /// [`ArgsError::UnknownFlag`] for another name or a word that is not text,
+    /// [`ArgsError::UnknownFlag`] for another name (the command line refuses a flag that is not
+    /// UTF-8 the same way before it gets here),
     /// [`ArgsError::FlagValue`] for a flag with no `=value` or an empty one,
     /// [`ArgsError::DuplicateFlag`] for a flag given twice and [`ArgsError::RelativeFlag`] for
     /// a path that is not absolute.
