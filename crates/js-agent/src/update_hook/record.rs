@@ -2,11 +2,14 @@
 //! finds it, and the lock that keeps two steps apart (host-updates design, 4.2, "The hook
 //! record" and "The record directory is not the service's").
 //!
-//! The record is `state_dir/record.json`; the lock is `state_dir/lock`, an exclusive `flock`
-//! taken without waiting and held for the whole step, so a second copy refuses (exit 1,
-//! reason `locked`) having changed nothing. The directory must be `root:root`, mode 0700 and
-//! not a symlink, and every directory above it must be owned by root and not writable by its
-//! group or by others, or the step refuses (`state_invalid`) before it opens anything in it.
+//! The record is `state_dir/record.json`. The lock is an exclusive `flock` on `state_dir`
+//! itself (the hook contract's lock) and one on `state_dir/lock` (kept so that a hook built
+//! before the directory lock still excludes this one). Both are taken without waiting and held
+//! for the whole step, the directory's first, so a second copy, or anything that holds the
+//! directory, makes the step refuse (exit 1, reason `locked`) having changed nothing. The
+//! directory must be `root:root`, mode 0700 and not a symlink, and every directory above it must
+//! be owned by root and not writable by its group or by others, or the step refuses
+//! (`state_invalid`) before it opens anything in it.
 //!
 //! The directory is opened once, walking down from `/` one component at a time without
 //! following a link, and checked through the descriptor it was opened as. The lock, the
@@ -295,10 +298,12 @@ pub enum StateError {
         /// What is wrong.
         problem: DirProblem,
     },
-    /// The lock could not be taken: another step holds it.
+    /// A lock could not be taken: another step, or anything else that locks the directory,
+    /// holds it.
     #[error("cannot lock {}: {source}", path.display())]
     Lock {
-        /// The lock file.
+        /// The state directory (the hook contract's lock) or the lock file in it, whichever
+        /// was held.
         path: PathBuf,
         /// The system's answer; `EWOULDBLOCK` when another holder has it.
         source: io::Error,
@@ -474,8 +479,9 @@ pub struct Held {
 }
 
 impl Held {
-    /// Opens `dir` once and takes the lock, without waiting. Every directory from `/` down
-    /// is looked at through `stat` (see [`fd_stat`]) as it is opened, with its path.
+    /// Opens `dir` once and takes the two locks, the directory's and then the lock file's,
+    /// without waiting. Every directory from `/` down is looked at through `stat` (see
+    /// [`fd_stat`]) as it is opened, with its path.
     ///
     /// # Errors
     /// [`StateError::Dir`] if the directory is not `root:root` 0700 and not a link or the
@@ -487,15 +493,32 @@ impl Held {
         stat: &dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
     ) -> Result<Held, StateError> {
         let fd = open_checked(dir, stat)?;
-        let path = dir.join(LOCK_FILE);
-        let lock = open_regular(fd.as_fd(), LOCK_FILE, OFlags::WRONLY | OFlags::CREATE)
-            .map_err(at(&path))?;
-        flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|errno| {
-            StateError::Lock {
-                path,
-                source: errno.into(),
-            }
+        // The directory first: a holder of it (the updater, another step) is refused before
+        // anything is made in it.
+        flock(&fd, FlockOperation::NonBlockingLockExclusive).map_err(|errno| StateError::Lock {
+            path: dir.to_owned(),
+            source: errno.into(),
         })?;
+        let path = dir.join(LOCK_FILE);
+        let locked = open_regular(fd.as_fd(), LOCK_FILE, OFlags::WRONLY | OFlags::CREATE)
+            .map_err(at(&path))
+            .and_then(|lock| {
+                flock(&lock, FlockOperation::NonBlockingLockExclusive)
+                    .map(|()| lock)
+                    .map_err(|errno| StateError::Lock {
+                        path,
+                        source: errno.into(),
+                    })
+            });
+        let lock = match locked {
+            Ok(lock) => lock,
+            Err(error) => {
+                // Released explicitly, as `Held`'s `drop` releases it: a copy of the descriptor
+                // in a child forked meanwhile would keep the lock after the close.
+                let _ = flock(&fd, FlockOperation::Unlock);
+                return Err(error);
+            }
+        };
         Ok(Held {
             dir: dir.to_owned(),
             fd,
@@ -642,5 +665,6 @@ pub(crate) fn peek(
 impl Drop for Held {
     fn drop(&mut self) {
         let _ = flock(&self.lock, FlockOperation::Unlock);
+        let _ = flock(&self.fd, FlockOperation::Unlock);
     }
 }

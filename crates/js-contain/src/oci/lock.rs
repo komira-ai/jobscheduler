@@ -80,7 +80,7 @@ pub fn open_lock_file(path: &Path) -> std::io::Result<File> {
 }
 
 /// Checks that `file` is a regular file owned by `uid`.
-fn plain_file_of(file: &File, uid: u32) -> std::io::Result<()> {
+pub(super) fn plain_file_of(file: &File, uid: u32) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt as _;
     let meta = file.metadata()?;
     let plain = meta.is_file() && meta.uid() == uid;

@@ -737,3 +737,57 @@ fn pure_crates_reach_no_runtime_or_network_crate() {
     );
     assert!(check_closure(&copy.dir, &metadata).is_err());
 }
+
+/// Asserts that only kbf's update-hook contract crate may come from kbf's repository, and only
+/// as a dev-dependency: the crate as a normal dependency, another crate from kbf's repository at
+/// the root (by a name without `kbf`), and a member's own git dependency on kbf's repository are
+/// each refused. Catches this repository taking anything else from kbf under another name.
+#[test]
+fn only_the_update_hook_contract_crate_may_come_from_kbf_and_only_for_tests() {
+    let from_kbf = |manifest: &str, package: &str| {
+        format!(
+            "{manifest} takes {package} from kbf's repository; only update-hook, as a dev-dependency, may come from there"
+        )
+    };
+    let real = Copy::new("kbf-contract-real");
+    assert!(
+        !real
+            .found()
+            .iter()
+            .any(|line| line.contains("kbf's repository")),
+        "{:?}",
+        real.found()
+    );
+
+    let copy = Copy::new("kbf-contract-normal");
+    copy.edit(
+        "crates/js-agent/Cargo.toml",
+        "[lints]",
+        "[dependencies.update-hook]\nworkspace = true\n\n[lints]",
+    );
+    assert!(
+        copy.found()
+            .contains(&from_kbf("crates/js-agent/Cargo.toml", "update-hook")),
+        "{:?}",
+        copy.found()
+    );
+
+    let copy = Copy::new("kbf-contract-other-root");
+    copy.edit(
+        "Cargo.toml",
+        "[workspace.dependencies]",
+        "[workspace.dependencies]\nstep-contract = { git = \"https://github.com/komira-ai/kbf\", rev = \"abc\" }",
+    );
+    assert_eq!(copy.found(), [from_kbf("Cargo.toml", "step-contract")]);
+
+    let copy = Copy::new("kbf-contract-other-member");
+    copy.edit(
+        "crates/js-client/Cargo.toml",
+        "[lints]",
+        "[dev-dependencies.wire-fixtures]\ngit = \"https://github.com/komira-ai/kbf.git\"\n\n[lints]",
+    );
+    assert_eq!(
+        copy.found(),
+        [from_kbf("crates/js-client/Cargo.toml", "wire-fixtures")]
+    );
+}

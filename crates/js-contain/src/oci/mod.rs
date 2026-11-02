@@ -58,6 +58,7 @@ mod lease;
 pub mod lock;
 pub(crate) mod logs;
 pub mod mounts;
+mod pin;
 pub(crate) mod spec;
 pub mod words;
 
@@ -65,6 +66,10 @@ pub mod words;
 mod gc_tests;
 #[cfg(test)]
 mod parity_tests;
+#[cfg(test)]
+mod pin_fault_tests;
+#[cfg(test)]
+mod pin_tests;
 #[cfg(test)]
 mod tests;
 

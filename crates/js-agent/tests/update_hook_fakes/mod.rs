@@ -4,7 +4,9 @@
 //!
 //! - `world/`, the observable state of the service the hook acts on, which the harness
 //!   compares between runs: `units/<unit>` (the unit manager), `link/<name>` (release links),
-//!   `lease.json` (the lease server's view of the host) and `state/` (the agent's state root).
+//!   `lease.json` (the lease server's view of the host, but its cordon), `cordon.json` (the
+//!   host's cordon, there only while the server holds one) and `state/` (the agent's state
+//!   root).
 //! - `control/`, what the harness must not compare: the clock (`clock`, milliseconds) and the
 //!   count of pauses (`ticks`), and the skew of the lease server's clock (`server-skew-ms`).
 //!
@@ -24,6 +26,9 @@ use js_agent::update_hook::{
 };
 use js_agent_wire::Taint;
 use serde::{Deserialize, Serialize};
+
+pub mod harness;
+pub mod watchdog;
 
 /// Where the fake clock starts, in milliseconds.
 pub const START_MS: u64 = 1_000_000;
@@ -77,12 +82,40 @@ impl World {
         self.gate.point();
     }
 
+    /// A kill point of the world's, for a change made through a world without one (see
+    /// `harness::Faulted`).
+    pub fn point(&self) {
+        self.gate();
+    }
+
     fn unit_file(&self, unit: &str) -> PathBuf {
         self.world.join("units").join(unit)
     }
 
     fn lease_file(&self) -> PathBuf {
         self.world.join("lease.json")
+    }
+
+    fn cordon_file(&self) -> PathBuf {
+        self.world.join("cordon.json")
+    }
+
+    /// Writes the server's view of `host`: the cordon in a file of its own, there only while
+    /// there is one, and the rest in the lease file. One file a cordon has its own, so that a
+    /// cordon placed or lifted is a file that appears or goes.
+    fn write_host(&self, host: &HostReading) -> io::Result<()> {
+        let bare = HostReading {
+            cordon: None,
+            ..host.clone()
+        };
+        fs::write(self.lease_file(), serde_json::to_vec(&bare)?)?;
+        match &host.cordon {
+            Some(cordon) => fs::write(self.cordon_file(), serde_json::to_vec(cordon)?),
+            None => match fs::remove_file(self.cordon_file()) {
+                Err(why) if why.kind() != io::ErrorKind::NotFound => Err(why),
+                _ => Ok(()),
+            },
+        }
     }
 
     fn put_unit(&self, unit: &str, active: &str, sub: &str) -> Result<(), PortError> {
@@ -130,7 +163,7 @@ impl World {
             agent_version: Some(agent_version.to_owned()),
             runtime: Some(self.exec_mode()),
         };
-        fs::write(self.lease_file(), serde_json::to_vec(&host).unwrap()).unwrap();
+        self.write_host(&host).unwrap();
         fs::write(self.control.join("host-id"), id).unwrap();
     }
 
@@ -166,6 +199,81 @@ impl World {
         fs::write(self.control.join("releases"), text).unwrap();
     }
 
+    /// Tells the fakes which version each release of `params` holds, as [`World::seed_update`]
+    /// does, replacing what they knew: the binary the harness runs says so on every run.
+    ///
+    /// # Panics
+    /// The file cannot be written.
+    pub fn set_releases(&self, params: &Params) {
+        let mut text = format!(
+            "{}\t{}\n",
+            params.staged_release.display(),
+            params.target_version
+        );
+        if let (Some(release), Some(version)) = (&params.previous_release, &params.previous_version)
+        {
+            text.push_str(&format!("{}\t{version}\n", release.display()));
+        }
+        fs::write(self.control.join("releases"), text).unwrap();
+    }
+
+    /// The agent of `unit` is started and dies at once: the unit is `failed`, and no hello
+    /// comes. A crashed unit is started again by the next start.
+    ///
+    /// # Errors
+    /// The unit's file cannot be written.
+    pub fn crash(&self, unit: &str) -> Result<(), PortError> {
+        self.put_unit(unit, "failed", "failed")
+    }
+
+    /// Starts `unit` as [`Units::start`] does, but the agent that starts never says hello.
+    ///
+    /// # Errors
+    /// The unit's file cannot be read or written.
+    pub fn start_silent(&self, unit: &str) -> Result<(), PortError> {
+        if self.show(unit)?.active == "active" {
+            return Ok(());
+        }
+        self.put_unit(unit, "active", "running")
+    }
+
+    /// Starts `unit` as [`Units::start`] does, but the hello of the agent it starts is
+    /// pending: it reaches the lease server only at [`World::deliver_hello`], as a real agent's
+    /// hello arrives on its own after its unit runs, whether or not the hook that started it is
+    /// still there. The pending hello is kept in the fakes' own files.
+    ///
+    /// # Errors
+    /// The unit's file cannot be read or written, or the link names a release the params never
+    /// did (nothing is changed then).
+    pub fn start_pending(&self, unit: &str) -> Result<(), PortError> {
+        if self.show(unit)?.active == "active" {
+            return Ok(());
+        }
+        let version = self.linked_version()?;
+        self.put_unit(unit, "active", "running")?;
+        if let Some(version) = version {
+            fs::write(self.control.join("pending-hello"), version).map_err(|why| io_err(&why))?;
+        }
+        Ok(())
+    }
+
+    /// The pending hello, if there is one, reaches the lease server; `true` if one did.
+    ///
+    /// # Errors
+    /// The server's files, or the pending hello, cannot be read or written.
+    pub fn deliver_hello(&self) -> Result<bool, PortError> {
+        let file = self.control.join("pending-hello");
+        let version = match fs::read_to_string(&file) {
+            Ok(version) => version,
+            Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(why) => return Err(io_err(&why)),
+        };
+        self.hello(&version)
+            .map_err(|why| PortError::Io(why.to_string()))?;
+        fs::remove_file(&file).map_err(|why| io_err(&why))?;
+        Ok(true)
+    }
+
     /// The server restarts: it forgets the host's session, and the next hello makes it live
     /// again. Until then the host is `awaiting` (epoch 0, no session) and a cordon, an uncordon
     /// and a reading work on it. The cordon and the taint were saved with the host's binding and
@@ -182,6 +290,7 @@ impl World {
         fs::write(self.saved_file(), serde_json::to_vec(&saved).unwrap()).unwrap();
         // An awaiting host has no file of its own.
         let _ = fs::remove_file(self.lease_file());
+        let _ = fs::remove_file(self.cordon_file());
     }
 
     fn saved_file(&self) -> PathBuf {
@@ -204,7 +313,7 @@ impl World {
     pub fn alter_host(&self, change: impl FnOnce(&mut HostReading)) {
         let mut host = self.stored().unwrap();
         change(&mut host);
-        fs::write(self.lease_file(), serde_json::to_vec(&host).unwrap()).unwrap();
+        self.write_host(&host).unwrap();
     }
 
     /// The host as stored, expiry not applied. After a restart that kept the host's binding
@@ -212,11 +321,17 @@ impl World {
     /// has it: epoch 0, no session, the saved cordon and taint, until its next hello. The
     /// server knows no host before a hello, or after the state file was lost.
     fn stored(&self) -> Result<HostReading, LeaseError> {
-        match fs::read(self.lease_file()) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|why| unreachable(&why)),
-            Err(why) if why.kind() == io::ErrorKind::NotFound => self.awaiting(),
-            Err(why) => Err(unreachable(&why)),
-        }
+        let mut host: HostReading = match fs::read(self.lease_file()) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|why| unreachable(&why))?,
+            Err(why) if why.kind() == io::ErrorKind::NotFound => return self.awaiting(),
+            Err(why) => return Err(unreachable(&why)),
+        };
+        host.cordon = match fs::read(self.cordon_file()) {
+            Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|why| unreachable(&why))?),
+            Err(why) if why.kind() == io::ErrorKind::NotFound => None,
+            Err(why) => return Err(unreachable(&why)),
+        };
+        Ok(host)
     }
 
     fn awaiting(&self) -> Result<HostReading, LeaseError> {
@@ -265,13 +380,14 @@ impl World {
 
     fn save(&self, host: &HostReading) -> Result<(), LeaseError> {
         self.gate();
-        serde_json::to_vec(host)
-            .map_err(|why| unreachable(&why))
-            .and_then(|bytes| fs::write(self.lease_file(), bytes).map_err(|why| unreachable(&why)))
+        self.write_host(host).map_err(|why| unreachable(&why))
     }
 
     /// The agent says hello: the server makes the host if it knows none (epoch 1), else one more
-    /// epoch; a new session, the version and the runtime either way.
+    /// epoch; a new session, the version and the runtime either way. The session is stamped
+    /// with the server's clock, or one millisecond later when that is the stamp of the session it
+    /// replaces (the fake clock moves only when a step pauses): a new session's stamp always
+    /// differs from the one it replaces.
     ///
     /// # Errors
     /// The server's file cannot be read or written.
@@ -295,7 +411,13 @@ impl World {
         };
         host.epoch += 1;
         host.state = "live".to_owned();
-        host.session_started_ms = Some(self.server_now_ms());
+        let now = self.server_now_ms();
+        let stamp = if host.session_started_ms == Some(now) {
+            now.saturating_add(1)
+        } else {
+            now
+        };
+        host.session_started_ms = Some(stamp);
         host.agent_version = Some(agent_version.to_owned());
         host.runtime = Some(self.exec_mode());
         self.save(&host)
@@ -341,12 +463,13 @@ impl World {
         let Some(target) = read_link(link).map_err(|why| io_err(&why))? else {
             return Ok(None);
         };
+        let resolved = resolve(link, &target);
         let table = fs::read_to_string(self.control.join("releases")).unwrap_or_default();
         table
             .lines()
             .filter_map(|line| line.split_once('\t'))
             .rev()
-            .find(|(path, _)| Path::new(path) == target)
+            .find(|(path, _)| Path::new(path) == target || Path::new(path) == resolved)
             .map(|(_, version)| Some(version.to_owned()))
             .ok_or_else(|| {
                 PortError::Io(format!(
@@ -360,6 +483,71 @@ impl World {
         link.file_name()
             .map(|name| self.world.join("link").join(name))
             .ok_or_else(|| PortError::Io(format!("{}: no file name", link.display())))
+    }
+}
+
+/// Where the link `file` points: its target, or a relative one read from the link's directory,
+/// with `.` and `..` taken away by name (the fake's targets are directories it knows, never
+/// links of their own).
+#[must_use]
+pub fn resolve(file: &Path, target: &Path) -> PathBuf {
+    if target.is_absolute() {
+        return target.to_owned();
+    }
+    let mut path = file.parent().map(Path::to_path_buf).unwrap_or_default();
+    for part in target.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                path.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => path.push(other),
+        }
+    }
+    path
+}
+
+/// `target` as a path relative to the directory of the link `file`, so that two worlds in two
+/// directories hold the same link to the same place in each.
+#[must_use]
+pub fn relative_to_link(file: &Path, target: &Path) -> PathBuf {
+    let from: Vec<_> = file.parent().unwrap_or(file).components().collect();
+    let to: Vec<_> = target.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut path = PathBuf::new();
+    for _ in common..from.len() {
+        path.push("..");
+    }
+    for part in &to[common..] {
+        path.push(part);
+    }
+    path
+}
+
+impl World {
+    /// Where the link of `link` points, a relative target read from the link's directory.
+    ///
+    /// # Errors
+    /// The link exists and is not a readable symbolic link.
+    pub fn resolved_target(&self, link: &Path) -> Result<Option<PathBuf>, PortError> {
+        let file = self.link_file(link)?;
+        let target = read_link(&file).map_err(|why| io_err(&why))?;
+        Ok(target.map(|target| resolve(&file, &target)))
+    }
+
+    /// Points the link of `link` at `target` by a path relative to the world, as
+    /// [`Link::relink`] does by an absolute one: the conformance harness compares the worlds of
+    /// two sandboxes, and an absolute target would name the sandbox.
+    ///
+    /// # Errors
+    /// The link could not be made.
+    pub fn relink_relative(&self, link: &Path, target: &Path) -> Result<(), PortError> {
+        let file = self.link_file(link)?;
+        if self.resolved_target(link)?.as_deref() == Some(target) {
+            return Ok(());
+        }
+        self.gate();
+        swap_link(&file, &relative_to_link(&file, target)).map_err(|why| io_err(&why))
     }
 }
 

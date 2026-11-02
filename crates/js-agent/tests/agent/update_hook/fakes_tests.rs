@@ -517,3 +517,136 @@ fn starting_a_unit_from_a_release_the_params_never_named_fails_and_changes_nothi
     assert!(format!("{why}").contains("mystery"), "{why}");
     assert_eq!(w.is_active(UNIT), Ok(false));
 }
+
+#[test]
+fn a_cordon_is_a_file_of_its_own_that_appears_when_placed_and_goes_when_lifted() {
+    let rig = Rig::new("hook-fake-cordon-file");
+    rig.world.seed_host(HOST, "1.0");
+    let cordon = rig.tmp.path().join("world/cordon.json");
+    assert!(!cordon.exists());
+    let lease = fs::read(rig.tmp.path().join("world/lease.json")).unwrap();
+    rig.world.cordon(300).unwrap();
+    assert!(cordon.is_file());
+    // The rest of the host's view is as it was; a second world reads the cordon back.
+    assert_eq!(
+        fs::read(rig.tmp.path().join("world/lease.json")).unwrap(),
+        lease
+    );
+    assert!(rig.again().host().unwrap().cordon.is_some());
+    rig.world.uncordon().unwrap();
+    assert!(!cordon.exists());
+    assert_eq!(rig.again().host().unwrap().cordon, None);
+}
+
+#[test]
+fn a_hello_at_the_instant_of_the_session_it_replaces_is_still_a_new_session() {
+    let rig = Rig::new("hook-fake-hello-tie");
+    rig.world.seed_host(HOST, "1.0");
+    let first = rig.world.host().unwrap().session_started_ms.unwrap();
+    rig.world.hello("1.1").unwrap();
+    let second = rig.world.host().unwrap().session_started_ms.unwrap();
+    assert_eq!(second, first + 1);
+    // Once the clock has moved on, the session is stamped with it.
+    rig.world.pause(Duration::from_secs(5));
+    rig.world.hello("1.2").unwrap();
+    assert_eq!(
+        rig.world.host().unwrap().session_started_ms,
+        Some(START_MS + 5_000)
+    );
+}
+
+#[test]
+fn a_relative_link_resolves_from_its_directory_and_a_relink_to_where_it_points_is_no_change() {
+    let rig = Rig::new("hook-fake-relative-link");
+    let link = Path::new("/opt/js-agent/current");
+    let release = rig.tmp.path().join("releases/1.1");
+    rig.world.relink_relative(link, &release).unwrap();
+    assert_eq!(rig.points(), 1);
+    let file = rig.tmp.path().join("world/link/current");
+    assert_eq!(
+        fs::read_link(&file).unwrap(),
+        Path::new("../../releases/1.1")
+    );
+    assert_eq!(rig.again().resolved_target(link), Ok(Some(release.clone())));
+    rig.world.relink_relative(link, &release).unwrap();
+    assert_eq!(rig.points(), 1, "a link already there is not a change");
+    assert_eq!(
+        super::fakes::resolve(&file, Path::new("./a/../b")),
+        rig.tmp.path().join("world/link/b")
+    );
+    assert_eq!(
+        super::fakes::resolve(&file, Path::new("/abs")),
+        Path::new("/abs")
+    );
+}
+
+#[test]
+fn a_crashed_start_leaves_the_unit_failed_and_a_silent_start_says_no_hello() {
+    let rig = Rig::new("hook-fake-crash");
+    rig.world.seed_host(HOST, "1.0");
+    let epoch = rig.world.host().unwrap().epoch;
+    rig.world.crash(UNIT).unwrap();
+    let state = rig.again().show(UNIT).unwrap();
+    assert_eq!(
+        (state.active.as_str(), state.sub.as_str()),
+        ("failed", "failed")
+    );
+    rig.world.start_silent(UNIT).unwrap();
+    assert_eq!(rig.world.is_active(UNIT), Ok(true));
+    assert_eq!(rig.world.host().unwrap().epoch, epoch, "no hello");
+    let points = rig.points();
+    rig.world.start_silent(UNIT).unwrap();
+    assert_eq!(
+        rig.points(),
+        points,
+        "a unit that runs is not started again"
+    );
+}
+
+#[test]
+fn the_world_view_of_the_record_says_ours_only_for_a_confirmed_cordon() {
+    use super::fakes::harness::{OWNED_CORDON, mirror_ownership};
+    use js_agent::update_hook::{Cordon, Record, UpdateInfo};
+    let rig = Rig::new("hook-fake-mirror");
+    let (world, state) = (rig.tmp.path().join("world"), rig.tmp.path().join("state"));
+    fs::create_dir_all(&state).unwrap();
+    let view = world.join(OWNED_CORDON);
+    mirror_ownership(&world, &state);
+    assert!(!view.exists(), "no record");
+    let mut record = Record::new(UpdateInfo {
+        target: "1.1".to_owned(),
+        previous: Some("1.0".to_owned()),
+        staged: "/r/1.1".into(),
+        previous_target: Some("/r/1.0".into()),
+        unit: UNIT.to_owned(),
+        artifact_digest: format!("sha256:{}", "a".repeat(64)),
+    });
+    for (cordon, ours) in [
+        (Cordon::default(), false),
+        (
+            Cordon {
+                placed: true,
+                provisional: true,
+                ..Cordon::default()
+            },
+            false,
+        ),
+        (
+            Cordon {
+                placed: true,
+                ..Cordon::default()
+            },
+            true,
+        ),
+        (Cordon::default(), false),
+    ] {
+        record.cordon = cordon;
+        fs::write(
+            state.join("record.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        mirror_ownership(&world, &state);
+        assert_eq!(view.exists(), ours, "{cordon:?}");
+    }
+}

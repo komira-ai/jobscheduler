@@ -2,7 +2,8 @@
 //! `crun`, as the agent runs it on a node: a root process that starts every container as a
 //! dedicated non-root job user.
 //!
-//! Every test is `#[ignore]`: they need `crun`, `newuidmap`/`newgidmap`, a job user with a
+//! Every test but the scripted ones of `escape` (the rules of the quota tests' escape walk,
+//! over a tree with no file system) is `#[ignore]`: they need `crun`, `newuidmap`/`newgidmap`, a job user with a
 //! subordinate id range (`JS_JOB_USER`), cgroup v2 with a delegated unit, root, and the
 //! network (the image is busybox, pinned by digest in `JS_TEST_IMAGE`). A missing
 //! prerequisite fails a test, never skips it. They are run by `cargo xtask crun-tests
@@ -13,6 +14,8 @@
 //! must have ended is waited for by the runtime.
 #![cfg(target_os = "linux")]
 
+mod escape;
+mod escape_xfs;
 mod quota;
 #[path = "../runtime_suite/mod.rs"]
 mod runtime_suite;

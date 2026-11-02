@@ -37,7 +37,14 @@ the manifests, so the manifest rules need no network (the transitive walk below 
 - a pure crate that lacks the `deny` below in its library root or any binary root, that
   relaxes the lints anywhere in its `src/` tree (see Purity), or that reaches a forbidden
   external crate through its resolved normal dependencies (see Purity);
-- a second `js-types` (below).
+- a second `js-types` (below);
+- a dependency taken from kbf's repository (a git source naming it, at the root or in a member)
+  other than `update-hook` as a dev-dependency (`KBF_CONTRACT` in `crates/xtask/src/layering.rs`).
+  `update-hook` is kbf's hook-contract crate: it depends on no other crate of kbf, and js-agent's
+  tests run its conformance harness against the hook (`crates/js-agent/tests/agent/update_hook/
+  conformance.rs`). It is pinned by revision in the root `[workspace.dependencies]`, and
+  `deny.toml` allows kbf's repository as a git source for it alone. It is the one exception to
+  this repository depending on nothing of kbf, and it reaches no shipped binary.
 
 `deny.toml` also bans kbf's crates by name in the resolved graph (cargo-deny matches exact
 names, so the list is explicit and is refreshed when kbf's crates change; the layering rule

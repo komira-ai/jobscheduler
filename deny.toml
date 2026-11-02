@@ -120,3 +120,7 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# kbf's update-hook contract crate, and nothing else of kbf: a dev-dependency of js-agent,
+# pinned by revision in Cargo.toml. The layering test refuses any other dependency from kbf's
+# repository, by any name, and this one as anything but a dev-dependency (docs/layering.md).
+allow-git = ["https://github.com/komira-ai/kbf"]
