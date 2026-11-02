@@ -63,8 +63,9 @@ impl Drop for Server {
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         // Wakes the accept: the thread sees the flag and ends.
         let _ = std::net::TcpStream::connect(self.addr);
+        // A thread that panicked has already failed its test; a panic here would hide that.
         if let Some(thread) = self.thread.take() {
-            thread.join().unwrap();
+            let _ = thread.join();
         }
     }
 }

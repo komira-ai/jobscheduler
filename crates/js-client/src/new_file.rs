@@ -145,6 +145,14 @@ impl Dir {
         rustix::fs::linkat(&self.fd, from, &self.fd, to, AtFlags::empty()).map_err(io::Error::from)
     }
 
+    /// Makes the directory's entries durable, through a descriptor that can be synced (the
+    /// `O_PATH` one cannot); best effort: a directory that cannot be read cannot be synced.
+    fn sync(&self) {
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        let _ = rustix::fs::openat(&self.fd, ".", flags, Mode::empty())
+            .and_then(|readable| rustix::fs::fsync(&readable));
+    }
+
     /// Removes the entry `name`, which this call made; best effort.
     fn remove(&self, name: &str) {
         let _ = rustix::fs::unlinkat(&self.fd, name, AtFlags::empty());
@@ -167,8 +175,8 @@ impl Dir {
 /// staged name this call made is removed whether or not the link was made.
 ///
 /// Once the link is made the call has succeeded: the sync of the directory that follows is
-/// best effort (it fails on the `O_PATH` descriptor the directory is held by, and on some
-/// filesystems; the file is in place all the same).
+/// best effort (a directory that cannot be read cannot be synced; the file is in place all
+/// the same).
 ///
 /// # Errors
 ///
@@ -195,9 +203,7 @@ fn create_new_with(
     let made = fill(&dir.join(&staged), file, bytes, mode)
         .and_then(|()| dir.link(&staged, name).map_err(at(NewFileStep::Link, path)));
     dir.remove(&staged);
-    made.inspect(|()| {
-        let _ = rustix::fs::fsync(&dir.fd);
-    })
+    made.inspect(|()| dir.sync())
 }
 
 /// The directory `path` is in: its parent, or `.` for a bare name.
