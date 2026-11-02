@@ -5,15 +5,18 @@
 // name, an internal repository name, a role, a commit SHA, or a date from before the project went public. The scan
 // reads every built file. It spells no internal host and no role: those are kept as SHA-256 digests, and the tests of
 // those rules use made-up names through injected sets. The date rule compares dates against a cutoff the scan takes
-// as a parameter, and its tests use only dates on or after the real cutoff.
+// as a parameter, and its tests use only dates on or after the real cutoff. It reads a date in each spelling a page or a
+// test is likely to use (2026-10-01, 2026/10/01, October 1, 2026, 1 October 2026, Oct 2026), and it is also run over every
+// file of the site's own tree, tests and fixtures included, so no early date is committed in any of them. A bare year
+// is not read as a date: "2000 m" is a quantity.
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { listFiles } from '../tools/check-dist';
-import { buildReal, copyTree, damage } from './support';
+import { buildReal, copyTree, damage, SITE } from './support';
 
 /** The hosts a page may name in a URL: the project's own, GitHub, the SVG namespace. */
 const PUBLIC_HOSTS = new Set(['jobscheduler.dev', 'kbf.dev', 'github.com', 'www.w3.org']);
@@ -90,12 +93,58 @@ function scanText(text: string, code = false, deny: ReadonlySet<string> = INTERN
   for (const m of code ? [] : text.matchAll(/\b[\w.-]+\.(?:internal|local|lan|corp|amazonaws\.com|cloudfront\.net)\b/g)) found.push(`a private or cloud host name, ${m[0]}`);
   for (const m of text.matchAll(/arn:aws[\w-]*:\S+/g)) found.push(`a cloud resource name, ${m[0]}`);
   for (const m of text.matchAll(new RegExp('komira-' + 'internal', 'g'))) found.push(`an internal repository name, ${m[0]}`);
-  // ISO dates compare as strings: a date earlier than the cutoff is a finding.
-  for (const m of text.matchAll(/\b\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b/g)) if (m[0] < cutoff) found.push(`a date before the project was public, ${m[0]}`);
+  for (const d of earlyDates(text, cutoff)) found.push(`a date before the project was public, ${d}`);
   for (const token of text.split(/[^A-Za-z0-9]+/)) if (token !== '' && roles.has(sha256(token.toLowerCase()))) found.push(`an internal role (sha256 ${sha256(token.toLowerCase()).slice(0, 12)})`);
   for (const m of text.matchAll(/\b[0-9a-f]{40}\b/g)) found.push(`a commit SHA, ${m[0]}`);
   return found;
 }
+
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+const MONTH = '(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)';
+const two = (n: number): string => String(n).padStart(2, '0');
+/** The month number (1 to 12) of a month's name or its abbreviation. */
+const monthOf = (name: string): number => MONTHS.findIndex((m) => m.startsWith(name.toLowerCase().slice(0, 3))) + 1;
+/** The last day of a month, as YYYY-MM-DD: a month with no day named is early only if all of it is. */
+const monthEnd = (y: number, m: number): string => `${y}-${two(m)}-${two(new Date(Date.UTC(y, m, 0)).getUTCDate())}`;
+
+/** The dates in `text` earlier than `cutoff` (YYYY-MM-DD), as written. Read: YYYY-MM-DD, YYYY/MM/DD, "Month D, YYYY", "D Month YYYY" and "Month YYYY" (names or their three-letter forms). */
+export function earlyDates(text: string, cutoff: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/\b(\d{4})[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b/g)) if (`${m[1]}-${m[2]}-${m[3]}` < cutoff) out.push(m[0]);
+  const named = new RegExp(`\\b(?:${MONTH}\\.? (\\d{1,2}),? (\\d{4})|(\\d{1,2}) ${MONTH}\\.?,? (\\d{4})|${MONTH}\\.?,? (\\d{4}))\\b`, 'g');
+  for (const m of text.matchAll(named)) {
+    const [month, day, year] = m[1] ? [m[1], m[2], m[3]] : m[5] ? [m[5], m[4], m[6]] : [m[7], undefined, m[8]];
+    const y = Number(year);
+    const at = day === undefined ? monthEnd(y, monthOf(month!)) : `${y}-${two(monthOf(month!))}-${two(Number(day))}`;
+    if (at < cutoff) out.push(m[0]);
+  }
+  return out;
+}
+
+/** Every file of the site's own tree, as paths from the site root: what is committed, without what npm and the build leave. */
+function siteFiles(dir = SITE, prefix = ''): string[] {
+  return readdirSync(join(dir), { withFileTypes: true }).flatMap((e) => {
+    if (['node_modules', 'build', 'dist'].includes(e.name)) return [];
+    return e.isDirectory() ? siteFiles(join(dir, e.name), `${prefix}${e.name}/`) : [`${prefix}${e.name}`];
+  });
+}
+
+test('no file of the site, tests and fixtures included, carries a date before the project went public, in any spelling', () => {
+  const files = siteFiles();
+  assert.ok(files.includes('test/hygiene.test.ts') && files.includes('content/index.html'), 'the walk reaches the tests and the pages');
+  assert.deepEqual(files.flatMap((f) => earlyDates(readFileSync(join(SITE, f), 'utf8'), PUBLIC_FROM).map((d) => `${f}: ${d}`)), []);
+});
+
+test('each spelling of a date is read and compared with the cutoff, and a month counts whole (the check can fail)', () => {
+  const cutoff = '2026-10-15';
+  assert.deepEqual(earlyDates('2026-10-01, 2026/10/01, October 1, 2026, Oct 1 2026, 1 October 2026, 1 Oct. 2026 and September 2026', cutoff),
+    ['2026-10-01', '2026/10/01', 'October 1, 2026', 'Oct 1 2026', '1 October 2026', '1 Oct. 2026', 'September 2026']);
+  assert.deepEqual(earlyDates('2026-10-15, October 15, 2026, 20 Oct 2026, October 2026, Nov 2026', cutoff), []);
+  // Not dates: a quantity, a version, and a month name with no year.
+  assert.deepEqual(earlyDates('2000 m, version 2026.9.1, in October', cutoff), []);
+  // The site walk sees a planted early spelling.
+  assert.deepEqual(earlyDates('see Sept 3, 2026', '2026-10-15'), ['Sept 3, 2026']);
+});
 
 const dist = buildReal('hygiene');
 const scanTree = (dir: string, deny: ReadonlySet<string> = INTERNAL_NAME_DIGESTS): string[] => listFiles(dir).flatMap((f) => scanText(readFileSync(join(dir, f), 'utf8'), /^assets\/[0-9a-f]+\/[a-z]+\.js$/.test(f), deny).map((p) => `${f}: ${p}`));
