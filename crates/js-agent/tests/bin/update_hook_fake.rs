@@ -39,7 +39,7 @@ use fakes::World;
 #[cfg(target_os = "linux")]
 use fakes::harness::{
     CONTROL_VAR, DEFECT_VAR, Defect, Fault, Faulted, FaultedState, Frozen, Guard, HarnessGate,
-    STATE_DIR_VAR, StagedAgent, WORLD_VAR, arranged, declaration,
+    MirroringGate, STATE_DIR_VAR, StagedAgent, WORLD_VAR, arranged, declaration, mirror_ownership,
 };
 
 /// The directory a flag or its variable names.
@@ -90,6 +90,16 @@ fn hung(asked: Duration) {
     std::process::exit(1);
 }
 
+/// The kill points, keeping the world's view of the record as the record says.
+#[cfg(target_os = "linux")]
+fn gate(setup: &Setup) -> MirroringGate {
+    MirroringGate {
+        inner: HarnessGate::from_env(),
+        world: setup.world.clone(),
+        state_dir: setup.state_dir.clone(),
+    }
+}
+
 /// Runs the step over the fakes.
 #[cfg(target_os = "linux")]
 fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
@@ -102,11 +112,7 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
             };
         }
     };
-    let world = World::new(
-        &setup.world,
-        &setup.control,
-        Box::new(HarnessGate::from_env()),
-    );
+    let world = World::new(&setup.world, &setup.control, Box::new(gate(setup)));
     world.set_releases(params);
     let quiet = World::new(&setup.world, &setup.control, Box::new(NoGate));
     let step_now = invocation.step;
@@ -141,7 +147,7 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
             lease: &ports,
             state: &state,
             clock: &guard,
-            gate: &HarnessGate::from_env(),
+            gate: &gate(setup),
         },
         runner: &staged,
         declaration: &declaration,
@@ -161,6 +167,8 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
         // Starts the agent again although it runs: a new session on every run.
         let _ = world.hello(&params.target_version);
     }
+    // The step's last change to the record is after its last kill point.
+    mirror_ownership(&setup.world, &setup.state_dir);
     done
 }
 

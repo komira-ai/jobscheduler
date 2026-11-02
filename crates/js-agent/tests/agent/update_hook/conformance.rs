@@ -19,12 +19,14 @@ use std::path::{Path, PathBuf};
 
 use js_agent::update_hook::{Lease, NoGate, Report as AgentReport, swap_link};
 use js_testkit::dir::TestDir;
-use update_hook::conformance::{Conformance, FakeService, Fault, HookCommand, Sandbox, Violation};
+use update_hook::conformance::{
+    Allowances, Conformance, FakeService, Fault, HookCommand, LapsingCordon, Sandbox, Violation,
+};
 use update_hook::{Params, Scalar, Step};
 
 use super::fakes::harness::{
-    self, CONTROL_VAR, DEFECT_VAR, Defect, HOST, PARAMS, ParamValue, RELEASE_LINK, STATE_DIR_VAR,
-    UNIT, WORLD_VAR,
+    self, CONTROL_VAR, DEFECT_VAR, Defect, HOST, OWNED_CORDON, PARAMS, ParamValue, RELEASE_LINK,
+    STATE_DIR_VAR, UNIT, WORLD_VAR,
 };
 use super::fakes::{World, relative_to_link};
 
@@ -80,6 +82,12 @@ impl FakeService for AgentHost {
     fn init(&mut self, sandbox: &Sandbox) -> io::Result<()> {
         let world = Self::world(sandbox);
         world.state_root();
+        // The directory of the record's view is always there; only its file comes and goes.
+        fs::create_dir_all(
+            sandbox
+                .world()
+                .join(Path::new(OWNED_CORDON).parent().unwrap()),
+        )?;
         if !self.first_install {
             world.seed_unit(UNIT, "active", "running");
             let link = sandbox.world().join("link").join("current");
@@ -120,7 +128,12 @@ impl FakeService for AgentHost {
             Fault::Halt => harness::Fault::Halt,
         };
         let step = agent_step(step);
-        if !fault.reachable(step) {
+        let reachable = if self.first_install {
+            fault.reachable_on_first_install(step)
+        } else {
+            fault.reachable(step)
+        };
+        if !reachable {
             return Ok(false);
         }
         harness::arrange(&Self::control(sandbox), step, fault);
@@ -155,6 +168,27 @@ fn agent_step(step: Step) -> js_agent::update_hook::Step {
     }
 }
 
+/// What the hook declares the harness should accept, each a safe behaviour of its design:
+///
+/// - a `rollback` run again after one that stopped the agent and deleted the record finds no
+///   record and says `reversible: true` (rollback.rs: it knows nothing; the updater ignores the
+///   flag on a rollback that succeeded);
+/// - a cordon placed by a `prepare` killed before the record confirmed it is taken for one that
+///   may be an operator's and left to lapse (prepare.rs, `place`): the cordon is the fake
+///   server's `cordon.json`, and the record holds it as its own while [`OWNED_CORDON`] is there;
+/// - on a first install, a `rollback` after `cutover` fails `no_previous_release` rather than
+///   stop an agent that may hold a job (rollback.rs, item 3).
+fn allowances() -> Allowances {
+    Allowances {
+        rollback_rerun_may_say_reversible: true,
+        lapsing_cordon: Some(LapsingCordon {
+            paths: vec![PathBuf::from("cordon.json")],
+            ownership: vec![PathBuf::from(OWNED_CORDON)],
+        }),
+        first_install_rollback_may_fail: true,
+    }
+}
+
 fn hook() -> HookCommand {
     HookCommand::new(Path::new(BIN))
 }
@@ -168,7 +202,7 @@ fn run<T>(
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
     let hook = hook();
     let first_install = fake.first_install;
-    let harness = Conformance::new(&hook, &mut fake, tmp.path());
+    let harness = Conformance::new(&hook, &mut fake, tmp.path()).with_allowances(allowances());
     // The params of a first install have no previous release or version.
     let mut harness = if first_install {
         harness.with_first_install()
@@ -509,4 +543,159 @@ fn the_faults_a_step_can_end_with_and_the_words_that_name_faults_and_defects() {
     }
     assert_eq!(Defect::from_word(Some(&"melt".into())), None);
     assert_eq!(Defect::from_word(None), None);
+}
+
+/// A first install through the updater's table: success, and every fault the steps can end with
+/// on a first install whose rollback, if any, runs before the link moved or is itself made to
+/// fail. Each ends with the verdict the table gives it.
+#[test]
+fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
+    use update_hook::{Class, Phase, Verdict};
+    let failed = |phase| Verdict::Failed {
+        phase,
+        class: Class::Release,
+    };
+    let cases: [(&[(Step, Fault)], Verdict); 7] = [
+        (
+            &[],
+            Verdict::Succeeded {
+                promotion_pending: false,
+            },
+        ),
+        (&[(Step::Prepare, Fault::Fail)], failed(Phase::BeforeCommit)),
+        (&[(Step::Prepare, Fault::Halt)], Verdict::Halt),
+        (&[(Step::Cutover, Fault::Halt)], Verdict::Halt),
+        (&[(Step::Verify, Fault::Halt)], Verdict::Halt),
+        (
+            &[(Step::Cutover, Fault::Fail), (Step::Rollback, Fault::Fail)],
+            failed(Phase::AfterCommit),
+        ),
+        (
+            &[(Step::Verify, Fault::Fail), (Step::Rollback, Fault::Fail)],
+            failed(Phase::AfterCommit),
+        ),
+    ];
+    for (n, (faults, verdict)) in cases.into_iter().enumerate() {
+        let trace = run(
+            &format!("hook-conf-first-table-{n}"),
+            AgentHost::first_install(),
+            |harness| harness.scenario(faults),
+        )
+        .unwrap()
+        .unwrap_or_else(|| panic!("{faults:?}: the fake cannot make it"));
+        assert_eq!(trace.verdict, verdict, "{faults:?}: {:?}", trace.steps);
+    }
+    // What a first install has no way to end with.
+    for faults in [
+        [(Step::Prepare, Fault::Defer)],
+        [(Step::Cutover, Fault::Defer)],
+        [(Step::Cleanup, Fault::Fail)],
+    ] {
+        let made = run(
+            "hook-conf-first-none",
+            AgentHost::first_install(),
+            |harness| harness.scenario(&faults),
+        )
+        .unwrap();
+        assert_eq!(made, None, "{faults:?}");
+    }
+}
+
+/// What the harness still refuses on a first install, and only that: its crash-resume and its
+/// sequences run a `rollback` after `cutover` and require it to succeed, and the hook's fails
+/// `no_previous_release` by design (rollback.rs, item 3). The first-install allowance covers
+/// the `rollback` of the run-twice check alone (update_hook::conformance::Allowances). Catches a
+/// first install that fails anything else on the way, and tells when the harness extends the
+/// allowance: then these become the checks themselves.
+#[test]
+fn on_a_first_install_the_harness_refuses_only_the_designed_rollback_after_cutover() {
+    let designed = |refused: Violation| {
+        assert!(
+            matches!(
+                refused,
+                Violation::UnexpectedOutcome {
+                    step: Step::Rollback,
+                    wanted: update_hook::Outcome::Success,
+                    got: update_hook::Outcome::Failure,
+                }
+            ),
+            "{refused}"
+        );
+    };
+    designed(
+        run(
+            "hook-conf-first-resume",
+            AgentHost::first_install(),
+            |harness| harness.crash_resume(),
+        )
+        .unwrap_err(),
+    );
+    for (n, step) in [Step::Cutover, Step::Verify].into_iter().enumerate() {
+        designed(
+            run(
+                &format!("hook-conf-first-rb-{n}"),
+                AgentHost::first_install(),
+                |harness| harness.scenario(&[(step, Fault::Fail)]),
+            )
+            .unwrap_err(),
+        );
+    }
+}
+
+/// Undeclared, each of the three behaviours is refused by the check that finds it: the
+/// allowances are what lets them through, and nothing else is.
+#[test]
+fn without_the_allowances_the_harness_refuses_exactly_the_three_designed_behaviours() {
+    let strict =
+        |name: &str, fake: AgentHost, check: &dyn Fn(&mut Conformance<'_>) -> Violation| {
+            let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
+            let hook = hook();
+            let first_install = fake.first_install;
+            let mut fake = fake;
+            let harness = Conformance::new(&hook, &mut fake, tmp.path());
+            let mut harness = if first_install {
+                harness.with_first_install()
+            } else {
+                harness
+            };
+            check(&mut harness)
+        };
+    let c1 = strict("hook-conf-strict-c1", AgentHost::update(), &|h| {
+        h.idempotence().unwrap_err()
+    });
+    assert!(
+        matches!(
+            c1,
+            Violation::RerunReversibleChanged {
+                step: Step::Rollback,
+                first: false,
+                second: true
+            }
+        ),
+        "{c1}"
+    );
+    let c2 = strict("hook-conf-strict-c2", AgentHost::update(), &|h| {
+        h.crash_resume().unwrap_err()
+    });
+    match &c2 {
+        Violation::CrashResumeDiverges {
+            step: Step::Prepare,
+            changes,
+            ..
+        } => assert_eq!(changes, &["added cordon.json"]),
+        other => panic!("{other}"),
+    }
+    let c3 = strict("hook-conf-strict-c3", AgentHost::first_install(), &|h| {
+        h.idempotence().unwrap_err()
+    });
+    assert!(
+        matches!(
+            c3,
+            Violation::UnexpectedOutcome {
+                step: Step::Rollback,
+                ..
+            }
+        ),
+        "{c3}"
+    );
 }

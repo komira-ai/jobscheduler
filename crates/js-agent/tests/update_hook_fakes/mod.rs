@@ -4,7 +4,9 @@
 //!
 //! - `world/`, the observable state of the service the hook acts on, which the harness
 //!   compares between runs: `units/<unit>` (the unit manager), `link/<name>` (release links),
-//!   `lease.json` (the lease server's view of the host) and `state/` (the agent's state root).
+//!   `lease.json` (the lease server's view of the host, but its cordon), `cordon.json` (the
+//!   host's cordon, there only while the server holds one) and `state/` (the agent's state
+//!   root).
 //! - `control/`, what the harness must not compare: the clock (`clock`, milliseconds) and the
 //!   count of pauses (`ticks`), and the skew of the lease server's clock (`server-skew-ms`).
 //!
@@ -93,6 +95,28 @@ impl World {
         self.world.join("lease.json")
     }
 
+    fn cordon_file(&self) -> PathBuf {
+        self.world.join("cordon.json")
+    }
+
+    /// Writes the server's view of `host`: the cordon in a file of its own, there only while
+    /// there is one, and the rest in the lease file. One file a cordon has its own, so that a
+    /// cordon placed or lifted is a file that appears or goes.
+    fn write_host(&self, host: &HostReading) -> io::Result<()> {
+        let bare = HostReading {
+            cordon: None,
+            ..host.clone()
+        };
+        fs::write(self.lease_file(), serde_json::to_vec(&bare)?)?;
+        match &host.cordon {
+            Some(cordon) => fs::write(self.cordon_file(), serde_json::to_vec(cordon)?),
+            None => match fs::remove_file(self.cordon_file()) {
+                Err(why) if why.kind() != io::ErrorKind::NotFound => Err(why),
+                _ => Ok(()),
+            },
+        }
+    }
+
     fn put_unit(&self, unit: &str, active: &str, sub: &str) -> Result<(), PortError> {
         self.gate();
         fs::write(self.unit_file(unit), format!("{active} {sub}")).map_err(|why| io_err(&why))
@@ -138,7 +162,7 @@ impl World {
             agent_version: Some(agent_version.to_owned()),
             runtime: Some(self.exec_mode()),
         };
-        fs::write(self.lease_file(), serde_json::to_vec(&host).unwrap()).unwrap();
+        self.write_host(&host).unwrap();
         fs::write(self.control.join("host-id"), id).unwrap();
     }
 
@@ -228,6 +252,7 @@ impl World {
         fs::write(self.saved_file(), serde_json::to_vec(&saved).unwrap()).unwrap();
         // An awaiting host has no file of its own.
         let _ = fs::remove_file(self.lease_file());
+        let _ = fs::remove_file(self.cordon_file());
     }
 
     fn saved_file(&self) -> PathBuf {
@@ -250,7 +275,7 @@ impl World {
     pub fn alter_host(&self, change: impl FnOnce(&mut HostReading)) {
         let mut host = self.stored().unwrap();
         change(&mut host);
-        fs::write(self.lease_file(), serde_json::to_vec(&host).unwrap()).unwrap();
+        self.write_host(&host).unwrap();
     }
 
     /// The host as stored, expiry not applied. After a restart that kept the host's binding
@@ -258,11 +283,17 @@ impl World {
     /// has it: epoch 0, no session, the saved cordon and taint, until its next hello. The
     /// server knows no host before a hello, or after the state file was lost.
     fn stored(&self) -> Result<HostReading, LeaseError> {
-        match fs::read(self.lease_file()) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|why| unreachable(&why)),
-            Err(why) if why.kind() == io::ErrorKind::NotFound => self.awaiting(),
-            Err(why) => Err(unreachable(&why)),
-        }
+        let mut host: HostReading = match fs::read(self.lease_file()) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|why| unreachable(&why))?,
+            Err(why) if why.kind() == io::ErrorKind::NotFound => return self.awaiting(),
+            Err(why) => return Err(unreachable(&why)),
+        };
+        host.cordon = match fs::read(self.cordon_file()) {
+            Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|why| unreachable(&why))?),
+            Err(why) if why.kind() == io::ErrorKind::NotFound => None,
+            Err(why) => return Err(unreachable(&why)),
+        };
+        Ok(host)
     }
 
     fn awaiting(&self) -> Result<HostReading, LeaseError> {
@@ -311,9 +342,7 @@ impl World {
 
     fn save(&self, host: &HostReading) -> Result<(), LeaseError> {
         self.gate();
-        serde_json::to_vec(host)
-            .map_err(|why| unreachable(&why))
-            .and_then(|bytes| fs::write(self.lease_file(), bytes).map_err(|why| unreachable(&why)))
+        self.write_host(host).map_err(|why| unreachable(&why))
     }
 
     /// The agent says hello: the server makes the host if it knows none (epoch 1), else one more

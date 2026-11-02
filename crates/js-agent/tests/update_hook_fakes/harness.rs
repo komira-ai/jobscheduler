@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use js_agent::CommandRunner;
 use js_agent::update_hook::{
-    Clock, Cordoned, Declaration, Gate, HostReading, Lease, LeaseError, Link, PortError, StateView,
-    Step, Uncordoned, UnitState, Units,
+    Clock, Cordoned, Declaration, Gate, HostReading, Lease, LeaseError, Link, PortError,
+    RECORD_FILE, Record, StateView, Step, Uncordoned, UnitState, Units,
 };
 use js_agent_wire::Taint;
 
@@ -168,6 +168,52 @@ impl Gate for HarnessGate {
     }
 }
 
+/// The world's view of the hook's record, for the conformance harness's crash-window
+/// allowance: a file there exactly while the record holds the cordon as the hook's own and
+/// confirmed (`cordon.placed` and not `provisional`). The record keeps that in one field of one
+/// file, and the harness tells a recorded cordon from one by which paths exist, so
+/// [`MirroringGate`] keeps this file as the record says at every kill point and at the end of
+/// every step. The hook neither reads nor writes it.
+pub const OWNED_CORDON: &str = "record-view/cordon-ours";
+
+/// Makes [`OWNED_CORDON`] in `world` say what the record in `state_dir` says.
+///
+/// # Panics
+/// The file cannot be written or removed.
+pub fn mirror_ownership(world: &Path, state_dir: &Path) {
+    let ours = fs::read(state_dir.join(RECORD_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+        .is_some_and(|record| record.cordon.placed && !record.cordon.provisional);
+    let file = world.join(OWNED_CORDON);
+    if ours {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"").unwrap();
+    } else {
+        match fs::remove_file(&file) {
+            Err(why) if why.kind() != std::io::ErrorKind::NotFound => panic!("{why}"),
+            _ => {}
+        }
+    }
+}
+
+/// [`HarnessGate`], with [`OWNED_CORDON`] brought up to date before each point.
+pub struct MirroringGate {
+    /// The kill points.
+    pub inner: HarnessGate,
+    /// The fakes' world.
+    pub world: PathBuf,
+    /// The hook's state directory.
+    pub state_dir: PathBuf,
+}
+
+impl Gate for MirroringGate {
+    fn point(&self) {
+        mirror_ownership(&self.world, &self.state_dir);
+        self.inner.point();
+    }
+}
+
 /// How a test asks a step to end: what the [`Faulted`] ports make go wrong while that step
 /// runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,6 +255,16 @@ impl Fault {
             (Step::Prepare | Step::Cutover, _) | (Step::Verify, Fault::Fail | Fault::Halt) => true,
             (Step::Cleanup | Step::Rollback, Fault::Fail) => true,
             (Step::Verify | Step::Cleanup | Step::Rollback, _) => false,
+        }
+    }
+
+    /// [`Fault::reachable`] on a first install: nothing defers (there is no host to drain and
+    /// no lease to wait out), and `cleanup` cannot fail (there is no cordon to lift).
+    #[must_use]
+    pub const fn reachable_on_first_install(self, step: Step) -> bool {
+        match (step, self) {
+            (_, Fault::Defer) | (Step::Cleanup, _) => false,
+            _ => self.reachable(step),
         }
     }
 }
