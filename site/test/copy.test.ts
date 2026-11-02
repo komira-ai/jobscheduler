@@ -202,9 +202,15 @@ test('every command block of the real pages copies without a prompt mark or a co
   assert.ok(blocks >= 5, `found only ${blocks} command blocks in the page copy`);
 });
 
+const contentOf = (pageName: string): string => readFileSync(join(SITE, 'content', `${pageName}.html`), 'utf8');
+
+/** How many <div> elements of a page the browser's '.cmd, .code' selector matches, however the tag is written. */
+function blockCount(html: string): number {
+  return [...html.matchAll(/<div\b[^>]*?\bclass\s*=\s*"([^"]*)"[^>]*>/g)].filter((m) => m[1].split(/\s+/).some((c) => c === 'cmd' || c === 'code')).length;
+}
+
 /** The blocks of a real page as the content file writes them: the classes of the div and the runs of its <pre>. */
-function realBlocks(pageName: string): { cls: string[]; block: FakeBlock }[] {
-  const html = readFileSync(join(SITE, 'content', `${pageName}.html`), 'utf8');
+function realBlocks(pageName: string, html: string = contentOf(pageName)): { cls: string[]; block: FakeBlock }[] {
   return [...html.matchAll(/<div class="((?:cmd|code)\b[^"]*)"><pre>([\s\S]*?)<\/pre>/g)].map((m) => {
     const cls = m[1].split(/\s+/);
     return { cls, block: new FakeBlock(new FakePre(runsOf(m[2])), cls) };
@@ -271,6 +277,7 @@ const EXPECTED: Record<string, (string | null)[]> = {
 for (const pageName of Object.keys(EXPECTED)) {
   test(`every block of ${pageName}.html that gets a button copies exactly the text in the table, and a transcript gets none`, async () => {
     const real = realBlocks(pageName);
+    assert.equal(real.length, blockCount(contentOf(pageName)), `${pageName}: a block the browser enhances is written in a way this test does not read`);
     assert.deepEqual(await copiedFrom(real.map((r) => r.block)), EXPECTED[pageName]);
     real.forEach((r, i) => assert.equal(r.cls.includes('transcript'), EXPECTED[pageName][i] === null, `${pageName} block ${i}: a transcript iff no button`));
   });
@@ -285,9 +292,16 @@ test('the demo of the landing page is a transcript with no Copy button', async (
 });
 
 test('a changed copied text, or a transcript given a button, is caught (the check can fail)', async () => {
-  // Negative: a block whose markup differs from the table's does not copy the table's text.
-  const changed = new FakeBlock(new FakePre(runsOf('<span class="p">$</span> js lease list --all')), ['code']);
-  assert.notDeepEqual(await copiedFrom([changed]), [EXPECTED.install[3]]);
+  // Negative: the real install page with one command changed no longer copies the table's text.
+  const install = contentOf('install');
+  const edited = install.replace('lease list</pre>', 'lease list --all</pre>');
+  assert.notEqual(edited, install, 'the edit lands');
+  assert.notDeepEqual(await copiedFrom(realBlocks('install', edited).map((r) => r.block)), EXPECTED.install);
+  // Negative: a block written another way (another class first, an attribute) is still counted, so it cannot hide.
+  const reshaped = install.replace('<div class="code"><pre><span class="p">$</span> js --server', '<div id="lease" class="wide code" ><pre><span class="p">$</span> js --server');
+  assert.notEqual(reshaped, install, 'the reshape lands');
+  assert.equal(blockCount(reshaped), blockCount(install));
+  assert.equal(realBlocks('install', reshaped).length, blockCount(install) - 1);
   // Negative: a transcript gets no button, and the same block unmarked does, so the table tells them apart.
   const marked = new FakeBlock(new FakePre(runsOf(INSTALL)), ['code', 'transcript']);
   const plain = new FakeBlock(new FakePre(runsOf(INSTALL)), ['code']);
