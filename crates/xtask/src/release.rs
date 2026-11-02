@@ -76,6 +76,16 @@ pub enum Error {
         /// The operating system's reason.
         why: String,
     },
+    /// A name `release stage` puts in a path is not a plain name.
+    #[error(
+        "{flag} {value:?} is not a name: ASCII letters, digits, `.`, `_` and `-`, starting with a letter or digit"
+    )]
+    BadName {
+        /// The flag.
+        flag: &'static str,
+        /// What it was given.
+        value: String,
+    },
     /// The output of `cargo metadata` is not what this reads.
     #[error("cargo metadata: {0}")]
     Metadata(String),

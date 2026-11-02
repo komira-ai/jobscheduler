@@ -52,7 +52,8 @@ environment  = { }
 prepare  = 3900
 # The unit's TimeoutStopSec 3900 + start to active 120 + 300.
 cutover  = 4320
-# The hello wait 300 + three polls of 5 s + 300.
+# verify looks at the unit and the lease server every 10 s (POLL_SECS) until this bound less 15 s
+# (VERIFY_MARGIN_SECS), 600 s, for the new agent's hello and the host's readiness.
 verify   = 615
 # drain_wait 3600 + the stop 3900 + start 120 + the hello wait 300 + 300.
 rollback = 8220

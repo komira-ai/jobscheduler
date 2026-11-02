@@ -3356,6 +3356,7 @@ dependencies = [
  "tar",
  "thiserror",
  "toml",
+ "update-hook",
  "update-rights",
  "ureq",
 ]

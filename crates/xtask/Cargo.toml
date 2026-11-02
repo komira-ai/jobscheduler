@@ -53,6 +53,8 @@ js-mac-session = { path = "../js-mac-session" }
 rcgen.workspace = true
 # The host updater's own validator of a declaration, which the js-agent declaration the release
 # ships must pass (tests/js_agent_declaration.rs).
+# The hook contract's `Step`, which the updater's launch takes (tests/js_agent_declaration_load.rs).
+update-hook.workspace = true
 update-rights.workspace = true
 
 [lints]

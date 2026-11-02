@@ -126,6 +126,13 @@ impl Rig {
         Rig::build_for(name, true, LEASE_SECS, MAX_SECS, Some(MAC_UNIT))
     }
 
+    /// The first update of a host the package installed: the release link points at the
+    /// directory of the package's agent (`usr/bin` of the tree, standing for `/usr/bin`, the
+    /// first target the crun tmpfiles file gives the link), which is the previous release.
+    pub fn from_package(name: &str) -> Rig {
+        Rig::build_from(name, true, LEASE_SECS, MAX_SECS, None, "usr/bin")
+    }
+
     /// The first install on a Mac.
     pub fn mac_first_install(name: &str) -> Rig {
         Rig::build_for(name, false, LEASE_SECS, MAX_SECS, Some(MAC_UNIT))
@@ -142,9 +149,21 @@ impl Rig {
         max_secs: u64,
         mac: Option<&str>,
     ) -> Rig {
+        Rig::build_from(name, previous, lease_secs, max_secs, mac, "releases/1.3.0")
+    }
+
+    /// [`Rig::build_for`] with the previous release at `old` in the tree.
+    fn build_from(
+        name: &str,
+        previous: bool,
+        lease_secs: u64,
+        max_secs: u64,
+        mac: Option<&str>,
+        old: &str,
+    ) -> Rig {
         let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
         let root = tmp.path().to_owned();
-        let (staged, old) = (root.join("releases/1.4.0"), root.join("releases/1.3.0"));
+        let (staged, old) = (root.join("releases/1.4.0"), root.join(old));
         fs::create_dir_all(&staged).unwrap();
         fs::write(staged.join("js-agent"), BINARY).unwrap();
         fs::create_dir_all(root.join("state")).unwrap();

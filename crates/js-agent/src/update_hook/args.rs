@@ -131,7 +131,12 @@ impl Invocation {
     where
         I: IntoIterator<Item = OsString>,
     {
-        let mut args = args.into_iter();
+        Invocation::parse_words(args.into_iter().collect())
+    }
+
+    /// [`Invocation::parse`] on the words, one body for every caller's iterator.
+    fn parse_words(words: Vec<OsString>) -> Result<Invocation, ArgsError> {
+        let mut args = words.into_iter();
         let mut flags = Flags::default();
         let first = loop {
             let word = args.next().ok_or(ArgsError::MissingStep)?;

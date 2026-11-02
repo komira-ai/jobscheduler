@@ -11,7 +11,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use js_agent::update_hook::{
-    Declaration as HookDeclaration, Invocation, Params, Record, UpdateInfo,
+    CUTOVER_MARGIN_SECS, Declaration as HookDeclaration, Invalid, Invocation, POLL_SECS,
+    PREPARE_MARGIN_SECS, Params, ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, Record,
+    START_WAIT_SECS, UpdateInfo, VERIFY_MARGIN_SECS,
 };
 use update_rights::{Declaration, Refusal, reserved};
 use xtask::pkg::{self, FILES, Source};
@@ -305,6 +307,64 @@ fn timeouts_below_the_hooks_or_the_updaters_bounds_are_refused() {
         )),
         "the updater refuses it: verify_deadline_secs 8834 is less than the verify and rollback bounds together (8835)"
     );
+}
+
+/// Each timeout at the edge of its rule: the smallest value the hook's bound (or the updater's,
+/// for the deadline) accepts, and the one below it refused, each by the rule that holds it.
+/// With `drain_wait_secs` 3600: `prepare` >= 3600 + 60, `cutover` > 120 + 60, `verify` > 15 +
+/// 10, `rollback` > 3600 + 120 + 300 + 60, and `verify_deadline_secs` >= `verify` + `rollback`.
+#[test]
+fn each_timeout_is_accepted_at_its_bound_and_refused_just_below_it() {
+    let wait = 3600;
+    let hook = |e: Invalid| format!("the hook's bounds refuse it: {e}");
+    let cases: [(&str, u64, u64, String); 4] = [
+        (
+            "prepare  = 3900",
+            wait + PREPARE_MARGIN_SECS,
+            wait + PREPARE_MARGIN_SECS - 1,
+            hook(Invalid::PrepareTimeout {
+                prepare: wait + PREPARE_MARGIN_SECS - 1,
+                wait,
+            }),
+        ),
+        (
+            "cutover  = 4320",
+            START_WAIT_SECS + CUTOVER_MARGIN_SECS + 1,
+            START_WAIT_SECS + CUTOVER_MARGIN_SECS,
+            hook(Invalid::CutoverTimeout {
+                cutover: START_WAIT_SECS + CUTOVER_MARGIN_SECS,
+            }),
+        ),
+        (
+            "verify   = 615",
+            VERIFY_MARGIN_SECS + POLL_SECS + 1,
+            VERIFY_MARGIN_SECS + POLL_SECS,
+            hook(Invalid::VerifyTimeout {
+                verify: VERIFY_MARGIN_SECS + POLL_SECS,
+            }),
+        ),
+        (
+            "rollback = 8220",
+            wait + START_WAIT_SECS + ROLLBACK_HELLO_SECS + ROLLBACK_MARGIN_SECS + 1,
+            wait + START_WAIT_SECS + ROLLBACK_HELLO_SECS + ROLLBACK_MARGIN_SECS,
+            hook(Invalid::RollbackTimeout {
+                rollback: wait + START_WAIT_SECS + ROLLBACK_HELLO_SECS + ROLLBACK_MARGIN_SECS,
+                wait,
+            }),
+        ),
+    ];
+    for (line, accepted, below, why) in cases {
+        let key = line.split('=').next().unwrap_or_default();
+        let at = |secs: u64| shipped_with(line, &format!("{key}= {secs}"));
+        check(&at(accepted)).unwrap_or_else(|e| panic!("{line} at {accepted}: {e}"));
+        assert_eq!(refused(&at(below)), why, "{line}");
+    }
+    // The deadline: equal to verify + rollback is enough.
+    check(&shipped_with(
+        "verify_deadline_secs = 9000",
+        "verify_deadline_secs = 8835",
+    ))
+    .unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// The hook is the agent's own binary, run with no shell: a declaration whose binary is a shell,
