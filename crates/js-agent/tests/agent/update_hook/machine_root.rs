@@ -1,8 +1,10 @@
 //! The agent's state root as the hook on a machine finds it, before any step runs: an update
 //! with none, a state root that is there and not usable on a first install and on an update,
 //! the record's commit kept in the refusal, a refusal that needs no lock and takes none, and the
-//! lease's credential from an unusable state root. The lease server is a counting stub: every
-//! case here is refused before a request, and the stub shows that none was sent. The owner and
+//! lease's credential from an unusable state root. No socket is opened: the params name a lease
+//! server ([`NO_SERVER`]) the client refuses to be made for, by its text alone, so a step that
+//! asked the lease anything would end with that refusal, which the exact details here rule out
+//! (`the_lease_server_of_these_tests_is_refused_before_any_socket` shows it). The owner and
 //! permission-denied cases need other users, and are in `tests/privilege/hook_root.rs`.
 
 use std::collections::BTreeMap;
@@ -16,7 +18,6 @@ use js_agent::update_hook::{
 };
 
 use super::lease_port::{all_unreachable, lease, reach};
-use super::lease_stub::{Reply, Stub};
 use super::machine::Tree;
 use super::step_rig::as_root;
 use crate::jobs::private;
@@ -74,12 +75,20 @@ fn unusable_roots(files: &Scratch) -> Vec<(PathBuf, String)> {
     .collect()
 }
 
-/// The params lines that would reach `stub` as `mac-1` with a token file.
-fn reaching_stub(stub: &Stub, files: &Scratch) -> String {
+/// A lease server the client is never made for: plain http to a host off the loopback, which
+/// it refuses from the text of the address before it opens a socket or resolves a name (the
+/// `.invalid` name is reserved and never resolves).
+const NO_SERVER: &str = "http://lease.invalid";
+
+/// What every lease call answers when the params name [`NO_SERVER`].
+const NO_SERVER_SAID: &str = "server: \"http://lease.invalid\" is plain http to a host off the \
+                              loopback: a bearer token never crosses a network in clear, use https://";
+
+/// The params lines that name [`NO_SERVER`] as `mac-1`, with a token file.
+fn lease_lines(files: &Scratch) -> String {
     let token = files.write("token", "token-0123456789abcdef", 0o600);
     format!(
-        "server = \"{}\"\ntoken_file = \"{}\"\nhost_id = \"mac-1\"\n",
-        stub.url,
+        "server = \"{NO_SERVER}\"\ntoken_file = \"{}\"\nhost_id = \"mac-1\"\n",
         token.display()
     )
 }
@@ -110,14 +119,13 @@ fn assert_refused(done: &Done, said: &str, reversible: bool, what: &str) {
 /// Asserts that an update whose params name no state root, or name a path where nothing is,
 /// fails every step `state_invalid` in exact words that say which of the two it is, and
 /// reversibly (no record says anything was done); that nothing is made in the hook's state
-/// directory, not even the lock file; and that no request reaches the lease server. It catches
+/// directory, not even the lock file; and that the lease is not asked anything. It catches
 /// an absent root read as "no taint, nothing owed" on an update, and a check that comes after
 /// the lock or the lease.
 #[test]
 fn an_update_with_no_state_root_or_one_that_is_not_there_fails_every_step_before_the_lock() {
-    let stub = Stub::start(&[Reply::Answer(200, "{}")]);
     let tree = Tree::new("hook-root-update-none");
-    let server = reaching_stub(&stub, &tree.files);
+    let server = lease_lines(&tree.files);
     let absent = tree.root.join("no-such-state");
     for (extra, said) in [
         (
@@ -142,18 +150,16 @@ fn an_update_with_no_state_root_or_one_that_is_not_there_fails_every_step_before
         }
     }
     assert!(state_files(&tree).is_empty());
-    assert_eq!(stub.stop(), 0, "no request reached the lease server");
 }
 
 /// Asserts that a first install, whose params name a lease server and a token file and no
 /// state root, or a state root where nothing is, runs `prepare` to success and writes its
-/// record, and that it sends no request to the lease server. It catches the update's rule
+/// record, and that it asks the lease nothing. It catches the update's rule
 /// applied to a first install.
 #[test]
 fn a_first_install_with_a_lease_server_and_no_state_root_still_runs() {
-    let stub = Stub::start(&[Reply::Answer(200, "{}")]);
     let tree = Tree::new("hook-root-first-none");
-    let server = reaching_stub(&stub, &tree.files);
+    let server = lease_lines(&tree.files);
     let absent = tree.root.join("no-such-state");
     for extra in [
         server.clone(),
@@ -165,19 +171,17 @@ fn a_first_install_with_a_lease_server_and_no_state_root_still_runs() {
         assert!(tree.record().exists());
         fs::remove_file(tree.record()).unwrap();
     }
-    assert_eq!(stub.stop(), 0, "a first install asks no lease server");
 }
 
 /// Asserts that every shape of a state root that is there and not usable fails every step of a
 /// first install and of an update `state_invalid`, in the exact words of the hook's param and
 /// the agent's check (never the agent's flag `--state-root`), reversibly, with nothing made in
-/// the hook's state directory and no request sent. It catches a first install that ignores an
+/// the hook's state directory and the lease not asked. It catches a first install that ignores an
 /// unusable root, a dangling link taken for no root, and a step that skips the check.
 #[test]
 fn a_state_root_that_is_there_and_unusable_fails_every_step_of_a_first_install_or_an_update() {
-    let stub = Stub::start(&[Reply::Answer(200, "{}")]);
     let tree = Tree::new("hook-root-unusable");
-    let server = reaching_stub(&stub, &tree.files);
+    let server = lease_lines(&tree.files);
     for (root, said) in unusable_roots(&tree.files) {
         for previous in [false, true] {
             let line = format!("{server}state_root = \"{}\"\n", root.display());
@@ -190,7 +194,6 @@ fn a_state_root_that_is_there_and_unusable_fails_every_step_of_a_first_install_o
         }
     }
     assert!(state_files(&tree).is_empty());
-    assert_eq!(stub.stop(), 0, "no request reached the lease server");
 }
 
 /// The record of an update from 1.3.0 in `tree`, with `marks` set to true.
@@ -218,13 +221,12 @@ fn record_with(tree: &Tree, first_install: bool, marks: &[&str]) -> Record {
 /// record that cannot be read, or one of another update that the step's body would refuse,
 /// says nothing of a commit (`true`). Each for an open state root,
 /// and for an update with none named. The hook's state directory is left byte for byte as it
-/// was, and no request is sent. It catches a refusal that tells the updater a committed update
+/// was, and the lease is not asked. It catches a refusal that tells the updater a committed update
 /// can still be undone.
 #[test]
 fn a_refused_step_whose_record_is_past_its_commit_says_it_cannot_be_undone() {
-    let stub = Stub::start(&[Reply::Answer(200, "{}")]);
     let tree = Tree::new("hook-root-committed");
-    let server = reaching_stub(&stub, &tree.files);
+    let server = lease_lines(&tree.files);
     let open = open_state_root(&tree.files);
     let open_said = unusable(&open, OPEN);
     let none_said = "state_root: an update needs the state root of the agent that runs, and the \
@@ -290,20 +292,18 @@ fn a_refused_step_whose_record_is_past_its_commit_says_it_cannot_be_undone() {
         }
         assert_eq!(state_files(&tree), before, "{what}");
     }
-    assert_eq!(stub.stop(), 0, "no request reached the lease server");
 }
 
 /// Asserts that the refusal of a state root needs no lock: while another holder has the hook's
 /// lock, every step with an unusable state root, or of an update with none, still ends with
 /// the state root's refusal, the record and the state directory stay byte for byte as they
-/// were, and no request is sent; and, as the control, the same step with a usable state root
+/// were, and the lease is not asked; and, as the control, the same step with a usable state root
 /// ends `lock_busy` (the lock was held). It catches a check made only after the lock, and one
 /// that makes or changes anything before refusing.
 #[test]
 fn a_refusal_of_the_state_root_needs_no_lock_and_changes_nothing() {
-    let stub = Stub::start(&[Reply::Answer(200, "{}")]);
     let tree = Tree::new("hook-root-locked");
-    let server = reaching_stub(&stub, &tree.files);
+    let server = lease_lines(&tree.files);
     let held = Held::open(&tree.root.join("state"), &as_root).unwrap();
     held.save(&record_with(&tree, false, &["stop_begun"]))
         .unwrap();
@@ -340,27 +340,46 @@ fn a_refusal_of_the_state_root_needs_no_lock_and_changes_nothing() {
     }
     drop(held);
     assert_eq!(state_files(&tree), before);
-    assert_eq!(stub.stop(), 0, "no request reached the lease server");
 }
 
 /// Asserts that a lease made from params whose state root is there and not usable answers
 /// `host`, `cordon` and `uncordon` with exactly the hook's refusal of that state root, for
 /// every shape of one, with a token file and without one: never a demand for `token_file`,
-/// never the server's refusal of a join token; and that no request is sent. It catches the
+/// never the server's refusal of a join token, never the refusal of the server's address. It catches the
 /// join token used in place of an unusable state root, which would reach the server under the
 /// pool's identity instead of the host's.
 #[test]
 fn an_unusable_state_root_is_the_leases_error_with_or_without_a_token_and_nothing_is_sent() {
     let files = Scratch::new("hook-root-lease");
-    let stub = Stub::start(&[Reply::Answer(200, "{}")]);
     let token = files.write("token", "token-0123456789abcdef", 0o600);
     for (root, said) in unusable_roots(&files) {
         for token in [Some(token.clone()), None] {
-            let params: ConnectParams = reach(&stub.url, Some(root.clone()), token.clone());
+            let params: ConnectParams = reach(NO_SERVER, Some(root.clone()), token.clone());
             for text in all_unreachable(&lease(&params, RequestLimit::DEFAULT)) {
                 assert_eq!(text, said, "{}, token {token:?}", root.display());
             }
         }
     }
-    assert_eq!(stub.stop(), 0, "no request reached the lease server");
+}
+
+/// Asserts the control of every test above: with a usable state root, an update's `prepare`
+/// does ask the lease, and ends `lease_unreachable` with exactly the client's refusal of
+/// [`NO_SERVER`], made from its text alone. So a step that asked the lease would show that
+/// detail, not the state root's refusal, and no test here can open a socket.
+#[test]
+fn the_lease_server_of_these_tests_is_refused_before_any_socket() {
+    let tree = Tree::new("hook-root-no-server");
+    let line = format!("{}{}", lease_lines(&tree.files), tree.state_line());
+    let done = tree.run(Step::Prepare, &tree.params(true, &line), Err("unused"));
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::LeaseUnreachable));
+    assert_eq!(done.report.detail.as_deref(), Some(NO_SERVER_SAID));
+    let params = reach(
+        NO_SERVER,
+        None,
+        Some(tree.files.write("t", "token-0123456789abcdef", 0o600)),
+    );
+    for text in all_unreachable(&lease(&params, RequestLimit::DEFAULT)) {
+        assert_eq!(text, NO_SERVER_SAID);
+    }
 }
