@@ -25,11 +25,13 @@
 //! the state, so nothing can carry over). The denial must carry the SANDBOX's own signature:
 //! the kernel's `Sandbox: <proc>(<pid>) deny(` line in the failure, or a bare `EPERM`/`EACCES` that
 //! the unified log (read from the start of run A) confirms as that seed's by such a line whose
-//! pid is the process that tried the seed (the tool that failed, its pid in the failure, or else
-//! a pid the runs print: the test process, each tool as a direct child, the process left
-//! running), and which carries the seed's token or the kind's operation. Neither a token nor an
-//! operation counts from any other pid, and a tool's operation (a `launchd` line, say) never
-//! counts when the job's own write failed and no tool ran. A bare `EPERM` or `EACCES` alone is an ordinary permission failure (a
+//! pid is the process that tried the seed, and which carries the seed's token or the kind's
+//! operation. That pid is the tool that failed (its pid is in the failure, and it must be one
+//! the run printed), or, when no tool is named, the job's own process alone: the first pid a
+//! run prints ([`JobProcs::own`]). Another tool of the job and the process it left running are
+//! never that pid. Neither a token nor an operation counts from any other pid, and a tool's
+//! operation (a `launchd` line, say) never counts when the job's own write failed and no tool
+//! ran. A bare `EPERM` or `EACCES` alone is an ordinary permission failure (a
 //! home with the wrong owner, a tool that is not executable) and proves nothing, like any
 //! other failure (`ENOSPC`, a missing tool, a crash). The denied row is recorded as refused by
 //! the profile. The minimum set (a file, a process, a keychain item, a launchd agent, shared
@@ -1449,6 +1451,50 @@ mod tests {
             BARE,
             own,
             &JobProcs::default()
+        ));
+    }
+
+    /// Asserts that a failed tool's pid binds a line only when the run printed that pid: the
+    /// failure and the log agreeing on a pid the job never printed (another process's text,
+    /// or a run that printed no pids at all) confirm nothing. It catches a binding that trusts
+    /// the failure text without the job's own record of its pids.
+    #[test]
+    fn a_tool_pid_the_job_never_printed_confirms_nothing() {
+        let a = token(0xa1);
+        let text = failed("/bin/launchctl", 900);
+        let line =
+            "Sandbox: launchctl(900) deny(1) mach-lookup com.apple.xpc.launchd.domain.user\n";
+        let tokened =
+            format!("Sandbox: launchctl(900) deny(1) file-read-data /h/iso-{a}-user.plist\n");
+        for job in [JobProcs { pids: vec![412] }, JobProcs::default()] {
+            for log in [line, tokened.as_str()] {
+                assert!(
+                    !log_confirms_denial(Kind::LaunchAgent, &a, &text, log, &job),
+                    "{log} {job:?}"
+                );
+                assert_eq!(
+                    resolve_seed(Kind::LaunchAgent, &a, &text, Some(log), &job),
+                    Verdict::Refused
+                );
+            }
+        }
+        // The same lines with the pid printed do confirm: only the printed pid was missing.
+        let printed = JobProcs {
+            pids: vec![412, 900],
+        };
+        assert!(log_confirms_denial(
+            Kind::LaunchAgent,
+            &a,
+            &text,
+            line,
+            &printed
+        ));
+        assert!(log_confirms_denial(
+            Kind::LaunchAgent,
+            &a,
+            &text,
+            &tokened,
+            &printed
         ));
     }
 
