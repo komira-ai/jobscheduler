@@ -309,12 +309,20 @@ fn agent_state(params: &Params) -> Result<Root, RootError> {
 /// The ending of a step whose state root the hook will not read: `state_invalid` with `why`,
 /// before the lock is taken and with nothing changed. A `cutover` or `rollback` whose record
 /// says it is past its commit ([`step::committed`]) says `reversible: false`, as its body would;
-/// the record is read without the lock ([`peek`]). A record that cannot be read says nothing of a
-/// commit, as for a step that cannot read its record under the lock.
-fn refused(step: Step, declaration: &Declaration, stat: &StatFn, why: &RootError) -> Done {
+/// the record is read without the lock ([`peek`]). A record that cannot be read, or that the
+/// rules of the declaration and the params refuse ([`validate`](super::validate)), says nothing
+/// of a commit, as for a step whose body cannot read or refuses its record under the lock.
+fn refused(
+    step: Step,
+    params: &Params,
+    declaration: &Declaration,
+    stat: &StatFn,
+    why: &RootError,
+) -> Done {
     let committed = peek(&declaration.state_dir, stat)
         .ok()
         .flatten()
+        .filter(|record| super::validate(record, declaration, params).is_ok())
         .is_some_and(|record| step::committed(step, &record));
     Done {
         outcome: Outcome::Failure,
@@ -384,7 +392,7 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     };
     let state = match agent_state(params) {
         Ok(state) => state,
-        Err(why) => return refused(invocation.step, &declaration, machine.stat, &why),
+        Err(why) => return refused(invocation.step, params, &declaration, machine.stat, &why),
     };
     let commands = SystemCommands::default();
     let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));

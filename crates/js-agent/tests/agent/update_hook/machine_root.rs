@@ -215,7 +215,8 @@ fn record_with(tree: &Tree, first_install: bool, marks: &[&str]) -> Record {
 /// `cutover` or `rollback` rerun whose record has `stop_begun` (an update) or `link_moved` (a
 /// first install) says `reversible: false`, as its own body would; `prepare`, `verify` and
 /// `cleanup` on the same record, and every step on a record with no such mark, say `true`; a
-/// record that cannot be read says nothing of a commit (`true`). Each for an open state root,
+/// record that cannot be read, or one of another update that the step's body would refuse,
+/// says nothing of a commit (`true`). Each for an open state root,
 /// and for an update with none named. The hook's state directory is left byte for byte as it
 /// was, and no request is sent. It catches a refusal that tells the updater a committed update
 /// can still be undone.
@@ -259,21 +260,36 @@ fn a_refused_step_whose_record_is_past_its_commit_says_it_cannot_be_undone() {
             }
         }
     }
-    fs::write(tree.record(), "not a record").unwrap();
-    let before = state_files(&tree);
+    // A record of another update (another target), past its commit, is one the step's body
+    // refuses before it reads the commit: it says nothing of this update's commit either.
+    let mut stale = record_with(&tree, false, &["stop_begun"]);
+    stale.update.target = "9.9.9".to_owned();
+    Held::open(&tree.root.join("state"), &as_root)
+        .unwrap()
+        .save(&stale)
+        .unwrap();
     let params = tree.params(
         true,
         &format!("{server}state_root = \"{}\"\n", open.display()),
     );
-    for step in [Step::Cutover, Step::Rollback] {
-        assert_refused(
-            &tree.run(step, &params, Err("unused")),
-            &open_said,
-            true,
-            &format!("{step}, a record that cannot be read"),
-        );
+    for (content, what) in [
+        (None, "a record of another update"),
+        (Some("not a record"), "a record that cannot be read"),
+    ] {
+        if let Some(content) = content {
+            fs::write(tree.record(), content).unwrap();
+        }
+        let before = state_files(&tree);
+        for step in [Step::Cutover, Step::Rollback] {
+            assert_refused(
+                &tree.run(step, &params, Err("unused")),
+                &open_said,
+                true,
+                &format!("{step}, {what}"),
+            );
+        }
+        assert_eq!(state_files(&tree), before, "{what}");
     }
-    assert_eq!(state_files(&tree), before);
     assert_eq!(stub.stop(), 0, "no request reached the lease server");
 }
 

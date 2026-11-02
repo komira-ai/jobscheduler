@@ -166,7 +166,9 @@ fn the_hook_refuses_a_state_root_it_is_denied_a_look_at_on_every_step() {
     let work = work_dir("priv-hook-root-denied");
     let tree = work.path().to_owned();
     hook_tree(&tree);
-    // The hook's state directory is the agent's here, as the hook runs as the agent.
+    // The probe, which runs as the agent's uid, counts what is in the hook's state directory
+    // afterwards, so the agent may read it. (The hook's own checks would refuse a state
+    // directory not root's; the refusal comes before them, so it is not reached.)
     std::os::unix::fs::lchown(tree.join("state"), Some(AGENT), Some(AGENT)).unwrap();
     let closed = tree.join("closed");
     make_dir(&closed, 0o700, 0);
