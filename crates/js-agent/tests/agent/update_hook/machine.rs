@@ -26,8 +26,8 @@ const UNIT: &str = "js-agent-crun.service";
 /// A tree of one test: the declaration, the state directory of the hook, the staged release
 /// (an agent that prints its version), and a place for the params files.
 pub(super) struct Tree {
-    _files: Scratch,
-    root: PathBuf,
+    pub(super) files: Scratch,
+    pub(super) root: PathBuf,
 }
 
 impl Tree {
@@ -49,10 +49,7 @@ impl Tree {
             .unwrap();
         assert!(made.success());
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
-        let tree = Tree {
-            _files: files,
-            root,
-        };
+        let tree = Tree { files, root };
         fs::write(
             tree.declaration(),
             format!(
@@ -80,6 +77,11 @@ impl Tree {
 
     pub(super) fn record(&self) -> PathBuf {
         self.root.join("state/record.json")
+    }
+
+    /// The params line that names the tree's own (private) state directory as the state root.
+    pub(super) fn state_line(&self) -> String {
+        format!("state_root = \"{}\"\n", self.root.join("state").display())
     }
 
     /// The params of an update from 1.3.0 (or a first install), plus `extra` lines.
@@ -206,7 +208,7 @@ fn a_first_install_needs_neither_a_server_nor_an_agent_state() {
 #[test]
 fn an_update_without_a_server_ends_as_a_lease_failure_of_the_environment() {
     let tree = Tree::new("hook-machine-no-server");
-    let params = tree.params(true, "");
+    let params = tree.params(true, &tree.state_line());
     let done = tree.run(Step::Prepare, &params, Err("unused"));
     assert_eq!(done.outcome, Outcome::Failure);
     assert_eq!(done.report.reason, Some(Reason::LeaseUnreachable));
@@ -261,7 +263,7 @@ fn a_declaration_that_cannot_be_read_ends_the_step_before_it_looks_at_anything()
 #[test]
 fn every_step_the_updater_can_ask_for_is_run_by_its_own_body() {
     let tree = Tree::new("hook-machine-dispatch");
-    let params = tree.params(true, "");
+    let params = tree.params(true, &tree.state_line());
     // With no record: `cutover` and `verify` have no `prepare` behind them and `cleanup` has
     // nothing to finish.
     for (step, outcome, reason) in [
@@ -273,6 +275,9 @@ fn every_step_the_updater_can_ask_for_is_run_by_its_own_body() {
         let done = tree.run(step, &params, Err("unused"));
         assert_eq!(done.outcome, outcome, "{step}");
         assert_eq!(done.report.reason, reason, "{step}");
+        // The step's own body answered, not the check of the state root before it.
+        let detail = done.report.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("there is no record"), "{step}: {detail}");
     }
 }
 
@@ -297,14 +302,7 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
     let empty_state = private(&files, "empty-state");
     let ca = files.path("no-such-ca.pem");
     // A credential in a state root that others can read is not used.
-    let open_state = files.path("open-state");
-    fs::create_dir_all(&open_state).unwrap();
-    fs::write(
-        open_state.join(js_agent::CREDENTIAL_FILE),
-        "cred-0123456789abcdefghij",
-    )
-    .unwrap();
-    fs::set_permissions(&open_state, fs::Permissions::from_mode(0o755)).unwrap();
+    let open_state = super::machine_root::open_state_root(&files);
     let full = ConnectParams {
         server: Some("http://127.0.0.1:1".to_owned()),
         state_root: Some(empty_state.clone()),
@@ -333,10 +331,19 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
                 state_root: Some(open_state),
                 ..full.clone()
             },
-            "token_file",
+            "state_root: ",
         ),
         (
             ConnectParams {
+                token_file: Some(files.path("no-such-token")),
+                ..full.clone()
+            },
+            "token_file: ",
+        ),
+        // A state root that is not there holds no credential: the token file is read.
+        (
+            ConnectParams {
+                state_root: Some(files.path("no-such-state")),
                 token_file: Some(files.path("no-such-token")),
                 ..full.clone()
             },
@@ -416,10 +423,16 @@ fn the_machine_reads_the_declaration_the_updater_installs_and_looks_at_directori
     let root = File::open("/").unwrap();
     let stat = (Machine::system().stat)(Path::new("/"), std::os::fd::AsFd::as_fd(&root)).unwrap();
     assert!(stat.is_dir && !stat.is_symlink);
-    // The machine's own id is a host id the way the agent makes one, or it cannot be read.
-    if let Ok(id) = (Machine::system().own_host_id)() {
-        assert!(id.starts_with("h-") && id.len() == 34, "{id}");
-    }
+    // The machine's own id is read the way the agent reads it, on this platform: the same id,
+    // or the same error when this host has none.
+    assert_eq!(
+        (Machine::system().own_host_id)(),
+        own_host_id(
+            &js_agent::Platform::current(),
+            &js_agent::SystemCommands::default(),
+            &js_agent::SystemFiles
+        )
+    );
 }
 
 #[test]

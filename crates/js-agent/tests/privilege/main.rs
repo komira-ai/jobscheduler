@@ -19,6 +19,7 @@
 
 mod egress;
 mod harness;
+mod hook_root;
 mod init_ns;
 mod layout;
 mod quota;
@@ -35,5 +36,6 @@ fn probe(name: &str) -> Vec<Kv> {
         .or_else(|| quota::probe(name))
         .or_else(|| layout::probe(name))
         .or_else(|| state_dir::probe(name))
+        .or_else(|| hook_root::probe(name))
         .unwrap_or_else(|| panic!("no probe named {name}"))
 }

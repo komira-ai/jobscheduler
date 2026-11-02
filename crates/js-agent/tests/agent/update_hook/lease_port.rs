@@ -364,9 +364,11 @@ fn the_credential_comes_from_the_token_file_the_params_name_and_a_bad_one_is_nam
     assert_eq!(counting.stop(), 0, "no refused client sent a request");
 
     let tree = Tree::new("hook-lease-port-token-prepare");
+    // A private state root with no credential in it, as an update needs: the token file is read.
     let lines = format!(
-        "server = \"{url}\"\ntoken_file = \"{}\"\nhost_id = \"mac-1\"\n",
-        missing.display()
+        "server = \"{url}\"\ntoken_file = \"{}\"\nhost_id = \"mac-1\"\n{}",
+        missing.display(),
+        tree.state_line()
     );
     let done = tree.run(Step::Prepare, &tree.params(true, &lines), Err("unused"));
     assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
