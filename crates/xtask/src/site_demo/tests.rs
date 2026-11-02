@@ -1,4 +1,6 @@
 use std::cell::Cell;
+use std::io::ErrorKind;
+use std::os::unix::process::ExitStatusExt as _;
 
 use super::*;
 
@@ -26,6 +28,10 @@ fn clock() -> FakeClock {
     }
 }
 
+fn addr(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+}
+
 /// Catches the commands drifting from what the page shows: the default recording's six command lines, word
 /// for word (the server start has its `&` and no `--listen`, the release names the id).
 #[test]
@@ -45,12 +51,14 @@ fn the_default_recording_runs_these_six_commands() {
 }
 
 /// Catches a port that reaches the client and not the server (or the reverse), and the default port given a
-/// `--listen` the recording does not show.
+/// `--listen` the recording does not show; port 0 is asked of the server as 0.
 #[test]
 fn another_port_reaches_the_server_and_every_client_command() {
     assert!(!server_args(DEFAULT_PORT).contains(&"--listen".to_owned()));
     let server = server_args(7411);
     assert_eq!(server[server.len() - 2..], ["--listen", "127.0.0.1:7411"]);
+    let any = server_args(0);
+    assert_eq!(any[any.len() - 2..], ["--listen", "127.0.0.1:0"]);
     for args in [
         acquire_args(7411),
         list_args(7411),
@@ -119,33 +127,33 @@ fn the_recorder_writes_the_host_file_then_each_command_with_its_output() {
 }
 
 /// Catches a wait that never ends or ends early: ready on the third probe after two sleeps of the
-/// interval, with no sleep once ready.
+/// interval, with no sleep once ready, and the value the probe gave comes back.
 #[test]
 fn the_wait_ends_when_the_probe_says_ready() {
     let answers = Cell::new(0);
     let mut c = clock();
     let probe = || {
         answers.set(answers.get() + 1);
-        Ok(answers.get() == 3)
+        Ok::<_, ()>((answers.get() == 3).then_some("up"))
     };
     let interval = Duration::from_millis(100);
     assert_eq!(
         wait_ready(probe, &mut c, Duration::from_secs(10), interval),
-        Ok(())
+        Ok(Some("up"))
     );
     assert_eq!(answers.get(), 3);
     assert_eq!(c.sleeps, [interval; 2]);
 }
 
 /// Catches a wait without a deadline (the check can fail): a probe that never says ready gives up once the
-/// timeout has passed, after about timeout/interval probes, and names the timeout.
+/// timeout has passed by the clock, after timeout/interval + 1 probes, and says nothing was ready.
 #[test]
 fn a_server_that_never_answers_ends_the_wait_at_the_deadline() {
     let answers = Cell::new(0);
     let mut c = clock();
     let probe = || {
         answers.set(answers.get() + 1);
-        Ok(false)
+        Ok::<Option<()>, ()>(None)
     };
     let result = wait_ready(
         probe,
@@ -153,10 +161,7 @@ fn a_server_that_never_answers_ends_the_wait_at_the_deadline() {
         Duration::from_secs(1),
         Duration::from_millis(250),
     );
-    assert_eq!(
-        result,
-        Err("the server did not answer within 1s".to_owned())
-    );
+    assert_eq!(result, Ok(None));
     assert_eq!(answers.get(), 5);
     assert_eq!(c.now, Duration::from_secs(1));
 }
@@ -166,12 +171,12 @@ fn a_server_that_never_answers_ends_the_wait_at_the_deadline() {
 fn a_probe_error_ends_the_wait_without_sleeping() {
     let mut c = clock();
     let result = wait_ready(
-        || Err("it died".to_owned()),
+        || Err::<Option<()>, _>("it died"),
         &mut c,
         Duration::from_secs(9),
         Duration::from_secs(1),
     );
-    assert_eq!(result, Err("it died".to_owned()));
+    assert_eq!(result, Err("it died"));
     assert!(c.sleeps.is_empty());
 }
 
@@ -191,54 +196,233 @@ fn only_a_200_status_line_is_healthy() {
     }
 }
 
-/// Catches the real clock standing still or sleeping nothing.
+/// Catches the server's address read from the wrong line: the first `listening on <address>` line among
+/// other output; none from lines that only look like it.
 #[test]
-fn the_system_clock_counts_time_and_sleeps() {
-    let mut c = SystemClock::start();
-    c.sleep(Duration::from_millis(5));
-    assert!(c.elapsed() >= Duration::from_millis(5));
+fn the_listening_address_is_the_one_the_server_printed() {
+    assert_eq!(
+        listening_addr(
+            "server: warning: x\nlistening on 127.0.0.1:41234\nlistening on 127.0.0.1:9\n"
+        ),
+        Some(addr(41234))
+    );
+    for log in [
+        "",
+        "listening on\n",
+        "listening on not-an-address\n",
+        "bound 127.0.0.1:41234\n",
+        " listening on 127.0.0.1:41234\n",
+    ] {
+        assert_eq!(listening_addr(log), None, "{log:?}");
+    }
 }
 
-/// Catches a probe that calls a port nothing listens on healthy.
+/// Catches an answer of the probe misread, with every outcome injected and no socket: a 200 is ready, any
+/// other status is not yet, the failures of a server still coming up (refused, reset, no answer in time, an
+/// early close) are not yet, and any other failure ends the wait naming the address and keeping its cause.
 #[test]
-fn a_port_nothing_listens_on_is_not_healthy() {
-    // The reservation is dropped with the statement: the port is free again.
-    let port = js_testkit::port::Reserved::new().port();
-    assert!(!probe_healthz(port));
-}
-
-/// Serves one connection on a port of its own with `answer` (nothing: it reads the request and holds the
-/// connection open without a word), and returns the port.
-fn serve_once(answer: &'static str) -> u16 {
-    use std::io::Read as _;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let port = listener.local_addr().expect("address").port();
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let mut request = [0u8; 256];
-        let _ = stream.read(&mut request);
-        if answer.is_empty() {
-            std::thread::sleep(Duration::from_millis(900));
-        } else {
-            let _ = stream.write_all(answer.as_bytes());
+fn a_probe_answer_is_ready_not_yet_or_a_failure() {
+    let at = addr(4000);
+    assert!(matches!(
+        judge(at, Ok("HTTP/1.1 200 OK\r\n".to_owned())),
+        Ok(Some(a)) if a == at
+    ));
+    assert!(matches!(
+        judge(at, Ok("HTTP/1.1 503 Service Unavailable\r\n".to_owned())),
+        Ok(None)
+    ));
+    for kind in [
+        ErrorKind::ConnectionRefused,
+        ErrorKind::ConnectionReset,
+        ErrorKind::TimedOut,
+        ErrorKind::UnexpectedEof,
+        ErrorKind::WouldBlock,
+    ] {
+        assert!(matches!(judge(at, Err(kind.into())), Ok(None)), "{kind:?}");
+    }
+    match judge(at, Err(ErrorKind::PermissionDenied.into())) {
+        Err(Error::Probe { url, source }) => {
+            assert_eq!(url, "http://127.0.0.1:4000");
+            assert_eq!(source.kind(), ErrorKind::PermissionDenied);
         }
-    });
-    port
+        other => panic!("{other:?}"),
+    }
 }
 
-/// Catches a probe that takes any answer, or a silent one, for healthy: a 200 is, a 503 is not, and a server
-/// that accepts and says nothing within the read timeout is not.
+/// Catches scratch files made wrong: the host file, an owner-only token file and an empty log are made, and
+/// a directory that is not there is a failure, not a panic.
 #[test]
-fn the_probe_wants_a_200_from_the_server() {
-    assert!(probe_healthz(serve_once("HTTP/1.1 200 OK\r\n\r\n")));
-    assert!(!probe_healthz(serve_once(
-        "HTTP/1.1 503 Service Unavailable\r\n\r\n"
-    )));
-    assert!(!probe_healthz(serve_once("")));
+fn the_scratch_files_are_made_and_a_missing_directory_fails() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = TestDir::under(std::env::temp_dir(), "site-demo-prepare");
+    prepare(&dir).expect("prepare");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("hosts.toml")).expect("hosts"),
+        HOSTS_TOML
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join(TOKEN_FILE)).expect("token"),
+        format!("{TOKEN}\n")
+    );
+    let mode = std::fs::metadata(dir.join(TOKEN_FILE))
+        .expect("token")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("server.log")).expect("log"),
+        ""
+    );
+    // A second preparation of the same directory finds the token file there.
+    let again = prepare(&dir).expect_err("the token file exists");
+    assert_eq!(again.kind(), ErrorKind::AlreadyExists);
+    let missing = prepare(&dir.join("missing")).expect_err("no directory");
+    assert_eq!(missing.kind(), ErrorKind::NotFound);
 }
 
-/// Catches the error's text losing its verb name.
+/// Catches an error that tells less than it knows: each variant's whole message, word for word.
 #[test]
-fn an_error_names_the_verb() {
-    assert_eq!(Error("boom".to_owned()).to_string(), "site-demo: boom");
+fn each_error_says_what_failed_and_with_what() {
+    let failed = ExitStatus::from_raw(1 << 8);
+    let denied = || std::io::Error::from(ErrorKind::PermissionDenied);
+    let cases = [
+        (
+            Error::BuildFailed {
+                command: "cargo build --release".to_owned(),
+                status: failed,
+            },
+            "`cargo build --release` ended with exit status: 1",
+        ),
+        (
+            Error::Spawn {
+                program: "cargo".to_owned(),
+                source: denied(),
+            },
+            "cannot start cargo: permission denied",
+        ),
+        (
+            Error::ResolveBinDir {
+                path: PathBuf::from("bins"),
+                source: denied(),
+            },
+            "cannot resolve bins: permission denied",
+        ),
+        (
+            Error::Scratch {
+                path: PathBuf::from("scratch"),
+                source: denied(),
+            },
+            "cannot prepare the scratch directory scratch: permission denied",
+        ),
+        (
+            Error::ServerExited {
+                status: failed,
+                log: "no token".to_owned(),
+            },
+            "js-lease-server ended with exit status: 1 before it answered: no token",
+        ),
+        (
+            Error::NotReady {
+                url: "http://127.0.0.1:7300".to_owned(),
+                timeout: Duration::from_secs(30),
+            },
+            "http://127.0.0.1:7300 did not answer 200 within 30s",
+        ),
+        (
+            Error::Probe {
+                url: "http://127.0.0.1:7300".to_owned(),
+                source: denied(),
+            },
+            "cannot ask http://127.0.0.1:7300: permission denied",
+        ),
+        (
+            Error::Client {
+                command: "js lease list".to_owned(),
+                status: failed,
+                output: "refused".to_owned(),
+            },
+            "`js lease list` ended with exit status: 1: refused",
+        ),
+        (
+            Error::NoLeaseId {
+                output: "nothing".to_owned(),
+            },
+            "`js lease acquire` printed no lease id: nothing",
+        ),
+        (
+            Error::CreateDir {
+                path: PathBuf::from("out"),
+                source: denied(),
+            },
+            "cannot make the directory out: permission denied",
+        ),
+        (
+            Error::WriteTranscript {
+                path: PathBuf::from("out/demo.transcript"),
+                source: denied(),
+            },
+            "cannot write out/demo.transcript: permission denied",
+        ),
+    ];
+    for (error, message) in cases {
+        assert_eq!(error.to_string(), message);
+    }
+}
+
+/// Catches a cause lost: an error built from an I/O failure hands that failure back as its source.
+#[test]
+fn an_io_error_stays_the_source_of_its_variant() {
+    use std::error::Error as _;
+    let error = Error::WriteTranscript {
+        path: PathBuf::from("x"),
+        source: ErrorKind::NotFound.into(),
+    };
+    let source = error.source().expect("a source");
+    assert_eq!(source.to_string(), "entity not found");
+    assert!(
+        Error::NoLeaseId {
+            output: String::new()
+        }
+        .source()
+        .is_none()
+    );
+}
+
+/// The committed recording, read: its commands and its first lines.
+fn committed() -> String {
+    std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../site/test/demo.transcript"),
+    )
+    .expect("site/test/demo.transcript")
+}
+
+/// Catches the recording on the landing page and the verb that makes it drifting apart (this is the check
+/// that cannot be forgotten: it reads the committed file, so it fails whichever was edited alone): the host
+/// block opens the file, and every `$ ` line is exactly the command the verb runs on the default port for
+/// the lease the recording acquired.
+#[test]
+fn committed_transcript_shows_the_commands_this_verb_runs() {
+    let text = committed();
+    assert!(
+        text.starts_with(&Recorder::with_host_file().finish()),
+        "the host file block"
+    );
+    let id = text
+        .lines()
+        .find_map(|l| l.strip_prefix("lease ")?.split(' ').next())
+        .expect("an acquired lease");
+    let shown: Vec<&str> = text.lines().filter_map(|l| l.strip_prefix("$ ")).collect();
+    assert_eq!(shown, commands(7300, id));
+}
+
+/// Catches a check that passes for any file (the check can fail): the same comparison on a transcript with
+/// one flag changed does not hold.
+#[test]
+fn a_transcript_with_a_changed_command_does_not_match_the_verb() {
+    let edited = committed().replace("--gpus 1", "--gpus 2");
+    let shown: Vec<&str> = edited
+        .lines()
+        .filter_map(|l| l.strip_prefix("$ "))
+        .collect();
+    assert_ne!(shown, commands(7300, "1-1"));
 }

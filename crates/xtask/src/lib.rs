@@ -56,7 +56,7 @@ pub mod site_demo;
 pub mod test_build;
 
 /// Why a verb failed.
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A release verb failed.
     #[error(transparent)]
@@ -77,7 +77,7 @@ pub enum Error {
     #[error("the program ended with status {0}")]
     Child(u8),
     /// The site demonstration could not be recorded.
-    #[error(transparent)]
+    #[error("site-demo: {0}")]
     SiteDemo(#[from] site_demo::Error),
     /// The real-crun tests, or the build of their targets, failed.
     #[error(transparent)]
@@ -267,6 +267,7 @@ fn run(cli: Cli) -> Result<String, Error> {
                 root: &root,
                 bin_dir: bin_dir.as_deref(),
                 out: &out,
+                scratch: &std::env::temp_dir(),
                 port,
                 ready_timeout: std::time::Duration::from_secs(ready_timeout),
             })?)

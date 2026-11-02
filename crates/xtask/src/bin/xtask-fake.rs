@@ -19,26 +19,39 @@
 //!
 //! - Run as `js-lease-server`, it is the lease server of `site-demo`: it exits 5 unless its working
 //!   directory holds `hosts.toml` and the `--token-file` it is given with mode 0600, then listens on
-//!   `--listen` (default 127.0.0.1:7300) and answers every request `200 ok` (`503` under `server-unhealthy`), and exits 0 after a `GET /quit`.
+//!   `--listen` (default 127.0.0.1:0, a port of the system's choosing), prints `listening on <address>`
+//!   with the address it bound, answers every request `200 ok` (`503` under `server-unhealthy`), and
+//!   exits 0 after a `GET /quit`.
 //! - Run as `js`, it is the client of `site-demo`: it answers `lease acquire`, `lease list` and `lease release <id>` from the file `fake-lease` in its
 //!   working directory (acquire makes it, release removes it, list prints it when it exists).
 //!
-//! `XTASK_FAKE_DEFECT` asks for one failure of the real programs: `build-fails` (every build
+//! `XTASK_FAKE_DEFECT`, or the first line of a file named `defect` next to the program, asks for one
+//! failure of the real programs: `build-fails` (every build
 //! exits 101) or `fails:<a>,<b>,...` (sudo exits 101, as a failed test binary does, when one
 //! of its arguments is one of `<a>`, `<b>`, ...: an argument every unit has fails them all,
 //! a target's binary fails only its unit), `unit-fails` (the `systemd-run` exits 0 but the
 //! unit's own result is `exit-code` with status 101: the failure `systemd-run` once hid),
 //! `show-fails` (`systemctl show` exits 1) or `show-garbled` (it prints what is not
-//! `Key=Value`), `server-dies` (the server exits 3 with a line on stderr), `server-unhealthy` (it answers
+//! `Key=Value`), `server-dies` (the server exits 3 with a line on stderr), `server-unannounced` (it serves, but
+//! prints `bound <address>` instead of `listening on <address>`), `server-unhealthy` (it answers
 //! 503 to everything), `js-fails` (the client exits 4 with a line on stderr) or `js-no-lease` (acquire prints no lease).
 
 use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
-/// The failure asked for, if any.
+/// The failure asked for, if any: `XTASK_FAKE_DEFECT`, or else the first line of the file `defect` next
+/// to this program (a test that runs fakes from its own process cannot set the environment for them).
 fn defect() -> String {
-    std::env::var("XTASK_FAKE_DEFECT").unwrap_or_default()
+    let asked = std::env::var("XTASK_FAKE_DEFECT").unwrap_or_default();
+    if !asked.is_empty() {
+        return asked;
+    }
+    let me = std::env::args().next().unwrap_or_default();
+    std::fs::read_to_string(Path::new(&me).with_file_name("defect"))
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
 }
 
 /// Appends `line` to the file `path`, making it if needed.
@@ -151,8 +164,15 @@ fn lease_server(args: &[String]) -> ExitCode {
         .iter()
         .position(|a| a == "--listen")
         .and_then(|i| args.get(i + 1))
-        .map_or("127.0.0.1:7300", String::as_str);
+        .map_or("127.0.0.1:0", String::as_str);
     let listener = std::net::TcpListener::bind(listen).expect("bind");
+    let announce = if defect() == "server-unannounced" {
+        "bound"
+    } else {
+        "listening on"
+    };
+    println!("{announce} {}", listener.local_addr().expect("address"));
+    std::io::stdout().flush().expect("flush");
     let unhealthy = defect() == "server-unhealthy";
     // Until a request for `/quit` (a test that wants the exit status; the verb's own servers are killed).
     loop {

@@ -7,7 +7,7 @@
 // out), a server flag that crates/js-lease-server/src/lib.rs does not document, and a recording whose commands are no
 // longer the ones `cargo xtask site-demo` (crates/xtask/src/site_demo.rs) runs. The recording itself is the output of
 // that command; no site test runs it, because it builds the workspace. The Rust test
-// `committed_transcript_shows_the_commands_this_verb_runs` (crates/xtask/tests/site_demo.rs) reads this transcript and
+// `committed_transcript_shows_the_commands_this_verb_runs` (crates/xtask/src/site_demo/tests.rs) reads this transcript and
 // compares every `$` line with the commands the Rust code builds, so a command changed in one place and not the other
 // fails there; the tests here hold the other side: that the Rust source still has every word of every recorded command,
 // and that the Rust test is still there and still reads this file.
@@ -23,7 +23,7 @@ const indexHtml = readFileSync(join(SITE, 'content', 'index.html'), 'utf8');
 const cliDocs = readFileSync(join(REPO, 'crates', 'js-cli', 'src', 'lib.rs'), 'utf8');
 const serverDocs = readFileSync(join(REPO, 'crates', 'js-lease-server', 'src', 'lib.rs'), 'utf8');
 const demoSource = readFileSync(join(REPO, 'crates', 'xtask', 'src', 'site_demo.rs'), 'utf8');
-const demoRustTest = readFileSync(join(REPO, 'crates', 'xtask', 'tests', 'site_demo.rs'), 'utf8');
+const demoRustTest = readFileSync(join(REPO, 'crates', 'xtask', 'src', 'site_demo', 'tests.rs'), 'utf8');
 const xtaskDocs = readFileSync(join(REPO, 'crates', 'xtask', 'src', 'lib.rs'), 'utf8');
 
 /** The text of the demo block of a page: the <pre> inside the section with id "demo", markup removed and entities read. */
