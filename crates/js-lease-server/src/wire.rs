@@ -36,6 +36,9 @@ pub(crate) struct AcquireBody {
     probe_host: Option<String>,
 }
 
+/// The reason of the 400 for a `probe_host` that is not a host id.
+const PROBE_HOST_INVALID: &str = "probe_host is not a valid host id";
+
 /// The resources of an [`AcquireBody`]; a dimension left out is zero.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,12 +65,8 @@ impl AcquireBody {
     pub(crate) fn into_parts(self) -> Result<(Request, Option<Duration>), ApiError> {
         let class = ClassId::new(&self.class)
             .map_err(|_| ApiError::bad_request("class is not a valid class id"))?;
-        let probe_host = self
-            .probe_host
-            .as_deref()
-            .map(HostId::new)
-            .transpose()
-            .map_err(|_| ApiError::bad_request("probe_host is not a valid host id"))?;
+        let probe_host = self.probe_host.as_deref().map(HostId::new).transpose();
+        let probe_host = probe_host.map_err(|_| ApiError::bad_request(PROBE_HOST_INVALID))?;
         let resources = &self.resources;
         let (cpu, memory, gpus) = (resources.cpu_millis, resources.memory_bytes, resources.gpus);
         let resources =

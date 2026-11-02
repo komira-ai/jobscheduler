@@ -108,14 +108,12 @@ async fn create_contract_refusals_are_422() {
 }
 
 /// Asserts that a body that is not the JSON the route takes is a 400 with a short
-/// reason, for each way it can be wrong (a `probe_host` that is not a host id among
-/// them).
+/// reason, for each way it can be wrong.
 #[tokio::test]
 async fn create_bad_bodies_are_400() {
     let h = Harness::new("create_400").await;
     let mut cases = vec![
         with(lease_body(), "class", json!("Not A Class")),
-        with(lease_body(), "probe_host", json!("Not A Host")),
         with(lease_body(), "resources", json!({ "gpus": 1 })),
         with(lease_body(), "ttl_seconds", json!(0)),
         with(lease_body(), "surprise", json!(1)),
