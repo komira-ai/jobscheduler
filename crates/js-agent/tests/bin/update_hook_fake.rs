@@ -43,7 +43,7 @@ use fakes::harness::{
     MirroringGate, STATE_DIR_VAR, StagedAgent, WORLD_VAR, arranged, declaration, mirror_ownership,
 };
 #[cfg(target_os = "linux")]
-use fakes::watchdog::{self, DEFAULT_WINDOW_MS, WINDOW_VAR, Window};
+use fakes::watchdog::{self, DEFAULT_WINDOW_MS, WINDOW_VAR};
 
 /// The directory a flag or its variable names.
 #[cfg(target_os = "linux")]
@@ -93,13 +93,10 @@ struct Setup {
 /// so does this, with a signal, so the harness sees a step that died of one.
 #[cfg(target_os = "linux")]
 fn hung(asked: Duration) {
-    eprintln!(
-        "js-update-hook-fake: the step asked to wait {} s, past its declared timeout: stopped as the updater would stop it",
+    watchdog::kill_step(&format!(
+        "the step asked to wait {} s, past its declared timeout, as the updater would stop it",
         asked.as_secs()
-    );
-    // SIGKILL, as the updater sends: no core file, nothing more runs.
-    let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
-    std::process::exit(1);
+    ));
 }
 
 /// The kill points, keeping the world's view of the record as the record says.
@@ -139,6 +136,7 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
         fault,
         silent_start: hang,
         stall: setup.defect == Some(Defect::Stall),
+        point_loop: setup.defect == Some(Defect::PointLoop),
         keeps_cordon: step_now == Step::Cleanup && setup.defect == Some(Defect::ForgetsCordon),
         control: &setup.control,
     };
@@ -222,17 +220,19 @@ fn main() -> ExitCode {
         eprintln!("js-update-hook-fake: the pending hello could not be delivered: {why}");
         return ExitCode::from(2);
     }
-    let window = std::env::var_os(WINDOW_VAR)
-        .and_then(|ms| ms.to_str()?.parse().ok())
-        .map_or(
-            Duration::from_millis(DEFAULT_WINDOW_MS),
-            Duration::from_millis,
-        );
-    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    let window = std::env::var_os(WINDOW_VAR);
+    let on_stall = window.as_deref() == Some(std::ffi::OsStr::new(watchdog::ON_STALL));
+    let span = window.and_then(|ms| ms.to_str()?.parse().ok()).map_or(
+        Duration::from_millis(DEFAULT_WINDOW_MS),
+        Duration::from_millis,
+    );
     std::thread::spawn(move || {
-        let mut wait = || match stopped.recv_timeout(window) {
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Window::Passed,
-            _ => Window::Stopped,
+        let mut wait = || {
+            if on_stall {
+                watchdog::wait_announced()
+            } else {
+                watchdog::wait_for(span)
+            }
         };
         watchdog::watch(&watchdog::events, &mut wait, &stalled);
     });
@@ -245,17 +245,14 @@ fn main() -> ExitCode {
         &mut stdout
     };
     let code = run(&args, out, &mut std::io::stderr(), &Host { step: &body });
-    drop(stop);
+    watchdog::finish();
     code
 }
 
-/// The watchdog fired: no progress event in a whole window. The step's process group is killed,
-/// as the updater kills a step past its timeout.
+/// The watchdog fired: no progress event in a whole window.
 #[cfg(target_os = "linux")]
 fn stalled() {
-    eprintln!("js-update-hook-fake: the step made no progress in a watch window: stopped");
-    let _ = rustix::process::kill_current_process_group(rustix::process::Signal::KILL);
-    std::process::exit(1);
+    watchdog::kill_step("the step made no progress in a watch window");
 }
 
 /// The hook is Linux code here (the fakes are); on any other target this test binary only says

@@ -116,7 +116,7 @@ pub enum Violation {
         /// The package.
         package: String,
     },
-    /// A dependency from kbf's repository other than the one it allows: [`KBF_CONTRACT`],
+    /// A dependency from kbf's repository other than the one it allows: `update-hook`,
     /// as a dev-dependency.
     FromKbf {
         /// The manifest.
@@ -131,7 +131,7 @@ pub enum Violation {
 /// hook's tests run. It depends on no other crate of kbf (kbf's own layering test keeps it
 /// so), and it is pinned by revision. Anything else from kbf's repository is refused, by any
 /// name.
-pub const KBF_CONTRACT: &str = "update-hook";
+const KBF_CONTRACT: &str = "update-hook";
 
 /// Whether a dependency's declaration names kbf's repository as its git source.
 fn from_kbf_repo(dep: &toml::Value) -> bool {

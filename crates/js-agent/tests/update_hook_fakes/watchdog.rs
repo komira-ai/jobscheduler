@@ -14,11 +14,24 @@
 //! fakes; it is no bound on an arbitrary hook binary the harness might start, whose waits the
 //! harness itself does not bound.
 //!
-//! What a window is, is injected ([`watch`]'s `wait`): the binary waits a span of real time,
-//! and only ever to end a step that has stopped making progress. A test of the watchdog itself
+//! What a window is, is injected ([`watch`]'s `wait`): the binary waits a span of real time
+//! ([`wait_for`]), and only ever to end a step that has stopped making progress; with
+//! [`ON_STALL`] it waits for the step's own announcement that it is stuck ([`announce_stall`],
+//! [`wait_announced`]), so a test of a stuck step reads no clock. A test of the watchdog itself
 //! gives it windows that end when the test says.
+//!
+//! Progress cannot keep a step alive for ever: a step that reaches more than [`MAX_POINTS`]
+//! kill points is killed as well ([`point`]). A loop that changes things without pausing is
+//! bounded by its kill points, one that pauses by the hang guard, one that does neither by the
+//! window.
+//!
+//! The kill is of the step's process group only when the step leads that group, as the harness
+//! makes it ([`kill_step`]); otherwise only the step itself is killed, so a caller that started
+//! the binary in its own group is never signalled.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 /// Progress events of this process: kill points and pauses.
 static PROGRESS: AtomicU64 = AtomicU64::new(0);
@@ -30,9 +43,92 @@ pub const WINDOW_VAR: &str = "UPDATE_HOOK_FAKE_WATCH_MS";
 /// of the fakes takes between two events, which is a few file operations.
 pub const DEFAULT_WINDOW_MS: u64 = 60_000;
 
+/// The value of [`WINDOW_VAR`] that makes a window end at the step's own announcement that it
+/// is stuck, never at a time.
+pub const ON_STALL: &str = "on-stall";
+
+/// The most kill points one step may reach; far more than any step of the hook reaches (its
+/// waits renew a cordon a few dozen times at most).
+pub const MAX_POINTS: u64 = 10_000;
+
+/// Kill points of this process.
+static POINTS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the step is stuck, and whether it is over.
+static STATE: Mutex<(bool, bool)> = Mutex::new((false, false));
+static CHANGED: Condvar = Condvar::new();
+
 /// One progress event of the step.
 pub fn progress() {
     PROGRESS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// One kill point: a progress event, and `true` once the step has reached more than
+/// [`MAX_POINTS`] of them.
+pub fn point() -> bool {
+    progress();
+    POINTS.fetch_add(1, Ordering::SeqCst) + 1 > MAX_POINTS
+}
+
+/// The step is stuck in a call that will not return ([`ON_STALL`]).
+pub fn announce_stall() {
+    let mut state = STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.0 = true;
+    CHANGED.notify_all();
+}
+
+/// The step is over: the watchdog stops at its next window.
+pub fn finish() {
+    let mut state = STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.1 = true;
+    CHANGED.notify_all();
+}
+
+/// A window of `span` of real time, ended early when the step is over.
+pub fn wait_for(span: Duration) -> Window {
+    let state = STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (state, _) = CHANGED
+        .wait_timeout_while(state, span, |state| !state.1)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state.1 {
+        Window::Stopped
+    } else {
+        Window::Passed
+    }
+}
+
+/// A window that ends when the step announces it is stuck, or is over; no time is read.
+pub fn wait_announced() -> Window {
+    let state = STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let state = CHANGED
+        .wait_while(state, |state| !state.0 && !state.1)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state.1 {
+        Window::Stopped
+    } else {
+        Window::Passed
+    }
+}
+
+/// Ends the step as the updater ends one past its timeout, with SIGKILL: its whole process
+/// group when it leads one (the harness starts it so), else only itself.
+pub fn kill_step(why: &str) -> ! {
+    use rustix::process::{Signal, getpgrp, getpid, kill_current_process_group, kill_process};
+    eprintln!("js-update-hook-fake: {why}: stopped");
+    if getpgrp() == getpid() {
+        let _ = kill_current_process_group(Signal::KILL);
+    } else {
+        let _ = kill_process(getpid(), Signal::KILL);
+    }
+    std::process::exit(1)
 }
 
 /// The events counted so far.

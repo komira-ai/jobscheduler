@@ -52,8 +52,8 @@ pub(super) struct AgentHost {
     defect: Option<Defect>,
     /// An operator has cordoned the host before the update.
     operator_cordon: bool,
-    /// The watchdog window of the binary, in milliseconds; its default when `None`.
-    window_ms: Option<u64>,
+    /// The watchdog window of the binary (`UPDATE_HOOK_FAKE_WATCH_MS`); its default when `None`.
+    window: Option<&'static str>,
     /// Readings of the host during `prepare` that still show a job draining
     /// ([`harness::DRAIN_LOOKS`]).
     drain_looks: u64,
@@ -65,7 +65,7 @@ impl AgentHost {
             first_install: false,
             defect: None,
             operator_cordon: false,
-            window_ms: None,
+            window: None,
             drain_looks: 0,
         }
     }
@@ -77,10 +77,18 @@ impl AgentHost {
         }
     }
 
-    fn with_defect(defect: Defect) -> AgentHost {
+    pub(super) fn with_defect(defect: Defect) -> AgentHost {
         AgentHost {
             defect: Some(defect),
             ..AgentHost::update()
+        }
+    }
+
+    /// The watchdog's windows end at the step's announcement that it is stuck, never at a time.
+    pub(super) fn on_stall(self) -> AgentHost {
+        AgentHost {
+            window: Some(super::fakes::watchdog::ON_STALL),
+            ..self
         }
     }
 
@@ -166,8 +174,8 @@ impl FakeService for AgentHost {
         if let Some(defect) = self.defect {
             env.push((DEFECT_VAR.into(), defect.word().into()));
         }
-        if let Some(ms) = self.window_ms {
-            env.push((WINDOW_VAR.into(), ms.to_string().into()));
+        if let Some(window) = self.window {
+            env.push((WINDOW_VAR.into(), window.into()));
         }
         env
     }
@@ -482,17 +490,30 @@ fn a_kill_point_that_cannot_be_counted_fails_the_run_visibly() {
 }
 
 /// A step that blocks without ever pausing (a call that never returns) is ended by the
-/// watchdog thread: the step's whole process group is killed, the harness reaps it and refuses
-/// the stalled step, `verify`, as one that died of a signal. The window is two seconds, far longer
-/// than any step of the fakes takes between two progress events, so the steps before `verify`
-/// are never cut; `verify` never makes progress, so it dies whatever the window.
+/// watchdog thread: the step's whole process group is killed, and the harness reaps it and
+/// refuses the stalled step, `verify`, as one that died of a signal. The watchdog's window ends
+/// when the stuck call announces itself, so nothing here depends on how long any step takes.
 #[test]
 fn a_step_that_blocks_without_pausing_is_killed_by_the_watchdog_and_refused() {
-    let host = AgentHost {
-        window_ms: Some(2000),
-        ..AgentHost::with_defect(Defect::Stall)
-    };
+    let host = AgentHost::with_defect(Defect::Stall).on_stall();
     let refused = run("hook-conf-stall", host, |harness| harness.idempotence()).unwrap_err();
+    assert!(
+        matches!(refused, Violation::DiedBySignal { step: Step::Verify }),
+        "{refused}"
+    );
+}
+
+/// A step that loops for ever reaching kill points and never pausing makes progress the
+/// watchdog sees, and is ended all the same once it passes the bound on kill points; the harness
+/// refuses it as one that died of a signal. Counted, not timed.
+#[test]
+fn a_step_that_reaches_kill_points_for_ever_is_killed_and_refused() {
+    let refused = run(
+        "hook-conf-point-loop",
+        AgentHost::with_defect(Defect::PointLoop),
+        |harness| harness.idempotence(),
+    )
+    .unwrap_err();
     assert!(
         matches!(refused, Violation::DiedBySignal { step: Step::Verify }),
         "{refused}"

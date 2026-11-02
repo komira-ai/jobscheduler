@@ -2,6 +2,7 @@
 //! it: a process, the fakes' directories on its command line or in its variables, a params
 //! file. It runs the hook's own steps.
 
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -20,7 +21,10 @@ const PARAMS: &str = concat!(
 );
 
 fn run(args: &[&str], envs: &[(&str, &str)]) -> (Option<i32>, String, String) {
+    // A group of its own, as the harness starts it: a watchdog that fires kills only the
+    // binary's group, never the test's.
     let out = Command::new(BIN)
+        .process_group(0)
         .args(args)
         .env_clear()
         .envs(envs.iter().copied())

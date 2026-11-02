@@ -98,6 +98,12 @@ impl Bed {
 
     /// Runs `step`; with `kill_at` above zero, kills it at that kill point.
     fn run(&self, step: Step, kill_at: u64) -> Ran {
+        self.run_grouped(step, kill_at, true)
+    }
+
+    /// [`Bed::run`], in a process group of the run's own (as the harness starts a step) or,
+    /// with `own_group` false, in the test's.
+    fn run_grouped(&self, step: Step, kill_at: u64, own_group: bool) -> Ran {
         let count = self.sandbox.control().join(COUNT_FILE);
         fs::write(&count, b"").unwrap();
         let mut command = Command::new(BIN);
@@ -105,7 +111,7 @@ impl Bed {
         if step == Step::Prepare {
             command.arg(self.sandbox.artifact());
         }
-        let mut child = command
+        command
             .arg("--params")
             .arg(self.sandbox.control().join("params.toml"))
             .env_clear()
@@ -115,10 +121,11 @@ impl Bed {
             .current_dir(self.sandbox.root())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        if own_group {
+            command.process_group(0);
+        }
+        let mut child = command.spawn().unwrap();
         let mut out = child.stdout.take().unwrap();
         let stdout = std::thread::spawn(move || {
             let mut text = String::new();
@@ -430,7 +437,13 @@ fn rollback_killed_at_every_kill_point_after_a_cut_short_step_reaches_its_uninte
             };
             let whole = Bed::update(&format!("{name}-whole"));
             setup(&whole);
-            let rollback_points = whole.run(Step::Rollback, 0).points;
+            let baseline = whole.run(Step::Rollback, 0);
+            assert_eq!(
+                baseline.outcome(),
+                Outcome::Success,
+                "{cut} cut at {cut_at}: the uninterrupted rollback: {baseline:?}"
+            );
+            let rollback_points = baseline.points;
             swept.push((cut, cut_at, rollback_points));
             let want = whole.state();
             for kill_at in 1..=rollback_points {
@@ -528,4 +541,101 @@ fn a_rollback_that_fails_repeats_then_resumes_once_the_fault_is_gone() {
     bed.clear(Step::Rollback);
     bed.ok(Step::Rollback);
     same(&want, &without_stamps(bed.state()), "rollback resumed");
+}
+
+/// A watchdog that fires in a binary started in its caller's process group kills only the
+/// binary: the test that started it is alive to see it die of SIGKILL. The stuck call announces
+/// itself, so the watchdog fires without a clock.
+#[test]
+fn a_watchdog_in_its_callers_process_group_kills_only_the_binary() {
+    use super::fakes::harness::Defect;
+    use std::os::unix::process::ExitStatusExt;
+    let bed = Bed::new(
+        "hook-runs-callers-group",
+        AgentHost::with_defect(Defect::Stall).on_stall(),
+    );
+    bed.ok(Step::Prepare);
+    bed.ok(Step::Cutover);
+    let mut command = Command::new(BIN);
+    let status = command
+        .args(["update-hook", "verify", "--params"])
+        .arg(bed.sandbox.control().join("params.toml"))
+        .env_clear()
+        .envs(bed.host.env(&bed.sandbox))
+        .current_dir(bed.sandbox.root())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(status.signal(), Some(9), "{status:?}");
+    // This test still runs: its group was not signalled.
+    assert!(bed.sandbox.root().exists());
+}
+
+/// On a host whose last job drained while `prepare` waited, `prepare` run again asks the lease
+/// server for its cordon again, which moves the cordon's expiry later: the run-twice check reads
+/// that as a change. This pins it as it is, the cordon's expiry and the record's, nothing else,
+/// the cordon still the hook's and never shortened, so a change to it shows here; whether the
+/// hook should skip the re-ask is a question for the hook, not this suite.
+#[test]
+fn a_second_prepare_on_a_host_it_waited_on_moves_only_its_own_cordons_expiry() {
+    use js_agent::update_hook::{CordonView, Record};
+    let bed = Bed::new("hook-runs-drain-twice", AgentHost::draining());
+    bed.ok(Step::Prepare);
+    let before = bed.state();
+    let cordon = |bed: &Bed| -> CordonView {
+        serde_json::from_slice(&fs::read(bed.sandbox.world().join("cordon.json")).unwrap()).unwrap()
+    };
+    let record = |bed: &Bed| -> Record {
+        serde_json::from_slice(&fs::read(bed.sandbox.record().join("record.json")).unwrap())
+            .unwrap()
+    };
+    let (first_cordon, first_record) = (cordon(&bed), record(&bed));
+    bed.ok(Step::Prepare);
+    assert_eq!(
+        changes(&before, &bed.state()),
+        ["changed cordon.json", "changed record/record.json"]
+    );
+    let (second_cordon, second_record) = (cordon(&bed), record(&bed));
+    assert!(second_cordon.expires_at_ms > first_cordon.expires_at_ms);
+    assert!(second_record.cordon.placed && !second_record.cordon.provisional);
+    assert_eq!(second_record.cordon.first_ms, first_record.cordon.first_ms);
+    assert_eq!(second_record.cordon.expires_ms, second_cordon.expires_at_ms);
+    let mut same_but_cordon = second_record.clone();
+    same_but_cordon.cordon = first_record.cordon;
+    assert_eq!(
+        same_but_cordon, first_record,
+        "nothing else in the record moved"
+    );
+}
+
+/// On that host, `prepare` killed at each of its kill points and every step then run to its
+/// end finishes the update: every step succeeds, the record is gone, and no cordon is left but
+/// the one a crash right after the placing leaves to lapse (the declared allowance).
+#[test]
+fn on_a_host_that_drains_while_prepare_waits_a_killed_prepare_resumes_to_a_finished_update() {
+    let gates = points_of(
+        "hook-runs-drain-resume-n",
+        AgentHost::draining(),
+        &[Step::Prepare],
+    )[0];
+    assert!(gates > 2, "{gates}");
+    let mut lapsing = 0;
+    for kill_at in 0..=gates {
+        let bed = Bed::new(
+            &format!("hook-runs-drain-resume-{kill_at}"),
+            AgentHost::draining(),
+        );
+        bed.run(Step::Prepare, kill_at);
+        for step in SUCCESS {
+            bed.ok(step);
+        }
+        assert!(
+            !bed.sandbox.record().join("record.json").exists(),
+            "{kill_at}"
+        );
+        lapsing += u32::from(bed.sandbox.world().join("cordon.json").exists());
+    }
+    assert!(lapsing <= 1, "{lapsing} kill points left a cordon");
 }

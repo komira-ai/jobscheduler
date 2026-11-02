@@ -191,7 +191,12 @@ impl HarnessGate {
 
 impl Gate for HarnessGate {
     fn point(&self) {
-        watchdog::progress();
+        if watchdog::point() {
+            watchdog::kill_step(&format!(
+                "the step reached more than {} kill points",
+                watchdog::MAX_POINTS
+            ));
+        }
         match self.count() {
             Ok(Some(n)) if n == self.kill_at => {
                 eprintln!("{PARKED}");
@@ -350,6 +355,8 @@ pub enum Defect {
     BrokenCount,
     /// `rollback` lifts any cordon the host holds when it ends, an operator's as well.
     LiftsAnyCordon,
+    /// `verify` loops for ever reaching kill points, never pausing.
+    PointLoop,
 }
 
 impl Defect {
@@ -364,11 +371,12 @@ impl Defect {
             Defect::ForgetsCordon => "forgets-cordon",
             Defect::BrokenCount => "broken-count",
             Defect::LiftsAnyCordon => "lifts-any-cordon",
+            Defect::PointLoop => "point-loop",
         }
     }
 
     /// Every defect.
-    pub const ALL: [Defect; 7] = [
+    pub const ALL: [Defect; 8] = [
         Defect::NoLastLine,
         Defect::CutoverRestarts,
         Defect::Hang,
@@ -376,6 +384,7 @@ impl Defect {
         Defect::ForgetsCordon,
         Defect::BrokenCount,
         Defect::LiftsAnyCordon,
+        Defect::PointLoop,
     ];
 
     /// The defect a value names; `None` for none or a word no defect has.
@@ -497,6 +506,8 @@ pub struct Faulted<'a> {
     pub silent_start: bool,
     /// `verify`'s first look at the unit never returns ([`Defect::Stall`]).
     pub stall: bool,
+    /// `verify`'s first look at the unit reaches kill points for ever ([`Defect::PointLoop`]).
+    pub point_loop: bool,
     /// An uncordon changes nothing and says nothing was there ([`Defect::ForgetsCordon`]).
     pub keeps_cordon: bool,
     /// The fakes' own files, where [`DRAIN_LOOKS`] is kept.
@@ -564,8 +575,14 @@ impl Faulted<'_> {
 impl Units for Faulted<'_> {
     fn show(&self, unit: &str) -> Result<UnitState, PortError> {
         if self.stall && self.step == Step::Verify {
+            watchdog::announce_stall();
             loop {
                 std::thread::park();
+            }
+        }
+        if self.point_loop && self.step == Step::Verify {
+            loop {
+                self.world.point();
             }
         }
         if self.is(Step::Verify, Fault::Fail) {
