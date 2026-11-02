@@ -6,8 +6,12 @@
 //! `docs/agents/shared-core.md`, and `docs/agents/shared-core.sha256` records the copy's
 //! SHA-256 in `sha256sum` format. The section must equal the copy byte for byte, and the
 //! copy must match the recorded hash, so changing the core means changing all three in one
-//! pull request. `CLAUDE.md` must hold the line `@AGENTS.md` outside a fenced code block
-//! (Claude Code does not read an import inside one).
+//! pull request. The hash record is the one line `sha256sum` writes: the digest, two
+//! spaces, the file name and a newline (or none).
+//!
+//! The first line of `CLAUDE.md` that is not blank must be exactly `@AGENTS.md`. Claude
+//! Code skips an import inside a code block or code span; with nothing before the import,
+//! nothing can open one around it, so the check needs no Markdown parser.
 //!
 //! The first three tests check the repository's files. The rest feed each check made-up
 //! text and pin what it accepts and what it refuses.
@@ -45,11 +49,12 @@ enum Fault {
         section: Option<String>,
         canonical: Option<String>,
     },
-    /// The hash record is not one `<64 lowercase hex> shared-core.md` line.
+    /// The hash record is not the line `<64 lowercase hex>  shared-core.md`, ending in
+    /// one newline or none.
     HashFormat(String),
     /// The copy's SHA-256 is not the recorded one.
     HashMismatch { recorded: String, actual: String },
-    /// No line of `CLAUDE.md` outside a fenced block is the import.
+    /// The first line of `CLAUDE.md` that is not blank is not the import.
     NoImport,
 }
 
@@ -112,9 +117,9 @@ fn drift(section: &str, canonical: &str) -> Result<(), Fault> {
 
 /// The hex digest a `sha256sum`-format `record` gives for the copy.
 fn recorded_hash(record: &str) -> Result<&str, Fault> {
-    let mut words = record.split_whitespace();
-    match (words.next(), words.next(), words.next()) {
-        (Some(hex), Some(COPY_NAME), None)
+    let line = record.strip_suffix('\n').unwrap_or(record);
+    match line.split_once("  ") {
+        Some((hex, COPY_NAME))
             if hex.len() == 64
                 && hex
                     .bytes()
@@ -139,25 +144,12 @@ fn hash_matches(copy: &str, record: &str) -> Result<(), Fault> {
     Ok(())
 }
 
-/// Whether `claude` holds the import line outside every fenced code block.
+/// Whether the first line of `claude` that is not blank is the import.
 fn imports(claude: &str) -> Result<(), Fault> {
-    // The open fence's character and length: only a run of the same character, at
-    // least as long, closes it (CommonMark).
-    let mut open: Option<(char, usize)> = None;
-    for line in claude.lines() {
-        let start = line.trim_start();
-        let fence = ['`', '~'].into_iter().find_map(|c| {
-            let run = start.chars().take_while(|&x| x == c).count();
-            (run >= 3).then_some((c, run))
-        });
-        match (open, fence) {
-            (None, Some(f)) => open = Some(f),
-            (Some((c, n)), Some((d, m))) if c == d && m >= n => open = None,
-            (None, None) if line.trim_end() == IMPORT => return Ok(()),
-            _ => {}
-        }
+    match claude.lines().find(|line| !line.trim().is_empty()) {
+        Some(IMPORT) => Ok(()),
+        _ => Err(Fault::NoImport),
     }
-    Err(Fault::NoImport)
 }
 
 /// The SHA-256 record of `copy`, as `sha256sum` writes it.
@@ -337,6 +329,19 @@ fn an_empty_section_against_a_copy_is_drift() {
 }
 
 #[test]
+fn a_record_ending_in_one_newline_or_none_is_accepted() {
+    let digest = hex::encode(Sha256::digest(b"A\n"));
+    assert_eq!(
+        hash_matches("A\n", &format!("{digest}  {COPY_NAME}\n")),
+        Ok(())
+    );
+    assert_eq!(
+        hash_matches("A\n", &format!("{digest}  {COPY_NAME}")),
+        Ok(())
+    );
+}
+
+#[test]
 fn a_copy_matches_the_record_sha256sum_writes_for_it() {
     // The digest of "abc", as `printf abc | sha256sum` prints it.
     let record =
@@ -369,6 +374,15 @@ fn a_malformed_hash_record_is_refused_by_name() {
         format!("{}g  {COPY_NAME}\n", &digest[..63]),
         format!("{digest}  other.md\n"),
         format!("{digest}  {COPY_NAME} extra\n"),
+        format!("{digest}\n{COPY_NAME}\n"),
+        format!("{digest}\t{COPY_NAME}\n"),
+        format!("{digest} {COPY_NAME}\n"),
+        format!("{digest}   {COPY_NAME}\n"),
+        format!(" {digest}  {COPY_NAME}\n"),
+        format!("{digest}  {COPY_NAME}\r\n"),
+        format!("{digest}  {COPY_NAME}\n\n"),
+        format!("{digest}  {COPY_NAME}\n{digest}  {COPY_NAME}\n"),
+        format!("{digest} *{COPY_NAME}\n"),
     ];
     for record in malformed {
         assert_eq!(
@@ -379,41 +393,50 @@ fn a_malformed_hash_record_is_refused_by_name() {
 }
 
 #[test]
-fn the_import_line_is_found_among_other_lines() {
+fn the_import_as_the_first_line_counts() {
     assert_eq!(imports("@AGENTS.md\n"), Ok(()));
     assert_eq!(imports("@AGENTS.md"), Ok(()));
-    assert_eq!(imports("# Notes\n\n@AGENTS.md\n\nMore.\n"), Ok(()));
-    assert_eq!(imports("@AGENTS.md  \r\n"), Ok(()));
+    assert_eq!(imports("@AGENTS.md\r\n"), Ok(()));
+    // What follows the import cannot reach back and hide it.
+    assert_eq!(imports("@AGENTS.md\n```\nx\n"), Ok(()));
+    assert_eq!(imports("@AGENTS.md\n\nRepo notes.\n"), Ok(()));
 }
 
 #[test]
-fn the_import_after_a_closed_fence_counts() {
-    assert_eq!(imports("```\nx\n```\n@AGENTS.md\n"), Ok(()));
-    assert_eq!(imports("~~~\nx\n~~~\n@AGENTS.md\n"), Ok(()));
+fn blank_lines_before_the_import_are_skipped() {
+    assert_eq!(imports("\n\n@AGENTS.md\n"), Ok(()));
+    assert_eq!(imports(" \t\n\r\n@AGENTS.md\n"), Ok(()));
 }
 
 #[test]
-fn an_import_inside_a_fenced_block_does_not_count() {
-    assert_eq!(imports("```\n@AGENTS.md\n```\n"), Err(Fault::NoImport));
-    assert_eq!(imports("~~~md\n@AGENTS.md\n"), Err(Fault::NoImport));
+fn an_import_after_any_other_text_does_not_count() {
+    // Each line before the import could hide it: a fence, a code span, an HTML comment,
+    // or a heading that carries no hiding at all but is still refused, so the rule needs
+    // no knowledge of Markdown.
+    for claude in [
+        "```\n@AGENTS.md\n```\n",
+        "~~~\n@AGENTS.md\n~~~\n",
+        "`example\n@AGENTS.md\nend`\n",
+        "``a\n@AGENTS.md\n``\n",
+        "<!--\n@AGENTS.md\n-->\n",
+        "    ```\n\n@AGENTS.md\n",
+        "# Notes\n@AGENTS.md\n",
+    ] {
+        assert_eq!(imports(claude), Err(Fault::NoImport), "{claude:?}");
+    }
 }
 
 #[test]
-fn only_a_matching_fence_closes_a_fenced_block() {
-    // A tilde line does not close a backtick fence, nor a shorter run a longer one.
-    assert_eq!(imports("```\n~~~\n@AGENTS.md\n"), Err(Fault::NoImport));
-    assert_eq!(imports("````\n```\n@AGENTS.md\n"), Err(Fault::NoImport));
-    assert_eq!(imports("```\n````\n@AGENTS.md\n"), Ok(()));
-    // Two backticks are not a fence.
-    assert_eq!(imports("``\n@AGENTS.md\n"), Ok(()));
-}
-
-#[test]
-fn a_mention_that_is_not_the_import_line_does_not_count() {
+fn a_first_line_that_is_not_exactly_the_import_does_not_count() {
     for claude in [
         "",
+        "\n \n",
         "Read @AGENTS.md first.\n",
         "`@AGENTS.md`\n",
+        "  @AGENTS.md\n",
+        "    @AGENTS.md\n",
+        "\t@AGENTS.md\n",
+        "@AGENTS.md \n",
         "@AGENTS.md.bak\n",
         "@agents.md\n",
         "AGENTS.md\n",
