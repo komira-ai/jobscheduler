@@ -65,3 +65,38 @@ fn a_provider_or_instance_the_server_would_refuse_is_refused() {
         assert_eq!(rig.names(), Vec::<String>::new());
     }
 }
+
+/// Asserts the edges of the two ids, which follow different rules: a provider is a provider
+/// id (lower case, 1 to 63 bytes), so 63 bytes is taken and 64 bytes or an upper-case letter
+/// is refused naming `instance.provider`; an instance id takes upper case and up to 128
+/// bytes, so 128 bytes and `I-0ABC` are taken and 129 bytes is refused. A dry run is enough:
+/// the ids are checked before the setup. It catches one rule documented or applied for both.
+#[test]
+fn the_provider_and_the_instance_have_their_own_rules() {
+    let (p63, p64) = ("p".repeat(63), "p".repeat(64));
+    let (i128, i129) = ("i".repeat(128), "i".repeat(129));
+    let taken: [(&str, &str); 3] = [(&p63, INSTANCE), (PROVIDER, &i128), (PROVIDER, "I-0ABC")];
+    for (provider, instance) in taken {
+        let rig = Rig::new("enroll_ids_taken");
+        let ran = rig.run(&["--provider", provider, "--instance", instance], TOKEN);
+        assert_eq!(ran.status, status(0), "{provider:?} {instance:?}: {ran:?}");
+        assert!(
+            ran.out.ends_with(&format!(
+                "status=planned provider={provider} instance={instance}\n"
+            )),
+            "{ran:?}"
+        );
+    }
+    let refused: [(&str, &str, &str); 3] = [
+        (&p64, INSTANCE, "instance.provider"),
+        ("Burst", INSTANCE, "instance.provider"),
+        (PROVIDER, &i129, "instance.instance_id"),
+    ];
+    for (provider, instance, field) in refused {
+        let rig = Rig::new("enroll_ids_refused");
+        let ran = rig.run(&["--provider", provider, "--instance", instance], TOKEN);
+        assert_eq!(ran.status, status(2), "{provider:?} {instance:?}: {ran:?}");
+        assert!(ran.err.contains(field), "{field}: {ran:?}");
+        assert_eq!(rig.setup_args(), None);
+    }
+}

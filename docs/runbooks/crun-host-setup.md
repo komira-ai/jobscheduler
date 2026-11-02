@@ -29,19 +29,29 @@ js --server https://scheduler.example.org:7300 --token-file ~/.config/js/token \
       --apply
 ```
 
+`--provider` is a provider id (`[a-z0-9._-]`, 1 to 63 bytes, leading letter or digit) and
+`--instance` an instance id (`[A-Za-z0-9._-]`, 1 to 128 bytes, leading letter or digit), the ids
+the server binds the token to. A token typed on the command line is refused without being
+repeated.
+
 Leave `--apply` out first: the setup script is run as its own dry run, the files are only
 looked at, and the output says what an apply would do. Nothing is installed without `--apply`:
-the script's dry run only reports what it would set up. With it, `enroll` does this, in order,
+the script's dry run only reports what it would set up. The dry run meets every refusal an
+apply would, except for the inputs only an apply uses (`--unit` and `--tmpfiles` with their
+sha256, and `--server`): the dry run names them as needed for an apply, and the apply refuses
+without them. With it, `enroll` does this, in order,
 after every check has passed (a refusal changes nothing):
 
 1. runs `/usr/share/js-agent/crun_host_setup.sh --apply` with the setup flags it was given
    (`--server`, `--unit`, `--unit-sha256`, `--tmpfiles`, `--tmpfiles-sha256`, `--job-user`,
    `--subid-start`, `--scratch-mount-unit`, `--dependents-limit`, `--skip-scratch-quota`; `--pool`
-   is the provider unless named). The script's exit 0 and 3 (nothing to do) go on; its exit 2 is
+   is the provider unless named, and is only taken with `--server`). The script's exit 0 and 3 (nothing to do) go on; its exit 2 is
    a refusal of `enroll` (exit 2) and its exit 1 a failure (exit 1, and the script's manifest,
    below, says what it did). A script that is missing, or that is not root's or is writable by
    others, is not run.
-2. writes `/etc/js-agent/instance`: `PROVIDER:INSTANCE`, root, mode 0644.
+2. looks at both files again (the setup ran in between) and writes `/etc/js-agent/instance`
+   if it is not there: `PROVIDER:INSTANCE`, root, mode 0644. A file the setup left there and
+   not right is a failure (exit 1).
 3. writes `/etc/js-agent/token`: the token from standard input, root, mode 0600. Only its
    sha256 is printed; compare it with `js`'s own line (`join token sha256 ...`) and the lease
    server's log.
@@ -49,7 +59,10 @@ after every check has passed (a refusal changes nothing):
 An instance file or a token file that is already there is left alone if it holds what would be
 written (the token is compared by sha256) and refused otherwise (`present but differs; remove it
 by hand and run again`): nothing is ever overwritten. Run it again with the same token on an
-enrolled host to see `status=already-enrolled`. The token is one-time, so a host that has
+enrolled host whose agent has not been started to see `status=already-enrolled`; once the agent's
+unit is active the setup refuses (exit 2, nothing changed) until the host is drained and the unit
+stopped. If `enroll` is killed on its own, the setup script it started runs to its end; wait for
+it before running `enroll` again. The token is one-time, so a host that has
 already joined needs a new token and its old token file removed by hand.
 
 `enroll` does not enable or start the unit, and does not add `--instance-file` to it. The agent

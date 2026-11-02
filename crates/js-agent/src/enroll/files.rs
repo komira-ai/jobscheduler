@@ -170,9 +170,20 @@ pub(super) fn write_new(path: &Path, kind: Kind, wanted: &[u8], owner: u32) -> R
     check_dir(path, owner).map_err(Failure::Failed)?;
     js_client::create_new(path, wanted, kind.mode())
         .map_err(|why| Failure::Failed(format!("cannot write {}: {why}", path.display())))?;
-    inspect(path, kind, wanted, owner)
-        .map(drop)
-        .map_err(Failure::Failed)
+    read_back(path, inspect(path, kind, wanted, owner))
+}
+
+/// What the look at a file just written says: it must be there and be what was written.
+/// A file that is gone again is a failure, not a success.
+fn read_back(path: &Path, found: Result<bool, String>) -> Result<(), Failure> {
+    match found {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Failure::Failed(format!(
+            "{}: was written and is gone again",
+            path.display()
+        ))),
+        Err(why) => Err(Failure::Failed(why)),
+    }
 }
 
 #[cfg(test)]
@@ -204,5 +215,54 @@ mod tests {
             assert_eq!(fs::read_to_string(&path).unwrap(), text);
             fs::remove_file(&path).unwrap();
         }
+    }
+
+    /// Asserts that the read-back after a write accepts only a file that is there and right:
+    /// one that is gone again is a failure naming the path, and a refusal of what is there
+    /// is a failure with its words. It catches a verb that reports `written` and `enrolled`
+    /// for a file that is not on the host.
+    #[test]
+    fn a_file_gone_after_its_write_is_a_failure() {
+        let path = Path::new("/etc/js-agent/token");
+        let words = |got: Result<(), Failure>| match got {
+            Ok(()) => "ok".to_owned(),
+            Err(Failure::Failed(text)) => format!("failed: {text}"),
+            Err(Failure::Usage(text)) => format!("usage: {text}"),
+        };
+        assert_eq!(words(read_back(path, Ok(true))), "ok");
+        assert_eq!(
+            words(read_back(path, Ok(false))),
+            "failed: /etc/js-agent/token: was written and is gone again"
+        );
+        assert_eq!(
+            words(read_back(path, Err("it differs".to_owned()))),
+            "failed: it differs"
+        );
+    }
+
+    /// Asserts that the directory check names the directory and the uid when the directory
+    /// is not the owner's, with the file check out of the way. It catches a staged secret in
+    /// a directory another user could swap it in.
+    #[test]
+    fn a_directory_of_another_owner_is_refused_by_its_path() {
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "enroll_dir_owner");
+        // The check refuses a directory others can write; the umask of the machine running
+        // the test must not decide that.
+        fs::set_permissions(
+            dir.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let mine = rustix::process::geteuid().as_raw();
+        let other = mine.wrapping_add(1);
+        let file = dir.path().join("token");
+        assert_eq!(check_dir(&file, mine), Ok(()));
+        assert_eq!(
+            check_dir(&file, other),
+            Err(format!(
+                "{}: is not owned by uid {other}",
+                dir.path().display()
+            ))
+        );
     }
 }

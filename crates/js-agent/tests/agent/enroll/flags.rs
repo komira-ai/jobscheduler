@@ -68,8 +68,10 @@ fn the_setup_flags_reach_the_script() {
 }
 
 /// Asserts that `--pool` overrides the provider as the pool written into the unit, that a
-/// `--pool` without `--server` is not passed (the script wants both or neither), and that a
-/// dry run passes the flags without `--apply`. It catches a pool taken from the wrong place.
+/// `--pool` without `--server` is a usage error (status 2, naming `--server`, nothing run)
+/// rather than dropped (the script wants both or neither), and that a dry run passes the
+/// flags without `--apply`. It catches a pool taken from the wrong place, and a `--pool`
+/// that is silently ignored.
 #[test]
 fn the_pool_defaults_to_the_provider_and_can_be_named() {
     let rig = Rig::new("enroll_flags_pool");
@@ -82,9 +84,12 @@ fn the_pool_defaults_to_the_provider_and_can_be_named() {
         rig.setup_args().unwrap(),
         ["--server", "http://127.0.0.1:7300", "--pool", "farm"]
     );
+    let rig = Rig::new("enroll_flags_pool_alone");
     let ran = rig.go(&["--pool", "farm"], TOKEN);
-    assert_eq!(ran.status, status(0), "{ran:?}");
-    assert_eq!(rig.setup_args().unwrap(), Vec::<String>::new());
+    assert_eq!(ran.status, status(2), "{ran:?}");
+    assert!(ran.err.contains("--server <URL>"), "{ran:?}");
+    assert_eq!(ran.out, "");
+    assert_eq!(rig.setup_args(), None);
 }
 
 /// Asserts that the help is printed on standard output with status 0, lists the flags and
@@ -151,6 +156,9 @@ fn the_command_line_is_checked_by_clap() {
 #[test]
 fn main_with_answers_the_verb() {
     if rustix::process::geteuid().as_raw() == 0 {
+        // As root, `Host::system` would enroll this machine for real (its /etc and the
+        // packaged script): the refusal this test needs exists only for another user.
+        eprintln!("skipped: running as root, where main_with would act on this machine's /etc");
         return;
     }
     let install = || -> std::io::Result<js_agent::SystemSleeper> {
@@ -171,4 +179,47 @@ fn main_with_answers_the_verb() {
     assert_eq!(format!("{code:?}"), status(2));
     let err = String::from_utf8(err).unwrap();
     assert!(err.contains("js-agent enroll: must run as root"), "{err}");
+}
+
+/// Asserts the exact refusal for a token put on the command line: as a bare word, as
+/// `--token=<token>` and as `--token <token>`, status 2, nothing on standard output, nothing
+/// run, and standard error exactly the refusal, which names an unexpected flag but shows no
+/// value and no bare word. It catches clap's own message, which repeats what was typed and
+/// so would print the token to the terminal and to logs.
+#[test]
+fn a_token_on_the_command_line_is_refused_without_being_shown() {
+    let rig = Rig::new("enroll_argv_token");
+    let ids = ["--provider", PROVIDER, "--instance", INSTANCE];
+    let flag = format!("--token={TOKEN}");
+    let tail = "the join token is read from standard input only)\n\n\
+                For more information, try '--help'.\n\n";
+    let cases: [(&[&str], String); 3] = [
+        (
+            &[TOKEN],
+            format!("js-agent enroll: error: unexpected argument (the word is not shown: {tail}"),
+        ),
+        (
+            &[&flag],
+            format!(
+                "js-agent enroll: error: unexpected argument '--token' (a value given with it \
+                 is not shown: {tail}"
+            ),
+        ),
+        (
+            &["--token", TOKEN],
+            format!(
+                "js-agent enroll: error: unexpected argument '--token' (a value given with it \
+                 is not shown: {tail}"
+            ),
+        ),
+    ];
+    for (extra, want) in cases {
+        let mut words = ids.to_vec();
+        words.extend(extra);
+        let ran = rig.run(&words, TOKEN);
+        assert_eq!(ran.status, status(2), "{extra:?}: {ran:?}");
+        assert_eq!(ran.out, "");
+        assert_eq!(ran.err, want, "{extra:?}");
+    }
+    assert_eq!(rig.setup_args(), None);
 }

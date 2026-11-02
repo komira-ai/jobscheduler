@@ -256,10 +256,11 @@ fn a_dangling_link_at_the_token_path_is_refused() {
     assert_eq!(rig.setup_args(), None);
 }
 
-/// Asserts that a file that appears between the look and the write (the setup script makes
-/// one) is not replaced and is reported as a failure of a step (status 1, the setup having
-/// run), not as a refusal that changed nothing. It catches a race that overwrites, and a
-/// failure that claims nothing was done.
+/// Asserts that a file that appears between the first look and the write (the setup script
+/// makes one that differs) is not replaced and is reported as a failure of a step (status 1,
+/// the setup having run, with the path and "remove it by hand"), not as a refusal that
+/// changed nothing. It catches a race that overwrites, and a failure that claims nothing was
+/// done.
 #[test]
 fn a_file_that_appears_before_the_write_is_kept_and_reported_as_a_failure() {
     let rig = Rig::new("enroll_raced");
@@ -271,9 +272,10 @@ fn a_file_that_appears_before_the_write_is_kept_and_reported_as_a_failure() {
     let ran = rig.go(&["--apply"], TOKEN);
     assert_eq!(ran.status, status(1), "{ran:?}");
     assert!(
-        ran.err.contains("cannot write") && ran.err.contains("exists"),
+        ran.err.contains(&theirs.display().to_string()) && ran.err.contains("remove it by hand"),
         "{ran:?}"
     );
+    assert_eq!(ran.out, "");
     assert_eq!(rig.read("instance"), "burst:other\n");
     assert_eq!(rig.names(), ["instance"]);
 }
@@ -339,6 +341,96 @@ fn a_file_that_differs_leaves_both_files_untouched() {
             assert_eq!(ran.out, "");
             assert_eq!(snapshot(&rig), before, "{instance:?} {held:?} {extra:?}");
             assert_eq!(rig.setup_args(), None, "the setup ran before the refusal");
+        }
+    }
+}
+
+/// Asserts that both files are looked at again after the setup has run, since it ran in
+/// between: a right file the setup removed is written again (`written`, status 0); a right
+/// file it replaced with one that differs, or made readable by others, is a failure with
+/// status 1 that names the path and leaves the file as the setup left it; and a right file
+/// the setup made is kept (`present`). It catches a verb that trusts what it saw before the setup
+/// and reports `enrolled` for a host with a missing or unfit identity or secret.
+#[test]
+fn the_files_are_looked_at_again_after_the_setup() {
+    let token = format!("{TOKEN}\n");
+    let rig = Rig::new("enroll_setup_removes");
+    rig.put("instance", LINE, 0o644);
+    rig.put("token", &token, 0o600);
+    let etc = rig.etc().display().to_string();
+    rig.script_with(&format!("rm '{etc}/instance' '{etc}/token'\nexit 0"));
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(0), "{ran:?}");
+    assert_eq!(
+        ran.out,
+        rig.report(["done", "written", "written"], "enrolled", TOKEN)
+    );
+    assert_eq!(
+        (rig.read("instance"), rig.mode("instance")),
+        (LINE.to_owned(), 0o644)
+    );
+    assert_eq!(
+        (rig.read("token"), rig.mode("token")),
+        (token.clone(), 0o600)
+    );
+
+    for (name, change, expect) in [
+        ("instance", "echo 'burst:other' > \"$f\"", "holds"),
+        ("token", "echo 'other' > \"$f\"", "present but differs"),
+        ("token", "chmod 0644 \"$f\"", "has mode 0644"),
+    ] {
+        let rig = Rig::new("enroll_setup_changes");
+        rig.put("instance", LINE, 0o644);
+        rig.put("token", &token, 0o600);
+        let path = rig.etc().join(name);
+        rig.script_with(&format!("f='{}'\n{change}\nexit 0", path.display()));
+        let ran = rig.go(&["--apply"], TOKEN);
+        assert_eq!(ran.status, status(1), "{name} {change}: {ran:?}");
+        assert!(
+            ran.err.contains(&path.display().to_string()) && ran.err.contains(expect),
+            "{name} {change}: {ran:?}"
+        );
+        assert_eq!(ran.out, "");
+        assert_eq!(rig.names(), ["instance", "token"]);
+    }
+
+    let rig = Rig::new("enroll_setup_makes");
+    let instance = rig.etc().join("instance");
+    rig.script_with(&format!(
+        "printf 'burst:i-0abc\\n' > '{}'\nexit 0",
+        instance.display()
+    ));
+    let ran = rig.go(&["--apply"], TOKEN);
+    assert_eq!(ran.status, status(0), "{ran:?}");
+    assert!(
+        ran.out.contains("enroll: instance status=present path="),
+        "{ran:?}"
+    );
+    assert_eq!(rig.read("token"), token);
+}
+
+/// Asserts that a named pipe at the instance path or the token path is refused (status 2,
+/// the path and "is not a regular file") before the setup runs, in a dry run and an apply,
+/// without the verb waiting for a writer, and is left in place. It catches a read that
+/// blocks on a pipe and a pipe taken for a missing file and replaced.
+#[test]
+fn a_named_pipe_at_either_file_is_refused() {
+    for name in ["instance", "token"] {
+        for flags in [&["--apply"][..], &[][..]] {
+            let rig = Rig::new("enroll_fifo_file");
+            let path = rig.etc().join(name);
+            super::setup::fifo(&path);
+            let ran = rig.go(flags, TOKEN);
+            assert_eq!(ran.status, status(2), "{name} {flags:?}: {ran:?}");
+            assert_eq!(
+                ran.err,
+                format!(
+                    "js-agent enroll: {}: is not a regular file\n",
+                    path.display()
+                )
+            );
+            assert_eq!(rig.setup_args(), None);
+            assert_eq!(rig.names(), [name]);
         }
     }
 }

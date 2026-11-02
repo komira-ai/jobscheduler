@@ -24,7 +24,9 @@
 //!    break, owned by root, mode 0600, which the agent reads with `--token-file`.
 //!
 //! The token is read from standard input and nowhere else: a terminal is refused, and no flag
-//! takes it, so it is on no command line. It must be what the server mints (64 lower-case hex
+//! takes it, so it is on no command line. A token put on the command line by mistake is
+//! refused, and the refusal does not repeat it: an unexpected word is not shown, and of an
+//! unexpected flag only the part before any `=` is. It must be what the server mints (64 lower-case hex
 //! digits, one line). It is printed nowhere; the verb prints its sha256, which names it for
 //! the operator and the server's log without being usable as it.
 //!
@@ -44,12 +46,17 @@
 //!
 //! # Dry run and apply
 //!
-//! Without `--apply` nothing is changed. The script is run without `--apply`, which is its
-//! own read-only dry run, so the refusals an apply would meet are met here; the two files
-//! are only looked at. With `--apply` every refusal comes before the first change: the root
-//! check, the token, the ids, the script, and the two files that are already there. Then the
-//! setup is applied, then the instance file is written, then the token file, and each is read
-//! back. A file is made whole in a staged file beside it, under a name no one can guess, and
+//! Without `--apply` nothing is changed and nothing is installed. The script is run without
+//! `--apply`, which is its own read-only dry run: it checks the host and reports what it
+//! would set up. The verb's own refusals (the root check, the token, the ids, the script, the
+//! two files) are the same in both modes. The script's dry run meets its own refusals too,
+//! with one difference: the inputs only an apply uses (`--unit` and `--tmpfiles` with their
+//! sha256, and `--server`) are refused only by an apply, and a dry run without them names
+//! them as needed for an apply instead. With `--apply` every refusal comes before the first
+//! change. Then the setup is applied; then each of the two files is looked at again, since
+//! the setup ran in between, and written if it is not there (a file that the setup left
+//! there but no longer right is a failure, exit 1); and each file written is read back, and
+//! one that is not there or not right then is a failure too. A file is made whole in a staged file beside it, under a name no one can guess, and
 //! linked to its name (js_client's `create_new`), so a crash leaves nothing but the staged
 //! file, and nothing is ever replaced. The directory the staged file is in (`/etc/js-agent`)
 //! must be a real directory, root's, that group and others cannot write, or the verb refuses
@@ -64,16 +71,30 @@
 //! again`. So is a link, a file that is not a regular file of root's, a mode the kind does
 //! not allow (the token file must be 0600 or 0400; the instance file must not be writable
 //! by group or others), and one longer than 4096 bytes. A second run on an enrolled host
-//! changes nothing and says so. It needs the token again, to compare.
+//! changes nothing and says so. It needs the token again, to compare, and the setup flags
+//! again, since the setup checks the host each time. It is meant for a host whose agent has
+//! not been started: the setup refuses (exit 2, nothing changed) while the agent's unit is
+//! active or about to restart, so a host that is running is drained and stopped first.
+//!
+//! # Interrupted
+//!
+//! A run that stops part way leaves what it did, and a rerun carries on: the setup is
+//! idempotent and a file that is there and right is kept. A signal from the terminal
+//! (Ctrl-C) reaches the verb and the setup script together, since they share the terminal's
+//! process group. A verb that is killed on its own does not stop the script it started: the
+//! script runs to its end and its manifest records what it did. Wait for it to end (no
+//! `crun_host_setup.sh` left in `ps`) before running the verb again, so two setups do not
+//! overlap.
 //!
 //! # Flags
 //!
 //! | flag | meaning |
 //! |---|---|
-//! | `--provider <id>`, `--instance <id>` | required: the host's identity, which the join token is bound to. Both are ids the server accepts (`[A-Za-z0-9._-]`, at most 128 bytes, leading letter or digit) |
+//! | `--provider <id>` | required: the provider of the host, which the join token is bound to: a provider id, `[a-z0-9._-]`, 1 to 63 bytes, leading letter or digit |
+//! | `--instance <id>` | required: the id of this host, which the join token is bound to: `[A-Za-z0-9._-]`, 1 to 128 bytes, leading letter or digit |
 //! | `--apply` | do it; without it the run is a dry run |
 //! | `--runtime crun` | the runtime to set the host up for; `crun` is the only one (the default) |
-//! | `--server <url>`, `--pool <name>` | written into the unit by the setup script, which wants both or neither for an apply. `--pool` defaults to the provider: the server mints a token only for the pool's own name |
+//! | `--server <url>`, `--pool <name>` | written into the unit by the setup script, which wants both or neither for an apply. `--pool` defaults to the provider (the server mints a token only for the pool's own name) and needs `--server`: `--pool` alone is a usage error |
 //! | `--job-user`, `--subid-start`, `--unit`, `--unit-sha256`, `--tmpfiles`, `--tmpfiles-sha256`, `--scratch-mount-unit`, `--dependents-limit`, `--skip-scratch-quota` | passed to the setup script as they are; see docs/runbooks/crun-host-setup.md |
 //!
 //! # Output and exit status
@@ -201,7 +222,7 @@ struct Args {
     #[arg(long, value_name = "URL")]
     server: Option<String>,
     /// The pool, written into the unit with --server (the provider when absent).
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", requires = "server")]
     pool: Option<String>,
     /// The job user (the setup script's default is jsjob).
     #[arg(long, value_name = "NAME")]
@@ -322,6 +343,28 @@ fn bad_ids(why: ValidationError) -> Failure {
     ))
 }
 
+/// The words of clap's refusal, without what was typed when it is a word the verb does not
+/// take: that may be the join token put on the command line by mistake, and the refusal goes
+/// to a terminal and to logs. Of an unexpected flag only its name (before any `=`) is shown.
+fn clap_refusal(e: &clap::Error) -> String {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    let typed = match e.get(ContextKind::InvalidArg) {
+        Some(ContextValue::String(typed)) if e.kind() == ErrorKind::UnknownArgument => typed,
+        _ => return e.to_string(),
+    };
+    let shown = match typed.strip_prefix('-') {
+        Some(_) => format!(
+            "unexpected argument '{}' (a value given with it is not shown",
+            typed.split('=').next().unwrap_or_default()
+        ),
+        None => "unexpected argument (the word is not shown".to_owned(),
+    };
+    format!(
+        "error: {shown}: the join token is read from standard input only)\n\n\
+         For more information, try '--help'.\n"
+    )
+}
+
 /// Runs the verb on `args` (the program name and the verb first). The report goes to `out`,
 /// the setup script's words and the refusals to `err`.
 pub fn run(
@@ -343,6 +386,16 @@ pub fn run(
     }
 }
 
+/// Looks at the file at `path` again after the setup, and writes it if it is not there.
+/// Returns whether it was there already. A file that is there and not right is a failure.
+fn settle(path: &std::path::Path, kind: Kind, wanted: &[u8], who: u32) -> Result<bool, Failure> {
+    let there = files::inspect(path, kind, wanted, who).map_err(Failure::Failed)?;
+    if !there {
+        files::write_new(path, kind, wanted, who)?;
+    }
+    Ok(there)
+}
+
 /// What the verb prints on success: the help text, or the report.
 fn enroll(
     args: &[OsString],
@@ -352,7 +405,7 @@ fn enroll(
 ) -> Result<String, Failure> {
     let args = match Args::try_parse_from(args.iter().skip(1)) {
         Ok(args) => args,
-        Err(e) if e.use_stderr() => return Err(Failure::Usage(e.to_string())),
+        Err(e) if e.use_stderr() => return Err(Failure::Usage(clap_refusal(&e))),
         Err(help) => return Ok(help.to_string()),
     };
     let Runtime::Crun = args.runtime;
@@ -398,12 +451,15 @@ fn enroll(
 
     let apply = args.apply;
     let setup = setup::run(&host.shell, &script, &args.setup_flags(), apply, err)?;
-    if apply && !have_instance {
-        files::write_new(&host.instance_file, Kind::Instance, line.as_bytes(), who)?;
-    }
-    if apply && !have_token {
-        files::write_new(&host.token_file, Kind::Token, token_line.as_bytes(), who)?;
-    }
+    // The setup ran in between: what is there now decides, and a file it left wrong is a
+    // failure. A dry run changed nothing, so what was seen before still holds.
+    let (have_instance, have_token) = match apply {
+        false => (have_instance, have_token),
+        true => (
+            settle(&host.instance_file, Kind::Instance, line.as_bytes(), who)?,
+            settle(&host.token_file, Kind::Token, token_line.as_bytes(), who)?,
+        ),
+    };
 
     let word = |present: bool| match (present, apply) {
         (true, _) => "present",

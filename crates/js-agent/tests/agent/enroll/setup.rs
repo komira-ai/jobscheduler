@@ -5,7 +5,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-use super::rig::{Rig, TOKEN, status};
+use super::rig::{INSTANCE, LINE, PROVIDER, Rig, TOKEN, status};
 
 /// Asserts that the script's exit 0 (done) and exit 3 (nothing to do) both let the verb go
 /// on to the files, with the word each has in the report. It catches a 3 read as a failure,
@@ -284,4 +284,157 @@ fn the_script_runs_with_a_clean_environment() {
         text.contains("PATH=/usr/sbin:/usr/bin:/sbin:/bin\n"),
         "{text}"
     );
+}
+
+/// Makes `path` a named pipe.
+pub(super) fn fifo(path: &std::path::Path) {
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_bits_truncate(0o644),
+        0,
+    )
+    .unwrap();
+}
+
+/// Asserts that a named pipe at the script's path or at the shell's is refused (status 2, the
+/// path and "is not a regular file") in a dry run and an apply, without the verb waiting for
+/// a writer, and that nothing is run or written. It catches an open that blocks on a pipe,
+/// which would hang the verb with nobody told why.
+#[test]
+fn a_named_pipe_at_the_script_or_the_shell_is_refused() {
+    for which in ["script", "shell"] {
+        for flags in [&["--apply"][..], &[][..]] {
+            let mut rig = Rig::new("enroll_fifo_program");
+            let path = match which {
+                "script" => {
+                    fs::remove_file(&rig.host.setup_script).unwrap();
+                    rig.host.setup_script.clone()
+                }
+                _ => rig.dir.path().join("shell"),
+            };
+            fifo(&path);
+            if which == "shell" {
+                rig.host.shell = path.clone();
+            }
+            let ran = rig.go(flags, TOKEN);
+            assert_eq!(ran.status, status(2), "{which} {flags:?}: {ran:?}");
+            assert_eq!(
+                ran.err,
+                format!(
+                    "js-agent enroll: {}: is not a regular file\n",
+                    path.display()
+                ),
+                "{which}"
+            );
+            assert_eq!(rig.setup_args(), None);
+            assert_eq!(rig.names(), Vec::<String>::new());
+        }
+    }
+}
+
+/// A standard error that fails every write and every flush.
+struct Closed;
+
+impl std::io::Write for Closed {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+}
+
+/// Asserts that a standard error that cannot be written does not stop the setup: a script
+/// that prints a mebibyte (far more than a pipe holds) still runs to its end, the verb goes
+/// on to write both files and reports `enrolled` on standard output with status 0. It
+/// catches a verb that stops reading the script's output when its own standard error fails,
+/// which would block the script half way through the host setup.
+#[test]
+fn a_closed_standard_error_does_not_stop_the_setup() {
+    let rig = Rig::new("enroll_closed_err");
+    let done = rig.beside_script("done");
+    rig.script_with(&format!(
+        "head -c 1048576 /dev/zero | tr '\\0' x\nhead -c 1048576 /dev/zero >&2\n\
+         touch '{done}'\nexit 0"
+    ));
+    let args: Vec<std::ffi::OsString> = [
+        "js-agent",
+        "enroll",
+        "--provider",
+        PROVIDER,
+        "--instance",
+        INSTANCE,
+        "--apply",
+    ]
+    .map(Into::into)
+    .to_vec();
+    let mut out = Vec::new();
+    let code = js_agent::enroll::run(
+        &args,
+        &mut TOKEN.as_bytes(),
+        &mut out,
+        &mut Closed,
+        &rig.host,
+    );
+    assert_eq!(format!("{code:?}"), status(0));
+    assert!(
+        fs::metadata(&done).is_ok(),
+        "the script did not run to its end"
+    );
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        rig.report(["done", "written", "written"], "enrolled", TOKEN)
+    );
+    assert_eq!(rig.read("instance"), LINE);
+}
+
+/// Asserts that the script reads end of file at once from its standard input: the token
+/// the verb read is not passed on, and nothing waits for a terminal. It catches a script
+/// that inherits the verb's standard input and so could read the token or block on it.
+#[test]
+fn the_script_gets_an_empty_standard_input() {
+    let rig = Rig::new("enroll_script_stdin");
+    let record = rig.beside_script("stdin");
+    rig.script_with(&format!(
+        "if IFS= read -r line; then echo \"read:$line\" > '{record}'; \
+         else echo \"eof:$line\" > '{record}'; fi\nexit 0"
+    ));
+    let ran = rig.go(&[], TOKEN);
+    assert_eq!(ran.status, status(0), "{ran:?}");
+    assert_eq!(fs::read_to_string(&record).unwrap(), "eof:\n");
+}
+
+/// Asserts that a rerun on a host whose agent has been started is the setup's refusal: the
+/// script refuses while the unit is active (here a stand-in that says so and exits 2), so
+/// the verb exits 2, says nothing on standard output, and leaves both files of the enrolled
+/// host exactly as they were. It catches a rerun that reports `already-enrolled` or touches
+/// the files of a running host.
+#[test]
+fn a_rerun_on_a_running_host_is_refused_and_keeps_both_files() {
+    use std::os::unix::fs::MetadataExt;
+    let rig = Rig::new("enroll_rerun_running");
+    rig.put("instance", LINE, 0o644);
+    rig.put("token", &format!("{TOKEN}\n"), 0o600);
+    let inodes =
+        || ["instance", "token"].map(|name| fs::metadata(rig.etc().join(name)).unwrap().ino());
+    let before = inodes();
+    rig.script_with(
+        "echo '  REFUSE: js-agent-crun.service is active: drain and stop it first'\nexit 2",
+    );
+    for flags in [&["--apply"][..], &[][..]] {
+        let ran = rig.go(flags, TOKEN);
+        assert_eq!(ran.status, status(2), "{flags:?}: {ran:?}");
+        assert_eq!(ran.out, "");
+        assert!(
+            ran.err.contains("is active: drain and stop it first"),
+            "{ran:?}"
+        );
+        assert!(ran.err.contains("the host setup refused"), "{ran:?}");
+    }
+    assert_eq!(inodes(), before);
+    assert_eq!(rig.read("instance"), LINE);
+    assert_eq!(rig.read("token"), format!("{TOKEN}\n"));
 }

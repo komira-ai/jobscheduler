@@ -7,18 +7,23 @@
 //! by its path (the shell itself is the system's `/usr/bin/bash`, in directories only root
 //! can write). The shell is then started on `/proc/self/fd/N` of the checked descriptor, so
 //! the check and the run are of one inode whatever happens to the path in between.
+//!
+//! Both files are opened without blocking, so a named pipe at either path is refused as not
+//! a regular file instead of hanging the verb. The script's descriptor is opened without
+//! close-on-exec, so the shell inherits it; nothing else is done in the child, and no
+//! `unsafe` code is needed. The umask the script runs with is set in this process around
+//! the start of the shell and put back right after: an exec keeps the umask, and a
+//! one-shot verb has no other thread making files in that moment.
 
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::os::unix::process::CommandExt;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use rustix::fs::{Mode, OFlags};
-use rustix::io::{FdFlags, fcntl_setfd};
 
 use super::Failure;
 
@@ -34,10 +39,12 @@ pub const MANIFEST: &str = "/var/lib/js-crun-host-setup/manifest";
 /// cannot be opened. The returned file is the checked one.
 pub(super) fn open_checked(path: &Path, owner: u32, hint: &str) -> Result<File, Failure> {
     let refuse = |why: String| Failure::Usage(format!("{}: {why}", path.display()));
-    let (file, meta) = OpenOptions::new()
-        .read(true)
-        .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
-        .open(path)
+    // No close-on-exec: the shell reads the script from this descriptor. No blocking: a
+    // named pipe is refused below, not waited on.
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    let (file, meta) = rustix::fs::open(path, flags, Mode::empty())
+        .map(File::from)
+        .map_err(io::Error::from)
         .and_then(|file| file.metadata().map(|meta| (file, meta)))
         .map_err(|why| refuse(format!("{why}; {hint}")))?;
     let problems = [
@@ -54,6 +61,14 @@ pub(super) fn open_checked(path: &Path, owner: u32, hint: &str) -> Result<File, 
     if let Some((_, why)) = problems.into_iter().find(|(bad, _)| *bad) {
         return Err(refuse(why));
     }
+    check_ancestors(path, owner).map_err(refuse)?;
+    Ok(file)
+}
+
+/// Checks every directory above `path`: each must be a directory that root or `owner` owns
+/// and that group and others cannot write. Returns the words of the first refusal, which
+/// name the directory.
+fn check_ancestors(path: &Path, owner: u32) -> Result<(), String> {
     for dir in path.ancestors().skip(1) {
         let meta = fs::metadata(dir).ok();
         let problems = [
@@ -73,10 +88,10 @@ pub(super) fn open_checked(path: &Path, owner: u32, hint: &str) -> Result<File, 
             ),
         ];
         if let Some((_, why)) = problems.iter().find(|(bad, _)| *bad) {
-            return Err(refuse(format!("{}: {why}", dir.display())));
+            return Err(format!("{}: {why}", dir.display()));
         }
     }
-    Ok(file)
+    Ok(())
 }
 
 /// A writer that does not fail: what the script prints is for a person, and a standard error
@@ -96,26 +111,11 @@ impl Write for Lenient<'_> {
     }
 }
 
-/// What the forked child does before it execs the shell: umask 022 whatever the caller's was
-/// (the script sets its own where it needs more), and the checked descriptor is kept open
-/// across the exec so the shell can read the script from `/proc/self/fd/N`. Two system
-/// calls and nothing else.
-fn before_exec(fd: RawFd) -> io::Result<()> {
-    rustix::process::umask(Mode::from_bits_truncate(0o022));
-    // SAFETY: `fd` is the descriptor of the checked script, open in this process for the
-    // whole of the call.
-    let script = unsafe { BorrowedFd::borrow_raw(fd) };
-    fcntl_setfd(script, FdFlags::empty()).map_err(Into::into)
-}
-
-/// The function run in the forked child.
-fn in_child(fd: RawFd) -> impl FnMut() -> io::Result<()> + Send + Sync + 'static {
-    move || before_exec(fd)
-}
-
 /// Starts `shell` on the open `script` with `flags`, with an empty environment but `PATH`
 /// and `LC_ALL`, no standard input, and standard output and standard error as one pipe that
-/// is copied to `err` as it fills. Returns the exit status, `None` when a signal ended it.
+/// is copied to `err` as it fills. The shell starts with umask 022 whatever this process's is
+/// (the script sets its own where it needs more). The child is always waited for, also when
+/// its output cannot be read. Returns the exit status, `None` when a signal ended it.
 fn start(
     shell: &Path,
     script: &File,
@@ -133,18 +133,19 @@ fn start(
         .stdin(Stdio::null())
         .stdout(writer.try_clone()?)
         .stderr(writer);
-    // SAFETY: `before_exec` makes two system calls and nothing else (no allocation, no
-    // lock) in the forked child before it execs.
-    unsafe {
-        command.pre_exec(in_child(script.as_raw_fd()));
-    }
-    let mut child = command.spawn()?;
+    let before = rustix::process::umask(Mode::from_bits_truncate(0o022));
+    let spawned = command.spawn();
+    rustix::process::umask(before);
+    let mut child = spawned?;
     // The command holds the write end; the pipe ends when the script and its children do.
     drop(command);
     let mut sink = Lenient(err);
-    io::copy(&mut reader, &mut sink)?;
-    sink.flush()?;
-    Ok(child.wait()?.code())
+    let copied = io::copy(&mut reader, &mut sink);
+    // A script that still writes after a failed read gets a broken pipe, not a block.
+    drop(reader);
+    let status = child.wait()?;
+    copied?;
+    Ok(status.code())
 }
 
 /// Runs the checked `script` through `shell` with `flags`. What it prints goes to `err`
@@ -174,19 +175,64 @@ pub(super) fn run(
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
-    /// Asserts that the function run in the child clears the close-on-exec flag of the
-    /// descriptor it is given (so the shell can read the script from it) and leaves the
-    /// umask 022. It catches a script descriptor that does not survive the exec, which the
-    /// integration tests only see as a failed run.
+    /// Asserts that a file that is not root's or the owner's is refused with exactly its path
+    /// and the uid, whatever the directories above it are. The integration tests cannot make
+    /// a file another user owns, and changing the owner there trips the script's own check
+    /// first, so the shell's check is pinned here. It catches a root process that starts a
+    /// program another user owns.
     #[test]
-    fn the_child_keeps_the_script_open_and_sets_the_umask() {
-        let file = File::open("/dev/null").unwrap();
-        in_child(file.as_raw_fd())().unwrap();
-        let flags = rustix::io::fcntl_getfd(&file).unwrap();
-        assert!(!flags.contains(FdFlags::CLOEXEC));
-        let before = rustix::process::umask(Mode::from_bits_truncate(0o022));
-        assert_eq!(before.bits(), 0o022);
+    fn a_file_of_another_owner_is_refused_by_its_path() {
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "enroll_open_owner");
+        let shell = dir.path().join("shell");
+        fs::write(&shell, "").unwrap();
+        fs::set_permissions(&shell, fs::Permissions::from_mode(0o755)).unwrap();
+        let mine = rustix::process::geteuid().as_raw();
+        if mine == 0 {
+            eprintln!("skipped: as root every file made here is root's, which the check accepts");
+            return;
+        }
+        let other = mine + 1;
+        let refused = open_checked(&shell, other, "hint").err().map(|f| match f {
+            Failure::Usage(text) => text,
+            Failure::Failed(text) => format!("failed: {text}"),
+        });
+        assert_eq!(
+            refused,
+            Some(format!(
+                "{}: is not owned by uid {other} or root",
+                shell.display()
+            ))
+        );
+    }
+
+    /// Asserts that the directory walk names the first directory above the file that is not
+    /// root's or the owner's, and passes when the owner is the one who made them. It is the
+    /// shell's and the script's directory check on its own, without the file check in front
+    /// of it. It catches a program in a directory another user can rename it out of.
+    #[test]
+    fn a_directory_of_another_owner_is_named() {
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "enroll_walk_owner");
+        let inner = dir.path().join("bin");
+        fs::create_dir(&inner).unwrap();
+        fs::set_permissions(&inner, fs::Permissions::from_mode(0o755)).unwrap();
+        let mine = rustix::process::geteuid().as_raw();
+        if mine == 0 {
+            eprintln!(
+                "skipped: as root every directory made here is root's, which the walk accepts"
+            );
+            return;
+        }
+        let other = mine + 1;
+        assert_eq!(
+            check_ancestors(&inner.join("shell"), other),
+            Err(format!(
+                "{}: is not owned by root or the owner",
+                inner.display()
+            ))
+        );
     }
 }
