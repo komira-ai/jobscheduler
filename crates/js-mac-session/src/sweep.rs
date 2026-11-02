@@ -933,7 +933,7 @@ fn unlock(_dir: &OwnedFd, _name: &OsStr, _stat: &Stat) -> io::Result<()> {
 
 mod entry;
 mod flags;
-pub use entry::remove_owned;
+pub(crate) use entry::remove_owned;
 #[cfg(test)]
 use flags::clear_below;
 pub use flags::{CLEARED_FLAGS, clear_flags, clear_flags_within};

@@ -15,7 +15,7 @@ use super::{Park, Swept, is_dir, note, open_base, present, remove_entry};
 /// `path` is a directory that `uid` owns: one of another owner, or a file or a link, is
 /// an error and stays as it is. A `path` that does not exist holds nothing.
 #[must_use]
-pub fn remove_owned(path: &Path, uid: u32) -> Swept {
+pub(crate) fn remove_owned(path: &Path, uid: u32) -> Swept {
     let mut swept = Swept::default();
     let result = remove_dir_of(path, uid, &mut swept);
     note(&mut swept, path, result);

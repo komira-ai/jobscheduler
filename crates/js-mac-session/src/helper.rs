@@ -791,16 +791,18 @@ impl Helper {
 
     /// The steps of [`Self::user_delete`] for the live lease `lease` with `uid`.
     fn delete_steps(&self, ledger: &mut Ledger, lease: LeaseId, uid: u32) -> Result<bool, String> {
-        let entry = self.user_entry(uid)?;
-        self.settled(uid)?;
         let name = user_name(lease);
+        let entry = self.user_entry(&name, uid)?;
+        self.settled(uid)?;
         let mut removed = Self::sweep_all(&self.settings.schedules, &name, uid)?;
         self.none_left(uid)?;
         let mut plan = self.settings.sweep.clone();
         plan.named
             .push(format!("{}/{{user}}", self.settings.homes.display()));
         removed += Self::sweep_all(&plan, &name, uid)?;
-        removed += Self::swept(crate::sweep::remove_owned(&entry, uid), &name)?;
+        if let Some(entry) = entry {
+            removed += Self::swept(crate::sweep::remove_owned(&entry, uid), &name)?;
+        }
         self.settled(uid)?;
         let existed = self
             .host
@@ -813,13 +815,24 @@ impl Helper {
         Ok(existed)
     }
 
-    /// The uid's entry under [`Settings::user_folders`], from its `DARWIN_USER_DIR`.
-    fn user_entry(&self, uid: u32) -> Result<PathBuf, String> {
+    /// The entry under [`Settings::user_folders`] of the user `name` with `uid`, from its
+    /// `DARWIN_USER_DIR`; `None` once the user's record is gone. The entry is removed
+    /// before the record in the same delete, so a record that is gone (a delete that
+    /// failed after it, now repeated) left no entry, and a uid with no record has no
+    /// `DARWIN_USER_DIR` of its own to ask for.
+    fn user_entry(&self, name: &str, uid: u32) -> Result<Option<PathBuf>, String> {
+        let account = self
+            .host
+            .account(name)
+            .map_err(|why| format!("looking up user {name}: {why}"))?;
+        if account.is_none() {
+            return Ok(None);
+        }
         let dir = self
             .host
             .user_dir(uid, self.settings.gid)
             .map_err(|why| format!("asking for the DARWIN_USER_DIR of uid {uid}: {why}"))?;
-        folders::entry(&dir, &self.settings.user_folders)
+        folders::entry(&dir, &self.settings.user_folders).map(Some)
     }
 
     /// [`Self::none_left`], then the uid's launchd domains booted out: refused while a

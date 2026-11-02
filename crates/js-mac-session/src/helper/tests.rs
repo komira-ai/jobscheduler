@@ -519,7 +519,10 @@ fn user_delete_refuses_live_processes_and_an_incomplete_sweep() {
     // A record already gone (a delete that crashed after it) still completes.
     rig.helper.user_create("9.2", None).unwrap();
     rig.host.state().users.clear();
+    log(&rig);
     assert_eq!(rig.helper.user_delete("9.2"), Ok(false));
+    // With no record there is no DARWIN_USER_DIR to ask for (and its entry went before it).
+    assert!(!log(&rig).iter().any(|c| c.starts_with("user_dir")));
     assert!(
         rig.helper
             .kill_uid("9.2")
@@ -597,7 +600,10 @@ fn a_process_started_during_user_delete_stops_it() {
         format!("domain_exists gui/{uid}"),
         format!("domain_exists user/{uid}"),
     ];
-    let mut want = vec![format!("user_dir {uid}:{}", my_gid())];
+    let mut want = vec![
+        "account kbf-lease-11-1".to_owned(),
+        format!("user_dir {uid}:{}", my_gid()),
+    ];
     want.extend(settle.clone());
     want.push(format!("live_processes {uid}"));
     want.extend(settle);
@@ -699,6 +705,7 @@ fn user_delete_waits_for_a_process_that_exits() {
         format!("domain_exists user/{uid}"),
     ];
     let mut want = vec![
+        "account kbf-lease-12-1".to_owned(),
         format!("user_dir {uid}:{}", my_gid()),
         look.clone(),
         "pause".to_owned(),

@@ -44,9 +44,9 @@ fn after(rig: &Rig, uid: u32) -> (Vec<String>, usize, usize) {
 /// Catches the leak the two-run isolation test found on a Mac: a per-user agent
 /// (`distnoted`) that launchd restarts after `kill-uid` and that outlives the user. The
 /// job runs as the uid, so booting `user/<uid>` out before the kill does nothing (the
-/// live job makes the domain again), and the agent is back after the kill. Red when the
-/// domain is not booted out after the kill: the domain survives `kill-uid` and the
-/// agent is running again at the next look.
+/// live job makes the domain again), and launchd restarts its agents from that domain
+/// for as long as it exists. Red when the domain is not booted out after the kill: the
+/// domain survives `kill-uid`.
 #[test]
 fn kill_uid_boots_the_user_domain_out_after_the_kill() {
     let (rig, uid) = one("teardown-agent", "21.1");
@@ -237,7 +237,7 @@ fn user_delete_removes_the_entry_its_darwin_user_dir_names() {
     assert!(folders.join("ab").exists());
     // Asked once, before anything was removed, with the user's ids.
     let calls = log(&rig);
-    assert_eq!(calls[0], format!("user_dir {uid}:{}", my_gid()));
+    assert_eq!(calls[1], format!("user_dir {uid}:{}", my_gid()));
     assert_eq!(
         calls.iter().filter(|c| c.starts_with("user_dir")).count(),
         1
@@ -312,4 +312,79 @@ fn an_entry_that_cannot_be_removed_refuses_user_delete_and_holds_the_uid() {
     );
     assert!(elsewhere.join("T/tmp").exists());
     assert!(link.symlink_metadata().is_ok());
+}
+
+/// Catches a `user-delete` that deletes the record when launchd made a domain of the uid
+/// again during the sweep: the last look, just before the record goes, boots it out and
+/// refuses while it stays. Red when the last look ignores the domains.
+#[test]
+fn a_domain_found_at_the_last_look_refuses_user_delete_and_holds_the_uid() {
+    let (rig, uid) = one("teardown-last-look", "28.1");
+    // Neither domain at the first look; `gui/<uid>` at the last.
+    rig.host
+        .state()
+        .exists_script
+        .extend([false, false, true, false]);
+    let got = rig.helper.user_delete("28.1");
+    held(
+        &rig,
+        "kbf-lease-28-1",
+        got,
+        &format!(
+            "launchd domains of uid {uid} remain: gui/{uid} (bootout: no such domain gui/{uid}); \
+             kill-uid first"
+        ),
+    );
+    assert!(!log(&rig).iter().any(|c| c.starts_with("delete_user")));
+}
+
+/// Catches a `kill-uid` whose second kill, after the crontab and `at` jobs are swept,
+/// reports success while a domain of the uid stays, and a refusal there that frees the
+/// uid. Red when the second kill's result is dropped.
+#[test]
+fn a_domain_that_stays_after_the_schedules_refuses_kill_uid_and_holds_the_uid() {
+    let (rig, uid) = one("teardown-second-kill", "29.1");
+    let mut script = vec![false, false];
+    for _ in 0..KILL_ROUNDS {
+        script.extend([false, true]);
+    }
+    rig.host.state().exists_script.extend(script);
+    let got = rig.helper.kill_uid("29.1");
+    held(
+        &rig,
+        "kbf-lease-29-1",
+        got,
+        &format!(
+            "launchd domains of uid {uid} remain after {KILL_ROUNDS} rounds: \
+             user/{uid} (bootout: no such domain user/{uid})"
+        ),
+    );
+    assert!(rig.host.state().exists_script.is_empty());
+}
+
+/// Catches a repeated `user-delete` that asks for the `DARWIN_USER_DIR` of a uid whose
+/// record a failed earlier delete already removed (macOS has none of its own for it, so
+/// the delete could never finish), and one that cannot look the record up and goes on.
+#[test]
+fn a_delete_repeated_after_the_record_went_completes_without_the_darwin_user_dir() {
+    let (rig, uid) = one("teardown-repeat-delete", "30.1");
+    rig.host.state().fail.insert("user_dir");
+    rig.host.state().users.clear();
+    assert_eq!(rig.helper.user_delete("30.1"), Ok(false));
+    assert!(!log(&rig).iter().any(|c| c.starts_with("user_dir")));
+    assert!(
+        rig.helper.user_create("30.2", None).is_ok(),
+        "uid {uid} is free"
+    );
+
+    let (rig, uid) = one("teardown-account", "31.1");
+    rig.host.state().fail.insert("account");
+    let got = rig.helper.user_delete("31.1");
+    held(
+        &rig,
+        "kbf-lease-31-1",
+        got,
+        "looking up user kbf-lease-31-1: account failed",
+    );
+    assert!(rig.host.state().users.values().any(|u| u.uid == uid));
 }

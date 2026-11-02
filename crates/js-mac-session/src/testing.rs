@@ -84,6 +84,9 @@ pub(crate) struct State {
     pub(crate) respawns: BTreeMap<u32, usize>,
     /// The uids whose agent launchd has a restart due for.
     pub(crate) due: BTreeSet<u32>,
+    /// Answers `domain_exists` gives, in order, before it reads `domains` again: a
+    /// domain that launchd makes (or ends) between two of the helper's steps.
+    pub(crate) exists_script: VecDeque<bool>,
     /// What `user_dir` answers, by uid; `/var/folders/zz/<uid>/0/` when unset.
     pub(crate) user_dirs: BTreeMap<u32, PathBuf>,
 }
@@ -168,7 +171,9 @@ impl Host for FakeHost {
 
     fn domain_exists(&self, domain: &str) -> io::Result<bool> {
         self.call("domain_exists", format!("domain_exists {domain}"))?;
-        Ok(self.state().domains.contains(domain))
+        let mut state = self.state();
+        let scripted = state.exists_script.pop_front();
+        Ok(scripted.unwrap_or_else(|| state.domains.contains(domain)))
     }
 
     /// A domain that does not exist fails as `launchctl bootout` does; one that exists
