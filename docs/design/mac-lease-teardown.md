@@ -23,6 +23,8 @@ The verdict is the outcome, never what a `launchctl` call answered: no process o
 
 A domain prints when `launchctl print` exits 0. Any other exit status is a domain launchd does not print. No exit status is matched as "not found": launchd's answer for a domain it does not have varies (on macOS 26, `launchctl print gui/<uid>` for a user that never logged in has exited 112 and 113, "Could not find domain", and 125, "Domain does not support specified action", from run to run). A `launchctl` that a signal ended, or that could not be run, gave no answer: the domain is not taken as gone, and the next attempt looks again.
 
+This reading is the teardown's only. A domain wrongly read as gone there is caught by the look at the processes. The readiness checks (`session-ready`, `role-session-ready`, `role-run`, and the session switch's rest at the VM user) act on a "not up": the switch logs the VM user in again. So they keep the strict reading: exit 0 is up, exit 112 or 113 with "Could not find domain" is not up, and any other answer (125 included) is an error that changes nothing.
+
 ## `user-delete`
 
 1. **The entry.**

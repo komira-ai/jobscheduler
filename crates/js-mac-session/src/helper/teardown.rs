@@ -263,11 +263,14 @@ impl Helper {
             .map_err(|source| TeardownError::Listing { uid, source })
     }
 
-    /// Whether launchd prints `domain` ([`printed`]).
+    /// Whether launchd prints `domain` ([`printed`]), as the teardown judges it: a
+    /// domain wrongly read as gone is caught by the look at the processes, so any exit
+    /// status but 0 is gone. The readiness checks read `launchctl print` more strictly
+    /// ([`Self::domain_exists`]).
     ///
     /// # Errors
     /// `launchctl` could not be run, or a signal ended it.
-    pub(super) fn domain_exists(&self, domain: &str) -> io::Result<bool> {
+    fn domain_prints(&self, domain: &str) -> io::Result<bool> {
         printed(&self.host.launchctl_print(domain)?)
     }
 
@@ -292,7 +295,7 @@ impl Helper {
     fn still_printing(&self, domains: &[String], refused: &[(String, String)]) -> Vec<String> {
         let mut left = Vec::new();
         for domain in domains {
-            match self.domain_exists(domain) {
+            match self.domain_prints(domain) {
                 Ok(false) => {}
                 Ok(true) => left.push(match refused.iter().find(|(d, _)| d == domain) {
                     Some((_, why)) => format!("{domain} (bootout: {why})"),

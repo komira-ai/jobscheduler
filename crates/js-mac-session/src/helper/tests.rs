@@ -898,6 +898,77 @@ fn a_gui_run_waits_for_the_lease_user_s_gui_domain() {
     );
 }
 
+fn readiness_answer(code: Option<i32>, stderr: &str) -> io::Result<bool> {
+    launchctl_print_answer(&PrintAnswer {
+        code,
+        stderr: stderr.to_owned(),
+    })
+}
+
+/// Asserts that a readiness check takes only `launchctl print`'s documented answers: exit 0 is a domain
+/// that exists; exit 112 (what macOS 26 answers for the `gui/<uid>` of a user that never
+/// logged in, its text here as it was printed) or 113, each with "Could not find
+/// domain", one that does not; every other answer (a refusal, another exit with the same
+/// words, 112 or 113 without them, a signal) is an error naming what launchctl said. It
+/// catches launchd's not-found answer read as a failure, and a failed look at launchd
+/// (125 included) read as a session that is down, which would make the session switch
+/// log the VM user in again over a live session.
+#[test]
+fn only_launchds_not_found_answer_is_absence() {
+    assert!(readiness_answer(Some(0), "").unwrap());
+    for (code, stderr) in [
+        (
+            112,
+            "Bad request.\nCould not find domain for user gui: 59125\n",
+        ),
+        (
+            112,
+            "Bad request.\nCould not find domain for user user: 501\n",
+        ),
+        (113, "Could not find domain for user: 501\n"),
+    ] {
+        assert!(
+            !readiness_answer(Some(code), stderr).unwrap(),
+            "{code} {stderr:?}"
+        );
+    }
+    for (code, stderr, want) in [
+        (
+            Some(1),
+            "Operation not permitted\n",
+            "launchctl print exited 1: Operation not permitted",
+        ),
+        (
+            Some(1),
+            "Could not find domain for user gui: 501\n",
+            "launchctl print exited 1: Could not find domain for user gui: 501",
+        ),
+        (
+            Some(112),
+            "Bad request.\n",
+            "launchctl print exited 112: Bad request.",
+        ),
+        (
+            Some(113),
+            "Bad request.\n",
+            "launchctl print exited 113: Bad request.",
+        ),
+        (Some(5), "", "launchctl print exited 5: "),
+        (
+            Some(125),
+            "Could not print domain: 125: Domain does not support specified action\n",
+            "launchctl print exited 125: Could not print domain: 125: Domain does not support \
+             specified action",
+        ),
+        (None, "", "launchctl print was ended by a signal: "),
+    ] {
+        assert_eq!(
+            readiness_answer(code, stderr).unwrap_err().to_string(),
+            want
+        );
+    }
+}
+
 mod bounds;
 mod outcome;
 mod teardown;

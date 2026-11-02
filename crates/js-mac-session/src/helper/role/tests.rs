@@ -204,6 +204,18 @@ fn the_role_session_is_ready_when_its_gui_domain_is_up_and_no_lease_holds_it() {
     let error = rig.helper.role_session_ready().unwrap_err();
     assert!(error.contains("asking launchd for gui/"), "{error}");
     rig.host.state().fail.clear();
+    // An answer that is not launchd's not-found answer (125 is what the teardown reads as
+    // gone) is an error here too, never "not ready", which would switch the session.
+    rig.host
+        .state()
+        .print_script
+        .push_back(crate::helper::PrintAnswer {
+            code: Some(125),
+            stderr: "Could not print domain: 125: Domain does not support specified action\n"
+                .to_owned(),
+        });
+    let error = rig.helper.role_session_ready().unwrap_err();
+    assert!(error.contains("launchctl print exited 125"), "{error}");
     std::fs::write(rig.dir.join("session-intent"), "garbage").unwrap();
     assert!(rig.helper.role_session_ready().is_err());
 }
