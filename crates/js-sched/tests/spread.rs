@@ -62,6 +62,7 @@ fn request(n: u32, resources: Resources, platform: &[(&str, &str)]) -> Request {
         hermetic: true,
         do_not_cache: false,
         whole_worker: false,
+        pin: None,
         needs: js_caps::Request::from_platform(platform.iter().copied()).unwrap(),
     }
 }

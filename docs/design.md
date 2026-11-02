@@ -170,8 +170,8 @@ Non-goals:
   execution of a job inside a lease; a lease may hold several. A *VM* is a fresh clone of a base image, booted for one run and destroyed
   after it; it is never reused, not even by the next run of the same lease (5.14).
 - **Whole-node lease.** The lease class `whole-node` (kbf's `whole_machine`, the merged `gpu-host`): the whole host, exclusive and quiet for
-  the lease, drained first, capped per pool (5.17). A *reserved* host is marked for one queued request and takes no new work (not the
-  agent's phase `draining`, 5.3).
+  the lease, drained first, capped per pool (5.17). A *reserved* host is marked for one queued request and takes no new work but
+  backfill that ends before the request starts there (whole-node.md section 4; not the agent's phase `draining`, 5.3).
 - **Booking.** The amount of a pool's resource vector the scheduler counts as taken by a lease. A booking is not a limit; the limit is
   what the agent enforces (7.3).
 - **Request history.** What the scheduler has learned about past attempts of similar work: peak memory, CPU parallelism, kills,
@@ -525,9 +525,9 @@ lease that books a host's shape under `Book` is a share, not this class.
 - **Admission.** Eligible hosts are the capable hosts of D41 (tainted and denied excluded). Refused (`no-capable-host`) only when no
   registered host could ever be given whole and no elastic provider could launch one; otherwise queued (D35). A quiet host is taken at
   once, else exactly one host is reserved: least worst-case drain, then fewest leases, then lowest id. The only reservation (R1).
-- **Draining.** A reserved host takes no new work; its work finishes or reaches its end. At `drain_deadline` (default: the pool's max wall
-  time) the reservation is given up and another host tried; nothing is stopped for a reservation. The token is minted only when the agent
-  reports the host quiet, and the clock starts then (D48, D52).
+- **Draining.** A reserved host takes no new work but backfill ending a minute before its tail (whole-node.md 4); its work finishes or
+  reaches its end. At `drain_deadline` (default: the pool's max wall time) the reservation is given up and another host tried; nothing
+  is stopped for a reservation. The token is minted only when the agent reports the host quiet, and the clock starts then (D48, D52).
 - **Caps.** Per pool `max_whole_node`, `max_draining`, a per-consumer limit and a floor of unmarked hosts in a mixed pool; a held lease is
   never revoked (D49). An elastic pool acquires before it drains (D50). Release returns the host only after the checks; host jobs only in
   a whole-node lease (D51). kbf requests the class for performance runs and GPU testing, two-level (9.1).
@@ -596,6 +596,13 @@ Spread is right for a fixed fleet. In any pool that scales, idle machines are te
 the scaler can release (5.8). Rank is therefore a trait with two shipped implementations: `Spread` (today's `Load`) and `FirstFit`, chosen
 per pool. How a host's capacity is booked and packed is in 6.6 ([design/placement.md](design/placement.md)). An optional dedup key on a
 request (absent: no coalescing) lets kbf keep its in-flight coalescing by action key (the `in_flight` map in `crates/kbf-sched/src/scheduler.rs`) without the core owning the table.
+
+### 6.7 A probe pinned to one host
+A probe names one host and runs only there, past that host's cordon: it is the only new work a cordoned host takes, so an operator can
+prove a host with one job while the host stays out of ordinary placement. One rule, `js_sched::admit_probe`, judges it in both placement
+engines (the scheduler's round, and the lease server's placer under `--placement js-sched`). It refuses by name a host that is unknown, not
+serving, not cordoned, draining, mismatched or too small. Room, the load predicate and `memory_schedulable_percent` apply to a probe as to
+any request. See [design/placement.md](design/placement.md).
 
 ## 7. Request history and sizing
 

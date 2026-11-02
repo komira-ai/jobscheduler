@@ -40,18 +40,25 @@ fn a_lease_that_shares_a_host_records_what_it_books() {
     let shared = table.acquire(asking(half()), None).unwrap();
     let whole = table.acquire(request(3600), None).unwrap();
 
+    // Both leases started at their acquire, so they start and end as the table lists them.
+    let listed = table.list();
+    let info = |id| listed.iter().find(|info| info.id == id).unwrap();
     let expected = vec![
         Booking {
             lease: shared.id,
             host: shared.host.clone(),
             state: LeaseState::Held,
             shares: Some(half()),
+            started_at: info(shared.id).acquired_at,
+            ends_at: info(shared.id).ends_at,
         },
         Booking {
             lease: whole.id,
             host: whole.host.clone(),
             state: LeaseState::Held,
             shares: None,
+            started_at: info(whole.id).acquired_at,
+            ends_at: info(whole.id).ends_at,
         },
     ];
     assert_eq!(read_bookings(scratch.file()).unwrap(), expected);

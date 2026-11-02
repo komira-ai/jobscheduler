@@ -495,7 +495,7 @@ impl Engine {
     /// next operation it numbers; and the caller's number.
     ///
     /// # Errors
-    /// The core is fenced, or the store did not take the request.
+    /// The core is fenced, the request is a probe, or the store did not take the request.
     pub(crate) fn admit(
         &mut self,
         a: &mut dyn Adapter,
@@ -506,6 +506,9 @@ impl Engine {
     ) -> Result<Admitted, NotQueued> {
         if self.fenced {
             return Err(NotQueued::Fenced);
+        }
+        if request.pin.is_some() {
+            return Err(NotQueued::Probe);
         }
         let SubmitOptions {
             size_key,

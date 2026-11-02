@@ -262,6 +262,7 @@ pub fn spec(lease: u64, id: &str) -> StartSpec {
         max_wall: Duration::from_secs(7200),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     };
     let spec = StartSpec::new(
         LeaseId::new(1, lease),

@@ -43,6 +43,9 @@ pub enum ConfigError {
     /// held to would be booked against a shape of zero bytes, and every run refused.
     #[error("a pool that names scratch-quota must set a disk_bytes above zero")]
     QuotaWithoutDisk,
+    /// The class a pool shares its hosts with books whole hosts, or is the pool's own.
+    #[error("must name a class that books part of a host, other than the pool's class")]
+    ShareClass,
 }
 
 /// What an operator decides about a pool of self-registering hosts.
@@ -59,6 +62,7 @@ pub struct PoolConfig {
     lost_retention_ms: u64,
     whole_node: Option<WholeNodeConfig>,
     exec: Option<ExecMode>,
+    share_class: Option<ResourceClass>,
 }
 
 impl PoolConfig {
@@ -85,6 +89,7 @@ impl PoolConfig {
             lost_retention_ms: DEFAULT_LOST_RETENTION_MS,
             whole_node: None,
             exec: None,
+            share_class: None,
         }
     }
 
@@ -242,6 +247,29 @@ impl PoolConfig {
         }
         self.whole_node = Some(whole);
         Ok(self)
+    }
+
+    /// The same pool, whose hosts also take leases of `class`, a class that books part of
+    /// a host (`Book`), beside its own class: leases of `class` share a host that has room,
+    /// placed by a placer ([`crate::Registry::set_placer`]; without one every such lease
+    /// is refused as an unsupported class). Its provider ([`crate::Registry::provider`])
+    /// serves both classes.
+    ///
+    /// # Errors
+    /// [`ConfigError::ShareClass`] when `class` books whole hosts or has the pool's own id.
+    pub fn with_share_class(mut self, class: ResourceClass) -> Result<Self, ConfigError> {
+        let books_part = matches!(class.admission(), Admission::Book(_));
+        if !books_part || class.id() == self.class.id() {
+            return Err(ConfigError::ShareClass);
+        }
+        self.share_class = Some(class);
+        Ok(self)
+    }
+
+    /// The class the pool's hosts are shared with, when it has one
+    /// ([`PoolConfig::with_share_class`]).
+    pub fn share_class(&self) -> Option<&ResourceClass> {
+        self.share_class.as_ref()
     }
 
     /// The whole-node settings, when the pool has them.

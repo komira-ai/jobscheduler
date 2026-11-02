@@ -2,7 +2,8 @@
 //!
 //! [`map`] holds the pure conversions between this crate's vocabulary and the scheduler's.
 //! [`place`] is the placer a registry takes under `--placement js-sched`: it builds a
-//! scheduler over the hosts a start could book and asks it which one.
+//! scheduler over the hosts a start could book and asks it which one. [`probe`] judges a
+//! probe's host by the scheduler's probe rule.
 
 // `host_id` and the lease-text conversions are for the step that reads grants back.
 #[allow(
@@ -11,6 +12,9 @@
 )]
 pub(crate) mod map;
 pub(crate) mod place;
+mod probe;
 
+#[cfg(test)]
+mod backfill_tests;
 #[cfg(test)]
 mod wiring_tests;

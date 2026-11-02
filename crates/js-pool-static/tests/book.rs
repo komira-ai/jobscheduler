@@ -30,6 +30,7 @@ fn spec(seq: u64) -> StartSpec {
         max_wall: Duration::from_secs(60),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     };
     StartSpec::new(LeaseId::new(1, seq), request, &[class()]).unwrap()
 }
@@ -142,6 +143,7 @@ fn class_gate_leases_whole_classes_only() {
             max_wall: Duration::from_secs(60),
             labels: BTreeMap::new(),
             validation_run: None,
+            probe_host: None,
         };
         StartSpec::new(LeaseId::new(1, 1), request, std::slice::from_ref(class)).unwrap()
     };
@@ -159,4 +161,47 @@ fn class_gate_leases_whole_classes_only() {
         HostBook::class_gate(&[], &spec_of(&whole)),
         Some(RefusalCode::UnsupportedClass)
     );
+}
+
+/// `spec` `seq`, a probe pinned to `pin`.
+fn probe_spec(seq: u64, pin: &str) -> StartSpec {
+    let mut request = spec(seq).request().clone();
+    request.probe_host = Some(host(pin));
+    StartSpec::new(LeaseId::new(1, seq), request, &[class()]).unwrap()
+}
+
+/// Asserts that booking by the first eligible host places no probe (it has no rule to
+/// judge one by) and books nothing for it, while booking by the caller's choice shows the
+/// caller the probe's host alone, even when an earlier host by id is free; with that host
+/// full the answer is NoCapacity, never another host. It catches a probe booked on a
+/// host it does not name, which would put work on a host its operator kept apart.
+#[test]
+fn a_probe_is_booked_only_by_choice_and_only_on_its_host() {
+    let mut book = book();
+    let any = |_: &HostId, _: &Shape| true;
+    let refused = book.start_where(&probe_spec(1, "b"), None, &any);
+    assert_eq!(refused, StartAck::Refused(RefusalCode::ProbeUnsupported));
+    assert_eq!(book.read(&LeaseId::new(1, 1)), Observed::Absent);
+
+    let shown = std::cell::RefCell::new(Vec::new());
+    let first = |open: &[js_pool_static::Candidate]| {
+        shown.replace(open.iter().map(|c| c.host.clone()).collect());
+        Some(0)
+    };
+    let started = book.start_by(&probe_spec(2, "b"), None, &any, &first);
+    assert_eq!(started, StartAck::Started { host: host("b") });
+    assert_eq!(shown.take(), [host("b")]);
+
+    // `b` (2000 millicores) takes one more 1000-millicore lease, then is full.
+    book.start_by(
+        &spec(3),
+        None,
+        &|id: &HostId, _: &Shape| id.as_str() == "b",
+        &first,
+    );
+    let full = book.start_by(&probe_spec(4, "b"), None, &any, &first);
+    assert_eq!(full, StartAck::Refused(RefusalCode::NoCapacity));
+    assert_eq!(book.read(&LeaseId::new(1, 4)), Observed::Absent);
+    let nowhere = book.start_by(&probe_spec(5, "c"), None, &any, &first);
+    assert_eq!(nowhere, StartAck::Refused(RefusalCode::NoFit));
 }

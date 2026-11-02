@@ -106,6 +106,15 @@ From the moment a host is reserved, **nothing new is placed on it**: no new leas
 exist. (The scheduler-side mark is `reserved`; the agent-announced phase `draining` of 5.3 is a different thing, and a reserved host is not
 "draining" for D41, because it is not leaving.) What runs on it **finishes or reaches its end**, and nothing is killed:
 
+- **Backfill, the one exception.** A host reserved with a known tail (the latest end of its leases when the mark was made: each lease's
+  estimate cut to its max wall, else its max wall) takes work that ends, with a minute to spare, by that tail, so the reserved request
+  still starts when the tail ends. The work's end is its max wall time (cut by the P90 of its key's wall minutes where that is known),
+  and counts only where the max wall is enforced, up to a ceiling; work with no known end, a host with an unknown tail and a tail already
+  past take none. In `js-sched` this is `Scheduler::with_backfill` (off unless the caller says its bounds are enforced, with the ceiling
+  it enforces) and applies to every held worker, a blocked head's too; the kept start never moves later. On the lease server it applies
+  under `--placement js-sched`, to a lease of the pool's `share_class` that is not a probe, with `server.max_lease_wall` as the
+  ceiling (the lease table ends every lease at its wall); without it, and for every other start, a reserved host takes nothing new.
+
 - A lease ends by release, by TTL, or by its max wall time, whichever is first. The renewal answer of a lease on a reserved host carries
   `host_reserved: true` (an additive field, R3): it asks the consumer to place no more work there and to release when its work is done
   (a consumer drains before it releases, 9.1). A consumer that ignores it keeps the lease to its TTL or max wall time; a renewal is not
@@ -341,7 +350,8 @@ Invariants, checked at every step of seeded runs of the fake agent and the simul
 
 - W1. **Never two leases on a whole-node host.** From commit to clearing, a host with a whole-node lease holds no other lease, no placed run
   and no `Start` of another lease.
-- W2. A reserved host takes no new lease, no placed run and no `Start` for a lease that did not exist at the reservation.
+- W2. A reserved host takes no new lease, no placed run and no `Start` for a lease that did not exist at the reservation, but backfill
+  that ends, with the margin, by the tail the reservation was made with (section 4).
 - W3. **The token is never minted before the agent reports ready**; the TTL and the max wall time count from the token.
 - W4. A request holds at most one reservation; a host carries at most one; a held host is not reservable.
 - W5. **Caps are never exceeded:** whole hosts at most the effective ceiling (held leases are not revoked when it falls); reserved-not-held at

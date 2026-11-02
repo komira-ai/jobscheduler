@@ -188,9 +188,11 @@ impl HostBook {
     /// 1. `LeaseEnded` when the lease was stopped;
     /// 2. `Started` on the host it already holds (a repeated start books nothing more);
     /// 3. `Refused(gate)` when the caller passes a refusal as `gate`;
-    /// 4. `Started` on the first host by id that fits the request, has room for it, and
+    /// 4. `Refused(ProbeUnsupported)` for a probe ([`js_types::Request::probe_host`]):
+    ///    this way of booking has no rule to judge one by, and places none;
+    /// 5. `Started` on the first host by id that fits the request, has room for it, and
     ///    that `eligible` accepts;
-    /// 5. `NoCapacity` when a host fits but none has room and is eligible, else `NoFit`.
+    /// 6. `NoCapacity` when a host fits but none has room and is eligible, else `NoFit`.
     ///
     /// A host that fits but is not eligible counts as a fit: the request could be served
     /// by it later. This stops at the first host that qualifies; [`start_by`] shows the
@@ -205,6 +207,9 @@ impl HostBook {
     ) -> StartAck {
         if let Some(settled) = self.settled(spec, gate) {
             return settled;
+        }
+        if spec.request().probe_host.is_some() {
+            return StartAck::Refused(RefusalCode::ProbeUnsupported);
         }
         let wanted = spec.request();
         let whole = spec.class().admission().books_whole_host();
@@ -251,7 +256,10 @@ impl HostBook {
     /// `choose` is shown every candidate (a host that fits, has room and is eligible, in
     /// id order; it is not asked when there is none) and answers the index of the one to
     /// book. The answers are those of [`start_where`]; `NoCapacity` also when `choose`
-    /// picks none, or an index past the candidates.
+    /// picks none, or an index past the candidates. A probe
+    /// ([`js_types::Request::probe_host`]) is booked here, unlike there: the caller has
+    /// judged it, and only the host it names is a candidate (any other host does not fit
+    /// it).
     ///
     /// [`start_where`]: HostBook::start_where
     pub fn start_by(
@@ -266,12 +274,15 @@ impl HostBook {
         }
         let wanted = spec.request();
         let whole = spec.class().admission().books_whole_host();
+        let pinned = |id: &HostId| wanted.probe_host.as_ref().is_none_or(|pin| pin == id);
         let fitting: Vec<(&HostId, &Host)> = self
             .hosts
             .iter()
-            .filter(|(_, host)| {
-                host.shape
-                    .satisfies(&wanted.resources, &wanted.capabilities)
+            .filter(|(id, host)| {
+                pinned(id)
+                    && host
+                        .shape
+                        .satisfies(&wanted.resources, &wanted.capabilities)
             })
             .collect();
         let fits_somewhere = !fitting.is_empty();

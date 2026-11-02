@@ -2,6 +2,7 @@
 
 mod commit;
 mod fault;
+mod gate;
 mod give_up;
 mod handoff;
 mod hold;
@@ -236,7 +237,8 @@ pub struct Scheduler {
     /// ([`Scheduler::recording_requeues`]).
     requeues: Option<Vec<Requeue>>,
     /// Queued whole-machine operations that fit nowhere, and the worker each holds:
-    /// work after it in queue order is not placed there (see [`Scheduler::place`]).
+    /// work after it in queue order is placed there only as backfill (see
+    /// [`Scheduler::place`]).
     reservations: BTreeMap<OperationId, WorkerId>,
     /// The memory floors, each operation's memory kills and each node's busy-node
     /// kills ([`memory`]). Boxed: most schedulers hold none, and the scheduler is
@@ -282,6 +284,8 @@ pub struct Scheduler {
     /// The marks, give-up counts and back-offs of whole-machine requests
     /// ([`Scheduler::whole_mark`]); empty without whole-node settings.
     drain: whole::Drain,
+    /// Backfill on held workers ([`Scheduler::with_backfill`]).
+    backfill: gate::Gate,
 }
 
 impl Scheduler {
@@ -320,6 +324,7 @@ impl Scheduler {
             whole_node: None,
             max_walls: BTreeMap::new(),
             drain: whole::Drain::default(),
+            backfill: gate::Gate::default(),
         }
     }
 
@@ -593,7 +598,8 @@ impl Scheduler {
     /// such action of a pool in queue order (the head) holds the worker of the pool with
     /// the smallest binding ratio, `max((L_cpu + p) / C_cpu, (L_mem + m) / C_mem)`, and
     /// keeps it while its ratio is within a tenth of the best: no operation after it in
-    /// queue order is placed there, so the worker empties as its leases end. At most one
+    /// queue order is placed there but as backfill ([`Scheduler::with_backfill`]), so the
+    /// worker empties as its leases end. At most one
     /// worker is held per pool, work before the head is never held back, and the head
     /// of a pool blocked only by the cold cap holds nothing. A worker held for a
     /// whole-machine operation or for a head, a draining, cordoned or whole-machine worker
@@ -602,7 +608,7 @@ impl Scheduler {
     /// A whole-machine operation that fits nowhere holds one worker that could run it
     /// (the one it held last round while that still could, else the one with fewest
     /// leases): no operation after it in queue order (less urgent, or as urgent and
-    /// younger) is placed there, so the worker empties as its leases end. Work before
+    /// younger) is placed there but as backfill, so the worker empties as its leases end. Work before
     /// it in queue order still is, so a reservation never holds back more urgent work.
     /// It lasts while the operation is queued and the worker could run it. No other
     /// operation holds a worker: an action at a worker's whole memory (the last step of
@@ -614,6 +620,14 @@ impl Scheduler {
     /// does, waits with a reason ([`Effect::Waiting`] when the reason changes), and is
     /// refused once it has waited so for the unservable wait. Its refusal is committed
     /// first and leaves the queue at once, so nothing places it meanwhile.
+    ///
+    /// A probe ([`Request::pin`]) is judged by the probe rule ([`crate::admit_probe`])
+    /// instead, and refused in the round if the rule refuses it. One the rule admits is
+    /// fitted to the worker it names alone, past that worker's cordon, by the same room
+    /// and load predicate as any request; it waits while they say no. It holds no worker,
+    /// and no reservation or held head keeps it off its own (none is ever on a cordoned
+    /// worker). A whole-machine probe is held to the whole-node caps and counts as a
+    /// whole worker in the round, as any whole-machine request.
     /// What operation `id`, asking `request`, is charged if placed now: its cost and how
     /// that is charged over time (`None`: flat).
     fn charging(&self, id: OperationId, request: &Request) -> (LeaseCost, Option<Arc<Profile>>) {
@@ -641,7 +655,7 @@ impl Scheduler {
         let mut placed = Vec::new();
         let mut verdicts = Vec::new();
         let mut stuck = Vec::new();
-        let mut reserved = BTreeSet::new();
+        let (mut reserved, mut holds) = self.backfill.round();
         let mut reservations = BTreeMap::new();
         let mut whole = self.whole_round();
         let mut head_holds = BTreeMap::new();
@@ -665,9 +679,12 @@ impl Scheduler {
             // A whole-machine request avoids the workers it gave up for the back-off.
             let barred = self.drain.barred(id, now);
             let avoid = whole::Drain::avoiding(&op.avoid, &barred);
+            let backfill = self.backfill_duration(id);
             let attempt = Attempt {
                 request,
                 reserved: &reserved,
+                starts: &holds.starts,
+                backfill,
                 avoid: &avoid,
                 not_whole: key_raised,
                 cost,
@@ -675,6 +692,31 @@ impl Scheduler {
                 lease,
                 fit_minutes,
             };
+            // A probe is placed by the probe rule and its worker's room alone: it never
+            // looks at another worker and holds none. A whole-machine probe is held to the
+            // whole-node caps and counts as a whole worker, as any whole-machine request.
+            // One the rule refuses is refused at once.
+            if let Some(pin) = &request.pin {
+                let whole_kind = request.kind == LeaseKind::WholeMachine;
+                match Servable::probe(&self.workers, &self.cordons, now, pin, request) {
+                    Err(refusal) => {
+                        verdicts.push((id, Verdict::Unservable(Unservable::Probe(refusal))));
+                    }
+                    Ok(())
+                        if placed.len() < round && (!whole_kind || self.quiet_take(&whole, id)) =>
+                    {
+                        let fit = servable.fit(&mut self.workers, &mut self.admission, &attempt);
+                        if let Some(p) = fit.placed {
+                            if whole_kind {
+                                whole.placed_whole();
+                            }
+                            placed.push((id, p));
+                        }
+                    }
+                    Ok(()) => {}
+                }
+                continue;
+            }
             let mut blocked = None;
             // A whole-machine request over a cap takes no quiet worker; it waits as any
             // request that cannot be placed does.
@@ -719,9 +761,9 @@ impl Scheduler {
                                 &placed,
                                 turn,
                             ) {
-                                Ok(held) => held.map(|(name, mark)| {
+                                Ok(held) => held.map(|(name, mark, tail)| {
                                     whole.marks.insert(id, mark);
-                                    name
+                                    (name, tail)
                                 }),
                                 Err(wait) => {
                                     whole.waits.insert(id, wait);
@@ -733,13 +775,15 @@ impl Scheduler {
                     // Without whole-node settings: as it always was, the worker with the
                     // fewest leases, kept while it could run the request, and no limit
                     // on how many requests hold a worker.
-                    None => servable.reserve_by_leases(
-                        &self.workers,
-                        request,
-                        &reserved,
-                        &op.avoid,
-                        self.reservations.get(&id),
-                    ),
+                    None => servable
+                        .reserve_by_leases(
+                            &self.workers,
+                            request,
+                            &reserved,
+                            &op.avoid,
+                            self.reservations.get(&id),
+                        )
+                        .map(|name| (name, None)),
                     // With settings, an action that owns its worker holds one worker per
                     // pool, by the least tail, the first request in queue order taking it
                     // (a blocked head shares the pool's slot below).
@@ -761,16 +805,18 @@ impl Scheduler {
                         if name.is_some() {
                             held_pools.insert(pool);
                         }
-                        name
+                        let tail = name.as_ref().and_then(|name| gate::tail_of(&drain, name));
+                        name.map(|name| (name, tail))
                     }
                 };
-                if let Some(name) = held {
+                if let Some((name, start)) = held {
+                    self.backfill.hold(&mut holds, id, &name, start);
                     reserved.insert(name.clone());
                     reservations.insert(id, name);
                 }
             }
             // A blocked head holds the worker with the most headroom, one per pool:
-            // requests after it in queue order are not placed there, so the worker
+            // requests after it in queue order are not placed there (but as backfill), so the worker
             // empties as its leases end instead of being refilled by small work. The
             // pool's slot is taken only by a request that holds a worker: one that
             // cannot (an exclusive action, say) leaves it to the next blocked request.
@@ -782,6 +828,8 @@ impl Scheduler {
                 let attempt = Attempt {
                     request,
                     reserved: &reserved,
+                    starts: &holds.starts,
+                    backfill,
                     avoid: &op.avoid,
                     not_whole: key_raised,
                     cost,
@@ -793,7 +841,9 @@ impl Scheduler {
                 // Without whole-node settings the hold is what it always was, by the
                 // binding ratio; with them, by the start time.
                 let held = match &self.whole_node {
-                    None => servable.hold_for_head(&self.workers, &self.admission, &attempt, kept),
+                    None => servable
+                        .hold_for_head(&self.workers, &self.admission, &attempt, kept)
+                        .map(|name| (name, None)),
                     Some(_) => {
                         let ends = self.lease_ends(&placed);
                         servable.hold_for_head_by_start(
@@ -804,8 +854,9 @@ impl Scheduler {
                         )
                     }
                 };
-                if let Some(name) = held {
+                if let Some((name, start)) = held {
                     self.admission.counters.reservations += u64::from(kept != Some(&name));
+                    self.backfill.hold(&mut holds, id, &name, start);
                     reserved.insert(name.clone());
                     head_holds.insert(id, name);
                     held_pools.insert(pool);
@@ -831,6 +882,7 @@ impl Scheduler {
         self.drain.marks = whole.marks;
         self.drain.waits = whole.waits;
         self.head_holds = head_holds;
+        self.backfill.end_round(holds);
         for (id, verdict) in verdicts {
             // A size a key floor gave it and no live worker can hold is lowered, not
             // waited on: the next round judges the smaller request.
@@ -879,10 +931,17 @@ impl Scheduler {
     /// Records this round's verdict on queued operation `id`: tells its waiters when
     /// the reason it waits changes, and proposes its refusal once no worker, cordoned or
     /// not, could run it for the unservable wait. Time spent waiting only for a cordon
-    /// does not count: the wait starts again when the work becomes unservable.
+    /// does not count: the wait starts again when the work becomes unservable. A probe
+    /// the probe rule refuses ([`Unservable::Probe`]) is refused in the same round, its
+    /// reason the rule's sentence alone.
     fn note(&mut self, id: OperationId, verdict: Verdict, effects: &mut Vec<Effect>) {
         let now = self.now;
-        let wait = self.unservable_wait;
+        // A probe the probe rule refuses is refused at once: waiting changes none of it.
+        let probe = matches!(verdict, Verdict::Unservable(Unservable::Probe(_)));
+        let wait = match probe {
+            true => Duration::ZERO,
+            false => self.unservable_wait,
+        };
         let op = self.ops.get_mut(&id).expect("queued operations exist");
         let (reason, refusable) = match verdict {
             Verdict::Servable => {
@@ -918,11 +977,14 @@ impl Scheduler {
             }
         };
         if unservable.refusable && now >= unservable.since.saturating_add(wait) {
-            let reason = format!(
-                "{} (waited {} s for a worker that can run it)",
-                unservable.text,
-                wait.as_secs()
-            );
+            let reason = match probe {
+                true => unservable.text.clone(),
+                false => format!(
+                    "{} (waited {} s for a worker that can run it)",
+                    unservable.text,
+                    wait.as_secs()
+                ),
+            };
             self.queue.remove(&(Reverse(op.request.qos.clone()), id));
             effects.push(Effect::Commit(ControlRecord::Refusal(RefusalRecord {
                 operation: id,

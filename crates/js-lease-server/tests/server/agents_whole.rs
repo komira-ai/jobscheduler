@@ -194,6 +194,7 @@ fn whole_request() -> js_types::Request {
         max_wall: secs(7200),
         labels: [("team".to_string(), "infra".to_string())].into(),
         validation_run: None,
+        probe_host: None,
     }
 }
 

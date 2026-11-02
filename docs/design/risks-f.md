@@ -53,7 +53,7 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
   host stays tainted until an operator reimages it, so a dedicated GPU or performance pool of few machines loses capacity for each such
   lease. Mitigated by host jobs off by default and needing four consents, by GPU and performance runs being `contained`, and by an elastic
   machine being replaced. Not mitigated: a pool that allows host jobs on its only machines.
-- **K38. Draining idles capacity, and a long lease holds a reservation.** A reserved host does no new work until it is quiet, up to its
+- **K38. Draining idles capacity, and a long lease holds a reservation.** A reserved host does no new work but backfill that ends by its tail (whole-node.md section 4) until it is quiet, up to its
   `drain_deadline`, and a consumer that ignores `host_reserved` keeps its lease to its TTL or max wall time (D48). Bounded by `max_draining`,
   the ceiling and `keep_for_ordinary` (D49), by cost-ordered host choice, by the give-up and back-off, and by acquiring a machine in an
   elastic pool before draining (D50). Residual: a pool of long leases pays most of a max wall time of idle per whole-node lease.

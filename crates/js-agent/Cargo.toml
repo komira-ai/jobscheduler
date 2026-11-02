@@ -62,7 +62,8 @@ js-provider = { path = "../js-provider" }
 js-registry = { path = "../js-registry" }
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
 clap.workspace = true
-rustix = { workspace = true, features = ["process", "thread"] }
+# `net`: a socket bound and never listening, for a server that is down (update_hook/lease_port).
+rustix = { workspace = true, features = ["net", "process", "thread"] }
 tar.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing-subscriber.workspace = true

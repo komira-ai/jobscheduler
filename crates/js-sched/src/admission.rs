@@ -669,6 +669,7 @@ mod tests {
             hermetic: true,
             do_not_cache: false,
             whole_worker: false,
+            pin: None,
         }
     }
 
