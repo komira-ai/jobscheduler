@@ -2,11 +2,11 @@
 //! finds it, and the lock that keeps two steps apart (host-updates design, 4.2, "The hook
 //! record" and "The record directory is not the service's").
 //!
-//! The record is `state_dir/record.json`; the lock is an exclusive `flock` on `state_dir`
-//! itself, as the hook contract has it, and on `state_dir/lock`, which hooks of before the
-//! directory lock take: both are taken without waiting and held for the whole step, the
-//! directory's first, so a second copy, or anything that holds the directory, makes the step
-//! refuse (exit 1, reason `locked`) having changed nothing. The directory must be `root:root`, mode 0700 and
+//! The record is `state_dir/record.json`. The lock is an exclusive `flock` on `state_dir`
+//! itself (the hook contract's lock) and one on `state_dir/lock` (kept so that a hook built
+//! before the directory lock still excludes this one). Both are taken without waiting and held
+//! for the whole step, the directory's first, so a second copy, or anything that holds the
+//! directory, makes the step refuse (exit 1, reason `locked`) having changed nothing. The directory must be `root:root`, mode 0700 and
 //! not a symlink, and every directory above it must be owned by root and not writable by its
 //! group or by others, or the step refuses (`state_invalid`) before it opens anything in it.
 //!
@@ -476,7 +476,8 @@ pub struct Held {
 }
 
 impl Held {
-    /// Opens `dir` once and takes the lock, without waiting. Every directory from `/` down
+    /// Opens `dir` once and takes the two locks, the directory's and then the lock file's,
+    /// without waiting. Every directory from `/` down
     /// is looked at through `stat` (see [`fd_stat`]) as it is opened, with its path.
     ///
     /// # Errors
@@ -509,7 +510,8 @@ impl Held {
         let lock = match locked {
             Ok(lock) => lock,
             Err(error) => {
-                // Released explicitly, as `drop` does (see above).
+                // Released explicitly, as `Held`'s `drop` releases it: a copy of the descriptor
+                // in a child forked meanwhile would keep the lock after the close.
                 let _ = flock(&fd, FlockOperation::Unlock);
                 return Err(error);
             }

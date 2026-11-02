@@ -319,8 +319,8 @@ impl World {
     /// The agent says hello: the server makes the host if it knows none (epoch 1), else one more
     /// epoch; a new session, the version and the runtime either way. The session is stamped
     /// with the server's clock, or one millisecond later when that is the stamp of the session it
-    /// replaces (the fake clock moves only when a step pauses): the server never stamps two
-    /// sessions alike.
+    /// replaces (the fake clock moves only when a step pauses): a new session's stamp always
+    /// differs from the one it replaces.
     ///
     /// # Errors
     /// The server's file cannot be read or written.

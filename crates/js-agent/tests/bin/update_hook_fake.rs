@@ -85,7 +85,9 @@ fn hung(asked: Duration) {
         "js-update-hook-fake: the step asked to wait {} s, past its declared timeout: stopped as the updater would stop it",
         asked.as_secs()
     );
-    std::process::abort();
+    // SIGKILL, as the updater sends: no core file, nothing more runs.
+    let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
+    std::process::exit(1);
 }
 
 /// Runs the step over the fakes.

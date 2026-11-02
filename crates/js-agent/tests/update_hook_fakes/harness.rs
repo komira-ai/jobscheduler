@@ -57,20 +57,23 @@ pub const RELEASE_LINK: &str = "/opt/js-agent/current";
 /// The host the lease server knows.
 pub const HOST: &str = "burst-1";
 
-/// The `[hook.timeout_secs]` of the declaration, in step order: the updater's bound on each
-/// step, which the hang guard holds the step's waits to.
-pub const TIMEOUTS: [(Step, u64); 5] = [
-    (Step::Prepare, 3900),
-    (Step::Cutover, 4320),
-    (Step::Verify, 615),
-    (Step::Rollback, 8220),
-    (Step::Cleanup, 120),
-];
+/// The `[hook.timeout_secs]` of the declaration: the updater's bound on `step`, which the hang
+/// guard holds the step's waits to.
+#[must_use]
+pub const fn timeout_secs(step: Step) -> u64 {
+    match step {
+        Step::Prepare => 3900,
+        Step::Cutover => 4320,
+        Step::Verify => 615,
+        Step::Rollback => 8220,
+        Step::Cleanup => 120,
+    }
+}
 
 /// The declaration the hook runs under, with its record in `state_dir`.
 #[must_use]
 pub fn declaration_text(state_dir: &Path) -> String {
-    let bound = |step: Step| TIMEOUTS.iter().find(|(s, _)| *s == step).map_or(0, |t| t.1);
+    let bound = timeout_secs;
     format!(
         concat!(
             "state_dir = \"{state}\"\n[hook]\nunits = [\"{unit}\"]\n",
@@ -277,7 +280,7 @@ pub struct Guard<'a> {
 
 impl<'a> Guard<'a> {
     /// Waits through `clock` until `budget` is spent, then calls `fire` with what was asked
-    /// (it does not return in the binary: it aborts the process).
+    /// (it does not return in the binary: it kills the process).
     #[must_use]
     pub fn new(clock: &'a dyn Clock, budget: Duration, fire: &'a dyn Fn(Duration)) -> Self {
         Self {
@@ -291,8 +294,7 @@ impl<'a> Guard<'a> {
     /// The bound of `step` in the declaration.
     #[must_use]
     pub fn budget_of(step: Step) -> Duration {
-        let secs = TIMEOUTS.iter().find(|(s, _)| *s == step).map_or(0, |t| t.1);
-        Duration::from_secs(secs)
+        Duration::from_secs(timeout_secs(step))
     }
 
     /// The waits asked for so far.
