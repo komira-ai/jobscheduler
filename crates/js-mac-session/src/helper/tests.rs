@@ -227,7 +227,7 @@ fn a_ledger_that_cannot_record_stops_the_verb() {
 
 /// Catches: booting the launchd domains out before the kill and never after (a live
 /// process of the uid makes `user/<uid>` again, and launchd then restarts its agents),
-/// giving up after one round, or never giving up.
+/// giving up after one attempt, or never giving up.
 #[test]
 fn kill_uid_kills_then_boots_out_until_none_is_left() {
     let rig = rig("kill", 2);
@@ -237,27 +237,25 @@ fn kill_uid_kills_then_boots_out_until_none_is_left() {
     rig.host.state().procs.insert(uid, 3);
     rig.host.state().stubborn.insert(uid, 2);
     let round = |left: usize| {
-        // The user never logged in and its agents are gone: launchd has neither
-        // domain, so none is booted out.
+        // The user never logged in, so `gui/<uid>` is never asked about; `user/<uid>` is
+        // booted out each attempt (it is not there: the bootout fails, which decides
+        // nothing) and looked at once the look at the processes is made.
         let mut calls = vec![
             format!("kill_all {uid}"),
-            format!("launchctl print gui/{uid}"),
-            format!("launchctl print user/{uid}"),
+            format!("bootout user/{uid}"),
             format!("live_processes {uid}"),
+            format!("launchctl print user/{uid}"),
         ];
-        match left {
-            0 => calls.extend([
-                format!("launchctl print gui/{uid}"),
-                format!("launchctl print user/{uid}"),
-            ]),
-            _ => calls.push("pause".to_owned()),
+        if left > 0 {
+            calls.push("pause".to_owned());
         }
         calls
     };
     assert_eq!(rig.helper.kill_uid("5.1"), Ok(()));
-    // Two rounds that leave processes, one that leaves none, then (after the crontab
-    // and `at` jobs are swept) the second kill's one round.
-    let want: Vec<String> = [3, 3, 0, 0].into_iter().flat_map(round).collect();
+    // The look for a GUI session, two attempts that leave processes, one that leaves
+    // none, then (after the crontab and `at` jobs are swept) the second kill's one.
+    let mut want = vec![format!("live_processes {uid}")];
+    want.extend([3, 3, 0, 0].into_iter().flat_map(round));
     assert_eq!(log(&rig), want);
 
     rig.host.state().procs.insert(uid, 1);
@@ -265,7 +263,10 @@ fn kill_uid_kills_then_boots_out_until_none_is_left() {
     let error = rig.helper.kill_uid("5.1").unwrap_err();
     assert_eq!(
         error,
-        format!("1 processes of uid {uid} remain after 10 rounds: 1000 (proc0)")
+        format!(
+            "1 processes of uid {uid} remain after 10 attempts: 1000 (proc0); uid {uid} is \
+             quarantined: no other lease gets it until a delete succeeds"
+        )
     );
     let rounds = log(&rig)
         .iter()
@@ -594,13 +595,11 @@ fn a_process_started_during_user_delete_stops_it() {
     );
 
     // With none left the delete completes, after three looks; the first and the last
-    // boot out the uid's domains and find neither left.
+    // boot out the uid's user domain and find it does not print.
     assert_eq!(rig.helper.user_delete("11.1"), Ok(true));
     let settle = [
         format!("live_processes {uid}"),
-        format!("launchctl print gui/{uid}"),
-        format!("launchctl print user/{uid}"),
-        format!("launchctl print gui/{uid}"),
+        format!("bootout user/{uid}"),
         format!("launchctl print user/{uid}"),
         format!("live_processes {uid}"),
     ];
@@ -703,9 +702,7 @@ fn user_delete_waits_for_a_process_that_exits() {
     assert_eq!(rig.helper.user_delete("12.1"), Ok(true));
     let look = format!("live_processes {uid}");
     let domains = [
-        format!("launchctl print gui/{uid}"),
-        format!("launchctl print user/{uid}"),
-        format!("launchctl print gui/{uid}"),
+        format!("bootout user/{uid}"),
         format!("launchctl print user/{uid}"),
     ];
     let mut want = vec![
@@ -789,9 +786,9 @@ fn kill_uid_removes_the_schedules_between_two_kills() {
     std::fs::create_dir_all(&tabs).unwrap();
     std::fs::write(&tab, "* * * * * job").unwrap();
     log(&rig);
-    // Nothing left after the first kill; a job fires before the sweep, so the
-    // second kill finds one and kills it.
-    rig.host.state().live_script.extend([0, 1]);
+    // No GUI session, and nothing left after the first kill; a job fires before the
+    // sweep, so the second kill finds one and kills it.
+    rig.host.state().live_script.extend([0, 0, 1]);
     rig.host.state().watch = Some(tab.clone());
     assert_eq!(rig.helper.kill_uid("14.1"), Ok(()));
     assert!(!tab.exists(), "kill-uid left the crontab");
@@ -809,7 +806,7 @@ fn kill_uid_removes_the_schedules_between_two_kills() {
             format!("kill_all {uid} (watched file absent)"),
             format!("kill_all {uid} (watched file absent)"),
         ],
-        "one round, the sweep, then two rounds"
+        "one attempt, the sweep, then two attempts"
     );
 
     if me() != 0 {
@@ -901,5 +898,79 @@ fn a_gui_run_waits_for_the_lease_user_s_gui_domain() {
     );
 }
 
+fn readiness_answer(code: Option<i32>, stderr: &str) -> io::Result<bool> {
+    launchctl_print_answer(&PrintAnswer {
+        code,
+        stderr: stderr.to_owned(),
+    })
+}
+
+/// Asserts that a readiness check takes only `launchctl print`'s documented answers: exit 0 is a domain
+/// that exists; exit 112 (what macOS 26 answers for the `gui/<uid>` of a user that never
+/// logged in, its text here as it was printed) or 113, each with "Could not find
+/// domain", one that does not; every other answer (a refusal, another exit with the same
+/// words, 112 or 113 without them, a signal) is an error naming what launchctl said. It
+/// catches launchd's not-found answer read as a failure, and a failed look at launchd
+/// (125 included) read as a session that is down, which would make the session switch
+/// log the VM user in again over a live session.
+#[test]
+fn only_launchds_not_found_answer_is_absence() {
+    assert!(readiness_answer(Some(0), "").unwrap());
+    for (code, stderr) in [
+        (
+            112,
+            "Bad request.\nCould not find domain for user gui: 59125\n",
+        ),
+        (
+            112,
+            "Bad request.\nCould not find domain for user user: 501\n",
+        ),
+        (113, "Could not find domain for user: 501\n"),
+    ] {
+        assert!(
+            !readiness_answer(Some(code), stderr).unwrap(),
+            "{code} {stderr:?}"
+        );
+    }
+    for (code, stderr, want) in [
+        (
+            Some(1),
+            "Operation not permitted\n",
+            "launchctl print exited 1: Operation not permitted",
+        ),
+        (
+            Some(1),
+            "Could not find domain for user gui: 501\n",
+            "launchctl print exited 1: Could not find domain for user gui: 501",
+        ),
+        (
+            Some(112),
+            "Bad request.\n",
+            "launchctl print exited 112: Bad request.",
+        ),
+        (
+            Some(113),
+            "Bad request.\n",
+            "launchctl print exited 113: Bad request.",
+        ),
+        (Some(5), "", "launchctl print exited 5: "),
+        (
+            Some(125),
+            "Could not print domain: 125: Domain does not support specified action\n",
+            "launchctl print exited 125: Could not print domain: 125: Domain does not support \
+             specified action",
+        ),
+        (None, "", "launchctl print was ended by a signal: "),
+    ] {
+        assert_eq!(
+            readiness_answer(code, stderr).unwrap_err().to_string(),
+            want
+        );
+    }
+}
+
 mod bounds;
+mod obligation;
+mod outcome;
+mod previous_release;
 mod teardown;

@@ -16,8 +16,11 @@
 //!   found" (`errSecNoDefaultKeychain`; the fresh user has no keychain at all, so it has no item). The tool exits with the negated error code modulo 256: -25300 gives 44, -25307 gives 37;
 //! - `defaults read`: exit status 1 with "does not exist" on standard error (the domain or
 //!   the domain/key pair is missing). Exit status 1 alone is not absence;
-//! - `launchctl print <domain>`: exit status 112 (macOS 26, for a `gui/<uid>` never logged
-//!   in to) or 113, with "Could not find domain" on standard error;
+//! - `launchctl print <domain>`: exit status 112 or 113 with "Could not find domain", or
+//!   125 with "Domain does not support specified action", on standard error (macOS 26 has
+//!   given each for a `gui/<uid>` never logged in to). Any other failure, a refusal such as
+//!   "Operation not permitted" included, is a failed look: this test is an oracle, so an
+//!   answer it does not know fails it loudly, never passes it;
 //! - `ps`, `ipcs`, `find`: no not-found answer; any status but 0 is a failed look.
 //!
 //! The same care applies to run A's seeds. A kind counts as COVERED when it was seeded, when
@@ -97,11 +100,13 @@ pub fn classify_defaults(code: Option<i32>, stdout: &str, stderr: &str) -> Outco
     }
 }
 
-/// `launchctl print <domain>`: the text of the domain, or its documented absence.
+/// `launchctl print <domain>`: the text of the domain, or one of launchd's answers for a
+/// domain it does not have.
 pub fn classify_launchctl_print(code: Option<i32>, stdout: &str, stderr: &str) -> Outcome {
     match code {
         Some(0) => Outcome::Found(stdout.to_owned()),
         Some(112 | 113) if stderr.contains("Could not find domain") => Outcome::Absent,
+        Some(125) if stderr.contains("Domain does not support specified action") => Outcome::Absent,
         _ => Outcome::CouldNotLook(format!("launchctl exited {code:?}: {}", stderr.trim())),
     }
 }
@@ -743,35 +748,58 @@ mod tests {
         }
     }
 
-    /// Asserts `launchctl print`'s answers: 0 returns the text; exit 112 or 113 with "Could not
-    /// find domain" is absent; those codes without the words, other codes and a signal are
-    /// failed looks. It catches a view that drops the exit status and so reads a permission
-    /// failure as an empty domain, and macOS 26's not-found answer (112) read as a failed look.
+    /// Asserts `launchctl print`'s answers: 0 returns the text; 112 or 113 with "Could not
+    /// find domain", and 125 with "Domain does not support specified action" (as macOS 26
+    /// has answered for a `gui/<uid>` never logged in to), are absent; those codes without
+    /// their words, a refusal, other codes and a signal are failed looks. It catches the
+    /// after-teardown look failing on 125, and a failed look (a permission failure, an
+    /// error) read as a domain that is gone.
     #[test]
-    fn launchctl_print_is_absent_only_on_its_not_found_answer() {
+    fn launchctl_print_is_absent_only_on_its_not_found_answers() {
         assert_eq!(
             classify_launchctl_print(Some(0), "user/700 = {\n}\n", ""),
             Outcome::Found("user/700 = {\n}\n".to_owned())
         );
-        for code in [112, 113] {
-            let text = "Bad request.\nCould not find domain for user gui: 700";
+        for (code, text) in [
+            (112, "Bad request.\nCould not find domain for user gui: 700"),
+            (113, "Could not find domain for user: 700"),
+            (
+                125,
+                "Could not print domain: 125: Domain does not support specified action",
+            ),
+        ] {
             assert_eq!(
                 classify_launchctl_print(Some(code), "", text),
-                Outcome::Absent
+                Outcome::Absent,
+                "{code} {text:?}"
             );
         }
-        for (code, text) in [
-            (Some(112), "Bad request."),
-            (Some(113), "Operation not permitted"),
-            (Some(1), "Could not find domain for user/700"),
-            (Some(150), "Domain does not support specified action"),
-            (None, ""),
+        for (code, text, want) in [
+            (
+                Some(112),
+                "Bad request.",
+                "launchctl exited Some(112): Bad request.",
+            ),
+            (
+                Some(125),
+                "Operation not permitted",
+                "launchctl exited Some(125): Operation not permitted",
+            ),
+            (
+                Some(1),
+                "Operation not permitted",
+                "launchctl exited Some(1): Operation not permitted",
+            ),
+            (
+                Some(150),
+                "Domain does not support specified action",
+                "launchctl exited Some(150): Domain does not support specified action",
+            ),
+            (None, "killed", "launchctl exited None: killed"),
         ] {
-            assert!(
-                matches!(
-                    classify_launchctl_print(code, "", text),
-                    Outcome::CouldNotLook(_)
-                ),
+            assert_eq!(
+                classify_launchctl_print(code, "", text),
+                Outcome::CouldNotLook(want.to_owned()),
                 "{code:?} {text:?}"
             );
         }

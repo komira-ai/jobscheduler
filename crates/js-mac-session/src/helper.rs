@@ -16,14 +16,21 @@
 //!   switch's intent record names (the one `session-login` logged in); `run` there is
 //!   refused until launchd has the user's `gui/<uid>` domain, which exists once the
 //!   login has completed. `session-ready` answers whether it does.
-//! - `kill-uid` kills, then boots out those of the uid's `gui/<uid>` and `user/<uid>`
-//!   launchd domains that launchd has (a pool user never logs in, so it has no
-//!   `gui/<uid>`: a domain launchd answers it does not have is skipped, never an
-//!   error), and repeats both until no process of the uid and neither domain is left
-//!   (at most [`KILL_ROUNDS`] rounds): launchd restarts a per-user agent such as
-//!   `distnoted` for as long as the domain exists, and a live process of the uid makes
-//!   the domain again. It then removes the user's crontab and `at` jobs, and does it all
-//!   again, so no scheduled job of the user starts after it returns.
+//! - `kill-uid` is judged by its outcome, never by what a `launchctl` call answered. It
+//!   decides, before the kill, whether the uid may have a GUI login session: the session
+//!   switch's intent record names it, it owns a `loginwindow` process (or one whose name
+//!   cannot be read), or an earlier teardown left its GUI domain owed (a record in the
+//!   state directory, kept until a teardown judges the domain gone). A pool user has none
+//!   of these, so its `gui/<uid>` is never asked about. Then, for at most
+//!   [`KILL_ROUNDS`] attempts, it kills every process of the
+//!   uid and boots out `user/<uid>` (and `gui/<uid>`, only with the session), the
+//!   bootout's own failure only logged, and looks again: done once no process of the
+//!   uid is left and none of those domains prints (`launchctl print` exits non-zero).
+//!   launchd restarts a per-user agent such as `distnoted` for as long as the domain
+//!   exists, and a live process of the uid makes the domain again. It then removes the
+//!   user's crontab and `at` jobs, and does it all again, so no scheduled job of the
+//!   user starts after it returns. An outcome that does not hold after the last attempt
+//!   fails, naming what remains, and the lease stays live: its uid is quarantined.
 //! - `user-delete` refuses while any process of the uid remains. It first asks for the
 //!   uid's `DARWIN_USER_DIR` (in a short-lived process of the uid, while its record is
 //!   there) and takes the uid's own entry under the per-user folders from it, refusing
@@ -87,8 +94,8 @@ mod vmrun;
 pub use image::{CHFLAGS, ImageSettings};
 pub use switch::Reset;
 
-/// How many times `kill-uid` kills, boots out the uid's launchd domains and looks again
-/// before it gives up.
+/// How many attempts `kill-uid` makes (kill, boot out the uid's launchd domains, look at
+/// the outcome) before it gives up.
 pub const KILL_ROUNDS: usize = 10;
 
 /// How many times each of `user-delete`'s looks lists the uid's processes, a
@@ -142,15 +149,16 @@ pub trait Host: Send + Sync {
     /// The record could not be deleted.
     fn delete_user(&self, name: &str) -> io::Result<bool>;
     /// How `launchctl print <domain>` ended: its exit code and its standard error. The
-    /// helper reads from it whether launchd has the domain; only launchd's answer for a
-    /// missing domain is absence.
+    /// teardown reads exit 0 as a domain launchd has and any other exit status as one it
+    /// does not print; the readiness checks take only launchd's not-found answer as
+    /// absence.
     ///
     /// # Errors
     /// `launchctl` could not be run.
     fn launchctl_print(&self, domain: &str) -> io::Result<PrintAnswer>;
-    /// `launchctl bootout <domain>`: ends the domain and every job in it. Asked only for
-    /// a domain `launchctl print` showed; one that went in between fails, and the
-    /// caller asks `launchctl print` again afterwards.
+    /// `launchctl bootout <domain>`: ends the domain and every job in it. Its failure is
+    /// no verdict (it fails for a domain that is not there, and can fail after ending
+    /// one): the caller logs it and asks `launchctl print` afterwards.
     ///
     /// # Errors
     /// The domain could not be booted out.
@@ -629,6 +637,54 @@ impl Helper {
         let domain = format!("gui/{uid}");
         self.domain_exists(&domain)
             .map_err(|why| format!("asking launchd for {domain}: {why}"))
+    }
+
+    /// Whether launchd has `domain`, for a readiness check ([`launchctl_print_answer`]).
+    ///
+    /// # Errors
+    /// `launchctl` could not be run, or failed other than by saying the domain is not
+    /// there.
+    pub(super) fn domain_exists(&self, domain: &str) -> io::Result<bool> {
+        launchctl_print_answer(&self.host.launchctl_print(domain)?)
+    }
+}
+
+/// The words `launchctl print` writes to standard error for a domain launchd does not
+/// have.
+const NO_DOMAIN_TEXT: &str = "Could not find domain";
+
+/// The exit statuses of `launchctl print` that, with [`NO_DOMAIN_TEXT`], mean launchd
+/// does not have the domain. 112 is launchd's "Could not find specified domain": on
+/// macOS 26 `launchctl print gui/<uid>` for a pool user, which never logs in and so has
+/// no GUI domain, exits 112 and writes "Bad request." and "Could not find domain for
+/// user gui: <uid>". 113 with the same words is read as absence too.
+const NO_DOMAIN_CODES: [i32; 2] = [112, 113];
+
+/// What `answer` (how `launchctl print <domain>` ended) says to a readiness check
+/// (`session-ready`, `role-session-ready`, `role-run`, the session switch's rest at the
+/// VM user): whether launchd has the domain. A "no" there has effects (the switch logs
+/// the VM user in again), so it is read strictly; the teardown reads `launchctl print`
+/// by whether it printed, in `teardown`. Exit 0 is a domain that exists; only launchd's answer for a missing domain
+/// (an exit status in [`NO_DOMAIN_CODES`] together with [`NO_DOMAIN_TEXT`] on standard
+/// error, never the words alone) is absence. Any other failure (refused, another exit,
+/// killed, launchd not answering) is an error, so it is never read as a domain that is
+/// gone.
+///
+/// # Errors
+/// `launchctl` failed in any other way.
+fn launchctl_print_answer(answer: &PrintAnswer) -> io::Result<bool> {
+    let stderr = answer.stderr.trim();
+    match answer.code {
+        Some(0) => Ok(true),
+        Some(code) if NO_DOMAIN_CODES.contains(&code) && stderr.contains(NO_DOMAIN_TEXT) => {
+            Ok(false)
+        }
+        Some(code) => Err(io::Error::other(format!(
+            "launchctl print exited {code}: {stderr}"
+        ))),
+        None => Err(io::Error::other(format!(
+            "launchctl print was ended by a signal: {stderr}"
+        ))),
     }
 }
 

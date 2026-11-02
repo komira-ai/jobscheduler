@@ -1,6 +1,6 @@
 //! The edges of the teardown's loops and the quarantine: success on the last allowed
-//! round, a failure that clears, each launchd domain on its own and both at once, a
-//! check that fails after one succeeded, a job launchd started during the final
+//! attempt, a failure that clears, each launchd domain on its own and both at once, a
+//! check that fails once after one succeeded, a job launchd started during the final
 //! bootout, a quarantine that outlives a restart of the helper, and a delete repeated
 //! after the record went that still finds what the uid left.
 
@@ -8,7 +8,6 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use super::*;
-use crate::testing::{found, no_domain};
 
 /// A rig of ONE uid, the test's own, holding lease `lease`.
 fn one(name: &str, lease: &str) -> (Rig, u32) {
@@ -32,8 +31,8 @@ fn uid_held(rig: &Rig) {
     );
 }
 
-/// Catches a bound off by one: processes that are gone at the last allowed round are a
-/// success, not a refusal, and the loop takes exactly [`KILL_ROUNDS`] rounds for it.
+/// Catches a bound off by one: processes that are gone at the last allowed attempt are a
+/// success, not a refusal, and the loop takes exactly [`KILL_ROUNDS`] attempts for it.
 #[test]
 fn kill_uid_succeeds_on_the_last_allowed_round() {
     let (rig, uid) = one("bounds-last-round", "41.1");
@@ -41,13 +40,13 @@ fn kill_uid_succeeds_on_the_last_allowed_round() {
     rig.host.state().stubborn.insert(uid, KILL_ROUNDS - 1);
     assert_eq!(rig.helper.kill_uid("41.1"), Ok(()));
     let calls = log(&rig);
-    // Every round of the first kill, and the one of the second.
+    // Every attempt of the first pass, and the one of the second.
     assert_eq!(count(&calls, &format!("kill_all {uid}")), KILL_ROUNDS + 1);
 }
 
 /// Catches a bootout failure taken as final, or one that is ignored: a bootout of
-/// `user/<uid>` that fails twice and then works ends in success, after exactly three
-/// bootouts of it and with the domain gone, and none once launchd says it is gone.
+/// `user/<uid>` that fails twice (the domain still prints) and then works ends in
+/// success, after exactly three attempts of the first pass, with the domain gone.
 #[test]
 fn a_bootout_failure_that_clears_ends_in_success() {
     let (rig, uid) = one("bounds-transient", "42.1");
@@ -58,61 +57,90 @@ fn a_bootout_failure_that_clears_ends_in_success() {
         .insert("bootout user", VecDeque::from([true, true]));
     assert_eq!(rig.helper.kill_uid("42.1"), Ok(()));
     let calls = log(&rig);
-    // Three in the first kill (the domain went at the third), none in the second.
-    assert_eq!(count(&calls, &format!("bootout user/{uid}")), 3);
+    // Three in the first pass (the domain went at the third), and the second pass's
+    // one, of a domain that is gone (it fails, which decides nothing).
+    assert_eq!(count(&calls, &format!("bootout user/{uid}")), 4);
+    assert_eq!(count(&calls, &format!("kill_all {uid}")), 4);
     assert!(rig.host.state().domains.is_empty());
 }
 
-/// Catches a teardown that looks at one domain only, or names the wrong one: the GUI
-/// domain alone is booted out; the GUI domain alone staying is named alone; both
-/// staying are both named, in order, each with why its bootout failed.
+/// The tail of a `kill-uid` refusal: the uid stays quarantined.
+fn quarantined(uid: u32) -> String {
+    format!("uid {uid} is quarantined: no other lease gets it until a delete succeeds")
+}
+
+/// Catches a teardown that looks at one domain only, or names the wrong one: for a uid
+/// with a GUI session, the GUI domain alone is booted out; the GUI domain alone staying
+/// is named alone; both staying are both named, in order, each with why its bootout
+/// failed. A uid with no session is not asked about a `gui/<uid>` at all.
 #[test]
 fn each_domain_is_handled_and_named_on_its_own() {
     let (rig, uid) = one("bounds-domains", "43.1");
-    rig.host.state().domains.insert(format!("gui/{uid}"));
+    let gui = format!("gui/{uid}");
+    let session = |rig: &Rig| {
+        let mut state = rig.host.state();
+        state.gui.insert(uid);
+        state.domains.insert(gui.clone());
+    };
+    session(&rig);
     assert_eq!(rig.helper.kill_uid("43.1"), Ok(()));
     assert!(rig.host.state().domains.is_empty());
 
-    rig.host.state().domains.insert(format!("gui/{uid}"));
+    session(&rig);
     rig.host.state().fail.insert("bootout gui");
     assert_eq!(
         rig.helper.kill_uid("43.1"),
         Err(format!(
-            "launchd domains of uid {uid} remain after {KILL_ROUNDS} rounds: \
-             gui/{uid} (bootout: bootout gui failed)"
+            "launchd domains of uid {uid} remain after {KILL_ROUNDS} attempts: \
+             gui/{uid} (bootout: bootout gui failed); {}",
+            quarantined(uid)
         ))
     );
     uid_held(&rig);
 
+    session(&rig);
     rig.host.state().domains.insert(format!("user/{uid}"));
     rig.host.state().fail.insert("bootout user");
     assert_eq!(
         rig.helper.kill_uid("43.1"),
         Err(format!(
-            "launchd domains of uid {uid} remain after {KILL_ROUNDS} rounds: \
-             gui/{uid} (bootout: bootout gui failed), user/{uid} (bootout: bootout user failed)"
+            "launchd domains of uid {uid} remain after {KILL_ROUNDS} attempts: \
+             gui/{uid} (bootout: bootout gui failed), user/{uid} (bootout: bootout user \
+             failed); {}",
+            quarantined(uid)
         ))
     );
     uid_held(&rig);
+
+    // The failed teardowns left `gui/<uid>` owed, though the kill ended the login
+    // window: the next one boots it out and judges it again, and discharges it.
+    rig.host.state().fail.clear();
+    rig.host.state().domains.remove(&format!("user/{uid}"));
+    log(&rig);
+    assert_eq!(rig.helper.kill_uid("43.1"), Ok(()));
+    assert!(log(&rig).contains(&format!("bootout {gui}")));
+    assert!(rig.host.state().domains.is_empty());
+    // Discharged: no session, so `gui/<uid>` is neither booted out nor looked at.
+    assert_eq!(rig.helper.kill_uid("43.1"), Ok(()));
+    assert!(!log(&rig).iter().any(|c| c.contains(&gui)));
 }
 
-/// Catches a launchd check whose later failure is taken for absence: the first check
-/// (of `gui/<uid>`) works, the second (of `user/<uid>`) fails, and `kill-uid` is refused
-/// naming that domain.
+/// Catches a launchd check whose later failure is taken for absence, or one failure
+/// taken as final: for a uid with a GUI session, the first attempt's check of
+/// `gui/<uid>` works and that of `user/<uid>` cannot be run; the next attempt looks at
+/// both again, and `kill-uid` succeeds there.
 #[test]
-fn a_check_that_fails_after_one_worked_refuses_kill_uid() {
+fn a_check_that_fails_once_after_one_worked_is_looked_at_again() {
     let (rig, uid) = one("bounds-check", "44.1");
+    rig.host.state().gui.insert(uid);
     rig.host
         .state()
         .fail_script
         .insert("launchctl print", VecDeque::from([false, true]));
-    assert_eq!(
-        rig.helper.kill_uid("44.1"),
-        Err(format!(
-            "asking launchd for user/{uid}: launchctl print failed"
-        ))
-    );
-    uid_held(&rig);
+    assert_eq!(rig.helper.kill_uid("44.1"), Ok(()));
+    let calls = log(&rig);
+    assert_eq!(count(&calls, &format!("launchctl print user/{uid}")), 3);
+    assert_eq!(count(&calls, &format!("kill_all {uid}")), 3);
 }
 
 /// Catches a last look that lists the processes only before the bootout: a job launchd
@@ -121,17 +149,9 @@ fn a_check_that_fails_after_one_worked_refuses_kill_uid() {
 #[test]
 fn a_job_started_during_the_final_bootout_refuses_user_delete() {
     let (rig, uid) = one("bounds-final-bootout", "45.1");
-    // Neither domain at the first look (before and after its bootout); `user/<uid>` at
-    // the last, where a job launchd starts just before the domain goes leaves one
-    // process.
-    let (gui, user) = (format!("gui/{uid}"), format!("user/{uid}"));
-    let mut script = Vec::new();
-    for _ in 0..2 {
-        script.extend([no_domain(&gui), no_domain(&user)]);
-    }
-    script.extend([no_domain(&gui), found()]);
-    rig.host.state().print_script.extend(script);
-    rig.host.state().bootout_starts.push_back(1);
+    // Nothing starts at the first look's bootout; at the last, a job launchd starts
+    // just before the domain goes leaves one process.
+    rig.host.state().bootout_starts.extend([0, 1]);
     let got = rig.helper.user_delete("45.1");
     assert_eq!(
         got,
@@ -140,7 +160,13 @@ fn a_job_started_during_the_final_bootout_refuses_user_delete() {
              while its launchd domains were booted out, so the delete stops here"
         ))
     );
-    assert!(!log(&rig).iter().any(|c| c.starts_with("delete_user")));
+    let calls = log(&rig);
+    assert_eq!(
+        count(&calls, &format!("bootout user/{uid}")),
+        2,
+        "{calls:#?}"
+    );
+    assert!(!calls.iter().any(|c| c.starts_with("delete_user")));
     assert!(rig.host.state().users.contains_key("kbf-lease-45-1"));
     uid_held(&rig);
 }

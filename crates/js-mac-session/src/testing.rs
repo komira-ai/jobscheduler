@@ -97,6 +97,21 @@ pub(crate) struct State {
     pub(crate) bootout_starts: VecDeque<usize>,
     /// What `user_dir` answers, by uid; `/var/folders/zz/<uid>/0/` when unset.
     pub(crate) user_dirs: BTreeMap<u32, PathBuf>,
+    /// The uids with a GUI login session: each has one more live process, the login
+    /// window's (`loginwindow`, pid 900), which a kill ends.
+    pub(crate) gui: BTreeSet<u32>,
+    /// What `launchctl_print` answers for a domain launchd does not have; [`no_domain`]
+    /// when unset. launchd's answer varies (112, 113 and 125 have been seen).
+    pub(crate) absent_print: Option<PrintAnswer>,
+    /// The domains whose `bootout` ends them and fails anyway, as `launchctl bootout`
+    /// can ("Boot-out failed: 5: Input/output error").
+    pub(crate) bootout_fails_anyway: BTreeSet<String>,
+    /// Per uid, how many `live_processes` calls of it come before a login of the uid
+    /// completes (it joins `gui`): a session that starts during a teardown.
+    pub(crate) login_after: BTreeMap<u32, usize>,
+    /// The uids with one more live process whose name cannot be read (`?`, pid 901),
+    /// which a kill ends.
+    pub(crate) unreadable: BTreeSet<u32>,
 }
 
 impl State {
@@ -201,7 +216,7 @@ impl Host for FakeHost {
     }
 
     /// The next answer of `print_script`, or launchd's: exit 0 for a domain in
-    /// `domains`, else [`no_domain`].
+    /// `domains`, else `absent_print` (or [`no_domain`]).
     fn launchctl_print(&self, domain: &str) -> io::Result<PrintAnswer> {
         self.call("launchctl print", format!("launchctl print {domain}"))?;
         let mut state = self.state();
@@ -209,13 +224,17 @@ impl Host for FakeHost {
         Ok(
             scripted.unwrap_or_else(|| match state.domains.contains(domain) {
                 true => found(),
-                false => no_domain(domain),
+                false => state
+                    .absent_print
+                    .clone()
+                    .unwrap_or_else(|| no_domain(domain)),
             }),
         )
     }
 
     /// A domain that does not exist fails as `launchctl bootout` does; one that exists
-    /// is ended, unless (`user/<uid>`) a process of the uid lives to make it again.
+    /// is ended, unless (`user/<uid>`) a process of the uid lives to make it again, and
+    /// then fails anyway if it is in `bootout_fails_anyway`.
     fn bootout(&self, domain: &str) -> io::Result<()> {
         let name = if domain.starts_with("gui/") {
             "bootout gui"
@@ -245,6 +264,9 @@ impl Host for FakeHost {
                 state.domains.insert(domain.to_owned());
             }
         }
+        if state.bootout_fails_anyway.contains(domain) {
+            return Err(io::Error::other("Boot-out failed: 5: Input/output error"));
+        }
         Ok(())
     }
 
@@ -273,6 +295,8 @@ impl Host for FakeHost {
         } else {
             state.procs.remove(&uid);
         }
+        state.gui.remove(&uid);
+        state.unreadable.remove(&uid);
         let left = state.respawns.get(&uid).copied().unwrap_or(0);
         if state.agents.remove(&uid) && state.domains.contains(&format!("user/{uid}")) && left > 0 {
             state.respawns.insert(uid, left - 1);
@@ -281,21 +305,43 @@ impl Host for FakeHost {
         Ok(())
     }
 
-    /// `n` live processes are pids 1000 to 999+n, commands `proc0` and on.
+    /// `n` live processes are pids 1000 to 999+n, commands `proc0` and on; after them
+    /// the login window's of a uid in `gui`, and the unreadable one of a uid in
+    /// `unreadable`.
     fn live_processes(&self, uid: u32) -> io::Result<Vec<LiveProcess>> {
         self.call("live_processes", format!("live_processes {uid}"))?;
         let mut state = self.state();
+        match state.login_after.get(&uid).copied() {
+            Some(0) => {
+                state.login_after.remove(&uid);
+                state.gui.insert(uid);
+            }
+            Some(n) => {
+                state.login_after.insert(uid, n - 1);
+            }
+            None => {}
+        }
         if state.due.remove(&uid) && state.domains.contains(&format!("user/{uid}")) {
             state.agents.insert(uid);
         }
         let agent = usize::from(state.agents.contains(&uid));
         let scripted = state.live_script.pop_front();
         let n = scripted.unwrap_or_else(|| state.procs.get(&uid).copied().unwrap_or(0) + agent);
+        let login = state.gui.contains(&uid).then(|| LiveProcess {
+            pid: 900,
+            command: "loginwindow".to_owned(),
+        });
+        let unreadable = state.unreadable.contains(&uid).then(|| LiveProcess {
+            pid: 901,
+            command: "?".to_owned(),
+        });
         Ok((0..n)
             .map(|i| LiveProcess {
                 pid: 1000 + i32::try_from(i).unwrap(),
                 command: format!("proc{i}"),
             })
+            .chain(login)
+            .chain(unreadable)
             .collect())
     }
 

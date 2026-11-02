@@ -1,13 +1,26 @@
 //! `kill-uid` and `user-delete`: the end of a lease user, and the errors their steps
 //! fail with ([`TeardownError`], worded for the refusal at the protocol boundary).
 //!
-//! The order the helper's header describes: `kill-uid` kills, then boots out those of
-//! the uid's launchd domains that launchd has, until neither a process nor a domain is
-//! left; `user-delete` asks for the uid's `DARWIN_USER_DIR` while the record is there,
-//! settles (no process, no
-//! domain, and still no process after the bootout), sweeps, removes the uid's entry
-//! under the per-user folders, settles again, and only then deletes the record. A step
-//! that fails leaves the lease live in the ledger, so its uid is held.
+//! Both are judged by their outcome, never by what a `launchctl` call answered: no
+//! process of the uid is left, and the uid's launchd domains no longer print. A
+//! `launchctl bootout` is asked for and its failure only logged; `launchctl print` is
+//! read as printed (exit 0) or not (any other exit status), so no exit status of it is
+//! matched.
+//!
+//! The order the helper's header describes: `kill-uid` decides whether the uid may have
+//! a GUI login session (the intent record names it, it owns a `loginwindow` process or
+//! one whose name cannot be read, or an earlier teardown left its GUI domain owed; a
+//! pool user has none of these), then kills and boots out its user domain (and its GUI
+//! domain, only with a session), until neither a process nor a domain is left. A GUI
+//! domain is owed, in a record in the helper's state directory, from the first look
+//! that sees the session until a teardown judges the domain gone, so neither a retry
+//! (the kill ended the `loginwindow` that showed the session) nor a restart of the
+//! helper forgets it. `user-delete` asks for the uid's `DARWIN_USER_DIR` while the
+//! record is there, settles (no process, the user domain, and the GUI domain while
+//! owed, booted out and no longer printing, and still no process after the bootout),
+//! sweeps, removes the uid's entry under the per-user folders, settles again, and only
+//! then deletes the record. A step that fails leaves the lease live in the ledger, so
+//! its uid is held (quarantined: handed to no other lease until a delete succeeds).
 
 use std::io;
 use std::path::PathBuf;
@@ -35,12 +48,26 @@ pub(crate) enum TeardownError {
     /// The process table could not be read.
     #[error("listing the processes of uid {uid}: {source}")]
     Listing { uid: u32, source: io::Error },
-    /// Processes of the uid outlived every kill round.
-    #[error("{}", remaining(*.uid, &format!("after {KILL_ROUNDS} rounds"), .left))]
-    Survived { uid: u32, left: Vec<LiveProcess> },
-    /// Launchd domains of the uid outlived every kill round.
-    #[error("launchd domains of uid {uid} remain after {KILL_ROUNDS} rounds: {}", .stayed.join(", "))]
-    DomainsSurvived { uid: u32, stayed: Vec<String> },
+    /// The outcome of `kill-uid` did not hold after its last attempt: processes of the
+    /// uid, or launchd domains that still print (each with why it could not be told
+    /// gone, or why its last bootout failed), or both.
+    /// `lease` is whether the uid is a lease's (quarantined by the ledger) or the VM
+    /// user's.
+    #[error("{}", outlived(*.uid, .left, .stayed, *.lease))]
+    Outlived {
+        uid: u32,
+        left: Vec<LiveProcess>,
+        stayed: Vec<String>,
+        lease: bool,
+    },
+    /// The record that the uid's GUI domain is still owed a teardown could not be read,
+    /// written or removed.
+    #[error("the GUI teardown record of uid {uid} ({}): {source}", .path.display())]
+    GuiRecord {
+        uid: u32,
+        path: PathBuf,
+        source: io::Error,
+    },
     /// Processes of the uid did not exit within a look of `user-delete`.
     #[error("{}; kill-uid first", remaining(*.uid, &format!("after {EXIT_LOOKS} looks"), .left))]
     StillRunning { uid: u32, left: Vec<LiveProcess> },
@@ -50,12 +77,9 @@ pub(crate) enum TeardownError {
         remaining(*.uid, "after the bootout", .started)
     )]
     StartedDuringBootout { uid: u32, started: Vec<LiveProcess> },
-    /// Launchd domains of the uid stayed at a look of `user-delete`.
+    /// Launchd domains of the uid still printed at a look of `user-delete`.
     #[error("launchd domains of uid {uid} remain: {}; kill-uid first", .stayed.join(", "))]
     DomainsLeft { uid: u32, stayed: Vec<String> },
-    /// Launchd could not say whether it has the domain.
-    #[error("asking launchd for {domain}: {source}")]
-    Launchd { domain: String, source: io::Error },
     /// The user's record could not be looked up.
     #[error("looking up user {name}: {source}")]
     Lookup { name: String, source: io::Error },
@@ -107,45 +131,72 @@ fn remaining(uid: u32, when: &str, left: &[LiveProcess]) -> String {
     )
 }
 
-/// The words `launchctl print` writes to standard error for a domain launchd does not
-/// have.
-const NO_DOMAIN_TEXT: &str = "Could not find domain";
+/// The text of [`TeardownError::Outlived`]: what remains of `uid` after the last attempt
+/// (the processes `left`, the domains that `stayed`), and what happens to the uid: a
+/// lease's (`lease`) is quarantined; the VM user's stays as it is, for `role-kill-uid`
+/// to be repeated.
+fn outlived(uid: u32, left: &[LiveProcess], stayed: &[String], lease: bool) -> String {
+    let when = format!("after {KILL_ROUNDS} attempts");
+    let mut parts = Vec::new();
+    if !left.is_empty() {
+        parts.push(remaining(uid, &when, left));
+    }
+    if !stayed.is_empty() {
+        parts.push(format!(
+            "launchd domains of uid {uid} remain {when}: {}",
+            stayed.join(", ")
+        ));
+    }
+    let then = match lease {
+        true => format!("uid {uid} is quarantined: no other lease gets it until a delete succeeds"),
+        false => "role-kill-uid can be repeated".to_owned(),
+    };
+    format!("{}; {then}", parts.join("; "))
+}
 
-/// The exit statuses of `launchctl print` that, with [`NO_DOMAIN_TEXT`], mean launchd
-/// does not have the domain. 112 is launchd's "Could not find specified domain": on
-/// macOS 26 `launchctl print gui/<uid>` for a pool user, which never logs in and so has
-/// no GUI domain, exits 112 and writes "Bad request." and "Could not find domain for
-/// user gui: <uid>". 113 with the same words is read as absence too.
-const NO_DOMAIN_CODES: [i32; 2] = [112, 113];
+/// The command name of the process the login window runs as the user of each GUI login
+/// session; a uid that owns one has a session (and a `gui/<uid>` launchd domain).
+const LOGINWINDOW: &str = "loginwindow";
 
-/// What `answer` (how `launchctl print <domain>` ended) says: whether launchd has the
-/// domain. Exit 0 is a domain that exists; only launchd's answer for a missing domain
-/// (an exit status in [`NO_DOMAIN_CODES`] together with [`NO_DOMAIN_TEXT`] on standard
-/// error, never the words alone) is absence. Any other failure (refused, another exit,
-/// killed, launchd not answering) is an error, so it is never read as a domain that is
-/// gone.
+/// The command name of a live process whose name could not be read
+/// ([`LiveProcess::command`]): it may be a login window, so it does not rule a session
+/// out.
+const UNREADABLE: &str = "?";
+
+/// Whether `processes` show a GUI login session or cannot rule one out: one of them is
+/// the login window's, or has a name that could not be read.
+fn session_seen(processes: &[LiveProcess]) -> bool {
+    processes
+        .iter()
+        .any(|p| p.command == LOGINWINDOW || p.command == UNREADABLE)
+}
+
+/// Whether `launchctl print` printed the domain (`answer`): exit 0 is a domain launchd
+/// has. Any other exit status is a domain it does not print; no exit status is matched
+/// as "not found", because launchd's answer for a domain it does not have varies
+/// (112, 113 and 125 have each been seen for the `gui/<uid>` of a user that never
+/// logged in).
 ///
 /// # Errors
-/// `launchctl` failed in any other way.
-fn launchctl_print_answer(answer: &PrintAnswer) -> io::Result<bool> {
-    let stderr = answer.stderr.trim();
+/// A signal ended `launchctl`, so it gave no answer.
+fn printed(answer: &PrintAnswer) -> io::Result<bool> {
     match answer.code {
-        Some(0) => Ok(true),
-        Some(code) if NO_DOMAIN_CODES.contains(&code) && stderr.contains(NO_DOMAIN_TEXT) => {
-            Ok(false)
-        }
-        Some(code) => Err(io::Error::other(format!(
-            "launchctl print exited {code}: {stderr}"
-        ))),
+        Some(code) => Ok(code == 0),
         None => Err(io::Error::other(format!(
-            "launchctl print was ended by a signal: {stderr}"
+            "launchctl print was ended by a signal: {}",
+            answer.stderr.trim()
         ))),
     }
 }
 
-/// The GUI and the user launchd domain of `uid`, in the order they are booted out.
-fn domains(uid: u32) -> [String; 2] {
-    [format!("gui/{uid}"), format!("user/{uid}")]
+/// The launchd domains of `uid` its teardown boots out and judges, in order: the GUI
+/// domain only when the uid has a GUI login session (`gui`), then the user domain.
+fn domains(uid: u32, gui: bool) -> Vec<String> {
+    let user = format!("user/{uid}");
+    match gui {
+        true => vec![format!("gui/{uid}"), user],
+        false => vec![user],
+    }
 }
 
 /// Reports that the user of `lease`, with `uid`, stays after a failed `kill-uid` or
@@ -160,19 +211,28 @@ fn kept(lease: LeaseId, uid: u32, why: &TeardownError) {
 }
 
 impl Helper {
-    /// `kill-uid <lease>`: kills every process of the uid, then boots out those of its
-    /// GUI and user launchd domains that launchd has (so launchd restarts none of its
-    /// agents, such as `distnoted`; a domain launchd does not have, such as the GUI
-    /// domain of a user that never logged in, is skipped), and repeats both until no
-    /// process and neither domain is left; then
-    /// removes the user's crontab and `at` jobs (so no job of the user starts after
-    /// kill-uid returns: one would start a process `user-delete` refuses), and kills and
-    /// boots out again, for a job that fired before they went.
+    /// `kill-uid <lease>`: looks, before anything is killed, whether the uid may have a
+    /// GUI login session: the session switch's intent record names the lease (the login
+    /// window logs in only the user it names), the uid owns a `loginwindow` process (or
+    /// one whose name cannot be read), or an earlier teardown left its GUI domain owed
+    /// ([`Self::gui_owed`]). A pool user has none of these, so its `gui/<uid>` is never
+    /// asked about. A session seen at a later look of the processes counts from the next
+    /// attempt on. Then, for at most
+    /// [`KILL_ROUNDS`] attempts, kills every process of the uid and boots out its user
+    /// domain (and its GUI domain, if it has the session), so launchd restarts none of
+    /// its agents, such as `distnoted`; a bootout's failure is only logged. Each attempt
+    /// ends with a look at the outcome: no process of the uid is left and none of those
+    /// domains prints. Then it removes the user's crontab and `at` jobs (so no job of the
+    /// user starts after kill-uid returns: one would start a process `user-delete`
+    /// refuses), and does the attempts again, for a job that fired before they went.
     ///
     /// # Errors
-    /// Why it was refused, processes or a domain that survived [`KILL_ROUNDS`] rounds,
-    /// launchd failing to say whether it has a domain, or a crontab or `at` job that
-    /// could not be removed (after the second kill).
+    /// Why it was refused, an outcome that did not hold after the last attempt (the uid
+    /// is then quarantined: held, named with what remains), a kill that could not be
+    /// sent, a process table that could not be read (not retried: the teardown stops
+    /// there, the uid held, and is repeated), the GUI teardown record that could not be
+    /// kept, or a crontab or `at` job that could not be removed (after the second
+    /// attempts).
     pub fn kill_uid(&self, lease: &str) -> Result<(), String> {
         let lease = parse_lease(lease)?;
         let ledger = self.lock();
@@ -184,46 +244,135 @@ impl Helper {
         let uid = self
             .live_uid(ledger, lease)
             .map_err(TeardownError::Refused)?;
-        self.kill_account(&user_name(lease), uid)
+        let intended = read_intent(&self.settings.session.intent)
+            .map_err(TeardownError::Refused)?
+            == Some(Intent::Lease(lease));
+        self.kill_account(&user_name(lease), uid, intended)
+            .map_err(|why| match why {
+                TeardownError::Outlived {
+                    uid, left, stayed, ..
+                } => TeardownError::Outlived {
+                    uid,
+                    left,
+                    stayed,
+                    lease: true,
+                },
+                other => other,
+            })
             .inspect_err(|why| kept(lease, uid, why))?;
         tracing::info!(lease = %Dotted(lease), uid, "no process of the lease user is left");
         Ok(())
     }
 
     /// Kills every process of `uid` and boots out its domains, as [`Self::kill_uid`]
-    /// describes, for the account `name`.
-    pub(super) fn kill_account(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
-        self.kill_rounds(uid)?;
+    /// describes, for the account `name`; `intended` is whether the session switch's
+    /// intent record names the account.
+    pub(super) fn kill_account(
+        &self,
+        name: &str,
+        uid: u32,
+        intended: bool,
+    ) -> Result<(), TeardownError> {
+        // Looked at before the kill, which ends the session's `loginwindow`.
+        // The record is read first, whatever else shows a session: a link there is refused
+        // before anything replaces it.
+        let owed = self.gui_owed(uid)?;
+        let mut gui = false;
+        if owed || intended || session_seen(&self.processes(uid)?) {
+            self.owe_gui(uid)?;
+            gui = true;
+        }
+        tracing::info!(uid, gui, "tearing down uid {uid}");
+        self.kill_rounds(uid, &mut gui)?;
         // Swept only once nothing of the user runs (the sweep's contract).
         let schedules = Self::swept(sweep(&self.settings.schedules, name, uid), name);
-        self.kill_rounds(uid)?;
-        schedules.map(drop)
+        self.kill_rounds(uid, &mut gui)?;
+        schedules?;
+        if gui {
+            self.discharge_gui(uid)?;
+        }
+        Ok(())
     }
 
-    /// Kills every process of `uid`, then boots out those of its GUI and user domains
-    /// that launchd has, until no process and neither domain is left, for at most
-    /// [`KILL_ROUNDS`] rounds.
-    fn kill_rounds(&self, uid: u32) -> Result<(), TeardownError> {
+    /// For at most [`KILL_ROUNDS`] attempts: kills every process of `uid`, boots out
+    /// its domains (`gui/<uid>` too while `gui`), and looks at the outcome, until no
+    /// process is left and none of them prints. A session seen at a look (the processes
+    /// left show one, [`session_seen`]) sets `gui`, and is recorded as owed, for the
+    /// next attempt and every later teardown until one discharges it.
+    fn kill_rounds(&self, uid: u32, gui: &mut bool) -> Result<(), TeardownError> {
         let mut left = Vec::new();
         let mut stayed = Vec::new();
         for _ in 0..KILL_ROUNDS {
             self.host
                 .kill_all(uid)
                 .map_err(|source| TeardownError::Kill { uid, source })?;
-            let refused = self.boot_out(uid)?;
+            let domains = domains(uid, *gui);
+            let refused = self.boot_out(&domains);
             left = self.processes(uid)?;
-            if left.is_empty() {
-                stayed = self.domains_left(uid, &refused)?;
-                if stayed.is_empty() {
-                    return Ok(());
-                }
+            stayed = self.still_printing(&domains, &refused);
+            if left.is_empty() && stayed.is_empty() {
+                return Ok(());
+            }
+            if !*gui && session_seen(&left) {
+                self.owe_gui(uid)?;
+                *gui = true;
             }
             self.host.pause();
         }
-        match left.is_empty() {
-            true => Err(TeardownError::DomainsSurvived { uid, stayed }),
-            false => Err(TeardownError::Survived { uid, left }),
+        Err(TeardownError::Outlived {
+            uid,
+            left,
+            stayed,
+            lease: false,
+        })
+    }
+
+    /// Where the record that `uid`'s GUI domain is owed a teardown is kept: beside the
+    /// session switch's intent record, in the helper's state directory, so it outlives a
+    /// failed teardown and a restart of the helper.
+    fn gui_record(&self, uid: u32) -> PathBuf {
+        self.settings
+            .session
+            .intent
+            .with_file_name(format!("gui-teardown.{uid}"))
+    }
+
+    /// Whether `uid`'s GUI domain is owed a teardown: one that saw a GUI session of the
+    /// uid did not end in its domain judged gone (its `loginwindow` may be gone, so the
+    /// session is not seen again).
+    /// The record is opened, never through a link: one there is an error.
+    fn gui_owed(&self, uid: u32) -> Result<bool, TeardownError> {
+        use rustix::fs::{CWD, Mode, OFlags};
+        let path = self.gui_record(uid);
+        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        match rustix::fs::openat(CWD, &path, flags, Mode::empty()) {
+            Ok(_) => Ok(true),
+            Err(rustix::io::Errno::NOENT) => Ok(false),
+            Err(why) => Err(TeardownError::GuiRecord {
+                uid,
+                path,
+                source: why.into(),
+            }),
         }
+    }
+
+    /// Records, durably, that `uid`'s GUI domain is owed a teardown.
+    fn owe_gui(&self, uid: u32) -> Result<(), TeardownError> {
+        let path = self.gui_record(uid);
+        crate::autologin::write_whole(&path, b"").map_err(|source| TeardownError::GuiRecord {
+            uid,
+            path,
+            source,
+        })
+    }
+
+    /// Removes the record that `uid`'s GUI domain is owed a teardown, once its domain was
+    /// judged gone.
+    fn discharge_gui(&self, uid: u32) -> Result<(), TeardownError> {
+        let path = self.gui_record(uid);
+        crate::autologin::remove(&path)
+            .map(drop)
+            .map_err(|source| TeardownError::GuiRecord { uid, path, source })
     }
 
     /// The live processes of `uid`.
@@ -233,62 +382,48 @@ impl Helper {
             .map_err(|source| TeardownError::Listing { uid, source })
     }
 
-    /// Whether launchd has `domain`, from `launchctl print` ([`launchctl_print_answer`]).
+    /// Whether launchd prints `domain` ([`printed`]), as the teardown judges it: a
+    /// domain wrongly read as gone is caught by the look at the processes, so any exit
+    /// status but 0 is gone. The readiness checks read `launchctl print` more strictly
+    /// ([`Self::domain_exists`]).
     ///
     /// # Errors
-    /// `launchctl` could not be run, or failed other than by saying the domain is not
-    /// there.
-    pub(super) fn domain_exists(&self, domain: &str) -> io::Result<bool> {
-        launchctl_print_answer(&self.host.launchctl_print(domain)?)
+    /// `launchctl` could not be run, or a signal ended it.
+    fn domain_prints(&self, domain: &str) -> io::Result<bool> {
+        printed(&self.host.launchctl_print(domain)?)
     }
 
-    /// [`Self::domain_exists`], its error naming the domain.
-    fn has_domain(&self, domain: &str) -> Result<bool, TeardownError> {
-        self.domain_exists(domain)
-            .map_err(|source| TeardownError::Launchd {
-                domain: domain.to_owned(),
-                source,
-            })
-    }
-
-    /// `launchctl bootout` of each of the GUI and the user domain of `uid` that launchd
-    /// has; a domain it does not have is not booted out. Returns why each bootout that
-    /// failed did (one that went between the look and the bootout fails too, which
-    /// [`Self::domains_left`] tells apart).
-    ///
-    /// # Errors
-    /// launchd could not say whether it has a domain.
-    fn boot_out(&self, uid: u32) -> Result<Vec<(String, String)>, TeardownError> {
+    /// `launchctl bootout` of each of `domains`. A bootout's own exit status is no
+    /// verdict (it fails for a domain that is not there, and can fail after it ended the
+    /// domain): each failure is logged and returned with its domain, for the report of a
+    /// domain that still prints.
+    fn boot_out(&self, domains: &[String]) -> Vec<(String, String)> {
         let mut refused = Vec::new();
-        for domain in domains(uid) {
-            if !self.has_domain(&domain)? {
-                continue;
-            }
-            if let Err(why) = self.host.bootout(&domain) {
-                tracing::debug!("launchctl bootout {domain}: {why}");
-                refused.push((domain, why.to_string()));
+        for domain in domains {
+            if let Err(why) = self.host.bootout(domain) {
+                tracing::info!("launchctl bootout {domain} (the outcome decides): {why}");
+                refused.push((domain.clone(), why.to_string()));
             }
         }
-        Ok(refused)
+        refused
     }
 
-    /// The domains of `uid` that launchd still has, each with why its bootout failed
-    /// (from `refused`), if it did.
-    fn domains_left(
-        &self,
-        uid: u32,
-        refused: &[(String, String)],
-    ) -> Result<Vec<String>, TeardownError> {
+    /// Those of `domains` that are not known to be gone: each that `launchctl print`
+    /// printed (with why its bootout failed, from `refused`, if it did), or that it gave
+    /// no answer for (with why).
+    fn still_printing(&self, domains: &[String], refused: &[(String, String)]) -> Vec<String> {
         let mut left = Vec::new();
-        for domain in domains(uid) {
-            if self.has_domain(&domain)? {
-                left.push(match refused.iter().find(|(d, _)| *d == domain) {
+        for domain in domains {
+            match self.domain_prints(domain) {
+                Ok(false) => {}
+                Ok(true) => left.push(match refused.iter().find(|(d, _)| d == domain) {
                     Some((_, why)) => format!("{domain} (bootout: {why})"),
-                    None => domain,
-                });
+                    None => domain.clone(),
+                }),
+                Err(why) => left.push(format!("{domain} (launchctl print: {why})")),
             }
         }
-        Ok(left)
+        left
     }
 
     /// `user-delete <lease>`: sweeps what the user leaves, deletes its record and
@@ -308,10 +443,14 @@ impl Helper {
     /// are gone (a job that started after `kill-uid` is found here, and none can start
     /// later), and after the whole sweep, just before the record goes (so no process
     /// outlives its user as an orphan uid that later leases' files are open to). At the
-    /// first and the last look the uid's launchd domains are booted out too, one that
-    /// stays refuses the delete, and the processes are looked at again after the
-    /// bootout (a job launchd started before it went). Each look waits up to
-    /// [`EXIT_LOOKS`] listings for the processes it finds to exit: a cron job that
+    /// first and the last look the uid's user domain is booted out too (its bootout's
+    /// failure only logged), one that still prints refuses the delete, and the processes
+    /// are looked at again after the bootout (a job launchd started before it went).
+    /// The GUI domain is asked about only while it is owed a teardown ([`Self::gui_owed`]):
+    /// with no process of the uid left there is no login session, and a `kill-uid` that
+    /// judged the domain gone discharged it. An owed domain is booted out and judged with
+    /// the user domain at both looks, and discharged after the last. Each look waits up
+    /// to [`EXIT_LOOKS`] listings for the processes it finds to exit: a cron job that
     /// started between `kill-uid` and this delete ends by itself, and one that does not
     /// is named in the refusal. The ledger lock is held throughout, so a refused delete
     /// holds back the other verbs for up to about five seconds per look.
@@ -322,8 +461,8 @@ impl Helper {
     /// # Errors
     /// Why it was refused: the intent record names the lease or cannot be read, the
     /// uid's `DARWIN_USER_DIR` could not be asked or is not an entry of the per-user
-    /// folders, a process or a launchd domain of the uid remains, or the sweep or the
-    /// deletion failed (the lease stays live, its uid held, so the delete can be
+    /// folders, a process or a domain of the uid remains, the GUI teardown record could not
+    /// be read or removed, or the sweep or the deletion failed (the lease stays live, its uid held, so the delete can be
     /// repeated).
     pub fn user_delete(&self, lease: &str) -> Result<bool, String> {
         let lease = parse_lease(lease)?;
@@ -372,7 +511,9 @@ impl Helper {
         for entry in &entries {
             removed += Self::swept(remove_owned(entry, uid), &name)?;
         }
-        self.settled(uid)?;
+        if self.settled(uid)? {
+            self.discharge_gui(uid)?;
+        }
         let existed = self
             .host
             .delete_user(&name)
@@ -416,22 +557,26 @@ impl Helper {
         Ok(vec![folders::entry(&dir, folders_root)?])
     }
 
-    /// [`Self::none_left`], the uid's launchd domains booted out, and one more look:
-    /// refused while a process or a domain of the uid is left, and refused at once (no
-    /// wait) when any process of the uid is seen after the bootout. Such a process is a
-    /// job launchd started before its domain went; it may have written again what the
-    /// sweep removed, so it is not waited out: the delete stops, the uid stays held, and
-    /// the repeated delete sweeps everything again.
-    fn settled(&self, uid: u32) -> Result<(), TeardownError> {
+    /// [`Self::none_left`], the uid's user domain (and its GUI domain, while owed) booted
+    /// out, and one more look: refused while a process is left or a domain still prints,
+    /// and refused at once (no wait)
+    /// when any process of the uid is seen after the bootout. Such a process is a job
+    /// launchd started before its domain went; it may have written again what the sweep
+    /// removed, so it is not waited out: the delete stops, the uid stays held, and the
+    /// repeated delete sweeps everything again. Returns whether the GUI domain was owed
+    /// (and is now judged gone).
+    fn settled(&self, uid: u32) -> Result<bool, TeardownError> {
         self.none_left(uid)?;
-        let refused = self.boot_out(uid)?;
-        let stayed = self.domains_left(uid, &refused)?;
+        let gui = self.gui_owed(uid)?;
+        let domains = domains(uid, gui);
+        let refused = self.boot_out(&domains);
+        let stayed = self.still_printing(&domains, &refused);
         if !stayed.is_empty() {
             return Err(TeardownError::DomainsLeft { uid, stayed });
         }
         let started = self.processes(uid)?;
         match started.is_empty() {
-            true => Ok(()),
+            true => Ok(gui),
             false => Err(TeardownError::StartedDuringBootout { uid, started }),
         }
     }

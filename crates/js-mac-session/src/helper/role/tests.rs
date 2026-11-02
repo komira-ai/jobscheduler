@@ -2,7 +2,7 @@
 
 use crate::autologin::{CommandOutput, Intent, kcpassword, read_intent};
 use crate::helper::tests::{Rig, fds, log, me, my_gid, rig_vm_with};
-use crate::helper::{NewUser, Outcome, Reset};
+use crate::helper::{KILL_ROUNDS, NewUser, Outcome, Reset};
 use crate::lease::UidRange;
 use crate::proto::{Reply, Request, Session};
 use crate::spawn::Spawn;
@@ -204,6 +204,18 @@ fn the_role_session_is_ready_when_its_gui_domain_is_up_and_no_lease_holds_it() {
     let error = rig.helper.role_session_ready().unwrap_err();
     assert!(error.contains("asking launchd for gui/"), "{error}");
     rig.host.state().fail.clear();
+    // An answer that is not launchd's not-found answer (125 is what the teardown reads as
+    // gone) is an error here too, never "not ready", which would switch the session.
+    rig.host
+        .state()
+        .print_script
+        .push_back(crate::helper::PrintAnswer {
+            code: Some(125),
+            stderr: "Could not print domain: 125: Domain does not support specified action\n"
+                .to_owned(),
+        });
+    let error = rig.helper.role_session_ready().unwrap_err();
+    assert!(error.contains("launchctl print exited 125"), "{error}");
     std::fs::write(rig.dir.join("session-intent"), "garbage").unwrap();
     assert!(rig.helper.role_session_ready().is_err());
 }
@@ -366,7 +378,9 @@ fn role_kill_uid_ends_the_vm_user_s_processes_and_no_one_else_s() {
         let mut state = rig.host.state();
         state.procs.insert(uid, 5);
         state.procs.insert(me(), 2);
-        // The VM user is logged in: launchd has both of its domains.
+        // The VM user is logged in (its login window runs): launchd has both of its
+        // domains.
+        state.gui.insert(uid);
         state.domains.insert(format!("gui/{uid}"));
         state.domains.insert(format!("user/{uid}"));
     }
@@ -399,10 +413,14 @@ fn role_kill_uid_ends_the_vm_user_s_processes_and_no_one_else_s() {
 
     rig.host.state().procs.insert(uid, 1);
     rig.host.state().stubborn.insert(uid, 100);
-    let error = rig.helper.role_kill_uid().unwrap_err();
-    assert!(
-        error.contains(&format!("processes of uid {uid} remain")),
-        "{error}"
+    // The VM user is no lease: nothing quarantines its uid, and the refusal says the
+    // verb can be repeated rather than that a delete frees it.
+    assert_eq!(
+        rig.helper.role_kill_uid(),
+        Err(format!(
+            "1 processes of uid {uid} remain after {KILL_ROUNDS} attempts: 1000 (proc0); \
+             role-kill-uid can be repeated"
+        ))
     );
     // Over the wire.
     rig.host.state().stubborn.clear();
