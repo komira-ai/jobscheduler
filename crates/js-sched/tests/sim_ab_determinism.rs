@@ -582,6 +582,7 @@ fn submit(s: &mut Scheduler, op: u64, cpu: u64) {
         hermetic: true,
         do_not_cache: false,
         whole_worker: false,
+        pin: None,
     };
     s.apply(at(
         0,

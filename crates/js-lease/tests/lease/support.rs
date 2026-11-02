@@ -106,6 +106,7 @@ pub fn request(max_wall_secs: u64) -> Request {
         max_wall: secs(max_wall_secs),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     }
 }
 

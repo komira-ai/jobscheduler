@@ -135,13 +135,20 @@ pub(crate) struct AcquireArgs {
     /// The validation run the lease serves.
     #[arg(long, value_name = "ID")]
     pub(crate) validation_run: Option<String>,
+    /// A probe: place the lease on this host alone, past its cordon (the server refuses it
+    /// by name when the host is unknown, not cordoned, not serving, too small or not one
+    /// the server can probe).
+    #[arg(long, value_name = "HOST")]
+    pub(crate) probe_host: Option<String>,
     /// How long to wait for a start the provider has not confirmed (202) to settle.
     #[arg(long, default_value = WAIT_PENDING, value_parser = parse_duration)]
     pub(crate) wait_pending: Duration,
 }
 
 impl AcquireArgs {
-    /// The body of `POST /v1/leases`; `lease run` adds its tag to the labels.
+    /// The body of `POST /v1/leases`; `lease run` adds its tag to the labels. A probe
+    /// host is sent only when asked for, so a server that predates the field takes the
+    /// body of every other start.
     pub(crate) fn body(&self, tag: Option<&RunTag>) -> Value {
         let mut labels: serde_json::Map<String, Value> = self
             .labels
@@ -149,7 +156,7 @@ impl AcquireArgs {
             .map(|(key, value)| (key.clone(), json!(value)))
             .collect();
         labels.extend(tag.map(|tag| (tag::KEY.to_owned(), json!(tag.value()))));
-        json!({
+        let mut body = json!({
             "class": self.class,
             "resources": {
                 "cpu_millis": self.cpu_millis,
@@ -161,7 +168,11 @@ impl AcquireArgs {
             "labels": labels,
             "validation_run": self.validation_run,
             "ttl_seconds": self.ttl.map(|ttl| ttl.as_secs()),
-        })
+        });
+        if let Some(host) = &self.probe_host {
+            body["probe_host"] = json!(host);
+        }
+        body
     }
 }
 
@@ -316,5 +327,64 @@ fn parse_id(text: &str) -> Result<String, String> {
     match text.split_once('-') {
         Some((term, sequence)) if digits(term) & digits(sequence) => Ok(text.to_owned()),
         _ => Err(format!("{text:?} is not a lease id such as 1-7")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `lease acquire`'s flags alone, as clap reads them.
+    #[derive(Debug, Parser)]
+    struct Acquire {
+        #[command(flatten)]
+        args: AcquireArgs,
+    }
+
+    /// `lease run`'s flags alone, as clap reads them.
+    #[derive(Debug, Parser)]
+    struct Run {
+        #[command(flatten)]
+        args: RunArgs,
+    }
+
+    const BASE: [&str; 5] = ["acquire", "--class", "c", "--max-wall", "1h"];
+
+    fn acquire(extra: &[&str]) -> AcquireArgs {
+        Acquire::try_parse_from(BASE.iter().chain(extra))
+            .unwrap()
+            .args
+    }
+
+    /// Asserts the body of a start: without `--probe-host` it has no `probe_host` key at
+    /// all (a server that predates the field refuses an unknown key, even a null one, so
+    /// every other start keeps working there); with it the key names the host and the rest
+    /// of the body is the same. It catches a key sent when unset, a flag parsed and
+    /// dropped, and a probe that changes the rest of the start.
+    #[test]
+    fn the_probe_host_is_in_the_body_only_when_asked_for() {
+        let plain = acquire(&[]).body(None);
+        let expected = json!({
+            "class": "c",
+            "resources": { "cpu_millis": 0, "memory_bytes": 0, "gpus": 0, "gpu_class": null },
+            "max_wall_seconds": 3600,
+            "labels": {},
+            "validation_run": null,
+            "ttl_seconds": null,
+        });
+        assert_eq!(plain, expected);
+        let probe = acquire(&["--probe-host", "mac-07"]).body(None);
+        let mut with = expected;
+        with["probe_host"] = json!("mac-07");
+        assert_eq!(probe, with);
+    }
+
+    /// Asserts that `lease run` takes `--probe-host` as `lease acquire` does and sends it.
+    /// It catches a flag left off the command that runs a job on the lease.
+    #[test]
+    fn lease_run_takes_the_probe_host() {
+        let words = BASE.iter().chain(&["--probe-host", "mac-07", "--", "true"]);
+        let run = Run::try_parse_from(words).unwrap().args;
+        assert_eq!(run.acquire.body(None)["probe_host"], "mac-07");
     }
 }

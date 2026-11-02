@@ -37,6 +37,7 @@ fn request(n: u8) -> Request {
         hermetic: true,
         do_not_cache: false,
         whole_worker: false,
+        pin: None,
         needs: js_caps::Request::default(),
     }
 }
@@ -567,6 +568,7 @@ fn in_flight_dedup_joins_only_the_same_instance_and_digest() {
         Request {
             do_not_cache: true,
             whole_worker: false,
+            pin: None,
             ..request(1)
         },
     );
@@ -622,6 +624,7 @@ fn twin_and_next_operation_name_the_operation_a_submission_gets() {
     let uncached = Request {
         do_not_cache: true,
         whole_worker: false,
+        pin: None,
         ..request(1)
     };
     expect(&mut h, 5, uncached, false);

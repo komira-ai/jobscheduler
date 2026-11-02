@@ -597,6 +597,13 @@ the scaler can release (5.8). Rank is therefore a trait with two shipped impleme
 per pool. How a host's capacity is booked and packed is in 6.6 ([design/placement.md](design/placement.md)). An optional dedup key on a
 request (absent: no coalescing) lets kbf keep its in-flight coalescing by action key (the `in_flight` map in `crates/kbf-sched/src/scheduler.rs`) without the core owning the table.
 
+### 6.7 A probe pinned to one host
+A probe names one host and runs only there, past that host's cordon: it is the only new work a cordoned host takes, so an operator can
+prove a host with one job while the host stays out of ordinary placement. One rule, `js_sched::admit_probe`, judges it in both placement
+engines (the scheduler's round, and the lease server's placer under `--placement js-sched`). It refuses by name a host that is unknown, not
+serving, not cordoned, draining, mismatched or too small. Room, the load predicate and `memory_schedulable_percent` apply to a probe as to
+any request. See [design/placement.md](design/placement.md).
+
 ## 7. Request history and sizing
 
 The sizing service is in [design/sizing.md](design/sizing.md), sections 7.1 to 7.6. It acts on individual requests, so under two-level

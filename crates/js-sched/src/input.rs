@@ -38,6 +38,17 @@ pub struct Request {
     /// and memory are not compared with the worker's, so the request fits workers of any
     /// size. Ignored for the other lease kinds. False places a request as before.
     pub whole_worker: bool,
+    /// A probe: the one worker the request may run on (`docs/design/placement.md`, 6.7).
+    /// It is placed there and nowhere else, past the worker's cordon: a worker that an
+    /// operator cordoned (a plain [`Cordon::Cordoned`](crate::Cordon::Cordoned), not a
+    /// drain) and that is serving takes a probe named for it and no other new work. Every
+    /// other rule still holds: the worker's room, the load predicate and the
+    /// memory_schedulable_percent cut of its capacity. A probe the rule refuses
+    /// ([`crate::admit_probe`]) is refused at once, with an
+    /// [`Unservable::Probe`](crate::Unservable::Probe) reason; one the worker has no room
+    /// for yet waits. A probe is never joined to a twin, nor a twin to it. `None` places
+    /// the request as before.
+    pub pin: Option<WorkerId>,
 }
 
 impl Request {
@@ -74,10 +85,11 @@ impl Request {
     }
 
     /// Whether another caller may join a running twin of this request. `do_not_cache`
-    /// and networked actions are never joined: their runs are not interchangeable.
+    /// and networked actions are never joined: their runs are not interchangeable. Nor is
+    /// a probe ([`Request::pin`]): its run proves one worker, and a twin's would not.
     #[must_use]
     pub fn joinable(&self) -> bool {
-        self.hermetic && !self.do_not_cache
+        self.hermetic && !self.do_not_cache && self.pin.is_none()
     }
 
     /// Whether a worker that reports `caps` and has `capacity` could run this request once
