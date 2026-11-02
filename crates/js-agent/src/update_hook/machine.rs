@@ -116,23 +116,23 @@ fn credential(params: &ConnectParams) -> Result<(PathBuf, &'static str), String>
 }
 
 /// Why the client could not be built, named by the params key whose value is wrong. The
-/// client names the command-line flags of the programs it serves (`--server`, `--token-file`,
-/// `--ca-cert`); the hook has none of them, only its params table, and the credential may be
-/// the state root's rather than a token file's (`credential_key` says which). A flag the hook
-/// has no key for is told as the client names it.
-fn named(error: ClientError, credential_key: &str) -> String {
-    match error {
-        ClientError::Flag { flag, why } => {
-            let key = match flag {
-                "--server" => SERVER_KEY,
-                "--ca-cert" => CA_CERT_KEY,
-                "--token-file" => credential_key,
-                other => other,
-            };
-            format!("{key}: {why}")
-        }
-        ClientError::Server(why) => why,
-    }
+/// client's text begins with the command-line flag of the programs it serves (`--server: `,
+/// `--token-file: `, `--ca-cert: `); the hook has none of them, only its params table, and the
+/// credential may be the state root's rather than a token file's (`credential_key` says which).
+/// A text that begins with no flag the hook has a key for is told as the client wrote it.
+fn named(error: &ClientError, credential_key: &str) -> String {
+    let text = error.to_string();
+    [
+        ("--server", SERVER_KEY),
+        ("--ca-cert", CA_CERT_KEY),
+        ("--token-file", credential_key),
+    ]
+    .into_iter()
+    .find_map(|(flag, key)| {
+        let why = text.strip_prefix(flag)?.strip_prefix(": ")?;
+        Some(format!("{key}: {why}"))
+    })
+    .unwrap_or(text)
 }
 
 /// The lease server's own-host routes for the host the params name; a connection that could not
@@ -173,7 +173,7 @@ impl MachineLease {
         HostId::new(&id).map_err(|why| format!("{HOST_ID_KEY}: {why}"))?;
         let (credential, key) = credential(params)?;
         HttpLease::connect(server, &credential, params.ca_cert.as_deref(), &id, limit)
-            .map_err(|why| named(why, key))
+            .map_err(|why| named(&why, key))
     }
 
     fn client(&self) -> Result<&HttpLease, LeaseError> {
@@ -311,13 +311,13 @@ mod tests {
     fn a_client_error_the_hook_has_no_key_for_is_told_as_it_is() {
         let error = ClientError::Server("cannot talk to http://127.0.0.1:1".to_owned());
         assert_eq!(
-            named(error, "token_file"),
+            named(&error, "token_file"),
             "cannot talk to http://127.0.0.1:1"
         );
         let error = ClientError::Flag {
             flag: "--other",
             why: "is wrong".to_owned(),
         };
-        assert_eq!(named(error, "token_file"), "--other: is wrong");
+        assert_eq!(named(&error, "token_file"), "--other: is wrong");
     }
 }
