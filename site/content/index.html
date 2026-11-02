@@ -15,6 +15,37 @@
   </div>
 </section>
 
+<section class="band" id="demo">
+  <div class="wrap">
+    <p class="kicker">A real run</p>
+    <h2>Lease a host on one machine</h2>
+    <p>This is a recording of one run on one machine: the lease server started from a file that lists one host, and the <code>js</code> client leasing that host, listing the lease and releasing it. There is no agent, so the host is held at once. The lease id and the expiry are as they were recorded.</p>
+    <div class="code"><pre><span class="c"># hosts.toml: one host, listed by hand; there is no agent</span>
+[[host]]
+id = "gpu-01"
+gpu_class = "nvidia-a100"
+
+[host.resources]
+cpu_millis = 64000
+memory_bytes = 549755813888
+gpus = 8
+
+[host.capabilities]
+isa = "x86-64-v3"
+driver = "550"
+<span class="p">$</span> printf 'a-local-token-of-at-least-32-bytes\n' &gt; client-token &amp;&amp; chmod 600 client-token
+<span class="p">$</span> js-lease-server --state-file leases.toml --boot initialise --token-file client-token --pool-config hosts.toml &amp;
+<span class="p">$</span> js --server http://127.0.0.1:7300 --token-file client-token lease acquire --class gpu-host --gpus 1 --gpu-class nvidia-a100 --max-wall 1h
+lease 1-1 host gpu-01 expires 1793614960284
+<span class="p">$</span> js --server http://127.0.0.1:7300 --token-file client-token lease list
+1-1 held host gpu-01 expires 1793614960284
+<span class="p">$</span> js --server http://127.0.0.1:7300 --token-file client-token lease release 1-1
+lease 1-1 freed
+<span class="p">$</span> js --server http://127.0.0.1:7300 --token-file client-token lease list</pre></div>
+    <p><code>site/tools/demo.sh</code> in the repository builds both programs and runs these commands again; the recording is <code>site/test/demo.transcript</code>. The <a href="install.html">install page</a> has the steps for a pool of agents.</p>
+  </div>
+</section>
+
 <section class="band" id="what">
   <div class="wrap">
     <p class="kicker">What it does</p>
