@@ -263,7 +263,7 @@ export function checkDist(dir: string): void {
       if (m.includes('/data/')) continue;
       for (const dep of importsOf(m, readFileSync(join(dir, m), 'utf8'))) if (have.has(dep)) queue.push(dep);
     }
-    const js = [...mods].reduce((a, m) => a + (size.get(m) ?? 0), 0);
+    const js = [...mods].reduce((a, m) => a + (size.get(m) as number), 0);
     if (js > PAGE_JS_MAX_BYTES) problems.push(`${f} loads ${js} bytes of JavaScript; the limit for one page is ${PAGE_JS_MAX_BYTES}`);
   }
   if (problems.length > 0) throw new DistError(problems);
