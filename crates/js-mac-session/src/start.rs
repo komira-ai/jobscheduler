@@ -163,6 +163,7 @@ pub fn prepare(
         homes: args.homes.clone(),
         schedules,
         sweep,
+        user_folders: PathBuf::from("/private/var/folders"),
         grant_keys,
         serial,
         session: SessionPaths {

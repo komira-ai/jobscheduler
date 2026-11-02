@@ -23,10 +23,12 @@
 //!    seed failure, a bare EPERM/EACCES included, proves nothing. A run that did not cover at
 //!    least a file, a process, a keychain item, a launchd agent and shared memory, or seeded
 //!    nothing itself, fails. A launch agent that root loaded is labelled "loaded by root" and
-//!    is no sandbox claim. A launch agent that neither the job nor root can load
-//!    (a pool uid has no login session, so launchd may have no domain for it) is NOT
-//!    EXERCISED: it covers nothing, root's every attempt is printed as a `PROBE agent-attempt`
-//!    line, and the run cannot reach a verdict.
+//!    is no sandbox claim. A launch agent that neither the job nor root can load (a pool uid
+//!    has no login session, so launchd may have no domain for it) has NO PATH, and is
+//!    covered, when launchd refused the job's own bootstrap and root's `launchctl print` shows
+//!    the domain absent or without the agent (`no_path.rs`); otherwise it is NOT EXERCISED:
+//!    it covers nothing, and the run cannot pass. Root's every attempt is a `PROBE
+//!    agent-attempt` line.
 //! 2. Between the runs the test does what the agent does when a run ends and the next
 //!    begins: `NativeRuntime::remove` (the helper's `kill-uid`, then `user-delete`), and
 //!    the next start makes the user again (`user-create`).
@@ -75,6 +77,7 @@ mod after_seed;
 mod child;
 mod lines;
 mod look;
+mod no_path;
 mod report;
 mod token;
 mod views;
@@ -524,6 +527,7 @@ impl Trial {
                         }
                         Verdict::Seeded => "seeded".to_owned(),
                         Verdict::Denied => "refused by the profile".to_owned(),
+                        Verdict::NoPath => "no path (refused the job and root)".to_owned(),
                         _ => "refused (proves nothing)".to_owned(),
                     },
                     line.text.clone(),

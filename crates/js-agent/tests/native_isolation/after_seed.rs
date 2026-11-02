@@ -1,10 +1,11 @@
 //! What the test does once run A has seeded: a seed refused with a bare permission error is
 //! confirmed (or not) as the sandbox's by the unified log, and a launch agent run A could not
-//! load is loaded by root, every attempt printed.
+//! load is loaded by root, every attempt printed, or shown to have no path out of the run.
 
 use std::fs;
 
 use super::lines::{Kind, Line, Verdict};
+use super::no_path::no_path;
 use super::{Trial, look, run_bounded, view};
 
 /// How many times, and how far apart, the unified log is read for a denial to confirm a seed.
@@ -77,8 +78,10 @@ impl Trial {
     /// to leave, and the domain is the one the helper's delete does not end. A pool uid has
     /// no login session, so launchd may have no domain for it: root then tries the documented
     /// ways to reach one (`launchctl asuser`) and prints every attempt with its exact command,
-    /// status and text. An agent root cannot load is NOT EXERCISED: it covers nothing, the run
-    /// cannot reach a verdict, and the attempts say why.
+    /// status and text. An agent root cannot load either has NO PATH (run A's own bootstrap was
+    /// refused by launchd and root's `launchctl print` shows no such agent in the domain:
+    /// `no_path.rs`), which covers the kind, or is NOT EXERCISED: it covers nothing, the run
+    /// cannot pass, and the attempts say why.
     pub(super) fn bootstrap_agents_as_root(&mut self, uid: u32) {
         for (kind, domain) in [(Kind::LaunchAgent, "user"), (Kind::GuiLaunchAgent, "gui")] {
             let Some(line) = self.seeded.iter_mut().find(|line| {
@@ -179,10 +182,30 @@ impl Trial {
                     ),
                 );
             } else {
-                println!(
-                    "PROBE note {} not exercised: root could not load it in {target}; every attempt is above",
-                    kind.label()
-                );
+                let printed = run_bounded("/bin/launchctl", &["print", &target]);
+                let domain = match printed {
+                    Ok((code, stdout, stderr)) => look::classify_launchctl_print(
+                        code,
+                        &String::from_utf8_lossy(&stdout),
+                        &stderr,
+                    ),
+                    Err(why) => look::Outcome::CouldNotLook(why),
+                };
+                // Only the job's own refusal: a seed the sandbox denied is covered already.
+                let path = match line.verdict {
+                    Verdict::Refused => no_path(&line.text, &attempts, (&target, &label), &domain),
+                    _ => Err("run A's seed was not refused by launchd".to_owned()),
+                };
+                match path {
+                    Ok(why) => {
+                        println!("PROBE note {} {why}", kind.label());
+                        *line = Line::new(Verdict::NoPath, kind, line.token.clone(), &why);
+                    }
+                    Err(why) => println!(
+                        "PROBE note {} not exercised: root could not load it in {target}, and no path is shown ({why}); every attempt is above",
+                        kind.label()
+                    ),
+                }
             }
         }
     }

@@ -67,6 +67,7 @@ pub(super) fn rig_vm_with(
             named: Vec::new(),
             owned: vec![dir.join("Shared")],
         },
+        user_folders: dir.join("folders"),
         grant_keys: Some(GrantKeys::parse(&key_line(7)).unwrap()),
         serial: "SERIAL1".to_owned(),
         session: SessionPaths::under(&dir),
@@ -224,44 +225,45 @@ fn a_ledger_that_cannot_record_stops_the_verb() {
     );
 }
 
-/// Catches: killing before the launchd domains are booted out (launchd would restart
-/// the user's agents), giving up after one round, or never giving up.
+/// Catches: booting the launchd domains out before the kill and never after (a live
+/// process of the uid makes `user/<uid>` again, and launchd then restarts its agents),
+/// giving up after one round, or never giving up.
 #[test]
-fn kill_uid_boots_out_then_kills_until_none_is_left() {
+fn kill_uid_kills_then_boots_out_until_none_is_left() {
     let rig = rig("kill", 2);
     rig.helper.user_create("5.1", None).unwrap();
     let uid = me();
     log(&rig);
     rig.host.state().procs.insert(uid, 3);
     rig.host.state().stubborn.insert(uid, 2);
-    rig.host.state().fail.insert("bootout gui");
-    assert_eq!(rig.helper.kill_uid("5.1"), Ok(()));
-    let calls = log(&rig);
-    assert_eq!(
-        calls,
-        [
+    let round = |left: usize| {
+        let mut calls = vec![
+            format!("kill_all {uid}"),
             format!("bootout gui/{uid}"),
             format!("bootout user/{uid}"),
-            format!("kill_all {uid}"),
             format!("live_processes {uid}"),
-            "pause".to_owned(),
-            format!("kill_all {uid}"),
-            format!("live_processes {uid}"),
-            "pause".to_owned(),
-            format!("kill_all {uid}"),
-            format!("live_processes {uid}"),
-            // The second kill, after the crontab and `at` jobs are swept.
-            format!("kill_all {uid}"),
-            format!("live_processes {uid}"),
-        ]
-    );
+        ];
+        match left {
+            0 => calls.extend([
+                format!("domain_exists gui/{uid}"),
+                format!("domain_exists user/{uid}"),
+            ]),
+            _ => calls.push("pause".to_owned()),
+        }
+        calls
+    };
+    assert_eq!(rig.helper.kill_uid("5.1"), Ok(()));
+    // Two rounds that leave processes, one that leaves none, then (after the crontab
+    // and `at` jobs are swept) the second kill's one round.
+    let want: Vec<String> = [3, 3, 0, 0].into_iter().flat_map(round).collect();
+    assert_eq!(log(&rig), want);
 
     rig.host.state().procs.insert(uid, 1);
     rig.host.state().stubborn.insert(uid, usize::MAX);
     let error = rig.helper.kill_uid("5.1").unwrap_err();
-    assert!(
-        error.contains(&format!("1 processes of uid {uid} remain after 10 rounds")),
-        "{error}"
+    assert_eq!(
+        error,
+        format!("1 processes of uid {uid} remain after 10 rounds: 1000 (proc0)")
     );
     let rounds = log(&rig)
         .iter()
@@ -270,11 +272,11 @@ fn kill_uid_boots_out_then_kills_until_none_is_left() {
     assert_eq!(rounds, KILL_ROUNDS);
 
     rig.host.state().fail.insert("kill_all");
-    assert!(
-        rig.helper
-            .kill_uid("5.1")
-            .unwrap_err()
-            .contains("kill_all failed")
+    assert_eq!(
+        rig.helper.kill_uid("5.1"),
+        Err(format!(
+            "killing the processes of uid {uid}: kill_all failed"
+        ))
     );
 }
 
@@ -585,17 +587,22 @@ fn a_process_started_during_user_delete_stops_it() {
         "{calls:?}"
     );
 
-    // With none left the delete completes, after three looks.
+    // With none left the delete completes, after three looks; the first and the last
+    // boot out the uid's domains and find neither left.
     assert_eq!(rig.helper.user_delete("11.1"), Ok(true));
-    assert_eq!(
-        log(&rig),
-        [
-            format!("live_processes {uid}"),
-            format!("live_processes {uid}"),
-            format!("live_processes {uid}"),
-            "delete_user kbf-lease-11-1".to_owned(),
-        ]
-    );
+    let settle = [
+        format!("live_processes {uid}"),
+        format!("bootout gui/{uid}"),
+        format!("bootout user/{uid}"),
+        format!("domain_exists gui/{uid}"),
+        format!("domain_exists user/{uid}"),
+    ];
+    let mut want = vec![format!("user_dir {uid}:{}", my_gid())];
+    want.extend(settle.clone());
+    want.push(format!("live_processes {uid}"));
+    want.extend(settle);
+    want.push("delete_user kbf-lease-11-1".to_owned());
+    assert_eq!(log(&rig), want);
 
     // An incomplete sweep of the schedules stops the delete too.
     if me() != 0 {
@@ -685,19 +692,25 @@ fn user_delete_waits_for_a_process_that_exits() {
     rig.host.state().live_script.extend([1, 1]);
     assert_eq!(rig.helper.user_delete("12.1"), Ok(true));
     let look = format!("live_processes {uid}");
-    assert_eq!(
-        log(&rig),
-        [
-            look.clone(),
-            "pause".to_owned(),
-            look.clone(),
-            "pause".to_owned(),
-            look.clone(),
-            look.clone(),
-            look,
-            "delete_user kbf-lease-12-1".to_owned(),
-        ]
-    );
+    let domains = [
+        format!("bootout gui/{uid}"),
+        format!("bootout user/{uid}"),
+        format!("domain_exists gui/{uid}"),
+        format!("domain_exists user/{uid}"),
+    ];
+    let mut want = vec![
+        format!("user_dir {uid}:{}", my_gid()),
+        look.clone(),
+        "pause".to_owned(),
+        look.clone(),
+        "pause".to_owned(),
+        look.clone(),
+    ];
+    want.extend(domains.clone());
+    want.extend([look.clone(), look]);
+    want.extend(domains);
+    want.push("delete_user kbf-lease-12-1".to_owned());
+    assert_eq!(log(&rig), want);
 
     // One that exits during the last look, after the sweep: waited for too.
     let uid = rig.helper.user_create("12.2", None).unwrap();
@@ -875,3 +888,5 @@ fn a_gui_run_waits_for_the_lease_user_s_gui_domain() {
             .contains("not <term>.<seq>")
     );
 }
+
+mod teardown;

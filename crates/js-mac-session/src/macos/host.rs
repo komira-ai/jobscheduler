@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
@@ -212,6 +212,29 @@ impl Host for MacHost {
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         )))
+    }
+
+    fn user_dir(&self, uid: u32, gid: u32) -> io::Result<PathBuf> {
+        use std::os::unix::process::CommandExt as _;
+        // As the uid, out of any session, with nothing of the helper's environment; std
+        // drops root's supplementary groups before the setuid.
+        let output = Command::new("/usr/bin/getconf")
+            .arg("DARWIN_USER_DIR")
+            .env_clear()
+            .current_dir("/")
+            .uid(uid)
+            .gid(gid)
+            .stdin(std::process::Stdio::null())
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "getconf DARWIN_USER_DIR as uid {uid}: {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let text = String::from_utf8(output.stdout).map_err(io::Error::other)?;
+        Ok(PathBuf::from(text.trim_end_matches('\n')))
     }
 
     fn kill_all(&self, uid: u32) -> io::Result<()> {

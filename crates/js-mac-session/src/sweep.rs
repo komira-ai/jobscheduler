@@ -64,9 +64,10 @@ impl SweepPlan {
     }
 
     /// macOS's other places besides the home folder (which the helper adds from where
-    /// it made it): launchd's per-uid overrides and login items, the shared user
-    /// folder and the temporary folders (`/private/var/folders` holds each user's
-    /// `DARWIN_USER_TEMP_DIR` and cache folders).
+    /// it made it) and the uid's own entry under `/private/var/folders` (which the
+    /// helper names from the uid's `DARWIN_USER_DIR` and removes whole with
+    /// [`remove_owned`]): launchd's per-uid overrides and login items, the shared user
+    /// folder and the temporary folders.
     #[must_use]
     pub fn macos() -> Self {
         Self {
@@ -81,7 +82,6 @@ impl SweepPlan {
                 Path::new("/Users").join("Shared"),
                 PathBuf::from("/private/tmp"),
                 PathBuf::from("/private/var/tmp"),
-                PathBuf::from("/private/var/folders"),
             ],
         }
     }
@@ -931,7 +931,9 @@ fn unlock(_dir: &OwnedFd, _name: &OsStr, _stat: &Stat) -> io::Result<()> {
     Ok(())
 }
 
+mod entry;
 mod flags;
+pub use entry::remove_owned;
 #[cfg(test)]
 use flags::clear_below;
 pub use flags::{CLEARED_FLAGS, clear_flags, clear_flags_within};

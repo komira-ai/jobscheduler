@@ -85,6 +85,10 @@ pub enum Verdict {
     /// Run A could not leave it because the product profile (the sandbox) denied it; the text
     /// says how. The job could not create the state, so nothing can carry over.
     Denied,
+    /// Run A's own bootstrap of a launch agent into its domain was refused by launchd, root
+    /// could not load one either, and the domain holds no such agent: the job has no way to
+    /// leave the item (`no_path.rs`); the text says why.
+    NoPath,
     /// Run B found the item; the text says where.
     Found,
     /// Run B could not tell whether the item is there; the text says why. Never a pass.
@@ -92,11 +96,18 @@ pub enum Verdict {
 }
 
 impl Verdict {
+    /// Whether run A's line covers its kind: seeded, denied by the sandbox, or with no path to
+    /// leave it.
+    pub fn covers(self) -> bool {
+        matches!(self, Verdict::Seeded | Verdict::Denied | Verdict::NoPath)
+    }
+
     fn word(self) -> &'static str {
         match self {
             Verdict::Seeded => "seeded",
             Verdict::Refused => "refused",
             Verdict::Denied => "denied",
+            Verdict::NoPath => "no-path",
             Verdict::Found => "found",
             Verdict::Unlooked => "unlooked",
         }
@@ -107,6 +118,7 @@ impl Verdict {
             Verdict::Seeded,
             Verdict::Refused,
             Verdict::Denied,
+            Verdict::NoPath,
             Verdict::Found,
             Verdict::Unlooked,
         ]
