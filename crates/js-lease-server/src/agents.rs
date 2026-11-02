@@ -104,6 +104,7 @@ pub(crate) fn assemble(
                 require_host_credential,
                 placement,
                 estimate_feed,
+                max_lease_wall,
             } = *agents;
             let path = state_path(state_file, ".agents");
             let joins = JoinTokens::open(
@@ -117,7 +118,7 @@ pub(crate) fn assemble(
             let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
             let registry = Registry::new(pool, clock.clone());
             // `--placement js-sched`: the scheduler picks the host of a start.
-            let placers = placement.placer();
+            let placers = placement.placer(max_lease_wall);
             placers
                 .into_iter()
                 .for_each(|placer| registry.set_placer(placer));

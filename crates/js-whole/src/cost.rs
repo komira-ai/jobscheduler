@@ -91,9 +91,8 @@ pub fn tail(load: &HostLoad) -> Option<u64> {
 /// Whether work estimated to take `estimated_duration` may start at `now` on a reserved
 /// host whose tail ends at `tail_end`: it must end, with `margin` to spare, no later
 /// than the tail. Work with no estimate never fits, and nothing fits a host whose tail is
-/// unknown: the check fails closed.
-///
-/// Nothing in production calls this yet; the backfill gate (step 3) will.
+/// unknown, nor work whose end with the margin is past the end of time (the sum
+/// overflows): the check fails closed.
 pub fn fits_in_tail(
     now: u64,
     estimated_duration: Option<u64>,
@@ -103,7 +102,10 @@ pub fn fits_in_tail(
     estimated_duration
         .zip(tail_end)
         .is_some_and(|(duration, tail_end)| {
-            now.saturating_add(duration).saturating_add(margin) <= tail_end
+            let end = now
+                .checked_add(duration)
+                .and_then(|end| end.checked_add(margin));
+            end.is_some_and(|end| end <= tail_end)
         })
 }
 
@@ -443,6 +445,22 @@ mod tests {
         // Catches: plain addition (wraps in release and would let huge work fit).
         assert!(!fits_in_tail(10, Some(u64::MAX), Some(100), 5));
         assert!(!fits_in_tail(u64::MAX, Some(1), Some(100), 0));
+    }
+
+    #[test]
+    fn a_sum_past_the_end_of_time_never_fits_even_the_last_tail() {
+        // Catches: a saturating sum, which reads an overflowing end as `u64::MAX` and so
+        // fits a tail that ends at `u64::MAX`, though only 30 s are left there and the
+        // margin alone is a minute.
+        let max = u64::MAX;
+        let margin = DEFAULT_BACKFILL_MARGIN_MS;
+        assert!(!fits_in_tail(max - 30_000, Some(1), Some(max), margin));
+        assert!(!fits_in_tail(max, Some(0), Some(max), margin));
+        assert!(!fits_in_tail(max, Some(0), Some(max), 1));
+        assert!(!fits_in_tail(1, Some(max), Some(max), 0));
+        // The last instant there is still fits exactly.
+        assert!(fits_in_tail(max - margin - 1, Some(1), Some(max), margin));
+        assert!(fits_in_tail(max, Some(0), Some(max), 0));
     }
 
     fn cfg(deadline: Option<u64>, attempts: u32) -> WholeNodeConfig {

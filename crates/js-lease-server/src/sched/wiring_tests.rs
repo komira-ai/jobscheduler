@@ -14,7 +14,7 @@ use js_lease::{ManualClock, Timestamp};
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, RegisteredProvider};
 use js_testkit::dir::TestDir;
-use js_types::{Admission, ClassId, HostId, LeaseId, Request, ResourceClass, Resources};
+use js_types::{HostId, LeaseId, Request, ResourceClass, Resources};
 use serde_json::{Value, json};
 
 use crate::adapt::SharedClock;
@@ -23,7 +23,7 @@ use crate::config::{Cli, Config};
 use crate::hosts::HostList;
 
 /// The join token of the pool.
-const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
+pub(super) const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 
 /// A pool of up to two machines with a node report: the scheduler describes a host by
 /// its `arch`.
@@ -43,12 +43,12 @@ arch = "x86_64"
 /// An empty directory of the test's own under the target directory, removed when the
 /// guard is dropped. Its path carries the process id and a counter beside `name`, so two
 /// runs of one test at once (two test binaries, or a test run twice) never share it.
-fn scratch(name: &str) -> TestDir {
+pub(super) fn scratch(name: &str) -> TestDir {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/placement_wiring");
     TestDir::under(root, name)
 }
 
-fn write(dir: &Path, name: &str, text: &str, mode: u32) -> OsString {
+pub(super) fn write(dir: &Path, name: &str, text: &str, mode: u32) -> OsString {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
     std::fs::write(&path, text).unwrap();
@@ -58,7 +58,7 @@ fn write(dir: &Path, name: &str, text: &str, mode: u32) -> OsString {
 
 /// The configuration of a server with agent registration over the agent pool `pool` and
 /// `extra` flags.
-fn config_of(dir: &Path, pool: &str, extra: &[&str]) -> Config {
+pub(super) fn config_of(dir: &Path, pool: &str, extra: &[&str]) -> Config {
     let flags = [
         ("--listen", "127.0.0.1:0".into()),
         ("--state-file", dir.join("leases.toml").into_os_string()),
@@ -86,7 +86,7 @@ fn config_of(dir: &Path, pool: &str, extra: &[&str]) -> Config {
     Config::from_cli(Cli::try_parse_from(args).unwrap()).unwrap()
 }
 
-fn hello(host: &str) -> Hello {
+pub(super) fn hello(host: &str) -> Hello {
     let body = json!({
         "host_id": host,
         "pool": "burst",
@@ -157,13 +157,13 @@ fn fixtures_of_one_name_have_their_own_directories() {
     );
 }
 
-fn sharing() -> ResourceClass {
-    let id = ClassId::new("share").unwrap();
-    ResourceClass::new(id, Admission::Book(Default::default()), 0)
+/// The class `share`, which books part of a host, as a pool's `share_class` names it.
+pub(super) fn sharing() -> ResourceClass {
+    crate::agent_pool::share_class("share").unwrap()
 }
 
 /// A lease of one core of class `share`, numbered `sequence`.
-fn sharing_spec(sequence: u64) -> StartSpec {
+pub(super) fn sharing_spec(sequence: u64) -> StartSpec {
     let request = Request {
         class: sharing().id().clone(),
         resources: Resources::new(1000, 1 << 20, 0, None).unwrap(),
@@ -176,7 +176,7 @@ fn sharing_spec(sequence: u64) -> StartSpec {
     StartSpec::new(LeaseId::new(1, sequence), request, &[sharing()]).unwrap()
 }
 
-fn host_of(ack: &StartAck) -> Option<&str> {
+pub(super) fn host_of(ack: &StartAck) -> Option<&str> {
     match ack {
         StartAck::Started { host } => Some(host.as_str()),
         _ => None,

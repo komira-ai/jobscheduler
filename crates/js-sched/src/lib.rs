@@ -45,7 +45,8 @@
 //!   all of it, so nothing is placed beside it; one that fits nowhere holds a worker
 //!   that could run it, in queue (QoS) order, and less urgent work is not placed there
 //!   until it has emptied (with [`Scheduler::with_whole_node`] the worker is the one
-//!   cheapest to drain: the latest end bound of its leases, then the fewest leases). An
+//!   cheapest to drain: the latest end bound of its leases, then the fewest leases), save
+//!   work that ends before the request starts there ([`Scheduler::with_backfill`]). An
 //!   action asking for a whole worker ([`Request::whole_worker`]) is placed only on a
 //!   worker with no lease, books all of its CPUs, memory, GPUs and VM slots (its
 //!   `Start` carries them), fits a worker of any size, and holds a worker while it
@@ -109,6 +110,7 @@
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod admission;
+mod backfill;
 mod cordon;
 mod devices;
 pub mod fence;
@@ -132,6 +134,7 @@ pub use admission::{
     FlagError, HORIZON_MINUTES, LoadConfig, LoadCounters, LoadView, MAX_CPU_SLACK_PERMILLE,
     PlacementLoad, Prediction,
 };
+pub use backfill::Backfill;
 pub use cordon::Cordon;
 pub use devices::DEVICE_LEASES_PER_WORKER;
 pub use fence::SelfFence;

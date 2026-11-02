@@ -11,7 +11,7 @@ use std::time::Duration;
 use js_agent_wire::{Command, Heartbeat, HeldRun, HeldState, Hello};
 use js_pool_static::Candidate;
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
-use js_registry::{Placer, PoolConfig, RunRefusal};
+use js_registry::{MarkedTails, Placer, PoolConfig, RunRefusal};
 use js_types::{Admission, ClassId, Dims, Request, ResourceClass, Resources};
 use support::world::*;
 use support::*;
@@ -52,27 +52,29 @@ fn job_of(run: &str, cpu_millis: u64, memory_bytes: u64) -> js_agent_wire::JobSp
     spec
 }
 
-/// A placer that books the last candidate it is shown, and remembers which hosts it was
-/// shown at each start.
+/// A placer that books the last candidate it is shown that no whole-node request has set
+/// aside, and remembers which hosts it was shown at each start.
 #[derive(Default)]
 struct Last(Mutex<Vec<Vec<String>>>);
 
 impl Placer for Last {
-    fn pick(&self, _: &StartSpec, open: &[Candidate]) -> Option<usize> {
+    fn pick(&self, _: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize> {
         let shown = open.iter().map(|c| c.host.to_string()).collect();
         self.0.lock().unwrap().push(shown);
-        open.len().checked_sub(1)
+        open.iter().rposition(|c| !marked.contains_key(&c.host))
     }
 }
 
-/// A placer that books the host named for the lease's sequence.
+/// A placer that books the host named for the lease's sequence, unless a whole-node
+/// request has set it aside.
 struct Named(Vec<(u64, &'static str)>);
 
 impl Placer for Named {
-    fn pick(&self, spec: &StartSpec, open: &[Candidate]) -> Option<usize> {
+    fn pick(&self, spec: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize> {
         let sequence = spec.lease().sequence();
         let (_, want) = self.0.iter().find(|(n, _)| *n == sequence)?;
-        open.iter().position(|c| c.host.as_str() == *want)
+        let named = |c: &Candidate| c.host.as_str() == *want && !marked.contains_key(&c.host);
+        open.iter().position(named)
     }
 }
 

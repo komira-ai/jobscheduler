@@ -420,6 +420,9 @@ pub(crate) struct AgentSetup {
     pub(crate) placement: Placement,
     /// `--estimate-feed`.
     pub(crate) estimate_feed: bool,
+    /// `server.max_lease_wall`: the ceiling the lease table holds a lease's wall time to,
+    /// and the one up to which `--placement js-sched` trusts it for backfill.
+    pub(crate) max_lease_wall: Option<Duration>,
 }
 
 impl Config {
@@ -524,6 +527,7 @@ impl Config {
                     require_host_credential: server.agents.require_host_credential(),
                     placement: server.agents.placement(),
                     estimate_feed: server.agents.estimate_feed(),
+                    max_lease_wall: server.max_lease_wall,
                 });
                 (
                     Hosts::Layered {
@@ -799,6 +803,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                     require_host_credential: cli.require_host_credential,
                     placement: cli.placement,
                     estimate_feed: cli.estimate_feed,
+                    max_lease_wall: None,
                 }),
             })
         }

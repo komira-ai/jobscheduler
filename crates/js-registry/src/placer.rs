@@ -1,5 +1,8 @@
 //! Choosing the host a start books, when more than one could take it.
 
+use std::collections::BTreeMap;
+use std::time::Duration;
+
 use js_agent_wire::Phase;
 use js_pool_static::Candidate;
 use js_provider::{RefusalCode, StartSpec};
@@ -22,10 +25,15 @@ pub struct ProbeHost {
     pub leaving: bool,
 }
 
+/// The hosts a waiting whole-node request has set aside, each with how long until the end
+/// of its tail as the mark took it: zero once that is past, `None` when it is not known.
+pub type MarkedTails = BTreeMap<HostId, Option<Duration>>;
+
 /// Picks the host a start books among the hosts that could take it.
 ///
 /// The registry shows the placer every host that fits the request, has room for it beside
-/// the leases already there, and is bookable and not set aside for another request. The
+/// the leases already there, and is bookable and not set aside for another request (a
+/// start that may backfill is shown the hosts set aside too, [`Placer::pick`]). The
 /// placer only chooses: the booking, the room and every refusal stay the registry's. A
 /// registry with no placer ([`crate::Registry::set_placer`]) books the first candidate,
 /// and refuses a class that books part of a host, since no host could share.
@@ -46,7 +54,13 @@ pub trait Placer: Send + Sync {
     ///
     /// For a probe, `open` holds the probe's host alone, and the placer is asked only once
     /// [`Placer::admit_probe`] has admitted the probe there: the host is then cordoned.
-    fn pick(&self, spec: &StartSpec, open: &[Candidate]) -> Option<usize>;
+    ///
+    /// `marked` names the hosts a waiting whole-node request has set aside, with the time
+    /// left until each one's tail ends. It is empty unless `spec` is of a class that shares
+    /// a host and is not a probe: only such a start is shown a marked host, beside the
+    /// others in `open`. The placer books a marked host only as backfill, for work that
+    /// ends by the end of its tail; a placer that does not judge that books none of them.
+    fn pick(&self, spec: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize>;
 
     /// Whether the probe `spec` may be booked on `pin`, the host it names, given what the
     /// registry knows of that host (`None`: the registry lists no live host of that name).
