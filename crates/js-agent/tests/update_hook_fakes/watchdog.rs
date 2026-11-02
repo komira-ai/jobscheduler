@@ -16,8 +16,10 @@
 //!
 //! What a window is, is injected ([`watch`]'s `wait`): the binary waits a span of real time
 //! ([`wait_for`]), and only ever to end a step that has stopped making progress; with
-//! [`ON_STALL`] it waits for the step's own announcement that it is stuck ([`announce_stall`],
-//! [`wait_announced`]), so a test of a stuck step reads no clock. A test of the watchdog itself
+//! [`ON_STALL`] a window also ends at the step's own announcement that it is stuck
+//! ([`announce_stall`], [`wait_announced`]), so a test of a stuck step need not wait out a
+//! window. The span of real time stays the fail-safe in both modes: a step that blocks without
+//! announcing it is ended at the end of its window all the same. A test of the watchdog itself
 //! gives it windows that end when the test says.
 //!
 //! Progress cannot keep a step alive for ever: a step that reaches more than [`MAX_POINTS`]
@@ -44,8 +46,29 @@ pub const WINDOW_VAR: &str = "UPDATE_HOOK_FAKE_WATCH_MS";
 pub const DEFAULT_WINDOW_MS: u64 = 60_000;
 
 /// The value of [`WINDOW_VAR`] that makes a window end at the step's own announcement that it
-/// is stuck, never at a time.
+/// is stuck, or at the end of its span, whichever comes first: `on-stall` (the default span) or
+/// `on-stall:<ms>`.
 pub const ON_STALL: &str = "on-stall";
+
+/// The watchdog's mode and span for a value of [`WINDOW_VAR`]: `<ms>` is a timed window of that
+/// span; `on-stall` and `on-stall:<ms>` end a window at the announcement too. Anything else, or
+/// no value, is a timed window of [`DEFAULT_WINDOW_MS`].
+#[must_use]
+pub fn parse_window(value: Option<&str>) -> (bool, Duration) {
+    let default = Duration::from_millis(DEFAULT_WINDOW_MS);
+    let Some(value) = value else {
+        return (false, default);
+    };
+    let (on_stall, ms) = match value.strip_prefix(ON_STALL) {
+        Some("") => return (true, default),
+        Some(rest) => (true, rest.strip_prefix(':')),
+        None => (false, Some(value)),
+    };
+    let span = ms
+        .and_then(|ms| ms.parse().ok())
+        .map_or(default, Duration::from_millis);
+    (on_stall, span)
+}
 
 /// The most kill points one step may reach; far more than any step of the hook reaches (its
 /// waits renew a cordon a few dozen times at most).
@@ -103,13 +126,14 @@ pub fn wait_for(span: Duration) -> Window {
     }
 }
 
-/// A window that ends when the step announces it is stuck, or is over; no time is read.
-pub fn wait_announced() -> Window {
+/// A window that ends when the step announces it is stuck, when it is over, or at the end of
+/// `span`, the fail-safe for a step that blocks without announcing it.
+pub fn wait_announced(span: Duration) -> Window {
     let state = STATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let state = CHANGED
-        .wait_while(state, |state| !state.0 && !state.1)
+    let (state, _) = CHANGED
+        .wait_timeout_while(state, span, |state| !state.0 && !state.1)
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if state.1 {
         Window::Stopped

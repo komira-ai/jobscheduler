@@ -242,3 +242,22 @@ fn a_state_directory_with_quotes_backslashes_and_control_characters_round_trips(
     }
     assert_eq!(harness::toml_string("a\"b\\c\n"), "\"a\\\"b\\\\c\\u000A\"");
 }
+
+/// The watchdog's window from its variable: a span, the announcement with the default span or a
+/// given one, and the default for no value or one that does not parse.
+#[test]
+fn the_watch_window_is_read_from_its_variable() {
+    let default = Duration::from_millis(watchdog::DEFAULT_WINDOW_MS);
+    assert_eq!(watchdog::parse_window(None), (false, default));
+    assert_eq!(
+        watchdog::parse_window(Some("250")),
+        (false, Duration::from_millis(250))
+    );
+    assert_eq!(watchdog::parse_window(Some("on-stall")), (true, default));
+    assert_eq!(
+        watchdog::parse_window(Some("on-stall:300")),
+        (true, Duration::from_millis(300))
+    );
+    assert_eq!(watchdog::parse_window(Some("on-stall:x")), (true, default));
+    assert_eq!(watchdog::parse_window(Some("soon")), (false, default));
+}

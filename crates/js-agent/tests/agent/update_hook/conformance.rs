@@ -503,6 +503,27 @@ fn a_step_that_blocks_without_pausing_is_killed_by_the_watchdog_and_refused() {
     );
 }
 
+/// With the watchdog's windows ending at a stuck call's announcement, a step that blocks
+/// without announcing it is ended all the same, by the window's span: the fail-safe holds in
+/// both modes. The span is short so the test does not wait long; the step never makes progress,
+/// so it dies whatever the span, and the test asserts only that a step was killed and reaped,
+/// not which or when.
+#[test]
+fn a_step_that_blocks_without_announcing_it_is_killed_by_the_fail_safe_window() {
+    let host = AgentHost {
+        window: Some("on-stall:300"),
+        ..AgentHost::with_defect(Defect::SilentStall)
+    };
+    let refused = run("hook-conf-silent-stall", host, |harness| {
+        harness.idempotence()
+    })
+    .unwrap_err();
+    assert!(
+        matches!(refused, Violation::DiedBySignal { .. }),
+        "{refused}"
+    );
+}
+
 /// A step that loops for ever reaching kill points and never pausing makes progress the
 /// watchdog sees, and is ended all the same once it passes the bound on kill points; the harness
 /// refuses it as one that died of a signal. Counted, not timed.

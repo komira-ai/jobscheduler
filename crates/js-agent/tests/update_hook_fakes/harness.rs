@@ -357,6 +357,8 @@ pub enum Defect {
     LiftsAnyCordon,
     /// `verify` loops for ever reaching kill points, never pausing.
     PointLoop,
+    /// `verify` blocks as [`Defect::Stall`] does, but never announces it.
+    SilentStall,
 }
 
 impl Defect {
@@ -372,11 +374,12 @@ impl Defect {
             Defect::BrokenCount => "broken-count",
             Defect::LiftsAnyCordon => "lifts-any-cordon",
             Defect::PointLoop => "point-loop",
+            Defect::SilentStall => "silent-stall",
         }
     }
 
     /// Every defect.
-    pub const ALL: [Defect; 8] = [
+    pub const ALL: [Defect; 9] = [
         Defect::NoLastLine,
         Defect::CutoverRestarts,
         Defect::Hang,
@@ -385,6 +388,7 @@ impl Defect {
         Defect::BrokenCount,
         Defect::LiftsAnyCordon,
         Defect::PointLoop,
+        Defect::SilentStall,
     ];
 
     /// The defect a value names; `None` for none or a word no defect has.
@@ -508,6 +512,8 @@ pub struct Faulted<'a> {
     pub stall: bool,
     /// `verify`'s first look at the unit reaches kill points for ever ([`Defect::PointLoop`]).
     pub point_loop: bool,
+    /// `verify`'s first look at the unit never returns, unannounced ([`Defect::SilentStall`]).
+    pub silent_stall: bool,
     /// An uncordon changes nothing and says nothing was there ([`Defect::ForgetsCordon`]).
     pub keeps_cordon: bool,
     /// The fakes' own files, where [`DRAIN_LOOKS`] is kept.
@@ -576,6 +582,11 @@ impl Units for Faulted<'_> {
     fn show(&self, unit: &str) -> Result<UnitState, PortError> {
         if self.stall && self.step == Step::Verify {
             watchdog::announce_stall();
+            loop {
+                std::thread::park();
+            }
+        }
+        if self.silent_stall && self.step == Step::Verify {
             loop {
                 std::thread::park();
             }

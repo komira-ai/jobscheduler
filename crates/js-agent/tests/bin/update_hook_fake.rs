@@ -43,7 +43,7 @@ use fakes::harness::{
     MirroringGate, STATE_DIR_VAR, StagedAgent, WORLD_VAR, arranged, declaration, mirror_ownership,
 };
 #[cfg(target_os = "linux")]
-use fakes::watchdog::{self, DEFAULT_WINDOW_MS, WINDOW_VAR};
+use fakes::watchdog::{self, WINDOW_VAR};
 
 /// The directory a flag or its variable names.
 #[cfg(target_os = "linux")]
@@ -136,6 +136,7 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
         fault,
         silent_start: hang,
         stall: setup.defect == Some(Defect::Stall),
+        silent_stall: setup.defect == Some(Defect::SilentStall),
         point_loop: setup.defect == Some(Defect::PointLoop),
         keeps_cordon: step_now == Step::Cleanup && setup.defect == Some(Defect::ForgetsCordon),
         control: &setup.control,
@@ -221,15 +222,11 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     let window = std::env::var_os(WINDOW_VAR);
-    let on_stall = window.as_deref() == Some(std::ffi::OsStr::new(watchdog::ON_STALL));
-    let span = window.and_then(|ms| ms.to_str()?.parse().ok()).map_or(
-        Duration::from_millis(DEFAULT_WINDOW_MS),
-        Duration::from_millis,
-    );
+    let (on_stall, span) = watchdog::parse_window(window.as_deref().and_then(|w| w.to_str()));
     std::thread::spawn(move || {
         let mut wait = || {
             if on_stall {
-                watchdog::wait_announced()
+                watchdog::wait_announced(span)
             } else {
                 watchdog::wait_for(span)
             }
