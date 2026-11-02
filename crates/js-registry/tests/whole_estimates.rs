@@ -8,6 +8,7 @@ mod support;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use js_provider::Provider;
 use js_registry::ProfileLives;
 use js_usage::ProfileKey;
 use support::world::*;
@@ -132,4 +133,125 @@ fn with_no_source_of_lives_a_keyed_run_changes_nothing() {
     keyed(&w, "a", 1, "r1", "fast");
     w.ask(3, "q");
     assert_eq!(w.reserved_host("q"), Some("b".to_string()));
+}
+
+/// The wall time of a lease with no max-wall bound: its end saturates to the end of time.
+const NO_WALL_S: u64 = u64::MAX / 1000;
+
+/// Catches: a lease with no keyed run and no bound ranked by what is known of its host, or
+/// first, or its saturated end taken for a far but known bound. `a`'s lease may run for
+/// ever (its end saturates) and has no keyed run, so with the feed on its tail is unknown:
+/// `a` ranks after `b`, whose lease is bound to end in ten hours, and alone it is reserved
+/// with no tail. Once a keyed run gives the lease a one minute estimate, `a` is known, ends
+/// a minute after the lease's start and empties first.
+#[test]
+fn a_lease_with_no_keyed_run_and_no_bound_is_unknown_and_ranks_after_every_known_tail() {
+    let mut w = world();
+    let start = w.now().millis();
+    w.share(1, NO_WALL_S);
+    w.share(2, 36_000);
+    w.ask(3, "q");
+    assert_eq!(w.reserved_host("q"), Some("b".to_string()));
+    assert_eq!(tail_of(&w, "q"), Some(start + 36_000_000));
+    w.cancel("q");
+    keyed(&w, "a", 1, "r1", "fast");
+    w.ask(4, "q2");
+    assert_eq!(w.reserved_host("q2"), Some("a".to_string()));
+    assert_eq!(tail_of(&w, "q2"), Some(start + 60_000));
+
+    let mut alone = World::new(&["a"], plain);
+    alone.fx.registry.set_lives(table());
+    alone.share(1, NO_WALL_S);
+    alone.ask(3, "q");
+    assert_eq!(alone.reserved_host("q"), Some("a".to_string()));
+    assert_eq!(tail_of(&alone, "q"), None);
+}
+
+/// Catches: the flag-off state changing for a lease whose end saturates. With no source of
+/// lives such a lease keeps its saturated end as a far, known bound, as before the feed.
+#[test]
+fn without_a_source_of_lives_a_saturated_end_stays_a_far_bound() {
+    let mut w = World::new(&["a"], plain);
+    w.share(1, NO_WALL_S);
+    w.ask(3, "q");
+    assert_eq!(w.reserved_host("q"), Some("a".to_string()));
+    assert_eq!(tail_of(&w, "q"), Some(js_lease::Timestamp::MAX.millis()));
+}
+
+/// The tail request `name` was reserved with.
+fn tail_of(w: &World, name: &str) -> Option<u64> {
+    w.reservation(name).and_then(|r| r.tail_end)
+}
+
+/// Hosts `a` and `b` in a pool that books whole hosts, so a lease put back is a plain
+/// booking, with the table of lives set when `lives` is.
+fn restored_world(lives: bool) -> World {
+    let w = World::of(config(4), &["a", "b"]);
+    if lives {
+        w.fx.registry.set_lives(table());
+    }
+    w
+}
+
+/// Puts back lease `sequence` on `on`, as the lease file records it: started `ago_ms`
+/// before now and bound to end `wall_ms` after its start.
+fn restore(w: &World, on: &str, sequence: u64, ago_ms: u64, wall_ms: u64) {
+    let started = w.now().millis() - ago_ms;
+    let booking = booking_at(on, sequence, None, started, started.saturating_add(wall_ms));
+    w.provider.seat_booked(&booking, None).unwrap();
+}
+
+/// Catches: a lease put back after a restart counted from the time it was put back, or as
+/// ending now. `a`'s lease started two minutes before the restart and its keyed run takes
+/// three, so it ends in a minute, before `b`'s lease (two minutes); counted from the
+/// restart it would end in three, after `b`.
+#[test]
+fn a_restored_lease_is_costed_from_the_start_the_lease_file_records() {
+    let mut w = restored_world(true);
+    restore(&w, "a", 1, 120_000, 900_000);
+    w.share(2, 120);
+    keyed(&w, "a", 1, "r1", "three");
+    w.ask(3, "q");
+    assert_eq!(w.reserved_host("q"), Some("a".to_string()));
+}
+
+/// Catches: a lease put back with no bound, which would count as ending now. `a`'s lease
+/// has no keyed run and is bound to end 900 s after its start, so it falls back to that
+/// bound and `b` (600 s) is reserved.
+#[test]
+fn a_restored_lease_with_no_keyed_run_is_costed_at_its_recorded_bound() {
+    let mut w = restored_world(true);
+    restore(&w, "a", 1, 0, 900_000);
+    w.share(2, 600);
+    w.ask(3, "q");
+    assert_eq!(w.reserved_host("q"), Some("b".to_string()));
+}
+
+/// Catches: the start and bound of a restored lease kept with the estimate feed off.
+/// Without a source of lives a lease put back has no bound, as it always had, and counts
+/// as ending now, so `a` is reserved over `b` (600 s) whatever the file records, and its
+/// stop counts nothing.
+#[test]
+fn without_a_source_of_lives_a_restored_lease_counts_as_ending_now() {
+    let mut w = restored_world(false);
+    restore(&w, "a", 1, 0, 900_000);
+    w.share(2, 600);
+    w.ask(3, "q");
+    assert_eq!(w.reserved_host("q"), Some("a".to_string()));
+    w.provider.stop(&lease(1));
+    let counted = w.fx.registry.tail_counters();
+    assert_eq!((counted.ended_estimated, counted.ended_unestimated), (0, 0));
+}
+
+/// Catches: a lease put back twice holding two bounds, which would count its stop twice.
+/// With the feed on, the stop of a restored lease with no keyed run counts once as ended
+/// with no estimate.
+#[test]
+fn a_lease_put_back_twice_keeps_one_bound_and_its_stop_counts_once() {
+    let mut w = restored_world(true);
+    restore(&w, "a", 1, 0, 900_000);
+    restore(&w, "a", 1, 0, 900_000);
+    w.provider.stop(&lease(1));
+    let counted = w.fx.registry.tail_counters();
+    assert_eq!((counted.ended_estimated, counted.ended_unestimated), (0, 1));
 }

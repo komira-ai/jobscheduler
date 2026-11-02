@@ -446,6 +446,8 @@ async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
 }
 
 #[cfg(test)]
+mod probe_tests;
+#[cfg(test)]
 mod status_gate_tests;
 #[cfg(test)]
 mod whole_restart_tests;

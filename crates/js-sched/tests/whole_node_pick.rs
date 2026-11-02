@@ -43,6 +43,7 @@ fn owner(f: &mut Farm) -> OperationId {
     let operation = f.s.next_operation();
     let request = Request {
         whole_worker: true,
+        pin: None,
         ..request(f.next_n, LeaseKind::Action)
     };
     f.submit(request);

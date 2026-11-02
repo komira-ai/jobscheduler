@@ -25,7 +25,7 @@
 //! ```text
 //! js lease acquire --class gpu-host [--gpus N --gpu-class X --cpu-millis N --memory-bytes N]
 //!                  --max-wall <dur> [--ttl <dur>] [--label k=v ...] [--validation-run ID]
-//!                  [--wait-pending <dur>]
+//!                  [--probe-host HOST] [--wait-pending <dur>]
 //! js lease renew <id> [--ttl <dur>]
 //! js lease release <id>
 //! js lease list
@@ -41,6 +41,13 @@
 //! run native jobs (`native-unsupported`) or holds no bundle store for `--bundle`
 //! (`bundle-unsupported`); a body that breaks a rule (a program that is not an absolute
 //! path, a bundle without a digest) is exit 4.
+//!
+//! `--probe-host HOST` asks for a probe: the lease is placed on that host alone, past the
+//! host's cordon, by a server that places with `js-sched` (`--placement js-sched`). A
+//! server that places no probe answers `probe-unsupported`, and one the host's state rules
+//! out `probe-host-unknown`, `-not-serving`, `-not-cordoned`, `-draining`, `-mismatch` or
+//! `-too-small` (all exit 3); a host with no room yet is `no-capacity`, as for any start.
+//! The flag is sent only when given, so a server that predates it takes every other start.
 //!
 //! Durations are whole seconds: `90`, `90s`, `15m`, `2h`. `acquire` prints
 //! `lease <id> host <host> expires <ms>` (`expires` is the server's clock in

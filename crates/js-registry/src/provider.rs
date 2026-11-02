@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
+use js_lease::Booking;
 use js_pool_static::SeatError;
 use js_provider::{Flavour, HostCapacity, Observed, Provider, StartAck, StartSpec, StopAck};
-use js_types::{HostId, LeaseId, ProviderId, ResourceClass, Resources};
+use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
 use crate::credential::Binding;
 use crate::registry::Registry;
@@ -96,22 +97,30 @@ impl RegisteredProvider {
         lease: LeaseId,
         binding: Option<Binding>,
     ) -> Result<(), SeatError> {
-        self.seat_booked(host, lease, binding, None)
+        self.registry.seat(host, lease, binding, None, None)
     }
 
-    /// As [`RegisteredProvider::seat`], with what the lease booked: `Some(resources)` puts
-    /// back a lease that shares its host, which books those resources and needs a host with
-    /// no whole-host lease and room for them beside the leases seated before it; `None` books
-    /// the whole shape, as [`RegisteredProvider::seat`] does. The refusals are those of
+    /// As [`RegisteredProvider::seat`], for `booking` as the lease file records it: its
+    /// host, its lease, what it booked and when it started. `shares` set puts back a lease
+    /// that shares its host, which books those resources and needs a host with no
+    /// whole-host lease and room for them beside the leases seated before it; `None` books
+    /// the whole shape, as [`RegisteredProvider::seat`] does. With a source of lives set
+    /// ([`crate::Registry::set_lives`]) the lease keeps its start and its end bound
+    /// (`started_at`, `ends_at`), so its drain cost is counted from them; without one it
+    /// has neither, as a lease put back always had. A lease started here counts from the
+    /// start call, so a whole-node lease, whose recorded start is the moment it was ready,
+    /// is costed after a restart from up to its preparation time later. The
+    /// booking's `state` is not read. The refusals are those of
     /// [`js_pool_static::HostBook::seat_as`] except `Unlisted`.
     pub fn seat_booked(
         &self,
-        host: &HostId,
-        lease: LeaseId,
+        booking: &Booking,
         binding: Option<Binding>,
-        shares: Option<Resources>,
     ) -> Result<(), SeatError> {
-        self.registry.seat(host, lease, binding, shares)
+        let times = (booking.started_at, booking.ends_at);
+        let shares = booking.shares.clone();
+        let registry = &self.registry;
+        registry.seat(&booking.host, booking.lease, binding, shares, Some(times))
     }
 }
 

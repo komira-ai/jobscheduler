@@ -153,5 +153,6 @@ pub fn request_of(class: &ResourceClass) -> Request {
         max_wall: std::time::Duration::from_secs(600),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     }
 }

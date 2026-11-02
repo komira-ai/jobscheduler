@@ -36,6 +36,7 @@ fn action(n: u8) -> Request {
         hermetic: true,
         do_not_cache: false,
         whole_worker: false,
+        pin: None,
         needs: js_caps::Request::default(),
     }
 }
@@ -44,6 +45,7 @@ fn action(n: u8) -> Request {
 fn whole(n: u8) -> Request {
     Request {
         whole_worker: true,
+        pin: None,
         resources: Resources::new(1_000, u64::MAX),
         ..action(n)
     }
@@ -221,6 +223,7 @@ fn a_whole_worker_request_is_servable_by_any_worker_and_takes_an_idle_one() {
     // The same size asked as a booking is not servable by the small worker.
     let sized = Request {
         whole_worker: false,
+        pin: None,
         ..whole(2)
     };
     r.submit(2, sized);
@@ -286,6 +289,7 @@ fn without_the_flag_a_request_shares_its_worker_as_before() {
 fn whole_small(n: u8) -> Request {
     Request {
         whole_worker: true,
+        pin: None,
         ..action(n)
     }
 }
@@ -303,6 +307,7 @@ fn the_flag_changes_nothing_for_a_vm_or_a_whole_machine_lease() {
     let vm = Request {
         kind: LeaseKind::Vm,
         whole_worker: true,
+        pin: None,
         ..action(2)
     };
     r.submit(2, vm.clone());
@@ -320,6 +325,7 @@ fn the_flag_changes_nothing_for_a_vm_or_a_whole_machine_lease() {
     let whole_machine = Request {
         kind: LeaseKind::WholeMachine,
         whole_worker: true,
+        pin: None,
         resources: huge,
         ..action(4)
     };
@@ -418,6 +424,7 @@ fn runnable_on_ignores_cpu_and_memory_for_a_whole_worker_request() {
     assert!(whole(1).runnable_on(&caps, &SMALL));
     let plain = Request {
         whole_worker: false,
+        pin: None,
         ..whole(1)
     };
     assert!(!plain.runnable_on(&caps, &SMALL));
