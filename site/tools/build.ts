@@ -39,15 +39,19 @@ export function assetId(files: ReadonlyMap<string, Buffer>): string {
   return hash.digest('hex').slice(0, 16);
 }
 
-/** The modules reachable from the entries, entries included, sorted. */
+/**
+ * The modules reachable from the entries, entries included, each once, sorted. A cycle ends where it closes (a module
+ * is queued the first time it is seen). Throws naming the entry that was not compiled, or the importer and the import.
+ */
 export function moduleGraph(js: ReadonlyMap<string, Buffer>, entries: readonly string[]): string[] {
+  for (const e of entries) if (!js.has(e)) throw new Error(`build: entry ${e} is missing; run tsc -p tsconfig.browser.json first`);
   const seen = new Set<string>(entries);
   const queue = [...entries];
   while (queue.length > 0) {
     const m = queue.shift() as string;
-    const src = js.get(m);
-    if (src === undefined) throw new Error(`build: ${m} is imported but was not compiled`);
+    const src = js.get(m) as Buffer;
     for (const dep of importsOf(m, src.toString('utf8'))) {
+      if (!js.has(dep)) throw new Error(`build: ${m} imports ${dep}, which was not compiled`);
       if (!seen.has(dep)) {
         seen.add(dep);
         queue.push(dep);
@@ -69,7 +73,6 @@ export function buildSite(opts: BuildOptions): { id: string; files: string[] } {
   }
   // Only the scripts the pages name and what they import ship.
   const entries = [...new Set(PAGES.flatMap((p) => p.scripts))].sort();
-  for (const e of entries) if (!compiled.has(e)) throw new Error(`build: ${e} is missing; run tsc -p tsconfig.browser.json first`);
   const assets = new Map<string, Buffer>();
   for (const m of moduleGraph(compiled, entries)) assets.set(m, compiled.get(m) as Buffer);
   for (const css of STYLESHEETS) assets.set(css, readFileSync(join(opts.staticDir, css)));
