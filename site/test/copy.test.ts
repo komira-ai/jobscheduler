@@ -201,6 +201,11 @@ test('every command block of the real pages copies without a prompt mark or a co
 
 // ---- feedback ---------------------------------------------------------------------------------------------------
 
+test('a block whose text content is null copies as one empty line, not as the word null', () => {
+  const pre = { cloneNode: () => ({ textContent: null, querySelectorAll: () => [] }) };
+  assert.equal(commandText(pre), '\n');
+});
+
 test('a block gets one Copy button, and a block without a pre gets none', () => {
   const withPre = new FakeBlock(new FakePre(runsOf('ls')));
   const without = new FakeBlock(null);

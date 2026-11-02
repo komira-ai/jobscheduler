@@ -7,7 +7,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { checkLinks, fileOf } from '../tools/links';
-import { buildReal, copyTree, damage } from './support';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { buildReal, copyTree, damage, scratch } from './support';
 
 const dist = buildReal('links');
 
@@ -50,4 +52,24 @@ test('a stylesheet or script at an asset id that is not built is reported', () =
   const t = copyTree(dist, 'links-asset');
   damage(t, 'install/index.html', /\/assets\/[0-9a-f]+\/theme\.css/, '/assets/0000000000000000/theme.css');
   assert.match(checkLinks(t).join('\n'), /install\/index\.html: <link href="\/assets\/0+\/theme\.css"> names no file/);
+});
+
+test('fileOf resolves a directory path to its index.html and a plain path to itself, and nothing else', () => {
+  const have = new Set(['index.html', 'a/index.html', 'a.css', 'b/c.js']);
+  assert.equal(fileOf('/', have), 'index.html');
+  assert.equal(fileOf('/a/', have), 'a/index.html');
+  assert.equal(fileOf('/a.css', have), 'a.css');
+  assert.equal(fileOf('/b/../a/', have), 'a/index.html');
+  assert.equal(fileOf('/b/c.js', have), 'b/c.js');
+  assert.equal(fileOf('/a', have), null);
+  assert.equal(fileOf('/missing/', have), null);
+});
+
+test('a fragment-only link resolves against its own page, and a relative link against its own directory', () => {
+  const dir = scratch('links-relative');
+  mkdirSync(join(dir, 'a'));
+  mkdirSync(join(dir, 'b'));
+  writeFileSync(join(dir, 'a', 'index.html'), '<!doctype html>\n<h2 id="top">t</h2><a href="#top">up</a><a href="#nope">x</a><a href="../b/?q=1#bid">b</a><a href="">self</a>\n');
+  writeFileSync(join(dir, 'b', 'index.html'), '<!doctype html>\n<h2 id="bid">b</h2>\n');
+  assert.deepEqual(checkLinks(dir), ['a/index.html: <a href="#nope"> names no id #nope on a/index.html']);
 });

@@ -26,9 +26,9 @@ export function checkLinks(dir: string): string[] {
     ids.set(p, new Set(tags.flatMap(([, attrs]) => attrs.filter(([k]) => k === 'id').map(([, v]) => v))));
   }
   const problems: string[] = [];
-  for (const p of pages) {
+  for (const [p, tags] of tagsOf) {
     const base = posix.dirname(p);
-    for (const [tag, attrs] of tagsOf.get(p) ?? []) {
+    for (const [tag, attrs] of tags) {
       for (const [name, raw] of attrs) {
         if (name !== 'href' && name !== 'src') continue;
         const v = decodeAttr(raw);
@@ -41,7 +41,7 @@ export function checkLinks(dir: string): string[] {
           problems.push(`${p}: <${tag} ${name}="${v}"> names no file`);
           continue;
         }
-        if (frag !== null && frag !== '' && target.endsWith('.html') && !ids.get(target)?.has(frag)) {
+        if (frag !== null && frag !== '' && target.endsWith('.html') && !(ids.get(target) as Set<string>).has(frag)) {
           problems.push(`${p}: <${tag} ${name}="${v}"> names no id #${frag} on ${target}`);
         }
       }
