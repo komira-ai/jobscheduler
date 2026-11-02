@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use js_agent::update_hook::{ArgsError, Invocation, Step};
+use js_agent::update_hook::{ArgsError, Flags, Invocation, Step};
 
 fn parse(words: &[&str]) -> Result<Invocation, ArgsError> {
     Invocation::parse(words.iter().map(OsString::from))
@@ -20,6 +20,7 @@ fn every_step_parses_with_its_arguments() {
         assert_eq!(
             got,
             Invocation {
+                flags: Flags::default(),
                 step,
                 artifact,
                 params: PathBuf::from("/run/params.toml"),

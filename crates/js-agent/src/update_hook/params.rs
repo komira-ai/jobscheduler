@@ -21,12 +21,18 @@
 //! of them; every step of an update needs `state_root`, and one that asks the lease server needs
 //! `server` too.
 //!
+//! These text values, and `release_link`, may come instead as flags before the step
+//! ([`Flags`], put in by [`Params::with_flags`]): the updater refuses a string in the
+//! `[hook.params]` of a hook that runs as root, so a Linux declaration gives them in its
+//! `hook_args`. A value comes from one place: the flag or the key, never both.
+//!
 //! The reserved key contains a dot, so in the file it is a quoted key. Written bare, TOML makes
 //! it a table `updater`, which is not a scalar and is refused.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::flags::Flags;
 use super::validate::is_digest;
 
 /// The reserved key the updater sets from the declaration's `promotion_ceiling_secs`.
@@ -134,6 +140,25 @@ pub enum ParamsError {
     /// A key this hook reads is not a whole, non-negative number of seconds.
     #[error("params key {0:?} must be a whole number of seconds, not negative")]
     NotSeconds(String),
+    /// A value given both by a flag before the step and by its key in the params file.
+    #[error("params key {0:?} is also given as a flag before the step; give it once")]
+    Twice(&'static str),
+}
+
+/// Puts the flag's value in `slot`, which must be empty when the flag is given.
+fn from_flag<T: Clone>(
+    slot: &mut Option<T>,
+    flag: Option<&T>,
+    key: &'static str,
+) -> Result<(), ParamsError> {
+    match (slot.is_some(), flag) {
+        (true, Some(_)) => Err(ParamsError::Twice(key)),
+        (false, Some(value)) => {
+            *slot = Some(value.clone());
+            Ok(())
+        }
+        (_, None) => Ok(()),
+    }
 }
 
 /// How the hook on a machine reaches the lease server and the agent's state: the values of the
@@ -250,6 +275,36 @@ impl Params {
                 host_id: string_of(&table, HOST_ID_KEY)?,
             },
         })
+    }
+}
+
+impl Params {
+    /// The params with the values of the flags before the step ([`Flags`]) put in: a flag
+    /// fills the key of the same name, which the file must then leave out.
+    ///
+    /// # Errors
+    /// [`ParamsError::Twice`] for a value given both ways.
+    pub fn with_flags(mut self, flags: &Flags) -> Result<Params, ParamsError> {
+        let connect = &mut self.connect;
+        from_flag(
+            &mut self.release_link,
+            flags.release_link.as_ref(),
+            RELEASE_LINK_KEY,
+        )?;
+        from_flag(&mut connect.server, flags.server.as_ref(), SERVER_KEY)?;
+        from_flag(
+            &mut connect.state_root,
+            flags.state_root.as_ref(),
+            STATE_ROOT_KEY,
+        )?;
+        from_flag(
+            &mut connect.token_file,
+            flags.token_file.as_ref(),
+            TOKEN_FILE_KEY,
+        )?;
+        from_flag(&mut connect.ca_cert, flags.ca_cert.as_ref(), CA_CERT_KEY)?;
+        from_flag(&mut connect.host_id, flags.host_id.as_ref(), HOST_ID_KEY)?;
+        Ok(self)
     }
 }
 

@@ -2,7 +2,7 @@
 //! design, 4.2).
 //!
 //! ```text
-//! js-agent update-hook <prepare|cutover|verify|rollback|cleanup> [<artifact>] --params <file>
+//! js-agent update-hook [--name=value ...] <prepare|cutover|verify|rollback|cleanup> [<artifact>] --params <file>
 //! ```
 //!
 //! The updater runs one step per process and reads two things: the exit status and the last
@@ -14,7 +14,8 @@
 //! The five steps have their bodies in [`step`], over the ports. [`Host::system`] runs them over
 //! the machine's: the unit manager, the release link, the lease server's own-host routes and the
 //! agent's state root (see [`machine`](Machine)). Where the lease server is and where the state
-//! root is come from the params table ([`ConnectParams`]); the declaration is read from
+//! root is come from the params table ([`ConnectParams`]) or from the flags before the step
+//! ([`Flags`]), which a declaration whose hook runs as root uses; the declaration is read from
 //! [`DECLARATION_PATH`].
 //!
 //! The hook builds on Linux and macOS and differs between them in two places only: the unit
@@ -24,6 +25,7 @@
 
 mod args;
 mod declaration;
+mod flags;
 mod launch_units;
 mod machine;
 mod params;
@@ -41,6 +43,10 @@ use std::process::ExitCode;
 
 pub use args::{ArgsError, Invocation, Step};
 pub use declaration::{DECLARATION_PATH, DEFAULT_RUNTIME, Declaration, DeclarationError, Timeouts};
+pub use flags::{
+    CA_CERT_FLAG, Flags, HOST_ID_FLAG, RELEASE_LINK_FLAG, SERVER_FLAG, STATE_ROOT_FLAG,
+    TOKEN_FILE_FLAG,
+};
 pub use launch_units::{BOOTOUT_MARGIN, LAUNCHCTL, LaunchUnits, SETTLE_READS, StopRunner};
 pub use machine::{Machine, MachineLease, StatFn, own_host_id, run_step};
 pub use params::{
@@ -173,7 +179,9 @@ impl Refusal {
 /// Reads the command line and the params file and runs the step they name.
 fn step_of(args: &[OsString], host: &Host<'_>) -> Result<Done, Refusal> {
     let invocation = Invocation::parse(args.iter().skip(2).cloned()).map_err(Refusal::Args)?;
-    let params = Params::read(&invocation.params).map_err(Refusal::Params)?;
+    let params = Params::read(&invocation.params)
+        .and_then(|params| params.with_flags(&invocation.flags))
+        .map_err(Refusal::Params)?;
     // `prepare` is given the staged tree twice, by argument and by the table; they must agree.
     if let Some(given) = invocation
         .artifact

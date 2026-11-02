@@ -13,6 +13,7 @@ mod fake_bin;
 #[path = "../../update_hook_fakes/mod.rs"]
 mod fakes;
 mod fakes_tests;
+mod flags;
 mod harness_tests;
 mod launchd;
 mod lease_port;

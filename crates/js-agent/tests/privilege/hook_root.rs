@@ -9,7 +9,7 @@ use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
 
 use js_agent::update_hook::{
-    DirStat, Done, Invocation, Machine, Outcome, Params, Reason, Step, fd_stat, run_step,
+    DirStat, Done, Flags, Invocation, Machine, Outcome, Params, Reason, Step, fd_stat, run_step,
 };
 
 use crate::harness::{AGENT, Kv, STRANGER, arg, kv, make_dir, require_root, run_agent, work_dir};
@@ -82,6 +82,7 @@ fn run(tree: &Path, step: Step, params: &Params) -> Done {
         own_host_id: &own,
     };
     let invocation = Invocation {
+        flags: Flags::default(),
         step,
         artifact: (step == Step::Prepare).then(|| tree.join("releases/1.4.0")),
         params: PathBuf::from("/unused"),

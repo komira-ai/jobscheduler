@@ -11,8 +11,8 @@ use std::process::Command;
 use js_agent::lifecycle::StateRoot;
 use js_agent::own_host::{Lease, LeaseError};
 use js_agent::update_hook::{
-    Class, ConnectParams, DECLARATION_PATH, Done, Invocation, Machine, MachineLease, Outcome,
-    Params, Reason, Step, own_host_id, run_step,
+    Class, ConnectParams, DECLARATION_PATH, Done, Flags, Invocation, Machine, MachineLease,
+    Outcome, Params, Reason, Step, own_host_id, run_step,
 };
 use js_agent_wire::Taint;
 
@@ -114,6 +114,7 @@ impl Tree {
     /// Runs `step` on a machine whose id is `own`, with the declaration of the tree.
     pub(super) fn run(&self, step: Step, params: &Params, own: Result<&str, &str>) -> Done {
         let invocation = Invocation {
+            flags: Flags::default(),
             step,
             artifact: (step == Step::Prepare).then(|| self.staged()),
             params: PathBuf::from("/unused"),
