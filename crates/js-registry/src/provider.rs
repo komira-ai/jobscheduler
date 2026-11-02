@@ -106,8 +106,10 @@ impl RegisteredProvider {
     /// whole-host lease and room for them beside the leases seated before it; `None` books
     /// the whole shape, as [`RegisteredProvider::seat`] does. With a source of lives set
     /// ([`crate::Registry::set_lives`]) the lease keeps its start and its end bound
-    /// (`started_at`, `ends_at`), so its drain cost is counted from them as for a lease
-    /// started here; without one it has neither, as a lease put back always had. The
+    /// (`started_at`, `ends_at`), so its drain cost is counted from them; without one it
+    /// has neither, as a lease put back always had. A lease started here counts from the
+    /// start call, so a whole-node lease, whose recorded start is the moment it was ready,
+    /// is costed after a restart from up to its preparation time later. The
     /// booking's `state` is not read. The refusals are those of
     /// [`js_pool_static::HostBook::seat_as`] except `Unlisted`.
     pub fn seat_booked(
