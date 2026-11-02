@@ -132,7 +132,9 @@ fn a_directory_that_cannot_take_the_file_is_an_error_and_makes_nothing() {
 /// Asserts that when the link is made and only the sync of the directory fails (a directory
 /// that can be written and searched but not read, 0300) the call succeeds: the file is in
 /// place and complete. It catches an error reported for a file that exists, which tells the
-/// caller a good secret is lost.
+/// caller a good secret is lost. Linux only: elsewhere there is no `O_PATH`, and a directory
+/// that cannot be read cannot be opened to make a file in.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_directory_that_cannot_be_synced_does_not_fail_a_file_that_is_in_place() {
     let dir = Scratch::new("create_new_unsynced");

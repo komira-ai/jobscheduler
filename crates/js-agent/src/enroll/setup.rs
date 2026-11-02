@@ -48,22 +48,72 @@ pub(super) fn open_checked(path: &Path, owner: u32, hint: &str) -> Result<File, 
         .map_err(io::Error::from)
         .and_then(|file| file.metadata().map(|meta| (file, meta)))
         .map_err(|why| refuse(format!("{why}; {hint}")))?;
-    let problems = [
-        (!meta.is_file(), "is not a regular file".to_owned()),
-        (
-            ![0, owner].contains(&meta.uid()),
-            format!("is not owned by uid {owner} or root"),
-        ),
-        (
-            meta.mode() & 0o022 != 0,
-            "is writable by group or others".to_owned(),
-        ),
-    ];
-    if let Some((_, why)) = problems.into_iter().find(|(bad, _)| *bad) {
+    if let Some(why) = file_refusal(Found::of(&meta), owner) {
         return Err(refuse(why));
     }
     check_ancestors(path, owner).map_err(refuse)?;
     Ok(file)
+}
+
+/// What the checks need to know of a file or a directory that was found.
+#[derive(Clone, Copy)]
+struct Found {
+    regular: bool,
+    dir: bool,
+    uid: u32,
+    mode: u32,
+}
+
+impl Found {
+    fn of(meta: &fs::Metadata) -> Self {
+        Self {
+            regular: meta.is_file(),
+            dir: meta.is_dir(),
+            uid: meta.uid(),
+            mode: meta.mode(),
+        }
+    }
+}
+
+/// Why a program at a path may not be run by root, if it may not: it is not a regular file,
+/// not root's or `owner`'s, or group or others can write it.
+fn file_refusal(found: Found, owner: u32) -> Option<String> {
+    let problems = [
+        (!found.regular, "is not a regular file".to_owned()),
+        (
+            ![0, owner].contains(&found.uid),
+            format!("is not owned by uid {owner} or root"),
+        ),
+        (
+            found.mode & 0o022 != 0,
+            "is writable by group or others".to_owned(),
+        ),
+    ];
+    problems
+        .into_iter()
+        .find(|(bad, _)| *bad)
+        .map(|(_, why)| why)
+}
+
+/// Why a directory above such a program is unfit, if it is: it cannot be read (`None`), is
+/// not a directory, is not root's or `owner`'s, or group or others can write it.
+fn dir_refusal(found: Option<Found>, owner: u32) -> Option<&'static str> {
+    let problems = [
+        (found.is_none(), "cannot be read"),
+        (found.is_some_and(|f| !f.dir), "is not a directory"),
+        (
+            found.is_some_and(|f| ![0, owner].contains(&f.uid)),
+            "is not owned by root or the owner",
+        ),
+        (
+            found.is_some_and(|f| f.mode & 0o022 != 0),
+            "is writable by group or others",
+        ),
+    ];
+    problems
+        .into_iter()
+        .find(|(bad, _)| *bad)
+        .map(|(_, why)| why)
 }
 
 /// Checks every directory above `path`: each must be a directory that root or `owner` owns
@@ -71,24 +121,8 @@ pub(super) fn open_checked(path: &Path, owner: u32, hint: &str) -> Result<File, 
 /// name the directory.
 fn check_ancestors(path: &Path, owner: u32) -> Result<(), String> {
     for dir in path.ancestors().skip(1) {
-        let meta = fs::metadata(dir).ok();
-        let problems = [
-            (meta.is_none(), "cannot be read"),
-            (
-                meta.as_ref().is_some_and(|meta| !meta.is_dir()),
-                "is not a directory",
-            ),
-            (
-                meta.as_ref()
-                    .is_some_and(|meta| ![0, owner].contains(&meta.uid())),
-                "is not owned by root or the owner",
-            ),
-            (
-                meta.as_ref().is_some_and(|meta| meta.mode() & 0o022 != 0),
-                "is writable by group or others",
-            ),
-        ];
-        if let Some((_, why)) = problems.iter().find(|(bad, _)| *bad) {
+        let found = fs::metadata(dir).ok().as_ref().map(Found::of);
+        if let Some(why) = dir_refusal(found, owner) {
             return Err(format!("{}: {why}", dir.display()));
         }
     }
@@ -174,54 +208,78 @@ pub(super) fn run(
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
 
-    /// Asserts that a file that is not root's or the owner's is refused with exactly its path
-    /// and the uid, whatever the directories above it are. The integration tests cannot make
-    /// a file another user owns, and changing the owner there trips the script's own check
-    /// first, so the shell's check is pinned here. It catches a root process that starts a
-    /// program another user owns.
+    /// A regular file or a directory with `uid` and `mode`.
+    fn found(dir: bool, uid: u32, mode: u32) -> Found {
+        Found {
+            regular: !dir,
+            dir,
+            uid,
+            mode,
+        }
+    }
+
+    /// Asserts each answer of the check of the script and the shell, on metadata given here
+    /// rather than on files the test makes, so the answers do not depend on who runs the
+    /// test: root's or the owner's file that group and others cannot write is fit; a file of
+    /// another user is refused naming the owner's uid, even with a safe mode; one others can
+    /// write is refused even when root's; a directory in its place is refused first. It
+    /// catches a root process that starts a program another user owns or can change.
     #[test]
-    fn a_file_of_another_owner_is_refused_by_its_path() {
-        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "enroll_open_owner");
-        let shell = dir.path().join("shell");
-        fs::write(&shell, "").unwrap();
-        fs::set_permissions(&shell, fs::Permissions::from_mode(0o755)).unwrap();
-        // The test runs as a user other than root, as the whole suite does: a file root
-        // made would pass the check whoever the owner is.
-        let other = rustix::process::geteuid().as_raw() + 1;
-        let refused = open_checked(&shell, other, "hint")
-            .err()
-            .map(|f| (f.code(), f.text().to_owned()));
+    fn who_owns_a_program_and_who_can_write_it_decide_if_root_runs_it() {
+        let owner = 1000;
+        for (uid, mode) in [(0, 0o755), (owner, 0o755), (owner, 0o700), (0, 0o4755)] {
+            assert_eq!(
+                file_refusal(found(false, uid, mode), owner),
+                None,
+                "{uid} {mode:o}"
+            );
+        }
+        let not_owner = Some("is not owned by uid 1000 or root".to_owned());
+        assert_eq!(file_refusal(found(false, 1001, 0o755), owner), not_owner);
+        assert_eq!(file_refusal(found(false, 1001, 0o700), owner), not_owner);
+        let writable = Some("is writable by group or others".to_owned());
+        for mode in [0o775, 0o757, 0o777] {
+            assert_eq!(
+                file_refusal(found(false, 0, mode), owner),
+                writable,
+                "{mode:o}"
+            );
+        }
         assert_eq!(
-            refused,
-            Some((
-                crate::exit::USAGE,
-                format!("{}: is not owned by uid {other} or root", shell.display())
-            ))
+            file_refusal(found(true, 0, 0o755), owner),
+            Some("is not a regular file".to_owned())
         );
     }
 
-    /// Asserts that the directory walk names the first directory above the file that is not
-    /// root's or the owner's, and passes when the owner is the one who made them. It is the
-    /// shell's and the script's directory check on its own, without the file check in front
-    /// of it. It catches a program in a directory another user can rename it out of.
+    /// Asserts each answer of the check of the directories above the script and the shell,
+    /// on metadata given here: root's or the owner's directory that group and others cannot
+    /// write is fit; one that cannot be read, a file in its place, another user's, and one
+    /// others can write are each refused with their own words, in that order. It catches a
+    /// program in a directory another user can rename it out of.
     #[test]
-    fn a_directory_of_another_owner_is_named() {
-        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "enroll_walk_owner");
-        let inner = dir.path().join("bin");
-        fs::create_dir(&inner).unwrap();
-        fs::set_permissions(&inner, fs::Permissions::from_mode(0o755)).unwrap();
-        // As in the test above, the test runs as a user other than root.
-        let other = rustix::process::geteuid().as_raw() + 1;
+    fn who_owns_a_directory_above_a_program_decides_if_root_runs_it() {
+        let owner = 1000;
+        for (uid, mode) in [(0, 0o755), (owner, 0o755), (0, 0o711)] {
+            assert_eq!(dir_refusal(Some(found(true, uid, mode)), owner), None);
+        }
+        assert_eq!(dir_refusal(None, owner), Some("cannot be read"));
         assert_eq!(
-            check_ancestors(&inner.join("shell"), other),
-            Err(format!(
-                "{}: is not owned by root or the owner",
-                inner.display()
-            ))
+            dir_refusal(Some(found(false, 0, 0o755)), owner),
+            Some("is not a directory")
+        );
+        assert_eq!(
+            dir_refusal(Some(found(true, 1001, 0o755)), owner),
+            Some("is not owned by root or the owner")
+        );
+        assert_eq!(
+            dir_refusal(Some(found(true, 1001, 0o777)), owner),
+            Some("is not owned by root or the owner")
+        );
+        assert_eq!(
+            dir_refusal(Some(found(true, 0, 0o1777)), owner),
+            Some("is writable by group or others")
         );
     }
 }

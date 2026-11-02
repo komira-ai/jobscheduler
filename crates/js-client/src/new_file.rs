@@ -3,9 +3,8 @@
 use std::ffi::OsStr;
 use std::fs::{File, Permissions};
 use std::io::{self, ErrorKind, Write};
-use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{AtFlags, Mode, OFlags};
@@ -98,23 +97,36 @@ const ATTEMPTS: usize = 4;
 /// is made, linked and removed in (by `openat`, `linkat` and `unlinkat`): a path to it that
 /// is changed after the judgement (a link repointed, a directory renamed) changes nothing.
 struct Dir {
-    fd: OwnedFd,
+    fd: File,
     path: PathBuf,
 }
+
+/// How the directory is opened. On Linux, `O_PATH`: the descriptor is for `fstat` and the
+/// `*at` calls, which need no read permission of the directory (a directory of mode 0300
+/// takes files all the same). Elsewhere there is no `O_PATH` and the directory is opened
+/// for reading, so it must be readable as well.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const DIR_FLAGS: OFlags = OFlags::PATH.union(OFlags::DIRECTORY).union(OFlags::CLOEXEC);
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const DIR_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::CLOEXEC);
+
+/// The mode a staged or probe file is made with: its owner's only, before [`fill`] gives it
+/// its own mode and before a byte is written.
+const MADE: Mode = Mode::RUSR.union(Mode::WUSR);
 
 impl Dir {
     /// Opens the directory at `path` and judges it: it must be the caller's or root's, and
     /// group and others must not be able to write it unless it is sticky.
     fn open(path: &Path) -> Result<Self, NewFileError> {
-        // `O_PATH`: the descriptor is for `fstat` and the `*at` calls, which need no read
-        // permission of the directory (a directory of mode 0300 takes files all the same).
-        let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
-        let (fd, stat) = rustix::fs::open(path, flags, Mode::empty())
-            .and_then(|fd| rustix::fs::fstat(&fd).map(|stat| (fd, stat)))
+        let (fd, meta) = rustix::fs::open(path, DIR_FLAGS, Mode::empty())
+            .map(File::from)
             .map_err(io::Error::from)
+            .and_then(|fd| fd.metadata().map(|meta| (fd, meta)))
             .map_err(at(NewFileStep::Inspect, path))?;
         let caller = rustix::process::geteuid().as_raw();
-        match unfit(stat.st_mode, stat.st_uid, caller) {
+        match unfit(meta.mode(), meta.uid(), caller) {
             Some(why) => Err(at(NewFileStep::Unsafe, path)(io::Error::new(
                 ErrorKind::PermissionDenied,
                 why,
@@ -131,11 +143,11 @@ impl Dir {
         self.path.join(name)
     }
 
-    /// Makes the entry `name`, new (never through a link), with `mode`.
-    fn create(&self, name: &str, mode: u32) -> io::Result<File> {
+    /// Makes the entry `name`, new (never through a link), its owner's only ([`MADE`]).
+    fn create(&self, name: &str) -> io::Result<File> {
         let flags =
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        rustix::fs::openat(&self.fd, name, flags, Mode::from_raw_mode(mode))
+        rustix::fs::openat(&self.fd, name, flags, MADE)
             .map(File::from)
             .map_err(io::Error::from)
     }
@@ -167,8 +179,9 @@ impl Dir {
 /// digits>`, the same length whatever the length of the name of `path`, made with
 /// `O_EXCL`), synced, and hard-linked to `path`; the link fails if anything is there, a
 /// dangling symbolic link included, so no reader ever sees a part of the content and an
-/// existing file is never replaced. The staged file is made with `mode` (the umask can only
-/// take bits off it), so it is never more open than the file will be.
+/// existing file is never replaced. The staged file is made readable and writable by its
+/// owner only, and is given `mode` before any byte is written, so no one but its owner can
+/// open it before it has its mode.
 ///
 /// Only a name this call made is removed. A staged name that is taken (by a file, a link or
 /// a directory) is left as it is and another name is tried, up to four times in all; the
@@ -199,7 +212,7 @@ fn create_new_with(
 ) -> Result<(), NewFileError> {
     let name = file_name(path)?;
     let dir = Dir::open(parent(path))?;
-    let (staged, file) = open_staged(&dir, path, mode, names)?;
+    let (staged, file) = open_staged(&dir, path, names)?;
     let made = fill(&dir.join(&staged), file, bytes, mode)
         .and_then(|()| dir.link(&staged, name).map_err(at(NewFileStep::Link, path)));
     dir.remove(&staged);
@@ -259,7 +272,7 @@ fn probe_with(path: &Path, names: Names<'_>) -> Result<(), NewFileError> {
     let dir = Dir::open(path)?;
     let first = names(".js-probe").map_err(at(NewFileStep::Entropy, path))?;
     let second = names(".js-probe").map_err(at(NewFileStep::Entropy, path))?;
-    dir.create(&first, 0o600)
+    dir.create(&first)
         .map_err(at(NewFileStep::Probe, &dir.join(&first)))?;
     let linked = dir
         .link(&first, OsStr::new(&second))
@@ -296,17 +309,12 @@ fn unique(prefix: &str) -> io::Result<String> {
 
 /// Makes the staged file in `dir`, beside `path`, new, under a name from `names`. Returns
 /// its name and the open file.
-fn open_staged(
-    dir: &Dir,
-    path: &Path,
-    mode: u32,
-    names: Names<'_>,
-) -> Result<(String, File), NewFileError> {
+fn open_staged(dir: &Dir, path: &Path, names: Names<'_>) -> Result<(String, File), NewFileError> {
     let mut attempt = 0;
     loop {
         attempt += 1;
         let name = names(".js-new").map_err(at(NewFileStep::Entropy, path))?;
-        match dir.create(&name, mode) {
+        match dir.create(&name) {
             Ok(file) => return Ok((name, file)),
             Err(err) if err.kind() == ErrorKind::AlreadyExists && attempt < ATTEMPTS => {}
             Err(err) => return Err(at(NewFileStep::Stage, &dir.join(&name))(err)),
@@ -546,5 +554,55 @@ mod tests {
             NewFileStep::Inspect
         );
         assert!(listing(&open).is_empty());
+    }
+
+    /// Asserts that once the directory is open, changing what its path names does not move
+    /// the file: while the call is under way (when it asks for the staged file's name), the
+    /// link the path goes through is pointed at another directory, and in a second run the
+    /// directory itself is renamed away and a new one made at its name. Each time the file is
+    /// published only in the directory that was opened, with its bytes and mode, the
+    /// replacement stays empty, and no staged file is left anywhere. It catches staging,
+    /// linking or cleanup done by path, which would land in whatever the path names by then.
+    #[test]
+    fn a_path_changed_after_the_directory_is_open_does_not_move_the_file() {
+        let owner = private("js-client-anchored");
+        let root = owner.path();
+        let (first, other) = (root.join("first"), root.join("other"));
+        for dir in [&first, &other] {
+            fs::create_dir(dir).unwrap();
+            fs::set_permissions(dir, Permissions::from_mode(0o700)).unwrap();
+        }
+        let link = root.join("via");
+        symlink(&first, &link).unwrap();
+        let mut repoint = |_: &str| {
+            fs::remove_file(&link).unwrap();
+            symlink(&other, &link).unwrap();
+            Ok(".js-new.repointed".to_owned())
+        };
+        create_new_with(&link.join("dest"), b"secret", 0o600, &mut repoint).unwrap();
+        assert_eq!(listing(&first), ["dest"].map(OsString::from));
+        assert_eq!(fs::read(first.join("dest")).unwrap(), b"secret");
+        assert_eq!(
+            fs::metadata(first.join("dest"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600
+        );
+        assert!(listing(&other).is_empty());
+
+        let (opened, moved) = (root.join("opened"), root.join("moved"));
+        fs::create_dir(&opened).unwrap();
+        fs::set_permissions(&opened, Permissions::from_mode(0o700)).unwrap();
+        let mut rename = |_: &str| {
+            fs::rename(&opened, &moved).unwrap();
+            fs::create_dir(&opened).unwrap();
+            Ok(".js-new.renamed".to_owned())
+        };
+        create_new_with(&opened.join("dest"), b"again", 0o600, &mut rename).unwrap();
+        assert_eq!(listing(&moved), ["dest"].map(OsString::from));
+        assert_eq!(fs::read(moved.join("dest")).unwrap(), b"again");
+        assert!(listing(&opened).is_empty());
     }
 }
