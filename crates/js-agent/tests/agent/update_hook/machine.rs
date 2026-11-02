@@ -569,3 +569,25 @@ fn a_step_that_never_reads_the_state_root_still_reports_it_unusable_by_the_hooks
         assert!(!detail.contains("--state-root"), "{step}: {detail}");
     }
 }
+
+#[test]
+fn a_state_root_that_is_there_and_unusable_fails_every_step_of_a_first_install_too() {
+    let tree = Tree::new("hook-machine-unusable-first");
+    let open = open_state_root(&tree._files);
+    // A link to a private directory, and a file, are no state root either.
+    let target = private(&tree._files, "private-state");
+    let link = tree._files.path("linked-state");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let file = tree._files.write("file-state", "x", 0o600);
+    for root in [open, link, file] {
+        let params = tree.params(false, &format!("state_root = \"{}\"\n", root.display()));
+        for step in Step::ALL {
+            let done = tree.run(step, &params, Err("unused"));
+            assert_eq!(done.outcome, Outcome::Failure, "{step}: {done:?}");
+            assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{step}");
+            let detail = done.report.detail.as_deref().unwrap();
+            assert!(detail.starts_with("state_root: "), "{step}: {detail}");
+        }
+        assert!(!tree.record().exists());
+    }
+}

@@ -492,6 +492,44 @@ fn a_path_swapped_for_a_link_after_the_open_does_not_redirect_a_write() {
 }
 
 #[test]
+fn an_ancestor_swapped_for_a_link_between_two_steps_redirects_nothing_and_the_next_is_refused() {
+    let (dir, parent, state) = tree("hook-record-swap-ancestor", 0o755);
+    let held = Held::open(&state, &rooted(dir.path())).unwrap();
+    held.save(&record("1.4.0")).unwrap();
+    // Another hand moves the parent away and puts a link where it was, to a parent of its own
+    // that holds a state directory of the right shape.
+    let moved = dir.path().join("moved");
+    let other = dir.path().join("other");
+    fs::create_dir_all(other.join("state")).unwrap();
+    fs::set_permissions(other.join("state"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::rename(&parent, &moved).unwrap();
+    symlink(&other, &parent).unwrap();
+
+    // The step that holds the directory goes on in the directory it opened.
+    let mut next = record("1.4.0");
+    next.stop_begun = true;
+    held.save(&next).unwrap();
+    assert_eq!(held.load().unwrap(), Some(next.clone()));
+    let kept: Record =
+        serde_json::from_slice(&fs::read(moved.join("state").join(RECORD_FILE)).unwrap()).unwrap();
+    assert_eq!(kept, next);
+    assert_eq!(fs::read_dir(other.join("state")).unwrap().count(), 0);
+    held.delete().unwrap();
+    assert!(!moved.join("state").join(RECORD_FILE).exists());
+    drop(held);
+
+    // The next step, coming by the path, is refused at the link and makes nothing anywhere.
+    match Held::open(&state, &rooted(dir.path())) {
+        Err(StateError::Ancestor { path, problem }) => {
+            assert_eq!(path, parent);
+            assert_eq!(problem, DirProblem::Symlink);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fs::read_dir(other.join("state")).unwrap().count(), 0);
+}
+
+#[test]
 fn the_lock_is_exclusive_and_a_second_holder_changes_nothing() {
     let dir = cell("hook-record-lock");
     let first = Held::open(dir.path(), &as_root).unwrap();
