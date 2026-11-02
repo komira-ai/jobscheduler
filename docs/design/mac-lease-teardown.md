@@ -19,6 +19,10 @@ The verdict is the outcome, never what a `launchctl` call answered: no process o
    A pool user has none of these, so its `gui/<uid>` is never asked about. A process named `loginwindow` without a session only costs a bootout of `gui/<uid>` that fails and a look that finds it gone. A session seen at a later look of the processes (step 4) counts from the next attempt on. The decision comes before the kill because the kill ends the `loginwindow`.
 
    From the moment a session is seen, `gui/<uid>` is owed a teardown: a record `gui-teardown.<uid>` in the helper's state directory, written before the kill. It is removed only once a teardown judges `gui/<uid>` gone. So a retry after a failed GUI teardown (whose kill ended the `loginwindow`), the boot reset after a restart of the helper, and `user-delete` all still boot out and judge it.
+
+   The record is read first, before anything else decides the session, and is opened never through a link: a link there refuses the teardown before anything is killed or replaced.
+
+   Across releases: the record is a file of its own, and no release lists the state directory; each opens only the files it names (the ledger, the intent record, the scan's baseline and window). A previous release therefore never sees it, and a release that finds no record (a state directory a previous release left) owes nothing. A record left behind by a rolled-back release, for a uid that a new lease has since received, costs that lease's teardown one bootout and one look of `gui/<uid>`, which does not print, and is then discharged.
 2. Kill every process of the uid.
 3. Boot out `user/<uid>` (and `gui/<uid>`, only with a session). The bootout's own exit status is not a verdict: it fails for a domain that is not there, and can fail after it ended the domain. A failure is logged.
 4. Look at the outcome:

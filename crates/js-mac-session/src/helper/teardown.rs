@@ -274,8 +274,11 @@ impl Helper {
         intended: bool,
     ) -> Result<(), TeardownError> {
         // Looked at before the kill, which ends the session's `loginwindow`.
+        // The record is read first, whatever else shows a session: a link there is refused
+        // before anything replaces it.
+        let owed = self.gui_owed(uid)?;
         let mut gui = false;
-        if intended || self.gui_owed(uid)? || session_seen(&self.processes(uid)?) {
+        if owed || intended || session_seen(&self.processes(uid)?) {
             self.owe_gui(uid)?;
             gui = true;
         }

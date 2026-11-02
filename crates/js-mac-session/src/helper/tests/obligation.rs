@@ -344,6 +344,15 @@ fn a_gui_teardown_record_that_cannot_be_kept_refuses_the_teardown() {
     refusal(rig.helper.kill_uid("68.1"));
     refusal(rig.helper.user_delete("68.1").map(drop));
     assert!(!log(&rig).iter().any(|c| c.starts_with("kill_all")));
+    // Refused too when the intent record names the lease (a session is decided without
+    // the record): the link is not replaced.
+    let intent = rig.dir.join("session-intent");
+    write_intent(&intent, Intent::Lease(LeaseId::new(68, 1))).unwrap();
+    refusal(rig.helper.kill_uid("68.1"));
+    assert!(record.symlink_metadata().unwrap().file_type().is_symlink());
+    assert!(!rig.dir.join("elsewhere").exists());
+    assert!(!log(&rig).iter().any(|c| c.starts_with("kill_all")));
+    crate::autologin::remove(&intent).unwrap();
     std::fs::remove_file(&record).unwrap();
 
     // A directory: read as owed, but neither written nor removed.
@@ -356,4 +365,80 @@ fn a_gui_teardown_record_that_cannot_be_kept_refuses_the_teardown() {
     assert!(!calls.iter().any(|c| c.starts_with("delete_user")));
     assert!(rig.host.state().users.contains_key("kbf-lease-68-1"));
     uid_held(&rig);
+}
+
+/// The names of the entries of a rig's state directory.
+fn entries(rig: &Rig) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(rig.dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect()
+}
+
+/// Catches a release that cannot take over the state a previous release left (which has
+/// no GUI teardown record at all): a ledger written in the previous release's format,
+/// holding a live lease, is opened by this one, whose boot reset reads the absent record
+/// as nothing owed, never asks about `gui/<uid>`, and deletes the lease.
+#[test]
+fn a_previous_releases_state_directory_is_read_as_owing_nothing() {
+    let dir = std::sync::Arc::new(crate::testing::scratch("helper-owed-previous"));
+    let uid = me();
+    std::fs::write(dir.join("ledger"), format!("created 70.1 {uid}\n")).unwrap();
+    let rig = rig_with("owed-previous", UidRange::new(uid, uid).unwrap(), Some(dir));
+    let reset = rig.helper.boot_reset(&[]).unwrap();
+    assert_eq!(reset.deleted, [LeaseId::new(70, 1)]);
+    let calls = log(&rig);
+    assert!(!calls.iter().any(|c| c.contains("gui/")), "{calls:#?}");
+    assert!(!owed(&rig, uid));
+    assert_eq!(rig.helper.user_create("70.2", None), Ok(uid));
+}
+
+/// Catches a GUI teardown record that a previous release could trip on: it reads only the
+/// files it names in the state directory (the ledger, the intent record, the scan's
+/// baseline and window), never lists it. With a record left by a failed GUI teardown, the
+/// ledger holds exactly the records of the previous release's format (and opens), and the
+/// state directory differs from the one a failed teardown without a session leaves only
+/// by the empty record.
+#[test]
+fn the_gui_teardown_record_changes_no_file_a_previous_release_reads() {
+    let (gui, uid) = one("owed-new-data-gui", "71.1");
+    stuck_gui(&gui, uid);
+    assert!(gui.helper.kill_uid("71.1").is_err());
+    let (plain, _) = one("owed-new-data-plain", "71.1");
+    plain.host.state().procs.insert(uid, 1);
+    plain.host.state().stubborn.insert(uid, usize::MAX);
+    assert!(plain.helper.kill_uid("71.1").is_err());
+
+    let record = format!("gui-teardown.{uid}");
+    let mut with = entries(&gui);
+    assert!(with.remove(&record), "{with:?}");
+    assert_eq!(with, entries(&plain));
+    assert_eq!(std::fs::read(gui.dir.join(&record)).unwrap(), b"");
+    let ledger = gui.dir.join("ledger");
+    assert_eq!(
+        std::fs::read_to_string(&ledger).unwrap(),
+        format!("created 71.1 {uid}\n")
+    );
+    assert_eq!(
+        std::fs::read(&ledger).unwrap(),
+        std::fs::read(plain.dir.join("ledger")).unwrap()
+    );
+    assert!(!gui.dir.join("session-intent").exists());
+    crate::ledger::Ledger::open(&ledger).unwrap();
+}
+
+/// Catches a stale record (a previous release, rolled back to, completed a teardown and
+/// left the record, and the uid went to a new lease) that blocks or misleads the new
+/// lease's teardown: `gui/<uid>` is booted out and judged once (it does not print: any
+/// answer but 0), the teardown completes and discharges the record, and the next one
+/// does not ask about `gui/<uid>`.
+#[test]
+fn a_stale_gui_teardown_record_costs_one_look_and_is_discharged() {
+    let (rig, uid) = one("owed-stale", "72.1");
+    std::fs::write(rig.dir.join(format!("gui-teardown.{uid}")), b"").unwrap();
+    assert_eq!(rig.helper.kill_uid("72.1"), Ok(()));
+    assert_eq!(count(&log(&rig), &format!("bootout gui/{uid}")), 2);
+    assert!(!owed(&rig, uid));
+    assert_eq!(rig.helper.user_delete("72.1"), Ok(true));
+    assert!(!log(&rig).iter().any(|c| c.contains("gui/")));
 }
