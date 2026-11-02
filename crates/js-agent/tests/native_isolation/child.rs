@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use super::lines::{Kind, Line, Verdict};
 use super::look::{
     Outcome, SeedFailure, classify_defaults, classify_errno, classify_path, classify_security,
-    classify_seed_failure, readback_matches,
+    classify_seed_failure, readback_matches, tool_failure,
 };
 use super::token::Token;
 
@@ -48,7 +48,7 @@ fn tool_raw(
     program: &str,
     args: &[&str],
     home: &Path,
-) -> Result<(Option<i32>, String, String), String> {
+) -> Result<(u32, Option<i32>, String, String), String> {
     let child = Command::new(program)
         .args(args)
         .env("HOME", home)
@@ -59,11 +59,13 @@ fn tool_raw(
         .map_err(|why| format!("{program}: {why}"))?;
     // The tool is a direct child, so this pid is exactly its own: the test binds a sandbox line
     // in the log to the job by pid and by nothing else.
-    println!("ISOPID {}", child.id());
+    let pid = child.id();
+    println!("ISOPID {pid}");
     let out = child
         .wait_with_output()
         .map_err(|why| format!("{program}: {why}"))?;
     Ok((
+        pid,
         out.status.code(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -72,13 +74,9 @@ fn tool_raw(
 
 /// The tool's standard output, or why it failed.
 fn tool(program: &str, args: &[&str], home: &Path) -> Result<String, String> {
-    let (code, stdout, stderr) = tool_raw(program, args, home)?;
+    let (pid, code, stdout, stderr) = tool_raw(program, args, home)?;
     if code != Some(0) {
-        return Err(format!(
-            "{program} exited {code:?}: {} {}",
-            stderr.trim(),
-            stdout.trim()
-        ));
+        return Err(tool_failure(program, pid, code, &stderr, &stdout));
     }
     Ok(stdout)
 }
@@ -349,7 +347,7 @@ pub fn probe(seeded: &Line, home: &Path) -> Outcome {
                     &["find-generic-password", "-s", tok],
                     home,
                 ) {
-                    Ok((code, _, stderr)) => classify_security(code, &stderr),
+                    Ok((_, code, _, stderr)) => classify_security(code, &stderr),
                     Err(why) => Outcome::CouldNotLook(why),
                 }
             }
@@ -357,7 +355,7 @@ pub fn probe(seeded: &Line, home: &Path) -> Outcome {
         },
         Kind::Defaults => {
             match tool_raw("/usr/bin/defaults", &["read", locator, DEFAULTS_KEY], home) {
-                Ok((code, stdout, stderr)) => classify_defaults(code, &stdout, &stderr),
+                Ok((_, code, stdout, stderr)) => classify_defaults(code, &stdout, &stderr),
                 Err(why) => Outcome::CouldNotLook(why),
             }
         }
