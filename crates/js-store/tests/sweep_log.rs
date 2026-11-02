@@ -57,6 +57,7 @@ fn a_requeued_orphan_is_logged_with_its_operation_lease_and_node() {
         hermetic: true,
         do_not_cache: false,
         whole_worker: false,
+        pin: None,
     };
     rows.submit(OperationId(4), &request, &[], None)
         .expect("submit");

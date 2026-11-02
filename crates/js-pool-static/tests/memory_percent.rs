@@ -33,6 +33,7 @@ fn asking(seq: u64, memory_bytes: u64) -> StartSpec {
         max_wall: Duration::from_secs(600),
         labels: BTreeMap::new(),
         validation_run: None,
+        probe_host: None,
     };
     StartSpec::new(LeaseId::new(1, seq), request, &[ResourceClass::gpu_host()]).unwrap()
 }

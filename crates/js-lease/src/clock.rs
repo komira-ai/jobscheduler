@@ -17,6 +17,9 @@ const MAX_MILLIS: u64 = i64::MAX as u64;
 pub struct Timestamp(u64);
 
 impl Timestamp {
+    /// The largest instant a timestamp holds, where [`Timestamp::plus`] saturates.
+    pub const MAX: Self = Self(MAX_MILLIS);
+
     /// The instant `millis` milliseconds after the epoch, saturating at the largest
     /// instant a timestamp holds.
     pub fn from_millis(millis: u64) -> Self {

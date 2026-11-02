@@ -298,9 +298,15 @@ impl Registry {
         let _ = self.shared.placer.set(placer);
     }
 
-    /// The provider the lease table runs on, serving the pool's class.
+    /// The provider the lease table runs on, serving the pool's class and its share class
+    /// ([`crate::PoolConfig::with_share_class`]), if it has one.
     pub fn provider(&self) -> crate::RegisteredProvider {
-        crate::RegisteredProvider::new(self.clone(), self.shared.config.class().clone())
+        let config = &self.shared.config;
+        let provider = crate::RegisteredProvider::new(self.clone(), config.class().clone());
+        match config.share_class() {
+            Some(share) => provider.with_classes(vec![config.class().clone(), share.clone()]),
+            None => provider,
+        }
     }
 
     /// The registry's state as of `now`: hosts lost for longer than the retention, with

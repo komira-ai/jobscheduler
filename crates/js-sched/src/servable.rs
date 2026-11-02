@@ -1,6 +1,7 @@
 //! Which live workers can run a request, for one placement round.
 //!
-//! A cordoned worker is not one of them: placement skips it, and work only it could
+//! A cordoned worker is not one of them: placement skips it (a probe pinned to it aside,
+//! which [`Servable::fit`] places there alone), and work only it could
 //! run waits with that reason for as long as the cordon lasts; it is never refused for
 //! it (a cordon is temporary by intent). A worker whose phase is not `serving`
 //! ([`NodePhase`]: switching its GUI session, or quarantined) is held back the
@@ -28,9 +29,11 @@ use crate::admission::{
     Admission, Blocked, Left, Profile, Ratio, Refusal, binding, clamped, new_charge, pick,
     start_time,
 };
+use crate::backfill;
 use crate::cordon::Cordons;
 use crate::input::Request;
 use crate::load::{Charge, HostFacts, LeaseFacts, Load, SLOTS, SlotHost, SlotLoad, least_loaded};
+use crate::probe::{ProbeHost, ProbeRefusal, admit_probe};
 use crate::scheduler::Worker;
 use crate::unservable::Unservable;
 
@@ -51,6 +54,11 @@ pub(crate) struct Attempt<'a> {
     pub(crate) request: &'a Request,
     /// Workers held for a whole-machine lease or a blocked head ahead of it.
     pub(crate) reserved: &'a BTreeSet<WorkerId>,
+    /// The start time of each worker in `reserved` (farm milliseconds; `None`: not known):
+    /// the request is placed there only as backfill that ends by it.
+    pub(crate) starts: &'a BTreeMap<WorkerId, Option<u64>>,
+    /// How long the request counts for backfill ([`crate::Backfill`]); `None` never fits.
+    pub(crate) backfill: Option<u64>,
     /// Workers its earlier runs ended on as the farm's fault.
     pub(crate) avoid: &'a BTreeSet<WorkerId>,
     /// A key floor raised its memory: a worker it would own whole is out.
@@ -64,6 +72,18 @@ pub(crate) struct Attempt<'a> {
     /// `L` of the lease's key where it is charged by a curve, else 1: the minutes the
     /// score's fit looks at.
     pub(crate) fit_minutes: u8,
+}
+
+impl Attempt<'_> {
+    /// Whether the request may go on `worker` at `now`: a worker no one holds, or a held
+    /// one where it fits as backfill ([`backfill::fits`]).
+    fn may_use(&self, worker: &WorkerId, now: FarmTime) -> bool {
+        !self.reserved.contains(worker)
+            || self
+                .starts
+                .get(worker)
+                .is_some_and(|start| backfill::fits(now.as_millis(), self.backfill, *start))
+    }
 }
 
 /// A candidate the predicate admitted, with what it computed for it.
@@ -206,7 +226,10 @@ impl Servable {
     /// whole-machine lease holds, and one that is draining or cordoned
     /// ([`Servable::new`]) are out before the load predicate is read and before any
     /// ranking, so a worker that is being emptied for someone is never the least loaded
-    /// one for small work.
+    /// one for small work. The one exception is backfill: a worker in `reserved` stays in
+    /// when the request ends, with a minute to spare, by that worker's start time in
+    /// `starts` ([`crate::backfill`]); the request is then judged and ranked there as on
+    /// any other worker.
     ///
     /// For an action under [`crate::PlacementLoad::On`], room is the load predicate
     /// ([`Admission`]) and the ranking is by what the worker is charged
@@ -233,21 +256,17 @@ impl Servable {
         attempt: &Attempt<'_>,
     ) -> Fit {
         let request = attempt.request;
-        let at = self.matching(workers, request);
-        let skip = self.avoided(at, workers, request, attempt.avoid);
+        let now = self.now;
+        let pool = self.pool_of(workers, request, attempt.avoid);
         let by_load = adm.by_load() && request.kind == LeaseKind::Action;
         // A VM is placed by its booking, and under load admission also held to the
         // flat-memory guard.
         let vm_by_load = adm.by_load() && request.kind == LeaseKind::Vm;
-        let now = self.now;
         // The workers that pass everything but the load predicate.
-        let candidates: Vec<&WorkerId> = self.memo[at]
-            .1
-            .iter()
-            .map(|&i| &self.live[i])
+        let candidates: Vec<&WorkerId> = pool
+            .into_iter()
             .filter(|name| {
-                !attempt.reserved.contains(*name)
-                    && !skip.contains(*name)
+                attempt.may_use(name, now)
                     && workers[*name].has_room(request, by_load)
                     && (!attempt.not_whole || !workers[*name].exclusive(request))
                     && (!vm_by_load || Self::vm_within_flat_memory(adm, &workers[*name], attempt))
@@ -310,6 +329,52 @@ impl Servable {
             }),
             blocked: None,
         }
+    }
+
+    /// The workers [`Servable::fit`] looks at for `request`, in name order: for a probe
+    /// ([`Request::pin`]) the worker it names alone, which the caller has admitted
+    /// ([`Servable::probe`]); else the live workers that serve its kind and satisfy its
+    /// platform, less those of `avoid` that placement skips ([`Servable::avoided`]).
+    fn pool_of<'s>(
+        &'s mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        request: &'s Request,
+        avoid: &BTreeSet<WorkerId>,
+    ) -> Vec<&'s WorkerId> {
+        if let Some(pin) = &request.pin {
+            return vec![pin];
+        }
+        let at = self.matching(workers, request);
+        let skip = self.avoided(at, workers, request, avoid);
+        self.memo[at]
+            .1
+            .iter()
+            .map(|&i| &self.live[i])
+            .filter(|name| !skip.contains(*name))
+            .collect()
+    }
+
+    /// Whether the probe `request`, which names `pin`, may run there ([`admit_probe`]), by
+    /// what the scheduler knows of the worker at `now`: its cordon, phase, capacity (after
+    /// the memory_schedulable_percent cut) and capabilities. A worker that is not live is
+    /// not known.
+    pub(crate) fn probe(
+        workers: &BTreeMap<WorkerId, Worker>,
+        cordons: &Cordons,
+        now: FarmTime,
+        pin: &WorkerId,
+        request: &Request,
+    ) -> Result<(), ProbeRefusal> {
+        let known = workers
+            .get(pin)
+            .filter(|w| w.alive(now))
+            .map(|w| ProbeHost {
+                cordon: cordons.get(pin),
+                phase: &w.phase,
+                capacity: &w.capacity,
+                caps: &w.caps,
+            });
+        admit_probe(pin, known, request)
     }
 
     /// Whether a VM of `attempt` passes the flat-memory guard on `worker`: its booked
@@ -568,8 +633,8 @@ impl Servable {
     /// `avoid` and not owned whole by the request, the one it can start on first
     /// ([`start_time`], with the lease ends in `ends`), a worker with no start time after
     /// every worker with one; among equals the smallest binding ratio, then the first by
-    /// name. Nothing is kept from the last round. `None` when no worker could take it at
-    /// all.
+    /// name. Nothing is kept from the last round. With the worker comes the start time that
+    /// ranked it (`None`: not known). `None` when no worker could take it at all.
     ///
     /// Two choices are deliberate. Ties among workers whose start time is unknown or equal
     /// use the binding ratio, which keeps the order the hold had before start times. And
@@ -585,7 +650,7 @@ impl Servable {
         adm: &Admission,
         attempt: &Attempt<'_>,
         ends: &BTreeMap<LeaseId, Option<u64>>,
-    ) -> Option<WorkerId> {
+    ) -> Option<(WorkerId, Option<u64>)> {
         let now = self.now.as_millis();
         let candidates = self.head_candidates(workers, adm, attempt);
         let timed = candidates.into_iter().map(|c| {
@@ -601,7 +666,7 @@ impl Servable {
         // The first of the least: the candidates are in name order.
         timed
             .min_by_key(|(_, (start, ratio))| (start.is_none(), *start, *ratio))
-            .map(|(name, _)| name.clone())
+            .map(|(name, (start, _))| (name.clone(), start))
     }
 
     /// The pool `request` is run from: the platform and kind it needs, shared by every

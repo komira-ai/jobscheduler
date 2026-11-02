@@ -11,7 +11,7 @@ use std::time::Duration;
 use js_agent_wire::{Command, Heartbeat, HeldRun, HeldState, Hello};
 use js_pool_static::Candidate;
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
-use js_registry::{Placer, PoolConfig, RunRefusal};
+use js_registry::{MarkedTails, Placer, PoolConfig, RunRefusal};
 use js_types::{Admission, ClassId, Dims, Request, ResourceClass, Resources};
 use support::world::*;
 use support::*;
@@ -52,27 +52,29 @@ fn job_of(run: &str, cpu_millis: u64, memory_bytes: u64) -> js_agent_wire::JobSp
     spec
 }
 
-/// A placer that books the last candidate it is shown, and remembers which hosts it was
-/// shown at each start.
+/// A placer that books the last candidate it is shown that no whole-node request has set
+/// aside, and remembers which hosts it was shown at each start.
 #[derive(Default)]
 struct Last(Mutex<Vec<Vec<String>>>);
 
 impl Placer for Last {
-    fn pick(&self, _: &StartSpec, open: &[Candidate]) -> Option<usize> {
+    fn pick(&self, _: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize> {
         let shown = open.iter().map(|c| c.host.to_string()).collect();
         self.0.lock().unwrap().push(shown);
-        open.len().checked_sub(1)
+        open.iter().rposition(|c| !marked.contains_key(&c.host))
     }
 }
 
-/// A placer that books the host named for the lease's sequence.
+/// A placer that books the host named for the lease's sequence, unless a whole-node
+/// request has set it aside.
 struct Named(Vec<(u64, &'static str)>);
 
 impl Placer for Named {
-    fn pick(&self, spec: &StartSpec, open: &[Candidate]) -> Option<usize> {
+    fn pick(&self, spec: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize> {
         let sequence = spec.lease().sequence();
         let (_, want) = self.0.iter().find(|(n, _)| *n == sequence)?;
-        open.iter().position(|c| c.host.as_str() == *want)
+        let named = |c: &Candidate| c.host.as_str() == *want && !marked.contains_key(&c.host);
+        open.iter().position(named)
     }
 }
 
@@ -187,7 +189,7 @@ fn a_restored_sharing_lease_keeps_its_resources() {
     let mut p = pool(&[]);
     p.fx.registry.set_placer(Arc::new(Last::default()));
     let two = || Some(Resources::new(2000, 1, 0, None).unwrap());
-    let seat = |n: u64| p.provider.seat_booked(&host("a"), lease(n), None, two());
+    let seat = |n: u64| p.provider.seat_booked(&booking("a", n, two()), None);
     assert_eq!((seat(1), seat(2)), (Ok(()), Ok(())));
     p.fx.join("a", "t");
     assert_eq!(
@@ -210,7 +212,7 @@ fn a_share_is_kept_off_a_host_that_holds_runs_of_no_booked_lease() {
     let mut p = pool(&[]);
     p.fx.registry.set_placer(Arc::new(Last::default()));
     let one = Some(Resources::new(1000, 1 << 20, 0, None).unwrap());
-    let seated = p.provider.seat_booked(&host("a"), lease(1), None, one);
+    let seated = p.provider.seat_booked(&booking("a", 1, one), None);
     assert_eq!(seated, Ok(()));
     let orphan = HeldRun {
         run_id: "orphan".into(),
@@ -295,7 +297,7 @@ fn a_restored_lease_runs_within_its_share() {
     p.fx.registry.set_placer(Arc::new(Last::default()));
     let share = || Some(Resources::new(2000, 1 << 30, 0, None).unwrap());
     for n in 1..=2 {
-        let seated = p.provider.seat_booked(&host("a"), lease(n), None, share());
+        let seated = p.provider.seat_booked(&booking("a", n, share()), None);
         assert_eq!(seated, Ok(()));
     }
     p.fx.join("a", "t");
@@ -419,9 +421,7 @@ fn stopping_a_restored_lease_counts_nothing() {
     let mut p = pool(&[]);
     p.fx.registry.set_placer(Arc::new(Last::default()));
     let two = Some(Resources::new(2000, 1, 0, None).unwrap());
-    p.provider
-        .seat_booked(&host("a"), lease(1), None, two)
-        .unwrap();
+    p.provider.seat_booked(&booking("a", 1, two), None).unwrap();
     p.fx.join("a", "t");
     p.provider.stop(&lease(1));
     let counted = p.fx.registry.tail_counters();

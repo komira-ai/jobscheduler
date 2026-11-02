@@ -45,7 +45,8 @@
 //!   all of it, so nothing is placed beside it; one that fits nowhere holds a worker
 //!   that could run it, in queue (QoS) order, and less urgent work is not placed there
 //!   until it has emptied (with [`Scheduler::with_whole_node`] the worker is the one
-//!   cheapest to drain: the latest end bound of its leases, then the fewest leases). An
+//!   cheapest to drain: the latest end bound of its leases, then the fewest leases), save
+//!   work that ends before the request starts there ([`Scheduler::with_backfill`]). An
 //!   action asking for a whole worker ([`Request::whole_worker`]) is placed only on a
 //!   worker with no lease, books all of its CPUs, memory, GPUs and VM slots (its
 //!   `Start` carries them), fits a worker of any size, and holds a worker while it
@@ -71,6 +72,11 @@
 //!   on; a drain waits for them until a deadline, then pauses, and never kills. Work
 //!   only cordoned workers could run waits, naming them, and is not refused for it; an
 //!   uncordon places queued work at once;
+//! - probes ([`Request::pin`]): a request that names one worker runs there and nowhere
+//!   else, and is the only new work a worker cordoned without a drain takes; the rule
+//!   ([`admit_probe`]) refuses it at once, by name, on an unknown, not serving, open,
+//!   draining, mismatched or too small worker, and room and the load predicate apply to
+//!   it as to any request;
 //! - a finished operation is kept for [`FINISHED_RETENTION`] after its waiters are
 //!   answered, then dropped;
 //! - memory kills (failure classes, 6.1): an action that passed its own memory limit
@@ -104,6 +110,7 @@
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod admission;
+mod backfill;
 mod cordon;
 mod devices;
 pub mod fence;
@@ -111,11 +118,13 @@ pub mod harness;
 mod headroom;
 mod input;
 mod load;
+mod probe;
 pub use load::{
     Charge, Choice, DecidedBy, EVALUATIONS_PER_WORKER, FitShape, H_PLUS, HORIZON, HostFacts,
     LeaseFacts, Load, MAX_BALANCE, PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer,
     least_loaded,
 };
+pub use probe::{ProbeHost, ProbeRefusal, admit_probe};
 mod requeue;
 mod scheduler;
 mod servable;
@@ -125,6 +134,7 @@ pub use admission::{
     FlagError, HORIZON_MINUTES, LoadConfig, LoadCounters, LoadView, MAX_CPU_SLACK_PERMILLE,
     PlacementLoad, Prediction,
 };
+pub use backfill::Backfill;
 pub use cordon::Cordon;
 pub use devices::DEVICE_LEASES_PER_WORKER;
 pub use fence::SelfFence;

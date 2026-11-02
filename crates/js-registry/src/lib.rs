@@ -153,7 +153,7 @@ pub use js_whole::{
 };
 pub use lives::ProfileLives;
 pub use load::{BadLease, node_load};
-pub use placer::Placer;
+pub use placer::{MarkedTails, Placer, ProbeHost};
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
 pub use registry::{

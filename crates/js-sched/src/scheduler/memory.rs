@@ -536,6 +536,7 @@ impl Scheduler {
             request.kind == LeaseKind::Action
                 && request.resources.gpus == 0
                 && !request.owns_worker()
+                && request.pin.is_none()
         })
     }
 
@@ -716,9 +717,17 @@ impl Scheduler {
         &self.memory
     }
 
-    /// Raises `request`'s memory booking to its key's floor, if it has one.
+    /// Raises `request`'s memory booking to its key's floor, if it has one and is not a
+    /// probe.
     pub(super) fn floored(&self, mut request: Request) -> Request {
-        if let Some(floor) = self.memory.floors.get(&request.key) {
+        // A probe books what it asks: a floor learned on a larger worker could make it
+        // too large for the one worker it may run on.
+        if let Some(floor) = self
+            .memory
+            .floors
+            .get(&request.key)
+            .filter(|_| request.pin.is_none())
+        {
             let memory = &mut request.resources.memory_bytes;
             *memory = (*memory).max(floor);
         }
@@ -793,7 +802,8 @@ impl Scheduler {
     /// The memory of the largest node that could run `request`, in bytes: one that is
     /// live (cordoned or not), serves its lease kind, satisfies its platform and holds
     /// its CPU, GPU and disk request, and always `ran_on`, the node its killed run used. A
-    /// node that is gone does not count; `booked` when none is registered.
+    /// node that is gone does not count; `booked` when none is registered. A probe
+    /// ([`Request::pin`]) runs on one node only, so its cap is `ran_on`'s memory.
     fn memory_cap(&self, request: &Request, ran_on: &WorkerId, booked: u64) -> u64 {
         // A request that owns its worker booked all of one: no node has more.
         if request.owns_worker() {
@@ -804,7 +814,8 @@ impl Scheduler {
             .iter()
             .filter(|(name, w)| {
                 *name == ran_on
-                    || (w.alive(self.now)
+                    || (request.pin.is_none()
+                        && w.alive(self.now)
                         && serves(&w.caps, request.kind)
                         && request.needs.matches(&w.caps)
                         && w.capacity.cpu_millis >= wanted.cpu_millis

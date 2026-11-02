@@ -352,6 +352,7 @@ impl World {
                     hermetic: true,
                     do_not_cache: false,
                     whole_worker: false,
+                    pin: None,
                 };
                 self.feed(Event::Submit {
                     waiter: WaiterId(id.0),

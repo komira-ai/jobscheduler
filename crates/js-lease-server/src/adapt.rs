@@ -92,6 +92,7 @@ mod tests {
             max_wall: std::time::Duration::from_secs(1),
             labels: BTreeMap::new(),
             validation_run: None,
+            probe_host: None,
         };
         let spec = StartSpec::new(LeaseId::new(1, 2), request, &boxed.classes()).unwrap();
         assert!(matches!(boxed.start(spec), StartAck::Started { .. }));

@@ -7,6 +7,9 @@ use js_pool_static::SeatError;
 use js_provider::{HostCapacity, Observed};
 use js_types::{Admission, HostId, LeaseId, Resources};
 
+use js_lease::Timestamp;
+
+use super::record::Bound;
 use super::{HostState, Record, Registry, State};
 use crate::credential::Binding;
 use crate::lives;
@@ -38,7 +41,8 @@ impl Registry {
                 // A lease ends: the error of its estimate, at the time of this call on the
                 // registry's clock. The host keeps a bound and a start for each lease it
                 // started, so the stop of any of them counts. A lease put back after a
-                // restart has neither, so its stop counts nothing.
+                // restart has neither unless a source of lives was set when it was put back
+                // (see `seat`), so without one its stop counts nothing.
                 let started: Vec<(LeaseId, u64)> = record
                     .bounds
                     .iter()
@@ -88,13 +92,16 @@ impl Registry {
     /// Puts back a booking the registry lost with its process. A host the registry does
     /// not know becomes an awaiting host: held, unobservable, not bookable, until its
     /// agent says hello; `binding` is what that hello must match, or `None` to let the
-    /// first hello bind it. See [`crate::RegisteredProvider::seat`].
+    /// first hello bind it. `times` is when the lease started and the latest it can end,
+    /// as the lease file records them: with a source of lives set they are kept as the
+    /// lease's start and bound. See [`crate::RegisteredProvider::seat_booked`].
     pub(crate) fn seat(
         &self,
         host: &HostId,
         lease: LeaseId,
         binding: Option<Binding>,
         shares: Option<Resources>,
+        times: Option<(Timestamp, Timestamp)>,
     ) -> Result<(), SeatError> {
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
@@ -107,6 +114,22 @@ impl Registry {
             }
             settled => settled,
         };
+        // Only with the estimate feed on: without it a lease put back has no bound and
+        // counts as ending now, as it always did.
+        let feed = self.shared.lives.get().is_some();
+        if let (Ok(()), true, Some((started, end))) = (&seated, feed, times) {
+            let here = book.leases().remove(host).unwrap_or_default();
+            let record = records.get_mut(host);
+            record.into_iter().for_each(|record| {
+                let kept = |bound: &Bound| here.contains(&bound.lease) & (bound.lease != lease);
+                record.bounds.retain(kept);
+                record.bounds.push(Bound {
+                    lease,
+                    end,
+                    started_at: started.millis(),
+                });
+            });
+        }
         // A restored whole-node booking is committed and not ready: the agent's
         // preparation is in memory only, so it must report ready for this lease again
         // before the lease reads present, a run is queued or the host books to anyone.

@@ -199,6 +199,7 @@ fn a_worker_bound_by_measured_load_has_no_start_time() {
 fn owner(r: &mut Rig) -> OperationId {
     let request = Request {
         whole_worker: true,
+        pin: None,
         ..r.request(LeaseKind::Action, 1_000, 4 * GIB)
     };
     r.submit(request)
