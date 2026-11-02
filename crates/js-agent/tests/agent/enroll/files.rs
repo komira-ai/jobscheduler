@@ -291,3 +291,54 @@ fn a_failed_write_leaves_no_staged_secret() {
     assert_eq!(rig.names(), ["instance", "token"]);
     assert!(rig.etc().join("token").is_dir());
 }
+
+/// What `etc/` holds: each file's name, bytes, mode and inode.
+fn snapshot(rig: &Rig) -> Vec<(String, String, u32, u64)> {
+    rig.names()
+        .into_iter()
+        .map(|name| {
+            let meta = fs::metadata(rig.etc().join(&name)).unwrap();
+            let text = rig.read(&name);
+            (name, text, meta.permissions().mode() & 0o7777, meta.ino())
+        })
+        .collect()
+}
+
+/// Asserts that when either file differs, a dry run and an apply both refuse with status 2
+/// and leave both files as they were (the same names, bytes, modes and inodes), whether the
+/// other file is right, differs too, or is not there yet. It catches a refusal of one file
+/// that still writes, replaces or removes the other.
+#[test]
+fn a_file_that_differs_leaves_both_files_untouched() {
+    let token = format!("{TOKEN}\n");
+    let other = format!("{OTHER}\n");
+    let cases: [(Option<&str>, Option<&str>); 5] = [
+        (Some("burst:i-other\n"), Some(&token)),
+        (Some("burst:i-other\n"), Some(&other)),
+        (Some("burst:i-other\n"), None),
+        (Some(LINE), Some(&other)),
+        (None, Some(&other)),
+    ];
+    for (instance, held) in cases {
+        for extra in [&[][..], &["--apply"][..]] {
+            let rig = Rig::new("enroll_differs_both");
+            if let Some(text) = instance {
+                rig.put("instance", text, 0o644);
+            }
+            if let Some(text) = held {
+                rig.put("token", text, 0o600);
+            }
+            let before = snapshot(&rig);
+            let ran = rig.go(extra, TOKEN);
+            assert_eq!(
+                ran.status,
+                status(2),
+                "{instance:?} {held:?} {extra:?}: {ran:?}"
+            );
+            assert!(ran.err.contains("remove it by hand"), "{ran:?}");
+            assert_eq!(ran.out, "");
+            assert_eq!(snapshot(&rig), before, "{instance:?} {held:?} {extra:?}");
+            assert_eq!(rig.setup_args(), None, "the setup ran before the refusal");
+        }
+    }
+}

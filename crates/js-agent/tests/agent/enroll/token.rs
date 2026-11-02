@@ -6,7 +6,7 @@ use std::io::{self, Read};
 
 use js_agent::enroll::{Token, TokenError};
 
-use super::rig::{OTHER, Rig, TOKEN, sha, status};
+use super::rig::{INSTANCE, OTHER, PROVIDER, Rig, TOKEN, sha, status};
 
 /// Asserts that the token's form is the server's: 64 lower-case hex digits and at most one
 /// line break; the sha256 is the one of the digits. It catches a form that is looser than the
@@ -151,15 +151,25 @@ fn the_token_is_on_no_command_line_and_in_no_output() {
         !argv.contains(&TOKEN[..16]) && !argv.contains(&sha(TOKEN)[..16]),
         "{argv}"
     );
-    let words: Vec<OsString> = vec![
-        "js-agent".into(),
-        "enroll".into(),
-        "--token".into(),
-        TOKEN.into(),
-    ];
+    // Everything a run needs but the token, so only a missing `--token` flag refuses it.
+    let words: Vec<OsString> = [
+        "js-agent",
+        "enroll",
+        "--provider",
+        PROVIDER,
+        "--instance",
+        INSTANCE,
+        "--token",
+        TOKEN,
+    ]
+    .map(OsString::from)
+    .to_vec();
     let mut input = TOKEN.as_bytes();
     let mut out = Vec::new();
     let mut err = Vec::new();
     let code = js_agent::enroll::run(&words, &mut input, &mut out, &mut err, &rig.host);
     assert_eq!(format!("{code:?}"), status(2), "there is no --token flag");
+    let err = String::from_utf8(err).unwrap();
+    assert!(err.contains("--token"), "{err}");
+    assert!(out.is_empty());
 }

@@ -89,8 +89,9 @@ fn the_pool_defaults_to_the_provider_and_can_be_named() {
 
 /// Asserts that the help is printed on standard output with status 0, lists the flags and
 /// the exit statuses, and runs nothing; and that a runtime other than `crun`, a missing
-/// `--provider` or `--instance`, an unknown flag and a token on the command line are all
-/// usage errors (status 2) with nothing run. It catches a flag that takes a token.
+/// `--provider` or `--instance`, an unknown flag and a token on the command line (as
+/// `--token`, `--token=` or a bare word) are all usage errors (status 2) with nothing run.
+/// It catches a flag or a positional argument that takes a token.
 #[test]
 fn the_command_line_is_checked_by_clap() {
     let rig = Rig::new("enroll_clap");
@@ -106,7 +107,8 @@ fn the_command_line_is_checked_by_clap() {
     ] {
         assert!(ran.out.contains(word), "{word}: {}", ran.out);
     }
-    let refused: [&[&str]; 5] = [
+    let token_flag = format!("--token={TOKEN}");
+    let refused: [&[&str]; 7] = [
         &[
             "--provider",
             PROVIDER,
@@ -132,6 +134,8 @@ fn the_command_line_is_checked_by_clap() {
             "--token",
             TOKEN,
         ],
+        &["--provider", PROVIDER, "--instance", INSTANCE, &token_flag],
+        &["--provider", PROVIDER, "--instance", INSTANCE, TOKEN],
     ];
     for words in refused {
         let ran = rig.run(words, TOKEN);

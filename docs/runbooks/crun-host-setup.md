@@ -30,7 +30,9 @@ js --server https://scheduler.example.org:7300 --token-file ~/.config/js/token \
 ```
 
 Leave `--apply` out first: the setup script is run as its own dry run, the files are only
-looked at, and the output says what an apply would do. With it, `enroll` does this, in order,
+looked at, and the output says what an apply would do. Without `--apply` nothing is installed:
+the setup's checks run and report what is missing, and only `--apply` makes the setup install
+it. With it, `enroll` does this, in order,
 after every check has passed (a refusal changes nothing):
 
 1. runs `/usr/share/js-agent/crun_host_setup.sh --apply` with the setup flags it was given

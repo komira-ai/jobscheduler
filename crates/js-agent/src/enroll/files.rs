@@ -174,3 +174,35 @@ pub(super) fn write_new(path: &Path, kind: Kind, wanted: &[u8], owner: u32) -> R
         .map(drop)
         .map_err(Failure::Failed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that an instance file or token file that holds the right bytes with an
+    /// allowed mode, but is not the owner's (root's on a host), is refused naming the uid,
+    /// and is left as it was. The integration tests cannot make a file another user owns,
+    /// so the owner the file is compared with is changed instead. It catches an existing
+    /// file of another user's being trusted as the host's identity or secret.
+    #[test]
+    fn a_file_of_another_owner_is_refused_and_kept() {
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "enroll_file_owner");
+        let mine = rustix::process::geteuid().as_raw();
+        for (kind, mode, text) in [
+            (Kind::Instance, 0o644, "burst:i-0abc\n"),
+            (Kind::Token, 0o600, "0123\n"),
+        ] {
+            let path = dir.path().join("file");
+            fs::write(&path, text).unwrap();
+            fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+            assert_eq!(inspect(&path, kind, text.as_bytes(), mine), Ok(true));
+            let other = mine.wrapping_add(1);
+            assert_eq!(
+                inspect(&path, kind, text.as_bytes(), other),
+                Err(format!("{}: is not owned by uid {other}", path.display()))
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), text);
+            fs::remove_file(&path).unwrap();
+        }
+    }
+}

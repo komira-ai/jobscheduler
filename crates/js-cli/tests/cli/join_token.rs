@@ -521,3 +521,36 @@ fn the_command_line_has_no_token_and_needs_both_ids() {
     }
     assert!(seen.lock().unwrap().is_empty());
 }
+
+/// Asserts that a client token file others can read or write is refused
+/// (status 2) with its path and mode before any request, and that nothing is minted or
+/// written to `--out`. It catches a mint that sends a client token other users could have
+/// read, which would let them mint join tokens of their own.
+#[test]
+fn a_client_token_file_others_can_read_is_refused_before_any_request() {
+    let scratch = Scratch::new("mint_client_token");
+    let (server, seen) = recording(created());
+    let js = against(&server, &scratch);
+    let out = scratch.path("minted");
+    for mode in [0o644, 0o640, 0o604, 0o660, 0o606] {
+        fs::set_permissions(&js.token_file, fs::Permissions::from_mode(mode)).unwrap();
+        let got = js.go(&words(&["--out", out.to_str().unwrap()]));
+        assert_eq!(got.code, 2, "{mode:o}: {}", got.err);
+        assert!(
+            got.err.contains(js.token_file.to_str().unwrap())
+                && got.err.contains(&format!("mode {mode:04o}")),
+            "{mode:o}: {}",
+            got.err
+        );
+        assert_eq!(got.out, "");
+        let got = js.go(&words(&[]));
+        assert_eq!(
+            (got.code, got.out.as_str()),
+            (2, ""),
+            "{mode:o}: {}",
+            got.err
+        );
+    }
+    assert!(!out.exists());
+    assert!(seen.lock().unwrap().is_empty());
+}
