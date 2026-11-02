@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use js_agent::own_host::{CordonView, HttpLease, Lease, LeaseError};
-use js_agent::{CREDENTIAL_FILE, Dialer, REQUEST_LIMIT};
+use js_agent::own_host::{CordonView, HttpLease, Lease, LeaseError, RequestLimit};
+use js_agent::{CREDENTIAL_FILE, Dialer};
 use js_client::ClientError;
 use serde_json::json;
 
@@ -38,7 +38,8 @@ pub(crate) struct Enrolled {
     pub(crate) server: Server,
     pub(crate) state: PathBuf,
     _files: Scratch,
-    _agent: Agent,
+    /// The agent that enrolled the host, held at its next wait.
+    pub(crate) agent: Agent,
 }
 
 impl Enrolled {
@@ -55,7 +56,7 @@ impl Enrolled {
             &credential,
             None,
             "mac-1",
-            REQUEST_LIMIT,
+            RequestLimit::DEFAULT,
         )
         .unwrap()
     }
@@ -91,14 +92,20 @@ pub(crate) fn enrol(name: &str) -> Enrolled {
         server,
         state,
         _files: files,
-        _agent: agent,
+        agent,
     }
 }
 
 /// The connector of the program: a real client for the host.
 fn real(at: &js_agent::cordon::Connection<'_>) -> Result<Box<dyn Lease>, ClientError> {
-    HttpLease::connect(at.server, at.credential, at.ca_cert, at.host, REQUEST_LIMIT)
-        .map(|lease| Box::new(lease) as Box<dyn Lease>)
+    HttpLease::connect(
+        at.server,
+        at.credential,
+        at.ca_cert,
+        at.host,
+        RequestLimit::DEFAULT,
+    )
+    .map(|lease| Box::new(lease) as Box<dyn Lease>)
 }
 
 /// Runs the verb for real on `flags`, over a pace the test gave.
@@ -175,13 +182,20 @@ fn the_pool_token_and_an_unknown_token_are_refused_as_credential_errors() {
     let unknown_file = files.write("unknown", unknown, 0o600);
     let url = server.url();
 
-    let pooled =
-        HttpLease::connect(&url, &server.join_file(), None, "mac-1", REQUEST_LIMIT).unwrap();
+    let pooled = HttpLease::connect(
+        &url,
+        &server.join_file(),
+        None,
+        "mac-1",
+        RequestLimit::DEFAULT,
+    )
+    .unwrap();
     let denied = || LeaseError::Refused("host-credential-required".to_owned());
     assert_eq!(pooled.cordon(60).unwrap_err(), denied());
     assert_eq!(pooled.uncordon().unwrap_err(), denied());
     assert_eq!(pooled.host().unwrap_err(), denied());
-    let stranger = HttpLease::connect(&url, &unknown_file, None, "mac-1", REQUEST_LIMIT).unwrap();
+    let stranger =
+        HttpLease::connect(&url, &unknown_file, None, "mac-1", RequestLimit::DEFAULT).unwrap();
     assert_eq!(
         stranger.cordon(60).unwrap_err(),
         LeaseError::Refused("http-401".to_owned())
@@ -218,12 +232,13 @@ fn a_restarted_server_that_has_not_heard_the_host_is_an_unknown_host() {
         server,
         state,
         _files,
-        _agent,
+        agent: _agent,
     } = enrol("cordon_http_unknown");
     let server = server.restart();
     let url = server.url();
     let credential = state.join(CREDENTIAL_FILE);
-    let lease = HttpLease::connect(&url, &credential, None, "mac-1", REQUEST_LIMIT).unwrap();
+    let lease =
+        HttpLease::connect(&url, &credential, None, "mac-1", RequestLimit::DEFAULT).unwrap();
     assert_eq!(lease.cordon(60).unwrap_err(), LeaseError::UnknownHost);
     assert_eq!(lease.host().unwrap_err(), LeaseError::UnknownHost);
 
@@ -301,7 +316,7 @@ fn an_answer_that_is_not_a_host_reading_is_not_understood() {
     let (url, served) = serve_garbage(4);
     let files = Scratch::new("cordon_http_garbage");
     let token = files.write("token", "token-0123456789abcdef", 0o600);
-    let lease = HttpLease::connect(&url, &token, None, "mac-1", REQUEST_LIMIT).unwrap();
+    let lease = HttpLease::connect(&url, &token, None, "mac-1", RequestLimit::DEFAULT).unwrap();
     for error in [
         lease.cordon(60).unwrap_err(),
         lease.uncordon().unwrap_err(),

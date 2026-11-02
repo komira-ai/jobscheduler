@@ -13,6 +13,8 @@ mod fakes;
 mod fakes_tests;
 mod launchd;
 mod lease_port;
+mod lease_port_transport;
+mod lease_stub;
 mod machine;
 mod params;
 mod ports;

@@ -28,8 +28,9 @@ use crate::facts::{
     CommandRunner, FileReader, Platform, SystemCommands, SystemFiles, host_id, machine_id,
 };
 use crate::lifecycle::StateRoot;
-use crate::own_host::{Cordoned, HostReading, HttpLease, Lease, LeaseError, Uncordoned};
-use crate::transport::REQUEST_LIMIT;
+use crate::own_host::{
+    Cordoned, HostReading, HttpLease, Lease, LeaseError, RequestLimit, Uncordoned,
+};
 
 use super::declaration::{DECLARATION_PATH, Declaration};
 use super::ports::{NoGate, Ports, StateView, SystemClock, SystemLink};
@@ -94,12 +95,17 @@ impl Machine<'static> {
 /// The file the bearer is read from, with the params key that led to it: the host credential
 /// of the state root when it holds one, which is what the agent sends once it has one, and
 /// otherwise the token file. A state root that is not private is not trusted with a
-/// credential.
+/// credential. A credential file that is there and cannot be read, or holds no credential, is
+/// refused by the key `state_root`, and the token file is not used in its place: the agent
+/// would not use it either.
 fn credential(params: &ConnectParams) -> Result<(PathBuf, &'static str), String> {
     let kept = match Root::find(params.state_root.as_deref()) {
         Root::Open(root) => {
             let file = CredentialFile::in_dir(root.path());
-            file.load()?.map(|_| (file.path(), STATE_ROOT_KEY))
+            let loaded = file
+                .load()
+                .map_err(|why| format!("{STATE_ROOT_KEY}: {why}"))?;
+            loaded.map(|_| (file.path(), STATE_ROOT_KEY))
         }
         Root::Absent | Root::Unusable(_) => None,
     };
@@ -137,14 +143,14 @@ pub struct MachineLease {
 
 impl MachineLease {
     /// Connects as the params say; `own_host_id` is asked when they name no host. Every call
-    /// ends within `limit` (the machine's is [`REQUEST_LIMIT`]): a server that is down or
-    /// does not answer is [`LeaseError::Unreachable`], and the steps that wait on the server
+    /// ends within `limit` (the machine's is [`RequestLimit::DEFAULT`]): a server that is down
+    /// or does not answer is [`LeaseError::Unreachable`], and the steps that wait on the server
     /// bound their waits by their own clock.
     #[must_use]
     pub fn connect(
         params: &ConnectParams,
         own_host_id: &dyn Fn() -> Result<String, String>,
-        limit: Duration,
+        limit: RequestLimit,
     ) -> Self {
         Self {
             client: Self::open(params, own_host_id, limit),
@@ -154,7 +160,7 @@ impl MachineLease {
     fn open(
         params: &ConnectParams,
         own_host_id: &dyn Fn() -> Result<String, String>,
-        limit: Duration,
+        limit: RequestLimit,
     ) -> Result<HttpLease, String> {
         let server = params
             .server
@@ -266,7 +272,7 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     let commands = SystemCommands::default();
     let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
     let units = platform_units(&commands, &stop);
-    let lease = MachineLease::connect(&params.connect, machine.own_host_id, REQUEST_LIMIT);
+    let lease = MachineLease::connect(&params.connect, machine.own_host_id, RequestLimit::DEFAULT);
     let state = Root::find(params.connect.state_root.as_deref());
     let env = Env {
         ports: Ports {

@@ -280,7 +280,7 @@ fn connect(params: &ConnectParams, own: Result<&str, &str>) -> MachineLease {
     MachineLease::connect(
         params,
         &|| own.map(str::to_owned).map_err(str::to_owned),
-        js_agent::REQUEST_LIMIT,
+        js_agent::own_host::RequestLimit::DEFAULT,
     )
 }
 
