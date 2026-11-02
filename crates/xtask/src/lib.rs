@@ -29,6 +29,12 @@
 //! - `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): the macOS installer package's
 //!   payload and scripts, laid down for `pkgbuild`, and the built package read back with
 //!   `pkgutil` and `lsbom` and refused unless it is exactly that.
+//! - `site-demo [--out <path>] [--bin-dir <dir>] [--port <n>] [--ready-timeout <s>]` ([`site_demo`]): records the demonstration on
+//!   the landing page of jobscheduler.dev, `site/test/demo.transcript`: builds the lease server and the
+//!   client, leases a host from a static host file, lists the lease and releases it.
+//! - `site-changed --event <name> --base <ref> --paths <file> --github-output <file>`
+//!   ([`site_changed`]): whether the site steps of the `lint` job run, from the event and the
+//!   files a pull request changes against the entries of `site/ci-paths`.
 //! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
 //!
@@ -49,10 +55,12 @@ pub mod layering;
 pub mod macpkg;
 pub mod pkg;
 pub mod release;
+pub mod site_changed;
+pub mod site_demo;
 pub mod test_build;
 
 /// Why a verb failed.
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A release verb failed.
     #[error(transparent)]
@@ -72,6 +80,12 @@ pub enum Error {
     /// A program `count-run` ran ended with a failure status, which is also this one's.
     #[error("the program ended with status {0}")]
     Child(u8),
+    /// The site demonstration could not be recorded.
+    #[error("site-demo: {0}")]
+    SiteDemo(#[from] site_demo::Error),
+    /// The site decision could not be written.
+    #[error(transparent)]
+    SiteChanged(#[from] site_changed::Error),
     /// The real-crun tests, or the build of their targets, failed.
     #[error(transparent)]
     CrunTests(#[from] test_build::Error),
@@ -151,6 +165,32 @@ enum Verb {
         #[arg(last = true)]
         command: Vec<std::ffi::OsString>,
     },
+    /// Record the demonstration on the landing page of jobscheduler.dev (a build of the lease
+    /// server and the client, a server on 127.0.0.1, a lease acquired, listed and released).
+    SiteDemo {
+        /// The repository root, where cargo builds.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Where to write the transcript (default: `site/test/demo.transcript` under `--root`).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Use the `js-lease-server` and `js` in this directory instead of building them.
+        #[arg(long)]
+        bin_dir: Option<PathBuf>,
+        /// The server's port on 127.0.0.1; the recording shows the default, 7300.
+        #[arg(long, default_value_t = site_demo::DEFAULT_PORT)]
+        port: u16,
+        /// How many seconds to wait for the server to answer.
+        #[arg(long, default_value_t = site_demo::READY_TIMEOUT.as_secs())]
+        ready_timeout: u64,
+        /// The directory the run's scratch directory is made in, and removed from after (default:
+        /// `target` under `--root`, cargo's own directory of the workspace).
+        #[arg(long)]
+        scratch: Option<PathBuf>,
+    },
+    /// Whether the site steps of the `lint` job run: always off a pull request, and on one when a
+    /// changed file matches `site/ci-paths` (writes `run=true` or `run=false`).
+    SiteChanged(site_changed::Args),
     /// The js-agent Linux package.
     Pkg {
         /// Which step.
@@ -227,6 +267,28 @@ fn run(cli: Cli) -> Result<String, Error> {
             count_file,
             command,
         } => count_run::run(&count_file, &command),
+        Verb::SiteDemo {
+            root,
+            out,
+            bin_dir,
+            port,
+            ready_timeout,
+            scratch,
+        } => {
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let out = out.unwrap_or_else(|| root.join(site_demo::DEFAULT_OUT));
+            let scratch = scratch.unwrap_or_else(|| root.join("target"));
+            Ok(site_demo::run(&site_demo::SiteDemo {
+                cargo: &cargo,
+                root: &root,
+                bin_dir: bin_dir.as_deref(),
+                out: &out,
+                scratch: &scratch,
+                port,
+                ready_timeout: std::time::Duration::from_secs(ready_timeout),
+            })?)
+        }
+        Verb::SiteChanged(args) => Ok(site_changed::run(&args)?),
         Verb::Pkg { verb } => Ok(match verb {
             PkgVerb::CheckDeb(args) => pkg::check(&args)?,
             PkgVerb::StageMacos(args) => macpkg::stage(&args)?,

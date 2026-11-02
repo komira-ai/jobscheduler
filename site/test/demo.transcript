@@ -1,0 +1,22 @@
+# hosts.toml: one host, listed by hand; there is no agent
+[[host]]
+id = "gpu-01"
+gpu_class = "nvidia-a100"
+
+[host.resources]
+cpu_millis = 64000
+memory_bytes = 549755813888
+gpus = 8
+
+[host.capabilities]
+isa = "x86-64-v3"
+driver = "550"
+$ printf 'a-local-token-of-at-least-32-bytes\n' > client-token && chmod 600 client-token
+$ js-lease-server --state-file leases.toml --boot initialise --token-file client-token --pool-config hosts.toml &
+$ js --server http://127.0.0.1:7300 --token-file client-token lease acquire --class gpu-host --gpus 1 --gpu-class nvidia-a100 --max-wall 1h
+lease 1-1 host gpu-01 expires 1793614960284
+$ js --server http://127.0.0.1:7300 --token-file client-token lease list
+1-1 held host gpu-01 expires 1793614960284
+$ js --server http://127.0.0.1:7300 --token-file client-token lease release 1-1
+lease 1-1 freed
+$ js --server http://127.0.0.1:7300 --token-file client-token lease list
