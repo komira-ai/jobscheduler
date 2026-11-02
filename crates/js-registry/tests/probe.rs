@@ -10,7 +10,7 @@ use std::time::Duration;
 use js_agent_wire::{Heartbeat, Phase, Taint};
 use js_pool_static::Candidate;
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
-use js_registry::{Placer, ProbeHost};
+use js_registry::{MarkedTails, Placer, ProbeHost};
 use js_types::{HostId, Request, ResourceClass};
 use support::*;
 
@@ -45,7 +45,7 @@ impl Scripted {
 }
 
 impl Placer for Scripted {
-    fn pick(&self, _: &StartSpec, open: &[Candidate]) -> Option<usize> {
+    fn pick(&self, _: &StartSpec, open: &[Candidate], _: &MarkedTails) -> Option<usize> {
         let shown = open.iter().map(|c| c.host.to_string()).collect();
         self.shown.lock().unwrap().push(shown);
         Some(0)
@@ -67,7 +67,7 @@ impl Placer for Scripted {
 struct First;
 
 impl Placer for First {
-    fn pick(&self, _: &StartSpec, _: &[Candidate]) -> Option<usize> {
+    fn pick(&self, _: &StartSpec, _: &[Candidate], _: &MarkedTails) -> Option<usize> {
         Some(0)
     }
 }

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::Hello;
-use js_lease::{ManualClock, Timestamp};
+use js_lease::{Clock, ManualClock, Timestamp};
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, RegisteredProvider};
 use js_testkit::dir::TestDir;
@@ -410,4 +410,309 @@ fn by_default_a_probe_is_refused_as_unsupported() {
     let ack = provider.start(spec);
     assert_eq!(ack, StartAck::Refused(RefusalCode::ProbeUnsupported));
     assert!(provider.booked().is_empty());
+}
+
+/// The agent side of a server, its provider serving the class `share` and the whole-node
+/// class, the clock it runs on, each registered host with its session, and the whole-node
+/// requests a consumer polls (lease sequence and request name).
+struct Live {
+    agents: Arc<Agents>,
+    provider: RegisteredProvider,
+    clock: ManualClock,
+    sessions: Vec<(String, u64, String)>,
+    asks: Vec<(u64, String)>,
+    _dir: TestDir,
+}
+
+/// The time the clock of [`Live`] starts at.
+const T0: u64 = 1_000_000;
+
+/// [`Live`] over [`POOL`] with `extra` flags and the hosts `hosts` registered at [`T0`].
+fn live(name: &str, hosts: &[&str], extra: &[&str]) -> Live {
+    let dir = scratch(name);
+    let config = config_of(dir.path(), POOL, extra);
+    let clock = ManualClock::new(Timestamp::from_millis(T0));
+    let shared = SharedClock::new(clock.clone());
+    let (_source, agents) =
+        assemble(config.hosts, config.usage, &shared, &config.state_file).unwrap();
+    let agents = agents.unwrap();
+    let credential = Credential::of_token(JOIN);
+    let sessions = hosts
+        .iter()
+        .map(|host| {
+            let welcome = agents.registry.hello(&hello(host), &credential).unwrap();
+            ((*host).to_owned(), welcome.epoch, welcome.session)
+        })
+        .collect();
+    let classes = vec![sharing(), ResourceClass::whole_node()];
+    let provider = agents.registry.provider().with_classes(classes);
+    Live {
+        agents,
+        provider,
+        clock,
+        sessions,
+        asks: Vec::new(),
+        _dir: dir,
+    }
+}
+
+impl Live {
+    /// Moves the clock to `ms` (from [`T0`]) five seconds at a time, every host beating and
+    /// every whole-node request not yet booked presented again at each step, as an agent
+    /// and a polling consumer do, so no host is lost and no request dropped.
+    fn at(&mut self, ms: u64) {
+        let credential = Credential::of_token(JOIN);
+        while self.clock.now().millis() < T0 + ms {
+            let left = T0 + ms - self.clock.now().millis();
+            self.clock.advance(Duration::from_millis(left.min(5_000)));
+            for (host, epoch, session) in &self.sessions {
+                let beat = js_agent_wire::Heartbeat {
+                    host_id: host.clone(),
+                    epoch: *epoch,
+                    session: session.clone(),
+                    phase: js_agent_wire::Phase::Serving,
+                    held: Vec::new(),
+                    results: Vec::new(),
+                    taint: None,
+                    exclusive_ready: None,
+                    exclusive_refused: None,
+                    load: None,
+                    disk_gib: None,
+                };
+                self.agents.registry.heartbeat(&beat, &credential).unwrap();
+            }
+            for (sequence, name) in self.asks.clone() {
+                let lease = LeaseId::new(1, sequence);
+                let booked = self
+                    .provider
+                    .capacity()
+                    .iter()
+                    .any(|c| c.leases.contains(&lease));
+                if !booked {
+                    self.whole(sequence, &name);
+                }
+            }
+        }
+    }
+
+    /// Starts lease `sequence` of class `share` that may run `wall_s`: the host it is
+    /// placed on, if any, else the answer.
+    fn share(&mut self, sequence: u64, wall_s: u64) -> Result<String, StartAck> {
+        let ack = self
+            .provider
+            .start(share_for(sequence, Duration::from_secs(wall_s)));
+        host_of(&ack).map(str::to_owned).ok_or(ack)
+    }
+
+    /// Starts whole-node request `name` as lease `sequence`, which may run an hour: its
+    /// mark is not given up (the registry's drain deadline) before then.
+    fn whole(&mut self, sequence: u64, name: &str) -> StartAck {
+        let class = ResourceClass::whole_node();
+        let mut request = sharing_spec(sequence).request().clone();
+        request.class = class.id().clone();
+        request.max_wall = Duration::from_secs(3_600);
+        let spec = StartSpec::new(LeaseId::new(1, sequence), request, &[class]).unwrap();
+        let id = js_types::RequestId::new(name).unwrap();
+        let ask = (sequence, name.to_owned());
+        if !self.asks.contains(&ask) {
+            self.asks.push(ask);
+        }
+        self.provider.start(spec.with_request_id(id))
+    }
+
+    /// The leases on `host`.
+    fn on(&self, host: &str) -> Vec<LeaseId> {
+        let listed = self.provider.capacity().into_iter();
+        let found = listed.into_iter().find(|c| c.host.as_str() == host);
+        found.map(|c| c.leases).unwrap_or_default()
+    }
+
+    /// The host request `name` holds and the end of its tail as the mark took it.
+    fn mark(&self, name: &str) -> Option<(String, Option<u64>)> {
+        let marks = self.agents.registry.reservations();
+        let mark = marks.into_iter().find(|r| r.request.as_str() == name);
+        mark.map(|r| (r.host.to_string(), r.tail_end))
+    }
+}
+
+/// A lease of one core of class `share` that may run `wall`, numbered `sequence`.
+fn share_for(sequence: u64, wall: Duration) -> StartSpec {
+    let mut request = sharing_spec(sequence).request().clone();
+    request.max_wall = wall;
+    StartSpec::new(LeaseId::new(1, sequence), request, &[sharing()]).unwrap()
+}
+
+/// [`live`] with `--placement js-sched` over `h1` alone: lease 1 of 600 s on `h1` from
+/// [`T0`], and whole-node request `q` (lease 2) waiting with `h1` set aside, its tail ending
+/// at `T0 + 600 s`; the clock at 10 s.
+fn marked(name: &str) -> Live {
+    let mut l = live(name, &["h1"], &["--placement", "js-sched"]);
+    assert_eq!(l.share(1, 600).as_deref(), Ok("h1"));
+    assert!(host_of(&l.whole(2, "q")).is_none());
+    assert_eq!(l.mark("q"), Some(("h1".to_owned(), Some(T0 + 600_000))));
+    l.at(10_000);
+    l
+}
+
+/// Asserts, through the server, that a host a whole-node request has set aside takes a
+/// lease that ends, with a minute to spare, by the end of its tail, and not one that ends
+/// after: at 10 s a lease of 300 s (ending at 310 s) lands on `h1` beside the lease the
+/// tail is made of, and counts as backfill; one of 600 s (610 s) has no host and waits;
+/// the mark is unchanged. It catches the marked host closed to every other start (the
+/// registry's rule without a placer), and the gate not applied to it.
+#[test]
+fn with_the_flag_a_lease_ending_inside_the_tail_backfills_a_marked_host() {
+    let mut l = marked("backfill_fits");
+    assert_eq!(l.share(3, 300).as_deref(), Ok("h1"));
+    assert_eq!(l.agents.registry.tail_counters().backfilled, 1);
+    let late = l.share(4, 600);
+    assert_eq!(late, Err(StartAck::Refused(RefusalCode::NoCapacity)));
+    assert_eq!(l.on("h1"), [LeaseId::new(1, 1), LeaseId::new(1, 3)]);
+    assert_eq!(l.mark("q"), Some(("h1".to_owned(), Some(T0 + 600_000))));
+}
+
+/// Asserts, through the server, that backfill does not delay the whole-node request past
+/// the tail it was set aside by: the lease of 300 s placed at 10 s ends at its wall
+/// (310 s); at 599 s the request still has no host, and at 600 s, when the lease the tail
+/// is made of ends, it is committed on `h1`, its host's only lease. It catches backfill
+/// left running past the tail, and a request that takes the host before it is quiet.
+#[test]
+fn with_the_flag_the_whole_node_request_starts_on_its_host_when_the_tail_ends() {
+    let mut l = marked("backfill_start");
+    assert_eq!(l.share(3, 300).as_deref(), Ok("h1"));
+    l.at(310_000);
+    l.provider.stop(&LeaseId::new(1, 3));
+    l.at(599_000);
+    assert!(host_of(&l.whole(2, "q")).is_none());
+    assert_eq!(l.on("h1"), [LeaseId::new(1, 1)]);
+    l.at(600_000);
+    l.provider.stop(&LeaseId::new(1, 1));
+    assert_eq!(l.whole(2, "q"), StartAck::Unknown);
+    assert_eq!(l.on("h1"), [LeaseId::new(1, 2)]);
+    assert_eq!(l.mark("q"), None);
+}
+
+/// Asserts, through the server, that a lease the tail of a marked host refuses goes to a
+/// host with room that is not marked: `h1` carries a lease of 600 s and `h2` one of 900 s
+/// (from 2 s), so `q` sets `h1` aside, and a lease of 600 s at 10 s, too long for `h1`,
+/// lands on `h2`. It catches the gate refusing the start outright, or the placer's
+/// fallback booking the marked host.
+#[test]
+fn with_the_flag_a_lease_too_long_for_the_tail_goes_to_an_unmarked_host() {
+    let flags = ["--placement", "js-sched"];
+    let mut l = live("backfill_elsewhere", &["h1", "h2"], &flags);
+    let second = Duration::from_secs(1);
+    // The scheduler packs a lease onto the busier host, so each host is given its lease
+    // while the other is cordoned for a second.
+    let cordon = |l: &Live, host: &str| {
+        let host = HostId::new(host).unwrap();
+        l.agents.registry.cordon(&host, second).unwrap();
+    };
+    cordon(&l, "h2");
+    assert_eq!(l.share(1, 600).as_deref(), Ok("h1"));
+    l.at(2_000);
+    cordon(&l, "h1");
+    assert_eq!(l.share(5, 900).as_deref(), Ok("h2"));
+    l.at(4_000);
+    assert!(host_of(&l.whole(2, "q")).is_none());
+    assert_eq!(l.mark("q"), Some(("h1".to_owned(), Some(T0 + 600_000))));
+    l.at(10_000);
+    assert_eq!(l.share(3, 600).as_deref(), Ok("h2"));
+    assert_eq!(l.on("h1"), [LeaseId::new(1, 1)]);
+}
+
+/// Asserts, through the server, that an overdue lease is handled as the design states: at
+/// 650 s the lease of 600 s on `h1` has not ended (nothing has stopped it yet), the mark
+/// stands (the request may run an hour, so its drain is not given up), the tail it took
+/// is past, and not even a lease of a second is placed there. It catches a past tail read
+/// as a free host.
+#[test]
+fn with_the_flag_a_marked_host_whose_tail_is_past_takes_no_backfill() {
+    let mut l = marked("backfill_overdue");
+    l.at(650_000);
+    assert_eq!(l.mark("q"), Some(("h1".to_owned(), Some(T0 + 600_000))));
+    let refused = l.share(3, 1);
+    assert_eq!(refused, Err(StartAck::Refused(RefusalCode::NoCapacity)));
+    assert_eq!(l.on("h1"), [LeaseId::new(1, 1)]);
+}
+
+/// Asserts, through the server, that a host whose lease has an unknown end takes no
+/// backfill: with `--estimate-feed`, a lease whose max wall time saturates the clock is no
+/// bound, and with no keyed run it has no estimate, so the mark's tail is unknown and a
+/// lease of a second is not placed on `h1`. It catches an unknown tail read as far away.
+#[test]
+fn with_the_flag_a_host_with_a_lease_of_unknown_end_takes_no_backfill() {
+    let flags = ["--placement", "js-sched", "--estimate-feed"];
+    let mut l = live("backfill_unknown", &["h1"], &flags);
+    let endless = l.provider.start(share_for(1, Duration::MAX));
+    assert_eq!(host_of(&endless), Some("h1"));
+    assert!(host_of(&l.whole(2, "q")).is_none());
+    assert_eq!(l.mark("q"), Some(("h1".to_owned(), None)));
+    l.at(10_000);
+    let refused = l.share(3, 1);
+    assert_eq!(refused, Err(StartAck::Refused(RefusalCode::NoCapacity)));
+    assert_eq!(l.on("h1"), [LeaseId::new(1, 1)]);
+}
+
+/// Asserts that without the flag a host a whole-node request has set aside takes no other
+/// start, as it always did: under the registry's placement the lease of class `share` is
+/// refused as before, and a lease of a class that books a whole host (the pool's own) is
+/// not placed beside the mark. It catches the registry opening marked hosts with no placer.
+#[test]
+fn without_the_flag_a_marked_host_takes_no_other_start() {
+    let mut l = live("backfill_off", &["h1"], &[]);
+    let mut provider = l.agents.registry.provider();
+    let own = provider.classes()[0].clone();
+    l.provider = provider
+        .clone()
+        .with_classes(vec![own.clone(), ResourceClass::whole_node()]);
+    let spec = |sequence: u64, wall_s: u64| {
+        let mut request = sharing_spec(sequence).request().clone();
+        request.class = own.id().clone();
+        request.max_wall = Duration::from_secs(wall_s);
+        StartSpec::new(
+            LeaseId::new(1, sequence),
+            request,
+            std::slice::from_ref(&own),
+        )
+        .unwrap()
+    };
+    assert_eq!(host_of(&l.provider.start(spec(1, 600))), Some("h1"));
+    l.provider.stop(&LeaseId::new(1, 1));
+    // An empty host would be committed to the request at once; one lease keeps it busy.
+    assert_eq!(host_of(&l.provider.start(spec(5, 600))), Some("h1"));
+    assert!(host_of(&l.whole(2, "q")).is_none());
+    assert_eq!(l.mark("q").map(|(host, _)| host).as_deref(), Some("h1"));
+    l.at(10_000);
+    assert!(host_of(&provider.start(spec(3, 1))).is_none());
+    assert_eq!(l.on("h1"), [LeaseId::new(1, 5)]);
+}
+
+/// Asserts that the placer of `--placement js-sched` trusts a lease's wall time up to the
+/// server's `max_lease_wall` and no further: with a ceiling of 300 s a lease of 300 s
+/// backfills a host set aside until 600 s, and one of 301 s, which would end in time, is
+/// not placed there. With no ceiling the 301 s lease is. It catches the ceiling not
+/// passed to the placer, or applied with `<` for `<=`.
+#[test]
+fn the_placer_trusts_a_wall_time_up_to_max_lease_wall() {
+    use js_pool_static::Candidate;
+    let open = [Candidate {
+        host: HostId::new("h1").unwrap(),
+        shape: js_types::Shape::new(
+            Resources::new(8000, 16 << 30, 0, None).unwrap(),
+            BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]),
+        ),
+        leases: Vec::new(),
+    }];
+    let marked =
+        js_registry::MarkedTails::from([(open[0].host.clone(), Some(Duration::from_secs(600)))]);
+    let five = crate::config::Placement::JsSched
+        .placer(Some(Duration::from_secs(300)))
+        .unwrap();
+    let wall = |s: u64| share_for(1, Duration::from_secs(s));
+    assert_eq!(five.pick(&wall(300), &open, &marked), Some(0));
+    assert_eq!(five.pick(&wall(301), &open, &marked), None);
+    let none = crate::config::Placement::JsSched.placer(None).unwrap();
+    assert_eq!(none.pick(&wall(301), &open, &marked), Some(0));
+    assert!(crate::config::Placement::Registry.placer(None).is_none());
 }

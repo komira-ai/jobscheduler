@@ -29,6 +29,7 @@ use crate::admission::{
     Admission, Blocked, Left, Profile, Ratio, Refusal, binding, clamped, new_charge, pick,
     start_time,
 };
+use crate::backfill;
 use crate::cordon::Cordons;
 use crate::input::Request;
 use crate::load::{Charge, HostFacts, LeaseFacts, Load, SLOTS, SlotHost, SlotLoad, least_loaded};
@@ -53,6 +54,11 @@ pub(crate) struct Attempt<'a> {
     pub(crate) request: &'a Request,
     /// Workers held for a whole-machine lease or a blocked head ahead of it.
     pub(crate) reserved: &'a BTreeSet<WorkerId>,
+    /// The start time of each worker in `reserved` (farm milliseconds; `None`: not known):
+    /// the request is placed there only as backfill that ends by it.
+    pub(crate) starts: &'a BTreeMap<WorkerId, Option<u64>>,
+    /// How long the request counts for backfill ([`crate::Backfill`]); `None` never fits.
+    pub(crate) backfill: Option<u64>,
     /// Workers its earlier runs ended on as the farm's fault.
     pub(crate) avoid: &'a BTreeSet<WorkerId>,
     /// A key floor raised its memory: a worker it would own whole is out.
@@ -66,6 +72,18 @@ pub(crate) struct Attempt<'a> {
     /// `L` of the lease's key where it is charged by a curve, else 1: the minutes the
     /// score's fit looks at.
     pub(crate) fit_minutes: u8,
+}
+
+impl Attempt<'_> {
+    /// Whether the request may go on `worker` at `now`: a worker no one holds, or a held
+    /// one where it fits as backfill ([`backfill::fits`]).
+    fn may_use(&self, worker: &WorkerId, now: FarmTime) -> bool {
+        !self.reserved.contains(worker)
+            || self
+                .starts
+                .get(worker)
+                .is_some_and(|start| backfill::fits(now.as_millis(), self.backfill, *start))
+    }
 }
 
 /// A candidate the predicate admitted, with what it computed for it.
@@ -208,7 +226,10 @@ impl Servable {
     /// whole-machine lease holds, and one that is draining or cordoned
     /// ([`Servable::new`]) are out before the load predicate is read and before any
     /// ranking, so a worker that is being emptied for someone is never the least loaded
-    /// one for small work.
+    /// one for small work. The one exception is backfill: a worker in `reserved` stays in
+    /// when the request ends, with a minute to spare, by that worker's start time in
+    /// `starts` ([`crate::backfill`]); the request is then judged and ranked there as on
+    /// any other worker.
     ///
     /// For an action under [`crate::PlacementLoad::On`], room is the load predicate
     /// ([`Admission`]) and the ranking is by what the worker is charged
@@ -245,7 +266,7 @@ impl Servable {
         let candidates: Vec<&WorkerId> = pool
             .into_iter()
             .filter(|name| {
-                !attempt.reserved.contains(*name)
+                attempt.may_use(name, now)
                     && workers[*name].has_room(request, by_load)
                     && (!attempt.not_whole || !workers[*name].exclusive(request))
                     && (!vm_by_load || Self::vm_within_flat_memory(adm, &workers[*name], attempt))
@@ -612,8 +633,8 @@ impl Servable {
     /// `avoid` and not owned whole by the request, the one it can start on first
     /// ([`start_time`], with the lease ends in `ends`), a worker with no start time after
     /// every worker with one; among equals the smallest binding ratio, then the first by
-    /// name. Nothing is kept from the last round. `None` when no worker could take it at
-    /// all.
+    /// name. Nothing is kept from the last round. With the worker comes the start time that
+    /// ranked it (`None`: not known). `None` when no worker could take it at all.
     ///
     /// Two choices are deliberate. Ties among workers whose start time is unknown or equal
     /// use the binding ratio, which keeps the order the hold had before start times. And
@@ -629,7 +650,7 @@ impl Servable {
         adm: &Admission,
         attempt: &Attempt<'_>,
         ends: &BTreeMap<LeaseId, Option<u64>>,
-    ) -> Option<WorkerId> {
+    ) -> Option<(WorkerId, Option<u64>)> {
         let now = self.now.as_millis();
         let candidates = self.head_candidates(workers, adm, attempt);
         let timed = candidates.into_iter().map(|c| {
@@ -645,7 +666,7 @@ impl Servable {
         // The first of the least: the candidates are in name order.
         timed
             .min_by_key(|(_, (start, ratio))| (start.is_none(), *start, *ratio))
-            .map(|(name, _)| name.clone())
+            .map(|(name, (start, _))| (name.clone(), start))
     }
 
     /// The pool `request` is run from: the platform and kind it needs, shared by every

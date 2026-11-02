@@ -12,7 +12,7 @@ use std::sync::Arc;
 use js_lease::Timestamp;
 use js_pool_static::{Candidate, SeatError};
 use js_provider::{Provider, StartSpec};
-use js_registry::{Placer, ProfileLives, TailCounters};
+use js_registry::{MarkedTails, Placer, ProfileLives, TailCounters};
 use js_types::{Admission, ClassId, Dims, Request, ResourceClass, Resources};
 use js_usage::ProfileKey;
 use support::world::*;
@@ -27,12 +27,12 @@ impl ProfileLives for Table {
     }
 }
 
-/// A placer that books the first host it is shown.
+/// A placer that books the first host it is shown that no whole-node request has set aside.
 struct First;
 
 impl Placer for First {
-    fn pick(&self, _: &StartSpec, open: &[Candidate]) -> Option<usize> {
-        (!open.is_empty()).then_some(0)
+    fn pick(&self, _: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize> {
+        open.iter().position(|c| !marked.contains_key(&c.host))
     }
 }
 

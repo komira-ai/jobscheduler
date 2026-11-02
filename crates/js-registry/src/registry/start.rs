@@ -240,6 +240,14 @@ impl Registry {
             tail,
             ..
         } = state;
+        // A start of a class that shares a host, not a probe, may be placed on a host a
+        // whole-node request has set aside, as backfill: the placer is shown the host and
+        // the time left until its tail ends, and books it only for work that ends by then.
+        let backfills = shares & probe.is_none();
+        let marked = match backfills {
+            true => marks.tails_left(now),
+            false => crate::MarkedTails::new(),
+        };
         let eligible = |id: &HostId, _: &Shape| {
             let record = records.get(id);
             // Only a whole-node request is kept off a host its earlier tries failed on.
@@ -252,7 +260,9 @@ impl Registry {
                 };
                 record.bookable_as(now, grace, quiet, admitted)
             });
-            let allowed = reserve::may_start(marks.holder(id), whole, spec.request_id(), room);
+            let set_aside = marks.holder(id);
+            let allowed = reserve::may_start(set_aside, whole, spec.request_id(), room)
+                | (backfills & set_aside.is_some());
             [bookable, !barred, allowed, unjudged]
                 .into_iter()
                 .all(|ok| ok)
@@ -262,7 +272,7 @@ impl Registry {
         // registry's lock and costs time in the hosts and leases it is shown.
         let ack = match placer {
             Some(placer) => {
-                let choose = |open: &[Candidate]| placer.pick(spec, open);
+                let choose = |open: &[Candidate]| placer.pick(spec, open, &marked);
                 book.start_by(spec, gate, &eligible, &choose)
             }
             None => book.start_where(spec, gate, &eligible),

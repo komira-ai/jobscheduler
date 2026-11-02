@@ -170,8 +170,8 @@ Non-goals:
   execution of a job inside a lease; a lease may hold several. A *VM* is a fresh clone of a base image, booted for one run and destroyed
   after it; it is never reused, not even by the next run of the same lease (5.14).
 - **Whole-node lease.** The lease class `whole-node` (kbf's `whole_machine`, the merged `gpu-host`): the whole host, exclusive and quiet for
-  the lease, drained first, capped per pool (5.17). A *reserved* host is marked for one queued request and takes no new work (not the
-  agent's phase `draining`, 5.3).
+  the lease, drained first, capped per pool (5.17). A *reserved* host is marked for one queued request and takes no new work but
+  backfill that ends before the request starts there (whole-node.md section 4; not the agent's phase `draining`, 5.3).
 - **Booking.** The amount of a pool's resource vector the scheduler counts as taken by a lease. A booking is not a limit; the limit is
   what the agent enforces (7.3).
 - **Request history.** What the scheduler has learned about past attempts of similar work: peak memory, CPU parallelism, kills,
@@ -525,7 +525,8 @@ lease that books a host's shape under `Book` is a share, not this class.
 - **Admission.** Eligible hosts are the capable hosts of D41 (tainted and denied excluded). Refused (`no-capable-host`) only when no
   registered host could ever be given whole and no elastic provider could launch one; otherwise queued (D35). A quiet host is taken at
   once, else exactly one host is reserved: least worst-case drain, then fewest leases, then lowest id. The only reservation (R1).
-- **Draining.** A reserved host takes no new work; its work finishes or reaches its end. At `drain_deadline` (default: the pool's max wall
+- **Draining.** A reserved host takes no new work but backfill that ends, with a minute to spare, by its tail (whole-node.md section 4);
+  its work finishes or reaches its end. At `drain_deadline` (default: the pool's max wall
   time) the reservation is given up and another host tried; nothing is stopped for a reservation. The token is minted only when the agent
   reports the host quiet, and the clock starts then (D48, D52).
 - **Caps.** Per pool `max_whole_node`, `max_draining`, a per-consumer limit and a floor of unmarked hosts in a mixed pool; a held lease is

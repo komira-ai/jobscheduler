@@ -5,7 +5,11 @@
 //! A [`Mark`] says a host is set aside for one waiting request. A host carries at most one
 //! mark and a request holds at most one ([`Marks::place`] keeps both by construction).
 //! A marked host takes no other request's start: the registry's start reads the mark, so
-//! a newer request cannot take the host of an older one. The mark is not a lease. The
+//! a newer request cannot take the host of an older one. The one exception is backfill
+//! under a placer: a start of a class that shares a host, not a probe, is shown the
+//! marked host with the time left until its tail ends ([`Marks::tails_left`]), and the
+//! placer books it there only for work that ends by then ([`crate::Placer::pick`]). The
+//! mark is not a lease. The
 //! pass here never commits one and never stops anything (W7); the request's own next
 //! start commits the lease on the host it was given, and drops the mark.
 //!
@@ -139,6 +143,16 @@ impl Marks {
     /// The request `host` is set aside for.
     pub(crate) fn holder(&self, host: &HostId) -> Option<&RequestId> {
         self.0.get(host).map(|mark| &mark.request)
+    }
+
+    /// Every marked host, with how long from `now` until the end of its tail as the mark
+    /// took it: zero once that is past, `None` when it is not known (an assigned mark, or a
+    /// host with a lease that had neither an estimate nor a bound).
+    pub(crate) fn tails_left(&self, now: Timestamp) -> crate::MarkedTails {
+        let left = |end: u64| Duration::from_millis(end.saturating_sub(now.millis()));
+        let marks = self.0.iter();
+        let tails = marks.map(|(host, mark)| (host.clone(), mark.tail_end.map(left)));
+        tails.collect()
     }
 
     /// Sets `host` aside for the request of `mark`. The request's earlier mark goes, so
