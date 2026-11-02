@@ -258,7 +258,7 @@ impl Helper {
     /// Kills and deletes the user of a lease left from before this start.
     fn remove_leftover(&self, ledger: &mut Ledger, lease: LeaseId) -> Result<(), String> {
         self.kill_locked(ledger, lease)?;
-        self.delete_locked(ledger, lease).map(drop)
+        Ok(self.delete_locked(ledger, lease).map(drop)?)
     }
 }
 

@@ -95,7 +95,8 @@ mod tests {
 
     /// Catches: a bound counted while bounds are not enforced (the default), a bound above
     /// the ceiling trusted, the ceiling itself refused (`<` for `<=`), work with no bound
-    /// given a duration, and the P90 read for a bound that does not count.
+    /// given a duration, and the P90 read for a bound that does not count or for work with
+    /// no bound.
     #[test]
     fn a_duration_needs_an_enforced_bound_no_longer_than_the_ceiling() {
         let wall = Some(Duration::from_secs(600));
@@ -110,7 +111,6 @@ mod tests {
         assert_eq!(on(600).duration(wall, p90), Some(MIN));
         assert_eq!(reads.get(), 1);
         assert_eq!(Backfill::default().duration(wall, || None), None);
-        // A bound that does not count reads no P90: the counting probe is passed and not called.
         assert_eq!(Backfill::default().duration(wall, p90), None);
         assert_eq!(on(600).duration(wall, || None), Some(10 * MIN));
         assert_eq!(on(599).duration(wall, || None), None);

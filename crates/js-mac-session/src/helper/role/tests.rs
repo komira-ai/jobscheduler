@@ -354,7 +354,8 @@ fn a_role_run_starts_the_vm_user_s_process_in_its_gui_session_and_returns_the_ch
 }
 
 /// Catches: a role kill that leaves the VM user's processes, that boots out the wrong
-/// domains, that kills a lease user's processes with them, or that reports success when
+/// domains or boots them out before the kill (launchd would restart an agent the kill
+/// ended), that kills a lease user's processes with them, or that reports success when
 /// processes survive.
 #[test]
 fn role_kill_uid_ends_the_vm_user_s_processes_and_no_one_else_s() {
@@ -376,10 +377,10 @@ fn role_kill_uid_ends_the_vm_user_s_processes_and_no_one_else_s() {
             .unwrap_or_else(|| panic!("no {prefix:?} in {calls:#?}"))
     };
     assert!(
-        at(&format!("bootout gui/{uid}")) < at(&format!("kill_all {uid}")),
+        at(&format!("kill_all {uid}")) < at(&format!("bootout gui/{uid}")),
         "{calls:#?}"
     );
-    assert!(at(&format!("bootout user/{uid}")) < at(&format!("kill_all {uid}")));
+    assert!(at(&format!("kill_all {uid}")) < at(&format!("bootout user/{uid}")));
     assert!(
         calls
             .iter()

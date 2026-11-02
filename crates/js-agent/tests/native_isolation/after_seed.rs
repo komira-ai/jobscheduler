@@ -1,10 +1,11 @@
 //! What the test does once run A has seeded: a seed refused with a bare permission error is
 //! confirmed (or not) as the sandbox's by the unified log, and a launch agent run A could not
-//! load is loaded by root, every attempt printed.
+//! load is loaded by root, every attempt printed, or shown to have no path out of the run.
 
 use std::fs;
 
-use super::lines::{Kind, Line, Verdict};
+use super::lines::{Line, Verdict};
+use super::no_path::{self, AGENT_KINDS};
 use super::{Trial, look, run_bounded, view};
 
 /// How many times, and how far apart, the unified log is read for a denial to confirm a seed.
@@ -77,10 +78,13 @@ impl Trial {
     /// to leave, and the domain is the one the helper's delete does not end. A pool uid has
     /// no login session, so launchd may have no domain for it: root then tries the documented
     /// ways to reach one (`launchctl asuser`) and prints every attempt with its exact command,
-    /// status and text. An agent root cannot load is NOT EXERCISED: it covers nothing, the run
-    /// cannot reach a verdict, and the attempts say why.
-    pub(super) fn bootstrap_agents_as_root(&mut self, uid: u32) {
-        for (kind, domain) in [(Kind::LaunchAgent, "user"), (Kind::GuiLaunchAgent, "gui")] {
+    /// status and text. An agent root cannot load either has NO PATH when the evidence
+    /// `no_path.rs` names is all there (launchd's domain-level refusal of the job's own
+    /// bootstrap, the job's plist valid by `plutil -lint` of `home`'s copy, every attempt of
+    /// root run, and the domain shown without the agent), which covers the kind; otherwise it
+    /// is NOT EXERCISED: it covers nothing, the run cannot pass, and the attempts say why.
+    pub(super) fn bootstrap_agents_as_root(&mut self, uid: u32, home: &std::path::Path) {
+        for (kind, domain) in AGENT_KINDS {
             let Some(line) = self.seeded.iter_mut().find(|line| {
                 line.kind == kind && matches!(line.verdict, Verdict::Refused | Verdict::Denied)
             }) else {
@@ -168,22 +172,35 @@ impl Trial {
                     break;
                 }
             }
-            if look::agent_loaded(&attempts) {
-                *line = Line::new(
-                    Verdict::Seeded,
-                    kind,
-                    line.token.clone(),
-                    &format!(
-                        "{label} ({} into {target}: run A could not)",
-                        look::LOADED_BY_ROOT
-                    ),
-                );
-            } else {
-                println!(
-                    "PROBE note {} not exercised: root could not load it in {target}; every attempt is above",
-                    kind.label()
-                );
-            }
+            let printed = run_bounded("/bin/launchctl", &["print", &target]);
+            let domain_look = match printed {
+                Ok((code, stdout, stderr)) => {
+                    look::classify_launchctl_print(code, &String::from_utf8_lossy(&stdout), &stderr)
+                }
+                Err(why) => look::Outcome::CouldNotLook(why),
+            };
+            // The plist the job itself bootstrapped (child.rs `seed_agent`).
+            let job_plist = home.join(format!("iso-{}-{domain}.plist", line.token));
+            let job_plist = job_plist.display().to_string();
+            let lint =
+                no_path::plist_lint(run_bounded("/usr/bin/plutil", &["-lint", &job_plist]).map(
+                    |(code, stdout, stderr)| {
+                        (
+                            code,
+                            format!("{}{stderr}", String::from_utf8_lossy(&stdout)),
+                        )
+                    },
+                ));
+            let evidence = no_path::Evidence {
+                target: &target,
+                label: &label,
+                attempts: &attempts,
+                domain: &domain_look,
+                lint: &lint,
+            };
+            let (verdict, note) = no_path::agent_verdict(line, &evidence);
+            println!("PROBE note {note}");
+            *line = verdict;
         }
     }
 }
