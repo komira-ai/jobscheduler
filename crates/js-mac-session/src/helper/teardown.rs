@@ -43,6 +43,12 @@ pub(crate) enum TeardownError {
     /// Processes of the uid did not exit within a look of `user-delete`.
     #[error("{}; kill-uid first", remaining(*.uid, &format!("after {EXIT_LOOKS} looks"), .left))]
     StillRunning { uid: u32, left: Vec<LiveProcess> },
+    /// Processes of the uid were seen after a bootout of `user-delete`.
+    #[error(
+        "{}; they started while its launchd domains were booted out, so the delete stops here",
+        remaining(*.uid, "after the bootout", .started)
+    )]
+    StartedDuringBootout { uid: u32, started: Vec<LiveProcess> },
     /// Launchd domains of the uid stayed at a look of `user-delete`.
     #[error("launchd domains of uid {uid} remain: {}; kill-uid first", .stayed.join(", "))]
     DomainsLeft { uid: u32, stayed: Vec<String> },
@@ -378,9 +384,12 @@ impl Helper {
         Ok(vec![folders::entry(&dir, folders_root)?])
     }
 
-    /// [`Self::none_left`], the uid's launchd domains booted out, and
-    /// [`Self::none_left`] again (a job launchd started before the bootout ended its
-    /// domain): refused while a process or a domain of the uid is left.
+    /// [`Self::none_left`], the uid's launchd domains booted out, and one more look:
+    /// refused while a process or a domain of the uid is left, and refused at once (no
+    /// wait) when any process of the uid is seen after the bootout. Such a process is a
+    /// job launchd started before its domain went; it may have written again what the
+    /// sweep removed, so it is not waited out: the delete stops, the uid stays held, and
+    /// the repeated delete sweeps everything again.
     fn settled(&self, uid: u32) -> Result<(), TeardownError> {
         self.none_left(uid)?;
         let refused = self.boot_out(uid);
@@ -388,7 +397,11 @@ impl Helper {
         if !stayed.is_empty() {
             return Err(TeardownError::DomainsLeft { uid, stayed });
         }
-        self.none_left(uid)
+        let started = self.processes(uid)?;
+        match started.is_empty() {
+            true => Ok(()),
+            false => Err(TeardownError::StartedDuringBootout { uid, started }),
+        }
     }
 
     /// Waits, for at most [`EXIT_LOOKS`] listings, until no process of `uid` is

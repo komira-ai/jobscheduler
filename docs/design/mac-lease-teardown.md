@@ -25,11 +25,11 @@ A domain counts as gone only on launchd's documented not-found answer to `launch
 
 1. **The entry.**
    - While the record exists, ask for the uid's `DARWIN_USER_DIR` (`getconf DARWIN_USER_DIR`, run as the uid and its group with an empty environment, `/` as its working directory and empty input). Take only an answer of the form `/var/folders/<xx>/<hash>/0`; the entry is `<user_folders>/<xx>/<hash>`. Never guess the path from the uid.
-   - If the record is already gone (a delete repeated after it went), there is no `DARWIN_USER_DIR` of the uid's own. Use every directory two levels down in the per-user folders that the uid owns.
+   - If the record is already gone (a delete repeated after it went), there is no `DARWIN_USER_DIR` of the uid's own. Use every directory two levels down in the per-user folders that the uid owns. An `<xx>`, or such a directory, on another filesystem (something mounted there) refuses the delete: the sweep never crosses a filesystem, so what is behind the mount is never taken as clean.
 2. **Settle.**
    - No process may remain.
    - Boot both domains out; one that stays refuses the delete.
-   - Look for processes again: a job launchd started before the bootout ended its domain is found here.
+   - Look for processes again, once, without waiting: a job launchd started before the bootout ended its domain is found here, and any process seen refuses the delete at once. Such a job may have written again what the sweep removed before exiting, so it is never waited out; the repeated delete sweeps everything again.
 3. Remove the crontab and `at` jobs. No process may remain.
 4. Sweep the home and the other places. Remove the entry whole, and only if the uid owns it:
    - nothing is followed;

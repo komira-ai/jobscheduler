@@ -126,13 +126,78 @@ fn a_job_started_during_the_final_bootout_refuses_user_delete() {
     assert_eq!(
         got,
         Err(format!(
-            "1 processes of uid {uid} remain after {EXIT_LOOKS} looks: 1000 (proc0); \
-             kill-uid first"
+            "1 processes of uid {uid} remain after the bootout: 1000 (proc0); they started \
+             while its launchd domains were booted out, so the delete stops here"
         ))
     );
     assert!(!log(&rig).iter().any(|c| c.starts_with("delete_user")));
     assert!(rig.host.state().users.contains_key("kbf-lease-45-1"));
     uid_held(&rig);
+}
+
+/// Catches a last look that waits out a job launchd started during the final bootout:
+/// a short-lived job may write again what the sweep removed (its entry, a file in the
+/// home) before it exits, so seeing it at all stops the delete, with no second listing,
+/// and the record stays. The repeated delete, with nothing started, sweeps everything
+/// again (the entry the job wrote included) and completes. Red when the look after the
+/// bootout waits for the job to exit.
+#[test]
+fn a_job_seen_after_the_final_bootout_stops_the_delete_even_if_it_exits() {
+    let (rig, uid) = one("bounds-short-job", "49.1");
+    let entry = rig.dir.join(format!("folders/zz/{uid}"));
+    // Looks: the first settle (before and after its bootout), the middle look, the last
+    // settle's first look: none; after the last bootout: the job, then nothing.
+    rig.host.state().live_script.extend([0, 0, 0, 0, 1, 0]);
+    // What the job wrote again before it exited.
+    std::fs::create_dir_all(entry.join("C/again")).unwrap();
+    let got = rig.helper.user_delete("49.1");
+    assert_eq!(
+        got,
+        Err(format!(
+            "1 processes of uid {uid} remain after the bootout: 1000 (proc0); they started \
+             while its launchd domains were booted out, so the delete stops here"
+        ))
+    );
+    let calls = log(&rig);
+    assert!(
+        !calls.iter().any(|c| c.starts_with("delete_user")),
+        "{calls:#?}"
+    );
+    assert!(!calls.iter().any(|c| *c == "pause"), "waited: {calls:#?}");
+    uid_held(&rig);
+    rig.host.state().live_script.clear();
+    std::fs::create_dir_all(entry.join("C/again")).unwrap();
+    assert_eq!(rig.helper.user_delete("49.1"), Ok(true));
+    assert!(!entry.exists());
+}
+
+/// Catches a delete repeated after the record went that frees the uid while what it
+/// left sits behind a mount in the per-user folders: an `<xx>` on another filesystem,
+/// or an entry of the uid on one, refuses the delete and the uid stays held.
+#[test]
+#[cfg(not(target_os = "macos"))] // A mount is pretended, which only works off macOS.
+fn a_mount_in_the_folders_refuses_a_delete_without_a_record() {
+    for (n, mounted) in ["ab", "ab/cdef0123"].into_iter().enumerate() {
+        let lease = format!("50.{}", n + 1);
+        let (rig, uid) = one(&format!("bounds-mounted-{n}"), &lease);
+        let folders = rig.dir.join("folders");
+        std::fs::create_dir_all(folders.join("ab/cdef0123")).unwrap();
+        crate::sweep::pretend_mounted(&[folders.join(mounted)]);
+        rig.host.state().users.clear();
+        let got = rig.helper.user_delete(&lease);
+        crate::sweep::pretend_mounted(&[]);
+        assert_eq!(
+            got,
+            Err(format!(
+                "searching {} for the entries of uid {uid}: {}: another filesystem is \
+                 mounted here; what uid {uid} left in it cannot be removed",
+                folders.display(),
+                folders.join(mounted).display()
+            ))
+        );
+        uid_held(&rig);
+        assert!(folders.join("ab/cdef0123").exists());
+    }
 }
 
 /// The helper over the same directory again, as after a restart, before its boot

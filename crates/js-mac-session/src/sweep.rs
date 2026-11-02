@@ -933,6 +933,8 @@ fn unlock(_dir: &OwnedFd, _name: &OsStr, _stat: &Stat) -> io::Result<()> {
 
 mod entry;
 mod flags;
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) use entry::pretend_mounted;
 pub(crate) use entry::{owned_entries, remove_owned};
 #[cfg(test)]
 use flags::clear_below;

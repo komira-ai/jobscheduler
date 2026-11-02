@@ -80,36 +80,83 @@ fn remove_dir_of(path: &Path, uid: u32, swept: &mut Swept) -> io::Result<()> {
 }
 
 /// The entries of the per-user folders `folders` (`<folders>/<xx>/<hash>`) that are
-/// directories `uid` owns, on the filesystem of `folders`; none when `folders` does not
-/// exist. Nothing is followed: a link is not an entry.
+/// directories `uid` owns; none when `folders` does not exist. Nothing is followed: a
+/// link is not an entry.
 ///
 /// # Errors
-/// `folders` or one of its `<xx>` directories could not be read.
+/// `folders` or one of its `<xx>` directories could not be read; or an `<xx>`, or a
+/// directory of the uid in one, is on another filesystem than `folders` (something is
+/// mounted there): what the uid left there cannot be removed by the sweep, which never
+/// crosses a filesystem, so it is never taken as clean.
 pub(crate) fn owned_entries(folders: &Path, uid: u32) -> io::Result<Vec<PathBuf>> {
     let Some(root) = open_base(folders)? else {
         return Ok(Vec::new());
     };
     let dev = rustix::fs::fstat(&root)?.st_dev;
+    let mounted = |at: &Path| {
+        io::Error::other(format!(
+            "{}: another filesystem is mounted here; what uid {uid} left in it cannot be removed",
+            at.display()
+        ))
+    };
     let mut found = Vec::new();
     for xx in listed(&root)? {
         let Some(stat) = examine(&root, &xx)? else {
             continue;
         };
-        // Without short-circuits: both are read.
-        if !(is_dir(&stat) & (stat.st_dev == dev)) {
+        if !is_dir(&stat) {
             continue;
+        }
+        let shard_path = folders.join(&xx);
+        if elsewhere(&stat, dev, &shard_path) {
+            return Err(mounted(&shard_path));
         }
         let shard = open_child(&root, &xx, &stat)?;
         for hash in listed(&shard)? {
             let Some(inner) = examine(&shard, &hash)? else {
                 continue;
             };
-            if is_dir(&inner) & (inner.st_uid == uid) & (inner.st_dev == dev) {
-                found.push(folders.join(&xx).join(&hash));
+            if !(is_dir(&inner) & (inner.st_uid == uid)) {
+                continue;
             }
+            let entry = shard_path.join(&hash);
+            if elsewhere(&inner, dev, &entry) {
+                return Err(mounted(&entry));
+            }
+            found.push(entry);
         }
     }
     Ok(found)
+}
+
+/// Whether `stat`, examined at `path`, is on another filesystem than `dev`. In tests, a
+/// path [`pretend_mounted`] names is too: an unprivileged test cannot mount one.
+fn elsewhere(stat: &rustix::fs::Stat, dev: super::StDev, path: &Path) -> bool {
+    (stat.st_dev != dev) | pretended(path)
+}
+
+/// Whether a test said another filesystem is mounted at `path` ([`pretend_mounted`]):
+/// off macOS only, where the tests run; nothing says so outside a test.
+#[cfg(not(target_os = "macos"))]
+fn pretended(path: &Path) -> bool {
+    MOUNTED.with_borrow(|paths| paths.iter().any(|p| p == path))
+}
+
+#[cfg(target_os = "macos")]
+fn pretended(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+thread_local! {
+    /// The paths a test says another filesystem is mounted at.
+    static MOUNTED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// For tests off macOS: on this thread, these paths count as on another filesystem.
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) fn pretend_mounted(paths: &[PathBuf]) {
+    MOUNTED.with_borrow_mut(|p| *p = paths.to_vec());
 }
 
 #[cfg(test)]

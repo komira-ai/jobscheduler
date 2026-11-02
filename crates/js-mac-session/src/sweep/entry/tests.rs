@@ -247,3 +247,34 @@ fn the_uid_s_entries_are_its_own_directories_two_levels_down() {
     fs::write(&not_a_dir, "x").unwrap();
     assert!(owned_entries(&not_a_dir, me()).is_err());
 }
+
+/// Asserts that an `<xx>` on another filesystem, or a directory of the uid on one, makes
+/// the search an error naming it, while one of another owner there does not. It catches
+/// a search that passes over a mount and so lets a delete free the uid with what the
+/// uid left behind the mount.
+#[test]
+#[cfg(not(target_os = "macos"))] // A mount is pretended, which only works off macOS.
+fn a_mount_in_the_folders_is_an_error() {
+    let dir = scratch("owned-mounted");
+    let folders = dir.join("folders");
+    fs::create_dir_all(folders.join("ab/mine")).unwrap();
+    fs::create_dir_all(folders.join("cd/theirs")).unwrap();
+    for at in [folders.join("ab"), folders.join("ab/mine")] {
+        pretend_mounted(std::slice::from_ref(&at));
+        let got = owned_entries(&folders, me());
+        pretend_mounted(&[]);
+        assert_eq!(
+            got.unwrap_err().to_string(),
+            format!(
+                "{}: another filesystem is mounted here; what uid {} left in it cannot be removed",
+                at.display(),
+                me()
+            )
+        );
+    }
+    // Another owner's entry on another filesystem is not the uid's to answer for.
+    pretend_mounted(&[folders.join("cd/theirs")]);
+    let got = owned_entries(&folders, me() + 1);
+    pretend_mounted(&[]);
+    assert_eq!(got.unwrap(), Vec::<PathBuf>::new());
+}
