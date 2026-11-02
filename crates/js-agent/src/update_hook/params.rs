@@ -17,8 +17,9 @@
 //! The hook on a machine also reads five optional keys, the values of the agent's own flags of
 //! the same names, which say how to reach the lease server and the agent's state
 //! ([`ConnectParams`]): `server`, `state_root`, `token_file`, `ca_cert` and `host_id`. The
-//! declaration of a host names them, as the plist of its agent does. A step that never asks the
-//! lease server (a first install) does not need them.
+//! declaration of a host names them, as the plist of its agent does. A first install needs none
+//! of them; every step of an update needs `state_root`, and one that asks the lease server needs
+//! `server` too.
 //!
 //! The reserved key contains a dot, so in the file it is a quoted key. Written bare, TOML makes
 //! it a table `updater`, which is not a scalar and is refused.

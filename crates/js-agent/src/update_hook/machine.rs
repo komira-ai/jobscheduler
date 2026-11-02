@@ -12,6 +12,13 @@
 //! params, no credential, an id that is no id) is not an error of the hook as a whole: a step
 //! that never asks the lease server (a first install) does not need it, and one that does ends
 //! with `lease_unreachable`, class environment, saying why.
+//!
+//! The agent's state root is looked at before any step runs. An update needs the state root of
+//! the agent that runs, so one the params do not name, or name and is not there, ends every
+//! step `state_invalid`: an absent root would otherwise read as "no taint, nothing owed". A
+//! state root that is there and is not private (a link, a file, another owner, open to others)
+//! ends every step `state_invalid` too, a first install's included. Only a first install may
+//! have none. Either error starts with the param's name, `state_root`.
 
 use std::io;
 use std::os::fd::BorrowedFd;
@@ -34,7 +41,8 @@ use super::ports::{NoGate, Ports, StateView, SystemClock, SystemLink};
 use super::step::{self, Env};
 use super::{
     ConnectParams, DirStat, Done, HOST_ID_KEY, Invocation, LaunchUnits, Outcome, Params,
-    PlatformUnits, PortError, Reason, Report, SERVER_KEY, Step, StopRunner, fd_stat,
+    PlatformUnits, PortError, Reason, Report, SERVER_KEY, STATE_ROOT_KEY, Step, StopRunner,
+    fd_stat,
 };
 
 /// How a directory of the state directory's path is looked at (see [`fd_stat`]).
@@ -90,14 +98,16 @@ impl Machine<'static> {
 
 /// The file the bearer is read from: the host credential of the state root when it holds one,
 /// which is what the agent sends once it has one, and otherwise the token file. A state root
-/// that is not private is not trusted with a credential.
+/// that is there and not private is an error of its own: it is not trusted with a credential,
+/// and the join token is not used in its place (the server would refuse it on the host's own
+/// routes, which says nothing of the cause).
 fn credential(params: &ConnectParams) -> Result<PathBuf, String> {
-    let kept = match Root::find(params.state_root.as_deref()) {
+    let kept = match find_root(params.state_root.as_deref())? {
         Root::Open(root) => {
             let file = CredentialFile::in_dir(root.path());
             file.load()?.map(|_| file.path())
         }
-        Root::Absent | Root::Unusable(_) => None,
+        Root::Absent => None,
     };
     kept.or_else(|| params.token_file.clone())
         .ok_or_else(|| "token_file: required unless state_root holds a host credential".to_owned())
@@ -162,35 +172,56 @@ impl Lease for MachineLease {
 
 /// The agent's state root as the hook finds it.
 enum Root {
-    /// None is named, or none is there (the agent never ran): no taint, no owed check.
+    /// None is named, or none is there (the agent never ran): no taint, no owed check. Only a
+    /// first install may find this (see [`agent_state`]).
     Absent,
     /// A private directory of the agent's.
     Open(StateRoot),
-    /// There is one and it is not usable (a link, another owner, open to others): the text
-    /// says why. Nothing can be said of a taint in it, so a step that reads it fails.
-    Unusable(String),
 }
 
-impl Root {
-    fn find(path: Option<&Path>) -> Root {
-        let Some(path) = path else {
-            return Root::Absent;
-        };
-        match path.try_exists() {
-            Ok(false) => Root::Absent,
-            _ => match StateRoot::open(path) {
-                Ok(root) => Root::Open(root),
-                Err(text) => Root::Unusable(text),
-            },
-        }
+/// The state root at `path`: [`Root::Absent`] when `path` is `None` or names nothing. One that
+/// is there and is not usable (a link, a file, another owner, open to others) is an error,
+/// whose text starts with [`STATE_ROOT_KEY`]: nothing can be said of a taint in it.
+fn find_root(path: Option<&Path>) -> Result<Root, String> {
+    let Some(path) = path else {
+        return Ok(Root::Absent);
+    };
+    match path.try_exists() {
+        Ok(false) => Ok(Root::Absent),
+        _ => StateRoot::open_named(path, STATE_ROOT_KEY).map(Root::Open),
     }
+}
+
+/// The state root the step reads: an update must find the private state root of the agent that
+/// runs; a first install may find none.
+///
+/// # Errors
+/// The state root is there and not usable, or it is an update's and the params name none or
+/// name one that is not there. The text starts with [`STATE_ROOT_KEY`].
+fn agent_state(params: &Params) -> Result<Root, String> {
+    let named = params.connect.state_root.as_deref();
+    let root = find_root(named)?;
+    if !matches!(root, Root::Absent) || params.previous_version.is_none() {
+        return Ok(root);
+    }
+    Err(match named {
+        None => format!(
+            "{STATE_ROOT_KEY}: an update needs the state root of the agent that runs, and the \
+             params name none"
+        ),
+        Some(path) => format!(
+            "{STATE_ROOT_KEY}: {} is not there, and an update needs the state root of the agent \
+             that runs",
+            path.display()
+        ),
+    })
 }
 
 impl StateView for Root {
     fn taint(&self) -> Option<Taint> {
         match self {
             Root::Open(root) => StateView::taint(root),
-            Root::Absent | Root::Unusable(_) => None,
+            Root::Absent => None,
         }
     }
 
@@ -198,18 +229,14 @@ impl StateView for Root {
         match self {
             Root::Open(root) => StateView::owed(root),
             Root::Absent => Ok(Vec::new()),
-            Root::Unusable(text) => Err(PortError::Io(text.clone())),
         }
     }
 }
 
-/// The unit manager of this platform. A Mac's `bootout` waits for the agent to exit, which its
-/// plist allows [`AGENT_EXIT_TIMEOUT_SECS`]: the stop is run by a runner that waits longer.
+/// The unit manager of this platform: on a Mac, [`launch_units`].
 #[cfg(target_os = "macos")]
 fn platform_units<'a>(commands: &'a SystemCommands, stop: &'a StopRunner) -> PlatformUnits<'a> {
-    super::LaunchUnits::new(commands)
-        .with_stop_runner(stop)
-        .with_gate(Path::new(js_mac_provision::daemon::GATE))
+    launch_units(commands, stop)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -218,13 +245,18 @@ fn platform_units<'a>(commands: &'a SystemCommands, _stop: &'a StopRunner) -> Pl
 }
 
 /// The units of a Mac: `launchctl` through `commands`, `bootout` through `stop` (it waits for the
-/// agent to exit), and a kickstart held back while the agent's token file is absent.
+/// agent to exit, which its plist allows [`AGENT_EXIT_TIMEOUT_SECS`], so `stop` must wait
+/// longer: see [`StopRunner`]), and a kickstart held back while the agent's token file
+/// ([`GATE`](js_mac_provision::daemon::GATE)) is absent. Built on every platform, so that a test
+/// off a Mac checks the wiring the Mac's hook runs with.
 #[must_use]
 pub fn launch_units<'a>(
     commands: &'a dyn CommandRunner,
-    _stop: &'a dyn CommandRunner,
+    stop: &'a dyn CommandRunner,
 ) -> LaunchUnits<'a> {
     LaunchUnits::new(commands)
+        .with_stop_runner(stop)
+        .with_gate(Path::new(js_mac_provision::daemon::GATE))
 }
 
 /// Runs the step the invocation names on this machine.
@@ -242,11 +274,19 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
             };
         }
     };
+    let state = match agent_state(params) {
+        Ok(state) => state,
+        Err(why) => {
+            return Done {
+                outcome: Outcome::Failure,
+                report: Report::failure(Reason::StateInvalid, why),
+            };
+        }
+    };
     let commands = SystemCommands::default();
     let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
     let units = platform_units(&commands, &stop);
     let lease = MachineLease::connect(&params.connect, machine.own_host_id);
-    let state = Root::find(params.connect.state_root.as_deref());
     let env = Env {
         ports: Ports {
             units: &units,
