@@ -9,7 +9,8 @@
 //!
 //! The steps are the hook's own (`update_hook::step`), over the declaration and params of
 //! `update_hook_fakes::harness`, the world's ports seen through the fault the test arranged for
-//! the step, kill points in the harness's protocol, and the hang guard on the clock.
+//! the step, kill points in the harness's protocol, the hang guard on the clock, and a watchdog
+//! thread that ends a step which stops making progress (`update_hook_fakes::watchdog`).
 
 #![allow(dead_code)]
 
@@ -41,6 +42,8 @@ use fakes::harness::{
     CONTROL_VAR, DEFECT_VAR, Defect, Fault, Faulted, FaultedState, Frozen, Guard, HarnessGate,
     MirroringGate, STATE_DIR_VAR, StagedAgent, WORLD_VAR, arranged, declaration, mirror_ownership,
 };
+#[cfg(target_os = "linux")]
+use fakes::watchdog::{self, DEFAULT_WINDOW_MS, WINDOW_VAR, Window};
 
 /// The directory a flag or its variable names.
 #[cfg(target_os = "linux")]
@@ -68,6 +71,15 @@ fn as_root(_: &Path, _: std::os::fd::BorrowedFd<'_>) -> std::io::Result<DirStat>
     })
 }
 
+/// The state directory cannot be looked at: the first-install `cleanup` fault (`Fault::Fail`).
+#[cfg(target_os = "linux")]
+fn unreadable(path: &Path, _: std::os::fd::BorrowedFd<'_>) -> std::io::Result<DirStat> {
+    Err(std::io::Error::other(format!(
+        "{}: the disk does not answer",
+        path.display()
+    )))
+}
+
 /// What the binary was started with.
 #[cfg(target_os = "linux")]
 struct Setup {
@@ -93,8 +105,10 @@ fn hung(asked: Duration) {
 /// The kill points, keeping the world's view of the record as the record says.
 #[cfg(target_os = "linux")]
 fn gate(setup: &Setup) -> MirroringGate {
+    let mut inner = HarnessGate::from_env();
+    inner.break_after_first = setup.defect == Some(Defect::BrokenCount);
     MirroringGate {
-        inner: HarnessGate::from_env(),
+        inner,
         world: setup.world.clone(),
         state_dir: setup.state_dir.clone(),
     }
@@ -124,6 +138,9 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
         step: step_now,
         fault,
         silent_start: hang,
+        stall: setup.defect == Some(Defect::Stall),
+        keeps_cordon: step_now == Step::Cleanup && setup.defect == Some(Defect::ForgetsCordon),
+        control: &setup.control,
     };
     let root = world.state_root();
     let state = FaultedState {
@@ -151,7 +168,14 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
         },
         runner: &staged,
         declaration: &declaration,
-        stat: &as_root,
+        stat: if step_now == Step::Cleanup
+            && fault == Some(Fault::Fail)
+            && params.previous_version.is_none()
+        {
+            &unreadable
+        } else {
+            &as_root
+        },
     };
     let done = match step_now {
         Step::Prepare => step::prepare(&env, params),
@@ -190,6 +214,25 @@ fn main() -> ExitCode {
         state_dir,
         defect: Defect::from_word(std::env::var_os(DEFECT_VAR).as_ref()),
     };
+    // A hello a killed step left pending has reached the server by now.
+    if let Err(why) = World::new(&setup.world, &setup.control, Box::new(NoGate)).deliver_hello() {
+        eprintln!("js-update-hook-fake: the pending hello could not be delivered: {why}");
+        return ExitCode::from(2);
+    }
+    let window = std::env::var_os(WINDOW_VAR)
+        .and_then(|ms| ms.to_str()?.parse().ok())
+        .map_or(
+            Duration::from_millis(DEFAULT_WINDOW_MS),
+            Duration::from_millis,
+        );
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut wait = || match stopped.recv_timeout(window) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Window::Passed,
+            _ => Window::Stopped,
+        };
+        watchdog::watch(&watchdog::events, &mut wait, &stalled);
+    });
     let body = |invocation: &Invocation, params: &Params| fake_step(&setup, invocation, params);
     let mut sink = std::io::sink();
     let mut stdout = std::io::stdout();
@@ -198,7 +241,18 @@ fn main() -> ExitCode {
     } else {
         &mut stdout
     };
-    run(&args, out, &mut std::io::stderr(), &Host { step: &body })
+    let code = run(&args, out, &mut std::io::stderr(), &Host { step: &body });
+    drop(stop);
+    code
+}
+
+/// The watchdog fired: no progress event in a whole window. The step's process group is killed,
+/// as the updater kills a step past its timeout.
+#[cfg(target_os = "linux")]
+fn stalled() {
+    eprintln!("js-update-hook-fake: the step made no progress in a watch window: stopped");
+    let _ = rustix::process::kill_current_process_group(rustix::process::Signal::KILL);
+    std::process::exit(1);
 }
 
 /// The hook is Linux code here (the fakes are); on any other target this test binary only says

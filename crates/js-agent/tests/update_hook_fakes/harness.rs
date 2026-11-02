@@ -27,6 +27,7 @@ use js_agent::update_hook::{
 use js_agent_wire::Taint;
 
 use super::World;
+use super::watchdog;
 
 /// Names the fakes' world (the harness's `world/`).
 pub const WORLD_VAR: &str = "UPDATE_HOOK_FAKE_WORLD";
@@ -70,18 +71,36 @@ pub const fn timeout_secs(step: Step) -> u64 {
     }
 }
 
+/// `text` as a TOML basic string, quotes included: a quotation mark, a backslash and every
+/// control character escaped, so the string parses back to `text`.
+#[must_use]
+pub fn toml_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// The declaration the hook runs under, with its record in `state_dir`.
 #[must_use]
 pub fn declaration_text(state_dir: &Path) -> String {
     let bound = timeout_secs;
     format!(
         concat!(
-            "state_dir = \"{state}\"\n[hook]\nunits = [\"{unit}\"]\n",
-            "write_paths = [\"/opt/js-agent\", \"{state}\"]\n",
+            "state_dir = {state}\n[hook]\nunits = [\"{unit}\"]\n",
+            "write_paths = [\"/opt/js-agent\", {state}]\n",
             "[hook.timeout_secs]\nprepare = {prepare}\ncutover = {cutover}\nverify = {verify}\n",
             "rollback = {rollback}\ncleanup = {cleanup}\n"
         ),
-        state = state_dir.display(),
+        state = toml_string(&state_dir.to_string_lossy()),
         unit = UNIT,
         prepare = bound(Step::Prepare),
         cutover = bound(Step::Cutover),
@@ -109,13 +128,20 @@ pub enum ParamValue {
     Text(&'static str),
 }
 
+/// The exit status of a step whose kill point could not be counted: none of the contract's, so
+/// the harness refuses the run by name (`UnknownExit`) rather than count fewer points.
+pub const EXIT_GATE_BROKEN: u8 = 70;
+
 /// The kill points, in the harness's protocol: each point appends a byte to the count file in
 /// the directory [`GATE_DIR_VAR`] names, and the point whose number is [`KILL_AT_VAR`]'s writes
 /// [`PARKED`] to standard error and parks until the harness kills it. Without the directory a
-/// point does nothing.
+/// point does nothing; with it, a count that cannot be kept ends the step with
+/// [`EXIT_GATE_BROKEN`], since a point left out would be one the harness never kills at.
 pub struct HarnessGate {
     dir: Option<PathBuf>,
     kill_at: u64,
+    /// [`Defect::BrokenCount`]: the count file is put out of reach after the first point.
+    pub break_after_first: bool,
 }
 
 impl HarnessGate {
@@ -129,6 +155,7 @@ impl HarnessGate {
         Self {
             dir: dir.map(PathBuf::from),
             kill_at,
+            break_after_first: false,
         }
     }
 
@@ -141,28 +168,42 @@ impl HarnessGate {
         )
     }
 
-    /// Counts one point and returns its number; `None` outside the harness or when the count
-    /// cannot be kept (the harness then sees fewer points and says so).
-    #[must_use]
-    pub fn count(&self) -> Option<u64> {
-        let dir = self.dir.as_ref()?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join(COUNT_FILE))
-            .ok()?;
-        file.write_all(b".").ok()?;
-        file.metadata().ok().map(|meta| meta.len())
+    /// Counts one point and returns its number; `None` outside the harness.
+    ///
+    /// # Errors
+    /// The count file could not be opened, written or looked at.
+    pub fn count(&self) -> std::io::Result<Option<u64>> {
+        let Some(dir) = self.dir.as_ref() else {
+            return Ok(None);
+        };
+        let path = dir.join(COUNT_FILE);
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        file.write_all(b".")?;
+        let n = file.metadata()?.len();
+        if self.break_after_first && n == 1 {
+            // In place of the count file, a directory: the next point cannot open it.
+            fs::remove_file(&path)?;
+            fs::create_dir(&path)?;
+        }
+        Ok(Some(n))
     }
 }
 
 impl Gate for HarnessGate {
     fn point(&self) {
-        if self.count() == Some(self.kill_at) {
-            eprintln!("{PARKED}");
-            // The harness kills the process group on the line; a wake-up parks again.
-            loop {
-                std::thread::park();
+        watchdog::progress();
+        match self.count() {
+            Ok(Some(n)) if n == self.kill_at => {
+                eprintln!("{PARKED}");
+                // The harness kills the process group on the line; a wake-up parks again.
+                loop {
+                    std::thread::park();
+                }
+            }
+            Ok(_) => {}
+            Err(why) => {
+                eprintln!("js-update-hook-fake: the kill point could not be counted: {why}");
+                std::process::exit(i32::from(EXIT_GATE_BROKEN));
             }
         }
     }
@@ -220,12 +261,13 @@ impl Gate for MirroringGate {
 pub enum Fault {
     /// The step fails (1): the staged agent is another version (`prepare`), the agent crashes
     /// on its start (`cutover`) or after it (`verify`), the lease server does not answer
-    /// (`cleanup`, `rollback`).
+    /// (`cleanup` of an update, `rollback`), the state directory cannot be looked at (`cleanup`
+    /// of a first install, which asks the lease server nothing).
     Fail,
     /// The host is busy (75): it holds a lease that never goes (`prepare`, `cutover`).
     Defer,
     /// No version can repair the host (76): the agent's state root holds a taint (`prepare`,
-    /// `cutover`, `verify`).
+    /// `cutover`, `verify`, `rollback`).
     Halt,
 }
 
@@ -246,24 +288,24 @@ impl Fault {
             .find(|fault| fault.word() == word.trim())
     }
 
-    /// Whether the steps of the hook can be made to end so at `step`: `verify`, `cleanup` and
-    /// `rollback` never defer (the contract gives them none), and `cleanup` and `rollback`
-    /// have no check that halts.
+    /// Whether this fake can make `step` end so, by the means [`Fault`] lists: `verify`,
+    /// `cleanup` and `rollback` never defer (the contract gives them none), and `cleanup` reads
+    /// no taint, so a taint does not halt it.
     #[must_use]
     pub const fn reachable(self, step: Step) -> bool {
         match (step, self) {
-            (Step::Prepare | Step::Cutover, _) | (Step::Verify, Fault::Fail | Fault::Halt) => true,
-            (Step::Cleanup | Step::Rollback, Fault::Fail) => true,
+            (Step::Prepare | Step::Cutover, _) | (_, Fault::Fail) => true,
+            (Step::Verify | Step::Rollback, Fault::Halt) => true,
             (Step::Verify | Step::Cleanup | Step::Rollback, _) => false,
         }
     }
 
-    /// [`Fault::reachable`] on a first install: nothing defers (there is no host to drain and
-    /// no lease to wait out), and `cleanup` cannot fail (there is no cordon to lift).
+    /// [`Fault::reachable`] on a first install: nothing defers, since there is no host to drain
+    /// and no lease to wait out.
     #[must_use]
     pub const fn reachable_on_first_install(self, step: Step) -> bool {
-        match (step, self) {
-            (_, Fault::Defer) | (Step::Cleanup, _) => false,
+        match self {
+            Fault::Defer => false,
             _ => self.reachable(step),
         }
     }
@@ -299,6 +341,13 @@ pub enum Defect {
     CutoverRestarts,
     /// The clock stands still and the new agent never says hello: `verify` waits forever.
     Hang,
+    /// `verify` blocks in its first look at the unit and never pauses, as a step stuck in a
+    /// call that never returns: only the watchdog ends it.
+    Stall,
+    /// `cleanup` deletes the record without lifting the cordon it recorded as its own.
+    ForgetsCordon,
+    /// The kill-point count file is put out of reach after the first point.
+    BrokenCount,
 }
 
 impl Defect {
@@ -309,16 +358,27 @@ impl Defect {
             Defect::NoLastLine => "no-last-line",
             Defect::CutoverRestarts => "cutover-restarts",
             Defect::Hang => "hang",
+            Defect::Stall => "stall",
+            Defect::ForgetsCordon => "forgets-cordon",
+            Defect::BrokenCount => "broken-count",
         }
     }
+
+    /// Every defect.
+    pub const ALL: [Defect; 6] = [
+        Defect::NoLastLine,
+        Defect::CutoverRestarts,
+        Defect::Hang,
+        Defect::Stall,
+        Defect::ForgetsCordon,
+        Defect::BrokenCount,
+    ];
 
     /// The defect a value names; `None` for none or a word no defect has.
     #[must_use]
     pub fn from_word(word: Option<&OsString>) -> Option<Defect> {
         let word = word?.to_str()?;
-        [Defect::NoLastLine, Defect::CutoverRestarts, Defect::Hang]
-            .into_iter()
-            .find(|defect| defect.word() == word)
+        Defect::ALL.into_iter().find(|defect| defect.word() == word)
     }
 }
 
@@ -331,6 +391,7 @@ pub struct Guard<'a> {
     clock: &'a dyn Clock,
     budget: Duration,
     asked: Cell<Duration>,
+    pauses: Cell<u64>,
     fire: &'a dyn Fn(Duration),
 }
 
@@ -343,6 +404,7 @@ impl<'a> Guard<'a> {
             clock,
             budget,
             asked: Cell::new(Duration::ZERO),
+            pauses: Cell::new(0),
             fire,
         }
     }
@@ -365,10 +427,15 @@ impl Clock for Guard<'_> {
         self.clock.now_ms()
     }
 
+    /// Every pause counts toward the bound, and so does every call: a step that asks more
+    /// pauses than its bound has seconds (zero-length ones, in a loop) is stopped as well.
     fn pause(&self, span: Duration) {
+        watchdog::progress();
         let asked = self.asked.get().saturating_add(span);
         self.asked.set(asked);
-        if asked > self.budget {
+        let pauses = self.pauses.get() + 1;
+        self.pauses.set(pauses);
+        if asked > self.budget || pauses > self.budget.as_secs() {
             (self.fire)(asked);
             return;
         }
@@ -424,7 +491,18 @@ pub struct Faulted<'a> {
     pub fault: Option<Fault>,
     /// The new agent never says hello ([`Defect::Hang`]).
     pub silent_start: bool,
+    /// `verify`'s first look at the unit never returns ([`Defect::Stall`]).
+    pub stall: bool,
+    /// An uncordon changes nothing and says nothing was there ([`Defect::ForgetsCordon`]).
+    pub keeps_cordon: bool,
+    /// The fakes' own files, where [`DRAIN_LOOKS`] is kept.
+    pub control: &'a Path,
 }
+
+/// The file in the fakes' own files that holds how many more readings of the host during
+/// `prepare` still show a lease: a host whose last job ends while `prepare` waits, so that
+/// `prepare` polls, pauses and renews its cordon before the host is drained. Absent: none.
+pub const DRAIN_LOOKS: &str = "drain-looks";
 
 impl Faulted<'_> {
     fn is(&self, step: Step, fault: Fault) -> bool {
@@ -450,9 +528,28 @@ impl Faulted<'_> {
         }
     }
 
-    /// A reading with a lease on the host while the step is to be deferred.
+    /// Whether a reading during `prepare` still shows the job that is draining, counting the
+    /// reading.
+    fn draining(&self) -> bool {
+        if self.step != Step::Prepare {
+            return false;
+        }
+        let file = self.control.join(DRAIN_LOOKS);
+        let left: u64 = fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(0);
+        if left == 0 {
+            return false;
+        }
+        fs::write(&file, (left - 1).to_string()).unwrap();
+        true
+    }
+
+    /// A reading with a lease on the host while the step is to be deferred, or while a job
+    /// drains.
     fn with_lease(&self, mut host: HostReading) -> HostReading {
-        if self.busy() {
+        if self.busy() || self.draining() {
             host.leases = 1;
             host.lease = Some("lease-1".to_owned());
         }
@@ -462,6 +559,11 @@ impl Faulted<'_> {
 
 impl Units for Faulted<'_> {
     fn show(&self, unit: &str) -> Result<UnitState, PortError> {
+        if self.stall && self.step == Step::Verify {
+            loop {
+                std::thread::park();
+            }
+        }
         if self.is(Step::Verify, Fault::Fail) {
             // The new agent ran and died after the start.
             return Ok(UnitState {
@@ -487,7 +589,11 @@ impl Units for Faulted<'_> {
         if self.silent_start {
             return self.quiet.start_silent(unit);
         }
-        self.quiet.start(unit)
+        // The unit runs, and the agent's hello is on its way: a kill here leaves it pending,
+        // and it arrives before the next step runs (`World::deliver_hello`).
+        self.quiet.start_pending(unit)?;
+        self.world.point();
+        self.quiet.deliver_hello().map(drop)
     }
 
     fn is_active(&self, unit: &str) -> Result<bool, PortError> {
@@ -515,6 +621,12 @@ impl Lease for Faulted<'_> {
 
     fn uncordon(&self) -> Result<Uncordoned, LeaseError> {
         self.check()?;
+        if self.keeps_cordon {
+            return Ok(Uncordoned {
+                lifted: false,
+                host: self.world.host()?,
+            });
+        }
         let mut uncordoned = self.world.uncordon()?;
         uncordoned.host = self.with_lease(uncordoned.host);
         Ok(uncordoned)

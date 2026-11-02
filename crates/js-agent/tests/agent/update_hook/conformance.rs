@@ -25,37 +25,53 @@ use update_hook::conformance::{
 use update_hook::{Params, Scalar, Step};
 
 use super::fakes::harness::{
-    self, CONTROL_VAR, DEFECT_VAR, Defect, HOST, OWNED_CORDON, PARAMS, ParamValue, RELEASE_LINK,
-    STATE_DIR_VAR, UNIT, WORLD_VAR,
+    self, CONTROL_VAR, DEFECT_VAR, Defect, EXIT_GATE_BROKEN, HOST, OWNED_CORDON, PARAMS,
+    ParamValue, STATE_DIR_VAR, UNIT, WORLD_VAR,
 };
+use super::fakes::watchdog::WINDOW_VAR;
 use super::fakes::{World, relative_to_link};
 
-const BIN: &str = env!("CARGO_BIN_EXE_js-update-hook-fake");
+pub(super) const BIN: &str = env!("CARGO_BIN_EXE_js-update-hook-fake");
 
 /// The version the harness's params name as the previous one (`update_hook::conformance`): the
 /// agent that runs when the update begins says hello with it.
-const PREVIOUS_VERSION: &str = "1.0.0";
+pub(super) const PREVIOUS_VERSION: &str = "1.0.0";
+
+/// How long the operator's cordon of [`AgentHost::operator_cordoned`] is asked for: longer than
+/// the hook's lease, so the hook's own cordon call leaves its expiry as it is.
+const OPERATOR_CORDON_SECS: u64 = 900;
 
 /// The js-agent host the harness acts on: the agent of the previous release runs on the unit,
 /// the release link points at it, the lease server knows the host and holds no lease, and the
 /// state root is clean. On a first install there is no agent, no link and no host.
-struct AgentHost {
-    first_install: bool,
+#[derive(Clone, Copy)]
+pub(super) struct AgentHost {
+    pub(super) first_install: bool,
     defect: Option<Defect>,
+    /// An operator has cordoned the host before the update.
+    operator_cordon: bool,
+    /// The watchdog window of the binary, in milliseconds; its default when `None`.
+    window_ms: Option<u64>,
+    /// Readings of the host during `prepare` that still show a job draining
+    /// ([`harness::DRAIN_LOOKS`]).
+    drain_looks: u64,
 }
 
 impl AgentHost {
-    fn update() -> AgentHost {
+    pub(super) fn update() -> AgentHost {
         AgentHost {
             first_install: false,
             defect: None,
+            operator_cordon: false,
+            window_ms: None,
+            drain_looks: 0,
         }
     }
 
-    fn first_install() -> AgentHost {
+    pub(super) fn first_install() -> AgentHost {
         AgentHost {
             first_install: true,
-            defect: None,
+            ..AgentHost::update()
         }
     }
 
@@ -66,14 +82,37 @@ impl AgentHost {
         }
     }
 
+    /// An update on a host an operator cordoned before it: the cordon is the operator's, and
+    /// the hook neither renews, records nor lifts it.
+    fn operator_cordoned() -> AgentHost {
+        AgentHost {
+            operator_cordon: true,
+            ..AgentHost::update()
+        }
+    }
+
+    /// An update on a host whose last job ends while `prepare` waits: `prepare` polls through
+    /// more than half of its cordon's lease, and renews the cordon it placed.
+    pub(super) fn draining() -> AgentHost {
+        AgentHost {
+            drain_looks: 20,
+            ..AgentHost::update()
+        }
+    }
+
+    /// The operator's cordon, as [`FakeService::init`] left it.
+    fn operator_file(sandbox: &Sandbox) -> PathBuf {
+        Self::control(sandbox).join("operator-cordon.json")
+    }
+
     /// The fakes' own files (the clock, the releases, the faults): beside the sandbox, never
     /// in it, because the harness requires every step to leave the sandbox outside `world/` and
     /// `record/` as it was, and the fake clock moves.
-    fn control(sandbox: &Sandbox) -> PathBuf {
+    pub(super) fn control(sandbox: &Sandbox) -> PathBuf {
         sandbox.root().with_extension("fake")
     }
 
-    fn world(sandbox: &Sandbox) -> World {
+    pub(super) fn world(sandbox: &Sandbox) -> World {
         World::new(&sandbox.world(), &Self::control(sandbox), Box::new(NoGate))
     }
 }
@@ -93,6 +132,22 @@ impl FakeService for AgentHost {
             let link = sandbox.world().join("link").join("current");
             swap_link(&link, &relative_to_link(&link, &sandbox.previous()))?;
             world.seed_host(HOST, PREVIOUS_VERSION);
+            if self.operator_cordon {
+                world
+                    .cordon(OPERATOR_CORDON_SECS)
+                    .map_err(|why| io::Error::other(why.to_string()))?;
+                fs::copy(
+                    sandbox.world().join("cordon.json"),
+                    Self::operator_file(sandbox),
+                )?;
+            }
+        }
+        if self.drain_looks > 0 {
+            fs::create_dir_all(Self::control(sandbox))?;
+            fs::write(
+                Self::control(sandbox).join(harness::DRAIN_LOOKS),
+                self.drain_looks.to_string(),
+            )?;
         }
         Ok(())
     }
@@ -105,6 +160,9 @@ impl FakeService for AgentHost {
         ];
         if let Some(defect) = self.defect {
             env.push((DEFECT_VAR.into(), defect.word().into()));
+        }
+        if let Some(ms) = self.window_ms {
+            env.push((WINDOW_VAR.into(), ms.to_string().into()));
         }
         env
     }
@@ -133,31 +191,52 @@ impl FakeService for AgentHost {
         } else {
             fault.reachable(step)
         };
-        if !reachable {
+        // The operator's cordon is not the hook's, so its `cleanup` asks the lease server
+        // nothing, and a server that does not answer cannot fail it.
+        let operators = self.operator_cordon
+            && step == js_agent::update_hook::Step::Cleanup
+            && fault == harness::Fault::Fail;
+        if !reachable || operators {
             return Ok(false);
         }
         harness::arrange(&Self::control(sandbox), step, fault);
         Ok(true)
     }
 
-    /// The hook's record, and a cordon in force on the host.
+    /// The hook's record, and a cordon on the host that is not the operator's. The cordon is
+    /// read from the server's cordon file itself: a file that cannot be read, or that holds no
+    /// cordon, is an error of the check, never "no cordon".
     fn residue(&self, sandbox: &Sandbox) -> io::Result<Vec<String>> {
-        let mut left = Vec::new();
-        if sandbox.record().join("record.json").exists() {
-            left.push("the hook record".to_owned());
-        }
-        if Self::world(sandbox)
-            .host()
-            .is_ok_and(|host| host.cordon.is_some())
-        {
-            left.push("the cordon".to_owned());
-        }
-        Ok(left)
+        residue_of(sandbox, self.operator_cordon)
     }
 }
 
+/// [`AgentHost::residue`].
+pub(super) fn residue_of(sandbox: &Sandbox, operator_cordon: bool) -> io::Result<Vec<String>> {
+    let mut left = Vec::new();
+    match fs::symlink_metadata(sandbox.record().join("record.json")) {
+        Ok(_) => left.push("the hook record".to_owned()),
+        Err(why) if why.kind() == io::ErrorKind::NotFound => {}
+        Err(why) => return Err(why),
+    }
+    let bytes = match fs::read(sandbox.world().join("cordon.json")) {
+        Ok(bytes) => bytes,
+        Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(left),
+        Err(why) => return Err(why),
+    };
+    serde_json::from_slice::<js_agent::update_hook::CordonView>(&bytes)
+        .map_err(|why| io::Error::new(io::ErrorKind::InvalidData, why))?;
+    let operators = operator_cordon
+        .then(|| fs::read(AgentHost::operator_file(sandbox)))
+        .transpose()?;
+    if operators.as_deref() != Some(bytes.as_slice()) {
+        left.push("the cordon".to_owned());
+    }
+    Ok(left)
+}
+
 /// The hook's step of the harness's.
-fn agent_step(step: Step) -> js_agent::update_hook::Step {
+pub(super) fn agent_step(step: Step) -> js_agent::update_hook::Step {
     use js_agent::update_hook::Step as Agent;
     match step {
         Step::Prepare => Agent::Prepare,
@@ -178,7 +257,7 @@ fn agent_step(step: Step) -> js_agent::update_hook::Step {
 ///   server's `cordon.json`, and the record holds it as its own while [`OWNED_CORDON`] is there;
 /// - on a first install, a `rollback` after `cutover` fails `no_previous_release` rather than
 ///   stop an agent that may hold a job (rollback.rs, item 3).
-fn allowances() -> Allowances {
+pub(super) fn allowances() -> Allowances {
     Allowances {
         rollback_rerun_may_say_reversible: true,
         lapsing_cordon: Some(LapsingCordon {
@@ -356,14 +435,154 @@ fn the_fake_binary_speaks_the_harness_kill_point_protocol() {
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "hook-conf-gate");
     let dir = Some(tmp.path().as_os_str().to_owned());
     let ours = harness::HarnessGate::new(dir.clone(), None);
-    assert_eq!(ours.count(), Some(1));
-    let theirs = gate::Gate::parse(dir, None).unwrap();
+    assert_eq!(ours.count().unwrap(), Some(1));
+    let theirs = gate::Gate::parse(dir.clone(), None).unwrap();
     assert_eq!(theirs.count(), 2);
-    assert_eq!(ours.count(), Some(3));
-    // Outside the harness a point counts nothing.
-    assert_eq!(harness::HarnessGate::new(None, None).count(), None);
+    assert_eq!(ours.count().unwrap(), Some(3));
+    // Outside the harness a point counts nothing; inside it, a count that cannot be kept is an
+    // error, never a point left out.
+    assert_eq!(harness::HarnessGate::new(None, None).count().unwrap(), None);
     let unwritable = harness::HarnessGate::new(Some(tmp.path().join("absent").into()), None);
-    assert_eq!(unwritable.count(), None);
+    assert!(unwritable.count().is_err());
+    // A count that worked once and then cannot be kept is an error at the next point.
+    let fresh = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "hook-conf-gate-break");
+    let mut breaking = harness::HarnessGate::new(Some(fresh.path().as_os_str().to_owned()), None);
+    breaking.break_after_first = true;
+    assert_eq!(breaking.count().unwrap(), Some(1));
+    assert!(breaking.count().is_err());
+}
+
+/// A kill point whose count fails after earlier points were counted ends the step with a status
+/// outside the contract, and the harness refuses the run by name: a point is never left out of
+/// the measurement and the replay in silence.
+#[test]
+fn a_kill_point_that_cannot_be_counted_fails_the_run_visibly() {
+    let refused = run(
+        "hook-conf-broken-count",
+        AgentHost::with_defect(Defect::BrokenCount),
+        |harness| harness.idempotence(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            Violation::UnknownExit {
+                step: Step::Prepare,
+                code,
+                ..
+            } if code == i32::from(EXIT_GATE_BROKEN)
+        ),
+        "{refused}"
+    );
+}
+
+/// A step that blocks without ever pausing (a call that never returns) is ended by the
+/// watchdog thread: the step's whole process group is killed, the harness reaps it and refuses
+/// a step that died of a signal, whatever the step. The window is short so the test does not
+/// wait long; the result does not depend on it, since the step never makes progress.
+#[test]
+fn a_step_that_blocks_without_pausing_is_killed_by_the_watchdog_and_refused() {
+    let host = AgentHost {
+        window_ms: Some(200),
+        ..AgentHost::with_defect(Defect::Stall)
+    };
+    let refused = run("hook-conf-stall", host, |harness| harness.idempotence()).unwrap_err();
+    assert!(
+        matches!(refused, Violation::DiedBySignal { .. }),
+        "{refused}"
+    );
+}
+
+/// With the allowances declared, a cordon the hook recorded as its own and then did not lift is
+/// still refused: the allowance excuses only the crash window.
+#[test]
+fn a_cleanup_that_leaves_its_own_cordon_is_refused_with_the_allowances_declared() {
+    let refused = run(
+        "hook-conf-forgets",
+        AgentHost::with_defect(Defect::ForgetsCordon),
+        |harness| harness.idempotence(),
+    )
+    .unwrap_err();
+    match &refused {
+        Violation::ResidueLeft {
+            step: Step::Cleanup,
+            left,
+        } => assert_eq!(left, &["the cordon"]),
+        other => panic!("{other}"),
+    }
+}
+
+/// On a host an operator cordoned before the update, every check passes with the allowances
+/// declared, and the operator's cordon is never the hook's: it is not residue, and the hook
+/// leaves its file as it found it. The cordon path is there before any step, so no kill point
+/// opens the crash window: every crash on this host is compared strictly.
+#[test]
+fn on_a_host_an_operator_cordoned_the_checks_pass_and_the_cordon_is_left_as_it_was() {
+    let host = AgentHost::operator_cordoned();
+    run("hook-conf-op-twice", host, |harness| harness.idempotence()).unwrap();
+    run("hook-conf-op-resume", host, |harness| {
+        harness.crash_resume()
+    })
+    .unwrap();
+    let (ran, _) = run("hook-conf-op-table", host, |harness| harness.scenarios()).unwrap();
+    assert!(ran.len() > 1, "{ran:?}");
+    let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "hook-conf-op-file");
+    let sandbox = Sandbox::create(tmp.path().join("run")).unwrap();
+    let mut fake = host;
+    fake.init(&sandbox).unwrap();
+    assert_eq!(fake.residue(&sandbox).unwrap(), Vec::<String>::new());
+    fs::write(
+        sandbox.world().join("cordon.json"),
+        br#"{"expires_at_ms":1}"#,
+    )
+    .unwrap();
+    assert_eq!(fake.residue(&sandbox).unwrap(), ["the cordon"]);
+}
+
+/// The residue check reads the cordon itself: a cordon file that does not parse, or that is
+/// not a file, makes the check fail rather than read as no cordon; a record directory entry
+/// that cannot be looked at is an error too.
+#[test]
+fn residue_that_cannot_be_read_fails_the_check_and_is_never_read_as_none() {
+    let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "hook-conf-residue");
+    let sandbox = Sandbox::create(tmp.path().join("run")).unwrap();
+    let mut fake = AgentHost::update();
+    fake.init(&sandbox).unwrap();
+    assert_eq!(fake.residue(&sandbox).unwrap(), Vec::<String>::new());
+    let cordon = sandbox.world().join("cordon.json");
+    fs::write(&cordon, b"not json").unwrap();
+    assert_eq!(
+        fake.residue(&sandbox).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+    fs::remove_file(&cordon).unwrap();
+    fs::create_dir(&cordon).unwrap();
+    assert!(fake.residue(&sandbox).is_err());
+    fs::remove_dir(&cordon).unwrap();
+    fs::write(sandbox.record().join("record.json"), b"{}").unwrap();
+    assert_eq!(fake.residue(&sandbox).unwrap(), ["the hook record"]);
+}
+
+/// A taint halts `rollback` before the commit (after a failed `prepare`) and after it (after a
+/// failed `cutover`): the updater's table stops with a halt either way.
+#[test]
+fn a_tainted_rollback_halts_before_and_after_the_commit() {
+    use update_hook::Verdict;
+    for (n, first) in [Step::Prepare, Step::Cutover].into_iter().enumerate() {
+        let faults = [(first, Fault::Fail), (Step::Rollback, Fault::Halt)];
+        let trace = run(
+            &format!("hook-conf-rb-halt-{n}"),
+            AgentHost::update(),
+            |harness| harness.scenario(&faults),
+        )
+        .unwrap()
+        .expect("the fake makes both");
+        assert_eq!(trace.verdict, Verdict::Halt, "{:?}", trace.steps);
+        assert_eq!(
+            trace.steps.last(),
+            Some(&(Step::Rollback, update_hook::Outcome::Halt))
+        );
+    }
 }
 
 /// Every last line the hook can write reads on the harness's strict reader with the same
@@ -422,132 +641,9 @@ fn every_last_line_and_exit_code_of_the_hook_is_the_harness_contract() {
     }
 }
 
-/// The release link the params name is inside the declaration's write paths, as the hook's
-/// `cutover` requires, and the declaration parses over the harness's record directory.
-#[test]
-fn the_declaration_of_the_fake_parses_and_covers_the_release_link() {
-    let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "hook-conf-decl");
-    let record = tmp.path().join("record");
-    fs::create_dir_all(&record).unwrap();
-    let declaration = harness::declaration(&record).unwrap();
-    assert_eq!(declaration.state_dir, record);
-    assert!(
-        declaration
-            .write_paths
-            .iter()
-            .any(|path| Path::new(RELEASE_LINK).starts_with(path))
-    );
-}
-
-/// A clock of the test's: a pause moves it on by what was asked.
-struct TestClock(std::cell::Cell<u64>);
-
-impl js_agent::update_hook::Clock for TestClock {
-    fn now_ms(&self) -> u64 {
-        self.0.get()
-    }
-
-    fn pause(&self, span: std::time::Duration) {
-        self.0
-            .set(self.0.get() + u64::try_from(span.as_millis()).unwrap());
-    }
-}
-
-/// The guard lets a step wait up to its declared bound and fires on the first pause past it,
-/// with the total asked; the clock it guards moves only for the pauses it lets through.
-#[test]
-fn the_hang_guard_fires_on_the_first_wait_past_the_bound_and_not_before() {
-    use js_agent::update_hook::Clock;
-    use std::cell::RefCell;
-    use std::time::Duration;
-    let clock = TestClock(std::cell::Cell::new(0));
-    let fired = RefCell::new(Vec::new());
-    let fire = |asked: Duration| fired.borrow_mut().push(asked);
-    let guard = harness::Guard::new(&clock, Duration::from_secs(30), &fire);
-    for _ in 0..3 {
-        guard.pause(Duration::from_secs(10));
-    }
-    assert_eq!(fired.borrow().as_slice(), &[] as &[Duration]);
-    assert_eq!(
-        (guard.now_ms(), guard.asked()),
-        (30_000, Duration::from_secs(30))
-    );
-    guard.pause(Duration::from_secs(1));
-    assert_eq!(fired.borrow().as_slice(), [Duration::from_secs(31)]);
-    assert_eq!(
-        guard.now_ms(),
-        30_000,
-        "the wait past the bound is not taken"
-    );
-}
-
-/// On a clock that stands still the guard still counts what is asked: a step whose own
-/// deadline never comes is stopped all the same.
-#[test]
-fn the_hang_guard_counts_the_waits_asked_even_when_the_clock_stands_still() {
-    use js_agent::update_hook::Clock;
-    use std::cell::Cell;
-    use std::time::Duration;
-    let clock = TestClock(Cell::new(5));
-    let frozen = harness::Frozen(&clock);
-    let fired = Cell::new(0);
-    let fire = |_: Duration| fired.set(fired.get() + 1);
-    let budget = harness::Guard::budget_of(js_agent::update_hook::Step::Verify);
-    assert_eq!(budget, Duration::from_secs(615));
-    let guard = harness::Guard::new(&frozen, budget, &fire);
-    let mut pauses = 0;
-    while fired.get() == 0 {
-        guard.pause(Duration::from_secs(10));
-        pauses += 1;
-    }
-    assert_eq!(pauses, 62);
-    assert_eq!(guard.now_ms(), 5);
-}
-
-/// The faults each step of the hook can be made to end with, and the words of the faults and
-/// the defects.
-#[test]
-fn the_faults_a_step_can_end_with_and_the_words_that_name_faults_and_defects() {
-    use harness::Fault as F;
-    use js_agent::update_hook::Step as S;
-    let reachable: Vec<(S, F)> = [S::Prepare, S::Cutover, S::Verify, S::Rollback, S::Cleanup]
-        .into_iter()
-        .flat_map(|step| [F::Fail, F::Defer, F::Halt].map(|fault| (step, fault)))
-        .filter(|(step, fault)| fault.reachable(*step))
-        .collect();
-    assert_eq!(
-        reachable,
-        [
-            (S::Prepare, F::Fail),
-            (S::Prepare, F::Defer),
-            (S::Prepare, F::Halt),
-            (S::Cutover, F::Fail),
-            (S::Cutover, F::Defer),
-            (S::Cutover, F::Halt),
-            (S::Verify, F::Fail),
-            (S::Verify, F::Halt),
-            (S::Rollback, F::Fail),
-            (S::Cleanup, F::Fail),
-        ]
-    );
-    let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "hook-conf-faults");
-    assert_eq!(harness::arranged(tmp.path(), S::Verify), None);
-    for fault in [F::Fail, F::Defer, F::Halt] {
-        harness::arrange(tmp.path(), S::Verify, fault);
-        assert_eq!(harness::arranged(tmp.path(), S::Verify), Some(fault));
-    }
-    fs::write(tmp.path().join("faults/verify"), "melt").unwrap();
-    assert_eq!(harness::arranged(tmp.path(), S::Verify), None);
-    for defect in [Defect::NoLastLine, Defect::CutoverRestarts, Defect::Hang] {
-        assert_eq!(Defect::from_word(Some(&defect.word().into())), Some(defect));
-    }
-    assert_eq!(Defect::from_word(Some(&"melt".into())), None);
-    assert_eq!(Defect::from_word(None), None);
-}
-
-/// A first install through the updater's table: success, and every fault the steps can end with
-/// on a first install whose rollback, if any, runs before the link moved or is itself made to
-/// fail. Each ends with the verdict the table gives it.
+/// A first install through the updater's table: success, and every fault the fake can make on a
+/// first install that leads to no rollback after the link moved, or to one that is itself made
+/// to fail. Each ends with the verdict the table gives it.
 #[test]
 fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
     use update_hook::{Class, Phase, Verdict};
@@ -555,7 +651,7 @@ fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
         phase,
         class: Class::Release,
     };
-    let cases: [(&[(Step, Fault)], Verdict); 7] = [
+    let cases: [(&[(Step, Fault)], Verdict); 8] = [
         (
             &[],
             Verdict::Succeeded {
@@ -566,6 +662,9 @@ fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
         (&[(Step::Prepare, Fault::Halt)], Verdict::Halt),
         (&[(Step::Cutover, Fault::Halt)], Verdict::Halt),
         (&[(Step::Verify, Fault::Halt)], Verdict::Halt),
+        // The state directory cannot be looked at: `cleanup` fails after the commit, is retried,
+        // and the update ends failed after the commit, with no rollback.
+        (&[(Step::Cleanup, Fault::Fail)], failed(Phase::AfterCommit)),
         (
             &[(Step::Cutover, Fault::Fail), (Step::Rollback, Fault::Fail)],
             failed(Phase::AfterCommit),
@@ -589,7 +688,6 @@ fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
     for faults in [
         [(Step::Prepare, Fault::Defer)],
         [(Step::Cutover, Fault::Defer)],
-        [(Step::Cleanup, Fault::Fail)],
     ] {
         let made = run(
             "hook-conf-first-none",
@@ -606,7 +704,9 @@ fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
 /// `no_previous_release` by design (rollback.rs, item 3). The first-install allowance covers
 /// the `rollback` of the run-twice check alone (update_hook::conformance::Allowances). Catches a
 /// first install that fails anything else on the way, and tells when the harness extends the
-/// allowance: then these become the checks themselves.
+/// allowance: then these become the checks themselves. The harness's refusal carries no
+/// reason; conformance_runs.rs drives the same paths without it and asserts the reason, the
+/// unchanged state and the updater's verdict, and kills the first install at every kill point.
 #[test]
 fn on_a_first_install_the_harness_refuses_only_the_designed_rollback_after_cutover() {
     let designed = |refused: Violation| {

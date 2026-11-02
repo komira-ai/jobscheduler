@@ -28,6 +28,7 @@ use js_agent_wire::Taint;
 use serde::{Deserialize, Serialize};
 
 pub mod harness;
+pub mod watchdog;
 
 /// Where the fake clock starts, in milliseconds.
 pub const START_MS: u64 = 1_000_000;
@@ -234,6 +235,43 @@ impl World {
             return Ok(());
         }
         self.put_unit(unit, "active", "running")
+    }
+
+    /// Starts `unit` as [`Units::start`] does, but the hello of the agent it starts is
+    /// pending: it reaches the lease server only at [`World::deliver_hello`], as a real agent's
+    /// hello arrives on its own after its unit runs, whether or not the hook that started it is
+    /// still there. The pending hello is kept in the fakes' own files.
+    ///
+    /// # Errors
+    /// The unit's file cannot be read or written, or the link names a release the params never
+    /// did (nothing is changed then).
+    pub fn start_pending(&self, unit: &str) -> Result<(), PortError> {
+        if self.show(unit)?.active == "active" {
+            return Ok(());
+        }
+        let version = self.linked_version()?;
+        self.put_unit(unit, "active", "running")?;
+        if let Some(version) = version {
+            fs::write(self.control.join("pending-hello"), version).map_err(|why| io_err(&why))?;
+        }
+        Ok(())
+    }
+
+    /// The pending hello, if there is one, reaches the lease server; `true` if one did.
+    ///
+    /// # Errors
+    /// The server's files, or the pending hello, cannot be read or written.
+    pub fn deliver_hello(&self) -> Result<bool, PortError> {
+        let file = self.control.join("pending-hello");
+        let version = match fs::read_to_string(&file) {
+            Ok(version) => version,
+            Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(why) => return Err(io_err(&why)),
+        };
+        self.hello(&version)
+            .map_err(|why| PortError::Io(why.to_string()))?;
+        fs::remove_file(&file).map_err(|why| io_err(&why))?;
+        Ok(true)
     }
 
     /// The server restarts: it forgets the host's session, and the next hello makes it live

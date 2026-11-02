@@ -6,12 +6,14 @@
 
 mod args;
 mod conformance;
+mod conformance_runs;
 mod declaration;
 mod fake_bin;
 #[allow(dead_code)]
 #[path = "../../update_hook_fakes/mod.rs"]
 mod fakes;
 mod fakes_tests;
+mod harness_tests;
 mod launchd;
 mod lease_port;
 mod lease_port_transport;
@@ -21,6 +23,7 @@ mod machine_root;
 mod params;
 mod ports;
 mod record;
+mod record_lock;
 mod report;
 #[allow(dead_code)]
 mod rollback_entries;
