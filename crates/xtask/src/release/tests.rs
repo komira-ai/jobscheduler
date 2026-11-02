@@ -530,9 +530,24 @@ fn every_workspace_package_in_the_lock_has_the_workspace_version() {
     {
         assert!(package.contains(&at_version), "{package}");
     }
-    // And a stamp leaves none behind at the old version.
+    // And a stamp leaves no workspace package behind at the old version, and every package
+    // from a source as it was: a git dependency that happens to be at the workspace's version
+    // (the update-hook dev-dependency) is not the workspace's to stamp.
     let stamped = set_lock_version(&lock, version, v(99, 0, 0));
-    assert!(!stamped.contains(&at_version));
+    let packages = |lock: &str| -> (Vec<String>, Vec<String>) {
+        lock.split("[[package]]")
+            .skip(1)
+            .map(str::to_owned)
+            .partition(|package| !package.contains("\nsource = "))
+    };
+    let (members, sourced) = packages(&stamped);
+    assert!(members.len() > 10);
+    let at_new = "\nversion = \"99.0.0\"\n";
+    for package in &members {
+        assert!(package.contains(at_new), "{package}");
+        assert!(!package.contains(&at_version), "{package}");
+    }
+    assert_eq!(sourced, packages(&lock).1);
 }
 
 /// Catches the shipped set of this repository being wrong: it must hold the three shipped

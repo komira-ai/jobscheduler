@@ -613,8 +613,9 @@ fn the_lock_is_exclusive_and_a_second_holder_changes_nothing() {
 
     let second = Held::open(dir.path(), &as_root).unwrap_err();
     match &second {
+        // The directory is locked first, so a second step is refused there.
         StateError::Lock { path, source } => {
-            assert_eq!(path, &dir.path().join(LOCK_FILE));
+            assert_eq!(path, dir.path());
             assert_eq!(source.kind(), io::ErrorKind::WouldBlock);
         }
         other => panic!("{other:?}"),
@@ -627,6 +628,49 @@ fn the_lock_is_exclusive_and_a_second_holder_changes_nothing() {
     drop(first);
     let third = Held::open(dir.path(), &as_root).unwrap();
     assert_eq!(third.load().unwrap(), Some(record("1.4.0")));
+}
+
+/// The hook contract's lock is an exclusive `flock` on the record directory itself: whoever
+/// holds it (the updater, the conformance harness) keeps the step out, and the step makes
+/// nothing in the directory, not even its lock file. Released, the step runs. Catches a hook
+/// that locks only a file inside the directory.
+#[test]
+fn a_holder_of_the_directory_lock_keeps_the_step_out_and_nothing_is_made() {
+    let dir = cell("hook-record-dir-lock");
+    let holder = File::open(dir.path()).unwrap();
+    holder.lock().unwrap();
+    match Held::open(dir.path(), &as_root).unwrap_err() {
+        StateError::Lock { path, source } => {
+            assert_eq!(path, dir.path());
+            assert_eq!(source.kind(), io::ErrorKind::WouldBlock);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    holder.unlock().unwrap();
+    let held = Held::open(dir.path(), &as_root).unwrap();
+    // The step holds the directory now: another holder cannot take it.
+    let other = File::open(dir.path()).unwrap();
+    assert!(other.try_lock().is_err());
+    drop(held);
+    other.try_lock().unwrap();
+}
+
+/// A hook of before the directory lock takes `state_dir/lock` only; while one holds it, this
+/// hook refuses too, at the lock file, and releases the directory it took on the way.
+#[test]
+fn a_holder_of_the_lock_file_alone_still_keeps_the_step_out() {
+    let dir = cell("hook-record-file-lock");
+    let old = File::create(dir.path().join(LOCK_FILE)).unwrap();
+    old.lock().unwrap();
+    match Held::open(dir.path(), &as_root).unwrap_err() {
+        StateError::Lock { path, source } => {
+            assert_eq!(path, dir.path().join(LOCK_FILE));
+            assert_eq!(source.kind(), io::ErrorKind::WouldBlock);
+        }
+        other => panic!("{other:?}"),
+    }
+    File::open(dir.path()).unwrap().try_lock().unwrap();
 }
 
 #[test]
