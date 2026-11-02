@@ -112,10 +112,15 @@ fn each_domain_is_handled_and_named_on_its_own() {
     );
     uid_held(&rig);
 
-    // No session: `gui/<uid>` is neither booted out nor looked at.
+    // The failed teardowns left `gui/<uid>` owed, though the kill ended the login
+    // window: the next one boots it out and judges it again, and discharges it.
     rig.host.state().fail.clear();
     rig.host.state().domains.remove(&format!("user/{uid}"));
     log(&rig);
+    assert_eq!(rig.helper.kill_uid("43.1"), Ok(()));
+    assert!(log(&rig).contains(&format!("bootout {gui}")));
+    assert!(rig.host.state().domains.is_empty());
+    // Discharged: no session, so `gui/<uid>` is neither booted out nor looked at.
     assert_eq!(rig.helper.kill_uid("43.1"), Ok(()));
     assert!(!log(&rig).iter().any(|c| c.contains(&gui)));
 }

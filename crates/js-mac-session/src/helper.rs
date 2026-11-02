@@ -17,9 +17,12 @@
 //!   refused until launchd has the user's `gui/<uid>` domain, which exists once the
 //!   login has completed. `session-ready` answers whether it does.
 //! - `kill-uid` is judged by its outcome, never by what a `launchctl` call answered. It
-//!   looks once, before the kill, whether the uid has a GUI login session (it owns a
-//!   `loginwindow` process; a pool user never logs in, so its `gui/<uid>` is never asked
-//!   about). Then, for at most [`KILL_ROUNDS`] attempts, it kills every process of the
+//!   decides, before the kill, whether the uid may have a GUI login session: the session
+//!   switch's intent record names it, it owns a `loginwindow` process (or one whose name
+//!   cannot be read), or an earlier teardown left its GUI domain owed (a record in the
+//!   state directory, kept until a teardown judges the domain gone). A pool user has none
+//!   of these, so its `gui/<uid>` is never asked about. Then, for at most
+//!   [`KILL_ROUNDS`] attempts, it kills every process of the
 //!   uid and boots out `user/<uid>` (and `gui/<uid>`, only with the session), the
 //!   bootout's own failure only logged, and looks again: done once no process of the
 //!   uid is left and none of those domains prints (`launchctl print` exits non-zero).

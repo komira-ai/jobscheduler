@@ -2,7 +2,7 @@
 
 use crate::autologin::{CommandOutput, Intent, kcpassword, read_intent};
 use crate::helper::tests::{Rig, fds, log, me, my_gid, rig_vm_with};
-use crate::helper::{NewUser, Outcome, Reset};
+use crate::helper::{KILL_ROUNDS, NewUser, Outcome, Reset};
 use crate::lease::UidRange;
 use crate::proto::{Reply, Request, Session};
 use crate::spawn::Spawn;
@@ -413,10 +413,14 @@ fn role_kill_uid_ends_the_vm_user_s_processes_and_no_one_else_s() {
 
     rig.host.state().procs.insert(uid, 1);
     rig.host.state().stubborn.insert(uid, 100);
-    let error = rig.helper.role_kill_uid().unwrap_err();
-    assert!(
-        error.contains(&format!("processes of uid {uid} remain")),
-        "{error}"
+    // The VM user is no lease: nothing quarantines its uid, and the refusal says the
+    // verb can be repeated rather than that a delete frees it.
+    assert_eq!(
+        rig.helper.role_kill_uid(),
+        Err(format!(
+            "1 processes of uid {uid} remain after {KILL_ROUNDS} attempts: 1000 (proc0); \
+             role-kill-uid can be repeated"
+        ))
     );
     // Over the wire.
     rig.host.state().stubborn.clear();

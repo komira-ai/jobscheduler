@@ -179,7 +179,9 @@ impl Helper {
     pub fn role_kill_uid(&self) -> Result<(), String> {
         let _ledger = self.lock();
         let role = self.vm_role()?;
-        self.kill_account(role.name, role.account.uid)?;
+        // The login window logs the VM user in while the intent record says `vm`.
+        let intended = read_intent(&self.settings.session.intent)? == Some(Intent::Vm);
+        self.kill_account(role.name, role.account.uid, intended)?;
         tracing::info!(uid = role.account.uid, "no process of the VM user is left");
         Ok(())
     }

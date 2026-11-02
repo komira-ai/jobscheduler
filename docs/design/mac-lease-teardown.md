@@ -11,14 +11,21 @@ How `js-mac-session` ends a lease user on macOS (`kill-uid`, then `user-delete`)
 
 The verdict is the outcome, never what a `launchctl` call answered: no process of the uid is left, and the uid's launchd domains no longer print.
 
-1. Look once, before anything is killed, whether the uid has a GUI login session: it owns a `loginwindow` process (the login window runs as the user of each GUI session). A pool user never logs in, so it has none, and its `gui/<uid>` is never asked about. A whole-machine lease's user or the VM user, logged in, has one; the kill in step 2 ends it, which is why the look comes first.
+1. Before anything is killed, decide whether the uid may have a GUI login session. It may when any of these holds:
+   - the session switch's intent record names the account (the login window logs in only the user it names, so a login may be on its way);
+   - the uid owns a `loginwindow` process (the login window runs as the user of each GUI session), or a process whose name cannot be read (which does not rule one out);
+   - an earlier teardown left its GUI domain owed (below).
+
+   A pool user has none of these, so its `gui/<uid>` is never asked about. A process named `loginwindow` without a session only costs a bootout of `gui/<uid>` that fails and a look that finds it gone. A session seen at a later look of the processes (step 4) counts from the next attempt on. The decision comes before the kill because the kill ends the `loginwindow`.
+
+   From the moment a session is seen, `gui/<uid>` is owed a teardown: a record `gui-teardown.<uid>` in the helper's state directory, written before the kill. It is removed only once a teardown judges `gui/<uid>` gone. So a retry after a failed GUI teardown (whose kill ended the `loginwindow`), the boot reset after a restart of the helper, and `user-delete` all still boot out and judge it.
 2. Kill every process of the uid.
 3. Boot out `user/<uid>` (and `gui/<uid>`, only with a session). The bootout's own exit status is not a verdict: it fails for a domain that is not there, and can fail after it ended the domain. A failure is logged.
 4. Look at the outcome:
    - a process of the uid is left, or a domain still prints: go to 2;
    - neither: done.
 
-   The loop runs at most `KILL_ROUNDS` (10) attempts. The bound is a count, never a time. If the outcome still does not hold after the last attempt, `kill-uid` fails naming what remains (the processes, the domains, and why each domain was not told gone), and the uid is quarantined (see below).
+   The loop runs at most `KILL_ROUNDS` (10) attempts. The bound is a count, never a time. If the outcome still does not hold after the last attempt, `kill-uid` fails naming what remains (the processes, the domains, and why each domain was not told gone), and the uid is quarantined (see below). For the VM user (`role-kill-uid`), which is no lease, the refusal says the verb can be repeated instead. A process table that cannot be read stops the teardown at once (not retried); the uid stays held and the caller repeats it.
 5. Remove the crontab and `at` jobs, then run 2–4 again.
 
 A domain prints when `launchctl print` exits 0. Any other exit status is a domain launchd does not print. No exit status is matched as "not found": launchd's answer for a domain it does not have varies (on macOS 26, `launchctl print gui/<uid>` for a user that never logged in has exited 112 and 113, "Could not find domain", and 125, "Domain does not support specified action", from run to run). A `launchctl` that a signal ended, or that could not be run, gave no answer: the domain is not taken as gone, and the next attempt looks again.
@@ -32,7 +39,7 @@ This reading is the teardown's only. A domain wrongly read as gone there is caug
    - If the record is already gone (a delete repeated after it went), there is no `DARWIN_USER_DIR` of the uid's own. Use every directory two levels down in the per-user folders that the uid owns. An `<xx>`, or such a directory, on another filesystem (something mounted there) refuses the delete: the sweep never crosses a filesystem, so what is behind the mount is never taken as clean.
 2. **Settle.**
    - No process may remain.
-   - Boot out `user/<uid>`, as in `kill-uid` (its failure logged); if it still prints, or `launchctl print` gave no answer, the delete is refused. `gui/<uid>` is not asked about: with no process of the uid left there is no login session, and `kill-uid` judged its domain.
+   - Boot out `user/<uid>`, and `gui/<uid>` while it is owed, as in `kill-uid` (a failure logged); if one still prints, or `launchctl print` gave no answer, the delete is refused. Otherwise `gui/<uid>` is not asked about: with no process of the uid left there is no login session. After the last settle an owed `gui/<uid>` is discharged.
    - Look for processes again, once, without waiting: a job launchd started before the bootout ended its domain is found here, and any process seen refuses the delete at once. Such a job may have written again what the sweep removed before exiting, so it is never waited out; the repeated delete sweeps everything again.
 3. Remove the crontab and `at` jobs. No process may remain.
 4. Sweep the home and the other places. Remove the entry whole, and only if the uid owns it:

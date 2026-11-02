@@ -106,6 +106,12 @@ pub(crate) struct State {
     /// The domains whose `bootout` ends them and fails anyway, as `launchctl bootout`
     /// can ("Boot-out failed: 5: Input/output error").
     pub(crate) bootout_fails_anyway: BTreeSet<String>,
+    /// Per uid, how many `live_processes` calls of it come before a login of the uid
+    /// completes (it joins `gui`): a session that starts during a teardown.
+    pub(crate) login_after: BTreeMap<u32, usize>,
+    /// The uids with one more live process whose name cannot be read (`?`, pid 901),
+    /// which a kill ends.
+    pub(crate) unreadable: BTreeSet<u32>,
 }
 
 impl State {
@@ -290,6 +296,7 @@ impl Host for FakeHost {
             state.procs.remove(&uid);
         }
         state.gui.remove(&uid);
+        state.unreadable.remove(&uid);
         let left = state.respawns.get(&uid).copied().unwrap_or(0);
         if state.agents.remove(&uid) && state.domains.contains(&format!("user/{uid}")) && left > 0 {
             state.respawns.insert(uid, left - 1);
@@ -299,10 +306,21 @@ impl Host for FakeHost {
     }
 
     /// `n` live processes are pids 1000 to 999+n, commands `proc0` and on; after them
-    /// the login window's of a uid in `gui`.
+    /// the login window's of a uid in `gui`, and the unreadable one of a uid in
+    /// `unreadable`.
     fn live_processes(&self, uid: u32) -> io::Result<Vec<LiveProcess>> {
         self.call("live_processes", format!("live_processes {uid}"))?;
         let mut state = self.state();
+        match state.login_after.get(&uid).copied() {
+            Some(0) => {
+                state.login_after.remove(&uid);
+                state.gui.insert(uid);
+            }
+            Some(n) => {
+                state.login_after.insert(uid, n - 1);
+            }
+            None => {}
+        }
         if state.due.remove(&uid) && state.domains.contains(&format!("user/{uid}")) {
             state.agents.insert(uid);
         }
@@ -313,12 +331,17 @@ impl Host for FakeHost {
             pid: 900,
             command: "loginwindow".to_owned(),
         });
+        let unreadable = state.unreadable.contains(&uid).then(|| LiveProcess {
+            pid: 901,
+            command: "?".to_owned(),
+        });
         Ok((0..n)
             .map(|i| LiveProcess {
                 pid: 1000 + i32::try_from(i).unwrap(),
                 command: format!("proc{i}"),
             })
             .chain(login)
+            .chain(unreadable)
             .collect())
     }
 
