@@ -24,7 +24,10 @@
 //!    passes. The connection stays open until the process exits: a thread of the runtime
 //!    waits on it, and [`Runtime::poll`] reads what it found, so it never blocks.
 //! 4. `kill-uid` ends every process of the user, not only the one started (a job may
-//!    detach children), and `user-delete` removes the user and sweeps its home.
+//!    detach children), and boots out the user's launchd domains so launchd restarts
+//!    none of its per-user agents; `user-delete` removes the user and sweeps its home and
+//!    its entry under `/var/folders`. A step that fails leaves the user in the helper's
+//!    ledger, its uid held, and the lease in the journal for the next start to end.
 //!
 //! A start that pins a bundle (`RunSpec::bundle`) also has its bundle's trees pinned for
 //! the run before anything is made, the trees the bundle writes to cloned into the run's

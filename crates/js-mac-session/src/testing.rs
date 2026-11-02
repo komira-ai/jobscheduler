@@ -41,7 +41,8 @@ pub(crate) struct State {
     /// Every `pause` so far.
     pub(crate) pauses: usize,
     /// Calls that fail, by name ("uid_taken", "make_home", "create_user",
-    /// "delete_user", "domain_exists", "bootout gui", "kill_all", "live_processes",
+    /// "delete_user", "domain_exists", "bootout gui", "bootout user", "user_dir",
+    /// "kill_all", "live_processes",
     /// "command", "reset_password", "boot_session", "account", "processes", "kill_group").
     pub(crate) fail: BTreeSet<&'static str>,
     /// What `command` answers, by the command's text (`program arg ...`). A command
@@ -70,8 +71,31 @@ pub(crate) struct State {
     pub(crate) tables_ok: Option<usize>,
     /// How many more `kill_group` calls leave their group alive.
     pub(crate) stubborn_groups: usize,
-    /// The launchd domains that exist (`gui/<uid>` once a login has completed).
+    /// The launchd domains that exist (`gui/<uid>` once a login has completed). As
+    /// launchd does, `bootout user/<uid>` ends the domain only while no process of the
+    /// uid lives (in `procs`): a live one makes it again.
     pub(crate) domains: BTreeSet<String>,
+    /// The uids whose per-user launchd agent (`distnoted`, say) runs in `user/<uid>`; it
+    /// counts as one more live process of the uid. A kill or a bootout of the domain
+    /// ends it.
+    pub(crate) agents: BTreeSet<u32>,
+    /// Per uid, how many more times launchd restarts the agent after a kill ended it.
+    /// The restart is there at the next look if `user/<uid>` still exists then.
+    pub(crate) respawns: BTreeMap<u32, usize>,
+    /// The uids whose agent launchd has a restart due for.
+    pub(crate) due: BTreeSet<u32>,
+    /// Answers `domain_exists` gives, in order, before it reads `domains` again: a
+    /// domain that launchd makes (or ends) between two of the helper's steps.
+    pub(crate) exists_script: VecDeque<bool>,
+    /// Per call name (as in `fail`), whether each next call fails, in order; once a
+    /// script is used up, `fail` decides again. A failure that clears, or one that starts
+    /// after some calls succeeded.
+    pub(crate) fail_script: BTreeMap<&'static str, VecDeque<bool>>,
+    /// For each next `bootout user/<uid>`, in order, how many processes of the uid a job
+    /// launchd starts just before the domain goes leaves running.
+    pub(crate) bootout_starts: VecDeque<usize>,
+    /// What `user_dir` answers, by uid; `/var/folders/zz/<uid>/0/` when unset.
+    pub(crate) user_dirs: BTreeMap<u32, PathBuf>,
 }
 
 impl State {
@@ -116,7 +140,11 @@ impl FakeHost {
     fn call(&self, name: &'static str, text: String) -> io::Result<()> {
         let mut state = self.state();
         state.log.push(text);
-        if state.fail.contains(name) {
+        let scripted = state
+            .fail_script
+            .get_mut(name)
+            .and_then(VecDeque::pop_front);
+        if scripted.unwrap_or_else(|| state.fail.contains(name)) {
             return Err(io::Error::other(format!("{name} failed")));
         }
         Ok(())
@@ -154,16 +182,54 @@ impl Host for FakeHost {
 
     fn domain_exists(&self, domain: &str) -> io::Result<bool> {
         self.call("domain_exists", format!("domain_exists {domain}"))?;
-        Ok(self.state().domains.contains(domain))
+        let mut state = self.state();
+        let scripted = state.exists_script.pop_front();
+        Ok(scripted.unwrap_or_else(|| state.domains.contains(domain)))
     }
 
+    /// A domain that does not exist fails as `launchctl bootout` does; one that exists
+    /// is ended, unless (`user/<uid>`) a process of the uid lives to make it again.
     fn bootout(&self, domain: &str) -> io::Result<()> {
         let name = if domain.starts_with("gui/") {
             "bootout gui"
         } else {
             "bootout user"
         };
-        self.call(name, format!("bootout {domain}"))
+        self.call(name, format!("bootout {domain}"))?;
+        let mut state = self.state();
+        let user = domain
+            .strip_prefix("user/")
+            .map(|uid| uid.parse::<u32>().unwrap());
+        // Whether a process of the uid lives to make the domain again: one that a job
+        // launchd started just before the bootout does not count, and keeps running.
+        let alive = user.is_some_and(|uid| state.procs.get(&uid).is_some_and(|n| *n > 0));
+        if let Some(uid) = user {
+            let started = state.bootout_starts.pop_front().unwrap_or(0);
+            if started > 0 {
+                *state.procs.entry(uid).or_default() += started;
+            }
+        }
+        if !state.domains.remove(domain) {
+            return Err(io::Error::other(format!("no such domain {domain}")));
+        }
+        if let Some(uid) = user {
+            state.agents.remove(&uid);
+            if alive {
+                state.domains.insert(domain.to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// The answer set in `user_dirs`, or `/var/folders/zz/<uid>/0/`.
+    fn user_dir(&self, uid: u32, gid: u32) -> io::Result<PathBuf> {
+        self.call("user_dir", format!("user_dir {uid}:{gid}"))?;
+        Ok(self
+            .state()
+            .user_dirs
+            .get(&uid)
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from(format!("/var/folders/zz/{uid}/0/"))))
     }
 
     fn kill_all(&self, uid: u32) -> io::Result<()> {
@@ -180,6 +246,11 @@ impl Host for FakeHost {
         } else {
             state.procs.remove(&uid);
         }
+        let left = state.respawns.get(&uid).copied().unwrap_or(0);
+        if state.agents.remove(&uid) && state.domains.contains(&format!("user/{uid}")) && left > 0 {
+            state.respawns.insert(uid, left - 1);
+            state.due.insert(uid);
+        }
         Ok(())
     }
 
@@ -187,8 +258,12 @@ impl Host for FakeHost {
     fn live_processes(&self, uid: u32) -> io::Result<Vec<LiveProcess>> {
         self.call("live_processes", format!("live_processes {uid}"))?;
         let mut state = self.state();
+        if state.due.remove(&uid) && state.domains.contains(&format!("user/{uid}")) {
+            state.agents.insert(uid);
+        }
+        let agent = usize::from(state.agents.contains(&uid));
         let scripted = state.live_script.pop_front();
-        let n = scripted.unwrap_or_else(|| state.procs.get(&uid).copied().unwrap_or(0));
+        let n = scripted.unwrap_or_else(|| state.procs.get(&uid).copied().unwrap_or(0) + agent);
         Ok((0..n)
             .map(|i| LiveProcess {
                 pid: 1000 + i32::try_from(i).unwrap(),

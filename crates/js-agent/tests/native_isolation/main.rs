@@ -23,10 +23,13 @@
 //!    seed failure, a bare EPERM/EACCES included, proves nothing. A run that did not cover at
 //!    least a file, a process, a keychain item, a launchd agent and shared memory, or seeded
 //!    nothing itself, fails. A launch agent that root loaded is labelled "loaded by root" and
-//!    is no sandbox claim. A launch agent that neither the job nor root can load
-//!    (a pool uid has no login session, so launchd may have no domain for it) is NOT
-//!    EXERCISED: it covers nothing, root's every attempt is printed as a `PROBE agent-attempt`
-//!    line, and the run cannot reach a verdict.
+//!    is no sandbox claim. A launch agent that neither the job nor root can load (a pool uid
+//!    has no login session, so launchd may have no domain for it) has NO PATH, and is
+//!    covered, only on all of `no_path.rs`'s evidence: launchd's domain-level refusal of the
+//!    job's own bootstrap, the job's plist valid by `plutil -lint`, every attempt of root run,
+//!    and root's `launchctl print` showing the domain absent or without the agent; otherwise it is NOT EXERCISED:
+//!    it covers nothing, and the run cannot pass. Root's every attempt is a `PROBE
+//!    agent-attempt` line.
 //! 2. Between the runs the test does what the agent does when a run ends and the next
 //!    begins: `NativeRuntime::remove` (the helper's `kill-uid`, then `user-delete`), and
 //!    the next start makes the user again (`user-create`).
@@ -75,6 +78,7 @@ mod after_seed;
 mod child;
 mod lines;
 mod look;
+mod no_path;
 mod report;
 mod token;
 mod views;
@@ -429,7 +433,8 @@ impl Trial {
             &mut self.seeded,
         )?;
         let a = ran_a.id.clone();
-        let owner = fs::metadata(self.fixture.homes.join(user_of(&a)))
+        let home_a = self.fixture.homes.join(user_of(&a));
+        let owner = fs::metadata(&home_a)
             .map_err(|why| format!("the home of run A: {why}"))?
             .uid();
         if owner != uid {
@@ -441,7 +446,7 @@ impl Trial {
             pids: ran_a.pids.clone(),
         };
         self.confirm_denials_by_log(&started, &job);
-        self.bootstrap_agents_as_root(uid);
+        self.bootstrap_agents_as_root(uid, &home_a);
         println!("{}", self.seeded_table());
         let missing = look::missing_minimum(&self.seeded);
         if !missing.is_empty() {
@@ -524,6 +529,7 @@ impl Trial {
                         }
                         Verdict::Seeded => "seeded".to_owned(),
                         Verdict::Denied => "refused by the profile".to_owned(),
+                        Verdict::NoPath => "no path (refused the job and root)".to_owned(),
                         _ => "refused (proves nothing)".to_owned(),
                     },
                     line.text.clone(),
