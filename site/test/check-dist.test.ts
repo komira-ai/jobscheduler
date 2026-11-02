@@ -223,15 +223,23 @@ test('check-dist follows modules that import each other in a cycle without loopi
   checkDist(withBody('cycle', '<script src="/assets/a.js"></script><script src="/assets/b.js"></script>', files));
 });
 
-test('check-dist counts a module two scripts share once, and counts nothing for a data module a page imports', () => {
+test('check-dist counts a module two scripts share once', () => {
   const quarter = 40 * 1024;
   const pad = (head: string): string => head + '\n//' + 'x'.repeat(quarter - head.length - 3);
-  const files = {
-    'assets/a.js': pad("import './s.js';\nimport './d/data/t.js';"),
-    'assets/b.js': pad("import './s.js';"),
-    'assets/s.js': pad('export {};'),
-    'assets/d/data/t.js': 'export default 1;\n',
-  };
-  // a + b + s once = 120 KiB, under the 128 KiB page limit; counted twice it would be 160 KiB.
+  const files = { 'assets/a.js': pad("import './s.js';"), 'assets/b.js': pad("import './s.js';"), 'assets/s.js': pad('export {};') };
+  // a + b + s once = 120 KiB, under the 128 KiB page limit; s counted twice would be 160 KiB and refused.
   checkDist(withBody('shared-once', '<script src="/assets/a.js"></script><script src="/assets/b.js"></script>', files));
+});
+
+test('check-dist counts the bytes of a data module a page imports, and does not follow what its text looks like it imports (the check can fail)', () => {
+  const quarter = 40 * 1024;
+  const pad = (head: string): string => head + '\n//' + 'x'.repeat(quarter - head.length - 3);
+  const page = '<script src="/assets/a.js"></script><script src="/assets/b.js"></script>';
+  const base = { 'assets/a.js': pad("import './s.js';\nimport './d/data/t.js';"), 'assets/b.js': pad("import './s.js';"), 'assets/s.js': pad('export {};') };
+  // A 20 KiB data module is counted: 120 + 20 KiB is over the limit.
+  const big = { ...base, 'assets/d/data/t.js': `export default "${'x'.repeat(20 * 1024)}";\n` };
+  assert.throws(() => checkDist(withBody('data-counted', page, big)), /loads \d+ bytes of JavaScript; the limit for one page is 131072/);
+  // A small data module whose JSON text reads like an import of a 40 KiB module: following it would reach 160 KiB.
+  const quoted = { ...base, 'assets/d/data/t.js': "export default \"import '../../z.js';\";\n", 'assets/z.js': pad('export {};') };
+  checkDist(withBody('data-not-followed', page, quoted));
 });

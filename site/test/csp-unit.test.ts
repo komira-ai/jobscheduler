@@ -66,8 +66,12 @@ const GOVERNED: [string, string][] = [
 for (const [tag, directive] of GOVERNED) {
   const name = tag.slice(0, tag.indexOf('>') + 1);
   test(`${name} is governed by ${directive}: refused when that directive lacks 'self', allowed when it has it (the check can fail)`, () => {
-    assert.equal(violationsOf(`default-src 'self'; ${directive} 'none'`, tag).length, 1);
-    assert.deepEqual(violationsOf(`default-src 'none'; ${directive} 'self'`, tag), []);
+    // A tag governed by default-src itself is tested with that one directive, so no policy repeats a directive.
+    const [refused, allowed] = directive === 'default-src'
+      ? ["default-src 'none'; img-src 'self'", "default-src 'self'; img-src 'none'"]
+      : [`default-src 'self'; ${directive} 'none'`, `default-src 'none'; ${directive} 'self'`];
+    assert.equal(violationsOf(refused, tag).length, 1);
+    assert.deepEqual(violationsOf(allowed, tag), []);
   });
 }
 
