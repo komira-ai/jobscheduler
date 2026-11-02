@@ -1,7 +1,8 @@
 //! Edges of the sweep the larger tests above do not reach: a path whose parent is not
 //! there, an entry that goes between a listing and its examination, a park that has
 //! no free name or cannot be written, a folder the owner must be given back by name,
-//! and a directory with no extended attributes.
+//! a directory with no extended attributes, and a per-user folders entry (or one of its
+//! entries) that goes while it is searched for or removed.
 
 use super::*;
 use crate::sweep::flags::make_owner_rwx;
@@ -196,4 +197,54 @@ fn a_parked_tree_that_cannot_be_removed_records_the_refusal() {
             .any(|error| error.contains("ermission denied")),
         "{swept:?}"
     );
+}
+
+/// Asserts that a `<xx>` or an entry gone between the search's listing and its look is
+/// skipped, not an error. It catches a search failed (and the uid held for good) by a
+/// daemon removing its own folder.
+#[test]
+fn an_entry_gone_during_the_search_is_skipped() {
+    let dir = scratch("entry-owned-vanish");
+    let folders = dir.join("folders");
+    fs::create_dir_all(folders.join("ab/one")).unwrap();
+    fs::create_dir_all(folders.join("cd/gone")).unwrap();
+    let shard = folders.join("cd");
+    // The first listing is of the folders: `cd` goes before it is looked at.
+    let found = vanishing(
+        after_listing(1, move || fs::remove_dir_all(&shard).unwrap()),
+        || crate::sweep::owned_entries(&folders, me()),
+    );
+    assert_eq!(found.unwrap(), [dir.join("folders/ab/one")]);
+
+    let folders = dir.join("folders");
+    let one = folders.join("ab/one");
+    // The second listing is of `ab`: its entry goes before it is looked at.
+    let found = vanishing(
+        after_listing(2, move || fs::remove_dir_all(&one).unwrap()),
+        || crate::sweep::owned_entries(&folders, me()),
+    );
+    assert_eq!(found.unwrap(), Vec::<std::path::PathBuf>::new());
+}
+
+/// Asserts that an entry inside the uid's entry that is gone by the time it is looked at
+/// is no error, and the entry still goes. It catches a removal failed by a daemon
+/// removing its own temporary file in the entry.
+#[test]
+fn something_gone_from_the_entry_during_its_removal_is_no_error() {
+    let dir = scratch("entry-removal-vanish");
+    let entry = dir.join("ab/cdef");
+    fs::create_dir_all(entry.join("T")).unwrap();
+    let t = entry.join("T");
+    let swept = vanishing(
+        after_listing(1, move || fs::remove_dir_all(&t).unwrap()),
+        || crate::sweep::remove_owned(&entry, me()),
+    );
+    assert_eq!(
+        swept,
+        crate::sweep::Swept {
+            removed: 1,
+            ..crate::sweep::Swept::default()
+        }
+    );
+    assert!(!dir.join("ab/cdef").exists());
 }

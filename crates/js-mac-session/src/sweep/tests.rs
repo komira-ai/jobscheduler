@@ -437,7 +437,7 @@ fn the_macos_plan_names_the_places_of_the_design() {
             .contains(&"/private/var/db/com.apple.xpc.launchd/loginitems.{uid}.plist".to_owned())
     );
     assert!(plan.owned.contains(&Path::new("/Users").join("Shared")));
-    assert!(plan.owned.contains(&PathBuf::from("/private/var/folders")));
+    assert!(!plan.owned.contains(&PathBuf::from("/private/var/folders")));
 }
 
 /// Catches: an emptied folder that keeps an entry because the uid does not own it (a

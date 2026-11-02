@@ -20,13 +20,13 @@
 //!   error;
 //! - `ps`, `ipcs`, `find`: no not-found answer; any status but 0 is a failed look.
 //!
-//! The same care applies to run A's seeds. A kind counts as COVERED when it was seeded, or
-//! when the product profile refused the seed with a SANDBOX denial (the job could not create
-//! the state, so nothing can carry over). The denial must carry the SANDBOX's own signature:
-//! the kernel's `Sandbox: <proc>(<pid>) deny(` line in the failure, or a bare `EPERM`/`EACCES` that
-//! the unified log (read from the start of run A) confirms as that seed's by such a line whose
-//! pid is the process that tried the seed, and which carries the seed's token or the kind's
-//! operation. That pid is the tool that failed (its pid is in the failure, and it must be one
+//! The same care applies to run A's seeds. A kind counts as COVERED when it was seeded, when
+//! the product profile refused the seed with a SANDBOX denial (the job could not create the
+//! state, so nothing can carry over), or (an agent) when it has no path (`no_path.rs`).
+//! The denial must carry the SANDBOX's own signature: the kernel's `Sandbox: <proc>(<pid>)
+//! deny(` line in the failure, or a bare `EPERM`/`EACCES` that the unified log (read from the
+//! start of run A) confirms as that seed's by such a line whose pid is the process that tried
+//! the seed, and which carries the seed's token or the kind's operation. That pid is the tool that failed (its pid is in the failure, and it must be one
 //! the run printed), or, when no tool is named, the job's own process alone: the first pid a
 //! run prints ([`JobProcs::own`]). Another tool of the job and the process it left running are
 //! never that pid. Neither a token nor an operation counts from any other pid, and a tool's
@@ -476,15 +476,15 @@ pub fn final_verdict(seeded: &[Line], survivors: usize, unproven: &[String]) -> 
     }
 }
 
-/// The kinds run A neither seeded nor had denied by the sandbox (refused otherwise, or not
+/// The kinds no line of run A covers ([`Verdict::covers`]: refused otherwise, or not
 /// reported at all), in kind order.
 fn unexercised_kinds(seeded: &[Line]) -> Vec<Kind> {
     Kind::ALL
         .into_iter()
         .filter(|kind| {
-            !seeded.iter().any(|line| {
-                line.kind == *kind && matches!(line.verdict, Verdict::Seeded | Verdict::Denied)
-            })
+            !seeded
+                .iter()
+                .any(|line| line.kind == *kind && line.verdict.covers())
         })
         .collect()
 }
@@ -577,13 +577,13 @@ fn has_sandbox_signature(text: &str) -> bool {
 
 /// The kinds a run A must have covered for the result to mean anything: a file, a process,
 /// a keychain item, a launchd agent and some shared memory. A kind is covered when it was
-/// seeded or denied by the profile. What is missing, by name; a run where these were refused
-/// for another reason proves nothing.
+/// seeded, denied by the profile, or (an agent) with no path. What is missing, by name; a run
+/// where these were refused for another reason proves nothing.
 pub fn missing_minimum(lines: &[Line]) -> Vec<&'static str> {
     let seeded = |kind: Kind| {
-        lines.iter().any(|line| {
-            line.kind == kind && matches!(line.verdict, Verdict::Seeded | Verdict::Denied)
-        })
+        lines
+            .iter()
+            .any(|line| line.kind == kind && line.verdict.covers())
     };
     let mut missing = Vec::new();
     for (kind, name) in [
