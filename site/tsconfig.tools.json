@@ -7,5 +7,5 @@
     "outDir": "build/tools",
     "rootDir": "."
   },
-  "include": ["tools", "test"]
+  "include": ["tools", "test", "src/copy.ts"]
 }

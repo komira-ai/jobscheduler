@@ -85,3 +85,28 @@ test('the workflow follows the repository\'s rules: no permission at the top, pi
   assert.match(wf, /persist-credentials: false/);
   assert.equal(/id-token|environment:|aws |s3 |publish/i.test(wf.replace(/^#.*$/gm, '')), false, 'this workflow builds and tests; it does not publish');
 });
+
+/** What is wrong with the test script: coverage is measured on the compiled tools and sources, and fails the run below 99%. */
+function testScriptProblems(script: string): string[] {
+  const out: string[] = [];
+  if (!script.includes('--experimental-test-coverage')) out.push('does not measure coverage');
+  for (const kind of ['lines', 'branches']) {
+    const m = new RegExp(`--test-coverage-${kind}=(\\d+)(?!\\d)`).exec(script);
+    if (!m) out.push(`no --test-coverage-${kind} threshold`);
+    else if (Number(m[1]) < 99) out.push(`--test-coverage-${kind}=${m[1]} is below 99`);
+  }
+  if (!script.includes("--test-coverage-exclude='build/tools/test/**'")) out.push('does not exclude the tests from the measurement');
+  return out;
+}
+
+test('npm test measures coverage and fails below 99% of lines and of branches', () => {
+  assert.deepEqual(testScriptProblems(pkg.scripts.test), []);
+});
+
+test('the coverage threshold check can fail', () => {
+  const ok = pkg.scripts.test as string;
+  assert.match(testScriptProblems(ok.replace('--experimental-test-coverage', '')).join(), /does not measure coverage/);
+  assert.match(testScriptProblems(ok.replace('--test-coverage-lines=99', '')).join(), /no --test-coverage-lines threshold/);
+  assert.match(testScriptProblems(ok.replace('--test-coverage-branches=99', '--test-coverage-branches=90')).join(), /branches=90 is below 99/);
+  assert.match(testScriptProblems(ok.replace("--test-coverage-exclude='build/tools/test/**'", '')).join(), /does not exclude the tests/);
+});

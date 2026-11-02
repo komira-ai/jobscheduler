@@ -91,14 +91,19 @@ export function buildSite(opts: BuildOptions): { id: string; files: string[] } {
   return { id, files: listFiles(opts.outDir) };
 }
 
-if (require.main === module) {
-  // Compiled to site/build/tools/tools/build.js.
-  const site = resolve(__dirname, '..', '..', '..');
+/**
+ * The command line: builds the site under `site` into `argv[0]`, or into site/dist without one, and reports the file
+ * count and the asset id to `out`.
+ */
+export function main(site: string, argv: readonly string[], out: { write(s: string): unknown }): void {
   const { id, files } = buildSite({
     browserDir: join(site, 'build', 'browser'),
     staticDir: join(site, 'static'),
     contentDir: join(site, 'content'),
-    outDir: join(site, 'dist'),
+    outDir: argv[0] === undefined ? join(site, 'dist') : resolve(argv[0]),
   });
-  process.stdout.write(`dist: ${files.length} files, assets/${id}/\n`);
+  out.write(`dist: ${files.length} files, assets/${id}/\n`);
 }
+
+// Compiled to site/build/tools/tools/build.js, so the site is three levels up.
+if (require.main === module) main(resolve(__dirname, '..', '..', '..'), process.argv.slice(2), process.stdout);

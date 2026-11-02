@@ -5,7 +5,7 @@
   "description": "The jobscheduler.dev web site: pages prerendered by a build program, a little script, no runtime dependencies",
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.browser.json",
-    "test": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\" && tsc -p tsconfig.browser.json && tsc -p tsconfig.tools.json && node --test build/tools/test/*.test.js",
+    "test": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\" && tsc -p tsconfig.browser.json && tsc -p tsconfig.tools.json && node --test --experimental-test-coverage --test-coverage-exclude='build/tools/test/**' --test-coverage-lines=99 --test-coverage-branches=99 build/tools/test/*.test.js",
     "build": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\" && tsc -p tsconfig.browser.json && tsc -p tsconfig.tools.json && node build/tools/tools/build.js",
     "golden": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\" && tsc -p tsconfig.browser.json && tsc -p tsconfig.tools.json && node build/tools/tools/manifest.js"
   },

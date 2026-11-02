@@ -329,3 +329,63 @@ test('the built copy script imports the logic module with an extension a browser
   assert.match(script, /from\s*['"]\.\/copy-core\.js['"]/);
   assert.ok(read(dist, 'assets', assets[1], 'copy-core.js').includes('Press Ctrl+C'));
 });
+
+// ---- the browser entry ------------------------------------------------------------------------------------------
+
+/**
+ * Loads the compiled src/copy.ts afresh with the given globals installed (the page reads them again at each click, so
+ * they stay until the returned function restores the originals).
+ */
+function loadEntry(globals: { document: unknown; navigator: unknown; setTimeout: unknown }): () => void {
+  const g = globalThis as unknown as Record<string, unknown>;
+  const names = ['document', 'navigator', 'setTimeout'] as const;
+  const saved = names.map((n) => Object.getOwnPropertyDescriptor(g, n));
+  const file = require.resolve('../src/copy');
+  const restore = (): void => {
+    names.forEach((n, i) => (saved[i] ? Object.defineProperty(g, n, saved[i]) : Reflect.deleteProperty(g, n)));
+    Reflect.deleteProperty(require.cache, file);
+  };
+  try {
+    for (const n of names) Object.defineProperty(g, n, { value: globals[n], configurable: true, writable: true });
+    Reflect.deleteProperty(require.cache, file);
+    require(file);
+  } catch (e) {
+    restore();
+    throw e;
+  }
+  return restore;
+}
+
+test('the browser entry adds a Copy button to each command block of the page, and a click writes the commands and arms the page timer', async () => {
+  const block = new FakeBlock(new FakePre(runsOf(INSTALL)));
+  const clipboard = new ManualClipboard();
+  const timers: { fn: () => void; ms: number }[] = [];
+  const restore = loadEntry({
+    document: new FakeDoc([block]),
+    navigator: { clipboard },
+    setTimeout: (fn: () => void, ms: number) => timers.push({ fn, ms }),
+  });
+  try {
+    assert.equal(block.buttons.length, 1);
+    assert.equal(block.buttons[0].textContent, 'Copy');
+    block.buttons[0].click();
+    await clipboard.resolve(0);
+    assert.deepEqual(clipboard.written, ['sha256sum -c --ignore-missing SHA256SUMS\njs lease acquire --max-wall 2h\n']);
+    assert.equal(block.buttons[0].textContent, 'Copied');
+    assert.deepEqual(timers.map((t) => t.ms), [DONE_MS], 'the reset runs on the page\'s own setTimeout');
+    timers[0].fn();
+    assert.equal(block.buttons[0].textContent, 'Copy');
+  } finally {
+    restore();
+  }
+});
+
+test('the browser entry does nothing on a page without a clipboard (the check can fail)', () => {
+  const none = new FakeBlock(new FakePre(runsOf(INSTALL)));
+  loadEntry({ document: new FakeDoc([none]), navigator: {}, setTimeout: () => 0 })();
+  assert.equal(none.buttons.length, 0);
+  // Negative: the same page with a clipboard is enhanced.
+  const some = new FakeBlock(new FakePre(runsOf(INSTALL)));
+  loadEntry({ document: new FakeDoc([some]), navigator: { clipboard: new ManualClipboard() }, setTimeout: () => 0 })();
+  assert.equal(some.buttons.length, 1);
+});
