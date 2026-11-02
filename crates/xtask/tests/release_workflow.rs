@@ -322,6 +322,26 @@ fn the_macos_leg_builds_the_client_agent_bundle_and_mac_tools_and_packs_with_gnu
     assert!(build.contains(r#""$tar" -C "stage-$bin" --sort=name"#));
 }
 
+/// Asserts that the files of every archive are laid down by `cargo xtask release stage`, the one
+/// list of what an archive holds (the Linux js-agent archive carries the updater's declaration),
+/// and not copied by the step itself, so an archive cannot drift from what the tests read.
+#[test]
+fn the_archives_are_staged_by_the_xtask_list_and_nothing_else() {
+    let text = workflow();
+    let jobs = jobs(&text);
+    let build = job(&jobs, "build").join("\n");
+    assert!(
+        build.contains(
+            r#"cargo xtask release stage --bin "$bin" --target "$TARGET" --version "$VERSION" --out "stage-$bin""#
+        ),
+        "{build}"
+    );
+    assert_eq!(build.matches("release stage").count(), 1, "{build}");
+    for copy in ["cp \"target/", "mkdir \"stage-", "LICENSE \"stage-"] {
+        assert!(!build.contains(copy), "{copy} in {build}");
+    }
+}
+
 /// Asserts that the `sums` job expects the `js-bundle` archive of both targets, so a build
 /// that stops making one fails before anything is attested, and that both matrix legs build it.
 /// The two Mac host tools are expected for darwin only.

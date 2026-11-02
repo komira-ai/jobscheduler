@@ -738,15 +738,17 @@ fn pure_crates_reach_no_runtime_or_network_crate() {
     assert!(check_closure(&copy.dir, &metadata).is_err());
 }
 
-/// Asserts that only kbf's update-hook contract crate may come from kbf's repository, and only
-/// as a dev-dependency: the crate as a normal dependency, another crate from kbf's repository at
-/// the root (by a name without `kbf`), and a member's own git dependency on kbf's repository are
-/// each refused. Catches this repository taking anything else from kbf under another name.
+/// Asserts that only kbf's update-hook contract crate and its declaration rules (update-rights)
+/// may come from kbf's repository, and only as dev-dependencies: either crate as a normal
+/// dependency, another crate from kbf's repository at the root (by a name without `kbf`), and a
+/// member's own git dependency on kbf's repository are each refused, and update-rights as a
+/// dev-dependency of another member is not. Catches this repository taking anything else from
+/// kbf under another name, or shipping either crate in a binary.
 #[test]
 fn only_the_update_hook_contract_crate_may_come_from_kbf_and_only_for_tests() {
     let from_kbf = |manifest: &str, package: &str| {
         format!(
-            "{manifest} takes {package} from kbf's repository; only update-hook, as a dev-dependency, may come from there"
+            "{manifest} takes {package} from kbf's repository; only update-hook and update-rights, as dev-dependencies, may come from there"
         )
     };
     let real = Copy::new("kbf-contract-real");
@@ -768,6 +770,34 @@ fn only_the_update_hook_contract_crate_may_come_from_kbf_and_only_for_tests() {
     assert!(
         copy.found()
             .contains(&from_kbf("crates/js-agent/Cargo.toml", "update-hook")),
+        "{:?}",
+        copy.found()
+    );
+
+    let copy = Copy::new("kbf-rights-normal");
+    copy.edit(
+        "crates/xtask/Cargo.toml",
+        "[lints]",
+        "[dependencies.update-rights]\nworkspace = true\n\n[lints]",
+    );
+    assert!(
+        copy.found()
+            .contains(&from_kbf("crates/xtask/Cargo.toml", "update-rights")),
+        "{:?}",
+        copy.found()
+    );
+
+    let copy = Copy::new("kbf-rights-dev-elsewhere");
+    copy.edit(
+        "crates/js-client/Cargo.toml",
+        "[lints]",
+        "[dev-dependencies.update-rights]\nworkspace = true\n\n[lints]",
+    );
+    assert!(
+        !copy
+            .found()
+            .iter()
+            .any(|line| line.contains("kbf's repository")),
         "{:?}",
         copy.found()
     );

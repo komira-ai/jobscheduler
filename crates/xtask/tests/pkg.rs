@@ -133,6 +133,11 @@ fn good() -> Spec {
                 0o755,
                 b"host setup",
             ),
+            file(
+                "./usr/share/js-agent/updater.d/js-agent.toml",
+                0o644,
+                b"declaration",
+            ),
             file("./usr/share/doc/js-agent/copyright", 0o644, b"license"),
         ],
     }
@@ -222,6 +227,7 @@ fn digests() -> Digests {
         service: sha(b"unit"),
         tmpfiles: sha(b"tmpfiles"),
         host_setup: sha(b"host setup"),
+        declaration: sha(b"declaration"),
         license: sha(b"license"),
     }
 }
@@ -468,6 +474,7 @@ fn bytes_other_than_the_sources_are_refused() {
         ("usr/lib/systemd/system/js-agent.service", "Service"),
         ("usr/lib/tmpfiles.d/js-agent.conf", "Tmpfiles"),
         ("usr/share/js-agent/crun_host_setup.sh", "HostSetup"),
+        ("usr/share/js-agent/updater.d/js-agent.toml", "Declaration"),
         ("usr/share/doc/js-agent/copyright", "License"),
     ] {
         let mut spec = good();
@@ -710,6 +717,12 @@ fn scratch(name: &str) -> PathBuf {
     std::fs::write(dir.join("packaging/js-agent.service"), b"unit").expect("unit");
     std::fs::write(dir.join("packaging/tmpfiles.conf"), b"tmpfiles").expect("tmpfiles");
     std::fs::write(dir.join("packaging/crun_host_setup.sh"), b"host setup").expect("script");
+    std::fs::create_dir_all(dir.join("packaging/updater.d")).expect("updater.d");
+    std::fs::write(
+        dir.join("packaging/updater.d/js-agent.toml"),
+        b"declaration",
+    )
+    .expect("declaration");
     std::fs::write(dir.join("LICENSE"), b"license").expect("license");
     std::fs::write(dir.join("js-agent.deb"), deb(&good())).expect("deb");
     dir
@@ -740,7 +753,7 @@ fn refused(dir: &Path) -> Vec<String> {
 fn check_compares_the_deb_with_the_files_it_was_built_from() {
     let dir = scratch("check");
     let line = check(&args(&dir)).expect("the package");
-    assert!(line.ends_with("js-agent 1.2.3 with 5 files"), "{line}");
+    assert!(line.ends_with("js-agent 1.2.3 with 6 files"), "{line}");
     let other = elf_with(2, 1, X86_64, &[(PT_LOAD, vec![1; 8])]);
     for (file, bytes, source) in [
         ("js-agent", other.as_slice(), "Binary"),
@@ -754,6 +767,11 @@ fn check_compares_the_deb_with_the_files_it_was_built_from() {
             "packaging/crun_host_setup.sh",
             &b"another script"[..],
             "HostSetup",
+        ),
+        (
+            "packaging/updater.d/js-agent.toml",
+            &b"another declaration"[..],
+            "Declaration",
         ),
         ("LICENSE", &b"another license"[..], "License"),
     ] {
@@ -792,6 +810,7 @@ fn check_names_the_file_it_cannot_read() {
         "packaging/js-agent.service",
         "packaging/tmpfiles.conf",
         "packaging/crun_host_setup.sh",
+        "packaging/updater.d/js-agent.toml",
         "LICENSE",
     ] {
         let dir = scratch(&format!("unreadable-{}", gone.replace('/', "-")));

@@ -19,7 +19,9 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    When there is nothing to release, the run ends there, green.
 4. `build` stamps the version into the CI checkout, builds the binaries for
    `x86_64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`) and `aarch64-apple-darwin` (`js`, `js-agent`, `js-bundle`, `js-mac-session`, `js-mac-provision`), checks that
-   the Linux ones are static and that `--version` prints the release version, and packages them. `sums` writes one `SHA256SUMS` over the archives.
+   the Linux ones are static and that `--version` prints the release version, and packages them:
+   `cargo xtask release stage` lays down the files of each archive (`crates/xtask/src/release/stage.rs`
+   lists them) and `tar` makes it. `sums` writes one `SHA256SUMS` over the archives.
 5. `attest` attests every archive with build provenance (`actions/attest-build-provenance`);
    `verify` then checks the attestations the way a user does (below).
 6. `publish` creates the GitHub release for `vX.Y.Z` as a draft (its tag name `vX.Y.Z`, its target the
@@ -76,7 +78,9 @@ from the dependency graph (`cargo metadata`), not listed: the crates of `js-leas
 (the `js` binary), `js-agent`, `js-bundle-cli` (the `js-bundle` binary), `js-mac-session`, `js-mac-provision` and `js-mdm`, and every workspace crate they depend on through normal or build
 dependencies. Every file of those crates ships (`src/**`, `Cargo.toml`, `build.rs`, a sample
 configuration compiled in with `include_str!`) except `tests/`, `benches/`, `examples/` and markdown;
-so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything under `.cargo/`.
+so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything under `.cargo/`,
+and `packaging/js-agent/updater.d/js-agent.toml`, the host updater's declaration, which the
+Linux `js-agent` archive carries as it is.
 
 A file in one of the excluded places still ships when a shipped source compiles it in. `plan` reads
 the `include_str!`, `include_bytes!` and `include!` calls of every shipped `.rs` file (not those
@@ -121,7 +125,7 @@ For version `X.Y.Z`:
 |---|---|
 | `js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary and `LICENSE` |
 | `js-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js` binary and `LICENSE` |
-| `js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-agent` binary and `LICENSE` |
+| `js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-agent` binary, `LICENSE` and `updater.d/js-agent.toml`, the host updater's declaration (below) |
 | `js-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js` binary for Apple silicon Macs and `LICENSE` |
 | `js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-agent` binary for Apple silicon Macs and `LICENSE` |
 | `js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-mdm` binary and `LICENSE` |
@@ -132,6 +136,16 @@ For version `X.Y.Z`:
 | `SHA256SUMS` | SHA-256 of the ten archives |
 
 Each archive unpacks to a directory named like the archive without `.tar.gz`.
+
+The Linux `js-agent` archive also holds `updater.d/js-agent.toml`, the declaration the host
+updater loads the js-agent hook's rights from (`packaging/js-agent/updater.d/js-agent.toml`; the
+updater's own install step puts it in `/etc/updater.d` from a verified release, after checking
+it asks for no more than the approved one). It sits beside the binary, at the name kbf's release
+unpacker takes a declaration by (`updater.d/<binary>.toml`), and the attestation of the archive
+covers it. It is the file the js-agent deb carries as
+`/usr/share/js-agent/updater.d/js-agent.toml`. `crates/xtask/tests/js_agent_declaration.rs` loads
+it with the updater's own validator (kbf's `update-rights`, at the revision the root manifest
+pins) and with the hook's, and fails if the deb or the archive leaves it out.
 
 The Linux binaries are statically linked against musl, so they run on any Linux host of that architecture, including `gcr.io/distroless/cc-debian12`. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools`; musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries, including the root helper `js-mac-session`, are not codesigned or notarized. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`.
 

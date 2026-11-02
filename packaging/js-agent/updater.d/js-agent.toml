@@ -1,0 +1,69 @@
+# /etc/updater.d/js-agent.toml   root:root, mode 0644: the host updater's declaration for js-agent on a
+# Linux host (kbf's host-updates design, 2.4 and 4.2). The js-agent archive of each release carries it
+# as updater.d/js-agent.toml beside the binary, and the deb as
+# /usr/share/js-agent/updater.d/js-agent.toml; the updater's own install step puts it in
+# /etc/updater.d from a verified release. Edit the lease server (`--server=` below) to this host's.
+#
+# The hook is `js-agent update-hook <step>`, run as root: it manages js-agent-crun.service, a root
+# unit, and reads the agent's state root, which only root may. The updater refuses a string in the
+# [hook.params] of a hook that runs as root, so the hook's text values are flags in `hook_args`:
+#   --release-link  the link js-agent-crun.service runs its program through; `cutover` and
+#                   `rollback` move it. It lies inside /opt/js-agent/link, a write path, and is not
+#                   one itself: the swap writes the link's parent
+#   --server        the lease server, as the agent's own --server in the unit
+#   --state-root    the agent's state root (the host credential, the taint and owed-* records)
+#   --token-file    the join token, used while the state root holds no host credential
+#
+# Top-level keys come first: in TOML a key after a table header belongs to that table.
+# crates/js-agent/tests/agent/update_hook/shipped_declaration.rs loads this file with the updater's
+# own validator and with the hook's, and pins the rules said here.
+name   = "js-agent"
+binary = "js-agent"
+hook_args = ["update-hook", "--release-link=/opt/js-agent/link/current", "--server=SET-THE-SERVER", "--state-root=/var/lib/js-agent/state", "--token-file=/etc/js-agent/token"]
+signer = { repository = "komira-ai/jobscheduler", workflow = "release.yml" }
+# js-agent-crun.service runs the agent as root; the agent runs every crun as the job user.
+uid    = "root"
+# The agent is stopped for the length of a cutover; the registration outlives a restart.
+registration_ttl_secs = 300
+# No health_ports: the agent has no listener. Its health is the hook's `verify`.
+# At least verify + rollback (615 + 8220 = 8835).
+verify_deadline_secs = 9000
+# The hook record: root's, mode 0700, outside the agent's and the job user's paths.
+state_dir = "/var/lib/js-agent-update"
+
+[hook]
+user  = "root"
+group = "root"
+# Root keeps file ownership and systemd's authority over the unit; no capability beyond it.
+capabilities = []
+# The releases and the link, the agent's state root (taint and owed-* records, the host credential)
+# and the join token.
+read_paths   = ["/opt/js-agent", "/var/lib/js-agent", "/etc/js-agent"]
+# Exactly three, none inside another: the release directories the updater stages, the directory of
+# the release link, and the hook record (the state_dir above).
+write_paths  = ["/opt/js-agent/releases", "/opt/js-agent/link", "/var/lib/js-agent-update"]
+units        = ["js-agent-crun.service"]
+# dbus (the unit manager) and the lease server.
+address_families = ["AF_UNIX", "AF_INET", "AF_INET6"]
+environment  = { }
+
+[hook.timeout_secs]
+# drain_wait 3600 + 300.
+prepare  = 3900
+# The unit's TimeoutStopSec 3900 + start to active 120 + 300.
+cutover  = 4320
+# The hello wait 300 + three polls of 5 s + 300.
+verify   = 615
+# drain_wait 3600 + the stop 3900 + start 120 + the hello wait 300 + 300.
+rollback = 8220
+# An HTTP call and a file delete.
+cleanup  = 120
+
+[hook.params]
+# Whole seconds, read by the hook (crates/js-agent/src/update_hook/params.rs).
+cordon_lease_secs = 300
+# prepare + cutover + verify + rollback + 300.
+cordon_max_secs   = 17355
+# The unit's --drain-wait.
+drain_wait_secs   = 3600
+defer_retry_secs  = 300

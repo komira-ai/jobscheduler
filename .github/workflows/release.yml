@@ -256,9 +256,9 @@ jobs:
             bin="${entry##*:}"
             cargo build --locked --release --target "$TARGET" -p "$package" --bin "$bin"
             name="$bin-$VERSION-$TARGET"
-            mkdir "stage-$bin"
-            mkdir "stage-$bin/$name"
-            cp "target/$TARGET/release/$bin" LICENSE "stage-$bin/$name/"
+            # The files of the archive (crates/xtask/src/release/stage.rs): the binary, LICENSE
+            # and, in the Linux js-agent archive, updater.d/js-agent.toml.
+            cargo xtask release stage --bin "$bin" --target "$TARGET" --version "$VERSION" --out "stage-$bin"
             "$tar" -C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz"
           done
           ls -l dist

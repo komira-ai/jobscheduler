@@ -201,6 +201,8 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         ".cargo/config.toml",
         ".cargo/config",
         ".cargo/other",
+        // The js-agent archive carries the host updater's declaration as it is.
+        "packaging/js-agent/updater.d/js-agent.toml",
     ] {
         assert!(is_shipped(path, &shipped), "{path} ships");
     }
@@ -221,6 +223,9 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         ".github/workflows/release.yml",
         "coverage-baseline",
         "deny.toml",
+        "packaging/js-agent/js-agent-crun.service",
+        "packaging/js-agent-macos/updater.toml",
+        "packaging/js-agent/updater.d/other.toml",
         "crates/js-cli/Cargo.lock",
     ] {
         assert!(!is_shipped(path, &shipped), "{path} does not ship");

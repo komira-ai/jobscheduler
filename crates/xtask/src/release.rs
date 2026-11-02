@@ -5,13 +5,17 @@
 //!   that ships changed since the latest `v*` tag, and the version if so.
 //! - [`stamp`]: sets the release version in the CI checkout (`Cargo.toml` and `Cargo.lock`)
 //!   before the build, so `--version` of every binary prints it. Nothing is committed.
+//! - [`stage`]: lays down the files of one release archive, the binary, `LICENSE` and, in the
+//!   Linux archive of `js-agent`, the host updater's declaration.
 //!
 //! What ships is computed, not listed: the workspace crates the shipped binaries
 //! (`js-lease-server`, `js` from `js-cli`, `js-agent`, `js-bundle` from `js-bundle-cli`, `js-mac-session`, `js-mac-provision`, `js-mdm`) depend on, through normal and build
 //! dependencies (`cargo metadata`). Every file of such a crate ships (`src/**`, manifest,
 //! `build.rs`, an `include_str!`'d sample configuration) except its `tests/`, `benches/`,
 //! `examples/`, markdown and `Cargo.lock`; so do the root `Cargo.toml`, `Cargo.lock`,
-//! `rust-toolchain.toml` and everything under `.cargo/`. Everything else does not: docs,
+//! `rust-toolchain.toml` and everything under `.cargo/`, and the host updater's declaration of
+//! js-agent ([`stage::DECLARATION_SOURCE`]), which the js-agent archive carries as it is.
+//! Everything else does not: docs,
 //! markdown, `.github/`, and the crates no shipped binary depends on (`xtask`,
 //! `js-coverage`, `js-conformance`). A file in one of the excluded places that a shipped
 //! source includes (`include_str!` and its kin, read by [`include`]) ships too.
@@ -28,6 +32,7 @@ use serde::Deserialize;
 
 pub mod include;
 pub mod plan;
+pub mod stage;
 pub mod stamp;
 
 #[cfg(test)]
@@ -247,18 +252,24 @@ impl Metadata {
 /// The files at the root of the repository that ship in every binary.
 const ROOT_FILES: [&str; 3] = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"];
 
+/// The files outside the crates that an archive carries as they are ([`stage::members`]), the
+/// binary and `LICENSE` aside: a change to one is a change of a release asset.
+const ARCHIVED_FILES: [&str; 1] = [stage::DECLARATION_SOURCE];
+
 /// The directory at the root whose files (`config.toml`: rustflags, linker, build settings)
 /// change how every binary is built.
 const CARGO_DIR: &str = ".cargo/";
 
 /// Whether a change to `path` (relative to the repository root) changes a shipped binary:
-/// a root build input (including everything under `.cargo/`), or a file of a shipped crate.
+/// a root build input (including everything under `.cargo/`), a file an archive carries as it
+/// is ([`ARCHIVED_FILES`]), or a file of a shipped crate.
 /// Everything in a shipped crate ships (a file can be `include_str!`'d from anywhere in
 /// it) except what is never compiled into a binary: `tests/`, `benches/`, `examples/`,
 /// markdown outside `src/`, and a crate-level `Cargo.lock` (cargo reads the workspace's);
 /// a file of those kinds that a shipped source includes still ships ([`first_shipped`]).
 pub fn is_shipped(path: &str, dirs: &BTreeSet<String>) -> bool {
     ROOT_FILES.contains(&path)
+        || ARCHIVED_FILES.contains(&path)
         || path.starts_with(CARGO_DIR)
         || dirs.iter().any(|dir| {
             path.strip_prefix(dir.as_str())
