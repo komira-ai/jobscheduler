@@ -38,6 +38,7 @@ const SERVER_KEYS: &[&str] = &[
     "agent_hello_interval",
     "require_host_credential",
     "placement",
+    "estimate_feed",
     "usage_db",
     "usage_off",
     "profile_store_bytes",
@@ -95,6 +96,7 @@ pub(crate) struct AgentKeys {
     interval: Option<Duration>,
     require_host_credential: Option<bool>,
     placement: Option<Placement>,
+    estimate_feed: Option<bool>,
 }
 
 impl AgentKeys {
@@ -108,6 +110,7 @@ impl AgentKeys {
                 self.require_host_credential.is_some(),
             ),
             ("placement", self.placement.is_some()),
+            ("estimate_feed", self.estimate_feed.is_some()),
         ];
         given.into_iter().find(|(_, set)| *set).map(|(key, _)| key)
     }
@@ -130,6 +133,12 @@ impl AgentKeys {
     /// Who places a lease on a registered host; the registry unless the file says so.
     pub(crate) fn placement(&self) -> Placement {
         self.placement.unwrap_or_default()
+    }
+
+    /// Whether each lease's estimated end is fed to the drain cost; off unless the file
+    /// says so.
+    pub(crate) fn estimate_feed(&self) -> bool {
+        self.estimate_feed.unwrap_or(false)
     }
 }
 
@@ -181,8 +190,13 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         interval: s.duration("agent_hello_interval")?,
         require_host_credential: s.boolean("require_host_credential")?,
         placement: read_placement(&mut s)?,
+        estimate_feed: s.boolean("estimate_feed")?,
     };
     let usage = read_usage(&mut s)?;
+    // The rule of `--estimate-feed`: with usage off there is nothing to estimate from.
+    if agents.estimate_feed() & usage.off {
+        return Err(s.fail("estimate_feed", "not allowed with server.usage_off"));
+    }
     let totals = super::budget::read_totals(&mut s)?;
     let alerts = read_alerts(&mut s)?;
     // The same check as `--default-ttl` and `--max-ttl`.

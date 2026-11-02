@@ -31,6 +31,7 @@ mod config_support;
 mod config_usage;
 mod disk;
 mod elastic_fake_e2e;
+mod estimate_feed;
 mod gpu_path_pin;
 mod guard_names;
 mod joins;

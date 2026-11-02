@@ -104,6 +104,12 @@ pub(crate) struct StoredLease {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     pub acquired_at_ms: u64,
+    /// When the lease's ttl and maximum wall time started counting, written only when it
+    /// is not `acquired_at_ms` (a whole lease observed ready after its acquire). Absent is
+    /// `acquired_at_ms`; a build that predates the field reads the row without it and keeps
+    /// it on rewrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
     pub expires_at_ms: u64,
     pub ends_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

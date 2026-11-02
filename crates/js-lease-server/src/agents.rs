@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use js_agent_wire::InstanceIdentity;
 use js_elastic::HostName;
-use js_registry::{Credential, OsSessions, Registry};
+use js_registry::{Credential, OsSessions, ProfileLives, Registry};
 use js_types::ProviderId;
+use js_usage::{ProfileCurves, ProfileKey};
 use tracing::{error, warn};
 
 use crate::adapt::SharedClock;
@@ -25,6 +26,24 @@ use crate::usage_hub::Usage;
 use crate::usage_map::limits_of;
 use crate::usage_setup::UsageSetup;
 use crate::util::blocking;
+
+/// The source of lives the estimate feed reads: the learned curves, or [`NoLives`] for a
+/// sink that keeps none.
+fn lives_of(curves: Option<Arc<ProfileCurves>>) -> Arc<dyn ProfileLives> {
+    match curves {
+        Some(curves) => curves,
+        None => Arc::new(NoLives),
+    }
+}
+
+/// The source of lives of a usage sink that keeps no curves: no profile has a known life.
+struct NoLives;
+
+impl ProfileLives for NoLives {
+    fn wall_minutes_p90(&self, _: &ProfileKey) -> Option<u32> {
+        None
+    }
+}
 
 /// What the agent routes and the tick share. Agent handlers take the registry's lock and
 /// nothing else of the server's: the lease table's lock is taken before the registry's
@@ -84,6 +103,7 @@ pub(crate) fn assemble(
                 hello_limit,
                 require_host_credential,
                 placement,
+                estimate_feed,
             } = *agents;
             let path = state_path(state_file, ".agents");
             let joins = JoinTokens::open(
@@ -102,9 +122,14 @@ pub(crate) fn assemble(
                 .into_iter()
                 .for_each(|placer| registry.set_placer(placer));
             let usage = usage.build(clock, limits, &registry)?;
-            // The learned lives of the profiles cost a lease's end in the drain order.
-            let curves = usage.iter().filter_map(|usage| usage.curves());
-            curves.for_each(|curves| registry.set_lives(curves));
+            // `--estimate-feed`: the learned lives of the profiles cost a lease's end in the
+            // drain order. Set before the bookings are put back, so a lease restored from
+            // the lease file keeps the start and the bound it records. A sink that keeps
+            // no curves gives a source that knows no profile: every lease is then costed
+            // at its bound, restored ones included. Off, no source is set, no estimate is
+            // passed and every lease is costed at its bound.
+            let lives = lives_of(usage.iter().find_map(|usage| usage.curves()));
+            estimate_feed.then(|| registry.set_lives(lives));
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());
             }
@@ -311,6 +336,10 @@ impl Agents {
 #[cfg(test)]
 #[path = "agents_mint_tests.rs"]
 mod mint_tests;
+
+#[cfg(test)]
+#[path = "agents_estimate_tests.rs"]
+mod estimate_tests;
 
 #[cfg(test)]
 mod tests {

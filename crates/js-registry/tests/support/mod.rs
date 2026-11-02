@@ -162,6 +162,30 @@ pub fn lease(sequence: u64) -> LeaseId {
     LeaseId::new(1, sequence)
 }
 
+/// The booking a lease file records for lease `sequence` held on `on`, booking `shares`
+/// (`None` for the whole host), started at 0 and bound to end at 0.
+pub fn booking(on: &str, sequence: u64, shares: Option<Resources>) -> js_lease::Booking {
+    booking_at(on, sequence, shares, 0, 0)
+}
+
+/// As [`booking`], started at `started_ms` and bound to end at `ends_ms`.
+pub fn booking_at(
+    on: &str,
+    sequence: u64,
+    shares: Option<Resources>,
+    started_ms: u64,
+    ends_ms: u64,
+) -> js_lease::Booking {
+    js_lease::Booking {
+        lease: lease(sequence),
+        host: host(on),
+        state: js_lease::LeaseState::Held,
+        shares,
+        started_at: Timestamp::from_millis(started_ms),
+        ends_at: Timestamp::from_millis(ends_ms),
+    }
+}
+
 pub fn request() -> Request {
     Request {
         class: ClassId::new("mac-host").unwrap(),

@@ -420,18 +420,25 @@ fn bookings_are_the_hosts_the_file_names() {
     let before = fs::read_to_string(scratch.file()).unwrap();
 
     let bookings = read_bookings(scratch.file()).unwrap();
+    // Both leases started at their acquire, so they start and end as the table lists them.
+    let listed = table.list();
+    let info = |id| listed.iter().find(|info| info.id == id).unwrap();
     let expected = vec![
         Booking {
             lease: held.id,
             host: held.host,
             state: LeaseState::Held,
             shares: None,
+            started_at: info(held.id).acquired_at,
+            ends_at: info(held.id).ends_at,
         },
         Booking {
             lease: doomed.id,
             host: doomed.host,
             state: LeaseState::Releasing,
             shares: None,
+            started_at: info(doomed.id).acquired_at,
+            ends_at: info(doomed.id).ends_at,
         },
     ];
     assert_eq!(bookings, expected);

@@ -45,6 +45,7 @@
 //! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
 //! | `--require-host-credential` | off by default: turn it on once every agent is new. The first hello of a one-time join token must then say the agent keeps a host credential, or it is refused `join-token-credential-required` (403) and the token stays unused; so the token of every launched host is dead after its first hello. Pool join tokens are not affected. Needs `--agent-pool-config` |
 //! | `--placement registry\|js-sched` | who picks the host of a lease on a host that registered itself, `registry` unless given. `registry` books the first free host by id: a lease holds a whole host, and a class that books part of a host is refused `unsupported-class`. `js-sched` builds a `js-sched` scheduler over the hosts that could take the lease (they fit it, have room beside the leases already there, and are bookable) and books the one it names (for a class that books part of a host, the host the lease fits most tightly, so the most booked first, equal hosts by a hash of the lease and the host; a lease that books a whole host is not scored and takes the first free host by id, as under `registry`; a start costs time in the open hosts plus their leases, under the registry's lock); a class that books part of a host is then leasable, and its leases share a host that has room, a host running its first lease taking a second. The registry still checks the room and makes the booking, and a request the scheduler cannot describe, or one it places nowhere though the registry found room, is booked first-by-id and counted and logged. The flag is refused at start for a pool whose capabilities name no `arch`. Leases restored from the lease file are seated with the resources it records whatever the flag says now. Needs `--agent-pool-config` |
+//! | `--estimate-feed` | off by default. When a whole-node request has to pick a host to drain, each lease is costed at its estimated end, cut to its max-wall bound: the lease's start plus the largest P90 wall time, among the profiles the usage file has learned, of the runs queued on it with a profile name. A lease with no such run is costed at its bound, as every lease is without the flag, and a lease with neither (no such run, and a max wall so long that its end saturates) ranks its host after every host whose tail is known. A usage sink that keeps no curves leaves every lease at its bound. A lease restored from the lease file keeps the start and the bound the file records (its acquire, or for a whole-node lease the moment it was ready). Needs `--agent-pool-config`; not with `--usage-off` |
 //! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start |
 //! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `250ms`, `15m`, `2h` |
 //! | `--tick` | how often the table is ticked and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
@@ -61,8 +62,8 @@
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
-//! hello limit flags, `--require-host-credential` and `--placement` need `--agent-pool-config`, and are
-//! refused without it.
+//! hello limit flags, `--require-host-credential`, `--placement` and `--estimate-feed` need
+//! `--agent-pool-config`, and are refused without it.
 //!
 //! # The configuration file
 //!
@@ -96,6 +97,8 @@
 //! # required by a pool with accelerators (a floor of one GPU or more); a lease asking for
 //! # more is refused 422 `wall-time-above-ceiling`; config file only, there is no flag
 //! # placement ("registry", or "js-sched"): the flag's name and values; refused unless a pool registers agents
+//! # estimate_feed (false): the flag's name and default; refused unless a pool registers
+//! # agents, and refused as true beside usage_off = true
 //! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456):
 //! # the flags' names, defaults and rules; usage_db is refused beside usage_off = true
 //! # alert_webhook_url, alert_webhook_token_file, alert_repeat_after (1h): every alert of the

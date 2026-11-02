@@ -58,8 +58,10 @@
 //! state = "held"            # pending | held | releasing
 //! host = "gpu-01"           # absent until the provider names it
 //! acquired_at_ms = 1000000
+//! started_at_ms = 1000500   # optional: when the ttl and wall time started counting, if not
+//!                           # acquired_at (a whole lease ready after its acquire)
 //! expires_at_ms = 1060000
-//! ends_at_ms = 4600000      # acquired_at plus the request's maximum wall time
+//! ends_at_ms = 4600500      # the start plus the request's maximum wall time
 //! validation_run = "val-7"  # optional
 //! whole = true              # optional: a whole-node class; absent means not whole
 //! ttl_ms = 60000            # a pending whole lease only: the granted ttl ...
@@ -74,7 +76,10 @@
 //! ```
 //!
 //! [`read_bookings`] reports `shares` as [`Booking::shares`], so a provider that lets
-//! leases share a host puts the lease back with what it booked. The field is read
+//! leases share a host puts the lease back with what it booked, and the start (`started_at_ms`,
+//! or `acquired_at_ms` when it is absent) and `ends_at_ms` as [`Booking::started_at`] and
+//! [`Booking::ends_at`], so a provider that estimates when a lease ends counts from them. A
+//! build that predates `started_at_ms` reads past it and keeps it on rewrite. The field is read
 //! leniently: a file from before it, or a row whose resources are not a valid vector,
 //! reads as a lease that books the whole host, and a field of the row that this build does
 //! not know is ignored. A row that is not a table, or lacks `cpu_millis` or `memory_bytes`,

@@ -187,7 +187,7 @@ fn a_restored_sharing_lease_keeps_its_resources() {
     let mut p = pool(&[]);
     p.fx.registry.set_placer(Arc::new(Last::default()));
     let two = || Some(Resources::new(2000, 1, 0, None).unwrap());
-    let seat = |n: u64| p.provider.seat_booked(&host("a"), lease(n), None, two());
+    let seat = |n: u64| p.provider.seat_booked(&booking("a", n, two()), None);
     assert_eq!((seat(1), seat(2)), (Ok(()), Ok(())));
     p.fx.join("a", "t");
     assert_eq!(
@@ -210,7 +210,7 @@ fn a_share_is_kept_off_a_host_that_holds_runs_of_no_booked_lease() {
     let mut p = pool(&[]);
     p.fx.registry.set_placer(Arc::new(Last::default()));
     let one = Some(Resources::new(1000, 1 << 20, 0, None).unwrap());
-    let seated = p.provider.seat_booked(&host("a"), lease(1), None, one);
+    let seated = p.provider.seat_booked(&booking("a", 1, one), None);
     assert_eq!(seated, Ok(()));
     let orphan = HeldRun {
         run_id: "orphan".into(),
@@ -295,7 +295,7 @@ fn a_restored_lease_runs_within_its_share() {
     p.fx.registry.set_placer(Arc::new(Last::default()));
     let share = || Some(Resources::new(2000, 1 << 30, 0, None).unwrap());
     for n in 1..=2 {
-        let seated = p.provider.seat_booked(&host("a"), lease(n), None, share());
+        let seated = p.provider.seat_booked(&booking("a", n, share()), None);
         assert_eq!(seated, Ok(()));
     }
     p.fx.join("a", "t");
@@ -419,9 +419,7 @@ fn stopping_a_restored_lease_counts_nothing() {
     let mut p = pool(&[]);
     p.fx.registry.set_placer(Arc::new(Last::default()));
     let two = Some(Resources::new(2000, 1, 0, None).unwrap());
-    p.provider
-        .seat_booked(&host("a"), lease(1), None, two)
-        .unwrap();
+    p.provider.seat_booked(&booking("a", 1, two), None).unwrap();
     p.fx.join("a", "t");
     p.provider.stop(&lease(1));
     let counted = p.fx.registry.tail_counters();
