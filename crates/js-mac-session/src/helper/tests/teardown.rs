@@ -3,6 +3,7 @@
 //! the uid's own entry under the per-user folders, named by its `DARWIN_USER_DIR`; and a
 //! step that fails leaves the lease live, so its uid is held and handed to no one else.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use super::*;
@@ -514,4 +515,171 @@ fn a_launchctl_print_failure_that_is_not_not_found_refuses_kill_uid() {
             "{calls:#?}"
         );
     }
+}
+
+/// `launchctl print`'s answer when it fails with `code` and `stderr`.
+fn print_failed(code: i32, stderr: &str) -> PrintAnswer {
+    PrintAnswer {
+        code: Some(code),
+        stderr: stderr.to_owned(),
+    }
+}
+
+/// Catches a bootout failure taken as final when the domain went between the look and
+/// the bootout: launchd shows `gui/<uid>`, the bootout then finds no such domain, and
+/// the look after it finds the domain gone. `kill-uid` and `user-delete` both complete.
+#[test]
+fn a_domain_gone_between_the_look_and_its_bootout_is_no_refusal() {
+    let (rig, uid) = one("teardown-gone-before-bootout", "36.1");
+    // Only the first look sees the domain; launchd (the fake's state) has none.
+    rig.host.state().print_script.push_back(found());
+    assert_eq!(rig.helper.kill_uid("36.1"), Ok(()));
+    let mut want = vec![
+        format!("kill_all {uid}"),
+        format!("launchctl print gui/{uid}"),
+        format!("bootout gui/{uid}"),
+    ];
+    want.extend(round(uid, &[]).into_iter().skip(2));
+    want.extend(round(uid, &[]));
+    assert_eq!(log(&rig), want);
+
+    rig.host.state().print_script.push_back(found());
+    assert_eq!(rig.helper.user_delete("36.1"), Ok(true));
+    let calls = log(&rig);
+    let bootouts: Vec<&String> = calls.iter().filter(|c| c.starts_with("bootout")).collect();
+    assert_eq!(bootouts, [&format!("bootout gui/{uid}")]);
+    assert!(calls.contains(&"delete_user kbf-lease-36-1".to_owned()));
+}
+
+/// Catches a domain skipped at the look before the bootout and never looked at again:
+/// launchd makes `gui/<uid>` after the first look found none. `kill-uid` sees it at the
+/// look after the bootout, goes round again and boots it out; `user-delete` refuses
+/// naming it, and keeps the record and the uid.
+#[test]
+fn a_domain_that_appears_after_the_first_look_is_found_by_the_second() {
+    let (rig, uid) = one("teardown-appears", "37.1");
+    let gui = format!("gui/{uid}");
+    rig.host.state().domains.insert(gui.clone());
+    rig.host.state().print_script.push_back(no_domain(&gui));
+    assert_eq!(rig.helper.kill_uid("37.1"), Ok(()));
+    let mut want = vec![
+        format!("kill_all {uid}"),
+        format!("launchctl print gui/{uid}"),
+        format!("launchctl print user/{uid}"),
+        format!("live_processes {uid}"),
+        format!("launchctl print gui/{uid}"),
+        format!("launchctl print user/{uid}"),
+        "pause".to_owned(),
+    ];
+    want.extend(round(uid, &["gui"]));
+    want.extend(round(uid, &[]));
+    assert_eq!(log(&rig), want);
+    assert!(rig.host.state().domains.is_empty());
+
+    let (rig, uid) = one("teardown-appears-delete", "38.1");
+    let gui = format!("gui/{uid}");
+    rig.host.state().domains.insert(gui.clone());
+    rig.host.state().print_script.push_back(no_domain(&gui));
+    let got = rig.helper.user_delete("38.1");
+    held(
+        &rig,
+        "kbf-lease-38-1",
+        got,
+        &format!("launchd domains of uid {uid} remain: {gui}; kill-uid first"),
+    );
+    let calls = log(&rig);
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("bootout") || c.starts_with("delete_user")),
+        "{calls:#?}"
+    );
+}
+
+/// Catches a failure of the look after the bootout read as absence: the looks before
+/// the bootout work, and a later one fails (launchctl not running, or another exit),
+/// in `kill-uid`'s first and second pass and in `user-delete`'s first and last look.
+/// Each refuses naming the domain, deletes nothing, and keeps the uid held.
+#[test]
+fn a_print_that_fails_after_the_bootout_refuses_the_teardown() {
+    let (rig, uid) = one("teardown-verify-fails", "39.1");
+    let (gui, user) = (format!("gui/{uid}"), format!("user/{uid}"));
+    let absent = |n: usize| -> Vec<PrintAnswer> {
+        (0..n)
+            .map(|i| no_domain(if i % 2 == 0 { &gui } else { &user }))
+            .collect()
+    };
+    let io = print_failed(5, "Input/output error\n");
+    // The first pass's look at `gui/<uid>` after the bootout cannot run launchctl.
+    rig.host
+        .state()
+        .fail_script
+        .insert("launchctl print", VecDeque::from([false, false, true]));
+    let got = rig.helper.kill_uid("39.1");
+    let want = format!("asking launchd for {gui}: launchctl print failed");
+    held(&rig, "kbf-lease-39-1", got, &want);
+    // The second pass's look at `user/<uid>` after the bootout exits 5.
+    let mut script = absent(4 + 3);
+    script.push(io.clone());
+    rig.host.state().print_script.extend(script);
+    let got = rig.helper.kill_uid("39.1");
+    let want = format!("asking launchd for {user}: launchctl print exited 5: Input/output error");
+    held(&rig, "kbf-lease-39-1", got, &want);
+    // `user-delete`'s first look after its bootout, then its last.
+    for before in [2, 4 + 3] {
+        let mut script = absent(before);
+        script.push(io.clone());
+        rig.host.state().print_script.extend(script);
+        let got = rig.helper.user_delete("39.1");
+        let domain = if before == 2 { &gui } else { &user };
+        let want =
+            format!("asking launchd for {domain}: launchctl print exited 5: Input/output error");
+        held(&rig, "kbf-lease-39-1", got, &want);
+        assert!(rig.host.state().print_script.is_empty());
+    }
+    let calls = log(&rig);
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("bootout") || c.starts_with("delete_user")),
+        "{calls:#?}"
+    );
+}
+
+/// Catches a teardown that, after booting out `gui/<uid>`, reads a failed look at
+/// `user/<uid>` as absence: the GUI domain is booted out, then the look at the user
+/// domain exits 5. `kill-uid` and `user-delete` refuse naming `user/<uid>`, the record
+/// stays and the uid is held.
+#[test]
+fn a_print_that_fails_after_the_gui_domain_went_refuses_the_teardown() {
+    let (rig, uid) = one("teardown-partial", "40.1");
+    let (gui, user) = (format!("gui/{uid}"), format!("user/{uid}"));
+    let want = format!("asking launchd for {user}: launchctl print exited 5: Input/output error");
+    let io = print_failed(5, "Input/output error\n");
+    rig.host.state().domains.insert(gui.clone());
+    rig.host.state().print_script.extend([found(), io.clone()]);
+    let got = rig.helper.kill_uid("40.1");
+    assert_eq!(
+        log(&rig),
+        [
+            format!("kill_all {uid}"),
+            format!("launchctl print {gui}"),
+            format!("bootout {gui}"),
+            format!("launchctl print {user}"),
+        ]
+    );
+    held(&rig, "kbf-lease-40-1", got, &want);
+    assert!(rig.host.state().domains.is_empty());
+
+    rig.host.state().domains.insert(gui.clone());
+    rig.host.state().print_script.extend([found(), io]);
+    let got = rig.helper.user_delete("40.1");
+    held(&rig, "kbf-lease-40-1", got, &want);
+    let calls = log(&rig);
+    assert!(calls.contains(&format!("bootout {gui}")), "{calls:#?}");
+    assert!(
+        !calls.iter().any(|c| c.starts_with("delete_user")),
+        "{calls:#?}"
+    );
+    assert!(rig.host.state().domains.is_empty());
 }
