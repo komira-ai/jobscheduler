@@ -237,16 +237,18 @@ fn kill_uid_kills_then_boots_out_until_none_is_left() {
     rig.host.state().procs.insert(uid, 3);
     rig.host.state().stubborn.insert(uid, 2);
     let round = |left: usize| {
+        // The user never logged in and its agents are gone: launchd has neither
+        // domain, so none is booted out.
         let mut calls = vec![
             format!("kill_all {uid}"),
-            format!("bootout gui/{uid}"),
-            format!("bootout user/{uid}"),
+            format!("launchctl print gui/{uid}"),
+            format!("launchctl print user/{uid}"),
             format!("live_processes {uid}"),
         ];
         match left {
             0 => calls.extend([
-                format!("domain_exists gui/{uid}"),
-                format!("domain_exists user/{uid}"),
+                format!("launchctl print gui/{uid}"),
+                format!("launchctl print user/{uid}"),
             ]),
             _ => calls.push("pause".to_owned()),
         }
@@ -596,10 +598,10 @@ fn a_process_started_during_user_delete_stops_it() {
     assert_eq!(rig.helper.user_delete("11.1"), Ok(true));
     let settle = [
         format!("live_processes {uid}"),
-        format!("bootout gui/{uid}"),
-        format!("bootout user/{uid}"),
-        format!("domain_exists gui/{uid}"),
-        format!("domain_exists user/{uid}"),
+        format!("launchctl print gui/{uid}"),
+        format!("launchctl print user/{uid}"),
+        format!("launchctl print gui/{uid}"),
+        format!("launchctl print user/{uid}"),
         format!("live_processes {uid}"),
     ];
     let mut want = vec![
@@ -701,10 +703,10 @@ fn user_delete_waits_for_a_process_that_exits() {
     assert_eq!(rig.helper.user_delete("12.1"), Ok(true));
     let look = format!("live_processes {uid}");
     let domains = [
-        format!("bootout gui/{uid}"),
-        format!("bootout user/{uid}"),
-        format!("domain_exists gui/{uid}"),
-        format!("domain_exists user/{uid}"),
+        format!("launchctl print gui/{uid}"),
+        format!("launchctl print user/{uid}"),
+        format!("launchctl print gui/{uid}"),
+        format!("launchctl print user/{uid}"),
     ];
     let mut want = vec![
         "account kbf-lease-12-1".to_owned(),
@@ -860,7 +862,7 @@ fn a_gui_run_waits_for_the_lease_user_s_gui_domain() {
     rig.helper.session_login("9.1").unwrap();
     log(&rig);
     assert_eq!(rig.helper.session_ready("9.1"), Ok(false));
-    assert_eq!(log(&rig), [format!("domain_exists gui/{uid}")]);
+    assert_eq!(log(&rig), [format!("launchctl print gui/{uid}")]);
     let error = gui("9.1");
     assert!(
         error.starts_with(&format!("gui/{uid} does not exist")),
@@ -888,7 +890,7 @@ fn a_gui_run_waits_for_the_lease_user_s_gui_domain() {
     #[cfg(not(target_os = "macos"))]
     assert!(gui("9.1").contains("a GUI session exists only on macOS"));
 
-    rig.host.state().fail.insert("domain_exists");
+    rig.host.state().fail.insert("launchctl print");
     let error = rig.helper.session_ready("9.1").unwrap_err();
     assert!(error.contains("asking launchd for gui/"), "{error}");
     assert!(

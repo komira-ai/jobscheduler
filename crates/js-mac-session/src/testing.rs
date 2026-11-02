@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::autologin::CommandOutput;
-use crate::helper::{Account, Host, LiveProcess, NewUser, Process};
+use crate::helper::{Account, Host, LiveProcess, NewUser, PrintAnswer, Process};
 
 /// The fake clock's time.
 pub(crate) const NOW: u64 = 1_800_000_000;
@@ -41,7 +41,7 @@ pub(crate) struct State {
     /// Every `pause` so far.
     pub(crate) pauses: usize,
     /// Calls that fail, by name ("uid_taken", "make_home", "create_user",
-    /// "delete_user", "domain_exists", "bootout gui", "bootout user", "user_dir",
+    /// "delete_user", "launchctl print", "bootout gui", "bootout user", "user_dir",
     /// "kill_all", "live_processes",
     /// "command", "reset_password", "boot_session", "account", "processes", "kill_group").
     pub(crate) fail: BTreeSet<&'static str>,
@@ -84,9 +84,10 @@ pub(crate) struct State {
     pub(crate) respawns: BTreeMap<u32, usize>,
     /// The uids whose agent launchd has a restart due for.
     pub(crate) due: BTreeSet<u32>,
-    /// Answers `domain_exists` gives, in order, before it reads `domains` again: a
-    /// domain that launchd makes (or ends) between two of the helper's steps.
-    pub(crate) exists_script: VecDeque<bool>,
+    /// Answers `launchctl_print` gives, in order, before it reads `domains` again: a
+    /// domain that launchd makes (or ends) between two of the helper's steps, or an
+    /// answer of launchctl's other than found and not found.
+    pub(crate) print_script: VecDeque<PrintAnswer>,
     /// Per call name (as in `fail`), whether each next call fails, in order; once a
     /// script is used up, `fail` decides again. A failure that clears, or one that starts
     /// after some calls succeeded.
@@ -125,6 +126,25 @@ impl State {
             let mode = if held { mode & !0o222 } else { mode | 0o200 };
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(mode)).unwrap();
         }
+    }
+}
+
+/// `launchctl print`'s answer for a domain launchd has.
+pub(crate) fn found() -> PrintAnswer {
+    PrintAnswer {
+        code: Some(0),
+        stderr: String::new(),
+    }
+}
+
+/// `launchctl print`'s answer for a domain launchd does not have, as macOS 26 gives it
+/// for `gui/<uid>`: exit 112, "Bad request." and "Could not find domain for user gui:
+/// <uid>" (`user/<uid>` worded the same way).
+pub(crate) fn no_domain(domain: &str) -> PrintAnswer {
+    let (kind, uid) = domain.split_once('/').unwrap();
+    PrintAnswer {
+        code: Some(112),
+        stderr: format!("Bad request.\nCould not find domain for user {kind}: {uid}\n"),
     }
 }
 
@@ -180,11 +200,18 @@ impl Host for FakeHost {
         Ok(self.state().users.remove(name).is_some())
     }
 
-    fn domain_exists(&self, domain: &str) -> io::Result<bool> {
-        self.call("domain_exists", format!("domain_exists {domain}"))?;
+    /// The next answer of `print_script`, or launchd's: exit 0 for a domain in
+    /// `domains`, else [`no_domain`].
+    fn launchctl_print(&self, domain: &str) -> io::Result<PrintAnswer> {
+        self.call("launchctl print", format!("launchctl print {domain}"))?;
         let mut state = self.state();
-        let scripted = state.exists_script.pop_front();
-        Ok(scripted.unwrap_or_else(|| state.domains.contains(domain)))
+        let scripted = state.print_script.pop_front();
+        Ok(
+            scripted.unwrap_or_else(|| match state.domains.contains(domain) {
+                true => found(),
+                false => no_domain(domain),
+            }),
+        )
     }
 
     /// A domain that does not exist fails as `launchctl bootout` does; one that exists

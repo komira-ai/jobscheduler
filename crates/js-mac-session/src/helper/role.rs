@@ -82,7 +82,6 @@ impl Helper {
         }
         let domain = format!("gui/{}", role.account.uid);
         let up = self
-            .host
             .domain_exists(&domain)
             .map_err(|why| format!("asking launchd for {domain}: {why}"))?;
         Ok(if up { Gui::Up } else { Gui::Down })
