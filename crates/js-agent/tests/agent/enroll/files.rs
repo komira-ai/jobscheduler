@@ -192,11 +192,11 @@ fn a_token_file_others_can_read_is_refused() {
 #[test]
 fn a_file_at_a_guessable_staging_name_does_not_matter() {
     let rig = Rig::new("enroll_guessable_stage");
-    rig.put(".token.new", "planted", 0o644);
+    rig.put(".token.new", "left by another run", 0o644);
     let ran = rig.go(&["--apply"], TOKEN);
     assert_eq!(ran.status, status(0), "{ran:?}");
     assert_eq!(rig.names(), [".token.new", "instance", "token"]);
-    assert_eq!(rig.read(".token.new"), "planted");
+    assert_eq!(rig.read(".token.new"), "left by another run");
     assert_eq!(rig.read("token"), format!("{TOKEN}\n"));
 }
 
