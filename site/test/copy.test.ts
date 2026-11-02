@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { commandText, DONE_MS, enhance, type CopyBlock, type CopyButton, type CopyClipboard, type CopyDocument } from '../src/copy-core';
+import { decodeAttr, readTags } from '../tools/check-dist';
 import { buildReal, read, SITE } from './support';
 
 // ---- a minimal fake DOM -----------------------------------------------------------------------------------------
@@ -189,10 +190,10 @@ test('the copied text is computed from a clone, so the block on the page keeps i
 test('every command block of the real pages copies without a prompt mark or a comment', () => {
   let blocks = 0;
   for (const page of ['index', 'concepts', 'install']) {
-    const html = readFileSync(join(SITE, 'content', `${page}.html`), 'utf8');
-    for (const m of html.matchAll(/<div class="(?:cmd|code)\b[^"]*"><pre>([\s\S]*?)<\/pre>/g)) {
+    for (const f of discover(contentOf(page))) {
+      if (f.pre === null) continue;
       blocks++;
-      const text = commandText(new FakePre(runsOf(m[1])));
+      const text = commandText(new FakePre(runsOf(f.pre)));
       assert.ok(text.endsWith('\n') && !text.endsWith('\n\n'), `${page}: ends with one newline`);
       for (const line of text.trimEnd().split('\n')) {
         assert.ok(!/^\s|^[$#]\s/.test(line), `${page}: "${line}" starts with a prompt, a comment or a space`);
@@ -204,17 +205,71 @@ test('every command block of the real pages copies without a prompt mark or a co
 
 const contentOf = (pageName: string): string => readFileSync(join(SITE, 'content', `${pageName}.html`), 'utf8');
 
-/** How many <div> elements of a page the browser's '.cmd, .code' selector matches, however the tag is written. */
-function blockCount(html: string): number {
-  return [...html.matchAll(/<div\b[^>]*?\bclass\s*=\s*"([^"]*)"[^>]*>/g)].filter((m) => m[1].split(/\s+/).some((c) => c === 'cmd' || c === 'code')).length;
+/** A start or end tag of a page with where it starts. */
+interface Mark {
+  open: boolean;
+  name: string;
+  attrs: [string, string][];
+  at: number;
 }
 
-/** The blocks of a real page as the content file writes them: the classes of the div and the runs of its <pre>. */
-function realBlocks(pageName: string, html: string = contentOf(pageName)): { cls: string[]; block: FakeBlock }[] {
-  return [...html.matchAll(/<div class="((?:cmd|code)\b[^"]*)"><pre>([\s\S]*?)<\/pre>/g)].map((m) => {
-    const cls = m[1].split(/\s+/);
-    return { cls, block: new FakeBlock(new FakePre(runsOf(m[2])), cls) };
+/** Every start and end tag of a page in order, the start tags read by the site's own tag reader (check-dist.readTags). */
+function marks(html: string): Mark[] {
+  assert.deepEqual(readTags(html).problems, [], 'the page is read without problems');
+  return [...html.matchAll(/<(\/?)([a-zA-Z][^\s/>]*)/g)].map((m) => {
+    const open = m[1] === '';
+    // A start tag read from its own '<' onwards is the first tag the reader returns.
+    const attrs = open ? readTags(html.slice(m.index)).tags[0][1] : [];
+    return { open, name: m[2].toLowerCase(), attrs, at: m.index };
   });
+}
+
+/** The class tokens of a tag (its first class attribute, as in the browser), however the value is quoted. */
+function classesOf(attrs: [string, string][]): string[] {
+  const raw = attrs.find(([k]) => k === 'class')?.[1] ?? '';
+  return (decodeAttr(raw) ?? raw).split(/\s+/).filter((c) => c !== '');
+}
+
+/** One element the browser's '.cmd, .code' selector matches: its classes and the inside of its first <pre> (null: none). */
+interface Found {
+  cls: string[];
+  pre: string | null;
+}
+
+/** Every element of any name whose class has the token cmd or code, in page order, with the content of its first <pre>. */
+function discover(html: string): Found[] {
+  const all = marks(html);
+  const found: Found[] = [];
+  all.forEach((m, i) => {
+    const cls = classesOf(m.attrs);
+    if (!m.open || !cls.some((c) => c === 'cmd' || c === 'code')) return;
+    let depth = 1;
+    let end = html.length;
+    for (const n of all.slice(i + 1)) {
+      if (n.name !== m.name) continue;
+      depth += n.open ? 1 : -1;
+      if (depth === 0) {
+        end = n.at;
+        break;
+      }
+    }
+    const pre = all.slice(i + 1).find((n) => n.open && n.name === 'pre' && n.at < end);
+    let inner: string | null = null;
+    if (pre) {
+      const from = html.indexOf('>', pre.at) + 1;
+      inner = html.slice(from, html.indexOf('</pre', from));
+    }
+    found.push({ cls, pre: inner });
+  });
+  return found;
+}
+
+/** How many elements of a page the browser's '.cmd, .code' selector matches, however the tag is written. */
+const blockCount = (html: string): number => discover(html).length;
+
+/** The blocks of a page the selector matches, as fakes (a block with no <pre> is one too: it gets no button). */
+function realBlocks(pageName: string, html: string = contentOf(pageName)): { cls: string[]; block: FakeBlock }[] {
+  return discover(html).map((f) => ({ cls: f.cls, block: new FakeBlock(f.pre === null ? null : new FakePre(runsOf(f.pre)), f.cls) }));
 }
 
 /** Enhances the blocks, clicks each button and returns the text each block wrote (null: no button). */
@@ -277,8 +332,11 @@ const EXPECTED: Record<string, (string | null)[]> = {
 for (const pageName of Object.keys(EXPECTED)) {
   test(`every block of ${pageName}.html that gets a button copies exactly the text in the table, and a transcript gets none`, async () => {
     const real = realBlocks(pageName);
-    assert.equal(real.length, blockCount(contentOf(pageName)), `${pageName}: a block the browser enhances is written in a way this test does not read`);
-    assert.deepEqual(await copiedFrom(real.map((r) => r.block)), EXPECTED[pageName]);
+    assert.equal(real.length, blockCount(contentOf(pageName)));
+    const copied = await copiedFrom(real.map((r) => r.block));
+    // A block that gets a button has an entry in the table and the other way round, so an added block fails until the table follows.
+    assert.equal(copied.length, EXPECTED[pageName].length, `${pageName}: the page and the table list different blocks`);
+    assert.deepEqual(copied, EXPECTED[pageName]);
     real.forEach((r, i) => assert.equal(r.cls.includes('transcript'), EXPECTED[pageName][i] === null, `${pageName} block ${i}: a transcript iff no button`));
   });
 }
@@ -297,11 +355,11 @@ test('a changed copied text, or a transcript given a button, is caught (the chec
   const edited = install.replace('lease list</pre>', 'lease list --all</pre>');
   assert.notEqual(edited, install, 'the edit lands');
   assert.notDeepEqual(await copiedFrom(realBlocks('install', edited).map((r) => r.block)), EXPECTED.install);
-  // Negative: a block written another way (another class first, an attribute) is still counted, so it cannot hide.
+  // Negative: a block written another way (another class first, an attribute) is still discovered, with the same text.
   const reshaped = install.replace('<div class="code"><pre><span class="p">$</span> js --server', '<div id="lease" class="wide code" ><pre><span class="p">$</span> js --server');
   assert.notEqual(reshaped, install, 'the reshape lands');
   assert.equal(blockCount(reshaped), blockCount(install));
-  assert.equal(realBlocks('install', reshaped).length, blockCount(install) - 1);
+  assert.deepEqual(await copiedFrom(realBlocks('install', reshaped).map((r) => r.block)), EXPECTED.install);
   // Negative: a transcript gets no button, and the same block unmarked does, so the table tells them apart.
   const marked = new FakeBlock(new FakePre(runsOf(INSTALL)), ['code', 'transcript']);
   const plain = new FakeBlock(new FakePre(runsOf(INSTALL)), ['code']);
@@ -309,6 +367,35 @@ test('a changed copied text, or a transcript given a button, is caught (the chec
   assert.notDeepEqual(await copiedFrom([plain]), [null]);
   assert.equal(marked.buttons.length, 0);
   assert.equal(plain.buttons.length, 1);
+});
+
+test('blocks written another way are discovered, counted and copied, so the table must follow (the check can fail)', async () => {
+  const pre = '<pre><span class="p">$</span> ls -l</pre>';
+  const base = `<p>x</p><div class="code">${pre}</div>`;
+  assert.equal(blockCount(base), 1);
+  const variants: Record<string, string> = {
+    'a single-quoted class': `<div class='code'>${pre}</div>`,
+    'an unquoted class': `<div class=code>${pre}</div>`,
+    'another element': `<section class="code">${pre}</section>`,
+    'a second token': `<div class="wide  cmd">${pre}</div>`,
+    'an upper-case tag and attribute': `<SECTION CLASS="code">${pre}</SECTION>`,
+  };
+  for (const [what, block] of Object.entries(variants)) {
+    const html = base + block;
+    assert.equal(blockCount(html), 2, `${what} is discovered`);
+    const copied = await copiedFrom(realBlocks('x', html).map((r) => r.block));
+    // The table of the page would need a second entry: with one entry the page and the table differ.
+    assert.deepEqual(copied, ['ls -l\n', 'ls -l\n'], `${what} copies its text`);
+    assert.notDeepEqual(copied, ['ls -l\n'], `${what}: a table of one entry fails`);
+  }
+  // A selected element with no <pre> inside is counted but gets no button; a <pre> after it is not its own.
+  const bare = `<div class="code"><p>no pre</p></div><div class="other">${pre}</div>`;
+  assert.equal(blockCount(bare), 1);
+  assert.deepEqual(await copiedFrom(realBlocks('x', bare).map((r) => r.block)), [null]);
+  // Not selected: a class that only contains the word; a nested element before the pre does not hide it.
+  assert.equal(blockCount(`<div class="codec">${pre}</div><div class="x-cmd">${pre}</div>`), 0);
+  const nested = `<div class="code"><div>inner</div>${pre}</div>`;
+  assert.deepEqual(await copiedFrom(realBlocks('x', nested).map((r) => r.block)), ['ls -l\n']);
 });
 
 // ---- feedback ---------------------------------------------------------------------------------------------------
