@@ -10,7 +10,7 @@ use js_agent_wire::InstanceIdentity;
 use js_elastic::HostName;
 use js_registry::{Credential, OsSessions, ProfileLives, Registry};
 use js_types::ProviderId;
-use js_usage::ProfileKey;
+use js_usage::{ProfileCurves, ProfileKey};
 use tracing::{error, warn};
 
 use crate::adapt::SharedClock;
@@ -26,6 +26,15 @@ use crate::usage_hub::Usage;
 use crate::usage_map::limits_of;
 use crate::usage_setup::UsageSetup;
 use crate::util::blocking;
+
+/// The source of lives the estimate feed reads: the learned curves, or [`NoLives`] for a
+/// sink that keeps none.
+fn lives_of(curves: Option<Arc<ProfileCurves>>) -> Arc<dyn ProfileLives> {
+    match curves {
+        Some(curves) => curves,
+        None => Arc::new(NoLives),
+    }
+}
 
 /// The source of lives of a usage sink that keeps no curves: no profile has a known life.
 struct NoLives;
@@ -119,14 +128,8 @@ pub(crate) fn assemble(
             // no curves gives a source that knows no profile: every lease is then costed
             // at its bound, restored ones included. Off, no source is set, no estimate is
             // passed and every lease is costed at its bound.
-            if estimate_feed {
-                let curves = usage.iter().find_map(|usage| usage.curves());
-                let lives: Arc<dyn ProfileLives> = match curves {
-                    Some(curves) => curves,
-                    None => Arc::new(NoLives),
-                };
-                registry.set_lives(lives);
-            }
+            let lives = lives_of(usage.iter().find_map(|usage| usage.curves()));
+            estimate_feed.then(|| registry.set_lives(lives));
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());
             }

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{Hello, Isolation, JobSpec, Limits};
-use js_lease::{Booking, LeaseState, ManualClock, Timestamp, read_bookings};
+use js_lease::{Booking, LeaseState, LeaseTable, ManualClock, Timestamp, read_bookings};
 use js_provider::{Provider, StartSpec};
 use js_registry::{Credential, RegisteredProvider};
 use js_state::SystemClock;
@@ -21,7 +21,7 @@ use js_types::{Admission, ClassId, HostId, LeaseId, Request, RequestId, Resource
 use js_usage::{NoUsage, ProfileCurves, ProfileKey, ProfileStore, RunMinute, RunSeries, UsageSink};
 use serde_json::json;
 
-use crate::adapt::SharedClock;
+use crate::adapt::{BoxedProvider, SharedClock};
 use crate::agents::{Agents, assemble};
 use crate::config::{Cli, Config};
 
@@ -74,10 +74,15 @@ fn write(dir: &Path, name: &str, text: &str, mode: u32) -> OsString {
 /// The configuration of a server with agent registration over [`POOL`] and `extra` flags.
 /// Usage is on, in `usage.db` beside the lease file.
 fn config(dir: &Path, extra: &[&str]) -> Config {
+    config_booted(dir, "initialise", extra)
+}
+
+/// As [`config`], with `--boot boot`.
+fn config_booted(dir: &Path, boot: &str, extra: &[&str]) -> Config {
     let flags = [
         ("--listen", "127.0.0.1:0".into()),
         ("--state-file", dir.join("leases.toml").into_os_string()),
-        ("--boot", "initialise".into()),
+        ("--boot", boot.into()),
         ("--token-file", write(dir, "token", &"t".repeat(40), 0o600)),
         (
             "--agent-token-file",
@@ -417,4 +422,109 @@ fn a_start_read_from_the_lease_file_reaches_the_drain_cost() {
         let reserved = reserved_with_tail(&mut served, 3);
         assert_eq!(reserved, (Some("a".to_string()), expected), "{name}");
     }
+}
+
+/// The lease table of a server over the files in `dir`, started as the server starts it,
+/// with no listener: the configuration read from `--boot boot` and `extra` flags (measuring
+/// usage with `sink` when one is given), the bookings of the lease file read, the agent side
+/// assembled, the bookings put back on its provider and the table opened over that
+/// provider. Returns the table and the agent side.
+fn started(
+    dir: &Path,
+    boot: &str,
+    extra: &[&str],
+    sink: Option<Arc<dyn UsageSink>>,
+    clock: &SharedClock,
+) -> (LeaseTable<BoxedProvider, SharedClock>, Arc<Agents>) {
+    let config = config_booted(dir, boot, extra);
+    let config = match sink {
+        Some(sink) => config.with_usage_sink(sink),
+        None => config,
+    };
+    let bookings = read_bookings(&config.state_file).unwrap();
+    let (source, agents) = assemble(config.hosts, config.usage, clock, &config.state_file).unwrap();
+    let seated = source.provider(&bookings).unwrap();
+    assert!(seated.unseated.is_empty(), "{:?}", seated.unseated);
+    let provider = BoxedProvider(seated.provider);
+    let table = LeaseTable::open(
+        provider,
+        clock.clone(),
+        config.settings,
+        &config.state_file,
+        config.boot,
+    );
+    (table.unwrap(), agents.unwrap())
+}
+
+/// Asserts the start-up path of a server with the flag, in process: a lease granted on a
+/// registered host is written to the lease file, and a restart with the flag (`--boot
+/// resume`) reads it back, puts it back held on that host, and keeps it held once the host
+/// says hello again and the table ticks; over the server's own usage file and over a usage
+/// sink that keeps no curves. It catches a start that fails, or drops or moves a restored
+/// lease, when the feed is on.
+#[test]
+fn with_the_flag_a_restart_puts_back_a_held_lease_on_its_host() {
+    let sinks: [(&str, Option<Arc<dyn UsageSink>>); 2] = [
+        ("restart_curves", None),
+        ("restart_no_curves", Some(Arc::new(NoUsage))),
+    ];
+    for (name, sink) in sinks {
+        let dir = scratch(name);
+        learn(&dir.path().join("usage.db"));
+        let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
+        let flag = ["--estimate-feed"];
+        let (mut table, agents) = started(dir.path(), "initialise", &flag, sink.clone(), &clock);
+        let credential = Credential::of_token(JOIN);
+        agents.registry.hello(&hello("a"), &credential).unwrap();
+        let class = ResourceClass::new(ClassId::new("burst-host").unwrap(), Admission::BookAll, 0);
+        let lease = table.acquire(request(&class, Duration::from_secs(600)), None);
+        let lease = lease.unwrap();
+        assert_eq!(lease.host, host("a"), "{name}");
+        drop(table);
+        drop(agents);
+
+        let (mut table, agents) = started(dir.path(), "resume", &flag, sink, &clock);
+        let listed = table.list();
+        assert_eq!(listed.len(), 1, "{name}");
+        assert_eq!(listed[0].id, lease.id, "{name}");
+        assert_eq!(listed[0].state, LeaseState::Held, "{name}");
+        assert_eq!(listed[0].host, Some(host("a")), "{name}");
+        agents.registry.hello(&hello("a"), &credential).unwrap();
+        table.tick();
+        let listed = table.list();
+        assert_eq!(listed.len(), 1, "{name}");
+        assert_eq!(listed[0].host, Some(host("a")), "{name}");
+        assert_eq!(listed[0].state, LeaseState::Held, "{name}");
+    }
+}
+
+/// The refusal `assemble` gives for the agent side over `dir` with `extra` flags, after
+/// `spoil` has been done to the directory.
+fn refused(name: &str, extra: &[&str], spoil: impl Fn(&Path)) -> String {
+    let dir = scratch(name);
+    let config = config(dir.path(), extra);
+    spoil(dir.path());
+    let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
+    let assembled = assemble(config.hosts, config.usage, &clock, &config.state_file);
+    match assembled {
+        Err(err) => err.to_string(),
+        Ok(_) => panic!("{name}: assembled"),
+    }
+}
+
+/// Asserts that with the flag a start whose usage file will not open (a directory in its
+/// place) is refused naming `--usage-db`, and one whose file of join tokens cannot be read
+/// (a directory in its place) is refused, before any source of lives is set. It catches a
+/// feed that turns a broken usage file into a start with no estimates.
+#[test]
+fn with_the_flag_a_start_over_files_that_will_not_open_is_refused() {
+    let usage = refused("refused_usage", &["--estimate-feed"], |dir| {
+        std::fs::create_dir(dir.join("usage.db")).unwrap();
+    });
+    assert!(usage.starts_with("--usage-db: "), "{usage}");
+    let joins = refused("refused_joins", &["--estimate-feed"], |dir| {
+        std::fs::create_dir(dir.join("leases.toml.joins")).unwrap();
+    });
+    assert!(!joins.is_empty());
+    assert!(!joins.starts_with("--usage-db"), "{joins}");
 }
