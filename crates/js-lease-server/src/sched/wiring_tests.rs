@@ -655,37 +655,47 @@ fn with_the_flag_a_host_with_a_lease_of_unknown_end_takes_no_backfill() {
 }
 
 /// Asserts that without the flag a host a whole-node request has set aside takes no other
-/// start, as it always did: under the registry's placement the lease of class `share` is
-/// refused as before, and a lease of a class that books a whole host (the pool's own) is
-/// not placed beside the mark. It catches the registry opening marked hosts with no placer.
+/// start, as it always did: a lease of class `share` (which would fit the tail) is refused
+/// `unsupported-class` as before, nothing is counted as backfill, and the mark stands. It
+/// catches the registry opening marked hosts with no placer.
 #[test]
 fn without_the_flag_a_marked_host_takes_no_other_start() {
     let mut l = live("backfill_off", &["h1"], &[]);
-    let mut provider = l.agents.registry.provider();
-    let own = provider.classes()[0].clone();
-    l.provider = provider
-        .clone()
-        .with_classes(vec![own.clone(), ResourceClass::whole_node()]);
-    let spec = |sequence: u64, wall_s: u64| {
-        let mut request = sharing_spec(sequence).request().clone();
-        request.class = own.id().clone();
-        request.max_wall = Duration::from_secs(wall_s);
-        StartSpec::new(
-            LeaseId::new(1, sequence),
-            request,
-            std::slice::from_ref(&own),
-        )
-        .unwrap()
-    };
-    assert_eq!(host_of(&l.provider.start(spec(1, 600))), Some("h1"));
-    l.provider.stop(&LeaseId::new(1, 1));
-    // An empty host would be committed to the request at once; one lease keeps it busy.
-    assert_eq!(host_of(&l.provider.start(spec(5, 600))), Some("h1"));
+    let own = l.agents.registry.provider().classes()[0].clone();
+    let classes = vec![own.clone(), sharing(), ResourceClass::whole_node()];
+    l.provider = l.agents.registry.provider().with_classes(classes);
+    let mut request = sharing_spec(1).request().clone();
+    request.class = own.id().clone();
+    let spec = StartSpec::new(LeaseId::new(1, 1), request, std::slice::from_ref(&own)).unwrap();
+    assert_eq!(host_of(&l.provider.start(spec)), Some("h1"));
     assert!(host_of(&l.whole(2, "q")).is_none());
     assert_eq!(l.mark("q").map(|(host, _)| host).as_deref(), Some("h1"));
     l.at(10_000);
-    assert!(host_of(&provider.start(spec(3, 1))).is_none());
-    assert_eq!(l.on("h1"), [LeaseId::new(1, 5)]);
+    let refused = l.provider.start(share_for(3, Duration::from_secs(1)));
+    assert_eq!(refused, StartAck::Refused(RefusalCode::UnsupportedClass));
+    assert_eq!(l.agents.registry.tail_counters().backfilled, 0);
+    assert_eq!(l.on("h1"), [LeaseId::new(1, 1)]);
+    assert_eq!(l.mark("q").map(|(host, _)| host).as_deref(), Some("h1"));
+}
+
+/// Asserts, through the server, that a probe never backfills a marked host: `h1` is set
+/// aside until 600 s and then cordoned, and a probe pinned to it that runs a second (which
+/// the tail would fit) books nothing, while an ordinary lease of a second does backfill
+/// there. It catches a probe shown the marked host as a backfill candidate.
+#[test]
+fn with_the_flag_a_probe_on_a_marked_host_is_not_backfilled() {
+    let mut l = marked("backfill_probe");
+    let h1 = HostId::new("h1").unwrap();
+    l.agents
+        .registry
+        .cordon(&h1, Duration::from_secs(600))
+        .unwrap();
+    let mut request = share_for(3, Duration::from_secs(1)).request().clone();
+    request.probe_host = Some(h1.clone());
+    let probe = StartSpec::new(LeaseId::new(1, 3), request, &[sharing()]).unwrap();
+    assert!(host_of(&l.provider.start(probe)).is_none());
+    assert_eq!(l.on("h1"), [LeaseId::new(1, 1)]);
+    assert_eq!(l.agents.registry.tail_counters().backfilled, 0);
 }
 
 /// Asserts that the placer of `--placement js-sched` trusts a lease's wall time up to the

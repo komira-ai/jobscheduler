@@ -89,14 +89,15 @@ fn small(r: &mut Rig, wall_s: u64) -> Option<String> {
 
 /// Catches: a head's hold closed to all later work, or open to work that ends after the
 /// head's start time. The head holds `b` from 1 s and is expected to start there at
-/// 100 s: a job of 30 s ends at 31 s, a minute before, and is placed on `b`; a job of 40 s
-/// would end at 41 s, less than a minute before, and is not. The head keeps its hold.
+/// 100 s: a job of 40 s would end at 41 s, less than a minute before, and is not placed;
+/// a job of 30 s ends at 31 s, a minute before, and is placed on `b`. The head keeps its
+/// hold.
 #[test]
 fn a_job_ending_before_the_heads_start_backfills_and_one_ending_after_does_not() {
     let mut r = backfilling(Rig::on(), true);
     let head = head_on_b(&mut r, false);
-    assert_eq!(small(&mut r, 30).as_deref(), Some("b"));
     assert_eq!(small(&mut r, 40), None);
+    assert_eq!(small(&mut r, 30).as_deref(), Some("b"));
     assert_eq!(r.s.head_hold(head), Some(&w("b")));
 }
 
