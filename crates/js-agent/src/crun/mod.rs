@@ -47,8 +47,9 @@
 //! # Labels, the sweep and the lost run
 //!
 //! What a dead process leaves is files, and the runtime keeps a ledger of them: before a
-//! lease's first directory is made, a sidecar file in `<scratch>/oci-labels` records the
-//! agent's id, the run id, the lease's name and the container's labels (see
+//! lease's image is pinned ([`Oci::pin_image`]) or its first directory is made, a sidecar
+//! file in `<scratch>/oci-labels` records the agent's id, the run id, the lease's name and
+//! the container's labels (see
 //! [`SweepReport`] and the module `ledger`), and it is removed after the last of the lease
 //! is. [`CrunRuntime::open`] sweeps: it removes every lease whose sidecar names this
 //! agent (the container's state, the cgroup, the directories, then the sidecar) and keeps
@@ -103,6 +104,7 @@
 //! read-back of the container's mounts.
 
 mod claim;
+mod dirs;
 mod ledger;
 #[cfg(test)]
 mod ledger_tests;
@@ -110,6 +112,8 @@ mod spec;
 #[cfg(test)]
 mod tests;
 mod wire;
+
+use dirs::{make_dir, project_of, take_dir};
 
 pub use claim::{ClaimError, HostClaim, prepare_store, require_trusted_ancestors};
 
@@ -120,9 +124,7 @@ pub use wire::{
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fs::File;
 use std::io;
-use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,7 +133,7 @@ use js_agent_wire::LogTail;
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
-use js_contain::oci::{GcReport, LeaseDirs, Oci, OciConfig, OciError, Owner};
+use js_contain::oci::{GcReport, JobError, LeaseDirs, Oci, OciConfig, OciError, Owner};
 use js_contain::running::Running;
 use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
@@ -316,6 +318,8 @@ enum Fault {
     Book(#[from] js_types::TypeError),
     #[error("remove an image that has no config: {0}")]
     Evict(#[from] io::Error),
+    #[error("the image's pin: {0}")]
+    Pin(#[from] JobError),
     #[error("{what}: {why}")]
     Step { what: &'static str, why: String },
 }
@@ -564,7 +568,8 @@ impl CrunRuntime {
                 }
             }
         }
-        Ok(())
+        // Last: the image may go only once nothing of the lease can use it.
+        step("remove the image's pin", self.oci.unpin_image(name))
     }
 
     /// [`Runtime::prepare`], waiting for the fetch to end: `Ready` or `Failed`. For a
@@ -583,11 +588,14 @@ impl CrunRuntime {
 
     /// Removes the image digests the store holds that nothing names: not one of
     /// `configured` (the digests the executor is set up with: its base and tool images,
-    /// `sha256:<hex>`) and not the image of a container this runtime holds, staged,
-    /// running or ended and not yet removed. The digests it removes are forgotten by the
-    /// prefetcher, so none is answered `Ready` after it is gone. For the start, after the
-    /// leases a dead agent left have been swept and before the disk to offer is read; see
-    /// [`Oci::collect_images`] for what is kept and why it is safe beside a pull.
+    /// `sha256:<hex>`) and not the image of a container this runtime, or another agent's
+    /// runtime on the same store, holds: staged, running or ended and not yet removed
+    /// (each such container pins its image, [`Oci::pin_image`]). The digests it removes are
+    /// forgotten by this runtime's prefetcher, so none is answered `Ready` after it is gone
+    /// (another agent's prefetcher may still say `Ready`: its next run fetches the image
+    /// again within the pull limit). For the start, after the leases a dead agent left have
+    /// been swept and before the disk to offer is read; see [`Oci::collect_images`] for what
+    /// is kept and why it is safe beside a pull.
     ///
     /// The kept image configs of removed digests stay (a pull of the digest writes it
     /// again).
@@ -660,42 +668,30 @@ impl CrunRuntime {
         if self.runs.contains_key(&name) {
             return Err(Fault::InUse(spec.run_id.clone()));
         }
-        let limit = self.hooks.pull_limit;
-        self.rt
-            .block_on(ensure_image(&self.oci, &image, limit))
-            .map_err(Fault::Image)?;
-        if !config_path(&self.configs, &image.digest).exists() {
-            // An image an earlier daemon (or a source that keeps no configs) unpacked has
-            // no config to run it by: it is fetched again, and the source keeps the config
-            // this time. The prefetcher is told, as it is for any image taken out.
-            self.rt.block_on(self.oci.remove_image(&image))?;
-            self.pulls.forget(given);
-            self.rt
-                .block_on(ensure_image(&self.oci, &image, limit))
-                .map_err(Fault::Image)?;
-        }
-        let config = ImageConfig::kept(&self.configs, &image.digest)?;
-        let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, &name);
-        let lease = self.oci.lease_dirs(&name);
-        let mut container = container_spec(&name, spec, &image, &lease, cgroup.name());
-        config.apply(args, &mut container)?;
         let now = (self.hooks.now_ms)();
         let mut labels = spec.labels.clone();
         labels.insert(label::AGENT.to_owned(), self.host_id.clone());
         labels.insert(label::CREATED_MS.to_owned(), now.to_string());
-        // Before the first thing the sidecar names is made (see the module `ledger`).
+        // Before the first thing the sidecar names is made (see the module `ledger`), the
+        // image's pin among them: the sweep of a later start removes a pin a dead process
+        // left, once it has removed the lease's container.
         let entry = Entry::new(&self.host_id, &spec.run_id, &name, &labels);
         self.ledger
             .record(&entry)
             .map_err(|why| Fault::step("record the lease's labels", &why))?;
-        if let Err(fault) = self.make_resources(spec, &container, &lease, &cgroup) {
-            // What the failed step left; none of it is a container. The sidecar goes with
-            // it, or stays for the next sweep when some of it cannot be removed.
-            let _ = self
-                .ledger
-                .discard(&entry, |entry| self.tear_down(&entry.name));
-            return Err(fault);
-        }
+        let (container, lease, cgroup) =
+            match self.make_recorded(spec, (given, &image), args, &name) {
+                Ok(made) => made,
+                Err(fault) => {
+                    // What the failed step left; none of it is a container. The sidecar goes with
+                    // it (the pin last), or stays for the next sweep when some of it cannot be
+                    // removed.
+                    let _ = self
+                        .ledger
+                        .discard(&entry, |entry| self.tear_down(&entry.name));
+                    return Err(fault);
+                }
+            };
         self.runs.insert(
             name.clone(),
             Run {
@@ -709,6 +705,44 @@ impl CrunRuntime {
             },
         );
         Ok(name)
+    }
+
+    /// The pinned image (`given`, parsed as `image`), the container spec with `args` and the
+    /// resources of the lease `name`, whose sidecar is recorded.
+    fn make_recorded(
+        &self,
+        spec: &RunSpec,
+        (given, image): (&str, &PinnedImage),
+        args: &[String],
+        name: &str,
+    ) -> Result<(ContainerSpec, LeaseDirs, LeaseCgroup), Fault> {
+        // Before the image is made sure of: from then on no agent on the store removes it
+        // until the lease is torn down.
+        self.oci.pin_image(image, name)?;
+        let limit = self.hooks.pull_limit;
+        self.rt
+            .block_on(ensure_image(&self.oci, image, limit))
+            .map_err(Fault::Image)?;
+        if !config_path(&self.configs, &image.digest).exists() {
+            // An image an earlier daemon (or a source that keeps no configs) unpacked has
+            // no config to run it by: it is fetched again, and the source keeps the config
+            // this time. The prefetcher is told, as it is for any image taken out. A run of
+            // another agent on the image pins it, and the removal is refused.
+            self.oci.unpin_image(name)?;
+            self.rt.block_on(self.oci.remove_image(image))?;
+            self.pulls.forget(given);
+            self.oci.pin_image(image, name)?;
+            self.rt
+                .block_on(ensure_image(&self.oci, image, limit))
+                .map_err(Fault::Image)?;
+        }
+        let config = ImageConfig::kept(&self.configs, &image.digest)?;
+        let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
+        let lease = self.oci.lease_dirs(name);
+        let mut container = container_spec(name, spec, image, &lease, cgroup.name());
+        config.apply(args, &mut container)?;
+        self.make_resources(spec, &container, &lease, &cgroup)?;
+        Ok((container, lease, cgroup))
     }
 
     /// The directories, hand-overs, cgroup and bundle of one lease.
@@ -814,60 +848,6 @@ fn step<T>(what: &str, result: Result<T, impl std::fmt::Display>) -> Result<T, S
     result.map_err(|why| format!("{what}: {why}"))
 }
 
-/// Makes the new directory `dir` with the mode `0755` whatever the umask is, setting the mode
-/// by the descriptor of what was made.
-fn make_dir(dir: &Path) -> io::Result<()> {
-    std::fs::create_dir(dir)?;
-    set_open_mode(dir)
-}
-
-/// Takes the directory `dir` the lifecycle made for the run whose scratch directory is
-/// `reference` ([`Runtime::lease_dir`]) and sets its mode to `0755`. It must be there, be an
-/// empty directory (not a link) and have the project id `project` reads of `reference`
-/// (`None` on both sides, a file system with no project ids, where no quota can be on, is the
-/// same project; a read that failed on either side refuses): otherwise it is refused and
-/// nothing is made, so a lease never lies outside the run's disk bound. Both directories
-/// are opened once, without following a link, and what is checked and set is what was opened.
-fn take_dir(
-    dir: &Path,
-    reference: &Path,
-    project: &dyn Fn(&File) -> io::Result<Option<u32>>,
-) -> io::Result<()> {
-    let open = open_nofollow(dir)?;
-    let held = open_nofollow(reference)?;
-    // The listing through the descriptor's own `/proc` link; an entry or a listing that cannot
-    // be read counts as something in it.
-    let empty = std::fs::read_dir(format!("/proc/self/fd/{}", open.as_raw_fd()))
-        .is_ok_and(|mut entries| entries.next().is_none());
-    if !empty {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{} is not an empty directory", dir.display()),
-        ));
-    }
-    if project(&open)? != project(&held)? {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("{} is not in the run's project", dir.display()),
-        ));
-    }
-    fchmod_open(&open)
-}
-
-/// The project id of an open directory ([`crate::quota::project_of`]).
-fn project_of(dir: &File) -> io::Result<Option<u32>> {
-    crate::quota::project_of(dir)
-}
-
-/// Opens the directory `dir` without following a link.
-fn open_nofollow(dir: &Path) -> io::Result<File> {
-    use rustix::fs::{Mode, OFlags};
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    rustix::fs::open(dir, flags, Mode::empty())
-        .map(File::from)
-        .map_err(io::Error::from)
-}
-
 /// Where an older agent kept the lease `name` in `store`; `None` for a name that is not
 /// exactly one ordinary path component (empty, with a `/`, `.` or `..`), which names no lease
 /// and must never reach a path.
@@ -877,16 +857,6 @@ fn legacy_lease(store: &Path, name: &str) -> Option<PathBuf> {
         (Some(std::path::Component::Normal(part)), None) if part == name => Some(store.join(name)),
         _ => None,
     }
-}
-
-/// Sets the mode of the open directory to `0755`.
-fn fchmod_open(dir: &File) -> io::Result<()> {
-    rustix::fs::fchmod(dir, rustix::fs::Mode::from_raw_mode(0o755)).map_err(io::Error::from)
-}
-
-/// Sets the mode of the directory `dir` to `0755` by its descriptor, not following a link.
-fn set_open_mode(dir: &Path) -> io::Result<()> {
-    open_nofollow(dir).and_then(|fd| fchmod_open(&fd))
 }
 
 /// The path of `file` of the cgroup `dir` in [`JOB_OWNED_FILES`], where the empty name is the
@@ -1024,6 +994,8 @@ impl Runtime for CrunRuntime {
         {
             return Err(failed("remove the lease directory", &why));
         }
+        oci.unpin_image(&id.0)
+            .map_err(|why| failed("remove the image's pin", &why))?;
         self.ledger
             .forget(&id.0)
             .map_err(|why| failed("remove the lease's sidecar", &why))?;
