@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::crun::{RunEnd, log_path};
-use super::image::{ImageCheckError, PinnedImage};
+use super::image::{ImageCheckError, PinnedImage, hex_of};
 use super::logs::{self, Capture, Launch};
 use super::words::{crun_words, init_words};
-use super::{JobError, Mapping, Oci, at, helper, init, mounts, spec};
+use super::{ImagePin, JobError, Mapping, Oci, at, helper, init, mounts, spec};
 use crate::container::{CONTAINER_OWNER, ContainerSpec, Dirs, Ended, own_nproc_hard_limit};
 use crate::running::Running;
 
@@ -198,12 +198,29 @@ impl Oci {
         self.images.ensure(self, image).await
     }
 
-    /// Removes `image` from the store (a root daemon removes the files of any owner) so that
-    /// the next [`Oci::check_pinned`] fetches it again, waiting for a fetch of it under way.
-    /// No container may run on it: its root is the lower layer of the mounts of one.
+    /// Pins `image` for a lease ([`ImagePin`]): while the pin is held, no collection of the
+    /// store ([`Oci::collect_images`]) removes the image, in this backend or in any other on
+    /// the same scratch directory. A lease takes it before [`Oci::check_pinned`] and holds it
+    /// until its container is removed: an image a collection removed before the pin was
+    /// taken is fetched again by that check, and one that is there once the check returns
+    /// stays. It waits while a collection is setting the digest aside (a rename).
     ///
     /// # Errors
-    /// The directory could not be removed.
+    /// [`JobError::Io`], naming the pin file: it could not be made or opened (its directory
+    /// is not a directory, or the name is a link or not a regular file of the running user).
+    pub fn pin_image(&self, image: &PinnedImage) -> Result<ImagePin, JobError> {
+        let hex = hex_of(image);
+        at(&self.images.pins().join(&hex), self.images.pin(&hex))
+    }
+
+    /// Removes `image` from the store (a root daemon removes the files of any owner) so that
+    /// the next [`Oci::check_pinned`] fetches it again, waiting for a fetch of it under way.
+    /// No container may run on it: its root is the lower layer of the mounts of one. An image
+    /// a lease of any backend on the store pins ([`Oci::pin_image`]) is kept and the removal
+    /// refused: a caller drops its own lease's pin before it removes the image.
+    ///
+    /// # Errors
+    /// A lease pins the image (`ResourceBusy`), or the directory could not be removed.
     pub async fn remove_image(&self, image: &PinnedImage) -> std::io::Result<()> {
         self.images.remove(image).await
     }

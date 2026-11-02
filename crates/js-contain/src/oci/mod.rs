@@ -58,6 +58,7 @@ mod lease;
 pub mod lock;
 pub(crate) mod logs;
 pub mod mounts;
+mod pin;
 pub(crate) mod spec;
 pub mod words;
 
@@ -65,6 +66,8 @@ pub mod words;
 mod gc_tests;
 #[cfg(test)]
 mod parity_tests;
+#[cfg(test)]
+mod pin_tests;
 #[cfg(test)]
 mod tests;
 
@@ -78,6 +81,7 @@ pub use crun::{EnvScrub, JobDrop, RunEnd};
 pub use gc::GcReport;
 pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
+pub use pin::ImagePin;
 
 /// The resolved seccomp section for `arch` (Go's name) and a job holding `caps`, as JSON.
 /// Only the egress spike tests (`tests/egress_spike`) call this, so that they apply the

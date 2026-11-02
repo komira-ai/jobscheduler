@@ -103,6 +103,7 @@
 //! read-back of the container's mounts.
 
 mod claim;
+mod dirs;
 mod ledger;
 #[cfg(test)]
 mod ledger_tests;
@@ -110,6 +111,8 @@ mod spec;
 #[cfg(test)]
 mod tests;
 mod wire;
+
+use dirs::{make_dir, project_of, take_dir};
 
 pub use claim::{ClaimError, HostClaim, prepare_store, require_trusted_ancestors};
 
@@ -120,9 +123,7 @@ pub use wire::{
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fs::File;
 use std::io;
-use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,7 +132,7 @@ use js_agent_wire::LogTail;
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
-use js_contain::oci::{GcReport, LeaseDirs, Oci, OciConfig, OciError, Owner};
+use js_contain::oci::{GcReport, ImagePin, LeaseDirs, Oci, OciConfig, OciError, Owner};
 use js_contain::running::Running;
 use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
@@ -350,6 +351,8 @@ struct Run {
     /// The OOM count of the cgroup above, when the lease started.
     backstop: Option<u64>,
     state: State,
+    /// The pin of the run's image: no agent on the store collects it while the run is held.
+    _pin: ImagePin,
 }
 
 /// A container runtime over `crun`.
@@ -583,11 +586,14 @@ impl CrunRuntime {
 
     /// Removes the image digests the store holds that nothing names: not one of
     /// `configured` (the digests the executor is set up with: its base and tool images,
-    /// `sha256:<hex>`) and not the image of a container this runtime holds, staged,
-    /// running or ended and not yet removed. The digests it removes are forgotten by the
-    /// prefetcher, so none is answered `Ready` after it is gone. For the start, after the
-    /// leases a dead agent left have been swept and before the disk to offer is read; see
-    /// [`Oci::collect_images`] for what is kept and why it is safe beside a pull.
+    /// `sha256:<hex>`) and not the image of a container this runtime, or another agent's
+    /// runtime on the same store, holds: staged, running or ended and not yet removed
+    /// (each such container pins its image, [`Oci::pin_image`]). The digests it removes are
+    /// forgotten by this runtime's prefetcher, so none is answered `Ready` after it is gone
+    /// (another agent's prefetcher may still say `Ready`: its next run fetches the image
+    /// again within the pull limit). For the start, after the leases a dead agent left have
+    /// been swept and before the disk to offer is read; see [`Oci::collect_images`] for what
+    /// is kept and why it is safe beside a pull.
     ///
     /// The kept image configs of removed digests stay (a pull of the digest writes it
     /// again).
@@ -660,6 +666,8 @@ impl CrunRuntime {
         if self.runs.contains_key(&name) {
             return Err(Fault::InUse(spec.run_id.clone()));
         }
+        // Before the image is made sure of: no agent on the store removes it from then on.
+        let mut pin = pin_image(&self.oci, &image)?;
         let limit = self.hooks.pull_limit;
         self.rt
             .block_on(ensure_image(&self.oci, &image, limit))
@@ -667,9 +675,12 @@ impl CrunRuntime {
         if !config_path(&self.configs, &image.digest).exists() {
             // An image an earlier daemon (or a source that keeps no configs) unpacked has
             // no config to run it by: it is fetched again, and the source keeps the config
-            // this time. The prefetcher is told, as it is for any image taken out.
+            // this time. The prefetcher is told, as it is for any image taken out. A run of
+            // another agent on the image pins it, and the removal is refused.
+            drop(pin);
             self.rt.block_on(self.oci.remove_image(&image))?;
             self.pulls.forget(given);
+            pin = pin_image(&self.oci, &image)?;
             self.rt
                 .block_on(ensure_image(&self.oci, &image, limit))
                 .map_err(Fault::Image)?;
@@ -706,6 +717,7 @@ impl CrunRuntime {
                 cap: js_contain::hard_memory_max(spec.memory_bytes),
                 backstop: None,
                 state: State::Created,
+                _pin: pin,
             },
         );
         Ok(name)
@@ -814,60 +826,6 @@ fn step<T>(what: &str, result: Result<T, impl std::fmt::Display>) -> Result<T, S
     result.map_err(|why| format!("{what}: {why}"))
 }
 
-/// Makes the new directory `dir` with the mode `0755` whatever the umask is, setting the mode
-/// by the descriptor of what was made.
-fn make_dir(dir: &Path) -> io::Result<()> {
-    std::fs::create_dir(dir)?;
-    set_open_mode(dir)
-}
-
-/// Takes the directory `dir` the lifecycle made for the run whose scratch directory is
-/// `reference` ([`Runtime::lease_dir`]) and sets its mode to `0755`. It must be there, be an
-/// empty directory (not a link) and have the project id `project` reads of `reference`
-/// (`None` on both sides, a file system with no project ids, where no quota can be on, is the
-/// same project; a read that failed on either side refuses): otherwise it is refused and
-/// nothing is made, so a lease never lies outside the run's disk bound. Both directories
-/// are opened once, without following a link, and what is checked and set is what was opened.
-fn take_dir(
-    dir: &Path,
-    reference: &Path,
-    project: &dyn Fn(&File) -> io::Result<Option<u32>>,
-) -> io::Result<()> {
-    let open = open_nofollow(dir)?;
-    let held = open_nofollow(reference)?;
-    // The listing through the descriptor's own `/proc` link; an entry or a listing that cannot
-    // be read counts as something in it.
-    let empty = std::fs::read_dir(format!("/proc/self/fd/{}", open.as_raw_fd()))
-        .is_ok_and(|mut entries| entries.next().is_none());
-    if !empty {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{} is not an empty directory", dir.display()),
-        ));
-    }
-    if project(&open)? != project(&held)? {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("{} is not in the run's project", dir.display()),
-        ));
-    }
-    fchmod_open(&open)
-}
-
-/// The project id of an open directory ([`crate::quota::project_of`]).
-fn project_of(dir: &File) -> io::Result<Option<u32>> {
-    crate::quota::project_of(dir)
-}
-
-/// Opens the directory `dir` without following a link.
-fn open_nofollow(dir: &Path) -> io::Result<File> {
-    use rustix::fs::{Mode, OFlags};
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    rustix::fs::open(dir, flags, Mode::empty())
-        .map(File::from)
-        .map_err(io::Error::from)
-}
-
 /// Where an older agent kept the lease `name` in `store`; `None` for a name that is not
 /// exactly one ordinary path component (empty, with a `/`, `.` or `..`), which names no lease
 /// and must never reach a path.
@@ -877,16 +835,6 @@ fn legacy_lease(store: &Path, name: &str) -> Option<PathBuf> {
         (Some(std::path::Component::Normal(part)), None) if part == name => Some(store.join(name)),
         _ => None,
     }
-}
-
-/// Sets the mode of the open directory to `0755`.
-fn fchmod_open(dir: &File) -> io::Result<()> {
-    rustix::fs::fchmod(dir, rustix::fs::Mode::from_raw_mode(0o755)).map_err(io::Error::from)
-}
-
-/// Sets the mode of the directory `dir` to `0755` by its descriptor, not following a link.
-fn set_open_mode(dir: &Path) -> io::Result<()> {
-    open_nofollow(dir).and_then(|fd| fchmod_open(&fd))
 }
 
 /// The path of `file` of the cgroup `dir` in [`JOB_OWNED_FILES`], where the empty name is the
@@ -914,6 +862,12 @@ fn make_helper_cgroup(dir: &Path, chown: Chown, (uid, gid): (u32, u32)) -> io::R
 /// The directory of the cgroup `name` (relative to `mount`, starting with `/`).
 fn cgroup_dir(mount: &Path, name: &str) -> PathBuf {
     mount.join(name.trim_start_matches('/'))
+}
+
+/// The pin of `image` for a run ([`Oci::pin_image`]), a failure named as a step.
+fn pin_image(oci: &Oci, image: &PinnedImage) -> Result<ImagePin, Fault> {
+    oci.pin_image(image)
+        .map_err(|why| Fault::step("pin the image", &why))
 }
 
 /// `image` in the store, fetched and unpacked if it is not, within `limit` for the whole.

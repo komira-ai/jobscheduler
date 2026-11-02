@@ -15,7 +15,8 @@
 //! step or, for the images the daemon is given up front, at start; a second use
 //! (and a daemon started later on the same data directory, once the first is gone) finds
 //! the directory and fetches nothing. Daemons share a directory, and only one
-//! that has it to itself sweeps stages ([`super::lock`]).
+//! that has it to itself sweeps stages ([`super::lock`]); a lease of any of them pins its
+//! image against the collection of every other ([`ImagePin`](super::ImagePin)).
 //!
 //! The unpack runs in a user namespace with the daemon user unmapped, the stage directory
 //! the only writable path and the downloaded blobs read-only, so a hostile tar can write
@@ -138,13 +139,16 @@ pub const STAGE_PREFIX: &str = ".stage-";
 #[derive(Debug)]
 pub(crate) struct Images {
     dir: PathBuf,
+    /// The pin files of the leases of every backend on the store, beside it
+    /// ([`super::pin`]).
+    pins: PathBuf,
     /// One gate for each digest: whether the image was fetched and unpacked by this
     /// daemon (`true`), held while it is being fetched or removed, so the two never overlap.
     flights: Mutex<HashMap<String, Arc<AsyncMutex<bool>>>>,
 }
 
 /// The hex of an image's `sha256:<hex>` digest, the name of its directory.
-fn hex_of(image: &PinnedImage) -> String {
+pub(super) fn hex_of(image: &PinnedImage) -> String {
     image
         .digest
         .strip_prefix("sha256:")
@@ -153,8 +157,10 @@ fn hex_of(image: &PinnedImage) -> String {
 }
 
 impl Images {
+    /// The store in `dir`, its pins in the directory [`super::pin::PINS_DIR`] beside it.
     pub(crate) fn new(dir: PathBuf) -> Self {
         Self {
+            pins: dir.with_file_name(super::pin::PINS_DIR),
             dir,
             flights: Mutex::new(HashMap::new()),
         }
@@ -198,7 +204,9 @@ impl Images {
         // done is done. A fetch that failed or was cancelled leaves the gate open for the
         // next use to try again.
         let mut fetched = flight.lock().await;
-        if !*fetched {
+        // Fetched by this daemon, and removed since by the collection of another backend
+        // on the store: fetched again.
+        if !*fetched || !self.dir_of(&image.digest).is_dir() {
             self.acquire(oci, image).await?;
             *fetched = true;
         }
@@ -221,6 +229,11 @@ impl Images {
         &self.dir
     }
 
+    /// The directory of the pin files.
+    pub(super) fn pins(&self) -> &Path {
+        &self.pins
+    }
+
     /// Moves the directory of the digest `hex` to a name of its own in the store
     /// (`.stage-gc-<hex>-<id>`) and returns it: a rename within the store, so the image is
     /// gone at once (`has` is false) and what is left to remove is a leftover the start
@@ -241,21 +254,34 @@ impl Images {
     /// the same image under way, and a fetch started meanwhile waits for it, so the two
     /// never work in the directory together. The directory is first set aside by a rename
     /// ([`Images::set_aside`]), so a removal that fails midway leaves no image that still
-    /// looks complete. The caller must see to it that no container still runs on the image
-    /// (its root is the lower layer of a container's mounts).
+    /// looks complete. An image a lease of any backend on the store pins ([`super::pin`]) is
+    /// not removed: the removal is refused, so a caller removing it for a lease of its own
+    /// drops that lease's pin first.
     ///
     /// # Errors
-    /// The directory could not be set aside (the image is kept), or what was set aside
-    /// could not be removed (the image is gone; the start sweep takes the rest).
+    /// A lease pins the image (`ResourceBusy`; the image is kept), the pin file could not be
+    /// opened, the directory could not be set aside (the image is kept), or what was set
+    /// aside could not be removed (the image is gone; the start sweep takes the rest).
     pub(crate) async fn remove(&self, image: &PinnedImage) -> std::io::Result<()> {
+        let hex = hex_of(image);
         let flight = self.gate(image);
         let mut fetched = flight.lock().await;
+        let claim = self.claim(&hex, &mut || {})?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::ResourceBusy,
+                format!("image {image} is pinned by a lease on this store"),
+            )
+        })?;
         *fetched = false;
-        match self.set_aside(&hex_of(image)) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
-            Ok(aside) => crate::remove::remove_tree(&aside),
+        let aside = self.set_aside(&hex);
+        if aside
+            .as_ref()
+            .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound)
+        {
+            return aside.map(drop);
         }
+        claim.retire();
+        aside.map_or(Ok(()), |aside| crate::remove::remove_tree(&aside))
     }
 
     /// Fetches the layers into a directory of blobs, unpacks them into a stage directory,
