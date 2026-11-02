@@ -84,6 +84,7 @@ pub(crate) fn assemble(
                 hello_limit,
                 require_host_credential,
                 placement,
+                estimate_feed,
             } = *agents;
             let path = state_path(state_file, ".agents");
             let joins = JoinTokens::open(
@@ -102,9 +103,13 @@ pub(crate) fn assemble(
                 .into_iter()
                 .for_each(|placer| registry.set_placer(placer));
             let usage = usage.build(clock, limits, &registry)?;
-            // The learned lives of the profiles cost a lease's end in the drain order.
+            // `--estimate-feed`: the learned lives of the profiles cost a lease's end in the
+            // drain order. Set before the bookings are put back, so a lease restored from
+            // the lease file keeps the start and the bound it records. Off, no estimate is
+            // passed and every lease is costed at its bound.
             let curves = usage.iter().filter_map(|usage| usage.curves());
-            curves.for_each(|curves| registry.set_lives(curves));
+            let fed = curves.filter(|_| estimate_feed | true);
+            fed.for_each(|curves| registry.set_lives(curves));
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());
             }
@@ -311,6 +316,10 @@ impl Agents {
 #[cfg(test)]
 #[path = "agents_mint_tests.rs"]
 mod mint_tests;
+
+#[cfg(test)]
+#[path = "agents_estimate_tests.rs"]
+mod estimate_tests;
 
 #[cfg(test)]
 mod tests {

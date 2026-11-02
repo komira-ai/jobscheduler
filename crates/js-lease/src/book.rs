@@ -60,6 +60,10 @@ pub(crate) struct Record {
     state: LeaseState,
     host: Option<HostId>,
     acquired_at: Timestamp,
+    /// When the lease's ttl and maximum wall time started counting: `acquired_at`, or for
+    /// a whole lease the moment it was observed ready. `ends_at` is this plus its maximum
+    /// wall time.
+    started_at: Timestamp,
     expires_at: Timestamp,
     ends_at: Timestamp,
     /// Whether the lease is of a whole-node class.
@@ -102,6 +106,9 @@ impl Record {
             state: stored.state,
             host,
             acquired_at: Timestamp::from_millis(stored.acquired_at_ms),
+            started_at: Timestamp::from_millis(
+                stored.started_at_ms.unwrap_or(stored.acquired_at_ms),
+            ),
             expires_at: Timestamp::from_millis(stored.expires_at_ms),
             ends_at: Timestamp::from_millis(stored.ends_at_ms),
             whole: stored.whole,
@@ -150,9 +157,9 @@ impl Record {
         }))
     }
 
-    /// The lease is ready at `now`: a whole lease's clock starts here, so it expires at
-    /// `now + ttl` (at most its wall time) and ends at `now + wall`. A lease with no
-    /// token is left as it is.
+    /// The lease is ready at `now`: a whole lease's clock starts here, so it started at
+    /// `now`, expires at `now + ttl` (at most its wall time) and ends at `now + wall`. A
+    /// lease with no token is left as it is.
     fn start_clock(&mut self, now: Timestamp) {
         let Some(token) = self.token.take() else {
             return;
@@ -168,6 +175,7 @@ impl Record {
             state: self.state,
             host: self.host.as_ref().map(|host| host.as_str().to_string()),
             acquired_at_ms: self.acquired_at.millis(),
+            started_at_ms: None,
             expires_at_ms: self.expires_at.millis(),
             ends_at_ms: self.ends_at.millis(),
             whole: self.whole,
@@ -265,6 +273,8 @@ pub(crate) fn bookings(path: &Path) -> Result<Vec<Booking>, OpenError> {
             host: record.host.clone()?,
             state: record.state,
             shares: record.shares.clone(),
+            started_at: record.started_at,
+            ends_at: record.ends_at,
         })
     });
     Ok(named.collect())
@@ -444,6 +454,7 @@ impl Book {
             state: LeaseState::Pending,
             host: None,
             acquired_at: now,
+            started_at: now,
             expires_at,
             ends_at,
             whole,

@@ -120,6 +120,15 @@ pub struct Cli {
     /// `arch`.
     #[arg(long, value_enum, default_value = "registry")]
     pub placement: Placement,
+    /// Feeds each lease's estimated end to the drain cost of a whole-node request: the
+    /// lease's start plus the largest P90 wall time, among the profiles the usage file has
+    /// learned, of the runs queued on it with a profile name. A lease with no such run is
+    /// costed at its max-wall bound, as every lease is without the flag. A lease put back
+    /// after a restart keeps the start and the bound the lease file records. Off by
+    /// default. Needs `--agent-pool-config`; not allowed with `--usage-off`, which leaves
+    /// nothing to estimate from.
+    #[arg(long, conflicts_with = "usage_off")]
+    pub estimate_feed: bool,
     /// The ttl of a lease whose client names none, such as `600s`, `10m` or `1h`.
     #[arg(long, default_value = "600s", value_parser = parse_duration)]
     pub default_ttl: Duration,
@@ -409,6 +418,8 @@ pub(crate) struct AgentSetup {
     pub(crate) require_host_credential: bool,
     /// `--placement`.
     pub(crate) placement: Placement,
+    /// `--estimate-feed`.
+    pub(crate) estimate_feed: bool,
 }
 
 impl Config {
@@ -512,6 +523,7 @@ impl Config {
                     hello_limit: server.agents.hello_limit(),
                     require_host_credential: server.agents.require_host_credential(),
                     placement: server.agents.placement(),
+                    estimate_feed: server.agents.estimate_feed(),
                 });
                 (
                     Hosts::Layered {
@@ -677,6 +689,15 @@ impl Config {
         }
     }
 
+    /// Whether each lease's estimated end is fed to the drain cost (`--estimate-feed`, or
+    /// `server.estimate_feed`): off for a server with no agent registration.
+    pub fn estimate_feed(&self) -> bool {
+        match &self.hosts {
+            Hosts::Layered { agents, .. } => agents.estimate_feed,
+            Hosts::Static(_) => false,
+        }
+    }
+
     /// The most bytes the learned cost curves may take (`--profile-store-bytes`).
     pub fn profile_store_bytes(&self) -> u64 {
         self.usage.profile_store_bytes
@@ -777,6 +798,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                     },
                     require_host_credential: cli.require_host_credential,
                     placement: cli.placement,
+                    estimate_feed: cli.estimate_feed,
                 }),
             })
         }

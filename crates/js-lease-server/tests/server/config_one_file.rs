@@ -145,6 +145,7 @@ fn the_registration_keys_need_an_elastic_pool_and_a_valid_value() {
         ("agent_hello_interval", "\"1s\""),
         ("require_host_credential", "false"),
         ("placement", "\"registry\""),
+        ("estimate_feed", "false"),
     ] {
         let scratch = Scratch::new(&format!("one_file_needs_{key}"));
         let stat = PoolText::static_pool(&scratch, "hosts");
@@ -173,6 +174,10 @@ fn the_registration_keys_need_an_elastic_pool_and_a_valid_value() {
             "server.placement: must be registry or js-sched",
         ),
         ("placement = 3", "server.placement: must be a string"),
+        (
+            "estimate_feed = \"on\"",
+            "server.estimate_feed: must be true or false",
+        ),
     ] {
         let scratch = Scratch::new("one_file_bad_value");
         let text = file(&server(&scratch, line), &[&pool(&scratch)]);
@@ -213,6 +218,10 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
     rows.push((
         vec!["--usage-off"],
         "--usage-off: not allowed with --config; set server.usage_off".to_owned(),
+    ));
+    rows.push((
+        vec!["--estimate-feed"],
+        "--estimate-feed: not allowed with --config; set server.estimate_feed".to_owned(),
     ));
     rows.push((
         vec!["--require-host-credential"],

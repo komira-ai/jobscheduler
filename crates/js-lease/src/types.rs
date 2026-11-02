@@ -233,6 +233,12 @@ pub struct Booking {
     /// resources. `None` for a lease that books the whole host, and for a file written
     /// before the file kept them, which a provider puts back as booking the whole host.
     pub shares: Option<Resources>,
+    /// When the lease's ttl and maximum wall time started counting: its acquire, or for a
+    /// whole-node lease the moment it was observed ready. A provider that estimates when
+    /// the lease ends counts from here.
+    pub started_at: Timestamp,
+    /// The latest the lease can end: `started_at` plus its maximum wall time.
+    pub ends_at: Timestamp,
 }
 
 /// Until when a host is excluded for a request.

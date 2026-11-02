@@ -96,7 +96,7 @@ fn host_with_two_leases(came: Came) -> (Fixture, u64) {
     let mut provider = fx.registry.provider().with_classes(vec![book()]);
     if let Came::Restored = came {
         for n in 1..=2 {
-            let seated = provider.seat_booked(&host("a"), lease(n), None, Some(half()));
+            let seated = provider.seat_booked(&booking("a", n, Some(half())), None);
             assert_eq!(seated, Ok(()));
         }
     }

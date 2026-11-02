@@ -209,12 +209,7 @@ impl CapacitySource for LayeredSource {
         let registered = self.registry.provider();
         for booking in rest {
             let binding = self.bindings.get(&booking.host).cloned();
-            let seated = registered.seat_booked(
-                &booking.host,
-                booking.lease,
-                binding,
-                booking.shares.clone(),
-            );
+            let seated = registered.seat_booked(booking, binding);
             if let Err(refused) = seated {
                 unseated.push(Unseated {
                     booking: booking.clone(),
@@ -525,6 +520,8 @@ mod tests {
             host: host("a"),
             state: js_lease::LeaseState::Held,
             shares: Some(Resources::new(2000, 1, 0, None).unwrap()),
+            started_at: now,
+            ends_at: now,
         };
         let seated = source.provider(&[booking(1), booking(2)]).unwrap();
         assert!(seated.unseated.is_empty(), "{:?}", seated.unseated);

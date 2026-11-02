@@ -61,9 +61,10 @@ pub(super) struct Record {
     /// Where the host stands in a whole-node lease; `Free` for a host that never held one.
     pub(super) exclusive: Exclusive,
     /// Every lease started on the host since the registry began, with the latest it can end
-    /// and when it started. A lease put back after a restart has none, and counts as ending
-    /// now. Held in memory only; a lease that is no longer booked on the host is dropped at
-    /// the next start.
+    /// and when it started. A lease put back after a restart has them only with a source of
+    /// lives set, from the lease file ([`crate::RegisteredProvider::seat_booked`]); without
+    /// one it has none, and counts as ending now. Held in memory only; a lease that is no
+    /// longer booked on the host is dropped at the next start or seat.
     pub(super) bounds: Vec<Bound>,
     /// Whether the host is being scaled away (see [`Registry::drain`]). It outlives a
     /// session and is held in memory only.

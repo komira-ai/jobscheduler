@@ -10,6 +10,7 @@
 --config default=none required=false
 --default-ttl default=600s required=false
 --drain-timeout default=10s required=false
+--estimate-feed default=none required=false values=true|false
 --handshake-timeout default=10s required=false
 --header-timeout default=10s required=false
 --listen default=127.0.0.1:7300 required=false

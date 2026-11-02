@@ -1,0 +1,312 @@
+//! `--estimate-feed` wired into the server, in process: the configuration read from the
+//! flags, the agent side assembled from it as the server assembles it over a usage file that
+//! has learned a profile, hosts registered with the registry, and leases started on its
+//! provider. No listener is bound and no connection is made. Which host a whole-node request
+//! reserves shows what each lease was costed at.
+
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use js_agent_wire::{Hello, Isolation, JobSpec, Limits};
+use js_lease::{Booking, LeaseState, ManualClock, Timestamp};
+use js_provider::{Provider, StartSpec};
+use js_registry::{Credential, RegisteredProvider};
+use js_state::SystemClock;
+use js_state::sqlite::{Options, SqliteStore};
+use js_testkit::dir::TestDir;
+use js_types::{Admission, ClassId, HostId, LeaseId, Request, RequestId, ResourceClass, Resources};
+use js_usage::{ProfileCurves, ProfileKey, ProfileStore, RunMinute, RunSeries};
+use serde_json::json;
+
+use crate::adapt::SharedClock;
+use crate::agents::{Agents, assemble};
+use crate::config::{Cli, Config};
+
+/// The join token of the pool.
+const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
+
+/// When the test's clock starts: day 0 of the usage file, so a profile learned on day 0 is
+/// fresh.
+const T0: u64 = 1_000_000;
+
+/// The profile the usage file has learned: three runs of one minute, so its P90 is one
+/// minute.
+const FAST: &str = "est.fast";
+
+/// A pool of up to two machines whose class books a whole host, so a lease put back is a
+/// plain booking. The provider of the tests serves the whole-node class beside it, so a
+/// whole-node request waits for a host and reserves one.
+const POOL: &str = r#"
+name = "burst"
+class = "burst-host"
+max_machines = 2
+
+[shape]
+cpu_millis = 8000
+memory_bytes = 17179869184
+
+[capabilities]
+arch = "x86_64"
+"#;
+
+/// An empty directory of the test's own under the target directory, removed when the
+/// guard is dropped.
+fn scratch(name: &str) -> TestDir {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/estimate_feed");
+    TestDir::under(root, name)
+}
+
+fn write(dir: &Path, name: &str, text: &str, mode: u32) -> OsString {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, text).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    path.into_os_string()
+}
+
+/// The configuration of a server with agent registration over [`POOL`] and `extra` flags.
+/// Usage is on, in `usage.db` beside the lease file.
+fn config(dir: &Path, extra: &[&str]) -> Config {
+    let flags = [
+        ("--listen", "127.0.0.1:0".into()),
+        ("--state-file", dir.join("leases.toml").into_os_string()),
+        ("--boot", "initialise".into()),
+        ("--token-file", write(dir, "token", &"t".repeat(40), 0o600)),
+        (
+            "--agent-token-file",
+            write(dir, "agent-tokens", &format!("{JOIN}\n"), 0o600),
+        ),
+        (
+            "--agent-pool-config",
+            write(dir, "agent-pool.toml", POOL, 0o644),
+        ),
+    ];
+    let mut args: Vec<OsString> = vec!["js-lease-server".into()];
+    for (flag, value) in flags {
+        args.push(flag.into());
+        args.push(value);
+    }
+    args.extend(extra.iter().map(OsString::from));
+    Config::from_cli(Cli::try_parse_from(args).unwrap()).unwrap()
+}
+
+/// Writes into the usage file at `db` three clean one-minute runs of [`FAST`], on day 0,
+/// as the server's profile store writes them when runs end; the server opening the file
+/// then holds a curve for it with a P90 of one minute.
+fn learn_fast(db: &Path) {
+    let store = SqliteStore::open(db, Arc::new(SystemClock::default()), Options::default());
+    let store = Arc::new(store.unwrap());
+    let curves = Arc::new(ProfileCurves::new(Box::new(|_| None)));
+    let mut profiles = ProfileStore::open(store, curves.clone(), 1 << 20, 0).unwrap();
+    let minute = RunMinute {
+        minute: 0,
+        cores_milli: 1000,
+        ws_bytes: 1 << 20,
+    };
+    let series = RunSeries {
+        minutes: vec![minute],
+        flags: 0,
+    };
+    let key = ProfileKey::parse(FAST).unwrap();
+    for _ in 0..3 {
+        profiles.run_ended(&key, &series, 0).unwrap();
+    }
+    assert_eq!(curves.wall_minutes_p90_of(&key), Some(1));
+}
+
+fn hello(host: &str) -> Hello {
+    let body = json!({
+        "host_id": host,
+        "pool": "burst",
+        "agent_version": "0.1.0",
+        "shape": { "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 0 },
+        "capabilities": { "arch": "x86_64" },
+        "labels": {},
+        "phase": "serving",
+    });
+    serde_json::from_value(body).unwrap()
+}
+
+/// The agent side of a server, the provider of its registry, and the directory of their
+/// files. The fields drop in order, so the directory goes after what writes into it.
+struct Served {
+    agents: Arc<Agents>,
+    provider: RegisteredProvider,
+    _dir: TestDir,
+}
+
+/// The agent side of a server over [`POOL`] with `extra` flags, assembled as the server
+/// assembles it over a usage file that has learned [`FAST`], with the bookings `restored`
+/// put back as the server puts back those of its lease file, hosts `a` and `b` registered,
+/// and the provider of its registry serving a class that books a whole host and the
+/// whole-node class.
+fn serving(name: &str, extra: &[&str], restored: &[Booking]) -> Served {
+    let dir = scratch(name);
+    let config = config(dir.path(), extra);
+    learn_fast(&dir.path().join("usage.db"));
+    let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
+    let (source, agents) =
+        assemble(config.hosts, config.usage, &clock, &config.state_file).unwrap();
+    let seated = source.provider(restored).unwrap();
+    assert!(seated.unseated.is_empty(), "{:?}", seated.unseated);
+    let agents = agents.unwrap();
+    let credential = Credential::of_token(JOIN);
+    for host in ["a", "b"] {
+        agents.registry.hello(&hello(host), &credential).unwrap();
+    }
+    let provider = agents
+        .registry
+        .provider()
+        .with_classes(vec![book(), whole()]);
+    Served {
+        agents,
+        provider,
+        _dir: dir,
+    }
+}
+
+fn book() -> ResourceClass {
+    ResourceClass::new(ClassId::new("book").unwrap(), Admission::BookAll, 0)
+}
+
+fn whole() -> ResourceClass {
+    ResourceClass::whole_node()
+}
+
+fn request(class: &ResourceClass, wall: Duration) -> Request {
+    Request {
+        class: class.id().clone(),
+        resources: Resources::new(1000, 1 << 20, 0, None).unwrap(),
+        capabilities: BTreeMap::new(),
+        max_wall: wall,
+        labels: BTreeMap::new(),
+        validation_run: None,
+    }
+}
+
+fn host(name: &str) -> HostId {
+    HostId::new(name).unwrap()
+}
+
+/// Starts lease `sequence` of [`book`], bound to `wall`, and returns the host it took.
+fn lease_for(served: &mut Served, sequence: u64, wall: Duration) -> String {
+    let spec = StartSpec::new(LeaseId::new(1, sequence), request(&book(), wall), &[book()]);
+    match served.provider.start(spec.unwrap()) {
+        js_provider::StartAck::Started { host } => host.to_string(),
+        other => panic!("lease {sequence} not started: {other:?}"),
+    }
+}
+
+/// Queues run `run` of lease `sequence` on `on`, named by the profile [`FAST`].
+fn keyed_run(served: &Served, on: &str, sequence: u64, run: &str) {
+    let spec = JobSpec {
+        run_id: run.into(),
+        lease_id: String::new(),
+        image: "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .into(),
+        args: Vec::new(),
+        limits: Limits {
+            cpu_millis: 1000,
+            memory_bytes: 1 << 20,
+            disk_bytes: None,
+            pids: None,
+            wall_ms: 60_000,
+        },
+        gpu_indices: Vec::new(),
+        mounts: Vec::new(),
+        isolation: Isolation::Contained,
+        labels: Default::default(),
+        heartbeat_seq: 0,
+        files: Vec::new(),
+        valid_for_ms: 0,
+        bundle: None,
+        native: None,
+    };
+    let profile = Some(ProfileKey::parse(FAST).unwrap());
+    let lease = LeaseId::new(1, sequence);
+    let registry = &served.agents.registry;
+    registry
+        .queue_keyed_run(&host(on), &lease, spec, profile)
+        .unwrap();
+}
+
+/// Asks for a whole node as request `q` under lease `sequence` and returns the host
+/// reserved for it.
+fn reserved_for_whole_node(served: &mut Served, sequence: u64) -> Option<String> {
+    let id = RequestId::new("q").unwrap();
+    let wanted = request(&whole(), Duration::from_secs(600));
+    let spec = StartSpec::new(LeaseId::new(1, sequence), wanted, &[whole()]);
+    served
+        .provider
+        .start(spec.unwrap().with_request_id(id.clone()));
+    let reservations = served.agents.registry.reservations();
+    let mark = reservations.into_iter().find(|mark| mark.request == id);
+    mark.map(|mark| mark.host.to_string())
+}
+
+/// Asserts the A/B case of the feed. Host `a` carries a lease of the longer max wall (an
+/// hour) whose keyed run has a learned P90 of one minute, so its estimated tail is the
+/// shorter; host `b` carries a lease of ten minutes with no keyed run. With
+/// `--estimate-feed` the whole-node request reserves `a`; without it no estimate is passed,
+/// every lease is costed at its bound, and the request reserves `b`, as before the flag
+/// existed. It catches a feed that is on without the flag, one the flag does not turn on,
+/// and a flag that does not reach the registry the server assembles.
+#[test]
+fn with_the_flag_the_shorter_estimated_tail_is_reserved_and_without_it_the_shorter_bound() {
+    for (name, extra, expected) in [
+        ("feed_on", vec!["--estimate-feed"], "a"),
+        ("feed_off", vec![], "b"),
+    ] {
+        let mut served = serving(name, &extra, &[]);
+        assert_eq!(lease_for(&mut served, 1, Duration::from_secs(3600)), "a");
+        assert_eq!(lease_for(&mut served, 2, Duration::from_secs(600)), "b");
+        keyed_run(&served, "a", 1, "r1");
+        let reserved = reserved_for_whole_node(&mut served, 3);
+        assert_eq!(reserved.as_deref(), Some(expected), "{name}");
+    }
+}
+
+/// Asserts the unknown case through the server, with the flag on: `a`'s lease may run for
+/// ever (its bound saturates) and has no keyed run, so its tail is unknown and ranks after
+/// `b`'s, which is bound to end in ten hours. It catches an unknown tail ranked by what is
+/// known of its host, or first.
+#[test]
+fn a_lease_with_no_keyed_run_and_no_bound_is_unknown_and_ranks_after_a_known_tail() {
+    let mut served = serving("feed_unknown", &["--estimate-feed"], &[]);
+    let forever = Duration::from_millis(u64::MAX);
+    assert_eq!(lease_for(&mut served, 1, forever), "a");
+    assert_eq!(lease_for(&mut served, 2, Duration::from_secs(36_000)), "b");
+    let reserved = reserved_for_whole_node(&mut served, 3);
+    assert_eq!(reserved.as_deref(), Some("b"));
+}
+
+/// Asserts that a lease put back from the lease file keeps its recorded start and bound
+/// only with the flag. Lease 1 on `a` is restored as started now and bound to end in an
+/// hour, with no keyed run; lease 2 on `b` starts here with ten minutes. With the flag `a`
+/// is costed at its recorded bound and `b` is reserved; without it the restored lease has
+/// no bound, counts as ending now as it always did, and `a` is reserved. It catches the
+/// start and bound dropped on the way from the lease file to the registry, and kept with
+/// the flag off.
+#[test]
+fn a_restored_lease_keeps_its_recorded_bound_only_with_the_flag() {
+    let restored = Booking {
+        lease: LeaseId::new(1, 1),
+        host: host("a"),
+        state: LeaseState::Held,
+        shares: None,
+        started_at: Timestamp::from_millis(T0),
+        ends_at: Timestamp::from_millis(T0 + 3_600_000),
+    };
+    for (name, extra, expected) in [
+        ("restored_on", vec!["--estimate-feed"], "b"),
+        ("restored_off", vec![], "a"),
+    ] {
+        let mut served = serving(name, &extra, std::slice::from_ref(&restored));
+        assert_eq!(lease_for(&mut served, 2, Duration::from_secs(600)), "b");
+        let reserved = reserved_for_whole_node(&mut served, 3);
+        assert_eq!(reserved.as_deref(), Some(expected), "{name}");
+    }
+}
