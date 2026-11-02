@@ -16,6 +16,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { PAGES } from '../tools/pages';
+import { ciPaths, ciWorkflow, pathMatches, siteScript, siteSteps } from './ci-site';
 import { read, REPO, SITE } from './support';
 
 type Row = readonly [page: string, shown: string, file: string, says: string];
@@ -744,29 +745,6 @@ test('a source note naming a missing file, and a page with no source note, are r
   assert.deepEqual(sourceNoteGaps(CLAIM_PAGES, noNote, inRepo).problems, ['kbf has no source note']);
 });
 
-/** The `paths:` filters of one trigger (`pull_request` or `push`) of a workflow, as written. */
-export function triggerPaths(yml: string, trigger: 'pull_request' | 'push'): string[] {
-  const lines = yml.split('\n');
-  const start = lines.findIndex((l) => l === `  ${trigger}:`);
-  if (start < 0) return [];
-  const out: string[] = [];
-  let inPaths = false;
-  for (const l of lines.slice(start + 1)) {
-    if (/^ {0,2}\S/.test(l)) break; // the next trigger, or the end of `on:`
-    if (/^ {4}paths:\s*$/.test(l)) { inPaths = true; continue; }
-    if (/^ {4}\S/.test(l)) { inPaths = false; continue; }
-    const m = /^ {6}- (\S+)\s*$/.exec(l);
-    if (inPaths && m) out.push(m[1]);
-  }
-  return out;
-}
-
-/** Whether a workflow path filter matches a '/'-separated file path: `**` is any run of characters, `*` any run without a slash. */
-export function pathMatches(filter: string, file: string): boolean {
-  const re = filter.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '.*');
-  return new RegExp(`^${re}$`).test(file);
-}
-
 /** The repository files the claims of this test read: the rows' sources, the files read by name above, and the files the pages' source notes name. */
 function claimInputs(): string[] {
   const own = read(SITE, 'test', 'claims.test.ts');
@@ -777,32 +755,32 @@ function claimInputs(): string[] {
   return [...new Set([...ROWS.map((r) => r[2]), ...named, ...notes])].sort();
 }
 
-/** The inputs of `files` that a trigger's filters do not match, as problems naming the trigger and the file. */
-export function unwatched(files: readonly string[], yml: string): string[] {
+/** The inputs of `files` that no entry of site/ci-paths matches, as problems; and the way ci.yml's site step fails to read that file. */
+export function unwatched(files: readonly string[], entries: readonly string[], yml: string): string[] {
   const out: string[] = [];
-  for (const trigger of ['pull_request', 'push'] as const) {
-    const filters = triggerPaths(yml, trigger);
-    if (filters.length === 0) out.push(`${trigger}: no path filters found`);
-    for (const f of files) if (!filters.some((p) => pathMatches(p, f))) out.push(`${trigger}: a change to ${f} does not run the site workflow, and a claim reads it`);
-  }
+  if (entries.length === 0) out.push('site/ci-paths: no entries found');
+  if (!siteScript(yml).includes('site/ci-paths')) out.push('ci.yml: the site step does not read site/ci-paths');
+  if (!siteSteps(yml).includes("if: ${{ steps.site.outputs.run == 'true' }}")) out.push('ci.yml: the site steps do not wait for the decision');
+  for (const f of files) if (!entries.some((p) => pathMatches(p, f))) out.push(`a change to ${f} does not run the site steps of ci.yml, and a claim reads it`);
   return out;
 }
 
-test('a change to any file a claim reads runs the site workflow, on pull requests and on pushes to main', () => {
+test('a change to any file a claim reads runs the site steps of ci.yml, on pull requests and on pushes to main', () => {
   const inputs = claimInputs();
   assert.ok(inputs.length >= 20, `${inputs.length} inputs`);
-  assert.deepEqual(unwatched(inputs, read(REPO, '.github', 'workflows', 'jobscheduler-site.yml')), []);
+  assert.deepEqual(unwatched(inputs, ciPaths(), ciWorkflow()), []);
 });
 
-test('a claim input outside the filters is reported for each trigger (the check can fail)', () => {
-  const yml = read(REPO, '.github', 'workflows', 'jobscheduler-site.yml');
-  assert.deepEqual(unwatched(['crates/nope/src/lib.rs'], yml), [
-    'pull_request: a change to crates/nope/src/lib.rs does not run the site workflow, and a claim reads it',
-    'push: a change to crates/nope/src/lib.rs does not run the site workflow, and a claim reads it',
-  ]);
-  const prOnly = yml.replace(/(  push:[\s\S]*?)      - docs\/\*\*\n/, '$1');
-  assert.deepEqual(unwatched(['docs/release.md'], prOnly), ['push: a change to docs/release.md does not run the site workflow, and a claim reads it']);
-  assert.equal(pathMatches('crates/js-agent/src/**', 'crates/js-agent/src/a/b.rs'), true);
-  assert.equal(pathMatches('docs/*', 'docs/design/x.md'), false);
+test('a claim input outside site/ci-paths, an empty list and a step that does not read the list are reported (the check can fail)', () => {
+  const yml = ciWorkflow();
+  const entries = ciPaths();
+  assert.deepEqual(unwatched(['crates/nope/src/lib.rs'], entries, yml), ['a change to crates/nope/src/lib.rs does not run the site steps of ci.yml, and a claim reads it']);
+  assert.deepEqual(unwatched(['docs/release.md'], entries.filter((e) => e !== 'docs/'), yml), ['a change to docs/release.md does not run the site steps of ci.yml, and a claim reads it']);
+  assert.deepEqual(unwatched([], [], yml), ['site/ci-paths: no entries found']);
+  assert.deepEqual(unwatched([], entries, yml.replaceAll('site/ci-paths', 'site/other')), ['ci.yml: the site step does not read site/ci-paths']);
+  assert.deepEqual(unwatched([], entries, yml.replaceAll("steps.site.outputs.run == 'true'", 'true')), ['ci.yml: the site steps do not wait for the decision']);
+  assert.equal(pathMatches('crates/js-agent/src/', 'crates/js-agent/src/a/b.rs'), true);
+  assert.equal(pathMatches('docs/', 'docs-old/x.md'), false);
   assert.equal(pathMatches('README.md', 'README.mdx'), false);
+  assert.equal(pathMatches('README.md', 'README.md'), true);
 });

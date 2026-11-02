@@ -22,8 +22,8 @@ The site is `site/` at the root of the repository, next to `docs/`, `packaging/`
 workspace is Rust and the site's tooling is Node), it ships in no release (a file ships only when it is in a crate of a
 released binary or a root build input, `docs/release.md`), and it reads the documents and sources its pages rest on
 from the checkout it is in. The tests find the repository root by looking for `.github/workflows` above them
-(`test/support.ts`), so moving the directory changes no code; `.github/workflows/jobscheduler-site.yml` names the
-directory in its `paths:` filters, `working-directory` and `node-version-file`, and `test/supply-chain.test.ts` checks
+(`test/support.ts`), so moving the directory changes no code; the site steps of the `lint` job in `.github/workflows/ci.yml` name the
+directory in their `working-directory` and `node-version-file`, `ci-paths` lists the paths whose change runs them (read by that job and the tests), and `test/supply-chain.test.ts` checks
 that the workflow and the site agree.
 
 | Path | What |

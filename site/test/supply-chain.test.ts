@@ -3,11 +3,14 @@
 // Catches: a runtime dependency (the site ships none: its pages are static files and its script has no imports from
 // packages), a range (^ or ~) or a tag where an exact version belongs, a lockfile entry that runs an install script,
 // is fetched from anywhere but the npm registry, or carries no integrity hash, a Node version that is not the one
-// pinned in .node-version, and a workflow that builds with another version or without --ignore-scripts. A drift in any
+// pinned in .node-version, and the site steps of ci.yml building with another version or without --ignore-scripts. A drift in any
 // of them changes what code runs in the build before anyone reviews it.
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { ciWorkflow, jobText, siteScript, siteSteps } from './ci-site';
 import { read, REPO, SITE, SITE_REL } from './support';
 
 interface Lock {
@@ -66,24 +69,57 @@ test('the policy checks can fail', () => {
   assert.match(lockProblems({ lockfileVersion: 3, packages: { 'node_modules/a': { resolved: 'https://registry.npmjs.org/a', integrity: 'sha512-x', hasInstallScript: true } } }).join(), /runs an install script/);
 });
 
-test('Node is pinned to one exact version, and the workflow builds with that file, scripts off', () => {
+/** What is wrong with the site steps of ci.yml: the Node version file, the directory, the install, and the steps' order. */
+function siteStepProblems(steps: string): string[] {
+  const out: string[] = [];
+  if (!steps.includes(`node-version-file: ${SITE_REL}/.node-version\n`)) out.push('does not read .node-version of the site');
+  if (/^\s*node-version:/m.test(steps)) out.push('a literal node-version would shadow .node-version');
+  if (!steps.includes('run: npm ci --ignore-scripts --no-audit --no-fund\n')) out.push('does not install with --ignore-scripts');
+  const cmds = [...steps.matchAll(/^ {8}run: (npm .*)$/gm)].map((m) => m[1]);
+  if (cmds.join('|') !== 'npm ci --ignore-scripts --no-audit --no-fund|npm run typecheck|npm test|npm run build') out.push(`runs ${cmds.join(', ')}`);
+  const runs = (steps.match(/^ {8}run: npm .*$/gm) ?? []).length;
+  const dirs = (steps.match(new RegExp(`^ {8}working-directory: ${SITE_REL}$`, 'gm')) ?? []).length;
+  if (dirs !== runs) out.push(`${dirs} of ${runs} npm steps run in the site directory`);
+  return out;
+}
+
+test('Node is pinned to one exact version, and the site steps of ci.yml build with that file, scripts off', () => {
   assert.match(read(SITE, '.node-version'), /^\d+\.\d+\.\d+\n$/);
   assert.equal(read(SITE, '.node-version'), '24.21.0\n');
-  const wf = read(REPO, '.github', 'workflows', 'jobscheduler-site.yml');
-  assert.ok(wf.includes(`node-version-file: ${SITE_REL}/.node-version\n`), 'the workflow reads .node-version of the site');
-  assert.ok(wf.includes(`working-directory: ${SITE_REL}\n`), 'the workflow runs in the site directory');
-  assert.equal(/^\s*node-version:/m.test(wf), false, 'a literal node-version would shadow .node-version');
-  assert.match(wf, /npm ci --ignore-scripts --no-audit --no-fund/);
+  assert.deepEqual(siteStepProblems(siteSteps(ciWorkflow())), []);
 });
 
-test('the workflow follows the repository\'s rules: no permission at the top, pinned actions, no deploy', () => {
-  const wf = read(REPO, '.github', 'workflows', 'jobscheduler-site.yml');
+test('the site-step checks can fail', () => {
+  const steps = siteSteps(ciWorkflow());
+  assert.ok(steps.length > 0);
+  assert.deepEqual(siteStepProblems(''), ['does not read .node-version of the site', 'does not install with --ignore-scripts', 'runs ']);
+  assert.match(siteStepProblems(steps.replace('node-version-file: site/.node-version', 'node-version: 24')).join(), /does not read \.node-version/);
+  assert.match(siteStepProblems(steps.replace('node-version-file: site/.node-version', 'node-version-file: site/.node-version\n          node-version: 24')).join(), /shadow/);
+  assert.match(siteStepProblems(steps.replace(' --ignore-scripts', '')).join(), /does not install with --ignore-scripts/);
+  assert.match(siteStepProblems(steps.replace('run: npm test\n', 'run: npm run build\n')).join(), /runs npm ci/);
+  assert.match(siteStepProblems(steps.replace('working-directory: site\n        run: npm test', 'run: npm test')).join(), /3 of 4 npm steps/);
+});
+
+test('the site steps follow the repository\'s rules: no permission at the top or added, pinned actions, no deploy', () => {
+  const wf = ciWorkflow();
   assert.match(wf, /^permissions: \{\}$/m);
+  const lint = jobText(wf, 'lint');
+  assert.match(lint, /^ {4}permissions:\n {6}contents: read\n/m);
+  assert.equal((lint.match(/permissions:/g) ?? []).length, 1, 'the lint job adds no permission for the site');
   const uses = wf.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('- uses:') || l.startsWith('uses:'));
   assert.ok(uses.length >= 2, `${uses.length} uses: lines`);
-  for (const line of uses) assert.match(line, /^(?:- )?uses: [\w.-]+\/[\w.-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/, line);
-  assert.match(wf, /persist-credentials: false/);
-  assert.equal(/id-token|environment:|aws |s3 |publish/i.test(wf.replace(/^#.*$/gm, '')), false, 'this workflow builds and tests; it does not publish');
+  for (const line of uses) assert.match(line, /^(?:- )?uses: [\w.-]+\/[\w./-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/, line);
+  assert.match(lint, /uses: actions\/setup-node@[0-9a-f]{40} # v\d+\.\d+\.\d+\n/);
+  assert.match(lint, /persist-credentials: false/);
+  const steps = siteSteps(wf).replace(/^\s*#.*$/gm, '');
+  assert.equal(/id-token|environment:|aws |s3 |publish/i.test(steps), false, 'the site steps build and test; they do not publish');
+});
+
+test('the site workflow is gone: its steps are in ci.yml and nothing else runs the site', () => {
+  assert.equal(existsSync(join(REPO, '.github', 'workflows', 'jobscheduler-site.yml')), false);
+  assert.equal(jobText(ciWorkflow(), 'nope'), '');
+  assert.equal(siteSteps('jobs:\n  lint:\n    steps:\n      - run: x\n'), '');
+  assert.equal(siteScript('jobs:\n  lint:\n    steps:\n      - id: site\n        if: x\n'), '');
 });
 
 /** What is wrong with the test script: coverage is measured on the compiled tools and sources, and fails the run below 99%. */

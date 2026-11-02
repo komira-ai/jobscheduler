@@ -1,0 +1,32 @@
+# The paths whose change runs the website's build and tests in the `lint` job of
+# .github/workflows/ci.yml (the step `id: site` reads this file). One entry per line:
+# a directory prefix ending in '/' (every file under it) or an exact file path.
+# Lines starting with '#' and blank lines are ignored.
+#
+# These are the site itself and every file a statement on a page is held to (the claims test
+# reads them): test/claims.test.ts fails when a file it reads is not listed here.
+site/
+README.md
+LICENSE
+Cargo.toml
+deny.toml
+docs/
+packaging/js-agent/
+packaging/js-agent-macos/
+crates/js-agent/src/
+crates/js-cli/src/
+crates/js-lease/src/
+crates/js-lease-server/src/
+crates/js-pool-static/src/
+crates/js-provider-lambdalabs/src/
+crates/js-mdm/src/
+crates/js-registry/src/
+crates/js-sched/src/
+crates/js-server-core/src/
+crates/js-sizing/src/
+crates/js-types/src/
+crates/js-whole/src/
+crates/xtask/tests/layering.rs
+.github/workflows/ci.yml
+.github/workflows/js-agent-deb.yml
+.github/workflows/js-agent-macos-pkg.yml

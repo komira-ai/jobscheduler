@@ -4,6 +4,16 @@
 # The Cargo cache (registry, git checkouts and target) is keyed on the runner, the job,
 # Cargo.lock and rust-toolchain.toml. Every job restores it; only a push to main saves
 # it, and only when the exact key missed, so a pull request never writes the cache.
+#
+# The `lint` job also builds and tests the jobscheduler.dev website (site/): TypeScript
+# compiled by tsc, a build program that prerenders the pages, and node:test tests over the
+# built tree (golden output, links, the Content-Security-Policy rules, the pinned theme, a
+# public-repo scan, and the statements of the pages held to the code and documents they rest
+# on). Those steps run on a push to main, and on a pull request that changes a path listed
+# in site/ci-paths (the site, and the files its statements are held to; the claims test reads
+# them), or whose diff cannot be computed. The Node version is exactly the one in
+# site/.node-version. The network is touched by `npm ci` alone, with install scripts off.
+# The site steps build and test; they hold no cloud access and put nothing anywhere.
 name: ci
 
 on:
@@ -32,6 +42,10 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # Lint also carries the site steps: it is the shorter job (it runs no tests, so the Rust
+  # tests in `test` are not delayed), and the decision is made in a step of the job itself,
+  # with the history the diff needs, rather than waiting on the `changes` job, which would
+  # hold back fmt and clippy.
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -40,7 +54,36 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      # Whether the site steps run: always on a push to main; on a pull request when a
+      # changed file matches site/ci-paths (a directory prefix ending in '/', or an exact
+      # file). Fail closed: a diff or a list that cannot be read runs them.
+      - id: site
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! files=$(git -c core.quotePath=false diff --no-renames --name-only "origin/$BASE...HEAD") ||
+            ! paths=$(grep -Ev '^[[:space:]]*(#|$)' site/ci-paths); then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          run=false
+          while IFS= read -r file; do
+            while IFS= read -r path; do
+              path=${path%%[[:space:]]*}
+              case "$path" in
+                */) [ "${file#"$path"}" != "$file" ] && run=true ;;
+                *) [ "$file" = "$path" ] && run=true ;;
+              esac
+            done <<< "$paths"
+          done <<< "$files"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
       - run: rustup toolchain install
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: cargo-cache
@@ -61,6 +104,22 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ steps.site.outputs.run == 'true' }}
+        with:
+          node-version-file: site/.node-version
+      - if: ${{ steps.site.outputs.run == 'true' }}
+        working-directory: site
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - if: ${{ steps.site.outputs.run == 'true' }}
+        working-directory: site
+        run: npm run typecheck
+      - if: ${{ steps.site.outputs.run == 'true' }}
+        working-directory: site
+        run: npm test
+      - if: ${{ steps.site.outputs.run == 'true' }}
+        working-directory: site
+        run: npm run build
 
   # js-state's Postgres tests run here too (a test that needs the server fails, and does
   # not skip, when KBF_TEST_POSTGRES_URL is unset), against a service container pinned by
