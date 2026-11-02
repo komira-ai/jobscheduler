@@ -14,7 +14,7 @@ use objc2_open_directory::{ODNode, ODRecord, ODSession, kODNodeTypeLocalNodes};
 use security_framework::random::SecRandom;
 
 use crate::autologin::{self, CommandOutput};
-use crate::helper::{self, Account, Host, LiveProcess, NewUser, Process};
+use crate::helper::{self, Account, Host, LiveProcess, NewUser, PrintAnswer, Process};
 
 const USERS: &str = "dsRecTypeStandard:Users";
 const GROUPS: &str = "dsRecTypeStandard:Groups";
@@ -189,16 +189,16 @@ impl Host for MacHost {
         })
     }
 
-    fn domain_exists(&self, domain: &str) -> io::Result<bool> {
+    fn launchctl_print(&self, domain: &str) -> io::Result<PrintAnswer> {
         let output = Command::new("/bin/launchctl")
             .args(["print", domain])
             .env_clear()
             .stdin(std::process::Stdio::null())
             .output()?;
-        helper::launchctl_print_answer(
-            output.status.code(),
-            &String::from_utf8_lossy(&output.stderr),
-        )
+        Ok(PrintAnswer {
+            code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
     }
 
     fn bootout(&self, domain: &str) -> io::Result<()> {

@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use super::*;
+use crate::testing::{found, no_domain};
 
 /// A rig of ONE uid, the test's own, holding lease `lease`.
 fn one(name: &str, lease: &str) -> (Rig, u32) {
@@ -46,7 +47,7 @@ fn kill_uid_succeeds_on_the_last_allowed_round() {
 
 /// Catches a bootout failure taken as final, or one that is ignored: a bootout of
 /// `user/<uid>` that fails twice and then works ends in success, after exactly three
-/// bootouts of it and with the domain gone.
+/// bootouts of it and with the domain gone, and none once launchd says it is gone.
 #[test]
 fn a_bootout_failure_that_clears_ends_in_success() {
     let (rig, uid) = one("bounds-transient", "42.1");
@@ -57,8 +58,8 @@ fn a_bootout_failure_that_clears_ends_in_success() {
         .insert("bootout user", VecDeque::from([true, true]));
     assert_eq!(rig.helper.kill_uid("42.1"), Ok(()));
     let calls = log(&rig);
-    // Three in the first kill (the domain went at the third), one in the second.
-    assert_eq!(count(&calls, &format!("bootout user/{uid}")), 4);
+    // Three in the first kill (the domain went at the third), none in the second.
+    assert_eq!(count(&calls, &format!("bootout user/{uid}")), 3);
     assert!(rig.host.state().domains.is_empty());
 }
 
@@ -104,11 +105,11 @@ fn a_check_that_fails_after_one_worked_refuses_kill_uid() {
     rig.host
         .state()
         .fail_script
-        .insert("domain_exists", VecDeque::from([false, true]));
+        .insert("launchctl print", VecDeque::from([false, true]));
     assert_eq!(
         rig.helper.kill_uid("44.1"),
         Err(format!(
-            "asking launchd for user/{uid}: domain_exists failed"
+            "asking launchd for user/{uid}: launchctl print failed"
         ))
     );
     uid_held(&rig);
@@ -120,8 +121,17 @@ fn a_check_that_fails_after_one_worked_refuses_kill_uid() {
 #[test]
 fn a_job_started_during_the_final_bootout_refuses_user_delete() {
     let (rig, uid) = one("bounds-final-bootout", "45.1");
-    // None at the first look's bootout; one at the last look's.
-    rig.host.state().bootout_starts.extend([0, 1]);
+    // Neither domain at the first look (before and after its bootout); `user/<uid>` at
+    // the last, where a job launchd starts just before the domain goes leaves one
+    // process.
+    let (gui, user) = (format!("gui/{uid}"), format!("user/{uid}"));
+    let mut script = Vec::new();
+    for _ in 0..2 {
+        script.extend([no_domain(&gui), no_domain(&user)]);
+    }
+    script.extend([no_domain(&gui), found()]);
+    rig.host.state().print_script.extend(script);
+    rig.host.state().bootout_starts.push_back(1);
     let got = rig.helper.user_delete("45.1");
     assert_eq!(
         got,
