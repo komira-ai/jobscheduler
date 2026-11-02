@@ -87,6 +87,13 @@ pub(crate) struct State {
     /// Answers `domain_exists` gives, in order, before it reads `domains` again: a
     /// domain that launchd makes (or ends) between two of the helper's steps.
     pub(crate) exists_script: VecDeque<bool>,
+    /// Per call name (as in `fail`), whether each next call fails, in order; once a
+    /// script is used up, `fail` decides again. A failure that clears, or one that starts
+    /// after some calls succeeded.
+    pub(crate) fail_script: BTreeMap<&'static str, VecDeque<bool>>,
+    /// For each next `bootout user/<uid>`, in order, how many processes of the uid a job
+    /// launchd starts just before the domain goes leaves running.
+    pub(crate) bootout_starts: VecDeque<usize>,
     /// What `user_dir` answers, by uid; `/var/folders/zz/<uid>/0/` when unset.
     pub(crate) user_dirs: BTreeMap<u32, PathBuf>,
 }
@@ -133,7 +140,11 @@ impl FakeHost {
     fn call(&self, name: &'static str, text: String) -> io::Result<()> {
         let mut state = self.state();
         state.log.push(text);
-        if state.fail.contains(name) {
+        let scripted = state
+            .fail_script
+            .get_mut(name)
+            .and_then(VecDeque::pop_front);
+        if scripted.unwrap_or_else(|| state.fail.contains(name)) {
             return Err(io::Error::other(format!("{name} failed")));
         }
         Ok(())
@@ -186,13 +197,24 @@ impl Host for FakeHost {
         };
         self.call(name, format!("bootout {domain}"))?;
         let mut state = self.state();
+        let user = domain
+            .strip_prefix("user/")
+            .map(|uid| uid.parse::<u32>().unwrap());
+        // Whether a process of the uid lives to make the domain again: one that a job
+        // launchd started just before the bootout does not count, and keeps running.
+        let alive = user.is_some_and(|uid| state.procs.get(&uid).is_some_and(|n| *n > 0));
+        if let Some(uid) = user {
+            let started = state.bootout_starts.pop_front().unwrap_or(0);
+            if started > 0 {
+                *state.procs.entry(uid).or_default() += started;
+            }
+        }
         if !state.domains.remove(domain) {
             return Err(io::Error::other(format!("no such domain {domain}")));
         }
-        if let Some(uid) = domain.strip_prefix("user/") {
-            let uid: u32 = uid.parse().unwrap();
+        if let Some(uid) = user {
             state.agents.remove(&uid);
-            if state.procs.get(&uid).is_some_and(|n| *n > 0) {
+            if alive {
                 state.domains.insert(domain.to_owned());
             }
         }

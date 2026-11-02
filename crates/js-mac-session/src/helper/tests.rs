@@ -557,7 +557,7 @@ fn a_process_started_during_user_delete_stops_it() {
 
     // A job starts while the crontab is removed and does not exit: found at the
     // second look, before the home folder is touched.
-    rig.host.state().live_script.push_back(0);
+    rig.host.state().live_script.extend([0, 0]);
     rig.host.state().procs.insert(uid, 1);
     let error = rig.helper.user_delete("11.1").unwrap_err();
     rig.host.state().procs.clear();
@@ -569,7 +569,7 @@ fn a_process_started_during_user_delete_stops_it() {
     // One starts during the rest of the sweep: found at the last look, and the user
     // record stays.
     log(&rig);
-    rig.host.state().live_script.extend([0, 0]);
+    rig.host.state().live_script.extend([0, 0, 0]);
     rig.host.state().procs.insert(uid, 1);
     let error = rig.helper.user_delete("11.1").unwrap_err();
     rig.host.state().procs.clear();
@@ -582,8 +582,9 @@ fn a_process_started_during_user_delete_stops_it() {
             .iter()
             .filter(|c| c.starts_with("live_processes"))
             .count(),
-        2 + EXIT_LOOKS,
-        "two looks, then the third waits its whole bound: {calls:?}"
+        3 + EXIT_LOOKS,
+        "the first look (before and after its bootout), the second, then the third \
+         waits its whole bound: {calls:?}"
     );
     assert!(
         !calls.iter().any(|c| c.starts_with("delete_user")),
@@ -599,6 +600,7 @@ fn a_process_started_during_user_delete_stops_it() {
         format!("bootout user/{uid}"),
         format!("domain_exists gui/{uid}"),
         format!("domain_exists user/{uid}"),
+        format!("live_processes {uid}"),
     ];
     let mut want = vec![
         "account kbf-lease-11-1".to_owned(),
@@ -714,15 +716,16 @@ fn user_delete_waits_for_a_process_that_exits() {
         look.clone(),
     ];
     want.extend(domains.clone());
-    want.extend([look.clone(), look]);
+    want.extend([look.clone(), look.clone(), look.clone()]);
     want.extend(domains);
+    want.push(look);
     want.push("delete_user kbf-lease-12-1".to_owned());
     assert_eq!(log(&rig), want);
 
     // One that exits during the last look, after the sweep: waited for too.
     let uid = rig.helper.user_create("12.2", None).unwrap();
     log(&rig);
-    let mut script = vec![0, 0];
+    let mut script = vec![0, 0, 0];
     script.extend(std::iter::repeat_n(3, EXIT_LOOKS - 1));
     rig.host.state().live_script.extend(script);
     assert_eq!(rig.helper.user_delete("12.2"), Ok(true));
@@ -896,4 +899,5 @@ fn a_gui_run_waits_for_the_lease_user_s_gui_domain() {
     );
 }
 
+mod bounds;
 mod teardown;

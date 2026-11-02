@@ -190,13 +190,15 @@ impl Host for MacHost {
     }
 
     fn domain_exists(&self, domain: &str) -> io::Result<bool> {
-        let status = Command::new("/bin/launchctl")
+        let output = Command::new("/bin/launchctl")
             .args(["print", domain])
             .env_clear()
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()?;
-        Ok(status.success())
+            .stdin(std::process::Stdio::null())
+            .output()?;
+        helper::launchctl_print_answer(
+            output.status.code(),
+            &String::from_utf8_lossy(&output.stderr),
+        )
     }
 
     fn bootout(&self, domain: &str) -> io::Result<()> {
@@ -215,26 +217,8 @@ impl Host for MacHost {
     }
 
     fn user_dir(&self, uid: u32, gid: u32) -> io::Result<PathBuf> {
-        use std::os::unix::process::CommandExt as _;
-        // As the uid, out of any session, with nothing of the helper's environment; std
-        // drops root's supplementary groups before the setuid.
-        let output = Command::new("/usr/bin/getconf")
-            .arg("DARWIN_USER_DIR")
-            .env_clear()
-            .current_dir("/")
-            .uid(uid)
-            .gid(gid)
-            .stdin(std::process::Stdio::null())
-            .output()?;
-        if !output.status.success() {
-            return Err(io::Error::other(format!(
-                "getconf DARWIN_USER_DIR as uid {uid}: {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        let text = String::from_utf8(output.stdout).map_err(io::Error::other)?;
-        Ok(PathBuf::from(text.trim_end_matches('\n')))
+        let (program, arg) = helper::folders::GETCONF;
+        helper::folders::ask(program, &[arg], uid, gid)
     }
 
     fn kill_all(&self, uid: u32) -> io::Result<()> {

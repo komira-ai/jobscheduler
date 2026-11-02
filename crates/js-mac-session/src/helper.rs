@@ -71,18 +71,22 @@ use crate::ledger::{Entry, Ledger};
 use crate::proto::{Limits, Reply, Request, Session};
 use crate::scan::ScanSettings;
 use crate::spawn::{self, Spawn};
-use crate::sweep::{SweepPlan, sweep};
+use crate::sweep::SweepPlan;
 
-mod folders;
+pub(crate) mod folders;
 mod image;
 mod leak;
 mod reap;
 mod role;
 mod switch;
+mod teardown;
 mod vmrun;
 
 pub use image::{CHFLAGS, ImageSettings};
 pub use switch::Reset;
+// Only `MacHost` asks launchd; off macOS the tests read it.
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
+pub(crate) use teardown::launchctl_print_answer;
 
 /// How many times `kill-uid` kills, boots out the uid's launchd domains and looks again
 /// before it gives up.
@@ -250,23 +254,6 @@ pub struct LiveProcess {
     pub pid: i32,
     /// Its command name as the kernel keeps it (truncated), or `?` if unreadable.
     pub command: String,
-}
-
-/// `<count> processes of uid <uid> remain <when>: <pid> (<command>), ...`.
-fn remain(uid: u32, when: &str, left: &[LiveProcess]) -> String {
-    let mut named: Vec<String> = left
-        .iter()
-        .take(NAMED)
-        .map(|p| format!("{} ({})", p.pid, p.command))
-        .collect();
-    if left.len() > NAMED {
-        named.push(format!("and {} more", left.len() - NAMED));
-    }
-    format!(
-        "{} processes of uid {uid} remain {when}: {}",
-        left.len(),
-        named.join(", ")
-    )
 }
 
 /// A user record to create.
@@ -634,273 +621,6 @@ impl Helper {
             .domain_exists(&domain)
             .map_err(|why| format!("asking launchd for {domain}: {why}"))
     }
-
-    /// `kill-uid <lease>`: kills every process of the uid, then boots out its GUI and
-    /// user launchd domains (so launchd restarts none of its agents, such as
-    /// `distnoted`), and repeats both until no process and neither domain is left; then
-    /// removes the user's crontab and `at` jobs (so no job of the user starts after
-    /// kill-uid returns: one would start a process `user-delete` refuses), and kills and
-    /// boots out again, for a job that fired before they went.
-    ///
-    /// # Errors
-    /// Why it was refused, processes or a domain that survived [`KILL_ROUNDS`] rounds,
-    /// or a crontab or `at` job that could not be removed (after the second kill).
-    pub fn kill_uid(&self, lease: &str) -> Result<(), String> {
-        let lease = parse_lease(lease)?;
-        let ledger = self.lock();
-        self.kill_locked(&ledger, lease)
-    }
-
-    /// [`Self::kill_uid`], with the ledger's lock held.
-    fn kill_locked(&self, ledger: &Ledger, lease: LeaseId) -> Result<(), String> {
-        let uid = self.live_uid(ledger, lease)?;
-        self.kill_account(&user_name(lease), uid)
-            .inspect_err(|why| kept(lease, uid, why))?;
-        tracing::info!(lease = %Dotted(lease), uid, "no process of the lease user is left");
-        Ok(())
-    }
-
-    /// Kills every process of `uid` and boots out its domains, as [`Self::kill_uid`]
-    /// describes, for the account `name`.
-    fn kill_account(&self, name: &str, uid: u32) -> Result<(), String> {
-        self.kill_rounds(uid)?;
-        // Swept only once nothing of the user runs (the sweep's contract).
-        let schedules = Self::sweep_all(&self.settings.schedules, name, uid);
-        self.kill_rounds(uid)?;
-        schedules.map(drop)
-    }
-
-    /// Kills every process of `uid`, then boots out its GUI and user domains, until no
-    /// process and neither domain is left, for at most [`KILL_ROUNDS`] rounds.
-    fn kill_rounds(&self, uid: u32) -> Result<(), String> {
-        let mut left = Vec::new();
-        let mut stayed = Vec::new();
-        for _ in 0..KILL_ROUNDS {
-            self.host
-                .kill_all(uid)
-                .map_err(|why| format!("killing the processes of uid {uid}: {why}"))?;
-            let refused = self.boot_out(uid);
-            left = self.live(uid)?;
-            if left.is_empty() {
-                stayed = self.domains_left(uid, &refused)?;
-                if stayed.is_empty() {
-                    return Ok(());
-                }
-            }
-            self.host.pause();
-        }
-        let when = format!("after {KILL_ROUNDS} rounds");
-        match left.is_empty() {
-            true => Err(format!(
-                "launchd domains of uid {uid} remain {when}: {}",
-                stayed.join(", ")
-            )),
-            false => Err(remain(uid, &when, &left)),
-        }
-    }
-
-    /// `launchctl bootout` of the GUI and the user domain of `uid`; why each one that
-    /// failed did (a domain that does not exist fails too, which [`Self::domains_left`]
-    /// tells apart).
-    fn boot_out(&self, uid: u32) -> Vec<(String, String)> {
-        domains(uid)
-            .into_iter()
-            .filter_map(|domain| match self.host.bootout(&domain) {
-                Ok(()) => None,
-                Err(why) => {
-                    tracing::debug!("launchctl bootout {domain}: {why}");
-                    Some((domain, why.to_string()))
-                }
-            })
-            .collect()
-    }
-
-    /// The domains of `uid` that launchd still has, each with why its bootout failed
-    /// (from `refused`), if it did.
-    fn domains_left(&self, uid: u32, refused: &[(String, String)]) -> Result<Vec<String>, String> {
-        let mut left = Vec::new();
-        for domain in domains(uid) {
-            let exists = self
-                .host
-                .domain_exists(&domain)
-                .map_err(|why| format!("asking launchd for {domain}: {why}"))?;
-            if exists {
-                left.push(match refused.iter().find(|(d, _)| *d == domain) {
-                    Some((_, why)) => format!("{domain} (bootout: {why})"),
-                    None => domain,
-                });
-            }
-        }
-        Ok(left)
-    }
-
-    /// `user-delete <lease>`: sweeps what the user leaves, deletes its record and
-    /// records the deletion. Returns whether a record was there to delete; a lease
-    /// already deleted returns `false` and touches nothing.
-    ///
-    /// The uid's entry under the per-user folders is taken from its `DARWIN_USER_DIR`,
-    /// asked first, while the record is there ([`Host::user_dir`]); an answer that is not
-    /// an entry of [`Settings::user_folders`] is refused, never guessed at, and the
-    /// entry is removed whole with the rest of the sweep.
-    ///
-    /// No process of the uid may be left at any of three looks: before anything is
-    /// removed (so nothing of the user races the walk), once the crontab and `at` jobs
-    /// are gone (a job that started after `kill-uid` is found here, and none can start
-    /// later), and after the whole sweep, just before the record goes (so no process
-    /// outlives its user as an orphan uid that later leases' files are open to). At the
-    /// first and the last look the uid's launchd domains are booted out too, and one
-    /// that stays refuses the delete: nothing is left for launchd to restart. Each
-    /// look waits up to [`EXIT_LOOKS`] listings for the processes it finds to exit: a
-    /// cron job that started between `kill-uid` and this delete ends by itself, and
-    /// one that does not is named in the refusal. The ledger lock is held throughout,
-    /// so a refused delete holds back the other verbs for up to about five seconds
-    /// per look.
-    ///
-    /// Refused while the session switch's intent record names the lease: its user is
-    /// the one the login window logs in.
-    ///
-    /// # Errors
-    /// Why it was refused: the intent record names the lease or cannot be read, the
-    /// uid's `DARWIN_USER_DIR` could not be asked or is not an entry of the per-user
-    /// folders, a process or a launchd domain of the uid remains, or the sweep or the
-    /// deletion failed (the lease stays live, its uid held, so the delete can be
-    /// repeated).
-    pub fn user_delete(&self, lease: &str) -> Result<bool, String> {
-        let lease = parse_lease(lease)?;
-        let mut ledger = self.lock();
-        if ledger.get(lease).is_some_and(|entry| entry.deleted) {
-            return Ok(false);
-        }
-        if read_intent(&self.settings.session.intent)? == Some(Intent::Lease(lease)) {
-            return Err(format!(
-                "lease {} holds the GUI session (auto-login); session-idle first",
-                Dotted(lease)
-            ));
-        }
-        self.delete_locked(&mut ledger, lease)
-    }
-
-    /// [`Self::user_delete`] of a live lease, with the ledger's lock held.
-    fn delete_locked(&self, ledger: &mut Ledger, lease: LeaseId) -> Result<bool, String> {
-        let uid = self.live_uid(ledger, lease)?;
-        let existed = self
-            .delete_steps(ledger, lease, uid)
-            .inspect_err(|why| kept(lease, uid, why))?;
-        Ok(existed)
-    }
-
-    /// The steps of [`Self::user_delete`] for the live lease `lease` with `uid`.
-    fn delete_steps(&self, ledger: &mut Ledger, lease: LeaseId, uid: u32) -> Result<bool, String> {
-        let name = user_name(lease);
-        let entry = self.user_entry(&name, uid)?;
-        self.settled(uid)?;
-        let mut removed = Self::sweep_all(&self.settings.schedules, &name, uid)?;
-        self.none_left(uid)?;
-        let mut plan = self.settings.sweep.clone();
-        plan.named
-            .push(format!("{}/{{user}}", self.settings.homes.display()));
-        removed += Self::sweep_all(&plan, &name, uid)?;
-        if let Some(entry) = entry {
-            removed += Self::swept(crate::sweep::remove_owned(&entry, uid), &name)?;
-        }
-        self.settled(uid)?;
-        let existed = self
-            .host
-            .delete_user(&name)
-            .map_err(|why| format!("deleting user {name}: {why}"))?;
-        ledger
-            .record_deleted(lease)
-            .map_err(|why| format!("recording the deletion of lease {}: {why}", Dotted(lease)))?;
-        tracing::info!(lease = %Dotted(lease), uid, removed, existed, "deleted lease user {name}");
-        Ok(existed)
-    }
-
-    /// The entry under [`Settings::user_folders`] of the user `name` with `uid`, from its
-    /// `DARWIN_USER_DIR`; `None` once the user's record is gone. The entry is removed
-    /// before the record in the same delete, so a record that is gone (a delete that
-    /// failed after it, now repeated) left no entry, and a uid with no record has no
-    /// `DARWIN_USER_DIR` of its own to ask for.
-    fn user_entry(&self, name: &str, uid: u32) -> Result<Option<PathBuf>, String> {
-        let account = self
-            .host
-            .account(name)
-            .map_err(|why| format!("looking up user {name}: {why}"))?;
-        if account.is_none() {
-            return Ok(None);
-        }
-        let dir = self
-            .host
-            .user_dir(uid, self.settings.gid)
-            .map_err(|why| format!("asking for the DARWIN_USER_DIR of uid {uid}: {why}"))?;
-        folders::entry(&dir, &self.settings.user_folders).map(Some)
-    }
-
-    /// [`Self::none_left`], then the uid's launchd domains booted out: refused while a
-    /// process or a domain of the uid is left.
-    fn settled(&self, uid: u32) -> Result<(), String> {
-        self.none_left(uid)?;
-        let refused = self.boot_out(uid);
-        let stayed = self.domains_left(uid, &refused)?;
-        if stayed.is_empty() {
-            return Ok(());
-        }
-        Err(format!(
-            "launchd domains of uid {uid} remain: {}; kill-uid first",
-            stayed.join(", ")
-        ))
-    }
-
-    /// Waits, for at most [`EXIT_LOOKS`] listings, until no process of `uid` is
-    /// alive; refuses, naming the processes, if some still are.
-    fn none_left(&self, uid: u32) -> Result<(), String> {
-        let mut left = self.live(uid)?;
-        let mut looks = 1;
-        while !left.is_empty() && looks < EXIT_LOOKS {
-            self.host.pause();
-            left = self.live(uid)?;
-            looks += 1;
-        }
-        if left.is_empty() {
-            return Ok(());
-        }
-        Err(format!(
-            "{}; kill-uid first",
-            remain(uid, &format!("after {EXIT_LOOKS} looks"), &left)
-        ))
-    }
-
-    /// Sweeps `plan` for the user; how many entries went, or why it is incomplete.
-    fn sweep_all(plan: &SweepPlan, name: &str, uid: u32) -> Result<usize, String> {
-        Self::swept(sweep(plan, name, uid), name)
-    }
-
-    /// What the sweep `swept` for the user `name` removed, or why it is incomplete.
-    fn swept(swept: crate::sweep::Swept, name: &str) -> Result<usize, String> {
-        if swept.errors.is_empty() {
-            Ok(swept.removed)
-        } else {
-            Err(format!(
-                "the sweep for {name} is incomplete: {}",
-                swept.errors.join("; ")
-            ))
-        }
-    }
-}
-
-/// The GUI and the user launchd domain of `uid`, in the order they are booted out.
-fn domains(uid: u32) -> [String; 2] {
-    [format!("gui/{uid}"), format!("user/{uid}")]
-}
-
-/// Reports that the user of `lease`, with `uid`, stays after a failed `kill-uid` or
-/// `user-delete`: the lease is live in the ledger, so the uid is held and handed to no
-/// other lease until a delete succeeds.
-fn kept(lease: LeaseId, uid: u32, why: &str) {
-    tracing::warn!(
-        lease = %Dotted(lease),
-        uid,
-        "the lease user stays and uid {uid} is held until a delete succeeds: {why}"
-    );
 }
 
 /// Makes the home folder `name` in `homes`: new (an existing one is an error), owned

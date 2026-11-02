@@ -1,0 +1,228 @@
+//! The edges of the teardown's loops and the quarantine: success on the last allowed
+//! round, a failure that clears, each launchd domain on its own and both at once, a
+//! check that fails after one succeeded, a job launchd started during the final
+//! bootout, a quarantine that outlives a restart of the helper, and a delete repeated
+//! after the record went that still finds what the uid left.
+
+use std::collections::VecDeque;
+use std::path::PathBuf;
+
+use super::*;
+
+/// A rig of ONE uid, the test's own, holding lease `lease`.
+fn one(name: &str, lease: &str) -> (Rig, u32) {
+    let rig = rig(name, 1);
+    let uid = rig.helper.user_create(lease, None).unwrap();
+    log(&rig);
+    (rig, uid)
+}
+
+/// How many logged calls are exactly `call`.
+fn count(calls: &[String], call: &str) -> usize {
+    calls.iter().filter(|c| *c == call).count()
+}
+
+/// Asserts that no other lease can have the uid: the lease is held.
+fn uid_held(rig: &Rig) {
+    let range = rig.helper.settings.range;
+    assert_eq!(
+        rig.helper.user_create("99.1", None),
+        Err(format!("no free uid in {range}"))
+    );
+}
+
+/// Catches a bound off by one: processes that are gone at the last allowed round are a
+/// success, not a refusal, and the loop takes exactly [`KILL_ROUNDS`] rounds for it.
+#[test]
+fn kill_uid_succeeds_on_the_last_allowed_round() {
+    let (rig, uid) = one("bounds-last-round", "41.1");
+    rig.host.state().procs.insert(uid, 1);
+    rig.host.state().stubborn.insert(uid, KILL_ROUNDS - 1);
+    assert_eq!(rig.helper.kill_uid("41.1"), Ok(()));
+    let calls = log(&rig);
+    // Every round of the first kill, and the one of the second.
+    assert_eq!(count(&calls, &format!("kill_all {uid}")), KILL_ROUNDS + 1);
+}
+
+/// Catches a bootout failure taken as final, or one that is ignored: a bootout of
+/// `user/<uid>` that fails twice and then works ends in success, after exactly three
+/// bootouts of it and with the domain gone.
+#[test]
+fn a_bootout_failure_that_clears_ends_in_success() {
+    let (rig, uid) = one("bounds-transient", "42.1");
+    rig.host.state().domains.insert(format!("user/{uid}"));
+    rig.host
+        .state()
+        .fail_script
+        .insert("bootout user", VecDeque::from([true, true]));
+    assert_eq!(rig.helper.kill_uid("42.1"), Ok(()));
+    let calls = log(&rig);
+    // Three in the first kill (the domain went at the third), one in the second.
+    assert_eq!(count(&calls, &format!("bootout user/{uid}")), 4);
+    assert!(rig.host.state().domains.is_empty());
+}
+
+/// Catches a teardown that looks at one domain only, or names the wrong one: the GUI
+/// domain alone is booted out; the GUI domain alone staying is named alone; both
+/// staying are both named, in order, each with why its bootout failed.
+#[test]
+fn each_domain_is_handled_and_named_on_its_own() {
+    let (rig, uid) = one("bounds-domains", "43.1");
+    rig.host.state().domains.insert(format!("gui/{uid}"));
+    assert_eq!(rig.helper.kill_uid("43.1"), Ok(()));
+    assert!(rig.host.state().domains.is_empty());
+
+    rig.host.state().domains.insert(format!("gui/{uid}"));
+    rig.host.state().fail.insert("bootout gui");
+    assert_eq!(
+        rig.helper.kill_uid("43.1"),
+        Err(format!(
+            "launchd domains of uid {uid} remain after {KILL_ROUNDS} rounds: \
+             gui/{uid} (bootout: bootout gui failed)"
+        ))
+    );
+    uid_held(&rig);
+
+    rig.host.state().domains.insert(format!("user/{uid}"));
+    rig.host.state().fail.insert("bootout user");
+    assert_eq!(
+        rig.helper.kill_uid("43.1"),
+        Err(format!(
+            "launchd domains of uid {uid} remain after {KILL_ROUNDS} rounds: \
+             gui/{uid} (bootout: bootout gui failed), user/{uid} (bootout: bootout user failed)"
+        ))
+    );
+    uid_held(&rig);
+}
+
+/// Catches a launchd check whose later failure is taken for absence: the first check
+/// (of `gui/<uid>`) works, the second (of `user/<uid>`) fails, and `kill-uid` is refused
+/// naming that domain.
+#[test]
+fn a_check_that_fails_after_one_worked_refuses_kill_uid() {
+    let (rig, uid) = one("bounds-check", "44.1");
+    rig.host
+        .state()
+        .fail_script
+        .insert("domain_exists", VecDeque::from([false, true]));
+    assert_eq!(
+        rig.helper.kill_uid("44.1"),
+        Err(format!(
+            "asking launchd for user/{uid}: domain_exists failed"
+        ))
+    );
+    uid_held(&rig);
+}
+
+/// Catches a last look that lists the processes only before the bootout: a job launchd
+/// started just before the final bootout ended its domain keeps running, and the
+/// record must not go. Red when the processes are not looked at after the bootout.
+#[test]
+fn a_job_started_during_the_final_bootout_refuses_user_delete() {
+    let (rig, uid) = one("bounds-final-bootout", "45.1");
+    // None at the first look's bootout; one at the last look's.
+    rig.host.state().bootout_starts.extend([0, 1]);
+    let got = rig.helper.user_delete("45.1");
+    assert_eq!(
+        got,
+        Err(format!(
+            "1 processes of uid {uid} remain after {EXIT_LOOKS} looks: 1000 (proc0); \
+             kill-uid first"
+        ))
+    );
+    assert!(!log(&rig).iter().any(|c| c.starts_with("delete_user")));
+    assert!(rig.host.state().users.contains_key("kbf-lease-45-1"));
+    uid_held(&rig);
+}
+
+/// The helper over the same directory again, as after a restart, before its boot
+/// reset; what the reopened ledger says of `uid`.
+fn restarted(rig: Rig, name: &str, uid: u32) -> Rig {
+    let range = rig.helper.settings.range;
+    let dir = rig.dir.clone();
+    drop(rig);
+    let again = rig_with(name, range, Some(dir));
+    assert!(
+        again.helper.lock().held_uids().contains(&uid),
+        "uid {uid} is free after the restart"
+    );
+    again
+}
+
+/// Catches a quarantine kept only in memory: after a failed `user-delete` (a domain that
+/// stays; and a deletion whose record went but whose ledger write failed) the reopened
+/// ledger still holds the uid, a boot reset that cannot end the user fails and keeps
+/// holding it, and the reset repeated once nothing stops it completes the delete and
+/// frees the uid.
+#[test]
+fn a_held_uid_stays_held_across_a_restart_until_a_delete_completes() {
+    let (rig, uid) = one("bounds-restart", "46.1");
+    rig.host.state().domains.insert(format!("user/{uid}"));
+    rig.host.state().fail.insert("bootout user");
+    assert!(rig.helper.user_delete("46.1").is_err());
+    let rig = restarted(rig, "bounds-restart", uid);
+    rig.host.state().domains.insert(format!("user/{uid}"));
+    rig.host.state().fail.insert("bootout user");
+    let got = rig.helper.boot_reset(&[]).unwrap_err();
+    assert!(
+        got.starts_with("the boot reset is incomplete: lease 46.1: "),
+        "{got}"
+    );
+    assert!(rig.helper.lock().held_uids().contains(&uid));
+    rig.host.state().fail.clear();
+    let reset = rig.helper.boot_reset(&[]).unwrap();
+    assert_eq!(reset.deleted.len(), 1);
+    assert_eq!(rig.helper.user_create("46.2", None), Ok(uid));
+
+    // The record goes, and the ledger cannot say so.
+    rig.helper.lock().fail_writes(&rig.dir.join("ledger"));
+    let got = rig.helper.user_delete("46.2").unwrap_err();
+    assert!(
+        got.starts_with("recording the deletion of lease 46.2"),
+        "{got}"
+    );
+    assert!(!rig.host.state().users.contains_key("kbf-lease-46-2"));
+    uid_held(&rig);
+    let rig = restarted(rig, "bounds-restart", uid);
+    rig.helper.boot_reset(&[]).unwrap();
+    assert_eq!(rig.helper.user_create("46.3", None), Ok(uid));
+}
+
+/// Catches a delete repeated after the record went that frees the uid while the uid's
+/// per-user folders entry is still there (an earlier teardown that did not finish, or
+/// a record removed by someone else): with no `DARWIN_USER_DIR` to ask for, every entry
+/// the uid owns there goes, and nothing else does.
+#[test]
+fn a_record_gone_with_its_entry_left_still_has_the_entry_removed() {
+    let (rig, _uid) = one("bounds-residual", "47.1");
+    let folders = rig.dir.join("folders");
+    let mine = folders.join("ab/cdef0123");
+    std::fs::create_dir_all(mine.join("C/com.apple.ScreenTimeAgent")).unwrap();
+    std::fs::write(mine.join("C/com.apple.ScreenTimeAgent/db"), "x").unwrap();
+    let file = folders.join("ab/not-an-entry");
+    std::fs::write(&file, "x").unwrap();
+    rig.host.state().users.clear();
+    assert_eq!(rig.helper.user_delete("47.1"), Ok(false));
+    assert!(!mine.exists());
+    assert!(file.exists());
+    let calls = log(&rig);
+    assert!(
+        !calls.iter().any(|c| c.starts_with("user_dir")),
+        "{calls:#?}"
+    );
+
+    // When the folders cannot be searched, the delete is refused and the uid held.
+    let (rig, uid) = one("bounds-residual-stuck", "48.1");
+    let folders: PathBuf = rig.dir.join("folders");
+    std::fs::write(&folders, "not a directory").unwrap();
+    rig.host.state().users.clear();
+    let got = rig.helper.user_delete("48.1").unwrap_err();
+    assert!(
+        got.starts_with(&format!(
+            "searching {} for the entries of uid {uid}: ",
+            folders.display()
+        )),
+        "{got}"
+    );
+    uid_held(&rig);
+}

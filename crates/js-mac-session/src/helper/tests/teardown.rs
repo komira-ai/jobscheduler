@@ -306,7 +306,8 @@ fn an_entry_that_cannot_be_removed_refuses_user_delete_and_holds_the_uid() {
         "kbf-lease-27-1",
         got,
         &format!(
-            "the sweep for kbf-lease-27-1 is incomplete: {}: not a directory; not removed",
+            "the sweep for kbf-lease-27-1 is incomplete: {}: not a directory on its parent's \
+             filesystem; not removed",
             link.display()
         ),
     );
