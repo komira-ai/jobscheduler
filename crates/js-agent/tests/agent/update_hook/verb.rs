@@ -6,8 +6,8 @@ use std::ffi::OsString;
 use std::process::{Command, ExitCode};
 
 use js_agent::update_hook::{
-    Class, DECLARATION_PATH, Done, Host, Invocation, Outcome, Params, Reason, Report, Step, VERB,
-    run,
+    Class, DECLARATION_PATH, Done, Host, Invocation, Machine, Outcome, Params, Reason, Report,
+    Step, VERB, fd_stat, run, run_step,
 };
 use js_testkit::dir::TestDir;
 
@@ -199,20 +199,36 @@ fn an_unreadable_or_incomplete_params_file_runs_no_step() {
     assert!(!called.get());
 }
 
-#[test]
-fn every_step_of_this_machine_reads_the_installed_declaration_before_anything_else() {
+/// The tests that run the verb as the process does, over the declaration path of the machine
+/// they run on, need that path to be empty.
+fn assert_no_declaration_installed() {
     assert!(
         !std::path::Path::new(DECLARATION_PATH).exists(),
         "this test needs a machine with no declaration installed"
     );
-    let (_dir, params) = params_file("hook-verb-machine", PARAMS);
+}
+
+#[test]
+fn every_step_of_a_machine_reads_the_declaration_before_anything_else() {
+    let (dir, params) = params_file("hook-verb-machine", PARAMS);
+    // A machine whose declaration is not there, whatever this host has installed.
+    let declaration = dir.path().join("no-such-declaration.toml");
+    let stat = |_: &std::path::Path, fd: std::os::fd::BorrowedFd<'_>| fd_stat(fd);
+    let own_id = || Err("unused".to_owned());
+    let machine = Machine {
+        declaration: &declaration,
+        stat: &stat,
+        own_host_id: &own_id,
+    };
+    let run_machine =
+        |invocation: &Invocation, params: &Params| run_step(invocation, params, &machine);
     for step in Step::ALL {
         let mut args = vec![step.name()];
         if step == Step::Prepare {
             args.push("/staged");
         }
         args.extend(["--params", &params]);
-        let ran = run_with(&args, &Host::system());
+        let ran = run_with(&args, &Host { step: &run_machine });
         assert_eq!(ran.status, status(1), "{step}");
         let line = last_line(&ran.out);
         assert_eq!(line["reason"], "state_invalid", "{step}");
@@ -228,6 +244,7 @@ fn every_step_of_this_machine_reads_the_installed_declaration_before_anything_el
 
 #[test]
 fn main_with_answers_the_verb_before_it_installs_the_signal_handlers() {
+    assert_no_declaration_installed();
     let (_dir, params) = params_file("hook-verb-dispatch", PARAMS);
     let installed = Cell::new(false);
     let install = || {
@@ -249,6 +266,7 @@ fn main_with_answers_the_verb_before_it_installs_the_signal_handlers() {
 
 #[test]
 fn the_binary_prints_one_valid_last_line_and_exits_1() {
+    assert_no_declaration_installed();
     let (_dir, params) = params_file("hook-verb-process", PARAMS);
     let output = Command::new(env!("CARGO_BIN_EXE_js-agent"))
         .args([VERB, "prepare"])
