@@ -282,4 +282,63 @@ mod tests {
             Some("is writable by group or others")
         );
     }
+
+    /// Asserts how `open_checked` puts the checks together, using modes (not owners) so the
+    /// answers are the same whoever runs the test: a file others can write is refused for
+    /// itself, as a usage refusal prefixed with its path, before any directory is looked at;
+    /// and a fit file in a directory others can write is refused naming that directory, the
+    /// nearest bad one above the file, and then the next one up once that one is fixed. (A
+    /// fit file opening is shown by the integration tests, whose directories are fit all the
+    /// way up.) It catches checks run in another order, a refusal that does not say which
+    /// path, and a walk that names a directory further up.
+    #[test]
+    fn the_file_is_judged_before_the_directories_and_the_nearest_bad_one_is_named() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = js_testkit::dir::TestDir::under(std::env::temp_dir(), "enroll_open_order");
+        let mode = |path: &Path, mode| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let (outer, inner) = (root.path().join("outer"), root.path().join("outer/inner"));
+        fs::create_dir_all(&inner).unwrap();
+        let program = inner.join("program");
+        fs::write(&program, "").unwrap();
+        let me = rustix::process::geteuid().as_raw();
+        let words =
+            |got: Result<File, Failure>| got.map(drop).map_err(|f| (f.code(), f.text().to_owned()));
+
+        mode(&outer, 0o777);
+        mode(&inner, 0o777);
+        mode(&program, 0o777);
+        assert_eq!(
+            words(open_checked(&program, me, "hint")),
+            Err((
+                crate::exit::USAGE,
+                format!("{}: is writable by group or others", program.display())
+            ))
+        );
+        mode(&program, 0o755);
+        assert_eq!(
+            words(open_checked(&program, me, "hint")),
+            Err((
+                crate::exit::USAGE,
+                format!(
+                    "{}: {}: is writable by group or others",
+                    program.display(),
+                    inner.display()
+                )
+            ))
+        );
+        mode(&inner, 0o755);
+        assert_eq!(
+            words(open_checked(&program, me, "hint")),
+            Err((
+                crate::exit::USAGE,
+                format!(
+                    "{}: {}: is writable by group or others",
+                    program.display(),
+                    outer.display()
+                )
+            ))
+        );
+    }
 }

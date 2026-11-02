@@ -324,19 +324,16 @@ fn an_out_that_cannot_be_made_is_refused_before_any_request() {
 }
 
 /// Asserts that a directory the token cannot be made in (read-only) is refused (exit 2)
-/// before any request, so no token is minted for it; and that a directory that can be
-/// written and searched but not read (0300), where only the sync of the directory fails,
-/// still gets the file and exit 0. It catches a token minted for a destination that was
-/// never usable, and a good token file reported as lost.
+/// before any request, so no token is minted for it. It catches a token minted for a
+/// destination that was never usable.
 #[test]
-fn the_out_directory_is_probed_before_the_request_and_a_sync_failure_is_not_a_loss() {
+fn the_out_directory_is_probed_before_the_request() {
     let dir = scratch("dirs");
     let server = Fake::minting();
-    for (name, mode) in [("readonly", 0o500), ("unreadable", 0o300)] {
-        mkdir(&dir.join(name), mode);
-    }
+    mkdir(&dir.join("readonly"), 0o500);
     let refused = dir.join("readonly").join("minted");
     let got = go(&server, &["--out", refused.to_str().unwrap()], false);
+    chmod(&dir.join("readonly"), 0o700);
     assert_eq!(got.code, 2, "{}", got.err);
     assert!(
         got.err.contains("--out") && got.err.contains("directory"),
@@ -348,12 +345,22 @@ fn the_out_directory_is_probed_before_the_request_and_a_sync_failure_is_not_a_lo
         0,
         "a token was minted for a read-only directory"
     );
+}
 
+/// Asserts that a directory that can be written and searched but not read (0300), where
+/// only the sync of the directory fails, still gets the file and exit 0. It catches a good
+/// token file reported as lost. Linux only: elsewhere there is no `O_PATH`, and a directory
+/// that cannot be read cannot be opened to make a file in, which is refused before the
+/// request.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_sync_failure_is_not_a_loss() {
+    let dir = scratch("unsynced");
+    let server = Fake::minting();
+    mkdir(&dir.join("unreadable"), 0o300);
     let kept = dir.join("unreadable").join("minted");
     let got = go(&server, &["--out", kept.to_str().unwrap()], false);
-    for name in ["readonly", "unreadable"] {
-        chmod(&dir.join(name), 0o700);
-    }
+    chmod(&dir.join("unreadable"), 0o700);
     assert_eq!((got.code, got.out.as_str()), (0, ""), "{}", got.err);
     assert_eq!(got.err, facts());
     assert_eq!(fs::read_to_string(kept).unwrap(), format!("{MINTED}\n"));
