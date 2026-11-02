@@ -116,7 +116,7 @@ impl Registry {
         };
         // Only with the estimate feed on: without it a lease put back has no bound and
         // counts as ending now, as it always did.
-        let feed = false;
+        let feed = self.shared.lives.get().is_some();
         if let (Ok(()), true, Some((started, end))) = (&seated, feed, times) {
             let here = book.leases().remove(host).unwrap_or_default();
             let record = records.get_mut(host);

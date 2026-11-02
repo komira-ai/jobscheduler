@@ -164,6 +164,7 @@ impl Record {
         let Some(token) = self.token.take() else {
             return;
         };
+        self.started_at = now;
         self.ends_at = now.plus(token.wall);
         self.expires_at = now.plus(token.ttl).min(self.ends_at);
     }
@@ -175,7 +176,7 @@ impl Record {
             state: self.state,
             host: self.host.as_ref().map(|host| host.as_str().to_string()),
             acquired_at_ms: self.acquired_at.millis(),
-            started_at_ms: None,
+            started_at_ms: (self.started_at != self.acquired_at).then(|| self.started_at.millis()),
             expires_at_ms: self.expires_at.millis(),
             ends_at_ms: self.ends_at.millis(),
             whole: self.whole,

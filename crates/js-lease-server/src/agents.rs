@@ -108,7 +108,7 @@ pub(crate) fn assemble(
             // the lease file keeps the start and the bound it records. Off, no estimate is
             // passed and every lease is costed at its bound.
             let curves = usage.iter().filter_map(|usage| usage.curves());
-            let fed = curves.filter(|_| estimate_feed | true);
+            let fed = curves.filter(|_| estimate_feed);
             fed.for_each(|curves| registry.set_lives(curves));
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());
