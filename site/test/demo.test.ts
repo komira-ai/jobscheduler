@@ -23,8 +23,8 @@ const serverDocs = readFileSync(join(REPO, 'crates', 'js-lease-server', 'src', '
 function demoText(html: string): string {
   const section = /<section class="band" id="demo">([\s\S]*?)<\/section>/.exec(html);
   if (!section) throw new Error('the page has no <section class="band" id="demo">');
-  const pre = /<div class="code"><pre>([\s\S]*?)<\/pre><\/div>/.exec(section[1]);
-  if (!pre) throw new Error('the demo section has no <div class="code"><pre> block');
+  const pre = /<div class="code transcript"><pre>([\s\S]*?)<\/pre><\/div>/.exec(section[1]);
+  if (!pre) throw new Error('the demo section has no <div class="code transcript"><pre> block');
   return pre[1]
     .replace(/<[^>]*>/g, '')
     .replace(/&lt;/g, '<')
@@ -143,7 +143,7 @@ test('a demo block that differs from the recording by one character is found (th
 
 test('a page without a demo section, or a demo section without a code block, is refused (the check can fail)', () => {
   assert.throws(() => demoText(indexHtml.replace('id="demo"', 'id="other"')), /no <section class="band" id="demo">/);
-  assert.throws(() => demoText(indexHtml.replace(/(id="demo">[\s\S]*?)<div class="code">/, '$1<div>')), /no <div class="code"><pre> block/);
+  assert.throws(() => demoText(indexHtml.replace(/(id="demo">[\s\S]*?)<div class="code transcript">/, '$1<div>')), /no <div class="code transcript"><pre> block/);
 });
 
 test('the demo comes after the install block of the hero and before "What it does", and links to the install page', () => {

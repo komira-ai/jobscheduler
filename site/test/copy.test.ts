@@ -3,7 +3,8 @@
 // Catches: a copied command that carries the prompt marks or the comments, loses a line of a multiline command or gains
 // blank lines; a refused clipboard write that gives no feedback (or leaves the "Copied" state); a page without a
 // clipboard that gets buttons that cannot work; clicks whose writes settle out of order, or whose timers fire late,
-// that leave the button in the state of an earlier click; and the built script no longer being the module the pages load.
+// that leave the button in the state of an earlier click; a command block of a real page whose copied text changes
+// without the table of expected texts following; a transcript (the recorded demo) that gets a Copy button; and the built script no longer being the module the pages load.
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -77,9 +78,11 @@ class FakeButton implements CopyButton {
 
 class FakeBlock implements CopyBlock {
   readonly buttons: FakeButton[] = [];
+  readonly classList: { contains(name: string): boolean };
   private readonly pre: FakePre | null;
-  constructor(pre: FakePre | null) {
+  constructor(pre: FakePre | null, classes: string[] = []) {
     this.pre = pre;
+    this.classList = { contains: (n) => classes.includes(n) };
   }
   querySelector(): FakePre | null {
     return this.pre;
@@ -197,6 +200,101 @@ test('every command block of the real pages copies without a prompt mark or a co
     }
   }
   assert.ok(blocks >= 5, `found only ${blocks} command blocks in the page copy`);
+});
+
+/** The blocks of a real page as the content file writes them: the classes of the div and the runs of its <pre>. */
+function realBlocks(pageName: string): { cls: string[]; block: FakeBlock }[] {
+  const html = readFileSync(join(SITE, 'content', `${pageName}.html`), 'utf8');
+  return [...html.matchAll(/<div class="((?:cmd|code)\b[^"]*)"><pre>([\s\S]*?)<\/pre>/g)].map((m) => {
+    const cls = m[1].split(/\s+/);
+    return { cls, block: new FakeBlock(new FakePre(runsOf(m[2])), cls) };
+  });
+}
+
+/** Enhances the blocks, clicks each button and returns the text each block wrote (null: no button). */
+async function copiedFrom(blocks: FakeBlock[]): Promise<(string | null)[]> {
+  const clipboard = new ManualClipboard();
+  enhance(new FakeDoc(blocks), clipboard, new ManualTimer().set);
+  const out: (string | null)[] = [];
+  for (const b of blocks) {
+    if (b.buttons.length === 0) {
+      out.push(null);
+      continue;
+    }
+    const at = clipboard.written.length;
+    b.buttons[0].click();
+    await clipboard.resolve(at);
+    out.push(clipboard.written[at]);
+  }
+  return out;
+}
+
+/** The complete clipboard text of each block of a page, in page order (null: a transcript, which gets no button). */
+const EXPECTED: Record<string, (string | null)[]> = {
+  index: ["gh release download vX.Y.Z -R komira-ai/jobscheduler -p 'js-lease-server-*-x86_64-unknown-linux-musl.tar.gz' -p SHA256SUMS\n", null],
+  concepts: [
+    [
+      'js lease acquire --class <class> --max-wall <dur> [--ttl <dur>] [--label k=v ...]',
+      'js lease renew <id> [--ttl <dur>]',
+      'js lease release <id>',
+      'js lease list',
+      'js lease run <the flags of acquire> -- <command> [args...]',
+      '',
+    ].join('\n'),
+  ],
+  install: [
+    [
+      "gh release download vX.Y.Z -R komira-ai/jobscheduler -p 'js-lease-server-*-x86_64-unknown-linux-musl.tar.gz' -p SHA256SUMS",
+      'sha256sum -c --ignore-missing SHA256SUMS',
+      'gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R komira-ai/jobscheduler \\',
+      '--signer-workflow komira-ai/jobscheduler/.github/workflows/release.yml \\',
+      '--source-ref refs/heads/main \\',
+      '--source-digest "$(git rev-parse vX.Y.Z^{commit})"',
+      '',
+    ].join('\n'),
+    ['name = "hosts"', 'class = "whole-node"', 'max_machines = 4', '[shape]', 'cpu_millis = 8000', 'memory_bytes = 17179869184', ''].join('\n'),
+    [
+      'js-lease-server --listen 127.0.0.1:7300 --state-file /var/lib/jobscheduler/leases.toml --boot initialise \\',
+      '--token-file /etc/jobscheduler/client-token \\',
+      '--agent-pool-config /etc/jobscheduler/agent-pool.toml \\',
+      '--agent-token-file /etc/jobscheduler/join-tokens',
+      '',
+    ].join('\n'),
+    [
+      'js --server http://127.0.0.1:7300 --token-file ~/.js-token lease acquire --class whole-node --max-wall 2h',
+      'js --server http://127.0.0.1:7300 --token-file ~/.js-token lease list',
+      '',
+    ].join('\n'),
+  ],
+};
+
+for (const pageName of Object.keys(EXPECTED)) {
+  test(`every block of ${pageName}.html that gets a button copies exactly the text in the table, and a transcript gets none`, async () => {
+    const real = realBlocks(pageName);
+    assert.deepEqual(await copiedFrom(real.map((r) => r.block)), EXPECTED[pageName]);
+    real.forEach((r, i) => assert.equal(r.cls.includes('transcript'), EXPECTED[pageName][i] === null, `${pageName} block ${i}: a transcript iff no button`));
+  });
+}
+
+test('the demo of the landing page is a transcript with no Copy button', async () => {
+  const demo = realBlocks('index').filter((b) => b.cls.includes('transcript'));
+  assert.equal(demo.length, 1);
+  assert.deepEqual(demo[0].cls, ['code', 'transcript']);
+  await copiedFrom([demo[0].block]);
+  assert.equal(demo[0].block.buttons.length, 0);
+});
+
+test('a changed copied text, or a transcript given a button, is caught (the check can fail)', async () => {
+  // Negative: a block whose markup differs from the table's does not copy the table's text.
+  const changed = new FakeBlock(new FakePre(runsOf('<span class="p">$</span> js lease list --all')), ['code']);
+  assert.notDeepEqual(await copiedFrom([changed]), [EXPECTED.install[3]]);
+  // Negative: a transcript gets no button, and the same block unmarked does, so the table tells them apart.
+  const marked = new FakeBlock(new FakePre(runsOf(INSTALL)), ['code', 'transcript']);
+  const plain = new FakeBlock(new FakePre(runsOf(INSTALL)), ['code']);
+  assert.deepEqual(await copiedFrom([marked]), [null]);
+  assert.notDeepEqual(await copiedFrom([plain]), [null]);
+  assert.equal(marked.buttons.length, 0);
+  assert.equal(plain.buttons.length, 1);
 });
 
 // ---- feedback ---------------------------------------------------------------------------------------------------

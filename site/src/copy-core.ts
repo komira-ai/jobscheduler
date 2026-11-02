@@ -22,6 +22,7 @@ export interface CopyPre {
   cloneNode(deep: boolean): CopyClone;
 }
 export interface CopyBlock {
+  classList: { contains(name: string): boolean };
   querySelector(selector: 'pre'): CopyPre | null;
   appendChild(button: CopyButton): unknown;
 }
@@ -73,8 +74,14 @@ function addCopyButton(block: CopyBlock, doc: CopyDocument, clipboard: CopyClipb
   block.appendChild(button);
 }
 
-/** Adds a Copy button to each command block. Without a clipboard the page is left as it is. */
+/** A block marked class="transcript" is a recording (configuration, commands and their output): it is read, not pasted. */
+export const TRANSCRIPT_CLASS = 'transcript';
+
+/** Adds a Copy button to each command block, but not to a transcript. Without a clipboard the page is left as it is. */
 export function enhance(doc: CopyDocument, clipboard: CopyClipboard | undefined, timer: CopyTimer): void {
   if (!clipboard) return;
-  for (const block of doc.querySelectorAll('.cmd, .code')) addCopyButton(block, doc, clipboard, timer);
+  for (const block of doc.querySelectorAll('.cmd, .code')) {
+    if (block.classList.contains(TRANSCRIPT_CLASS)) continue;
+    addCopyButton(block, doc, clipboard, timer);
+  }
 }
