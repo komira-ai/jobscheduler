@@ -304,13 +304,14 @@ mod vectors {
 
     /// C strings, and the null-ended vector of pointers to them.
     pub(super) struct Strings {
-        /// The strings; the pointers point into them.
-        strings: Vec<CString>,
+        /// The strings, owned here so that the pointers into them stay valid; read only
+        /// through `pointers`.
+        _strings: Vec<CString>,
         /// A pointer to each string, in order, then a null pointer.
         pointers: Vec<*const c_char>,
     }
 
-    // SAFETY: the pointers point into the bytes of `strings`, which this value owns and
+    // SAFETY: the pointers point into the bytes of `_strings`, which this value owns and
     // never changes after it is made; a `CString`'s bytes are on the heap and stay where
     // they are when the value moves to another thread.
     unsafe impl Send for Strings {}
@@ -339,7 +340,10 @@ mod vectors {
                 .map(|text| text.as_ptr())
                 .chain(std::iter::once(std::ptr::null()))
                 .collect();
-            Ok(Self { strings, pointers })
+            Ok(Self {
+                _strings: strings,
+                pointers,
+            })
         }
 
         /// The argument vector: `program`, then each of `args`.
@@ -383,7 +387,7 @@ mod vectors {
         /// How many strings it holds.
         #[cfg(test)]
         pub(super) fn len(&self) -> usize {
-            self.strings.len()
+            self._strings.len()
         }
     }
 
@@ -468,9 +472,7 @@ mod vectors {
                 Strings::file(OsStr::new("/bin/c\0at")),
             ];
             for refused in refusals {
-                let Err(why) = refused else {
-                    panic!("a NUL was accepted");
-                };
+                let why = refused.err().expect("a NUL was accepted");
                 assert_eq!(why.kind(), io::ErrorKind::InvalidInput);
                 assert_eq!(
                     why.to_string(),
@@ -498,10 +500,8 @@ mod vectors {
             assert_eq!(locate(OsStr::new("tmp"), Some(OsStr::new("/"))), None);
             assert_eq!(locate(OsStr::new("no-such-program-anywhere"), bin), None);
             let default = locate(OsStr::new("sh"), None).unwrap();
-            assert!(
-                default == Path::new("/usr/bin/sh") || default == Path::new("/bin/sh"),
-                "{default:?}"
-            );
+            let shells = [Path::new("/usr/bin/sh"), Path::new("/bin/sh")];
+            assert!(shells.contains(&default.as_path()), "{default:?}");
         }
     }
 }
@@ -788,12 +788,13 @@ mod tests {
         assert!(out.status.success());
         assert!(marker.exists(), "the program did not run after the step");
         std::fs::remove_file(&marker).unwrap();
+        // A step that fails, run here too: in the child it leaves no coverage record.
+        fn refuse() -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(libc::EPERM))
+        }
+        assert_eq!(refuse().unwrap_err().raw_os_error(), Some(libc::EPERM));
         // SAFETY: the step allocates nothing and calls nothing.
-        let mut refused = unsafe {
-            Program::with_steps("/bin/sh", ["-c", &script], || {
-                Err(io::Error::from_raw_os_error(libc::EPERM))
-            })
-        };
+        let mut refused = unsafe { Program::with_steps("/bin/sh", ["-c", &script], refuse) };
         let error = refused.spawn().unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EPERM));
         assert!(!marker.exists(), "the program ran after a failing step");
