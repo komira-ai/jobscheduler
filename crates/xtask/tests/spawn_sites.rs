@@ -330,6 +330,88 @@ fn h() { l::system(c); }
     );
 }
 
+/// A module that names `Command` or the C library's shells, imported under another name,
+/// is a site by itself: `use std::process as p; type C = p::Command;` then `C::new` names
+/// neither `process` with `Command` nor a constructor the check knows. The same renames in
+/// a macro's tokens are sites too, and importing those modules under their own names is
+/// not. It catches a complete start outside the spawner that no word of it gives away.
+#[test]
+fn a_renamed_process_module_is_found() {
+    let tree = Tree::new("renamed-process");
+    tree.put(
+        "crates/js-agent/src/lib.rs",
+        r#"use std::process as p;
+type C = p::Command;
+fn start() { let _ = C::new("/usr/bin/true").spawn(); }
+use std::process::{self as q};
+use tokio::process as t;
+use std::os::unix::process as u;
+use std::process;
+use std::io as i;
+m!(use std::process as p2;);
+m!(use std::process::{self as p3};);
+m!(use tokio::process as t2; use std::os::unix::process as u2;);
+m!(use libc as l2; use libc::{self as l3};);
+"#,
+    );
+    assert_eq!(
+        tree.sites(),
+        at(
+            "crates/js-agent/src/lib.rs",
+            &[
+                (1, "std::process renamed"),
+                (4, "std::process renamed"),
+                (5, "tokio::process renamed"),
+                (6, "std::os::unix::process renamed"),
+                (9, "std::process renamed"),
+                (10, "std::process renamed"),
+                (11, "std::os::unix::process renamed"),
+                (11, "tokio::process renamed"),
+                (12, "libc renamed"),
+                (12, "libc renamed"),
+            ]
+        )
+    );
+}
+
+/// A module whose file a `#[cfg_attr(.., path = ..)]` chooses stops the check with an
+/// error naming it: the macOS build could read a file the check never does. A `cfg_attr`
+/// that sets no path is followed as usual. It catches a clean default module hiding a
+/// start in the file the macOS build reads.
+#[test]
+fn a_conditional_module_path_is_an_error() {
+    let tree = Tree::new("cfg-attr-path");
+    tree.put(
+        "crates/js-agent/src/lib.rs",
+        "#[allow(unused)]\n#[cfg_attr(test, allow(dead_code))]\nmod plain;\n#[cfg_attr]\nmod bare;\n\
+         #[cfg_attr(target_os = \"macos\", path = \"mac_jobs.rs\")]\nmod jobs;\n",
+    );
+    tree.put(
+        "crates/js-agent/src/plain.rs",
+        "fn f() { Command::new(\"x\"); }\n",
+    );
+    tree.put("crates/js-agent/src/bare.rs", "");
+    tree.put("crates/js-agent/src/jobs.rs", "");
+    tree.put(
+        "crates/js-agent/src/mac_jobs.rs",
+        "fn f() { Command::new(\"x\"); }\n",
+    );
+    assert_eq!(
+        tree.error(),
+        "crates/js-agent/src/lib.rs: `mod jobs` has a #[cfg_attr(.., path = ..)], which \
+         the spawn-site check does not follow: name the file with a plain #[path] or a \
+         module of its own"
+    );
+    tree.put(
+        "crates/js-agent/src/lib.rs",
+        "#[allow(unused)]\n#[cfg_attr(test, allow(dead_code))]\nmod plain;\n#[cfg_attr]\nmod bare;\n",
+    );
+    assert_eq!(
+        tree.sites(),
+        at("crates/js-agent/src/plain.rs", &[(1, "Command::new")])
+    );
+}
+
 /// The same forms inside a macro's tokens are sites, including an import list in braces
 /// (nested too). It catches a macro that hides an alias, an import or a call from the
 /// check, or an import list that is read without the path before it.

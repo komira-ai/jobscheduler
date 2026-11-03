@@ -39,14 +39,17 @@
 //!   name; and any of [`EXECUTORS`] by itself, such as `execv`;
 //! - a glob import of `std::process`, `tokio::process`, `std::os::unix::process` or
 //!   `libc`: `process::*`, `libc::*`;
-//! - an import or `extern crate` that renames the `libc` crate (`libc renamed`), under
-//!   whose other name `system` and `popen` would not be seen.
+//! - an import that renames the `libc` crate or one of the `process` modules above
+//!   (`libc renamed`, `std::process renamed`, ...), and an `extern crate libc` under
+//!   another name: under it `Command`, `system` and `popen` would be named without the
+//!   words looked for (`use std::process as p; type C = p::Command;`).
 //!
 //! The same sequences are looked for in the tokens of every macro call, which `syn` does
 //! not parse; a braced import list there is expanded with its prefix as in code. A `mod`
 //! declaration whose file is missing, a `#[path]` attribute on an inline module, inside
-//! an inline module or with a value that is not a string literal, an `include!` (the
-//! check follows none of these), a crate with no root and a spawner that no module
+//! an inline module or with a value that is not a string literal, a `#[cfg_attr(..)]`
+//! that may set a module's `path` (the file would depend on the target), an `include!`
+//! (the check follows none of these), a crate with no root and a spawner that no module
 //! declares are errors, never a part of the tree skipped in silence.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -89,7 +92,7 @@ const SHELLS: [&str; 2] = ["system", "popen"];
 /// the `libc` functions and the single words of [`EXECUTORS`]. A path's words are its
 /// segments; a method call's are `.` and the method; a macro's are its tokens, without the
 /// `:` of a `::`.
-const SEQUENCES: [(&[&str], &str); 9] = [
+const SEQUENCES: [(&[&str], &str); 17] = [
     (&["process", "Command"], "process::Command"),
     (&["CommandExt"], "CommandExt"),
     (&["Command", "new"], "Command::new"),
@@ -99,6 +102,30 @@ const SEQUENCES: [(&[&str], &str); 9] = [
     (&["tokio", "process", "*"], "process::*"),
     (&["unix", "process", "*"], "process::*"),
     (&["libc", "*"], "libc::*"),
+    (&["libc", "as"], "libc renamed"),
+    (&["libc", "self", "as"], "libc renamed"),
+    (&["std", "process", "as"], "std::process renamed"),
+    (&["std", "process", "self", "as"], "std::process renamed"),
+    (&["tokio", "process", "as"], "tokio::process renamed"),
+    (
+        &["tokio", "process", "self", "as"],
+        "tokio::process renamed",
+    ),
+    (&["unix", "process", "as"], "std::os::unix::process renamed"),
+    (
+        &["unix", "process", "self", "as"],
+        "std::os::unix::process renamed",
+    ),
+];
+
+/// The modules whose import under another name is a site: under it, `Command`, `system`
+/// or `popen` would be named without the words the check looks for (`use std::process as
+/// p; type C = p::Command;`).
+const RENAMED: [&[&str]; 4] = [
+    &["libc"],
+    &["std", "process"],
+    &["tokio", "process"],
+    &["std", "os", "unix", "process"],
 ];
 
 /// A place in the production code of the checked crates that starts a program without the
@@ -162,6 +189,15 @@ pub enum Error {
     /// inside an inline module, or one whose value is not a string literal.
     #[error("{}: `mod {name}` has a #[path] attribute that the spawn-site check does not follow (it follows a string literal on a `mod name;` outside an inline module)", .path.display())]
     PathAttribute {
+        /// The file that declares the module.
+        path: PathBuf,
+        /// The module's name.
+        name: String,
+    },
+    /// A module whose file a `#[cfg_attr(.., path = ..)]` chooses by target, which the check
+    /// does not evaluate.
+    #[error("{}: `mod {name}` has a #[cfg_attr(.., path = ..)], which the spawn-site check does not follow: name the file with a plain #[path] or a module of its own", .path.display())]
+    ConditionalPath {
         /// The file that declares the module.
         path: PathBuf,
         /// The module's name.
@@ -430,17 +466,17 @@ impl Visitor<'_, '_> {
         if full.last().is_some_and(|last| last == "self") {
             full.pop();
         }
-        if full == ["libc"] {
-            self.renamed(ident.span());
+        if RENAMED.iter().any(|module| full == *module) {
+            self.renamed(ident.span(), &full.join("::"));
         }
     }
 
-    /// Records a renamed C library crate at `span`.
-    fn renamed(&mut self, span: Span) {
+    /// Records the module `module` renamed at `span`.
+    fn renamed(&mut self, span: Span, module: &str) {
         self.walk.sites.push(Site {
             file: self.file.clone(),
             line: span.start().line,
-            what: "libc renamed".to_owned(),
+            what: format!("{module} renamed"),
         });
     }
 
@@ -576,6 +612,20 @@ fn comma_parts(tokens: TokenStream) -> Vec<TokenStream> {
     parts
 }
 
+/// Whether `attr` is a `#[cfg_attr(..)]` that may set the module's `path`: the file a
+/// build reads would then depend on the target, which the check does not evaluate.
+fn sets_path(attr: &Attribute) -> bool {
+    let Meta::List(list) = &attr.meta else {
+        return false;
+    };
+    list.path.is_ident("cfg_attr")
+        && list
+            .tokens
+            .clone()
+            .into_iter()
+            .any(|tree| matches!(&tree, TokenTree::Ident(ident) if ident == "path"))
+}
+
 /// The string literal of a `#[path = "..."]` attribute, if it is one.
 fn path_literal(attr: &Attribute) -> Option<String> {
     let Meta::NameValue(pair) = &attr.meta else {
@@ -620,6 +670,14 @@ impl<'ast> Visit<'ast> for Visitor<'_, '_> {
         }
         let name = item.ident.to_string();
         let children = self.dir().join(&name);
+        if item.attrs.iter().any(sets_path) {
+            let error = Error::ConditionalPath {
+                path: self.file.clone(),
+                name,
+            };
+            self.fail(error);
+            return;
+        }
         let path_attr = item.attrs.iter().find(|attr| attr.path().is_ident("path"));
         if item.content.is_some() {
             if path_attr.is_some() {
@@ -685,7 +743,7 @@ impl<'ast> Visit<'ast> for Visitor<'_, '_> {
 
     fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
         if item.ident == "libc" && item.rename.is_some() {
-            self.renamed(item.ident.span());
+            self.renamed(item.ident.span(), "libc");
         }
         visit::visit_item_extern_crate(self, item);
     }

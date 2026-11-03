@@ -32,7 +32,7 @@ What the disclaim gives: the program is its own responsible process, and what it
 
 ## How the rule is kept
 
-`cargo test -p xtask --test spawn_sites` parses, with `syn`, the production source of `js-agent`, `js-mac-session` and every workspace crate built into them for macOS (their path dependencies, not the Linux-only target tables), from every crate root the manifests and the source layout give. Outside `disclaim.rs` it reports any naming of the standard library's or tokio's `process::Command`, `CommandExt`, a `pre_exec` or `exec` call, the C library's `exec*`, `posix_spawn*`, `vfork`, `system` and `popen`, and glob imports of those modules, in code, imports and macro tokens. What only a test build compiles is left out. A module it cannot find, an `include!`, or a crate with no root stops it with an error, never a skip.
+`cargo test -p xtask --test spawn_sites` parses, with `syn`, the production source of `js-agent`, `js-mac-session` and every workspace crate built into them for macOS (their path dependencies, not the Linux-only target tables), from every crate root the manifests and the source layout give. Outside `disclaim.rs` it reports an import that renames `libc` or a `process` module (under another name, `Command` and the shells would not be named), and any naming of the standard library's or tokio's `process::Command`, `CommandExt`, a `pre_exec` or `exec` call, the C library's `exec*`, `posix_spawn*`, `vfork`, `system` and `popen`, and glob imports of those modules, in code, imports and macro tokens. What only a test build compiles is left out. A module it cannot find, a module whose file a `cfg_attr` chooses by target, an `include!`, or a crate with no root stops it with an error, never a skip.
 
 `js-mac-provision`'s `pfctl` and `launchctl` runners go through `Program` too: the agent starts `pfctl` through them.
 
@@ -45,7 +45,7 @@ Added, in `js-mac-session` (a workspace crate, not published):
 
 Changed: `macos::gui::command(uid, gid, program, args) -> io::Result<Command>` became `macos::gui::argv(uid, gid, program, args) -> io::Result<(&'static str, Vec<OsString>)>`, the vector `launchctl asuser` is started with, so the start goes through `Program`.
 
-Added, in `xtask`: `spawn_sites` (`check`, `crates`, `Site`, `Error` and its constants), used by its test only.
+Added, in `xtask` (used by its `spawn_sites` test only): the module `spawn_sites`, with `check(&Path) -> Result<Vec<Site>, Error>` and `crates(&Path) -> Result<BTreeSet<String>, Error>` (both borrow the repository root and return owned results); `Site` (file, line, what); `Error`, whose variants each carry the file and the cause (`Read`, `Parse`, `Manifest`, `NoModule`, `PathAttribute`, `ConditionalPath`, `Include`, `NoRoot`, `NoSpawner`); and the constants `START_CRATES`, `SPAWNER`, `EXECUTORS`.
 
 No CLI, flag, configuration key, wire message or file format changes.
 

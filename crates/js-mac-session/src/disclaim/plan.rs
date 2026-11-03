@@ -128,8 +128,9 @@ impl Plan {
     /// The execution of `program` with `args` in the environment `env`. A program with a
     /// `/` is the one file to try; otherwise each directory of the environment's `PATH` (or
     /// of [`DEFAULT_PATH`]) gives one, in order, an empty directory meaning the working
-    /// directory. Nothing is looked at here: relative files are tried by the child, in the
-    /// directory it runs in.
+    /// directory. An empty program has no file to try, so its answer is `ENOENT`. Nothing
+    /// is looked at here: relative files are tried by the child, in the directory it runs
+    /// in.
     ///
     /// # Errors
     /// The program, an argument, or a variable's name or value holds NUL
@@ -158,6 +159,8 @@ impl Plan {
         let searched = !program.as_bytes().contains(&b'/');
         let files: Vec<Vec<u8>> = match searched {
             false => vec![program.as_bytes().to_vec()],
+            // An empty name is found nowhere, as `execvp` says before it searches.
+            true if program.is_empty() => Vec::new(),
             true => {
                 let path = env
                     .iter()

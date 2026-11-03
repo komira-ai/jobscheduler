@@ -619,3 +619,19 @@ fn paths_that_are_not_text_are_tried_as_they_are() {
     });
     assert_eq!(files, [b"/x\xff/p".to_vec()]);
 }
+
+/// An empty program is not found, at once: no directory of the `PATH` is tried (a
+/// directory joined to an empty name is the directory, which would answer `EACCES`).
+/// Catches an empty name searched for, or answered with anything but not found.
+#[test]
+fn an_empty_program_is_not_found_without_a_search() {
+    let plan = Plan::new(
+        OsStr::new(""),
+        &os(&["a"]),
+        &env(&[("PATH", "/bin:/usr/bin")]),
+    )
+    .unwrap();
+    assert_eq!(tried(&plan, &[libc::EACCES]), (libc::ENOENT, Vec::new()));
+    let error = Program::new("", [""; 0]).spawn().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+}

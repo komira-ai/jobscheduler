@@ -470,3 +470,17 @@ fn jobs_started_at_the_same_moment_keep_their_own_state() {
         job.finish();
     }
 }
+
+/// An empty program is not found, and no directory of the job's `PATH` is tried for it. It
+/// catches an empty name joined to each directory, which `posix_spawn` would refuse as a
+/// directory (`EACCES`) instead of a missing program.
+#[test]
+fn an_empty_program_is_not_found() {
+    let dir = Scratch::new("disclaim-empty");
+    let refused = start(&dir.path(""), &[""], &[("PATH", "/bin:/usr/bin")])
+        .err()
+        .unwrap();
+    assert_eq!(refused.kind(), std::io::ErrorKind::NotFound);
+    let error = Program::new("", [""; 0]).spawn().unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+}
