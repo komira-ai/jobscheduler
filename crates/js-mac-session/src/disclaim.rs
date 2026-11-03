@@ -782,13 +782,17 @@ mod tests {
         let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "disclaim-steps");
         let marker = dir.join("ran");
         let script = format!("echo ran > {}", marker.display());
+        // The steps, run here too: a step run in the child leaves no coverage record.
+        fn proceed() -> io::Result<()> {
+            Ok(())
+        }
+        proceed().unwrap();
         // SAFETY: the step calls nothing and allocates nothing.
-        let mut started = unsafe { Program::with_steps("/bin/sh", ["-c", &script], || Ok(())) };
+        let mut started = unsafe { Program::with_steps("/bin/sh", ["-c", &script], proceed) };
         let out = started.output().unwrap();
         assert!(out.status.success());
         assert!(marker.exists(), "the program did not run after the step");
         std::fs::remove_file(&marker).unwrap();
-        // A step that fails, run here too: in the child it leaves no coverage record.
         fn refuse() -> io::Result<()> {
             Err(io::Error::from_raw_os_error(libc::EPERM))
         }

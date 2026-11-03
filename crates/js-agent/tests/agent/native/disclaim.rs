@@ -24,8 +24,14 @@ fn pipe() -> (OwnedFd, std::io::PipeWriter) {
     (read.into(), write)
 }
 
+/// `/dev/null`, open for reading and writing: a stream either way.
 fn null() -> OwnedFd {
-    std::fs::File::open("/dev/null").unwrap().into()
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+        .unwrap()
+        .into()
 }
 
 /// Starts `argv` the way the helper's `run` does, as the user running the tests, in the
