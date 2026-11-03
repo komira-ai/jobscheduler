@@ -75,7 +75,7 @@ mod tests {
             forked.send(()).expect("the writer waits");
             child
         });
-        let installed = publish(&scratch, "program", |file| {
+        let installed = publish(&scratch, "program", move |file| {
             file.write_all(crate::oci::init::BINARY)?;
             open.send(()).expect("the forker waits");
             fork_done.recv().expect("the forker forked");
