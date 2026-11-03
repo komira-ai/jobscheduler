@@ -375,8 +375,9 @@ m!(use libc as l2; use libc::{self as l3};);
 }
 
 /// A module whose file a `#[cfg_attr(.., path = ..)]` chooses stops the check with an
-/// error naming it: the macOS build could read a file the check never does. A `cfg_attr`
-/// that sets no path is followed as usual. It catches a clean default module hiding a
+/// error naming it, whether the `path` is in it or in a `cfg_attr` nested in it: the macOS
+/// build could read a file the check never does. A `cfg_attr` that sets no path is
+/// followed as usual. It catches a clean default module hiding a
 /// start in the file the macOS build reads.
 #[test]
 fn a_conditional_module_path_is_an_error() {
@@ -399,6 +400,23 @@ fn a_conditional_module_path_is_an_error() {
     assert_eq!(
         tree.error(),
         "crates/js-agent/src/lib.rs: `mod jobs` has a #[cfg_attr(.., path = ..)], which \
+         the spawn-site check does not follow: name the file with a plain #[path] or a \
+         module of its own"
+    );
+    // The path one level down, in a `cfg_attr` within a `cfg_attr`.
+    tree.put(
+        "crates/js-agent/src/lib.rs",
+        "#[cfg_attr(unix, cfg_attr(target_os = \"macos\", path = \"mac_nested.rs\"))]\n\
+         mod nested;\n",
+    );
+    tree.put("crates/js-agent/src/nested.rs", "");
+    tree.put(
+        "crates/js-agent/src/mac_nested.rs",
+        "fn f() { Command::new(\"x\"); }\n",
+    );
+    assert_eq!(
+        tree.error(),
+        "crates/js-agent/src/lib.rs: `mod nested` has a #[cfg_attr(.., path = ..)], which \
          the spawn-site check does not follow: name the file with a plain #[path] or a \
          module of its own"
     );

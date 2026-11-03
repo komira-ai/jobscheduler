@@ -612,18 +612,23 @@ fn comma_parts(tokens: TokenStream) -> Vec<TokenStream> {
     parts
 }
 
-/// Whether `attr` is a `#[cfg_attr(..)]` that may set the module's `path`: the file a
-/// build reads would then depend on the target, which the check does not evaluate.
+/// Whether `attr` is a `#[cfg_attr(..)]` that may set the module's `path`, at any depth
+/// (a `cfg_attr` nested in another holds its attributes in a group): the file a build
+/// reads would then depend on the target, which the check does not evaluate.
 fn sets_path(attr: &Attribute) -> bool {
     let Meta::List(list) = &attr.meta else {
         return false;
     };
-    list.path.is_ident("cfg_attr")
-        && list
-            .tokens
-            .clone()
-            .into_iter()
-            .any(|tree| matches!(&tree, TokenTree::Ident(ident) if ident == "path"))
+    list.path.is_ident("cfg_attr") && names_path(list.tokens.clone())
+}
+
+/// Whether `tokens`, or a group in them at any depth, hold the identifier `path`.
+fn names_path(tokens: TokenStream) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        TokenTree::Ident(ident) => ident == "path",
+        TokenTree::Group(group) => names_path(group.stream()),
+        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
 }
 
 /// The string literal of a `#[path = "..."]` attribute, if it is one.
