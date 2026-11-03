@@ -318,7 +318,19 @@ pub(crate) fn prepare_rootfs(dir: &Path, binary: &str) -> std::io::Result<()> {
 /// scratch directory was checked to be searchable by others. The copy is written on a thread
 /// with a descriptor table of its own, so no forked child holds it busy (`super::install`).
 pub(crate) fn install_daemon(scratch: &Path, daemon: &Path) -> std::io::Result<PathBuf> {
+    install_daemon_with(scratch, daemon, &mut super::install::nothing_while_open)
+}
+
+/// [`install_daemon`], running `while_open` on the writing thread once the copy is written
+/// and before its file is closed: the seam a test forks through.
+pub(crate) fn install_daemon_with(
+    scratch: &Path,
+    daemon: &Path,
+    while_open: &mut super::install::WhileOpen<'_>,
+) -> std::io::Result<PathBuf> {
     super::install::publish(scratch, "daemon", &mut |file| {
-        std::io::copy(&mut std::fs::File::open(daemon)?, file).map(drop)
+        std::io::copy(&mut std::fs::File::open(daemon)?, file)?;
+        while_open();
+        Ok(())
     })
 }
