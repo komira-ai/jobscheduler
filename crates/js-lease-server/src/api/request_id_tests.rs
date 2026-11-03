@@ -266,13 +266,15 @@ async fn a_committed_lease_is_committed_again_after_a_restart() {
 async fn acquires_at_once_under_one_id_make_one_lease() {
     let rig = Rig::new("request_id_race").await;
     rig.lease().await;
-    let (one, two) = tokio::join!(post(&rig, &whole("r1")), post(&rig, &whole("r1")));
+    let (first, again) = (whole("r1"), whole("r1"));
+    let (one, two) = tokio::join!(post(&rig, &first), post(&rig, &again));
     assert_eq!((one.0, two.0), (StatusCode::ACCEPTED, StatusCode::ACCEPTED));
     assert_eq!(one.1, two.1);
     let r1 = one_id(&one.1, &two.1);
     let mut bigger = whole("r2");
     bigger["resources"]["cpu_millis"] = json!(2000);
-    let (one, two) = tokio::join!(post(&rig, &whole("r2")), post(&rig, &bigger));
+    let same = whole("r2");
+    let (one, two) = tokio::join!(post(&rig, &same), post(&rig, &bigger));
     let mut statuses = [one.0, two.0];
     statuses.sort();
     assert_eq!(statuses, [StatusCode::ACCEPTED, StatusCode::CONFLICT]);
