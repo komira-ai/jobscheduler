@@ -38,7 +38,8 @@
 //!   files a pull request changes against the entries of `site/ci-paths`.
 //! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
-//! - [`spawn_sites`]: every program `js-agent` and `js-mac-session` start goes through
+//! - [`spawn_sites`]: every program the crates `js-agent` and `js-mac-session` are built
+//!   from (themselves and their path dependencies built for macOS) start goes through
 //!   `js_mac_session::disclaim`, used by a test rather than a verb: `cargo test -p xtask
 //!   --test spawn_sites`.
 //!

@@ -16,6 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+# The one way the agent's code starts a program (`disclaim::Program`): `pfctl` and
+# `launchctl` are started with their privacy (TCC) responsibility disclaimed on macOS.
+js-mac-session = { path = "../js-mac-session" }
 thiserror.workspace = true
 
 [dev-dependencies]

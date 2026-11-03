@@ -1266,6 +1266,7 @@ name = "js-mac-provision"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "js-mac-session",
  "js-testkit",
  "thiserror",
 ]

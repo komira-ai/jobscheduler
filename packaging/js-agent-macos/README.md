@@ -73,16 +73,26 @@ one. A grant given to either by hand, or by a profile, never reaches a job. macO
 process use the grants of its *responsible* process, which is whoever started it, unless
 the starter disclaims that responsibility as it starts it. Every process the helper
 starts for a job (the job's program, and `launchctl` with the helper's `as-user` mode for
-a GUI session), and every program the agent starts itself, is started with that
-responsibility disclaimed (`crates/js-mac-session/src/disclaim.rs`). A job's process
-therefore answers for itself, and has only what its own code signature was granted, which
-is nothing.
+a GUI session), and every program the agent starts itself (its probes, the `sandbox-exec`
+self-test, `pfctl`), is started with that responsibility disclaimed
+(`crates/js-mac-session/src/disclaim.rs`; the design is in
+`docs/design/spawn-disclaim.md`). A job's process therefore answers for itself, and the
+processes it starts answer for it: none of them holds the agent's or the helper's grants.
+What a job may do is then what its own program was granted. A grant that someone gave a
+job's program itself (an app the job runs, say) is that program's, and the disclaim does
+not take it away.
 
 The hosted CI runner has no grant to give, so CI checks the disclaim and not a refused
-read: on the macOS runner the agent's tests read back the responsible process of a
-process the helper's `run` started, and see that it is the process itself. To check a
-host by hand, run `sudo launchctl procinfo <pid>` for a job's process: its `responsible
-pid` is its own pid.
+read: on the macOS runner the agent's tests read back the responsible process of the
+processes the helper's `run` and the agent start, and see that each is the process itself.
+To check a host by hand that a grant does not reach a job: give `js-mac-session` Full
+Disk Access in Privacy & Security, run a native job whose program is `/bin/ls` with the
+argument `/Library/Application Support/com.apple.TCC`, and see it fail with `Operation not
+permitted`. A refusal is also what a grant that did not take effect gives, so check the
+grant the same way with a release from before the disclaim (one whose
+`crates/js-mac-session/src/disclaim.rs` does not exist): there the same job answers for
+the helper and lists the directory. Remove the grant afterwards. `sudo launchctl procinfo <pid>` of a running job's
+process shows its `responsible pid` equal to its own pid.
 
 ## Not done yet
 

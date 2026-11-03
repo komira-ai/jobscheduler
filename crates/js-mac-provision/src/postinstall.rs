@@ -2,10 +2,12 @@
 //!
 //! STUB: the body arrives with the code commit; the tests of `tests/postinstall.rs` come first.
 
+use std::ffi::OsStr;
 use std::io;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+use js_mac_session::disclaim::Program;
 
 use crate::daemon::{
     AGENT_LABEL, LAUNCH_DAEMONS_DIR, RELEASE_LINK, RELEASES_DIR, SESSION_LABEL, SHARE_DIR,
@@ -49,19 +51,22 @@ impl Launchctl for SystemLaunchctl {
     /// `launchctl print system/<label>` exits 0 for a loaded service. Any other status
     /// counts as not loaded: a bootstrap of a service that was loaded after all fails, loudly.
     fn is_loaded(&self, label: &str) -> io::Result<bool> {
-        let status = Command::new(&self.program)
-            .args(["print", &format!("system/{label}")])
+        let status = Program::new(&self.program, ["print", &format!("system/{label}")])
             .output()?
             .status;
         Ok(status.success())
     }
 
     fn bootstrap(&self, plist: &Path) -> io::Result<()> {
-        let out = Command::new(&self.program)
-            .arg("bootstrap")
-            .arg("system")
-            .arg(plist)
-            .output()?;
+        let out = Program::new(
+            &self.program,
+            [
+                OsStr::new("bootstrap"),
+                OsStr::new("system"),
+                plist.as_os_str(),
+            ],
+        )
+        .output()?;
         if out.status.success() {
             return Ok(());
         }

@@ -3,40 +3,63 @@
 //! responsibility disclaimed (that module's documentation says why). The check is used by
 //! the `spawn_sites` test rather than a verb: `cargo test -p xtask --test spawn_sites`.
 //!
-//! [`check`] parses (with `syn`) the production source of the two crates ([`CRATES`]): the
-//! module tree from each crate's roots (`src/lib.rs`, `src/main.rs`), following each
-//! `mod name;` to `name.rs` or `name/mod.rs`. It leaves out what only a test build
-//! compiles: a module, function, `impl` block or method under `#[cfg(test)]`, or under a
-//! `#[cfg(all(...))]` that holds `test`. It also leaves out the spawner itself
-//! ([`SPAWNER`]). Code built for one platform only is not left out. On every other
+//! **Which crates.** [`crates`] starts from [`START_CRATES`] and follows, through each
+//! `crates/<name>/Cargo.toml`, every `path` dependency of `[dependencies]` and of
+//! `[target.<cfg>.dependencies]`, transitively. The one target table it does not follow is
+//! the one whose key is exactly `cfg(target_os = "linux")` (code that is not built for
+//! macOS). Dev- and build-dependencies are not followed. A manifest that cannot be read is
+//! an error.
+//!
+//! **Which files.** [`check`] parses (with `syn`) the production source of those crates.
+//! The roots of a crate are the `[lib] path`, each `[[bin]] path`, and the files of the
+//! default layout that exist: `src/lib.rs`, `src/main.rs`, `src/bin/*.rs` and
+//! `src/bin/*/main.rs`. From each root it follows every `mod name;` to `name.rs` or
+//! `name/mod.rs`, or a `#[path = "literal"] mod name;` (outside an inline module) to the
+//! file at that path from the directory of the declaring file; that file's own child
+//! modules are in its own directory, as for a `mod.rs`. A crate with no root is an error. It leaves out what only a test build
+//! compiles: a module, function, `use`, `impl` block or method under `#[cfg(test)]`, or
+//! under a `#[cfg(all(...))]` that holds `test`. It also leaves out the spawner itself
+//! ([`SPAWNER`]). Code built for one platform only is not left out: on every other
 //! platform the spawner is the standard library's `Command` unchanged, so one rule holds
 //! everywhere and the check needs to know nothing about targets.
 //!
-//! In what is left, each of these is a [`Site`], the place where a program could start
-//! without the disclaim:
+//! **What is a site.** In what is left, each of these is a [`Site`], a place where a
+//! program could start without the disclaim. The words of a path, of a type path and of
+//! every import (a `use` tree is expanded to the full path of each leaf, and a rename is
+//! matched by the original name) are looked at in sequence:
 //!
-//! - a path that ends in `Command::new` (the standard library's command, or tokio's);
-//! - a call of a method named `pre_exec` or `exec` (`CommandExt`'s ways to run code before
-//!   a program, or to execute one in the caller's place);
-//! - a path, an import or a foreign function named for a C library function that executes
-//!   a program ([`EXECUTORS`]), or `libc::system` and `libc::popen`, which run a shell;
-//! - an import that renames `Command`, which would hide a `Command::new`.
+//! - `process` then `Command` (`std::process::Command`, `tokio::process::Command`), even
+//!   as a bare import or a type alias: `process::Command`;
+//! - `CommandExt`, which covers `exec` and `pre_exec` called as plain functions:
+//!   `CommandExt`;
+//! - `Command` then `new`: `Command::new`;
+//! - a method call named `pre_exec` or `exec`: `.pre_exec`, `.exec`;
+//! - `libc` then a C library function that executes a program ([`EXECUTORS`]) or runs a
+//!   shell (`system`, `popen`), such as `libc::system`, also as a foreign function of that
+//!   name; and any of [`EXECUTORS`] by itself, such as `execv`;
+//! - a glob import of `std::process`, `tokio::process`, `std::os::unix::process` or
+//!   `libc`: `process::*`, `libc::*`;
+//! - an import or `extern crate` that renames the `libc` crate (`libc renamed`), under
+//!   whose other name `system` and `popen` would not be seen.
 //!
 //! The same sequences are looked for in the tokens of every macro call, which `syn` does
-//! not parse. A `mod` declaration whose file is missing, a `#[path]` attribute (which the
-//! check does not follow), a crate with no root and a spawner that no module declares are
-//! errors, never a part of the tree skipped in silence.
+//! not parse; a braced import list there is expanded with its prefix as in code. A `mod`
+//! declaration whose file is missing, a `#[path]` attribute on an inline module, inside
+//! an inline module or with a value that is not a string literal, an `include!` (the
+//! check follows none of these), a crate with no root and a spawner that no module
+//! declares are errors, never a part of the tree skipped in silence.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use proc_macro2::{Span, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
-use syn::{Attribute, Meta, Token};
+use syn::{Attribute, Meta, Token, UseTree};
 
-/// The crates whose production code the check reads.
-pub const CRATES: [&str; 2] = ["js-agent", "js-mac-session"];
+/// The crates the check starts from; it adds the crates they depend on (see [`crates`]).
+pub const START_CRATES: [&str; 2] = ["js-agent", "js-mac-session"];
 
 /// The one module that may start programs, from the repository root.
 pub const SPAWNER: &str = "crates/js-mac-session/src/disclaim.rs";
@@ -56,21 +79,30 @@ pub const EXECUTORS: [&str; 11] = [
     "vfork",
 ];
 
-/// The crate roots the module tree starts from, in `src/`.
-const ROOTS: [&str; 2] = ["lib.rs", "main.rs"];
+/// The key of the one target table of a manifest that is not followed.
+const LINUX_ONLY: &str = r#"cfg(target_os = "linux")"#;
+
+/// The C library's functions that run a shell, besides [`EXECUTORS`].
+const SHELLS: [&str; 2] = ["system", "popen"];
 
 /// The word sequences that start a program, with the name a [`Site`] gives each, besides
-/// one word for each of [`EXECUTORS`]. A path's words are its segments; a method call's
-/// are `.` and the method; a macro's are its tokens, without the `:` of a `::`.
-const SEQUENCES: [(&[&str], &str); 5] = [
+/// the `libc` functions and the single words of [`EXECUTORS`]. A path's words are its
+/// segments; a method call's are `.` and the method; a macro's are its tokens, without the
+/// `:` of a `::`.
+const SEQUENCES: [(&[&str], &str); 9] = [
+    (&["process", "Command"], "process::Command"),
+    (&["CommandExt"], "CommandExt"),
     (&["Command", "new"], "Command::new"),
     (&[".", "pre_exec"], ".pre_exec"),
     (&[".", "exec"], ".exec"),
-    (&["libc", "system"], "libc::system"),
-    (&["libc", "popen"], "libc::popen"),
+    (&["std", "process", "*"], "process::*"),
+    (&["tokio", "process", "*"], "process::*"),
+    (&["unix", "process", "*"], "process::*"),
+    (&["libc", "*"], "libc::*"),
 ];
 
-/// A place in the production code of [`CRATES`] that starts a program without the spawner.
+/// A place in the production code of the checked crates that starts a program without the
+/// spawner.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Site {
     /// The file, from the repository root.
@@ -90,7 +122,7 @@ impl fmt::Display for Site {
 /// Why the check could not read the tree. Each path is from the repository root.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// A source file could not be read.
+    /// A source file or a manifest could not be read.
     #[error("{}: {source}", .path.display())]
     Read {
         /// The file.
@@ -106,6 +138,14 @@ pub enum Error {
         /// The reason.
         source: syn::Error,
     },
+    /// A manifest is not TOML.
+    #[error("{}: {source}", .path.display())]
+    Manifest {
+        /// The manifest.
+        path: PathBuf,
+        /// The reason.
+        source: toml::de::Error,
+    },
     /// A `mod name;` declaration whose file is neither `name.rs` nor `name/mod.rs`.
     #[error("{}: `mod {name};` has no file ({} or {})", .path.display(), .flat.display(), .nested.display())]
     NoModule {
@@ -118,16 +158,25 @@ pub enum Error {
         /// Where `name/mod.rs` was looked for.
         nested: PathBuf,
     },
-    /// A `#[path]` attribute, which the check does not follow.
-    #[error("{}: `mod {name}` has a #[path] attribute, which the spawn-site check does not follow", .path.display())]
+    /// A `#[path]` attribute the check does not follow: one on an inline module, one
+    /// inside an inline module, or one whose value is not a string literal.
+    #[error("{}: `mod {name}` has a #[path] attribute that the spawn-site check does not follow (it follows a string literal on a `mod name;` outside an inline module)", .path.display())]
     PathAttribute {
         /// The file that declares the module.
         path: PathBuf,
         /// The module's name.
         name: String,
     },
-    /// One of [`CRATES`] has neither root.
-    #[error("crates/{krate}/src has neither lib.rs nor main.rs")]
+    /// An `include!`, which the check does not follow.
+    #[error("{}: `include!` is not followed by the spawn-site check", .path.display())]
+    Include {
+        /// The file that calls it.
+        path: PathBuf,
+    },
+    /// A checked crate has no source file to start from.
+    #[error(
+        "crates/{krate}: no crate root (no [lib] or [[bin]] path, src/lib.rs, src/main.rs or src/bin source)"
+    )]
     NoRoot {
         /// The crate.
         krate: String,
@@ -137,32 +186,118 @@ pub enum Error {
     NoSpawner,
 }
 
+/// A word of a path or of a macro's tokens, and where it is.
+type Word = (String, Span);
+
+/// The directory names, under `crates/`, of the crates the check reads (see the module
+/// documentation): [`START_CRATES`] and the crates they depend on through a `path`.
+///
+/// # Errors
+/// A manifest cannot be read or parsed.
+pub fn crates(root: &Path) -> Result<BTreeSet<String>, Error> {
+    Ok(closure(root)?.into_keys().collect())
+}
+
+/// The manifest of each crate of [`crates`], by crate.
+fn closure(root: &Path) -> Result<BTreeMap<String, toml::Table>, Error> {
+    let mut manifests = BTreeMap::new();
+    let mut queue: Vec<String> = START_CRATES.map(str::to_owned).to_vec();
+    while let Some(name) = queue.pop() {
+        if manifests.contains_key(&name) {
+            continue;
+        }
+        let rel = PathBuf::from("crates").join(&name).join("Cargo.toml");
+        let text = std::fs::read_to_string(root.join(&rel)).map_err(|source| Error::Read {
+            path: rel.clone(),
+            source,
+        })?;
+        let table: toml::Table =
+            toml::from_str(&text).map_err(|source| Error::Manifest { path: rel, source })?;
+        queue.extend(path_dependencies(&table));
+        manifests.insert(name, table);
+    }
+    Ok(manifests)
+}
+
+/// The directory names of the `path` dependencies of the manifest `table` that are built
+/// for macOS: those of `[dependencies]` and of every target table but [`LINUX_ONLY`].
+fn path_dependencies(table: &toml::Table) -> Vec<String> {
+    let mut tables: Vec<&toml::Value> = Vec::new();
+    tables.extend(table.get("dependencies"));
+    if let Some(targets) = table.get("target").and_then(toml::Value::as_table) {
+        for (key, target) in targets {
+            if key.as_str() != LINUX_ONLY {
+                tables.extend(target.get("dependencies"));
+            }
+        }
+    }
+    let mut names = Vec::new();
+    for dependencies in tables.into_iter().filter_map(toml::Value::as_table) {
+        for dependency in dependencies.values() {
+            let path = dependency.get("path").and_then(toml::Value::as_str);
+            let name = path.and_then(|path| Path::new(path).file_name());
+            names.extend(name.map(|name| name.to_string_lossy().into_owned()));
+        }
+    }
+    names
+}
+
+/// The source files the module tree of the crate `name` starts from.
+fn roots(root: &Path, name: &str, manifest: &toml::Table) -> Result<Vec<PathBuf>, Error> {
+    let dir = root.join("crates").join(name);
+    let src = dir.join("src");
+    let mut found: BTreeSet<PathBuf> = BTreeSet::new();
+    let lib = manifest
+        .get("lib")
+        .and_then(|lib| lib.get("path"))
+        .and_then(toml::Value::as_str);
+    if let Some(lib) = lib {
+        found.insert(dir.join(lib));
+    }
+    if let Some(bins) = manifest.get("bin").and_then(toml::Value::as_array) {
+        for bin in bins {
+            let path = bin.get("path").and_then(toml::Value::as_str);
+            found.extend(path.map(|path| dir.join(path)));
+        }
+    }
+    let mut implied = vec![src.join("lib.rs"), src.join("main.rs")];
+    if let Ok(entries) = std::fs::read_dir(src.join("bin")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            implied.push(path.join("main.rs"));
+            implied.push(path);
+        }
+    }
+    for path in implied {
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+            found.insert(path);
+        }
+    }
+    if found.is_empty() {
+        return Err(Error::NoRoot {
+            krate: name.to_owned(),
+        });
+    }
+    Ok(found.into_iter().collect())
+}
+
 /// Every [`Site`] of the tree at `root` (a repository checkout), in file and line order;
 /// none when every program is started through [`SPAWNER`].
 ///
 /// # Errors
-/// A file cannot be read or parsed, a module has no file or a `#[path]`, a crate has no
-/// root, or no module is [`SPAWNER`].
+/// A manifest or a source file cannot be read or parsed, a module has no file or a
+/// `#[path]`, a file calls `include!`, a crate has no root, or no module is [`SPAWNER`].
 pub fn check(root: &Path) -> Result<Vec<Site>, Error> {
     let mut walk = Walk {
         root,
         sites: Vec::new(),
         spawner: false,
+        seen: BTreeSet::new(),
     };
-    for krate in CRATES {
-        let src = root.join("crates").join(krate).join("src");
-        let roots: Vec<PathBuf> = ROOTS
-            .iter()
-            .map(|name| src.join(name))
-            .filter(|path| path.is_file())
-            .collect();
-        if roots.is_empty() {
-            return Err(Error::NoRoot {
-                krate: krate.to_owned(),
-            });
-        }
-        for path in roots {
-            walk.file(&path, src.clone())?;
+    for (name, manifest) in closure(root)? {
+        for path in roots(root, &name, &manifest)? {
+            let children = path.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+            walk.file(&path, children)?;
         }
     }
     if !walk.spawner {
@@ -177,6 +312,8 @@ struct Walk<'r> {
     root: &'r Path,
     sites: Vec<Site>,
     spawner: bool,
+    /// The files read already: a module two roots declare is read once.
+    seen: BTreeSet<PathBuf>,
 }
 
 impl Walk<'_> {
@@ -184,6 +321,9 @@ impl Walk<'_> {
     fn file(&mut self, path: &Path, children: PathBuf) -> Result<(), Error> {
         if path == self.root.join(SPAWNER) {
             self.spawner = true;
+            return Ok(());
+        }
+        if !self.seen.insert(path.to_path_buf()) {
             return Ok(());
         }
         let file = self.relative(path);
@@ -198,6 +338,7 @@ impl Walk<'_> {
         let mut visitor = Visitor {
             walk: self,
             file,
+            here: path.parent().map_or_else(PathBuf::new, Path::to_path_buf),
             dirs: vec![children],
             failed: None,
         };
@@ -216,6 +357,8 @@ struct Visitor<'w, 'r> {
     walk: &'w mut Walk<'r>,
     /// The file, from the repository root.
     file: PathBuf,
+    /// The directory of the file, where a `#[path]` is relative to.
+    here: PathBuf,
     /// The directory of the child modules of each module the visit is in, innermost last.
     dirs: Vec<PathBuf>,
     /// The first error of this file or of a module file it declares.
@@ -224,28 +367,88 @@ struct Visitor<'w, 'r> {
 
 impl Visitor<'_, '_> {
     /// Records a [`Site`] for each sequence that starts a program in `words`.
-    fn look(&mut self, words: &[(String, Span)]) {
-        let singles = EXECUTORS.map(|name| ([name], name));
-        let sequences = SEQUENCES.iter().copied().chain(
-            singles
-                .iter()
-                .map(|(sequence, what)| (&sequence[..], *what)),
-        );
-        for (sequence, what) in sequences {
-            for window in words.windows(sequence.len()) {
-                if window
-                    .iter()
-                    .map(|(word, _)| word.as_str())
-                    .eq(sequence.iter().copied())
-                {
-                    self.walk.sites.push(Site {
-                        file: self.file.clone(),
-                        line: window[0].1.start().line,
-                        what: what.to_owned(),
-                    });
+    fn look(&mut self, words: &[Word]) {
+        let names: Vec<&str> = words.iter().map(|(name, _)| name.as_str()).collect();
+        let mut found: Vec<(usize, String)> = Vec::new();
+        for at in 0..names.len() {
+            for (sequence, what) in SEQUENCES {
+                if names[at..].starts_with(sequence) {
+                    found.push((at, what.to_owned()));
+                }
+            }
+            if let ["libc", next, ..] = &names[at..] {
+                let runs = EXECUTORS.iter().chain(&SHELLS).any(|name| name == next);
+                if runs {
+                    found.push((at, format!("libc::{next}")));
+                }
+            }
+            let after_libc = names[..at].last() == Some(&"libc");
+            let executes = EXECUTORS.iter().any(|name| *name == names[at]);
+            if executes && !after_libc {
+                found.push((at, names[at].to_owned()));
+            }
+        }
+        for (at, what) in found {
+            self.walk.sites.push(Site {
+                file: self.file.clone(),
+                line: words[at].1.start().line,
+                what,
+            });
+        }
+    }
+
+    /// Looks at the imports of `tree` after the path `prefix`.
+    fn use_tree(&mut self, tree: &UseTree, prefix: &mut Vec<Word>) {
+        match tree {
+            UseTree::Path(path) => {
+                prefix.push(word(&path.ident));
+                self.use_tree(&path.tree, prefix);
+                prefix.pop();
+            }
+            UseTree::Name(name) => self.use_leaf(prefix, word(&name.ident)),
+            UseTree::Rename(rename) => {
+                self.renamed_libc(prefix, &rename.ident);
+                self.use_leaf(prefix, word(&rename.ident));
+            }
+            UseTree::Glob(glob) => {
+                self.use_leaf(prefix, ("*".to_owned(), glob.star_token.spans[0]))
+            }
+            UseTree::Group(group) => {
+                for item in &group.items {
+                    self.use_tree(item, prefix);
                 }
             }
         }
+    }
+
+    /// Records a [`Site`] when an import renames the C library crate (`use libc as l`,
+    /// `use libc::{self as l}`): under another name its `system` and `popen` would not be
+    /// seen.
+    fn renamed_libc(&mut self, prefix: &[Word], ident: &syn::Ident) {
+        let mut full: Vec<String> = prefix.iter().map(|(name, _)| name.clone()).collect();
+        full.push(ident.to_string());
+        if full.last().is_some_and(|last| last == "self") {
+            full.pop();
+        }
+        if full == ["libc"] {
+            self.renamed(ident.span());
+        }
+    }
+
+    /// Records a renamed C library crate at `span`.
+    fn renamed(&mut self, span: Span) {
+        self.walk.sites.push(Site {
+            file: self.file.clone(),
+            line: span.start().line,
+            what: "libc renamed".to_owned(),
+        });
+    }
+
+    /// Looks at the full path of one import: `prefix` and the name `last`.
+    fn use_leaf(&mut self, prefix: &[Word], last: Word) {
+        let mut path = prefix.to_vec();
+        path.push(last);
+        self.look(&path);
     }
 
     /// Keeps `error` unless an earlier one is kept already.
@@ -255,6 +458,50 @@ impl Visitor<'_, '_> {
         }
     }
 
+    /// Fails with a `#[path]` the check does not follow, on the module `name`.
+    fn refuse_path(&mut self, name: String) {
+        let error = Error::PathAttribute {
+            path: self.file.clone(),
+            name,
+        };
+        self.fail(error);
+    }
+
+    /// The file of the module `name;` and the directory of its child modules: `name.rs` or
+    /// `name/mod.rs` (`children`). A missing file is an error.
+    fn locate(&mut self, name: String, children: PathBuf) -> Option<(PathBuf, PathBuf)> {
+        let flat = self.dir().join(format!("{name}.rs"));
+        let nested = children.join("mod.rs");
+        let found = [&flat, &nested]
+            .into_iter()
+            .find(|path| path.is_file())
+            .cloned();
+        if found.is_none() {
+            let error = Error::NoModule {
+                path: self.file.clone(),
+                name,
+                flat: self.walk.relative(&flat),
+                nested: self.walk.relative(&nested),
+            };
+            self.fail(error);
+        }
+        found.map(|path| (path, children))
+    }
+
+    /// The file of the module `name;` that has the attribute `attr`, and the directory of
+    /// its child modules (its own, as for a `mod.rs`). Only a string literal on a module
+    /// outside an inline module is followed; any other `#[path]` is an error.
+    fn locate_path(&mut self, attr: &Attribute, name: String) -> Option<(PathBuf, PathBuf)> {
+        let followed = path_literal(attr).filter(|_| self.dirs.len() == 1);
+        let Some(text) = followed else {
+            self.refuse_path(name);
+            return None;
+        };
+        let file = self.here.join(text);
+        let below = file.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+        Some((file, below))
+    }
+
     /// The directory the child modules of the innermost module are in.
     fn dir(&self) -> &Path {
         self.dirs.last().map_or(Path::new(""), PathBuf::as_path)
@@ -262,19 +509,86 @@ impl Visitor<'_, '_> {
 }
 
 /// An identifier as a word.
-fn word(ident: &syn::Ident) -> (String, Span) {
+fn word(ident: &syn::Ident) -> Word {
     (ident.to_string(), ident.span())
 }
 
-/// The words of a macro's tokens, flattened (see [`SEQUENCES`]).
-fn words(tokens: TokenStream, into: &mut Vec<(String, Span)>) {
+/// The words of a macro's tokens, flattened (see [`SEQUENCES`]), after the path `prefix`
+/// they belong to. A braced list after a `::` is the list of an import: each of its
+/// comma-separated parts is read after the path that precedes the list.
+fn words(tokens: TokenStream, prefix: &[Word], into: &mut Vec<Word>) {
+    into.extend(prefix.iter().cloned());
+    let mut run: Vec<Word> = prefix.to_vec();
+    let mut colons = !prefix.is_empty();
     for tree in tokens {
         match tree {
-            TokenTree::Group(group) => words(group.stream(), into),
-            TokenTree::Punct(punct) if punct.as_char() == ':' => {}
-            other => into.push((other.to_string(), other.span())),
+            TokenTree::Punct(punct) => {
+                if punct.as_char() == ':' {
+                    colons = true;
+                } else {
+                    into.push((punct.to_string(), punct.span()));
+                    run.clear();
+                    colons = false;
+                }
+            }
+            TokenTree::Group(group) => {
+                if colons && group.delimiter() == Delimiter::Brace {
+                    into.truncate(into.len() - run.len());
+                    for part in comma_parts(group.stream()) {
+                        words(part, &run, into);
+                    }
+                } else {
+                    words(group.stream(), &[], into);
+                }
+                run.clear();
+                colons = false;
+            }
+            TokenTree::Ident(ident) => {
+                if !colons {
+                    run.clear();
+                }
+                run.push(word(&ident));
+                into.push(word(&ident));
+                colons = false;
+            }
+            TokenTree::Literal(literal) => {
+                into.push((literal.to_string(), literal.span()));
+                run.clear();
+                colons = false;
+            }
         }
     }
+}
+
+/// `tokens` cut at its commas.
+fn comma_parts(tokens: TokenStream) -> Vec<TokenStream> {
+    let mut parts = Vec::new();
+    let mut current = TokenStream::new();
+    for tree in tokens {
+        let comma = matches!(&tree, TokenTree::Punct(punct) if punct.as_char() == ',');
+        if comma {
+            parts.push(std::mem::take(&mut current));
+        } else {
+            current.extend([tree]);
+        }
+    }
+    parts.push(current);
+    parts
+}
+
+/// The string literal of a `#[path = "..."]` attribute, if it is one.
+fn path_literal(attr: &Attribute) -> Option<String> {
+    let Meta::NameValue(pair) = &attr.meta else {
+        return None;
+    };
+    let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Str(text),
+        ..
+    }) = &pair.value
+    else {
+        return None;
+    };
+    Some(text.value())
 }
 
 /// Whether `attrs` make the item exist only in a test build: a `#[cfg(test)]`, or a
@@ -306,36 +620,25 @@ impl<'ast> Visit<'ast> for Visitor<'_, '_> {
         }
         let name = item.ident.to_string();
         let children = self.dir().join(&name);
+        let path_attr = item.attrs.iter().find(|attr| attr.path().is_ident("path"));
         if item.content.is_some() {
+            if path_attr.is_some() {
+                self.refuse_path(name);
+                return;
+            }
             self.dirs.push(children);
             visit::visit_item_mod(self, item);
             self.dirs.pop();
             return;
         }
-        if item.attrs.iter().any(|attr| attr.path().is_ident("path")) {
-            self.fail(Error::PathAttribute {
-                path: self.file.clone(),
-                name,
-            });
-            return;
-        }
-        let flat = self.dir().join(format!("{name}.rs"));
-        let nested = children.join("mod.rs");
-        let found = [&flat, &nested]
-            .into_iter()
-            .find(|path| path.is_file())
-            .cloned();
-        let Some(path) = found else {
-            let error = Error::NoModule {
-                path: self.file.clone(),
-                name,
-                flat: self.walk.relative(&flat),
-                nested: self.walk.relative(&nested),
-            };
-            self.fail(error);
+        let located = match path_attr {
+            None => self.locate(name, children),
+            Some(attr) => self.locate_path(attr, name),
+        };
+        let Some((path, below)) = located else {
             return;
         };
-        if let Err(error) = self.walk.file(&path, children) {
+        if let Err(error) = self.walk.file(&path, below) {
             self.fail(error);
         }
     }
@@ -358,6 +661,12 @@ impl<'ast> Visit<'ast> for Visitor<'_, '_> {
         }
     }
 
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if !test_only(&item.attrs) {
+            self.use_tree(&item.tree, &mut Vec::new());
+        }
+    }
+
     fn visit_path(&mut self, path: &'ast syn::Path) {
         let words: Vec<_> = path
             .segments
@@ -374,6 +683,13 @@ impl<'ast> Visit<'ast> for Visitor<'_, '_> {
         visit::visit_expr_method_call(self, call);
     }
 
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        if item.ident == "libc" && item.rename.is_some() {
+            self.renamed(item.ident.span());
+        }
+        visit::visit_item_extern_crate(self, item);
+    }
+
     fn visit_foreign_item_fn(&mut self, item: &'ast syn::ForeignItemFn) {
         // A foreign function is the C library's: named as `libc::` would name it.
         let libc = ("libc".to_owned(), item.sig.ident.span());
@@ -381,24 +697,19 @@ impl<'ast> Visit<'ast> for Visitor<'_, '_> {
         visit::visit_foreign_item_fn(self, item);
     }
 
-    fn visit_use_name(&mut self, name: &'ast syn::UseName) {
-        self.look(&[word(&name.ident)]);
-    }
-
-    fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
-        if rename.ident == "Command" {
-            self.walk.sites.push(Site {
-                file: self.file.clone(),
-                line: rename.ident.span().start().line,
-                what: format!("Command imported as {}", rename.rename),
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if mac
+            .path
+            .segments
+            .last()
+            .is_some_and(|last| last.ident == "include")
+        {
+            self.fail(Error::Include {
+                path: self.file.clone(),
             });
         }
-        self.look(&[word(&rename.ident)]);
-    }
-
-    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         let mut found = Vec::new();
-        words(mac.tokens.clone(), &mut found);
+        words(mac.tokens.clone(), &[], &mut found);
         self.look(&found);
         visit::visit_macro(self, mac);
     }
