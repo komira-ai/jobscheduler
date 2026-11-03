@@ -42,6 +42,11 @@ use std::path::{Path, PathBuf};
 /// The directory of the scratch directory the programs are installed in.
 const DIR: &str = "oci-bin";
 
+/// What writes a program into its staged file. A trait object, not a type parameter, so the
+/// install is one function whatever its callers pass (each instantiation of a generic one would
+/// be measured on its own).
+pub(crate) type Fill<'a> = dyn FnMut(&mut File) -> io::Result<()> + Send + 'a;
+
 /// Installs the program `fill` writes as `<scratch>/oci-bin/<name>` (mode 0755, replaced
 /// atomically) and returns that path. `fill` is given the staged file, open for writing, on
 /// a thread with a descriptor table of its own (see the module docs).
@@ -53,11 +58,7 @@ const DIR: &str = "oci-bin";
 ///
 /// # Panics
 /// When `fill` panics: the panic is the caller's.
-pub(crate) fn publish(
-    scratch: &Path,
-    name: &str,
-    fill: impl FnOnce(&mut File) -> io::Result<()> + Send,
-) -> io::Result<PathBuf> {
+pub(crate) fn publish(scratch: &Path, name: &str, fill: &mut Fill<'_>) -> io::Result<PathBuf> {
     publish_with(own_table, scratch, name, fill)
 }
 
@@ -67,14 +68,14 @@ fn publish_with(
     unshare: fn() -> io::Result<()>,
     scratch: &Path,
     name: &str,
-    fill: impl FnOnce(&mut File) -> io::Result<()> + Send,
+    fill: &mut Fill<'_>,
 ) -> io::Result<PathBuf> {
     let dir = scratch.join(DIR);
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))?;
     let staged = dir.join(format!(".{name}-{}", std::process::id()));
     // The file is closed when the closure returns, on the thread that opened it.
-    let written = alone(unshare, || {
+    let written = alone(unshare, &mut || {
         File::create(&staged).and_then(|mut file| fill(&mut file))
     });
     let target = dir.join(name);
@@ -89,10 +90,10 @@ fn publish_with(
 
 /// Runs `work` on a thread of its own that has first called `unshare`, and returns what it
 /// returned; the thread has ended when this returns. A panic in `work` reaches the caller.
-fn alone<T: Send>(
+fn alone(
     unshare: fn() -> io::Result<()>,
-    work: impl FnOnce() -> io::Result<T> + Send,
-) -> io::Result<T> {
+    work: &mut (dyn FnMut() -> io::Result<()> + Send),
+) -> io::Result<()> {
     std::thread::scope(|scope| {
         let thread = std::thread::Builder::new()
             .name("oci-install".to_owned())
@@ -158,7 +159,7 @@ mod tests {
             forked.send(()).expect("the writer waits");
             child
         });
-        let installed = publish(&scratch, "program", move |file| {
+        let installed = publish(&scratch, "program", &mut move |file| {
             file.write_all(crate::oci::init::BINARY)?;
             open.send(()).expect("the forker waits");
             fork_done.recv().expect("the forker forked");
@@ -183,8 +184,8 @@ mod tests {
     #[test]
     fn a_write_that_fails_keeps_the_installed_program_and_no_staged_file() {
         let scratch = crate::unit_dir("install-fails");
-        let first = publish(&scratch, "p", |f| f.write_all(b"one")).expect("first");
-        let failed = publish(&scratch, "p", |f| {
+        let first = publish(&scratch, "p", &mut |f| f.write_all(b"one")).expect("first");
+        let failed = publish(&scratch, "p", &mut |f| {
             f.write_all(b"tw")?;
             Err(io::Error::other("the source ended"))
         });
@@ -200,9 +201,9 @@ mod tests {
     #[test]
     fn a_refused_own_table_fails_the_install_and_writes_nothing() {
         let scratch = crate::unit_dir("install-unshare");
-        let first = publish(&scratch, "p", |f| f.write_all(b"one")).expect("first");
+        let first = publish(&scratch, "p", &mut |f| f.write_all(b"one")).expect("first");
         let refused: fn() -> io::Result<()> = || Err(io::Error::from_raw_os_error(1));
-        let failed = publish_with(refused, &scratch, "p", |f| f.write_all(b"two"));
+        let failed = publish_with(refused, &scratch, "p", &mut |f| f.write_all(b"two"));
         let why = failed.expect_err("no table of its own");
         assert_eq!(why.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(
@@ -219,6 +220,6 @@ mod tests {
     #[should_panic(expected = "the writer panicked")]
     fn a_panic_while_writing_reaches_the_caller() {
         let scratch = crate::unit_dir("install-panics");
-        let _ = publish(&scratch, "p", |_| panic!("the writer panicked"));
+        let _ = publish(&scratch, "p", &mut |_| panic!("the writer panicked"));
     }
 }

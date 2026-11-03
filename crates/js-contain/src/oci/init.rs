@@ -42,7 +42,7 @@ fn install_bytes(scratch: &Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
             "this build has no container init: containers run on Linux only",
         ));
     }
-    super::install::publish(scratch, "js-init", |file| file.write_all(bytes))
+    super::install::publish(scratch, "js-init", &mut |file| file.write_all(bytes))
 }
 
 #[cfg(test)]
