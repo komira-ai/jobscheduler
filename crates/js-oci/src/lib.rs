@@ -43,6 +43,24 @@
 //!   port; the flag is ignored on a name (`localhost` included) and on every other
 //!   address, and does not touch other entries.
 //!
+//! Credentials ([`Allow::with_credentials`], [`Credentials`]): a token realm that issues
+//! pull tokens only to a user it knows (a private package on GitHub's container registry)
+//! is sent `Authorization: Basic` with the user and password an entry carries. They go to
+//! that token realm and nowhere else: only to the realm the registry's challenge names,
+//! only after it passed the realm checks above, only when it is on the registry's own
+//! host and port, only over https (never to an [`Allow::plain_http_loopback`] entry), and
+//! never to a manifest or blob request or to the target of a redirect. A pull of a
+//! repository whose entry has none is anonymous, as before. The client reads no
+//! credentials of its own (no environment variable, no Docker `config.json`, no
+//! credential helper): the caller hands them over, from a file it checked.
+//!
+//! What the credentials are exposed to: the registry's own host, over TLS to a
+//! certificate the client trusts. Whoever answers as that host can read them, so the
+//! user or token should be one that can only pull, and only what the host needs; a
+//! registry that is compromised, or a trust store an attacker can add a root to, gives
+//! them away. They are not written anywhere by the client and never appear in an error
+//! or in `Debug` output.
+//!
 //! Where the client does *not* look:
 //! - `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` are deliberately not honoured: the
 //!   client connects to the addresses it resolved and checked, so a proxy the
@@ -85,6 +103,7 @@
 //! ```
 
 mod client;
+mod credentials;
 mod digest;
 mod error;
 mod http;
@@ -97,6 +116,7 @@ mod text;
 mod verify;
 
 pub use client::{BlobSink, Client, Repository};
+pub use credentials::Credentials;
 pub use digest::Digest;
 pub use error::Error;
 pub use http::{RootSummary, Timeouts};

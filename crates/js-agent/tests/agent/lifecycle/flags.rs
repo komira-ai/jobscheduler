@@ -528,3 +528,56 @@ fn a_wrong_image_allow_entry_stops_the_agent_before_it_registers() {
         assert_eq!(sent, 0, "{entry}");
     }
 }
+
+/// Asserts that `--registry-credentials` is read when the agent starts: a good file for a
+/// listed entry starts the agent as before, and a file other users may read, or one not
+/// owned by the user it must be owned by (root outside a test), ends it with status 2
+/// before it registers, naming the flag and the file and holding nothing of the content.
+/// It catches a flag that is read only at the first pull, and a secret file any local user
+/// could read being used.
+#[test]
+fn registry_credentials_are_checked_before_the_agent_registers() {
+    let dir = Scratch::new("life-flags-credentials");
+    // The file's directory must not be writable by group or others either.
+    fs::set_permissions(dir.path("."), fs::Permissions::from_mode(0o700)).unwrap();
+    let good = dir.write("good", "puller:s3cret-pw\n", 0o600);
+    let loose = dir.write("loose", "puller:s3cret-pw\n", 0o644);
+    let me = rustix::process::geteuid().as_raw();
+    let mut host = linux_host();
+    host.secret_owner = me;
+    let flag = |path: &std::path::Path| format!("registry.example/team={}", path.display());
+    let with = |path: &std::path::Path| {
+        vec![
+            "--image-allow".to_owned(),
+            "registry.example/team".to_owned(),
+            "--registry-credentials".to_owned(),
+            flag(path),
+        ]
+    };
+    let started = |host: &crate::support::Host, path: &std::path::Path| {
+        let args = with(path);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        start_on(host, &args)
+    };
+
+    let (status, err, sent) = started(&host, &good);
+    assert_eq!(status, code(0), "{err}");
+    assert_eq!(sent, 2, "the hello, and the draining heartbeat of the stop");
+
+    let rule = "not owned by the expected user, or readable or writable by group or others";
+    let mut not_root = host.clone();
+    not_root.secret_owner = me.wrapping_add(1);
+    for (host, path) in [(&host, &loose), (&not_root, &good)] {
+        let (status, err, sent) = started(host, path);
+        assert_eq!(status, code(2), "{err}");
+        assert!(
+            err.contains(&format!(
+                "--registry-credentials: {}: {rule}",
+                path.display()
+            )),
+            "{err}"
+        );
+        assert!(!err.contains("s3cret"), "{err}");
+        assert_eq!(sent, 0, "{err}");
+    }
+}

@@ -97,6 +97,7 @@
 //! | `--bundle-low-water-gib <n>` | fetches are refused while the volume has less than this free; default 0 |
 //! | `--bundle-pull <never\|missing>` | whether a bundle the store lacks is fetched; default `never` (a job that names one is refused `bundle-not-held`); `missing` needs trust `list` and a registry flag: the first start that names a bundle begins a fetch in the background (`bundle-pending` until it is held; every byte is checked against its digest; a fetch that fails is reported once as `bundle-fetch-failed`) |
 //! | `--bundle-registry-allow`, `--bundle-registry-allow-private <host[:port]/prefix>` | the registries and namespaces a bundle's name may point to; repeatable; a bare host is refused; when any is given, a name outside them is refused `bundle-registry-not-allowed` |
+//! | `--registry-credentials <host[:port]/prefix>=<path>` | the user and password an entry of `--image-allow`, `--bundle-registry-allow` or `--bundle-registry-allow-private` (spelled as it is there) sends to its registry's token realm, for a private package (a task image or a bundle); repeatable, once per entry. The file holds one line `USER:PASSWORD` (the user up to the first colon; a trailing line break is dropped) and must be a regular file, not a link (opened with `O_NOFOLLOW`), owned by root with no permission for group or others (`0600` or `0400`), at most 4096 bytes, in a root-owned directory that group and others cannot write. Read once at start; a flag that is not `ENTRY=PATH`, an entry given twice or on no allow flag, and a file that breaks a rule or holds no `USER:PASSWORD` stop the agent with status 2, naming the flag or the file and never its content. The credentials go only to the token realm the registry's challenge names, when it passes js-oci's realm checks and is on the registry's own host and port, over https: never to a manifest or blob request, a redirect's target, another host, or a plain-http registry. Whoever answers as the registry's host can read them, so give a token that can only pull what the host's jobs need. Nothing the agent prints or records holds them. The `image-pull` verb does not take it |
 //! | `--bundle-min-age-min <n>` | minutes a bundle's trees stay after their last use; default 30 |
 //! | `--bundle-keep-file`, `--bundle-prefetch-file <path>` | files of manifest digests (`sha256:<hex>` a line, `#` comments), checked at start; the eviction and the fetcher that read them arrive later |
 //! | `--bundle-deny-file <path>` | digests refused `bundle-denied`, read at every start of a job |
@@ -261,11 +262,13 @@ pub mod native;
 pub mod own_host;
 pub mod quota;
 mod readiness;
+mod registry_credentials;
 mod run;
 mod session;
 mod signals;
 mod system;
 mod transport;
+mod trusted_file;
 pub mod update_hook;
 pub mod usage;
 mod worker;
@@ -299,6 +302,7 @@ pub use readiness::{
     EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner,
     HookWindow, Hooked, ReadinessHook, Verdict, WorkerHook, hook_runner,
 };
+pub use registry_credentials::{CREDENTIALS_MAX, RegistryCredentials, RegistryCredentialsError};
 pub use run::{Exit, Sleeper, Wake, drive};
 pub use session::{
     CredentialState, Drain, Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step,
@@ -366,6 +370,9 @@ pub struct Services<'a> {
     /// The directories above a crun scratch root are checked from here down (`/` outside a
     /// test): a test that cannot make `/tmp` root-owned names the tree it made.
     pub ancestors_floor: &'a Path,
+    /// The user a `--registry-credentials` file must be owned by: root (0) outside a test,
+    /// which cannot make a root-owned file.
+    pub secret_owner: u32,
 }
 
 /// Why the program ends without a stop request.
@@ -388,6 +395,7 @@ fn runtime_flags(
     cli: &Cli,
     platform: &Platform,
     services: &Services<'_>,
+    credentials: &RegistryCredentials,
     err: &mut dyn Write,
 ) -> Result<Option<Settings>, Failure> {
     let usage = |text: &str| Err(Failure::Usage(text.to_owned()));
@@ -405,6 +413,7 @@ fn runtime_flags(
                     let _ = writeln!(err, "js-agent: warning: {warning}");
                 }
                 let allow = lifecycle::image_allow(&cli.image_allow).map_err(Failure::Usage)?;
+                let allow = credentials.attach_all(allow);
                 Ok(Some(Settings::for_crun(
                     ready.crun,
                     &ready.job_user,
@@ -414,7 +423,7 @@ fn runtime_flags(
             }
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = (services, err);
+                let _ = (services, credentials, err);
                 usage("--runtime crun: this build has no crun runtime")
             }
         }
@@ -498,6 +507,7 @@ pub fn main_with(
                 rescue_bound: None,
                 euid: rustix::process::geteuid().as_raw(),
                 ancestors_floor: Path::new("/"),
+                secret_owner: 0,
             };
             run_with(args, out, err, services)
         }
@@ -548,6 +558,10 @@ fn execute(
     services: &mut Services<'_>,
 ) -> Result<(), Failure> {
     let cli = Cli::try_parse_from(args).map_err(Failure::Clap)?;
+    // Read once, before anything else: a credentials file that breaks a rule stops the
+    // agent before it registers, and the files are never read again.
+    let credentials = RegistryCredentials::from_cli(&cli, services.secret_owner)
+        .map_err(|why| Failure::Usage(why.to_string()))?;
     let ca_cert = cli.ca_cert.as_deref();
     let bearer_file = bearer_file(&cli)?;
     let mut transport = services
@@ -560,6 +574,7 @@ fn execute(
     // stops the agent now and not at the first job.
     let host = &services.bundle;
     let bundle = BundleSettings::from_cli(&cli, platform, &**host).map_err(Failure::Usage)?;
+    let bundle = bundle.map(|settings| settings.with_credentials(credentials.clone()));
     // An agent that runs native jobs opens its store now, before the hello: the hello says
     // it holds bundles only when the store is open, and the runtime is made over the same
     // store. An agent that runs no native job could never run a bundle, so it opens none.
@@ -600,7 +615,7 @@ fn execute(
                 .to_owned(),
         ));
     }
-    let crun = runtime_flags(&cli, platform, services, err)?;
+    let crun = runtime_flags(&cli, platform, services, &credentials, err)?;
     // Native jobs need the Seatbelt and the helper of a Mac.
     if cli.native_helper_socket.is_some() && !platform.is_macos() {
         return Err(Failure::Usage(

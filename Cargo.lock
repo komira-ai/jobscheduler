@@ -1344,6 +1344,7 @@ name = "js-oci"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "bytes",
  "hex",
  "http-body-util",

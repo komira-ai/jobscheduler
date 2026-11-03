@@ -86,6 +86,10 @@ pub enum Error {
     /// The registry's authentication challenge could not be answered.
     #[error("registry authentication: {0}")]
     Auth(String),
+    /// A user name or password that cannot be sent as basic auth; the text says which rule
+    /// it breaks and holds neither.
+    #[error("registry credentials: {0}")]
+    Credentials(&'static str),
     /// A response is larger than its limit.
     #[error("{what} is larger than {limit} bytes")]
     TooLarge {
