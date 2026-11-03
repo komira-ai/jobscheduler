@@ -319,7 +319,10 @@
 //! and is refused `exclusive-not-ready` after `max_replace` failed prepares. A wait list
 //! that holds 1024 requests refuses the next new one `no-capacity`. `DELETE /v1/leases/{id}` of a waiting
 //! lease cancels the request at once: it leaves the wait list and the host set aside for it
-//! returns to serving in the same call (200 `{state: "freed"}`).
+//! returns to serving in the same call (200 `{state: "freed"}`), the request's record of
+//! give-ups and failed prepares is forgotten (an acquire under the id again is a new
+//! request), and the lease file says so before the answer does. A waiting lease restored
+//! by `--boot resume` is cancelled the same way before any tick has presented it again.
 //!
 //! A whole-node request whose tries on hosts all failed is answered `exclusive-not-ready`
 //! once, and the server then forgets the request. A client that lost that 409 and

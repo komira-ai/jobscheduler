@@ -350,15 +350,18 @@ async fn no_request_id_is_byte_identical_to_today() {
     );
 }
 
-/// Asserts the field's check: a `request_id` that is not a request id (spaces, empty, 64
-/// bytes) is a 400 whose reason names `request_id`, and makes no lease; `null` is no id
-/// and the acquire is granted as without the field. It catches an id the registry would
-/// key a request by without checking it, and a `null` refused.
+/// Asserts the field's check at its edges. A string that is not a request id (spaces,
+/// empty, 64 bytes, a letter outside ASCII) is a 400 whose reason names `request_id`, and a
+/// value that is not a string is a 400 as any mistyped field is; none makes a lease. An id
+/// of 63 bytes is taken. `null` is no id: the answer is byte for byte the answer to the
+/// same body without the field, and so is the lease file it leaves. It catches an id the
+/// registry would key a request by without checking it, a limit off by one, and a `null`
+/// read as anything but absent.
 #[tokio::test]
 async fn bad_request_id_is_a_400_naming_the_field() {
     let h = Harness::new("request_id_bad").await;
     let long = "a".repeat(64);
-    for bad in ["not an id", "", long.as_str()] {
+    for bad in ["not an id", "", long.as_str(), "caf\u{e9}"] {
         let mut body = lease_body();
         body["request_id"] = json!(bad);
         let refused = acquire(&h, &body).await;
@@ -369,8 +372,26 @@ async fn bad_request_id_is_a_400_naming_the_field() {
         });
         assert_eq!(refused.json(), expected, "{bad:?}");
     }
+    let mut number = lease_body();
+    number["request_id"] = json!(7);
+    let refused = acquire(&h, &number).await;
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert_eq!(refused.json()["error"], "bad-request");
     assert!(lease_ids(&h).await.is_empty());
+    let mut longest = lease_body();
+    longest["request_id"] = json!("a".repeat(63));
+    assert_eq!(acquire(&h, &longest).await.status, 201);
+
+    let without = Harness::new("request_id_without").await;
+    let nulled = Harness::new("request_id_null").await;
     let mut body = lease_body();
+    let plain = acquire(&without, &body).await;
     body["request_id"] = Value::Null;
-    assert_eq!(acquire(&h, &body).await.status, 201);
+    let null = acquire(&nulled, &body).await;
+    assert_eq!(
+        (null.status, null.body.as_str()),
+        (plain.status, plain.body.as_str())
+    );
+    let file = |h: &Harness| std::fs::read_to_string(h.scratch.state()).unwrap();
+    assert_eq!(file(&nulled), file(&without));
 }

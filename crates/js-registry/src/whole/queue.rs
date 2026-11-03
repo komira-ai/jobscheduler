@@ -175,6 +175,13 @@ impl WaitList {
         self.entries.len() < before
     }
 
+    /// Binds the waiting request `id` to `lease`, as if `lease` had presented it, without
+    /// a presentation: a stop of `lease` then takes it off the list. Whether `id` waits.
+    pub(crate) fn bind(&mut self, id: &RequestId, lease: LeaseId) -> bool {
+        let entry = self.entries.iter_mut().find(|entry| entry.id == *id);
+        entry.map(|entry| entry.lease = Some(lease)).is_some()
+    }
+
     /// Removes the request lease `lease` presented last, at once; its id, if one waited.
     pub(crate) fn cancel_lease(&mut self, lease: &LeaseId) -> Option<RequestId> {
         let at = self.position_of(lease)?;

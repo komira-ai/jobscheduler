@@ -152,6 +152,13 @@ impl Requests {
             .any(|(held, kept)| (kept == key) & (held != lease))
     }
 
+    /// Drops the record of request `id`: its consumer cancelled it, so a later request
+    /// under the id starts with no failures, give-ups or exclusions.
+    pub(crate) fn forget(&mut self, id: &RequestId) {
+        let key = RequestKey::from(id);
+        self.records.retain(|entry| entry.key != key);
+    }
+
     /// The lease ended; it no longer stands for its request.
     pub(crate) fn release(&mut self, lease: &LeaseId) {
         self.placed.remove(lease);

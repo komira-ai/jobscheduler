@@ -130,14 +130,22 @@
 //! file; nothing else remembers an id, so a lease that is gone (released, expired, dropped)
 //! takes its id with it. A repeat of the acquire under the id is answered from that lease,
 //! without calling the provider, and one that asks for another request is refused
-//! [`AcquireError::RequestIdConflict`]. A provider that queues the request
+//! [`AcquireError::RequestIdConflict`]. The two are compared as the row records them: the
+//! class, the resources, the capabilities, the probe host, the labels, the validation run
+//! and the wall time in whole milliseconds (at most `i64::MAX`, the largest integer the file
+//! holds), so a repeat that matched before a restart matches after it. The ttl is not
+//! compared. A row's fields of a later version are kept and written back, and a file in
+//! which two leases keep one request id is an [`OpenError::Corrupt`]. A provider that queues the request
 //! ([`js_provider::Provider::waits`]) leaves the lease pending, and each tick presents it
 //! again under the same lease and request id, which keeps its place and lets the start
 //! that finds it a host book it; the prepare deadline counts from the last presentation
 //! that found it waiting. On open, a pending whole lease with a `request` row is presented
-//! at the first tick, which binds it to whatever the provider restored for the id. A row
-//! that is not a valid request (an id, class, host or resources the types refuse) is an
-//! [`OpenError::Corrupt`]. The row is additive: a file without it loads as before, a build
+//! at the first tick, which binds it to whatever the provider restored for the id
+//! ([`LeaseTable::request_ids`] lists the leases kept with an id, for a caller that binds
+//! them sooner). A row that is not a valid request (an id, class, host or resources the
+//! types refuse, or a request [`js_types::Request::validate`] refuses) is an
+//! [`OpenError::Corrupt`]. [`LeaseTable::write_reservations`] writes the reservation ledger
+//! at once, for a caller whose provider cancelled a request the file must not keep. The row is additive: a file without it loads as before, a build
 //! that predates it keeps it on rewrite and serves the lease as one acquired without an id,
 //! and a file with no lease acquired under an id is written byte for byte as before.
 //!
@@ -169,7 +177,7 @@
 //! meanwhile, so a slow disk stalls every call on the table. [`Timings`] times each save
 //! on a monotonic clock ([`SystemMonotonic`] unless [`LeaseTable::watch_saves`] gives
 //! another) under the step that made it (`open`, `acquire`, `acquire-settled`, `renew`,
-//! `release`, `release-settled`, `tick`), and the server's handlers time their wait for
+//! `release`, `release-settled`, `tick`, `reservations`), and the server's handlers time their wait for
 //! the table's lock under `wait-` and the call's name. A step that takes over one second
 //! (exactly one second is not) is logged as a warning, `slow lease step`, naming the
 //! operation and `took_ms`. [`Timings::report`] gives, per operation, how many steps were

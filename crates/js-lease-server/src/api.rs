@@ -173,7 +173,13 @@ impl Shared {
                 // The registry's reservations are written with the leases of this tick.
                 self.handed.hand_over(&agents.registry, &mut table);
             }
-            table.tick()
+            let report = table.tick();
+            if let Some(agents) = &self.agents {
+                // The tick's presentations may have placed, refused or moved a waiting
+                // request: the file follows before the lock is let go.
+                self.handed.write_over(&agents.registry, &mut table);
+            }
+            report
         };
         let counts = match &self.agents {
             Some(agents) => {
@@ -425,7 +431,16 @@ async fn release(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
-    let outcome = shared.lock("wait-release").await.release(&id)?;
+    let outcome = {
+        let mut table = shared.lock("wait-release").await;
+        let outcome = table.release(&id)?;
+        // A release of a waiting lease cancelled its request in the registry: the file
+        // says so before the answer does.
+        if let Some(agents) = &shared.agents {
+            shared.handed.write_over(&agents.registry, &mut table);
+        }
+        outcome
+    };
     Ok(match outcome {
         ReleaseOutcome::Freed => json(StatusCode::OK, &Released { state: "freed" }),
         ReleaseOutcome::Releasing => json(StatusCode::ACCEPTED, &Released { state: "releasing" }),
@@ -455,6 +470,8 @@ async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
 
 #[cfg(test)]
 mod probe_tests;
+#[cfg(test)]
+mod request_id_tests;
 #[cfg(test)]
 mod status_gate_tests;
 #[cfg(test)]

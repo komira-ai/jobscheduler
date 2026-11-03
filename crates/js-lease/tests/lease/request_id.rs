@@ -4,15 +4,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::time::Duration;
 
 use js_lease::{AcquireError, Boot, LeaseState, LeaseTable, ManualClock, OpenError};
 use js_provider::{
     Call, Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
 };
 use js_provider_fake::FakeProvider;
-use js_types::{LeaseId, ProviderId, Request, RequestId, ResourceClass};
+use js_types::{ClassId, LeaseId, ProviderId, Request, RequestId, ResourceClass, Resources};
 
-use crate::support::{Scratch, T0, at, clock, fake, fresh, host, request, secs, settings, states};
+use crate::support::{
+    Scratch, T0, at, break_dir, clock, fake, fresh, host, request, secs, settings, states,
+};
 
 /// What [`Queueing`] answers a start with.
 #[derive(Debug, Clone, Copy)]
@@ -282,28 +285,50 @@ fn a_lease_without_a_request_id_has_no_request_row() {
     assert!(!text.contains("request"), "{text}");
 }
 
-/// Asserts that a `request` row the types refuse (a class id with spaces, a request id
-/// with one) refuses the open as a corrupt file naming the lease, and the table does not
-/// start without it. It catches a row read as no request at all, which would forget the
-/// id and let a repeat take a second host.
+/// Opens, over a queueing provider, a file in which `requests` wait under their ids, after
+/// `good` is replaced with `bad` in it; the open must be refused.
+fn refused_after(name: &str, requests: &[(&str, Request)], good: &str, bad: &str) -> OpenError {
+    let scratch = Scratch::new(name);
+    let clock = clock();
+    let mut table = queued(&scratch, &clock, Boot::Initialise);
+    for (named, request) in requests {
+        let answer = table.acquire_with_id(id(named), request.clone(), None);
+        assert!(
+            matches!(answer, Err(AcquireError::Unconfirmed(_))),
+            "{answer:?}"
+        );
+    }
+    drop(table);
+    let text = fs::read_to_string(scratch.file()).unwrap();
+    let broken = text.replace(good, bad);
+    assert_ne!(broken, text, "{good}");
+    fs::write(scratch.file(), broken).unwrap();
+    let opened = LeaseTable::open(fake(), clock, settings(), scratch.file(), Boot::Resume);
+    opened.expect_err("refused")
+}
+
+/// Asserts that a `request` row that is not a valid request refuses the open as a corrupt
+/// file naming the lease, and the table does not start without it: a class or request id
+/// the types refuse, a probe host that is not a host id, resources that name GPUs with no
+/// GPU class, a zero wall time, a `disk-gib` capability that is not a number, and a row
+/// with no class at all. It catches a row read as no request at all, which would forget the
+/// id and let a repeat take a second host, and a restored request no acquire would accept.
 #[test]
 fn a_request_row_that_is_not_a_request_refuses_the_open() {
     let faults = [
-        ("class = \"whole-node\"", "class = \"Not A Class\""),
-        ("id = \"r1\"", "id = \"r 1\""),
+        (asked(), "class = \"whole-node\"", "class = \"Not A Class\""),
+        (asked(), "id = \"r1\"", "id = \"r 1\""),
+        (
+            probed(),
+            "probe_host = \"h1\"",
+            "probe_host = \"not a host\"",
+        ),
+        (asked(), "gpu_class = \"g\"\n", ""),
+        (asked(), "max_wall_ms = 600000", "max_wall_ms = 0"),
+        (probed(), "isa = \"x86-64-v3\"", "disk-gib = \"lots\""),
     ];
-    for (good, bad) in faults {
-        let scratch = Scratch::new("request_id_bad_row");
-        let clock = clock();
-        let mut table = queued(&scratch, &clock, Boot::Initialise);
-        waiting_lease(&mut table, asked());
-        drop(table);
-        let text = fs::read_to_string(scratch.file()).unwrap();
-        let broken = text.replace(good, bad);
-        assert_ne!(broken, text);
-        fs::write(scratch.file(), broken).unwrap();
-        let opened = LeaseTable::open(fake(), clock, settings(), scratch.file(), Boot::Resume);
-        let err = opened.expect_err("refused");
+    for (request, good, bad) in faults {
+        let err = refused_after("request_id_bad_row", &[("r1", request)], good, bad);
         assert!(matches!(err, OpenError::Corrupt { .. }), "{bad}: {err}");
         let named = err.to_string();
         assert!(
@@ -311,6 +336,177 @@ fn a_request_row_that_is_not_a_request_refuses_the_open() {
             "{named}"
         );
     }
+    let err = refused_after(
+        "request_id_no_class",
+        &[("r1", asked())],
+        "class = \"whole-node\"\n",
+        "",
+    );
+    assert!(matches!(err, OpenError::Corrupt { .. }), "{err}");
+}
+
+/// Asserts that a file in which two leases keep one request id is refused as corrupt,
+/// naming the id. It catches a file that would answer a repeat of the id from either
+/// lease, whichever the table found first.
+#[test]
+fn two_leases_under_one_request_id_refuse_the_open() {
+    let both = [("r1", asked()), ("r2", asked())];
+    let err = refused_after("request_id_twice", &both, "id = \"r2\"", "id = \"r1\"");
+    assert!(matches!(err, OpenError::Corrupt { .. }), "{err}");
+    let named = err.to_string();
+    assert!(
+        named.contains("the request id r1 is kept by two leases"),
+        "{named}"
+    );
+}
+
+/// Asserts which fields make the request: under one id, a request that differs from the
+/// first in the class, any resource dimension, a capability, the probe host, the
+/// validation run, a label or the wall time is a conflict naming the lease, each alone;
+/// one that differs only in the ttl is the same request and is answered with the lease, its
+/// expiry the first acquire's. It catches a field left out of the comparison (a changed
+/// request would be taken for the same) and a ttl taken into it (a retry with another
+/// ttl would be refused).
+#[test]
+fn each_field_of_the_request_counts_and_the_ttl_does_not() {
+    let (mut table, _clock, _scratch) = fresh("request_id_fields");
+    let first = table.acquire_with_id(id("r1"), asked(), None).unwrap();
+    let base = asked;
+    let with = |resources: Resources| Request {
+        resources,
+        ..base()
+    };
+    let variants = [
+        Request {
+            class: ClassId::new("gpu-host").unwrap(),
+            ..base()
+        },
+        with(Resources::new(2000, 1, 1, Some("g".into())).unwrap()),
+        with(Resources::new(1000, 2, 1, Some("g".into())).unwrap()),
+        with(Resources::new(1000, 1, 0, None).unwrap()),
+        with(Resources::new(1000, 1, 1, Some("h".into())).unwrap()),
+        with(base().resources.with_disk_bytes(1)),
+        Request {
+            capabilities: probed().capabilities,
+            ..base()
+        },
+        Request {
+            probe_host: Some(host("h1")),
+            ..base()
+        },
+        Request {
+            validation_run: None,
+            ..base()
+        },
+        Request {
+            labels: BTreeMap::from([("team".to_owned(), "web".to_owned())]),
+            ..base()
+        },
+        Request {
+            max_wall: secs(601),
+            ..base()
+        },
+    ];
+    for variant in variants {
+        let answer = table.acquire_with_id(id("r1"), variant.clone(), None);
+        let named =
+            matches!(answer, Err(AcquireError::RequestIdConflict(lease)) if lease == first.id);
+        assert!(named, "{variant:?}: {answer:?}");
+    }
+    let other_ttl = table
+        .acquire_with_id(id("r1"), asked(), Some(secs(30)))
+        .unwrap();
+    assert_eq!(other_ttl, first);
+}
+
+/// Asserts that a request whose wall time has a part below a millisecond (the file keeps
+/// whole milliseconds) is the same request after a restart as before it: a repeat is
+/// answered with the waiting lease both times. It catches a comparison of the exact wall
+/// time against a restored one cut to the millisecond, which would refuse the client's own
+/// retry after a restart.
+#[test]
+fn a_wall_time_below_the_millisecond_is_the_same_request_after_a_restart() {
+    let scratch = Scratch::new("request_id_micros");
+    let clock = clock();
+    let fine = Request {
+        max_wall: Duration::from_micros(600_000_500),
+        ..asked()
+    };
+    let mut table = queued(&scratch, &clock, Boot::Initialise);
+    let lease = waiting_lease(&mut table, fine.clone());
+    let repeat = table.acquire_with_id(id("r1"), fine.clone(), None);
+    assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
+    drop(table);
+    let mut table = queued(&scratch, &clock, Boot::Resume);
+    let repeat = table.acquire_with_id(id("r1"), fine, None);
+    assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
+}
+
+/// Asserts that the fields of a later version in a `request` row survive: a scalar and a
+/// table added to the row are read, the repeat still matches (they are not compared), and
+/// a write of the file keeps both. It catches a row this build rewrites without what a
+/// newer build put in it.
+#[test]
+fn unknown_fields_of_the_request_row_survive_a_rewrite() {
+    let scratch = Scratch::new("request_id_unknown");
+    let clock = clock();
+    let mut table = queued(&scratch, &clock, Boot::Initialise);
+    let lease = waiting_lease(&mut table, asked());
+    drop(table);
+    let text = fs::read_to_string(scratch.file()).unwrap();
+    let text = text.replace("[lease.request]\n", "[lease.request]\nfuture = \"x\"\n");
+    let text = format!("{text}\n[lease.request.later]\nk = 1\n");
+    fs::write(scratch.file(), text).unwrap();
+
+    let mut table = queued(&scratch, &clock, Boot::Resume);
+    assert_eq!(table.request_ids(), [(lease, id("r1"))]);
+    let repeat = table.acquire_with_id(id("r1"), asked(), None);
+    assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
+    table.write_reservations(Vec::new()).unwrap();
+    let written = fs::read_to_string(scratch.file()).unwrap();
+    assert!(written.contains("future = \"x\""), "{written}");
+    assert!(written.contains("k = 1"), "{written}");
+}
+
+/// Asserts that an id names nothing once the acquire under it left no lease: a refused
+/// acquire records nothing, so the next one under the id is a new request; a lease that
+/// expired and was freed takes its id with it, so an acquire under the id with another
+/// request is a new lease, not a conflict. An acquire whose first write failed keeps its
+/// pending record in memory, so a repeat answers that lease and the provider is not asked
+/// again. It catches an id kept after a refusal or an expiry, and a repeat after a failed
+/// write that starts a second attempt.
+#[test]
+fn an_id_names_nothing_once_its_lease_is_refused_or_gone() {
+    let (mut table, clock, scratch) = fresh("request_id_lifecycle");
+    let too_big = Request {
+        resources: Resources::new(1000, 1, 9, Some("g".into())).unwrap(),
+        ..asked()
+    };
+    let refused = table.acquire_with_id(id("r1"), too_big, None);
+    assert!(
+        matches!(refused, Err(AcquireError::Refused(_))),
+        "{refused:?}"
+    );
+    let held = table.acquire_with_id(id("r1"), asked(), None).unwrap();
+    clock.advance(secs(61));
+    assert_eq!(table.tick().freed, [held.id]);
+    let other = Request {
+        max_wall: secs(601),
+        ..asked()
+    };
+    let again = table.acquire_with_id(id("r1"), other, None).unwrap();
+    assert_ne!(again.id, held.id);
+
+    let booked = table.provider().booked().len();
+    break_dir(&scratch);
+    let unsaved = table.acquire_with_id(id("r2"), asked(), None);
+    assert!(matches!(unsaved, Err(AcquireError::Save(_))), "{unsaved:?}");
+    let repeat = table.acquire_with_id(id("r2"), asked(), None);
+    assert!(
+        matches!(repeat, Err(AcquireError::Unconfirmed(_))),
+        "{repeat:?}"
+    );
+    assert_eq!(table.provider().booked().len(), booked);
 }
 
 /// Asserts a waiting lease whose request can no longer be put to the provider (the

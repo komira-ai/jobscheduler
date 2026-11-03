@@ -145,9 +145,10 @@ pub(crate) struct StoredLease {
 }
 
 /// The request a lease was acquired under, as written: the id, and what the request
-/// asked for beyond the labels and validation run the lease row holds. A field this build
-/// does not know is ignored.
-#[derive(Debug, Serialize, Deserialize)]
+/// asked for beyond the labels and validation run the lease row holds. The wall time is
+/// whole milliseconds, at most [`LARGEST`]. A field this build does not know is kept, as
+/// read, and written back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct StoredRequest {
     pub id: String,
     pub class: String,
@@ -157,11 +158,14 @@ pub(crate) struct StoredRequest {
     pub resources: StoredShares,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub capabilities: BTreeMap<String, String>,
+    /// Fields of a later version, kept as read.
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 /// The resources a lease that shares its host books, as written. A field this build does
 /// not know is ignored.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct StoredShares {
     pub cpu_millis: u64,
     pub memory_bytes: u64,

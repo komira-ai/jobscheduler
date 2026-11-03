@@ -10,7 +10,12 @@
 //! - The table is opened with a restart grace ([`with_restart_grace`]): a restored
 //!   deadline is at least the boot plus [`RESERVATION_BOOT_GRACE`].
 //! - Once the table is open, the registry is given the ledger it read ([`restore`]), before
-//!   any host says hello. The registry drops and counts what cannot stand.
+//!   any host says hello. The registry drops and counts what cannot stand. Each restored
+//!   waiting request is then bound to the pending lease the file keeps it with, so a
+//!   release of that lease cancels it even before the first tick presents it again.
+//! - A release, and a tick whose presentations changed the registry, write the ledger at
+//!   once ([`Handed::write_over`]), so a crash right after cannot bring back a request the
+//!   registry has already cancelled, placed or refused.
 //! - Nothing about estimates is kept: the registry's drain choice reads them again.
 //!
 //! The file format is additive: a build from before the ledger, or from before the wait
@@ -47,10 +52,12 @@ pub(crate) fn with_restart_grace(settings: Settings, whole: Option<&WholeNodeCon
 pub(crate) fn restore(registry: &Registry, table: &Table) {
     let records = table.reservations();
     let restored = registry.restore_reservations(&records);
+    let bound = registry.bind_waiting(&table.request_ids());
     if !records.is_empty() {
         info!(
             resumed = restored.resumed,
             dropped = restored.dropped,
+            bound,
             "reservations restored from the lease file"
         );
     }
@@ -77,6 +84,19 @@ impl Handed {
         let mut last = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if last.as_ref() != Some(&ledger) {
             table.set_reservations(ledger.clone());
+            *last = Some(ledger);
+        }
+    }
+
+    /// Writes `table`'s file now with the registry's ledger if it is not the one handed
+    /// last, for a call that changed the registry after the tick's hand-over (a release, or
+    /// the tick's own presentations). A failed write is left to the next tick, which finds
+    /// the file behind and writes it again.
+    pub(crate) fn write_over(&self, registry: &Registry, table: &mut Table) {
+        let ledger = registry.reservation_ledger();
+        let mut last = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.as_ref() != Some(&ledger) {
+            let _ = table.write_reservations(ledger.clone());
             *last = Some(ledger);
         }
     }

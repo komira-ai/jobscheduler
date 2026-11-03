@@ -235,6 +235,22 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         self.book.set_reservations(records);
     }
 
+    /// Replaces the reservation ledger with `records` as [`Self::set_reservations`] does,
+    /// and writes the file now, with the leases as they stand, instead of at the next tick.
+    /// A caller whose provider just changed the ledger in a way that must not be lost to a
+    /// crash (a cancelled request, whose lease is already gone from the file) writes it
+    /// this way. A failed write leaves the file behind, and the next tick writes it again.
+    pub fn write_reservations(&mut self, records: Vec<ReservationRecord>) -> Result<(), SaveError> {
+        self.book.set_reservations(records);
+        self.save("reservations")
+    }
+
+    /// Every lease the table keeps with a request id ([`Self::acquire_with_id`]), with that
+    /// id, in lease order: pending, held or releasing, as long as it is in the table.
+    pub fn request_ids(&self) -> Vec<(LeaseId, RequestId)> {
+        self.book.request_ids()
+    }
+
     /// The reservation ledger, in request id order: as set, or as the open restored it
     /// (held deadlines extended by the boot grace, `claim_by` stamped).
     pub fn reservations(&self) -> Vec<ReservationRecord> {

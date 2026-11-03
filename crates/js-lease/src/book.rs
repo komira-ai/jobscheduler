@@ -2,7 +2,7 @@
 //! [`crate::LeaseTable`] calls the provider and hands each answer here, so every branch
 //! is one non-generic function.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -70,16 +70,27 @@ struct Token {
 
 /// The request id a lease was acquired under and what that acquire asked for: a repeat
 /// of the id is compared with it, and a lease whose request waits on the provider is
-/// presented again with it.
+/// presented again with it. `extra` holds the fields of the file's row that this build
+/// does not know, written back as read.
 #[derive(Debug, Clone)]
 struct Asked {
     id: RequestId,
     request: Request,
+    extra: toml::Table,
 }
 
 impl Asked {
-    /// The request a stored lease row records, or `None` when a part of it is not valid.
-    /// The labels and validation run are the row's own.
+    fn new(id: RequestId, request: Request) -> Self {
+        Self {
+            id,
+            request,
+            extra: toml::Table::new(),
+        }
+    }
+
+    /// The request a stored lease row records, or `None` when a part of it is not valid or
+    /// the request breaks a rule every request meets ([`Request::validate`]). The labels and
+    /// validation run are the row's own.
     fn restore(row: &StoredRequest, stored: &StoredLease) -> Option<Self> {
         let probe_host = row.probe_host.as_deref().map(HostId::new);
         let request = Request {
@@ -91,20 +102,46 @@ impl Asked {
             validation_run: stored.validation_run.clone(),
             probe_host: probe_host.transpose().ok()?,
         };
+        request.validate().ok()?;
         let id = RequestId::new(&row.id).ok()?;
-        Some(Self { id, request })
+        let extra = row.extra.clone();
+        Some(Self { id, request, extra })
     }
 
     fn stored(&self) -> StoredRequest {
-        let request = &self.request;
         StoredRequest {
             id: self.id.to_string(),
-            class: request.class.to_string(),
-            max_wall_ms: millis_of(request.max_wall),
-            probe_host: (request.probe_host.as_ref()).map(|host| host.as_str().to_string()),
-            resources: StoredShares::of(&request.resources),
-            capabilities: request.capabilities.clone(),
+            extra: self.extra.clone(),
+            ..shape(&self.request)
         }
+    }
+
+    /// Whether `request` asks for what this lease's request asked for, as the file records
+    /// it: the class, the resources, the capabilities, the wall time to the millisecond, the
+    /// probe host, the labels and the validation run. Comparing the recorded form keeps the
+    /// answer the same before and after a restart.
+    fn asks_for(&self, request: &Request) -> bool {
+        let mine = &self.request;
+        let same = [
+            shape(mine) == shape(request),
+            mine.labels == request.labels,
+            mine.validation_run == request.validation_run,
+        ];
+        same.into_iter().all(|same| same)
+    }
+}
+
+/// What the file records of `request` beyond its labels and validation run, with no id and
+/// no fields of a later version.
+fn shape(request: &Request) -> StoredRequest {
+    StoredRequest {
+        id: String::new(),
+        class: request.class.to_string(),
+        max_wall_ms: millis_of(request.max_wall).min(store::LARGEST),
+        probe_host: (request.probe_host.as_ref()).map(|host| host.as_str().to_string()),
+        resources: StoredShares::of(&request.resources),
+        capabilities: request.capabilities.clone(),
+        extra: toml::Table::new(),
     }
 }
 
@@ -341,8 +378,15 @@ fn restore_all(path: &Path, document: &Document) -> Result<BTreeMap<LeaseId, Rec
     let restored = restored.collect::<Result<Vec<_>, _>>();
     let restored = restored.map_err(|reason| store::corrupt(path, reason))?;
     let mut leases = BTreeMap::new();
+    let mut seen = BTreeSet::new();
     for record in restored {
         let id = record.id;
+        let request = record.asked.as_ref().map(|asked| asked.id.clone());
+        let twice = request.filter(|request| !seen.insert(request.clone()));
+        if let Some(request) = twice {
+            let reason = format!("the request id {request} is kept by two leases");
+            return Err(store::corrupt(path, reason));
+        }
         if leases.insert(id, record).is_some() {
             return Err(store::corrupt(path, format!("lease {id} is listed twice")));
         }
@@ -488,6 +532,13 @@ impl Book {
         self.unsaved = true;
     }
 
+    /// Every lease kept with a request id, with that id, in lease order.
+    pub(crate) fn request_ids(&self) -> Vec<(LeaseId, RequestId)> {
+        let kept = self.leases.values();
+        let kept = kept.filter_map(|record| Some((record.id, record.asked.as_ref()?.id.clone())));
+        kept.collect()
+    }
+
     pub(crate) fn reservations(&self) -> Vec<ReservationRecord> {
         self.ledger.values().cloned().collect()
     }
@@ -555,10 +606,7 @@ impl Book {
             labels: spec.labels().clone(),
             shares: (!spec.class().admission().books_whole_host())
                 .then(|| request.resources.clone()),
-            asked: spec.request_id().map(|id| Asked {
-                id: id.clone(),
-                request: request.clone(),
-            }),
+            asked: (spec.request_id()).map(|id| Asked::new(id.clone(), request.clone())),
             waiting: false,
             extra: toml::Table::new(),
         };
@@ -608,7 +656,7 @@ impl Book {
             let asked = record.asked.as_ref().filter(|asked| asked.id == *id)?;
             Some((record, asked))
         })?;
-        if asked.request != *request {
+        if !asked.asks_for(request) {
             return Some(Err(AcquireError::RequestIdConflict(record.id)));
         }
         Some(match (record.state, record.host.clone()) {

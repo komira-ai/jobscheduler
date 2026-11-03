@@ -143,9 +143,10 @@ pub(crate) struct AcquireArgs {
     /// The request's id, of your choosing (1 to 63 of `a-z`, `A-Z`, `0-9`, `.`, `_`,
     /// `-`): an acquire repeated with the same id and flags answers the lease the first one
     /// made instead of taking a second, and a whole-node request waits for a host instead
-    /// of being refused for lack of one. The same id with other flags is refused
-    /// `request-id-conflict`, and so is a second `lease run` under it (each run adds its
-    /// own random label).
+    /// of being refused for lack of one. Every flag that shapes the request counts; `--ttl`
+    /// and `--wait-pending` do not. The same id with another request is refused
+    /// `request-id-conflict` while the first lease is on the server, and so is a second
+    /// `lease run` under it then (each run adds its own random label).
     #[arg(long, value_name = "ID")]
     pub(crate) request_id: Option<String>,
     /// How long to wait for a start the provider has not confirmed (202) to settle.

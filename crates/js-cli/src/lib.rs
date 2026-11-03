@@ -52,14 +52,14 @@
 //! `--request-id ID` names the start (1 to 63 of `a-z`, `A-Z`, `0-9`, `.`, `_`, `-`, of
 //! your choosing). An `acquire` repeated with the same id and the same flags is answered
 //! with the lease the first one made (held, or still pending) and takes no second host,
-//! for as long as that lease is on the server; the same id with other flags is refused
-//! `request-id-conflict` (exit 3). A `whole-node` start with an id waits on the server for
+//! for as long as that lease is on the server; the same id with another request (any flag
+//! but `--ttl` and `--wait-pending` changed) is refused `request-id-conflict` (exit 3). A `whole-node` start with an id waits on the server for
 //! a host instead of being refused `no-capacity`: it is pending until a host is set aside,
 //! drained and prepared for it, so give `--wait-pending` as long as you mean to wait (the
 //! pending lease is released when it runs out, which cancels the request). On `run` the id
 //! does not make a repeat safe, since every `run` adds its own random label (below), which
-//! the server compares: a second `run` under the id is refused `request-id-conflict`. The
-//! flag is sent only when given.
+//! the server compares: a second `run` under the id while the first run's lease is on the
+//! server is refused `request-id-conflict`. The flag is sent only when given.
 //!
 //! Durations are whole seconds: `90`, `90s`, `15m`, `2h`. `acquire` prints
 //! `lease <id> host <host> expires <ms>` (`expires` is the server's clock in

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use js_pool_static::SeatError;
 use js_provider::{HostCapacity, Observed};
-use js_types::{Admission, HostId, LeaseId, Resources};
+use js_types::{Admission, HostId, LeaseId, RequestId, Resources};
 
 use js_lease::Timestamp;
 
@@ -37,8 +37,13 @@ impl Registry {
             marks,
             ..
         } = &mut *guard;
+        // A cancelled request leaves no trace: no mark, and no record of its failures, so
+        // the id names a fresh request if it is used again.
         let cancelled = waiting.cancel_lease(lease);
-        cancelled.iter().for_each(|id| marks.drop_request(id));
+        cancelled.iter().for_each(|id| {
+            marks.drop_request(id);
+            requests.forget(id);
+        });
         runs.stop_lease(lease);
         requests.release(lease);
         if let Observed::Present { host } = book.read(lease) {
@@ -63,6 +68,18 @@ impl Registry {
             });
         }
         book.stop(lease)
+    }
+
+    /// Binds each restored waiting request of `held` to the lease the lease file keeps it
+    /// with, so that a stop of that lease cancels it even before the lease has presented it
+    /// again. Call it once at a start, after [`Registry::restore_reservations`]. A request
+    /// that is not waiting is left alone. How many were bound.
+    pub fn bind_waiting(&self, held: &[(LeaseId, RequestId)]) -> usize {
+        let mut state = self.lock();
+        let bound = held
+            .iter()
+            .filter(|(lease, id)| state.waiting.bind(id, *lease));
+        bound.count()
     }
 
     /// Whether the whole-node request lease `lease` presented last waits for a host
