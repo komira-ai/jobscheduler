@@ -102,20 +102,22 @@ fn id(text: &str) -> RequestId {
     RequestId::new(text).unwrap()
 }
 
-/// A whole-node request with something in every field the file keeps for it.
+/// A whole-node request with labels and a validation run, which the fake's hosts take.
 fn asked() -> Request {
     Request {
-        capabilities: BTreeMap::from([("isa".to_owned(), "x86-64-v3".to_owned())]),
         labels: BTreeMap::from([("team".to_owned(), "infra".to_owned())]),
         validation_run: Some("val-7".to_owned()),
         ..request(600)
     }
 }
 
-/// [`asked`] as a probe of host `h1`.
+/// [`asked`] with something in every other field the file keeps for it: a probe of host
+/// `h1` and a capability. Only a provider that queues takes it (the fake's hosts report
+/// no capability).
 fn probed() -> Request {
     Request {
         probe_host: Some(host("h1")),
+        capabilities: BTreeMap::from([("isa".to_owned(), "x86-64-v3".to_owned())]),
         ..asked()
     }
 }
@@ -155,7 +157,7 @@ fn a_waiting_lease_is_presented_again_each_tick_until_placed() {
     let mut table = queued(&scratch, &clock, Boot::Initialise);
     let lease = waiting_lease(&mut table, asked());
     let carried = (lease, Some(id("r1")));
-    assert_eq!(table.provider().starts, [carried.clone()]);
+    assert_eq!(table.provider().starts, std::slice::from_ref(&carried));
     let repeat = table.acquire_with_id(id("r1"), asked(), None);
     assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
     assert_eq!(table.provider().starts.len(), 1, "a repeat calls nothing");
@@ -241,7 +243,7 @@ fn a_repeat_answers_the_lease_as_it_stands() {
 /// Asserts that the id and the request outlive a restart. The lease file keeps the
 /// waiting lease's request under `[lease.request]`, its probe host included; after a
 /// `resume` boot over a fresh provider a repeat of the acquire answers the same pending
-/// lease without a start, a repeat that differs only in the probe host is a conflict, and
+/// lease without a start, a repeat without the probe host and the capability is a conflict, and
 /// the first tick presents the lease again under its id. It catches a request id or a
 /// request lost with the process (the repeat would make a second lease, or a changed
 /// request would be taken for the same), and a restored lease that is never presented
