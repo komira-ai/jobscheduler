@@ -162,6 +162,34 @@ async fn a_cancel_is_written_before_it_is_answered() {
     assert_eq!(rig.registry.queue_position(&id("r1")), None);
 }
 
+/// Asserts recovery from a crash between a release's two writes. The first write holds the
+/// lease as releasing and the ledger as it was, with the request waiting; a server started
+/// over exactly that file binds the request to the releasing lease, and its first tick stops
+/// the lease again, which cancels the request: no waiter, no reservation, the lease gone and
+/// no row for the request in the file. The same file is what a failed second write leaves.
+/// It catches a crash or a failed write at that point that leaves a request waiting, and a
+/// host set aside, for a lease that is gone.
+#[tokio::test]
+async fn a_crash_between_the_release_writes_cancels_the_request_at_the_next_tick() {
+    let (rig, _busy, waiting) = reserved("request_id_release_crash").await;
+    let text = file(&rig);
+    let releasing = text.replace("state = \"pending\"", "state = \"releasing\"");
+    assert_ne!(releasing, text);
+    std::fs::write(rig.file(), releasing).unwrap();
+
+    let rig = rig.restart(true).await;
+    assert_eq!(rig.registry.queue_position(&id("r1")), Some(0));
+    rig.shared.tick().await;
+    assert_eq!(rig.registry.queue_position(&id("r1")), None);
+    assert!(rig.registry.reservations().is_empty());
+    assert_eq!(state(&rig, &waiting).await, "gone");
+    assert!(
+        !file(&rig).contains("request_id = \"r1\""),
+        "{}",
+        file(&rig)
+    );
+}
+
 /// Asserts that the tick whose presentation placed a waiting request writes the ledger as
 /// it then stands: the file has a row for the request exactly when the registry still does.
 /// It catches a file one tick behind the presentations, which a crash after the commit

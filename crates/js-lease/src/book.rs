@@ -97,7 +97,8 @@ impl Asked {
             class: ClassId::new(&row.class).ok()?,
             resources: row.resources.resources()?,
             capabilities: row.capabilities.clone(),
-            max_wall: Duration::from_millis(row.max_wall_ms),
+            max_wall: Duration::from_millis(row.max_wall_ms)
+                .saturating_add(Duration::from_nanos(row.max_wall_nanos)),
             labels: stored.labels.clone(),
             validation_run: stored.validation_run.clone(),
             probe_host: probe_host.transpose().ok()?,
@@ -117,8 +118,8 @@ impl Asked {
     }
 
     /// Whether `request` asks for what this lease's request asked for, as the file records
-    /// it: the class, the resources, the capabilities, the wall time to the millisecond, the
-    /// probe host, the labels and the validation run. Comparing the recorded form keeps the
+    /// it: the class, the resources, the capabilities, the wall time, the probe host, the
+    /// labels and the validation run. Comparing the recorded form keeps the
     /// answer the same before and after a restart.
     fn asks_for(&self, request: &Request) -> bool {
         let mine = &self.request;
@@ -138,6 +139,7 @@ fn shape(request: &Request) -> StoredRequest {
         id: String::new(),
         class: request.class.to_string(),
         max_wall_ms: millis_of(request.max_wall).min(store::LARGEST),
+        max_wall_nanos: u64::from(request.max_wall.subsec_nanos() % 1_000_000),
         probe_host: (request.probe_host.as_ref()).map(|host| host.as_str().to_string()),
         resources: StoredShares::of(&request.resources),
         capabilities: request.capabilities.clone(),

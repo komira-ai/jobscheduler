@@ -146,13 +146,16 @@ pub(crate) struct StoredLease {
 
 /// The request a lease was acquired under, as written: the id, and what the request
 /// asked for beyond the labels and validation run the lease row holds. The wall time is
-/// whole milliseconds, at most [`LARGEST`]. A field this build does not know is kept, as
-/// read, and written back.
+/// whole milliseconds, at most [`LARGEST`], and the nanoseconds below a millisecond
+/// (written only when not zero), so a wall time is kept exactly. A field this build does
+/// not know is kept, as read, and written back.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct StoredRequest {
     pub id: String,
     pub class: String,
     pub max_wall_ms: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_wall_nanos: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe_host: Option<String>,
     pub resources: StoredShares,

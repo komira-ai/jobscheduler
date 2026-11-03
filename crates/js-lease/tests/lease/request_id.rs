@@ -419,27 +419,50 @@ fn each_field_of_the_request_counts_and_the_ttl_does_not() {
     assert_eq!(other_ttl, first);
 }
 
-/// Asserts that a request whose wall time has a part below a millisecond (the file keeps
-/// whole milliseconds) is the same request after a restart as before it: a repeat is
-/// answered with the waiting lease both times. It catches a comparison of the exact wall
-/// time against a restored one cut to the millisecond, which would refuse the client's own
-/// retry after a restart.
+/// Asserts that a wall time with a part below a millisecond is kept exactly: the row holds
+/// the whole milliseconds and the nanoseconds below them; after a restart a repeat of the
+/// same request is answered with the waiting lease, one whose wall time differs by a
+/// microsecond is a conflict, and the first tick presents the restored request. With a wall
+/// time of half a millisecond, which an acquire accepts (it is positive), the restored
+/// request is the same positive wall time, not zero, and the file opens. It catches a wall
+/// time cut to the millisecond, which would refuse the client's own retry after a restart,
+/// or read a valid half-millisecond wall time back as zero and refuse the whole file.
 #[test]
-fn a_wall_time_below_the_millisecond_is_the_same_request_after_a_restart() {
-    let scratch = Scratch::new("request_id_micros");
-    let clock = clock();
-    let fine = Request {
-        max_wall: Duration::from_micros(600_000_500),
-        ..asked()
-    };
-    let mut table = queued(&scratch, &clock, Boot::Initialise);
-    let lease = waiting_lease(&mut table, fine.clone());
-    let repeat = table.acquire_with_id(id("r1"), fine.clone(), None);
-    assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
-    drop(table);
-    let mut table = queued(&scratch, &clock, Boot::Resume);
-    let repeat = table.acquire_with_id(id("r1"), fine, None);
-    assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
+fn a_wall_time_below_the_millisecond_is_kept_exactly_across_a_restart() {
+    let walls = [
+        (
+            600_000_500,
+            "max_wall_ms = 600000\nmax_wall_nanos = 500000\n",
+        ),
+        (500, "max_wall_ms = 0\nmax_wall_nanos = 500000\n"),
+    ];
+    for (micros, row) in walls {
+        let scratch = Scratch::new("request_id_micros");
+        let clock = clock();
+        let fine = Request {
+            max_wall: Duration::from_micros(micros),
+            ..asked()
+        };
+        let mut table = queued(&scratch, &clock, Boot::Initialise);
+        let lease = waiting_lease(&mut table, fine.clone());
+        let repeat = table.acquire_with_id(id("r1"), fine.clone(), None);
+        assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
+        drop(table);
+        let text = fs::read_to_string(scratch.file()).unwrap();
+        assert!(text.contains(row), "{text}");
+
+        let mut table = queued(&scratch, &clock, Boot::Resume);
+        let repeat = table.acquire_with_id(id("r1"), fine.clone(), None);
+        assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
+        let off = Request {
+            max_wall: Duration::from_micros(micros + 1),
+            ..asked()
+        };
+        let conflict = table.acquire_with_id(id("r1"), off, None);
+        assert!(matches!(conflict, Err(AcquireError::RequestIdConflict(named)) if named == lease));
+        table.tick();
+        assert_eq!(table.provider().starts, [(lease, Some(id("r1")))]);
+    }
 }
 
 /// Asserts that the fields of a later version in a `request` row survive: a scalar and a

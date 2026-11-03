@@ -132,8 +132,10 @@
 //! without calling the provider, and one that asks for another request is refused
 //! [`AcquireError::RequestIdConflict`]. The two are compared as the row records them: the
 //! class, the resources, the capabilities, the probe host, the labels, the validation run
-//! and the wall time in whole milliseconds (at most `i64::MAX`, the largest integer the file
-//! holds), so a repeat that matched before a restart matches after it. The ttl is not
+//! and the wall time (`max_wall_ms`, whole milliseconds up to `i64::MAX`, the largest
+//! integer the file holds, and `max_wall_nanos`, the nanoseconds below a millisecond, left
+//! out when zero), so a repeat that matched before a restart matches after it, and a wall
+//! time below a millisecond reads back as the positive wall time it was. The ttl is not
 //! compared. A row's fields of a later version are kept and written back, and a file in
 //! which two leases keep one request id is an [`OpenError::Corrupt`]. A provider that queues the request
 //! ([`js_provider::Provider::waits`]) leaves the lease pending, and each tick presents it
@@ -144,8 +146,9 @@
 //! ([`LeaseTable::request_ids`] lists the leases kept with an id, for a caller that binds
 //! them sooner). A row that is not a valid request (an id, class, host or resources the
 //! types refuse, or a request [`js_types::Request::validate`] refuses) is an
-//! [`OpenError::Corrupt`]. [`LeaseTable::write_reservations`] writes the reservation ledger
-//! at once, for a caller whose provider cancelled a request the file must not keep. The row is additive: a file without it loads as before, a build
+//! [`OpenError::Corrupt`]. [`LeaseTable::release_then`] writes a lease's end and the
+//! reservation ledger its stop left in one replace, and [`LeaseTable::write_reservations`]
+//! writes the ledger at once, for a caller whose provider changed it outside a release. The row is additive: a file without it loads as before, a build
 //! that predates it keeps it on rewrite and serves the lease as one acquired without an id,
 //! and a file with no lease acquired under an id is written byte for byte as before.
 //!

@@ -168,10 +168,31 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// leaves the lease releasing, with its booking counted, for [`Self::tick`] to
     /// retry. Releasing a lease that is already releasing stops it again.
     pub fn release(&mut self, id: &LeaseId) -> Result<ReleaseOutcome, ReleaseError> {
+        self.release_then(id, || None)
+    }
+
+    /// Releases a lease as [`Self::release`] does, and asks `ledger`, after the provider's
+    /// stop and before the write that follows it, for the reservation ledger as the stop
+    /// left it. `Some` replaces the table's ledger, so the lease's end and the ledger the
+    /// provider changed with it (a waiting request it cancelled) are written in one replace
+    /// of the file, and no crash can keep one without the other; `None` keeps the ledger.
+    ///
+    /// The first write, before the stop, holds the lease as releasing and the ledger as it
+    /// was. A crash after it, or a failure of the second write, leaves that file: the next
+    /// start finds the lease releasing and stops it again, which cancels its request then.
+    pub fn release_then(
+        &mut self,
+        id: &LeaseId,
+        ledger: impl FnOnce() -> Option<Vec<ReservationRecord>>,
+    ) -> Result<ReleaseOutcome, ReleaseError> {
         let marked = self.book.mark_releasing(id);
         marked.ok_or(ReleaseError::Unknown(*id))?;
         self.save("release")?;
         let freed = self.stop(id);
+        let after = ledger();
+        after
+            .into_iter()
+            .for_each(|records| self.book.set_reservations(records));
         let _ = self.save("release-settled");
         match freed {
             true => Ok(ReleaseOutcome::Freed),

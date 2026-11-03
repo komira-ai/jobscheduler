@@ -433,13 +433,15 @@ async fn release(
     let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
     let outcome = {
         let mut table = shared.lock("wait-release").await;
-        let outcome = table.release(&id)?;
-        // A release of a waiting lease cancelled its request in the registry: the file
-        // says so before the answer does.
-        if let Some(agents) = &shared.agents {
-            shared.handed.write_over(&agents.registry, &mut table);
+        // A release of a waiting lease cancels its request in the registry: the lease's
+        // end and the ledger the stop left are written in one replace, before the answer.
+        match &shared.agents {
+            Some(agents) => {
+                let handed = &shared.handed;
+                table.release_then(&id, || Some(handed.take(&agents.registry)))?
+            }
+            None => table.release(&id)?,
         }
-        outcome
     };
     Ok(match outcome {
         ReleaseOutcome::Freed => json(StatusCode::OK, &Released { state: "freed" }),

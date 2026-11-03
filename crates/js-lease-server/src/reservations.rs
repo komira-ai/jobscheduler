@@ -13,9 +13,14 @@
 //!   any host says hello. The registry drops and counts what cannot stand. Each restored
 //!   waiting request is then bound to the pending lease the file keeps it with, so a
 //!   release of that lease cancels it even before the first tick presents it again.
-//! - A release, and a tick whose presentations changed the registry, write the ledger at
-//!   once ([`Handed::write_over`]), so a crash right after cannot bring back a request the
-//!   registry has already cancelled, placed or refused.
+//! - A release writes the lease's end and the ledger its stop left in one replace of the
+//!   file ([`Handed::take`] gives the ledger to `LeaseTable::release_then`), and a tick
+//!   whose presentations changed the registry writes the ledger at once after its own write
+//!   ([`Handed::write_over`]), so a crash cannot bring back a request the registry has
+//!   cancelled with its lease, and at most bring back for `regain_grace` one it placed or
+//!   refused at a tick. A crash between a release's two writes leaves the lease releasing
+//!   with its request in the ledger: the next start binds the two, and its first tick stops
+//!   the lease again, which cancels the request.
 //! - Nothing about estimates is kept: the registry's drain choice reads them again.
 //!
 //! The file format is additive: a build from before the ledger, or from before the wait
@@ -86,6 +91,15 @@ impl Handed {
             table.set_reservations(ledger.clone());
             *last = Some(ledger);
         }
+    }
+
+    /// The registry's ledger now, noted as the one handed last, for a release to write with
+    /// the lease's end in one replace.
+    pub(crate) fn take(&self, registry: &Registry) -> Vec<ReservationRecord> {
+        let ledger = registry.reservation_ledger();
+        let mut last = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        *last = Some(ledger.clone());
+        ledger
     }
 
     /// Writes `table`'s file now with the registry's ledger if it is not the one handed
