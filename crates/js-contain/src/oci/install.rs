@@ -95,7 +95,7 @@ fn alone(
     work: &mut (dyn FnMut() -> io::Result<()> + Send),
 ) -> io::Result<()> {
     std::thread::scope(|scope| {
-        let thread = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("oci-install".to_owned())
             .spawn_scoped(scope, move || {
                 unshare()
@@ -103,10 +103,12 @@ fn alone(
                         io::Error::new(why.kind(), format!("unshare(CLONE_FILES): {why}"))
                     })
                     .and_then(|()| work())
-            })?;
-        thread
-            .join()
-            .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+            });
+        spawned.and_then(|thread| {
+            thread
+                .join()
+                .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+        })
     })
 }
 
