@@ -581,3 +581,38 @@ fn registry_credentials_are_checked_before_the_agent_registers() {
         assert_eq!(sent, 0, "{err}");
     }
 }
+
+/// Asserts that the job flags, read on their own as a caller other than the start of the
+/// agent reads them, refuse an `--image-allow` entry that is not one and name the flag
+/// (the agent's start refuses it earlier, with the same words). It catches job flags that
+/// take a bare host when they are read without the start's check.
+#[test]
+fn the_job_flags_alone_refuse_a_wrong_image_allow_entry() {
+    use clap::Parser as _;
+
+    let dir = Scratch::new("life-flags-image-allow");
+    let root = dir.path("scratch");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let root = root.display().to_string();
+    let argv = [
+        "js-agent",
+        "--server",
+        "http://127.0.0.1:1",
+        "--token-file",
+        "/nonexistent/token",
+        "--pool",
+        "p",
+        "--scratch-root",
+        &root,
+        "--scratch-quota",
+        "--image-allow",
+        "ghcr.io",
+    ];
+    let cli = js_agent::Cli::try_parse_from(argv).unwrap();
+    let why = js_agent::lifecycle::Local::from_cli(&cli, 0).unwrap_err();
+    assert_eq!(
+        why,
+        "--image-allow: \"ghcr.io\" is not a well formed registry reference"
+    );
+}
