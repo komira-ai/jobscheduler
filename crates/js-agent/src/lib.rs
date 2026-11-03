@@ -397,7 +397,7 @@ fn runtime_flags(
     cli: &Cli,
     platform: &Platform,
     services: &Services<'_>,
-    credentials: &RegistryCredentials,
+    image_allow: Vec<js_oci::Allow>,
     err: &mut dyn Write,
 ) -> Result<Option<Settings>, Failure> {
     let usage = |text: &str| Err(Failure::Usage(text.to_owned()));
@@ -414,19 +414,16 @@ fn runtime_flags(
                 for warning in &ready.warnings {
                     let _ = writeln!(err, "js-agent: warning: {warning}");
                 }
-                let allow = credentials
-                    .image_allow(cli)
-                    .map_err(|why| Failure::Usage(why.to_string()))?;
                 Ok(Some(Settings::for_crun(
                     ready.crun,
                     &ready.job_user,
                     ready.job_ids,
-                    allow,
+                    image_allow,
                 )))
             }
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = (services, credentials, err);
+                let _ = (services, image_allow, err);
                 usage("--runtime crun: this build has no crun runtime")
             }
         }
@@ -565,6 +562,10 @@ fn execute(
     // agent before it registers, and the files are never read again.
     let credentials = RegistryCredentials::from_cli(&cli, services.secret_owner)
         .map_err(|why| Failure::Usage(why.to_string()))?;
+    // The image client's allow-list, with the credentials: what the crun runtime pulls by.
+    let image_allow = credentials
+        .image_allow(&cli)
+        .map_err(|why| Failure::Usage(why.to_string()))?;
     let ca_cert = cli.ca_cert.as_deref();
     let bearer_file = bearer_file(&cli)?;
     let mut transport = services
@@ -618,7 +619,7 @@ fn execute(
                 .to_owned(),
         ));
     }
-    let crun = runtime_flags(&cli, platform, services, &credentials, err)?;
+    let crun = runtime_flags(&cli, platform, services, image_allow, err)?;
     // Native jobs need the Seatbelt and the helper of a Mac.
     if cli.native_helper_socket.is_some() && !platform.is_macos() {
         return Err(Failure::Usage(

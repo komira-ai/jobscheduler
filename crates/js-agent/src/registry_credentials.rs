@@ -508,9 +508,9 @@ mod tests {
         );
         let bare = self::cli(&["--image-allow=registry.example".to_owned()]);
         let refused = table.image_allow(&bare).expect_err("a bare host");
-        assert!(
-            matches!(&refused, ImageAllowError(js_oci::Error::Reference(entry)) if entry == "registry.example"),
-            "{refused:?}"
+        assert_eq!(
+            format!("{refused:?}"),
+            "ImageAllowError(Reference(\"registry.example\"))"
         );
         assert_eq!(
             refused.to_string(),
