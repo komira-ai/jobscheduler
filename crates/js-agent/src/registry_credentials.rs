@@ -97,6 +97,12 @@ pub enum RegistryCredentialsError {
     },
 }
 
+/// An `--image-allow` entry that is not a js-oci allow-list entry; the js-oci error says
+/// which entry and why.
+#[derive(Debug, thiserror::Error)]
+#[error("--image-allow: {0}")]
+pub struct ImageAllowError(#[source] pub js_oci::Error);
+
 /// The credentials of the `--registry-credentials` flags, by allow-list entry.
 ///
 /// `Debug` prints the entries and `Credentials(<redacted>)` for each secret.
@@ -155,9 +161,13 @@ impl RegistryCredentials {
     ///
     /// # Errors
     ///
-    /// An entry that is not `HOST[:PORT]/PREFIX`, naming `--image-allow`.
-    pub fn image_allow(&self, cli: &Cli) -> Result<Vec<Allow>, String> {
-        crate::lifecycle::image_allow(&cli.image_allow).map(|allow| self.attach_all(allow))
+    /// [`ImageAllowError`]: the first entry that is not `HOST[:PORT]/PREFIX`.
+    pub fn image_allow(&self, cli: &Cli) -> Result<Vec<Allow>, ImageAllowError> {
+        cli.image_allow
+            .iter()
+            .map(|text| Allow::parse(text).map(|entry| self.attach(entry)))
+            .collect::<Result<_, _>>()
+            .map_err(ImageAllowError)
     }
 
     /// Every entry of `entries` with its credentials, in order ([`Self::attach`]).
@@ -497,8 +507,13 @@ mod tests {
             ]
         );
         let bare = self::cli(&["--image-allow=registry.example".to_owned()]);
+        let refused = table.image_allow(&bare).expect_err("a bare host");
+        assert!(
+            matches!(&refused, ImageAllowError(js_oci::Error::Reference(entry)) if entry == "registry.example"),
+            "{refused:?}"
+        );
         assert_eq!(
-            table.image_allow(&bare).expect_err("a bare host"),
+            refused.to_string(),
             "--image-allow: \"registry.example\" is not a well formed registry reference"
         );
     }

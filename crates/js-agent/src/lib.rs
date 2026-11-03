@@ -302,7 +302,9 @@ pub use readiness::{
     EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner,
     HookWindow, Hooked, ReadinessHook, Verdict, WorkerHook, hook_runner,
 };
-pub use registry_credentials::{CREDENTIALS_MAX, RegistryCredentials, RegistryCredentialsError};
+pub use registry_credentials::{
+    CREDENTIALS_MAX, ImageAllowError, RegistryCredentials, RegistryCredentialsError,
+};
 pub use run::{Exit, Sleeper, Wake, drive};
 pub use session::{
     CredentialState, Drain, Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step,
@@ -412,7 +414,9 @@ fn runtime_flags(
                 for warning in &ready.warnings {
                     let _ = writeln!(err, "js-agent: warning: {warning}");
                 }
-                let allow = credentials.image_allow(cli).map_err(Failure::Usage)?;
+                let allow = credentials
+                    .image_allow(cli)
+                    .map_err(|why| Failure::Usage(why.to_string()))?;
                 Ok(Some(Settings::for_crun(
                     ready.crun,
                     &ready.job_user,
