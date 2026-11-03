@@ -175,7 +175,7 @@ mod tests {
             .stderr(Stdio::null())
             .status();
         child.finish();
-        let status = started.unwrap_or_else(|e| panic!("start {}: {e}", installed.display()));
+        let status = started.expect("the installed program starts, not busy");
         assert_eq!(status.code(), Some(2), "the init's usage exit");
     }
 
@@ -201,9 +201,15 @@ mod tests {
     #[test]
     fn a_refused_own_table_fails_the_install_and_writes_nothing() {
         let scratch = crate::unit_dir("install-unshare");
-        let first = publish(&scratch, "p", &mut |f| f.write_all(b"one")).expect("first");
+        let mut writes = 0;
+        let mut fill = |f: &mut File| {
+            writes += 1;
+            f.write_all(b"one")
+        };
+        let first = publish(&scratch, "p", &mut fill).expect("first");
         let refused: fn() -> io::Result<()> = || Err(io::Error::from_raw_os_error(1));
-        let failed = publish_with(refused, &scratch, "p", &mut |f| f.write_all(b"two"));
+        let failed = publish_with(refused, &scratch, "p", &mut fill);
+        assert_eq!(writes, 1, "the writer ran without a table of its own");
         let why = failed.expect_err("no table of its own");
         assert_eq!(why.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(
