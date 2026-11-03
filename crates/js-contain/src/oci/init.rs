@@ -30,7 +30,8 @@ pub(crate) fn create_report(lease: &Path) -> Result<std::fs::File, String> {
 }
 
 /// Writes the program into `<scratch>/oci-bin/js-init` (mode 0755, replaced
-/// atomically) and returns that path.
+/// atomically) and returns that path. It is written on a thread with a descriptor table of
+/// its own, so no forked child holds it busy (`super::install`).
 pub(crate) fn install(scratch: &Path) -> std::io::Result<PathBuf> {
     install_bytes(scratch, BINARY)
 }

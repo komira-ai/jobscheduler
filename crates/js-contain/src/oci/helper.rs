@@ -315,7 +315,8 @@ pub(crate) fn prepare_rootfs(dir: &Path, binary: &str) -> std::io::Result<()> {
 /// Copies the daemon's binary to `<scratch>/oci-bin/daemon` (mode 0755, replaced
 /// atomically) and returns that path. A helper with a job's ids cannot search the
 /// directories the binary was installed or built under (a home directory is 0750), but the
-/// scratch directory was checked to be searchable by others.
+/// scratch directory was checked to be searchable by others. The copy is written on a thread
+/// with a descriptor table of its own, so no forked child holds it busy (`super::install`).
 pub(crate) fn install_daemon(scratch: &Path, daemon: &Path) -> std::io::Result<PathBuf> {
     super::install::publish(scratch, "daemon", |file| {
         std::io::copy(&mut std::fs::File::open(daemon)?, file).map(drop)

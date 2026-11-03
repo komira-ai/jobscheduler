@@ -79,7 +79,7 @@ pub fn retry_busy(
 /// When `sh` cannot be run, or the copy fails.
 pub fn install_copy(source: &Path, dest: &Path, mode: &str) {
     run_sh(
-        r#"cp "$1" "$2" && chmod "$3" "$2""#,
+        r#"cp -- "$1" "$2" && chmod -- "$3" "$2""#,
         &[source.as_os_str(), dest.as_os_str(), OsStr::new(mode)],
     );
 }
@@ -91,12 +91,13 @@ pub fn install_copy(source: &Path, dest: &Path, mode: &str) {
 /// When `sh` cannot be run, or the write fails.
 pub fn install_script(dest: &Path, body: &str, mode: &str) {
     run_sh(
-        r#"printf '%s' "$1" > "$2" && chmod "$3" "$2""#,
+        r#"printf '%s' "$1" > "$2" && chmod -- "$3" "$2""#,
         &[OsStr::new(body), dest.as_os_str(), OsStr::new(mode)],
     );
 }
 
-/// Runs `script` under `sh -c` with `args` as `$1`, `$2`, ...
+/// Runs `script` under `sh -c` with `args` as `$1`, `$2`, ... The scripts pass `--` before
+/// the paths, so `cp` and `chmod` never read a path that starts with `-` as an option.
 fn run_sh(script: &str, args: &[&OsStr]) {
     let status = Command::new("sh")
         .args(["-c", script, "sh"])
