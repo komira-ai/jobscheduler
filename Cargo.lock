@@ -1532,6 +1532,7 @@ dependencies = [
 name = "js-testkit"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "js-oci",
  "js-testkit",
  "libc",

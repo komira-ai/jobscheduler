@@ -1,11 +1,13 @@
-//! Credentials for a registry's token realm, against registries in this process: a
+//! Credentials for a registry's token realm, against registries served in memory (the
+//! fixture's [`Network`]: no socket is bound or connected, and the client's resolution,
+//! address policy, TLS and redirects run over the in-memory streams as over TCP): a
 //! private pull works with them, and they reach the registry's own token realm and
 //! nothing else (no other host, no manifest or blob, no redirect target, no plain http).
 
 mod support;
 
 use js_oci::{Allow, BlobSink, BundleSource, Client, Credentials, Error, Kind, Location, Policy};
-use support::{Artifact, Fixture, LOOPBACK, OTHER, REGISTRY, REPO};
+use support::{Artifact, Fixture, LOOPBACK, Network, OTHER, REGISTRY, REPO};
 
 /// The user and password of the tests, and the header they make (worked out by hand:
 /// base64 of `puller:s3cret-pass-1`).
@@ -43,7 +45,7 @@ fn bundle() -> Artifact {
 /// A registry over TLS holding `artifact` whose realm issues the token `tok`, and only
 /// to a request that carries [`BASIC`].
 async fn private_registry(artifact: &Artifact) -> Fixture {
-    let fx = Fixture::start().await;
+    let fx = Fixture::in_memory();
     fx.publish(artifact);
     fx.behave(|b| {
         b.token = Some("tok".to_owned());
@@ -266,12 +268,12 @@ async fn credentials_not_sent_after_a_redirect() {
 async fn credentials_follow_only_the_registrys_own_realm() {
     let artifact = bundle();
     let fx = private_registry(&artifact).await;
-    let side = Fixture::start().await;
+    let side = fx.network().start();
     side.behave(|b| {
         b.token = Some("tok".to_owned());
         b.token_basic = Some(BASIC.to_owned());
     });
-    let untrusted = Fixture::start().await;
+    let untrusted = fx.network().start();
     let (host, port, digest) = (fx.at(REGISTRY), fx.port, &artifact.digest);
     let listed = |fixture: &Fixture| {
         Allow::parse(&format!("{}/elsewhere", fixture.at(REGISTRY)))
@@ -289,7 +291,8 @@ async fn credentials_follow_only_the_registrys_own_realm() {
     let client = Client::with_roots(policy, vec![fx.cert.clone(), side.cert.clone()])
         .with_resolved(REGISTRY, LOOPBACK)
         .with_resolved(OTHER, LOOPBACK)
-        .with_resolved("unlisted.test", LOOPBACK);
+        .with_resolved("unlisted.test", LOOPBACK)
+        .with_connector(fx.network().connector());
     let manifest_line = format!("{host} GET /v2/{REPO}/manifests/{digest} []");
 
     fx.behave(|b| b.realm = Some(format!("https://REGISTRY.TEST:{port}/token")));
@@ -452,7 +455,7 @@ async fn the_token_of_the_credentials_is_reused_and_renewed() {
 #[tokio::test]
 async fn credentials_not_sent_over_plain_http() {
     let artifact = bundle();
-    let fx = Fixture::start_plain().await;
+    let fx = Network::default().start_plain();
     fx.publish(&artifact);
     fx.behave(|b| {
         b.token = Some("tok".to_owned());
@@ -464,7 +467,8 @@ async fn credentials_not_sent_over_plain_http() {
         .loopback()
         .plain_http_loopback()
         .with_credentials(credentials());
-    let client = Client::with_roots(Policy::new(vec![plain]), Vec::new());
+    let client = Client::with_roots(Policy::new(vec![plain]), Vec::new())
+        .with_connector(fx.network().connector());
     let location = Location::parse(&format!("{authority}/{REPO}")).expect("location");
     let err = manifest(&client, location, &artifact)
         .await
@@ -490,7 +494,7 @@ async fn credentials_not_sent_over_plain_http() {
 #[tokio::test]
 async fn anonymous_registry_is_unaffected() {
     let artifact = bundle();
-    let fx = Fixture::start().await;
+    let fx = Fixture::in_memory();
     fx.publish(&artifact);
     fx.behave(|b| b.token = Some("tok".to_owned()));
     let other = Allow::parse(&format!("{}/elsewhere", fx.at(OTHER)))
@@ -532,7 +536,7 @@ fn last_token_authorization(fx: &Fixture) -> String {
 #[tokio::test]
 async fn credentials_follow_the_most_specific_entry() {
     let artifact = bundle();
-    let fx = Fixture::start().await;
+    let fx = Fixture::in_memory();
     fx.publish(&artifact);
     fx.behave(|b| b.token = Some("tok".to_owned()));
     let with = |prefix: &str| entry(&fx, prefix).with_credentials(credentials());
@@ -569,7 +573,7 @@ async fn credentials_follow_the_most_specific_entry() {
 #[tokio::test]
 async fn sibling_repositories_send_only_their_own_credentials() {
     let artifact = bundle();
-    let fx = Fixture::start().await;
+    let fx = Fixture::in_memory();
     fx.publish(&artifact);
     fx.behave(|b| {
         b.token = Some("tok".to_owned());
@@ -633,8 +637,9 @@ async fn credentials_do_not_appear_in_debug_or_errors() {
     let fx = private_registry(&artifact).await;
     let wrong = Credentials::new(USER, "wrong-pass").expect("credentials");
     let policy = Policy::new(vec![entry(&fx, "team").with_credentials(wrong)]);
-    let client =
-        Client::with_roots(policy.clone(), vec![fx.cert.clone()]).with_resolved(REGISTRY, LOOPBACK);
+    let client = Client::with_roots(policy.clone(), vec![fx.cert.clone()])
+        .with_resolved(REGISTRY, LOOPBACK)
+        .with_connector(fx.network().connector());
     let repo = client.repository(fx.location(REPO)).expect("repository");
     let err = repo
         .fetch_manifest(&artifact.digest, &Kind::bundle())

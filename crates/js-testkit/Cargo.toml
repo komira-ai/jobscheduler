@@ -31,13 +31,14 @@ postgres = ["dep:postgres"]
 # crate that pulls through js-oci. Off by default, so the crates that take this one as a
 # normal dependency link no TLS stack. (js-oci has this crate as a dev-dependency: a cycle
 # cargo allows, since a dev-dependency is not linked into the library.)
-oci-registry = ["dep:js-oci", "dep:rcgen", "dep:rustls", "dep:tokio-rustls"]
+oci-registry = ["dep:async-trait", "dep:js-oci", "dep:rcgen", "dep:rustls", "dep:tokio-rustls"]
 
 # No kbf dependency: every crate may take this one as a dev-dependency (or a
 # dependency of a test-only bin) without a cycle. rustix makes its system calls
 # directly on Linux; libc is for the two calls rustix has no portable form of
 # (mkfifo, and signal to ignore one). `kbf-m2-act` still links statically.
 [dependencies]
+async-trait = { workspace = true, optional = true }
 js-oci = { path = "../js-oci", optional = true }
 libc.workspace = true
 postgres = { workspace = true, optional = true }

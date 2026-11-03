@@ -2,7 +2,7 @@
 //! digest it is named by before anyone uses it.
 
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use hyper::header::{ACCEPT, AUTHORIZATION, HeaderName, WWW_AUTHENTICATE};
@@ -10,7 +10,7 @@ use rustls::pki_types::CertificateDer;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 
-use crate::http::{Http, Reach, RootSummary, Roots, Timeouts};
+use crate::http::{Connect, Http, Reach, RootSummary, Roots, Timeouts};
 use crate::location::Authority;
 use crate::location::{HTTP_PORT, HTTPS_PORT};
 use crate::manifest::{self, Descriptor, Kind, Manifest};
@@ -124,6 +124,16 @@ impl Client {
     #[must_use]
     pub fn with_resolved(mut self, host: &str, ip: IpAddr) -> Self {
         self.http.resolve_to(host, ip);
+        self
+    }
+
+    /// Opens connections with `connect` in place of TCP: for a test that serves its
+    /// registry in memory. The client still resolves every host and checks every address
+    /// against the policy first, and runs TLS, the requests and redirects over the stream
+    /// `connect` returns, exactly as over TCP.
+    #[must_use]
+    pub fn with_connector(mut self, connect: Arc<dyn Connect>) -> Self {
+        self.http.connect_with(connect);
         self
     }
 

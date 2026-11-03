@@ -61,6 +61,11 @@
 //! them away. They are not written anywhere by the client and never appear in an error
 //! or in `Debug` output.
 //!
+//! How a connection is opened: by TCP to the addresses the client resolved and checked,
+//! unless the caller gives a [`Connect`] ([`Client::with_connector`]), as a test that
+//! serves its registry in memory does. Every check above runs before it is asked, and
+//! TLS, the requests and redirects run over the stream it returns.
+//!
 //! Where the client does *not* look:
 //! - `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` are deliberately not honoured: the
 //!   client connects to the addresses it resolved and checked, so a proxy the
@@ -119,7 +124,7 @@ pub use client::{BlobSink, Client, Repository};
 pub use credentials::Credentials;
 pub use digest::Digest;
 pub use error::Error;
-pub use http::{RootSummary, Timeouts};
+pub use http::{Connect, Io, RootSummary, Timeouts};
 pub use layout::{Layout, LayoutFault};
 pub use location::{Authority, Location};
 pub use manifest::{Descriptor, Kind, Limits, Manifest, Platform, media};

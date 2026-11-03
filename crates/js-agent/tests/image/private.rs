@@ -1,4 +1,5 @@
-//! A private image through the crun runtime's image client: the `--registry-credentials`
+//! A private image through the crun runtime's image client, against a registry served in
+//! memory (no socket): the `--registry-credentials`
 //! flags, read by the agent's own table, give the `--image-allow` entry the credentials
 //! its registry's token realm asks for, and nothing else the client sends carries them.
 
@@ -71,7 +72,7 @@ fn pin(fx: &Fixture, artifact: &Artifact) -> PinnedImage {
 
 /// A registry holding `artifact` whose realm issues `tok` only to [`BASIC`].
 async fn private_registry(artifact: &Artifact) -> Fixture {
-    let fx = Fixture::start().await;
+    let fx = Fixture::in_memory();
     fx.publish(artifact);
     fx.behave(|b| {
         b.token = Some("tok".to_owned());

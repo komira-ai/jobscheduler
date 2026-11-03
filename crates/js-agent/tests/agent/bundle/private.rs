@@ -1,4 +1,5 @@
-//! A private bundle through the store's registry client: the `--registry-credentials`
+//! A private bundle through the store's registry client, against a registry served in
+//! memory (no socket): the `--registry-credentials`
 //! flags, read by the agent's own table and handed to the bundle settings, give a
 //! `--bundle-registry-allow` or `--bundle-registry-allow-private` entry the credentials
 //! its registry's token realm asks for, and only the token request carries them.
@@ -35,7 +36,7 @@ fn standard(dir: &Scratch) -> Bundle {
 /// runtime it runs on (kept alive by the caller).
 fn private_registry(bundle: &Bundle) -> (tokio::runtime::Runtime, Fixture) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let fixture = runtime.block_on(Fixture::start());
+    let fixture = Fixture::in_memory();
     fixture.publish(&bundle.artifact);
     fixture.behave(|b| {
         b.token = Some("tok".to_owned());
