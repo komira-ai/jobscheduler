@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 700" width="1320" height="700" role="img" aria-label="Row one is the release pipeline from push to main to a deploy step; row two is the coordinator rolling the new version to the host updater, which prepares, cuts over, verifies and confirms, with rollback on a failed verify.">
+<title>Release and update pipeline</title>
+<defs><marker id="release-update-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="release-update-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="release-update-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-a{fill:#FD4F1D;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-g{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4}
+.box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
+.box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-r{stroke:#C0392B;fill:none;stroke-width:1.5}
+.ln-rd{stroke:#C0392B;fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-r{fill:#C0392B;font-size:12px}
+.t-w{fill:#FFFFFF;font-weight:600}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1320" height="700" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">Release pipeline above, host update below</text>
+<rect x="22" y="120" width="124" height="100" rx="5" class="box-b"/>
+<text x="84.0" y="174.0" class="b" text-anchor="middle">push to main</text>
+<path d="M146,170 L166,170" class="ln" marker-end="url(#release-update-ak)"/>
+<rect x="166" y="120" width="124" height="100" rx="5" class="box-b"/>
+<text x="228.0" y="158.0" class="b" text-anchor="middle">ci</text>
+<text x="228.0" y="174.0" class="t-m" text-anchor="middle">all jobs except</text>
+<text x="228.0" y="190.0" class="t-m" text-anchor="middle">macOS</text>
+<path d="M290,170 L310,170" class="ln" marker-end="url(#release-update-ak)"/>
+<rect x="310" y="120" width="124" height="100" rx="5" class="box-b"/>
+<text x="372.0" y="142.0" class="b" text-anchor="middle">plan</text>
+<text x="372.0" y="158.0" class="t-m" text-anchor="middle">version = highest</text>
+<text x="372.0" y="174.0" class="t-m" text-anchor="middle">ancestor tag + 1;</text>
+<text x="372.0" y="190.0" class="t-m" text-anchor="middle">docs-only ends</text>
+<text x="372.0" y="206.0" class="t-m" text-anchor="middle">here</text>
+<path d="M434,170 L454,170" class="ln" marker-end="url(#release-update-ak)"/>
+<rect x="454" y="120" width="124" height="100" rx="5" class="box-b"/>
+<text x="516.0" y="150.0" class="b" text-anchor="middle">build</text>
+<text x="516.0" y="166.0" class="t-m" text-anchor="middle">musl Linux</text>
+<text x="516.0" y="182.0" class="t-m" text-anchor="middle">x86_64, macOS</text>
+<text x="516.0" y="198.0" class="t-m" text-anchor="middle">arm64</text>
+<path d="M578,170 L598,170" class="ln" marker-end="url(#release-update-ak)"/>
+<rect x="598" y="120" width="124" height="100" rx="5" class="box-b"/>
+<text x="660.0" y="174.0" class="b" text-anchor="middle">sums</text>
+<path d="M722,170 L742,170" class="ln" marker-end="url(#release-update-ak)"/>
+<rect x="742" y="120" width="124" height="100" rx="5" class="box-b"/>
+<text x="804.0" y="174.0" class="b" text-anchor="middle">attest</text>
+<path d="M866,170 L886,170" class="ln" marker-end="url(#release-update-ak)"/>
+<rect x="886" y="120" width="124" height="100" rx="5" class="box-b"/>
+<text x="948.0" y="174.0" class="b" text-anchor="middle">verify</text>
+<path d="M1010,170 L1030,170" class="ln" marker-end="url(#release-update-ak)"/>
+<rect x="1030" y="120" width="124" height="100" rx="5" class="box-o"/>
+<text x="1092.0" y="150.0" class="b" text-anchor="middle">publish</text>
+<text x="1092.0" y="166.0" class="t-m" text-anchor="middle">draft, upload,</text>
+<text x="1092.0" y="182.0" class="t-m" text-anchor="middle">ancestor check,</text>
+<text x="1092.0" y="198.0" class="t-m" text-anchor="middle">tag created last</text>
+<path d="M1154,170 L1174,170" class="ln" marker-end="url(#release-update-ak)"/>
+<rect x="1174" y="120" width="124" height="100" rx="5" class="box-o"/>
+<text x="1236.0" y="150.0" class="b" text-anchor="middle">gamma</text>
+<text x="1236.0" y="166.0" class="t-m" text-anchor="middle">off unless</text>
+<text x="1236.0" y="182.0" class="t-m" text-anchor="middle">coordinator</text>
+<text x="1236.0" y="198.0" class="t-m" text-anchor="middle">configured</text>
+<rect x="640" y="46" width="330" height="44" rx="5" class="box-r"/>
+<text x="805.0" y="64.5" class="t-r" text-anchor="middle">signer = this repo's release workflow:</text>
+<text x="805.0" y="79.5" class="t-r" text-anchor="middle">push access to main means root on hosts</text>
+<path d="M804,90 L804,120" class="ln-r" marker-end="url(#release-update-ar)"/>
+<path d="M1236,220 L1236,245 L122,245 L122,280" class="ln" marker-end="url(#release-update-ak)"/>
+<text x="680" y="238" class="t-m lbl" text-anchor="middle">hands over the released version</text>
+<rect x="22" y="280" width="200" height="64" rx="5" class="box-o"/>
+<text x="122.0" y="300.0" class="b" text-anchor="middle">coordinator:</text>
+<text x="122.0" y="316.0" class="t-m" text-anchor="middle">desired version,</text>
+<text x="122.0" y="332.0" class="t-m" text-anchor="middle">server service first</text>
+<rect x="270" y="280" width="200" height="64" rx="5" class="box-o"/>
+<text x="370.0" y="307.5" class="b" text-anchor="middle">coordinator:</text>
+<text x="370.0" y="324.5" class="t-m" text-anchor="middle">agent service</text>
+<path d="M222,312 L270,312" class="ln" marker-end="url(#release-update-ak)"/>
+<path d="M470,312 L520,312" class="ln" marker-end="url(#release-update-ak)"/>
+<rect x="520" y="280" width="420" height="340" rx="5" class="box-b"/>
+<text x="540" y="302" class="b" text-anchor="start">host updater</text>
+<rect x="540" y="320" width="240" height="50" rx="5" class="box"/>
+<text x="660.0" y="340.5" class="b" text-anchor="middle">prepare</text>
+<text x="660.0" y="357.5" class="t-m" text-anchor="middle">cordon, wait for no runs</text>
+<rect x="540" y="390" width="240" height="50" rx="5" class="box"/>
+<text x="660.0" y="410.5" class="b" text-anchor="middle">cutover</text>
+<text x="660.0" y="427.5" class="t-m" text-anchor="middle">swap link, restart unit</text>
+<rect x="540" y="460" width="240" height="50" rx="5" class="box"/>
+<text x="660.0" y="480.5" class="b" text-anchor="middle">verify</text>
+<text x="660.0" y="497.5" class="t-m" text-anchor="middle">new hello seen</text>
+<rect x="540" y="530" width="240" height="50" rx="5" class="box"/>
+<text x="660.0" y="559.0" class="b" text-anchor="middle">confirm + uncordon</text>
+<path d="M660,370 L660,390" class="ln" marker-end="url(#release-update-ak)"/>
+<path d="M660,440 L660,460" class="ln" marker-end="url(#release-update-ak)"/>
+<path d="M660,510 L660,530" class="ln" marker-end="url(#release-update-ak)"/>
+<rect x="820" y="460" width="100" height="50" rx="5" class="box-r"/>
+<text x="870.0" y="489.0" class="t-r" text-anchor="middle">rollback</text>
+<path d="M780,485 L820,485" class="ln-r" marker-end="url(#release-update-ar)"/>
+<text x="800" y="477" class="t-r lbl" text-anchor="middle">fails</text>
+<rect x="980" y="280" width="290" height="60" rx="5" class="box-gd"/>
+<text x="1125.0" y="305.5" class="t-m" text-anchor="middle">lease server: no update hook;</text>
+<text x="1125.0" y="322.5" class="t-m" text-anchor="middle">update drops all runs</text>
+<path d="M30,670 L80,670" class="ln-r" marker-end="url(#release-update-ar)"/>
+<text x="90" y="674" class="t-m" text-anchor="start">failure path</text>
+<rect x="220" y="659" width="36" height="22" rx="5" class="box-gd"/>
+<text x="266" y="674" class="t-m" text-anchor="start">no update hook for this service</text>
+</svg>

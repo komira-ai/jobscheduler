@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 610" width="1160" height="610" role="img" aria-label="Timeline of four hosts: the whole-node request marks the host with the least estimated remaining time, backfill only fits inside that tail, and a bar that overshoots the tail is refused.">
+<title>Tail placement for a whole-node lease</title>
+<defs><marker id="tail-placement-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="tail-placement-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="tail-placement-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker><pattern id="tail-placement-hatch" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="#5A5A57" stroke-width="2"/></pattern></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-a{fill:#FD4F1D;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-g{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4}
+.box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
+.box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-r{stroke:#C0392B;fill:none;stroke-width:1.5}
+.ln-rd{stroke:#C0392B;fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-r{fill:#C0392B;font-size:12px}
+.t-w{fill:#FFFFFF;font-weight:600}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1160" height="610" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">Whole-node placement: reserve the host with the least estimated remaining time</text>
+<path d="M300,100 L300,520" class="ln-o"/>
+<text x="300" y="94" class="b" text-anchor="middle">now</text>
+<text x="20" y="140" class="b" text-anchor="start">H1</text>
+<text x="20" y="203" class="b" text-anchor="start">H2</text>
+<text x="20" y="414" class="b" text-anchor="start">H3</text>
+<text x="20" y="490" class="b" text-anchor="start">H4</text>
+<rect x="300" y="114" width="420" height="16" rx="3" class="box-g"/>
+<rect x="720" y="114" width="80" height="16" rx="3" fill="url(#tail-placement-hatch)" stroke="#5A5A57" stroke-width="1"/>
+<rect x="300" y="136" width="500" height="16" rx="3" class="box-g"/>
+<rect x="800" y="136" width="100" height="16" rx="3" fill="url(#tail-placement-hatch)" stroke="#5A5A57" stroke-width="1"/>
+<rect x="282" y="172" width="560" height="200" rx="5" class="box-t"/>
+<rect x="300" y="190" width="260" height="18" rx="3" class="box-g"/>
+<rect x="560" y="190" width="40" height="18" rx="3" fill="url(#tail-placement-hatch)" stroke="#5A5A57" stroke-width="1"/>
+<path d="M560,176 L560,342" class="ln-d"/>
+<text x="560" y="184" class="b lbl" text-anchor="middle">T</text>
+<text x="852" y="203" class="b" text-anchor="start">least estimated remaining time</text>
+<rect x="300" y="225" width="260" height="76" rx="5" class="box-o"/>
+<text x="310" y="241" class="t-m" text-anchor="start">reservation (from now to T)</text>
+<rect x="315" y="250" width="90" height="22" rx="3" class="box-n"/>
+<text x="360" y="265" class="t-m" text-anchor="middle">backfill</text>
+<rect x="420" y="250" width="110" height="22" rx="3" class="box-n"/>
+<text x="475" y="265" class="t-m" text-anchor="middle">backfill</text>
+<text x="307" y="290" class="t-m" text-anchor="start">backfill: now + P90 + 60 s margin &lt;= T</text>
+<rect x="560" y="225" width="260" height="76" rx="5" class="box-a"/>
+<text x="690" y="267" class="t-w" text-anchor="middle">whole-node lease</text>
+<rect x="430" y="312" width="260" height="20" rx="3" class="box-rd"/>
+<path d="M430,312 L690,332" class="ln-r"/>
+<path d="M430,332 L690,312" class="ln-r"/>
+<text x="700" y="326" class="t-r" text-anchor="start">does not fit: refused</text>
+<path d="M300,342 L300,350 L560,350 L560,342" class="ln"/>
+<text x="430" y="366" class="t-m" text-anchor="middle">tail</text>
+<rect x="20" y="260" width="150" height="44" rx="5" class="box"/>
+<text x="95.0" y="277.5" text-anchor="middle">whole-node request</text>
+<text x="95.0" y="294.5" text-anchor="middle">waiting</text>
+<path d="M170,282 L300,282" class="ln-o" marker-end="url(#tail-placement-ao)"/>
+<text x="235" y="262" class="t-m lbl" text-anchor="middle">mark H2</text>
+<text x="235" y="276" class="t-m lbl" text-anchor="middle">(drain_cost)</text>
+<rect x="300" y="402" width="400" height="16" rx="3" class="box-g"/>
+<path d="M700,410 L1090,410" class="ln-d" marker-end="url(#tail-placement-ak)"/>
+<text x="1112" y="416" class="b" text-anchor="20">?</text>
+<text x="300" y="436" class="t-m" text-anchor="start">no estimate, no bound: tail unknown, ranked last</text>
+<text x="300" y="490" text-anchor="start">quiet host: assigned at once, no drain</text>
+<path d="M300,540 L1100,540" class="ln" marker-end="url(#tail-placement-ak)"/>
+<text x="1112" y="544" class="t-m" text-anchor="start">time</text>
+<rect x="20" y="574" width="24" height="14" rx="3" class="box-g"/>
+<text x="52" y="586" class="t-m" text-anchor="start">lease</text>
+<rect x="112.3076923076923" y="574" width="24" height="14" rx="3" fill="url(#tail-placement-hatch)" stroke="#5A5A57" stroke-width="1"/>
+<text x="144.30769230769232" y="586" class="t-m" text-anchor="start">gap to max-wall bound</text>
+<rect x="308.0" y="574" width="24" height="14" rx="3" class="box-o"/>
+<text x="340.0" y="586" class="t-m" text-anchor="start">reservation</text>
+<rect x="439.0769230769231" y="574" width="24" height="14" rx="3" class="box-n"/>
+<text x="471.0769230769231" y="586" class="t-m" text-anchor="start">backfill</text>
+<rect x="550.7692307692308" y="574" width="24" height="14" rx="3" class="box-rd"/>
+<text x="582.7692307692308" y="586" class="t-m" text-anchor="start">refused</text>
+<text x="662.0" y="586" class="b" text-anchor="middle">?</text>
+<text x="688.0" y="586" class="t-m" text-anchor="start">no estimate</text>
+</svg>

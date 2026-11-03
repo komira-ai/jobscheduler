@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 800" width="1100" height="800" role="img" aria-label="Eight ordered steps by which the lease server recovers after a restart, with what survives on disk and what is lost.">
+<title>Restart recovery</title>
+<defs><marker id="restart-recovery-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="restart-recovery-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="restart-recovery-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-a{fill:#FD4F1D;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-g{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4}
+.box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
+.box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-r{stroke:#C0392B;fill:none;stroke-width:1.5}
+.ln-rd{stroke:#C0392B;fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-r{fill:#C0392B;font-size:12px}
+.t-w{fill:#FFFFFF;font-weight:600}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1100" height="800" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">Lease server restart: eight steps in order</text>
+<rect x="30" y="70" width="520" height="62" rx="5" class="box-o"/>
+<text x="290.0" y="105.0" class="b" text-anchor="middle">1  flock lease file lock</text>
+<path d="M290,132 L290,152" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="152" width="520" height="62" rx="5" class="box-o"/>
+<text x="290.0" y="178.5" class="b" text-anchor="middle">2  read lease file</text>
+<text x="290.0" y="195.5" class="t-m" text-anchor="middle">refuse short, duplicate, bad row</text>
+<path d="M290,214 L290,234" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="234" width="520" height="62" rx="5" class="box-o"/>
+<text x="290.0" y="269.0" class="b" text-anchor="middle">3  term + 1; sequence continues</text>
+<path d="M290,296 L290,316" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="316" width="520" height="62" rx="5" class="box-o"/>
+<text x="290.0" y="334.0" class="b" text-anchor="middle">4  restore ledger</text>
+<text x="290.0" y="351.0" class="t-m" text-anchor="middle">deadlines &gt;= boot + 120 s, claim_by = boot + regain_grace,</text>
+<text x="290.0" y="368.0" class="t-m" text-anchor="middle">wait-list entries without bodies</text>
+<path d="M290,378 L290,398" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="398" width="520" height="62" rx="5" class="box-o"/>
+<text x="290.0" y="424.5" class="b" text-anchor="middle">5  observe each held lease once</text>
+<text x="290.0" y="441.5" class="t-m" text-anchor="middle">present keep, absent drop, unknown keep</text>
+<path d="M290,460 L290,480" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="480" width="520" height="62" rx="5" class="box-o"/>
+<text x="290.0" y="506.5" class="b" text-anchor="middle">6  seat hosts as awaiting</text>
+<text x="290.0" y="523.5" class="t-m" text-anchor="middle">read .agents (bindings, taints)</text>
+<path d="M290,542 L290,562" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="562" width="520" height="62" rx="5" class="box-o"/>
+<text x="290.0" y="597.0" class="b" text-anchor="middle">7  agents: 409 unknown-host -&gt; hello</text>
+<path d="M290,624 L290,644" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="644" width="520" height="62" rx="5" class="box-o"/>
+<text x="290.0" y="679.0" class="b" text-anchor="middle">8  whole-node bookings report ready again</text>
+<rect x="640" y="140" width="420" height="400" rx="5" class="box-b"/>
+<text x="660" y="162" class="b" text-anchor="start">survives restart</text>
+<text x="660" y="187" text-anchor="start">leases</text>
+<text x="660" y="351" text-anchor="start">ledger</text>
+<text x="660" y="515" text-anchor="start">bindings, taints</text>
+<text x="660" y="265" text-anchor="start">scaler records, usage</text>
+<path d="M550,183 L640,183" class="ln-d" marker-end="url(#restart-recovery-ak)"/>
+<text x="595" y="176" class="t-m lbl" text-anchor="middle">restores</text>
+<path d="M550,347 L640,347" class="ln-d" marker-end="url(#restart-recovery-ak)"/>
+<text x="595" y="340" class="t-m lbl" text-anchor="middle">restores</text>
+<path d="M550,511 L640,511" class="ln-d" marker-end="url(#restart-recovery-ak)"/>
+<text x="595" y="504" class="t-m lbl" text-anchor="middle">restores</text>
+<rect x="640" y="570" width="420" height="190" rx="5" class="box-r"/>
+<text x="660" y="592" class="b" text-anchor="start">lost</text>
+<text x="660" y="620" class="t-r" text-anchor="start">runs (agents told Cancel,</text>
+<text x="660" y="640" class="t-r" text-anchor="start">client sees 410 run-forgotten)</text>
+<text x="660" y="660" class="t-r" text-anchor="start">exclusive state</text>
+<text x="660" y="680" class="t-r" text-anchor="start">tail counters</text>
+<text x="660" y="700" class="t-r" text-anchor="start">unacked results on the agent</text>
+<text x="660" y="720" class="t-r" text-anchor="start">wait-list bodies until re-presented</text>
+<path d="M550,593 L640,593" class="ln-rd" marker-end="url(#restart-recovery-ar)"/>
+<text x="595" y="586" class="t-r lbl" text-anchor="middle">not restored</text>
+<path d="M550,675 L640,675" class="ln-rd" marker-end="url(#restart-recovery-ar)"/>
+<text x="595" y="668" class="t-r lbl" text-anchor="middle">not restored</text>
+</svg>

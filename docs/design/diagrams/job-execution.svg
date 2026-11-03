@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1290 860" width="1290" height="860" role="img" aria-label="Swimlanes for client, lease server and agent host: a run request is checked, carried to the agent on a heartbeat reply, started in a locked-down container, its result is acknowledged and the host is cleaned up.">
+<title>Job execution</title>
+<defs><marker id="job-execution-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="job-execution-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="job-execution-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-a{fill:#FD4F1D;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-g{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4}
+.box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
+.box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-r{stroke:#C0392B;fill:none;stroke-width:1.5}
+.ln-rd{stroke:#C0392B;fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-r{fill:#C0392B;font-size:12px}
+.t-w{fill:#FFFFFF;font-weight:600}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1290" height="860" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">A run: from client request to a cleaned-up slot</text>
+<rect x="10" y="48" width="1060" height="90" rx="5" class="box-p"/>
+<text x="20" y="93.0" class="b" text-anchor="start">Client</text>
+<rect x="10" y="138" width="1060" height="100" rx="5" class="box-p"/>
+<text x="20" y="188.0" class="b" text-anchor="start">Lease server</text>
+<rect x="10" y="238" width="1060" height="552" rx="5" class="box-p"/>
+<text x="20" y="268" class="b" text-anchor="start">Agent host</text>
+<rect x="120" y="64" width="330" height="60" rx="5" class="box-b"/>
+<text x="285.0" y="89.5" class="b" text-anchor="middle">mint read grant + one presigned PUT</text>
+<text x="285.0" y="106.5" class="t-m" text-anchor="middle">one key, create-only, size cap, expiry</text>
+<rect x="520" y="64" width="270" height="60" rx="5" class="box-b"/>
+<text x="655.0" y="89.5" class="b" text-anchor="middle">POST /v1/leases/{id}/runs</text>
+<text x="655.0" y="106.5" class="t-m" text-anchor="middle">with spec and files</text>
+<path d="M450,94 L520,94" class="ln" marker-end="url(#job-execution-ak)"/>
+<text x="485" y="86" class="t-m lbl" text-anchor="middle">grant, URL</text>
+<rect x="520" y="158" width="270" height="60" rx="5" class="box-o"/>
+<text x="655.0" y="183.5" class="b" text-anchor="middle">check limits</text>
+<text x="655.0" y="200.5" class="t-m" text-anchor="middle">vs lease shape</text>
+<path d="M655,124 L655,158" class="ln" marker-end="url(#job-execution-ak)"/>
+<text x="663" y="146" class="t-m lbl" text-anchor="start">run request</text>
+<rect x="120" y="158" width="330" height="60" rx="5" class="box-o"/>
+<text x="285.0" y="175.0" class="b" text-anchor="middle">carry Start on next heartbeat reply</text>
+<text x="285.0" y="192.0" class="t-m" text-anchor="middle">repeat until listed;</text>
+<text x="285.0" y="209.0" class="t-m" text-anchor="middle">wall = min(run, lease left)</text>
+<path d="M520,188 L450,188" class="ln" marker-end="url(#job-execution-ak)"/>
+<text x="485" y="180" class="t-m lbl" text-anchor="middle">accepted</text>
+<rect x="830" y="158" width="230" height="60" rx="5" class="box-o"/>
+<text x="945.0" y="183.5" class="b" text-anchor="middle">ResultAck</text>
+<text x="945.0" y="200.5" class="t-m" text-anchor="middle">acknowledges the result</text>
+<path d="M250,218 L250,256" class="ln" marker-end="url(#job-execution-ak)"/>
+<text x="258" y="241" class="t-m lbl" text-anchor="start">Start</text>
+<rect x="120" y="256" width="200" height="64" rx="5" class="box-b"/>
+<text x="220.0" y="283.5" class="b" text-anchor="middle">worker thread</text>
+<text x="220.0" y="300.5" class="t-m" text-anchor="middle">(not the heartbeat loop)</text>
+<rect x="350" y="256" width="210" height="64" rx="5" class="box-b"/>
+<text x="455.0" y="275.0" class="b" text-anchor="middle">validate</text>
+<text x="455.0" y="292.0" class="t-m" text-anchor="middle">digest-pinned image required;</text>
+<text x="455.0" y="309.0" class="t-m" text-anchor="middle">refusal codes</text>
+<rect x="590" y="256" width="210" height="64" rx="5" class="box-b"/>
+<text x="695.0" y="275.0" class="b" text-anchor="middle">pull image</text>
+<text x="695.0" y="292.0" class="t-m" text-anchor="middle">allow-list,</text>
+<text x="695.0" y="309.0" class="t-m" text-anchor="middle">digest verified</text>
+<rect x="830" y="256" width="230" height="64" rx="5" class="box-b"/>
+<text x="945.0" y="275.0" class="b" text-anchor="middle">write files to tmpfs</text>
+<text x="945.0" y="292.0" class="t-m" text-anchor="middle">mount read-only at</text>
+<text x="945.0" y="309.0" class="t-m" text-anchor="middle">run-files path</text>
+<path d="M320,288 L350,288" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M560,288 L590,288" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M800,288 L830,288" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M945,320 L945,346 L370,346 L370,372" class="ln" marker-end="url(#job-execution-ak)"/>
+<text x="660" y="340" class="t-m lbl" text-anchor="middle">start the run</text>
+<rect x="120" y="372" width="500" height="240" rx="5" class="box-t"/>
+<text x="140" y="394" class="b" text-anchor="start">crun container</text>
+<text x="140" y="424" class="t-m" text-anchor="start">non-root job user + subuid range</text>
+<text x="140" y="446" class="t-m" text-anchor="start">caps: none, no-new-privs</text>
+<text x="140" y="468" class="t-m" text-anchor="start">seccomp pinned</text>
+<text x="140" y="490" class="t-m" text-anchor="start">cgroup = booking</text>
+<text x="140" y="512" class="t-m" text-anchor="start">scratch dir + quota</text>
+<text x="140" y="534" class="t-m" text-anchor="start">loopback only</text>
+<text x="140" y="556" class="t-m" text-anchor="start">wall clock from start</text>
+<rect x="470" y="450" width="130" height="50" rx="5" class="box-o"/>
+<text x="535.0" y="479.0" class="b" text-anchor="middle">job</text>
+<path d="M600,475 L1160,475" class="ln-d" marker-end="url(#job-execution-ak)"/>
+<text x="890" y="467" class="t-m lbl" text-anchor="middle">one PUT; second write refused (412)</text>
+<rect x="1160" y="445" width="110" height="60" rx="5" class="box-g"/>
+<text x="1215.0" y="479.0" class="b" text-anchor="middle">Object store</text>
+<path d="M620,575 L660,575" class="ln" marker-end="url(#job-execution-ak)"/>
+<text x="640" y="568" class="t-m lbl" text-anchor="middle">exit</text>
+<rect x="660" y="545" width="190" height="60" rx="5" class="box-b"/>
+<text x="755.0" y="570.5" class="b" text-anchor="middle">Result + log tail</text>
+<text x="755.0" y="587.5" class="t-m" text-anchor="middle">(8 KiB)</text>
+<path d="M850,575 L880,575" class="ln" marker-end="url(#job-execution-ak)"/>
+<rect x="880" y="545" width="180" height="60" rx="5" class="box-b"/>
+<text x="970.0" y="570.5" class="b" text-anchor="middle">heartbeat</text>
+<text x="970.0" y="587.5" class="t-m" text-anchor="middle">carries result</text>
+<path d="M1060,575 L1130,575 L1130,188 L1060,188" class="ln" marker-end="url(#job-execution-ak)"/>
+<text x="1144" y="330" class="t-m lbl" text-anchor="middle" transform="rotate(-90 1144 330)">result</text>
+<path d="M1060,205 L1090,205 L1090,678 L1060,678" class="ln" marker-end="url(#job-execution-ak)"/>
+<text x="1108" y="640" class="t-m lbl" text-anchor="middle" transform="rotate(-90 1108 640)">ack, then clean up</text>
+<text x="370" y="640" class="t-m" text-anchor="start">agent cleanup chain</text>
+<rect x="910" y="650" width="150" height="56" rx="5" class="box-b"/>
+<text x="985.0" y="682.0" class="b" text-anchor="middle">container</text>
+<rect x="730" y="650" width="150" height="56" rx="5" class="box-b"/>
+<text x="805.0" y="682.0" class="b" text-anchor="middle">scratch</text>
+<rect x="550" y="650" width="150" height="56" rx="5" class="box-b"/>
+<text x="625.0" y="682.0" class="b" text-anchor="middle">post-job checks</text>
+<rect x="370" y="650" width="150" height="56" rx="5" class="box-b"/>
+<text x="445.0" y="682.0" class="b" text-anchor="middle">free slot</text>
+<path d="M910,678 L880,678" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M730,678 L700,678" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M550,678 L520,678" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M625,706 L625,736" class="ln-r" marker-end="url(#job-execution-ar)"/>
+<text x="633" y="726" class="t-r lbl" text-anchor="start">fails</text>
+<rect x="420" y="736" width="430" height="44" rx="5" class="box-r"/>
+<text x="635.0" y="754.5" class="t-r" text-anchor="middle">check fails: write taint marker first, then report;</text>
+<text x="635.0" y="769.5" class="t-r" text-anchor="middle">host takes no work</text>
+<rect x="120" y="810" width="700" height="34" rx="5" class="box-rd"/>
+<text x="470.0" y="831.0" class="t-r" text-anchor="middle">Not built: fence field on Start; agent self-fence on silence</text>
+</svg>

@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1140 1192" width="1140" height="1192" role="img" aria-label="Sequence diagram between client, lease server, registry, agent and lease file for four flows: ordinary acquire, whole-node acquire with request_id, renew and release.">
+<title>Lease sequence: acquire, whole-node, renew, release</title>
+<defs><marker id="lease-sequence-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="lease-sequence-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="lease-sequence-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-a{fill:#FD4F1D;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-g{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4}
+.box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
+.box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-r{stroke:#C0392B;fill:none;stroke-width:1.5}
+.ln-rd{stroke:#C0392B;fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-r{fill:#C0392B;font-size:12px}
+.t-w{fill:#FFFFFF;font-weight:600}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1140" height="1192" fill="#FFFFFF"/>
+<path d="M90,76 L90,1168" class="ln-d"/>
+<path d="M340,76 L340,1168" class="ln-d"/>
+<path d="M590,76 L590,1168" class="ln-d"/>
+<path d="M820,76 L820,1168" class="ln-d"/>
+<path d="M1040,76 L1040,1168" class="ln-d"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">Four lease calls between client, lease server, registry, agent and lease file</text>
+<rect x="40.0" y="44" width="100" height="32" rx="5" class="box-b"/>
+<text x="90.0" y="64.0" class="b" text-anchor="middle">Client</text>
+<rect x="255.0" y="44" width="170" height="32" rx="5" class="box-b"/>
+<text x="340.0" y="64.0" class="b" text-anchor="middle">Lease server (table)</text>
+<rect x="535.0" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="590.0" y="64.0" class="b" text-anchor="middle">Registry</text>
+<rect x="770.0" y="44" width="100" height="32" rx="5" class="box-b"/>
+<text x="820.0" y="64.0" class="b" text-anchor="middle">Agent</text>
+<rect x="980.0" y="44" width="120" height="32" rx="5" class="box-b"/>
+<text x="1040.0" y="64.0" class="b" text-anchor="middle">Lease file</text>
+<text x="20" y="104" class="b lbl" text-anchor="start">A  acquire (ordinary)</text>
+<path d="M90,144 L340,144" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="215.0" y="137" class="t-m lbl" text-anchor="middle">1  POST /v1/leases</text>
+<path d="M340,178 L1040,178" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="690.0" y="171" class="t-m lbl" text-anchor="middle">2  save pending (commit before start)</text>
+<path d="M340,212 L590,212" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="465.0" y="205" class="t-m lbl" text-anchor="middle">3  start</text>
+<path d="M590,246 L340,246" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
+<text x="465.0" y="239" class="t-m lbl" text-anchor="middle">4  started(host)</text>
+<path d="M340,280 L1040,280" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="690.0" y="273" class="t-m lbl" text-anchor="middle">5  save held</text>
+<path d="M340,314 L90,314" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
+<text x="215.0" y="307" class="t-m lbl" text-anchor="middle">6  201 {id, host, expires_at_ms}</text>
+<rect x="350" y="324" width="520" height="26" rx="5" class="box-r"/>
+<text x="610.0" y="341.0" class="t-r" text-anchor="middle">step 6: answer lost: retry may double-book (no idempotency without request_id)</text>
+<text x="20" y="380" class="b lbl" text-anchor="start">B  whole-node with request_id</text>
+<path d="M90,420 L340,420" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="215.0" y="413" class="t-m lbl" text-anchor="middle">1  POST /v1/leases {request_id}</text>
+<path d="M340,454 L1040,454" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="690.0" y="447" class="t-m lbl" text-anchor="middle">2  save pending</text>
+<path d="M340,488 L590,488" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="465.0" y="481" class="t-m lbl" text-anchor="middle">3  start(request_id)</text>
+<text x="605" y="492" class="t-m lbl" text-anchor="start">wait list; reserve and drain</text>
+<path d="M340,522 L90,522" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
+<text x="215.0" y="515" class="t-m lbl" text-anchor="middle">4  202 {id, state: pending}</text>
+<path d="M340,574 L590,574" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="465.0" y="567" class="t-m lbl" text-anchor="middle">a  present request again</text>
+<text x="605" y="572" class="t-m lbl" text-anchor="start">mark host, drain until</text>
+<text x="605" y="586" class="t-m lbl" text-anchor="start">quiet, commit</text>
+<path d="M590,618 L820,618" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="705.0" y="611" class="t-m lbl" text-anchor="middle">b  exclusive lease (via heartbeat reply)</text>
+<path d="M820,652 L590,652" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
+<text x="705.0" y="645" class="t-m lbl" text-anchor="middle">c  exclusive_ready</text>
+<path d="M340,686 L1040,686" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="690.0" y="679" class="t-m lbl" text-anchor="middle">d  present seen: save held, start ttl and wall clocks</text>
+<rect x="60" y="536" width="1040" height="164" rx="5" class="box-p"/>
+<text x="72" y="552" class="t-m lbl" text-anchor="start">loop: every tick</text>
+<path d="M340,734 L90,734" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
+<text x="215.0" y="727" class="t-m lbl" text-anchor="middle">e  next poll or renew sees held</text>
+<rect x="30" y="390" width="1100" height="364" rx="5" class="box-p"/>
+<text x="1120" y="406" class="t-m" text-anchor="end">in review</text>
+<text x="20" y="792" class="b lbl" text-anchor="start">C  renew</text>
+<path d="M90,832 L340,832" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="215.0" y="825" class="t-m lbl" text-anchor="middle">1  POST .../renew</text>
+<path d="M340,866 L1040,866" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="690.0" y="859" class="t-m lbl" text-anchor="middle">2  save</text>
+<path d="M340,900 L590,900" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="465.0" y="893" class="t-m lbl" text-anchor="middle">3  host reserved?</text>
+<path d="M340,934 L90,934" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
+<text x="215.0" y="927" class="t-m lbl" text-anchor="middle">4  {expires_at_ms, host_reserved}</text>
+<text x="20" y="966" class="b lbl" text-anchor="start">D  release</text>
+<path d="M90,1006 L340,1006" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="215.0" y="999" class="t-m lbl" text-anchor="middle">1  DELETE</text>
+<path d="M340,1040 L1040,1040" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="690.0" y="1033" class="t-m lbl" text-anchor="middle">2  save releasing</text>
+<path d="M340,1074 L590,1074" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="465.0" y="1067" class="t-m lbl" text-anchor="middle">3  stop (runs, booking)</text>
+<path d="M340,1108 L1040,1108" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="690.0" y="1101" class="t-m lbl" text-anchor="middle">4  save</text>
+<path d="M340,1142 L90,1142" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
+<text x="215.0" y="1135" class="t-m lbl" text-anchor="middle">5  200 freed, or 202 releasing</text>
+</svg>

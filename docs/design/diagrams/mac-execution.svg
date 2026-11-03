@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 1016" width="1120" height="1016" role="img" aria-label="Steps between the root agent, the root js-mac-session helper and the kernel when a job runs on macOS: throwaway user, sandbox profile, network policy, run, kill, delete, journal, with the failure path to quarantine.">
+<title>macOS job execution</title>
+<defs><marker id="mac-execution-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="mac-execution-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="mac-execution-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-a{fill:#FD4F1D;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-g{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4}
+.box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
+.box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-r{stroke:#C0392B;fill:none;stroke-width:1.5}
+.ln-rd{stroke:#C0392B;fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-r{fill:#C0392B;font-size:12px}
+.t-w{fill:#FFFFFF;font-weight:600}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1120" height="1016" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">A job on macOS: a throwaway user under a sandbox, torn down by the helper</text>
+<text x="40" y="60" class="b" text-anchor="start">js-agent (root)</text>
+<text x="400" y="60" class="b" text-anchor="start">js-mac-session helper (root)</text>
+<text x="790" y="60" class="b" text-anchor="start">kernel / launchd</text>
+<rect x="40" y="90" width="300" height="56" rx="5" class="box-b"/>
+<text x="190.0" y="113.5" class="b" text-anchor="middle">1  write lease journal entry</text>
+<text x="190.0" y="130.5" class="t-m" text-anchor="middle">synced</text>
+<rect x="400" y="172" width="300" height="70" rx="5" class="box-o"/>
+<text x="550.0" y="194.0" class="b" text-anchor="middle">2  user-create</text>
+<text x="550.0" y="211.0" class="t-m" text-anchor="middle">throwaway user, uid from range,</text>
+<text x="550.0" y="228.0" class="t-m" text-anchor="middle">name never reused, ledger</text>
+<rect x="40" y="268" width="300" height="56" rx="5" class="box-b"/>
+<text x="190.0" y="291.5" class="b" text-anchor="middle">3  make run dir</text>
+<text x="190.0" y="308.5" class="t-m" text-anchor="middle">exec/ and tmp/, chown to user</text>
+<rect x="400" y="350" width="300" height="56" rx="5" class="box-o"/>
+<text x="550.0" y="373.5" class="b" text-anchor="middle">4  generate sandbox profile</text>
+<text x="550.0" y="390.5" class="t-m" text-anchor="middle">typed policy, private floor last</text>
+<rect x="400" y="432" width="300" height="70" rx="5" class="box-o"/>
+<text x="550.0" y="454.0" class="b" text-anchor="middle">5  network: off / loopback / on</text>
+<text x="550.0" y="471.0" class="t-m" text-anchor="middle">on needs packet-filter anchor for uid</text>
+<text x="550.0" y="488.0" class="t-m" text-anchor="middle">range, checked before job</text>
+<rect x="400" y="528" width="300" height="56" rx="5" class="box-gd"/>
+<text x="550.0" y="551.5" class="b" text-anchor="middle">6  spawn via disclaiming spawner</text>
+<text x="550.0" y="568.5" class="t-m" text-anchor="middle">in review</text>
+<rect x="400" y="610" width="300" height="76" rx="5" class="box-o"/>
+<text x="410" y="636" class="b" text-anchor="start">run under user:</text>
+<text x="410" y="656" class="t-m" text-anchor="start">sandbox-exec, rlimits</text>
+<rect x="600" y="626" width="90" height="44" rx="5" class="box"/>
+<text x="645.0" y="652.0" class="b" text-anchor="middle">job</text>
+<rect x="400" y="712" width="300" height="70" rx="5" class="box-o"/>
+<text x="550.0" y="734.0" class="b" text-anchor="middle">7  kill-uid (&lt;= 10 rounds)</text>
+<text x="550.0" y="751.0" class="t-m" text-anchor="middle">outcome-judged: no process,</text>
+<text x="550.0" y="768.0" class="t-m" text-anchor="middle">no launchd domain</text>
+<rect x="400" y="808" width="300" height="70" rx="5" class="box-o"/>
+<text x="550.0" y="838.5" class="b" text-anchor="middle">8  user-delete</text>
+<text x="550.0" y="855.5" class="t-m" text-anchor="middle">home, per-user temp entry, record</text>
+<rect x="40" y="904" width="300" height="44" rx="5" class="box-b"/>
+<text x="190.0" y="930.0" class="b" text-anchor="middle">9  journal entry done</text>
+<path d="M190,146 L190,159 L550,159 L550,172" class="ln" marker-end="url(#mac-execution-ak)"/>
+<path d="M550,242 L550,255 L190,255 L190,268" class="ln" marker-end="url(#mac-execution-ak)"/>
+<path d="M190,324 L190,337 L550,337 L550,350" class="ln" marker-end="url(#mac-execution-ak)"/>
+<path d="M550,406 L550,419 L550,419 L550,432" class="ln" marker-end="url(#mac-execution-ak)"/>
+<path d="M550,502 L550,515 L550,515 L550,528" class="ln" marker-end="url(#mac-execution-ak)"/>
+<path d="M550,584 L550,597 L550,597 L550,610" class="ln" marker-end="url(#mac-execution-ak)"/>
+<path d="M550,686 L550,699 L550,699 L550,712" class="ln" marker-end="url(#mac-execution-ak)"/>
+<path d="M550,782 L550,795 L550,795 L550,808" class="ln" marker-end="url(#mac-execution-ak)"/>
+<path d="M550,878 L550,891 L190,891 L190,904" class="ln" marker-end="url(#mac-execution-ak)"/>
+<rect x="790" y="70" width="300" height="818" rx="5" class="box-p"/>
+<rect x="810" y="172" width="260" height="70" rx="5" class="box-b"/>
+<text x="940.0" y="202.5" class="b" text-anchor="middle">account database</text>
+<text x="940.0" y="219.5" class="t-m" text-anchor="middle">user record, home</text>
+<path d="M700,207.0 L810,207.0" class="ln" marker-end="url(#mac-execution-ak)"/>
+<text x="755" y="201.0" class="t-m lbl" text-anchor="middle">create record</text>
+<rect x="810" y="432" width="260" height="70" rx="5" class="box-b"/>
+<text x="940.0" y="462.5" class="b" text-anchor="middle">packet filter</text>
+<text x="940.0" y="479.5" class="t-m" text-anchor="middle">anchor for the uid range</text>
+<path d="M700,467.0 L810,467.0" class="ln" marker-end="url(#mac-execution-ak)"/>
+<text x="755" y="461.0" class="t-m lbl" text-anchor="middle">check anchor</text>
+<rect x="810" y="712" width="260" height="70" rx="5" class="box-b"/>
+<text x="940.0" y="742.5" class="b" text-anchor="middle">launchd and processes</text>
+<text x="940.0" y="759.5" class="t-m" text-anchor="middle">per-user domain, uid processes</text>
+<path d="M700,747.0 L810,747.0" class="ln" marker-end="url(#mac-execution-ak)"/>
+<text x="755" y="741.0" class="t-m lbl" text-anchor="middle">kill-uid rounds</text>
+<rect x="810" y="808" width="260" height="70" rx="5" class="box-b"/>
+<text x="940.0" y="838.5" class="b" text-anchor="middle">account database</text>
+<text x="940.0" y="855.5" class="t-m" text-anchor="middle">record removed</text>
+<path d="M700,843.0 L810,843.0" class="ln" marker-end="url(#mac-execution-ak)"/>
+<text x="755" y="837.0" class="t-m lbl" text-anchor="middle">delete record</text>
+<rect x="40" y="712" width="300" height="166" rx="5" class="box-r"/>
+<text x="190.0" y="782.0" class="t-r" text-anchor="middle">fails: uid stays quarantined in ledger,</text>
+<text x="190.0" y="799.0" class="t-r" text-anchor="middle">lease stays in journal,</text>
+<text x="190.0" y="816.0" class="t-r" text-anchor="middle">reclaim at next start</text>
+<path d="M400,747.0 L340,747.0" class="ln-r" marker-end="url(#mac-execution-ar)"/>
+<text x="370" y="741.0" class="t-r lbl" text-anchor="middle">fails</text>
+<path d="M400,843.0 L340,843.0" class="ln-r" marker-end="url(#mac-execution-ar)"/>
+<text x="370" y="837.0" class="t-r lbl" text-anchor="middle">fails</text>
+<rect x="790" y="918" width="300" height="68" rx="5" class="box-gd"/>
+<text x="940.0" y="940.0" class="t-m" text-anchor="middle">not built: stage inputs / collect</text>
+<text x="940.0" y="956.0" class="t-m" text-anchor="middle">outputs, adopt after restart, soft stop,</text>
+<text x="940.0" y="972.0" class="t-m" text-anchor="middle">reused user pool, VM runtime</text>
+</svg>

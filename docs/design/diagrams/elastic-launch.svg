@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 560" width="1060" height="560" role="img" aria-label="Sequence of an elastic launch: the scaler writes its records, mints a one-time join token, the provider launches the machine with the token in its boot payload, the agent says hello with the token, the registry admits it and the welcome carries a host credential.">
+<title>Elastic launch and join sequence</title>
+<defs><marker id="elastic-launch-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="elastic-launch-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="elastic-launch-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-a{fill:#FD4F1D;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-g{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4}
+.box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
+.box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-r{stroke:#C0392B;fill:none;stroke-width:1.5}
+.ln-rd{stroke:#C0392B;fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-r{fill:#C0392B;font-size:12px}
+.t-w{fill:#FFFFFF;font-weight:600}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1060" height="560" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">Elastic launch and join: records first, then token, then machine</text>
+<path d="M90,76 L90,540" class="ln-d"/>
+<rect x="30" y="44" width="120" height="32" rx="5" class="box-b"/><text x="90" y="64" class="b" text-anchor="middle">Scaler</text>
+<path d="M290,76 L290,540" class="ln-d"/>
+<rect x="230" y="44" width="120" height="32" rx="5" class="box-b"/><text x="290" y="64" class="b" text-anchor="middle">Join tokens</text>
+<path d="M500,76 L500,540" class="ln-d"/>
+<rect x="440" y="44" width="120" height="32" rx="5" class="box-b"/><text x="500" y="64" class="b" text-anchor="middle">Provider</text>
+<path d="M720,76 L720,540" class="ln-d"/>
+<rect x="660" y="44" width="120" height="32" rx="5" class="box-b"/><text x="720" y="64" class="b" text-anchor="middle">Host / agent</text>
+<path d="M940,76 L940,540" class="ln-d"/>
+<rect x="880" y="44" width="120" height="32" rx="5" class="box-b"/><text x="940" y="64" class="b" text-anchor="middle">Registry</text>
+<rect x="100" y="106" width="176" height="26" rx="5" class="box-o"/><text x="110" y="124" class="t-m" text-anchor="start">1  write .scaler records</text>
+<path d="M90,182 L290,182" class="ln" marker-end="url(#elastic-launch-ak)"/>
+<text x="190.0" y="174" class="t-m lbl" text-anchor="middle">2  mint one-time token</text>
+<path d="M90,244 L500,244" class="ln-o" marker-end="url(#elastic-launch-ao)"/>
+<text x="295.0" y="236" class="t-m lbl" text-anchor="middle">3  launch, token in payload</text>
+<path d="M500,306 L720,306" class="ln" marker-end="url(#elastic-launch-ak)"/>
+<text x="610.0" y="298" class="t-m lbl" text-anchor="middle">4  boots, agent starts</text>
+<path d="M720,368 L940,368" class="ln" marker-end="url(#elastic-launch-ak)"/>
+<text x="830.0" y="360" class="t-m lbl" text-anchor="middle">5  hello with token</text>
+<path d="M940,430 L720,430" class="ln-o" marker-end="url(#elastic-launch-ao)"/>
+<text x="830.0" y="422" class="t-m lbl" text-anchor="middle">6  welcome + credential</text>
+<path d="M720,492 L940,492" class="ln" marker-end="url(#elastic-launch-ak)"/>
+<text x="830.0" y="484" class="t-m lbl" text-anchor="middle">7  heartbeats</text>
+<rect x="40" y="544" width="980" height="52" rx="5" class="box-r"/>
+<text x="60" y="564" class="t-r" text-anchor="start">Failure: welcome lost after step 6 retires the token. The next hello gets 401, the agent exits, and the scaler releases the host at boot timeout.</text>
+<text x="60" y="582" class="t-r" text-anchor="start">Join token lifetime for a scaler launch is boot timeout plus a margin (20 minutes by default).</text>
+</svg>
