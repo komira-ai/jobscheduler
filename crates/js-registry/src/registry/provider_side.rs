@@ -20,7 +20,9 @@ impl Registry {
     /// to stop. The host takes no new lease until a heartbeat lists none of those runs.
     /// After a whole-node lease it takes none until a second heartbeat has followed the
     /// stop (the first may have crossed it) and the last one shows it serving with
-    /// nothing held (design `whole-node.md` section 8).
+    /// nothing held (design `whole-node.md` section 8). A whole-node request the lease
+    /// presented and that still waits for a host is cancelled at once: it leaves the wait
+    /// list and the host set aside for it returns to serving (`whole-node.md` section 3).
     pub(crate) fn stop(&self, lease: &LeaseId) -> Observed {
         let ended_at = self.shared.clock.now().millis();
         let source = self.shared.lives.get().map(|lives| &**lives);
@@ -31,8 +33,12 @@ impl Registry {
             runs,
             requests,
             tail,
+            waiting,
+            marks,
             ..
         } = &mut *guard;
+        let cancelled = waiting.cancel_lease(lease);
+        cancelled.iter().for_each(|id| marks.drop_request(id));
         runs.stop_lease(lease);
         requests.release(lease);
         if let Observed::Present { host } = book.read(lease) {
@@ -57,6 +63,12 @@ impl Registry {
             });
         }
         book.stop(lease)
+    }
+
+    /// Whether the whole-node request lease `lease` presented last waits for a host
+    /// (see [`js_provider::Provider::waits`]).
+    pub(crate) fn waits(&self, lease: &LeaseId) -> bool {
+        self.lock().waiting.holds_lease(lease)
     }
 
     /// `Present` only while the host holding the lease is live and, for a whole-node

@@ -135,9 +135,28 @@ pub(crate) struct StoredLease {
         deserialize_with = "lenient_shares"
     )]
     pub shares: Option<SharesRow>,
+    /// The request id the lease was acquired under and what that acquire asked for;
+    /// absent for a lease acquired without one and in a file written before the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<StoredRequest>,
     /// Fields of a later version, kept as read.
     #[serde(flatten)]
     pub extra: toml::Table,
+}
+
+/// The request a lease was acquired under, as written: the id, and what the request
+/// asked for beyond the labels and validation run the lease row holds. A field this build
+/// does not know is ignored.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct StoredRequest {
+    pub id: String,
+    pub class: String,
+    pub max_wall_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_host: Option<String>,
+    pub resources: StoredShares,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub capabilities: BTreeMap<String, String>,
 }
 
 /// The resources a lease that shares its host books, as written. A field this build does

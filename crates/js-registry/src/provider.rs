@@ -33,7 +33,12 @@ use crate::registry::Registry;
 ///   takes a second. Without a placer the first host by id is booked and such a class is
 ///   refused `UnsupportedClass`.
 /// - **Stop** frees the booking at once and reads back `Absent`, as it does for a lost
-///   host: the table asked for the end of the lease.
+///   host: the table asked for the end of the lease. A whole-node request the lease
+///   presented and that still waits leaves the wait list, and the host set aside for it is
+///   free again, at once.
+/// - **Waits** says whether the lease's whole-node request is on the wait list: its
+///   start answered `Unknown` because no host is free yet, not because a host was
+///   committed. The table presents such a lease again on every tick.
 /// - **Observe** says `Present` while the host is live and `Unknown` once it is lost
 ///   or only awaiting. It says `Absent` only for a lease with no booking: a host that
 ///   goes silent keeps its booking until the lease is stopped, because silence is not
@@ -153,5 +158,9 @@ impl Provider for RegisteredProvider {
 
     fn capacity(&self) -> Vec<HostCapacity> {
         self.registry.capacity()
+    }
+
+    fn waits(&self, lease: &LeaseId) -> bool {
+        self.registry.waits(lease)
     }
 }

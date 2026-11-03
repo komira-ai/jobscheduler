@@ -160,6 +160,11 @@ impl Provider for LayeredProvider {
         hosts.sort_by(|a, b| a.host.cmp(&b.host));
         hosts
     }
+
+    /// A lease waits when the child that queues its request says so.
+    fn waits(&self, lease: &LeaseId) -> bool {
+        self.children.iter().any(|child| child.waits(lease))
+    }
 }
 
 /// Builds the layered provider: the static pool from its source, and the registered

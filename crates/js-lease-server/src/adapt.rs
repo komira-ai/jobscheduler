@@ -38,6 +38,10 @@ impl Provider for BoxedProvider {
     fn capacity(&self) -> Vec<HostCapacity> {
         self.0.capacity()
     }
+
+    fn waits(&self, lease: &LeaseId) -> bool {
+        self.0.waits(lease)
+    }
 }
 
 /// A clock the server and its caller can both hold: clones read the same source.

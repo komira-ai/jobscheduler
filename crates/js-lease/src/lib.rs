@@ -73,6 +73,15 @@
 //! [lease.shares]            # optional: only a lease of a class that books part of a host
 //! cpu_millis = 4000         # ... what it books there (gpus, gpu_class and disk_bytes
 //! memory_bytes = 8589934592 # are left out when zero); absent means the whole host
+//!
+//! [lease.request]           # optional: only a lease acquired under a request id
+//! id = "nightly-42"         # ... the id, and what that acquire asked for beyond the
+//! class = "whole-node"      # labels and validation run above (probe_host is left out
+//! max_wall_ms = 3600000     # when there is none, capabilities when empty)
+//!
+//! [lease.request.resources] # as lease.shares
+//! cpu_millis = 4000
+//! memory_bytes = 8589934592
 //! ```
 //!
 //! [`read_bookings`] reports `shares` as [`Booking::shares`], so a provider that lets
@@ -113,6 +122,24 @@
 //! is benign, since the host is restored when the lease is stopped. The note that the
 //! deadline has been observed is kept in memory: after a restart the lease is observed
 //! once more.
+//!
+//! # Request ids
+//!
+//! A lease acquired with [`LeaseTable::acquire_with_id`] keeps the consumer's request id,
+//! and what the request asked for, in its `request` row for as long as the lease is in the
+//! file; nothing else remembers an id, so a lease that is gone (released, expired, dropped)
+//! takes its id with it. A repeat of the acquire under the id is answered from that lease,
+//! without calling the provider, and one that asks for another request is refused
+//! [`AcquireError::RequestIdConflict`]. A provider that queues the request
+//! ([`js_provider::Provider::waits`]) leaves the lease pending, and each tick presents it
+//! again under the same lease and request id, which keeps its place and lets the start
+//! that finds it a host book it; the prepare deadline counts from the last presentation
+//! that found it waiting. On open, a pending whole lease with a `request` row is presented
+//! at the first tick, which binds it to whatever the provider restored for the id. A row
+//! that is not a valid request (an id, class, host or resources the types refuse) is an
+//! [`OpenError::Corrupt`]. The row is additive: a file without it loads as before, a build
+//! that predates it keeps it on rewrite and serves the lease as one acquired without an id,
+//! and a file with no lease acquired under an id is written byte for byte as before.
 //!
 //! On open, a lease stored as `held` is observed once: present stays held (on the host
 //! the provider names), absent is dropped, unknown is kept.

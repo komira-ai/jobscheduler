@@ -9,7 +9,9 @@ use axum::response::{IntoResponse, Response};
 use js_agent_wire::limits;
 use js_lease::{AcquireError, LeaseInfo, ReleaseError, RenewError};
 use js_provider::RefusalCode;
-use js_types::{ClassId, HostId, LeaseId, Request, Requirements, RequirementsError, Resources};
+use js_types::{
+    ClassId, HostId, LeaseId, Request, RequestId, Requirements, RequirementsError, Resources,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::error::Category;
@@ -34,10 +36,18 @@ pub(crate) struct AcquireBody {
     /// (or null), the lease is placed as before.
     #[serde(default)]
     probe_host: Option<String>,
+    /// The consumer's id for the request: a repeat of the acquire under it finds the
+    /// lease it made, and a whole-node request waits for a host under it. Left out (or
+    /// null), the acquire is answered as before.
+    #[serde(default)]
+    request_id: Option<String>,
 }
 
 /// The reason of the 400 for a `probe_host` that is not a host id.
 const PROBE_HOST_INVALID: &str = "probe_host is not a valid host id";
+
+/// The reason of the 400 for a `request_id` that is not a request id.
+const REQUEST_ID_INVALID: &str = "request_id is not a valid request id";
 
 /// The resources of an [`AcquireBody`]; a dimension left out is zero.
 #[derive(Debug, Deserialize)]
@@ -59,6 +69,13 @@ struct ResourcesBody {
 }
 
 impl AcquireBody {
+    /// The request id the body names, if any, or the 400 for one that is not a request id
+    /// (1 to 63 bytes of `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`, as [`RequestId`] takes).
+    pub(crate) fn request_id(&self) -> Result<Option<RequestId>, ApiError> {
+        let id = self.request_id.as_deref().map(RequestId::new).transpose();
+        id.map_err(|_| ApiError::bad_request(REQUEST_ID_INVALID))
+    }
+
     /// The request and the ttl asked for, or the 400 for a body that names an id, a
     /// GPU class or a `disk_bytes` the types refuse, or a `disk-gib` or `exec` capability that is not a
     /// requirement (the registry and the scaler read them as the job's disk and mode).
@@ -281,6 +298,11 @@ impl From<AcquireError> for ApiError {
             // issue no lease until the operator restores the state file (js-lease docs).
             AcquireError::IdsExhausted => {
                 Self::coded(StatusCode::SERVICE_UNAVAILABLE, "ids-exhausted")
+            }
+            // The request id names a lease acquired for another request: the client reused
+            // an id, and the lease it names is unchanged.
+            AcquireError::RequestIdConflict(_) => {
+                Self::coded(StatusCode::CONFLICT, "request-id-conflict")
             }
             // A pending start is answered by the caller before this conversion; the arm
             // is shared so that no path invents an answer for it.

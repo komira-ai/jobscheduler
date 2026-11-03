@@ -241,7 +241,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none). A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` only to a server that has it. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools and static host files can book disk: elastic and joined pools have no `disk_bytes` key, so a request for disk there is refused `no-fit` and never waits. An optional `probe_host` (a host id, else 400 naming `probe_host`; left out or `null` is no probe) asks for a probe: the lease is placed on that host alone, past its cordon (`docs/design/placement.md`, 6.7), and only under `--placement js-sched`; 409 `probe-unsupported` when the server cannot place a probe (the default placement, the static pool, a whole-node class, a request or host with no scheduler form), else 409 `probe-host-unknown`, `probe-host-not-serving`, `probe-host-not-cordoned`, `probe-host-draining`, `probe-host-mismatch` or `probe-host-too-small` by the probe rule, at once and for good; a probe its host has no room for is `no-capacity`, never placed elsewhere. Send `probe_host` only to a server that has it, as `disk_bytes` |
+//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none). A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` only to a server that has it. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools and static host files can book disk: elastic and joined pools have no `disk_bytes` key, so a request for disk there is refused `no-fit` and never waits. An optional `probe_host` (a host id, else 400 naming `probe_host`; left out or `null` is no probe) asks for a probe: the lease is placed on that host alone, past its cordon (`docs/design/placement.md`, 6.7), and only under `--placement js-sched`; 409 `probe-unsupported` when the server cannot place a probe (the default placement, the static pool, a whole-node class, a request or host with no scheduler form), else 409 `probe-host-unknown`, `probe-host-not-serving`, `probe-host-not-cordoned`, `probe-host-draining`, `probe-host-mismatch` or `probe-host-too-small` by the probe rule, at once and for good; a probe its host has no room for is `no-capacity`, never placed elsewhere. Send `probe_host` only to a server that has it, as `disk_bytes`. An optional `request_id` (1 to 63 bytes of `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`, else 400 naming `request_id`; left out or `null` is none, and the acquire is answered as without the field) names the request: see "Request ids" below; 409 `request-id-conflict` when the id names a lease acquired for another request. Send `request_id` only to a server that has it, as `disk_bytes` |
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms, host_reserved?}`, where `host_reserved: true` says the host the lease holds is set aside for a waiting whole-node request (the renewal is not refused for it; the field is left out when false); 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
@@ -269,15 +269,57 @@
 //! - `DELETE /v1/leases/{id}`: the lease is marked releasing in memory and the provider
 //!   was not asked to stop it yet. The next tick stops it. Treat the lease as released.
 //!
-//! An acquire is not safe to retry blindly. If the connection drops or times out after
-//! the request was sent and before the answer arrived, the client cannot tell whether
-//! the lease was granted: the server may hold a lease, and a host, that the client has
-//! no id for. A client must not repeat `POST /v1/leases` after a lost answer without
-//! first listing (`GET /v1/leases`) and finding its lease by the labels it sent, or the
-//! retry can take a second host; the first one lapses only when its ttl does. An
-//! idempotency key, so that a repeated acquire returns the lease it made, is a
-//! follow-up and not built here. Renew and release name their lease and are safe to
-//! repeat.
+//! An acquire without a `request_id` is not safe to retry blindly. If the connection
+//! drops or times out after the request was sent and before the answer arrived, the client
+//! cannot tell whether the lease was granted: the server may hold a lease, and a host, that
+//! the client has no id for. A client must not repeat such a `POST /v1/leases` after a lost
+//! answer without first listing (`GET /v1/leases`) and finding its lease by the labels it
+//! sent, or the retry can take a second host; the first one lapses only when its ttl does.
+//! An acquire with a `request_id` is safe to repeat (below). Renew and release name their
+//! lease and are safe to repeat.
+//!
+//! ## Request ids
+//!
+//! A `request_id` is the client's name for one request, chosen by the client and unique
+//! among its requests. The lease the acquire makes keeps it, in the lease file, for as
+//! long as the lease is in the table: pending, held, or releasing until the provider
+//! confirms it gone. While it is, a `POST /v1/leases` with the same `request_id` and the
+//! same request (the class, resources, capabilities, `max_wall_seconds`, labels,
+//! `validation_run` and `probe_host`; `ttl_seconds` is not compared, and the lease keeps
+//! the ttl of its first acquire) makes nothing and answers from that lease: 201 with its
+//! id, host and expiry as they stand when it is held, 202 `{id, state: "pending"}` when it
+//! is pending, and 409 `lease-ended` once it is releasing. The same `request_id` with
+//! another request is 409 `request-id-conflict`, and the lease is unchanged. A restart
+//! keeps the id with the lease. Once the lease is gone (released and freed, expired, or
+//! dropped by the provider) the server remembers nothing of the id, and an acquire under it
+//! makes a new lease; so does a refused acquire, which records nothing. The server is
+//! single-tenant (see "Who may do what"): an id is not scoped to a client, so two clients
+//! that share the token must not share ids.
+//!
+//! The id means the same for every class: a retry finds its lease. Only a `whole-node`
+//! request does more with it. Without an id a whole-node request that finds no quiet host
+//! is refused `no-capacity`, as before, and the client polls. With one it is accepted and
+//! queued (`docs/design/whole-node.md`, sections 2 and 3): the answer is 202 `{id, state:
+//! "pending"}`, the lease is listed `pending`, and the registry's wait list keeps the
+//! request in first-seen order, sets a host aside for it (`GET /v1/hosts` shows `mark:
+//! "reserved"` and `reserved_for` with the request id), drains that host if it is busy,
+//! and commits it once it is quiet; the lease is then held as any whole-node lease is
+//! (above). The server presents the waiting request to the registry again on every tick,
+//! so the client need not repeat the acquire to keep its place (a repeat is harmless). The
+//! registry drops a request not presented for the pool's `regain_grace` (15 s unless the
+//! pool file sets it), so keep `--tick` below it: a request dropped between two ticks is
+//! entered again at the back by the next one, without the host it had. The
+//! lease's `prepare_timeout` counts from the tick that committed a host, not from the
+//! acquire, so a wait for a host is not a prepare; `expires_at_ms` of a waiting lease is a
+//! `prepare_timeout` after the last tick. The wait ends with a refusal as the registry's
+//! rules say, and the lease is then dropped from the list (the client reads it gone): it is
+//! refused `no-capable-host` once no host could ever serve it for `regain_grace`. A prepare
+//! that fails ends the lease as it ends any whole-node lease; an acquire under the same
+//! `request_id` after that is the request's next try, kept off the hosts that failed it,
+//! and is refused `exclusive-not-ready` after `max_replace` failed prepares. A wait list
+//! that holds 1024 requests refuses the next new one `no-capacity`. `DELETE /v1/leases/{id}` of a waiting
+//! lease cancels the request at once: it leaves the wait list and the host set aside for it
+//! returns to serving in the same call (200 `{state: "freed"}`).
 //!
 //! A whole-node request whose tries on hosts all failed is answered `exclusive-not-ready`
 //! once, and the server then forgets the request. A client that lost that 409 and
@@ -519,8 +561,16 @@
 //! of failed prepares and give-ups is kept, so a restart does not reset
 //! `max_reserve_attempts` or `max_replace`. Estimates are not kept. The format is
 //! additive: the rows and their keys are read past by a build that does not know them.
-//! Nothing in this server sends a request id on a lease request yet, so no reservation is
-//! made through the HTTP routes, and the ledger of a running server is empty until one is.
+//! A reservation is made through `POST /v1/leases` with a `request_id` (see "Request ids"
+//! above). The lease file keeps that lease's request with it, so after a `--boot resume`
+//! the first tick presents the pending lease's request again under its id: that is the
+//! presentation that claims the restored record, so the drain continues on the host set
+//! aside with its stored deadline (floored as above, never reset), whether or not the
+//! client repeats the acquire, and a repeat of it answers the same pending lease. The
+//! host keeps the mark only as the registry's pass allows: a pass that finds no capable
+//! host at all (none has said hello yet, and none is put back from the lease file) has a
+//! ceiling of zero hosts whole and drops the restored mark, and the request then waits for
+//! a host as a new one would.
 //!
 //! # Usage
 //!

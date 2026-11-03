@@ -364,8 +364,16 @@ fn json<T: Serialize>(status: StatusCode, body: &T) -> Response {
 }
 
 async fn acquire(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
-    let (request, ttl) = parse::<AcquireBody>(&body)?.into_parts()?;
-    let outcome = shared.lock("wait-acquire").await.acquire(request, ttl);
+    let body = parse::<AcquireBody>(&body)?;
+    let request_id = body.request_id()?;
+    let (request, ttl) = body.into_parts()?;
+    let outcome = {
+        let mut table = shared.lock("wait-acquire").await;
+        match request_id {
+            Some(id) => table.acquire_with_id(id, request, ttl),
+            None => table.acquire(request, ttl),
+        }
+    };
     match outcome {
         Ok(lease) => {
             let granted = Granted {

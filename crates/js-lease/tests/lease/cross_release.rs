@@ -434,3 +434,32 @@ fn the_previous_release_keeps_the_start_of_a_lease_ready_after_its_acquire() {
     fs::write(scratch.file(), previous::write(&document)).unwrap();
     assert_eq!(read_bookings(scratch.file()).unwrap(), bookings);
 }
+
+/// Asserts the `request` row across releases, both ways. This release writes the row for a
+/// lease acquired under a request id; the previous release's reader takes it into the
+/// lease's `extra` (it would refuse nothing) and its writer writes it back; this release
+/// opens that rewrite and still knows the id: a repeat of the acquire answers the same held
+/// lease. A file the previous release wrote has no such row and is read as before
+/// (`this_release_reads_the_previous_release_file`). It catches a row the previous release
+/// would refuse or drop, which would turn a rollback and roll forward into a second lease
+/// on the next repeat.
+#[test]
+fn the_previous_release_keeps_the_request_row_of_a_lease() {
+    let scratch = Scratch::new("cross_release_request");
+    let clock = clock();
+    let mut table = open(fake(), &clock, &scratch);
+    let named = js_types::RequestId::new("r1").unwrap();
+    let lease = table
+        .acquire_with_id(named.clone(), gpu_host_request(3600), None)
+        .unwrap();
+    let written = fs::read_to_string(scratch.file()).unwrap();
+    let provider = table.into_provider();
+
+    let document = previous::read(&written);
+    let kept: Vec<&String> = document.lease[0].extra.keys().collect();
+    assert_eq!(kept, [&"request".to_owned()]);
+    fs::write(scratch.file(), previous::write(&document)).unwrap();
+    let mut table = open(provider, &clock, &scratch);
+    let again = table.acquire_with_id(named, gpu_host_request(3600), None);
+    assert_eq!(again.unwrap(), lease);
+}

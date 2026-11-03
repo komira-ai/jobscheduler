@@ -199,7 +199,10 @@ impl Registry {
         let place = spec
             .request_id()
             .filter(|_| queueing.into_iter().all(|ok| ok));
-        let verdict = place.map(|id| state.waiting.present(id, wanted, capable, now, regain));
+        let verdict = place.map(|id| {
+            let waiting = &mut state.waiting;
+            waiting.present(id, lease, wanted, capable, now, regain)
+        });
         let settings = whole_settings(&self.shared.config);
         let hosts = self.host_facts(state, now);
         self.place_waiting(state, &settings, &hosts, now);

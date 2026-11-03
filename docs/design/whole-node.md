@@ -85,7 +85,10 @@ holds at most one reservation and a host carries at most one. The host is chosen
 A reserved request that finds another available eligible host already quiet takes that host and drops its reservation. Otherwise it keeps
 the host it has and does not switch to a cheaper one later (no thrash). Two requests never share a host; the next request in queue order
 picks the cheapest host that no reservation holds. A request that is cancelled by its consumer, or whose wait ends, drops its reservation
-at once and the host returns to `serving`.
+at once and the host returns to `serving`. *In the lease server a whole-node request has a request id when its `POST /v1/leases` names a `request_id`; the
+request is then the pending lease the acquire made, the server presents it to the registry again on every tick (the poll that keeps its
+place and commits the host set aside for it), and `DELETE /v1/leases/{id}` of that pending lease is the cancel. A request without one is
+not queued: it is refused `no-capacity` while no host is quiet.*
 
 **Reservations survive a restart (D55).** *In the lease server, the registry's marks, the wait list's order and the give-up and failed-prepare counts are persisted as below, in the reservation ledger of the lease file. The js-sched copy of the state machine (`scheduler/whole.rs`) keeps its state in memory only and is not what the lease server runs.* A reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
 atomic write as the leases and under the same single-writer, fsync and lock rules, before the scheduler acts on it (commit before act). A
@@ -93,7 +96,7 @@ atomic write as the leases and under the same single-writer, fsync and lock rule
 give-ups and `max_replace` prepare failures) and its host exclusions with their end times; in the registry's ledger it also holds the request's place on the wait list and the instant it was first presented, and whether the host was quiet when it was set aside (an assigned mark drains nothing). The record outlives the reservation only
 while the request lives (it carries the counters of a request between reservations) and is deleted when the request is granted, refused,
 cancelled or unclaimed. The queue's order is persisted (the place and the first-seen instant) but not what each request asks for (the table holds leases, not requests); a consumer presents the same request id
-again after a restart, as it re-presents any request, and the registry binds it to its record and its place, so the drain in progress continues with its
+again after a restart, as it re-presents any request, and the registry binds it to its record and its place (*in the lease server the consumer is the lease table: the pending lease keeps its request id and its request in the lease file, so the first tick after the boot presents it, and a client's repeat of the acquire answers the same lease*), so the drain in progress continues with its
 original deadline (raised to at least boot plus the boot grace, `RESERVATION_BOOT_GRACE`, two minutes in the lease server; never the stored deadline plus the grace; the lease-side grace is a separate setting, not yet wired) and the counters keep the bounds of sections 4 and 5 across any number of
 restarts. A record not claimed within `regain_grace` of the boot is dropped, and the host returns to `serving`. Why persisted: the drain
 is the expensive step (up to a max wall time of idle host), and a restart that dropped it would restart every drain and let a restart loop

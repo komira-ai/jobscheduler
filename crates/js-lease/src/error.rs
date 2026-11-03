@@ -113,6 +113,11 @@ pub enum AcquireError {
     /// and the table resolves it by observing it; it is not held.
     #[error("lease {0} is pending: the provider did not answer the start")]
     Unconfirmed(LeaseId),
+    /// The request id was given before, to this lease, for another request: a repeat must
+    /// ask for what the first acquire asked (see [`crate::LeaseTable::acquire_with_id`]).
+    /// Nothing was recorded and the provider was not called.
+    #[error("lease {0} was acquired under this request id for another request")]
+    RequestIdConflict(LeaseId),
     /// The lease file could not be written before the provider was called, so it was
     /// not called. The record stays pending in memory, retried by [`crate::LeaseTable::tick`]
     /// and ended by its expiry. A save that fails after the provider answered is not an

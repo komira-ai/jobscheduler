@@ -388,8 +388,8 @@ async fn a_resumed_lease_file_marks_the_host_with_the_deadline_floored() {
     assert_eq!(host["drain_deadline_ms"], floor, "{host}");
 }
 
-/// Asserts what the reservation ledger leaves out. A request that came over HTTP carries
-/// no request id, so the registry keeps its failed prepare under its content, and a
+/// Asserts what the reservation ledger leaves out. A request sent without a request id
+/// is keyed by the registry under its content, so it keeps its failed prepare there, and a
 /// record under content is not written to the lease file: after the silent agent has
 /// failed the prepare, the registry holds the record and the ledger is empty. It catches
 /// a ledger that tries to name a request with no id.
