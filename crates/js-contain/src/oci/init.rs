@@ -7,11 +7,11 @@
 //! at [`super::OciConfig::init_dest`], in the container's own `/dev` (a `tmpfs` made fresh per container, so
 //! the image's root is never written to).
 
-use std::os::unix::fs::PermissionsExt as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 /// The program, empty on a target that runs no containers.
-const BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/js-init"));
+pub(crate) const BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/js-init"));
 
 /// Where the container sees it unless the caller says otherwise
 /// ([`super::OciConfig::init_dest`]).
@@ -41,19 +41,13 @@ fn install_bytes(scratch: &Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
             "this build has no container init: containers run on Linux only",
         ));
     }
-    let dir = scratch.join("oci-bin");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))?;
-    let staged = dir.join(format!(".js-init-{}", std::process::id()));
-    std::fs::write(&staged, bytes)?;
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
-    let target = dir.join("js-init");
-    std::fs::rename(&staged, &target)?;
-    Ok(target)
+    super::install::publish(scratch, "js-init", |file| file.write_all(bytes))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
