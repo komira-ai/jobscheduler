@@ -38,6 +38,9 @@
 //!   files a pull request changes against the entries of `site/ci-paths`.
 //! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
+//! - [`spawn_sites`]: every program `js-agent` and `js-mac-session` start goes through
+//!   `js_mac_session::disclaim`, used by a test rather than a verb: `cargo test -p xtask
+//!   --test spawn_sites`.
 //!
 //! Exit status: 0 when the verb passed, 1 when it failed (one reason on stderr), 2 on a
 //! usage error.
@@ -58,6 +61,7 @@ pub mod pkg;
 pub mod release;
 pub mod site_changed;
 pub mod site_demo;
+pub mod spawn_sites;
 pub mod test_build;
 
 /// Why a verb failed.

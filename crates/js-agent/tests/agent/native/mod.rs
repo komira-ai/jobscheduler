@@ -2,10 +2,14 @@
 //! Seatbelt profile, and the lifecycle that drives it. The helper is a fake that speaks the
 //! helper's real protocol on a socket (`fake_helper`), so everything but what the verbs do
 //! to a machine runs as in the agent. On a Mac, one test module applies the runtime's
-//! `sandbox-exec` command line for real, as the user running the tests (`mac`).
+//! `sandbox-exec` command line for real, as the user running the tests (`mac`), and one
+//! reads back that what the helper starts answers to the privacy controls for itself
+//! (`disclaim`).
 
 mod agent;
 mod bundle;
+#[cfg(target_os = "macos")]
+mod disclaim;
 mod fake_helper;
 mod journal;
 mod lifecycle;

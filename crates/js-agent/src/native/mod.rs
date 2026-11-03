@@ -45,6 +45,25 @@
 //! file and the most processes the user may have on each run, so a run cannot fill the disk
 //! through its output or the process table with a fork bomb.
 //!
+//! # Privacy grants (TCC)
+//!
+//! macOS's privacy controls (TCC: Full Disk Access and the like) let a process do what its
+//! *responsible* process was granted, and a process answers for whoever started it unless
+//! its starter disclaims that when it starts it. Nothing in this repository gives the agent
+//! or the helper a grant, and neither needs one: what they touch is their own state, the
+//! run users' homes and the system's tools (the helper's sweep takes the system's refusal of
+//! Apple's data vaults, which root without Full Disk Access cannot examine, as an entry
+//! that is not there). A grant someone gives them anyway never reaches a job. Every
+//! process of a run is started through `js_mac_session::disclaim`, which disclaims the
+//! responsibility, so the run's processes answer for themselves and hold no grant of the
+//! helper's or the agent's. The same holds for the programs the agent starts itself (its
+//! probes and the `sandbox-exec` self-test) and for the helper's own (`launchctl`,
+//! `getconf`). `cargo test -p xtask --test spawn_sites` fails when either crate starts a
+//! program another way. On a Mac, the tests read the responsible process of a process
+//! that the helper's `run` started (`tests/agent/native/disclaim.rs`). To check a host by
+//! hand, `sudo launchctl procinfo <pid>` of a job's process shows `responsible pid` equal
+//! to the process's own pid.
+//!
 //! What this runtime does not do yet: stage inputs or collect outputs (a start that names
 //! either is refused `native-unsupported`), adopt a run after the agent restarts (the
 //! journal ends it), stop a run softly (the helper only kills), or grant the user's
@@ -68,7 +87,6 @@ use std::io;
 use std::os::fd::AsFd as _;
 use std::os::unix::fs::{PermissionsExt as _, chown};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
@@ -79,6 +97,7 @@ use js_mac_pool::seatbelt::{
     AbsPath, Caps, Narrowing, Net, Policy, Profile, ReadModel, SlotLayout,
 };
 use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
+use js_mac_session::disclaim::Program;
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
 use js_mac_session::lease::{Dotted, user_name};
 use js_mac_session::proto::{Limits, Session};
@@ -712,8 +731,7 @@ pub fn self_test(config: &NativeConfig, sandbox_exec: &Path) -> Result<(), Strin
     };
     let argv = profile_argv(config, &probe, &config.homes).map_err(|why| why.0)?;
     let name = sandbox_exec.display();
-    let out = Command::new(sandbox_exec)
-        .args(&argv[1..])
+    let out = Program::new(sandbox_exec, &argv[1..])
         .env_clear()
         .output()
         .map_err(|why| format!("{name}: {why}"))?;

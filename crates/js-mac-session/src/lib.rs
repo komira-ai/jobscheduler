@@ -14,6 +14,9 @@
 //! - [`sweep`]: what `user-delete` removes, never following a link.
 //! - [`scan`]: the leak scan's items, its baseline and the baseline window.
 //! - [`spawn`]: starting a process as the lease user.
+//! - [`disclaim`]: the one way this crate and `js-agent` start a program; on macOS with
+//!   its privacy (TCC) responsibility disclaimed, so it never holds the helper's or the
+//!   agent's grants.
 //! - [`proto`], [`server`], [`client`]: the socket, its wire format, the caller check.
 //! - [`start`]: flags and start-up.
 //! - [`node_admin`]: the `node-admin` mode, the verbs a node's administrator runs
@@ -36,6 +39,7 @@
 
 pub mod autologin;
 pub mod client;
+pub mod disclaim;
 pub mod grant;
 pub mod helper;
 pub mod lease;

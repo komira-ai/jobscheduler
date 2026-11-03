@@ -65,6 +65,25 @@ Each is named only in the environment of the step that needs it. The key is impo
 runner that exists for this job alone. The version typed for a manual run is checked as
 MAJOR.MINOR.PATCH before it is used in a file name.
 
+## Privacy grants (TCC)
+
+The agent and the helper need no privacy grant (Full Disk Access, or any other the
+Privacy & Security settings list), and nothing in this package or this repository gives
+one. A grant given to either by hand, or by a profile, never reaches a job. macOS lets a
+process use the grants of its *responsible* process, which is whoever started it, unless
+the starter disclaims that responsibility as it starts it. Every process the helper
+starts for a job (the job's program, and `launchctl` with the helper's `as-user` mode for
+a GUI session), and every program the agent starts itself, is started with that
+responsibility disclaimed (`crates/js-mac-session/src/disclaim.rs`). A job's process
+therefore answers for itself, and has only what its own code signature was granted, which
+is nothing.
+
+The hosted CI runner has no grant to give, so CI checks the disclaim and not a refused
+read: on the macOS runner the agent's tests read back the responsible process of a
+process the helper's `run` started, and see that it is the process itself. To check a
+host by hand, run `sudo launchctl procinfo <pid>` for a job's process: its `responsible
+pid` is its own pid.
+
 ## Not done yet
 
 - The package is a workflow artifact for seven days, not a release asset: `release.yml` lists

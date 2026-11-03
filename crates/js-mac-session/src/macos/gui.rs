@@ -7,13 +7,14 @@
 //! must be run as root; the program it runs is still root's. So the helper runs its own
 //! binary there in the `as-user` mode ([`as_user`]), which drops to the lease user's
 //! uid and gid, with no supplementary groups, and only then executes the action's
-//! argument vector. The working directory, the environment and the descriptors
-//! `crate::spawn` set up pass through both executions unchanged.
+//! argument vector, with its responsibility disclaimed (`crate::disclaim::exec`), so it
+//! answers to the privacy controls (TCC) for itself. The working directory, the
+//! environment and the descriptors `crate::spawn` set up pass through both executions
+//! unchanged.
 
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::os::unix::process::CommandExt as _;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
 /// The program that switches bootstrap namespaces.
 pub const LAUNCHCTL: &str = "/bin/launchctl";
@@ -21,26 +22,31 @@ pub const LAUNCHCTL: &str = "/bin/launchctl";
 /// The first argument of the helper's `as-user` mode.
 pub const AS_USER: &str = "as-user";
 
-/// The command that starts `program` with `args` as `uid`:`gid` in `gui/<uid>`:
-/// `launchctl asuser <uid> <this binary> as-user <uid> <gid> -- <program> <args>`,
-/// to be run as root.
+/// The program and arguments that start `program` with `args` as `uid`:`gid` in
+/// `gui/<uid>`: `launchctl asuser <uid> <this binary> as-user <uid> <gid> -- <program>
+/// <args>`, to be run as root.
 ///
 /// # Errors
 /// This binary's path cannot be found.
-pub fn command(uid: u32, gid: u32, program: &str, args: &[String]) -> io::Result<Command> {
+pub fn argv(
+    uid: u32,
+    gid: u32,
+    program: &str,
+    args: &[String],
+) -> io::Result<(&'static str, Vec<OsString>)> {
     let helper = std::env::current_exe()?;
-    let mut command = Command::new(LAUNCHCTL);
-    command
-        .arg("asuser")
-        .arg(uid.to_string())
-        .arg(helper)
-        .arg(AS_USER)
-        .arg(uid.to_string())
-        .arg(gid.to_string())
-        .arg("--")
-        .arg(program)
-        .args(args);
-    Ok(command)
+    let mut argv: Vec<OsString> = vec![
+        "asuser".into(),
+        uid.to_string().into(),
+        helper.into(),
+        AS_USER.into(),
+        uid.to_string().into(),
+        gid.to_string().into(),
+        "--".into(),
+        program.into(),
+    ];
+    argv.extend(args.iter().map(OsString::from));
+    Ok((LAUNCHCTL, argv))
 }
 
 /// The `as-user` mode, given the arguments after `as-user`: `<uid> <gid> -- <program>
@@ -80,7 +86,7 @@ fn drop_and_exec(args: &[OsString]) -> Result<std::convert::Infallible, (u8, Str
     };
     let (uid, gid) = (id(uid)?, id(gid)?);
     drop_to(uid, gid).map_err(refused)?;
-    let error = Command::new(program).args(rest).exec();
+    let error = crate::disclaim::exec(program, rest);
     Err((
         127,
         format!("executing {}: {error}", program.to_string_lossy()),
@@ -163,11 +169,11 @@ mod tests {
     /// uid, or that passes the ids or the argument vector out of order.
     #[test]
     fn the_command_runs_this_binary_as_user_under_launchctl_asuser() {
-        let command = command(650, 20, "/usr/bin/id", &["-u".to_owned(), "-r".to_owned()])
-            .expect("the command");
-        assert_eq!(command.get_program(), LAUNCHCTL);
-        let got: Vec<String> = command
-            .get_args()
+        let (program, args) =
+            argv(650, 20, "/usr/bin/id", &["-u".to_owned(), "-r".to_owned()]).expect("the command");
+        assert_eq!(program, LAUNCHCTL);
+        let got: Vec<String> = args
+            .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         let me = std::env::current_exe().unwrap();

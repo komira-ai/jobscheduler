@@ -25,14 +25,19 @@
 //! once, and macOS cannot receive a descriptor already close-on-exec, so a lease
 //! directory just received for one lease could otherwise leak into another lease's
 //! process started at that moment.
+//!
+//! Both are started through [`crate::disclaim::Program`]: on macOS the process the
+//! child executes (the action's program, or `launchctl`, whose `as-user` mode executes
+//! the program with [`crate::disclaim::exec`]) answers to the privacy controls (TCC) for
+//! itself, never for the helper, so no grant the helper holds reaches an action.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::fd::{AsRawFd as _, OwnedFd};
-use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 
+use crate::disclaim::Program;
 use crate::limits::Limits;
 use crate::proto::Session;
 
@@ -121,13 +126,16 @@ pub fn spawn(spawn: Spawn) -> io::Result<Child> {
         .argv
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argument vector"))?;
+    // `cwd` stays open in the parent until `spawn` returns, so the child's copy is the
+    // lease directory.
+    let steps = child_steps(spawn.cwd.as_raw_fd(), spawn.limits);
     let mut command = match spawn.session {
         Session::Background => {
-            let mut command = Command::new(program);
-            command.args(args).uid(spawn.uid).gid(spawn.gid);
+            let mut command = start(OsStr::new(program), args, steps);
+            command.uid(spawn.uid).gid(spawn.gid);
             command
         }
-        Session::Gui => gui(spawn.uid, spawn.gid, program, args)?,
+        Session::Gui => gui(spawn.uid, spawn.gid, program, args, steps)?,
     };
     command
         .env_clear()
@@ -145,28 +153,46 @@ pub fn spawn(spawn: Spawn) -> io::Result<Child> {
         .stdin(Stdio::from(spawn.stdin))
         .stdout(Stdio::from(spawn.stdout))
         .stderr(Stdio::from(spawn.stderr));
-    let cwd = spawn.cwd.as_raw_fd();
-    // SAFETY: the closure runs in the child between fork and exec; `run_steps` calls
-    // only async-signal-safe functions and allocates nothing. `cwd` stays open in the
-    // parent until `spawn` returns, so the child's copy is the lease directory.
-    unsafe {
-        command.pre_exec(child_steps(cwd, spawn.limits));
-    }
     let child = command.spawn();
     drop(spawn.cwd);
     child
 }
 
-/// The command that starts `program` in the GUI session of `uid` (see the module
-/// documentation).
+/// The [`Program`] that runs `program` with `args` after the child's `steps`, its
+/// responsibility disclaimed (`crate::disclaim`).
+fn start(
+    program: &OsStr,
+    args: &[impl AsRef<OsStr>],
+    steps: impl FnMut() -> io::Result<()> + Send + Sync + 'static,
+) -> Program {
+    // SAFETY: the steps run in the child between fork and exec; they are
+    // [`child_steps`]', which call only async-signal-safe functions and allocate nothing.
+    unsafe { Program::with_steps(program, args, steps) }
+}
+
+/// The [`Program`] that starts `program` in the GUI session of `uid` (see the module
+/// documentation), after the child's `steps`.
 #[cfg(target_os = "macos")]
-fn gui(uid: u32, gid: u32, program: &str, args: &[String]) -> io::Result<Command> {
-    crate::macos::gui::command(uid, gid, program, args)
+fn gui(
+    uid: u32,
+    gid: u32,
+    program: &str,
+    args: &[String],
+    steps: impl FnMut() -> io::Result<()> + Send + Sync + 'static,
+) -> io::Result<Program> {
+    let (launcher, args) = crate::macos::gui::argv(uid, gid, program, args)?;
+    Ok(start(OsStr::new(launcher), &args, steps))
 }
 
 /// There is no GUI session to start a process in off macOS.
 #[cfg(not(target_os = "macos"))]
-fn gui(_: u32, _: u32, _: &str, _: &[String]) -> io::Result<Command> {
+fn gui(
+    _: u32,
+    _: u32,
+    _: &str,
+    _: &[String],
+    _: impl FnMut() -> io::Result<()> + Send + Sync + 'static,
+) -> io::Result<Program> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "a GUI session exists only on macOS",
@@ -224,8 +250,8 @@ impl ChildOs for Os {
     }
 }
 
-/// The closure `pre_exec` runs in the child: [`run_steps`] on the operating system, with
-/// the lease directory and the limits.
+/// The steps the child runs before the program executes ([`Program::with_steps`]):
+/// [`run_steps`] on the operating system, with the lease directory and the limits.
 fn child_steps(
     cwd: libc::c_int,
     limits: Option<Limits>,
