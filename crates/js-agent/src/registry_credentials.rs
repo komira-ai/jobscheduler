@@ -14,9 +14,10 @@
 //! # The file
 //!
 //! One line, `USER:PASSWORD`: the user is everything before the first colon, the
-//! password (a registry token, typically) everything after it, and a trailing line
-//! break is dropped. The user may not be empty; the password may not be empty and
-//! neither may hold a control character, so a second line is refused.
+//! password (a registry token, typically) everything after it, and one line ending
+//! (`\n` or `\r\n`) is dropped. The user may not be empty; the password may not be
+//! empty and neither may hold a control character, so a second line, a blank line or a
+//! stray carriage return after the first is refused.
 //!
 //! The file must be a regular file (not a link: it is opened with `O_NOFOLLOW`) owned by
 //! root, with no permission bit for group or others (`0600` or `0400`), at most
@@ -149,6 +150,16 @@ impl RegistryCredentials {
         }
     }
 
+    /// The `--image-allow` entries of `cli`, each checked and given its credentials: the
+    /// allow-list of the crun runtime's image client.
+    ///
+    /// # Errors
+    ///
+    /// An entry that is not `HOST[:PORT]/PREFIX`, naming `--image-allow`.
+    pub fn image_allow(&self, cli: &Cli) -> Result<Vec<Allow>, String> {
+        crate::lifecycle::image_allow(&cli.image_allow).map(|allow| self.attach_all(allow))
+    }
+
     /// Every entry of `entries` with its credentials, in order ([`Self::attach`]).
     #[must_use]
     pub fn attach_all(&self, entries: Vec<Allow>) -> Vec<Allow> {
@@ -171,7 +182,12 @@ fn read(path: &Path, owner: u32) -> Result<Credentials, RegistryCredentialsError
     };
     let text = trusted_file::read(path, owner, SECRET, CREDENTIALS_MAX)
         .map_err(|why| file(why.to_string()))?;
-    let line = text.trim_end_matches(['\r', '\n']);
+    // One line ending is dropped, `\n` or `\r\n`; anything left (a blank line, a stray
+    // carriage return) stays in the password, which refuses control characters.
+    let line = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(&text);
     let (user, password) = line
         .split_once(':')
         .ok_or_else(|| content("does not hold USER:PASSWORD".to_owned()))?;
@@ -310,12 +326,29 @@ mod tests {
         }
     }
 
-    /// Proves a file is refused at start, one case each, when group or others may read
-    /// it, when it is a link (to a good file), when it is larger than the cap, when it is
-    /// not root's (here: not the expected owner's), and when it holds no `USER:PASSWORD`;
-    /// and that no message holds a byte of the file. Catches a secret any local user
-    /// could read, a link that swaps the file, an unbounded read, and the content echoed
-    /// in an error.
+    /// The error of a file at `path` that breaks a rule, `why` saying which.
+    fn file_error(path: &Path, why: &str) -> RegistryCredentialsError {
+        RegistryCredentialsError::File {
+            path: path.to_owned(),
+            why: why.to_owned(),
+        }
+    }
+
+    /// The error of a file at `path` whose content breaks a rule.
+    fn content_error(path: &Path, why: &str) -> RegistryCredentialsError {
+        RegistryCredentialsError::Content {
+            path: path.to_owned(),
+            why: why.to_owned(),
+        }
+    }
+
+    /// Proves a file is refused at start, one case each, by the exact error: a mode that
+    /// lets group or others read it, a link (to a good file), one byte over the cap, not
+    /// root's (here: not the expected owner's), missing, an empty path, no `USER:PASSWORD`,
+    /// an empty user, a second line, a blank line and a stray carriage return after the
+    /// first. No error holds a byte of the file. Catches a secret any local user could
+    /// read, a link that swaps the file, an unbounded read, extra lines taken as one, and
+    /// the content echoed in an error.
     #[test]
     fn loose_mode_or_symlinked_or_oversize_credentials_file_is_refused_at_start() {
         let dir = private_dir("registry-credentials-files");
@@ -326,72 +359,153 @@ mod tests {
         let mut big = b"puller:".to_vec();
         big.resize(usize::try_from(CREDENTIALS_MAX).expect("cap") + 1, b'x');
         let oversize = secret(&dir, "oversize", &big, 0o600);
+        let missing = dir.path().join("missing");
         let no_colon = secret(&dir, "no-colon", b"s3cret-pw\n", 0o600);
         let empty_user = secret(&dir, "empty-user", b":s3cret-pw", 0o600);
         let two_lines = secret(&dir, "two-lines", b"puller:s3cret-pw\nmore\n", 0o600);
-        let display = |path: &Path| path.display().to_string();
+        let blank_line = secret(&dir, "blank-line", b"puller:s3cret-pw\n\n", 0o600);
+        let stray_cr = secret(&dir, "stray-cr", b"puller:s3cret-pw\r\r\n", 0o600);
         let owner_rule =
             "not owned by the expected user, or readable or writable by group or others";
+        let not_found = std::io::Error::from_raw_os_error(libc::ENOENT).to_string();
+        let user_rule = "registry credentials: the user name is empty or holds a colon or a \
+                         control character";
+        let password_rule =
+            "registry credentials: the password is empty or holds a control character";
+        let empty = PathBuf::new();
         let cases = [
-            (&loose, me(), format!("{}: {owner_rule}", display(&loose))),
+            (&loose, me(), file_error(&loose, owner_rule)),
             (
                 &link,
                 me(),
-                format!(
-                    "{}: {}",
-                    display(&link),
-                    std::io::Error::from_raw_os_error(libc::ELOOP)
+                file_error(
+                    &link,
+                    &std::io::Error::from_raw_os_error(libc::ELOOP).to_string(),
                 ),
             ),
             (
                 &oversize,
                 me(),
-                format!("{}: larger than the size cap", display(&oversize)),
+                file_error(&oversize, "larger than the size cap"),
             ),
-            (
-                &good,
-                me().wrapping_add(1),
-                format!("{}: {owner_rule}", display(&good)),
-            ),
+            (&good, me().wrapping_add(1), file_error(&good, owner_rule)),
+            (&missing, me(), file_error(&missing, &not_found)),
+            (&empty, me(), file_error(&empty, &not_found)),
             (
                 &no_colon,
                 me(),
-                format!("{}: does not hold USER:PASSWORD", display(&no_colon)),
+                content_error(&no_colon, "does not hold USER:PASSWORD"),
             ),
-            (
-                &empty_user,
-                me(),
-                format!(
-                    "{}: registry credentials: the user name is empty or holds a colon or \
-                     a control character",
-                    display(&empty_user)
-                ),
-            ),
-            (
-                &two_lines,
-                me(),
-                format!(
-                    "{}: registry credentials: the password is empty or holds a control \
-                     character",
-                    display(&two_lines)
-                ),
-            ),
+            (&empty_user, me(), content_error(&empty_user, user_rule)),
+            (&two_lines, me(), content_error(&two_lines, password_rule)),
+            (&blank_line, me(), content_error(&blank_line, password_rule)),
+            (&stray_cr, me(), content_error(&stray_cr, password_rule)),
         ];
         for (path, owner, want) in cases {
             let flags = [flag("registry.example/team", path)];
             let err = RegistryCredentials::from_cli(&cli(&flags), owner).expect_err("refused");
-            assert_eq!(
-                err.to_string(),
-                format!("--registry-credentials: {want}"),
-                "{path:?}"
-            );
-            assert!(!format!("{err:?}").contains("s3cret"), "{err:?}");
+            assert_eq!(err, want, "{path:?}");
         }
+        assert_eq!(
+            file_error(&loose, owner_rule).to_string(),
+            format!("--registry-credentials: {}: {owner_rule}", loose.display())
+        );
+        assert_eq!(
+            content_error(&no_colon, "does not hold USER:PASSWORD").to_string(),
+            format!(
+                "--registry-credentials: {}: does not hold USER:PASSWORD",
+                no_colon.display()
+            )
+        );
+    }
+
+    /// Proves the files that keep every rule are read: exactly at the cap, mode `0400`,
+    /// one `\n` or `\r\n` or no line ending, and a path holding a space and `=` (the flag
+    /// is split at its first `=` only). Catches a cap that is off by one, a line ending
+    /// kept in the password, and a path cut at a later `=`.
+    #[test]
+    fn a_file_that_keeps_every_rule_is_read_at_its_boundaries() {
+        let dir = private_dir("registry-credentials-bounds");
+        let mut full = b"puller:".to_vec();
+        let cap = usize::try_from(CREDENTIALS_MAX).expect("cap");
+        full.resize(cap, b'x');
+        let at_cap = secret(&dir, "at-cap", &full, 0o400);
+        let password = "x".repeat(cap - "puller:".len());
+        for (name, text, want) in [
+            ("lf", &b"puller:pw\n"[..], "pw"),
+            ("crlf", &b"puller:pw\r\n"[..], "pw"),
+            ("bare", &b"puller:pw"[..], "pw"),
+            ("odd name=with = signs", &b"puller:pw"[..], "pw"),
+        ] {
+            let path = secret(&dir, name, text, 0o600);
+            let table =
+                RegistryCredentials::from_cli(&cli(&[flag("registry.example/team", &path)]), me())
+                    .expect(name);
+            assert_eq!(
+                table.attach(entry("registry.example/team")),
+                entry("registry.example/team").with_credentials(credentials("puller", want)),
+                "{name}"
+            );
+        }
+        let table =
+            RegistryCredentials::from_cli(&cli(&[flag("registry.example/team", &at_cap)]), me())
+                .expect("at the cap");
+        assert_eq!(
+            table.attach(entry("registry.example/team")),
+            entry("registry.example/team").with_credentials(credentials("puller", &password))
+        );
+    }
+
+    /// Proves the credentials are read once: after the table is made, the file can be
+    /// replaced or removed and the table still gives the credentials it read, so a later
+    /// pull uses those. Catches a table that reads its file again at each use.
+    #[test]
+    fn the_credentials_are_read_once_at_start() {
+        let dir = private_dir("registry-credentials-once");
+        let path = secret(&dir, "image", b"puller:first", 0o600);
+        let cli = cli(&[flag("registry.example/team", &path)]);
+        let table = RegistryCredentials::from_cli(&cli, me()).expect("credentials");
+        let want = entry("registry.example/team").with_credentials(credentials("puller", "first"));
+        fs::write(&path, "puller:second").expect("replace");
+        assert_eq!(table.attach(entry("registry.example/team")), want);
+        fs::remove_file(&path).expect("remove");
+        assert_eq!(table.attach(entry("registry.example/team")), want);
+        assert_eq!(
+            table.image_allow(&cli).expect("image allow"),
+            [want],
+            "the crun runtime's allow-list"
+        );
+    }
+
+    /// Proves the crun runtime's allow-list is the `--image-allow` entries in order, each
+    /// with its own file's credentials and the others without, and that a wrong entry
+    /// names `--image-allow`. Catches credentials dropped on the way to the image client.
+    #[test]
+    fn the_image_allow_list_carries_the_credentials() {
+        let dir = private_dir("registry-credentials-images");
+        let path = secret(&dir, "image", b"puller:pw", 0o600);
+        let cli = cli(&[
+            "--image-allow=registry.example/other".to_owned(),
+            flag("registry.example/team", &path),
+        ]);
+        let table = RegistryCredentials::from_cli(&cli, me()).expect("credentials");
+        assert_eq!(
+            table.image_allow(&cli).expect("image allow"),
+            [
+                entry("registry.example/team").with_credentials(credentials("puller", "pw")),
+                entry("registry.example/other"),
+            ]
+        );
+        let bare = self::cli(&["--image-allow=registry.example".to_owned()]);
+        assert_eq!(
+            table.image_allow(&bare).expect_err("a bare host"),
+            "--image-allow: \"registry.example\" is not a well formed registry reference"
+        );
     }
 
     /// Proves the table prints no secret: its `Debug` shows the entries and a redacted
-    /// marker for each file's credentials. Catches a derived `Debug` that prints the
-    /// header js-oci sends.
+    /// marker for each file's credentials, and the flags' `Debug` holds only the path.
+    /// Catches a derived `Debug` that prints the header js-oci sends.
     #[test]
     fn credentials_do_not_appear_in_debug_or_errors() {
         let dir = private_dir("registry-credentials-debug");

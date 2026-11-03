@@ -110,9 +110,10 @@ pub struct Behaviour {
     /// The token endpoint answers 401 unless the request's `Authorization` is exactly
     /// this (`Basic <base64>`): a realm that issues tokens to known users only.
     pub token_basic: Option<String>,
-    /// The token endpoint redirects to this path on the same host, where the token is
-    /// issued (under the same `token_basic` rule).
-    pub redirect_token: Option<String>,
+    /// Redirects, in order: a request whose path begins with the first of a pair is
+    /// answered 307 to the second. `/issued` serves tokens as `/token` does (under the
+    /// same `token_basic` rule), so a token realm can be sent there.
+    pub redirects: Vec<(String, String)>,
     /// The realm the challenge names; the registry's own `/token` if `None`.
     pub realm: Option<String>,
     /// A challenge with this scheme instead of Bearer.
@@ -470,7 +471,11 @@ fn answer(s: &State, request: &Request) -> Answer {
     if b.redirect_without_location {
         return Answer::Bytes(response(307, &[], b""));
     }
-    if let (Some(to), true) = (&b.redirect_token, path.starts_with("/token")) {
+    if let Some((_, to)) = b
+        .redirects
+        .iter()
+        .find(|(from, _)| path.starts_with(from.as_str()))
+    {
         return Answer::Bytes(response(307, &[("Location", to.clone())], b""));
     }
     if path.starts_with("/token") || path.starts_with("/issued") {

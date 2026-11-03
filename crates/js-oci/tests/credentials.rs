@@ -178,30 +178,266 @@ async fn credentials_not_sent_to_manifest_or_blob_requests() {
     );
 }
 
-/// Proves a redirect from the token realm drops the credentials, even to a path of the
-/// same host: the target, which also wants basic auth, is asked without them and the
-/// pull fails. Catches the `Authorization` of the token request kept across a redirect.
+/// The requests `fx` saw after the first `before`.
+fn since(fx: &Fixture, before: usize) -> Vec<String> {
+    fx.requests().split_off(before)
+}
+
+/// Proves a redirect from the token realm drops the credentials wherever it goes and
+/// never gets them back: to a path of the same host, to another host, and through
+/// another host back to the registry's own; and that a redirect to plain http is refused
+/// before it is followed. Each target also wants basic auth, so it refuses. Catches the
+/// `Authorization` of the token request kept across a redirect, restored when a chain
+/// returns to the registry, or sent in clear.
 #[tokio::test]
 async fn credentials_not_sent_after_a_redirect() {
     let artifact = bundle();
     let fx = private_registry(&artifact).await;
-    fx.behave(|b| b.redirect_token = Some("/issued".to_owned()));
-    let client = fx.client_with(vec![entry(&fx, "team").with_credentials(credentials())]);
+    let other = Allow::parse(&format!("{}/elsewhere", fx.at(OTHER)))
+        .expect("entry")
+        .private()
+        .loopback();
+    let client = fx.client_with(vec![
+        entry(&fx, "team").with_credentials(credentials()),
+        other,
+    ]);
+    let (host, there, digest) = (fx.at(REGISTRY), fx.at(OTHER), &artifact.digest);
+    let first = vec![
+        format!("{host} GET /v2/{REPO}/manifests/{digest} []"),
+        format!("{host} GET /token?{TOKEN_QUERY} [{BASIC}]"),
+    ];
+    let refused = format!("https://{host}/token: the registry answered 401");
+    let hop = |from: &str, to: String| (from.to_owned(), to);
+    let cases = [
+        (
+            "the same host",
+            vec![hop("/token", "/issued".to_owned())],
+            vec![format!("{host} GET /issued []")],
+            refused.clone(),
+        ),
+        (
+            "another host",
+            vec![hop("/token", format!("https://{there}/issued"))],
+            vec![format!("{there} GET /issued []")],
+            refused.clone(),
+        ),
+        (
+            "back to the registry",
+            vec![
+                hop("/token", format!("https://{there}/hop")),
+                hop("/hop", format!("https://{host}/issued")),
+            ],
+            vec![
+                format!("{there} GET /hop []"),
+                format!("{host} GET /issued []"),
+            ],
+            refused.clone(),
+        ),
+        (
+            "plain http",
+            vec![hop("/token", format!("http://{host}/issued"))],
+            vec![],
+            format!("http://{host}/issued is not https"),
+        ),
+    ];
+    for (case, redirects, after, want) in cases {
+        fx.behave(|b| b.redirects = redirects);
+        let before = fx.requests().len();
+        let err = manifest(&client, fx.location(REPO), &artifact)
+            .await
+            .expect_err(case);
+        assert_eq!(err.to_string(), want, "{case}");
+        let mut log = first.clone();
+        log.extend(after);
+        assert_eq!(since(&fx, before), log, "{case}");
+    }
+}
+
+/// Proves the credentials follow the registry's own realm and nothing that only looks
+/// like it: a realm that spells the registry's host in capitals is the registry's (the
+/// authority is compared as the connection sees it) and gets them; the same host on
+/// another port, though the policy lists it, is asked anonymously; a realm the policy
+/// refuses (plain http, an unlisted host, a host allowed as a realm whose address is
+/// refused, a host whose certificate is not trusted) fails before any request reaches
+/// it; and a challenge for basic auth on the registry itself is refused. Catches a realm
+/// compared by its text, by host without port, or credentials sent before the realm's
+/// checks.
+#[tokio::test]
+async fn credentials_follow_only_the_registrys_own_realm() {
+    let artifact = bundle();
+    let fx = private_registry(&artifact).await;
+    let side = Fixture::start().await;
+    side.behave(|b| {
+        b.token = Some("tok".to_owned());
+        b.token_basic = Some(BASIC.to_owned());
+    });
+    let untrusted = Fixture::start().await;
+    let (host, port, digest) = (fx.at(REGISTRY), fx.port, &artifact.digest);
+    let listed = |fixture: &Fixture| {
+        Allow::parse(&format!("{}/elsewhere", fixture.at(REGISTRY)))
+            .expect("entry")
+            .private()
+            .loopback()
+    };
+    let policy = Policy::new(vec![
+        entry(&fx, "team").with_credentials(credentials()),
+        listed(&side),
+        listed(&untrusted),
+    ])
+    .allow_realm(&fx.at(OTHER))
+    .expect("realm host");
+    let client = Client::with_roots(policy, vec![fx.cert.clone(), side.cert.clone()])
+        .with_resolved(REGISTRY, LOOPBACK)
+        .with_resolved(OTHER, LOOPBACK)
+        .with_resolved("unlisted.test", LOOPBACK);
+    let manifest_line = format!("{host} GET /v2/{REPO}/manifests/{digest} []");
+
+    fx.behave(|b| b.realm = Some(format!("https://REGISTRY.TEST:{port}/token")));
+    manifest(&client, fx.location(REPO), &artifact)
+        .await
+        .expect("the registry's own realm, in capitals");
+    assert_eq!(
+        fx.requests()[..2],
+        [
+            manifest_line.clone(),
+            format!("{host} GET /token?{TOKEN_QUERY} [{BASIC}]")
+        ]
+    );
+
+    let side_realm = format!("https://{}/token", side.at(REGISTRY));
+    fx.behave(|b| b.realm = Some(side_realm.clone()));
     let err = manifest(&client, fx.location(REPO), &artifact)
         .await
-        .expect_err("the redirect target wants basic auth");
-    let host = fx.at(REGISTRY);
+        .expect_err("another port wants basic auth");
     assert_eq!(
         err.to_string(),
-        format!("https://{host}/token: the registry answered 401")
+        format!("{side_realm}: the registry answered 401")
     );
-    let digest = &artifact.digest;
     assert_eq!(
-        fx.requests(),
+        side.requests(),
+        [format!("{} GET /token?{TOKEN_QUERY} []", side.at(REGISTRY))]
+    );
+
+    let realm_refusal = |realm: &str| {
+        format!("the token realm {realm} is not the registry's host or an allowed host")
+    };
+    let plain = format!("http://{host}/token");
+    let unlisted = format!("https://unlisted.test:{port}/token");
+    let address = format!("https://{}/token", fx.at(OTHER));
+    for (realm, want) in [
+        (plain.clone(), realm_refusal(&plain)),
+        (unlisted.clone(), realm_refusal(&unlisted)),
+        (
+            address,
+            "other.test resolves to 127.0.0.1, a loopback address".to_owned(),
+        ),
+    ] {
+        fx.behave(|b| b.realm = Some(realm.clone()));
+        let before = fx.requests().len();
+        let err = manifest(&client, fx.location(REPO), &artifact)
+            .await
+            .expect_err(&realm);
+        assert_eq!(err.to_string(), want, "{realm}");
+        assert_eq!(since(&fx, before), [manifest_line.clone()], "{realm}");
+    }
+
+    fx.behave(|b| b.realm = Some(format!("https://{}/token", untrusted.at(REGISTRY))));
+    let err = manifest(&client, fx.location(REPO), &artifact)
+        .await
+        .expect_err("an untrusted certificate");
+    assert!(matches!(err, Error::Transport { .. }), "{err}");
+    assert!(
+        untrusted.requests().is_empty(),
+        "{:?}",
+        untrusted.requests()
+    );
+
+    fx.behave(|b| {
+        b.realm = None;
+        b.challenge_scheme = Some("Basic".to_owned());
+    });
+    let before = fx.requests().len();
+    let err = manifest(&client, fx.location(REPO), &artifact)
+        .await
+        .expect_err("a basic challenge");
+    assert_eq!(
+        err.to_string(),
+        "registry authentication: the registry asks for \"Basic\" authentication; only \
+         Bearer tokens are supported"
+    );
+    assert_eq!(since(&fx, before), [manifest_line]);
+}
+
+/// Proves the token the realm issued for the credentials is kept and renewed: a later
+/// request reuses it, a request the registry later refuses it for gets a new one from the
+/// realm with the same credentials, and a registry that refuses the token it just issued
+/// ends the pull with that said. Catches a token asked for at every request, a renewal
+/// made without the credentials, and a loop of renewals.
+#[tokio::test]
+async fn the_token_of_the_credentials_is_reused_and_renewed() {
+    let artifact = bundle();
+    let fx = private_registry(&artifact).await;
+    let client = fx.client_with(vec![entry(&fx, "team").with_credentials(credentials())]);
+    let repo = client.repository(fx.location(REPO)).expect("repository");
+    let manifest = repo
+        .fetch_manifest(&artifact.digest, &Kind::bundle())
+        .await
+        .expect("manifest");
+    let (host, digest) = (fx.at(REGISTRY), &artifact.digest);
+    let layers = manifest.layers();
+    let mut sink = Keep::default();
+    repo.fetch_blob(&layers[0], &mut sink)
+        .await
+        .expect("first layer");
+    fx.behave(|b| b.token = Some("tok2".to_owned()));
+    let before = fx.requests().len();
+    let mut sink = Keep::default();
+    repo.fetch_blob(&layers[1], &mut sink)
+        .await
+        .expect("second layer");
+    assert_eq!(sink.0, artifact.layers[1]);
+    let blob = format!("{host} GET /v2/{REPO}/blobs/{}", layers[1].digest());
+    assert_eq!(
+        since(&fx, before),
+        [
+            format!("{blob} [Bearer tok]"),
+            format!("{host} GET /token?{TOKEN_QUERY} [{BASIC}]"),
+            format!("{blob} [Bearer tok2]"),
+        ]
+    );
+    assert_eq!(
+        fx.requests()[..5],
         [
             format!("{host} GET /v2/{REPO}/manifests/{digest} []"),
             format!("{host} GET /token?{TOKEN_QUERY} [{BASIC}]"),
-            format!("{host} GET /issued []"),
+            format!("{host} GET /v2/{REPO}/manifests/{digest} [Bearer tok]"),
+            format!(
+                "{host} GET /v2/{REPO}/blobs/{} [Bearer tok]",
+                layers[0].digest()
+            ),
+            format!("{blob} [Bearer tok]"),
+        ],
+        "the first token served both the manifest and the first layer"
+    );
+
+    fx.behave(|b| b.refuse_token = true);
+    let before = fx.requests().len();
+    let fresh = client.repository(fx.location(REPO)).expect("repository");
+    let err = fresh
+        .fetch_manifest(&artifact.digest, &Kind::bundle())
+        .await
+        .expect_err("the registry refuses its token");
+    let url = format!("https://{host}/v2/{REPO}/manifests/{digest}");
+    assert_eq!(
+        err.to_string(),
+        format!("registry authentication: {url}: the registry refused the token it issued")
+    );
+    assert_eq!(
+        since(&fx, before),
+        [
+            format!("{host} GET /v2/{REPO}/manifests/{digest} []"),
+            format!("{host} GET /token?{TOKEN_QUERY} [{BASIC}]"),
+            format!("{host} GET /v2/{REPO}/manifests/{digest} [Bearer tok2]"),
         ]
     );
 }
@@ -297,12 +533,21 @@ async fn credentials_follow_the_most_specific_entry() {
     fx.behave(|b| b.token = Some("tok".to_owned()));
     let with = |prefix: &str| entry(&fx, prefix).with_credentials(credentials());
     let without = |prefix: &str| entry(&fx, prefix);
+    let other = |prefix: &str| {
+        entry(&fx, prefix).with_credentials(Credentials::new("other", "pw-2").expect("credentials"))
+    };
     for (case, allow, want) in [
         ("broad has them", vec![with("team"), without(REPO)], ""),
         ("narrow has them", vec![without("team"), with(REPO)], BASIC),
         ("both have them", vec![with(REPO), with(REPO)], BASIC),
         ("first has them", vec![with(REPO), without(REPO)], ""),
         ("second has them", vec![without(REPO), with(REPO)], ""),
+        ("they differ, ours first", vec![with(REPO), other(REPO)], ""),
+        (
+            "they differ, ours second",
+            vec![other(REPO), with(REPO)],
+            "",
+        ),
     ] {
         let client = fx.client_with(allow);
         manifest(&client, fx.location(REPO), &artifact)
@@ -310,6 +555,57 @@ async fn credentials_follow_the_most_specific_entry() {
             .expect(case);
         assert_eq!(last_token_authorization(&fx), want, "{case}");
     }
+}
+
+/// Proves sibling repositories of one registry, pulled at once through one client, each
+/// send only their own entry's credentials: `team/a` and `team/b` carry different ones,
+/// and `team/ab` (a neighbour of `team/a` by text, not by path component) falls under the
+/// broad `team` entry, which has none. Catches credentials taken by text prefix, and one
+/// repository's credentials used for another's token request while both are in flight.
+#[tokio::test]
+async fn sibling_repositories_send_only_their_own_credentials() {
+    let artifact = bundle();
+    let fx = Fixture::start().await;
+    fx.publish(&artifact);
+    fx.behave(|b| {
+        b.token = Some("tok".to_owned());
+        b.challenge_no_scope = true;
+    });
+    let alpha = Credentials::new("alpha", "pw-a").expect("credentials");
+    let beta = Credentials::new("beta", "pw-b").expect("credentials");
+    let client = fx.client_with(vec![
+        entry(&fx, "team"),
+        entry(&fx, "team/a").with_credentials(alpha),
+        entry(&fx, "team/b").with_credentials(beta),
+    ]);
+    let at =
+        |repo: &str| Location::parse(&format!("{}/{repo}", fx.at(REGISTRY))).expect("location");
+    let (a, b, ab) = tokio::join!(
+        manifest(&client, at("team/a/app"), &artifact),
+        manifest(&client, at("team/b/app"), &artifact),
+        manifest(&client, at("team/ab/app"), &artifact),
+    );
+    for pulled in [a, b, ab] {
+        pulled.expect("a pull");
+    }
+    let host = fx.at(REGISTRY);
+    let mut tokens: Vec<String> = fx
+        .requests()
+        .into_iter()
+        .filter(|line| line.contains(" GET /token?"))
+        .collect();
+    tokens.sort();
+    let token = |repo: &str, auth: &str| {
+        format!("{host} GET /token?service=fake-registry&scope=repository:{repo}:pull [{auth}]")
+    };
+    assert_eq!(
+        tokens,
+        [
+            token("team/a/app", "Basic YWxwaGE6cHctYQ=="),
+            token("team/ab/app", ""),
+            token("team/b/app", "Basic YmV0YTpwdy1i"),
+        ]
+    );
 }
 
 /// Proves nothing a caller prints holds the user, the password or the header: the
@@ -351,18 +647,28 @@ async fn credentials_do_not_appear_in_debug_or_errors() {
         last_token_authorization(&fx),
         "Basic cHVsbGVyOndyb25nLXBhc3M="
     );
-    let printed = [
-        format!("{policy:?}"),
+    let port = fx.port;
+    let allow_shown = format!(
+        "Allow {{ authority: Authority {{ host: \"registry.test\", port: {port} }}, prefix: \
+         \"team\", private: true, loopback: true, plain_http: false, port_named: true, \
+         credentials: Some(Credentials(<redacted>)) }}"
+    );
+    let policy_shown = format!("Policy {{ allow: [{allow_shown}], realms: [] }}");
+    assert_eq!(format!("{policy:?}"), policy_shown);
+    assert_eq!(
         format!("{client:?}"),
+        format!(
+            "Client {{ http: Http {{ policy: {policy_shown}, resolve: {{\"registry.test\": \
+             127.0.0.1}}, timeouts: Timeouts {{ connect: 30s, head: 60s, idle: 60s, manifest: \
+             300s, blob: 7200s }}, .. }} }}"
+        )
+    );
+    let authority = format!("Authority {{ host: \"registry.test\", port: {port} }}");
+    assert_eq!(
         format!("{repo:?}"),
-    ];
-    for text in printed {
-        for secret in [USER, "wrong-pass", "cHVsbGVy", "Basic"] {
-            assert!(!text.contains(secret), "{secret} in {text}");
-        }
-        assert!(
-            text.contains("Credentials(<redacted>)") || text.starts_with("Repository"),
-            "{text}"
-        );
-    }
+        format!(
+            "Repository {{ location: Location {{ registry: {authority}, endpoint: {authority}, \
+             repository: \"team/bundle\" }}, .. }}"
+        )
+    );
 }

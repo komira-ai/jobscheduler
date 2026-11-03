@@ -33,6 +33,12 @@ pub(crate) const SECRET: Rule = Rule {
     says: "readable or writable by group or others",
 };
 
+/// What an error says of a file larger than its cap.
+const TOO_LARGE: &str = "larger than the size cap";
+
+/// What an error says of a file that is not UTF-8.
+const NOT_TEXT: &str = "not UTF-8 text";
+
 /// Whether `meta` is of `owner` and has none of `forbidden`'s bits.
 fn owned(meta: &fs::Metadata, owner: u32, forbidden: u32) -> bool {
     (meta.uid() == owner) & (meta.mode() & forbidden == 0)
@@ -63,11 +69,10 @@ pub(crate) fn read(path: &Path, owner: u32, rule: Rule, cap: u64) -> io::Result<
         )));
     }
     if meta.len() > cap {
-        return Err(io::Error::other("larger than the size cap"));
+        return Err(io::Error::other(TOO_LARGE));
     }
-    let parent = path.parent().unwrap_or(Path::new("/"));
     if !owned(
-        &fs::metadata(parent)?,
+        &fs::metadata(directory_of(path))?,
         owner,
         NOT_WRITABLE_BY_OTHERS.forbidden,
     ) {
@@ -75,9 +80,25 @@ pub(crate) fn read(path: &Path, owner: u32, rule: Rule, cap: u64) -> io::Result<
             "its directory is not owned by the expected user, or is writable by group or others",
         ));
     }
-    let mut text = String::new();
-    file.take(cap).read_to_string(&mut text)?;
-    Ok(text)
+    // The length was checked through the descriptor, but a file can grow after that (and
+    // some report no length at all): one byte past the cap is read, and refused, so a
+    // file is never taken for the prefix of it that fits.
+    let mut bytes = Vec::new();
+    file.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > cap {
+        return Err(io::Error::other(TOO_LARGE));
+    }
+    String::from_utf8(bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, NOT_TEXT))
+}
+
+/// The directory `path` is in: its parent, the current directory for a bare file name,
+/// and `/` for `/` itself.
+fn directory_of(path: &Path) -> &Path {
+    let parent = path.parent().unwrap_or(Path::new("/"));
+    match parent.as_os_str().is_empty() {
+        true => Path::new("."),
+        false => parent,
+    }
 }
 
 #[cfg(test)]
@@ -159,5 +180,90 @@ mod tests {
         fs::set_permissions(&binary, Permissions::from_mode(0o600)).expect("mode");
         let not_text = read(&binary, me(), SECRET, 16).expect_err("not UTF-8");
         assert_eq!(not_text.kind(), io::ErrorKind::InvalidData, "{not_text}");
+    }
+
+    /// Proves every permission bit of group and of others is refused on its own for a
+    /// secret, the write bits alone for a list, and that a file exactly at the cap is
+    /// read. Catches a mask that misses one bit (a world-readable secret), and a cap that
+    /// is off by one.
+    #[test]
+    fn each_bit_is_judged_alone_and_the_cap_is_inclusive() {
+        let dir = TestDir::under(std::env::temp_dir(), "trusted-file-bits");
+        let secret_rule =
+            "not owned by the expected user, or readable or writable by group or others";
+        let list_rule = "not owned by the expected user, or writable by group or others";
+        for (mode, secret_ok, list_ok) in [
+            (0o600, true, true),
+            (0o400, true, true),
+            (0o640, false, true),
+            (0o620, false, false),
+            (0o610, false, true),
+            (0o604, false, true),
+            (0o602, false, false),
+            (0o601, false, true),
+        ] {
+            let path = file(
+                &dir,
+                &format!("m{mode:o}"),
+                "line
+",
+                mode,
+            );
+            let as_secret = read(&path, me(), SECRET, 5).map_err(|e| e.to_string());
+            let as_list = read(&path, me(), NOT_WRITABLE_BY_OTHERS, 5).map_err(|e| e.to_string());
+            let want = |ok: bool, rule: &str| match ok {
+                true => Ok("line\n".to_owned()),
+                false => Err(rule.to_owned()),
+            };
+            assert_eq!(as_secret, want(secret_ok, secret_rule), "{mode:o}");
+            assert_eq!(as_list, want(list_ok, list_rule), "{mode:o}");
+        }
+    }
+
+    /// Proves a directory that its group alone, or others alone, can write is refused.
+    /// Catches a parent check that looks at one of the two.
+    #[test]
+    fn a_directory_its_group_or_others_can_write_is_refused() {
+        let want =
+            "its directory is not owned by the expected user, or is writable by group or others";
+        for mode in [0o720, 0o702] {
+            let dir = TestDir::under(std::env::temp_dir(), "trusted-file-parent");
+            let path = file(&dir, "inside", "line\n", 0o600);
+            fs::set_permissions(dir.path(), Permissions::from_mode(mode)).expect("mode");
+            assert_eq!(refusal(&path, me(), SECRET, 16), want, "{mode:o}");
+        }
+    }
+
+    /// Proves the directory a path is in is found for a bare file name (the current
+    /// directory), a relative and an absolute path, and `/`. Catches a bare file name
+    /// whose empty parent fails the directory check, refusing a file that keeps every
+    /// rule.
+    #[test]
+    fn the_directory_of_a_bare_file_name_is_the_current_one() {
+        for (path, want) in [
+            ("creds", "."),
+            ("conf/creds", "conf"),
+            ("/etc/js/creds", "/etc/js"),
+            ("/creds", "/"),
+            ("/", "/"),
+        ] {
+            assert_eq!(directory_of(Path::new(path)), Path::new(want), "{path}");
+        }
+    }
+
+    /// Proves a file that holds more than its cap when it is read is refused, even when
+    /// the descriptor said it was small: a `/proc` file reports a length of 0 (as a file
+    /// that grew after the check would report a stale one). Catches a reader that takes
+    /// the first `cap` bytes of a longer file for the whole of it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_longer_than_its_reported_length_is_refused() {
+        let status = Path::new("/proc/self/status");
+        let whole = read(status, me(), NOT_WRITABLE_BY_OTHERS, 1 << 20).expect("read");
+        assert!(whole.len() > 8, "{whole}");
+        assert_eq!(
+            refusal(status, me(), NOT_WRITABLE_BY_OTHERS, 8),
+            "larger than the size cap"
+        );
     }
 }

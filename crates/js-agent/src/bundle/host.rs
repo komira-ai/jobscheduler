@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use js_bundle::{DottedVersion, XcodeComponent, XcodeNeed};
-use js_oci::{Allow, Client, Policy};
+use js_oci::{Client, Policy};
 use js_treestore::Sealer;
 #[cfg(target_os = "macos")]
 use js_treestore::mac::{Clonefile, Fchflags, MacSealer, Owner};
@@ -302,17 +302,9 @@ impl<R: CommandRunner + Clone + Send + Sync + 'static> BundleHost for SystemHost
         let Some(sealer) = &self.sealer else {
             return Ok(None);
         };
-        let allowed = settings.registries.iter().map(|registry| {
-            let entry = Allow::parse(&format!("{}/{}", registry.host, registry.prefix))?;
-            let entry = settings.credentials.attach(entry);
-            Ok(if registry.private {
-                entry.private()
-            } else {
-                entry
-            })
-        });
-        let allowed = allowed.collect::<Result<Vec<_>, js_oci::Error>>();
-        let allowed = allowed.map_err(|why| format!("--bundle-registry-allow: {why}"))?;
+        let allowed = settings
+            .registry_allow()
+            .map_err(|why| format!("--bundle-registry-allow: {why}"))?;
         // The volume's free space is asked at every eviction decision, so it is read again
         // each time. A volume that cannot be read is not known to be low: counting it as 0
         // would evict every tree that is not pinned, so the budget alone bounds the store.

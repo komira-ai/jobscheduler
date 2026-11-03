@@ -570,14 +570,14 @@ fn registry_credentials_are_checked_before_the_agent_registers() {
     for (host, path) in [(&host, &loose), (&not_root, &good)] {
         let (status, err, sent) = started(host, path);
         assert_eq!(status, code(2), "{err}");
-        assert!(
-            err.contains(&format!(
-                "--registry-credentials: {}: {rule}",
+        // The credentials are read before anything else is said, so this is all of it.
+        assert_eq!(
+            err,
+            format!(
+                "js-agent: --registry-credentials: {}: {rule}\n",
                 path.display()
-            )),
-            "{err}"
+            )
         );
-        assert!(!err.contains("s3cret"), "{err}");
         assert_eq!(sent, 0, "{err}");
     }
 }

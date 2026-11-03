@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use js_agent_wire::ReadModel;
 use js_agent_wire::limits::MAX_CAPABILITY_VALUE_LEN;
+use js_oci::Allow;
 
 use super::host::BundleHost;
 use super::list::parse_digests;
@@ -325,5 +326,27 @@ impl Settings {
             credentials,
             ..self
         }
+    }
+
+    /// The allow-list of the store's registry client: each registry as an entry, with the
+    /// credentials `--registry-credentials` gave it, and reachable at a private address
+    /// when it came from `--bundle-registry-allow-private`.
+    ///
+    /// # Errors
+    ///
+    /// A registry that is not a js-oci allow-list entry.
+    pub fn registry_allow(&self) -> Result<Vec<Allow>, js_oci::Error> {
+        self.registries
+            .iter()
+            .map(|registry| {
+                let entry = Allow::parse(&format!("{}/{}", registry.host, registry.prefix))?;
+                let entry = self.credentials.attach(entry);
+                Ok(if registry.private {
+                    entry.private()
+                } else {
+                    entry
+                })
+            })
+            .collect()
     }
 }
