@@ -1111,6 +1111,7 @@ dependencies = [
  "js-testkit",
  "js-types",
  "libc",
+ "nix 0.31.3",
  "oci-spec",
  "runc",
  "rustix",

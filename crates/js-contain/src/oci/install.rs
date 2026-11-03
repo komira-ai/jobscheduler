@@ -127,13 +127,13 @@ fn alone(unshare: fn() -> io::Result<()>, work: &mut Work<'_>) -> io::Result<()>
 
 /// Gives the calling thread a descriptor table of its own: a copy of the process's, which
 /// the other threads no longer share with it.
+///
+/// Sound as the one caller uses it: the thread `alone` makes for one install calls this before
+/// anything else, uses no descriptor another thread made (it opens the staged file, and the
+/// daemon it copies from, itself) and hands none out (it closes both before it ends), so no
+/// thread ever uses a descriptor across the two tables.
 fn own_table() -> io::Result<()> {
-    // SAFETY: the one caller is the thread `alone` makes for one install, before it does
-    // anything else. That thread uses no descriptor another thread made (it opens the
-    // staged file, and the daemon it copies from, itself) and hands none out (it closes
-    // both before it ends), so no thread ever uses a descriptor across the two tables.
-    unsafe { rustix::thread::unshare_unsafe(rustix::thread::UnshareFlags::FILES) }
-        .map_err(io::Error::from)
+    nix::sched::unshare(nix::sched::CloneFlags::CLONE_FILES).map_err(io::Error::from)
 }
 
 #[cfg(test)]

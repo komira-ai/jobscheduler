@@ -24,6 +24,7 @@ test = false
 async-trait.workspace = true
 flate2.workspace = true
 js-types = { path = "../js-types" }
+nix = { workspace = true, features = ["sched"] }
 oci-spec.workspace = true
 runc.workspace = true
 rustix = { workspace = true, features = ["fs", "process", "thread"] }
