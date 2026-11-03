@@ -346,7 +346,7 @@ fn a_nul_anywhere_in_a_plan_is_refused_without_naming_it() {
     let refusals = [
         Plan::new(OsStr::new("/bin/e\0cho"), &[], &[]),
         Plan::new(OsStr::new("bad\0name"), &[], &[]),
-        Plan::new(OsStr::new("/bin/echo"), &[secret.clone()], &[]),
+        Plan::new(OsStr::new("/bin/echo"), std::slice::from_ref(&secret), &[]),
         Plan::new(
             OsStr::new("echo"),
             &[],

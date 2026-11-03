@@ -96,6 +96,20 @@ struct Candidate {
     shell: Strings,
 }
 
+impl Candidate {
+    /// The candidate `file`, run with the arguments `tail` when the shell runs it.
+    fn new(file: Vec<u8>, tail: &[Vec<u8>]) -> io::Result<Self> {
+        let shell = std::iter::once(b"sh".to_vec())
+            .chain(std::iter::once(file.clone()))
+            .chain(tail.iter().cloned())
+            .collect();
+        Ok(Self {
+            file: Strings::new(vec![file])?,
+            shell: Strings::new(shell)?,
+        })
+    }
+}
+
 /// Everything a disclaimed execution of a program uses, made before the fork.
 pub(super) struct Plan {
     /// The argument vector: the program as given, then each argument.
@@ -158,19 +172,10 @@ impl Plan {
                     .collect()
             }
         };
-        let candidates = files
-            .into_iter()
-            .map(|file| {
-                let shell = std::iter::once(b"sh".to_vec())
-                    .chain(std::iter::once(file.clone()))
-                    .chain(tail.iter().cloned())
-                    .collect();
-                Ok(Candidate {
-                    file: Strings::new(vec![file])?,
-                    shell: Strings::new(shell)?,
-                })
-            })
-            .collect::<io::Result<Vec<_>>>()?;
+        let mut candidates = Vec::new();
+        for file in files {
+            candidates.push(Candidate::new(file, &tail)?);
+        }
         Ok(Self {
             argv,
             envp,
