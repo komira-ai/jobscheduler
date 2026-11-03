@@ -209,12 +209,8 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
                         report.freed.push(id);
                     }
                 }
-                Step::Resolve => {
-                    let seen = self.resolve(&id, now);
-                    note_seen(&mut report, id, seen);
-                }
-                Step::Present => {
-                    let seen = self.present(&id, now);
+                step @ (Step::Resolve | Step::Present) => {
+                    let seen = self.settle_pending(&id, step, now);
                     note_seen(&mut report, id, seen);
                 }
             }
@@ -260,6 +256,15 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// The provider, mutably. Tests use it to script the fake.
     pub fn provider_mut(&mut self) -> &mut P {
         &mut self.provider
+    }
+
+    /// Settles pending lease `id` as `step` says: a lease whose request waits on the
+    /// provider is presented again, any other is observed.
+    fn settle_pending(&mut self, id: &LeaseId, step: Step, now: Timestamp) -> Seen {
+        match step {
+            Step::Present => self.present(id, now),
+            _ => self.resolve(id, now),
+        }
     }
 
     /// Observes pending lease `id` and applies the answer.
