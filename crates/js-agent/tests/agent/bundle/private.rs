@@ -129,14 +129,15 @@ fn a_private_bundle_is_fetched_with_the_flag_credentials() {
         store
             .ensure_registry(&format!("{entry}/bundle"), &bundle.digest())
             .unwrap();
-        assert_eq!(
-            with_basic(&fx),
-            [format!(
-                "{} GET /token?service=fake-registry&scope=repository:{REPO}:pull [{BASIC}]",
-                fx.at(REGISTRY)
-            )],
-            "{flag}"
+        // Each resource the client is challenged for asks the realm; every one of those
+        // token requests, and nothing else, carries the credentials.
+        let token = format!(
+            "{} GET /token?service=fake-registry&scope=repository:{REPO}:pull [{BASIC}]",
+            fx.at(REGISTRY)
         );
+        let sent = with_basic(&fx);
+        assert!(!sent.is_empty(), "{flag}");
+        assert!(sent.iter().all(|line| *line == token), "{flag}: {sent:?}");
     }
 }
 

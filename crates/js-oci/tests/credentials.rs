@@ -338,7 +338,11 @@ async fn credentials_follow_only_the_registrys_own_realm() {
             .await
             .expect_err(&realm);
         assert_eq!(err.to_string(), want, "{realm}");
-        assert_eq!(since(&fx, before), [manifest_line.clone()], "{realm}");
+        assert_eq!(
+            since(&fx, before),
+            std::slice::from_ref(&manifest_line),
+            "{realm}"
+        );
     }
 
     fx.behave(|b| b.realm = Some(format!("https://{}/token", untrusted.at(REGISTRY))));
