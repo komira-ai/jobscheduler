@@ -13,6 +13,7 @@ mod fake_bin;
 #[path = "../../update_hook_fakes/mod.rs"]
 mod fakes;
 mod fakes_tests;
+mod flags;
 mod harness_tests;
 mod launchd;
 mod lease_port;
@@ -33,6 +34,7 @@ mod steps_cleanup;
 mod steps_cutover;
 mod steps_cutover_cordon;
 mod steps_cutover_launchd;
+mod steps_from_package;
 mod steps_prepare;
 mod steps_prepare_cordon;
 mod steps_rollback;

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use js_agent::Cli;
 use js_agent::lifecycle::DEFAULT_STOP_GRACE;
-use xtask::pkg::{FILES, Source};
+use xtask::pkg::{DECLARATION, FILES, Source};
 
 const UNIT: &str = "packaging/js-agent/js-agent.service";
 const WORKFLOW: &str = ".github/workflows/js-agent-deb.yml";
@@ -388,6 +388,7 @@ fn the_nfpm_configuration_lists_the_files_of_the_checker() {
                 Source::Service => "packaging/js-agent/js-agent.service".to_owned(),
                 Source::Tmpfiles => "packaging/js-agent/tmpfiles.conf".to_owned(),
                 Source::HostSetup => "packaging/js-agent/crun_host_setup.sh".to_owned(),
+                Source::Declaration => format!("packaging/js-agent/{DECLARATION}"),
                 Source::License => "LICENSE".to_owned(),
             };
             (src, (*path).to_owned(), *mode)

@@ -847,6 +847,9 @@ step_reload() {
   say "systemd"
   if act "systemctl daemon-reload" systemctl daemon-reload; then
     record reload 1
+    # The unit runs its program through the release link (/opt/js-agent/link/current), which the tmpfiles file
+    # makes; the verify below needs the program to be there.
+    if [ -f "$TMPF_DST" ]; then act "systemd-tmpfiles --create $TMPF_DST" systemd-tmpfiles --create "$TMPF_DST" || return 0; fi
     if systemd-analyze verify "$UNIT_DST" >/dev/null 2>&1; then say "  systemd-analyze verify $UNIT_DST: ok"; else say "  FAILED: systemd-analyze verify $UNIT_DST"; mark_failed; fi
   fi
 }

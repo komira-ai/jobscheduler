@@ -67,10 +67,18 @@ fn agent_cli() -> Cli {
         .unwrap_or_else(|e| panic!("ExecStart is not a command line of js-agent: {e}"))
 }
 
-/// The directories the tmpfiles file makes: path and mode.
+/// The directories the tmpfiles file makes (its `d` lines): path and mode. Every other line is
+/// the release link's `L` line (tests/js_agent_declaration.rs reads it).
 fn directories() -> Vec<(PathBuf, u32)> {
-    code(&read(TMPFILES))
-        .iter()
+    let lines = code(&read(TMPFILES));
+    let (dirs, others): (Vec<String>, Vec<String>) =
+        lines.into_iter().partition(|line| line.starts_with("d "));
+    assert_eq!(
+        others,
+        ["L /opt/js-agent/link/current - - - - /usr/bin"],
+        "lines other than directories"
+    );
+    dirs.iter()
         .map(|line| {
             let f: Vec<&str> = line.split_whitespace().collect();
             assert_eq!(f.len(), 6, "{line}");
@@ -250,7 +258,9 @@ fn the_unit_makes_its_directories_and_waits_for_the_scratch_disk() {
 /// The modes of the directories are the ones the agent and the job's ids need: the scratch root is
 /// what the agent's `Searchable` layout accepts (`0711`), the directory above it is the unit's
 /// `StateDirectoryMode`, so the two files agree and a start does not change the other's work, and
-/// the state root and the token directory stay private. No other directory is made.
+/// the state root and the token directory stay private. The release layout of the update hook
+/// (`/opt/js-agent`, its releases and the link's directory) is root's and closed to writes by
+/// others. No other directory is made.
 #[test]
 fn the_directories_have_the_modes_the_agent_and_the_jobs_ids_need() {
     let cli = agent_cli();
@@ -273,7 +283,18 @@ fn the_directories_have_the_modes_the_agent_and_the_jobs_ids_need() {
     );
     assert_eq!(mode_of(&state), Some(DirLayout::Private.dir_mode()));
     assert_eq!(mode_of(Path::new("/etc/js-agent")), Some(0o700));
-    assert_eq!(dirs.len(), 5, "{dirs:?}");
+    for release_dir in [
+        "/opt/js-agent",
+        "/opt/js-agent/releases",
+        "/opt/js-agent/link",
+    ] {
+        assert_eq!(
+            mode_of(Path::new(release_dir)),
+            Some(0o755),
+            "{release_dir}"
+        );
+    }
+    assert_eq!(dirs.len(), 8, "{dirs:?}");
     assert_eq!(
         value("StateDirectory"),
         parent.file_name().unwrap().to_str().unwrap()

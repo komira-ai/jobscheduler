@@ -15,7 +15,7 @@ pub const UNIT: &str = "packaging/js-agent/js-agent-crun.service";
 pub const TMPFILES: &str = "packaging/js-agent/tmpfiles-crun.conf";
 
 /// The programs the script runs that read or change the host. Each has a stand-in.
-pub const GUARDED: [&str; 15] = [
+pub const GUARDED: [&str; 16] = [
     "apparmor_parser",
     "apt-get",
     "dpkg-query",
@@ -27,6 +27,7 @@ pub const GUARDED: [&str; 15] = [
     "sha256sum",
     "systemctl",
     "systemd-analyze",
+    "systemd-tmpfiles",
     "umount",
     "uname",
     "useradd",
@@ -356,6 +357,7 @@ impl Rig {
                     "rw,relatime,attr2,inode64,logbufs=8,prjquota\n",
                 )],
             ),
+            ok("systemd-tmpfiles", "--create *", ""),
             ok("systemd-analyze", "verify *", ""),
         ]
     }
@@ -477,9 +479,8 @@ pub fn mutating(call: &str) -> bool {
     let mut words = call.split(' ');
     let name = words.next().unwrap_or_default();
     match name {
-        "apt-get" | "useradd" | "usermod" | "userdel" | "apparmor_parser" | "mount" | "umount" => {
-            true
-        }
+        "apt-get" | "useradd" | "usermod" | "userdel" | "apparmor_parser" | "mount" | "umount"
+        | "systemd-tmpfiles" => true,
         "systemctl" => !matches!(
             words.next(),
             Some("--version" | "show" | "list-dependencies")

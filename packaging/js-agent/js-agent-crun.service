@@ -47,6 +47,13 @@
 #   TimeoutStopSec=3900   the longest drain (3600 + 120 s) plus the 30 s the server gets to
 #                         acknowledge the results and a margin; finite, so a hung agent is
 #                         killed and Restart=always brings it back. Raise it with either flag.
+#   ExecStart=/opt/js-agent/link/current/js-agent
+#                         the program is run through the release link, which the host updater's
+#                         js-agent hook moves from one release to the next (`cutover`, and back on
+#                         `rollback`); packaging/js-agent/updater.d/js-agent.toml names the link
+#                         (--release-link) and this unit. The tmpfiles file makes the link, once,
+#                         pointing at /usr/bin, so until an update moves it the program is the
+#                         package's /usr/bin/js-agent; it never replaces a link that is there
 # No container engine is in After= and none is pulled in.
 #
 # Like js-agent.service, the unit runs as root with no sandboxing (the agent reads /proc/1/ns and
@@ -70,7 +77,7 @@ DelegateSubgroup=supervisor
 StateDirectory=js-agent
 StateDirectoryMode=0711
 ExecStartPre=+systemd-tmpfiles --create /etc/tmpfiles.d/js-agent-crun.conf
-ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --drain-wait 3600 --stop-grace 120 --runtime crun --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
+ExecStart=/opt/js-agent/link/current/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --drain-wait 3600 --stop-grace 120 --runtime crun --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
 KillMode=mixed
 TimeoutStopSec=3900
 Restart=always

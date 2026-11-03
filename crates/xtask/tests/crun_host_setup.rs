@@ -29,6 +29,7 @@ fn the_harness_reaches_only_stand_ins_and_names_the_calls_that_change_the_host()
         "usermod x",
         "mount a",
         "umount a",
+        "systemd-tmpfiles --create a",
     ] {
         assert!(mutating(call), "{call}");
     }
@@ -156,6 +157,20 @@ fn an_apply_on_a_fresh_root_sets_the_host_up() {
         .rposition(|c| c == &format!("findmnt -n -o OPTIONS --mountpoint {SCRATCH}"))
         .expect("the mount options were read");
     assert!(reload < stop && stop < start && start < check, "{calls:?}");
+    // The tmpfiles file is applied after the reload and before the verify: the unit's program is
+    // reached through the release link that file makes.
+    let tmpfiles = index(
+        &calls,
+        &format!(
+            "systemd-tmpfiles --create {}",
+            rig.path("etc/tmpfiles.d/js-agent-crun.conf").display()
+        ),
+    );
+    let verify = calls
+        .iter()
+        .position(|c| c.starts_with("systemd-analyze verify "))
+        .expect("the unit was verified");
+    assert!(reload < tmpfiles && tmpfiles < verify, "{calls:?}");
     assert!(
         index(
             &calls,

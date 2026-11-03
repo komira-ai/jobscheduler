@@ -5,9 +5,10 @@
 //!   ([`fetch`]): a pinned tool, downloaded over HTTPS and refused unless its SHA-256
 //!   matches, before anything is unpacked or written.
 //!
-//! - `release plan --head <sha>` and `release stamp --to <version>`
-//!   ([`release`]): whether a commit of main is released and as which version, and setting
-//!   that version in the CI checkout before the build (docs/release.md).
+//! - `release plan --head <sha>`, `release stamp --to <version>` and `release stage --bin <name>
+//!   --target <triple> --version <version> --out <dir>` ([`release`]): whether a commit of main
+//!   is released and as which version, setting that version in the CI checkout before the build,
+//!   and laying down the files of each release archive (docs/release.md).
 //!
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
@@ -223,6 +224,8 @@ enum ReleaseVerb {
     Plan(release::plan::PlanArgs),
     /// Set the release version in this checkout (not committed).
     Stamp(release::stamp::StampArgs),
+    /// Lay down the files of one release archive.
+    Stage(release::stage::StageArgs),
 }
 
 /// Runs the verb `cli` names: the line to print when it passed.
@@ -297,6 +300,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         Verb::Release { verb } => Ok(match verb {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,
             ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,
+            ReleaseVerb::Stage(args) => release::stage::run(&args)?,
         }),
     }
 }

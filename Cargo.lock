@@ -3013,6 +3013,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "update-rights"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/kbf?rev=e74c32bf01dc398d3c78ef130b6703c2341e4af6#e74c32bf01dc398d3c78ef130b6703c2341e4af6"
+dependencies = [
+ "hex",
+ "libc",
+ "rustix",
+ "serde",
+ "sha2 0.11.1",
+ "thiserror",
+ "toml",
+ "update-hook",
+]
+
+[[package]]
 name = "ureq"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3341,6 +3356,8 @@ dependencies = [
  "tar",
  "thiserror",
  "toml",
+ "update-hook",
+ "update-rights",
  "ureq",
 ]
 

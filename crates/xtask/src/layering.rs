@@ -116,8 +116,8 @@ pub enum Violation {
         /// The package.
         package: String,
     },
-    /// A dependency from kbf's repository other than the one it allows: `update-hook`,
-    /// as a dev-dependency.
+    /// A dependency from kbf's repository other than the ones it allows: `update-hook` and
+    /// `update-rights`, as dev-dependencies.
     FromKbf {
         /// The manifest.
         manifest: String,
@@ -126,12 +126,13 @@ pub enum Violation {
     },
 }
 
-/// The one crate this repository may take from kbf's repository, and only as a
-/// dev-dependency: kbf's update-hook contract crate, whose conformance harness the js-agent
-/// hook's tests run. It depends on no other crate of kbf (kbf's own layering test keeps it
-/// so), and it is pinned by revision. Anything else from kbf's repository is refused, by any
-/// name.
-const KBF_CONTRACT: &str = "update-hook";
+/// The crates this repository may take from kbf's repository, and only as dev-dependencies:
+/// kbf's update-hook contract crate, whose conformance harness the js-agent hook's tests run,
+/// and the host updater's declaration rules (`update-rights`), which load the js-agent
+/// declaration the release ships (crates/xtask/tests/js_agent_declaration.rs). Neither depends
+/// on another crate of kbf but `update-hook` (kbf's own layering test keeps them so), and both
+/// are pinned by one revision. Anything else from kbf's repository is refused, by any name.
+const KBF_TEST_CRATES: [&str; 2] = ["update-hook", "update-rights"];
 
 /// Whether a dependency's declaration names kbf's repository as its git source.
 fn from_kbf_repo(dep: &toml::Value) -> bool {
@@ -183,7 +184,8 @@ impl fmt::Display for Violation {
             ),
             Violation::FromKbf { manifest, package } => write!(
                 f,
-                "{manifest} takes {package} from kbf's repository; only {KBF_CONTRACT}, as a dev-dependency, may come from there"
+                "{manifest} takes {package} from kbf's repository; only {}, as dev-dependencies, may come from there",
+                KBF_TEST_CRATES.join(" and ")
             ),
         }
     }
@@ -545,8 +547,8 @@ pub fn check(root: &Path) -> Result<Vec<Violation>, Error> {
         }
     }
 
-    // From kbf's repository: only the contract crate, declared once at the root and taken
-    // by members as a dev-dependency.
+    // From kbf's repository: only the test crates, declared once at the root and taken by
+    // members as dev-dependencies.
     let root_deps = root_manifest
         .get("workspace")
         .and_then(|w| w.get("dependencies"))
@@ -560,7 +562,10 @@ pub fn check(root: &Path) -> Result<Vec<Violation>, Error> {
             real.unwrap_or(key).to_owned()
         })
         .collect();
-    for package in kbf_at_root.iter().filter(|p| *p != KBF_CONTRACT) {
+    for package in kbf_at_root
+        .iter()
+        .filter(|p| !KBF_TEST_CRATES.contains(&p.as_str()))
+    {
         violations.insert(Violation::FromKbf {
             manifest: "Cargo.toml".to_owned(),
             package: package.clone(),
@@ -577,7 +582,9 @@ pub fn check(root: &Path) -> Result<Vec<Violation>, Error> {
         for (dep, value, dev) in &m.deps {
             let via_root = value.get("workspace").and_then(toml::Value::as_bool) == Some(true)
                 && kbf_at_root.contains(dep);
-            if (from_kbf_repo(value) || via_root) && (!dev || dep != KBF_CONTRACT) {
+            if (from_kbf_repo(value) || via_root)
+                && (!dev || !KBF_TEST_CRATES.contains(&dep.as_str()))
+            {
                 violations.insert(Violation::FromKbf {
                     manifest: manifest.clone(),
                     package: dep.clone(),
