@@ -4,9 +4,9 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use crate::Error;
 use crate::location::{Authority, Location, path_ok};
 use crate::text::{clip, escape};
+use crate::{Credentials, Error};
 
 /// Why an address is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,6 +151,8 @@ pub struct Allow {
     plain_http: bool,
     /// The entry's host names a port (without one the authority reads as 443).
     port_named: bool,
+    /// Sent to the registry's own token realm, and nowhere else.
+    credentials: Option<Credentials>,
 }
 
 impl Allow {
@@ -178,7 +180,35 @@ impl Allow {
                 Some(v6) => !v6.ends_with(']'),
                 None => host.contains(':'),
             },
+            credentials: None,
         })
+    }
+
+    /// This entry with `credentials` for its registry's token realm: a registry that
+    /// issues pull tokens only to a user it knows (GitHub's container registry, for one,
+    /// for a private package).
+    ///
+    /// The credentials go as `Authorization: Basic` on the token request, and only there:
+    /// - only to the realm the registry's `WWW-Authenticate` challenge names, after the
+    ///   realm passed the checks every realm passes (see [`Policy::allow_realm`]), and only
+    ///   when the realm's host and port are the registry's own. A realm on another host is
+    ///   asked anonymously, even one this policy lists or allows;
+    /// - only over https: an entry pulled over plain http ([`Allow::plain_http_loopback`])
+    ///   never sends them;
+    /// - never to a manifest or blob request, which carry the bearer token the realm
+    ///   issued, and never to the target of a redirect (the token request's included);
+    /// - for the repositories whose most specific entry (the longest prefix) is this one.
+    ///   When several entries of that prefix admit a repository, they must all carry the
+    ///   same credentials, or none are sent.
+    ///
+    /// The registry names the realm in its challenge, so it could name any URL: the realm
+    /// checks and the same-host rule are what keep the credentials on the registry's own
+    /// host. Anyone who can answer as that host over TLS (its operator, or whoever holds
+    /// a certificate for it that the client trusts) can read them.
+    #[must_use]
+    pub fn with_credentials(mut self, credentials: Credentials) -> Self {
+        self.credentials = Some(credentials);
+        self
     }
 
     /// This entry as one whose host may be reached at a private address: a registry on
@@ -325,6 +355,23 @@ impl Policy {
                 .filter(|a| a.prefix.len() == n)
                 .all(Allow::is_plain_http)
         })
+    }
+
+    /// The credentials for `location`'s token realm: those of the most specific entry (the
+    /// longest prefix) that admits it, when every entry of that prefix that admits it
+    /// carries the same ones (see [`Allow::with_credentials`]).
+    pub(crate) fn credentials(&self, location: &Location) -> Option<Credentials> {
+        let admitting = || self.allow.iter().filter(|a| a.admits(location));
+        let longest = admitting().map(|a| a.prefix.len()).max();
+        let mut most_specific = admitting()
+            .filter(|a| Some(a.prefix.len()) == longest)
+            .map(|a| a.credentials.as_ref());
+        let first = most_specific.next().flatten();
+        most_specific
+            .all(|other| other == first)
+            .then_some(first)
+            .flatten()
+            .cloned()
     }
 
     /// Whether a pin may name `location`.

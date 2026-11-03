@@ -4,9 +4,11 @@ use std::path::{Path, PathBuf};
 
 use js_agent_wire::ReadModel;
 use js_agent_wire::limits::MAX_CAPABILITY_VALUE_LEN;
+use js_oci::Allow;
 
 use super::host::BundleHost;
 use super::list::parse_digests;
+use crate::RegistryCredentials;
 use crate::cli::Cli;
 use crate::facts::{GIB, Platform};
 
@@ -88,6 +90,9 @@ pub struct Settings {
     pub allow_file: Option<PathBuf>,
     /// `--read-model`.
     pub read_model: ReadModel,
+    /// The `--registry-credentials` of the registries, which the store's client sends to
+    /// their token realms ([`Settings::with_credentials`]); none from [`Settings::from_cli`].
+    pub credentials: RegistryCredentials,
 }
 
 /// The default of `--bundle-min-age-min`.
@@ -309,6 +314,39 @@ impl Settings {
             trust,
             allow_file,
             read_model,
+            credentials: RegistryCredentials::default(),
         }))
+    }
+
+    /// These settings with `credentials`, the agent's `--registry-credentials`, which it
+    /// read once at start.
+    #[must_use]
+    pub fn with_credentials(self, credentials: RegistryCredentials) -> Self {
+        Self {
+            credentials,
+            ..self
+        }
+    }
+
+    /// The allow-list of the store's registry client: each registry as an entry, with the
+    /// credentials `--registry-credentials` gave it, and reachable at a private address
+    /// when it came from `--bundle-registry-allow-private`.
+    ///
+    /// # Errors
+    ///
+    /// A registry that is not a js-oci allow-list entry.
+    pub fn registry_allow(&self) -> Result<Vec<Allow>, js_oci::Error> {
+        self.registries
+            .iter()
+            .map(|registry| {
+                let entry = Allow::parse(&format!("{}/{}", registry.host, registry.prefix))?;
+                let entry = self.credentials.attach(entry);
+                Ok(if registry.private {
+                    entry.private()
+                } else {
+                    entry
+                })
+            })
+            .collect()
     }
 }

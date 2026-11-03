@@ -9,6 +9,7 @@ pub mod fixture;
 mod hello;
 mod lifecycle;
 mod place;
+mod private;
 mod registry;
 mod settings;
 mod start;

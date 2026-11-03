@@ -10,6 +10,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Empty};
 use hyper::body::Incoming;
@@ -17,6 +18,7 @@ use hyper::header::{AUTHORIZATION, CONNECTION, HOST, HeaderName, LOCATION, USER_
 use hyper::{Request, Response, Uri};
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::{CertificateDer, ServerName};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
@@ -126,6 +128,38 @@ pub(crate) struct Http {
     resolve: BTreeMap<String, IpAddr>,
     pub(crate) timeouts: Timeouts,
     tls: OnceLock<Result<(TlsConnector, RootSummary), String>>,
+    /// What opens a connection to an address the policy allowed: TCP, or a test's.
+    connect: Arc<dyn Connect>,
+}
+
+/// A byte stream to a registry, as [`Connect`] opens it.
+pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+/// What opens the connection of a request, once its host has been resolved and every
+/// address checked against the [`Policy`]: TCP to those addresses unless a caller says
+/// otherwise ([`crate::Client::with_connector`]). TLS, the request, redirects and every
+/// check of the client run over the stream it returns, whatever opened it.
+#[async_trait]
+pub trait Connect: Send + Sync {
+    /// A stream to one of `addrs`, which the client resolved and the policy allowed.
+    ///
+    /// # Errors
+    /// No address could be connected to.
+    async fn connect(&self, addrs: &[SocketAddr]) -> std::io::Result<Box<dyn Io>>;
+}
+
+/// TCP to the first address that answers.
+struct Tcp;
+
+#[async_trait]
+impl Connect for Tcp {
+    async fn connect(&self, addrs: &[SocketAddr]) -> std::io::Result<Box<dyn Io>> {
+        TcpStream::connect(addrs)
+            .await
+            .map(|tcp| Box::new(tcp) as Box<dyn Io>)
+    }
 }
 
 impl std::fmt::Debug for Http {
@@ -146,7 +180,12 @@ impl Http {
             resolve: BTreeMap::new(),
             timeouts: Timeouts::default(),
             tls: OnceLock::new(),
+            connect: Arc::new(Tcp),
         }
+    }
+
+    pub(crate) fn connect_with(&mut self, connect: Arc<dyn Connect>) {
+        self.connect = connect;
     }
 
     pub(crate) fn resolve_to(&mut self, host: &str, ip: IpAddr) {
@@ -275,7 +314,9 @@ impl Http {
         };
         let connect = async {
             let addrs = self.addresses(&authority).await?;
-            let tcp = TcpStream::connect(addrs.as_slice())
+            let tcp = self
+                .connect
+                .connect(&addrs)
                 .await
                 .map_err(|e| transport(format!("connect: {e}")))?;
             Ok::<_, Error>(match tls_name {

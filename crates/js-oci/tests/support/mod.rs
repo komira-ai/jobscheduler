@@ -1,15 +1,19 @@
 //! A registry in this process: HTTP/1.1 over TLS on a loopback socket, serving the
 //! manifests and blobs a test publishes, with the behaviours the client must survive: a
 //! token challenge, redirects, tampered bytes, stalls.
+//!
+//! A [`Network`] serves the same registries with no socket at all: a client given its
+//! connector reaches each fixture started on it at its port over an in-memory stream, and
+//! the client's resolution, address policy, TLS and redirects run as they do over TCP.
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::collections::{BTreeMap, HashMap};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use js_oci::{Allow, Client, Digest, Location, Policy};
+use js_oci::{Allow, Client, Connect, Digest, Io, Location, Policy};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
@@ -107,6 +111,13 @@ pub struct Behaviour {
     pub token_answer: Option<String>,
     /// The token endpoint's status.
     pub token_status: Option<u16>,
+    /// The token endpoint answers 401 unless the request's `Authorization` is exactly
+    /// this (`Basic <base64>`): a realm that issues tokens to known users only.
+    pub token_basic: Option<String>,
+    /// Redirects, in order: a request whose path begins with the first of a pair is
+    /// answered 307 to the second. `/issued` serves tokens as `/token` does (under the
+    /// same `token_basic` rule), so a token realm can be sent there.
+    pub redirects: Vec<(String, String)>,
     /// The realm the challenge names; the registry's own `/token` if `None`.
     pub realm: Option<String>,
     /// A challenge with this scheme instead of Bearer.
@@ -157,19 +168,138 @@ pub struct Fixture {
     pub port: u16,
     pub cert: CertificateDer<'static>,
     state: Arc<Mutex<State>>,
-    task: tokio::task::JoinHandle<()>,
+    /// The accept loop of a fixture on a socket; none in memory.
+    task: Option<tokio::task::JoinHandle<()>>,
+    /// The network of a fixture served in memory; none on a socket.
+    network: Option<Network>,
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+/// A certificate for exactly `names` and an acceptor that presents it.
+fn tls_for(names: Vec<String>) -> (CertificateDer<'static>, TlsAcceptor) {
+    let made = rcgen::generate_simple_self_signed(names).expect("certificate");
+    let cert = made.cert.der().clone();
+    let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(made.signing_key.serialize_der()));
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("versions")
+    .with_no_client_auth()
+    .with_single_cert(vec![cert.clone()], key)
+    .expect("server config");
+    (cert, TlsAcceptor::from(Arc::new(config)))
+}
+
+/// The names a default fixture's certificate is good for.
+fn default_names() -> Vec<String> {
+    [REGISTRY, OTHER, "127.0.0.1"].map(str::to_owned).to_vec()
+}
+
+/// What a fixture served in memory answers with.
+#[derive(Clone)]
+struct Endpoint {
+    acceptor: Option<TlsAcceptor>,
+    state: Arc<Mutex<State>>,
+}
+
+/// Registries served in memory, by port: no socket is bound or connected. A client made
+/// by [`Fixture::client_with`] for a fixture of the network, or given
+/// [`Network::connector`], reaches every fixture of the network at its loopback address
+/// and port, after the client's own resolution and address checks; an address of no
+/// fixture is refused as a closed port is.
+#[derive(Clone, Default)]
+pub struct Network {
+    endpoints: Arc<Mutex<BTreeMap<u16, Endpoint>>>,
+}
+
+impl Network {
+    /// A registry over TLS, its certificate good for the test names.
+    pub fn start(&self) -> Fixture {
+        let (cert, acceptor) = tls_for(default_names());
+        self.add(cert, Some(acceptor))
+    }
+
+    /// A registry over plain http.
+    pub fn start_plain(&self) -> Fixture {
+        let (cert, _) = tls_for(vec![REGISTRY.to_owned()]);
+        self.add(cert, None)
+    }
+
+    fn add(&self, cert: CertificateDer<'static>, acceptor: Option<TlsAcceptor>) -> Fixture {
+        let state = Arc::new(Mutex::new(State {
+            plain: acceptor.is_none(),
+            ..State::default()
+        }));
+        let mut endpoints = self.endpoints.lock().expect("lock");
+        let port = 40_000 + u16::try_from(endpoints.len()).expect("ports");
+        let endpoint = Endpoint {
+            acceptor,
+            state: Arc::clone(&state),
+        };
+        endpoints.insert(port, endpoint);
+        Fixture {
+            port,
+            cert,
+            state,
+            task: None,
+            network: Some(self.clone()),
+        }
+    }
+
+    /// What a client connects with to reach the network's fixtures.
+    pub fn connector(&self) -> Arc<dyn Connect> {
+        Arc::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl Connect for Network {
+    async fn connect(&self, addrs: &[SocketAddr]) -> std::io::Result<Box<dyn Io>> {
+        let found = {
+            let endpoints = self.endpoints.lock().expect("lock");
+            addrs
+                .iter()
+                .find_map(|addr| endpoints.get(&addr.port()).cloned())
+        };
+        let Some(endpoint) = found else {
+            return Err(std::io::ErrorKind::ConnectionRefused.into());
+        };
+        let (client, server) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            match endpoint.acceptor {
+                Some(acceptor) => {
+                    if let Ok(stream) = acceptor.accept(server).await {
+                        serve(stream, endpoint.state).await;
+                    }
+                }
+                None => serve(server, endpoint.state).await,
+            }
+        });
+        Ok(Box::new(client))
     }
 }
 
 impl Fixture {
     pub async fn start() -> Self {
-        let names = [REGISTRY, OTHER, "127.0.0.1"].map(str::to_owned).to_vec();
-        Self::start_named(names).await
+        Self::start_named(default_names()).await
+    }
+
+    /// A registry over TLS served in memory, on a network of its own: no socket.
+    pub fn in_memory() -> Self {
+        Network::default().start()
+    }
+
+    /// The network a fixture served in memory is on.
+    pub fn network(&self) -> Network {
+        self.network.clone().expect("a fixture served in memory")
     }
 
     /// A fixture whose certificate is valid for exactly `names`.
@@ -193,18 +323,8 @@ impl Fixture {
 
     async fn start_at(bind: &str, tls: Option<Vec<String>>) -> Self {
         let names = tls.clone().unwrap_or_else(|| vec![REGISTRY.to_owned()]);
-        let made = rcgen::generate_simple_self_signed(names).expect("certificate");
-        let cert = made.cert.der().clone();
-        let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(made.signing_key.serialize_der()));
-        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("versions")
-        .with_no_client_auth()
-        .with_single_cert(vec![cert.clone()], key)
-        .expect("server config");
-        let acceptor = tls.map(|_| TlsAcceptor::from(Arc::new(config)));
+        let (cert, acceptor) = tls_for(names);
+        let acceptor = tls.map(|_| acceptor);
         let listener = TcpListener::bind(bind).await.expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let state = Arc::new(Mutex::new(State {
@@ -242,7 +362,8 @@ impl Fixture {
             port,
             cert,
             state,
-            task,
+            task: Some(task),
+            network: None,
         }
     }
 
@@ -293,10 +414,14 @@ impl Fixture {
 
     /// A client with exactly this allow-list.
     pub fn client_with(&self, allow: Vec<Allow>) -> Client {
-        Client::with_roots(Policy::new(allow), vec![self.cert.clone()])
+        let client = Client::with_roots(Policy::new(allow), vec![self.cert.clone()])
             .with_resolved(REGISTRY, LOOPBACK)
             .with_resolved(OTHER, LOOPBACK)
-            .with_resolved("rebind.test", LOOPBACK)
+            .with_resolved("rebind.test", LOOPBACK);
+        match &self.network {
+            Some(network) => client.with_connector(network.connector()),
+            None => client,
+        }
     }
 
     /// Publishes `artifact`: its manifest under its digest, and every blob.
@@ -464,7 +589,21 @@ fn answer(s: &State, request: &Request) -> Answer {
     if b.redirect_without_location {
         return Answer::Bytes(response(307, &[], b""));
     }
-    if path.starts_with("/token") {
+    if let Some((_, to)) = b
+        .redirects
+        .iter()
+        .find(|(from, _)| path.starts_with(from.as_str()))
+    {
+        return Answer::Bytes(response(307, &[("Location", to.clone())], b""));
+    }
+    if path.starts_with("/token") || path.starts_with("/issued") {
+        if b.token_basic.is_some() && request.authorization != b.token_basic {
+            return Answer::Bytes(response(
+                401,
+                &[("WWW-Authenticate", r#"Basic realm="tokens""#.to_owned())],
+                b"who are you",
+            ));
+        }
         if let Some(status) = b.token_status {
             return Answer::Bytes(response(status, &[], b"no token"));
         }

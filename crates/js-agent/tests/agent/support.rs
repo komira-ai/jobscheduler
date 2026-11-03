@@ -318,6 +318,8 @@ pub struct Host {
     pub euid: u32,
     /// Where the check of the directories above a scratch root begins (`/` as in production).
     pub ancestors_floor: PathBuf,
+    /// The owner a `--registry-credentials` file must have (root, as in production).
+    pub secret_owner: u32,
 }
 
 pub fn platform(os: &str, arch: &str) -> Platform {
@@ -345,6 +347,7 @@ pub fn linux_host() -> Host {
             .with_link("/proc/1/ns/mnt", "mnt:[4026531841]"),
         euid: 0,
         ancestors_floor: PathBuf::from("/"),
+        secret_owner: 0,
     }
 }
 
@@ -360,6 +363,7 @@ pub fn mac_host() -> Host {
         files: FakeFiles::default(),
         euid: 0,
         ancestors_floor: PathBuf::from("/"),
+        secret_owner: 0,
     }
 }
 
@@ -684,6 +688,7 @@ pub fn run_with_store(
         rescue_bound: Some(RESCUE_TEST_BOUND),
         euid: host.euid,
         ancestors_floor: &host.ancestors_floor,
+        secret_owner: host.secret_owner,
     };
     let argv = std::iter::once("js-agent").chain(args.iter().copied());
     let argv = argv.map(Into::into).collect();

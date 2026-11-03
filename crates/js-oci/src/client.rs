@@ -2,7 +2,7 @@
 //! digest it is named by before anyone uses it.
 
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use hyper::header::{ACCEPT, AUTHORIZATION, HeaderName, WWW_AUTHENTICATE};
@@ -10,14 +10,14 @@ use rustls::pki_types::CertificateDer;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 
-use crate::http::{Http, Reach, RootSummary, Roots, Timeouts};
+use crate::http::{Connect, Http, Reach, RootSummary, Roots, Timeouts};
 use crate::location::Authority;
 use crate::location::{HTTP_PORT, HTTPS_PORT};
 use crate::manifest::{self, Descriptor, Kind, Manifest};
 use crate::source::BundleSource;
 use crate::text;
 use crate::verify::Receiving;
-use crate::{Digest, Error, Location, Policy};
+use crate::{Credentials, Digest, Error, Location, Policy};
 
 /// Where the bytes of a blob go as they arrive.
 ///
@@ -127,6 +127,16 @@ impl Client {
         self
     }
 
+    /// Opens connections with `connect` in place of TCP: for a test that serves its
+    /// registry in memory. The client still resolves every host and checks every address
+    /// against the policy first, and runs TLS, the requests and redirects over the stream
+    /// `connect` returns, exactly as over TCP.
+    #[must_use]
+    pub fn with_connector(mut self, connect: Arc<dyn Connect>) -> Self {
+        self.http.connect_with(connect);
+        self
+    }
+
     /// The repository `location` names.
     ///
     /// # Errors
@@ -134,9 +144,11 @@ impl Client {
     pub fn repository(&self, location: Location) -> Result<Repository<'_>, Error> {
         self.http.policy.admit(&location)?;
         let plain = self.http.policy.plain_http(&location);
+        let credentials = self.http.policy.credentials(&location);
         Ok(Repository {
             http: &self.http,
             plain,
+            credentials,
             location,
             token: Mutex::new(None),
         })
@@ -150,12 +162,14 @@ impl Client {
 pub struct Repository<'c> {
     http: &'c Http,
     plain: bool,
+    /// For the registry's own token realm ([`crate::Allow::with_credentials`]).
+    credentials: Option<Credentials>,
     location: Location,
     token: Mutex<Option<String>>,
 }
 
-/// Prints the repository and never the token: a caller logs `{repo:?}`, and the bearer
-/// token the registry issued is a credential.
+/// Prints the repository and never the token or the credentials: a caller logs
+/// `{repo:?}`, and the bearer token the registry issued is a credential.
 impl std::fmt::Debug for Repository<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Repository")
@@ -249,13 +263,15 @@ impl Repository<'_> {
         }
     }
 
-    /// The anonymous pull token a `Bearer` challenge asks for, from an endpoint on the
-    /// registry's host or another allow-listed one.
+    /// The pull token a `Bearer` challenge asks for, from an endpoint on the registry's
+    /// host or another allow-listed one: asked anonymously, or with the entry's
+    /// credentials when [`Repository::basic_auth`] says they may go there.
     async fn fetch_token(&self, challenge: &str) -> Result<String, Error> {
         let params = Challenge::parse(challenge)?;
         let (url, realm) = self.token_url(&params)?;
         let what = text::url(&url);
-        let response = self.http.get(&url, &[], self.reach(&realm)).await?;
+        let headers = self.basic_auth(&realm);
+        let response = self.http.get(&url, &headers, self.reach(&realm)).await?;
         if !response.status().is_success() {
             return Err(Error::Status {
                 url: what,
@@ -279,6 +295,20 @@ impl Repository<'_> {
             .or(token.access_token)
             .filter(|t| !t.is_empty())
             .ok_or_else(|| Error::Auth(format!("{what}: the answer holds no token")))
+    }
+
+    /// The `Authorization` the token request to `realm` (which passed the realm checks)
+    /// carries: the entry's credentials when it has them, the repository is pulled over
+    /// https, and `realm` is the registry's own host and port; nothing otherwise. The
+    /// request does not keep it across a redirect ([`Http::get`]).
+    fn basic_auth(&self, realm: &Authority) -> Vec<(HeaderName, String)> {
+        let own = !self.plain & (realm == self.location.endpoint());
+        self.credentials
+            .as_ref()
+            .filter(|_| own)
+            .map(|credentials| (AUTHORIZATION, credentials.header().to_owned()))
+            .into_iter()
+            .collect()
     }
 
     /// The URL to ask for a token, and the endpoint it is at. The realm must be an https
@@ -369,7 +399,7 @@ impl Challenge {
         let (scheme, rest) = header.split_once(' ').unwrap_or((header, ""));
         if !scheme.eq_ignore_ascii_case("bearer") {
             return Err(Error::Auth(format!(
-                "the registry asks for {} authentication; only anonymous Bearer tokens are supported",
+                "the registry asks for {} authentication; only Bearer tokens are supported",
                 text::shown(scheme)
             )));
         }

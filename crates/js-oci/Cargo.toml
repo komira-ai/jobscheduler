@@ -11,6 +11,7 @@ publish.workspace = true
 # over hyper and rustls (no HTTP client crate, so a daemon links nothing it does not use).
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 bytes.workspace = true
 hex.workspace = true
 http-body-util.workspace = true

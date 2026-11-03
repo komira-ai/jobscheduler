@@ -484,6 +484,17 @@ pub struct Cli {
     /// runtimes do not.
     #[arg(long, value_name = "HOST/PREFIX")]
     pub image_allow: Vec<String>,
+    /// The credentials an allow-list entry sends to its registry's token realm, for a
+    /// private package: `ENTRY=PATH`, where `ENTRY` is an `--image-allow`,
+    /// `--bundle-registry-allow` or `--bundle-registry-allow-private` entry as given there
+    /// and `PATH` a file holding one line `USER:PASSWORD`; repeatable, once per entry. The
+    /// file must be a regular file (not a link) owned by root with no permission for group
+    /// or others, at most 4096 bytes, in a root-owned directory that group and others
+    /// cannot write; it is read at start, and a file or entry that breaks a rule stops the
+    /// agent. The credentials go only to the token realm on the registry's own host, over
+    /// https; never to manifest or blob requests, redirects or other hosts.
+    #[arg(long = "registry-credentials", value_name = "HOST[:PORT]/PREFIX=PATH")]
+    pub registry_credentials: Vec<String>,
     /// How many seconds a container gets to stop on its own before it is killed, whenever
     /// the agent stops one: a `Stop` or `Cancel` from the server, a job past its wall-time
     /// limit, the end of a drain. By default 10; at most 3600. Needs `--container-bin`.

@@ -7,5 +7,6 @@
 #![cfg(target_os = "linux")]
 
 mod config;
+mod private;
 mod pull;
 mod source;
