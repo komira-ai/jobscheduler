@@ -51,6 +51,9 @@ fn rig_over<C: js_agent::Connector + Send + 'static>(
     let mut flags = vec![
         "--host-id",
         "h1",
+        "--runtime",
+        "docker",
+        "--allow-container-engine",
         "--container-bin",
         &exec,
         "--container-user",

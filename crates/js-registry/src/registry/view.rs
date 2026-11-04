@@ -2,7 +2,7 @@
 //! host is, read from the parts of the registry's state that say it.
 
 use js_lease::Timestamp;
-use js_pool_static::HostBook;
+use js_provider::HostBook;
 use js_types::HostId;
 
 use super::record::Record;

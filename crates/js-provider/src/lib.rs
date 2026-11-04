@@ -18,13 +18,20 @@
 //! Observed state follows 5.6: [`Observed::Present`] and [`Observed::Absent`] are
 //! answers, [`Observed::Unknown`] is the lack of one. Only `Absent` frees a booking
 //! ([`Observed::frees_booking`]).
+//!
+//! [`HostBook`] is the booking table a pool of hosts keeps: the leases each host holds
+//! and what each books there, and every lease it has stopped. The static pool (`js-pool-static`) and the
+//! registry of self-registered hosts (`js-registry`) both book through it, so neither
+//! copies its rules.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod ack;
+mod book;
 mod spec;
 
 pub use ack::{Call, HostCapacity, Observed, StartAck, StopAck};
+pub use book::{Candidate, ChooseOver, Held, HostBook, SeatError};
 pub use spec::{RefusalCode, StartSpec};
 
 use js_types::{LeaseId, ProviderId, ResourceClass};
