@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use js_elastic::{Demand, Offer, PriceUnit, ProviderCaps};
-use js_types::ExecMode;
+use js_types::{Arch, ExecMode, normalise_arch};
 
 use crate::model::{Architecture, InstanceTypeOffer};
 use crate::options::OptionTable;
@@ -14,11 +14,14 @@ const GIB: u64 = 1 << 30;
 /// The operating system of every instance type: Lambda launches Linux only.
 const OS: &str = "linux";
 
+/// The offer's architecture in the one spelling: `x86_64`, `arm64`, and any other text the
+/// catalog gives through [`normalise_arch`], so a catalog that says `aarch64` offers
+/// `arm64` and one this crate does not know is kept as the catalog spells it.
 fn arch_name(architecture: &Architecture) -> String {
     match architecture {
-        Architecture::X86_64 => "x86_64".to_owned(),
-        Architecture::Arm64 => "aarch64".to_owned(),
-        Architecture::Other(other) => other.clone(),
+        Architecture::X86_64 => Arch::X86_64.name().to_owned(),
+        Architecture::Arm64 => Arch::Arm64.name().to_owned(),
+        Architecture::Other(other) => normalise_arch(other).to_owned(),
     }
 }
 
@@ -104,6 +107,9 @@ pub(crate) fn offers(
                 gpu_class: Some(row.gpu_class.clone()),
                 os: OS.to_owned(),
                 arch: arch_name(&kind.architecture),
+                // The catalog does not say which ISA level an instance type's CPU reaches,
+                // so the offer states none and fits no demand that asks for a level.
+                isa_level: None,
                 exec: ExecMode::Container,
                 price_cents_per_hour: Some(kind.price_cents_per_hour),
                 price_unit: PriceUnit::UsCents,
@@ -175,6 +181,7 @@ mod tests {
             disk_bytes: None,
             os: None,
             arch: None,
+            isa_level: None,
             exec: None,
         }
     }

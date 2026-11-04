@@ -15,17 +15,27 @@ use xtask::release::stage::{
 };
 
 const LINUX: &str = "x86_64-unknown-linux-musl";
+const ARM_LINUX: &str = "aarch64-unknown-linux-musl";
 const MAC: &str = "aarch64-apple-darwin";
 
-/// A checkout of its own, unique to the test, with the built binaries of both targets, the
-/// license and the declaration.
+/// The five binaries a release ships for Linux, of both architectures.
+const LINUX_BINS: [&str; 5] = ["js-lease-server", "js", "js-agent", "js-bundle", "js-mdm"];
+
+/// A checkout of its own, unique to the test, with the built binaries of the targets (the agent
+/// and the client for x86_64 Linux and the Mac, all five Linux binaries for arm64 Linux), the
+/// license and the declaration. The x86_64 checkout lacks `js-lease-server` on purpose: a test
+/// below stages it to see the copy fail.
 fn checkout(name: &str) -> TestDir {
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
     let dir = tmp.path();
-    for target in [LINUX, MAC] {
+    for (target, bins) in [
+        (LINUX, &["js-agent", "js"][..]),
+        (MAC, &["js-agent", "js"][..]),
+        (ARM_LINUX, &LINUX_BINS[..]),
+    ] {
         let release = dir.join(format!("target/{target}/release"));
         std::fs::create_dir_all(&release).expect("target dir");
-        for bin in ["js-agent", "js"] {
+        for &bin in bins {
             let file = release.join(bin);
             std::fs::write(&file, format!("{bin} for {target}")).expect("binary");
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).expect("mode");
@@ -141,6 +151,114 @@ fn every_other_archive_holds_the_binary_and_the_license_only() {
             [
                 Member {
                     source: format!("target/{target}/release/{bin}"),
+                    path: bin.to_owned(),
+                },
+                Member {
+                    source: "LICENSE".to_owned(),
+                    path: "LICENSE".to_owned(),
+                },
+            ]
+        );
+    }
+}
+
+/// The arm64 Linux js-agent archive holds what the x86_64 one does: its binary (still
+/// executable), the license and the declaration at `updater.d/js-agent.toml`, each with the bytes
+/// of the checkout's file, in a directory named for the arm64 target. Catches a `members` that
+/// keys the declaration on the x86_64 target's name, which would ship an arm64 agent the
+/// updater cannot read the rights of a release from.
+#[test]
+fn the_arm64_linux_agent_archive_holds_the_binary_the_license_and_the_declaration() {
+    let tmp = checkout("stage-arm64-linux-agent");
+    let repo = tmp.path();
+    let line = run(&args(repo, "js-agent", ARM_LINUX)).expect("staged");
+    let top = repo.join(format!("stage/js-agent-1.2.3-{ARM_LINUX}"));
+    assert_eq!(
+        line,
+        format!(
+            "staged {}: js-agent, LICENSE, updater.d/js-agent.toml",
+            top.display()
+        )
+    );
+    assert_eq!(
+        tree(&repo.join("stage")),
+        [
+            "js-agent-1.2.3-aarch64-unknown-linux-musl/",
+            "js-agent-1.2.3-aarch64-unknown-linux-musl/LICENSE",
+            "js-agent-1.2.3-aarch64-unknown-linux-musl/js-agent",
+            "js-agent-1.2.3-aarch64-unknown-linux-musl/updater.d/",
+            "js-agent-1.2.3-aarch64-unknown-linux-musl/updater.d/js-agent.toml",
+        ]
+    );
+    for (member, source) in [
+        ("js-agent", format!("target/{ARM_LINUX}/release/js-agent")),
+        ("LICENSE", "LICENSE".to_owned()),
+        (DECLARATION_MEMBER, DECLARATION_SOURCE.to_owned()),
+    ] {
+        assert_eq!(
+            std::fs::read(top.join(member)).expect("staged file"),
+            std::fs::read(repo.join(source)).expect("source"),
+            "{member}"
+        );
+    }
+    // The binary is the arm64 build, not the x86_64 one of the same name.
+    assert_eq!(
+        std::fs::read(top.join("js-agent")).expect("binary"),
+        format!("js-agent for {ARM_LINUX}").into_bytes()
+    );
+    let mode = std::fs::metadata(top.join("js-agent"))
+        .expect("binary")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o111, 0o111, "{mode:o}");
+    assert_eq!(
+        members("js-agent", ARM_LINUX),
+        [
+            Member {
+                source: format!("target/{ARM_LINUX}/release/js-agent"),
+                path: "js-agent".to_owned(),
+            },
+            Member {
+                source: "LICENSE".to_owned(),
+                path: "LICENSE".to_owned(),
+            },
+            Member {
+                source: DECLARATION_SOURCE.to_owned(),
+                path: DECLARATION_MEMBER.to_owned(),
+            },
+        ]
+    );
+}
+
+/// Every other arm64 Linux archive (the lease server's, the client's, the bundle tool's and
+/// js-mdm's) holds the binary and the license only, as its x86_64 twin does. Catches a
+/// declaration added to an archive that is not the agent's.
+#[test]
+fn every_other_arm64_linux_archive_holds_the_binary_and_the_license_only() {
+    for bin in LINUX_BINS.into_iter().filter(|&bin| bin != "js-agent") {
+        let tmp = checkout(&format!("stage-arm64-other-{bin}"));
+        let repo = tmp.path();
+        let line = run(&args(repo, bin, ARM_LINUX)).expect("staged");
+        assert!(line.ends_with(&format!(": {bin}, LICENSE")), "{line}");
+        let name = format!("{bin}-1.2.3-aarch64-unknown-linux-musl");
+        assert_eq!(
+            tree(&repo.join("stage")),
+            [
+                format!("{name}/"),
+                format!("{name}/LICENSE"),
+                format!("{name}/{bin}"),
+            ]
+        );
+        assert_eq!(
+            std::fs::read(repo.join(format!("stage/{name}/{bin}"))).expect("binary"),
+            format!("{bin} for {ARM_LINUX}").into_bytes(),
+            "{bin}"
+        );
+        assert_eq!(
+            members(bin, ARM_LINUX),
+            [
+                Member {
+                    source: format!("target/{ARM_LINUX}/release/{bin}"),
                     path: bin.to_owned(),
                 },
                 Member {

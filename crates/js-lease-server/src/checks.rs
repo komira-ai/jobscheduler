@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use js_elastic::{CapacityProvider, CheckResult, Offer};
 use js_lease::{Clock, Timestamp};
+use js_types::normalise_arch;
 use serde::Serialize;
 use tokio::task::spawn_blocking;
 use tracing::{info, warn};
@@ -217,23 +218,27 @@ fn catalog_notes(offers: &[Offer], floor: &Floor, pins: Option<&AgentPins>) -> V
         ));
     }
     if let Some(offer) = pins.and_then(|pins| pins.missing(offers)) {
+        let arch = normalise_arch(&offer.arch);
         notes.push(format!(
-            "catalog: {} is for the architecture {}, which has no agent pin (agent.{})",
-            offer.id, offer.arch, offer.arch
+            "catalog: {} is for the architecture {arch}, which has no agent pin (agent.{arch})",
+            offer.id
         ));
     }
     notes
 }
 
-/// The architectures a pool that launches has an agent pinned for. An offer of another
-/// is never launched, so the pool says so while it is unavailable.
+/// The architectures a pool that launches has an agent pinned for, in the one spelling
+/// (the keys of the loaded pins). An offer of another is never launched, so the pool says
+/// so while it is unavailable.
 #[derive(Debug, Clone)]
 pub(crate) struct AgentPins(pub(crate) BTreeSet<String>);
 
 impl AgentPins {
     /// The first of `offers` of an architecture with no pin.
     fn missing<'a>(&self, offers: &'a [Offer]) -> Option<&'a Offer> {
-        offers.iter().find(|offer| !self.0.contains(&offer.arch))
+        offers
+            .iter()
+            .find(|offer| !self.0.contains(normalise_arch(&offer.arch)))
     }
 }
 

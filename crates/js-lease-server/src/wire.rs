@@ -77,8 +77,9 @@ impl AcquireBody {
     }
 
     /// The request and the ttl asked for, or the 400 for a body that names an id, a
-    /// GPU class or a `disk_bytes` the types refuse, or a `disk-gib` or `exec` capability that is not a
-    /// requirement (the registry and the scaler read them as the job's disk and mode).
+    /// GPU class or a `disk_bytes` the types refuse, or a `disk-gib`, `exec` or `isa_level`
+    /// capability that is not a requirement (the registry and the scaler read them as the
+    /// job's disk, mode and least ISA level).
     pub(crate) fn into_parts(self) -> Result<(Request, Option<Duration>), ApiError> {
         let class = ClassId::new(&self.class)
             .map_err(|_| ApiError::bad_request("class is not a valid class id"))?;
@@ -116,6 +117,9 @@ impl AcquireBody {
                     "disk-gib must be a whole number of GiB below 2^34"
                 }
                 RequirementsError::BadExec(_) => "exec must be container or sandbox-exec",
+                RequirementsError::BadIsaLevel(_) => {
+                    "isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a"
+                }
             })
         })?;
         Ok((request, self.ttl_seconds.map(Duration::from_secs)))
@@ -559,6 +563,64 @@ mod tests {
             assert!(!reason.contains("lots"), "{reason}");
             assert!(!reason.contains("vm"), "{reason}");
         }
+    }
+
+    /// Asserts that an `isa_level` capability that is not a level is the 400 that names
+    /// `isa_level` and never repeats the value, the same refusal as a bad `disk-gib`.
+    /// Catches a level the server admits but no host can state, which would wait for ever.
+    #[test]
+    fn a_bad_isa_level_is_a_400_naming_it() {
+        for caps in [
+            r#"{"isa_level":"x86-64-v9"}"#,
+            r#"{"isa_level":""}"#,
+            r#"{"isa_level":"x86-64-v3,x86-64-v4"}"#,
+        ] {
+            let err = body(caps).into_parts().unwrap_err();
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                err.reason.as_deref(),
+                Some("isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a"),
+                "{caps}"
+            );
+        }
+    }
+
+    /// Asserts that the request bodies a client of the previous release sends (with and
+    /// without `capabilities.arch`, `arch=x86_64`, `arch=arm64`, `disk-gib` and `exec`)
+    /// parse to the requirements they did, with no ISA level; that `arch=aarch64` reads as
+    /// `arm64`; and that a body naming `isa_level` among its capabilities, the key the
+    /// capability matcher already reads, asks for that level. Catches a level made a
+    /// required part of a body, and a body of the previous release that reads differently.
+    #[test]
+    fn previous_request_bodies_parse_unchanged() {
+        use js_types::{ArmVersion, IsaLevel, X86Level};
+        let wanted = |caps: &str| {
+            let (request, _) = body(caps).into_parts().unwrap();
+            Requirements::from_request(&request)
+        };
+        let any = wanted("{}");
+        assert_eq!((any.os, any.arch, any.isa_level), (None, None, None));
+        assert_eq!((any.disk_bytes, any.exec), (None, None));
+        for arch in ["x86_64", "arm64"] {
+            let one = wanted(&format!(r#"{{"os":"linux","arch":"{arch}"}}"#));
+            assert_eq!(one.arch.as_deref(), Some(arch));
+            assert_eq!(one.os.as_deref(), Some("linux"));
+            assert_eq!(one.isa_level, None);
+        }
+        let full = wanted(r#"{"arch":"x86_64","disk-gib":"40","exec":"container"}"#);
+        assert_eq!(full.disk_bytes, Some(40 << 30));
+        assert_eq!(full.exec, Some(ExecMode::Container));
+        assert_eq!(full.isa_level, None);
+        assert_eq!(
+            wanted(r#"{"arch":"aarch64"}"#).arch.as_deref(),
+            Some("arm64")
+        );
+        assert_eq!(
+            wanted(r#"{"isa_level":"x86-64-v3"}"#).isa_level,
+            Some(IsaLevel::X86_64(X86Level::V3))
+        );
+        let arm = wanted(r#"{"arch":"arm64","isa_level":"armv8.2-a"}"#);
+        assert_eq!(arm.isa_level, Some(IsaLevel::Arm64(ArmVersion::V8_2)));
     }
 
     /// Asserts the renewal body: without a reservation it is the old body byte for byte,

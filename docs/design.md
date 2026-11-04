@@ -734,6 +734,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-registry` (merged) | new | the registered hosts: `RegisteredProvider` is the core of the `DefaultProvider` (5.5, providers.md) |
 | `js-lease-server` (merged) | new | level 1 over HTTP; `CapacitySource`; `LayeredProvider` (static, then registered) becomes the configured hierarchy; gains the pool-scaler tick; is the service of 5.16 (readiness, boot grace and a state check at steps 48 to 50) |
 | `js-cli` (merged) | new | the level-1 client; gains pool selection |
+| `js-proto` (merged) | new | the job service as protobuf (package `jobscheduler.v1`: jobs, hosts, pools, providers, usage) with its generated messages and gRPC client and server traits (runtime layer); no server implements it yet |
 | `js-coverage` (merged) | new | the coverage ratchet (R6) |
 | `js-config` | new | the configuration schema and loader of 5.7 |
 | `js-provider-aws` | new | the `aws` capacity provider over a cloud-client trait with a fake (5.5); disabled by default |

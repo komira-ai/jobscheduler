@@ -165,10 +165,10 @@ fn the_bound_saturates_and_counts_an_acquire_that_may_land() {
 fn the_capabilities_count_offers_with_no_capacity_and_no_gpu() {
     let mut cpu = offer(None);
     (cpu.id, cpu.gpus, cpu.gpu_class, cpu.available) = ("cpu".to_owned(), 0, None, false);
-    cpu.arch = "aarch64".to_owned();
+    cpu.arch = "arm64".to_owned();
     let cloud = ElasticFake::new(FakeClock::new(START), Billing::Gce, vec![cpu.clone()]);
     let caps = cloud.capabilities();
-    assert_eq!(caps.arch, BTreeSet::from(["aarch64".to_owned()]));
+    assert_eq!(caps.arch, BTreeSet::from(["arm64".to_owned()]));
     assert!(caps.accelerators.is_empty());
     assert!(caps.covers(&cpu));
 }

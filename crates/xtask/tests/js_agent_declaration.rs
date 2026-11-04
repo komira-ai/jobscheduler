@@ -478,14 +478,17 @@ fn carried(deb: &[(&str, u32, Source)], archive: &[Member]) -> Vec<String> {
     missing
 }
 
-/// The deb and the Linux js-agent release archive both carry the declaration, from the same file
-/// of the repository, the archive at the name kbf's release unpacker takes it by
-/// (`updater.d/<binary>.toml`); the Mac archive and the other binaries' archives do not. The
-/// check of this fails when either list omits it.
+/// The deb and the Linux js-agent release archives, x86_64 and arm64, all carry the declaration,
+/// from the same file of the repository, the archives at the name kbf's release unpacker takes it
+/// by (`updater.d/<binary>.toml`); the Mac archive and the other binaries' archives, of either
+/// Linux architecture, do not. The check of this fails when either list omits it, and catches an
+/// arm64 agent archive that drops it.
 #[test]
 fn the_deb_and_the_linux_agent_archive_carry_the_declaration() {
     let linux = stage::members("js-agent", "x86_64-unknown-linux-musl");
     assert_eq!(carried(&FILES, &linux), Vec::<String>::new());
+    let arm_linux = stage::members("js-agent", "aarch64-unknown-linux-musl");
+    assert_eq!(carried(&FILES, &arm_linux), Vec::<String>::new());
     assert_eq!(
         format!("packaging/js-agent/{}", pkg::DECLARATION),
         DECLARATION_SOURCE
@@ -497,10 +500,12 @@ fn the_deb_and_the_linux_agent_archive_carry_the_declaration() {
         .copied()
         .filter(|(_, _, source)| !matches!(source, Source::Declaration))
         .collect();
-    assert_eq!(
-        carried(&deb_without, &linux),
-        ["the deb does not carry the declaration"]
-    );
+    for archive in [&linux, &arm_linux] {
+        assert_eq!(
+            carried(&deb_without, archive),
+            ["the deb does not carry the declaration"]
+        );
+    }
     let mac = stage::members("js-agent", "aarch64-apple-darwin");
     assert_eq!(
         carried(&FILES, &mac),
@@ -511,6 +516,10 @@ fn the_deb_and_the_linux_agent_archive_carry_the_declaration() {
         ("js-agent", "aarch64-apple-darwin"),
         ("js", "x86_64-unknown-linux-musl"),
         ("js-lease-server", "x86_64-unknown-linux-musl"),
+        ("js", "aarch64-unknown-linux-musl"),
+        ("js-lease-server", "aarch64-unknown-linux-musl"),
+        ("js-bundle", "aarch64-unknown-linux-musl"),
+        ("js-mdm", "aarch64-unknown-linux-musl"),
     ] {
         assert!(
             !stage::members(bin, target)

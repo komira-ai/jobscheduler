@@ -91,6 +91,7 @@ fn request(scheduler: &str, offer: &str, zone: &str) -> AcquireRequest {
             gpu_class: None,
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
+            isa_level: None,
             exec: ExecMode::Container,
             price_cents_per_hour: Some(75),
             price_unit: PriceUnit::UsCents,

@@ -148,9 +148,9 @@ pub use scheduler::memory::{
     MemoryState, NOT_STARTED_RERUNS,
 };
 pub use scheduler::{
-    Avoided, FINISHED_RETENTION, Fate, LeasePhase, LeaseView, MAX_AVOIDED, OpState,
-    PLACEMENT_ROUND, QueueGroup, QueueView, Recovered, RecoveredLease, Scheduler, Snapshot,
-    UNSERVABLE_WAIT, WaitingGroup, WholeMark, WholeReason, WholeState, WholeSummary, WholeWait,
-    platform_label,
+    Avoided, Bar, Cancelled, FINISHED_RETENTION, Fate, LeasePhase, LeaseView, MAX_AVOIDED, OpState,
+    PLACEMENT_ROUND, QueueGroup, QueueView, Recovered, RecoveredLease, RestoredMark, RestoredWhole,
+    Room, Scheduler, Snapshot, UNSERVABLE_WAIT, WaitingGroup, WholeError, WholeMark, WholeReason,
+    WholeState, WholeSummary, WholeWait, platform_label,
 };
 pub use unservable::Unservable;

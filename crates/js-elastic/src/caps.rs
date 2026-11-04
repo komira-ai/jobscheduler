@@ -14,7 +14,7 @@ use crate::offer::{GpuClass, Offer};
 pub struct ProviderCaps {
     /// The operating systems, as [`Offer::os`] spells them (`linux`, `macos`).
     pub os: BTreeSet<String>,
-    /// The CPU architectures, as [`Offer::arch`] spells them (`x86_64`, `aarch64`).
+    /// The CPU architectures, as [`Offer::arch`] spells them (`x86_64`, `arm64`).
     pub arch: BTreeSet<String>,
     /// The GPU classes, as [`Offer::gpu_class`] spells them.
     pub accelerators: BTreeSet<GpuClass>,
@@ -74,6 +74,7 @@ mod tests {
             gpu_class: class.map(|class| GpuClass::parse(class).unwrap()),
             os: os.to_owned(),
             arch: arch.to_owned(),
+            isa_level: None,
             exec: ExecMode::Container,
             price_cents_per_hour: None,
             price_unit: PriceUnit::UsCents,
@@ -102,7 +103,7 @@ mod tests {
         assert!(caps.covers(&offer("linux", "x86_64", Some("nvidia-a10"))));
         assert!(caps.covers(&offer("linux", "x86_64", None)));
         assert!(!caps.covers(&offer("macos", "x86_64", None)));
-        assert!(!caps.covers(&offer("linux", "aarch64", None)));
+        assert!(!caps.covers(&offer("linux", "arm64", None)));
         assert!(!caps.covers(&offer("linux", "x86_64", Some("nvidia-h100"))));
         assert!(!ProviderCaps::default().covers(&offer("linux", "x86_64", None)));
     }

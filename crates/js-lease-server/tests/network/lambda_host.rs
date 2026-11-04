@@ -42,6 +42,7 @@ fn offer(disk_gib: u64) -> Offer {
         gpu_class: Some(GpuClass::parse("nvidia-a10").unwrap()),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
+        isa_level: None,
         exec: ExecMode::Container,
         price_cents_per_hour: Some(129),
         price_unit: PriceUnit::UsCents,

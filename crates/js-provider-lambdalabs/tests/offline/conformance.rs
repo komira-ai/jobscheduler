@@ -198,7 +198,7 @@ gpus = 8
     let class = |text: &str| GpuClass::parse(text).unwrap();
     let expected = ProviderCaps {
         os: BTreeSet::from(["linux".to_owned()]),
-        arch: BTreeSet::from(["aarch64".to_owned(), "x86_64".to_owned()]),
+        arch: BTreeSet::from(["arm64".to_owned(), "x86_64".to_owned()]),
         accelerators: BTreeSet::from([class("nvidia-example"), class("nvidia-sample")]),
         whole_host: true,
         host_ports: true,

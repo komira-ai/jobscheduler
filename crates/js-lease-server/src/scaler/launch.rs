@@ -11,6 +11,7 @@ use js_elastic::{
     RefusalCode, SchedulerId, Secret,
 };
 use js_scaler::AcquirePlan;
+use js_types::normalise_arch;
 use tracing::warn;
 
 use crate::bootstrap::{BootSecrets, payload};
@@ -60,8 +61,10 @@ impl Launcher {
     /// slot twice) is a [`RefusalCode::Shape`] refusal, which nothing retries.
     pub fn acquire(&self, plan: &AcquirePlan, token: Secret) -> Acquired {
         let host = HostName::derive(&self.scheduler, &plan.acquire);
-        let Some(agent) = self.agents.get(&plan.offer.arch) else {
-            return Self::unpinned(&plan.offer.arch);
+        // The pins are keyed by the architecture in the one spelling, an offer's own.
+        let arch = normalise_arch(&plan.offer.arch);
+        let Some(agent) = self.agents.get(arch) else {
+            return Self::unpinned(arch);
         };
         let launch = LaunchCtx {
             pool: &plan.pool,

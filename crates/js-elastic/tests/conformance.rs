@@ -115,6 +115,7 @@ fn offer() -> Offer {
         gpu_class: None,
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
+        isa_level: None,
         exec: ExecMode::Container,
         price_cents_per_hour: Some(1),
         price_unit: PriceUnit::UsCents,

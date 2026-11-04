@@ -54,6 +54,7 @@ use std::time::Duration;
 
 use js_agent_wire::{GpuDevice, Hello, Phase, ProtocolRange, WireShape};
 use js_mac_session::disclaim::Program;
+use js_types::normalise_arch;
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -520,7 +521,8 @@ impl FileReader for SystemFiles {
 pub struct Platform {
     /// `macos`, `linux`, ...
     pub os: String,
-    /// `aarch64`, `x86_64`, ...
+    /// `arm64`, `x86_64`, ...: the architecture in the one spelling ([`normalise_arch`]),
+    /// so Rust's `aarch64` is `arm64`.
     pub arch: String,
 }
 
@@ -529,7 +531,7 @@ impl Platform {
     pub fn current() -> Self {
         Self {
             os: std::env::consts::OS.to_owned(),
-            arch: std::env::consts::ARCH.to_owned(),
+            arch: normalise_arch(std::env::consts::ARCH).to_owned(),
         }
     }
 

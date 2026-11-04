@@ -15,7 +15,7 @@ pub enum RequestError {
     /// A label was refused.
     #[error(transparent)]
     Label(#[from] LabelError),
-    /// The `disk-gib` or `exec` capability is not a requirement.
+    /// The `disk-gib`, `exec` or `isa_level` capability is not a requirement.
     #[error(transparent)]
     Requirements(#[from] RequirementsError),
 }
@@ -44,7 +44,7 @@ pub struct Request {
 
 impl Request {
     /// Applies the rules every request must meet: a positive wall time, labels free
-    /// of reserved keys, and a `disk-gib` and `exec` capability that are requirements
+    /// of reserved keys, and `disk-gib`, `exec` and `isa_level` capabilities that are requirements
     /// ([`Requirements::try_from_request`]). Returns the labels to stamp on every billable resource: the
     /// caller's, plus the validation run label when a validation run id is set.
     pub fn validate(&self) -> Result<Labels, RequestError> {
@@ -125,6 +125,25 @@ mod tests {
             r.validate(),
             Err(RequestError::Requirements(RequirementsError::BadExec(_)))
         ));
+    }
+
+    /// Asserts that a request whose `isa_level` is not a level is refused by `validate`
+    /// naming the text, as a bad `disk-gib` is, and one that names a level passes.
+    /// Catches an admitted request whose level no host can state.
+    #[test]
+    fn a_bad_isa_level_is_refused() {
+        let mut r = request();
+        r.capabilities
+            .insert("isa_level".into(), "armv8.2-a".into());
+        assert!(r.validate().is_ok());
+        r.capabilities
+            .insert("isa_level".into(), "x86-64-v9".into());
+        assert_eq!(
+            r.validate(),
+            Err(RequestError::Requirements(RequirementsError::BadIsaLevel(
+                "x86-64-v9".into()
+            )))
+        );
     }
 
     /// Asserts that a reserved caller label and a malformed validation run id are

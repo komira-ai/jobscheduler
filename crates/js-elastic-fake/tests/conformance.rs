@@ -16,7 +16,7 @@ use js_elastic_fake::{Billing, Call, ElasticFake, FakeClock, PROVIDER_ID, Step};
 use js_types::ProviderId;
 
 /// The fake under the suite: a fresh cloud for each case, whose quota is the room and
-/// whose catalog holds an x86_64 offer and an aarch64 one.
+/// whose catalog holds an x86_64 offer and an arm64 one.
 struct FakeRig {
     fake: ElasticFake,
 }
@@ -44,7 +44,7 @@ impl Rig for FakeRig {
 
     fn make_room(&mut self, machines: u32) {
         let mut arm = offer(Some(PRICE));
-        (arm.id, arm.arch) = ("a10-arm".to_owned(), "aarch64".to_owned());
+        (arm.id, arm.arch) = ("a10-arm".to_owned(), "arm64".to_owned());
         let offers = vec![offer(Some(PRICE)), arm];
         self.fake = ElasticFake::new(FakeClock::new(START), Billing::Lambda, offers);
         let mut knobs = self.fake.knobs();
