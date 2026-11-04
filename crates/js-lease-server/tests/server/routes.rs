@@ -52,7 +52,8 @@ async fn create_honours_ttl_and_validation_run() {
 }
 
 /// Asserts that a request the provider cannot place is a 409 naming the code: no host
-/// is free, or none could ever fit.
+/// is free (`no-capacity`), or no host could ever hold it, which admission refuses
+/// (`no-capable-host`).
 #[tokio::test]
 async fn create_refusals_are_409() {
     let h = Harness::new("create_409").await;
@@ -72,7 +73,7 @@ async fn create_refusals_are_409() {
     let body = with(lease_body(), "resources", big);
     let reply = h.call("POST", "/v1/leases", Some(&body)).await;
     assert_eq!(reply.status, 409);
-    assert_eq!(reply.json(), json!({ "error": "no-fit" }));
+    assert_eq!(reply.json(), json!({ "error": "no-capable-host" }));
 }
 
 /// Asserts that a request breaking the start contract or its class is a 422 naming the

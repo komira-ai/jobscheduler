@@ -1577,6 +1577,7 @@ name = "js-sched"
 version = "0.1.0"
 dependencies = [
  "js-caps",
+ "js-elastic",
  "js-sim",
  "js-sizing",
  "js-types",

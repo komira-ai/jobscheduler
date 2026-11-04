@@ -114,8 +114,8 @@ fn a_start_repeated_under_its_request_id_answers_the_same_lease() {
 }
 
 /// Asserts that each answer of the server maps to its status and prints the code:
-/// 409 refusals are exit 3 (no capacity once both hosts are taken, no fit for a request
-/// no host satisfies), 422 and 400 refusals are exit 4 with the reason when there is
+/// 409 refusals are exit 3 (no capacity once both hosts are taken, no capable host for a
+/// request no host could ever hold), 422 and 400 refusals are exit 4 with the reason when there is
 /// one.
 #[test]
 fn refusals_have_their_exit_status() {
@@ -127,7 +127,7 @@ fn refusals_have_their_exit_status() {
     assert_eq!(full.err, "js: refused: no-capacity\n");
 
     let cases: [(&[&str], u8, &str); 4] = [
-        (&["--gpus", "99"], 3, "js: refused: no-fit\n"),
+        (&["--gpus", "99"], 3, "js: refused: no-capable-host\n"),
         (
             &["--class", "no-such-class"],
             4,
@@ -161,7 +161,7 @@ fn refusals_are_json_with_json() {
     let said: serde_json::Value = serde_json::from_str(&got.err).unwrap();
     assert_eq!(
         said,
-        json!({ "error": "refused", "message": "refused: no-fit" })
+        json!({ "error": "refused", "message": "refused: no-capable-host" })
     );
 }
 
