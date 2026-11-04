@@ -14,6 +14,9 @@ use crate::{JobId, JobSpec, JobState, JobStore, JobStoreError, MINT_TRIES, NewJo
 /// The digits of a minted id.
 const HEX_DIGITS: &[u8] = b"0123456789abcdef";
 
+/// A field of a spec, and how to change it.
+type Change = (&'static str, fn(&mut JobSpec));
+
 fn new_job(id: &JobId, spec: JobSpec, priority: i32) -> NewJob {
     NewJob {
         id: Some(id.clone()),
@@ -88,7 +91,7 @@ pub fn same_id_different_job_is_a_conflict<B: Backend>(backend: &B) {
     let rig = rig(backend);
     let id = rig.queue("b");
     let before = rig.raw("job/b");
-    let changes: [(&str, fn(&mut JobSpec)); 12] = [
+    let changes: [Change; 12] = [
         ("image digest", |spec| {
             spec.image =
                 ImageDigestRef::parse(&format!("team/app:1@{}", digest('b'))).expect("an image");

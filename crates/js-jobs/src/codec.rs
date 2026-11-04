@@ -209,7 +209,11 @@ impl Writer {
         fields.extend(self.0);
         let mut out = vec![FORMAT];
         for (tag, value) in fields {
-            let len = u32::try_from(value.len()).map_err(|_| JobStoreError::TooLarge { tag })?;
+            // The error is built eagerly: no test can allocate a field over 4 GiB, and a closure
+            // that never runs would be a line no test covers.
+            let len = u32::try_from(value.len())
+                .ok()
+                .ok_or(JobStoreError::TooLarge { tag })?;
             out.extend_from_slice(&tag.to_be_bytes());
             out.extend_from_slice(&len.to_be_bytes());
             out.extend_from_slice(&value);
@@ -479,7 +483,10 @@ fn items_of(tag: u16, value: &[u8]) -> Result<Vec<&[u8]>, DecodeError> {
 }
 
 /// The keys and values of a map value.
-fn pairs_of(tag: u16, value: &[u8]) -> Result<Vec<(&[u8], &[u8])>, DecodeError> {
+/// The keys and values of a map value, borrowed from it.
+type Pairs<'a> = Vec<(&'a [u8], &'a [u8])>;
+
+fn pairs_of(tag: u16, value: &[u8]) -> Result<Pairs<'_>, DecodeError> {
     let items = items_of(tag, value)?;
     let pairs = items.chunks_exact(2);
     pairs
