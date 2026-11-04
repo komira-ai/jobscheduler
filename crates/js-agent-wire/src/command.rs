@@ -2,8 +2,10 @@
 
 use std::collections::BTreeMap;
 
+use js_types::{Arch, Os};
 use serde::{Deserialize, Serialize};
 
+use crate::caps::ONE_JOB_CAPABILITY;
 use crate::check::{self, At};
 use crate::error::{Rule, ValidationError};
 use crate::files::{self, RunFile};
@@ -12,6 +14,7 @@ use crate::image;
 use crate::limits;
 use crate::native::{self, NativeSpec};
 use crate::refusal;
+use crate::run::RunSpec;
 
 /// Whether a job is confined to a container or may change the machine (design 5.12).
 ///
@@ -157,6 +160,14 @@ impl Mount {
 
 /// The body of a start: one job.
 ///
+/// A job is named one way on both platforms: a non-empty `image`, pinned by digest, with an
+/// optional `run` that says what runs from it, and the `os` and `arch` of the manifest the
+/// digest pins. Linux runs the image's container; macOS resolves the image to a bundle and
+/// runs its entrypoint under the sandbox. The legacy forms, a container job without `run`
+/// and a `native` body with an optional `bundle` and an empty `image`, are read and checked
+/// as before for this release; [`JobSpec::downgrade_for`] writes a start in them for a host
+/// that did not report the `one-job` capability.
+///
 /// Fields the design gives a start that are not here yet: the fence, the booking, the
 /// deadline, named assignments beyond `gpu_indices`, and environment by reference. The
 /// run-delivery change adds them, as optional fields.
@@ -166,9 +177,10 @@ pub struct JobSpec {
     pub run_id: String,
     /// The lease the run belongs to.
     pub lease_id: String,
-    /// The container image, empty for a native job (see [`JobSpec::native`]); a decoded start
-    /// may leave it out. The agent holds no registry credential, so it must be
-    /// present on the host or pullable without one. A registry reference
+    /// The job's image, empty for a legacy native job (see [`JobSpec::native`]); a decoded
+    /// start may leave it out, and a start with a `run` never does. The agent holds no
+    /// registry credential, so it must be present on the host or pullable without one. A
+    /// registry reference
     /// `name[:tag][@digest]` as the OCI distribution grammar defines it (a domain with an
     /// optional port only in the first component, lower-case path components, a tag of
     /// at most 128 bytes, a digest `algorithm:hex`). A transport prefix such as `oci:`,
@@ -177,11 +189,30 @@ pub struct JobSpec {
     /// start must also pin the image: [`JobSpec::require_pinned`].
     #[serde(default)]
     pub image: String,
-    /// What to run on the host instead of a container. A start has exactly one of a
-    /// non-empty `image` and this body; `image` is empty (and still sent) for a native job,
-    /// so an agent that predates the body refuses the start as `invalid-image` and never
-    /// runs it as a container. A native job is contained, and its `args`, `gpu_indices`
-    /// and `mounts` are empty.
+    /// What runs from the image, on either platform: the program, its arguments,
+    /// environment, inputs, outputs and network ([`RunSpec`]). Valid only beside a non-empty
+    /// `image` (one without is refused `invalid-image`) and never beside `native` (refused
+    /// `invalid-job` naming `run`); the job's own `args` are then empty. The program may be
+    /// `@bundle/<entrypoint>`, an entrypoint of the bundle the image resolves to. An agent
+    /// from before the field ignores it, so a server sends it only to a host that reported
+    /// the `one-job` capability ([`crate::ONE_JOB_CAPABILITY`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunSpec>,
+    /// The operating system of the image manifest the digest pins (`linux`, `macos`).
+    /// Absent on a legacy start. A value this version does not know fails to decode, and
+    /// inside a reply the start reads as [`Command::Unknown`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<Os>,
+    /// The CPU architecture of the image manifest the digest pins (`x86_64`, `arm64`;
+    /// `aarch64` is read as `arm64`). Absent on a legacy start; decoded as `os` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<Arch>,
+    /// What to run on the host instead of a container: a legacy form, read and checked as
+    /// before for this release and removed in a later one ([`JobSpec::run`] replaces it). A
+    /// start has exactly one of a non-empty `image` and this body; `image` is empty (and
+    /// still sent) for a native job, so an agent that predates the body refuses the start
+    /// as `invalid-image` and never runs it as a container. A native job is contained, and
+    /// its `args`, `gpu_indices` and `mounts` are empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<NativeSpec>,
     /// The command line after the image: at most [`limits::MAX_ARGS`] entries, no NUL.
@@ -216,7 +247,9 @@ pub struct JobSpec {
     /// on the agent's clock alone; 0 means no bound.
     #[serde(default)]
     pub valid_for_ms: u64,
-    /// A darwin bundle the job pins: `name[:tag]@sha256:<manifest digest>`, at most one.
+    /// A darwin bundle the job pins: `name[:tag]@sha256:<manifest digest>`, at most one. A
+    /// legacy form, read and checked as before for this release and removed in a later one:
+    /// a `run` names its bundle by the job's `image`.
     /// It is checked like `image` (same alphabet and length) and must be pinned
     /// ([`JobSpec::require_pinned`]). It belongs to a native job and to nothing else: a
     /// bundle without `native`, or beside a non-empty `image`, is refused `invalid-bundle`
@@ -251,9 +284,12 @@ impl JobSpec {
     }
 
     /// Exactly one of the image and the native body names what runs; a native job also
-    /// leaves the container-only fields unused.
+    /// leaves the container-only fields unused. A run is the third case: beside an image.
     fn check_body(&self) -> Result<(), ValidationError> {
         let at = At::new("image", refusal::INVALID_IMAGE);
+        if let Some(run) = &self.run {
+            return self.check_run(at, run);
+        }
         let Some(native) = &self.native else {
             return image::image(at, &self.image);
         };
@@ -262,6 +298,73 @@ impl JobSpec {
         }
         native.validate()?;
         native::check_job(self, native)
+    }
+
+    /// A run names its job by the image, so the image must be there and the legacy native
+    /// body must not; the command line is the run's, so the job's own `args` are empty.
+    /// Nothing here reads `os` or `arch`: a run is checked the same way for both platforms.
+    fn check_run(&self, at: At, run: &RunSpec) -> Result<(), ValidationError> {
+        if self.native.is_some() {
+            return Err(ValidationError::new(
+                "run",
+                Rule::Inconsistent,
+                refusal::INVALID_JOB,
+            ));
+        }
+        image::image(at, &self.image)?;
+        run.validate()?;
+        if !self.args.is_empty() {
+            return Err(ValidationError::new(
+                "args",
+                Rule::Inconsistent,
+                refusal::INVALID_JOB,
+            ));
+        }
+        Ok(())
+    }
+
+    /// The start as a host that reported the capabilities `host_caps` reads it. Called after
+    /// [`JobSpec::validate`] and [`JobSpec::require_pinned`] have passed.
+    ///
+    /// A host that reported `one-job` ([`crate::ONE_JOB_CAPABILITY`]) as `true` gets the
+    /// start unchanged. Any other host gets it in the legacy forms: without `os` and
+    /// `arch`, and a `run` beside an image built for `macos` (a bundle) becomes the `native`
+    /// body with that image as its `bundle` and an empty `image`. A start without a `run` is
+    /// already a legacy one and keeps everything else.
+    ///
+    /// # Errors
+    ///
+    /// [`refusal::INVALID_JOB`] when the start has no legacy form: a `run` beside an image
+    /// that is not named as built for `macos` (a container image, which an older agent
+    /// would run without the run, so it is never sent to one), naming `run`; and a `run`
+    /// whose native form the legacy checks refuse (beside `mounts`, `gpu_indices` or a host
+    /// isolation), naming that field.
+    pub fn downgrade_for(
+        &self,
+        host_caps: &BTreeMap<String, String>,
+    ) -> Result<JobSpec, ValidationError> {
+        if host_caps.get(ONE_JOB_CAPABILITY).map(String::as_str) == Some("true") {
+            return Ok(self.clone());
+        }
+        let mut legacy = self.clone();
+        (legacy.os, legacy.arch) = (None, None);
+        let Some(run) = legacy.run.take() else {
+            return Ok(legacy);
+        };
+        if self.os != Some(Os::Macos) {
+            return Err(ValidationError::new(
+                "run",
+                Rule::Inconsistent,
+                refusal::INVALID_JOB,
+            ));
+        }
+        legacy.bundle = Some(std::mem::take(&mut legacy.image));
+        legacy.native = Some(NativeSpec::from(run));
+        // The run passed the checks the native body shares with it, so what the legacy
+        // checks can still refuse is a job-level field a native job leaves unused, which is
+        // `invalid-job`.
+        legacy.validate()?;
+        Ok(legacy)
     }
 
     /// Checks the start contract and every bound: ids, image, arguments, limits, GPU

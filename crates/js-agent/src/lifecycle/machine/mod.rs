@@ -362,6 +362,19 @@ impl Lifecycle {
                 Some(bundle) => bundle.admit(spec)?,
             }
         }
+        // A start named by its image: the runtime must run images, and a `run` beside the
+        // image has no consumer on any runtime yet, so it is refused rather than dropped.
+        if spec.native.is_none() {
+            self.runtime
+                .check_image()
+                .map_err(|refused| (refused.code, refused.why))?;
+            if spec.run.is_some() {
+                return Err(no(
+                    refusal::RUN_UNSUPPORTED,
+                    "this agent runs an image's own command and no run body yet",
+                ));
+            }
+        }
         if let Some(native) = &spec.native {
             self.runtime
                 .check_native(native)
