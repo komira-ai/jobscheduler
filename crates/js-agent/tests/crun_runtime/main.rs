@@ -16,6 +16,7 @@
 
 mod escape;
 mod escape_xfs;
+mod gpu;
 mod quota;
 #[path = "../runtime_suite/mod.rs"]
 mod runtime_suite;

@@ -13,7 +13,9 @@ use js_contain::delegate::{self, PROC_SELF_CGROUP};
 use js_contain::subids::IdFiles;
 use js_oci::{Client, Policy};
 
-use super::{CgroupSettings, CrunError, CrunRuntime, CrunSettings, Hooks, config_dir};
+use super::{
+    CgroupSettings, CrunError, CrunRuntime, CrunSettings, GpuSettings, Hooks, config_dir, read_node,
+};
 use crate::cli_runtime::{CGROUP_ROOT, CrunPlan, Mapping};
 use crate::crun_host::CrunHost;
 use crate::image::RegistryImages;
@@ -193,6 +195,11 @@ pub fn open(
         host_id: host_id.to_owned(),
         pull_threads: PULL_THREADS,
         files: plan.files.clone(),
+        // A node is read from the host when a run starts, as the start check read it.
+        gpus: plan.gpus.clone().map(|passthrough| GpuSettings {
+            passthrough,
+            read: read_node,
+        }),
     };
     let runtime = CrunRuntime::open_with(settings, Arc::new(images), seams.hooks)?;
     let (uid, gid) = runtime.subordinate_ids();

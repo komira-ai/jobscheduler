@@ -248,6 +248,10 @@ pub struct CrunPlan {
     pub scratch_root: PathBuf,
     /// The root of the runs' files, when the agent has one, set by [`Settings::placed_beside`].
     pub files: Option<FilesRoot>,
+    /// The GPUs a run is given (`--gpu-device`, `--gpu-mount`, `--gpu-env`), when the agent
+    /// passes them, set by [`Settings::with_gpus`].
+    #[cfg(target_os = "linux")]
+    pub gpus: Option<crate::crun::GpuPassthrough>,
     actions: Arc<OnceLock<String>>,
 }
 
@@ -379,6 +383,8 @@ impl Settings {
                 claim_dir: PathBuf::new(),
                 scratch_root: PathBuf::new(),
                 files: None,
+                #[cfg(target_os = "linux")]
+                gpus: None,
                 actions: Arc::new(OnceLock::new()),
             })),
         }
@@ -397,6 +403,17 @@ impl Settings {
             plan.scratch_root = scratch_root.to_owned();
             plan.store = parent.join(CRUN_STORE_DIR);
             plan.files = files;
+        }
+        self
+    }
+
+    /// These crun settings with the GPUs a run is given (none: the runtime runs no GPU job).
+    /// Settings of another runtime are returned as they are.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn with_gpus(mut self, gpus: Option<crate::crun::GpuPassthrough>) -> Self {
+        if let Some(plan) = &mut self.crun {
+            plan.gpus = gpus;
         }
         self
     }

@@ -263,6 +263,7 @@ impl Node {
             host_id: "node-1".to_owned(),
             pull_threads: 1,
             files: None,
+            gpus: None,
         }
     }
 

@@ -62,6 +62,52 @@ Every refusal is found before the first write: a dry run shows the same refusals
 A rerun on a host that is set up changes nothing and exits 3, so it is safe to run again after an
 interruption or to check a host.
 
+## GPU hosts
+
+The script installs no driver and sets no GPU flag. On a host whose GPUs the agent should give its
+jobs, install the driver first (the host's software lifecycle does that, not the agent), then add
+the GPU flags to the unit's `ExecStart`. The agent discovers nothing: it reads no CDI spec and runs
+no vendor hook. It gives a job that booked GPU indices exactly what the flags list:
+
+- `--gpu-device PATH`, repeatable: a character device below `/dev`. A path with `{index}` is one
+  GPU's node and is given only for the indices the job booked; a path without it is given to every
+  GPU job. The job's device cgroup allows these nodes and denies every other device.
+- `--gpu-mount SRC:DST`, repeatable: a directory bound read-only (`nosuid`, `nodev`) at `DST`,
+  not recursively: a mount below the directory on the host does not reach the job. A file source
+  is refused: binding a file where the image has none would leave a file in the image's root that
+  every job of that image shares. `DST` may not be at or below `/proc`, `/sys`, `/dev`,
+  `/scratch`, another mount's destination, or a place the runtime mounts itself (`/work`, `/root`,
+  `/tmp`, `/var/tmp`, `/run`, `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`), nor hold one of
+  them (`/etc`, `/var`). A job whose
+  image has a link or a file on the way to `DST`, or whose driver directory is gone, is refused
+  when it starts, naming `--gpu-mount`; so pick a destination the image does not have, such as
+  `/usr/local/nvidia/lib64`.
+- `--gpu-env NAME=VALUE`, repeatable: a variable set over the image's of that name (one entry,
+  however many the image has).
+
+A job that books no GPU gets none of it. At start every node must be a character device, for every
+GPU the host offers (`--gpus` lowers that), or the agent exits 2 naming the flag; with the flags in
+place the hello reports `gpu-passthrough`. Without `--gpu-device` a start that books a GPU is
+refused `gpu-unsupported`, as before.
+
+An example for an NVIDIA driver, to adapt: the device names are the driver's; the directories are
+ones you make, holding copies of the driver's user-space libraries and programs for that version
+(a link to a file outside the directory does not resolve in the job's container), so that nothing
+else of the host's library directory is given to the job.
+
+```text
+--gpu-device /dev/nvidiactl --gpu-device /dev/nvidia-uvm --gpu-device /dev/nvidia-uvm-tools \
+--gpu-device '/dev/nvidia{index}' \
+--gpu-mount /opt/nvidia-driver/lib64:/usr/local/nvidia/lib64 \
+--gpu-mount /opt/nvidia-driver/bin:/usr/local/nvidia/bin \
+--gpu-env LD_LIBRARY_PATH=/usr/local/nvidia/lib64 \
+--gpu-env PATH=/usr/local/nvidia/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+```
+
+`PATH` replaces the image's own, so list the image's directories after the driver's. A pool whose
+`exec` is `container` and whose shape has GPUs also asks for `gpu-toolkit`, which only the engine
+runtime's `--gpu-toolkit-hook` reports: such a pool does not admit a crun host yet.
+
 ## The scratch quota
 
 The agent puts a project quota on each run's directory, which needs the scratch XFS filesystem

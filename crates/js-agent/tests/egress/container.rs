@@ -200,6 +200,7 @@ impl ContainerHost {
             limits: ContainerLimits::DEFAULT,
             shared: Vec::new(),
             mounts: Vec::new(),
+            devices: Vec::new(),
         }
     }
 
