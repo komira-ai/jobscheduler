@@ -443,14 +443,14 @@ fn the_object_converts_to_its_booking_and_keys() {
         ..AcceleratorRequest::default()
     };
     let need = convert(0, None, Some(vendor_only)).unwrap();
-    assert_eq!((need.gpus, need.gpu_class), (0, None));
+    assert_eq!((need.gpus, need.gpu_class.as_deref()), (0, None));
     assert_eq!(entries(&need), [("accelerator.vendor", "nvidia")]);
     let model_only = AcceleratorRequest {
         model: Some("nvidia-h100".into()),
         ..AcceleratorRequest::default()
     };
     let need = convert(0, None, Some(model_only)).unwrap();
-    assert_eq!((need.gpus, need.gpu_class), (0, None));
+    assert_eq!((need.gpus, need.gpu_class.as_deref()), (0, None));
     let count_only = AcceleratorRequest {
         count: Some(4),
         ..AcceleratorRequest::default()
