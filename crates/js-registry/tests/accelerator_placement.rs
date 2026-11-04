@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::{GpuDevice, Hello};
-use js_provider::StartSpec;
+use js_provider::{Pool, StartSpec};
 use js_registry::PoolConfig;
 use js_types::{Capabilities, ClassId, ProviderId, Request, Resources, Shape};
 use support::*;
@@ -120,6 +120,12 @@ fn reported_accelerator_capabilities_do_not_change_where_a_host_is_placed() {
             ("accelerator.model", model),
             ("accelerator.memory-gib", gib),
         ];
-        assert_eq!(placed(&fx, gpu_request("nvidia-a100", &caps)), expected);
+        // Each request books the model it names, so the H100 one is a valid request that
+        // the host's validated A100 cannot serve, not one refused for contradicting itself.
+        assert_eq!(
+            placed(&fx, gpu_request(model, &caps)),
+            expected,
+            "{model} {gib}"
+        );
     }
 }
