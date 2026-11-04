@@ -2,14 +2,14 @@ use js_types::{HostId, LeaseId, MemoryHeadroom, Shape};
 
 use crate::RefusalCode;
 
-/// The provider calls that can answer Unknown.
+/// The pool calls that can answer Unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Call {
-    /// [`crate::Provider::start`].
+    /// [`crate::Pool::start`].
     Start,
-    /// [`crate::Provider::stop`].
+    /// [`crate::Pool::stop`].
     Stop,
-    /// [`crate::Provider::observe`].
+    /// [`crate::Pool::observe`].
     Observe,
 }
 
@@ -21,7 +21,7 @@ pub enum StartAck {
         /// The host that was booked.
         host: HostId,
     },
-    /// The provider will not run it, for this reason.
+    /// The pool will not run it, for this reason.
     Refused(RefusalCode),
     /// No answer, or a partial one. The start may or may not have taken effect;
     /// look the lease up with `observe` before any retry.
@@ -31,12 +31,12 @@ pub enum StartAck {
 /// What a read of one lease found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Observed {
-    /// The provider confirms the lease, on this host.
+    /// The pool confirms the lease, on this host.
     Present {
         /// The host the lease holds.
         host: HostId,
     },
-    /// The provider answered that the lease does not exist.
+    /// The pool answered that the lease does not exist.
     Absent,
     /// No answer, a partial answer, or an error other than not-found.
     Unknown,
@@ -53,7 +53,7 @@ impl Observed {
 /// The answer to a stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopAck {
-    /// The provider stopped the lease, or found it already gone, and read this back.
+    /// The pool stopped the lease, or found it already gone, and read this back.
     Stopped {
         /// The state read after the stop.
         read_back: Observed,
@@ -62,7 +62,7 @@ pub enum StopAck {
     Unknown,
 }
 
-/// One host of a provider's capacity and who holds it.
+/// One host of a pool's capacity and who holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostCapacity {
     /// The host.

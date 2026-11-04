@@ -13,13 +13,13 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use js_lease::{AcquireError, LeaseTable, ReleaseOutcome, TickReport, Timings};
-use js_provider::Provider;
+use js_provider::Pool;
 use js_registry::{Registry, WholeCounts};
 use serde::Serialize;
 use tokio::sync::{Mutex, MutexGuard};
 use tracing::{error, info};
 
-use crate::adapt::{BoxedProvider, SharedClock};
+use crate::adapt::{BoxedPool, SharedClock};
 use crate::agent_api;
 use crate::agents::Agents;
 use crate::config::{Token, is_private_address};
@@ -41,7 +41,7 @@ use crate::wire::{
 pub const BODY_LIMIT: usize = 64 * 1024;
 
 /// The lease table over the server's provider and clock.
-pub(crate) type Table = LeaseTable<BoxedProvider, SharedClock>;
+pub(crate) type Table = LeaseTable<BoxedPool, SharedClock>;
 
 /// What every request handler and the tick loop share: the table behind its one lock,
 /// the token, the count of lease-file writes that failed, and the agent side when agents

@@ -15,7 +15,7 @@ use js_agent_wire::{ExclusiveRefusal, RefusalReason};
 use js_agent_wire::{LoadDrops, NodeLoad as Wire};
 use js_pool_static::Candidate;
 use js_provider::Observed;
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{
     DEFAULT_LOST_RETENTION_MS, DEFAULT_PREPARE_TIMEOUT_MS, MarkedTails, Placer, PoolConfig,
 };

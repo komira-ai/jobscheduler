@@ -8,7 +8,7 @@ use js_agent_wire::{
     Command, HeartbeatReply, HeldRun, HeldState, Isolation, JobSpec, Limits, Phase, Taint,
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
-use js_provider::{Observed, Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, RegisteredProvider, RunRefusal, RunState};
 use js_types::{Admission, ClassId, ProviderId, Request, ResourceClass, Resources};
 use support::*;

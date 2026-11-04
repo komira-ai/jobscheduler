@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Hello, LoadDrops, NodeLoad as Wire, Phase};
 use js_lease::{ManualClock, Timestamp};
-use js_provider::{Provider, StartSpec};
+use js_provider::{Pool, StartSpec};
 use js_registry::{Credential, RegisteredProvider};
 use js_testkit::dir::TestDir;
 use js_types::{LeaseId, Request, Resources};
@@ -123,14 +123,14 @@ impl Rig {
     /// The lease table the server runs over this agent side, on the same clock, opened as
     /// the server opens it: on a resume the provider is given the bookings the lease file
     /// names first, which the registry puts back before any host says hello.
-    pub(super) fn table(&self) -> js_lease::LeaseTable<crate::adapt::BoxedProvider, SharedClock> {
+    pub(super) fn table(&self) -> js_lease::LeaseTable<crate::adapt::BoxedPool, SharedClock> {
         let (settings, file, boot) = self.table_of.clone();
         let bookings = match boot {
             js_lease::Boot::Resume => js_lease::read_bookings(&file).unwrap(),
             js_lease::Boot::Initialise => Vec::new(),
         };
         let seated = self.source.provider(&bookings).unwrap();
-        let provider = crate::adapt::BoxedProvider(seated.provider);
+        let provider = crate::adapt::BoxedPool(seated.provider);
         let clock = SharedClock::new(self.clock.clone());
         js_lease::LeaseTable::open(provider, clock, settings, &file, boot).unwrap()
     }

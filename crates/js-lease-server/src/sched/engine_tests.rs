@@ -7,7 +7,7 @@
 use js_agent_wire::NodeLoad as Wire;
 use js_agent_wire::limits::MAX_MEMORY_BYTES;
 use js_lease::Timestamp;
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::HostState;
 use js_sched::LoadConfig;
 use js_types::{LeaseId, Resources};

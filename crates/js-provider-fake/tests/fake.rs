@@ -3,21 +3,21 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_provider::{Call, Flavour, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck};
-use js_provider_fake::{Defect, FakeProvider};
+use js_provider::{Call, Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
+use js_provider_fake::{Defect, FakePool};
 use js_types::{ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape};
 
 fn host(name: &str) -> HostId {
     HostId::new(name).unwrap()
 }
 
-fn fake() -> FakeProvider {
+fn fake() -> FakePool {
     let shape = Shape::new(
         Resources::new(8000, 8, 1, Some("g".into())).unwrap(),
         BTreeMap::new(),
     );
     let hosts = vec![(host("h1"), shape.clone()), (host("h2"), shape)];
-    FakeProvider::new(ProviderId::new("fake").unwrap(), hosts)
+    FakePool::new(ProviderId::new("fake").unwrap(), hosts)
 }
 
 fn spec(seq: u64, cpu_millis: u64) -> StartSpec {
@@ -43,7 +43,6 @@ fn lease(seq: u64) -> LeaseId {
 fn books_idempotently_and_frees_on_stop() {
     let mut f = fake();
     assert_eq!(f.id().as_str(), "fake");
-    assert_eq!(f.flavour(), Flavour::Delegated);
     assert_eq!(f.classes(), vec![ResourceClass::gpu_host()]);
     assert_eq!(
         f.start(spec(1, 1000)),

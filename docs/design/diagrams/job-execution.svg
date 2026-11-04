@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1220 660" width="1220" height="660" role="img" aria-label="A job from submit to result: the client mints a create-only upload URL and submits the job; the service checks and records it, places it and hands it to the host on a heartbeat reply; the agent starts it once, pulls and verifies the image, runs it with crun as a non-root user in the job cgroup; the job writes one object to the object store; the agent holds the result until acknowledged and then cleans up, tainting the host on a failed check; the service frees the allocation when the host confirms the container is gone; the client reads the result for the retention window.">
+<title>A job, step by step</title>
+<defs><marker id="job-execution-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="job-execution-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="job-execution-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-a{fill:#FD4F1D;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-g{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4}
+.box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
+.box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-bd{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4;stroke-dasharray:6 4}
+.box-od{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4;stroke-dasharray:6 4}
+.box-bld{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4;stroke-dasharray:6 4}
+.box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-r{stroke:#C0392B;fill:none;stroke-width:1.5}
+.ln-rd{stroke:#C0392B;fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-r{fill:#C0392B;font-size:12px}
+.t-w{fill:#FFFFFF;font-weight:600}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1220" height="660" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">A job: from submit to result</text>
+<text x="20" y="58" class="b" text-anchor="start">Client</text>
+<text x="330" y="58" class="b" text-anchor="start">Service</text>
+<text x="700" y="58" class="b" text-anchor="start">Agent host (js-agent)</text>
+<rect x="20" y="80" width="250" height="84" rx="5" class="box"/>
+<text x="145.0" y="109.5" class="b" text-anchor="middle">Submit the job</text>
+<text x="145.0" y="126.5" class="t-m" text-anchor="middle">image digest, command, needs,</text>
+<text x="145.0" y="143.5" class="t-m" text-anchor="middle">create-only upload URL, files</text>
+<circle cx="20" cy="80" r="11" class="box-a"/>
+<text x="20" y="84" class="t-w" text-anchor="middle">1</text>
+<rect x="330" y="80" width="290" height="84" rx="5" class="box"/>
+<text x="475.0" y="109.5" class="b" text-anchor="middle">Check, record, place</text>
+<text x="475.0" y="126.5" class="t-m" text-anchor="middle">queued under a job id, then placed:</text>
+<text x="475.0" y="143.5" class="t-m" text-anchor="middle">an allocation books the host</text>
+<circle cx="330" cy="80" r="11" class="box-a"/>
+<text x="330" y="84" class="t-w" text-anchor="middle">2</text>
+<rect x="330" y="200" width="290" height="84" rx="5" class="box"/>
+<text x="475.0" y="229.5" class="b" text-anchor="middle">Hand to the host</text>
+<text x="475.0" y="246.5" class="t-m" text-anchor="middle">on the agent's next call, resent</text>
+<text x="475.0" y="263.5" class="t-m" text-anchor="middle">until the host lists the job</text>
+<circle cx="330" cy="200" r="11" class="box-a"/>
+<text x="330" y="204" class="t-w" text-anchor="middle">3</text>
+<rect x="700" y="200" width="280" height="84" rx="5" class="box-o"/>
+<text x="840.0" y="229.5" class="b" text-anchor="middle">The agent starts it</text>
+<text x="840.0" y="246.5" class="t-m" text-anchor="middle">Start once: the same job id never</text>
+<text x="840.0" y="263.5" class="t-m" text-anchor="middle">runs twice; image digest verified</text>
+<circle cx="700" cy="200" r="11" class="box-a"/>
+<text x="700" y="204" class="t-w" text-anchor="middle">4</text>
+<rect x="700" y="320" width="280" height="96" rx="5" class="box-o"/>
+<text x="840.0" y="355.5" class="b" text-anchor="middle">Run contained</text>
+<text x="840.0" y="372.5" class="t-m" text-anchor="middle">crun, non-root user, no capabilities</text>
+<text x="840.0" y="389.5" class="t-m" text-anchor="middle">cgroup of the job, scratch, wall limit</text>
+<circle cx="700" cy="320" r="11" class="box-a"/>
+<text x="700" y="324" class="t-w" text-anchor="middle">5</text>
+<rect x="700" y="450" width="280" height="70" rx="5" class="box-o"/>
+<text x="840.0" y="481.0" class="b" text-anchor="middle">The job runs and exits</text>
+<text x="840.0" y="498.0" class="t-m" text-anchor="middle">may write one object, once</text>
+<circle cx="700" cy="450" r="11" class="box-a"/>
+<text x="700" y="454" class="t-w" text-anchor="middle">6</text>
+<rect x="1040" y="450" width="160" height="70" rx="5" class="box-g"/>
+<text x="1120.0" y="481.0" class="b" text-anchor="middle">Object store</text>
+<text x="1120.0" y="498.0" class="t-m" text-anchor="middle">create-only URL</text>
+<rect x="700" y="550" width="280" height="84" rx="5" class="box-o"/>
+<text x="840.0" y="579.5" class="b" text-anchor="middle">Report, then clean up</text>
+<text x="840.0" y="596.5" class="t-m" text-anchor="middle">result held until acknowledged;</text>
+<text x="840.0" y="613.5" class="t-m" text-anchor="middle">host confirms the container is gone</text>
+<circle cx="700" cy="550" r="11" class="box-a"/>
+<text x="700" y="554" class="t-w" text-anchor="middle">7</text>
+<rect x="330" y="550" width="290" height="84" rx="5" class="box"/>
+<text x="475.0" y="577.5" class="b" text-anchor="middle">Acknowledge, keep the result</text>
+<text x="475.0" y="594.5" class="t-m" text-anchor="middle">acknowledges the report; keeps the result</text>
+<text x="475.0" y="611.5" class="t-m" text-anchor="middle">frees the allocation once the host</text>
+<text x="475.0" y="627.5" class="t-m" text-anchor="middle">confirms the container is gone</text>
+<rect x="20" y="550" width="250" height="84" rx="5" class="box"/>
+<text x="145.0" y="579.5" class="b" text-anchor="middle">Read the result</text>
+<text x="145.0" y="596.5" class="t-m" text-anchor="middle">exit code, log tail, timing, usage;</text>
+<text x="145.0" y="613.5" class="t-m" text-anchor="middle">kept for the retention window</text>
+<circle cx="20" cy="550" r="11" class="box-a"/>
+<text x="20" y="554" class="t-w" text-anchor="middle">8</text>
+<rect x="1040" y="550" width="160" height="84" rx="5" class="box-r"/>
+<text x="1120.0" y="579.5" class="b" text-anchor="middle">Taint</text>
+<text x="1120.0" y="596.5" class="t-m" text-anchor="middle">failed check: host</text>
+<text x="1120.0" y="613.5" class="t-m" text-anchor="middle">takes no more work</text>
+<path d="M270,122 L330,122" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M475,164 L475,200" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M620,242 L700,242" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M840,284 L840,320" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M840,416 L840,450" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M980,485 L1040,485" class="ln-d" marker-end="url(#job-execution-ak)"/>
+<path d="M840,520 L840,550" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M700,592 L620,592" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M330,592 L270,592" class="ln" marker-end="url(#job-execution-ak)"/>
+<path d="M980,592 L1040,592" class="ln-r" marker-end="url(#job-execution-ar)"/>
+<text x="1120" y="430" class="t-m" text-anchor="middle">one write, second</text>
+<text x="1120" y="445" class="t-m" text-anchor="middle">refused</text>
+</svg>

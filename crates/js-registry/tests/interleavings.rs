@@ -8,7 +8,7 @@
 
 mod support;
 
-use js_provider::{Provider, StartAck};
+use js_provider::{Pool, StartAck};
 use js_registry::{Busy, HostMark, HostView, RunRefusal};
 use js_sim::SimRng;
 use js_types::LeaseId;
@@ -18,11 +18,11 @@ use support::*;
 /// One call on the registry, drawn from the seed.
 #[derive(Clone, Copy, Debug)]
 enum Op {
-    /// A lease placement (`Provider::start`).
+    /// A lease placement (`Pool::start`).
     StartLease,
     /// A direct run start of the booked lease (`Registry::queue_run`).
     StartRun,
-    /// The booked lease ends (`Provider::stop`).
+    /// The booked lease ends (`Pool::stop`).
     StopLease,
     Drain,
     ReleaseHost,

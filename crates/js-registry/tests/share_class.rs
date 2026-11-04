@@ -3,7 +3,7 @@
 
 mod support;
 
-use js_provider::Provider;
+use js_provider::Pool;
 use js_registry::{ConfigError, PoolConfig};
 use js_types::{Admission, ClassId, Dims, ProviderId, ResourceClass};
 use support::*;

@@ -13,7 +13,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request as HttpRequest, StatusCode};
 use js_agent_wire::Hello;
 use js_lease::{ManualClock, Timestamp};
-use js_provider::{Provider, StartSpec};
+use js_provider::{Pool, StartSpec};
 use js_registry::{Credential, HostState};
 use js_types::{LeaseId, Resources};
 use serde_json::{Value, json};
