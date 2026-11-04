@@ -49,6 +49,65 @@ fn a_restart_between_the_record_and_the_call_launches_nothing_twice() {
     assert_eq!(fresh.record(0).cloud_id.as_deref(), Some("i-1"));
 }
 
+/// A rig whose catalog holds the one offer `a10`, stating `x86-64-v3`, with the request
+/// `r1` for that level waiting, after the step that launched for it.
+fn launched_for_a_level() -> Rig {
+    let mut rig = Rig::new(settings("gpu"));
+    rig.pool().offers = vec![js_elastic::Offer {
+        isa_level: Some("x86-64-v3".parse().unwrap()),
+        ..offer("a10", 60)
+    }];
+    let mut wanting = request("r1");
+    wanting.demand.isa_level = Some("x86-64-v3".parse().unwrap());
+    rig.input.waiting = vec![wanting];
+    assert_eq!(acquires(&rig.tick(at(0))).len(), 1);
+    rig
+}
+
+/// The rig after a restart from the records file `rig` wrote, before the machine's hello.
+fn restarted(rig: &Rig) -> Rig {
+    let text = rig.state.records.encode().unwrap();
+    let mut fresh = Rig::new(settings("gpu"));
+    fresh.input = rig.input.clone();
+    fresh.state = State::new(Records::decode(&text).unwrap());
+    fresh
+}
+
+/// Asserts that a machine launched for a request that asks for an ISA level, from an offer
+/// that states it, still covers that request after the scaler restarts from its records
+/// file before the machine says hello: the record read back holds no level (the file does
+/// not keep it), the catalog states it again for the same offer, and three steps with the
+/// request still waiting make no other acquire. Catches a restart that forgets the level
+/// and launches a second machine for the one request.
+#[test]
+fn a_restart_before_hello_keeps_a_launch_for_a_level_covering_its_request() {
+    let rig = launched_for_a_level();
+    let mut fresh = restarted(&rig);
+    assert_eq!(fresh.record(0).offer.isa_level, None);
+    for step_at in [5, 10, 15] {
+        assert!(acquires(&fresh.tick(at(step_at * SECOND))).is_empty());
+    }
+    assert_eq!(fresh.state.records.instances.len(), 1);
+}
+
+/// Asserts that the level a restored record takes from the catalog is that of its own
+/// offer: when the catalog lists only another offer stating the level, the restored
+/// machine no longer covers the request and that offer is launched. Catches a level taken
+/// from whatever the catalog holds, which would credit a machine with a level its offer
+/// never stated.
+#[test]
+fn a_restored_record_takes_the_level_of_its_own_offer_only() {
+    let rig = launched_for_a_level();
+    let mut fresh = restarted(&rig);
+    fresh.pool().offers = vec![js_elastic::Offer {
+        isa_level: Some("x86-64-v3".parse().unwrap()),
+        ..offer("b10", 60)
+    }];
+    let plans = acquires(&fresh.tick(at(5 * SECOND)));
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].offer.id, "b10");
+}
+
 /// Asserts that an acquire that got no answer is not repeated while the request waits,
 /// and that a list showing the machine moves it to booting with the id the list gives.
 #[test]

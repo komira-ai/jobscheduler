@@ -122,8 +122,9 @@ pub struct StoredOffer {
     /// It is read from the file when present and never written: the reader of the release
     /// before this one refuses an unknown key, so a file this release writes stays one that
     /// release reads (a rollback restarts from it). A record read back after a restart
-    /// states no level until a later release writes the key. A file without the key reads
-    /// as stating none.
+    /// holds no level; the scaler then takes the level the catalog states for the same
+    /// offer and zone when it judges whether the machine covers a request. A file without
+    /// the key reads as stating none.
     #[serde(default, skip_serializing)]
     pub isa_level: Option<String>,
     /// The execution mode.
