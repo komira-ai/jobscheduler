@@ -90,9 +90,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status};
-use js_agent::native::{NativeConfig, NativeRuntime};
+use js_agent::native::{Ceiling, NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
-use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
+use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::Client;
 
 use lines::{Kind, Line, Verdict, parse_lines};
@@ -259,7 +259,7 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
     let denied = |path: &Path| AbsPath::new(path).unwrap();
     let config = NativeConfig {
         homes: fs::canonicalize(&fixture.homes).unwrap(),
-        net: Net::Off,
+        network: Ceiling::Off,
         tool_roots: vec![
             PathBuf::from("/usr/bin"),
             PathBuf::from("/bin"),
@@ -299,6 +299,7 @@ fn spec(fixture: &Fixture, run_id: &str, exe: &Path, env: &[(&str, &str)]) -> Ru
             inputs: Vec::new(),
             outputs: Vec::new(),
             network: NetworkLevel::Off,
+            ports: Vec::new(),
         }),
         cpu_millis: 1000,
         memory_bytes: 1 << 30,

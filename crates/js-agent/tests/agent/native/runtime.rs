@@ -8,10 +8,10 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 
 use js_agent::lifecycle::{Body, Exit, RunHandle, Runtime, Status};
-use js_agent::native::NativeRuntime;
+use js_agent::native::{Ceiling, NativeRuntime};
 use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 use js_agent_wire::{NetworkLevel, refusal};
-use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
+use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::Client;
 use js_mac_session::helper::RESET_ALREADY;
 use js_mac_session::proto::Limits;
@@ -105,24 +105,25 @@ fn each_start_gets_a_user_of_its_own() {
     assert!(rig.fake.home_of("7.1").join("exec").is_dir());
 }
 
-/// Asserts the network rules by the lower of what the start asks and what the agent allows:
-/// `off` has no loopback rule, `loopback` has it, a request above the cap is held at the
-/// cap, and an open network has no network rule at all. It catches a request that raises
-/// the agent's cap and a level mapped to the wrong rules.
+/// Asserts the network rules of the profile: `off` has no loopback rule, `loopback` has it,
+/// and an open network has no network rule at all; a request above the ceiling, given to the
+/// runtime directly, is still held at the ceiling. An agent refuses such a start before it
+/// reaches the runtime (`check_native`); the profile's own bound is a defence in depth. It
+/// catches a profile that grants more than the ceiling and a level mapped to the wrong rules.
 #[test]
 fn a_runs_network_is_the_lower_of_its_request_and_the_agents_cap() {
     let loopback = "(allow network* (remote ip \"localhost:*\"))";
     let cases = [
-        (Net::Loopback, NetworkLevel::Off, false, true),
-        (Net::Loopback, NetworkLevel::Loopback, true, true),
-        (Net::Loopback, NetworkLevel::On, true, true),
-        (Net::Off, NetworkLevel::On, false, true),
-        (Net::On, NetworkLevel::On, false, false),
-        (Net::On, NetworkLevel::Off, false, true),
+        (Ceiling::Loopback, NetworkLevel::Off, false, true),
+        (Ceiling::Loopback, NetworkLevel::Loopback, true, true),
+        (Ceiling::Loopback, NetworkLevel::On, true, true),
+        (Ceiling::Off, NetworkLevel::On, false, true),
+        (Ceiling::On, NetworkLevel::On, false, false),
+        (Ceiling::On, NetworkLevel::Off, false, true),
     ];
     for (n, (cap, asked, has_loopback, denies)) in cases.into_iter().enumerate() {
         let mut rig = Rig::with(&format!("net{n}"), |config| {
-            config.net = cap.clone();
+            config.network = cap;
             config.egress = Some(Fake::new(Verdict::Enforced));
         });
         let mut body = native("/bin/true", &[]);

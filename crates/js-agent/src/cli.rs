@@ -236,14 +236,18 @@ pub struct Cli {
     /// `/Users`. It must exist; the agent canonicalises it. Needs `--native-helper-socket`.
     #[arg(long, value_name = "PATH")]
     pub native_homes: Option<PathBuf>,
-    /// The most network a native run gets: `off` (the default), `loopback` or `on`. A start
-    /// that asks for more is held to this. `on` is limited by the pf anchor of
-    /// `js-mac-provision` (see `--native-pf-uid-start`): without it a run could reach the
-    /// scheduler, the cloud metadata address and the rest of the network, so the agent does
-    /// not start with `on` unless the anchor is in force, and refuses each job that asks for
-    /// the network (`egress-unchecked`) while it is not. `loopback` is shared by every run
-    /// of the Mac. Needs `--native-helper-socket`.
-    #[arg(long, value_name = "off|loopback|on")]
+    /// The most network a native job may ask for: `off` (the default), `loopback`, `on` or
+    /// `open`. A job that asks for more is refused at start (`network-above-ceiling`) and is
+    /// never run with less. A job's level maps onto these values: `none` is `off`,
+    /// `allow-list` is `on`, `open` is `open`; `loopback` is a ceiling only, shared by every
+    /// run of the Mac. `on` is limited by the pf anchor of `js-mac-provision` (see
+    /// `--native-pf-uid-start`): the agent does not start with `on` unless the anchor is in
+    /// force, and refuses each `allow-list` job (`egress-unchecked`) while it is not. `open`
+    /// allows the network with no filter and needs no anchor: it leaves the scheduler, the
+    /// cloud metadata address and the rest of the network reachable from the job, and any
+    /// `--native-pf-*` flag beside it stops the agent at start. The hello reports the value
+    /// as `egress` (`none` for `off` and `loopback`). Needs `--native-helper-socket`.
+    #[arg(long, value_name = "off|loopback|on|open")]
     pub native_network: Option<String>,
     /// A path no native run may read, in addition to the agent's own roots, its token,
     /// instance and CA files, the helper's socket directory and `/etc/kcpassword`; repeatable.
@@ -269,7 +273,8 @@ pub struct Cli {
     /// refuses every job that asks for the network (`egress-unchecked`), unless the anchor
     /// `js-mac-provision` installed is in force (pf enabled, the main ruleset reaches the
     /// anchor, the loaded rules are the ones these flags render); required then, and
-    /// refused otherwise. Needs `--native-network on`.
+    /// refused otherwise (with `--native-network open` the agent does not start). Needs
+    /// `--native-network on`.
     #[arg(long, value_name = "UID")]
     pub native_pf_uid_start: Option<u32>,
     /// How many uids the pool holds: the helper's `--uid-range` count. Required with

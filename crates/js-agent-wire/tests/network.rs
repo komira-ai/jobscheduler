@@ -163,6 +163,7 @@ fn native_job() -> JobSpec {
         inputs: Vec::new(),
         outputs: Vec::new(),
         network: js_agent_wire::NetworkLevel::Off,
+        ports: Vec::new(),
     });
     spec
 }
@@ -479,4 +480,78 @@ fn a_hello_with_the_ceiling_passes_the_previous_receivers_bounds() {
     let mut hello = hello();
     hello.capabilities = written;
     assert_eq!(hello.validate(), Ok(()));
+}
+
+/// The ports of `native_job()`'s native body set to `ports`, checked by `JobSpec::validate`.
+fn check_native_ports(ports: Vec<PortMap>) -> js_agent_wire::ValidationError {
+    broken(
+        &native_job(),
+        |j| j.native.as_mut().unwrap().ports = ports,
+        JobSpec::validate,
+    )
+}
+
+/// Proves that the ports of a native body are held to every bound of a container job's, with
+/// the same rule and code, named under `native.ports`: a zero host or container port, a host
+/// port given twice and a seventeenth port are refused `invalid-job`; sixteen, a port below
+/// 1024 and one container port behind two host ports are valid. A body with no ports encodes
+/// without the key, so the wire form of every native start from before the field is
+/// unchanged, and a body with one encodes it as a container job's `ports` are. Catches a
+/// native body whose ports go unchecked (an unbounded list or port 0 reaching an agent), a
+/// second set of bounds that drifts from the container job's, and an empty `ports` that
+/// changes the text an older agent reads.
+#[test]
+fn ports_on_the_native_body_validate_like_the_container_job() {
+    let err = check_native_ports(vec![port(0, 80)]);
+    expect(
+        err,
+        "native.ports[0].host",
+        Rule::OutOfRange,
+        refusal::INVALID_JOB,
+    );
+    let err = check_native_ports(vec![port(8080, 80), port(8081, 0)]);
+    expect(
+        err,
+        "native.ports[1].container",
+        Rule::OutOfRange,
+        refusal::INVALID_JOB,
+    );
+    let err = check_native_ports(vec![port(8080, 80), port(8081, 81), port(8080, 82)]);
+    expect(
+        err,
+        "native.ports[2].host",
+        Rule::Duplicate,
+        refusal::INVALID_JOB,
+    );
+    let many: Vec<PortMap> = (1..=17).map(|n| port(8000 + n, 80)).collect();
+    let err = check_native_ports(many.clone());
+    expect(err, "native.ports", Rule::TooMany, refusal::INVALID_JOB);
+    let container = check_ports(many);
+    assert_eq!(
+        (container.rule(), container.code()),
+        (Rule::TooMany, refusal::INVALID_JOB),
+        "the container job's bound is the same"
+    );
+
+    let mut spec = native_job();
+    let body = spec.native.as_mut().unwrap();
+    body.ports = (1..=16).map(|n| port(8000 + n, 80)).collect();
+    assert_eq!(spec.validate(), Ok(()));
+    let body = spec.native.as_mut().unwrap();
+    body.ports = vec![port(80, 8080), port(443, 8080), port(1, 65535)];
+    assert_eq!(spec.validate(), Ok(()));
+    let value = serde_json::to_value(&spec).unwrap();
+    assert_eq!(
+        value["native"]["ports"],
+        json!([
+            {"host": 80, "container": 8080},
+            {"host": 443, "container": 8080},
+            {"host": 1, "container": 65535}
+        ])
+    );
+    let round: JobSpec = serde_json::from_value(value).unwrap();
+    assert_eq!(round, spec);
+
+    let bare = serde_json::to_value(native_job()).unwrap();
+    assert!(bare["native"].get("ports").is_none(), "{bare}");
 }

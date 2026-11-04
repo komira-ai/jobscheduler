@@ -171,7 +171,8 @@ pub const QUOTA_UNAVAILABLE: &str = "quota-unavailable";
 /// host names the level asked for and the ceiling (`network allow-list asked, agent ceiling
 /// is none`). The host's ceiling is at fault, not the run: the run may be sent to a host
 /// whose ceiling covers it. A container-engine run (Docker or Podman) has the ceiling
-/// `none`.
+/// `none`. A Mac agent answers it, too, for a native body whose `network` is above its
+/// `--native-network` (the text then names that value: `the agent allows at most off`).
 pub const NETWORK_ABOVE_CEILING: &str = "network-above-ceiling";
 /// As the detail of a `failed_to_start` result: a start that declares a host port the agent
 /// does not list (`--egress-forward-port`, reported in the hello as the capability
@@ -180,7 +181,9 @@ pub const NETWORK_ABOVE_CEILING: &str = "network-above-ceiling";
 pub const PORT_ABOVE_CEILING: &str = "port-above-ceiling";
 /// As the detail of a `failed_to_start` result: a start within the agent's ceiling that
 /// declares ports, on an agent that does not forward declared ports yet. Nothing was
-/// created. It is checked after [`NETWORK_ABOVE_CEILING`] and [`PORT_ABOVE_CEILING`].
+/// created. It is checked after [`NETWORK_ABOVE_CEILING`] and [`PORT_ABOVE_CEILING`]. A Mac
+/// agent, which lists no host port, answers it for a native body that declares any, after
+/// [`NETWORK_ABOVE_CEILING`].
 pub const PORTS_NOT_SUPPORTED: &str = "ports-not-supported";
 
 /// A capabilities frame whose digests, root or Xcode builds are malformed.

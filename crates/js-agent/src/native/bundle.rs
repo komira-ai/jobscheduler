@@ -21,8 +21,11 @@
 //!
 //! The profile of a run that pins a bundle is the same as any native run's: reads are open
 //! (`ReadModel::Open`, the only model with a profile builder), so the store's trees need no
-//! grant. The network is the lowest of what the start asks, what the bundle's tools need
-//! (`seatbelt.network_max`) and what the agent allows.
+//! grant. The network is the lower of what the start asks and what the bundle's tools need
+//! (`seatbelt.network_max`). That is not the agent's ceiling (`--native-network`): a start
+//! above the ceiling was refused before its user was made, and is never lowered to it; the
+//! bundle only says its tools need no more than its `network_max`, so the profile grants no
+//! more.
 
 use std::fs;
 use std::io;
@@ -74,7 +77,8 @@ pub(super) struct Prepared {
     pub args: Vec<String>,
     /// The environment: the agent's, the bundle's rules, then the job's.
     pub env: Vec<(String, String)>,
-    /// The network the run gets, before the agent's own cap.
+    /// The network the run's profile gets: the start's, lowered to the bundle's
+    /// `network_max`.
     pub network: NetworkLevel,
 }
 
@@ -169,16 +173,20 @@ fn entrypoint_file(
     Ok(text.to_owned())
 }
 
-/// How much network a level is, lowest first.
+/// How much network a level is, lowest first. `on` and `open` give one profile (no network
+/// rule), and `open` is the more: a bundle whose tools need `on` lowers an `open` start to it.
 fn rank(level: NetworkLevel) -> u8 {
     match level {
         NetworkLevel::Off => 0,
         NetworkLevel::Loopback => 1,
         NetworkLevel::On => 2,
+        NetworkLevel::Open => 3,
     }
 }
 
-/// The lower of what the start asks and what the bundle's tools need.
+/// The lower of what the start asks and what the bundle's tools need: a statement of the
+/// tools' needs, applied to the profile after the start was admitted, and not a ceiling that
+/// refuses.
 fn lower(asked: NetworkLevel, config: &BundleConfig) -> NetworkLevel {
     let needed = match config.seatbelt.network_max {
         js_bundle::NetworkLevel::Off => NetworkLevel::Off,

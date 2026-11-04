@@ -25,9 +25,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status};
-use js_agent::native::{NativeConfig, NativeRuntime};
+use js_agent::native::{Ceiling, NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
-use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
+use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::Client;
 
 /// The variable naming the directory the tests work in.
@@ -160,7 +160,7 @@ fn runtime_with(fixture: &Fixture, adjust: impl FnOnce(&mut NativeConfig)) -> Na
     let denied = |path: &Path| AbsPath::new(path).unwrap();
     let mut config = NativeConfig {
         homes: fs::canonicalize(&fixture.homes).unwrap(),
-        net: Net::Off,
+        network: Ceiling::Off,
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![
             denied(&fixture.state),
@@ -192,6 +192,7 @@ fn spec(fixture: &Fixture, run_id: &str, program: &str, args: &[&str]) -> RunSpe
             inputs: Vec::new(),
             outputs: Vec::new(),
             network: NetworkLevel::Off,
+            ports: Vec::new(),
         }),
         cpu_millis: 1000,
         memory_bytes: 1 << 30,

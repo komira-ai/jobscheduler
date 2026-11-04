@@ -169,17 +169,35 @@ and to IPv4 loopback; everything else over TCP and UDP is refused at once, the w
   A LaunchDaemon runs `install` at boot and every 30 seconds. `check` also requires pf to
   be enabled and the main ruleset to evaluate the anchor, and compares the live anchor with
   the readback `install` stored; it only reads (root, for `/dev/pf`).
+- The Mac agent's ceiling is `--native-network` (`off`, the default, `loopback`, `on` or
+  `open`), and a job's level maps onto it: `none` is `off` (the profile denies the network),
+  `allow-list` is `on` (the profile allows the network and this anchor limits it), `open` is
+  `open` (the profile allows the network and nothing filters it); `loopback` is a ceiling
+  only. A job above the ceiling is refused at start (`network-above-ceiling`, nothing
+  created) and never run with less. The hello reports the ceiling as `egress` (`none` for
+  `off` and `loopback`, `allow-list` for `on`, `open` for `open`).
 - The Mac agent gates jobs with `js_mac_provision::enforced`: with `--native-network on` it
-  does not start unless the anchor is enforced, and before every job that asks for the
-  network it asks again and refuses the job (`egress-unchecked`, nothing created) on any
-  error. Jobs that ask for no network or loopback only are not concerned. The agent is
+  does not start unless the anchor is enforced, and before every `allow-list` job it asks
+  again and refuses the job (`egress-unchecked`, nothing created) on any error. Jobs with no
+  network, loopback only or `open` are not concerned and never ask `pfctl`. The agent is
   told the policy by `--native-pf-uid-start`, `--native-pf-uid-count`,
   `--native-pf-endpoint`, `--native-pf-anchor`, `--native-pf-state-dir` and
   `--native-pfctl`; the endpoints must be the ones `install` was given, or the anchor reads
   back as different and every such job is refused. The interval does not close the window
-  after a main-ruleset reload; the per-job call does.
-- Limits: pf matches `user` on TCP and UDP only; loopback between pool users cannot be
-  narrowed by the sender's uid and stays open; the node's own address is refused unless it
-  is a listed endpoint; DNS through mDNSResponder (a unix socket) is outside pf; and the
-  behaviour on a Mac is shown only by the root test, `tests/pf_as_root.rs`, which a farm
-  Mac runs through a held script.
+  after a main-ruleset reload; the per-job call does. With `--native-network open` no pf
+  flag is accepted (the agent does not start), since nothing would check it.
+- The bundle's `seatbelt.network_max` is not a ceiling: it says what the bundle's tools need
+  and lowers the profile of an admitted job to it.
+- Known limits:
+  - declared ports are refused on a Mac (`ports-not-supported`, before any user is made)
+    until the root test `crates/js-agent/tests/native_inbound_pf/` (built by the manual
+    workflow `js-agent-native-inbound-pf-test`, run by an operator as root on a provisioned
+    Mac) shows that this anchor filters inbound traffic to a pool uid's listener;
+  - `open` leaves the network unfiltered: the scheduler, the cloud metadata address and
+    every other address the Mac reaches are reachable from the job;
+  - DNS through the system resolver (mDNSResponder, a unix socket) is outside the filter;
+  - pf matches `user` on TCP and UDP only; loopback between pool users cannot be narrowed by
+    the sender's uid and stays open (loopback is shared by every run of the Mac); the node's
+    own address is refused unless it is a listed endpoint; and the behaviour on a Mac is
+    shown only by the root test, `tests/pf_as_root.rs`, which an operator runs on a
+    provisioned Mac through a held script.

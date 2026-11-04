@@ -94,6 +94,36 @@ fn a_mac_agent_reports_sandbox_exec_and_a_linux_one_is_refused() {
     assert!(other.verbs().is_empty(), "the helper was not asked");
 }
 
+/// Asserts that a Mac agent's hello reports its `--native-network` as the job level a
+/// server places by: `none` by default (`off`), `none` for `loopback`, `open` for `open`, and
+/// never `egress-ports`. It catches a Mac host that a server would send an `open` job it
+/// refuses, or one that says nothing and is never sent one.
+#[test]
+fn a_mac_agent_advertises_its_native_network_ceiling() {
+    for (n, (given, reported)) in [
+        (None, "none"),
+        (Some("loopback"), "none"),
+        (Some("open"), "open"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = Scratch::new(&format!("native-agent-egress{n}"));
+        let fake = FakeHelper::start(&dir);
+        let mut extra = native_flags(&dir, &fake);
+        if let Some(value) = given {
+            extra.extend(["--native-network".to_owned(), value.to_owned()]);
+        }
+        let (ran, hello) = hello_on(&mac_host(), &extra, welcome(1));
+        assert_eq!(ran.status(), code(0), "{given:?}: {}", ran.err);
+        assert_eq!(hello["capabilities"]["egress"], reported, "{given:?}");
+        assert!(
+            hello["capabilities"].get("egress-ports").is_none(),
+            "{given:?}"
+        );
+    }
+}
+
 /// Asserts that an agent whose helper does not answer ends with status 2 before it says
 /// hello, naming the flag. It catches an agent that registers as a native host with no way
 /// to run a job.

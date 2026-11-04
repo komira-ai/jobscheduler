@@ -1,4 +1,5 @@
-//! The packet-filter check of a native agent whose network cap is `on`.
+//! The packet-filter check of a native agent whose network ceiling is `on`. A ceiling of
+//! `open` has no filter and takes none of these flags.
 //!
 //! A Seatbelt profile cannot name the hosts a run may reach, so the egress of a Mac pool's
 //! users is limited by a pf anchor keyed on their uids (`js-mac-provision`). The agent runs
@@ -44,6 +45,25 @@ pub struct PfFlags<'a> {
     pub endpoints: &'a [String],
 }
 
+impl PfFlags<'_> {
+    /// The first pf flag the command line gave, by its name, or `None` when it gave none.
+    #[must_use]
+    pub(crate) fn first_given(&self) -> Option<&'static str> {
+        let given = [
+            ("--native-pfctl", self.pfctl.is_some()),
+            ("--native-pf-anchor", self.anchor.is_some()),
+            ("--native-pf-state-dir", self.state_dir.is_some()),
+            ("--native-pf-uid-start", self.uid_start.is_some()),
+            ("--native-pf-uid-count", self.uid_count.is_some()),
+            ("--native-pf-endpoint", !self.endpoints.is_empty()),
+        ];
+        given
+            .iter()
+            .find(|(_, given)| *given)
+            .map(|(flag, _)| *flag)
+    }
+}
+
 /// The policy `js-mac-provision` installed, as the agent was told it.
 #[derive(Debug, Clone)]
 pub struct PfPolicy {
@@ -74,16 +94,8 @@ impl PfPolicy {
             endpoints,
         } = *flags;
         if !network_on {
-            let given = [
-                ("--native-pfctl", pfctl.is_some()),
-                ("--native-pf-anchor", anchor.is_some()),
-                ("--native-pf-state-dir", state_dir.is_some()),
-                ("--native-pf-uid-start", uid_start.is_some()),
-                ("--native-pf-uid-count", uid_count.is_some()),
-                ("--native-pf-endpoint", !endpoints.is_empty()),
-            ];
-            return match given.iter().find(|(_, given)| *given) {
-                Some((flag, _)) => Err(format!("{flag}: needs --native-network on")),
+            return match flags.first_given() {
+                Some(flag) => Err(format!("{flag}: needs --native-network on")),
                 None => Ok(None),
             };
         }
