@@ -256,10 +256,13 @@ fn run_nothing_books() -> Observations {
     observations
 }
 
+/// One row of [`NEGATIVE_CASES`]: an invariant and a case that must trip it alone.
+type NegativeCase = (Invariant, fn() -> Observations);
+
 /// Every negative case and the one invariant it must trip. A step case is checked by a
 /// fresh checker's step over everything in it; an end case by that step and the end
 /// check.
-const NEGATIVE_CASES: &[(Invariant, fn() -> Observations)] = &[
+const NEGATIVE_CASES: &[NegativeCase] = &[
     (Invariant::NoDoubleBooking, past_capacity),
     (Invariant::NoDoubleBooking, one_run_on_two_agents),
     (Invariant::NoDoubleBooking, whole_host_beside_another_lease),
