@@ -24,7 +24,7 @@
 //! - **Seating.** The pool's bookings live in memory and a restart loses them.
 //!   [`StaticPool::seat`] books a named host for a named lease without a start, so a
 //!   caller that has the bookings elsewhere (a lease file) can put them back; it refuses
-//!   a host the pool does not list or another lease holds ([`SeatError`]).
+//!   a host the pool does not list or another lease holds ([`js_provider::SeatError`]).
 //!
 //! # Configuration
 //!
@@ -36,11 +36,9 @@
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 #![doc = concat!("```toml\n", include_str!("../example.toml"), "```")]
 
-mod book;
 mod config;
 pub mod kind;
 mod pool;
 
-pub use book::{Candidate, Held, HostBook, SeatError};
 pub use config::{ConfigError, EXAMPLE_CONFIG};
 pub use pool::StaticPool;

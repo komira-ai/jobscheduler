@@ -1,10 +1,13 @@
 //! The provider side of the registry: the booking, stop and observation calls the lease
-//! table makes through [`crate::RegisteredProvider`].
+//! table makes through [`crate::RegisteredProvider`], and what the placer is told of the
+//! books between starts ([`crate::Placer::host_up`], [`crate::Placer::heard`],
+//! [`crate::Placer::ended`], [`crate::Placer::host_gone`]).
 
 use std::collections::BTreeMap;
 
-use js_pool_static::SeatError;
+use js_provider::SeatError;
 use js_provider::{HostCapacity, Observed};
+use js_types::sched::usage::NodeLoad;
 use js_types::{Admission, HostId, LeaseId, RequestId, Resources};
 
 use js_lease::Timestamp;
@@ -52,25 +55,21 @@ impl Registry {
         if let Observed::Present { host } = book.read(lease) {
             let record = records.get_mut(&host);
             record.into_iter().for_each(|record| {
-                // A lease ends: the error of its estimate, at the time of this call on the
-                // registry's clock. The host keeps a bound and a start for each lease it
-                // started, so the stop of any of them counts. A lease put back after a
-                // restart has neither unless a source of lives was set when it was put back
-                // (see `seat`), so without one its stop counts nothing.
-                let started: Vec<(LeaseId, u64)> = record
-                    .bounds
-                    .iter()
-                    .filter(|bound| bound.lease == *lease)
-                    .map(|bound| (bound.lease, bound.started_at))
-                    .collect();
-                let estimates = started.iter().map(|_| estimate);
-                estimates
-                    .into_iter()
-                    .for_each(|estimate| tail.ended(ended_at, estimate));
+                // A lease ends: the error of its estimate (read once, above), at the time of
+                // this call on the registry's clock. The host keeps a bound and a start for
+                // each lease it started, so the stop of any of them counts. A lease put back
+                // after a restart has neither unless a source of lives was set when it was
+                // put back (see `seat`), so without one its stop counts nothing.
+                let bounds = record.bounds.iter();
+                let started = bounds.filter(|bound| bound.lease == *lease);
+                started.for_each(|_| tail.ended(ended_at, estimate));
                 record.exclusive = record.exclusive.stopped();
             });
         }
         let read_back = book.stop(lease);
+        if let Some(placer) = self.shared.placer.get() {
+            placer.ended(*lease);
+        }
         drop(guard);
         self.log_ended(ended);
         read_back
@@ -92,6 +91,19 @@ impl Registry {
     /// (see [`js_provider::Pool::waits`]).
     pub(crate) fn waits(&self, lease: &LeaseId) -> bool {
         self.lock().waiting.holds_lease(lease)
+    }
+
+    /// Ends every committed whole-node lease that was not reported ready within
+    /// `prepare_timeout` of its commit, as a failed prepare: the lease then reads
+    /// `Absent`, so the lease table drops it by its ordinary path. A silent agent and a
+    /// host gone lost are overdue the same as a slow one. The lease table's tick reads
+    /// every pending lease through [`crate::RegisteredProvider`], which advances first;
+    /// this does the same for a caller with a clock of its own.
+    pub fn advance(&self) {
+        let now = self.shared.clock.now();
+        let mut state = self.lock_at(now);
+        self.advance_at(&mut state, now);
+        self.release(state);
     }
 
     /// `Present` only while the host holding the lease is live and, for a whole-node
@@ -182,5 +194,28 @@ impl Registry {
             });
         }
         seated
+    }
+
+    /// Tells the placer, if there is one, that `host` said hello, booked as the pool's
+    /// shape.
+    pub(super) fn tell_up(&self, host: &HostId) {
+        if let Some(placer) = self.shared.placer.get() {
+            placer.host_up(host, self.shared.config.booked());
+        }
+    }
+
+    /// Tells the placer, if there is one, that `host` is no longer listed.
+    pub(super) fn tell_gone(&self, host: &HostId) {
+        if let Some(placer) = self.shared.placer.get() {
+            placer.host_gone(host);
+        }
+    }
+
+    /// Tells the placer, if there is one, that a heartbeat of `host` was accepted, with
+    /// the reading it brought ([`crate::Placer::heard`]).
+    pub(super) fn tell_heard(&self, host: &HostId, reading: Option<&NodeLoad>) {
+        if let Some(placer) = self.shared.placer.get() {
+            placer.heard(host, reading);
+        }
     }
 }

@@ -1,15 +1,22 @@
 //! Placing a bundle on the host: the agent's side of the tree store.
 //!
 //! A [`Placer`] owns the store of one agent (`<bundle-store>/v1/objects`: `trees/` of the
-//! tree store, `manifests/` and `configs/` beside it). It does three things:
+//! tree store, `manifests/`, `configs/` and `indexes/` beside it). It does three things:
 //!
 //! - **Ensure.** [`Placer::ensure_registry`] and [`Placer::ensure_layout`] pull the bundle
-//!   whose manifest has a given digest through js-oci (every byte checked against a digest
-//!   on the way in), read its config, have each layer extracted and sealed as a tree by the
-//!   tree store, and only then write the manifest and the config beside the trees. A
-//!   manifest in the store therefore means that its trees were there when it was written;
+//!   a digest names through js-oci (every byte checked against a digest on the way in). The
+//!   digest names either the bundle's manifest or an image index, from which js-oci takes the
+//!   one darwin/arm64 manifest. The config is read, each layer is extracted and sealed as a
+//!   tree by the tree store, and only then are the config and the manifest (named by its own
+//!   digest) written beside the trees, and last, when the pin named an index, the alias
+//!   `indexes/<index digest>` that holds the digest of the manifest it resolved to. A
+//!   manifest in the store therefore means that its trees were there when it was written, and
+//!   an alias means that its manifest was;
 //!   [`Placer::pin`] looks at the trees again, since the store may have evicted some since
-//!   (the host's list of held bundles reads the manifests only).
+//!   (the host's list of held bundles reads the manifests only). [`manifest_of`] reads the
+//!   alias: a pin that is an index digest stands for the manifest the alias names, and an
+//!   alias that is damaged or names a manifest the store lacks makes the bundle not held,
+//!   never a pin of another manifest.
 //! - **Fetch.** [`Placer::fetch`] is what the admission of a start calls when
 //!   `--bundle-pull missing` and the store lacks the bundle: it begins an ensure on a
 //!   thread of its own and answers [`Fetch::Started`] at once, so the lifecycle's worker
@@ -398,6 +405,25 @@ pub fn load_config(
     BundleConfig::parse(&bytes).map_err(|why| why.to_string())
 }
 
+/// The manifest digest the pin digest `digest` stands for in the store at `root`: the one
+/// `v1/objects/indexes/<hex>` names when that file is there, reads through `read` and holds a
+/// sha256 digest; `digest` itself otherwise (a manifest pin, or a damaged alias, which then
+/// names no held manifest).
+pub fn manifest_of(
+    root: &Path,
+    digest: &str,
+    read: &dyn Fn(&Path) -> Result<String, String>,
+) -> String {
+    let Ok(hex) = hex_of(digest) else {
+        return digest.to_owned();
+    };
+    let alias = root.join("v1/objects/indexes").join(hex);
+    match read(&alias) {
+        Ok(text) if hex_of(text.trim()).is_ok() => text.trim().to_owned(),
+        _ => digest.to_owned(),
+    }
+}
+
 /// The `<hex>` of `sha256:<hex>`.
 fn hex_of(digest: &str) -> Result<&str, String> {
     let hex = digest.strip_prefix("sha256:").unwrap_or("");
@@ -447,7 +473,7 @@ impl Placer {
             config,
             &BTreeSet::new(),
         )?;
-        for dir in ["manifests", "configs"] {
+        for dir in ["manifests", "configs", "indexes"] {
             fs::create_dir_all(objects.join(dir))?;
         }
         Ok(Arc::new(Self {
@@ -491,10 +517,11 @@ impl Placer {
     }
 
     fn ensure(&self, origin: &Origin, digest: &js_oci::Digest) -> Result<(), PlaceError> {
-        let kind = Kind::bundle();
-        let manifest = self
+        let kind = Kind::bundle_from_index();
+        let selected = self
             .runtime
-            .block_on(origin.fetch_manifest(digest, &kind))?;
+            .block_on(origin.fetch_selected(digest, &kind))?;
+        let manifest = selected.manifest;
         let config_bytes = self
             .runtime
             .block_on(origin.fetch_config(&manifest, &kind))?;
@@ -514,9 +541,17 @@ impl Placer {
         )?;
         put(
             &self.objects.join("manifests"),
-            &format!("{}.json", digest.hex()),
+            &format!("{}.json", manifest.digest().hex()),
             manifest.bytes(),
         )?;
+        // Last: an alias in the store means that the manifest it names is there.
+        if let Some(index) = &selected.index {
+            put(
+                &self.objects.join("indexes"),
+                index.hex(),
+                manifest.digest().as_str().as_bytes(),
+            )?;
+        }
         Ok(())
     }
 
@@ -544,8 +579,9 @@ impl Placer {
         self.flights.settle();
     }
 
-    /// Pins every tree of the held bundle `pin` (`name[:tag]@sha256:<manifest digest>`) for
-    /// `run`, which must be a run id the tree store takes (the lease's name is one).
+    /// Pins every tree of the held bundle `pin` (`name[:tag]@sha256:<digest>`, the digest of
+    /// the bundle's manifest or of an index that resolved to it) for `run`, which must be a
+    /// run id the tree store takes (the lease's name is one).
     ///
     /// # Errors
     ///
@@ -558,7 +594,8 @@ impl Placer {
         let read = |path: &Path| {
             fs::read_to_string(path).map_err(|why| format!("{}: {why}", path.display()))
         };
-        let config = load_config(&self.root, pin.digest(), &read).map_err(PlaceError::Held)?;
+        let manifest = manifest_of(&self.root, pin.digest(), &read);
+        let config = load_config(&self.root, &manifest, &read).map_err(PlaceError::Held)?;
         let layers = config.layers.clone();
         let mut pinned = Pinned {
             placer: Arc::clone(self),

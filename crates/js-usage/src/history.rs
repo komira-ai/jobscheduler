@@ -10,7 +10,8 @@
 //! build does not read is skipped by [`EndedHistory::range`], not fatal.
 //!
 //! The row is the first form of the allocation record of the design (section 10.1, "Usage
-//! history"): today the registry writes one when a lease's booking ends (`Registry::stop`), and
+//! history"): today the registry writes one when a lease's booking ends (a stop, or a
+//! whole-node prepare that failed), and
 //! the engine that will own allocations writes the same row, under the same key, when it frees
 //! one.
 //!
@@ -163,8 +164,9 @@ pub enum DrainOutcome {
     NoMark,
     /// A whole-node request placed on the host its mark set aside: the mark held to the end.
     MarkHeld,
-    /// A whole-node request whose mark was dropped: it gave a host up and was placed on a host
-    /// not marked for it, or it was cancelled while it held a mark.
+    /// A whole-node request whose mark was dropped: it held a mark at some time while it
+    /// waited, or gave a host up, and did not start on the host its mark set aside (it
+    /// started elsewhere, or was cancelled).
     MarkDropped,
     /// A whole-node allocation put back after a restart: what its request went through was
     /// not kept.
@@ -230,7 +232,8 @@ pub struct Used {
 pub struct EndedRow {
     /// The allocation: until allocations have job ids, the lease id's text.
     pub id: AllocationId,
-    /// The profile key a run of the allocation named, if one did (the first by run id).
+    /// The profile key a run of the allocation named, if one did: the first a run of it was
+    /// queued with.
     pub profile: Option<ProfileKey>,
     /// The host it was booked on; `None` for a request cancelled before it had one.
     pub host: Option<HostId>,

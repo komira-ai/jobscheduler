@@ -61,12 +61,9 @@ fn host_of(state: &State, lease: &LeaseId) -> Option<HostId> {
 
 /// The bound `host` keeps for `lease`: its start, latest end and queue.
 fn bound_of(state: &State, host: &HostId, lease: &LeaseId) -> Option<Bound> {
-    let record = state.records.get(host)?;
-    record
-        .bounds
-        .iter()
-        .copied()
-        .find(|bound| bound.lease == *lease)
+    let bounds = state.records.get(host).into_iter();
+    let bounds = bounds.flat_map(|record| record.bounds.iter());
+    bounds.copied().find(|bound| bound.lease == *lease)
 }
 
 /// How a booking ended: when, at what estimated end, why, what it booked and the profile

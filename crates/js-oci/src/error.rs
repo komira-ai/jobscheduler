@@ -106,9 +106,30 @@ pub enum Error {
         /// What the bytes hash to.
         actual: String,
     },
-    /// The digest names an image index or manifest list.
+    /// The digest names an image index or manifest list, which the kind does not take
+    /// (or an index entry that is itself one: one level only).
     #[error("{0} names an image index; pin the manifest of one platform")]
     Index(String),
+    /// An index that lists no manifest of the platform asked for.
+    #[error("the index {index} lists no {want} manifest; it lists {listed}")]
+    NoPlatform {
+        /// The index digest.
+        index: String,
+        /// The platform asked for, `os/architecture`.
+        want: String,
+        /// The platforms the index lists, cut and escaped.
+        listed: String,
+    },
+    /// An index that lists more than one manifest of the platform asked for.
+    #[error("the index {index} lists more than one {want} manifest: {digests}")]
+    AmbiguousPlatform {
+        /// The index digest.
+        index: String,
+        /// The platform asked for, `os/architecture`.
+        want: String,
+        /// The distinct digests of the manifests of that platform.
+        digests: String,
+    },
     /// A manifest of another artifact type than the one asked for.
     #[error("the manifest has artifact type {have:?}, not {want}")]
     ArtifactType {

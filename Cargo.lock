@@ -1031,7 +1031,6 @@ dependencies = [
  "js-mac-provision",
  "js-mac-session",
  "js-oci",
- "js-pool-static",
  "js-provider",
  "js-registry",
  "js-testkit",
@@ -1496,6 +1495,7 @@ name = "js-provider"
 version = "0.1.0"
 dependencies = [
  "js-types",
+ "thiserror",
 ]
 
 [[package]]

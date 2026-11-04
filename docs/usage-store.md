@@ -18,7 +18,7 @@ Every row starts with a version byte.
 | field | what it holds |
 |---|---|
 | `id` | the allocation: the lease id's text today, the job id later |
-| `profile` | the profile key a run of the lease named, if one did (the first by run id) |
+| `profile` | the profile key a run of the lease named, if one did (the first a run of the lease was queued with) |
 | `host` | the host it was booked on; absent for a request cancelled before it had one |
 | `booked` | what it booked: whether the whole host, and the CPU (thousandths of a core) and memory (bytes); absent with no host |
 | `queued_ms` | the queue wait, below; absent when not known |

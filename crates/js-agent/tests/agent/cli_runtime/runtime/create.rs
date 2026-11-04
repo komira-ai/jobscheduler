@@ -372,16 +372,14 @@ fn the_agents_own_labels_win() {
     assert_eq!(labels.len(), 5);
 }
 
-/// Asserts that the network, user, pull policy and `/tmp` size flags reach the
-/// container: a named network instead of none, the configured uid and gid, `--pull
-/// missing`, and the size in the tmpfs option. It catches a flag that is checked and then
-/// ignored.
+/// Asserts that the user, pull policy and `/tmp` size flags reach the container: the
+/// configured uid and gid, `--pull missing`, and the size in the tmpfs option; and that the
+/// network stays `none`. It catches a flag that is checked and then ignored.
 #[test]
-fn a_configured_network_and_user_are_used() {
+fn a_configured_user_is_used_and_the_network_is_none() {
     let world = docker();
     let set = js_agent::cli_runtime::Settings::new(
         std::path::Path::new(super::super::BIN),
-        Some("jobs"),
         Some("2000:3000"),
     )
     .unwrap()
@@ -396,7 +394,7 @@ fn a_configured_network_and_user_are_used() {
         let at = args.iter().position(|a| a == flag).unwrap();
         args[at + 1].clone()
     };
-    assert_eq!(value("--network"), "jobs");
+    assert_eq!(value("--network"), "none");
     assert_eq!(value("--user"), "2000:3000");
     assert_eq!(value("--pull"), "missing");
     assert_eq!(value("--tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=1g");

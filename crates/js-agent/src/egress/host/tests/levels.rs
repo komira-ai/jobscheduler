@@ -56,7 +56,7 @@ fn each_level_is_wired_into_its_own_set() {
     let egress = started(&fake, open());
     let before = fake.log().len();
     let wide = egress
-        .attach("wide", PID, JobNetwork::Open)
+        .attach("wide", PID, JobNetwork::Open, &[])
         .expect("attach");
     assert_eq!(wide.interface(), Some("jsv0"));
     let calls: Vec<String> = attach_calls()
@@ -75,7 +75,7 @@ fn each_level_is_wired_into_its_own_set() {
     );
     let before = fake.log().len();
     let listed = egress
-        .attach("listed", PID, JobNetwork::AllowList)
+        .attach("listed", PID, JobNetwork::AllowList, &[])
         .expect("attach");
     assert_eq!(fake.log()[before..], attach_calls()[..]);
     drop(listed);
@@ -83,7 +83,7 @@ fn each_level_is_wired_into_its_own_set() {
     let fake = Fake::new();
     let egress = started(&fake, allow_list());
     let before = fake.calls();
-    let above = egress.attach("above", PID, JobNetwork::Open);
+    let above = egress.attach("above", PID, JobNetwork::Open, &[]);
     assert_eq!(
         above.map(|a| a.interface().map(str::to_owned)),
         Err(EgressError::AboveCeiling {
@@ -124,7 +124,7 @@ fn none_is_the_default_and_has_loopback_only() {
         let egress = started(&fake, config);
         let before = fake.calls();
         let attachment = egress
-            .attach("quiet", PID, spec.network)
+            .attach("quiet", PID, spec.network, &[])
             .expect("nothing to wire");
         assert_eq!(attachment.interface(), None);
         drop(attachment);
@@ -143,7 +143,7 @@ fn a_member_left_in_a_set_is_never_reused_by_another_run() {
     let fake = Fake::new();
     let egress = started(&fake, open());
     let wide = egress
-        .attach("wide", PID, JobNetwork::Open)
+        .attach("wide", PID, JobNetwork::Open, &[])
         .expect("attach");
     assert_eq!(wide.interface(), Some("jsv0"));
     fake.answer(
@@ -157,7 +157,7 @@ fn a_member_left_in_a_set_is_never_reused_by_another_run() {
     );
     let before = fake.log().len();
     let listed = egress
-        .attach("listed", PID, JobNetwork::AllowList)
+        .attach("listed", PID, JobNetwork::AllowList, &[])
         .expect("attach");
     assert_eq!(listed.interface(), Some("jsv1"));
     assert!(
@@ -172,11 +172,11 @@ fn a_member_left_in_a_set_is_never_reused_by_another_run() {
         "netns",
         Err("RTNETLINK answers: Invalid argument".to_owned()),
     );
-    let failed = egress.attach("failed", PID, JobNetwork::Open);
+    let failed = egress.attach("failed", PID, JobNetwork::Open, &[]);
     assert!(failed.is_err());
     fake.answer("netns", Ok(String::new()));
     let next = egress
-        .attach("next", PID, JobNetwork::AllowList)
+        .attach("next", PID, JobNetwork::AllowList, &[])
         .expect("attach");
     assert_eq!(
         next.interface(),
@@ -187,7 +187,7 @@ fn a_member_left_in_a_set_is_never_reused_by_another_run() {
     fake.answer("delete element", Ok(String::new()));
     next.release().expect("release");
     let again = egress
-        .attach("again", PID, JobNetwork::AllowList)
+        .attach("again", PID, JobNetwork::AllowList, &[])
         .expect("attach");
     assert_eq!(
         again.interface(),
@@ -209,14 +209,14 @@ fn a_removal_that_could_not_run_is_not_taken_for_gone() {
     let fake = Fake::new();
     let egress = started(&fake, open());
     let wide = egress
-        .attach("wide", PID, JobNetwork::Open)
+        .attach("wide", PID, JobNetwork::Open, &[])
         .expect("attach");
     fake.not_run("delete element");
     let error = wide.release().expect_err("nft did not run");
     assert!(error.to_string().contains("not run: "), "{error}");
     fake.run_again();
     let listed = egress
-        .attach("listed", PID, JobNetwork::AllowList)
+        .attach("listed", PID, JobNetwork::AllowList, &[])
         .expect("attach");
     assert_eq!(listed.interface(), Some("jsv1"));
     fake.answer(
@@ -227,7 +227,7 @@ fn a_removal_that_could_not_run_is_not_taken_for_gone() {
         .release()
         .expect("nft ran and said the member is gone");
     let again = egress
-        .attach("again", PID, JobNetwork::AllowList)
+        .attach("again", PID, JobNetwork::AllowList, &[])
         .expect("attach");
     assert_eq!(again.interface(), Some("jsv1"), "that block is given back");
     drop(again);

@@ -62,6 +62,56 @@ Every refusal is found before the first write: a dry run shows the same refusals
 A rerun on a host that is set up changes nothing and exits 3, so it is safe to run again after an
 interruption or to check a host.
 
+## When the agent stops or crashes
+
+Each job's container runs under a supervisor process of its own (the agent's binary in a helper
+mode, as the job user, in the agent's control group but its own process group). The supervisor
+holds the container's output and, when the container ends, writes how it ended to `exit.json` in
+the lease's directory. The unit's `KillMode=process` lets systemd kill only the agent's main
+process, on a stop and after a crash, so the supervisors and the containers outlive the agent.
+
+- **A stop** (`systemctl stop`, an update) still drains: the agent lets its jobs run for up to
+  `--drain-wait` seconds, stops them within `--stop-grace`, reports, and exits.
+- **A crash** leaves the jobs running. When `Restart=always` starts the agent again, it reads its
+  ledger and takes over (adopts) each container its record holds, then lists those jobs in its
+  first heartbeat. A job that ended while no agent ran is reported with the code and output tail
+  from `exit.json`. Anything of the agent's that it cannot take over is removed and logged
+  (`js-agent: warning: crun: removed the lease of job <id>: <reason>`), and the server finds that
+  job lost because the agent no longer lists it. Each job taken over is logged too
+  (`js-agent: warning: crun: adopted job <id>`).
+- **A job's wall limit** counts the time the job ran with no agent, but only a running agent stops
+  a job: one whose limit passed while no agent ran is stopped at the new agent's first step, and
+  its result says it timed out.
+- **An agent with an allow-list `--egress`** takes over no container that may still run: its
+  start removes every network wiring an earlier process made, so it removes those containers
+  instead, and their jobs are lost. A container that ended while no agent ran has no network
+  left: it is taken over and its result reported, as above.
+
+The ledger is one file per lease, `<image store>/oci-labels/<lease>.json` (the image store is
+`oci` beside the scratch root), mode 0600, root's. Version 2 of the file holds:
+
+| field | what |
+|---|---|
+| `version` | `2`; a version 1 file (an older agent's) is not taken over: its lease is removed |
+| `agent`, `run_id`, `name`, `labels` | the agent's id, the job id, the lease's name, the container's labels |
+| `state` | `starting` until the supervisor runs, then `running`; a lease left `starting` is removed |
+| `allocation` | the allocation (lease) id the start carried |
+| `booked` | `cpu_millis`, `memory_bytes`, `disk_bytes`, `gpus`, `slot`: what the job booked |
+| `started_wall_ms`, `wall_ms` | when the container started (wall clock) and its wall limit; the new agent gives the job the time left, never more than `wall_ms` |
+| `lease_dir`, `cgroup`, `scratch`, `exit_record` | the lease's directory, its control group under `<unit>/actions`, the job's scratch directory, and the supervisor's `exit.json` |
+| `image_digest` | the digest of the job's image |
+| `supervisor` | the supervisor's `pid` and `start` (start time in clock ticks): together they name the process |
+
+A lease is taken over only when the file is version 2 and in state `running`, its labels agree with
+its fields, its directories and control group are where the agent puts them (not links), and
+either `exit.json` is there or `crun state` names the container's first process in the lease's
+control group and the supervisor still runs.
+
+Results the server has not acknowledged, and the job ids the agent must not run again, are kept in
+the state root: one file per held result in `held/`, and `retired.json` (job id and allocation id
+pairs, the newest 4096). A file there that cannot be read is dropped and logged as a finding; it
+does not stop the agent from starting.
+
 ## GPU hosts
 
 The script installs no driver and sets no GPU flag. On a host whose GPUs the agent should give its

@@ -296,12 +296,11 @@ fn the_job_users_are_the_uid_range() {
     assert_eq!(JobUsers::Uid(65534).range(), Ok(IdRange::single(65534)));
     let mapped = JobUsers::resolved(Mapping::new(231_072, 462_144));
     assert_eq!(mapped.range(), Ok(IdRange::of_job(231_072)));
-    let unresolved =
-        js_agent::cli_runtime::Settings::new(std::path::Path::new("/bin/sh"), None, None)
-            .unwrap()
-            .with_subuid("jobmap")
-            .unwrap()
-            .uid();
+    let unresolved = js_agent::cli_runtime::Settings::new(std::path::Path::new("/bin/sh"), None)
+        .unwrap()
+        .with_subuid("jobmap")
+        .unwrap()
+        .uid();
     let said = unresolved.range().unwrap_err();
     assert!(said.to_string().contains("not been resolved"), "{said}");
 }

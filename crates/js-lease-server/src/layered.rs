@@ -477,7 +477,7 @@ mod tests {
 
     /// A child that lets leases share its host: the booking table alone.
     struct Shares {
-        book: js_pool_static::HostBook,
+        book: js_provider::HostBook,
         classes: Vec<ResourceClass>,
     }
 
@@ -489,7 +489,7 @@ mod tests {
             self.classes.clone()
         }
         fn start(&mut self, spec: StartSpec) -> StartAck {
-            let gate = js_pool_static::HostBook::listed_gate(&self.classes, &spec);
+            let gate = js_provider::HostBook::listed_gate(&self.classes, &spec);
             self.book.start_where(&spec, gate, &|_, _| true)
         }
         fn stop(&mut self, lease: &LeaseId) -> StopAck {
@@ -530,7 +530,7 @@ mod tests {
     /// lease of each host, which sends the repeat to the free host and books the lease twice.
     #[test]
     fn a_lease_booked_second_on_a_host_is_found_in_its_child() {
-        let mut book = js_pool_static::HostBook::new();
+        let mut book = js_provider::HostBook::new();
         book.insert_host(host("x"), shape(4000, 0));
         let mut shares = Shares {
             book,

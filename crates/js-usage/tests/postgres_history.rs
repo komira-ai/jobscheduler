@@ -18,9 +18,12 @@ use js_usage::{
     ended_id_key, ended_key,
 };
 
-fn store() -> impl Store {
+/// A store in a schema of its own, and the backend that drops the schema when it is
+/// dropped: keep it for as long as the store is used.
+fn open() -> (PostgresBackend, impl Store) {
     let backend = PostgresBackend::new(&js_testkit::database::server_url(), Flaw::None);
-    backend.open(Arc::new(ManualClock::default()))
+    let store = backend.open(Arc::new(ManualClock::default()));
+    (backend, store)
 }
 
 /// The row of allocation `id`, ended at `end`.
@@ -58,7 +61,7 @@ fn ends(store: &dyn Store, from: u64, to: u64) -> (Vec<u64>, u64) {
 /// leaves the index entry of a row it deleted.
 #[test]
 fn ended_rows_on_postgres_are_written_once_read_in_order_and_pruned_with_their_index() {
-    let store = store();
+    let (_backend, store) = open();
     let history = EndedHistory::new(&store);
     for (end, id) in [
         (0, "a"),

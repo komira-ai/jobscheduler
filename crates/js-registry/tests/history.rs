@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use js_agent_wire::{ExclusiveRefusal, HeldRun, HeldState, RefusalReason};
-use js_pool_static::Candidate;
-use js_provider::{Observed, Pool, StartSpec, StopAck};
+
+use js_provider::{Candidate, Observed, Pool, StartSpec, StopAck};
 use js_registry::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_REGAIN_GRACE_MS, ERROR_EDGES_MS, MAX_FINISHED_RUNS,
     MarkedTails, Placer, ProfileLives, Registry, WholeNodeConfig,
