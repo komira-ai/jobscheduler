@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::{Value, json};
 
 use crate::failure::Failure;
@@ -22,7 +22,7 @@ const STOP_GRACE: &str = "30s";
 #[command(
     name = "js",
     version,
-    about = "Acquires, renews and releases leases on a lease server"
+    about = "Acquires, renews and releases leases on a lease server, and makes the calls of the job service"
 )]
 pub struct Cli {
     /// The lease server, such as `https://leases.example:7300`. Plain `http://` is
@@ -47,6 +47,12 @@ pub struct Cli {
     pub(crate) json: bool,
     #[command(subcommand)]
     pub(crate) command: Command,
+}
+
+/// The whole command line: the lease commands of [`Cli`] and the job commands generated
+/// from the job service ([`crate::jobs::commands`]).
+pub(crate) fn command() -> clap::Command {
+    Cli::command().subcommands(crate::jobs::commands(crate::jobs::surface()))
 }
 
 impl Cli {

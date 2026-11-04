@@ -9,18 +9,31 @@ publish.workspace = true
 
 [dependencies]
 js-agent-wire = { path = "../js-agent-wire" }
+# The job service's messages and generated gRPC client (the job client, src/jobs).
+js-proto = { path = "../js-proto" }
+# The job client's byte stream under the gRPC channel.
+hyper-util = { workspace = true, features = ["tokio"] }
 rustix = { workspace = true, features = ["fs", "process"] }
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-rustls.workspace = true
+# `channel`: the HTTP/2 client the generated gRPC client runs on, without tonic's own TLS
+# (the job client does TLS itself, with the roots below).
+tonic = { workspace = true, features = ["channel"] }
 ureq.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
+http-body-util.workspace = true
+hyper.workspace = true
 js-testkit = { path = "../js-testkit" }
 rcgen.workspace = true
-webpki-roots.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tonic = { workspace = true, features = ["transport"] }
 
 [lints]
 workspace = true

@@ -27,6 +27,11 @@ test = false
 clap.workspace = true
 flate2.workspace = true
 hex.workspace = true
+# `gen-job-surface` reads the job service's descriptor set: the one js-proto builds, decoded
+# with prost into prost-types' descriptor messages.
+js-proto = { path = "../js-proto" }
+prost.workspace = true
+prost-types.workspace = true
 # The scratch directory and the guarded server child of `site-demo`.
 js-testkit = { path = "../js-testkit" }
 rustls.workspace = true
@@ -50,10 +55,16 @@ ureq.workspace = true
 # accepts and the server addresses the client refuses (tests/js_agent_package.rs).
 js-agent = { path = "../js-agent" }
 js-client = { path = "../js-client" }
+# The interpreter that builds the job commands from a generated table, run on the tables the
+# generator renders for the test definition (tests/job_surface.rs).
+js-cli = { path = "../js-cli" }
 js-elastic = { path = "../js-elastic" }
 # The plists the package carries must be flags the programs accept (tests/macos_pkg.rs).
 js-mac-provision = { path = "../js-mac-provision" }
 js-mac-session = { path = "../js-mac-session" }
+# The test definition of tests/job_surface.rs, compiled as js-proto's build script compiles
+# the job service.
+protox.workspace = true
 rcgen.workspace = true
 # The host updater's own validator of a declaration, which the js-agent declaration the release
 # ships must pass (tests/js_agent_declaration.rs).

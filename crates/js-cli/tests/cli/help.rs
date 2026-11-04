@@ -1,5 +1,6 @@
 //! The help text of the commands, held to golden files under `goldens/`: the lease commands'
-//! as they were before the job commands were added beside them.
+//! as they were before the job commands were added beside them, and the job commands', which
+//! are built from the generated table.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -19,6 +20,27 @@ const LEASE: [&[&str]; 7] = [
     &["lease", "list"],
     &["lease", "run"],
     &["lease", "native"],
+];
+
+/// The program and the job commands, whose help is held to `goldens/job_help/`.
+const JOB: [&[&str]; 17] = [
+    &[],
+    &["job"],
+    &["job", "submit"],
+    &["job", "get"],
+    &["job", "list"],
+    &["job", "cancel"],
+    &["job", "result"],
+    &["job", "logs"],
+    &["host"],
+    &["host", "list"],
+    &["host", "cordon"],
+    &["host", "uncordon"],
+    &["pool"],
+    &["pool", "list"],
+    &["provider"],
+    &["provider", "list"],
+    &["usage"],
 ];
 
 /// What `js <words> --help` prints on stdout; it must exit 0 and print nothing on stderr.
@@ -62,6 +84,16 @@ pub fn differing(dir: &str, commands: &[&[&str]]) -> Vec<String> {
 #[test]
 fn lease_help_is_unchanged() {
     let differ = differing("lease_help", &LEASE);
+    assert!(differ.is_empty(), "{}", differ.join("\n"));
+}
+
+/// Asserts that `js --help` and the help of every job group and command equal their
+/// goldens: the commands' words, each flag with its field's comment, the required flags,
+/// and `--id` in place of `--spec.job-id`. A change to the definition or to the generator's
+/// rules moves these goldens.
+#[test]
+fn job_help_text_matches_goldens() {
+    let differ = differing("job_help", &JOB);
     assert!(differ.is_empty(), "{}", differ.join("\n"));
 }
 

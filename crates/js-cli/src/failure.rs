@@ -1,6 +1,8 @@
 //! What ends a command without success, and the exit status each kind has.
 
 use js_client::ClientError;
+use js_client::jobs::{JobError, NotSent};
+use tonic::Code;
 
 use crate::events::ForwardedSignal;
 
@@ -31,6 +33,10 @@ pub mod exit {
     /// attempt: the lease may stay held until its ttl runs out. It replaces the command's
     /// own status, which is said on stderr.
     pub const RELEASE_UNCONFIRMED: u8 = 8;
+    /// A job command sent its request and read no definite answer: the call may have taken
+    /// effect. For `job submit` the job may exist, and the same command with the same `--id`
+    /// is safe to run again.
+    pub const UNCONFIRMED: u8 = 9;
     /// `lease run` could not start its command.
     pub const NOT_STARTED: u8 = 127;
 }
@@ -82,6 +88,37 @@ pub(crate) enum Failure {
     /// A signal ended `lease run` while it waited for the lease; nothing was started.
     #[error("interrupted by {} before the lease was held; asked the server to release it", .0.name())]
     Interrupted(ForwardedSignal),
+    /// A job command's request never reached the server's handling: the connection or the
+    /// TLS handshake failed before it was written, or the server refused the token.
+    #[error("{0}")]
+    NotSent(String),
+    /// A job command's request was written and no definite answer was read.
+    #[error("{0}")]
+    Unanswered(String),
+    /// The generated command table does not match the descriptor set it was generated from.
+    #[error(
+        "the job command table does not match the job service ({0}); regenerate it with cargo xtask gen-job-surface"
+    )]
+    Surface(String),
+}
+
+/// A job command's failure: a bad flag is a usage error as for every command; a request
+/// that was not sent is exit 1 (`not-sent`); a definite refusal is exit 4 when the request
+/// itself is invalid (`INVALID_ARGUMENT`) and exit 3 otherwise; a lost answer is exit 9
+/// (`unconfirmed`).
+impl From<JobError> for Failure {
+    fn from(err: JobError) -> Self {
+        match err {
+            JobError::NotSent(NotSent::Flag { flag, why }) => Self::flag(flag, why),
+            JobError::NotSent(other) => Self::NotSent(other.to_string()),
+            JobError::Rejected {
+                code: Code::InvalidArgument,
+                reason,
+            } => Self::Contract(reason),
+            JobError::Rejected { reason, .. } => Self::Refused(reason),
+            JobError::MayHaveActed(why) => Self::Unanswered(why),
+        }
+    }
 }
 
 impl From<ClientError> for Failure {
@@ -111,6 +148,9 @@ impl Failure {
             Self::NotStarted { .. } => (exit::NOT_STARTED, "not-started"),
             Self::LeaseLost(_) | Self::LeaseUnrenewed(_) => (exit::LEASE_LOST, "lease-lost"),
             Self::Interrupted(signal) => (128 + signal.number(), "interrupted"),
+            Self::NotSent(_) => (exit::SERVER, "not-sent"),
+            Self::Unanswered(_) => (exit::UNCONFIRMED, "unconfirmed"),
+            Self::Surface(_) => (exit::SERVER, "internal"),
         }
     }
 }

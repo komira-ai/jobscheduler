@@ -2,13 +2,15 @@
 //! 127.0.0.1: every subcommand and exit status, the pending poll and the renewal loop
 //! driven through the injected waiter and clock, TLS, the refusals before any request,
 //! lost replies, the processes a command leaves behind, and the program itself run as a
-//! child process.
+//! child process; and the job commands against an in-memory job server.
 
 mod acquire;
 mod binary;
 mod failures;
+mod fake_jobs;
 mod flags;
 mod help;
+mod jobs;
 mod lost_reply;
 mod native;
 mod ops;

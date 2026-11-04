@@ -3,6 +3,8 @@
 //! plain http and over TLS with a certificate made for the test.
 
 mod client;
+mod fake_jobs;
+mod jobs;
 mod run;
 mod server_url;
 mod support;

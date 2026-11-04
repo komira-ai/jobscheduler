@@ -1,0 +1,254 @@
+//! The generator's refusals, each on a small descriptor set made by hand: what it cannot
+//! read, what it cannot render, and the retry-key entry that names a call or field the
+//! definition lost.
+
+use std::path::{Path, PathBuf};
+
+use prost::Message as _;
+use prost_types::field_descriptor_proto::{Label, Type};
+use prost_types::{
+    DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet, MessageOptions,
+    MethodDescriptorProto, ServiceDescriptorProto,
+};
+
+use super::{Args, generate, run};
+
+/// A field `name` of `kind`; `type_name` names its enum or message, when it has one.
+fn field(name: &str, number: i32, kind: Type, type_name: &str) -> FieldDescriptorProto {
+    FieldDescriptorProto {
+        name: Some(name.to_owned()),
+        number: Some(number),
+        label: Some(Label::Optional.into()),
+        r#type: Some(kind.into()),
+        type_name: Some(type_name.to_owned()),
+        ..FieldDescriptorProto::default()
+    }
+}
+
+/// A message `name` with `fields`.
+fn message(name: &str, fields: Vec<FieldDescriptorProto>) -> DescriptorProto {
+    DescriptorProto {
+        name: Some(name.to_owned()),
+        field: fields,
+        ..DescriptorProto::default()
+    }
+}
+
+/// A call `name` from `input` to the message `Empty`.
+fn method(name: &str, input: &str) -> MethodDescriptorProto {
+    MethodDescriptorProto {
+        name: Some(name.to_owned()),
+        input_type: Some(input.to_owned()),
+        output_type: Some(".p.Empty".to_owned()),
+        ..MethodDescriptorProto::default()
+    }
+}
+
+/// The encoded set of one file of package `package` holding `messages`, the message
+/// `Empty` and the service `Svc` with `methods`.
+fn set(
+    package: &str,
+    methods: Vec<MethodDescriptorProto>,
+    messages: Vec<DescriptorProto>,
+) -> Vec<u8> {
+    let mut messages = messages;
+    messages.push(message("Empty", Vec::new()));
+    let file = FileDescriptorProto {
+        name: Some("p.proto".to_owned()),
+        package: Some(package.to_owned()),
+        message_type: messages,
+        service: vec![ServiceDescriptorProto {
+            name: Some("Svc".to_owned()),
+            method: methods,
+            ..ServiceDescriptorProto::default()
+        }],
+        ..FileDescriptorProto::default()
+    };
+    FileDescriptorSet { file: vec![file] }.encode_to_vec()
+}
+
+/// What `generate` says of `descriptor`, or "" when it renders.
+fn refused(descriptor: &[u8]) -> String {
+    generate(descriptor)
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default()
+}
+
+/// One call `name` whose request is `Req` with `fields`.
+fn one(name: &str, fields: Vec<FieldDescriptorProto>) -> String {
+    refused(&set(
+        "p",
+        vec![method(name, ".p.Req")],
+        vec![message("Req", fields)],
+    ))
+}
+
+/// Asserts the refusals of what cannot be read: bytes that are not a descriptor set, a set
+/// with no service, a type that is not in the set (a request, a response, an enum), a map
+/// entry without its two fields, and a call whose request streams.
+#[test]
+fn what_cannot_be_read_is_refused_by_name() {
+    assert!(refused(&[0xff]).starts_with("the descriptor set does not decode: "));
+    let empty = FileDescriptorSet {
+        file: vec![FileDescriptorProto::default()],
+    };
+    assert_eq!(
+        refused(&empty.encode_to_vec()),
+        "the descriptor set must hold one service, not 0"
+    );
+    assert_eq!(
+        refused(&set(
+            "p",
+            vec![method("GetThing", ".p.Missing")],
+            Vec::new()
+        )),
+        "the descriptor set has no type .p.Missing"
+    );
+    let mut lost = method("GetThing", ".p.Empty");
+    lost.output_type = Some(".p.Gone".to_owned());
+    assert_eq!(
+        refused(&set("p", vec![lost], Vec::new())),
+        "the descriptor set has no type .p.Gone"
+    );
+    assert_eq!(
+        one("ListThings", vec![field("shade", 1, Type::Enum, ".p.Nope")]),
+        "the descriptor set has no type .p.Nope"
+    );
+    let mut request = message(
+        "Req",
+        vec![field("pairs", 1, Type::Message, ".p.Req.Entry")],
+    );
+    let mut entry = message("Entry", vec![field("key", 1, Type::String, "")]);
+    entry.options = Some(MessageOptions {
+        map_entry: Some(true),
+        ..MessageOptions::default()
+    });
+    request.nested_type = vec![entry];
+    assert_eq!(
+        refused(&set(
+            "p",
+            vec![method("ListThings", ".p.Req")],
+            vec![request]
+        )),
+        "the descriptor set has no type Entry: a map entry without a key and a value"
+    );
+    let mut streaming = method("PutThings", ".p.Empty");
+    streaming.client_streaming = Some(true);
+    assert_eq!(
+        refused(&set("p", vec![streaming], Vec::new())),
+        "PutThings streams its requests; a generated command sends one request"
+    );
+}
+
+/// Asserts the refusals of commands that cannot be: a name without a noun, a command on the
+/// hand-written `lease` words, two calls on one command, a field whose flag is one of `js`'s
+/// own, and two fields with one flag.
+#[test]
+fn a_command_that_cannot_be_is_refused_by_name() {
+    assert_eq!(
+        one("Ping", Vec::new()),
+        "Ping: its name has no noun after the verb"
+    );
+    assert_eq!(
+        one("ListLeases", Vec::new()),
+        "ListLeases: `js lease list` is a command js writes by hand"
+    );
+    let two = set(
+        "p",
+        vec![
+            method("ListJob", ".p.Empty"),
+            method("ListJobs", ".p.Empty"),
+        ],
+        Vec::new(),
+    );
+    assert_eq!(refused(&two), "ListJobs: `js job list` is where ListJob is");
+    assert_eq!(
+        one(
+            "ListThings",
+            vec![
+                field("server", 1, Type::String, ""),
+                field("json", 2, Type::Bool, "")
+            ]
+        ),
+        "ListThings: the flag --server is a flag of js itself"
+    );
+    let mut ports = field("ports", 1, Type::Message, ".p.Empty");
+    ports.label = Some(Label::Repeated.into());
+    assert_eq!(
+        one(
+            "ListThings",
+            vec![ports, field("ports_file", 2, Type::String, "")]
+        ),
+        "ListThings: the flag --ports-file is the flag of two fields"
+    );
+}
+
+/// Asserts that the retry-key entry fails loudly when the job service loses what it names:
+/// the call `SubmitJob`, the message on the way to the id (`spec` is no message), or a
+/// `spec.job_id` that is not a string. It catches the entry dropped without a word, which
+/// would leave `js job submit` without its drawn id.
+#[test]
+fn the_retry_key_entry_fails_when_the_definition_loses_it() {
+    let package = "jobscheduler.v1";
+    let service = |methods, messages| {
+        let mut file = FileDescriptorSet::decode(set(package, methods, messages).as_slice())
+            .unwrap_or_default();
+        file.file.iter_mut().for_each(|file| {
+            file.service
+                .iter_mut()
+                .for_each(|s| s.name = Some("JobService".to_owned()))
+        });
+        refused(&file.encode_to_vec())
+    };
+    let empty = ".jobscheduler.v1.Empty";
+    let mut get = method("GetJob", empty);
+    get.output_type = Some(empty.to_owned());
+    assert_eq!(
+        service(vec![get], Vec::new()),
+        "jobscheduler.v1.JobService.SubmitJob is not in the definition, which the generator's retry-key entry names"
+    );
+    let mut submit = method("SubmitJob", ".jobscheduler.v1.Req");
+    submit.output_type = Some(empty.to_owned());
+    let flat = message("Req", vec![field("spec", 1, Type::String, "")]);
+    let lost = "jobscheduler.v1.JobService.SubmitJob has no singular string field spec.job_id, which the generator's retry-key entry names";
+    assert_eq!(service(vec![submit.clone()], vec![flat]), lost);
+    let nested = message(
+        "Req",
+        vec![field("spec", 1, Type::Message, ".jobscheduler.v1.Spec")],
+    );
+    let spec = message("Spec", vec![field("job_id", 1, Type::Uint64, "")]);
+    assert_eq!(service(vec![submit], vec![nested, spec]), lost);
+}
+
+/// The directory of this crate, which holds no generated file.
+fn here() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Asserts the verb's own refusals: a descriptor file that cannot be read, a root the files
+/// cannot be written under (it is a file), and `--check` against a root without them, which
+/// names both.
+#[test]
+fn the_verb_names_what_it_cannot_read_write_or_match() {
+    let missing = here().join("no-such-descriptor.bin");
+    let args = |descriptor: Option<PathBuf>, out: &Path, check: bool| Args {
+        descriptor,
+        out: out.to_path_buf(),
+        check,
+    };
+    let said = run(&args(Some(missing.clone()), &here(), false))
+        .err()
+        .map(|e| e.to_string());
+    let want = format!("cannot read {}: ", missing.display());
+    assert!(said.unwrap_or_default().starts_with(&want));
+    let file = here().join("Cargo.toml");
+    let said = run(&args(None, &file, false)).err().map(|e| e.to_string());
+    let want = format!("cannot write {}: ", file.join(super::CLIENT_FILE).display());
+    assert!(said.unwrap_or_default().starts_with(&want));
+    let said = run(&args(None, &here(), true)).err().map(|e| e.to_string());
+    assert_eq!(
+        said.unwrap_or_default(),
+        "not what `cargo xtask gen-job-surface --out .` renders from the job service: crates/js-client/src/jobs/generated.rs, crates/js-cli/src/jobs/generated.rs"
+    );
+}

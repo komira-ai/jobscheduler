@@ -13,14 +13,21 @@ path = "src/main.rs"
 
 [dependencies]
 js-client = { path = "../js-client" }
+# The job service's descriptor set, which the job commands build requests and print answers by.
+js-proto = { path = "../js-proto" }
 clap.workspace = true
 getrandom.workspace = true
+prost.workspace = true
+prost-reflect.workspace = true
 rustix = { workspace = true, features = ["process"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "signal"] }
+tonic.workspace = true
 
 [dev-dependencies]
+http-body-util.workspace = true
+hyper.workspace = true
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
 js-pool-static = { path = "../js-pool-static" }
@@ -31,6 +38,7 @@ js-types = { path = "../js-types" }
 rcgen.workspace = true
 rustix = { workspace = true, features = ["event"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+tonic = { workspace = true, features = ["transport"] }
 
 [lints]
 workspace = true

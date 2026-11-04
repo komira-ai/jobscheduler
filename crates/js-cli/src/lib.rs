@@ -1,5 +1,7 @@
 //! `js`: the command-line client of `js-lease-server`. It acquires, renews and releases
-//! leases on whole GPU hosts, and runs a command while it holds one.
+//! leases on whole GPU hosts, and runs a command while it holds one; and it makes the calls
+//! of the job service (`jobscheduler.v1.JobService`), one command per call (see "Job
+//! commands" below).
 //!
 //! The library is the program: [`run_with`] takes the arguments, the streams to print
 //! to and the [`Services`] (the waiter, the clock and the signal source), and `main`
@@ -83,6 +85,61 @@
 //! (once: it does not retry the list, so a start the server only finishes afterwards
 //! stays held until its ttl).
 //!
+//! # Job commands
+//!
+//! ```text
+//! js job submit [--id ID] --spec.image REF [--spec.args A ...] [--spec.env K=V ...]
+//!               [--spec.needs.cpu-millis N ...] [--spec.wall-limit-seconds <dur>] ...
+//! js job get --job-id ID          js job cancel --job-id ID
+//! js job list [--states S ...] [--labels K=V ...] [--page-size N] [--page-token T]
+//! js job result --job-id ID       js job logs --job-id ID
+//! js host list                    js host cordon --host-id ID [--cordon-secs <dur>]
+//! js host uncordon --host-id ID   js pool list     js provider list
+//! js usage [--from-ms N] [--to-ms N] [--host-id ID] [--job-id ID] ...
+//! ```
+//!
+//! These commands are not written here: `cargo xtask gen-job-surface` generates their table
+//! from the service definition in `js-proto` ([`jobs::surface`]), and [`jobs`] builds the
+//! command line from it, so a call added to the definition is a command with no hand-written
+//! code. `js <command> --help` shows each flag with the comment of its field. The global
+//! flags mean what they mean for the lease commands: the same `--server` rule, token file
+//! and roots, over gRPC (HTTP/2) to the one origin.
+//!
+//! How a call is named: a call is a verb and a noun. When its request has exactly one
+//! singular, non-`optional` scalar field (its subject, whose flag is required) named
+//! `<owner>_id`, the command is `<owner> <verb>` when the noun is the owner (`GetJob` is
+//! `job get`) and `<owner> <noun>` otherwise (`GetResult` is `job result`). Otherwise it is
+//! `<noun> <verb>` with the noun's trailing `s` dropped (`ListHosts` is `host list`), and a
+//! `Get` is the noun alone (`GetUsage` is `usage`).
+//!
+//! How a field is a flag: the field names in kebab case, joined by dots through nested
+//! messages, so there is one flag per leaf (`--spec.needs.cpu-millis 1500`). A scalar takes
+//! one value (`true`/`false` for a bool); a repeated field repeats the flag; a map is
+//! `--labels KEY=VALUE`, repeated; an integer field named `*_seconds` or `*_secs` takes a
+//! duration (`90`, `90s`, `15m`, `2h`); an enum takes its value's short name, its name
+//! without the enum's shared prefix in lower case with dashes (`--states failed-to-start`).
+//! A field the flags cannot spell (`bytes`, a repeated message such as `spec.ports`, a map
+//! of messages, a `oneof` member) is `--<name>-file PATH`, a file holding the field's value
+//! in proto3 JSON (`--spec.ports-file ports.json` holding
+//! `[{"hostPort": 8080, "containerPort": 80}]`).
+//!
+//! Output: one `path: value` line per field of the answer that is set (`job.state:
+//! queued`, `jobs[0].id: ...`), or with `--json` the answer in proto3 JSON on one line. A
+//! log tail (`job logs`, `job result`) prints its label on a line and then its text: the
+//! standard output tail, then the standard error tail, and `truncated: true` when a stream
+//! was cut.
+//!
+//! `job submit` is idempotent on the job's id (design section 5.3): the same id with the
+//! same job answers from the job the first submit made. Without `--id`, `js` draws 128
+//! random bits and uses them in hexadecimal, and prints `js: job id <id>` on stderr before
+//! it sends. When the request was sent and no answer was read (the connection broke, the
+//! call timed out, the server answered `UNAVAILABLE`, `UNKNOWN` or `INTERNAL`), the job may
+//! exist: `js` says `js: the job may exist; run the same command again with --id <id>` and
+//! exits 9 (JSON kind `unconfirmed`). A request that was never sent (the connection or TLS
+//! failed first, or the token was refused) is exit 1 (`not-sent`) and changed nothing. A
+//! definite refusal is exit 4 for `INVALID_ARGUMENT` (the request itself, such as a wall
+//! limit of 0) and exit 3 for any other code (`no-capable-host`, an unknown job).
+//!
 //! # Renewal and the deadline
 //!
 //! `run` knows how long the lease lasts from the server's answers, not from what was
@@ -139,14 +196,15 @@
 //! | status | meaning |
 //! |---|---|
 //! | 0 | held, renewed, freed, listed; for `run`, the command's own status |
-//! | 1 | the server or the network failed, or the token was refused (401); a start whose answer was lost (the lease may exist: run `js lease list`) |
+//! | 1 | the server or the network failed, or the token was refused (401); a start whose answer was lost (the lease may exist: run `js lease list`); a job command whose request was not sent (`not-sent`) |
 //! | 2 | a flag or a file it names is wrong, including what clap refuses |
-//! | 3 | refused: `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`, `request-id-conflict`, `unknown-lease`, `not-held`, `expired`, or a pending start that was dropped (`pending-dropped`) |
-//! | 4 | the request itself was refused: a start-contract rule (`unknown-class`, `reserved-label`, `invalid-label`, `below-class-minimum`, `wall-time-not-positive`) or a body the server cannot read |
+//! | 3 | refused: a job command's definite refusal other than `INVALID_ARGUMENT` (`no-capable-host`, an unknown job); `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`, `request-id-conflict`, `unknown-lease`, `not-held`, `expired`, or a pending start that was dropped (`pending-dropped`) |
+//! | 4 | the request itself was refused: a job command answered `INVALID_ARGUMENT`; a start-contract rule (`unknown-class`, `reserved-label`, `invalid-label`, `below-class-minimum`, `wall-time-not-positive`) or a body the server cannot read |
 //! | 5 | a pending start was not confirmed within `--wait-pending` |
 //! | 6 | `release`: the stop was accepted but is not confirmed; the server retries it |
 //! | 7 | `run`: the lease was lost (gone from the server, or not renewed before the deadline short of its expiry); the command was stopped |
 //! | 8 | `run`: the release of the lease could not be confirmed after three tries, so it may stay held until its ttl; replaces the command's own status, which is said on stderr |
+//! | 9 | a job command sent its request and read no answer, so the call may have taken effect (`unconfirmed`); for `job submit` the job may exist and the same command with the same `--id` is safe to run again |
 //! | 127 | `run`: the command could not be started |
 //! | 129, 130, 143 | `run`: SIGHUP, SIGINT or SIGTERM ended `js` while the start was pending (after the command started, the command's own status) |
 //!
@@ -157,6 +215,7 @@ mod cli;
 mod command;
 mod events;
 mod failure;
+pub mod jobs;
 mod leases;
 mod render;
 mod renewals;
@@ -168,7 +227,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{ArgMatches, FromArgMatches};
 
 use cli::{Action, Cli, Command};
 use failure::Failure;
@@ -201,8 +260,8 @@ pub fn run_with(
     err: &mut dyn Write,
     services: Services,
 ) -> u8 {
-    match Cli::try_parse_from(args) {
-        Ok(cli) => execute(cli, out, err, services),
+    match cli::command().try_get_matches_from(args) {
+        Ok(matches) => execute(&matches, out, err, services),
         Err(usage) => usage_exit(&usage, out, err),
     }
 }
@@ -216,16 +275,40 @@ fn usage_exit(usage: &clap::Error, out: &mut dyn Write, err: &mut dyn Write) -> 
     u8::try_from(usage.exit_code()).unwrap_or(exit::USAGE)
 }
 
-/// Runs a parsed command line and prints its failure, if any.
-fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, services: Services) -> u8 {
-    let render = Render::new(cli.json);
-    match dispatch(cli, render, out, err, services) {
+/// Runs a parsed command line, a job command or a lease command, and prints its failure,
+/// if any.
+fn execute(
+    matches: &ArgMatches,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    services: Services,
+) -> u8 {
+    let render = Render::new(matches.get_flag("json"));
+    let done = match jobs::chosen(matches) {
+        Some((command, own)) => {
+            jobs::run(command, matches, own, render, out, err, &services.dialer)
+        }
+        None => lease(matches, render, out, err, services),
+    };
+    match done {
         Ok(code) => code,
         Err(failure) => {
             let _ = err.write_all(render.failure(&failure).as_bytes());
             failure.parts().0
         }
     }
+}
+
+/// Runs a lease command.
+fn lease(
+    matches: &ArgMatches,
+    render: Render,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    services: Services,
+) -> Result<u8, Failure> {
+    let cli = Cli::from_arg_matches(matches).map_err(|usage| Failure::Usage(usage.to_string()))?;
+    dispatch(cli, render, out, err, services)
 }
 
 fn dispatch(
