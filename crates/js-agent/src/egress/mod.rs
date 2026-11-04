@@ -24,4 +24,4 @@ pub use config::{
     Mode, Pool, ROUTE_WAIT,
 };
 #[cfg(target_os = "linux")]
-pub use host::{Attachment, Egress, EgressError};
+pub use host::{Attachment, Egress, EgressError, HOST_LOCK};

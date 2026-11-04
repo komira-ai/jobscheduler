@@ -234,6 +234,7 @@ fn start(life: &mut Lifecycle, node: &Node, run_id: &str) -> Vec<String> {
         .map(|event| match event {
             Event::Started { run_id } => format!("started {run_id}"),
             Event::Refused { run_id, code, .. } => format!("refused {run_id} {code}"),
+            Event::ResultReady { run_id } => format!("result {run_id}"),
             other => format!("{other:?}"),
         })
         .collect()
@@ -606,6 +607,7 @@ fn mode_none_calls_no_egress_port() {
     runtime.wait_ended(&id);
     assert!(matches!(runtime.poll(&id), Ok(Status::Exited(_))));
     runtime.remove(&id).expect("removed");
+    assert_eq!(asks(&node, "r1"), 0, "no pid asked for without a port");
     drop(runtime);
 
     let wanted = allow_list();
@@ -633,4 +635,202 @@ fn mode_none_calls_no_egress_port() {
 
     let failed = start_egress(&wanted, |_| Err::<(), _>(EgressError::Forwarding));
     assert_eq!(failed, Err(EgressError::Forwarding));
+}
+
+/// Captures the warnings logged on this thread while the guard lives.
+fn warnings() -> (Lines, tracing::subscriber::DefaultGuard) {
+    let lines = Lines::default();
+    let writer = lines.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    tracing::callsite::rebuild_interest_cache();
+    (lines, guard)
+}
+
+impl Lines {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().expect("lines").clone()).expect("utf-8")
+    }
+}
+
+/// Proves a container's pid that `crun state` names only after the route wait has passed on
+/// the runtime's clock (a clock that jumps a minute at each read) is refused: the container's
+/// init has given up its wait, so the port is not asked to wire it, and the container is
+/// ended and removed with its lease. Catches a late answer that slips past the wait.
+#[test]
+fn a_pid_named_after_the_route_wait_is_refused() {
+    let node = Node::new("egress-pid-late-answer");
+    let seen = Seen::new(&node);
+    let hooks = Hooks {
+        now_ms: ticking,
+        ..impatient()
+    };
+    let mut runtime = open(&node, port(&seen), hooks);
+    let why = runtime
+        .create_and_start(&node.spec("r1-wired"))
+        .map(|_| ())
+        .expect_err("named too late");
+    assert_eq!(
+        why.to_string(),
+        "wire the container's network: crun state named the pid after the route wait of 30s: \
+         the init has given up"
+    );
+    assert_eq!(asks(&node, "r1-wired"), 1);
+    assert_eq!(seen.taken(), Vec::<String>::new());
+    assert!(nothing_left(&node, "r1-wired"));
+}
+
+/// Proves a release that fails on the removal path itself (the run's end never polled, and a
+/// run removed while it runs) is logged as a warning naming the lease and the reason, the
+/// removal still takes the lease apart, and nothing is released again afterwards. Catches a
+/// removal that returns the release error, keeps the lease, or releases twice.
+#[test]
+fn a_release_error_on_removal_is_logged_and_the_lease_still_goes() {
+    let (lines, _guard) = warnings();
+    let node = Node::new("egress-remove-release-fails");
+    let seen = Seen::new(&node);
+    seen.release_fails.store(true, Ordering::SeqCst);
+    let mut runtime = open(&node, port(&seen), impatient());
+    let ended = runtime.create_and_start(&node.spec("r1")).expect("started");
+    runtime.wait_ended(&ended);
+    let running = runtime
+        .create_and_start(&node.spec("r2-wired"))
+        .expect("started");
+    seen.taken();
+    for (id, run) in [(&ended, "r1"), (&running, "r2-wired")] {
+        runtime
+            .remove(id)
+            .expect("removed despite the failed release");
+        assert_eq!(seen.taken(), [format!("release {}", id.0)], "{run}");
+        assert!(nothing_left(&node, run), "{run}");
+        let said = lines.text();
+        let warned = said.lines().any(|line| {
+            line.contains("WARN")
+                && line.contains(&id.0)
+                && line.contains(
+                    "release the network of the run: egress: deleting the veth: \
+                                  Operation not permitted",
+                )
+        });
+        assert!(warned, "{said}");
+    }
+    for id in [&ended, &running] {
+        runtime.remove(id).expect("gone already");
+        assert_eq!(runtime.poll(id).expect("polled"), Status::Gone);
+    }
+    assert_eq!(seen.taken(), Vec::<String>::new(), "released once each");
+}
+
+/// Proves a removal that fails after it released the wiring (here `crun delete` fails) keeps
+/// the lease for the next removal, which takes it apart without releasing the wiring again.
+/// Catches a retried removal that releases twice, and one that cannot finish because the
+/// wiring is gone.
+#[test]
+fn a_removal_that_fails_after_its_release_is_retried_without_a_second_release() {
+    let node = Node::new("egress-remove-retry");
+    let seen = Seen::new(&node);
+    let mut runtime = open(&node, port(&seen), impatient());
+    let id = runtime
+        .create_and_start(&node.spec("r1-wired"))
+        .expect("started");
+    seen.taken();
+    let fails = node.dir.path().join("delete-fails");
+    std::fs::write(&fails, b"").expect("make crun delete fail");
+    let why = runtime.remove(&id).expect_err("crun delete fails");
+    assert!(
+        why.to_string().starts_with("delete the container: "),
+        "{why}"
+    );
+    assert_eq!(seen.taken(), [format!("release {}", id.0)]);
+    assert_eq!(runtime.list_labelled().expect("listed").len(), 1, "kept");
+    std::fs::remove_file(&fails).expect("let crun delete work");
+    runtime.remove(&id).expect("removed at the retry");
+    assert_eq!(seen.taken(), Vec::<String>::new(), "no second release");
+    assert!(nothing_left(&node, "r1-wired"));
+}
+
+/// Proves a start whose wiring fails and whose removal then fails too returns the wiring's
+/// error (the cause), logs the removal's failure naming the lease, and keeps the container
+/// listed so that a later removal takes it apart: nothing is left once it does. Catches a
+/// cleanup failure that hides the cause, passes without a trace, or forgets the container.
+#[test]
+fn a_failed_wiring_whose_cleanup_fails_keeps_the_lease_for_a_later_removal() {
+    let (lines, _guard) = warnings();
+    let node = Node::new("egress-wire-and-cleanup-fail");
+    let seen = Seen::new(&node);
+    seen.attach_fails.store(true, Ordering::SeqCst);
+    let mut runtime = open(&node, port(&seen), impatient());
+    let fails = node.dir.path().join("delete-fails");
+    std::fs::write(&fails, b"").expect("make crun delete fail");
+    let why = runtime
+        .create_and_start(&node.spec("r1-wired"))
+        .map(|_| ())
+        .expect_err("not wired");
+    assert_eq!(
+        why.to_string(),
+        format!("wire the container's network: {}", EgressError::Exhausted)
+    );
+    let listed = runtime.list_labelled().expect("listed");
+    assert_eq!(listed.len(), 1, "the container is kept: {listed:?}");
+    let id = listed[0].id.clone();
+    let said = lines.text();
+    let warned = said.lines().any(|line| {
+        line.contains("WARN")
+            && line.contains(&id.0)
+            && line.contains("remove the failed start: delete the container: ")
+    });
+    assert!(warned, "{said}");
+    std::fs::remove_file(&fails).expect("let crun delete work");
+    runtime.remove(&id).expect("removed later");
+    assert!(nothing_left(&node, "r1-wired"));
+    assert_eq!(seen.taken().len(), 1, "one attach, nothing to release");
+}
+
+/// Proves a wiring that fails after the container started is, to the lifecycle, a start that
+/// failed: no `started` event, a `start-failed` finding that says the wiring failed, and a
+/// `failed_to_start` result with the runtime's detail, for a refused attach and for a
+/// container that never named a pid alike; nothing of either lease is left. Catches a job
+/// reported running, or reported with no reason, when its network was never wired.
+#[test]
+fn a_failed_wiring_is_a_failed_start_of_the_lifecycle() {
+    let node = Node::new("egress-life-wiring-fails");
+    let seen = Seen::new(&node);
+    seen.attach_fails.store(true, Ordering::SeqCst);
+    let runtime = open(&node, port(&seen), impatient());
+    assert_eq!(runtime.wait_prepared(&node.image()), Prepared::Ready);
+    let mut life = lifecycle(&node, runtime);
+    for run in ["r1-wired", "r2-nopid"] {
+        let events = start(&mut life, &node, run);
+        assert!(
+            !events.iter().any(|e| e.starts_with("started")),
+            "{events:?}"
+        );
+        assert!(events.contains(&format!("result {run}")), "{events:?}");
+        let finding = events.iter().any(|e| {
+            e.starts_with("Finding")
+                && e.contains("start-failed")
+                && e.contains("wire the container's network")
+        });
+        assert!(finding, "{events:?}");
+        let results = life.results();
+        let result = results.iter().find(|r| r.run_id == run).expect("a result");
+        assert_eq!(result.outcome, js_agent_wire::Outcome::FailedToStart);
+        assert_eq!(result.detail.as_deref(), Some("runtime-failed"));
+        assert!(nothing_left(&node, run), "{run}");
+    }
+    let calls = seen.taken();
+    assert_eq!(
+        calls.iter().filter(|c| c.starts_with("check")).count(),
+        2,
+        "{calls:?}"
+    );
+    assert_eq!(
+        calls.iter().filter(|c| c.starts_with("attach")).count(),
+        1,
+        "{calls:?}"
+    );
 }

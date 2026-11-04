@@ -903,8 +903,10 @@ impl Runtime for CrunRuntime {
         let id = self.stage(spec)?;
         if let Err(why) = self.start_staged(&id) {
             // The failed start leaves no container: the lease is taken apart as a removal
-            // does.
-            let _ = self.remove(&id);
+            // does. What cannot be is kept, listed, and removed by the next removal or sweep.
+            if let Err(left) = self.remove(&id) {
+                tracing::warn!(lease = %id.0, "remove the failed start: {left}");
+            }
             return Err(why);
         }
         Ok(id)

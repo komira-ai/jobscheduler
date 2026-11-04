@@ -104,7 +104,8 @@ pub(super) fn check(egress: Option<&dyn EgressPort>) -> Result<(), RuntimeError>
 /// The wiring of the started container of `spec`, which `running` runs, by `egress`; none
 /// without one. The container's pid is asked for until `crun` names one (right after
 /// `Oci::start` the container may not be made yet), and the asks end without one when
-/// `crun state` answers with no usable pid, when `crun run` has ended, or when [`ROUTE_WAIT`]
+/// `crun state` answers with no usable pid (or names one too late), when `crun run` has ended,
+/// or when [`ROUTE_WAIT`]
 /// (an allow-list's `Config::route_wait`, the only egress with a port) has passed on
 /// `now_ms`: the container's init gives up its wait for the route then.
 ///
@@ -137,6 +138,11 @@ fn pid_of(
     let deadline = now_ms().saturating_add(ROUTE_WAIT.as_secs().saturating_mul(1000));
     loop {
         let why = match oci.container_pid(spec) {
+            Ok(_) if now_ms() >= deadline => {
+                return Err(format!(
+                    "crun state named the pid after the route wait of {ROUTE_WAIT:?}: the init has given up"
+                ));
+            }
             Ok(pid) => return Ok(pid),
             Err(why) if answered(&why) => return Err(why),
             Err(why) => why,

@@ -439,8 +439,8 @@ fn a_low_water_mark_without_a_scratch_root_is_refused() {
 /// Asserts the egress flags of an agent whose runtime is not `crun`. The default is no
 /// network and is accepted with and without `--egress none`; every flag of an allow-list
 /// names the mode it needs; a mode that is not one of the two is refused; and an allow-list
-/// is refused at start, naming `--runtime crun` (the only runtime that enforces it; these
-/// flags select no runtime or a container engine), as is the Podman network flag beside it,
+/// is refused at start, naming `--runtime crun` (the only runtime that enforces it), with no
+/// runtime given and with `--runtime docker`, as is the Podman network flag beside it,
 /// so an operator who asks for a network never gets a different one. It catches an
 /// allow-list accepted and silently ignored by a runtime that gives jobs no such network,
 /// and one that is accepted together with `--container-network`.
@@ -479,11 +479,15 @@ fn egress_allow_list_is_refused_without_the_crun_runtime() {
             "--egress-nft",
             "/bin/sh",
         ];
-        let said = refused(&allow, &host);
-        assert!(
-            said.contains("--egress allow-list: needs --runtime crun"),
-            "{said}"
-        );
+        let mut docker = allow.to_vec();
+        docker.extend(["--runtime", "docker", "--container-bin", "/bin/sh"]);
+        for given in [&allow[..], &docker[..]] {
+            let said = refused(given, &host);
+            assert!(
+                said.contains("--egress allow-list: needs --runtime crun"),
+                "{given:?}: {said}"
+            );
+        }
         let mut both = allow.to_vec();
         both.extend(["--container-network", "jsnet"]);
         let said = refused(&both, &host);

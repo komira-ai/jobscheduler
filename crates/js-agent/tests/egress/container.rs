@@ -16,14 +16,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings, config_dir, oci_config};
 use js_agent::egress::Egress;
-use js_agent::lifecycle::{Body, RunSpec};
+use js_agent::lifecycle::{Body, RunSpec, Runtime as _};
 use js_contain::container::{ACTION_ID, ContainerLimits, ContainerSpec, Ended};
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
 use js_contain::oci::{Oci, OciConfig, stderr_path, stdout_path};
 use js_contain::running::Running;
 use js_contain::subids::{DaemonIds, IdFiles, user_ids};
+use js_testkit::dir::TestDir;
 
-use crate::sys::var;
+use crate::sys::{eventually, var};
 
 #[derive(Debug)]
 struct NoImages;
@@ -363,20 +364,69 @@ const IMAGE_CONFIG: &str =
     r#"{"config":{"Entrypoint":["/bin/sh","-c"],"Env":["PATH=/bin"]},"rootfs":{"diff_ids":[]}}"#;
 
 /// The agent's `CrunRuntime` on this host, wired by an `Egress`, as the agent opens it: the
-/// agent's cgroup is a tree of its own (this process in its leaf `supervisor`, the leases'
-/// cgroups in `actions`), the store holds a busybox image and its kept config, and the runs'
-/// scratch directories are made below `runs`.
+/// agent's cgroup is a tree of this test's own (this process in its leaf `supervisor`, the
+/// leases' cgroups in `actions`), the store holds a busybox image and its kept config, and the
+/// runs' scratch directories are made below `runs`. Dropped, it removes every run it holds,
+/// moves this process back to the cgroup it came from and removes the tree, then the files;
+/// each guard is in place before the step it undoes, so a failed setup is undone too.
 pub struct RuntimeHost {
     pub runtime: CrunRuntime,
-    work: PathBuf,
     image: String,
+    // Dropped after the runtime: the process goes home and the tree goes, then the files.
+    _cgroup: OwnedCgroup,
+    work: TestDir,
+}
+
+/// A cgroup subtree a test made and moved this process into: dropped, it moves the process
+/// back to `home` and kills and removes the subtree, deepest first.
+struct OwnedCgroup {
+    dir: PathBuf,
+    home: PathBuf,
+}
+
+impl Drop for OwnedCgroup {
+    fn drop(&mut self) {
+        let _ = fs::write(
+            self.home.join("cgroup.procs"),
+            std::process::id().to_string(),
+        );
+        // A killed process leaves its cgroup a moment after the kill.
+        eventually(Duration::from_secs(10), || {
+            remove_cgroup_tree(&self.dir);
+            !self.dir.exists()
+        });
+    }
+}
+
+/// Kills what runs in the cgroup `dir` and removes it and the cgroups below it; what is busy
+/// stays.
+fn remove_cgroup_tree(dir: &Path) {
+    let _ = fs::write(dir.join("cgroup.kill"), "1");
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            remove_cgroup_tree(&entry.path());
+        }
+    }
+    let _ = fs::remove_dir(dir);
+}
+
+/// The cgroup this process is in now (cgroup version 2).
+fn own_cgroup() -> PathBuf {
+    let own = fs::read_to_string("/proc/self/cgroup").unwrap();
+    let path = own
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .unwrap();
+    Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'))
 }
 
 impl RuntimeHost {
     /// The runtime for `label`, wired by `egress`.
     pub fn new(label: &str, egress: &Egress) -> Self {
         let (uid, gid) = job_user();
-        let work = world_dir(&format!("js-r-{label}"));
+        // Below `/tmp`, where every directory above can be searched by the job user.
+        let work = TestDir::under(std::env::temp_dir(), &format!("js-r-{label}"));
+        fs::set_permissions(work.path(), fs::Permissions::from_mode(0o755)).unwrap();
         let store = work.join("store");
         mkdir(&store, 0o711);
         mkdir(&work.join("runs"), 0o711);
@@ -389,18 +439,25 @@ impl RuntimeHost {
         mkdir(&config_dir(&store), 0o755);
         fs::write(config_dir(&store).join(format!("{hex}.json")), IMAGE_CONFIG).unwrap();
 
-        let name = format!("/js-r-{label}");
-        let cgroup = PathBuf::from(format!("/sys/fs/cgroup{name}"));
-        mkdir(&cgroup.join("supervisor"), 0o755);
-        fs::write(cgroup.join("cgroup.subtree_control"), "+cpu +memory +pids").unwrap();
+        let name = format!("/js-r-{label}-{}", std::process::id());
+        let cgroup = OwnedCgroup {
+            dir: PathBuf::from(format!("/sys/fs/cgroup{name}")),
+            home: own_cgroup(),
+        };
+        mkdir(&cgroup.dir.join("supervisor"), 0o755);
         fs::write(
-            cgroup.join("supervisor/cgroup.procs"),
+            cgroup.dir.join("cgroup.subtree_control"),
+            "+cpu +memory +pids",
+        )
+        .unwrap();
+        fs::write(
+            cgroup.dir.join("supervisor/cgroup.procs"),
             std::process::id().to_string(),
         )
         .unwrap();
-        mkdir(&cgroup.join("actions"), 0o755);
+        mkdir(&cgroup.dir.join("actions"), 0o755);
         fs::write(
-            cgroup.join("actions/cgroup.subtree_control"),
+            cgroup.dir.join("actions/cgroup.subtree_control"),
             "+cpu +memory +pids",
         )
         .unwrap();
@@ -425,8 +482,9 @@ impl RuntimeHost {
             .unwrap_or_else(|why| panic!("a root agent opens the runtime: {why}"));
         Self {
             runtime,
-            work,
             image: format!("local/busybox@sha256:{hex}"),
+            _cgroup: cgroup,
+            work,
         }
     }
 
@@ -458,6 +516,8 @@ impl RuntimeHost {
 
 impl Drop for RuntimeHost {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.work);
+        for found in self.runtime.list_labelled().unwrap_or_default() {
+            let _ = self.runtime.remove(&found.id);
+        }
     }
 }
