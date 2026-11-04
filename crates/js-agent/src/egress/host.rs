@@ -115,9 +115,9 @@ pub(crate) trait Sys: std::fmt::Debug + Send + Sync {
     /// Opens the network namespace of process `pid` and keeps it open as long as the
     /// result lives.
     fn open_netns(&self, pid: u32) -> std::io::Result<Netns>;
-    /// Binds [`HOST_LOCK`] and holds it as long as the result lives; `None` when another
-    /// process holds it.
-    fn lock_host(&self) -> std::io::Result<Option<Held>>;
+    /// Binds the abstract socket `name` ([`HOST_LOCK`] for an agent) and holds it as long as
+    /// the result lives; `None` when another process holds it.
+    fn lock_host(&self, name: &str) -> std::io::Result<Option<Held>>;
 }
 
 /// An open network namespace: its identity, and a path any process of the host can open to
@@ -167,10 +167,10 @@ impl Sys for System {
         })
     }
 
-    fn lock_host(&self) -> std::io::Result<Option<Held>> {
+    fn lock_host(&self, name: &str) -> std::io::Result<Option<Held>> {
         use std::os::linux::net::SocketAddrExt as _;
         use std::os::unix::net::{SocketAddr, UnixListener};
-        let name = SocketAddr::from_abstract_name(HOST_LOCK)?;
+        let name = SocketAddr::from_abstract_name(name)?;
         let in_use = |why: std::io::Error| {
             (why.kind() == std::io::ErrorKind::AddrInUse)
                 .then_some(None)
@@ -284,10 +284,16 @@ impl Egress {
     }
 
     fn start_on(config: Config, sys: Arc<dyn Sys>) -> Result<Self, EgressError> {
+        Self::start_holding(config, sys, HOST_LOCK)
+    }
+
+    /// [`Egress::start_on`] holding the abstract socket `lock` in place of [`HOST_LOCK`]: a
+    /// test on the real machine holds a name of its own, never the host's.
+    fn start_holding(config: Config, sys: Arc<dyn Sys>, lock: &str) -> Result<Self, EgressError> {
         let (mut baseline, mut host) = (None, None);
         if config.mode() == Mode::AllowList {
             let held = sys
-                .lock_host()
+                .lock_host(lock)
                 .map_err(|why| command("holding the host's egress", why))?;
             host = Some(held.ok_or(EgressError::Held)?);
             sweep(&*sys, &config)?;

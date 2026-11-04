@@ -184,7 +184,7 @@ impl Sys for Fake {
             .ok_or_else(|| std::io::Error::from(ErrorKind::NotFound))
     }
 
-    fn lock_host(&self) -> std::io::Result<Option<Held>> {
+    fn lock_host(&self, _name: &str) -> std::io::Result<Option<Held>> {
         Ok((!self.state().held).then(|| Arc::new(()) as Held))
     }
 
@@ -640,11 +640,17 @@ fn the_real_machine_runs_programs_and_reads_files() {
     assert_eq!(system.identity(&own_pid.path).expect("by path"), one);
     assert!(system.open_netns(u32::MAX).is_err());
 
-    let lock = system.lock_host().expect("bound").expect("free");
-    assert!(system.lock_host().expect("asked").is_none(), "held once");
+    // A name of this test's own: the host's (`HOST_LOCK`) may be held by an agent of this
+    // machine, and no test may depend on that.
+    let name = format!("{HOST_LOCK}-unit-{}", std::process::id());
+    let lock = system.lock_host(&name).expect("bound").expect("free");
+    assert!(
+        system.lock_host(&name).expect("asked").is_none(),
+        "held once"
+    );
     drop(lock);
     let again = system
-        .lock_host()
+        .lock_host(&name)
         .expect("bound")
         .expect("free once dropped");
     drop(again);
@@ -659,7 +665,8 @@ fn the_real_machine_runs_programs_and_reads_files() {
         nsenter: Some(&echo[0]),
         ..Flags::default()
     };
-    let error = Egress::start(Config::from_flags(&flags).expect("sound")).expect_err("not JSON");
+    let config = Config::from_flags(&flags).expect("sound");
+    let error = Egress::start_holding(config, Arc::new(System), &name).expect_err("not JSON");
     assert!(
         error.to_string().contains("listing the interfaces"),
         "{error}"
