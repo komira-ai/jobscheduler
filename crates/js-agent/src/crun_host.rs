@@ -744,18 +744,12 @@ pub fn flags(cli: &Cli) -> Result<Request<'_>, String> {
     }
     let mut engine_flags = vec![
         ("--container-bin", cli.container_bin.is_some()),
-        ("--container-network", cli.container_network.is_some()),
         ("--container-user", cli.container_user.is_some()),
         ("--container-subuid", cli.container_subuid.is_some()),
         ("--container-host", cli.container_host.is_some()),
         ("--container-pull", cli.container_pull.is_some()),
         ("--container-tmp-size", cli.container_tmp_size.is_some()),
         ("--container-add-host", !cli.container_add_host.is_empty()),
-        (
-            "--container-egress-allow",
-            !cli.container_egress_allow.is_empty(),
-        ),
-        ("--container-nft", cli.container_nft.is_some()),
         ("--actions-cgroup", cli.actions_cgroup.is_some()),
         ("--gpu-toolkit-hook", cli.gpu_toolkit_hook.is_some()),
         // A job's mount is bound from a directory the job's writer may swap for a link

@@ -110,7 +110,7 @@ fn given() -> Vec<(PathBuf, u32, u32)> {
 #[test]
 fn the_scratch_goes_to_the_containers_user_when_the_agent_is_root() {
     let world = docker();
-    let root = js_agent::cli_runtime::Settings::new(Path::new(BIN), None, Some("2000:3000"))
+    let root = js_agent::cli_runtime::Settings::new(Path::new(BIN), Some("2000:3000"))
         .unwrap()
         .with_agent(0, 0)
         .unwrap();
