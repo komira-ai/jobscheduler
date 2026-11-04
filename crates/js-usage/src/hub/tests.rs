@@ -22,6 +22,10 @@ struct Fake {
     panic_on_observe: AtomicBool,
     panic_on_ended: AtomicBool,
     drop_with: Mutex<Option<DropReason>>,
+    /// The records of ended allocations written, in order.
+    history: Mutex<Vec<EndedRow>>,
+    /// Refuses to write the record of this allocation.
+    refuse: Mutex<Option<AllocationId>>,
 }
 
 impl Fake {
@@ -106,6 +110,17 @@ impl UsageSink for Fake {
         self.down()
     }
 
+    fn allocation_ended(&self, row: &EndedRow) -> Result<(), UsageFault> {
+        let refused = self.refuse.lock().unwrap().as_ref() == Some(&row.id);
+        match refused {
+            true => Err(UsageFault("refused".to_string())),
+            false => {
+                self.history.lock().unwrap().push(row.clone());
+                Ok(())
+            }
+        }
+    }
+
     fn counters(&self) -> SinkCounters {
         SinkCounters {
             minutes_deduped: 7,
@@ -113,6 +128,8 @@ impl UsageSink for Fake {
         }
     }
 }
+
+mod history;
 
 /// A key source over a map of run ids.
 struct Keys(BTreeMap<String, ProfileKey>);

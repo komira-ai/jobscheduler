@@ -60,6 +60,7 @@
 //! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given. Needs agent registration to have anything to keep. Not with `--usage-off` |
 //! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
+//! | `--history-retention-days <n>` | how many days the record of each ended allocation (today a lease's booking) is kept in the usage file, `90`; the daily prune removes older ones, and a record that ended exactly that long ago is kept; `0` is refused. Not a cap on tenants or cost (`docs/usage-store.md`) |
 //! | `--job-retention <duration>` | how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, `7d`: a whole count of days (`7d`) or a duration (`36h`, `90m`), at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag. Read once at start: it is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The server does not serve jobs yet, so today the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
@@ -101,8 +102,9 @@
 //! # placement ("registry", or "js-sched"): the flag's name and values; refused unless a pool registers agents
 //! # estimate_feed (false): the flag's name and default; refused unless a pool registers
 //! # agents, and refused as true beside usage_off = true
-//! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456):
-//! # the flags' names, defaults and rules; usage_db is refused beside usage_off = true
+//! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456),
+//! # history_retention_days (90): the flags' names, defaults and rules; usage_db is refused
+//! # beside usage_off = true
 //! # job_retention ("7d"): the flag's name, default and rules
 //! # alert_webhook_url, alert_webhook_token_file, alert_repeat_after (1h): every alert of the
 //! # scaler is also POSTed as {source, key, text} JSON
@@ -597,6 +599,15 @@
 //! default): node minutes are written by the flush, and the profiles learned from clean
 //! runs are kept under `--profile-store-bytes`; a file that cannot be opened refuses the
 //! start. `--usage-off` leaves the usage side out altogether.
+//!
+//! The same file keeps the record of every ended allocation (`docs/usage-store.md`): when a
+//! lease's booking ends, the registry hands the usage side one record (the lease, its host,
+//! what it booked and was measured to use, its queue wait and run time, why it ended, its
+//! drain and give-up outcome, its estimated against its actual end), with the registry's lock
+//! released; the record is queued in memory and written by the next tick, and kept for
+//! `--history-retention-days`. A write that fails costs the record nothing: it stays queued
+//! (up to 4096) for the next tick, is counted in [`Running::usage_counters`], and a run of
+//! failures is logged once.
 //!
 //! Every tick acts by the wall clock of the server: the sink is flushed every five
 //! minutes and once more at shutdown, and pruned at the first tick and once a day. A

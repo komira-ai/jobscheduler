@@ -30,6 +30,7 @@ use crate::whole::reserve::{Marks, Reservation};
 
 mod cordon;
 mod demand;
+mod history;
 mod ledger;
 mod marks;
 mod provider_side;
@@ -206,6 +207,7 @@ struct Shared {
     lives: OnceLock<Arc<dyn crate::ProfileLives>>,
     /// The placer that picks the host of a start ([`Registry::set_placer`]).
     placer: OnceLock<Arc<dyn crate::Placer>>,
+    log: OnceLock<Arc<dyn js_usage::AllocationLog>>,
 }
 
 /// The hosts of one pool that registered themselves, and the lease bookings on them.
@@ -273,6 +275,7 @@ impl Registry {
                 state: Mutex::new(state),
                 lives: OnceLock::new(),
                 placer: OnceLock::new(),
+                log: OnceLock::new(),
             }),
         }
     }
@@ -486,30 +489,27 @@ impl Registry {
     /// the request with.
     ///
     /// The hello is checked as the wire rules say first ([`Hello::negotiate`] and
-    /// [`Hello::validate`], which include the reserved label prefix), then in this
-    /// order: the pool is this one; the host id is not reserved to another source
-    /// ([`Registry::reserve`]); the host id is not bound to another credential, nor
-    /// to another instance when its binding names one; the host id is not live; when
-    /// the pool declares an execution mode ([`PoolConfig::with_exec`]), the host meets its
-    /// contract ([`Refusal::HostContract`] and [`Refusal::ExecutionMismatch`] name the
-    /// capability at fault); the shape claimed offers at least the pool's shape; the pool has room for a host it
-    /// does not know (hosts forgotten after the lost-host retention do not count); a
-    /// session secret can be made. A
-    /// refused hello creates and changes nothing. An admitted one starts a new session:
-    /// the epoch is one more than the host's last, the host is live, and the id is bound
-    /// to `credential`, and to `Hello::instance` when the hello names one, if it was not
-    /// bound yet. A host that is lost or only awaiting is replaced, keeping its booking.
-    /// The welcome carries a fresh session secret from the registry's
-    /// [`SessionSource`]; the registry keeps only its digest, and every heartbeat of the
-    /// session must carry it ([`Registry::heartbeat`]). The secret of the replaced
-    /// session stops working.
+    /// [`Hello::validate`], which include the reserved label prefix), then in this order: the pool
+    /// is this one; the host id is not reserved to another source ([`Registry::reserve`]); the
+    /// host id is not bound to another credential, nor to another instance when its binding names
+    /// one; the host id is not live; when the pool declares an execution mode
+    /// ([`PoolConfig::with_exec`]), the host meets its contract ([`Refusal::HostContract`] and
+    /// [`Refusal::ExecutionMismatch`] name the capability at fault); the shape claimed offers at
+    /// least the pool's shape; the pool has room for a host it does not know (hosts forgotten
+    /// after the lost-host retention do not count); a session secret can be made. A refused hello
+    /// creates and changes nothing. An admitted one starts a new session: the epoch is one more
+    /// than the host's last, the host is live, and the id is bound to `credential`, and to
+    /// `Hello::instance` when the hello names one, if it was not bound yet. A host that is lost or
+    /// only awaiting is replaced, keeping its booking. The welcome carries a fresh session secret
+    /// from the registry's [`SessionSource`]; the registry keeps only its digest, and every
+    /// heartbeat of the session must carry it ([`Registry::heartbeat`]). The secret of the
+    /// replaced session stops working.
     ///
-    /// The binding is as strong as what the first hello presented. With an instance
-    /// identity it names the machine. Without one it holds at the level of the pool
-    /// credential only: whoever holds the pool's token can say hello for the id once
-    /// the host is lost, and inherits its booking. Per-host tokens or client
-    /// certificates close that later (design D18). A binding is not upgraded by a later
-    /// hello that names an instance.
+    /// The binding is as strong as what the first hello presented. With an instance identity it
+    /// names the machine. Without one it holds at the level of the pool credential only: whoever
+    /// holds the pool's token can say hello for the id once the host is lost, and inherits its
+    /// booking. Per-host tokens or client certificates close that later (design D18). A binding is
+    /// not upgraded by a later hello that names an instance.
     ///
     /// The pool-full check does not stop a holder of the pool token from locking the pool
     /// out: retention bounds only silent squatters. Such a holder can say hello for

@@ -42,9 +42,17 @@
 //! every [`FLUSH_EVERY_MINUTES`] minutes, and pruned at the first tick and at each change
 //! of day. The hub logs nothing; a flush returns the node minutes it closed and the
 //! readings that were dropped, for the caller to report.
+//!
+//! **Ended allocations.** The hub is the [`AllocationLog`] a server runs. Beside the tracks
+//! it keeps, per lease the server holds, the highest minute of CPU and of working set its
+//! beats carried ([`Used`]); when the registry hands it the row of an allocation that ended,
+//! the hub fills the row's `used` from them (when the row has none) and queues it, under its
+//! mutex only. Every tick writes the queue through the sink, oldest first
+//! ([`UsageHub::write_history`]); a row the sink cannot write stays queued, with the ones
+//! after it, for the next tick, and at most [`MAX_PENDING_ENDED`] rows are queued.
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -52,8 +60,8 @@ use js_types::{HostId, LeaseId};
 
 use crate::sink::{KeySource, RunEnd, SinkCounters, UsageFault, UsageSink};
 use crate::{
-    DropReason, KeyProfile, Limits, LoadIn, MinuteIn, NodeMinute, Observed, ProfileCurves,
-    ProfileKey, RunMinute, RunSeries,
+    AllocationId, AllocationLog, DropReason, EndedRow, KeyProfile, Limits, LoadIn, MinuteIn,
+    NodeMinute, Observed, ProfileCurves, ProfileKey, RunMinute, RunSeries, Used,
 };
 
 /// Heartbeats of a host after the one that carried a run's acknowledgement, at which the
@@ -69,6 +77,10 @@ pub const MAX_TRACKS: usize = 1024;
 /// How long, in wall minutes, a lease's minutes are kept without a heartbeat adding to
 /// them: a lease that never produced a result does not stay for ever.
 pub const TRACK_IDLE_MINUTES: u64 = 1440;
+
+/// The most records of ended allocations queued for the sink at once; past it the oldest
+/// is dropped and counted (`history_dropped`).
+pub const MAX_PENDING_ENDED: usize = 4096;
 
 /// Wall minutes in a day.
 const MINUTES_PER_DAY: u64 = 1440;
@@ -99,6 +111,12 @@ pub struct UsageCounters {
     /// Calls to the sink that failed, and beats whose usage work panicked
     /// ([`UsageHub::note_fault`]).
     pub faults: u64,
+    /// Records of ended allocations the sink wrote.
+    pub history_written: u64,
+    /// Writes of a record of an ended allocation that failed; the record stays queued.
+    pub history_failed: u64,
+    /// Records of ended allocations dropped because [`MAX_PENDING_ENDED`] were queued.
+    pub history_dropped: u64,
     /// What the sink counted.
     pub sink: SinkCounters,
 }
@@ -178,6 +196,10 @@ pub struct Flushed {
     pub dropped: Vec<DroppedReadings>,
 }
 
+/// What one [`UsageHub::write_history`] did: how many records of ended allocations it
+/// wrote, or the failure that stopped it (counted; the record stays queued).
+pub type HistoryWritten = Result<u64, UsageFault>;
+
 /// What one tick of the hub did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ticked {
@@ -186,6 +208,8 @@ pub struct Ticked {
     /// The prune, if one was due, with the sink's failure if it had one (counted as a
     /// fault).
     pub prune: Option<Result<(), UsageFault>>,
+    /// The write of the queued records of ended allocations, if any were queued.
+    pub history: Option<HistoryWritten>,
 }
 
 /// The minutes of one lease: `(mean cores in thousandths, working set maximum)` by minute.
@@ -210,6 +234,22 @@ struct Ending {
 /// Readings the sink dropped, by wall minute and host, and why.
 type Drops = BTreeMap<(u64, HostId), BTreeMap<DropReason, u32>>;
 
+/// What a lease the server holds was measured to use so far.
+struct Measured {
+    used: Used,
+    touched: u64,
+}
+
+impl Measured {
+    /// Takes the minute `m` into the highest of each figure.
+    fn add(&mut self, m: &MinuteIn, now: u64) {
+        let cpu = u64::from(m.mean_cores_milli);
+        self.used.cpu_milli = self.used.cpu_milli.max(cpu);
+        self.used.memory_bytes = self.used.memory_bytes.max(m.working_set_max_bytes);
+        self.touched = now;
+    }
+}
+
 /// What is kept between beats, behind the hub's one mutex.
 struct Books {
     running: BTreeMap<LeaseId, Track>,
@@ -218,6 +258,10 @@ struct Books {
     counts: UsageCounters,
     last_flush: u64,
     last_prune_day: Option<u64>,
+    /// What each lease the server holds was measured to use, by the id of its allocation.
+    used: BTreeMap<AllocationId, Measured>,
+    /// Records of ended allocations the sink has not written yet, oldest first.
+    pending: VecDeque<EndedRow>,
 }
 
 /// Files the minute `m` into `slots`; a minute seen again (the last index repeats) keeps
@@ -268,6 +312,39 @@ impl Books {
                     free.insert(track);
                 }
             }
+        }
+    }
+
+    /// Takes the fresh minutes of the leases in `held` (those the server holds for the
+    /// beat's host) into what each lease was measured to use. A lease not yet measured is
+    /// begun only while fewer than [`MAX_TRACKS`] are.
+    fn note_used(&mut self, fresh: &[MinuteIn], held: &BTreeSet<LeaseId>, now: u64) {
+        for m in fresh.iter().filter(|m| held.contains(&m.lease)) {
+            let full = self.used.len() >= MAX_TRACKS;
+            match self.used.entry(AllocationId::of_lease(&m.lease)) {
+                Entry::Occupied(mut kept) => kept.get_mut().add(m, now),
+                Entry::Vacant(_) if full => {}
+                Entry::Vacant(free) => {
+                    let mut measured = Measured {
+                        used: Used {
+                            cpu_milli: 0,
+                            memory_bytes: 0,
+                        },
+                        touched: now,
+                    };
+                    measured.add(m, now);
+                    free.insert(measured);
+                }
+            }
+        }
+    }
+
+    /// Drops the oldest queued records of ended allocations past [`MAX_PENDING_ENDED`],
+    /// counting them.
+    fn cap_pending(&mut self) {
+        while self.pending.len() > MAX_PENDING_ENDED {
+            self.pending.pop_front();
+            self.counts.history_dropped += 1;
         }
     }
 
@@ -327,6 +404,7 @@ impl Books {
         let idle = |touched: u64| now.saturating_sub(touched) > TRACK_IDLE_MINUTES;
         self.running.retain(|_, track| !idle(track.touched));
         self.ending.retain(|_, ending| !idle(ending.touched));
+        self.used.retain(|_, measured| !idle(measured.touched));
     }
 
     /// Whether a flush and a prune are due at wall minute `now`, and notes that they were
@@ -394,6 +472,8 @@ impl UsageHub {
                 counts: UsageCounters::default(),
                 last_flush: now_minute,
                 last_prune_day: None,
+                used: BTreeMap::new(),
+                pending: VecDeque::new(),
             }),
         }
     }
@@ -467,6 +547,7 @@ impl UsageHub {
         let finished = {
             let mut books = self.books();
             books.add_minutes(beat.host, &fresh, &held, now_minute);
+            books.note_used(&fresh, &held, now_minute);
             let finished = books.beat_done(beat.host);
             books.results(beat.host, beat.results, &*self.keys, now_minute);
             finished
@@ -511,7 +592,41 @@ impl UsageHub {
         Ticked {
             flush: flush.then(|| self.finish(now_minute)),
             prune: prune.then(|| self.guard(self.sink.prune(now_minute))),
+            history: self.write_history(),
         }
+    }
+
+    /// Writes the queued records of ended allocations through the sink, oldest first, and
+    /// stops at the first that fails: it and the ones after it stay queued, ahead of any
+    /// queued meanwhile, for the next call. `None` when nothing was queued. Every tick
+    /// calls it; a caller calls it once more at shutdown. Blocks on the sink.
+    pub fn write_history(&self) -> Option<HistoryWritten> {
+        let queued = std::mem::take(&mut self.books().pending);
+        if queued.is_empty() {
+            return None;
+        }
+        let mut rows = queued.into_iter();
+        let mut written = 0;
+        let mut failed = None;
+        for row in rows.by_ref() {
+            match self.sink.allocation_ended(&row) {
+                Ok(()) => written += 1,
+                Err(fault) => {
+                    failed = Some((row, fault));
+                    break;
+                }
+            }
+        }
+        let mut books = self.books();
+        books.counts.history_written += written;
+        let Some((row, fault)) = failed else {
+            return Some(Ok(written));
+        };
+        books.counts.history_failed += 1;
+        let later = std::mem::take(&mut books.pending);
+        books.pending = std::iter::once(row).chain(rows).chain(later).collect();
+        books.cap_pending();
+        Some(Err(fault))
     }
 
     /// The flush at shutdown, whatever the schedule says. Flushes the sink, reports the
@@ -552,6 +667,19 @@ impl UsageHub {
     /// and returned. Blocks on the sink.
     pub fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
         self.guard(self.sink.key_profile(key))
+    }
+}
+
+impl AllocationLog for UsageHub {
+    /// Fills the row's `used` with what the hub measured of its lease, when the row has
+    /// none, forgets that, and queues the row for the next tick to write. Takes the hub's
+    /// mutex and nothing else: it never blocks on the sink.
+    fn ended(&self, mut row: EndedRow) {
+        let mut books = self.books();
+        let measured = books.used.remove(&row.id).map(|measured| measured.used);
+        row.used = row.used.or(measured);
+        books.pending.push_back(row);
+        books.cap_pending();
     }
 }
 

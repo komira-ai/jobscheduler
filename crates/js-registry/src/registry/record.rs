@@ -1,14 +1,71 @@
 //! What the registry keeps for each host that said hello, and what it can say of it.
 
 use super::*;
+use js_usage::DrainOutcome;
 
 /// A lease booked on a host, the latest it can end (its start plus its max wall time) and
-/// when it started, in milliseconds on the registry's clock.
+/// when it started, in milliseconds on the registry's clock, and what its request went
+/// through before the start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Bound {
     pub(super) lease: LeaseId,
     pub(super) end: Timestamp,
     pub(super) started_at: u64,
+    pub(super) queue: Queue,
+}
+
+/// What a lease's request went through before the lease started, for the record of its end
+/// ([`js_usage::EndedRow`]): how long it waited, what became of the host set aside for it
+/// and how many hosts it gave up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Queue {
+    pub(super) queued_ms: Option<u64>,
+    pub(super) drain: DrainOutcome,
+    pub(super) give_ups: Option<u32>,
+}
+
+impl Queue {
+    /// An ordinary lease: placed on arrival, it waited for nothing and drained nothing.
+    pub(super) const ORDINARY: Self = Self {
+        queued_ms: Some(0),
+        drain: DrainOutcome::None,
+        give_ups: None,
+    };
+
+    /// A whole-node request started at `now`: it waited from `since`, its first presentation
+    /// (`None` for one that never waited, which waited for nothing); `held` says it started on
+    /// the host its mark set aside, and `give_ups` is how many hosts it had given up.
+    pub(super) fn whole(
+        now: Timestamp,
+        since: Option<Timestamp>,
+        held: bool,
+        give_ups: u32,
+    ) -> Self {
+        let waited = since.map_or(0, |since| now.millis().saturating_sub(since.millis()));
+        let drain = match (held, give_ups > 0) {
+            (true, _) => DrainOutcome::MarkHeld,
+            (false, true) => DrainOutcome::MarkDropped,
+            (false, false) => DrainOutcome::NoMark,
+        };
+        Self {
+            queued_ms: Some(waited),
+            drain,
+            give_ups: Some(give_ups),
+        }
+    }
+
+    /// A lease put back after a restart, of a pool whose class books a whole node (`whole`)
+    /// or not: an ordinary lease's queue is known, a whole-node request's was not kept.
+    pub(super) fn restored(whole: bool) -> Self {
+        match whole {
+            true => Self {
+                queued_ms: None,
+                drain: DrainOutcome::Unknown,
+                give_ups: None,
+            },
+            false => Self::ORDINARY,
+        }
+    }
 }
 
 #[derive(Debug)]

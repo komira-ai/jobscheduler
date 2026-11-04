@@ -1541,6 +1541,8 @@ dependencies = [
  "js-pool-static",
  "js-provider",
  "js-sim",
+ "js-state",
+ "js-testkit",
  "js-types",
  "js-usage",
  "js-whole",

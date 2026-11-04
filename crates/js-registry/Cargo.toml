@@ -27,6 +27,10 @@ thiserror.workspace = true
 # against `StaticCapacity`.
 js-elastic = { path = "../js-elastic", features = ["conformance"] }
 js-sim = { path = "../js-sim" }
+# tests/history.rs writes the records of ended leases into the in-memory fake state store
+# and into a SQLite file in a scratch directory.
+js-state = { path = "../js-state", features = ["test-support"] }
+js-testkit = { path = "../js-testkit" }
 serde_json.workspace = true
 
 [lints]

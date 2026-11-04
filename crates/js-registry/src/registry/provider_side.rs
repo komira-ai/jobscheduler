@@ -9,7 +9,7 @@ use js_types::{Admission, HostId, LeaseId, RequestId, Resources};
 
 use js_lease::Timestamp;
 
-use super::record::Bound;
+use super::record::{Bound, Queue};
 use super::{HostState, Record, Registry, State};
 use crate::credential::Binding;
 use crate::lives;
@@ -23,10 +23,13 @@ impl Registry {
     /// nothing held (design `whole-node.md` section 8). A whole-node request the lease
     /// presented and that still waits for a host is cancelled at once: it leaves the wait
     /// list and the host set aside for it returns to serving (`whole-node.md` section 3).
+    /// With a log set ([`Registry::set_allocation_log`]), a stop that frees a booking or
+    /// cancels a waiting request hands the log the record of it, once the lock is released.
     pub(crate) fn stop(&self, lease: &LeaseId) -> Observed {
         let ended_at = self.shared.clock.now().millis();
         let source = self.shared.lives.get().map(|lives| &**lives);
         let mut guard = self.lock();
+        let ended = self.ended_row(&guard, lease, ended_at);
         let State {
             book,
             records,
@@ -67,7 +70,10 @@ impl Registry {
                 record.exclusive = record.exclusive.stopped();
             });
         }
-        book.stop(lease)
+        let read_back = book.stop(lease);
+        drop(guard);
+        self.log_ended(ended);
+        read_back
     }
 
     /// Binds each restored waiting request of `held` to the lease the lease file keeps it
@@ -156,6 +162,7 @@ impl Registry {
                     lease,
                     end,
                     started_at: started.millis(),
+                    queue: Queue::restored(self.whole_admission()),
                 });
             });
         }
