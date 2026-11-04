@@ -2,8 +2,11 @@
 //! packaged unit is (`Delegate=yes`, `DelegateSubgroup=supervisor`). Its own test binary: any
 //! other test of the crun runtime runs the delegate step in its process, which moves the process
 //! into the leaf and enables the controllers, and this test needs a process nothing has done that to.
-//! The test is `#[ignore]`d; the crun-runtime workflow runs it in its own step.
+//! The tests are `#[ignore]`d; the crun-runtime workflow runs them in their own step. The module
+//! `unit` holds the test of the packaged unit's kill settings, which starts units of its own.
 #![cfg(target_os = "linux")]
+
+mod unit;
 
 /// Proves, in a real systemd unit started as the packaged unit is (`Delegate=yes` and
 /// `DelegateSubgroup=supervisor`, so the agent starts in `<unit>/supervisor` and the unit's

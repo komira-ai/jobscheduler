@@ -22,7 +22,7 @@
 //!   `docs/design/agent-egress.md`.
 //!
 //! The runtime that starts the containers calls, in this order: [`Egress::check`] before
-//! every create (a failure is `egress-unchecked` and creates nothing), `Oci::start`,
+//! every create (a failure is `egress-unchecked` and creates nothing), `Oci::start_supervised`,
 //! `Oci::container_pid`, [`Egress::attach`] with the job's level and declared ports, and
 //! [`Attachment::release`] when the run ends. A `none` job is not attached: its container has
 //! loopback only, and its init waits for no route; the admission refuses it ports

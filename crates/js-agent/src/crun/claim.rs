@@ -1,11 +1,11 @@
 //! One crun agent for each host id, and for each scratch root, on a host.
 //!
-//! The lease names, the sidecar files and the start-up sweep of a [`CrunRuntime`](super::CrunRuntime)
-//! derive from the agent's host id, and the sweep removes every entry of the scratch root that
-//! is not one of the agent's runs. Two agents that share a host id (the default id comes from
+//! The lease names, the sidecar files and the start-up pass of a [`CrunRuntime`](super::CrunRuntime)
+//! derive from the agent's host id; the pass adopts the agent's own leases that still stand and
+//! removes every other entry of the scratch root that is not one of the agent's runs. Two agents that share a host id (the default id comes from
 //! the machine, so two agents of one machine share it), or a scratch root and the store beside
 //! it, would remove each other's leases and run directories. The agent takes both claims
-//! before it registers (and so before the sweep) and holds them for as long as it runs.
+//! before it registers (and so before the start-up pass) and holds them for as long as it runs.
 //!
 //! Both claim files live in one directory, the one above the scratch root, so agents that
 //! share a host id must share that directory too: two agents whose scratch roots have
