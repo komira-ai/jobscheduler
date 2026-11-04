@@ -4,7 +4,7 @@
 //!
 //! | Key | Comparison |
 //! |---|---|
-//! | `arch` | exact |
+//! | `arch` | exact, in the one spelling: `x86_64` or `arm64` (`aarch64` is read as `arm64`) |
 //! | `isa_level` | at least, within the family (`x86-64-v3` is served by v3 and v4) |
 //! | `cpu.feature` (repeatable) | subset: every requested feature is present |
 //! | `cpus`, `mem_gib`, `nvme_gib`, `disk-gib`, `gpu` | countable: the node has at least the amount |
@@ -45,8 +45,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::cpu::{Arch, CpuCaps};
-use crate::level::IsaLevel;
+use js_types::{Arch, IsaLevel};
+
+use crate::cpu::CpuCaps;
 
 /// A countable resource a request asks a minimum of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

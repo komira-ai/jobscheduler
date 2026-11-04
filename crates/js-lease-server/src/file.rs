@@ -187,9 +187,10 @@ pub struct ElasticPlan {
     pub exec: Option<ExecMode>,
     /// How a launched host reaches the server.
     pub network: NetworkPlan,
-    /// The agent the host downloads, with its hash, by CPU architecture (`x86_64`,
-    /// `aarch64`). A pool that launches needs at least one; an offer of an architecture
-    /// with no entry is never launched with another's.
+    /// The agent the host downloads, with its hash, by CPU architecture in the one
+    /// spelling (`x86_64`, `arm64`; the file may write `aarch64`, read as `arm64`). A pool
+    /// that launches needs at least one; an offer of an architecture with no entry is never
+    /// launched with another's.
     pub agent: BTreeMap<String, Artifact>,
     /// The id that marks what this scheduler launches (`server.scheduler_id`).
     pub scheduler: SchedulerId,
@@ -859,6 +860,7 @@ impl Elastic<'_> {
             disk_bytes: None,
             os: None,
             arch: None,
+            isa_level: None,
             exec,
         };
         let shape = Shape::new(resources, BTreeMap::new());

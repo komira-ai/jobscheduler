@@ -69,14 +69,16 @@ impl Gate {
         self.only.get(&operation)
     }
 
-    /// Forgets what is kept for `operation`, which is gone.
-    pub(super) fn forget(&mut self, operation: OperationId) {
-        self.only.remove(&operation);
-    }
-
     /// The end of a round: its holds are the ones the next round keeps.
     pub(super) fn end_round(&mut self, holds: Holds) {
         self.last = holds.by_operation;
+    }
+
+    /// Forgets the hold `operation` had last round, so its next hold keeps no earlier start,
+    /// and the workers it was held to ([`Scheduler::place_only_on`]).
+    pub(super) fn forget(&mut self, operation: OperationId) {
+        self.last.remove(&operation);
+        self.only.remove(&operation);
     }
 }
 

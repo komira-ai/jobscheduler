@@ -59,6 +59,8 @@ pub(crate) struct Attempt<'a> {
     pub(crate) starts: &'a BTreeMap<WorkerId, Option<u64>>,
     /// How long the request counts for backfill ([`crate::Backfill`]); `None` never fits.
     pub(crate) backfill: Option<u64>,
+    /// Workers barred to it ([`crate::Bar`] other than a back-off): never granted to it.
+    pub(crate) barred: &'a BTreeSet<WorkerId>,
     /// Workers its earlier runs ended on as the farm's fault.
     pub(crate) avoid: &'a BTreeSet<WorkerId>,
     /// A key floor raised its memory: a worker it would own whole is out.
@@ -78,17 +80,22 @@ pub(crate) struct Attempt<'a> {
 }
 
 impl Attempt<'_> {
-    /// Whether the request may go on `worker` at `now`: a worker no one holds, or a held
-    /// one where it fits as backfill ([`backfill::fits`]).
+    /// Whether the request may go on `worker` at `now`: one of the workers it is held to,
+    /// if it is held to some, not barred to it, and either no one holds it or it fits
+    /// there as backfill ([`backfill::fits`]).
     fn may_use(&self, worker: &WorkerId, now: FarmTime) -> bool {
         let allowed = self.only.is_none_or(|only| only.contains(worker));
-        let held = self.reserved.contains(worker);
-        let backfills = || {
-            self.starts
+        allowed && !self.barred.contains(worker) && self.may_share(worker, now)
+    }
+
+    /// Whether the request may go on `worker` at `now` as far as holds go: a worker no
+    /// one holds, or a held one where it fits as backfill ([`backfill::fits`]).
+    fn may_share(&self, worker: &WorkerId, now: FarmTime) -> bool {
+        !self.reserved.contains(worker)
+            || self
+                .starts
                 .get(worker)
                 .is_some_and(|start| backfill::fits(now.as_millis(), self.backfill, *start))
-        };
-        allowed && (!held || backfills())
     }
 }
 
@@ -147,6 +154,9 @@ pub(crate) struct Servable {
     memo: Vec<((js_caps::Request, LeaseKind), Vec<usize>)>,
 }
 
+/// No bars: what a hold reads, whose bars are already in its `avoid` and `reserved`.
+static NO_BARS: BTreeSet<WorkerId> = BTreeSet::new();
+
 /// The new lease's charge `slot` minutes ahead on `worker` as the predicate counts it, as
 /// `(millicores, bytes)`, where `left` is what the worker is charged now. It is the one
 /// function behind `Scheduler::charge_at` and the figures the score reads, so the two
@@ -197,6 +207,11 @@ impl Servable {
             cordoned,
             memo: Vec::new(),
         }
+    }
+
+    /// Whether placement may use `worker` this round: live, not cordoned and serving.
+    pub(crate) fn is_live(&self, worker: &WorkerId) -> bool {
+        self.live.contains(worker)
     }
 
     /// Where in `memo` the live workers that serve `request`'s kind and satisfy its
@@ -263,7 +278,7 @@ impl Servable {
     ) -> Fit {
         let request = attempt.request;
         let now = self.now;
-        let pool = self.pool_of(workers, request, attempt.avoid);
+        let pool = self.pool_of(workers, request, attempt.avoid, attempt.barred);
         let by_load = adm.by_load() && request.kind == LeaseKind::Action;
         // A VM is placed by its booking, and under load admission also held to the
         // flat-memory guard.
@@ -340,18 +355,20 @@ impl Servable {
     /// The workers [`Servable::fit`] looks at for `request`, in name order: for a probe
     /// ([`Request::pin`]) the worker it names alone, which the caller has admitted
     /// ([`Servable::probe`]); else the live workers that serve its kind and satisfy its
-    /// platform, less those of `avoid` that placement skips ([`Servable::avoided`]).
+    /// platform, less those of `avoid` that placement skips ([`Servable::avoided`]) while a
+    /// worker neither avoided nor `barred` could run the request.
     fn pool_of<'s>(
         &'s mut self,
         workers: &BTreeMap<WorkerId, Worker>,
         request: &'s Request,
         avoid: &BTreeSet<WorkerId>,
+        barred: &BTreeSet<WorkerId>,
     ) -> Vec<&'s WorkerId> {
         if let Some(pin) = &request.pin {
             return vec![pin];
         }
         let at = self.matching(workers, request);
-        let skip = self.avoided(at, workers, request, avoid);
+        let skip = self.avoided(at, workers, request, (avoid, barred));
         self.memo[at]
             .1
             .iter()
@@ -592,7 +609,7 @@ impl Servable {
     ) -> Vec<HeadCandidate<'s>> {
         let request = attempt.request;
         let at = self.matching(workers, request);
-        let skip = self.avoided(at, workers, request, attempt.avoid);
+        let skip = self.avoided(at, workers, request, (attempt.avoid, attempt.barred));
         let now = self.now;
         self.memo[at]
             .1
@@ -757,7 +774,7 @@ impl Servable {
         avoid: &BTreeSet<WorkerId>,
     ) -> Vec<&WorkerId> {
         let at = self.matching(workers, request);
-        let skip = self.avoided(at, workers, request, avoid);
+        let skip = self.avoided(at, workers, request, (avoid, &NO_BARS));
         self.memo[at]
             .1
             .iter()
@@ -790,20 +807,22 @@ impl Servable {
     }
 
     /// The workers of `avoid` that placement skips for `request`, whose matching live
-    /// workers are `memo[at]`: all of them while a matching worker outside `avoid`
-    /// could run the request once its bookings end, else none.
+    /// workers are `memo[at]`: all of them while a matching worker outside `avoid` and not
+    /// `barred` (a hard bar, which the request is never granted) could run the request
+    /// once its bookings end, else none.
     fn avoided<'a>(
         &self,
         at: usize,
         workers: &BTreeMap<WorkerId, Worker>,
         request: &Request,
-        avoid: &'a BTreeSet<WorkerId>,
+        (avoid, barred): (&'a BTreeSet<WorkerId>, &BTreeSet<WorkerId>),
     ) -> &'a BTreeSet<WorkerId> {
         static NONE: BTreeSet<WorkerId> = BTreeSet::new();
-        let elsewhere =
-            self.memo[at].1.iter().map(|&i| &self.live[i]).any(|name| {
-                !avoid.contains(name) && workers[name].capacity.fits(&request.demand())
-            });
+        let elsewhere = self.memo[at].1.iter().map(|&i| &self.live[i]).any(|name| {
+            !avoid.contains(name)
+                && !barred.contains(name)
+                && workers[name].capacity.fits(&request.demand())
+        });
         if elsewhere { avoid } else { &NONE }
     }
 

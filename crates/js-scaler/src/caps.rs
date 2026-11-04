@@ -21,9 +21,10 @@ pub(crate) const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 pub(crate) const MONTH: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// The order in which [`Offer::fit`] checks, which is how near a miss is.
-const DIMENSIONS: [Dimension; 8] = [
+const DIMENSIONS: [Dimension; 9] = [
     Dimension::Os,
     Dimension::Arch,
+    Dimension::IsaLevel,
     Dimension::Exec,
     Dimension::CpuMillis,
     Dimension::MemoryBytes,

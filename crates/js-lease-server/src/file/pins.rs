@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use js_elastic::Artifact;
+use js_types::normalise_arch;
 
 use super::Section;
 use crate::error::StartupError;
@@ -13,12 +14,17 @@ use crate::file_checks::{https_url, sha256};
 pub(super) const LIVE_NEEDS: &str = "required with launch = \"live\": the bootstrap downloads it";
 
 /// The agent pins by architecture: each key of `table` is an architecture (lower-case
-/// letters, digits and `_`) and holds a pin.
+/// letters, digits and `_`) and holds a pin. The pins are keyed by the architecture in the
+/// one spelling ([`normalise_arch`]), the spelling of an offer's, so `agent.aarch64` pins
+/// the agent of an `arm64` offer; `agent.aarch64` and `agent.arm64` together name one
+/// architecture twice and are refused, naming both, rather than one chosen.
 pub(super) fn read_agents(
     table: toml::Table,
     head: String,
 ) -> Result<BTreeMap<String, Artifact>, StartupError> {
     let mut agents = BTreeMap::new();
+    // By the architecture in the one spelling: the key as the file writes it.
+    let mut written: BTreeMap<String, String> = BTreeMap::new();
     for (arch, value) in table {
         let place = format!("{head}{arch}");
         let letters = arch
@@ -34,7 +40,17 @@ pub(super) fn read_agents(
             return Err(StartupError::at(place, "must be a table { url, sha256 }"));
         };
         let artifact = read_artifact(pin, format!("{head}{arch}."))?;
-        agents.insert(arch, artifact);
+        let canonical = normalise_arch(&arch).to_owned();
+        if let Some(other) = written.insert(canonical.clone(), arch.clone()) {
+            let mut both = [other, arch];
+            both.sort();
+            let [first, second] = both;
+            return Err(StartupError::at(
+                head.trim_end_matches('.'),
+                format!("{first} and {second} are both {canonical}; pin it once"),
+            ));
+        }
+        agents.insert(canonical, artifact);
     }
     Ok(agents)
 }

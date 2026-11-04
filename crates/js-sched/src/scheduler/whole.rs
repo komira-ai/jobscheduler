@@ -11,6 +11,31 @@
 //! `max_whole_node_per_consumer` is not enforced: no request, waiter or qos here names
 //! a consumer, so there is nothing to count; the lease server or the registry, where the
 //! caller's identity exists, enforces it ([`Scheduler::with_whole_node`]).
+//!
+//! The whole-node state of each operation is kept in memory only: its queue time, its
+//! mark (the worker, when it was made, its deadline and the end of the tail the worker
+//! was chosen on), how many holds it has given up, and the workers barred to it, each
+//! with a [`Bar`] (the back-off of a give-up, or a hard bar set with
+//! [`Scheduler::bar_whole`]). The waits ([`Scheduler::whole_wait`]) are only the last
+//! round's reading. A caller that keeps the rest outside the scheduler (a ledger, a
+//! store) puts it back with [`Scheduler::restore_whole`] after a restart, and reads it
+//! with [`Scheduler::whole_mark`], [`Scheduler::whole_give_ups`] and
+//! [`Scheduler::whole_barred`].
+//!
+//! [`Scheduler::restore_whole`], [`Scheduler::bar_whole`] and [`Scheduler::cancel_whole`] are
+//! methods of the scheduler, not [`crate::Event`]s, as [`Scheduler::unplace`] is: the
+//! caller learns what they say from outside the event stream (its ledger, a store, a
+//! prepare that failed on the host) and calls them under the lock that serialises its
+//! inputs. A replay of the events alone therefore does not rebuild what they set; the
+//! replay property of the events is unchanged.
+
+mod bar;
+mod restore;
+mod room;
+
+pub use bar::Bar;
+pub use restore::{RestoredMark, RestoredWhole, WholeError};
+pub use room::Room;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,6 +50,7 @@ use js_whole::caps::{
 use js_whole::cost::{DrainCost, HostLoad, drain_cost, reserve_deadline, tail};
 
 use super::{Scheduler, Worker};
+use crate::backfill;
 use crate::servable::{Placed, Servable, serves};
 
 /// Why a whole-machine request that fits nowhere holds no worker though it has waited
@@ -48,18 +74,26 @@ pub struct WholeMark {
     pub made: FarmTime,
     /// When the hold is given up if the worker is still busy.
     pub deadline: FarmTime,
+    /// The end of the worker's tail when the mark was made on it: when the request is
+    /// expected to start there (`None`: not known). Taken once, when the mark is made,
+    /// and kept while the mark stays on that worker; work after the request is placed
+    /// there only as backfill that ends by it, or by the tail now if that ends sooner
+    /// ([`Scheduler::with_backfill`]). It stays the bound when the tail now is not known,
+    /// as a hold made again on the same worker keeps its earlier start; a mark made with
+    /// none admits no backfill until it moves.
+    pub tail_end: Option<FarmTime>,
 }
 
-/// The drain state of the whole-node requests: marks, give-up counts and back-offs, kept
-/// in memory only. Empty unless whole-node settings are on.
+/// The drain state of the whole-node requests: marks, give-up counts and bars, kept in
+/// memory only. Empty unless whole-node settings are on.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Drain {
     /// The mark of each request that holds a worker, as of the last placement round.
     pub(super) marks: BTreeMap<OperationId, WholeMark>,
     /// How many holds each request has given up.
     give_ups: BTreeMap<OperationId, u32>,
-    /// The workers each request avoids, and until when (exclusive).
-    backoff: BTreeMap<OperationId, BTreeMap<WorkerId, FarmTime>>,
+    /// The workers each request is barred from, and how ([`Bar`]).
+    bars: BTreeMap<OperationId, BTreeMap<WorkerId, Bar>>,
     /// Why each request without a mark waits, as of the last placement round.
     pub(super) waits: BTreeMap<OperationId, WholeWait>,
 }
@@ -73,26 +107,71 @@ pub(super) struct Turn {
 }
 
 impl Drain {
-    /// The workers `operation` avoids at `now`, each with when its back-off ends
-    /// (exclusive): those whose back-off has not ended.
+    /// The bars of `operation` that hold at `now`.
+    pub(super) fn bars_at(&self, operation: OperationId, now: FarmTime) -> BTreeMap<WorkerId, Bar> {
+        self.bars
+            .get(&operation)
+            .map_or_else(BTreeMap::new, |bars| {
+                bars.iter()
+                    .filter(|(_, bar)| bar.holds_at(now))
+                    .map(|(worker, bar)| (worker.clone(), *bar))
+                    .collect()
+            })
+    }
+
+    /// The workers `operation` is barred from at `now`, each with when its bar ends
+    /// (exclusive; the end of time for a bar for life).
     pub(super) fn barred_until(
         &self,
         operation: OperationId,
         now: FarmTime,
     ) -> BTreeMap<WorkerId, FarmTime> {
-        self.backoff
-            .get(&operation)
-            .map_or_else(BTreeMap::new, |m| {
-                m.iter()
-                    .filter(|(_, until)| **until > now)
-                    .map(|(worker, until)| (worker.clone(), *until))
-                    .collect()
-            })
+        let bars = self.bars_at(operation, now).into_iter();
+        bars.map(|(worker, bar)| (worker, bar.end())).collect()
     }
 
-    /// The workers `operation` avoids at `now`: those whose back-off has not ended.
+    /// The workers `operation` may not mark at `now`: every one barred to it.
     pub(super) fn barred(&self, operation: OperationId, now: FarmTime) -> BTreeSet<WorkerId> {
-        self.barred_until(operation, now).into_keys().collect()
+        self.bars_at(operation, now).into_keys().collect()
+    }
+
+    /// The workers `operation` is barred from at `now`, split as placement reads them:
+    /// those hard-barred, which it is never granted, and those in a back-off, which it
+    /// avoids as it avoids the workers of [`crate::Fate::avoid`].
+    pub(super) fn kept_off(
+        &self,
+        operation: OperationId,
+        now: FarmTime,
+    ) -> (BTreeSet<WorkerId>, BTreeSet<WorkerId>) {
+        let (hard, soft): (Vec<_>, Vec<_>) = self
+            .bars_at(operation, now)
+            .into_iter()
+            .partition(|(_, bar)| bar.is_hard());
+        let names = |bars: Vec<(WorkerId, Bar)>| bars.into_iter().map(|(w, _)| w).collect();
+        (names(hard), names(soft))
+    }
+
+    /// The operations `worker` is barred to at `now`.
+    pub(super) fn barred_operations<'a>(
+        &'a self,
+        worker: &'a WorkerId,
+        now: FarmTime,
+    ) -> impl Iterator<Item = OperationId> + 'a {
+        self.bars
+            .iter()
+            .filter(move |(_, bars)| bars.get(worker).is_some_and(|bar| bar.holds_at(now)))
+            .map(|(id, _)| *id)
+    }
+
+    /// Bars `worker` to `operation` with `bar` at `now`; the worker keeps the stronger bar.
+    pub(super) fn bar(
+        &mut self,
+        operation: OperationId,
+        worker: WorkerId,
+        bar: Bar,
+        now: FarmTime,
+    ) {
+        bar::set_bar(self.bars.entry(operation).or_default(), worker, bar, now);
     }
 
     /// Whether the hold of `operation` is given up when its deadline comes: not once it
@@ -116,9 +195,9 @@ impl Drain {
     /// Whether `operation`, queued since `queued_at`, may hold a worker this round, and
     /// what it keeps. `None` before `drain_after` has passed. A hold that has reached its
     /// deadline and is still not placed (a worker that emptied would have been taken
-    /// before this) is given up here: counted, dropped, and its worker barred until the
-    /// back-off ends. A request that has given up `max_reserve_attempts` holds is not
-    /// given up again.
+    /// before this) is given up here: counted, dropped, and its worker barred with a
+    /// [`Bar::Backoff`] until the back-off ends. A request that has given up
+    /// `max_reserve_attempts` holds is not given up again.
     pub(super) fn turn(
         &mut self,
         operation: OperationId,
@@ -138,10 +217,7 @@ impl Drain {
                 *self.give_ups.entry(operation).or_default() += 1;
                 let until =
                     FarmTime::from_millis(now.as_millis().saturating_add(cfg.reserve_backoff_ms));
-                self.backoff
-                    .entry(operation)
-                    .or_default()
-                    .insert(mark.worker, until);
+                self.bar(operation, mark.worker, Bar::Backoff(until), now);
             } else {
                 kept = Some(mark);
             }
@@ -153,12 +229,13 @@ impl Drain {
     }
 
     /// The mark `operation` has on `worker` at `now`: the one it kept, when it is on the
-    /// same worker, else a new one on `worker` whose deadline follows [`reserve_deadline`]
-    /// and whose time of making is the kept mark's: a hold that moves keeps its age.
+    /// same worker, else a new one on `worker` whose deadline follows [`reserve_deadline`],
+    /// whose tail end is `tail` (the end of the worker's tail now) and whose time of
+    /// making is the kept mark's: a hold that moves keeps its age.
     pub(super) fn mark(
         &self,
         operation: OperationId,
-        worker: &WorkerId,
+        (worker, tail): (&WorkerId, Option<u64>),
         kept: Option<WholeMark>,
         now: FarmTime,
         cfg: &WholeNodeConfig,
@@ -177,14 +254,21 @@ impl Drain {
             worker: worker.clone(),
             made,
             deadline: FarmTime::from_millis(now.as_millis().saturating_add(wait)),
+            tail_end: tail.map(FarmTime::from_millis),
         }
+    }
+
+    /// Puts back the give-up count and the bars of `operation`, replacing its own.
+    fn restore(&mut self, operation: OperationId, give_ups: u32, bars: BTreeMap<WorkerId, Bar>) {
+        self.give_ups.insert(operation, give_ups);
+        self.bars.insert(operation, bars);
     }
 
     /// Forgets `operation`.
     pub(super) fn forget(&mut self, operation: OperationId) {
         self.marks.remove(&operation);
         self.give_ups.remove(&operation);
-        self.backoff.remove(&operation);
+        self.bars.remove(&operation);
         self.waits.remove(&operation);
     }
 }
@@ -247,17 +331,19 @@ fn capability(worker: &Worker, now: FarmTime) -> Capability {
 
 impl Scheduler {
     /// The mark queued whole-machine `operation` has on the worker it holds, with
-    /// whole-node settings on ([`Scheduler::with_whole_node`]): its time and deadline. The
-    /// marks, the give-up counts and the back-offs are in memory only: a recovered
-    /// scheduler starts without them, so a request that gave up holds again from a count
-    /// of zero.
+    /// whole-node settings on ([`Scheduler::with_whole_node`]): its time, its deadline and
+    /// the tail end it was made with. The marks, the give-up counts and the bars are in
+    /// memory only: a recovered scheduler starts without them, so a request that gave up
+    /// holds again from a count of zero, unless the caller puts them back
+    /// ([`Scheduler::restore_whole`]).
     #[must_use]
     pub fn whole_mark(&self, operation: OperationId) -> Option<&WholeMark> {
         self.drain.marks.get(&operation)
     }
 
     /// How many holds `operation` has given up at their deadline, with whole-node
-    /// settings on; zero after a recovery.
+    /// settings on; zero after a recovery that did not restore it
+    /// ([`Scheduler::restore_whole`]).
     #[must_use]
     pub fn whole_give_ups(&self, operation: OperationId) -> u32 {
         self.drain.give_ups.get(&operation).copied().unwrap_or(0)
@@ -449,12 +535,17 @@ impl Scheduler {
     }
 
     /// The worker whole-machine `id`, at queue `position`, holds this round, its mark and
-    /// the end of the worker's tail (when the request is expected to start there; `None`:
-    /// not known), when it holds one: `kept` stays on its worker without a check (that mark is
-    /// already counted); a new mark is made only if the caps allow it ([`may_reserve`])
-    /// and the worker is not the last capable one of an older ordinary request, in which
-    /// case the next worker by drain cost is tried. `Err` is the reason it holds none.
-    /// `Ok(None)` is no worker that could.
+    /// the start time of the hold for backfill, when it holds one. `kept` stays on its
+    /// worker without a check (that mark is already counted); a new mark is made only if
+    /// the caps allow it ([`may_reserve`]) and the worker is not the last capable one of an
+    /// older ordinary request, in which case the next worker by drain cost is tried. `Err`
+    /// is the reason it holds none. `Ok(None)` is no worker that could.
+    ///
+    /// The start time is when the request is expected to start there (`None`: not known):
+    /// the mark's tail end, or the worker's tail now if that ends sooner
+    /// ([`backfill::kept`]); a known tail end is kept when the tail now is not known, and a
+    /// mark made with no known tail end has no start, whatever the tail now, so nothing
+    /// backfills under it.
     ///
     /// Head holds are not marks: `reserved` keeps a request off a worker a head holds, and
     /// no cap counts it.
@@ -493,11 +584,14 @@ impl Scheduler {
                     continue;
                 }
             }
+            let tail = super::gate::tail_of(&drain, &name);
             let mark = self
                 .drain
-                .mark(id, &name, turn.kept, self.now, cfg, max_wall);
-            let tail = super::gate::tail_of(&drain, &name);
-            return Ok(Some((name, mark, tail)));
+                .mark(id, (&name, tail), turn.kept, self.now, cfg, max_wall);
+            let start = mark
+                .tail_end
+                .and_then(|end| backfill::kept(Some(end.as_millis()), tail));
+            return Ok(Some((name, mark, start)));
         }
     }
 
@@ -607,6 +701,7 @@ mod tests {
             worker: worker.clone(),
             made: FarmTime::from_millis(0),
             deadline: FarmTime::from_millis(deadline),
+            tail_end: None,
         };
         let mut drain = Drain::default();
         drain.marks.insert(op, mark(10));
@@ -619,11 +714,11 @@ mod tests {
         );
         drain.marks.insert(op, mark(10));
         assert_eq!(drain.give_ups.get(&op), Some(&1));
-        assert!(drain.backoff.contains_key(&op));
+        assert!(drain.bars.contains_key(&op));
         drain.forget(op);
         assert!(!drain.marks.contains_key(&op));
         assert!(!drain.give_ups.contains_key(&op));
-        assert!(!drain.backoff.contains_key(&op));
+        assert!(!drain.bars.contains_key(&op));
         assert!(drain.marks.contains_key(&other));
     }
 

@@ -54,6 +54,25 @@ fn launch_actions(
     [Some(mint), acquire].into_iter().flatten()
 }
 
+/// The offer `record` was launched from, as a request's fit judges it: the stored shape,
+/// and, when it holds no ISA level, the level the pool's catalog states now for the same
+/// offer in the same zone. The records file does not keep the level
+/// ([`crate::StoredOffer::isa_level`]), so a record read back after a restart has none;
+/// the level is a fact of the offer, which the catalog states again, so a machine still
+/// booting for a request that asked for a level keeps covering it. An offer the catalog no
+/// longer lists states no level, as before.
+fn launched_offer(record: &Record, pool: &PoolInput) -> Offer {
+    let mut offer = record.offer.to_offer(0);
+    if offer.isa_level.is_none() {
+        offer.isa_level = pool
+            .offers
+            .iter()
+            .find(|listed| (&listed.id, &listed.zone) == (&offer.id, &offer.zone))
+            .and_then(|listed| listed.isa_level);
+    }
+    offer
+}
+
 /// The most a restart may lose of the time the scaler observed a pending silent or missing
 /// time: the records are written at least this often, or a sixth of the shortest
 /// `unknown_hold` among the pools if that is less. Derived, not a setting.
@@ -130,7 +149,7 @@ impl Pass<'_> {
                         COMING.contains(&record.phase)
                             || self.awaited(record, pool.settings.boot_timeout),
                         !claims.records.contains(&i),
-                        record.offer.to_offer(0).fit(&request.demand).is_ok(),
+                        launched_offer(record, pool).fit(&request.demand).is_ok(),
                     ]
                     .into_iter()
                     .all(|ok| ok)
