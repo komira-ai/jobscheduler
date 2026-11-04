@@ -16,6 +16,11 @@
 //! answers `UNIMPLEMENTED`. The crate neither listens nor connects: a caller brings the
 //! transport. No server implements the service yet.
 //!
+//! Each method of the service carries a `google.api.http` option, its route under the
+//! HTTP/JSON gateway (crate `js-api-gateway`, which generates its routes from them). The two
+//! files that define the option, `google/api/annotations.proto` and `google/api/http.proto`,
+//! are copied unchanged from googleapis (Apache-2.0) into `proto/google/api/`.
+//!
 //! A refused submit is a [`tonic::Status`] carrying a [`v1::Refusal`] in its details;
 //! [`refusal`] makes one and reads one back. [`FILE_DESCRIPTOR_SET`] is the encoded
 //! descriptor set of the package, with its comments, for reflection and for the tests.
@@ -44,7 +49,9 @@ impl fmt::Debug for v1::JobFile {
 }
 
 /// The encoded `google.protobuf.FileDescriptorSet` of package `jobscheduler.v1`: its four
-/// files, with their comments.
+/// files, with their comments, and the files they import (`google/api/annotations.proto`,
+/// `google/api/http.proto` and `google/protobuf/descriptor.proto`), so that a reader of the
+/// set resolves the `google.api.http` option each method of the service carries.
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/jobscheduler_v1_descriptor_set.bin"

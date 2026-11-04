@@ -55,6 +55,8 @@ objc2-virtualization = { version = "0.3.2", features = ["block2", "dispatch2", "
 # The container runner (js-contain) writes OCI bundles with oci-spec and drives `crun`
 # with the runc client.
 oci-spec = "0.7.1"
+# The HTTP/JSON gateway (js-api-gateway): the query string of a request, percent-decoded.
+percent-encoding = "2.3.2"
 # macOS only (js-vmm): the property lists of the guest disk, as values, not through serde.
 plist = { version = "1.10.1", default-features = false }
 # The state store's Postgres backend (js-state, feature `postgres`): the blocking client,
@@ -65,6 +67,10 @@ proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 # The job service's messages (js-proto): prost encodes and decodes them, and prost-types
 # holds the descriptor set the crate's tests read the schema from.
 prost = "0.14.4"
+# The HTTP/JSON gateway (js-api-gateway): reads the `google.api.http` option of each method from
+# the job service's descriptor set, and with its `serde` feature maps the messages to and from
+# JSON by the proto3 JSON mapping, so no message is mapped by hand.
+prost-reflect = "0.16.5"
 prost-types = "0.14.4"
 # js-proto's build script compiles the `.proto` files with protox, a pure-Rust compiler, so
 # no `protoc` is installed or run.
