@@ -125,6 +125,8 @@ impl Live {
                     exclusive_refused: None,
                     load: None,
                     disk_gib: None,
+                    jobs: Vec::new(),
+                    retired_jobs: Vec::new(),
                 };
                 self.agents.registry.heartbeat(&beat, &credential).unwrap();
             }

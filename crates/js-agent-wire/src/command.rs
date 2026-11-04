@@ -11,6 +11,7 @@ use crate::hello::WireShape;
 use crate::image;
 use crate::limits;
 use crate::native::{self, NativeSpec};
+use crate::per_job::JobStartSpec;
 use crate::refusal;
 
 /// Whether a job is confined to a container or may change the machine (design 5.12).
@@ -366,6 +367,18 @@ pub enum Command {
         /// The run to cancel.
         run_id: String,
     },
+    /// Start one job, keyed by its job id: the allocation's booked resources and the job's
+    /// own wall limit, no lease (see [`crate::per_job`]). Idempotent on the job id. Sent
+    /// only to an agent that reported [`crate::PER_JOB_CAPABILITY`]; an agent from before it
+    /// reads it as [`Command::Unknown`].
+    JobStart(Box<JobStartSpec>),
+    /// Stop one job: a retained intent, resent until the job leaves the agent's `jobs`
+    /// listing or its id is in `retired_jobs`. An agent that does not hold the job retires
+    /// the id and reports it in `retired_jobs`, which counts as stopped and gone.
+    JobStop {
+        /// The job to stop.
+        job_id: String,
+    },
     /// A command this version cannot decode. The agent ignores it, so the commands
     /// beside it still take effect.
     #[serde(other)]
@@ -373,13 +386,18 @@ pub enum Command {
 }
 
 impl Command {
-    /// Checks the command: a start by [`JobSpec::validate`], a stop or cancel by its run
-    /// id. An unknown command passes; the agent skips it.
+    /// Checks the command: a start by [`JobSpec::validate`], a job start by
+    /// [`JobStartSpec::validate`], each with its `require_pinned`, a stop or cancel by its
+    /// run id and a job stop by its job id. An unknown command passes; the agent skips it.
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
             Self::Start(spec) => spec.validate().and_then(|()| spec.require_pinned()),
+            Self::JobStart(spec) => spec.validate().and_then(|()| spec.require_pinned()),
             Self::Stop { run_id } | Self::Cancel { run_id } => {
                 check::ident(At::new("run_id", refusal::INVALID_REPLY), run_id)
+            }
+            Self::JobStop { job_id } => {
+                check::ident(At::new("job_id", refusal::INVALID_REPLY), job_id)
             }
             Self::Unknown => Ok(()),
         }

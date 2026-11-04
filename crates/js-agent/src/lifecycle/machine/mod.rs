@@ -8,6 +8,7 @@ mod adopt;
 mod cleanup;
 mod exclusive;
 mod job;
+mod per_job;
 mod prepare;
 mod slots;
 mod tails;
@@ -16,12 +17,13 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use js_agent_wire::{
-    Ack, Command, HeartbeatReply, HeldRun, HeldState, Isolation, JobSpec, Outcome, ResultAck,
-    RunResult, Taint, limits, refusal,
+    Ack, Command, HeartbeatReply, HeldRun, Isolation, JobSpec, Outcome, ResultAck, RunResult,
+    Taint, limits, refusal,
 };
 
 pub use self::exclusive::{Quiet, Restored};
-use self::job::{Job, Retired, Stage, Stuck, Waiting, blind_taint, host_taint, run_spec};
+use self::job::{Job, Keyed, Retired, Stage, Stuck, Waiting, blind_taint, host_taint, run_spec};
+pub use self::per_job::RETIRED_LISTED;
 pub use self::slots::Slots;
 use super::quota::QuotaHealth;
 use super::runtime::{Prepared, ResolvedMount, RunHandle, Runtime, RuntimeError};
@@ -89,6 +91,9 @@ pub struct Lifecycle {
     /// Containers no job stands for that could not be removed; not held runs.
     stuck: Vec<Stuck>,
     retired: Retired,
+    /// The job ids retired on a `JobStop` for a job the agent did not hold, oldest first,
+    /// listed in `retired_jobs` until a reply's `retired_acks` names them (see `per_job`).
+    answered: Vec<String>,
     /// The slots the runs hold, and the ones taken out of use.
     slots: Slots,
     taint: TaintState,
@@ -136,9 +141,11 @@ impl Lifecycle {
         }
         for command in &checked.commands {
             match command {
-                Command::Start(spec) => self.start(spec, received, &mut events),
+                Command::Start(spec) => self.start((spec, Keyed::Run), received, &mut events),
                 Command::Stop { run_id } => self.stop(run_id, false),
                 Command::Cancel { run_id } => self.stop(run_id, true),
+                Command::JobStart(spec) => self.start_job(spec, received, &mut events),
+                Command::JobStop { job_id } => self.stop_job(job_id),
                 Command::Unknown => {}
             }
         }
@@ -147,6 +154,15 @@ impl Lifecycle {
                 .result_acks
                 .iter()
                 .for_each(|ack| self.acknowledge(ack));
+        }
+        if checked.job_acks.is_ok() {
+            reply
+                .job_acks
+                .iter()
+                .for_each(|ack| self.acknowledge_job(ack));
+        }
+        if checked.retired_acks.is_ok() {
+            self.acknowledge_retired(&reply.retired_acks);
         }
         self.taint.ack(reply.taint_ack);
         self.sweep();
@@ -190,28 +206,29 @@ impl Lifecycle {
 
     /// The runs the agent holds, for the next heartbeat: adopted ones first, then in the
     /// order they started. A run is listed until its container and scratch are gone and
-    /// its result is acknowledged.
+    /// its result is acknowledged. A job a job start began is not a run and is not here
+    /// ([`Lifecycle::held_jobs`]).
     pub fn held(&self) -> Vec<HeldRun> {
-        self.jobs
-            .iter()
+        self.keyed(Keyed::Run)
             .map(|job| HeldRun {
                 run_id: job.run_id.clone(),
-                state: match job.stage {
-                    Stage::Preparing(_) => HeldState::Starting,
-                    Stage::Running(_) => HeldState::Running,
-                    _ => HeldState::ExitedUnacked,
-                },
+                state: job.held_state(),
             })
             .collect()
     }
 
+    /// The jobs of one keying, in the order of [`Lifecycle::held`].
+    fn keyed(&self, keyed: Keyed) -> impl Iterator<Item = &Job> {
+        self.jobs.iter().filter(move |job| job.keyed == keyed)
+    }
+
     /// The runs that are running, one for each lease (a second run of a lease already named
-    /// is left out), in the order of [`Lifecycle::held`].
+    /// is left out), in the order of [`Lifecycle::held`]. A job a job start began has no
+    /// lease and is not sampled per lease, so it is not here.
     pub fn running(&self) -> Vec<RunningLease> {
         let mut named = BTreeSet::new();
         let running = self
-            .jobs
-            .iter()
+            .keyed(Keyed::Run)
             .filter(|job| matches!(job.stage, Stage::Running(_)));
         running
             .filter(|job| named.insert(job.lease_id.as_str()))
@@ -251,10 +268,10 @@ impl Lifecycle {
         lines
     }
 
-    /// The results the server has not acknowledged, for the next heartbeat.
+    /// The results of runs the server has not acknowledged, for the next heartbeat. The
+    /// result of a job a job start began is in its listing ([`Lifecycle::held_jobs`]).
     pub fn results(&self) -> Vec<RunResult> {
-        self.jobs
-            .iter()
+        self.keyed(Keyed::Run)
             .filter_map(|job| job.result.clone())
             .collect()
     }
@@ -326,17 +343,27 @@ impl Lifecycle {
     }
 
     fn acknowledge(&mut self, ack: &ResultAck) {
-        if ack.ack == Ack::Unknown {
+        self.drop_result((Keyed::Run, &ack.run_id), ack.ack);
+    }
+
+    /// Drops the result of the job of `keyed` named `id` on a verdict the agent knows; an
+    /// unknown verdict keeps it, to be sent again.
+    fn drop_result(&mut self, (keyed, id): (Keyed, &str), ack: Ack) {
+        if ack == Ack::Unknown {
             return;
         }
         self.jobs
             .iter_mut()
-            .filter(|job| job.run_id == ack.run_id)
+            .filter(|job| job.keyed == keyed && job.run_id == id)
             .for_each(|job| job.result = None);
     }
 
     fn stop(&mut self, run_id: &str, silent: bool) {
-        match self.jobs.iter_mut().find(|job| job.run_id == run_id) {
+        let held = self
+            .jobs
+            .iter_mut()
+            .find(|job| job.keyed == Keyed::Run && job.run_id == run_id);
+        match held {
             Some(job) => job.request_stop(silent),
             None => self.retired.insert(run_id),
         }
@@ -465,8 +492,15 @@ impl Lifecycle {
     }
 
     /// Answers a start `failed_to_start` with `wire` as the detail, having created nothing.
-    fn refuse(&mut self, spec: &JobSpec, wire: &'static str, why: String, events: &mut Vec<Event>) {
+    fn refuse(
+        &mut self,
+        (spec, keyed): (&JobSpec, Keyed),
+        wire: &'static str,
+        why: String,
+        events: &mut Vec<Event>,
+    ) {
         let mut job = Job::of(spec, Stage::Freed, 0, None, 0);
+        job.keyed = keyed;
         job.result = Some(job.report(Outcome::FailedToStart, None, Some(wire)));
         self.jobs.push(job);
         events.push(Event::Refused {
@@ -585,7 +619,23 @@ impl Lifecycle {
         }
     }
 
-    fn start(&mut self, spec: &JobSpec, received: u64, events: &mut Vec<Event>) {
+    /// Starts the run `spec` names, or the job a job start names (`keyed`; see `per_job`).
+    fn start(&mut self, (spec, keyed): (&JobSpec, Keyed), received: u64, events: &mut Vec<Event>) {
+        if self.may_start((spec, keyed), received, events) {
+            self.admit_and_start((spec, keyed), received, events);
+        }
+    }
+
+    /// Whether a start is new work this agent may take on: not late, not held (a start of
+    /// held work changes nothing; one that names held work of the other keying is a clash),
+    /// not retired, and not beyond the jobs a heartbeat can list. A start that may not is
+    /// skipped, with an event when that is worth a line.
+    fn may_start(
+        &mut self,
+        (spec, keyed): (&JobSpec, Keyed),
+        received: u64,
+        events: &mut Vec<Event>,
+    ) -> bool {
         let run_id = &spec.run_id;
         let waited = self.clock.now_ms().saturating_sub(received);
         let late = spec.valid_for_ms != 0 && waited > spec.valid_for_ms;
@@ -594,25 +644,44 @@ impl Lifecycle {
                 run_id: run_id.clone(),
                 why: Skip::Stale,
             });
-            return;
+            return false;
         }
-        if self.jobs.iter().any(|job| &job.run_id == run_id) {
-            return;
+        if let Some(held) = self.jobs.iter().find(|job| &job.run_id == run_id) {
+            // The same id under the other keying is another piece of work that would share
+            // this one's scratch directory and labels: it is not started.
+            if held.keyed != keyed {
+                events.push(Event::Skipped {
+                    run_id: run_id.clone(),
+                    why: Skip::Clash,
+                });
+            }
+            return false;
         }
         if self.retired.contains(run_id) {
             events.push(Event::Skipped {
                 run_id: run_id.clone(),
                 why: Skip::Retired,
             });
-            return;
+            return false;
         }
         if self.jobs.len() >= MAX_JOBS {
             events.push(Event::Skipped {
                 run_id: run_id.clone(),
                 why: Skip::Full,
             });
-            return;
+            return false;
         }
+        true
+    }
+
+    /// Admits a start [`Lifecycle::may_start`] let through and starts it, or refuses it.
+    fn admit_and_start(
+        &mut self,
+        (spec, keyed): (&JobSpec, Keyed),
+        received: u64,
+        events: &mut Vec<Event>,
+    ) {
+        let run_id = &spec.run_id;
         // A job that may change the host taints it before it exists: whatever it does, and
         // however the agent or the host ends, the marker is already there. One whose marker
         // cannot be written is not started.
@@ -622,7 +691,7 @@ impl Lifecycle {
         let mounts = match admitted {
             Ok(mounts) => mounts,
             Err((wire, why)) => {
-                self.refuse(spec, wire, why, events);
+                self.refuse((spec, keyed), wire, why, events);
                 return;
             }
         };
@@ -642,7 +711,7 @@ impl Lifecycle {
         let slot = match self.take_slot(run_id, events) {
             Ok(slot) => slot,
             Err((wire, why)) => {
-                self.refuse(spec, wire, why, events);
+                self.refuse((spec, keyed), wire, why, events);
                 return;
             }
         };
@@ -674,15 +743,19 @@ impl Lifecycle {
                     lease_end_ms,
                 };
                 let stage = Stage::Preparing(Box::new(waiting));
-                self.jobs.push(Job::of(spec, stage, 0, Some(slot), booked));
+                let mut job = Job::of(spec, stage, 0, Some(slot), booked);
+                job.keyed = keyed;
+                self.jobs.push(job);
             }
             Prepared::Ready => {
-                let started = self.begin(spec, mounts, slot, booked, events);
-                self.settle(spec, started, (slot, booked), (None, u64::MAX), events);
+                let started = self.begin((spec, keyed), mounts, slot, booked, events);
+                let at = (None, u64::MAX);
+                self.settle((spec, keyed), started, (slot, booked), at, events);
             }
             Prepared::Failed(why) => {
                 let failure = runtime_failure(&why);
-                self.settle(spec, Err(failure), (slot, booked), (None, u64::MAX), events);
+                let at = (None, u64::MAX);
+                self.settle((spec, keyed), Err(failure), (slot, booked), at, events);
             }
         }
     }
@@ -691,7 +764,7 @@ impl Lifecycle {
     /// its container.
     fn begin(
         &mut self,
-        spec: &JobSpec,
+        (spec, keyed): (&JobSpec, Keyed),
         mounts: Vec<ResolvedMount>,
         slot: u32,
         booked: u64,
@@ -738,7 +811,7 @@ impl Lifecycle {
             written.map(|files| (scratch, files)).map_err(failed)
         });
         started.and_then(|(scratch, files)| {
-            let run = run_spec(spec, mounts, scratch, files, slot, booked);
+            let run = run_spec((spec, keyed), mounts, scratch, files, slot, booked);
             self.runtime
                 .create_and_start(&run)
                 .map_err(|why| runtime_failure(&why))
@@ -751,7 +824,7 @@ impl Lifecycle {
     /// `replace` (a start that waited), or is added.
     fn settle(
         &mut self,
-        spec: &JobSpec,
+        (spec, keyed): (&JobSpec, Keyed),
         started: Result<RunHandle, Failure>,
         (slot, booked): (u32, u64),
         (replace, cap): (Option<usize>, u64),
@@ -786,6 +859,8 @@ impl Lifecycle {
                 job
             }
         };
+        let mut job = job;
+        job.keyed = keyed;
         match replace {
             Some(index) => self.jobs[index] = job,
             None => self.jobs.push(job),

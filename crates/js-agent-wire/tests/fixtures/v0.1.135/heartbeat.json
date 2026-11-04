@@ -1,0 +1,15 @@
+{
+  "host_id": "mac-01",
+  "epoch": 3,
+  "session": "s3cret-0",
+  "phase": "draining",
+  "held": [{"run_id": "run-1", "state": "exited_unacked"}],
+  "results": [{
+    "run_id": "run-1",
+    "lease_id": "1-1",
+    "outcome": "timed_out",
+    "exit_code": 137,
+    "detail": "wall limit"
+  }],
+  "taint": {"reason": "cleanup-failed", "run_id": "run-1", "check": "new_mount"}
+}

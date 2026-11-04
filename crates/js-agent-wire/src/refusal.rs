@@ -34,9 +34,13 @@ pub const BUNDLE_DIGEST_REQUIRED: &str = "bundle-digest-required";
 /// A native job whose `program` is empty, relative, climbs with `..`, or holds a
 /// character a path may not.
 pub const INVALID_PROGRAM: &str = "invalid-program";
-/// A native job whose environment has a bad name or value, too many entries, or a
-/// name the agent reserves (`DYLD_`, `LD_`, `SANDBOX_`, `JS_AGENT_`).
+/// A native job, or a job start, whose environment has a bad name or value, too many
+/// entries, or a name the agent reserves (`DYLD_`, `LD_`, `SANDBOX_`, `JS_AGENT_`).
 pub const INVALID_ENV: &str = "invalid-env";
+/// A job start with a non-empty `env`, answered `failed_to_start` by an agent whose
+/// runtimes cannot yet set a container's environment; nothing runs. Temporary: the change
+/// that passes the environment into the runtimes (`js-agent-job-env-runtimes`) removes it.
+pub const ENV_UNSUPPORTED: &str = "env-unsupported";
 /// A start with a `native` body sent to an agent that cannot run native jobs. An agent
 /// that predates the field reads such a start as `invalid-image` instead.
 pub const NATIVE_UNSUPPORTED: &str = "native-unsupported";

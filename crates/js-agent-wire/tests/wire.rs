@@ -60,6 +60,7 @@ fn refusal_codes_snapshot() {
         refusal::INVALID_BUNDLE,
         refusal::BUNDLE_DIGEST_REQUIRED,
         refusal::QUOTA_UNAVAILABLE,
+        refusal::ENV_UNSUPPORTED,
     ];
     assert_eq!(
         codes.join(" "),
@@ -68,7 +69,7 @@ fn refusal_codes_snapshot() {
          no-capacity host-not-registered limits-exceed-shape host-jobs-not-allowed \
          unsupported-protocol invalid-heartbeat invalid-welcome invalid-reply unknown-pool \
          shape-not-accepted host-contract execution-mismatch pool-full host-bound session-mismatch session-unavailable host-listed rate-limited \
-         body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready invalid-program invalid-env native-unsupported invalid-bundle bundle-digest-required quota-unavailable"
+         body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready invalid-program invalid-env native-unsupported invalid-bundle bundle-digest-required quota-unavailable env-unsupported"
     );
 }
 
@@ -213,5 +214,7 @@ fn round_trip_of_every_message() {
         }],
         taint_ack: true,
         exclusive: None,
+        job_acks: Vec::new(),
+        retired_acks: Vec::new(),
     });
 }

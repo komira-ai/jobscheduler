@@ -196,23 +196,7 @@ impl NativeSpec {
     }
 
     fn check_env(&self) -> Result<(), ValidationError> {
-        let at = At::new("native.env", refusal::INVALID_ENV);
-        check::count(at, self.env.len(), limits::MAX_ENV)?;
-        let mut total = 0usize;
-        for (key, value) in &self.env {
-            env_name(at, key)?;
-            if value.len() > limits::MAX_ENV_VALUE_LEN {
-                return Err(at.fail(Rule::TooLong));
-            }
-            if value.contains('\0') {
-                return Err(at.fail(Rule::BadChars));
-            }
-            total += key.len() + value.len();
-        }
-        if total > limits::MAX_ENV_TOTAL_BYTES {
-            return Err(at.fail(Rule::TooLong));
-        }
-        Ok(())
+        check_env(At::new("native.env", refusal::INVALID_ENV), &self.env)
     }
 
     fn check_inputs(&self) -> Result<(), ValidationError> {
@@ -278,6 +262,30 @@ pub(crate) fn check_job(job: &JobSpec, native: &NativeSpec) -> Result<(), Valida
 /// `[A-Za-z0-9._+-]`: the bytes of an entrypoint name.
 fn entrypoint_byte(byte: u8) -> bool {
     check::ident_byte(byte) || byte == b'+'
+}
+
+/// An environment: at most [`limits::MAX_ENV`] entries, each name `[A-Za-z_][A-Za-z0-9_]*`
+/// and not reserved, each value at most [`limits::MAX_ENV_VALUE_LEN`] bytes without NUL, and
+/// [`limits::MAX_ENV_TOTAL_BYTES`] in all. A native body's and a job start's: one check
+/// and one set of bounds, until the one job definition (`js-one-job-definition`) takes it
+/// over for every job body.
+pub(crate) fn check_env(at: At, env: &BTreeMap<String, String>) -> Result<(), ValidationError> {
+    check::count(at, env.len(), limits::MAX_ENV)?;
+    let mut total = 0usize;
+    for (key, value) in env {
+        env_name(at, key)?;
+        if value.len() > limits::MAX_ENV_VALUE_LEN {
+            return Err(at.fail(Rule::TooLong));
+        }
+        if value.contains('\0') {
+            return Err(at.fail(Rule::BadChars));
+        }
+        total += key.len() + value.len();
+    }
+    if total > limits::MAX_ENV_TOTAL_BYTES {
+        return Err(at.fail(Rule::TooLong));
+    }
+    Ok(())
 }
 
 fn env_name(at: At, key: &str) -> Result<(), ValidationError> {
