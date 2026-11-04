@@ -59,7 +59,7 @@
 //! | `--scratch-low-water-gib <n>` | GiB of the scratch root's free disk kept back from jobs; the disk offered (`shape.disk_bytes`, and `disk-gib` in GiB) is the free space read at start minus this, 0 when this is more; needs `--scratch-root` |
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required with `--container-bin` |
 //! | `--run-files-root <path>` | where each run's files (the `files` of a start: a URL or a token the task reads) are written, in a directory of their own per run, `0555` with `0444` files, mounted read-only at `/run/js-files`. Made `0700` when missing; it must be on a `tmpfs` (the secrets never reach a disk) and the agent refuses to start when it is not. A reboot clears it, which is fine: a run does not survive one. Default `/run/js-agent/files` when that can be made; otherwise the agent runs without run files and does not report the `run-files` capability. tmpfs pages can be swapped to disk when the host has swap: run hosts that handle these secrets with swap off or encrypted. With `--native-helper-socket` (a Mac, which has no tmpfs) the root is used only when the flag is given, is made `0711`, and is not checked for a tmpfs: the files are on disk unless the flag points at a RAM-backed volume; each run's directory and files are given to the run's user (`0500`, files `0400`) before its program starts, its profile denies writes there, and `JS_FILES_DIR` names it. It may not be, hold or lie in the state, scratch or a mount root, the homes of the native users, or a path native runs may not read. Needs `--container-bin` or `--native-helper-socket` |
-//! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; every container gets network none (loopback only: a job that needs a network runs on `--runtime crun`, see `--egress`); a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); every job runs in a user namespace mapped onto the `--container-subuid` range (Podman is given the maps for each container; a Docker daemon must run with `userns-remap` set to that user, or the agent does not start); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
+//! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs, with `--runtime docker --allow-container-engine` (on Linux without `--runtime` it is refused, since the runtime is then `crun`, which takes no engine flag); never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; every container gets network none (loopback only: a job that needs a network runs on `--runtime crun`, see `--egress`); a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); every job runs in a user namespace mapped onto the `--container-subuid` range (Podman is given the maps for each container; a Docker daemon must run with `userns-remap` set to that user, or the agent does not start); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
 //! | `--native-helper-socket <path>` | the Unix socket of the root helper `js-mac-session`: with it a Mac agent runs native jobs, each as a user the helper makes for the run, under a Seatbelt profile, and reports `runtime` and `exec` as `sandbox-exec` (see [`native`]); macOS only; the agent must run as root and checks at start that `sandbox-exec` applies a profile; needs `--scratch-root` and `--state-root`; not with `--container-bin`; the helper must be dedicated to this agent on a Mac used for native jobs only, started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes` (never the defaults of another helper), because the agent asks it for its boot reset, which ends the lease users of whoever used it before and clears the Mac's auto-login; native runs are NOT stopped when the agent stops, restarts or dies: the lease journal in the state root ends them when the agent next starts, or when the rescue of an agent whose worker died runs; until then they run on, and their wall limit is enforced only while an agent runs; the profile does not deny System V or POSIX shared memory, semaphores or message queues, and the helper reuses uids, so what a run leaves in them can be read by a later run that gets the same uid: an open channel between runs on one Mac |
 //! | `--native-homes <path>` | the directory the helper makes its lease users' homes in (its `--homes`); by default `/Users`; it must exist; needs `--native-helper-socket` |
 //! | `--native-network <level>` | the most network a native run gets: `off` (the default), `loopback` or `on`; a start that asks for more is held to it; `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every job that asks for the network it checks again and refuses the job (`egress-unchecked`) if it is not; `loopback` is shared by every run of the Mac; needs `--native-helper-socket` |
@@ -84,7 +84,8 @@
 //! | `--egress-ip <path>`, `--egress-nft <path>`, `--egress-nsenter <path>` | the absolute paths of the `ip`, `nft` and `nsenter` programs the egress setup runs, by default `/usr/sbin/ip`, `/usr/sbin/nft` and `/usr/bin/nsenter`; need `--egress allow-list` or `open` |
 //! | `--actions-cgroup <path>` | the cgroup version 2 directory below `/sys/fs/cgroup` that holds every container (made and delegated by the operator): each container is created with `--cgroup-parent` naming it (the slice name for one `.slice` directly below `/sys/fs/cgroup`, the systemd driver; the path with a leading `/` otherwise, the cgroupfs driver), and the heartbeat carries the usage of the directory and of each lease's cgroup (see [`usage`]); without it the heartbeat carries no load, and the agent says so at start; needs `--container-bin` |
 //! | `--gpu-toolkit-hook <path>` | the absolute path of a program that checks the GPU container toolkit, run once at start when the host offers a GPU; exit 0 makes the hello report `gpu-toolkit`, anything else leaves it out and warns; needs `--container-bin` |
-//! | `--runtime <docker\|crun>` | what runs a job: `docker` (the engine program of `--container-bin`, Docker or Podman, which is also what no flag means) or `crun` (js-contain over the distribution's `crun`, each command run as `--job-user`; Linux only). The packaged unit of the Docker cloud hosts names `--runtime docker`; the unit for the Linux farm (`packaging/js-agent/js-agent-crun.service`) names `--runtime crun`. With `crun` the agent checks the host before it registers and exits 2 naming every piece that is missing: `crun` at `--crun-bin` and its version (1.14 or newer), `newuidmap` and `newgidmap`, the job user and its subuid and subgid ranges (65536 ids or more each), the state root (`0700`, owned by root) and the scratch root (`0711`, owned by root, every directory above it searchable by the job user), `crun`, `newuidmap` and `newgidmap` executable by the job user, the cgroup version 2 controllers `cpu`, `memory` and `pids` in the agent's own cgroup (`Delegate=yes`), and, where `kernel.apparmor_restrict_unprivileged_userns` is 1, a loaded AppArmor profile for `crun`. Then the worker runs jobs through `CrunRuntime`: images are pulled by the agent's registry client from the `--image-allow` entries into a store beside the scratch root (`oci`), and the agent takes no `--mount-root` or `--mount-root-ro` with it, because the runtime does not read a job's binds back yet |
+//! | `--runtime <docker\|crun\|none>` | what runs a job: `crun` (js-contain over the distribution's `crun`, each command run as `--job-user`; Linux only), which is the default Linux runtime: a Linux agent given no `--runtime` and no `--native-*` flag runs `crun`; or `docker` (the engine program of `--container-bin`, Docker or Podman), which needs `--allow-container-engine`; or `none`, an agent that registers and heartbeats and starts no job, which takes neither `--container-bin` nor a `--native-*` flag. A Mac agent given no `--runtime` runs native jobs (`--native-helper-socket`), or none without it. The packaged unit of the Docker cloud hosts names `--runtime docker --allow-container-engine`; the unit for the Linux farm (`packaging/js-agent/js-agent-crun.service`) names `--runtime crun`. With `crun`, named or the default, the agent checks the host before it registers and exits 2 naming every piece that is missing, and never runs the engine instead (a start that named no `--runtime` is also told that crun is the default, of docs/runbooks/crun-host-setup.md, and of the opt-in to the engine): `crun` at `--crun-bin` and its version (1.14 or newer), `newuidmap` and `newgidmap`, the job user and its subuid and subgid ranges (65536 ids or more each), the state root (`0700`, owned by root) and the scratch root (`0711`, owned by root, every directory above it searchable by the job user), `crun`, `newuidmap` and `newgidmap` executable by the job user, the cgroup version 2 controllers `cpu`, `memory` and `pids` in the agent's own cgroup (`Delegate=yes`), and, where `kernel.apparmor_restrict_unprivileged_userns` is 1, a loaded AppArmor profile for `crun`. Then the worker runs jobs through `CrunRuntime`: images are pulled by the agent's registry client from the `--image-allow` entries into a store beside the scratch root (`oci`), and the agent takes no `--mount-root` or `--mount-root-ro` with it, because the runtime does not read a job's binds back yet |
+//! | `--allow-container-engine` | accept `--runtime docker`: the engine at `--container-bin` runs the jobs, a fallback for a host that cannot run `crun` and for GPU jobs; every job it runs gets network none, and the agent prints one warning at start that says so. `--runtime docker` without it exits 2 (`--runtime docker: needs --allow-container-engine`), and it without `--runtime docker` exits 2 (`--allow-container-engine: needs --runtime docker`). When the fallback is dropped is an open question of the design (question 7 of komira-ai/jobscheduler#648) |
 //! | `--crun-bin <path>` | the `crun` of `--runtime crun`; by default `/usr/bin/crun`, the path the distribution's AppArmor profile attaches to; any other path starts the agent with a warning (and is refused by the kernel where user namespaces are restricted) |
 //! | `--job-user <name>` | the non-root user every `crun` command runs as, whose subuid and subgid ranges every job's user namespace is mapped onto; required with `--runtime crun`, and needs it |
 //! | `--gpu-device <path>` | a character device below `/dev` a `crun` job that booked a GPU is given; repeatable. With `{index}` (`/dev/nvidia{index}`) it is one GPU's node, given for each index the job booked and no other; without it (`/dev/nvidiactl`, `/dev/nvidia-uvm`) every GPU job gets it. Each node must be a character device at start, for every GPU the host offers, and the host must offer one; the cgroup of a GPU job allows exactly its nodes. With it the crun runtime runs GPU jobs and the hello reports `gpu-passthrough`; without it a start that names a GPU is refused `gpu-unsupported`. Needs `--runtime crun` |
@@ -113,8 +114,10 @@
 //!
 //! # Jobs
 //!
-//! Without `--container-bin` the agent registers and heartbeats and starts nothing; a
-//! `Start` the server sends it is ignored (and counted in the log). With it, the agent
+//! With `--runtime none` (and on a Mac given neither `--runtime` nor `--native-helper-socket`)
+//! the agent registers and heartbeats and starts nothing; a `Start` the server sends it is
+//! ignored (and counted in the log). A Linux agent given no `--runtime` runs `crun` (see the
+//! `--runtime` flag). With `--runtime docker`, the agent
 //! builds the container runtime (Docker or Podman by their command line), takes the
 //! baseline of the host for the post-job checks, opens the taint marker, adopts the
 //! containers an earlier process of this agent left, and starts the [`Worker`], the thread
@@ -221,8 +224,8 @@
 //! hook (`--readiness-hook`, see `readiness`) runs once for each lease, after the agent's
 //! own checks passed, and its verdict is kept for the lease; an agent that restarts while it
 //! holds no run of the lease prepares it again, and the hook runs again. The deadline is
-//! [`PREPARE_TIMEOUT`] until a flag sets it, counted on the worker's clock. An agent without
-//! `--container-bin` runs no job and has no host to prepare, so it ignores `exclusive`. The
+//! [`PREPARE_TIMEOUT`] until a flag sets it, counted on the worker's clock. An agent that runs no
+//! job (`--runtime none`) has no host to prepare, so it ignores `exclusive`. The
 //! VM check of the design is a later change. [`Hooked`] is the same hook rule as a wrapper
 //! around any [`Quiesce`], for a host driven in-thread.
 //!
@@ -392,11 +395,23 @@ enum Failure {
     Worker(String),
 }
 
-/// Checks `--runtime` and the flags that belong to it, and for `crun` the host: a wrong
-/// flag or a missing piece of the host ends the agent with status 2 before it registers.
-/// For `crun` it returns the settings of the crun runtime, which stand where
+/// The refusal of `--runtime docker` without its opt-in.
+pub const ENGINE_NEEDS_OPT_IN: &str = "--runtime docker: needs --allow-container-engine (crun is \
+     the default Linux runtime; the engine is a fallback for a host that cannot run crun and for \
+     GPU jobs)";
+
+/// The one warning of an agent that runs its jobs through the container engine.
+pub const ENGINE_WARNING: &str = "--runtime docker --allow-container-engine: the container \
+     engine runs this host's jobs, and gives none of them a network (network none): it is a \
+     fallback for a host that cannot run crun and for GPU jobs";
+
+/// Checks the runtime ([`Cli::effective_runtime`]) and the flags that belong to it, and for
+/// `crun` the host: a wrong flag or a missing piece of the host ends the agent with status 2
+/// before it registers, and a host that fails the crun check is never given the engine
+/// instead. For `crun` it returns the settings of the crun runtime, which stand where
 /// `--container-bin` stands for the engines; `gpus` are the indices of the GPUs the host
-/// offers, whose nodes the GPU flags must name.
+/// offers, whose nodes the GPU flags must name. The engine runs only with
+/// `--runtime docker --allow-container-engine`, and says so on `err`.
 fn runtime_flags(
     cli: &Cli,
     platform: &Platform,
@@ -406,7 +421,14 @@ fn runtime_flags(
     err: &mut dyn Write,
 ) -> Result<Option<Settings>, Failure> {
     let usage = |text: &str| Err(Failure::Usage(text.to_owned()));
-    match cli.runtime {
+    if cli.allow_container_engine && cli.runtime != Some(RuntimeKind::Docker) {
+        return usage("--allow-container-engine: needs --runtime docker");
+    }
+    let native = cli
+        .native_flags()
+        .into_iter()
+        .find_map(|(flag, given)| given.then_some(flag));
+    match cli.effective_runtime(platform) {
         Some(RuntimeKind::Crun) => {
             if platform.is_macos() {
                 return usage("--runtime crun: Linux only: the post-job checks read /proc");
@@ -435,13 +457,27 @@ fn runtime_flags(
         Some(RuntimeKind::Docker) if cli.container_bin.is_none() => {
             usage("--runtime docker: needs --container-bin")
         }
+        // An agent that runs no job takes no flag of a runtime that would run them.
+        Some(RuntimeKind::NoJobs) if cli.container_bin.is_some() => usage(
+            "--container-bin: not with --runtime none (an agent that runs no job; \
+             --runtime docker --allow-container-engine runs jobs through the engine)",
+        ),
+        Some(RuntimeKind::NoJobs) if native.is_some() => usage(&format!(
+            "{}: not with --runtime none (an agent that runs no job)",
+            native.unwrap_or_default()
+        )),
         _ if cli.crun_bin.is_some() => usage("--crun-bin: needs --runtime crun"),
         _ if cli.job_user.is_some() => usage("--job-user: needs --runtime crun"),
         // Only the crun runtime gives a job a GPU's nodes: the engines take theirs by index
         // from the toolkit, and a Mac runs no container.
-        _ => match cli.gpu_flags().into_iter().find(|(_, given)| *given) {
+        kind => match cli.gpu_flags().into_iter().find(|(_, given)| *given) {
             Some((flag, _)) => usage(&format!("{flag}: needs --runtime crun")),
-            None => Ok(None),
+            None if kind != Some(RuntimeKind::Docker) => Ok(None),
+            None if !cli.allow_container_engine => usage(ENGINE_NEEDS_OPT_IN),
+            None => {
+                let _ = writeln!(err, "js-agent: warning: {ENGINE_WARNING}");
+                Ok(None)
+            }
         },
     }
 }

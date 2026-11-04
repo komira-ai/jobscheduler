@@ -25,7 +25,7 @@ type Row = readonly [page: string, shown: string, file: string, says: string];
 const ROWS: readonly Row[] = [
   ['index', 'jobscheduler is a generic scheduler for jobs and compute', 'README.md', 'A generic job and compute scheduler'],
   ['index', 'An agent on each host tells the server what the host offers, keeps telling it that the host is alive, and runs the container or native jobs the client queues on the lease.', 'crates/js-agent/src/lib.rs', 'tells a lease server what the machine offers'],
-  ['index', 'through Docker, Podman or crun', 'crates/js-agent/src/lib.rs', '`--runtime <docker\\|crun>`'],
+  ['index', 'through Docker, Podman or crun', 'crates/js-agent/src/lib.rs', '`--runtime <docker\\|crun\\|none>`'],
   ['index', '(through Docker, Podman or crun) and native jobs on a Mac', 'crates/js-agent/src/lib.rs', 'with it a Mac agent runs native jobs'],
   ['index', 'The lease server calls it only under <code>--placement js-sched</code>', 'crates/js-lease-server/src/lib.rs', '`--placement registry\\|js-sched`'],
   ['index', 'to pick among the hosts with room by the hosts\' load readings, then by how tightly a lease fits', 'crates/js-lease-server/src/lib.rs', 'the hosts\' load readings choose among those that still fit, then the host the lease fits most tightly'],
@@ -270,6 +270,9 @@ const ROWS: readonly Row[] = [
   ['install', '<code>--server</code> is <code>https://host:port</code>', 'crates/js-agent/src/lib.rs', '`--server <url>` | required: `https://host:port`'],
   ['install', 'The unit\'s <code>--runtime docker</code> runs jobs', 'packaging/js-agent/js-agent.service', '--runtime docker --container-bin /usr/bin/docker'],
   ['install', 'runs jobs through the engine at <code>--container-bin</code>', 'crates/js-agent/src/lib.rs', '`docker` (the engine program of `--container-bin`'],
+  ['install', '<code>--allow-container-engine</code> is the opt-in the engine needs', 'packaging/js-agent/js-agent.service', '--runtime docker --container-bin /usr/bin/docker --allow-container-engine'],
+  ['install', 'an agent given no <code>--runtime</code> runs jobs with <code>crun</code>, the default Linux runtime,', 'crates/js-agent/src/lib.rs', 'which is the default Linux runtime: a Linux agent given no `--runtime` and no `--native-*` flag runs `crun`'],
+  ['install', 'and exits 2 on a host that fails the crun check, naming each missing piece.', 'crates/js-agent/src/lib.rs', 'With `crun`, named or the default, the agent checks the host before it registers and exits 2 naming every piece that is missing, and never runs the engine instead'],
   ['install', 'A second unit, <code>js-agent-crun.service</code>, runs jobs with <code>crun</code> on a farm node', 'packaging/js-agent/js-agent-crun.service', 'js-agent on a Linux farm node that runs jobs with crun'],
   ['install', '<code>packaging/js-agent/crun_host_setup.sh</code> sets a host up for it', 'packaging/js-agent/crun_host_setup.sh', 'sets up a Linux host to run js-agent with `--runtime crun`'],
   ['install', '<span class="tag tag-planned">none</span> A published package or', '.github/workflows/js-agent-deb.yml', 'It publishes nothing: no release, no package repository, no registry'],
