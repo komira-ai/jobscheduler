@@ -3,7 +3,13 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::time::Duration;
 
+use js_agent::lifecycle::{
+    DEFAULT_SILENCE_STOP, DEFAULT_STOP_GRACE, MAX_SILENCE_STOP_SECS, SILENCE_STOP_GRACE_RATIO,
+    fits_grace, silence_stop,
+};
+use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, RETRY_AFTER_CAP};
 use js_oci::Allow;
 
 use super::quota::local_with;
@@ -615,4 +621,100 @@ fn the_job_flags_alone_refuse_a_wrong_image_allow_entry() {
         why,
         "--image-allow: \"ghcr.io\" is not a well formed registry reference"
     );
+}
+
+/// Asserts the default silence bound against the numbers it is chosen from: at least
+/// [`SILENCE_STOP_GRACE_RATIO`] (twenty) times the server's default grace, above what a
+/// server restart costs a well agent beside the restart's own time (a heartbeat interval,
+/// the cap on `Retry-After` and the old session's grace) plus the stop grace, taken by a
+/// welcome of the default grace, and within the flag's bounds. It catches an edit of the
+/// default (or of a number it rests on) that slips it under the grace, so that a routine
+/// server restart or a lost reply would stop every job of the fleet.
+#[test]
+fn silence_stop_default_is_well_above_the_grace() {
+    let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap();
+    let default = ms(DEFAULT_SILENCE_STOP);
+    assert_eq!(SILENCE_STOP_GRACE_RATIO, 20);
+    assert!(default >= SILENCE_STOP_GRACE_RATIO * DEFAULT_GRACE_MS);
+    let restart = DEFAULT_HEARTBEAT_INTERVAL_MS + ms(RETRY_AFTER_CAP) + DEFAULT_GRACE_MS;
+    assert!(
+        default > restart + ms(DEFAULT_STOP_GRACE),
+        "{default} {restart}"
+    );
+    assert_eq!(
+        fits_grace(DEFAULT_SILENCE_STOP, DEFAULT_GRACE_MS, DEFAULT_STOP_GRACE),
+        Ok(())
+    );
+    assert_eq!(silence_stop(None), Ok(DEFAULT_SILENCE_STOP));
+    assert!(DEFAULT_SILENCE_STOP.as_secs() <= MAX_SILENCE_STOP_SECS);
+}
+
+/// Asserts the bounds of `--silence-stop`: 1 and 7200 seconds are taken, 0 (there is no
+/// value that turns the stop off) and 7201 are refused naming the flag, a bound exactly at
+/// the grace plus the stop grace is refused and one a millisecond above is taken, and the
+/// flag on an agent that runs no job ends it with status 2 before anything is sent. It
+/// catches a bound that switches the stop off, one without a ceiling, an off-by-one at the
+/// grace, and a flag taken where nothing would be stopped.
+#[test]
+fn the_silence_stop_flag_is_bounded() {
+    assert_eq!(silence_stop(Some(1)), Ok(Duration::from_secs(1)));
+    assert_eq!(silence_stop(Some(7200)), Ok(Duration::from_secs(7200)));
+    let zero = silence_stop(Some(0)).unwrap_err();
+    assert!(
+        zero.starts_with("--silence-stop: at least 1 second"),
+        "{zero}"
+    );
+    assert_eq!(
+        silence_stop(Some(7201)),
+        Err("--silence-stop: at most 7200 seconds".to_owned())
+    );
+    let (bound, grace) = (Duration::from_secs(25), Duration::from_secs(1));
+    assert!(fits_grace(bound, 24_000, grace).is_err());
+    assert_eq!(fits_grace(bound, 23_999, grace), Ok(()));
+
+    let (status, err, sent) = start(&["--silence-stop", "300"]);
+    assert_eq!(status, code(2), "{err}");
+    assert!(
+        err.contains("--silence-stop: needs --container-bin or --native-helper-socket"),
+        "{err}"
+    );
+    assert_eq!(sent, 0);
+}
+
+/// Asserts that an agent whose stop grace the silence bound does not outlast, against the
+/// server's default grace, ends at start with status 2 before anything is sent, naming
+/// `--silence-stop` and the numbers: `--stop-grace 285` with the default bound of 300 s
+/// (285 s and 15 s are exactly 300 s). It catches an agent that registers with a bound the
+/// default grace could trip, and then ends at every welcome instead of once, at start.
+#[test]
+fn a_stop_grace_the_silence_bound_does_not_outlast_is_refused_at_start() {
+    let dir = Scratch::new("life-flags-silence-grace");
+    let (state, scratch) = (dir.path("state"), dir.path("scratch"));
+    for path in [&state, &scratch] {
+        fs::create_dir(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
+    let user = container_user();
+    let s = |path: &std::path::Path| path.display().to_string();
+    let (exec, state, scratch) = (s(&exec), s(&state), s(&scratch));
+    let (status, err, sent) = start(&[
+        "--container-bin",
+        &exec,
+        "--container-user",
+        &user,
+        "--container-subuid",
+        "jobmap",
+        "--state-root",
+        &state,
+        "--scratch-root",
+        &scratch,
+        "--stop-grace",
+        "285",
+    ]);
+    assert_eq!(status, code(2), "{err}");
+    let said = "--silence-stop: 300000 ms is at or below the server's grace of 15000 ms plus the \
+                stop grace of 285000 ms";
+    assert!(err.contains(said), "{err}");
+    assert_eq!(sent, 0);
 }

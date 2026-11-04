@@ -22,6 +22,7 @@ mod mac_pf;
 mod pf_gate;
 mod runtime;
 mod settings;
+mod silence;
 mod worker;
 
 use std::collections::BTreeMap;

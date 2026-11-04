@@ -20,6 +20,12 @@
 //! - **The worker steps by itself.** It calls [`Lifecycle::step`] after each order and
 //!   whenever it has had none for the step interval of its [`Plan`], so a container that
 //!   exited is found whether or not the server said anything.
+//! - **The session says when it heard the server.** [`Worker::heard`] stamps a [`Contact`]
+//!   on the lifecycle's clock without waiting, at every welcome and every accepted reply,
+//!   whether or not the queue had room for it; the lifecycle reads it at every step and
+//!   stops every job once the server has been silent for the plan's bound
+//!   ([`Lifecycle::stop_on_silence`]). The session refuses a welcome whose grace that
+//!   bound does not outlast ([`Worker::check_grace`]).
 //! - **The runtime is made on the worker thread**, by the [`Machine`] of the plan, so it
 //!   needs no `Send` bound. The lifecycle is built (and the containers the previous
 //!   process left are adopted) before [`Worker::start`] returns, so the first hello can
@@ -97,7 +103,7 @@ use js_agent_wire::{Command, HeartbeatReply, HeldJob, HeldRun, HeldState, RunRes
 use crate::cli_runtime::CALL_LIMIT;
 use crate::facts::Platform;
 use crate::integrity::Integrity;
-use crate::lifecycle::{CheckHook, Config, Event, Lifecycle, Status};
+use crate::lifecycle::{CheckHook, Config, Contact, Event, Lifecycle, Status, fits_grace};
 use crate::readiness::{HookWindow, WorkerHook};
 
 mod quiesce;
@@ -164,6 +170,9 @@ pub struct Plan {
     /// The readiness hook the worker runs for a whole-node lease whose host it found quiet;
     /// none when the operator gave no `--readiness-hook`.
     pub readiness: Option<WorkerHook>,
+    /// How long the server may be silent before every job is stopped (`--silence-stop`);
+    /// none for a worker that never stops a job for silence, which the agent never builds.
+    pub silence_stop: Option<Duration>,
 }
 
 /// The most containers [`Rescue::stop_all`] stops; the rest are reported as not tried. It
@@ -504,6 +513,10 @@ pub struct Worker {
     handle: Handle,
     clock: SharedClock,
     rescue: Rescue,
+    /// When the server was last heard, which the lifecycle reads.
+    contact: Contact,
+    /// The silence bound and the stop grace, when the lifecycle stops jobs for silence.
+    silence: Option<(Duration, Duration)>,
 }
 
 impl Worker {
@@ -523,6 +536,8 @@ impl Worker {
         let hook = plan.readiness.take();
         let (own, step_every, thread_clock) = (shared.clone(), plan.step_every, clock.clone());
         let stop_grace = plan.config.stop_grace;
+        let contact = Contact::default();
+        let (bound, thread_contact) = (plan.silence_stop, contact.clone());
         let rescue = Rescue::new(
             plan.machine.clone(),
             plan.backend.clone(),
@@ -543,7 +558,10 @@ impl Worker {
                 Err(why) => {
                     let _ = ready.send(Err(why));
                 }
-                Ok((life, usage, lines)) => {
+                Ok((mut life, usage, lines)) => {
+                    if let Some(bound) = bound {
+                        life.stop_on_silence(bound, thread_contact);
+                    }
                     own.publish(Snapshot::of(&life), &LeaseAnswers::default(), lines);
                     let _ = ready.send(Ok(()));
                     let seams = (step_every, stop_grace);
@@ -559,6 +577,8 @@ impl Worker {
             handle: Handle { orders, shared },
             clock,
             rescue,
+            contact,
+            silence: bound.map(|bound| (bound, stop_grace)),
         })
     }
 
@@ -600,6 +620,8 @@ impl Worker {
             },
             clock,
             rescue,
+            contact: Contact::default(),
+            silence: None,
         }
     }
 
@@ -616,6 +638,27 @@ impl Worker {
             Err(TrySendError::Full(_)) => Delivery::Full,
             Err(TrySendError::Disconnected(_)) => Delivery::Gone,
         }
+    }
+
+    /// Says that the server was heard now, on the lifecycle's clock: a welcome, or a
+    /// heartbeat reply the session accepted, whether or not [`Worker::try_deliver`] found
+    /// room for it. The silence after which the lifecycle stops every job counts from the
+    /// last of these. It never waits.
+    pub fn heard(&self) {
+        self.contact.heard(self.clock.now_ms());
+    }
+
+    /// Whether the silence bound outlasts the grace a welcome names (`grace_ms`) plus the
+    /// stop grace; always for a worker that stops no job for silence.
+    ///
+    /// # Errors
+    ///
+    /// The text names `--silence-stop` and the numbers: a bound the server's own grace
+    /// could trip.
+    pub fn check_grace(&self, grace_ms: u64) -> Result<(), String> {
+        self.silence.map_or(Ok(()), |(bound, stop_grace)| {
+            fits_grace(bound, grace_ms, stop_grace)
+        })
     }
 
     /// From now on a `Start` or `JobStart` is not acted on. Stops, cancels, job stops and

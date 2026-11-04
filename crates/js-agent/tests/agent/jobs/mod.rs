@@ -23,6 +23,7 @@ mod per_job;
 mod quiesce;
 mod quota_start;
 mod session;
+mod silence;
 mod system;
 mod usage;
 mod worker;
@@ -112,6 +113,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         usage: None,
         rescue_bound: Some(crate::support::RESCUE_TEST_BOUND),
         readiness: None,
+        silence_stop: None,
     }
 }
 

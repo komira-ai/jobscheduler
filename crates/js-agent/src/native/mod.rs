@@ -73,11 +73,23 @@
 //! the native body. A start named by its image without a `run`, or on a runtime with no
 //! store, is refused `image-unsupported-here`.
 //!
+//! # While no agent runs
+//!
+//! The wall limit of a native run and the silence bound (`--silence-stop`) are counted by
+//! the agent's lifecycle and enforced through [`Runtime::stop`], which is `kill-uid` here: a
+//! silence stops every native run the agent holds as a server's stop does, at once, with
+//! no grace. The helper holds no deadline of a run's own (its `run` verb takes the program,
+//! its environment and the file-size and process limits, and nothing ends the process but
+//! `kill-uid`), so while the agent is down, has stopped or is restarting, a native run
+//! goes on with no bound until an agent starts again: the journal then ends it (see
+//! above). A deadline the helper enforces by itself is a change to the helper, not made
+//! here.
+//!
 //! What this runtime does not do yet: stage inputs or collect outputs (a start that names
 //! either is refused `native-unsupported`), adopt a run after the agent restarts (the
-//! journal ends it), stop a run softly (the helper only kills), or grant the user's
-//! `/var/folders` entry (toolchains that need it get their temporary files from `TMPDIR`,
-//! which is inside the home).
+//! journal ends it), stop a run softly (the helper only kills), bound a run while no agent
+//! runs (above), or grant the user's `/var/folders` entry (toolchains that need it get
+//! their temporary files from `TMPDIR`, which is inside the home).
 //!
 //! The runtime builds on every platform so that its rules are tested on Linux; only a
 //! macOS agent makes one.

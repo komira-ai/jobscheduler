@@ -2,7 +2,7 @@
 //! cleanup in order.
 
 use super::Lifecycle;
-use super::job::{Cause, Stage, blind_taint, check_taint, cleanup_taint, outcome};
+use super::job::{Cause, Stage, blind_taint, cause_detail, check_taint, cleanup_taint, outcome};
 use crate::lifecycle::runtime::{RunHandle, Status};
 use crate::lifecycle::{CheckFinding, Config, Event, Finding, Finished, code};
 
@@ -76,7 +76,7 @@ impl Lifecycle {
                 // A result read back from the state root is the one to send: the exit of a
                 // container taken over after the agent had reported it makes no second.
                 if !job.silent && job.result.is_none() {
-                    let mut result = job.report(how, status, None);
+                    let mut result = job.report(how, status, cause_detail(cause));
                     // The container is still there: it is removed in the next stage. A log
                     // that cannot be read costs the result its tail and nothing else.
                     if exit.is_some() {
