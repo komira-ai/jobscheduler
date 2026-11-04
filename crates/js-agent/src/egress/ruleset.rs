@@ -12,12 +12,21 @@
 //!   `169.254.0.0/16`, one acceptance per resolver (UDP and TCP, port 53) and per
 //!   endpoint (a new TCP connection) for an interface in the set `jobifs`, under the ceiling
 //!   `open` one acceptance of IPv4 to any address for an interface in the set `openifs`, and
-//!   the refusal of everything else from an interface named `jsv*`. The `input` chain refuses
-//!   every packet a job sends to the host itself. Every rule counts and carries a comment, so
-//!   a refusal can be told to be the rule's doing.
-//! - `ip js_crun_egress_nat`: the masquerade of the pool's addresses toward anything outside
-//!   the pool, so that an endpoint on another host answers to the host and not to an
-//!   address only the host knows.
+//!   the refusal of everything else from an interface named `jsv*`. After the metadata refusal
+//!   it accepts the replies a job sends on a connection that reached it through a declared
+//!   port's forward (`forward-reply`: `ct direction reply ct status dnat`; no connection a job
+//!   opens is DNATed, so this accepts nothing a job starts). The `input` chain refuses every
+//!   packet a job sends to the host itself. Every rule counts and carries a comment, so a
+//!   refusal can be told to be the rule's doing.
+//! - `ip js_crun_egress_nat`: the chain `prerouting` (a NAT hook at priority `dstnat`), empty
+//!   here, which holds the DNAT rules of the declared ports while their jobs run, and the
+//!   masquerade of the pool's addresses toward anything outside the pool, so that an endpoint
+//!   on another host answers to the host and not to an address only the host knows.
+//!
+//! The forwards of the declared ports ([`super::forward`]) are two rules each, one in
+//! `prerouting` and one at the head of `forward` (before the `inbound` refusal), both
+//! commented `fwd-<host port>`; the prefix `fwd-` is theirs alone, and no rule here carries
+//! it. They are added and removed with their jobs, so they are not in the text below.
 //!
 //! The set `jobifs` holds the names of the interfaces of the `allow-list` runs that are wired
 //! now, and `openifs` (rendered under the ceiling `open` only) those of the `open` runs; the
@@ -81,7 +90,8 @@ pub fn render(config: &Config) -> String {
          \t\toifname \"{IF_PREFIX}*\" counter drop comment \"inbound\"\n\
          \t\tiifname \"{IF_PREFIX}*\" meta nfproto ipv6 counter drop comment \"ipv6\"\n\
          \t\tiifname \"{IF_PREFIX}*\" meta nfproto ipv4 fib saddr . iif oif missing counter drop comment \"spoof\"\n\
-         \t\tiifname \"{IF_PREFIX}*\" ip daddr 169.254.0.0/16 counter reject with icmp type admin-prohibited comment \"metadata\"\n"
+         \t\tiifname \"{IF_PREFIX}*\" ip daddr 169.254.0.0/16 counter reject with icmp type admin-prohibited comment \"metadata\"\n\
+         \t\tiifname \"{IF_PREFIX}*\" ct direction reply ct status dnat counter accept comment \"forward-reply\"\n"
     );
     for (n, server) in config.dns().iter().enumerate() {
         for proto in ["udp", "tcp"] {
@@ -119,6 +129,9 @@ pub fn render(config: &Config) -> String {
          \t\tiifname \"{IF_PREFIX}*\" counter drop comment \"input-other\"\n\
          \t}}\n}}\n\
          table ip {NAT_TABLE} {{\n\
+         \tchain prerouting {{\n\
+         \t\ttype nat hook prerouting priority dstnat; policy accept;\n\
+         \t}}\n\
          \tchain postrouting {{\n\
          \t\ttype nat hook postrouting priority srcnat; policy accept;\n\
          \t\tip saddr {pool} ip daddr != {pool} counter masquerade comment \"masquerade\"\n\
@@ -213,6 +226,7 @@ mod tests {
             "comment \"ipv6\"",
             "comment \"spoof\"",
             "comment \"metadata\"",
+            "comment \"forward-reply\"",
             "comment \"dns-udp-0\"",
             "comment \"dns-tcp-0\"",
             "comment \"allow-0\"",
@@ -230,7 +244,7 @@ mod tests {
         assert!(
             text.contains("ip saddr 198.18.0.0/16 ip daddr != 198.18.0.0/16 counter masquerade")
         );
-        assert_eq!(text.matches("counter accept").count(), 5, "{text}");
+        assert_eq!(text.matches("counter accept").count(), 6, "{text}");
         // Every accepting rule of a new connection is for a registered interface.
         for line in text
             .lines()
@@ -240,7 +254,7 @@ mod tests {
         }
     }
 
-    /// The allow-list of [`config`] as the agent loaded it before the ceiling `open` existed.
+    /// The allow-list of [`config`]: the text the ceiling `open` does not change.
     #[cfg(target_os = "linux")]
     const ALLOW_LIST_TEXT: &str = "add table inet js_crun_egress\n\
         delete table inet js_crun_egress\n\
@@ -257,6 +271,7 @@ mod tests {
         \t\tiifname \"jsv*\" meta nfproto ipv6 counter drop comment \"ipv6\"\n\
         \t\tiifname \"jsv*\" meta nfproto ipv4 fib saddr . iif oif missing counter drop comment \"spoof\"\n\
         \t\tiifname \"jsv*\" ip daddr 169.254.0.0/16 counter reject with icmp type admin-prohibited comment \"metadata\"\n\
+        \t\tiifname \"jsv*\" ct direction reply ct status dnat counter accept comment \"forward-reply\"\n\
         \t\tiifname @jobifs ip daddr 192.0.2.53 udp dport 53 counter accept comment \"dns-udp-0\"\n\
         \t\tiifname @jobifs ip daddr 192.0.2.53 tcp dport 53 counter accept comment \"dns-tcp-0\"\n\
         \t\tiifname @jobifs ip daddr 192.0.2.10 tcp dport 9300 counter accept comment \"allow-0\"\n\
@@ -271,20 +286,58 @@ mod tests {
         \t}\n\
         }\n\
         table ip js_crun_egress_nat {\n\
+        \tchain prerouting {\n\
+        \t\ttype nat hook prerouting priority dstnat; policy accept;\n\
+        \t}\n\
         \tchain postrouting {\n\
         \t\ttype nat hook postrouting priority srcnat; policy accept;\n\
         \t\tip saddr 198.18.0.0/16 ip daddr != 198.18.0.0/16 counter masquerade comment \"masquerade\"\n\
         \t}\n\
         }\n";
 
-    /// Catches a ceiling `allow-list` whose firewall changed when `open` was added: the text
-    /// is byte for byte what it was, with no `openifs` set and no `open` rule.
+    /// Catches a ceiling `allow-list` whose firewall a change for another ceiling or for the
+    /// forwards reaches: the text is byte for byte the allow-list's, with no `openifs` set,
+    /// no `open` rule, an empty `prerouting` chain and no rule of a forward (`fwd-`).
     #[cfg(target_os = "linux")]
     #[test]
     fn an_allow_list_ruleset_is_the_text_it_was() {
         let text = render(&config());
         assert_eq!(text, ALLOW_LIST_TEXT);
         assert!(!text.contains(OPEN_SET));
+        assert!(!text.contains(crate::egress::forward::PREFIX));
+    }
+
+    /// Catches a forward that would have no chain to go in, or a reply of a forwarded
+    /// connection refused on its way out: the NAT table holds the chain `prerouting`, hooked
+    /// at `dstnat` and empty, ahead of the masquerade; and the replies of DNATed connections
+    /// (and nothing else) are accepted from a job's interface after every refusal of what a
+    /// job sends (IPv6, a spoofed source, the metadata range) and before the default refusal.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_nat_table_holds_an_empty_prerouting_chain_and_replies_leave() {
+        let text = render(&config());
+        let nat = text
+            .split("table ip js_crun_egress_nat {")
+            .nth(1)
+            .expect("the NAT table");
+        assert!(
+            nat.starts_with(
+                "\n\tchain prerouting {\n\t\ttype nat hook prerouting priority dstnat; policy accept;\n\t}\n\tchain postrouting {"
+            ),
+            "{nat}"
+        );
+        let reply = text
+            .lines()
+            .find(|line| line.contains("comment \"forward-reply\""))
+            .expect("the reply rule");
+        assert_eq!(
+            reply.trim(),
+            "iifname \"jsv*\" ct direction reply ct status dnat counter accept comment \"forward-reply\""
+        );
+        let at = |needle: &str| text.find(needle).expect(needle);
+        assert!(at("comment \"spoof\"") < at("comment \"forward-reply\""));
+        assert!(at("comment \"metadata\"") < at("comment \"forward-reply\""));
+        assert!(at("comment \"forward-reply\"") < at("comment \"default-reject\""));
     }
 
     /// Catches an `open` ceiling whose acceptance comes before a refusal, one that lets IPv6
@@ -321,6 +374,7 @@ mod tests {
             "comment \"ipv6\"",
             "comment \"spoof\"",
             "comment \"metadata\"",
+            "comment \"forward-reply\"",
             "comment \"dns-udp-0\"",
             "comment \"allow-0\"",
             "comment \"open\"",

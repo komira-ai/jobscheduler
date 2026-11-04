@@ -112,6 +112,6 @@ fn the_system_opens_a_runtime_by_its_version_text() {
 fn settings_with(dir: &Scratch, script: &str) -> js_agent::cli_runtime::Settings {
     let exec = dir.write("engine", script, 0o755);
     let (user, uid, gid) = super::user();
-    let settings = js_agent::cli_runtime::Settings::new(&exec, None, Some(&user)).unwrap();
+    let settings = js_agent::cli_runtime::Settings::new(&exec, Some(&user)).unwrap();
     settings.with_agent(uid, gid).unwrap()
 }

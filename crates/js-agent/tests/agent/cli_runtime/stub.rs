@@ -81,7 +81,7 @@ fn cli_runtime_argv_snapshot() {
     let bin = dir.write("docker", STUB, 0o755);
     settle(&bin);
     fs::remove_file(format!("{}.log", bin.display())).unwrap();
-    let settings = Settings::new(&bin, Some("jobs"), Some("1000:1000")).unwrap();
+    let settings = Settings::new(&bin, Some("1000:1000")).unwrap();
     let runner = Box::new(system_runner(Duration::from_secs(10)));
     let mut rt = CliRuntime::open(settings, HOST, &platform("linux"), made_at, runner)
         .ok()
@@ -146,7 +146,7 @@ fn cli_runtime_argv_snapshot() {
             "--security-opt",
             &profile_option(),
             "--network",
-            "jobs",
+            "none",
             "--read-only",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,nodev,size=64m",
@@ -156,8 +156,6 @@ fn cli_runtime_argv_snapshot() {
             "private",
             "--cgroupns",
             "private",
-            "--sysctl",
-            "net.ipv6.conf.all.disable_ipv6=1",
             "--log-driver",
             "json-file",
             "--log-opt",
@@ -242,7 +240,7 @@ fn cli_runtime_argv_snapshot() {
 fn missing_binary_and_nonzero_status_are_typed_errors() {
     let dir = Scratch::new("cli-stub-errors");
     let bin = dir.write("docker", STUB, 0o755);
-    let settings = Settings::new(&bin, None, None).unwrap();
+    let settings = Settings::new(&bin, None).unwrap();
     fs::remove_file(&bin).unwrap();
     let runner = Box::new(system_runner(Duration::ZERO));
     let opened = CliRuntime::open(settings, HOST, &platform("linux"), made_at, runner);
@@ -253,7 +251,7 @@ fn missing_binary_and_nonzero_status_are_typed_errors() {
     assert!(why.starts_with(bin.to_str().unwrap()), "{why}");
     assert!(why.contains("No such file or directory"), "{why}");
 
-    let falsy = Settings::new(Path::new("/usr/bin/false"), None, None).unwrap();
+    let falsy = Settings::new(Path::new("/usr/bin/false"), None).unwrap();
     let runner = Box::new(system_runner(Duration::ZERO));
     let opened = CliRuntime::open(falsy, HOST, &platform("linux"), made_at, runner);
     let Some(CliError::Call { call, why }) = opened.err() else {
@@ -272,7 +270,7 @@ fn a_runtime_error_carries_the_call_and_the_status_only() {
     let dir = Scratch::new("cli-stub-text");
     let bin = dir.write("docker", "#!/bin/sh\necho secret-output\nexit 3\n", 0o755);
     settle(&bin);
-    let settings = Settings::new(&bin, None, None).unwrap();
+    let settings = Settings::new(&bin, None).unwrap();
     let runner = Box::new(system_runner(Duration::from_secs(10)));
     let opened = CliRuntime::open(settings, HOST, &platform("linux"), made_at, runner);
     let Some(CliError::Call { why, .. }) = opened.err() else {

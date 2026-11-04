@@ -239,6 +239,7 @@ pub fn spec_of(s: &mut dyn Subject, run_id: &str, program: Program) -> RunSpec {
             run_id.to_owned(),
         )]),
         network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

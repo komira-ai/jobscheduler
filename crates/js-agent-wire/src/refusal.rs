@@ -179,8 +179,10 @@ pub const NETWORK_ABOVE_CEILING: &str = "network-above-ceiling";
 /// the ports the agent lists. The host's ceiling is at fault, not the run.
 pub const PORT_ABOVE_CEILING: &str = "port-above-ceiling";
 /// As the detail of a `failed_to_start` result: a start within the agent's ceiling that
-/// declares ports, on an agent that does not forward declared ports yet. Nothing was
-/// created. It is checked after [`NETWORK_ABOVE_CEILING`] and [`PORT_ABOVE_CEILING`].
+/// declares ports, on an agent that forwards none (its hello reports no `egress-ports`), or
+/// for a job whose network is `none` (a forward needs a job with an address). Nothing was
+/// created. It is checked after [`NETWORK_ABOVE_CEILING`]; on an agent that forwards some
+/// ports, after [`PORT_ABOVE_CEILING`].
 pub const PORTS_NOT_SUPPORTED: &str = "ports-not-supported";
 
 /// A capabilities frame whose digests, root or Xcode builds are malformed.
