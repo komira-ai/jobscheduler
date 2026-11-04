@@ -31,7 +31,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="400" y="60" class="b" text-anchor="start">js-mac-session helper (root)</text>
 <text x="790" y="60" class="b" text-anchor="start">kernel / launchd</text>
 <rect x="40" y="90" width="300" height="56" rx="5" class="box-b"/>
-<text x="190.0" y="113.5" class="b" text-anchor="middle">1  write lease journal entry</text>
+<text x="190.0" y="113.5" class="b" text-anchor="middle">1  write booking journal entry</text>
 <text x="190.0" y="130.5" class="t-m" text-anchor="middle">synced</text>
 <rect x="400" y="172" width="300" height="70" rx="5" class="box-o"/>
 <text x="550.0" y="194.0" class="b" text-anchor="middle">2  user-create</text>
@@ -96,7 +96,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="755" y="837.0" class="t-m lbl" text-anchor="middle">delete record</text>
 <rect x="40" y="712" width="300" height="166" rx="5" class="box-r"/>
 <text x="190.0" y="782.0" class="t-r" text-anchor="middle">fails: uid stays quarantined in ledger,</text>
-<text x="190.0" y="799.0" class="t-r" text-anchor="middle">lease stays in journal,</text>
+<text x="190.0" y="799.0" class="t-r" text-anchor="middle">booking stays in journal,</text>
 <text x="190.0" y="816.0" class="t-r" text-anchor="middle">reclaim at next start</text>
 <path d="M400,747.0 L340,747.0" class="ln-r" marker-end="url(#mac-execution-ar)"/>
 <text x="370" y="741.0" class="t-r lbl" text-anchor="middle">fails</text>

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 880" width="1060" height="880" role="img" aria-label="Sequence of an accelerator request for four or more nvidia-gb300: the client asks; the engine checks admission and finds no free host; the EC2 provider's cached catalog returns offers in our vocabulary; the engine filters and orders them and acquires one; the cloud launches an arm64 VM that boots js-agent; the agent's hello carries its detected capabilities; the engine verifies them against the offer; the lease binds. A capacity refusal fails over to the next zone, offer and provider; a mismatch releases the machine and marks the offer bad for a cool-down.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 880" width="1060" height="880" role="img" aria-label="Sequence of an accelerator request for four or more nvidia-gb300: the client asks; the engine checks admission and finds no free host; the EC2 provider's cached catalog returns offers in our vocabulary; the engine filters and orders them and acquires one; the cloud launches an arm64 VM that boots js-agent; the agent's hello carries its detected capabilities; the engine verifies them against the offer; the job is placed. A capacity refusal fails over to the next zone, offer and provider; a mismatch releases the machine and marks the offer bad for a cool-down.">
 <title>Accelerator request, end to end</title>
 <defs><marker id="accelerator-request-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="accelerator-request-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="accelerator-request-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
 <style>
@@ -38,7 +38,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <path d="M960,76 L960,700" class="ln-d"/>
 <rect x="895" y="44" width="130" height="32" rx="5" class="box-b"/><text x="960" y="64" class="b" text-anchor="middle">New VM: js-agent</text>
 <path d="M90,122 L280,122" class="ln" marker-end="url(#accelerator-request-ak)"/>
-<text x="185.0" y="114" class="t-m lbl" text-anchor="middle">1  acquire: accelerator nvidia-gb300, count &gt;= 4</text>
+<text x="185.0" y="114" class="t-m lbl" text-anchor="middle">1  submit job: accelerator nvidia-gb300, count &gt;= 4</text>
 <rect x="290" y="144" width="470" height="38" rx="5" class="box-o"/>
 <text x="300" y="161" class="t-m" text-anchor="start">2  admission: could any host, catalog or platform ever offer it?</text>
 <text x="300" y="177" class="t-m" text-anchor="start">If not, refuse now with no-capable-host. Unreadable catalog: may offer.</text>
@@ -54,7 +54,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="390.0" y="348" class="t-m lbl" text-anchor="middle">6  offers in our vocabulary</text>
 <text x="390.0" y="371" class="t-m lbl" text-anchor="middle">model, arm64, zone, price, spot</text>
 <rect x="290" y="382" width="470" height="38" rx="5" class="box-o"/>
-<text x="300" y="399" class="t-m" text-anchor="start">7  filter by the request and the pool limits (allowed types, max price);</text>
+<text x="300" y="399" class="t-m" text-anchor="start">7  filter by the job and the pool limits (allowed types, max price);</text>
 <text x="300" y="415" class="t-m" text-anchor="start">order: provider, price, fewest accelerators, spare resources, offer id.</text>
 <path d="M280,452 L500,452" class="ln-o" marker-end="url(#accelerator-request-ao)"/>
 <text x="390.0" y="444" class="t-m lbl" text-anchor="middle">8  acquire(offer)</text>
@@ -71,10 +71,10 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="300" y="647" class="t-m" text-anchor="start">12  verify: model equal, count &gt;= offer, arch equal, sizes within tolerance.</text>
 <text x="300" y="663" class="t-m" text-anchor="start">Mismatch: release, offer bad for a cool-down, counts toward the brake.</text>
 <path d="M280,690 L90,690" class="ln-o" marker-end="url(#accelerator-request-ao)"/>
-<text x="185.0" y="682" class="t-m lbl" text-anchor="middle">13  lease bound to the new host</text>
+<text x="185.0" y="682" class="t-m lbl" text-anchor="middle">13  job placed on the new host</text>
 <rect x="40" y="716" width="980" height="142" rx="5" class="box-r"/>
 <text x="60" y="738" class="t-r" text-anchor="start">Failover: a capacity refusal at step 9 tries the next zone, then the next offer, then the next machine provider in order.</text>
-<text x="60" y="758" class="t-r" text-anchor="start">A quota refusal passes that instance type over for a while. If every offer is refused, pass 2 retries; the request ends as no-capacity after the pool wait.</text>
+<text x="60" y="758" class="t-r" text-anchor="start">A quota refusal passes that instance type over for a while. If every offer is refused, pass 2 retries; the job ends as failed to start, code no-capacity, after the pool wait.</text>
 <text x="60" y="778" class="t-r" text-anchor="start">Catalogs are cached per provider with a refresh interval and dropped on a capacity or quota refusal. Admission reads the same cache, so it is cheap.</text>
 <text x="60" y="798" class="t-r" text-anchor="start">Built: Offer::fit, the capacity refusal code, the agent's own GPU detection. Planned: steps 7, 9, 19, 25 and 26 of section 12.1.</text>
 <text x="60" y="818" class="t-r" text-anchor="start">A GPU job gets its GPU on the container-engine fallback until step 23 passes GPUs into crun jobs.</text>

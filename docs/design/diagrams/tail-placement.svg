@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 610" width="1160" height="610" role="img" aria-label="Timeline of four hosts: the whole-node request marks the host with the least estimated remaining time, backfill only fits inside that tail, and a bar that overshoots the tail is refused.">
-<title>Tail placement for a whole-node lease</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 610" width="1160" height="610" role="img" aria-label="Timeline of four hosts: the whole-host job marks the host with the least estimated remaining time, backfill only fits inside that tail, and a job whose bar overshoots the tail is refused.">
+<title>Tail placement for a whole-host job</title>
 <defs><marker id="tail-placement-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="tail-placement-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="tail-placement-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker><pattern id="tail-placement-hatch" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="#5A5A57" stroke-width="2"/></pattern></defs>
 <style>
 .box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
@@ -26,7 +26,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 .lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
 </style>
 <rect x="0" y="0" width="1160" height="610" fill="#FFFFFF"/>
-<text x="20" y="28" class="b" text-anchor="start" font-size="16">Whole-node placement: reserve the host with the least estimated remaining time</text>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">Whole-host placement: mark the host with the least estimated remaining time</text>
 <path d="M300,100 L300,520" class="ln-o"/>
 <text x="300" y="94" class="b" text-anchor="middle">now</text>
 <text x="20" y="140" class="b" text-anchor="start">H1</text>
@@ -44,14 +44,14 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="560" y="184" class="b lbl" text-anchor="middle">T</text>
 <text x="852" y="203" class="b" text-anchor="start">least estimated remaining time</text>
 <rect x="300" y="225" width="260" height="76" rx="5" class="box-o"/>
-<text x="310" y="241" class="t-m" text-anchor="start">reservation (from now to T)</text>
+<text x="310" y="241" class="t-m" text-anchor="start">mark (from now to T)</text>
 <rect x="315" y="250" width="90" height="22" rx="3" class="box-n"/>
 <text x="360" y="265" class="t-m" text-anchor="middle">backfill</text>
 <rect x="420" y="250" width="110" height="22" rx="3" class="box-n"/>
 <text x="475" y="265" class="t-m" text-anchor="middle">backfill</text>
 <text x="307" y="290" class="t-m" text-anchor="start">backfill: now + P90 + 60 s margin &lt;= T</text>
 <rect x="560" y="225" width="260" height="76" rx="5" class="box-a"/>
-<text x="690" y="267" class="t-w" text-anchor="middle">whole-node lease</text>
+<text x="690" y="267" class="t-w" text-anchor="middle">whole-host job</text>
 <rect x="430" y="312" width="260" height="20" rx="3" class="box-rd"/>
 <path d="M430,312 L690,332" class="ln-r"/>
 <path d="M430,332 L690,312" class="ln-r"/>
@@ -59,8 +59,8 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <path d="M300,342 L300,350 L560,350 L560,342" class="ln"/>
 <text x="430" y="366" class="t-m" text-anchor="middle">tail</text>
 <rect x="20" y="260" width="150" height="44" rx="5" class="box"/>
-<text x="95.0" y="277.5" text-anchor="middle">whole-node request</text>
-<text x="95.0" y="294.5" text-anchor="middle">waiting</text>
+<text x="95.0" y="277.5" text-anchor="middle">whole-host job</text>
+<text x="95.0" y="294.5" text-anchor="middle">queued</text>
 <path d="M170,282 L300,282" class="ln-o" marker-end="url(#tail-placement-ao)"/>
 <text x="235" y="262" class="t-m lbl" text-anchor="middle">mark H2</text>
 <text x="235" y="276" class="t-m lbl" text-anchor="middle">(drain_cost)</text>
@@ -72,11 +72,11 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <path d="M300,540 L1100,540" class="ln" marker-end="url(#tail-placement-ak)"/>
 <text x="1112" y="544" class="t-m" text-anchor="start">time</text>
 <rect x="20" y="574" width="24" height="14" rx="3" class="box-g"/>
-<text x="52" y="586" class="t-m" text-anchor="start">lease</text>
+<text x="52" y="586" class="t-m" text-anchor="start">job</text>
 <rect x="112.3076923076923" y="574" width="24" height="14" rx="3" fill="url(#tail-placement-hatch)" stroke="#5A5A57" stroke-width="1"/>
 <text x="144.30769230769232" y="586" class="t-m" text-anchor="start">gap to max-wall bound</text>
 <rect x="308.0" y="574" width="24" height="14" rx="3" class="box-o"/>
-<text x="340.0" y="586" class="t-m" text-anchor="start">reservation</text>
+<text x="340.0" y="586" class="t-m" text-anchor="start">mark</text>
 <rect x="439.0769230769231" y="574" width="24" height="14" rx="3" class="box-n"/>
 <text x="471.0769230769231" y="586" class="t-m" text-anchor="start">backfill</text>
 <rect x="550.7692307692308" y="574" width="24" height="14" rx="3" class="box-rd"/>

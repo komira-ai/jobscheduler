@@ -87,7 +87,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="540" y="302" class="b" text-anchor="start">host updater</text>
 <rect x="540" y="320" width="240" height="50" rx="5" class="box"/>
 <text x="660.0" y="340.5" class="b" text-anchor="middle">prepare</text>
-<text x="660.0" y="357.5" class="t-m" text-anchor="middle">cordon, wait for no runs</text>
+<text x="660.0" y="357.5" class="t-m" text-anchor="middle">cordon, wait for no jobs</text>
 <rect x="540" y="390" width="240" height="50" rx="5" class="box"/>
 <text x="660.0" y="410.5" class="b" text-anchor="middle">cutover</text>
 <text x="660.0" y="427.5" class="t-m" text-anchor="middle">swap link, restart unit</text>
@@ -104,8 +104,8 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <path d="M780,485 L820,485" class="ln-r" marker-end="url(#release-update-ar)"/>
 <text x="800" y="477" class="t-r lbl" text-anchor="middle">fails</text>
 <rect x="980" y="280" width="290" height="60" rx="5" class="box-gd"/>
-<text x="1125.0" y="305.5" class="t-m" text-anchor="middle">lease server: no update hook;</text>
-<text x="1125.0" y="322.5" class="t-m" text-anchor="middle">update drops all runs</text>
+<text x="1125.0" y="305.5" class="t-m" text-anchor="middle">service: no update hook yet;</text>
+<text x="1125.0" y="322.5" class="t-m" text-anchor="middle">jobs survive in Postgres</text>
 <path d="M30,670 L80,670" class="ln-r" marker-end="url(#release-update-ar)"/>
 <text x="90" y="674" class="t-m" text-anchor="start">failure path</text>
 <rect x="220" y="659" width="36" height="22" rx="5" class="box-gd"/>

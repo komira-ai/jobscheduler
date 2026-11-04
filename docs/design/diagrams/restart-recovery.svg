@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 800" width="1100" height="800" role="img" aria-label="Nine ordered steps by which the lease server recovers after a restart with the lease-file store, with what survives on disk and what is lost.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 600" width="1100" height="600" role="img" aria-label="Seven ordered steps by which the service recovers after a restart with the Postgres store: take the advisory lock, read jobs and allocations, restore the reservation ledger with grace, seat hosts as awaiting, agents say hello and list their jobs, reconcile, and resume; with what survives in the store and what is rebuilt.">
 <title>Restart recovery</title>
 <defs><marker id="restart-recovery-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="restart-recovery-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="restart-recovery-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
 <style>
@@ -12,6 +12,9 @@
 .box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
 .box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
 .box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-bd{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4;stroke-dasharray:6 4}
+.box-od{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4;stroke-dasharray:6 4}
+.box-bld{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4;stroke-dasharray:6 4}
 .box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
 .ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
 .ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
@@ -25,59 +28,48 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 .t-w{fill:#FFFFFF;font-weight:600}
 .lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
 </style>
-<rect x="0" y="0" width="1100" height="800" fill="#FFFFFF"/>
-<text x="20" y="28" class="b" text-anchor="start" font-size="16">Lease server restart: nine steps in order (lease-file store; Postgres changes steps 1 to 4, wait-list bodies return)</text>
+<rect x="0" y="0" width="1100" height="600" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">Service restart: seven steps in order (Postgres store)</text>
 <rect x="30" y="50" width="520" height="58" rx="5" class="box-o"/>
-<text x="290" y="84" class="b" text-anchor="middle">1  take the exclusive flock on the lease file lock</text>
+<text x="290" y="74" class="b" text-anchor="middle">1  take the advisory lock</text>
+<text x="290" y="92" class="t-m" text-anchor="middle">a second process refuses to start or waits</text>
 <path d="M290,108 L290,122" class="ln" marker-end="url(#restart-recovery-ak)"/>
 <rect x="30" y="122" width="520" height="58" rx="5" class="box-o"/>
-<text x="290" y="142" class="b" text-anchor="middle">2  read the lease file</text>
-<text x="290" y="159" class="t-m" text-anchor="middle">refuse a bad row, a count mismatch or a duplicate id</text>
+<text x="290" y="146" class="b" text-anchor="middle">2  read the store</text>
+<text x="290" y="164" class="t-m" text-anchor="middle">jobs (queued whole-host jobs included), allocations, hosts, marks</text>
 <path d="M290,180 L290,194" class="ln" marker-end="url(#restart-recovery-ak)"/>
 <rect x="30" y="194" width="520" height="58" rx="5" class="box-o"/>
-<text x="290" y="228" class="b" text-anchor="middle">3  term + 1; sequence continues</text>
+<text x="290" y="218" class="b" text-anchor="middle">3  restore the mark ledger</text>
+<text x="290" y="236" class="t-m" text-anchor="middle">deadlines >= boot + 120 s, claim_by = boot + path_grace</text>
 <path d="M290,252 L290,266" class="ln" marker-end="url(#restart-recovery-ak)"/>
 <rect x="30" y="266" width="520" height="58" rx="5" class="box-o"/>
-<text x="290" y="286" class="b" text-anchor="middle">4  restore ledger</text>
-<text x="290" y="303" class="t-m" text-anchor="middle">deadlines &gt;= boot + 120 s, claim_by = boot + regain_grace,</text>
-<text x="290" y="318" class="t-m" text-anchor="middle">wait-list entries without bodies</text>
+<text x="290" y="290" class="b" text-anchor="middle">4  seat hosts that hold allocations as awaiting</text>
+<text x="290" y="308" class="t-m" text-anchor="middle">unobservable, unbookable, until the agent says hello</text>
 <path d="M290,324 L290,338" class="ln" marker-end="url(#restart-recovery-ak)"/>
 <rect x="30" y="338" width="520" height="58" rx="5" class="box-o"/>
-<text x="290" y="358" class="b" text-anchor="middle">5  observe each held lease once</text>
-<text x="290" y="375" class="t-m" text-anchor="middle">present keep, absent drop, unknown keep</text>
+<text x="290" y="362" class="b" text-anchor="middle">5  agents: 409 unknown-host -> hello, list their jobs</text>
+<text x="290" y="380" class="t-m" text-anchor="middle">placed whole-host jobs prepare again; others by listing</text>
 <path d="M290,396 L290,410" class="ln" marker-end="url(#restart-recovery-ak)"/>
 <rect x="30" y="410" width="520" height="58" rx="5" class="box-o"/>
-<text x="290" y="430" class="b" text-anchor="middle">6  seat hosts as awaiting</text>
-<text x="290" y="447" class="t-m" text-anchor="middle">read .agents (bindings, taints)</text>
+<text x="290" y="434" class="b" text-anchor="middle">6  reconcile each job with its host's listing</text>
+<text x="290" y="452" class="t-m" text-anchor="middle">listed: keep; placed, unlisted: start resent; running, unlisted: lost</text>
 <path d="M290,468 L290,482" class="ln" marker-end="url(#restart-recovery-ak)"/>
 <rect x="30" y="482" width="520" height="58" rx="5" class="box-o"/>
-<text x="290" y="516" class="b" text-anchor="middle">7  agents: 409 unknown-host -&gt; hello</text>
-<path d="M290,540 L290,554" class="ln" marker-end="url(#restart-recovery-ak)"/>
-<rect x="30" y="554" width="520" height="58" rx="5" class="box-o"/>
-<text x="290" y="574" class="b" text-anchor="middle">8  expiry has no boot grace</text>
-<text x="290" y="591" class="t-m" text-anchor="middle">leases whose time passed during the outage expire</text>
-<path d="M290,612 L290,626" class="ln" marker-end="url(#restart-recovery-ak)"/>
-<rect x="30" y="626" width="520" height="58" rx="5" class="box-o"/>
-<text x="290" y="646" class="b" text-anchor="middle">9  runs are gone</text>
-<text x="290" y="663" class="t-m" text-anchor="middle">agents told Cancel; client sees 410 run-forgotten</text>
-<rect x="640" y="140" width="420" height="300" rx="5" class="box-b"/>
-<text x="660" y="162" class="b" text-anchor="start">survives restart</text>
-<text x="660" y="190" text-anchor="start">leases (lease file)</text>
-<text x="660" y="230" text-anchor="start">ledger</text>
-<text x="660" y="270" text-anchor="start">bindings, taints (.agents)</text>
-<text x="660" y="310" text-anchor="start">scaler records, usage</text>
-<path d="M550,186 L640,186" class="ln-d" marker-end="url(#restart-recovery-ak)"/>
-<text x="595" y="179" class="t-m lbl" text-anchor="middle">restores</text>
-<path d="M550,262 L640,226" class="ln-d" marker-end="url(#restart-recovery-ak)"/>
-<path d="M550,402 L640,266" class="ln-d" marker-end="url(#restart-recovery-ak)"/>
-<rect x="640" y="470" width="420" height="190" rx="5" class="box-r"/>
-<text x="660" y="492" class="b" text-anchor="start">lost</text>
-<text x="660" y="520" class="t-r" text-anchor="start">runs (agents told Cancel,</text>
-<text x="660" y="540" class="t-r" text-anchor="start">client sees 410 run-forgotten)</text>
-<text x="660" y="560" class="t-r" text-anchor="start">exclusive state</text>
-<text x="660" y="580" class="t-r" text-anchor="start">tail counters</text>
-<text x="660" y="600" class="t-r" text-anchor="start">unacked results on the agent</text>
-<text x="660" y="620" class="t-r" text-anchor="start">wait-list bodies until re-presented</text>
-<path d="M550,664 L640,560" class="ln-rd" marker-end="url(#restart-recovery-ar)"/>
-<text x="600" y="640" class="t-r lbl" text-anchor="middle">not restored</text>
+<text x="290" y="506" class="b" text-anchor="middle">7  resume the tick</text>
+<text x="290" y="524" class="t-m" text-anchor="middle">queue-wait and retention deadlines raised to boot + 120 s at least</text>
+<rect x="640" y="120" width="420" height="260" rx="5" class="box-b"/>
+<text x="660" y="142" class="b" text-anchor="start">survives restart (in Postgres)</text>
+<text x="660" y="172" class="" text-anchor="start">jobs and their results</text>
+<text x="660" y="208" class="" text-anchor="start">allocations</text>
+<text x="660" y="244" class="" text-anchor="start">mark ledger (queued whole-host jobs are job rows)</text>
+<text x="660" y="280" class="" text-anchor="start">host bindings, taints, join-token digests</text>
+<text x="660" y="316" class="" text-anchor="start">acquire records, usage history</text>
+<path d="M550,79 L640,150" class="ln-d" marker-end="url(#restart-recovery-ak)"/>
+<rect x="640" y="410" width="420" height="200" rx="5" class="box-r"/>
+<text x="660" y="432" class="b" text-anchor="start">rebuilt, not stored</text>
+<text x="660" y="462" class="t-r" text-anchor="start">live sessions and heartbeat times</text>
+<text x="660" y="492" class="t-r" text-anchor="start">whole-host Committed, Ready, Restoring states</text>
+<text x="660" y="522" class="t-r" text-anchor="start">unacknowledged results on the agent (resent)</text>
+<text x="660" y="552" class="t-r" text-anchor="start">tail counters (until step 3 stores them)</text>
+<path d="M550,295 L640,470" class="ln-rd" marker-end="url(#restart-recovery-ar)"/>
 </svg>
