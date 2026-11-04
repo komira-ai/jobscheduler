@@ -328,7 +328,11 @@ async fn serve_jobs(
     let listed = heartbeat.jobs.clone();
     let retired = heartbeat.retired_jobs.clone();
     let served = blocking(move || {
-        let served = per_job::serve(&jobs, &host, &ceiling, &listed, &retired, room);
+        let context = per_job::BeatContext {
+            host: &host,
+            ceiling: &ceiling,
+        };
+        let served = per_job::serve(&jobs, &context, &listed, &retired, room);
         (host, served)
     })
     .await;

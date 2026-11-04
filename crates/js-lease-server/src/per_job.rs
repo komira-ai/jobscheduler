@@ -71,8 +71,19 @@ struct Reported {
     unknown: BTreeSet<String>,
 }
 
-/// The per-job half of a heartbeat of `host`, whose agent reports `ceiling`, listing `listed`
-/// and `retired`, with room for `room` commands: the listing and the retired ids committed,
+/// What a heartbeat's per-job half knows of the host it serves. It is the one argument the
+/// start builder ([`start_of`]) and the result commit ([`commit_result`]) take beside the
+/// job, so what a later change needs of the host reaches both from here.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BeatContext<'a> {
+    /// The host whose heartbeat this is.
+    pub(crate) host: &'a HostId,
+    /// The most network the host's agent reported it gives a job.
+    pub(crate) ceiling: &'a NetworkCeiling,
+}
+
+/// The per-job half of a heartbeat of the host `context` names, listing `listed` and
+/// `retired`, with room for `room` commands: the listing and the retired ids committed,
 /// confirmed containers freed, then the stops and starts that follow from the store.
 ///
 /// # Errors
@@ -80,13 +91,13 @@ struct Reported {
 /// the agent reports again.
 pub(crate) fn serve<S: Store, I: IdSource>(
     jobs: &JobStore<S, I>,
-    host: &HostId,
-    ceiling: &NetworkCeiling,
+    context: &BeatContext<'_>,
     listed: &[HeldJob],
     retired: &[String],
     room: usize,
 ) -> Result<JobReply, JobStoreError> {
-    let reported = commit_listing(jobs, host, listed)?;
+    let host = context.host;
+    let reported = commit_listing(jobs, context, listed)?;
     for job_id in retired {
         if let Ok(id) = JobId::parse(job_id) {
             job_alloc::answer_retired(jobs, host, &id)?;
@@ -108,7 +119,7 @@ pub(crate) fn serve<S: Store, I: IdSource>(
     let stops = stops_for(&live, listed, &reported.unknown)
         .into_iter()
         .map(|job_id| Command::JobStop { job_id });
-    let starts = starts_for(&live, &held, ceiling)
+    let starts = starts_for(&live, &held, context)
         .into_iter()
         .map(|spec| Command::JobStart(Box::new(spec)));
     let mut commands: Vec<Command> = stops.chain(starts).collect();
@@ -128,13 +139,13 @@ pub(crate) fn serve<S: Store, I: IdSource>(
 /// outcome this version does not know is left unanswered and changes nothing.
 fn commit_listing<S: Store, I: IdSource>(
     jobs: &JobStore<S, I>,
-    host: &HostId,
+    context: &BeatContext<'_>,
     listed: &[HeldJob],
 ) -> Result<Reported, JobStoreError> {
     let mut reported = Reported::default();
     for held in listed {
-        let ack = match placement_of(jobs, host, held)? {
-            Some(job) => report(jobs, job, held)?,
+        let ack = match placement_of(jobs, context.host, held)? {
+            Some(job) => report(jobs, context, job, held)?,
             None => {
                 reported.unknown.insert(held.job_id.clone());
                 held.result.as_ref().map(|_| Ack::Stale)
@@ -173,9 +184,11 @@ fn placement_of<S: Store, I: IdSource>(
 }
 
 /// Commits what the host reports of `job`, which it holds: a state moves the job forward, a
-/// result ends it. Returns the verdict on the result, if one was listed and read.
+/// result ends it ([`commit_result`]). Returns the verdict on the result, if one was listed
+/// and read.
 fn report<S: Store, I: IdSource>(
     jobs: &JobStore<S, I>,
+    context: &BeatContext<'_>,
     job: JobRecord,
     held: &HeldJob,
 ) -> Result<Option<Ack>, JobStoreError> {
@@ -187,6 +200,22 @@ fn report<S: Store, I: IdSource>(
         };
         return Ok(None);
     };
+    commit_result(jobs, context, job, result)
+}
+
+/// Commits the result the host of `context` lists for `job`, which it holds, and returns the
+/// verdict on it: the one place a listed result is recorded. The job ends as [`end_of`] reads
+/// the result, in one transaction with its allocation's move to releasing, after the steps it
+/// skipped when it ran and ended between two heartbeats ([`Ack::Accepted`]); a job that has
+/// already ended is left as it is ([`Ack::Duplicate`]); an end its state cannot take is logged
+/// and changes nothing ([`Ack::Stale`]); an outcome this version does not know is left
+/// unanswered.
+fn commit_result<S: Store, I: IdSource>(
+    jobs: &JobStore<S, I>,
+    context: &BeatContext<'_>,
+    job: JobRecord,
+    result: &JobResult,
+) -> Result<Option<Ack>, JobStoreError> {
     let Some(end) = end_of(&job, result) else {
         return Ok(None);
     };
@@ -204,7 +233,10 @@ fn report<S: Store, I: IdSource>(
     };
     match jobs.end_job(&job.id, end) {
         Ok(_) => Ok(Some(Ack::Accepted)),
-        Err(JobStoreError::IllegalTransition { .. }) => Ok(Some(Ack::Stale)),
+        Err(JobStoreError::IllegalTransition { from, to, .. }) => {
+            warn!(host = %context.host, job = %job.id, ?from, ?to, "a listed end the job's state cannot take is answered stale");
+            Ok(Some(Ack::Stale))
+        }
         Err(error) => Err(error),
     }
 }
@@ -304,7 +336,7 @@ pub(crate) fn stops_for(
 fn starts_for(
     live: &[(AllocationRecord, Option<JobRecord>)],
     held: &BTreeSet<&str>,
-    ceiling: &NetworkCeiling,
+    context: &BeatContext<'_>,
 ) -> Vec<JobStartSpec> {
     let placed = live.iter().filter_map(|(allocation, job)| {
         let job = job.as_ref()?;
@@ -316,7 +348,7 @@ fn starts_for(
     });
     placed
         .filter_map(|(allocation, job)| {
-            start_of(job, allocation, ceiling)
+            start_of(job, allocation, context)
                 .inspect_err(|why| warn!(job = %job.id, %why, "a placed job's start is not sent"))
                 .ok()
         })

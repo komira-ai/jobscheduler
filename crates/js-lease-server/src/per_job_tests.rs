@@ -7,7 +7,9 @@ use js_jobs::{Booked, JobState, JobStoreError};
 use js_state::StoreError;
 use js_types::HostId;
 
-use super::{Command, serve};
+use js_state::Store;
+
+use super::{BeatContext, Command, serve};
 use crate::agent_api::job_rig::{BOOKED, placed, result, spec, starts, stops, tables};
 
 fn host() -> HostId {
@@ -30,7 +32,17 @@ fn a_retired_id_that_is_no_job_id_is_acknowledged() {
     let long = "x".repeat(70);
     let ceiling = NetworkCeiling::default();
     let before = store.commit_stats().txns;
-    let reply = serve(&jobs, &host(), &ceiling, &[], &[long.clone()], 8).unwrap();
+    let reply = serve(
+        &jobs,
+        &BeatContext {
+            host: &host(),
+            ceiling: &ceiling,
+        },
+        &[],
+        &[long.clone()],
+        8,
+    )
+    .unwrap();
     assert_eq!(reply.retired_acks, [long]);
     assert!(reply.commands.is_empty() & reply.clean);
     assert_eq!(store.commit_stats().txns, before);
@@ -49,7 +61,17 @@ fn a_listed_state_that_names_no_step_moves_nothing() {
     ];
     let before = store.commit_stats().txns;
     let ceiling = NetworkCeiling::default();
-    let reply = serve(&jobs, &host(), &ceiling, &listing, &[], 8).unwrap();
+    let reply = serve(
+        &jobs,
+        &BeatContext {
+            host: &host(),
+            ceiling: &ceiling,
+        },
+        &listing,
+        &[],
+        8,
+    )
+    .unwrap();
     assert_eq!(store.commit_stats().txns, before);
     assert!(reply.commands.is_empty() & reply.job_acks.is_empty());
     for id in [exited.id, unknown.id] {
@@ -76,7 +98,16 @@ fn a_failed_end_commit_is_an_error() {
     let listing = [listed("job-a", HeldState::ExitedUnacked, Some(ended))];
     store.fail_next();
     let ceiling = NetworkCeiling::default();
-    let answer = serve(&jobs, &host(), &ceiling, &listing, &[], 8);
+    let answer = serve(
+        &jobs,
+        &BeatContext {
+            host: &host(),
+            ceiling: &ceiling,
+        },
+        &listing,
+        &[],
+        8,
+    );
     assert_eq!(
         answer.map(drop),
         Err(JobStoreError::Store(StoreError::Failed(
@@ -105,7 +136,17 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
     placed(&jobs, "job-b", "host-a", spec(), BOOKED);
     placed(&jobs, "job-c", "host-a", spec(), BOOKED);
     let ceiling = NetworkCeiling::default();
-    let reply = serve(&jobs, &host(), &ceiling, &[], &[], 1).unwrap();
+    let reply = serve(
+        &jobs,
+        &BeatContext {
+            host: &host(),
+            ceiling: &ceiling,
+        },
+        &[],
+        &[],
+        1,
+    )
+    .unwrap();
     let ids = |commands: Vec<Command>| {
         let reply = HeartbeatReply {
             commands,
@@ -115,7 +156,17 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
         (started, stops(&reply))
     };
     assert_eq!(ids(reply.commands), (vec!["job-b".to_owned()], vec![]));
-    let reply = serve(&jobs, &host(), &ceiling, &[], &[], 8).unwrap();
+    let reply = serve(
+        &jobs,
+        &BeatContext {
+            host: &host(),
+            ceiling: &ceiling,
+        },
+        &[],
+        &[],
+        8,
+    )
+    .unwrap();
     let both = vec!["job-b".to_owned(), "job-c".to_owned()];
     assert_eq!(ids(reply.commands), (both, vec![]));
     assert_eq!(

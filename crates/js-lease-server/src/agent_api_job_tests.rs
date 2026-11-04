@@ -6,7 +6,6 @@ use js_agent_wire::{Ack, HeldState, Outcome};
 use js_jobs::{AllocationStep, EndReason, JobId, JobState, ResultReason, StartFailure};
 
 use super::job_rig::{FakeAgent, rig, starts, stops};
-use super::*;
 use crate::per_job::NO_EXIT_CODE;
 
 /// A running job with a cancel intent is told to stop in every reply while its host lists it

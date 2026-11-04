@@ -6,9 +6,11 @@
 //! device index, a network level the host's agent does not report it can give, a job id or a
 //! file the wire's grammar refuses.
 
-use js_agent_wire::{BookedResources, JobStartSpec, NetworkCeiling, RunFile};
+use js_agent_wire::{BookedResources, JobStartSpec, RunFile};
 use js_jobs::{AllocationRecord, Booked, JobRecord, NetworkPolicy};
 use js_types::{JobNetwork, PortMap};
+
+use crate::per_job::BeatContext;
 
 /// Why a placement's start cannot be sent.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -42,8 +44,9 @@ pub(crate) enum Unsendable {
     },
 }
 
-/// The start of the job `job` for its allocation `allocation`, to a host whose agent reports
-/// `ceiling`: the image, the command then its arguments, the environment, the files, what the
+/// The start of the job `job` for its allocation `allocation`, to the host of `context`
+/// (whose agent reports the ceiling `context` holds), and the one place a start is built: the
+/// image, the command then its arguments, the environment, the files, what the
 /// allocation booked, the wall limit, the network level and the declared ports, keyed by the
 /// job id and the allocation id. The start is checked as the agent checks it
 /// ([`JobStartSpec::validate`] and [`JobStartSpec::require_pinned`]) before it is returned.
@@ -53,8 +56,9 @@ pub(crate) enum Unsendable {
 pub(crate) fn start_of(
     job: &JobRecord,
     allocation: &AllocationRecord,
-    ceiling: &NetworkCeiling,
+    context: &BeatContext<'_>,
 ) -> Result<JobStartSpec, Unsendable> {
+    let ceiling = context.ceiling;
     let spec = &job.spec;
     let booked = match allocation.booked {
         Booked::WholeHost => return Err(Unsendable::WholeHost),
@@ -87,7 +91,7 @@ pub(crate) fn start_of(
             container: port.container,
         })
         .collect();
-    let covered = ceiling.allows(network) && ports.iter().all(|port| ceiling.forwards(port.host));
+    let covered = ceiling.allows(network) & ports.iter().all(|port| ceiling.forwards(port.host));
     if !covered {
         return Err(Unsendable::AboveCeiling);
     }
