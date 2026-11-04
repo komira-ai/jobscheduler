@@ -173,9 +173,15 @@ pub struct Cli {
     /// agent refuses to start when it is not. A reboot clears it, which is fine: a run does
     /// not survive a reboot. A tmpfs can be swapped to disk when the host has swap, so run hosts
     /// that handle these secrets with swap off or encrypted. It may not be, hold or lie in
-    /// the state, scratch or a mount root. Needs `--container-bin`. Without the flag `/run/js-agent/files` is used when it can be
+    /// the state, scratch or a mount root. Needs `--container-bin` or
+    /// `--native-helper-socket`. Without the flag `/run/js-agent/files` is used when it can be
     /// made; when it cannot, the agent runs without run files and does not report the
-    /// `run-files` capability.
+    /// `run-files` capability. With `--native-helper-socket` (a Mac, which has no tmpfs) the
+    /// root is used only when this flag is given and is not checked for a tmpfs: the files are
+    /// on disk unless the flag points at a RAM-backed volume. Each run's directory is given to
+    /// the run's user (`0500`, files `0400`) before its program starts and is named by
+    /// `JS_FILES_DIR`; the root may not be, hold or lie in the homes of the native users or a
+    /// path native runs may not read.
     #[arg(long, value_name = "PATH")]
     pub run_files_root: Option<PathBuf>,
     /// The directory the agent keeps its taint marker and its host credential in: it must be

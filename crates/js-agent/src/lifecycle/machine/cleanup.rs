@@ -157,6 +157,17 @@ impl Lifecycle {
                         });
                         job.stage = Stage::Scratch;
                     }
+                    // Everything of the run is gone and only the copy of an output failed (a
+                    // link where an output was declared, an output over its cap): the host
+                    // holds nothing of the job, so it is a finding and not a taint, and the
+                    // cleanup goes on.
+                    Err(why) if why.is_outputs() => {
+                        job.note(code::OUTPUTS_FAILED, why.to_string(), events);
+                        events.push(Event::ContainerRemoved {
+                            run_id: run_id.clone(),
+                        });
+                        job.stage = Stage::Scratch;
+                    }
                     Err(why) => {
                         let tainted = cleanup_taint(Some(&run_id), code::CONTAINER_REMOVE_FAILED);
                         job.taint(taint, tainted, events);
