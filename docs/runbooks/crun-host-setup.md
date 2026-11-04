@@ -1,13 +1,32 @@
 # Setting up a Linux host to run js-agent with crun (`crun_host_setup.sh`)
 
 `js-agent --runtime crun` runs jobs with `crun` as an unprivileged job user, without a container
-engine. Before it can start, the host needs a handful of pieces; the agent's own start check names
-each one that is missing and exits 2. `crun_host_setup.sh` makes the pieces, once per host.
+engine. `crun` is the default Linux runtime: an agent given no `--runtime` (and no `--native-*`
+flag) runs it too. Before it can start, the host needs a handful of pieces; the agent's own start
+check names each one that is missing and exits 2. `crun_host_setup.sh` makes the pieces, once per
+host.
 
 The script is in the repository (`packaging/js-agent/crun_host_setup.sh`) and in the js-agent deb, at
 `/usr/share/js-agent/crun_host_setup.sh` (mode 0755). The unit and tmpfiles file it installs are
 `packaging/js-agent/js-agent-crun.service` and `tmpfiles-crun.conf` of the same release: it takes
 them by path and sha256, so what lands in `/etc` is the file you checked.
+
+## A host that fails the check
+
+The agent never falls back to the container engine when the check fails: it exits 2 before it
+registers, naming every missing piece and what to do about it (the unit's journal shows the
+list: `journalctl -u js-agent-crun` for the packaged crun unit). An agent that was given no
+`--runtime` is also told that `crun` is the default and of the two ways forward:
+
+- Fix the pieces. Run `crun_host_setup.sh` (below), or fix each named piece by hand. Two pieces
+  are what a host most often lacks: the AppArmor profile for `/usr/bin/crun` where
+  `kernel.apparmor_restrict_unprivileged_userns` is 1 (`apparmor profile` in the list), and the
+  cgroup version 2 controllers `cpu`, `memory` and `pids` offered to the agent's cgroup, which a
+  unit with `Delegate=yes` gets (`cgroup v2 delegation` in the list).
+- Opt in to the engine, on a host that cannot run `crun` or that runs GPU jobs: give
+  `--runtime docker --container-bin <path> --allow-container-engine` (the packaged
+  `js-agent.service` does). Every job the engine runs gets network none, and the agent prints one
+  warning at start that says so. `--runtime docker` without `--allow-container-engine` exits 2.
 
 ## What it sets up
 

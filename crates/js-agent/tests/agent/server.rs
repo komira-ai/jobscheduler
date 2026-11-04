@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
 use crate::jobs::fake::FakeMachine;
-use crate::support::{Host, Lowest, Ran, Scratch, run_on};
+use crate::support::{Host, Lowest, Ran, Scratch, run_on, run_on_defaulted};
 
 /// The wall time the server's clock starts at.
 pub const T0: u64 = 1_000_000;
@@ -287,7 +287,7 @@ impl Agent {
         connector: impl Connector + Send + 'static,
         machine: Arc<FakeMachine>,
     ) -> Self {
-        Self::launch(url, Some(token), extra, host, connector, machine)
+        Self::launch(url, Some(token), extra, host, connector, machine, false)
     }
 
     /// [`Agent::spawn_on`] over any machine.
@@ -300,7 +300,21 @@ impl Agent {
         connector: impl Connector + Send + 'static,
         machine: Arc<dyn Machine>,
     ) -> Self {
-        Self::launch(url, Some(token), extra, host, connector, machine)
+        Self::launch(url, Some(token), extra, host, connector, machine, false)
+    }
+
+    /// [`Agent::spawn_machine`] with `extra` exactly as given: a start with no `--runtime` is
+    /// the default runtime's (`crun` on Linux), not the agent that runs no job.
+    #[cfg(target_os = "linux")]
+    pub fn spawn_machine_defaulted(
+        url: String,
+        token: PathBuf,
+        extra: &[&str],
+        host: fn() -> Host,
+        connector: impl Connector + Send + 'static,
+        machine: Arc<dyn Machine>,
+    ) -> Self {
+        Self::launch(url, Some(token), extra, host, connector, machine, true)
     }
 
     /// [`Agent::spawn`] with no `--token-file`: the agent finds its credential in the state
@@ -312,7 +326,7 @@ impl Agent {
         connector: impl Connector + Send + 'static,
     ) -> Self {
         let machine = Arc::new(FakeMachine::new());
-        Self::launch(url, None, extra, host, connector, machine)
+        Self::launch(url, None, extra, host, connector, machine, false)
     }
 
     fn launch(
@@ -322,6 +336,7 @@ impl Agent {
         host: fn() -> Host,
         connector: impl Connector + Send + 'static,
         machine: Arc<dyn Machine>,
+        defaulted: bool,
     ) -> Self {
         let (tell, worker) = channel();
         let (slept, waits) = channel();
@@ -346,7 +361,8 @@ impl Agent {
                 let _ = tell.send(worker);
             };
             let jobs = (machine, Some(&hook as &dyn Fn(Handle)));
-            run_on(&args, &host(), &connector, &mut sleeper, &mut Lowest, jobs)
+            let run = if defaulted { run_on_defaulted } else { run_on };
+            run(&args, &host(), &connector, &mut sleeper, &mut Lowest, jobs)
         });
         Self {
             slept: waits,
