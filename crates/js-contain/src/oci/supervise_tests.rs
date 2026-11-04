@@ -731,12 +731,19 @@ fn a_supervisor_is_known_by_the_lease_its_command_line_names() {
     let dir = dir("supervises");
     let lease = lease_in(&dir);
     // `sh -c <script> <$0>`: the command line is `sh -c <script> <lease>`, the lease fourth.
+    // Right after the spawn the kernel may not have set the new program's arguments yet: the
+    // shell's word says it runs, and its command line is set by then.
     let mut child = Command::new("sh")
-        .args(["-c", "read line"])
+        .args(["-c", "echo up; read line"])
         .arg(&lease)
         .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .spawn()
         .expect("sh");
+    let mut word = [0; 3];
+    let out = child.stdout.as_mut().expect("piped");
+    std::io::Read::read_exact(out, &mut word).expect("the shell runs");
+    assert_eq!(&word, b"up\n");
     let id = SupervisorId::of(child.id()).expect("the child");
     assert!(id.supervises(&lease));
     assert!(!id.supervises(&dir.join("another-lease")));

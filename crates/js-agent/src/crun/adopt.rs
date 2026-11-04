@@ -230,7 +230,10 @@ impl CrunRuntime {
     pub(super) fn recover(&mut self) -> Result<SweepReport, CrunError> {
         let swept = self
             .ledger
-            .sweep(|entry| self.judge(entry), |entry| self.tear_down(entry))?;
+            .sweep(|entry| self.judge(entry), |entry| self.tear_down(entry));
+        // On a line of its own: the line of the call above holds the closures, and its only
+        // region of this function would be the error's, which no start takes.
+        let swept = swept?;
         let mut report = swept.report;
         for (name, run) in swept.adopted {
             self.runs.insert(name, run);
