@@ -75,15 +75,16 @@ pub struct PfPolicy {
 }
 
 impl PfPolicy {
-    /// Checks `flags` given the agent's network cap (`network_on`); `None` when the cap is
-    /// below `on` and no pf flag is given.
+    /// Checks `flags` given whether the agent's network ceiling is `on` (`network_on`); `None`
+    /// when it is not and no pf flag is given. A pf flag beside a ceiling of `open` is refused
+    /// before this, naming `--native-network open` (`NativeSettings::from_flags`).
     ///
     /// # Errors
     ///
-    /// The text names the flag at fault: a pf flag with a cap below `on`, a cap of `on`
-    /// without the pool's uids, a uid range, anchor name or endpoint the provisioner would
-    /// refuse, or a path that is not absolute (the agent runs as root and starts `pfctl` by
-    /// exactly this path).
+    /// The text names the flag at fault: a pf flag with a ceiling that is not `on`, a ceiling
+    /// of `on` without the pool's uids, a uid range, anchor name or endpoint the provisioner
+    /// would refuse, or a path that is not absolute (the agent runs as root and starts
+    /// `pfctl` by exactly this path).
     pub fn from_flags(flags: &PfFlags<'_>, network_on: bool) -> Result<Option<Self>, String> {
         let PfFlags {
             pfctl,
