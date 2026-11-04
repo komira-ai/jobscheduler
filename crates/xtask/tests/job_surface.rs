@@ -276,10 +276,9 @@ fn client_methods(client: &str) -> BTreeMap<String, String> {
                 },
                 syn::FnArg::Receiver(_) => None,
             });
-            methods.insert(
-                method.sig.ident.to_string(),
-                request.expect("a request type"),
-            );
+            // The stream reader's `next` takes no request.
+            let Some(request) = request else { continue };
+            methods.insert(method.sig.ident.to_string(), request);
         }
     }
     methods
