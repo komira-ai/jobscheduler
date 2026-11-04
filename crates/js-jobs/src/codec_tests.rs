@@ -130,76 +130,98 @@ fn a_record_reads_back_as_written() {
     }
 }
 
-// Catches two values of an enum sharing a code, or a code read back as another value.
+// Catches a code renumbered in the encoder and the decoder alike: each value is compared with
+// its code as a literal here, both ways, so two values cannot share one and none can move.
 #[test]
-fn every_enum_value_reads_back() {
+fn every_enum_value_has_its_own_fixed_code() {
     use StartFailure::*;
-    for state in [
-        JobState::Queued,
-        JobState::Placed,
-        JobState::Starting,
-        JobState::Running,
-        JobState::Succeeded,
-        JobState::Failed,
-        JobState::Cancelled,
-        JobState::Lost,
-        JobState::FailedToStart(NoCapacity),
-        JobState::FailedToStart(StartTimeout),
-        JobState::FailedToStart(ExclusiveNotReady),
-        JobState::FailedToStart(AgentRefused),
-    ] {
-        let job = JobRecord {
+    let job = job_row(&full_job());
+    let states = [
+        (JobState::Queued, 0),
+        (JobState::Placed, 1),
+        (JobState::Starting, 2),
+        (JobState::Running, 3),
+        (JobState::Succeeded, 4),
+        (JobState::Failed, 5),
+        (JobState::Cancelled, 6),
+        (JobState::Lost, 7),
+        (JobState::FailedToStart(NoCapacity), 8),
+        (JobState::FailedToStart(StartTimeout), 9),
+        (JobState::FailedToStart(ExclusiveNotReady), 10),
+        (JobState::FailedToStart(AgentRefused), 11),
+    ];
+    for (state, code) in states {
+        let written = job_row(&JobRecord {
             state,
             ..full_job()
-        };
-        assert_eq!(decode_job(&job_row(&job)).map(|j| j.state), Ok(state));
+        });
+        assert_eq!(field_of(&written, 22), Some(vec![code]), "{state:?}");
+        assert_eq!(
+            decode_job(&with(&job, 22, &[code])).map(|j| j.state),
+            Ok(state)
+        );
     }
-    for exec in [ExecMode::Container, ExecMode::SandboxExec] {
-        let mut job = full_job();
-        job.spec.constraints.exec = Some(exec);
-        assert_eq!(decode_job(&job_row(&job)), Ok(job));
+    for (exec, code) in [(ExecMode::Container, 0), (ExecMode::SandboxExec, 1)] {
+        let mut record = full_job();
+        record.spec.constraints.exec = Some(exec);
+        assert_eq!(
+            field_of(&job_row(&record), 14),
+            Some(vec![code]),
+            "{exec:?}"
+        );
+        assert_eq!(decode_job(&with(&job, 14, &[code])), Ok(record));
     }
-    for network in [
-        NetworkPolicy::None,
-        NetworkPolicy::AllowList,
-        NetworkPolicy::Open,
+    for (network, code) in [
+        (NetworkPolicy::None, 0),
+        (NetworkPolicy::AllowList, 1),
+        (NetworkPolicy::Open, 2),
     ] {
-        let mut job = full_job();
-        job.spec.network = network;
-        assert_eq!(decode_job(&job_row(&job)), Ok(job));
+        let mut record = full_job();
+        record.spec.network = network;
+        assert_eq!(
+            field_of(&job_row(&record), 17),
+            Some(vec![code]),
+            "{network:?}"
+        );
+        assert_eq!(decode_job(&with(&job, 17, &[code])), Ok(record));
     }
-    for step in [
-        AllocationStep::Booked,
-        AllocationStep::Releasing,
-        AllocationStep::Freed,
+    let row = allocation_row(&allocation(shape()));
+    for (step, code) in [
+        (AllocationStep::Booked, 0),
+        (AllocationStep::Releasing, 1),
+        (AllocationStep::Freed, 2),
     ] {
-        let allocation = AllocationRecord {
+        let record = AllocationRecord {
             step,
             ..allocation(shape())
         };
         assert_eq!(
-            decode_allocation(&allocation_row(&allocation)),
-            Ok(allocation)
+            field_of(&allocation_row(&record), 9),
+            Some(vec![code]),
+            "{step:?}"
         );
+        assert_eq!(decode_allocation(&with(&row, 9, &[code])), Ok(record));
     }
-    for reason in [
-        EndReason::Exited,
-        EndReason::WallLimit,
-        EndReason::Memory,
-        EndReason::Cancelled,
-        EndReason::HostAbsent,
-        EndReason::FailedPrepare,
-        EndReason::StartTimeout,
-        EndReason::Refused,
+    for (reason, code) in [
+        (EndReason::Exited, 0),
+        (EndReason::WallLimit, 1),
+        (EndReason::Memory, 2),
+        (EndReason::Cancelled, 3),
+        (EndReason::HostAbsent, 4),
+        (EndReason::FailedPrepare, 5),
+        (EndReason::StartTimeout, 6),
+        (EndReason::Refused, 7),
     ] {
-        let allocation = AllocationRecord {
+        let record = AllocationRecord {
             end_reason: Some(reason),
             ..allocation(shape())
         };
         assert_eq!(
-            decode_allocation(&allocation_row(&allocation)),
-            Ok(allocation)
+            field_of(&allocation_row(&record), 12),
+            Some(vec![code]),
+            "{reason:?}"
         );
+        assert_eq!(decode_allocation(&with(&row, 12, &[code])), Ok(record));
     }
 }
 
@@ -228,59 +250,155 @@ fn an_enum_value_this_build_does_not_know_is_newer() {
         );
     }
     assert_eq!(decode_job(&[FORMAT + 1]), Err(DecodeError::Newer));
+    let later_label = items(&[b"jobscheduler.dev/later", b"x"]);
+    assert_eq!(
+        decode_job(&with(&job, job_tag::LABELS, &later_label)),
+        Err(DecodeError::Newer),
+        "a reserved label a later build sets"
+    );
 }
 
-// Catches a change to the bytes of a row: the format byte, the tag order, the width of a tag
-// or a length, a time's unit, or a list's framing. A build that wrote these differently
-// could not read its predecessor's rows.
+/// A list value framed here, apart from the codec's own `list`.
+fn framed(items: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for item in items {
+        out.extend_from_slice(&u32::try_from(item.len()).expect("small").to_be_bytes());
+        out.extend_from_slice(item);
+    }
+    out
+}
+
+/// A time of whole seconds as a row holds it.
+fn seconds(secs: u64) -> Vec<u8> {
+    let mut out = secs.to_be_bytes().to_vec();
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out
+}
+
+/// A row of format 1 holding `fields` in the order given.
+fn literal_row(fields: &[(u16, Vec<u8>)]) -> Vec<u8> {
+    let mut out = vec![1];
+    for (tag, value) in fields {
+        out.extend_from_slice(&tag.to_be_bytes());
+        out.extend_from_slice(&u32::try_from(value.len()).expect("small").to_be_bytes());
+        out.extend_from_slice(value);
+    }
+    out
+}
+
+// Catches a change to the bytes of a row: the format byte, a tag's number, the tag order,
+// the width of a tag, a length or a time, or the framing of a list or map. The rows are
+// written out here with literal tags and codes, independent of the codec's constants, so a
+// renumbering done consistently in the encoder and decoder still fails.
 #[test]
 fn the_layout_is_pinned_byte_for_byte() {
-    let mut allocation = allocation(Booked::WholeHost);
-    allocation.allocation_id = AllocationId::from_bits([0xab; 16]);
-    allocation.end_reason = None;
-    let mut want = vec![FORMAT];
-    let mut field = |tag: u16, value: &[u8]| {
-        want.extend_from_slice(&tag.to_be_bytes());
-        want.extend_from_slice(&u32::try_from(value.len()).expect("small").to_be_bytes());
-        want.extend_from_slice(value);
-    };
-    field(alloc_tag::JOB, b"full-1");
-    field(alloc_tag::ALLOCATION_ID, &[0xab; 16]);
-    field(alloc_tag::HOST, b"host-a");
-    field(alloc_tag::WHOLE_HOST, b"");
-    field(alloc_tag::STEP, &[2]);
-    field(alloc_tag::CREATED_AT, &1_000_000_000u64.to_be_bytes());
-    field(alloc_tag::FREED_AT, &2_000_000_000u64.to_be_bytes());
-    assert_eq!(allocation_row(&allocation), want);
+    let job = literal_row(&[
+        (1, b"full-1".to_vec()),
+        (
+            2,
+            format!("team/app:1@sha256:{}", "a".repeat(64)).into_bytes(),
+        ),
+        (3, framed(&[b"run"])),
+        (4, framed(&[b"--fast", b"--seed=7"])),
+        (5, framed(&[b"LEVEL", b"2", b"MODE", b"test"])),
+        (7, 2000u64.to_be_bytes().to_vec()),
+        (8, (1u64 << 30).to_be_bytes().to_vec()),
+        (9, 1u64.to_be_bytes().to_vec()),
+        (10, b"accel-a".to_vec()),
+        (11, (1u64 << 32).to_be_bytes().to_vec()),
+        (12, b"linux".to_vec()),
+        (13, b"x86_64".to_vec()),
+        (14, vec![0]),
+        (15, framed(&[b"driver", b"550"])),
+        (16, 600u64.to_be_bytes().to_vec()),
+        (17, vec![1]),
+        (18, vec![0x1f, 0x90, 0, 80]),
+        (19, framed(&[b"inputs/upload", b"upload-target"])),
+        (
+            20,
+            framed(&[b"jobscheduler.dev/run", b"run-1", b"team", b"infra"]),
+        ),
+        (21, (-4i32).to_be_bytes().to_vec()),
+        (22, vec![3]),
+        (23, seconds(1)),
+        (24, seconds(2)),
+        (25, seconds(3)),
+        (26, seconds(4)),
+        (27, b"host-a".to_vec()),
+        (28, vec![1]),
+        (29, seconds(5)),
+        (30, seconds(6)),
+    ]);
+    assert_eq!(job_row(&full_job()), job);
+    assert_eq!(decode_job(&job), Ok(full_job()));
 
-    let job = JobRecord {
-        spec: JobSpec {
-            command: vec!["a".to_owned(), "bc".to_owned()],
-            env: BTreeMap::from([("K".to_owned(), "V".to_owned())]),
-            ..bare_job().spec
-        },
-        ..bare_job()
-    };
-    let row = job_row(&job);
+    let shared = literal_row(&[
+        (1, b"full-1".to_vec()),
+        (2, vec![7; 16]),
+        (3, b"host-a".to_vec()),
+        (5, 1u64.to_be_bytes().to_vec()),
+        (6, 2u64.to_be_bytes().to_vec()),
+        (7, 3u64.to_be_bytes().to_vec()),
+        (8, 4u64.to_be_bytes().to_vec()),
+        (9, vec![2]),
+        (10, seconds(1)),
+        (11, seconds(2)),
+        (12, vec![0]),
+    ]);
+    assert_eq!(allocation_row(&allocation(shape())), shared);
+    assert_eq!(decode_allocation(&shared), Ok(allocation(shape())));
+
+    let whole = literal_row(&[
+        (1, b"full-1".to_vec()),
+        (2, vec![7; 16]),
+        (3, b"host-a".to_vec()),
+        (4, Vec::new()),
+        (9, vec![2]),
+        (10, seconds(1)),
+        (11, seconds(2)),
+        (12, vec![0]),
+    ]);
+    assert_eq!(allocation_row(&allocation(Booked::WholeHost)), whole);
+
+    let bare = job_row(&bare_job());
     assert_eq!(
-        field_of(&row, job_tag::COMMAND),
-        Some(vec![0, 0, 0, 1, b'a', 0, 0, 0, 2, b'b', b'c'])
-    );
-    assert_eq!(
-        field_of(&row, job_tag::ENV),
-        Some(vec![0, 0, 0, 1, b'K', 0, 0, 0, 1, b'V'])
-    );
-    assert_eq!(
-        field_of(&row, job_tag::PORTS),
+        field_of(&bare, 18),
         Some(Vec::new()),
         "an empty list is written empty"
     );
+    assert_eq!(field_of(&bare, 24), None, "None is not written");
+    assert_eq!(field_of(&bare, 6), Some(Vec::new()), "a marker is empty");
+}
+
+// Catches a time cut to fit: the largest reading of the store's clock is written as it is,
+// and nanoseconds that make a whole second are refused.
+#[test]
+fn every_store_time_is_written_as_it_is() {
+    let latest = StoreTime::from_duration(Duration::MAX);
+    let job = JobRecord {
+        submitted_at: latest,
+        ended_at: Some(latest),
+        ..full_job()
+    };
+    assert_eq!(decode_job(&job_row(&job)), Ok(job));
+    let mut value = u64::MAX.to_be_bytes().to_vec();
+    value.extend_from_slice(&999_999_999u32.to_be_bytes());
     assert_eq!(
-        field_of(&row, job_tag::PLACED_AT),
-        None,
-        "None is not written"
+        field_of(
+            &job_row(&JobRecord {
+                submitted_at: latest,
+                ..full_job()
+            }),
+            23
+        ),
+        Some(value)
     );
-    assert_eq!(job_row(&decode_job(&row).expect("reads")), row);
+    let mut whole_second = 0u64.to_be_bytes().to_vec();
+    whole_second.extend_from_slice(&1_000_000_000u32.to_be_bytes());
+    assert_eq!(
+        decode_job(&with(&job_row(&full_job()), 23, &whole_second)),
+        Err(DecodeError::BadValue { tag: 23 })
+    );
 }
 
 // Catches a reader that drops a field it does not know, or a writer that does not put it
@@ -464,10 +582,23 @@ fn a_value_that_is_not_valid_for_its_field_is_refused_by_tag() {
         (t::ID, b"a b".to_vec(), BadValue { tag: t::ID }),
         (t::HOST, b"Host A".to_vec(), BadValue { tag: t::HOST }),
         (t::IMAGE, b"app:latest".to_vec(), BadValue { tag: t::IMAGE }),
+        (t::WHOLE_HOST, vec![1], BadValue { tag: t::WHOLE_HOST }),
         (
-            t::LABELS,
-            items(&[b"jobscheduler.dev/unknown", b"x"]),
-            BadValue { tag: t::LABELS },
+            t::ENV,
+            items(&[b"K", b"V", b"K", b"W"]),
+            BadValue { tag: t::ENV },
+        ),
+        (
+            t::FILES,
+            items(&[b"f", b"1", b"f", b"2"]),
+            BadValue { tag: t::FILES },
+        ),
+        (
+            t::SUBMITTED_AT,
+            vec![0; 8],
+            BadLength {
+                tag: t::SUBMITTED_AT,
+            },
         ),
         (
             t::LABELS,
@@ -496,6 +627,12 @@ fn a_value_that_is_not_valid_for_its_field_is_refused_by_tag() {
             tag: alloc_tag::ALLOCATION_ID
         })
     );
+    assert_eq!(
+        decode_allocation(&with(&allocation, alloc_tag::WHOLE_HOST, &[1])),
+        Err(BadValue {
+            tag: alloc_tag::WHOLE_HOST
+        })
+    );
 }
 
 // Catches an error text that does not say what is wrong and where.
@@ -506,6 +643,10 @@ fn a_decode_error_says_what_and_which_field() {
         (DecodeError::BadFormat, "the row's format byte is 0"),
         (DecodeError::Newer, "the row was written by a later build"),
         (DecodeError::Truncated, "the row ends inside a field"),
+        (
+            DecodeError::WrongKey,
+            "the row names another job than its key",
+        ),
         (
             DecodeError::DuplicateTag { tag: 7 },
             "field 7 appears twice",

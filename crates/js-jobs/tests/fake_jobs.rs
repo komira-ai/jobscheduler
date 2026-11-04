@@ -58,3 +58,13 @@ fn a_scan_that_resumes_at_its_token_repeats_a_job() {
         Flaw::ScanResumesAtToken,
     ));
 }
+
+// Catches a requeue whose job and allocation are written in separate steps: the job goes back
+// to queued while its allocation stays booked.
+#[test]
+#[should_panic(
+    expected = "requeue_loses_to_a_change_of_either_row: the job was requeued without its allocation"
+)]
+fn a_partial_transaction_breaks_an_atomic_requeue() {
+    suite::requeue_loses_to_a_change_of_either_row(&FakeBackend::new(Flaw::PartialTxn));
+}

@@ -23,35 +23,25 @@ use crate::{
     NewJob, RandomIds,
 };
 
+mod clock;
+mod compat;
+mod failures;
 mod idempotency;
 mod lifecycle;
+mod paging;
 mod placement;
+mod races;
 mod rows;
 
-pub use idempotency::{
-    a_concurrent_insert_answers_from_the_job_it_made, a_minted_id_collision_is_retried,
-    a_priority_only_difference_is_the_same_job, minted_ids_do_not_repeat_across_instances,
-    same_id_different_job_is_a_conflict, same_id_same_job_returns_the_existing_row,
-};
-pub use lifecycle::{
-    a_freed_allocation_row_is_kept_as_history, an_ended_job_cannot_move_again,
-    cancel_of_a_queued_job_is_immediate_and_of_a_placed_job_is_an_intent,
-    cancel_twice_is_cancel_once,
-    ending_a_placed_job_moves_its_allocation_to_releasing_in_the_same_commit,
-    free_twice_keeps_the_first_reason, releasing_needs_an_end_or_a_cancel,
-};
-pub use placement::{
-    a_failed_commit_changes_nothing, a_requeued_job_gets_a_new_allocation,
-    booked_on_sums_the_live_allocations_of_a_host, place_on_a_job_that_changed_is_stale,
-    place_refuses_a_job_that_is_not_queued_or_still_booked,
-    placement_and_allocation_commit_together,
-};
-pub use rows::{
-    a_row_that_does_not_parse_is_corrupt, a_row_with_a_higher_format_byte_is_unknown_not_missing,
-    a_row_with_unknown_tags_is_read_and_rewritten_intact,
-    a_row_without_the_newest_tag_reads_with_defaults,
-    list_jobs_pages_in_key_order_and_filters_by_state,
-};
+pub use clock::*;
+pub use compat::*;
+pub use failures::*;
+pub use idempotency::*;
+pub use lifecycle::*;
+pub use paging::*;
+pub use placement::*;
+pub use races::*;
+pub use rows::*;
 
 /// Runs every check of the suite against `backend`, one after another.
 pub fn run_job_store_suite<B: Backend>(backend: &B)
@@ -61,15 +51,26 @@ where
     same_id_same_job_returns_the_existing_row(backend);
     same_id_different_job_is_a_conflict(backend);
     a_priority_only_difference_is_the_same_job(backend);
+    the_same_job_is_found_by_value_not_by_bytes(backend);
     a_concurrent_insert_answers_from_the_job_it_made(backend);
     minted_ids_do_not_repeat_across_instances(backend);
     a_minted_id_collision_is_retried(backend);
+    minting_stops_at_its_budget(backend);
     placement_and_allocation_commit_together(backend);
     a_failed_commit_changes_nothing(backend);
+    a_failed_read_changes_nothing(backend);
+    opening_after_another_store_wrote_the_schema_reads_its_row(backend);
     place_on_a_job_that_changed_is_stale(backend);
     place_refuses_a_job_that_is_not_queued_or_still_booked(backend);
     a_requeued_job_gets_a_new_allocation(backend);
+    a_repeated_allocation_id_is_drawn_again(backend);
     booked_on_sums_the_live_allocations_of_a_host(backend);
+    requeue_loses_to_a_change_of_either_row(backend);
+    a_move_that_loses_its_job_version_is_stale(backend);
+    a_cancel_that_loses_to_a_placement_is_stale(backend);
+    a_release_that_loses_to_a_free_is_stale(backend);
+    concurrent_frees_keep_the_first_committed_reason(backend);
+    a_placement_over_a_changed_freed_allocation_is_stale(backend);
     a_freed_allocation_row_is_kept_as_history(backend);
     free_twice_keeps_the_first_reason(backend);
     an_ended_job_cannot_move_again(backend);
@@ -77,11 +78,20 @@ where
     cancel_of_a_queued_job_is_immediate_and_of_a_placed_job_is_an_intent(backend);
     cancel_twice_is_cancel_once(backend);
     releasing_needs_an_end_or_a_cancel(backend);
+    every_time_is_the_store_clock_at_its_step(backend);
+    every_supported_end_is_stored_with_its_time_and_release(backend);
     a_row_with_unknown_tags_is_read_and_rewritten_intact(backend);
+    unknown_fields_survive_every_rewrite(backend);
     a_row_without_the_newest_tag_reads_with_defaults(backend);
     a_row_with_a_higher_format_byte_is_unknown_not_missing(backend);
+    a_reserved_label_of_a_later_build_is_an_unknown_row(backend);
+    a_row_this_build_cannot_read_refuses_every_write(backend);
     a_row_that_does_not_parse_is_corrupt(backend);
+    a_row_under_another_jobs_key_is_refused(backend);
     list_jobs_pages_in_key_order_and_filters_by_state(backend);
+    list_jobs_walks_past_pages_with_nothing_to_show(backend);
+    list_jobs_is_capped_at_max_page(backend);
+    list_jobs_follows_rows_that_change_between_pages(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -103,15 +113,26 @@ macro_rules! job_store_tests {
             same_id_same_job_returns_the_existing_row,
             same_id_different_job_is_a_conflict,
             a_priority_only_difference_is_the_same_job,
+            the_same_job_is_found_by_value_not_by_bytes,
             a_concurrent_insert_answers_from_the_job_it_made,
             minted_ids_do_not_repeat_across_instances,
             a_minted_id_collision_is_retried,
+            minting_stops_at_its_budget,
             placement_and_allocation_commit_together,
             a_failed_commit_changes_nothing,
+            a_failed_read_changes_nothing,
+            opening_after_another_store_wrote_the_schema_reads_its_row,
             place_on_a_job_that_changed_is_stale,
             place_refuses_a_job_that_is_not_queued_or_still_booked,
             a_requeued_job_gets_a_new_allocation,
+            a_repeated_allocation_id_is_drawn_again,
             booked_on_sums_the_live_allocations_of_a_host,
+            requeue_loses_to_a_change_of_either_row,
+            a_move_that_loses_its_job_version_is_stale,
+            a_cancel_that_loses_to_a_placement_is_stale,
+            a_release_that_loses_to_a_free_is_stale,
+            concurrent_frees_keep_the_first_committed_reason,
+            a_placement_over_a_changed_freed_allocation_is_stale,
             a_freed_allocation_row_is_kept_as_history,
             free_twice_keeps_the_first_reason,
             an_ended_job_cannot_move_again,
@@ -119,11 +140,20 @@ macro_rules! job_store_tests {
             cancel_of_a_queued_job_is_immediate_and_of_a_placed_job_is_an_intent,
             cancel_twice_is_cancel_once,
             releasing_needs_an_end_or_a_cancel,
+            every_time_is_the_store_clock_at_its_step,
+            every_supported_end_is_stored_with_its_time_and_release,
             a_row_with_unknown_tags_is_read_and_rewritten_intact,
+            unknown_fields_survive_every_rewrite,
             a_row_without_the_newest_tag_reads_with_defaults,
             a_row_with_a_higher_format_byte_is_unknown_not_missing,
+            a_reserved_label_of_a_later_build_is_an_unknown_row,
+            a_row_this_build_cannot_read_refuses_every_write,
             a_row_that_does_not_parse_is_corrupt,
+            a_row_under_another_jobs_key_is_refused,
             list_jobs_pages_in_key_order_and_filters_by_state,
+            list_jobs_walks_past_pages_with_nothing_to_show,
+            list_jobs_is_capped_at_max_page,
+            list_jobs_follows_rows_that_change_between_pages,
         );
     };
 }
@@ -205,6 +235,26 @@ impl<S: Store> Rig<S> {
             .txn(Txn::new().put(key, value, Cond::Any))
             .expect("the store is reachable")
             .expect("an unconditional put commits");
+    }
+
+    /// Removes the row `key`, past the job store.
+    pub(crate) fn delete_raw(&self, key: &str) {
+        self.store
+            .inner()
+            .txn(Txn::new().delete(key, Cond::Any))
+            .expect("the store is reachable")
+            .expect("an unconditional delete commits");
+    }
+
+    /// A second writer over the wrapped store: its commits pass the interference by, so a
+    /// hook can use it to commit between an operation's read and its commit.
+    pub(crate) fn other(&self) -> JobStore<S> {
+        JobStore::new(self.store.inner(), RandomIds).expect("a second writer opens")
+    }
+
+    /// A job store over the wrapped store (interference included) minting from `ids`.
+    pub(crate) fn minting<I: crate::IdSource>(&self, ids: I) -> JobStore<Interfere<S>, I> {
+        JobStore::new(Arc::clone(&self.store), ids).expect("a job store opens")
     }
 
     /// Every row and the commit counters.

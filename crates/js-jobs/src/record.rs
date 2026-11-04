@@ -384,11 +384,41 @@ mod tests {
                 allocations: 3,
             })
         );
-        let full = HostBooking {
-            cpu_millis: u64::MAX,
-            ..HostBooking::default()
+        // Each dimension on its own: the largest sum is answered, one more is refused, with
+        // every other dimension small.
+        let one = |dimension: usize, count: u64| {
+            let mut counts = [1u64; 4];
+            counts[dimension] = count;
+            let [cpu_millis, memory_bytes, disk_bytes, accelerators] = counts;
+            Booked::Shape {
+                cpu_millis,
+                memory_bytes,
+                disk_bytes,
+                accelerators,
+            }
         };
-        assert_eq!(full.plus(&shape), None);
+        for dimension in 0..4 {
+            let start = HostBooking::default()
+                .plus(&one(dimension, u64::MAX - 1))
+                .expect("one booking fits");
+            let largest = start
+                .plus(&one(dimension, 1))
+                .expect("the largest sum fits");
+            let counts = [
+                largest.cpu_millis,
+                largest.memory_bytes,
+                largest.disk_bytes,
+                largest.accelerators,
+            ];
+            let mut want = [2u64; 4];
+            want[dimension] = u64::MAX;
+            assert_eq!(counts, want, "dimension {dimension}");
+            assert_eq!(
+                largest.plus(&one(dimension, 1)),
+                None,
+                "dimension {dimension}"
+            );
+        }
         let counted_out = HostBooking {
             allocations: u64::MAX,
             ..HostBooking::default()

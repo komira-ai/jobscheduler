@@ -33,6 +33,8 @@ js-jobs = { path = ".", features = ["test-support"] }
 js-state = { path = "../js-state", features = ["test-support"] }
 # The SQLite test's scratch directories and the Postgres test's server URL.
 js-testkit = { path = "../js-testkit", features = ["postgres"] }
+# A unit test reads the warning a list logs for a row it skips.
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

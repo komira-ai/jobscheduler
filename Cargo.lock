@@ -1194,6 +1194,7 @@ dependencies = [
  "js-types",
  "thiserror",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

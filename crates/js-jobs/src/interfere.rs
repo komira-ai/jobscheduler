@@ -16,12 +16,15 @@ pub const INJECTED: &str = "the commit failed (injected)";
 type Hook = Box<dyn FnOnce() + Send>;
 
 /// A store that passes every call to the store it wraps, except that the commit
-/// [`Interfere::fail_after`] names fails without reaching it, and a hook
-/// [`Interfere::before_next`] sets runs just before the next commit does.
+/// [`Interfere::fail_after`] names, and the read [`Interfere::fail_read_after`] names, fail
+/// without reaching it, and a hook [`Interfere::before_next`] sets runs just before the next
+/// commit does.
 pub struct Interfere<S> {
     inner: Arc<S>,
     /// How many commits pass before one fails; `None`: none fails.
     fail_at: Mutex<Option<usize>>,
+    /// How many reads (gets and scans) pass before one fails; `None`: none fails.
+    fail_read_at: Mutex<Option<usize>>,
     before: Mutex<Option<Hook>>,
 }
 
@@ -36,6 +39,7 @@ impl<S: Store> Interfere<S> {
         Interfere {
             inner: Arc::new(inner),
             fail_at: Mutex::new(None),
+            fail_read_at: Mutex::new(None),
             before: Mutex::new(None),
         }
     }
@@ -58,6 +62,12 @@ impl<S: Store> Interfere<S> {
         *lock(&self.fail_at) = Some(commits);
     }
 
+    /// Lets `reads` reads (a get, a prefix scan or a range scan each) through, then fails the
+    /// next one with [`StoreError::Failed`] before it reaches the wrapped store.
+    pub fn fail_read_after(&self, reads: usize) {
+        *lock(&self.fail_read_at) = Some(reads);
+    }
+
     /// Fails the next commit ([`Interfere::fail_after`] of 0).
     pub fn fail_next(&self) {
         self.fail_after(0);
@@ -69,19 +79,19 @@ impl<S: Store> Interfere<S> {
         *lock(&self.before) = Some(Box::new(hook));
     }
 
-    /// Whether this commit is the one to fail.
-    fn fails_now(&self) -> bool {
-        let mut fail_at = lock(&self.fail_at);
-        match *fail_at {
+    /// [`StoreError::Failed`] when this call is the one `slot` counts down to.
+    fn countdown(slot: &Mutex<Option<usize>>) -> Result<(), StoreError> {
+        let mut left = lock(slot);
+        match *left {
             Some(0) => {
-                *fail_at = None;
-                true
+                *left = None;
+                Err(StoreError::Failed(INJECTED.to_owned()))
             }
-            Some(left) => {
-                *fail_at = Some(left - 1);
-                false
+            Some(n) => {
+                *left = Some(n - 1);
+                Ok(())
             }
-            None => false,
+            None => Ok(()),
         }
     }
 }
@@ -93,21 +103,22 @@ impl<S: Store> Store for Interfere<S> {
         if let Some(hook) = hook {
             hook();
         }
-        if self.fails_now() {
-            return Err(StoreError::Failed(INJECTED.to_owned()));
-        }
+        Self::countdown(&self.fail_at)?;
         self.inner.apply_batch(batch)
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
+        Self::countdown(&self.fail_read_at)?;
         self.inner.get(key)
     }
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        Self::countdown(&self.fail_read_at)?;
         self.inner.scan_prefix(prefix)
     }
 
     fn scan_range(&self, scan: ScanRange<'_>) -> Result<ScanPage, StoreError> {
+        Self::countdown(&self.fail_read_at)?;
         self.inner.scan_range(scan)
     }
 
@@ -171,6 +182,32 @@ mod tests {
             .map(|(key, _)| key)
             .collect();
         assert_eq!(keys, ["a", "c"]);
+    }
+
+    // Catches a read failure that hits the wrong read, more than one, or a commit.
+    #[test]
+    fn the_named_read_fails_and_only_it() {
+        let store = wrapped();
+        put(&store, "a").expect("commits");
+        store.fail_read_after(1);
+        assert!(store.get("a").expect("the first read passes").is_some());
+        assert_eq!(
+            store.scan_prefix(""),
+            Err(StoreError::Failed(INJECTED.to_owned()))
+        );
+        assert_eq!(
+            store.scan_prefix("").expect("the next read passes").len(),
+            1
+        );
+        store.fail_read_after(0);
+        let range = js_state::ScanRange::new("", std::num::NonZeroUsize::MIN);
+        assert_eq!(
+            store.scan_range(range),
+            Err(StoreError::Failed(INJECTED.to_owned()))
+        );
+        store.fail_read_after(0);
+        assert_eq!(store.get("a"), Err(StoreError::Failed(INJECTED.to_owned())));
+        put(&store, "b").expect("a commit does not count as a read");
     }
 
     // Catches a hook that runs after the commit, or more than once.

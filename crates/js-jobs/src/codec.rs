@@ -9,10 +9,11 @@
 //! ```
 //!
 //! Fields are written in tag order, so one record always has one encoding. Within a value an
-//! integer is big-endian of its width, a time is the store clock's reading in nanoseconds as
-//! a `u64`, text is UTF-8, a list is its items each as `len:u32` and the bytes, and a map is
-//! a list of its keys and values in turn, in key order. A field whose value is `None` is not
-//! written; a list or map that is empty is written empty.
+//! integer is big-endian of its width, a time is the store clock's reading as whole seconds
+//! (`u64`) and the nanoseconds within the second (`u32`), text is UTF-8, a list is its items
+//! each as `len:u32` and the bytes, and a map is a list of its keys and values in turn, in
+//! key order, no key twice. A marker (the whole host) is a field with an empty value. A field
+//! whose value is `None` is not written; a list or map that is empty is written empty.
 //!
 //! **Additive only (B8).** A reader skips a tag it does not know and keeps its bytes, and the
 //! record carries them ([`Carried`]) into the next write of the row, so a build one release
@@ -177,6 +178,9 @@ pub enum DecodeError {
         /// The tag.
         tag: u16,
     },
+    /// A row is stored under the key of another job than the one it names (field 1).
+    #[error("the row names another job than its key")]
+    WrongKey,
     /// A value parses but is not valid for its field (a list that ends inside an item, an
     /// id or image reference that does not parse, a label that is refused).
     #[error("field {tag} holds a value that is not valid")]
@@ -226,10 +230,13 @@ fn text(value: &str) -> Vec<u8> {
     value.as_bytes().to_vec()
 }
 
+/// A time: the seconds as a `u64` and the nanoseconds within the second as a `u32`, so every
+/// reading of the store's clock is written as it is.
 fn time(at: StoreTime) -> Vec<u8> {
-    // u64 nanoseconds reach past the year 2500 of a clock whose origin is the Unix epoch.
-    let nanos = u64::try_from(at.as_duration().as_nanos()).unwrap_or(u64::MAX);
-    nanos.to_be_bytes().to_vec()
+    let since = at.as_duration();
+    let mut out = since.as_secs().to_be_bytes().to_vec();
+    out.extend_from_slice(&since.subsec_nanos().to_be_bytes());
+    out
 }
 
 /// A list value. An item longer than a `u32` length is cut here, but its field is then over
@@ -417,9 +424,15 @@ impl Fields {
         self.opt(tag, read)?.ok_or(DecodeError::Missing { tag })
     }
 
-    /// Whether the row holds `tag`, whatever its value.
-    fn has(&mut self, tag: u16) -> bool {
-        self.0.remove(&tag).is_some()
+    /// Whether the row holds the marker `tag`, whose value is empty.
+    fn has(&mut self, tag: u16) -> Result<bool, DecodeError> {
+        self.opt(tag, |tag, value| {
+            value
+                .is_empty()
+                .then_some(())
+                .ok_or(DecodeError::BadValue { tag })
+        })
+        .map(|marked| marked.is_some())
     }
 
     fn carried(self) -> Carried {
@@ -459,8 +472,21 @@ fn bool_of(tag: u16, value: Vec<u8>) -> Result<bool, DecodeError> {
 }
 
 fn time_of(tag: u16, value: Vec<u8>) -> Result<StoreTime, DecodeError> {
-    u64_of(tag, value).map(|nanos| StoreTime::from_duration(Duration::from_nanos(nanos)))
+    let bytes: [u8; 12] = value
+        .as_slice()
+        .try_into()
+        .map_err(|_| DecodeError::BadLength { tag })?;
+    let [s0, s1, s2, s3, s4, s5, s6, s7, n0, n1, n2, n3] = bytes;
+    let secs = u64::from_be_bytes([s0, s1, s2, s3, s4, s5, s6, s7]);
+    let nanos = u32::from_be_bytes([n0, n1, n2, n3]);
+    if nanos >= NANOS_PER_SEC {
+        return Err(DecodeError::BadValue { tag });
+    }
+    Ok(StoreTime::from_duration(Duration::new(secs, nanos)))
 }
+
+/// Nanoseconds in a second: a time's nanoseconds are fewer.
+const NANOS_PER_SEC: u32 = 1_000_000_000;
 
 fn text_of(tag: u16, value: Vec<u8>) -> Result<String, DecodeError> {
     String::from_utf8(value).map_err(|_| DecodeError::NotUtf8 { tag })
@@ -504,22 +530,42 @@ fn texts_of(tag: u16, value: Vec<u8>) -> Result<Vec<String>, DecodeError> {
         .collect()
 }
 
+/// `map` when it kept every one of the `pairs` it was made from: a key written twice is
+/// refused rather than one of its values dropped.
+fn no_repeats<V>(
+    tag: u16,
+    pairs: usize,
+    map: BTreeMap<String, V>,
+) -> Result<BTreeMap<String, V>, DecodeError> {
+    if map.len() == pairs {
+        Ok(map)
+    } else {
+        Err(DecodeError::BadValue { tag })
+    }
+}
+
 fn text_map_of(tag: u16, value: Vec<u8>) -> Result<BTreeMap<String, String>, DecodeError> {
-    pairs_of(tag, &value)?
+    let pairs = pairs_of(tag, &value)?;
+    let count = pairs.len();
+    let map: BTreeMap<String, String> = pairs
         .into_iter()
         .map(|(key, value)| -> Result<(String, String), DecodeError> {
             Ok((text_of(tag, key.to_vec())?, text_of(tag, value.to_vec())?))
         })
-        .collect()
+        .collect::<Result<_, DecodeError>>()?;
+    no_repeats(tag, count, map)
 }
 
 fn files_of(tag: u16, value: Vec<u8>) -> Result<BTreeMap<String, Vec<u8>>, DecodeError> {
-    pairs_of(tag, &value)?
+    let pairs = pairs_of(tag, &value)?;
+    let count = pairs.len();
+    let map: BTreeMap<String, Vec<u8>> = pairs
         .into_iter()
         .map(|(key, value)| -> Result<(String, Vec<u8>), DecodeError> {
             Ok((text_of(tag, key.to_vec())?, value.to_vec()))
         })
-        .collect()
+        .collect::<Result<_, DecodeError>>()?;
+    no_repeats(tag, count, map)
 }
 
 fn ports_of(tag: u16, value: Vec<u8>) -> Result<Vec<DeclaredPort>, DecodeError> {
@@ -547,7 +593,8 @@ const RESERVED: [ReservedKey; 5] = [
 ];
 
 /// A label set as a row holds it: the caller's labels, and the reserved ones the scheduler
-/// set, each checked as when it was first made.
+/// set, each checked as when it was first made. A reserved key this build does not know is
+/// one a later build sets: the row is [`DecodeError::Newer`], as for an enum value.
 fn labels_of(tag: u16, value: Vec<u8>) -> Result<Labels, DecodeError> {
     let bad = DecodeError::BadValue { tag };
     let (reserved, caller): (BTreeMap<String, String>, BTreeMap<String, String>) =
@@ -561,7 +608,7 @@ fn labels_of(tag: u16, value: Vec<u8>) -> Result<Labels, DecodeError> {
             let known = RESERVED
                 .into_iter()
                 .find(|reserved| reserved.key() == key)
-                .ok_or(bad)?;
+                .ok_or(DecodeError::Newer)?;
             labels.with_reserved(known, &value).map_err(|_| bad)
         })
 }
@@ -719,7 +766,7 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
     let command = fields.opt(t::COMMAND, texts_of)?.unwrap_or_default();
     let args = fields.opt(t::ARGS, texts_of)?.unwrap_or_default();
     let env = fields.opt(t::ENV, text_map_of)?.unwrap_or_default();
-    let needs = if fields.has(t::WHOLE_HOST) {
+    let needs = if fields.has(t::WHOLE_HOST)? {
         Needs::WholeHost
     } else {
         Needs::Shape(take_resources(fields)?)
@@ -799,7 +846,7 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
     let job = fields.need(t::JOB, job_id_of)?;
     let allocation_id = fields.need(t::ALLOCATION_ID, allocation_id_of)?;
     let host = fields.need(t::HOST, host_of)?;
-    let booked = if fields.has(t::WHOLE_HOST) {
+    let booked = if fields.has(t::WHOLE_HOST)? {
         Booked::WholeHost
     } else {
         Booked::Shape {
@@ -839,6 +886,22 @@ pub(crate) fn set_field(row: &[u8], tag: u16, value: &[u8]) -> Option<Vec<u8>> {
     let mut fields = Fields::of(row).ok()?;
     fields.0.insert(tag, value.to_vec());
     Writer(fields.0).finish(&Carried::default()).ok()
+}
+
+/// `row` with its fields in descending tag order and the fields `without` left out: the same
+/// record, if what is left out is a default, in bytes no build writes. Test support.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn rearranged(row: &[u8], without: &[u16]) -> Option<Vec<u8>> {
+    let fields = Fields::of(row).ok()?;
+    let mut out = vec![FORMAT];
+    for (tag, value) in fields.0.iter().rev() {
+        if !without.contains(tag) {
+            out.extend_from_slice(&tag.to_be_bytes());
+            out.extend_from_slice(&(value.len() as u32).to_be_bytes());
+            out.extend_from_slice(value);
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]

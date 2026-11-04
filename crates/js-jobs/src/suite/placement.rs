@@ -4,14 +4,15 @@
 use std::sync::Arc;
 
 use js_state::conformance::Backend;
-use js_state::{Cond, Store, StoreError, Txn};
+use js_state::{Cond, ManualClock, Store, StoreError, Txn};
 
 use super::{host, job_id, rig, share, whole_host_spec};
-use crate::codec::FORMAT;
-use crate::interfere::INJECTED;
+use crate::codec::{FORMAT, alloc_tag, set_field};
+use crate::ids::ScriptedIds;
+use crate::interfere::{INJECTED, Interfere};
 use crate::{
-    AllocationStep, Booked, EndReason, HostBooking, JobState, JobStore, JobStoreError, NewJob,
-    RandomIds,
+    AllocationId, AllocationStep, Booked, EndReason, HostBooking, JobState, JobStore,
+    JobStoreError, MINT_TRIES, NewJob, RandomIds,
 };
 
 /// The error an operation answers when its commit fails.
@@ -97,7 +98,7 @@ pub fn a_failed_commit_changes_nothing<B: Backend>(backend: &B) {
 
     type Operation<'a> = Box<dyn Fn() -> Result<(), JobStoreError> + 'a>;
     let jobs = &rig.jobs;
-    let operations: [(&str, Operation<'_>); 11] = [
+    let operations: [(&str, Operation<'_>); 10] = [
         (
             "an insert with an id",
             Box::new(|| {
@@ -158,10 +159,6 @@ pub fn a_failed_commit_changes_nothing<B: Backend>(backend: &B) {
             "a requeue",
             Box::new(|| jobs.requeue_failed_prepare(&whole).map(drop)),
         ),
-        (
-            "an open",
-            Box::new(|| JobStore::new(Arc::clone(&rig.store), RandomIds).map(drop)),
-        ),
     ];
     for (name, operation) in operations {
         let before = rig.snapshot();
@@ -177,6 +174,23 @@ pub fn a_failed_commit_changes_nothing<B: Backend>(backend: &B) {
             "a_failed_commit_changes_nothing: {name} with a failed commit changed the store"
         );
     }
+
+    // The first open of an empty store commits the schema row: with that commit failing, it
+    // answers the store's error and the store holds no schema row.
+    let fresh = Arc::new(Interfere::new(
+        backend.open(Arc::new(ManualClock::default())),
+    ));
+    fresh.fail_next();
+    assert_eq!(
+        JobStore::new(Arc::clone(&fresh), RandomIds).map(drop),
+        Err(injected()),
+        "a_failed_commit_changes_nothing: the first open with a failed commit answered otherwise"
+    );
+    assert_eq!(
+        fresh.get(crate::keys::SCHEMA).expect("reads"),
+        None,
+        "a_failed_commit_changes_nothing: the first open with a failed commit wrote"
+    );
 }
 
 /// A second writer cancels the job between the placement's read and its commit: the
@@ -233,25 +247,32 @@ pub fn place_refuses_a_job_that_is_not_queued_or_still_booked<B: Backend>(backen
         "place_refuses_a_job_that_is_not_queued_or_still_booked: a refused placement wrote"
     );
 
-    // A queued job whose allocation row books (a copy of the placed job's): placing it again
-    // would book the host twice.
+    // A queued job whose allocation row books or releases (the placed job's row, renamed):
+    // placing it again would book the host twice.
     let queued = rig.queue("r-queued");
     let booked = rig.raw("alloc/r-placed").expect("an allocation").value;
-    rig.put_raw("alloc/r-queued", booked);
-    let before = rig.snapshot();
-    assert_eq!(
-        rig.jobs.place(&queued, host("host-b"), share()),
-        Err(JobStoreError::AllocationHeld {
-            id: queued.clone(),
-            step: AllocationStep::Booked,
-        }),
-        "place_refuses_a_job_that_is_not_queued_or_still_booked: a booked allocation was replaced"
-    );
-    assert_eq!(
-        rig.snapshot(),
-        before,
-        "place_refuses_a_job_that_is_not_queued_or_still_booked: a refused placement wrote"
-    );
+    let booked = set_field(&booked, alloc_tag::JOB, b"r-queued").expect("the row parses");
+    let releasing = set_field(&booked, alloc_tag::STEP, &[1]).expect("the row parses");
+    for (row, step) in [
+        (booked, AllocationStep::Booked),
+        (releasing, AllocationStep::Releasing),
+    ] {
+        rig.put_raw("alloc/r-queued", row);
+        let before = rig.snapshot();
+        assert_eq!(
+            rig.jobs.place(&queued, host("host-b"), share()),
+            Err(JobStoreError::AllocationHeld {
+                id: queued.clone(),
+                step,
+            }),
+            "place_refuses_a_job_that_is_not_queued_or_still_booked: a {step:?} allocation was replaced"
+        );
+        assert_eq!(
+            rig.snapshot(),
+            before,
+            "place_refuses_a_job_that_is_not_queued_or_still_booked: a refused placement wrote"
+        );
+    }
 
     let missing = job_id("r-missing");
     assert_eq!(
@@ -358,6 +379,102 @@ pub fn a_requeued_job_gets_a_new_allocation<B: Backend>(backend: &B) {
         }),
         "a_requeued_job_gets_a_new_allocation: a queued job was requeued"
     );
+
+    // A placed whole-host job whose allocation already ended (the host read absent) or began
+    // to release: a requeue would overwrite how it ended.
+    let absent = rig.queue_spec("w-absent", whole_host_spec());
+    rig.jobs
+        .place(&absent, host("host-d"), Booked::WholeHost)
+        .expect("placed");
+    rig.jobs
+        .free(&absent, EndReason::HostAbsent)
+        .expect("the host read absent");
+    let releasing = rig.queue_spec("w-releasing", whole_host_spec());
+    rig.jobs
+        .place(&releasing, host("host-e"), Booked::WholeHost)
+        .expect("placed");
+    let row = rig.raw("alloc/w-releasing").expect("an allocation").value;
+    rig.put_raw(
+        "alloc/w-releasing",
+        set_field(&row, alloc_tag::STEP, &[1]).expect("the row parses"),
+    );
+    let before = rig.snapshot();
+    for (id, step) in [
+        (absent.clone(), AllocationStep::Freed),
+        (releasing, AllocationStep::Releasing),
+    ] {
+        assert_eq!(
+            rig.jobs.requeue_failed_prepare(&id),
+            Err(JobStoreError::AllocationNotBooked {
+                id: id.clone(),
+                step,
+            }),
+            "a_requeued_job_gets_a_new_allocation: a job whose allocation is {step:?} was requeued"
+        );
+    }
+    assert_eq!(
+        rig.snapshot(),
+        before,
+        "a_requeued_job_gets_a_new_allocation: a refused requeue wrote"
+    );
+    assert_eq!(
+        rig.jobs
+            .get_allocation(&absent)
+            .expect("reads")
+            .and_then(|allocation| allocation.end_reason),
+        Some(EndReason::HostAbsent),
+        "a_requeued_job_gets_a_new_allocation: the first end of the allocation did not stand"
+    );
+
+    let lost_row = rig.queue_spec("w-no-row", whole_host_spec());
+    rig.jobs
+        .place(&lost_row, host("host-f"), Booked::WholeHost)
+        .expect("placed");
+    rig.delete_raw("alloc/w-no-row");
+    assert_eq!(
+        rig.jobs.requeue_failed_prepare(&lost_row),
+        Err(JobStoreError::NoAllocation { id: lost_row }),
+        "a_requeued_job_gets_a_new_allocation: a job with no allocation row was requeued"
+    );
+}
+
+/// A source that repeats the freed allocation's id is drawn again, so a placement after a
+/// requeue never reuses the id the agent's fence knows the old placement by; a source that
+/// only repeats it is given up on, writing nothing.
+pub fn a_repeated_allocation_id_is_drawn_again<B: Backend>(backend: &B) {
+    let name = "a_repeated_allocation_id_is_drawn_again";
+    let rig = rig(backend);
+    let first = [0x11; 16];
+    let other = [0x22; 16];
+    let jobs = rig.minting(ScriptedIds::new(first, [first, other]));
+    let id = rig.queue_spec("rep", whole_host_spec());
+    let (_, placed) = jobs
+        .place(&id, host("host-a"), Booked::WholeHost)
+        .expect("placed");
+    assert_eq!(placed.allocation_id, AllocationId::from_bits(first));
+    jobs.requeue_failed_prepare(&id).expect("requeued");
+    let (_, again) = jobs
+        .place(&id, host("host-a"), Booked::WholeHost)
+        .expect("a_repeated_allocation_id_is_drawn_again: placed again");
+    assert_eq!(
+        again.allocation_id,
+        AllocationId::from_bits(other),
+        "{name}: the placement after a requeue reused the earlier allocation id"
+    );
+
+    let stuck = rig.minting(ScriptedIds::new(first, []));
+    let id = rig.queue_spec("rep-stuck", whole_host_spec());
+    stuck
+        .place(&id, host("host-a"), Booked::WholeHost)
+        .expect("placed");
+    stuck.requeue_failed_prepare(&id).expect("requeued");
+    let before = rig.snapshot();
+    assert_eq!(
+        stuck.place(&id, host("host-a"), Booked::WholeHost),
+        Err(JobStoreError::IdSpaceExhausted { tries: MINT_TRIES }),
+        "{name}: a source of only the earlier id was not given up on"
+    );
+    assert_eq!(rig.snapshot(), before, "{name}: giving up wrote");
 }
 
 /// What a host's live allocations book: shares and the whole host summed, releasing ones

@@ -1,8 +1,11 @@
 # Golden rows
 
 Rows as an older build wrote them, which this build must still read
-(`a_row_without_the_newest_tag_reads_with_defaults` in `src/suite/rows.rs`). A golden file
-is never rewritten: a change to the encoding that cannot read one is not additive.
+(`a_row_without_the_newest_tag_reads_with_defaults` in `src/suite/rows.rs`). Once a release
+has written rows, a golden file is never rewritten: a change to the encoding that cannot read
+one is not additive. (Before the first release the time encoding changed from one `u64` of
+nanoseconds to whole seconds and nanoseconds, and this file was written again for it; no
+build ever released the earlier encoding.)
 
 ## `job-before-network.bin`
 
@@ -26,5 +29,5 @@ reads with the defaults: network `none`, no ports, no files, no retention end.
 | 20 | labels | empty |
 | 21 | priority | 3 |
 | 22 | state | 0 (queued) |
-| 23 | submitted at | 5 s on the store's clock (5 000 000 000 ns) |
+| 23 | submitted at | 5 s on the store's clock (seconds 5, nanoseconds 0) |
 | 28 | cancel requested | 0 |

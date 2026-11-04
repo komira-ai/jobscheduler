@@ -76,6 +76,15 @@ pub enum JobStoreError {
         /// Where its allocation is.
         step: AllocationStep,
     },
+    /// The job's allocation already began to release, or was freed, so a requeue would
+    /// overwrite how it ended.
+    #[error("job {id} has an allocation that is {step:?}, not booked")]
+    AllocationNotBooked {
+        /// The job.
+        id: JobId,
+        /// Where its allocation is.
+        step: AllocationStep,
+    },
     /// The job neither ended nor was asked to cancel, so its allocation stays booked.
     #[error("job {id} has not ended and no cancel was asked for")]
     NotReleasable {
@@ -194,6 +203,13 @@ mod tests {
                     step: AllocationStep::Booked,
                 },
                 "job a still has an allocation that is Booked",
+            ),
+            (
+                JobStoreError::AllocationNotBooked {
+                    id: id.clone(),
+                    step: AllocationStep::Freed,
+                },
+                "job a has an allocation that is Freed, not booked",
             ),
             (
                 JobStoreError::NotReleasable { id: id.clone() },

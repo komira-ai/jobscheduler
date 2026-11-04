@@ -3,7 +3,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use js_state::{Commit, Cond, Conflict, ResumeToken, ScanRange, Store, Txn, Version, Versioned};
+use js_state::{Commit, Cond, ResumeToken, ScanRange, Store, Txn, Version, Versioned};
 use js_types::HostId;
 
 use crate::codec::{
@@ -87,23 +87,56 @@ fn schema_of(row: Option<Versioned>) -> Result<u32, JobStoreError> {
     Ok(u32::from_be_bytes(bytes))
 }
 
+/// `record`, read from the row `key`, when the key is `own`, the key the record names itself
+/// by: a row under another job's key is [`DecodeError::WrongKey`].
+fn same_key<T>(key: &str, own: String, record: T) -> Result<T, DecodeError> {
+    if key == own {
+        Ok(record)
+    } else {
+        Err(DecodeError::WrongKey)
+    }
+}
+
+/// The job the row `key` holds.
+fn job_at(key: &str, value: &[u8]) -> Result<JobRecord, JobStoreError> {
+    decode_job(value)
+        .and_then(|job| same_key(key, keys::job(&job.id), job))
+        .map_err(|why| JobStoreError::row(key, why))
+}
+
+/// The allocation the row `key` holds.
+fn allocation_at(key: &str, value: &[u8]) -> Result<AllocationRecord, JobStoreError> {
+    decode_allocation(value)
+        .and_then(|allocation| same_key(key, keys::allocation(&allocation.job), allocation))
+        .map_err(|why| JobStoreError::row(key, why))
+}
+
 impl<S: Store, I: IdSource> JobStore<S, I> {
-    /// The job store over `store`, minting ids from `ids`. The first store to open writes the
-    /// schema version; a version above this build's is accepted, since rows change only by
-    /// adding fields.
+    /// The job store over `store`, minting ids from `ids`. The schema row is read; when there
+    /// is none, this build's version is written with `Cond::Absent`, and when another store
+    /// wrote one first, that one is read. A version above this build's is accepted, since rows
+    /// change only by adding fields. As with every operation, an error means nothing was
+    /// written: no read follows the commit that writes the row.
     ///
     /// # Errors
     /// [`JobStoreError::Store`] when the store fails; [`JobStoreError::Corrupt`] when the
     /// schema row is not four bytes.
     pub fn new(store: Arc<S>, ids: I) -> Result<JobStore<S, I>, JobStoreError> {
-        let mark = Txn::new().put(
-            keys::SCHEMA,
-            SCHEMA_VERSION.to_be_bytes().to_vec(),
-            Cond::Absent,
-        );
-        // A conflict is a schema row another store wrote first; it is read back below.
-        let _first: Result<Commit, Conflict> = store.txn(mark)?;
-        let schema = schema_of(store.get(keys::SCHEMA)?)?;
+        let schema = match store.get(keys::SCHEMA)? {
+            Some(row) => schema_of(Some(row))?,
+            None => {
+                let mark = Txn::new().put(
+                    keys::SCHEMA,
+                    SCHEMA_VERSION.to_be_bytes().to_vec(),
+                    Cond::Absent,
+                );
+                match store.txn(mark)? {
+                    Ok(_) => SCHEMA_VERSION,
+                    // Another store wrote the row between the read and the commit.
+                    Err(_) => schema_of(store.get(keys::SCHEMA)?)?,
+                }
+            }
+        };
         Ok(JobStore { store, ids, schema })
     }
 
@@ -209,11 +242,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// placed on `host`, and its allocation is written as booked with a newly minted
     /// allocation id. The job must still be queued at the version read, and its allocation
     /// row must still be absent, or freed (a requeued job's earlier allocation, which the new
-    /// one overwrites), at the version read.
+    /// one overwrites), at the version read. The new allocation id differs from the freed
+    /// row's: a source that repeats it is drawn again, at most [`MINT_TRIES`] times.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not
     /// queued; [`JobStoreError::AllocationHeld`] when its allocation is not freed;
+    /// [`JobStoreError::IdSpaceExhausted`] when every allocation id drawn was the freed row's;
     /// [`JobStoreError::Stale`] when either row changed before the commit; as for any read and
     /// write.
     pub fn place(
@@ -231,8 +266,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 found: job.state,
             },
         )?;
-        let allocation_cond = match self.read_allocation(id)? {
-            None => Cond::Absent,
+        let (allocation_cond, earlier_id) = match self.read_allocation(id)? {
+            None => (Cond::Absent, None),
             Some((earlier, version)) => {
                 ensure(
                     earlier.step == AllocationStep::Freed,
@@ -241,13 +276,14 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                         step: earlier.step,
                     },
                 )?;
-                Cond::Version(version)
+                (Cond::Version(version), Some(earlier.allocation_id))
             }
         };
+        let allocation_id = self.fresh_allocation_id(earlier_id)?;
         let now = self.store.now();
         let allocation = AllocationRecord {
             job: id.clone(),
-            allocation_id: AllocationId::from_bits(self.ids.mint()?),
+            allocation_id,
             host: host.clone(),
             booked,
             step: AllocationStep::Booked,
@@ -353,6 +389,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// [`JobStoreError::UnexpectedState`] when the job is not placed;
     /// [`JobStoreError::IllegalTransition`] when it does not need the whole host or a cancel
     /// was asked for (it is then cancelled, not requeued); [`JobStoreError::NoAllocation`];
+    /// [`JobStoreError::AllocationNotBooked`] when the allocation is already releasing or
+    /// freed (its first end stands);
     /// [`JobStoreError::Stale`]; as for any read and write.
     pub fn requeue_failed_prepare(
         &self,
@@ -376,6 +414,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             },
         )?;
         let (allocation, allocation_version) = self.allocation_row(id)?;
+        ensure(
+            allocation.step == AllocationStep::Booked,
+            JobStoreError::AllocationNotBooked {
+                id: id.clone(),
+                step: allocation.step,
+            },
+        )?;
         let now = self.store.now();
         let queued = JobRecord {
             state: JobState::Queued,
@@ -535,7 +580,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let mut jobs = Vec::new();
         let mut skipped = Vec::new();
         for (key, row) in page.rows {
-            match decode_job(&row.value) {
+            match decode_job(&row.value).and_then(|job| same_key(&key, keys::job(&job.id), job)) {
                 Ok(job) => {
                     if state.is_none_or(|state| state == job.state) {
                         jobs.push(job);
@@ -565,8 +610,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     pub fn booked_on(&self, host: &HostId) -> Result<HostBooking, JobStoreError> {
         let mut total = HostBooking::default();
         for (key, row) in self.store.scan_prefix(keys::ALLOCATION)? {
-            let allocation =
-                decode_allocation(&row.value).map_err(|why| JobStoreError::row(&key, why))?;
+            let allocation = allocation_at(&key, &row.value)?;
             if allocation.host == *host && allocation.step != AllocationStep::Freed {
                 total = total
                     .plus(&allocation.booked)
@@ -582,11 +626,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let key = keys::job(id);
         self.store
             .get(&key)?
-            .map(|row| {
-                decode_job(&row.value)
-                    .map(|record| (record, row.version))
-                    .map_err(|why| JobStoreError::row(&key, why))
-            })
+            .map(|row| Ok((job_at(&key, &row.value)?, row.version)))
             .transpose()
     }
 
@@ -602,12 +642,23 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let key = keys::allocation(id);
         self.store
             .get(&key)?
-            .map(|row| {
-                decode_allocation(&row.value)
-                    .map(|record| (record, row.version))
-                    .map_err(|why| JobStoreError::row(&key, why))
-            })
+            .map(|row| Ok((allocation_at(&key, &row.value)?, row.version)))
             .transpose()
+    }
+
+    /// An allocation id for a placement, other than `earlier`, the id of the freed allocation
+    /// the placement replaces.
+    fn fresh_allocation_id(
+        &self,
+        earlier: Option<AllocationId>,
+    ) -> Result<AllocationId, JobStoreError> {
+        for _ in 0..MINT_TRIES {
+            let drawn = AllocationId::from_bits(self.ids.mint()?);
+            if Some(drawn) != earlier {
+                return Ok(drawn);
+            }
+        }
+        Err(JobStoreError::IdSpaceExhausted { tries: MINT_TRIES })
     }
 
     fn allocation_row(&self, id: &JobId) -> Result<(AllocationRecord, Version), JobStoreError> {
@@ -738,5 +789,62 @@ mod tests {
             Vec::new()
         );
         assert_eq!(store.scan_prefix(keys::JOB).expect("reads").len(), 1);
+    }
+
+    /// A log sink a test reads back.
+    #[derive(Clone, Default)]
+    struct Lines(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Lines {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Lines {
+        type Writer = Lines;
+
+        fn make_writer(&'a self) -> Lines {
+            self.clone()
+        }
+    }
+
+    // Catches a row a later build wrote that a list leaves out without a word: the warning
+    // names the row's key.
+    #[test]
+    fn a_list_logs_each_row_it_skips() {
+        use std::io::Write as _;
+
+        let lines = Lines::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(lines.clone())
+            .with_ansi(false)
+            .finish();
+        let store = fake();
+        store
+            .txn(Txn::new().put("job/later", vec![crate::codec::FORMAT + 1], Cond::Any))
+            .expect("reachable")
+            .expect("commits");
+        let jobs = JobStore::new(store, RandomIds).expect("opens");
+        let page = tracing::subscriber::with_default(subscriber, || {
+            jobs.list_jobs(None, None, std::num::NonZeroUsize::MIN)
+                .expect("lists")
+        });
+        assert_eq!(page.skipped, ["job/later"]);
+        lines.clone().flush().expect("flushes");
+        let said = String::from_utf8(lines.0.lock().expect("unpoisoned").clone()).expect("text");
+        assert!(
+            said.contains("a job row a later build wrote is left out of the list")
+                & said.contains("key=job/later"),
+            "{said}"
+        );
     }
 }
