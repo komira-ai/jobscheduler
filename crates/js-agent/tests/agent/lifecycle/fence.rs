@@ -78,11 +78,12 @@ fn the_same_job_with_a_new_allocation_is_accepted() {
     h.fake.exit("j1", 0);
     h.life.step();
     ack_job(&mut h, "j1");
-    let events = names(&h.apply(vec![job_start("j1", "a1"), job_start("j1", "a2")]));
-    assert_eq!(
-        events,
-        ["skipped j1 FenceRetired", "skipped j1 FenceRetired"]
-    );
+    // One reply names a job once (the wire refuses a repeated job id), so each start comes
+    // in a reply of its own, as the server resends them.
+    for allocation in ["a1", "a2"] {
+        let events = names(&h.apply(vec![job_start("j1", allocation)]));
+        assert_eq!(events, ["skipped j1 FenceRetired"], "{allocation}");
+    }
     assert_eq!(created(&h).len(), 2);
 }
 
