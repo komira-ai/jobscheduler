@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Phase, Taint, Welcome, WireShape};
 use js_caps::{BUNDLE_ROOT, EXEC, FLAG_SET, HostContract, RUN_FILES, RUNTIME, SCRATCH_QUOTA};
 use js_lease::{Clock, Timestamp};
-use js_pool_static::HostBook;
+use js_provider::HostBook;
 use js_provider::Observed;
 use js_types::sched::usage::NodeLoad;
 use js_types::{ExecMode, HostId, LeaseId, MemoryHeadroom, ProviderId, RequestId, Shape};

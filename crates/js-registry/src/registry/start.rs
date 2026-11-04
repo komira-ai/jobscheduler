@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use js_elastic::Demand;
 use js_lease::Timestamp;
-use js_pool_static::{Candidate, HostBook};
+use js_provider::{Candidate, HostBook};
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
 use js_types::{Admission, Capabilities, HostId, LeaseId, ResourceClass, Resources, Shape};
 
@@ -128,7 +128,7 @@ impl Registry {
         *dropped += reserve::advance(marks, waiting, requests, pass);
     }
 
-    /// Books `spec`'s lease as [`js_pool_static::HostBook`] does. A `Whole` class is
+    /// Books `spec`'s lease as [`js_provider::HostBook`] does. A `Whole` class is
     /// committed, not granted: the booking is made only on a host that is bookable (live,
     /// serving, clean), quiet (no held run, none live here) and clear of another
     /// whole-node lease or a restore, and the answer is `Unknown` so the lease stays

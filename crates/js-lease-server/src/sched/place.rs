@@ -48,7 +48,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use js_lease::Clock;
-use js_pool_static::Candidate;
+use js_provider::Candidate;
 use js_provider::{RefusalCode, StartSpec};
 use js_registry::{MarkedTails, Placer, ProbeHost};
 use js_types::sched::FarmTime;
@@ -303,7 +303,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
-    use js_pool_static::Held;
+    use js_provider::Held;
     use js_sched::Backfill;
     use js_types::{Admission, ClassId, HostId, LeaseId, Request as HostRequest};
     use js_types::{ResourceClass, Resources, Shape};

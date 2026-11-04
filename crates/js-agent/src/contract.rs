@@ -6,11 +6,12 @@
 //! ([`js_caps::DETECTED_KEYS`]), so a pool that requires them is not satisfied by a
 //! host's say-so:
 //!
-//! - `runtime` and `exec` are `container` for an agent given `--container-bin`. The hello
-//!   is sent only after the job half has started, which opened the program the flag names,
-//!   ran it (`--version`) and found Docker or Podman; an engine that does not run ends the
-//!   agent first, so no hello names a runtime that was not found. An agent that runs no
-//!   jobs (no `--container-bin`) reports neither.
+//! - `runtime` and `exec` are `container` for an agent that runs container jobs: the engine
+//!   of `--runtime docker --container-bin`, or `crun`. The hello is sent only after the job
+//!   half has started, which for the engine opened the program the flag names, ran it
+//!   (`--version`) and found Docker or Podman; a runtime that does not start ends the agent
+//!   first, so no hello names a runtime that was not found. An agent that runs no jobs
+//!   (`--runtime none`) reports neither.
 //! - `run-files` is `true` for an agent with a run files root (`--run-files-root`, on a
 //!   tmpfs): it writes a start's `files` and mounts them at `/run/js-files`. The server sends a start with files to a host that reports it only.
 //! - `scratch-quota` is `project` and `scratch-default-gib` is the GiB a run without
@@ -65,7 +66,7 @@ impl ToolkitHook {
     ///
     /// The text names the flag: the path is not absolute, or `--container-bin` is not
     /// given (the toolkit is the container engine's, and an agent without one runs no
-    /// job).
+    /// engine job).
     pub(crate) fn from_cli(cli: &Cli) -> Result<Option<Self>, String> {
         let Some(path) = &cli.gpu_toolkit_hook else {
             return Ok(None);

@@ -13,7 +13,7 @@ use js_agent_wire::DEFAULT_GRACE_MS;
 use js_agent_wire::limits::MAX_MEMORY_BYTES;
 use js_agent_wire::{ExclusiveRefusal, RefusalReason};
 use js_agent_wire::{LoadDrops, NodeLoad as Wire};
-use js_pool_static::Candidate;
+use js_provider::Candidate;
 use js_provider::Observed;
 use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{

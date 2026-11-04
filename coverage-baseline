@@ -43,7 +43,7 @@ js-oci                      0      0
 js-platform                 0      -
 js-pool-static              0      0
 js-proto                    0      -
-js-provider                 0      -
+js-provider                 0      0
 js-provider-fake            0      0
 js-provider-lambdalabs      0      0
 js-registry                 0      0
