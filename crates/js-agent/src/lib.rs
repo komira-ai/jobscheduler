@@ -42,7 +42,7 @@
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
 //! | `--label k=v` | a label on the host; repeatable |
-//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle` and `bundle-root` are detected and cannot be set |
+//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `gpu-passthrough`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle` and `bundle-root` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | not available yet: refused at start, because the scheduler does not record a host job's taint yet; without it a start with `isolation = host` creates nothing and is refused |
@@ -79,7 +79,7 @@
 //! | `--container-add-host <name>:<ip>` | a static host entry for every container, passed at create as `--add-host`; repeatable, at most 16; the name is a DNS name, the address IPv4 or IPv6 (`host-gateway` and anything else is refused, a name twice too); a network made without DNS resolves nothing, and a presigned URL names its host (its signature covers the Host header), so every endpoint a job may reach is given this way; needs `--container-bin` |
 //! | `--container-egress-allow <ip:port>` | an endpoint a named network may reach, `IPV4:PORT` or `CIDR:PORT` (prefix 24 to 32, outside 169.254.0.0/16 and the network's own subnet); repeatable, at most 16; required with a named `--container-network` (the agent does not start without it); before every job is created the agent reads back the network (a bridge, DNS off, no IPv6, one IPv4 subnet), `br_netfilter` and the nftables table `inet js_egress`, and refuses the job (`egress-unchecked`) unless the table holds exactly the rules for these endpoints; Podman only; see docs/egress.md; needs `--container-bin` |
 //! | `--container-nft <path>` | the absolute path of `nft` for that check; by default `/usr/sbin/nft`; needs `--container-egress-allow` |
-//! | `--egress <none\|allow-list>` | the network a job's `crun` container gets: `none` (the default) loopback only, no route; `allow-list` one interface to the host, which forwards only what `--egress-allow` and `--egress-dns` name; the agent, as root, wires each container from outside and keeps the firewall (docs/design/agent-egress.md); only the `crun` runtime reads it and this build cannot select that runtime yet, so `allow-list` is refused at start, as is `--container-network` beside it |
+//! | `--egress <none\|allow-list>` | the network a job's `crun` container gets: `none` (the default) loopback only, no route; `allow-list` one interface to the host, which forwards only what `--egress-allow` and `--egress-dns` name; the agent, as root, wires each container from outside after its start, while the container's init holds the job until its default route is there, keeps the firewall and checks it before every create (`egress-unchecked` when it changed), and takes the wiring down when the run ends or is removed (docs/design/agent-egress.md); started once, after the claims of the scratch root and the host id, holding the host's egress (the abstract socket `@js-agent-egress`: one allow-list agent per host, a second is refused), and an allow-list that cannot be set up ends the agent with status 2; only `--runtime crun` reads it, so another runtime is refused `allow-list` at start, and `--container-network` is refused beside it |
 //! | `--egress-allow <ip:port>` | an endpoint an allow-list may reach, `IPV4:PORT` or `CIDR:PORT` (TCP; prefix 24 to 32, outside 169.254.0.0/16 and the pool); repeatable, at most 16; at least one is required; needs `--egress allow-list` |
 //! | `--egress-dns <ip>` | a resolver an allow-list may ask (UDP and TCP port 53) and the only nameserver of a job's `resolv.conf`; repeatable, at most 4; without one a job resolves no name; needs `--egress allow-list` |
 //! | `--egress-pool <cidr>` | the IPv4 network the jobs' addresses come from, one /30 each, `/16` to `/24`; by default `198.18.0.0/16`; needs `--egress allow-list` |
@@ -89,6 +89,9 @@
 //! | `--runtime <docker\|crun>` | what runs a job: `docker` (the engine program of `--container-bin`, Docker or Podman, which is also what no flag means) or `crun` (js-contain over the distribution's `crun`, each command run as `--job-user`; Linux only). The packaged unit of the Docker cloud hosts names `--runtime docker`; the unit for the Linux farm (`packaging/js-agent/js-agent-crun.service`) names `--runtime crun`. With `crun` the agent checks the host before it registers and exits 2 naming every piece that is missing: `crun` at `--crun-bin` and its version (1.14 or newer), `newuidmap` and `newgidmap`, the job user and its subuid and subgid ranges (65536 ids or more each), the state root (`0700`, owned by root) and the scratch root (`0711`, owned by root, every directory above it searchable by the job user), `crun`, `newuidmap` and `newgidmap` executable by the job user, the cgroup version 2 controllers `cpu`, `memory` and `pids` in the agent's own cgroup (`Delegate=yes`), and, where `kernel.apparmor_restrict_unprivileged_userns` is 1, a loaded AppArmor profile for `crun`. Then the worker runs jobs through `CrunRuntime`: images are pulled by the agent's registry client from the `--image-allow` entries into a store beside the scratch root (`oci`), and the agent takes no `--mount-root` or `--mount-root-ro` with it, because the runtime does not read a job's binds back yet |
 //! | `--crun-bin <path>` | the `crun` of `--runtime crun`; by default `/usr/bin/crun`, the path the distribution's AppArmor profile attaches to; any other path starts the agent with a warning (and is refused by the kernel where user namespaces are restricted) |
 //! | `--job-user <name>` | the non-root user every `crun` command runs as, whose subuid and subgid ranges every job's user namespace is mapped onto; required with `--runtime crun`, and needs it |
+//! | `--gpu-device <path>` | a character device below `/dev` a `crun` job that booked a GPU is given; repeatable. With `{index}` (`/dev/nvidia{index}`) it is one GPU's node, given for each index the job booked and no other; without it (`/dev/nvidiactl`, `/dev/nvidia-uvm`) every GPU job gets it. Each node must be a character device at start, for every GPU the host offers, and the host must offer one; the cgroup of a GPU job allows exactly its nodes. With it the crun runtime runs GPU jobs and the hello reports `gpu-passthrough`; without it a start that names a GPU is refused `gpu-unsupported`. Needs `--runtime crun` |
+//! | `--gpu-mount <src>:<dst>` | a host directory a `crun` GPU job is given read-only (`nosuid,nodev`, not recursive), such as the driver's libraries; repeatable; both absolute, the source a directory not below `/proc`, `/sys` or `/dev`, the destination not at or below those, `/scratch` or a place the runtime mounts itself (`/work`, `/root`, `/tmp`, `/var/tmp`, `/run`, the `/etc` name files), nor hold one of them (`/etc`, `/var`), nor at or below another's. A file source is refused: binding a file where the image has none would leave a file in the image's root that every job of that image shares. A GPU job whose image has a link or a file on the way to the destination, or whose driver directory is gone, is refused when it starts, naming the flag. Needs `--gpu-device` |
+//! | `--gpu-env <name>=<value>` | a variable set in a `crun` GPU job's environment, over the image's of that name, such as the library path; repeatable; the name `[A-Z_][A-Z0-9_]*`, not starting with `JS_`, given once; needs `--gpu-device` |
 //! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci; the Docker and Podman runtimes pull as `--container-pull` says and do not read it |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; needs `--container-bin` |
 //! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; needs `--container-bin` |
@@ -146,8 +149,10 @@
 //!
 //! The host contract (see `contract`): once the job half has started, which ran the engine
 //! program, the hello carries `runtime=container` and `exec=container`; with GPUs offered
-//! and a `--gpu-toolkit-hook` that exits 0 it also carries `gpu-toolkit=true`. An agent that
-//! runs no jobs reports none of them, as an older agent does not. A pool that declares an
+//! and a `--gpu-toolkit-hook` that exits 0 it also carries `gpu-toolkit=true`; a `crun` agent
+//! given `--gpu-device` carries `gpu-passthrough=true`, which tells the operator it gives jobs
+//! the GPUs they book (it is not a placement rule). An agent that runs no jobs reports none
+//! of them, as an older agent does not. A pool that declares an
 //! execution mode refuses a host without them (`host-contract`, `execution-mismatch`).
 //!
 //! On Linux the CPU count and memory are the lowest of the machine's total and what the
@@ -392,12 +397,14 @@ enum Failure {
 /// Checks `--runtime` and the flags that belong to it, and for `crun` the host: a wrong
 /// flag or a missing piece of the host ends the agent with status 2 before it registers.
 /// For `crun` it returns the settings of the crun runtime, which stand where
-/// `--container-bin` stands for the engines.
+/// `--container-bin` stands for the engines; `gpus` are the indices of the GPUs the host
+/// offers, whose nodes the GPU flags must name.
 fn runtime_flags(
     cli: &Cli,
     platform: &Platform,
     services: &Services<'_>,
     image_allow: Vec<js_oci::Allow>,
+    gpus: &[u32],
     err: &mut dyn Write,
 ) -> Result<Option<Settings>, Failure> {
     let usage = |text: &str| Err(Failure::Usage(text.to_owned()));
@@ -408,22 +415,22 @@ fn runtime_flags(
             }
             #[cfg(target_os = "linux")]
             {
+                // The GPU flags need no host check, so a wrong one is named first.
+                let passthrough = crun::GpuPassthrough::from_cli(cli, gpus, crun::read_node);
+                let passthrough = passthrough.map_err(|why| Failure::Usage(why.to_string()))?;
                 let host = services.machine.crun_host();
                 let ready = crun_host::start(cli, &host, services.commands);
                 let ready = ready.map_err(Failure::Usage)?;
                 for warning in &ready.warnings {
                     let _ = writeln!(err, "js-agent: warning: {warning}");
                 }
-                Ok(Some(Settings::for_crun(
-                    ready.crun,
-                    &ready.job_user,
-                    ready.job_ids,
-                    image_allow,
-                )))
+                let settings =
+                    Settings::for_crun(ready.crun, &ready.job_user, ready.job_ids, image_allow);
+                Ok(Some(settings.with_gpus(passthrough)))
             }
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = (services, image_allow, err);
+                let _ = (services, image_allow, gpus, err);
                 usage("--runtime crun: this build has no crun runtime")
             }
         }
@@ -432,7 +439,12 @@ fn runtime_flags(
         }
         _ if cli.crun_bin.is_some() => usage("--crun-bin: needs --runtime crun"),
         _ if cli.job_user.is_some() => usage("--job-user: needs --runtime crun"),
-        _ => Ok(None),
+        // Only the crun runtime gives a job a GPU's nodes: the engines take theirs by index
+        // from the toolkit, and a Mac runs no container.
+        _ => match cli.gpu_flags().into_iter().find(|(_, given)| *given) {
+            Some((flag, _)) => usage(&format!("{flag}: needs --runtime crun")),
+            None => Ok(None),
+        },
     }
 }
 
@@ -619,7 +631,13 @@ fn execute(
                 .to_owned(),
         ));
     }
-    let crun = runtime_flags(&cli, platform, services, image_allow, err)?;
+    let gpus: Vec<u32> = offer
+        .hello
+        .gpu_devices
+        .iter()
+        .map(|gpu| gpu.index)
+        .collect();
+    let crun = runtime_flags(&cli, platform, services, image_allow, &gpus, err)?;
     // Native jobs need the Seatbelt and the helper of a Mac.
     if cli.native_helper_socket.is_some() && !platform.is_macos() {
         return Err(Failure::Usage(
@@ -662,6 +680,15 @@ fn execute(
         }
         None => None,
     };
+    // The egress of the crun runtime starts once, here: after the claims, because an
+    // allow-list's start removes every interface and table a previous agent left, which must
+    // not be another agent's that still runs. Mode none starts nothing.
+    #[cfg(target_os = "linux")]
+    if let Some(plan) = local.container.as_mut().and_then(Settings::crun_mut) {
+        let started = crun::start_egress(&local.egress, crate::egress::Egress::start);
+        let mode = local.egress.mode();
+        plan.egress = started.map_err(|why| Failure::Usage(format!("--egress {mode}: {why}")))?;
+    }
     local
         .check_filesystems(services.files)
         .map_err(Failure::Usage)?;
@@ -710,6 +737,15 @@ fn execute(
     // only after the job half below has started, and that ends the agent first if the program
     // (or the helper) does not run, so no hello that names a runtime is sent for one that was
     // not found.
+    // A crun agent given a device list gives jobs the GPUs they book.
+    #[cfg(target_os = "linux")]
+    let passthrough = local
+        .container
+        .as_ref()
+        .and_then(Settings::crun)
+        .is_some_and(|plan| plan.gpus.is_some());
+    #[cfg(not(target_os = "linux"))]
+    let passthrough = false;
     let reported = match (local.container.is_some(), local.native.is_some()) {
         (true, _) => Some(contract::report(
             &mut offer.hello,
@@ -717,6 +753,7 @@ fn execute(
             commands,
             local.files.is_some(),
             default_gib,
+            passthrough,
         )),
         (false, true) => Some(contract::report_native(&mut offer.hello)),
         (false, false) => None,

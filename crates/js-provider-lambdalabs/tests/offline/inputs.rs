@@ -4,7 +4,7 @@
 use std::num::NonZeroUsize;
 
 use js_elastic::{
-    Acquired, BootPayload, ElasticProvider, Reason, Refusal, RefusalCode, SchedulerId,
+    Acquired, BootPayload, CapacityProvider, Reason, Refusal, RefusalCode, SchedulerId,
 };
 use js_provider_lambdalabs::{ApiError, Call, ElasticConfig, ErrorCode, PrepareError};
 

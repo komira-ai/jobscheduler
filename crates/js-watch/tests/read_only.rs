@@ -79,7 +79,7 @@ fn holders() -> Vec<String> {
         ["Lambda", "Api"].concat(),
         "LambdaProvider".to_owned(),
         ["Http", "Api"].concat(),
-        "ElasticProvider".to_owned(),
+        "CapacityProvider".to_owned(),
         "Aborter".to_owned(),
         "LambdaTarget".to_owned(),
         "client::aborter".to_owned(),

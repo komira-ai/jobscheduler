@@ -10,12 +10,17 @@ use std::sync::Arc;
 use js_contain::OciConfig;
 use js_contain::container::ACTION_ID;
 use js_contain::delegate::{self, PROC_SELF_CGROUP};
+use js_contain::oci::RESOLV_CONF;
 use js_contain::subids::IdFiles;
 use js_oci::{Client, Policy};
 
-use super::{CgroupSettings, CrunError, CrunRuntime, CrunSettings, Hooks, config_dir};
+use super::{
+    CgroupSettings, CrunError, CrunRuntime, CrunSettings, GpuSettings, Hooks, config_dir, port_of,
+    read_node,
+};
 use crate::cli_runtime::{CGROUP_ROOT, CrunPlan, Mapping};
 use crate::crun_host::CrunHost;
+use crate::egress::{Config, Egress};
 use crate::image::RegistryImages;
 
 /// The directories `crun`, run as the job user, finds `newuidmap` and `newgidmap` in.
@@ -24,14 +29,22 @@ pub const ID_TOOL_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 /// The threads that pull images.
 pub const PULL_THREADS: usize = 2;
 
-/// The backend's configuration for the `crun` at `crun` and the job user `job_ids`: every
-/// `crun` command runs as that user, finding the id tools in [`ID_TOOL_PATH`].
+/// The backend's configuration for the `crun` at `crun`, the job user `job_ids` and the
+/// egress `egress`: every `crun` command runs as that user, finding the id tools in
+/// [`ID_TOOL_PATH`]. An allow-list gives every container the configured resolvers as its
+/// only nameservers (the backend's loopback one when it names none) and has its init hold
+/// the job until the default route is there ([`Config::route_wait`]); mode none changes
+/// neither.
 #[must_use]
-pub fn oci_config(crun: &Path, job_ids: (u32, u32)) -> OciConfig {
+pub fn oci_config(crun: &Path, job_ids: (u32, u32), egress: &Config) -> OciConfig {
     OciConfig {
         runtime: crun.to_owned(),
         id_tool_path: Some(ID_TOOL_PATH.into()),
         job_user: Some(job_ids),
+        resolv_conf: egress
+            .resolv_conf()
+            .unwrap_or_else(|| RESOLV_CONF.to_owned()),
+        route_wait: egress.route_wait(),
         ..OciConfig::default()
     }
 }
@@ -179,7 +192,11 @@ pub fn open(
     let policy = Policy::new(plan.image_allow.clone());
     let images = RegistryImages::new(Client::new(policy), std::env::consts::ARCH)?
         .keeping_configs(config_dir(&plan.store));
-    let mut oci = oci_config(&plan.crun, plan.job_ids);
+    // The egress was started once, when the agent started (`start_egress`): every
+    // runtime opened from the plan (the rescue's too) shares it.
+    let none = Config::none();
+    let config = plan.egress.as_ref().map_or(&none, Egress::config);
+    let mut oci = oci_config(&plan.crun, plan.job_ids, config);
     oci.id_files = seams.ids.files.clone();
     oci.id_tool_path = Some(seams.ids.tool_path.clone());
     oci.check_search = seams.ids.check_search;
@@ -193,6 +210,12 @@ pub fn open(
         host_id: host_id.to_owned(),
         pull_threads: PULL_THREADS,
         files: plan.files.clone(),
+        egress: plan.egress.as_ref().map(port_of),
+        // A node is read from the host when a run starts, as the start check read it.
+        gpus: plan.gpus.clone().map(|passthrough| GpuSettings {
+            passthrough,
+            read: read_node,
+        }),
     };
     let runtime = CrunRuntime::open_with(settings, Arc::new(images), seams.hooks)?;
     let (uid, gid) = runtime.subordinate_ids();

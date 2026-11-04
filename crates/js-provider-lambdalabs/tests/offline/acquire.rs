@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use js_elastic::{
-    Acquired, BootPayload, ElasticProvider, HostStatus, Reason, Refusal, RefusalCode, Released,
+    Acquired, BootPayload, CapacityProvider, HostStatus, Reason, Refusal, RefusalCode, Released,
 };
 use js_provider_lambdalabs::{ApiError, Call, ErrorCode, PAYLOAD_LIMIT, SCHEDULER_TAG};
 

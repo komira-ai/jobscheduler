@@ -70,6 +70,7 @@ pub(super) fn container_spec(
         target: target.to_owned(),
         source: source.to_owned(),
         read_only,
+        recursive: true,
     };
     let mut mounts = vec![bind(SCRATCH_TARGET, &run.scratch, false)];
     mounts.extend(
@@ -101,6 +102,8 @@ pub(super) fn container_spec(
         },
         shared: Vec::new(),
         mounts,
+        // A run's GPUs are given after the image's config ([`super::gpu::Wiring::apply`]).
+        devices: Vec::new(),
     }
 }
 

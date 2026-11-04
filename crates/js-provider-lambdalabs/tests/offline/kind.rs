@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, ElasticProvider, HostName, Offer, PriceUnit,
+    AcquireId, AcquireRequest, Acquired, BootPayload, CapacityProvider, HostName, Offer, PriceUnit,
     Reason, RefusalCode, SchedulerId,
 };
 use js_provider_lambdalabs::ManualClock;

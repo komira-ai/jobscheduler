@@ -1217,6 +1217,7 @@ dependencies = [
 name = "js-elastic"
 version = "0.1.0"
 dependencies = [
+ "js-elastic",
  "js-types",
  "sha2 0.11.1",
  "thiserror",
@@ -1263,6 +1264,20 @@ dependencies = [
  "js-testkit",
  "rustix",
  "thiserror",
+]
+
+[[package]]
+name = "js-jobs"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "js-jobs",
+ "js-state",
+ "js-testkit",
+ "js-types",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

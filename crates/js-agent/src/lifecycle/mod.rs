@@ -625,8 +625,7 @@ pub struct Local {
     /// The `--image-allow` flags, in the order given: where an image may be pulled from.
     pub image_allow: Vec<Allow>,
     /// The `--egress*` flags: how much network a `crun` container gets. Mode none unless an
-    /// allow-list was given, which this build refuses until the `crun` runtime wires it
-    /// (see [`crate::egress`]).
+    /// allow-list was given, which only `--runtime crun` takes (see [`crate::egress`]).
     pub egress: crate::egress::Config,
 }
 
@@ -710,7 +709,7 @@ impl Local {
                     .to_owned(),
             );
         }
-        let egress = egress_of(cli)?;
+        let egress = egress_of(cli, crun.is_some())?;
         let mounts = MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;
         let scratch = cli
             .scratch_root
@@ -912,11 +911,11 @@ impl Local {
     }
 }
 
-/// The `--egress*` flags, checked. There is one network mode: the Podman runtime's own
-/// network flags (`--container-network`) cannot be given with this one, and only the `crun`
-/// runtime enforces an allow-list, which cannot be selected yet, so an allow-list is
-/// refused here rather than silently run with no network at all or with the wrong one.
-fn egress_of(cli: &Cli) -> Result<crate::egress::Config, String> {
+/// The `--egress*` flags, checked, for an agent whose runtime is `crun` when `crun`. There is
+/// one network mode: the Podman runtime's own network flags (`--container-network`) cannot
+/// be given with this one, and only the `crun` runtime enforces an allow-list, so another
+/// runtime is refused one rather than silently run with no network at all or the wrong one.
+fn egress_of(cli: &Cli, crun: bool) -> Result<crate::egress::Config, String> {
     use crate::egress::{Config, Flags, Mode};
     let config = Config::from_flags(&Flags {
         mode: cli.egress.as_deref(),
@@ -935,11 +934,10 @@ fn egress_of(cli: &Cli) -> Result<crate::egress::Config, String> {
                 .to_owned(),
         );
     }
-    if config.mode() != Mode::None {
+    if config.mode() != Mode::None && !crun {
         return Err(format!(
-            "--egress {}: only the crun runtime enforces it, and the crun runtime of this \
-             build gives jobs loopback only; with --container-bin the network is \
-             --container-network",
+            "--egress {}: needs --runtime crun, the only runtime that enforces it; with \
+             --container-bin the network is --container-network",
             config.mode()
         ));
     }

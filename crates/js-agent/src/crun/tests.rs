@@ -136,6 +136,7 @@ fn a_run_becomes_the_container_it_asked_for() {
         target: target.to_owned(),
         source: PathBuf::from(source),
         read_only,
+        recursive: true,
     };
     assert_eq!(
         spec.mounts,
@@ -557,4 +558,45 @@ fn a_legacy_lease_path_is_made_only_from_one_plain_name() {
     for bad in ["", ".", "..", "../x", "a/b", "/abs", "x/", "x/.."] {
         assert_eq!(super::legacy_lease(store, bad), None, "{bad:?}");
     }
+}
+
+/// Proves the backend's configuration follows the egress. An allow-list that names
+/// resolvers gives every container those, and only those, as its nameservers and arms the
+/// init's wait for the route; one that names none keeps the backend's loopback nameserver
+/// (nothing answers there) and still arms the wait; mode none changes neither. Catches a job
+/// that starts before its network is wired (no wait: its first connection fails or finds
+/// loopback only), and a container that resolves through another nameserver.
+#[test]
+fn allow_list_sets_the_resolv_conf_and_the_route_wait() {
+    use crate::egress::{Config, Flags, ROUTE_WAIT};
+    use js_contain::oci::RESOLV_CONF;
+    let allow = vec!["192.0.2.10:443".to_owned()];
+    let resolvers = vec!["192.0.2.53".to_owned()];
+    let allow_list = |dns: &[String]| {
+        let flags = Flags {
+            mode: Some("allow-list"),
+            allow: &allow,
+            dns,
+            ip: Some("/bin/sh"),
+            nft: Some("/bin/sh"),
+            nsenter: Some("/bin/sh"),
+            ..Flags::default()
+        };
+        Config::from_flags(&flags).expect("a sound allow-list")
+    };
+    let crun = Path::new("/usr/bin/crun");
+    let named = super::oci_config(crun, (7, 8), &allow_list(&resolvers));
+    assert_eq!(
+        named.resolv_conf,
+        "nameserver 192.0.2.53\noptions timeout:1 attempts:1\n"
+    );
+    assert_eq!(named.route_wait, Some(ROUTE_WAIT));
+    let unnamed = super::oci_config(crun, (7, 8), &allow_list(&[]));
+    assert_eq!(unnamed.resolv_conf, RESOLV_CONF);
+    assert_eq!(unnamed.route_wait, Some(ROUTE_WAIT));
+    let none = super::oci_config(crun, (7, 8), &Config::none());
+    assert_eq!(none.resolv_conf, RESOLV_CONF);
+    assert_eq!(none.route_wait, None);
+    assert_eq!(none.runtime, crun.to_owned());
+    assert_eq!(none.job_user, Some((7, 8)));
 }

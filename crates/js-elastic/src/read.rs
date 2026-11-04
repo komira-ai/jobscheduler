@@ -1,6 +1,6 @@
 //! The read half of a provider: a handle that can look and cannot buy.
 //!
-//! [`ElasticProvider`] holds both halves, the reads and the calls that make or end a
+//! [`CapacityProvider`] holds both halves, the reads and the calls that make or end a
 //! machine. A pool in plan mode must launch nothing, and "nothing calls `acquire`" is a
 //! property of the code that holds the provider. [`ReadHandle`] makes it a property of
 //! the type: it offers the catalog, the checks, the host preparation, the payload limit,
@@ -17,19 +17,19 @@ use crate::answer::Held;
 use crate::boot::BootStep;
 use crate::ids::{AcquireId, HostRef};
 use crate::offer::Offer;
-use crate::provider::{CheckResult, ElasticProvider, ProviderError};
+use crate::provider::{CapacityProvider, CheckResult, ProviderError};
 
 /// A provider seen through its reads only. Cheap to clone.
 #[derive(Clone)]
-pub struct ReadHandle(Arc<dyn ElasticProvider>);
+pub struct ReadHandle(Arc<dyn CapacityProvider>);
 
 impl ReadHandle {
     /// The read half of `provider`.
-    pub fn new(provider: Arc<dyn ElasticProvider>) -> Self {
+    pub fn new(provider: Arc<dyn CapacityProvider>) -> Self {
         Self(provider)
     }
 
-    /// [`ElasticProvider::catalog`].
+    /// [`CapacityProvider::catalog`].
     ///
     /// # Errors
     ///
@@ -38,22 +38,22 @@ impl ReadHandle {
         self.0.catalog()
     }
 
-    /// [`ElasticProvider::checks`].
+    /// [`CapacityProvider::checks`].
     pub fn checks(&self) -> Vec<CheckResult> {
         self.0.checks()
     }
 
-    /// [`ElasticProvider::host_prep`].
+    /// [`CapacityProvider::host_prep`].
     pub fn host_prep(&self, offer: &Offer) -> Vec<BootStep> {
         self.0.host_prep(offer)
     }
 
-    /// [`ElasticProvider::payload_limit`].
+    /// [`CapacityProvider::payload_limit`].
     pub fn payload_limit(&self) -> usize {
         self.0.payload_limit()
     }
 
-    /// [`ElasticProvider::list`].
+    /// [`CapacityProvider::list`].
     ///
     /// # Errors
     ///
@@ -62,12 +62,12 @@ impl ReadHandle {
         self.0.list()
     }
 
-    /// [`ElasticProvider::unresolved`].
+    /// [`CapacityProvider::unresolved`].
     pub fn unresolved(&self) -> Vec<AcquireId> {
         self.0.unresolved()
     }
 
-    /// [`ElasticProvider::is_gone`].
+    /// [`CapacityProvider::is_gone`].
     pub fn is_gone(&self, id: &HostRef) -> bool {
         self.0.is_gone(id)
     }
@@ -78,7 +78,11 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::answer::{Acquired, Released};
+    use crate::answer::{Acquired, Observed, Released};
+    use crate::caps::{Capacity, ProviderCaps};
+    use js_types::ProviderId;
+
+    use crate::ids::Hello;
     use crate::provider::AcquireRequest;
 
     /// A provider that writes down the name of every call made on it.
@@ -91,10 +95,33 @@ mod tests {
         }
     }
 
-    impl ElasticProvider for Recorder {
+    impl CapacityProvider for Recorder {
+        fn id(&self) -> ProviderId {
+            self.note("id");
+            ProviderId::known("recorder")
+        }
+
+        fn can_launch(&self) -> bool {
+            self.note("can_launch");
+            true
+        }
+
+        fn capabilities(&self) -> ProviderCaps {
+            self.note("capabilities");
+            ProviderCaps::default()
+        }
+
         fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
             self.note("catalog");
             Ok(Vec::new())
+        }
+
+        fn capacity(&self) -> Capacity {
+            self.note("capacity");
+            Capacity {
+                supplied: 0,
+                can_add: None,
+            }
         }
 
         fn checks(&self) -> Vec<CheckResult> {
@@ -132,9 +159,19 @@ mod tests {
             Vec::new()
         }
 
+        fn observe(&self, _id: &HostRef) -> Observed {
+            self.note("observe");
+            Observed::Absent
+        }
+
         fn is_gone(&self, _id: &HostRef) -> bool {
             self.note("is_gone");
             true
+        }
+
+        fn verify_instance(&self, _hello: &Hello) -> Option<HostRef> {
+            self.note("verify_instance");
+            None
         }
     }
 
@@ -201,5 +238,27 @@ mod tests {
         );
         let log = provider.0.lock().unwrap().clone();
         assert_eq!(log[reads.len()..], ["acquire", "release"]);
+
+        // The calls the handle does not offer, made on the provider itself, are logged too.
+        assert_eq!(provider.id().as_str(), "recorder");
+        assert!(provider.can_launch());
+        assert_eq!(provider.capabilities(), ProviderCaps::default());
+        assert_eq!(provider.capacity().supplied, 0);
+        assert_eq!(provider.observe(&HostRef("i".to_owned())), Observed::Absent);
+        let hello = Hello {
+            name: "n".to_owned(),
+            instance_id: None,
+        };
+        assert_eq!(provider.verify_instance(&hello), None);
+        let log = provider.0.lock().unwrap().clone();
+        let direct = [
+            "id",
+            "can_launch",
+            "capabilities",
+            "capacity",
+            "observe",
+            "verify_instance",
+        ];
+        assert_eq!(log[reads.len() + 2..], direct);
     }
 }
