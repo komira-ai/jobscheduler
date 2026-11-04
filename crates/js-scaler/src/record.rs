@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use js_elastic::{AcquireId, GpuClass, Offer, PriceUnit};
-use js_types::ExecMode;
+use js_types::{ExecMode, normalise_arch};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::time::Millis;
@@ -158,7 +158,10 @@ impl StoredOffer {
         }
     }
 
-    /// The offer this shape was taken from, priced at `price`, available.
+    /// The offer this shape was taken from, priced at `price`, available. The architecture
+    /// is read in the one spelling, so a record written when offers spelt Arm `aarch64`
+    /// rebuilds an `arm64` offer. The ISA level is not kept in the file: the offers a record
+    /// is taken from, the catalog's, state none, so the rebuilt offer states none either.
     #[must_use]
     pub fn to_offer(&self, price: u64) -> Offer {
         Offer {
@@ -173,7 +176,8 @@ impl StoredOffer {
                 .as_deref()
                 .and_then(|class| GpuClass::parse(class).ok()),
             os: self.os.clone(),
-            arch: self.arch.clone(),
+            arch: normalise_arch(&self.arch).to_owned(),
+            isa_level: None,
             exec: match self.exec {
                 StoredExec::Container => ExecMode::Container,
                 StoredExec::SandboxExec => ExecMode::SandboxExec,

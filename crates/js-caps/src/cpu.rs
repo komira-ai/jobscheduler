@@ -2,52 +2,10 @@
 //! the text the operating system already publishes.
 
 use std::collections::BTreeSet;
-use std::fmt;
-use std::str::FromStr;
 
-use crate::level::{ArmVersion, IsaLevel, X86Level};
+use js_types::{Arch, ArmVersion, IsaLevel, X86Level};
+
 use crate::macos;
-
-/// A CPU architecture, named as in node reports.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Arch {
-    X86_64,
-    Arm64,
-}
-
-impl Arch {
-    /// The report name: `x86_64` or `arm64`.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::X86_64 => "x86_64",
-            Self::Arm64 => "arm64",
-        }
-    }
-}
-
-impl fmt::Display for Arch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-/// A string that names no architecture this crate knows.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("unknown architecture {0:?}")]
-pub struct UnknownArch(pub String);
-
-impl FromStr for Arch {
-    type Err = UnknownArch;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "x86_64" => Ok(Self::X86_64),
-            "arm64" => Ok(Self::Arm64),
-            _ => Err(UnknownArch(s.to_owned())),
-        }
-    }
-}
 
 /// Why capability text could not be parsed.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]

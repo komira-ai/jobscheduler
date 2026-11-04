@@ -25,8 +25,9 @@ fn refused(extra: &[&str], host: &crate::support::Host) -> String {
 }
 
 /// Asserts that the hello offers what was detected when no flag lowers it, with the
-/// detected `os` and `arch`, the operator's capabilities and labels, the pool, and the
-/// GPUs of the host.
+/// detected `os` and `arch` (the architecture in the one spelling: a host whose platform
+/// says `aarch64`, as Rust names it, reports `arm64`), the operator's capabilities and
+/// labels, the pool, and the GPUs of the host. Catches an agent that sends `aarch64`.
 #[test]
 fn the_hello_offers_what_was_detected() {
     let hello = hello_of(
@@ -50,7 +51,7 @@ fn the_hello_offers_what_was_detected() {
     assert_eq!(hello["shape"]["gpu_class"], "apple-m");
     assert_eq!(
         hello["capabilities"],
-        json!({ "os": "macos", "arch": "aarch64", "toolchain": "xcode16" })
+        json!({ "os": "macos", "arch": "arm64", "toolchain": "xcode16" })
     );
     assert_eq!(hello["labels"], json!({ "rack": "r1" }));
     assert_eq!(hello["gpu_devices"], json!([]));

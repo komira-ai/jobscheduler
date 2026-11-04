@@ -18,7 +18,7 @@ use js_elastic::{
     AcquireId, Artifact, BootPlan, BootStep, Demand, Dimension, ElasticProvider, HostName, Offer,
     SchedulerId,
 };
-use js_types::{ExecMode, MemoryHeadroom};
+use js_types::{ExecMode, MemoryHeadroom, normalise_arch};
 use serde::Serialize;
 
 use crate::adapt::SharedClock;
@@ -214,11 +214,9 @@ impl Pool {
         let Some(base) = self.advertise.as_deref() else {
             return Err("server.advertise_url is not set".to_owned());
         };
-        let Some(agent) = self.agents.get(&offer.arch) else {
-            return Err(format!(
-                "the agent binary for {} is not available",
-                offer.arch
-            ));
+        let arch = normalise_arch(&offer.arch);
+        let Some(agent) = self.agents.get(arch) else {
+            return Err(format!("the agent binary for {arch} is not available"));
         };
         let mode = match &self.mode {
             Ok(mode) => mode,
@@ -303,9 +301,10 @@ pub(crate) struct NoOffer {
 }
 
 /// The names of the dimensions an offer can fail, as the status page spells them.
-const DIMENSIONS: [(Dimension, &str); 8] = [
+const DIMENSIONS: [(Dimension, &str); 9] = [
     (Dimension::Os, "os"),
     (Dimension::Arch, "arch"),
+    (Dimension::IsaLevel, "isa_level"),
     (Dimension::Exec, "exec"),
     (Dimension::CpuMillis, "cpu_millis"),
     (Dimension::MemoryBytes, "memory_bytes"),

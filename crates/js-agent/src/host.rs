@@ -7,6 +7,7 @@ use js_agent_wire::limits::MAX_DISK_BYTES;
 use js_agent_wire::{Hello, InstanceIdentity, Phase, ProtocolRange, WireShape};
 
 use js_caps::{DETECTED_KEYS, DISK_GIB};
+use js_types::normalise_arch;
 
 use crate::bundle::{BundleHost, Settings, hello_capabilities, report, reserve_bytes};
 use crate::cli::Cli;
@@ -48,8 +49,9 @@ fn class(
     }
 }
 
-/// The capabilities to report: the operator's, and `os` and `arch` as detected. The keys
-/// of the host contract are detected too and cannot be given.
+/// The capabilities to report: the operator's, and `os` and `arch` as detected, the
+/// architecture in the one spelling (`arm64`, never `aarch64`). The keys of the host
+/// contract are detected too and cannot be given.
 fn capabilities(
     platform: &Platform,
     given: &[(String, String)],
@@ -65,7 +67,7 @@ fn capabilities(
             .cloned()
             .chain([
                 ("os".to_owned(), platform.os.clone()),
-                ("arch".to_owned(), platform.arch.clone()),
+                ("arch".to_owned(), normalise_arch(&platform.arch).to_owned()),
             ])
             .collect()),
     }

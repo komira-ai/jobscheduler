@@ -4,7 +4,7 @@
 use js_elastic::{GpuClass, Offer, PriceUnit};
 use js_registry::{HostMark, HostState, HostView, Waiting as Request};
 use js_scaler::{HostFacts, HostState as Hearing, Mark, Waiting};
-use js_types::{ExecMode, Shape};
+use js_types::{ExecMode, IsaLevel, Shape, normalise_arch};
 
 /// Bytes in a GiB, the unit of the `disk-gib` capability.
 const GIB: u64 = 1 << 30;
@@ -21,6 +21,11 @@ const GIB: u64 = 1 << 30;
 /// request the registry admitted covered by a host that serves it. A host with neither
 /// offers none, so a request for disk is not counted as served by it. It is never
 /// `u64::MAX`: a host said to have all the disk covers a request the scheduler refuses.
+///
+/// The architecture is the host's `arch` capability in the one spelling ([`normalise_arch`]:
+/// an agent that reports `aarch64` offers `arm64`), and the ISA level is the highest of the
+/// levels its `isa_level` capability lists ([`IsaLevel::highest_listed`]); a host that lists
+/// none, or a text that is not a list of levels of one family, states no level.
 ///
 /// Today only agent pools and static host files can book disk; elastic and joined pools
 /// have no `disk_bytes` key, so a request for disk there is refused before the scaler
@@ -46,7 +51,11 @@ fn offer_of(shape: &Shape, booked: &Shape, exec: ExecMode) -> Offer {
             .gpu_class()
             .and_then(|class| GpuClass::parse(class).ok()),
         os: text("os"),
-        arch: text("arch"),
+        arch: normalise_arch(&text("arch")).to_owned(),
+        isa_level: capabilities
+            .get("isa_level")
+            .map(String::as_str)
+            .and_then(IsaLevel::highest_listed),
         exec,
         price_cents_per_hour: None,
         price_unit: PriceUnit::UsCents,
@@ -156,6 +165,7 @@ mod tests {
             disk_bytes: None,
             os: None,
             arch: None,
+            isa_level: None,
             exec: None,
         };
         let none = offer_of(&shape(0, &[]), &shape(0, &[]), ExecMode::Container);
@@ -179,5 +189,73 @@ mod tests {
         for bad in ["lots", "-1", "", "18446744073709551615"] {
             assert_eq!(disk(&claim(bad), &none), 0, "{bad:?}");
         }
+    }
+
+    /// A demand for the capabilities `caps`, as the registry reads a waiting request.
+    fn demand_of(caps: &[(&str, &str)]) -> js_elastic::Demand {
+        let request = js_types::Request {
+            class: js_types::ClassId::new("whole-node").unwrap(),
+            resources: Resources::new(1000, 1 << 30, 0, None).unwrap(),
+            capabilities: caps
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+            max_wall: std::time::Duration::from_secs(60),
+            labels: BTreeMap::new(),
+            validation_run: None,
+            probe_host: None,
+        };
+        js_elastic::Demand::from_request(&request)
+    }
+
+    /// Asserts that the offer of a host whose `arch` capability is `aarch64` (an agent
+    /// built before `arm64` was the one spelling) fits a request for `arch=arm64`, and for
+    /// `arch=aarch64`, and that a request for `arch=x86_64` against it still fails on the
+    /// architecture. Catches an offer that keeps the host's `aarch64`, which `fit`
+    /// compares by equality against the request's `arm64`, and a normalisation that makes
+    /// every architecture fit.
+    #[test]
+    fn an_arm64_request_fits_an_aarch64_offer() {
+        let host = shape(0, &[("arch", "aarch64"), ("os", "linux")]);
+        let offer = offer_of(&host, &shape(0, &[]), ExecMode::Container);
+        assert_eq!(offer.arch, "arm64");
+        assert_eq!(offer.fit(&demand_of(&[("arch", "arm64")])), Ok(()));
+        assert_eq!(offer.fit(&demand_of(&[("arch", "aarch64")])), Ok(()));
+        assert_eq!(
+            offer.fit(&demand_of(&[("arch", "x86_64")])),
+            Err(js_elastic::Dimension::Arch)
+        );
+        let other = offer_of(&shape(0, &[("arch", "sparc")]), &host, ExecMode::Container);
+        assert_eq!(other.arch, "sparc");
+    }
+
+    /// Asserts that a host's offer states the highest ISA level its `isa_level`
+    /// capability lists, one level or the list of it and those below, and states none for
+    /// a host that lists none, an unknown level or both families; and that a request for
+    /// a level fits only the host that states one at least as high. Catches an offer that
+    /// never states the level (no registered host would count for a level request) or
+    /// takes the first of the list.
+    #[test]
+    fn a_hosts_offer_states_the_highest_level_it_lists() {
+        use js_types::X86Level;
+        let level = |caps: &[(&str, &str)]| {
+            offer_of(&shape(0, caps), &shape(0, &[]), ExecMode::Container).isa_level
+        };
+        let v3 = Some(IsaLevel::X86_64(X86Level::V3));
+        assert_eq!(level(&[("isa_level", "x86-64-v3")]), v3);
+        assert_eq!(level(&[("isa_level", "x86-64-v1,x86-64-v2,x86-64-v3")]), v3);
+        for none in ["", "x86-64-v9", "x86-64-v3,armv8.4-a"] {
+            assert_eq!(level(&[("isa_level", none)]), None, "{none:?}");
+        }
+        assert_eq!(level(&[]), None);
+        let at =
+            |caps: &[(&str, &str)]| offer_of(&shape(0, caps), &shape(0, &[]), ExecMode::Container);
+        let wants_v3 = demand_of(&[("isa_level", "x86-64-v3")]);
+        assert_eq!(at(&[("isa_level", "x86-64-v4")]).fit(&wants_v3), Ok(()));
+        assert_eq!(
+            at(&[("isa_level", "x86-64-v2")]).fit(&wants_v3),
+            Err(js_elastic::Dimension::IsaLevel)
+        );
+        assert_eq!(at(&[]).fit(&wants_v3), Err(js_elastic::Dimension::IsaLevel));
     }
 }

@@ -247,6 +247,24 @@ fn a_stored_offer_rebuilds_its_offer() {
     assert_eq!(shown.gpu_class, None);
 }
 
+/// Asserts that a record written when offers spelt Arm `aarch64` rebuilds an `arm64`
+/// offer, which fits an `arm64` demand, and that another architecture is kept as written.
+/// Catches a rebuilt offer that keeps `aarch64`, so a machine launched before the upgrade
+/// would no longer count for the request it was launched for.
+#[test]
+fn a_stored_aarch64_offer_rebuilds_as_arm64() {
+    let mut stored = StoredOffer::from_offer(&offer("arm", 60));
+    stored.arch = "aarch64".to_owned();
+    let rebuilt = stored.to_offer(60);
+    assert_eq!(rebuilt.arch, "arm64");
+    assert_eq!(rebuilt.isa_level, None);
+    let mut wanted = demand();
+    wanted.arch = Some("arm64".to_owned());
+    assert_eq!(rebuilt.fit(&wanted), Ok(()));
+    stored.arch = "riscv64".to_owned();
+    assert_eq!(stored.to_offer(60).arch, "riscv64");
+}
+
 const ALL: [Phase; 11] = [
     Phase::Planned,
     Phase::Launching,
