@@ -195,6 +195,7 @@ fn spec(fixture: &Fixture, exe: &Path) -> RunSpec {
         labels: Default::default(),
         bundle: None,
         network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

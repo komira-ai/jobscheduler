@@ -652,7 +652,7 @@ fn a_run_body_decodes_its_defaults_and_refuses_what_it_cannot_read() {
         ),
         (
             "unknown network",
-            json!({"program": "/bin/true", "network": "open"}),
+            json!({"program": "/bin/true", "network": "wide"}),
         ),
         (
             "unknown input type",
