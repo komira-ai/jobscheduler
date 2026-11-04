@@ -119,7 +119,9 @@ const CONFIG: &str =
 /// (it fails: no container), `*-late` (it fails twice, then names it), `*-badpid` (a state
 /// with no pid) and `*-hugepid` (a pid out of range); those but `*-nopid` run until they are
 /// killed and ignore SIGTERM, as `*-wired` does, and `*-nopid` exits at once with a `crun`
-/// error in its log.
+/// error in its log. `*-stuckcg` runs as `*-wired` does after it left a cgroup `left`, with a
+/// file in it, below its lease's cgroup (so that the lease's cgroup cannot be removed until
+/// the test removes it); its `state` names the pid only once that is there.
 const CRUN: &str = r#"#!/bin/sh
 MOUNT=@MOUNT@
 DIR=@DIR@
@@ -168,6 +170,7 @@ case "$cmd" in
         exit 137;;
       *-wired|*-late|*-deaf|*-badpid|*-hugepid) trap '' TERM; exec sleep 600;;
       *-nopid) echo '{"level":"error","msg":"no container made"}' >> "$log"; exit 1;;
+      *-stuckcg) mkdir -p "$cg/left"; : > "$cg/left/held"; trap '' TERM; exec sleep 600;;
       *) exit 0;;
     esac;;
   kill)
@@ -184,6 +187,7 @@ case "$cmd" in
       *-nopid|*-deaf) echo "no container $name" >&2; exit 1;;
       *-badpid) echo '{"status":"running"}'; exit 0;;
       *-hugepid) echo '{"pid":99999999999}'; exit 0;;
+      *-stuckcg) [ -e "$cg/left/held" ] || { echo "no container $name yet" >&2; exit 1; };;
       *-late)
         if [ "$(wc -l < "$DIR/asks-$name")" -le 2 ]; then
           echo "no container $name yet" >&2; exit 1

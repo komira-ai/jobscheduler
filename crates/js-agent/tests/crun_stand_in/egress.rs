@@ -725,10 +725,10 @@ fn a_release_error_on_removal_is_logged_and_the_lease_still_goes() {
     assert_eq!(seen.taken(), Vec::<String>::new(), "released once each");
 }
 
-/// Proves a removal that fails after it released the wiring (here `crun delete` fails) keeps
-/// the lease for the next removal, which takes it apart without releasing the wiring again.
-/// Catches a retried removal that releases twice, and one that cannot finish because the
-/// wiring is gone.
+/// Proves a removal that fails after it released the wiring (here the lease's cgroup cannot
+/// be removed: something is left in it) keeps the lease for the next removal, which takes it
+/// apart without releasing the wiring again. Catches a retried removal that releases twice,
+/// and one that cannot finish because the wiring is gone.
 #[test]
 fn a_removal_that_fails_after_its_release_is_retried_without_a_second_release() {
     let node = Node::new("egress-remove-retry");
@@ -738,25 +738,27 @@ fn a_removal_that_fails_after_its_release_is_retried_without_a_second_release() 
         .create_and_start(&node.spec("r1-wired"))
         .expect("started");
     seen.taken();
-    let fails = node.dir.path().join("delete-fails");
-    std::fs::write(&fails, b"").expect("make crun delete fail");
-    let why = runtime.remove(&id).expect_err("crun delete fails");
+    let blocker = node.cgroup_of(&id.0).join("left");
+    std::fs::create_dir(&blocker).expect("a cgroup left below the lease's");
+    std::fs::write(blocker.join("held"), b"").expect("which cannot be removed");
+    let why = runtime.remove(&id).expect_err("the cgroup stays");
     assert!(
-        why.to_string().starts_with("delete the container: "),
+        why.to_string().starts_with("remove the lease's cgroup: "),
         "{why}"
     );
     assert_eq!(seen.taken(), [format!("release {}", id.0)]);
     assert_eq!(runtime.list_labelled().expect("listed").len(), 1, "kept");
-    std::fs::remove_file(&fails).expect("let crun delete work");
+    std::fs::remove_dir_all(&blocker).expect("let the cgroup go");
     runtime.remove(&id).expect("removed at the retry");
     assert_eq!(seen.taken(), Vec::<String>::new(), "no second release");
     assert!(nothing_left(&node, "r1-wired"));
 }
 
-/// Proves a start whose wiring fails and whose removal then fails too returns the wiring's
-/// error (the cause), logs the removal's failure naming the lease, and keeps the container
-/// listed so that a later removal takes it apart: nothing is left once it does. Catches a
-/// cleanup failure that hides the cause, passes without a trace, or forgets the container.
+/// Proves a start whose wiring fails and whose removal then fails too (the container left a
+/// cgroup below its lease's, which cannot be removed) returns the wiring's error (the cause),
+/// logs the removal's failure naming the lease, and keeps the container listed so that a later
+/// removal takes it apart: nothing is left once it does. Catches a cleanup failure that hides
+/// the cause, passes without a trace, or forgets the container.
 #[test]
 fn a_failed_wiring_whose_cleanup_fails_keeps_the_lease_for_a_later_removal() {
     let (lines, _guard) = warnings();
@@ -764,10 +766,8 @@ fn a_failed_wiring_whose_cleanup_fails_keeps_the_lease_for_a_later_removal() {
     let seen = Seen::new(&node);
     seen.attach_fails.store(true, Ordering::SeqCst);
     let mut runtime = open(&node, port(&seen), impatient());
-    let fails = node.dir.path().join("delete-fails");
-    std::fs::write(&fails, b"").expect("make crun delete fail");
     let why = runtime
-        .create_and_start(&node.spec("r1-wired"))
+        .create_and_start(&node.spec("r1-stuckcg"))
         .map(|_| ())
         .expect_err("not wired");
     assert_eq!(
@@ -781,12 +781,12 @@ fn a_failed_wiring_whose_cleanup_fails_keeps_the_lease_for_a_later_removal() {
     let warned = said.lines().any(|line| {
         line.contains("WARN")
             && line.contains(&id.0)
-            && line.contains("remove the failed start: delete the container: ")
+            && line.contains("remove the failed start: remove the lease's cgroup: ")
     });
     assert!(warned, "{said}");
-    std::fs::remove_file(&fails).expect("let crun delete work");
+    std::fs::remove_dir_all(node.cgroup_of(&id.0).join("left")).expect("let the cgroup go");
     runtime.remove(&id).expect("removed later");
-    assert!(nothing_left(&node, "r1-wired"));
+    assert!(nothing_left(&node, "r1-stuckcg"));
     assert_eq!(seen.taken().len(), 1, "one attach, nothing to release");
 }
 
