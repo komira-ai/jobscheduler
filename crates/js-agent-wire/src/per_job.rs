@@ -25,6 +25,7 @@ use crate::files::{self, RunFile};
 use crate::heartbeat::{Ack, HeldState, LogTail, Outcome};
 use crate::image;
 use crate::limits;
+use crate::log_sink::{self, LogReport, LogSink};
 use crate::network;
 use crate::refusal;
 use crate::run::{self, RunSpec};
@@ -151,13 +152,25 @@ pub struct JobStartSpec {
     /// out when there are none, and refused or forwarded as there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<PortMap>,
+    /// Where to upload the job's output while it runs ([`LogSink`]), sent only to a host
+    /// that reported [`crate::LOG_UPLOAD_CAPABILITY`]; absent means no live logs. It is
+    /// never part of the start's acceptance: a value that does not decode reads as absent,
+    /// and [`JobStartSpec::validate`] does not look at it; [`JobStartSpec::log_sink_checked`]
+    /// does. An agent that predates the field ignores it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub log_sink: Option<LogSink>,
 }
 
 impl JobStartSpec {
     /// Checks the start: the ids, that an image is named and well formed, the command, the
     /// environment, the files, the booked resources, the wall limit and the declared ports. The server calls it
     /// before it sends a start and the agent before it acts on one, together with
-    /// [`JobStartSpec::require_pinned`].
+    /// [`JobStartSpec::require_pinned`]. It does not look at `log_sink`: a sink never
+    /// refuses a start ([`JobStartSpec::log_sink_checked`]).
     pub fn validate(&self) -> Result<(), ValidationError> {
         let at = At::new("job", refusal::INVALID_JOB);
         check::ident(at.field("job_id"), &self.job_id)?;
@@ -185,6 +198,24 @@ impl JobStartSpec {
         }
         check::range(at.field("wall_ms"), self.wall_ms, 1, limits::MAX_WALL_MS)?;
         network::check_ports(&self.ports)
+    }
+
+    /// The start's [`LogSink`], checked: `Ok(None)` when there is none, and an error with
+    /// [`refusal::INVALID_LOG_SINK`] naming the part (`log_sink.endpoint`, `log_sink.region`,
+    /// `log_sink.bucket` or `log_sink.prefix`) when it is out of the form [`LogSink`] gives,
+    /// or when its prefix does not end in this start's own job id and `/`. The server calls
+    /// it before it sends a sink, and sends none when it fails; the agent calls it and, on an
+    /// error, starts the job without a sink. It never refuses the start.
+    ///
+    /// # Errors
+    ///
+    /// The sink is malformed or names another job's prefix.
+    pub fn log_sink_checked(&self) -> Result<Option<&LogSink>, ValidationError> {
+        let Some(sink) = &self.log_sink else {
+            return Ok(None);
+        };
+        let at = At::new("log_sink", refusal::INVALID_LOG_SINK);
+        sink.check(at, &self.job_id).map(|()| Some(sink))
     }
 
     /// Checks that the image is pinned by a `sha256:` digest, after
@@ -218,13 +249,32 @@ pub struct JobResult {
     /// The end of what the job printed, when the agent could read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_tail: Option<LogTail>,
+    /// What the capture saw of each stream ([`LogReport`]), from a runtime that uploads live
+    /// logs; absent otherwise. Never part of the result's acceptance: a value that does not
+    /// decode reads as absent, [`JobResult::validate`] does not look at it, and
+    /// [`JobResult::logs_report`] gives it only when it is consistent. A server from before
+    /// the field ignores it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub logs: Option<LogReport>,
 }
 
 impl JobResult {
     /// Checks the ids, the detail, the log tail and that the exit status agrees with the
-    /// outcome, as [`crate::RunResult::validate`] does for a run.
+    /// outcome, as [`crate::RunResult::validate`] does for a run. It does not look at
+    /// `logs`.
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.check(At::new("jobs", refusal::INVALID_HEARTBEAT))
+    }
+
+    /// The result's [`LogReport`] when it has one in which neither stream dropped more
+    /// bytes than it had; `None` otherwise, and a server then stores nothing of it.
+    #[must_use]
+    pub fn logs_report(&self) -> Option<&LogReport> {
+        self.logs.as_ref().filter(|report| report.consistent())
     }
 
     fn check(&self, at: At) -> Result<(), ValidationError> {

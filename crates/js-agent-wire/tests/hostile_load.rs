@@ -7,8 +7,8 @@ use common::{expect, heartbeat, load, long};
 use js_agent_wire::limits::*;
 use js_agent_wire::refusal;
 use js_agent_wire::{
-    Heartbeat, HeldRun, HeldState, LeaseClock, LeaseMinute, LoadDrops, NodeLoad, Outcome, Rule,
-    RunResult, lease_parts,
+    Heartbeat, HeldJob, HeldRun, HeldState, JobResult, LeaseClock, LeaseMinute, LoadDrops,
+    LogGrantState, LogReport, NodeLoad, Outcome, Rule, RunResult, lease_parts,
 };
 
 const BAD_IDS: [&str; 8] = [
@@ -326,6 +326,73 @@ fn worst_id(i: u64) -> String {
 /// bound a beat with more held runs or results, which `validate` allows.
 #[test]
 fn a_load_at_every_cap_with_96_held_and_8_results_stays_under_the_budget() {
+    let (load, beat) = beat_at_every_cap();
+    assert_eq!(beat.validate(), Ok(()));
+    let load_len = serde_json::to_string(&load).unwrap().len();
+    let beat_len = serde_json::to_string(&beat).unwrap().len();
+    assert!(load_len <= MAX_LOAD_BYTES, "load {load_len} bytes");
+    assert!(beat_len <= 48 * 1024, "beat {beat_len} bytes");
+    assert!(beat_len * 4 <= HEARTBEAT_BODY_BUDGET * 3);
+}
+
+/// Asserts that the beat of the test above, with a `log_grant_state` at its longest and 8
+/// job listings at 128-byte ids whose results each carry a `logs` report with every count
+/// at its digit maximum, still validates and stays within the same 48 KiB, three quarters
+/// of `HEARTBEAT_BODY_BUDGET`; and that the state adds exactly 66 bytes and each report
+/// exactly 157 (the figures of `docs/design/agent-wire.md`). It catches a log field that
+/// grows a beat past the totals the test above fixes. Fix the fields, not this threshold.
+#[test]
+fn a_heartbeat_with_log_fields_stays_inside_the_totals_the_existing_test_fixes() {
+    let wide = |i: usize| format!("{i:0>128}");
+    let full = LogReport {
+        stdout_bytes: u64::MAX,
+        stderr_bytes: u64::MAX,
+        stdout_dropped: u64::MAX,
+        stderr_dropped: u64::MAX,
+    };
+    let listing = |i: usize, logs: Option<LogReport>| HeldJob {
+        job_id: wide(i),
+        state: HeldState::ExitedUnacked,
+        result: Some(JobResult {
+            job_id: wide(i),
+            allocation_id: wide(i + 1000),
+            outcome: Outcome::TimedOut,
+            exit_code: None,
+            detail: None,
+            log_tail: None,
+            logs,
+        }),
+    };
+    let len = |beat: &Heartbeat| serde_json::to_string(beat).unwrap().len();
+    let (_, plain) = beat_at_every_cap();
+    let bare = Heartbeat {
+        jobs: (0..8).map(|i| listing(i, None)).collect(),
+        ..plain
+    };
+    let beat = Heartbeat {
+        jobs: (0..8).map(|i| listing(i, Some(full))).collect(),
+        log_grant_state: Some(LogGrantState {
+            stale: false,
+            until_ms: Some(u64::MAX),
+        }),
+        ..bare.clone()
+    };
+    assert_eq!(beat.validate(), Ok(()));
+    let without_state = Heartbeat {
+        log_grant_state: None,
+        ..beat.clone()
+    };
+    assert_eq!(len(&beat) - len(&without_state), 66);
+    assert_eq!(len(&without_state) - len(&bare), 8 * 157);
+    let beat_len = len(&beat);
+    assert!(beat_len <= 48 * 1024, "beat {beat_len} bytes");
+    assert!(beat_len * 4 <= HEARTBEAT_BODY_BUDGET * 3);
+}
+
+/// The beat of the two tests above: a load with lists at their caps, every id the longest
+/// form and every number at its digit maximum (so untouched by `vet`), 96 held runs and 8
+/// results at 128-byte ids; with the load alone.
+fn beat_at_every_cap() -> (NodeLoad, Heartbeat) {
     let max = u32::MAX;
     let load = NodeLoad {
         seq: u64::MAX,
@@ -368,12 +435,7 @@ fn a_load_at_every_cap_with_96_held_and_8_results_stays_under_the_budget() {
         load: Some(load.clone()),
         ..heartbeat()
     };
-    assert_eq!(beat.validate(), Ok(()));
-    let load_len = serde_json::to_string(&load).unwrap().len();
-    let beat_len = serde_json::to_string(&beat).unwrap().len();
-    assert!(load_len <= MAX_LOAD_BYTES, "load {load_len} bytes");
-    assert!(beat_len <= 48 * 1024, "beat {beat_len} bytes");
-    assert!(beat_len * 4 <= HEARTBEAT_BODY_BUDGET * 3);
+    (load, beat)
 }
 
 /// Asserts the caps are the documented ones. It catches a silent edit of the table.

@@ -41,7 +41,7 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   (`JobResultAck`) and `retired_acks`.
 - `Command`, tagged by `type`: `start` (`JobSpec`, keyed by run and lease), `stop` and `cancel` (by `run_id`), and the per-job
   `job_start` (`JobStartSpec`) and `job_stop` (by `job_id`). A tag this version does not know reads as `Command::Unknown`.
-- Planned, the live-log fields ([live-logs.md](live-logs.md), section 7): `JobStartSpec.log_sink` (where to upload one job's logs;
+- The live-log fields ([live-logs.md](live-logs.md), section 7), in `js-agent-wire` and filled by no agent or server yet: `JobStartSpec.log_sink` (where to upload one job's logs;
   no secret), `HeartbeatReply.log_grant` (the host's upload credential), the heartbeat's `log_grant_state` (`stale`, `until_ms`) and
   `JobResult.logs` (each stream's length and dropped bytes). An agent announces them with the hello capability `log-upload`, and a
   server sends `log_sink` and `log_grant` only to an agent that reported it. Each is decoded as `load` is: a malformed value reads as
@@ -230,10 +230,11 @@ byte. In the worst case two streams of 8 KiB of such characters are 2×8,192×6 
 agent cuts them to fit, `results_budget`), and 2×(1+2+8,192) = 16,390 bytes of protobuf for the two strings, 1+3+16,390 = 16,394 with
 the `LogTail` sub-message around them. Derived.
 
-### The live-log fields (Planned)
+### The live-log fields
 
 The fields of [live-logs.md](live-logs.md), section 7, in the compact JSON `serde_json` writes, each at its bounds (a `u64` at its 20
-digits), with the comma that joins it to the message. Derived.
+digits), with the comma that joins it to the message. Derived, and measured by the wire's tests
+(`a_reply_with_a_maximum_credential_fits_the_reply_bound`, `a_heartbeat_with_log_fields_stays_inside_the_totals_the_existing_test_fixes`).
 
 - `logs` in a result, `,"logs":{"stdout_bytes":N,"stderr_bytes":N,"stdout_dropped":N,"stderr_dropped":N}`: 1 + 7 + 1 + (15 + 20) +
   1 + (15 + 20) + 1 + (17 + 20) + 1 + (17 + 20) + 1 = **157** bytes per result.

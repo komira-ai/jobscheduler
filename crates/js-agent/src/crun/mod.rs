@@ -734,7 +734,7 @@ impl CrunRuntime {
         }
         let started = self
             .oci
-            .start_supervised(&run.spec)
+            .start_supervised(&run.spec, None)
             .map_err(|why| RuntimeError::new(format!("start crun: {why}")))?;
         run.backstop = run.cgroup.parent_ooms().ok();
         // The supervisor is on the sidecar before anything else is done, in the state still
