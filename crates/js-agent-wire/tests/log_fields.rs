@@ -76,6 +76,9 @@ fn grant() -> LogGrant {
     }
 }
 
+/// One refused grant: the edit that breaks it, the field named and the rule broken.
+type GrantCase = (fn(&mut LogGrant), &'static str, Rule);
+
 /// A stop of the run `run`.
 fn stop(run: &str) -> Command {
     Command::Stop { run_id: run.into() }
@@ -440,7 +443,7 @@ fn a_log_grant_round_trips_and_is_bounded() {
     let token = "log_grant.session_token";
     let key = "log_grant.access_key_id";
     let secret = "log_grant.secret_access_key";
-    let cases: [(fn(&mut LogGrant), &str, Rule); 11] = [
+    let cases: [GrantCase; 11] = [
         (
             |g| g.session_token = Some("t".repeat(MAX_LOG_SESSION_TOKEN + 1)),
             token,
