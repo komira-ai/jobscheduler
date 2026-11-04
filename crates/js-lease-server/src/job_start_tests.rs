@@ -27,7 +27,7 @@ fn records() -> (JobRecord, AllocationRecord) {
 }
 
 /// The start of `job` for `allocation` to `host-a`, whose agent reports `ceiling`.
-fn start(
+fn build(
     job: &JobRecord,
     allocation: &AllocationRecord,
     ceiling: &NetworkCeiling,
@@ -59,7 +59,7 @@ fn allow_list() -> NetworkCeiling {
 #[test]
 fn a_start_carries_the_job_and_what_its_allocation_booked() {
     let (job, mut allocation) = records();
-    let start = start(&job, &allocation, &allow_list()).unwrap();
+    let start = build(&job, &allocation, &allow_list()).unwrap();
     assert_eq!(start.job_id, "job-a");
     assert_eq!(start.allocation_id, allocation.allocation_id.to_string());
     assert_eq!(start.image, image());
@@ -96,7 +96,7 @@ fn a_start_carries_the_job_and_what_its_allocation_booked() {
         level: JobNetwork::Open,
         ports: Vec::new(),
     };
-    let start = start(&open, &allocation, &ceiling).unwrap();
+    let start = build(&open, &allocation, &ceiling).unwrap();
     assert_eq!(start.network, JobNetwork::Open);
     assert_eq!(
         start.booked,
@@ -119,7 +119,7 @@ fn a_start_the_wire_cannot_carry_says_why() {
     let ceiling = allow_list();
     let mut whole = allocation.clone();
     whole.booked = Booked::WholeHost;
-    assert_eq!(start(&job, &whole, &ceiling), Err(Unsendable::WholeHost));
+    assert_eq!(build(&job, &whole, &ceiling), Err(Unsendable::WholeHost));
     let mut gpus = allocation.clone();
     gpus.booked = Booked::Shape {
         cpu_millis: 1000,
@@ -127,15 +127,15 @@ fn a_start_the_wire_cannot_carry_says_why() {
         disk_bytes: 0,
         accelerators: 2,
     };
-    assert_eq!(start(&job, &gpus, &ceiling), Err(Unsendable::GpuIndices(2)));
+    assert_eq!(build(&job, &gpus, &ceiling), Err(Unsendable::GpuIndices(2)));
     assert_eq!(
-        start(&job, &allocation, &NetworkCeiling::default()),
+        build(&job, &allocation, &NetworkCeiling::default()),
         Err(Unsendable::AboveCeiling)
     );
     let mut unforwarded = job.clone();
     unforwarded.spec.ports[0].host = 9090;
     assert_eq!(
-        start(&unforwarded, &allocation, &ceiling),
+        build(&unforwarded, &allocation, &ceiling),
         Err(Unsendable::AboveCeiling)
     );
     let mut binary = job.clone();
@@ -144,19 +144,19 @@ fn a_start_the_wire_cannot_carry_says_why() {
         .files
         .insert("blob".to_owned(), vec![0xff, 0xfe]);
     assert_eq!(
-        start(&binary, &allocation, &ceiling),
+        build(&binary, &allocation, &ceiling),
         Err(Unsendable::FileNotText("blob".to_owned()))
     );
     let mut endless = job.clone();
     endless.spec.wall_limit_secs = u64::MAX;
     assert_eq!(
-        start(&endless, &allocation, &ceiling),
+        build(&endless, &allocation, &ceiling),
         Err(Unsendable::WallLimit)
     );
     let mut dashed = job;
     dashed.id = JobId::parse("-job").unwrap();
     assert_eq!(
-        start(&dashed, &allocation, &ceiling),
+        build(&dashed, &allocation, &ceiling),
         Err(Unsendable::Invalid {
             code: "invalid-job",
             field: "job_id",
