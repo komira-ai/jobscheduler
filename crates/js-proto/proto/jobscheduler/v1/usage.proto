@@ -1,0 +1,55 @@
+// Usage history: one record for each booking of a job on a host that has ended, with what
+// was booked against what was used. A whole-host job placed again after a failed prepare
+// has one record for each placement. The evolution rule of every file of this package is in
+// the header of service.proto.
+
+syntax = "proto3";
+
+package jobscheduler.v1;
+
+import "jobscheduler/v1/fleet.proto";
+import "jobscheduler/v1/job.proto";
+
+// How a whole-host job got its host (design sections 5.4 and 5.5).
+enum WholeHostOutcome {
+  // The job was not a whole-host job, or a reader met a value it does not know.
+  WHOLE_HOST_OUTCOME_UNSPECIFIED = 0;
+  // A host was already quiet, so none was drained.
+  WHOLE_HOST_OUTCOME_QUIET_HOST = 1;
+  // A marked host was drained and committed to the job.
+  WHOLE_HOST_OUTCOME_DRAINED = 2;
+}
+
+// One ended booking: a job's resources on one host, from placement until the host
+// confirmed the job's container gone or its provider said the host is absent.
+message UsageRecord {
+  // The job the resources were booked for.
+  string job_id = 1;
+  // The host they were booked on.
+  string host_id = 2;
+  // How long the job waited from queued to placed, in milliseconds.
+  uint64 queue_wait_ms = 3;
+  // How long the job ran, from running to its end, in milliseconds. 0 for a job that did
+  // not run.
+  uint64 run_ms = 4;
+  // The job's state when the booking ended: its ended state, or queued for a booking freed
+  // by a failed whole-host prepare.
+  JobState end_state = 5;
+  // How the job ended, as its result says. Unspecified for a job without a result.
+  ResultReason ended_reason = 6;
+  // When the booking ended, in milliseconds since the Unix epoch. A usage window selects
+  // records by it.
+  uint64 ended_at_ms = 7;
+  // The resources that were booked.
+  HostBooking booked = 10;
+  // The resources the job used, as the host's agent reported them.
+  ResourceUsage used = 11;
+  // How a whole-host job got its host.
+  WholeHostOutcome whole_host = 20;
+  // How many times a mark set for the whole-host job was given up at its deadline before
+  // the job got a host.
+  uint32 mark_give_ups = 21;
+  // The run time placement estimated for the job, in milliseconds. Absent: it had no
+  // estimate.
+  optional uint64 estimated_run_ms = 22;
+}

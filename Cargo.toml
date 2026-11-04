@@ -62,6 +62,13 @@ plist = { version = "1.10.1", default-features = false }
 postgres = "0.19.10"
 # The spawn-site check (xtask): the line of each token it reports.
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+# The job service's messages (js-proto): prost encodes and decodes them, and prost-types
+# holds the descriptor set the crate's tests read the schema from.
+prost = "0.14.4"
+prost-types = "0.14.4"
+# js-proto's build script compiles the `.proto` files with protox, a pure-Rust compiler, so
+# no `protoc` is installed or run.
+protox = "0.10.0"
 # The simulation kernel's seeded random stream (js-sim).
 rand_chacha = "0.10.0"
 # Test certificates only.
@@ -92,6 +99,15 @@ time = { version = "0.3.55", default-features = false, features = ["formatting",
 tokio = "1.53.2"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
 toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }
+# The job service's generated client and server traits (js-proto): `codegen` only, so the
+# library neither listens nor connects; its tests add `transport` to run the two over an
+# in-memory stream. tonic-prost is the codec the generated code calls, and
+# tonic-prost-build (js-proto's build script) writes the messages and the traits from the
+# descriptor set protox makes; without its default `transport` feature the client has no
+# `connect`.
+tonic = { version = "0.14.9", default-features = false, features = ["codegen"] }
+tonic-prost = "0.14.9"
+tonic-prost-build = { version = "0.14.9", default-features = false, features = ["cleanup-markdown"] }
 tower = { version = "0.5.3", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
