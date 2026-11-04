@@ -7,7 +7,7 @@ use js_elastic::Demand;
 use js_lease::Timestamp;
 use js_provider::{Candidate, HostBook};
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
-use js_types::{Admission, HostId, LeaseId, ResourceClass, Shape};
+use js_types::{Admission, Capabilities, HostId, LeaseId, ResourceClass, Resources, Shape};
 
 use super::record::Bound;
 use super::{HostState, Registry, State};
@@ -28,7 +28,31 @@ const ENDLESS: Timestamp = Timestamp::MAX;
 /// The bound [`js_whole::cost::tail`] reads as none.
 const NO_BOUND: u64 = u64::MAX;
 
+/// The hosts that reported a taint: none of them could ever hold a request again.
+fn tainted(state: &State) -> BTreeSet<HostId> {
+    state
+        .records
+        .iter()
+        .filter(|(_, record)| record.taint.is_some())
+        .map(|(host, _)| host.clone())
+        .collect()
+}
+
 impl Registry {
+    /// Whether some host in the table could ever hold a request for `resources` that
+    /// requires `required`: the check a whole-node start makes before it answers
+    /// `NoCapableHost`, without a request's own bars. A host fits when its booked shape
+    /// satisfies both and it has not reported a taint; a busy, lost or reserved host counts,
+    /// since it could free. With no host in the table it is `false`.
+    pub fn could_ever_hold(&self, resources: &Resources, required: &Capabilities) -> bool {
+        let state = self.lock_at(self.shared.clock.now());
+        let tainted = tainted(&state);
+        let listed = state.book.hosts();
+        listed
+            .iter()
+            .any(|host| placement::could_hold(host, resources, required, &tainted))
+    }
+
     /// Every host as the reservation pass reads it, in id order. Every host is booked as
     /// the pool's shape.
     pub(super) fn host_facts(&self, state: &State, now: Timestamp) -> Vec<HostFacts> {
@@ -176,12 +200,7 @@ impl Registry {
         // A whole-node request that fits the pool is refused for lack of a host only when
         // no host could ever be given whole; otherwise it waits, if it has an id.
         let listed = state.book.hosts();
-        let tainted = state
-            .records
-            .iter()
-            .filter(|(_, record)| record.taint.is_some())
-            .map(|(host, _)| host.clone())
-            .collect::<BTreeSet<_>>();
+        let tainted = tainted(state);
         let asking = Asking {
             spec,
             key: &key,
