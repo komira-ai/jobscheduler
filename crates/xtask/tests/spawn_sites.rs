@@ -141,11 +141,19 @@ fn a_start_added_to_the_real_agent_is_found() {
             &repo().join(&rel).join("tests/bin"),
             &tree.root().join(&rel).join("tests/bin"),
         );
-        // The fakes the agent's test binary reaches through `#[path]`.
-        copy(
-            &repo().join(&rel).join("tests/update_hook_fakes"),
-            &tree.root().join(&rel).join("tests/update_hook_fakes"),
-        );
+        // The modules the agent's test-only binaries reach through `#[path]`: the fakes of
+        // `js-update-hook-fake`, and the measurement and the runtime host of
+        // `js-launch-measure`.
+        for dir in [
+            "tests/update_hook_fakes",
+            "tests/launch_measure",
+            "tests/runtime_host",
+        ] {
+            copy(
+                &repo().join(&rel).join(dir),
+                &tree.root().join(&rel).join(dir),
+            );
+        }
         std::fs::copy(
             repo().join(&rel).join("Cargo.toml"),
             tree.root().join(&rel).join("Cargo.toml"),
