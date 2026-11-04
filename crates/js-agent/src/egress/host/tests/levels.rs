@@ -196,3 +196,49 @@ fn a_member_left_in_a_set_is_never_reused_by_another_run() {
     );
     drop((listed, again));
 }
+
+/// Catches a removal whose program could not be started read as "already gone": under
+/// `open`, an `open` run's release while `nft` cannot be started (the error a missing program
+/// gives is "No such file or directory", as `nft`'s own word for a missing member is) is a
+/// failed release even though its veth was deleted, so once `nft` is back the `allow-list` run
+/// that comes next is wired as `jsv1`, never under the name `jsv0` that `openifs` still holds.
+/// The same release with `nft` running and saying the member is not there gives the block
+/// back. A sweep whose `ip` cannot be started fails too, rather than leaving the leftovers.
+#[test]
+fn a_removal_that_could_not_run_is_not_taken_for_gone() {
+    let fake = Fake::new();
+    let egress = started(&fake, open());
+    let wide = egress
+        .attach("wide", PID, JobNetwork::Open)
+        .expect("attach");
+    fake.not_run("delete element");
+    let error = wide.release().expect_err("nft did not run");
+    assert!(error.to_string().contains("not run: "), "{error}");
+    fake.run_again();
+    let listed = egress
+        .attach("listed", PID, JobNetwork::AllowList)
+        .expect("attach");
+    assert_eq!(listed.interface(), Some("jsv1"));
+    fake.answer(
+        "delete element",
+        Err("Error: Could not process rule: No such file or directory".to_owned()),
+    );
+    listed
+        .release()
+        .expect("nft ran and said the member is gone");
+    let again = egress
+        .attach("again", PID, JobNetwork::AllowList)
+        .expect("attach");
+    assert_eq!(again.interface(), Some("jsv1"), "that block is given back");
+    drop(again);
+
+    let fake = Fake::new();
+    fake.answer("link show", Ok(r#"[{"ifname":"jsv4"}]"#.to_owned()));
+    fake.not_run("link del");
+    let refused = Egress::start_on(open(), fake.clone()).map(drop);
+    let error = refused.expect_err("the sweep could not delete the leftover");
+    assert!(
+        error.to_string().contains("deleting a leftover veth"),
+        "{error}"
+    );
+}

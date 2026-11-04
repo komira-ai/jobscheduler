@@ -76,6 +76,8 @@ struct State {
     calls: usize,
     fail: Option<usize>,
     answers: Vec<(String, Result<String, String>)>,
+    /// The calls whose program cannot be started, by a part of their logged line.
+    not_run: Vec<String>,
     files: HashMap<String, String>,
     write_errors: HashMap<String, ErrorKind>,
     identities: HashMap<String, (Seen, usize)>,
@@ -115,6 +117,17 @@ impl Fake {
 
     /// Answers the calls whose logged line contains `needle` with `result` (the latest
     /// script wins).
+    /// Makes the program of the calls whose logged line contains `needle` impossible to
+    /// start (as a missing program is), until [`Fake::run_again`].
+    fn not_run(&self, needle: &str) {
+        self.state().not_run.push(needle.to_owned());
+    }
+
+    /// Makes every program startable again.
+    fn run_again(&self) {
+        self.state().not_run.clear();
+    }
+
     fn answer(&self, needle: &str, result: Result<String, String>) {
         self.state().answers.insert(0, (needle.to_owned(), result));
     }
@@ -146,7 +159,7 @@ impl Fake {
 }
 
 impl Sys for Fake {
-    fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
+    fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, RunError> {
         let mut state = self.state();
         let name = program.rsplit('/').next().expect("a name");
         let line = format!("{name} {}", args.join(" "));
@@ -157,14 +170,24 @@ impl Sys for Fake {
             })
         ));
         state.stdins.push(stdin.unwrap_or_default().to_owned());
+        if state
+            .not_run
+            .iter()
+            .any(|needle| line.contains(needle.as_str()))
+        {
+            return Err(RunError::NotRun(format!(
+                "{program}: No such file or directory (os error 2)"
+            )));
+        }
         if Self::counted(&mut state) {
-            return Err("injected".to_owned());
+            return Err(RunError::Failed("injected".to_owned()));
         }
         state
             .answers
             .iter()
             .find(|(needle, _)| line.contains(needle.as_str()))
             .map_or(Ok(String::new()), |(_, answer)| answer.clone())
+            .map_err(RunError::Failed)
     }
 
     fn write(&self, path: &str, text: &str) -> std::io::Result<()> {
@@ -664,11 +687,19 @@ fn the_real_machine_runs_programs_and_reads_files() {
     let failed = system
         .run("/bin/ls", &["/no/such/directory"], None)
         .expect_err("fails");
-    assert!(failed.contains("No such file or directory"), "{failed}");
+    let RunError::Failed(said) = &failed else {
+        panic!("ran and failed: {failed:?}");
+    };
+    assert!(said.contains("No such file or directory"), "{said}");
+    assert_eq!(failed.to_string(), *said);
     let missing = system
         .run("/no/such/program", &[], None)
         .expect_err("not started");
-    assert!(missing.starts_with("/no/such/program: "), "{missing}");
+    let RunError::NotRun(why) = &missing else {
+        panic!("not started: {missing:?}");
+    };
+    assert!(why.starts_with("/no/such/program: "), "{why}");
+    assert_eq!(missing.to_string(), format!("not run: {why}"));
 
     let file = programs().join("note");
     let path = file.to_string_lossy().into_owned();

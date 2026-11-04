@@ -112,12 +112,32 @@ pub enum EgressError {
     Held,
 }
 
+/// Why a program the host side runs gave no output: it could not be started at all, or it
+/// ran and failed. Only the second says anything about the thing it was asked to change: a
+/// program that did not run removed nothing, whatever the text of its error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunError {
+    /// The program could not be started (it is missing, not executable, out of resources).
+    NotRun(String),
+    /// The program ran and failed; its standard error.
+    Failed(String),
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotRun(why) => write!(f, "not run: {why}"),
+            Self::Failed(said) => f.write_str(said),
+        }
+    }
+}
+
 /// What the host side does to the machine; the real one is [`System`].
 pub(crate) trait Sys: std::fmt::Debug + Send + Sync {
     /// Runs `program args`, with `stdin` as its standard input (empty when `None`), and
-    /// returns its standard output; an error is the program's standard error, or why it did
-    /// not run.
-    fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String>;
+    /// returns its standard output; an error is the program's standard error
+    /// ([`RunError::Failed`]), or why it did not run ([`RunError::NotRun`]).
+    fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, RunError>;
     /// Writes `text` to the file `path`.
     fn write(&self, path: &str, text: &str) -> std::io::Result<()>;
     /// Reads the file `path`.
@@ -148,12 +168,14 @@ pub(crate) struct Netns {
 pub(crate) struct System;
 
 impl Sys for System {
-    fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
+    fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, RunError> {
         let output = spawn(program, args, stdin.unwrap_or_default())
-            .map_err(|why| format!("{program}: {why}"))?;
+            .map_err(|why| RunError::NotRun(format!("{program}: {why}")))?;
         match output.status.success() {
             true => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
-            false => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+            false => Err(RunError::Failed(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            )),
         }
     }
 
@@ -267,10 +289,21 @@ fn call(
         .map_err(|why| command(what, format!("{program} {args:?}: {why}")))
 }
 
-/// Whether `error` says that the thing it tried to remove was not there.
-fn gone(error: &EgressError) -> bool {
-    let text = error.to_string();
-    text.contains("No such file or directory") || text.contains("Cannot find device")
+/// `sys.run` of a removal: done when the program removed the thing, and also when it ran and
+/// said the thing was not there (its own words: `nft`'s "No such file or directory", `ip`'s
+/// "Cannot find device"). A program that could not be started removed nothing, so that is an
+/// error whatever its text says (a missing `nft` reads "No such file or directory" too).
+fn remove(sys: &dyn Sys, what: &str, program: &str, args: &[&str]) -> Result<(), EgressError> {
+    match sys.run(program, args, None) {
+        Ok(_) => Ok(()),
+        Err(RunError::Failed(said))
+            if said.contains("No such file or directory")
+                || said.contains("Cannot find device") =>
+        {
+            Ok(())
+        }
+        Err(why) => Err(command(what, format!("{program} {args:?}: {why}"))),
+    }
 }
 
 /// Writes `value` to the sysctl `path` (below `/proc/sys`). A host booted without IPv6 has
@@ -440,28 +473,23 @@ impl Attachment {
         };
         let (config, sys) = (&self.inner.config, &*self.inner.sys);
         let element = format!("{{ \"{name}\" }}");
-        let removed = call(
+        let removed = remove(
             sys,
             "removing the interface from the firewall set",
             config.nft(),
             &["delete", "element", "inet", TABLE, set, &element],
-            None,
         );
-        let deleted = call(
+        let deleted = remove(
             sys,
             "deleting the veth",
             config.ip(),
             &["link", "del", &name],
-            None,
         );
-        let mut result = Ok(());
-        for step in [removed, deleted] {
-            if let Err(error) = step
-                && !gone(&error)
-            {
-                result = Err(error);
-            }
-        }
+        // Both are tried; the veth's error is the one reported when both fail.
+        let result = match (removed, deleted) {
+            (_, Err(error)) | (Err(error), Ok(())) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        };
         // The block, and with it the name `jsvN`, is given back only once both are gone. The
         // sets hold names, so a member left behind would let the next run that takes the name
         // in through that set's rule (an `allow-list` run taking the name an `open` run left in
@@ -621,18 +649,12 @@ fn sweep(sys: &dyn Sys, config: &Config) -> Result<(), EgressError> {
         .filter(|name| numbered(name, IF_PREFIX) || numbered(name, PEER_PREFIX));
     for name in leftovers {
         // Deleting one end of a pair deletes the other, which may be later in the list.
-        let deleted = call(
+        remove(
             sys,
             "deleting a leftover veth",
             config.ip(),
             &["link", "del", name],
-            None,
-        );
-        if let Err(error) = deleted
-            && !gone(&error)
-        {
-            return Err(error);
-        }
+        )?;
     }
     // Add then delete makes the removal work whether or not the tables exist.
     call(
