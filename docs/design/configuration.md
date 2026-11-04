@@ -61,6 +61,11 @@ host's hello is held to the whole listed memory, not the cut (a host must really
 /v1/hosts` shows, per host, `memory: {configured_bytes, schedulable_percent, bookable_bytes}` (`shape.memory_bytes` is the bookable
 figure), and `GET /v1/pools` and `/status` show the same three for an elastic pool's floor.
 
+Under `--placement js-sched` the percent of an agent pool (the agent pool file, or a `[[pool]]` whose hosts register) is the placement
+engine's rule instead: the registry books each host's whole `[shape]` memory (`shape.memory_bytes` in `GET /v1/hosts` is the whole), and
+the engine books no more than `floor(memory x percent / 100)` of it. What fits the pool is still judged at the cut, so a request above it
+is refused `no-fit`, and `memory` still shows the percent and the bookable figure. A static pool is not affected.
+
 The rest of this page is the example of the scheduler's own configuration of section 5.7, which the server does not read yet.
 
 ```toml

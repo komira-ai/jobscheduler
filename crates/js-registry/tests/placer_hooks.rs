@@ -10,10 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_agent_wire::limits::MAX_MEMORY_BYTES;
+use js_agent_wire::{ExclusiveRefusal, RefusalReason};
 use js_agent_wire::{LoadDrops, NodeLoad as Wire};
 use js_pool_static::Candidate;
+use js_provider::Observed;
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
-use js_registry::{MarkedTails, Placer, PoolConfig};
+use js_registry::{DEFAULT_PREPARE_TIMEOUT_MS, MarkedTails, Placer, PoolConfig};
 use js_types::sched::usage::NodeLoad;
 use js_types::{Admission, ClassId, Dims, HostId, LeaseId, Request, ResourceClass, Resources};
 use js_types::{ProviderId, Shape};
@@ -228,4 +230,89 @@ fn the_book_lets_shared_cpu_go_over_by_the_placers_slack() {
     }
     let fifth = provider.start(sharing(5, 1000));
     assert_eq!(fifth, StartAck::Refused(RefusalCode::NoCapacity));
+}
+
+/// Catches: a whole-node lease that ends as a failed prepare (the agent's typed refusal,
+/// or the prepare timeout) stopped in the book without the placer being told, which
+/// would leave a placer that keeps a picture of the books holding a lease the registry
+/// no longer books. Each way, once the lease reads `Absent`, the placer has been told of
+/// its end.
+#[test]
+fn a_failed_prepare_is_told_to_the_placer_as_an_end() {
+    for refused in [true, false] {
+        let told = Arc::new(Told::default());
+        let class = ResourceClass::whole_node();
+        let name = ProviderId::new("builders").unwrap();
+        let fx = fixture_of(PoolConfig::new(name, class.clone(), pool_shape(), 4));
+        fx.registry.set_placer(told.clone());
+        let epoch = fx.join("a", "t");
+        let request = Request {
+            class: class.id().clone(),
+            ..request()
+        };
+        let spec = StartSpec::new(lease(1), request, std::slice::from_ref(&class)).unwrap();
+        let mut provider = fx.provider.clone();
+        assert_eq!(provider.start(spec), StartAck::Unknown);
+        told.said();
+        if refused {
+            let mut beat = fx.heartbeat("a", epoch);
+            beat.exclusive_refused = Some(ExclusiveRefusal {
+                lease_id: lease(1).to_string(),
+                code: RefusalReason::SetupFailed,
+                detail: String::new(),
+            });
+            fx.registry.heartbeat(&beat, &cred("t")).unwrap();
+        } else {
+            fx.clock
+                .advance(Duration::from_millis(DEFAULT_PREPARE_TIMEOUT_MS));
+        }
+        assert_eq!(provider.observe(&lease(1)), Observed::Absent);
+        let said = told.said();
+        let ended = format!("ended {}", lease(1));
+        assert!(said.contains(&ended), "refused {refused}: {said:?}");
+    }
+}
+
+/// A placer that places nothing.
+struct Declines;
+
+impl Placer for Declines {
+    fn pick(&self, _: &StartSpec, _: &[Candidate], _: &MarkedTails) -> Option<usize> {
+        None
+    }
+}
+
+/// Catches: a pool that books the whole memory for its placer still listing its hosts at
+/// the cut, no longer reporting the percent, or answering a request above the share
+/// `NoCapacity` (a client would retry for ever) where it fits no host by the percent. At
+/// 90 the host is listed with its whole 8 GiB and reports 90 percent of it bookable; a
+/// start the placer declines is `NoCapacity` within the share and `NoFit` above it.
+#[test]
+fn a_pool_that_books_whole_memory_keeps_the_percent_for_fit_and_report() {
+    let name = ProviderId::new("builders").unwrap();
+    let percent = js_types::MemoryPercent::new(90).unwrap();
+    let config = PoolConfig::new(name, book(), pool_shape(), 4)
+        .with_memory_percent(percent)
+        .booking_whole_memory();
+    let fx = fixture_of(config);
+    fx.registry.set_placer(Arc::new(Declines));
+    fx.join("a", "t");
+    let mut provider = fx.registry.provider().with_classes(vec![book()]);
+    let listed = provider.capacity();
+    assert_eq!(listed[0].shape.resources().memory_bytes(), 8 << 30);
+    assert_eq!(listed[0].memory.percent(), percent);
+    assert_eq!(listed[0].memory.bookable_bytes(), 7_730_941_132);
+    let asking = |sequence: u64, memory_bytes: u64| {
+        let request = Request {
+            class: book().id().clone(),
+            resources: Resources::new(1000, memory_bytes, 0, None).unwrap(),
+            ..request()
+        };
+        StartSpec::new(lease(sequence), request, &[book()]).unwrap()
+    };
+    let share = listed[0].memory.bookable_bytes();
+    let within = provider.start(asking(1, share));
+    assert_eq!(within, StartAck::Refused(RefusalCode::NoCapacity));
+    let above = provider.start(asking(2, share + 1));
+    assert_eq!(above, StartAck::Refused(RefusalCode::NoFit));
 }

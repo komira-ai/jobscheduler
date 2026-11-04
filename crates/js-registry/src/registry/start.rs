@@ -170,7 +170,7 @@ impl Registry {
         // `NoFit` when no listed host fits, and every host is booked as the pool's shape,
         // so that happens for a request the pool's shape fits only when no host is listed
         // yet. A host could still join, which is capacity, not fit.
-        let floor = self.shared.config.booked();
+        let floor = self.shared.config.fit();
         let wanted = spec.request();
         let fits_pool = floor.satisfies(&wanted.resources, &wanted.capabilities);
         // A whole-node request that fits the pool is refused for lack of a host only when
@@ -330,6 +330,11 @@ impl Registry {
             (_, true, true) => placement::answer(verdict, capable),
             (StartAck::Refused(RefusalCode::NoFit), true, false) => {
                 StartAck::Refused(RefusalCode::NoCapacity)
+            }
+            // A host's room is its whole memory when the placer keeps the percent: a
+            // request above the share fits a host but never the pool.
+            (StartAck::Refused(RefusalCode::NoCapacity), false, _) => {
+                StartAck::Refused(RefusalCode::NoFit)
             }
             (other, _, _) => other,
         }

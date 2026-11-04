@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use js_lease::{Clock, ManualClock, Timestamp};
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
-use js_registry::Credential;
+use js_registry::{Credential, Placer};
 use js_testkit::dir::TestDir;
 use js_types::{HostId, LeaseId, ResourceClass, Resources};
 

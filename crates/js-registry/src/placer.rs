@@ -41,9 +41,10 @@ pub type MarkedTails = BTreeMap<HostId, Option<Duration>>;
 ///
 /// Why a trait here: the placer that ships, `SchedPlacer` of `js-lease-server`, keeps a
 /// `js-sched` scheduler for the life of the server and maps hosts and requests into it with
-/// the server's own conversions; it learns the registry's books from the calls below the
-/// two that place ([`Placer::host_up`], [`Placer::heard`], [`Placer::ended`]). This crate is in the runtime layer (`layers.toml`) and the server is above
-/// it, so the registry cannot name that placer; it can only hold something the server
+/// the server's own conversions; it learns the registry's books from the three calls that
+/// do not place ([`Placer::host_up`], [`Placer::heard`], [`Placer::ended`]). This crate is
+/// in the runtime layer (`layers.toml`) and the server is above it, so the registry cannot
+/// name that placer; it can only hold something the server
 /// hands it, which is this seam. A boxed `Fn` would be the same seam with the same one
 /// call; the trait is used instead so that the contract of the call (the index, the order
 /// of `open`, never asked with no candidate) is written once on [`Placer::pick`], and so

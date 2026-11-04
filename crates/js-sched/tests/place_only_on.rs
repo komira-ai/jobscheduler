@@ -123,3 +123,20 @@ fn a_worker_held_outside_takes_work_again_once_released() {
     assert_eq!(placed(&mut r), ["a"]);
     assert!(leased(&r, op));
 }
+
+/// Catches: an operation held to no worker that still holds one for itself while it waits
+/// (an action that owns its worker holds the emptiest worker it could run on), which keeps
+/// every later operation off that worker. Held to none, an action that would own `a`
+/// whole holds nothing, and an ordinary action submitted after it is placed on `a`.
+#[test]
+fn an_operation_held_to_no_worker_holds_none_for_itself() {
+    let mut r = rig(&["a"]);
+    let mut owner = r.request(js_types::sched::LeaseKind::Action, 1_000, GIB);
+    owner.whole_worker = true;
+    let owner = r.submit(owner);
+    r.s.place_only_on(owner, BTreeSet::new());
+    let after = action(&mut r);
+    assert_eq!(placed(&mut r), ["a"]);
+    assert!(leased(&r, after));
+    assert!(!leased(&r, owner));
+}

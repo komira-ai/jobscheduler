@@ -108,6 +108,11 @@ impl Host {
     }
 }
 
+/// The choice [`HostBook::start_over`] asks for: shown the candidates of a start and a way
+/// to read every listed host ([`HostBook::candidates`]), it answers the index of the
+/// candidate to book, or `None` for none.
+pub type ChooseOver<'a> = &'a dyn Fn(&[Candidate], &dyn Fn() -> Vec<Candidate>) -> Option<usize>;
+
 /// Every host of `hosts` as a candidate, in id order.
 fn listing(hosts: &BTreeMap<HostId, Host>) -> Vec<Candidate> {
     let listed = hosts.iter().map(|(id, host)| Candidate {
@@ -312,7 +317,7 @@ impl HostBook {
         spec: &StartSpec,
         gate: Option<RefusalCode>,
         eligible: &dyn Fn(&HostId, &Shape) -> bool,
-        choose: &dyn Fn(&[Candidate], &dyn Fn() -> Vec<Candidate>) -> Option<usize>,
+        choose: ChooseOver<'_>,
     ) -> StartAck {
         if let Some(settled) = self.settled(spec, gate) {
             return settled;

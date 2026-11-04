@@ -72,10 +72,10 @@ pub struct HostView {
     /// of them. Empty when the host holds none.
     pub leases: Vec<LeaseId>,
     /// The shape the pool books for the host (not the host's own claim), with its memory
-    /// cut to the pool's memory percent.
+    /// cut to the pool's memory percent; whole for a pool whose placer keeps the percent.
     pub shape: Shape,
-    /// The memory the pool lists for the host, the percent of it that is booked and what
-    /// that comes to (the memory of `shape`).
+    /// The memory the pool lists for the host, the percent of it that may be booked and
+    /// what that comes to (the memory of `shape`, unless the placer keeps the percent).
     pub memory: MemoryHeadroom,
     /// The shape the host announced at its last hello, which the registry checked against
     /// the pool's floor; `None` for a host that has not said hello since a restart. A
@@ -361,6 +361,7 @@ impl Registry {
             requests,
             rules,
             now,
+            placer: self.shared.placer.get().map(|placer| &**placer),
         };
         for (host, record) in records.iter_mut() {
             let overdue = record.exclusive.overdue(now, rules.prepare_timeout_ms);
@@ -793,6 +794,7 @@ impl Registry {
                 requests: &mut *requests,
                 rules,
                 now,
+                placer: self.shared.placer.get().map(|placer| &**placer),
             };
             ending.fail(
                 (&mut record.taint, &mut record.exclusive),

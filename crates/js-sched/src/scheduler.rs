@@ -750,6 +750,7 @@ impl Scheduler {
             if !fitted
                 && (request.kind == LeaseKind::WholeMachine || request.owns_worker())
                 && verdict == Verdict::Servable
+                && self.backfill.only(id).is_none()
             {
                 let held = match &self.whole_node {
                     Some(cfg) if request.kind == LeaseKind::WholeMachine => {

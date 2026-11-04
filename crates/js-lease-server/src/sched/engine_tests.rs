@@ -310,11 +310,12 @@ fn load_readings_choose_among_hosts_that_fit() {
     assert_eq!(second, first);
 }
 
-/// Asserts that a heartbeat whose load the vet drops (a working set past the most the
-/// wire takes) still counts as a beat: the registry keeps the host live with no reading,
-/// the engine keeps it a worker past its own lease grace of 60 s on such beats alone, and
-/// no reading is used: lease 2 goes where booking alone sends it. It catches a beat whose
-/// bad load is fed to the engine, and a bad load that loses the beat.
+/// Asserts that a heartbeat whose load the vet drops (an active file figure past the most
+/// the wire takes) still counts as a beat and feeds no reading: the registry keeps every
+/// host live with no reading, and lease 2 goes where booking alone sends it. The dropped
+/// readings say all 8 cores of each host are busy with a working set the engine would
+/// take, so had they been fed, the engine would place lease 2 nowhere. It catches a beat
+/// whose bad load reaches the engine, and a bad load that loses the beat.
 #[test]
 fn a_heartbeat_with_a_bad_load_still_counts_as_a_beat() {
     let hosts = ["h1", "h2"];
@@ -325,10 +326,11 @@ fn a_heartbeat_with_a_bad_load_still_counts_as_a_beat() {
         &["--placement", "js-sched"],
     );
     let first = r.start(sharing_spec(1)).unwrap();
-    for seq in 1..=16 {
+    for seq in 1..=4 {
         r.advance(5_000);
         for host in hosts {
-            let bad = reading(seq, 8_000, MAX_MEMORY_BYTES + 1, &["1-1"]);
+            let mut bad = reading(seq, 8_000, GIB, &["1-1"]);
+            bad.active_file_bytes = MAX_MEMORY_BYTES + 1;
             r.beat(host, Some(bad));
         }
     }
@@ -343,8 +345,10 @@ fn a_heartbeat_with_a_bad_load_still_counts_as_a_beat() {
 /// engine's own default, read from js-sched and not restated) a 10-core host whose leases
 /// book 10 cores refuses a start of 1.2 cores and takes one of 1 core, and a start that
 /// would pass the host's memory is refused whatever the slack; with `--cpu-slack 1.0` the
-/// 1-core start is refused. It catches the setting dropped, a default restated that
-/// drifts, and slack applied to memory.
+/// 1-core start is refused; with `--cpu-slack 1.5` five more cores are taken and a sixth
+/// is not, which the engine's own rule decides as much as the registry's book. It catches
+/// the setting dropped on either side, a default restated that drifts, and slack applied
+/// to memory.
 #[test]
 fn slack_1_1_lets_cpu_book_ten_percent_over() {
     let sched = ["--placement", "js-sched"];
@@ -372,6 +376,14 @@ fn slack_1_1_lets_cpu_book_ten_percent_over() {
     assert_eq!(r.start(share_of(11, 1_000, 1)), None);
     let refused = r.provider.start(share_of(12, 1_000, 1));
     assert_eq!(refused, StartAck::Refused(RefusalCode::NoCapacity));
+    let mut extra = sched.to_vec();
+    extra.extend(["--cpu-slack", "1.5"]);
+    let mut r = full("slack_one_half", &extra);
+    for sequence in 11..=15 {
+        assert_eq!(r.start(share_of(sequence, 1_000, 1)).as_deref(), Some("h1"));
+    }
+    assert_eq!(r.start(share_of(16, 1_000, 1)), None);
+    assert_eq!(r.counted(), (NONE, 0, 1));
 }
 
 /// What 90 percent of 16 GiB books, rounded down: 15461882265.6 bytes.
@@ -380,7 +392,7 @@ const NINETY: u64 = 16 * GIB / 100 * 90 + 16 * GIB % 100 * 90 / 100;
 /// Asserts that under `--placement js-sched` the pool's `memory_schedulable_percent` is
 /// the engine's rule: at 90 a host of 16 GiB takes starts totalling 90% of it, and one
 /// byte more is placed nowhere (the decline stands and is counted), while the registry
-/// books the host's whole 16 GiB. It catches the registry still cutting the shape (a
+/// books the host's whole 16 GiB and still reports the percent. It catches the registry still cutting the shape (a
 /// double cut to 81%, which refuses the third start) and the engine ignoring the key
 /// (which places the fourth).
 #[test]
@@ -404,17 +416,24 @@ fn memory_percent_cuts_bookable_memory_in_the_engine() {
     assert_eq!(r.counted(), (declined, 0, 1));
     let listed = r.agents.registry.provider().capacity();
     assert_eq!(listed[0].shape.resources().memory_bytes(), 16 * GIB);
+    let hosts = r.agents.registry.hosts();
+    assert_eq!(hosts[0].memory.percent().get(), 90);
+    assert_eq!(hosts[0].memory.bookable_bytes(), NINETY);
 }
 
 /// Asserts that a host whose hello claims far more memory than the pool lists (512 GiB)
-/// is still held to the pool's percent: the engine books what 90% of the pool's 16 GiB
-/// allows on it and not a byte more. It catches a host booked by its claim.
+/// is still held to the pool's percent: a request one byte above 90% of the pool's 16 GiB
+/// fits no host (`no-fit`, not a wait), and the engine books what 90% allows on it and not
+/// a byte more. It catches a host booked by its claim, and a request above the share left
+/// to wait for ever.
 #[test]
 fn an_agent_claim_never_raises_the_percent() {
     let percent = "memory_schedulable_percent = 90";
     let sched = ["--placement", "js-sched"];
     let mut r = rig("percent_claim", &pool(2, 8000, percent), &[], &sched);
     r.hello(&hello_of("big", 64_000, 512 * GIB));
+    let above = r.provider.start(share_of(9, 1_000, NINETY + 1));
+    assert_eq!(above, StartAck::Refused(RefusalCode::NoFit));
     assert_eq!(r.start(share_of(1, 1_000, NINETY)).as_deref(), Some("big"));
     assert_eq!(r.start(share_of(2, 1_000, 1)), None);
     assert_eq!(r.placer().fallbacks().declined, 1);

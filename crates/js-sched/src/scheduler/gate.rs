@@ -123,8 +123,10 @@ impl Scheduler {
 
     /// Holds `operation` to `workers`: from the next placement round it is placed on none
     /// but them, and on an empty set on none at all, whatever else would take it. A second
-    /// call replaces the set. The set is dropped with the operation (retired or forgotten
-    /// as queued). An operation never given a set is placed as before.
+    /// call replaces the set. While it waits, an operation held to a set holds no worker
+    /// for itself, as a whole-machine request or an action that owns its worker otherwise
+    /// does. The set is dropped with the operation (retired or forgotten as queued). An
+    /// operation never given a set is placed as before.
     ///
     /// The lease server's registry offers each start only the hosts eligible for it, and
     /// passes them this way; once the start is booked it passes an empty set, so the

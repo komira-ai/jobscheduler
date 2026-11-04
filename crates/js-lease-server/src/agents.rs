@@ -124,7 +124,7 @@ pub(crate) fn assemble(
             // `--placement js-sched`: the scheduler picks the host of a start, and books
             // the share of each host's memory the pool's percent says; the registry books
             // the whole shape. Under `registry` the registry cuts it, as it always did.
-            let (pool, memory) = placement.split(pool)?;
+            let (pool, memory) = placement.split(pool);
             let registry = Registry::new(pool, clock.clone());
             let placer = placement.placer(max_lease_wall, cpu_slack, memory, clock);
             if let Some(placer) = &placer {

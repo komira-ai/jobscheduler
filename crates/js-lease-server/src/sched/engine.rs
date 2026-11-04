@@ -23,6 +23,10 @@
 //! that host rebuilds the engine. Every host the registry offers is heard from at that
 //! start ([`Event::Capacity`]), so the registry, not the engine's own grace, says which
 //! hosts are live.
+//!
+//! A host the registry forgets (lost past its retention, or given back) is not told to
+//! the engine: it stays a worker there, silent and so out of every placement, until the
+//! engine is next built.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -86,6 +90,8 @@ pub(crate) struct Engine {
     outside: BTreeSet<HostId>,
     /// The farm time last fed.
     now: FarmTime,
+    /// The number the next lease the engine takes up gets, in term 0.
+    taken: u64,
 }
 
 impl Engine {
@@ -103,11 +109,11 @@ impl Engine {
         let mut operations = Vec::new();
         let mut holds = Vec::new();
         for (number, (candidate, held)) in (0..).zip(held) {
-            operations.push(recovered(number, &candidate.host, held));
             let placed = Placed {
                 lease: SchedLeaseId::new(0, number),
                 operation: OperationId(number),
             };
+            operations.push(recovered(placed, &candidate.host, held));
             holds.push((candidate.host.clone(), held.lease, placed));
         }
         let next = OperationId(u64::try_from(operations.len()).unwrap_or(u64::MAX));
@@ -119,6 +125,7 @@ impl Engine {
             back: BTreeMap::new(),
             outside: BTreeSet::new(),
             now,
+            taken: u64::try_from(holds.len()).unwrap_or(u64::MAX),
         };
         for candidate in every {
             engine.host_up(&candidate.host, &candidate.shape, now);
@@ -145,6 +152,27 @@ impl Engine {
             .or_default()
             .insert(lease, placed);
         self.back.insert(placed.lease, (host.clone(), lease));
+    }
+
+    /// Takes up `spec`'s lease, which the registry booked on `candidate` without the
+    /// engine placing it (the fallback of a start the engine cannot describe): it is held
+    /// there as a lease recovered after a restart is, booking what the registry books.
+    pub(crate) fn adopt(&mut self, candidate: &Candidate, spec: &StartSpec) {
+        // A lease that books the whole host is taken up as a request that owns its worker.
+        let held = js_pool_static::Held {
+            lease: spec.lease(),
+            resources: spec.request().resources.clone(),
+            whole: spec.class().admission().books_whole_host(),
+        };
+        let placed = Placed {
+            lease: SchedLeaseId::new(0, self.taken),
+            operation: self.sched.next_operation(),
+        };
+        self.taken = self.taken.saturating_add(1);
+        let _ = self
+            .sched
+            .take_in(recovered(placed, &candidate.host, &held));
+        self.hold(&candidate.host, spec.lease(), placed);
     }
 
     /// `host` said hello, booked as `shape`: a worker up, of the capacity and caps the
@@ -372,9 +400,10 @@ impl Engine {
     }
 }
 
-/// The recovered operation, numbered `number`, that stands for the lease `held` on
-/// `host`: charged its CPU and memory as it books them.
-fn recovered(number: u64, host: &HostId, held: &js_pool_static::Held) -> Recovered {
+/// The recovered operation that stands for the lease `held` on `host`, numbered as
+/// `placed` says: charged its CPU and memory as it books them.
+fn recovered(placed: Placed, host: &HostId, held: &js_pool_static::Held) -> Recovered {
+    let number = placed.operation.0;
     let booked = map::booking(&held.resources);
     let request = Request {
         key: WorkKey::new("held", held.lease.to_string()),
@@ -396,11 +425,11 @@ fn recovered(number: u64, host: &HostId, held: &js_pool_static::Held) -> Recover
         key_hash: 0,
     };
     Recovered {
-        operation: OperationId(number),
+        operation: placed.operation,
         request,
         waiter: WaiterId(number),
         lease: Some(RecoveredLease {
-            lease: SchedLeaseId::new(0, number),
+            lease: placed.lease,
             worker: map::worker(host),
             cost: Some(cost),
         }),
@@ -553,5 +582,27 @@ mod tests {
         assert_eq!(engine.sched.leases_on(&map::worker(&b)).len(), 1);
         assert_eq!(engine.on.len(), 1);
         assert!(engine.agrees(&every, 3));
+    }
+
+    /// Catches: an agreement check that counts the leases on a host and does not read
+    /// them, or reads the engine's maps and not its scheduler. Shown `b` with another lease
+    /// in place of the one the engine holds there, the engine disagrees; after `b` is
+    /// silent past the engine's lease grace, so that the engine gives its lease up while
+    /// the registry still lists it, it disagrees too, and the given-up lease is not placed
+    /// again by the engine alone.
+    #[test]
+    fn the_engine_disagrees_on_other_leases_and_on_a_lease_it_gave_up() {
+        let every = [candidate("b", shape(true), &[2])];
+        let mut engine = Engine::build(Settings::default(), &every, at(0));
+        assert!(engine.agrees(&every, 9));
+        let other = [candidate("b", shape(true), &[3])];
+        assert!(!engine.agrees(&other, 9));
+        engine.feed(at(120_000), Event::Tick);
+        let b = HostId::new("b").unwrap();
+        assert!(engine.sched.leases_on(&map::worker(&b)).is_empty());
+        assert!(!engine.agrees(&every, 9));
+        engine.heard(&b, None, at(121_000));
+        engine.feed(at(122_000), Event::Tick);
+        assert!(engine.sched.leases_on(&map::worker(&b)).is_empty());
     }
 }

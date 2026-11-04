@@ -67,7 +67,8 @@ pub(crate) struct SchedPlacer {
     unmappable: AtomicU64,
     declined: AtomicU64,
     resynced: AtomicU64,
-    /// How many engines this placer built: one, and one more per resync.
+    /// How many engines this placer built, counted for the tests that hold it to one.
+    #[cfg(test)]
     built: AtomicU64,
 }
 
@@ -93,6 +94,7 @@ impl SchedPlacer {
             unmappable: AtomicU64::new(0),
             declined: AtomicU64::new(0),
             resynced: AtomicU64::new(0),
+            #[cfg(test)]
             built: AtomicU64::new(1),
         }
     }
@@ -141,6 +143,7 @@ impl SchedPlacer {
         let mut engine = self.engine();
         if !engine.agrees(open, spec.lease().sequence()) {
             *engine = Engine::build(self.settings, &every(), now);
+            #[cfg(test)]
             self.built.fetch_add(1, Ordering::Relaxed);
             let count = self.resynced.fetch_add(1, Ordering::Relaxed) + 1;
             warn!(lease = %spec.lease(), count, "the placement engine disagreed with the registry and was rebuilt");
@@ -174,7 +177,8 @@ impl Placer for SchedPlacer {
     /// When the scheduler cannot take these hosts or this request (a shape that does not
     /// describe a node, a capability that is not a platform requirement), the first host
     /// not in `marked` is booked, as a registry with no placer does, and the start is
-    /// counted as unmappable and logged: the registry's check of the room stands. When the
+    /// counted as unmappable and logged: the registry's check of the room stands, and the
+    /// engine takes the lease up on that host ([`Engine::adopt`]). When the
     /// engine, agreeing with the registry's books, places the start nowhere (its memory
     /// percent or CPU slack is reached, its readings say the hosts are full), that stands:
     /// no host is booked (`NoCapacity`; the client retries), and the start is counted as
@@ -204,7 +208,9 @@ impl Placer for SchedPlacer {
             }
             Err(err) => {
                 let first = open.iter().position(|c| !marked.contains_key(&c.host));
-                first.inspect(|_| {
+                first.inspect(|at| {
+                    // The registry books it there: the engine holds it from now on.
+                    self.engine().adopt(&open[*at], spec);
                     let count = self.unmappable.fetch_add(1, Ordering::Relaxed) + 1;
                     let cause = err.to_string();
                     warn!(lease = %spec.lease(), %cause, count, "placement fell back to the first host");
@@ -425,6 +431,33 @@ mod tests {
         assert_eq!(placer.pick(&spec(), &open, &unmarked()), Some(1));
         let odd = spec_with(&sharing(), 1, &[("colour", "red")]);
         assert_eq!(placer.pick(&odd, &open, &unmarked()), Some(0));
+        assert_eq!(placer.fallbacks().unmappable, 1);
+    }
+
+    /// Catches: a lease the fallback booked left out of the engine, so that the next start
+    /// meeting its host finds the two pictures apart and rebuilds the engine. The first
+    /// start (the engine knows neither host yet) builds it once; the odd request falls back
+    /// to `a`, and the next start, shown `a` with that lease on it, agrees with the engine
+    /// and builds nothing more.
+    #[test]
+    fn a_lease_the_fallback_booked_is_taken_up_without_a_rebuild() {
+        let placer = SchedPlacer::default();
+        let open = [host("a", x86(), &[]), host("b", x86(), &[])];
+        let odd = spec_with(&sharing(), 1, &[("colour", "red")]);
+        assert_eq!(placer.pick(&odd, &open, &unmarked()), Some(0));
+        assert_eq!((placer.resynced(), placer.built()), (1, 2));
+        let booked = Held {
+            lease: odd.lease(),
+            resources: odd.request().resources.clone(),
+            whole: false,
+        };
+        let mut after = open.clone();
+        after[0].leases.push(booked);
+        assert_eq!(
+            placer.pick(&spec_of(&sharing(), 2), &after, &unmarked()),
+            Some(0)
+        );
+        assert_eq!((placer.resynced(), placer.built()), (1, 2));
         assert_eq!(placer.fallbacks().unmappable, 1);
     }
 
