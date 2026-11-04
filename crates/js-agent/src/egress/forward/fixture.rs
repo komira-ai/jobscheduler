@@ -9,6 +9,7 @@ pub(crate) fn nat_rule(host: u16, job: &str, container: u16, handle: u64) -> Val
         "family": "ip", "table": "js_crun_egress_nat", "chain": "prerouting",
         "handle": handle, "comment": format!("fwd-{host}"),
         "expr": [
+            {"match": {"op": "!=", "left": {"meta": {"key": "iifname"}}, "right": "jsv*"}},
             {"match": {"op": "==", "left": {"fib": {"result": "type", "flags": ["daddr"]}}, "right": "local"}},
             {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": host}},
             {"counter": {"packets": 0, "bytes": 0}},

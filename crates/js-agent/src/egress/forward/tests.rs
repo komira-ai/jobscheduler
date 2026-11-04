@@ -23,7 +23,8 @@ fn forward(host: u16, job: Ipv4Addr, container: u16, iface: &str) -> Forward {
 
 /// Catches a forward that reaches more than its one destination and port, or that accepts a
 /// packet that was not DNATed: the DNAT rule rewrites only a packet addressed to the host
-/// itself on the one host port, to the one address and port; the acceptance names the one
+/// itself, that did not come from a job's interface, on the one host port, to the one address
+/// and port; the acceptance names the one
 /// interface, the one address, the one port and needs `ct status dnat`; both carry the
 /// comment `fwd-<host>`, and nothing in either is a range, a set or a prefix. The
 /// transaction holds both rules of every forward, the DNAT rule first.
@@ -32,19 +33,22 @@ fn forward_rules_name_one_destination_and_one_port() {
     let (nat, filter) = forward_rules(8080, JOB, 80, "jsv0");
     assert_eq!(
         nat,
-        "add rule ip js_crun_egress_nat prerouting fib daddr type local tcp dport 8080 \
-         counter dnat to 198.18.0.2:80 comment \"fwd-8080\""
+        "add rule ip js_crun_egress_nat prerouting iifname != \"jsv*\" fib daddr type local \
+         tcp dport 8080 counter dnat to 198.18.0.2:80 comment \"fwd-8080\""
     );
     assert_eq!(
         filter,
         "insert rule inet js_crun_egress forward oifname \"jsv0\" ip daddr 198.18.0.2 \
          tcp dport 80 ct status dnat counter accept comment \"fwd-8080\""
     );
+    // No prefix, set, wildcard (but the one naming the jobs' interfaces) or range.
     for text in [&nat, &filter] {
-        for wide in ["/", "{", "@", "*", "-80", "8080-"] {
+        for wide in ["/", "{", "@", " 80-", "8080-", "jsv0*"] {
             assert!(!text.contains(wide), "{wide} in {text}");
         }
     }
+    assert_eq!(nat.matches('*').count(), 1, "{nat}");
+    assert!(!filter.contains('*'), "{filter}");
     assert_eq!(comment(8080), "fwd-8080");
     let both = [
         forward(8080, JOB, 80, "jsv0"),
@@ -135,7 +139,7 @@ fn a_listing_decodes_back_to_the_forwards_that_made_it() {
         none(),
         "another address in the acceptance"
     );
-    let to = with(nat(), "/rule/expr/3/dnat/addr", json!("198.18.0.9"));
+    let to = with(nat(), "/rule/expr/4/dnat/addr", json!("198.18.0.9"));
     assert_eq!(
         one(filter(), to),
         none(),
@@ -143,9 +147,9 @@ fn a_listing_decodes_back_to_the_forwards_that_made_it() {
     );
     let port = with(filter(), "/rule/expr/2/match/right", json!(81));
     assert_eq!(one(port, nat()), none(), "another port in the acceptance");
-    let port = with(nat(), "/rule/expr/3/dnat/port", json!(81));
+    let port = with(nat(), "/rule/expr/4/dnat/port", json!(81));
     assert_eq!(one(filter(), port), none(), "another port in the DNAT rule");
-    let host = with(nat(), "/rule/expr/1/match/right", json!(8081));
+    let host = with(nat(), "/rule/expr/2/match/right", json!(8081));
     assert_eq!(one(filter(), host), none(), "a host port not its comment's");
     let iface = with(filter(), "/rule/expr/0/match/right", json!("jsv7"));
     assert_eq!(
@@ -192,13 +196,16 @@ fn only_the_exact_rules_read_as_a_forward() {
         assert_eq!(one(changed, nat()), none(), "filter {pointer} = {value}");
     }
     let nats = [
-        ("/rule/expr/0/match/right", json!("unicast")),
-        ("/rule/expr/1/match/op", json!("in")),
-        ("/rule/expr/3/dnat", json!("x")),
-        ("/rule/expr/3/dnat/addr", json!("x")),
-        ("/rule/expr/3/dnat/port", json!("80")),
-        ("/rule/expr/3/dnat/family", json!("ip6")),
-        ("/rule/expr/3/dnat/flags", json!("persistent")),
+        ("/rule/expr/0/match/op", json!("==")),
+        ("/rule/expr/0/match/right", json!("eth*")),
+        ("/rule/expr", json!([{"counter": null}])),
+        ("/rule/expr/1/match/right", json!("unicast")),
+        ("/rule/expr/2/match/op", json!("in")),
+        ("/rule/expr/4/dnat", json!("x")),
+        ("/rule/expr/4/dnat/addr", json!("x")),
+        ("/rule/expr/4/dnat/port", json!("80")),
+        ("/rule/expr/4/dnat/family", json!("ip6")),
+        ("/rule/expr/4/dnat/flags", json!("persistent")),
         ("/rule/chain", json!("postrouting")),
     ];
     for (pointer, value) in nats {
@@ -242,10 +249,10 @@ fn only_the_exact_rules_read_as_a_forward() {
     let nat_spelled = with(
         with(
             spelled(nat(), &[protocol]),
-            "/rule/expr/1/match/left/fib/flags",
+            "/rule/expr/2/match/left/fib/flags",
             json!("daddr"),
         ),
-        "/rule/expr/4/dnat/family",
+        "/rule/expr/5/dnat/family",
         json!("ip"),
     );
     assert_eq!(one(filter_spelled, nat_spelled), made);

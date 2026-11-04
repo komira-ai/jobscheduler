@@ -84,9 +84,11 @@ New traffic toward a job is refused (`inbound`), and a declared port is the only
 rules, both commented `fwd-<host>`; the prefix `fwd-` is reserved for them
 (`egress/forward.rs`):
 
-- in `prerouting` of `ip js_crun_egress_nat`: `fib daddr type local tcp dport <host> counter
-  dnat to <job address>:<container>`. `fib daddr type local` leaves alone a packet the host
-  merely routes;
+- in `prerouting` of `ip js_crun_egress_nat`: `iifname != "jsv*" fib daddr type local tcp
+  dport <host> counter dnat to <job address>:<container>`. `fib daddr type local` leaves alone
+  a packet the host merely routes, and `iifname != "jsv*"` a packet of a job: a job that
+  connects to the host's address on a forwarded port meets the `input` refusal, so no job
+  reaches another job (or itself) through a forward;
 - at the head of `forward` of `inet js_crun_egress` (`insert rule`, so before `inbound`):
   `oifname "<jsvN>" ip daddr <job address> tcp dport <container> ct status dnat counter
   accept`. It names the one interface, address and port, and needs the packet to have been

@@ -180,7 +180,9 @@ fn an_undeclared_port_is_refused() {
 /// declaring `8080 -> 80` and the second nothing, each listening on 80 and 8080: the host's
 /// port 8080 reaches the first job only; the second job's address, on either port, and the
 /// host's port 8081 are refused, from the far host, and the first job cannot reach the second
-/// either.
+/// either. Neither job reaches the forward through the host's addresses (its gateway, or the
+/// host's address on the far link): a job's packet to the host is not DNATed and meets the
+/// `input` refusal, whose counter moves while the forward's does not.
 #[test]
 #[ignore = "needs root, ip, nft, unshare: see the module docs"]
 fn a_job_with_no_ports_has_no_inbound_path() {
@@ -216,6 +218,23 @@ fn a_job_with_no_ports_has_no_inbound_path() {
             "from the first job, {to}: {reached:?}"
         );
     }
+    let (forwarded, input) = (packets("fwd-8080"), packets("input"));
+    for (from, gateway) in [(&open, 1), (&closed, 5)] {
+        let gateway = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(198, 18, 0, gateway), 8080));
+        for to in [gateway, host(8080)] {
+            let reached = tcp(&from.ns, to);
+            assert!(
+                matches!(reached, Reach::Failed(_)),
+                "through the host, {to}: {reached:?}"
+            );
+        }
+    }
+    assert_eq!(
+        packets("fwd-8080"),
+        forwarded,
+        "a job's packet was forwarded"
+    );
+    assert!(packets("input") >= input + 4, "each refused by input");
     let reached = tcp(&far_host.ns, host(8080));
     assert!(reached.connected(), "{reached:?}");
     let accepted: Vec<u64> = servers.iter().map(Server::accepted).collect();
@@ -288,6 +307,9 @@ fn a_changed_or_deleted_forward_is_seen_by_the_check_and_a_released_one_is_gone(
         "ip",
         "js_crun_egress_nat",
         "prerouting",
+        "iifname",
+        "!=",
+        "\"jsv*\"",
         "fib",
         "daddr",
         "type",

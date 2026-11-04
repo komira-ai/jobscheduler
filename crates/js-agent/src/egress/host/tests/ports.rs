@@ -449,7 +449,7 @@ fn check_accepts_the_forwards_of_live_jobs_and_refuses_any_other() {
         (
             "another target",
             inet_with(&[with(filter(), "/rule/expr/2/match/right", 81.into())]),
-            nat_with(&[with(nat(), "/rule/expr/3/dnat/port", 81.into())]),
+            nat_with(&[with(nat(), "/rule/expr/4/dnat/port", 81.into())]),
         ),
         (
             "the forward twice",

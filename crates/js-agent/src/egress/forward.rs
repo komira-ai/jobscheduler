@@ -5,9 +5,12 @@
 //! `fwd-<host>` (the comment prefix [`PREFIX`] is theirs alone):
 //!
 //! - in the chain `prerouting` of `ip js_crun_egress_nat` (a NAT hook at priority `dstnat`,
-//!   which [`super::ruleset::render`] makes empty): `fib daddr type local tcp dport <host>
-//!   counter dnat to <job>:<container>`. `fib daddr type local` leaves alone a packet the host
-//!   merely routes (one not addressed to the host itself).
+//!   which [`super::ruleset::render`] makes empty): `iifname != "jsv*" fib daddr type local tcp
+//!   dport <host> counter dnat to <job>:<container>`. `fib daddr type local` leaves alone a
+//!   packet the host merely routes (one not addressed to the host itself), and `iifname !=
+//!   "jsv*"` a packet of a job: a job's packet to the host's address stays one to the host,
+//!   which the `input` refusal drops, so no job reaches another job (or itself) through a
+//!   forward.
 //! - in the chain `forward` of `inet js_crun_egress`, ahead of the `inbound` refusal (`insert
 //!   rule` puts it first): `oifname "<iface>" ip daddr <job> tcp dport <container> ct status
 //!   dnat counter accept`. It names the one interface, the one address and the one port, and
@@ -27,7 +30,7 @@ use std::net::Ipv4Addr;
 
 use serde_json::{Value, json};
 
-use super::ruleset::{NAT_TABLE, TABLE};
+use super::ruleset::{IF_PREFIX, NAT_TABLE, TABLE};
 
 /// The comment prefix of the forwards' rules: no other rule's comment starts with it.
 pub const PREFIX: &str = "fwd-";
@@ -80,8 +83,8 @@ pub fn forward_rules(
     let comment = comment(host_port);
     (
         format!(
-            "add rule ip {NAT_TABLE} {NAT_CHAIN} fib daddr type local tcp dport {host_port} \
-             counter dnat to {job_ip}:{container_port} comment \"{comment}\""
+            "add rule ip {NAT_TABLE} {NAT_CHAIN} iifname != \"{IF_PREFIX}*\" fib daddr type local \
+             tcp dport {host_port} counter dnat to {job_ip}:{container_port} comment \"{comment}\""
         ),
         format!(
             "insert rule inet {TABLE} {FILTER_CHAIN} oifname \"{iface}\" ip daddr {job_ip} \
@@ -245,6 +248,7 @@ fn half(nat: bool, rule: &Value) -> Option<Half> {
             true,
             NAT_CHAIN,
             [
+                Piece::Outside,
                 Piece::Local,
                 Piece::Dport(host),
                 Piece::Counter,
@@ -278,6 +282,8 @@ fn half(nat: bool, rule: &Value) -> Option<Half> {
 /// One expression of a forward's rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Piece {
+    /// `iifname != "jsv*"`.
+    Outside,
     /// `fib daddr type local`.
     Local,
     /// `oifname "<name>"`.
@@ -335,6 +341,7 @@ fn port(value: &Value) -> Option<u16> {
 /// What a match compares, of the ones a forward's rule holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Subject {
+    Iif,
     Oif,
     Daddr,
     Dport,
@@ -347,6 +354,7 @@ enum Subject {
 /// What the left side of a match is.
 fn subject(left: &Value) -> Option<Subject> {
     [
+        (json!({"meta": {"key": "iifname"}}), Subject::Iif),
         (json!({"meta": {"key": "oifname"}}), Subject::Oif),
         (
             json!({"payload": {"protocol": "ip", "field": "daddr"}}),
@@ -381,6 +389,7 @@ fn matched(body: &Value) -> Option<Piece> {
     let op = body.get("op")?.as_str()?;
     let right = body.get("right")?;
     let piece = match (subject(body.get("left")?)?, op) {
+        (Subject::Iif, "!=") => flag(right, &format!("{IF_PREFIX}*"), Piece::Outside)?,
         (Subject::Oif, "==") => Piece::Oif(right.as_str()?.to_owned()),
         (Subject::Daddr, "==") => Piece::Daddr(right.as_str()?.parse().ok()?),
         (Subject::Dport, "==") => Piece::Dport(port(right)?),

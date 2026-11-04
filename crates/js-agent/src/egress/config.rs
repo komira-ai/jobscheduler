@@ -595,8 +595,8 @@ mod tests {
     /// `open`, arms the route wait and names no resolver; `--egress none` with an endpoint or a
     /// forward port is refused naming that flag; a forward port of 0, 70000, a backwards range
     /// or text, and 17 of them, are refused naming `--egress-forward-port`; 16 are accepted,
-    /// sorted and each once, and the ceiling holds them while the advertised one does not (the
-    /// agent forwards nothing yet). An allow-list under an open ceiling keeps its endpoints.
+    /// sorted and each once, and the ceiling holds them. An allow-list under an open ceiling
+    /// keeps its endpoints.
     #[cfg(target_os = "linux")]
     #[test]
     fn egress_flags_are_checked_naming_the_flag() {
