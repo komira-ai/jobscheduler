@@ -7,8 +7,12 @@
 //! `crates/<name>/Cargo.toml`, every `path` dependency of `[dependencies]` and of
 //! `[target.<cfg>.dependencies]`, transitively. The one target table it does not follow is
 //! the one whose key is exactly `cfg(target_os = "linux")` (code that is not built for
-//! macOS). Dev- and build-dependencies are not followed. A manifest that cannot be read is
-//! an error.
+//! macOS). Dev- and build-dependencies are not followed, and neither is an `optional`
+//! dependency of a crate whose `default` feature is absent or empty: a build of the agent
+//! links it only when something turns a feature of that crate on, which the `agent_features`
+//! test refuses for the job client (`js-client`'s `jobs`). A crate with a non-empty
+//! `default` feature has every dependency followed. A manifest that cannot be read is an
+//! error.
 //!
 //! **Which files.** [`check`] parses (with `syn`) the production source of those crates.
 //! The roots of a crate are the `[lib] path`, each `[[bin]] path`, and the files of the
@@ -256,7 +260,8 @@ fn closure(root: &Path) -> Result<BTreeMap<String, toml::Table>, Error> {
 }
 
 /// The directory names of the `path` dependencies of the manifest `table` that are built
-/// for macOS: those of `[dependencies]` and of every target table but [`LINUX_ONLY`].
+/// for macOS: those of `[dependencies]` and of every target table but [`LINUX_ONLY`],
+/// without the `optional` ones unless the crate has a non-empty `default` feature.
 fn path_dependencies(table: &toml::Table) -> Vec<String> {
     let mut tables: Vec<&toml::Value> = Vec::new();
     tables.extend(table.get("dependencies"));
@@ -267,10 +272,19 @@ fn path_dependencies(table: &toml::Table) -> Vec<String> {
             }
         }
     }
+    let defaults = table
+        .get("features")
+        .and_then(|features| features.get("default"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|default| !default.is_empty());
     let mut names = Vec::new();
     for dependencies in tables.into_iter().filter_map(toml::Value::as_table) {
         for dependency in dependencies.values() {
-            let path = dependency.get("path").and_then(toml::Value::as_str);
+            let optional = dependency.get("optional").and_then(toml::Value::as_bool) == Some(true);
+            let path = dependency
+                .get("path")
+                .and_then(toml::Value::as_str)
+                .filter(|_| defaults | !optional);
             let name = path.and_then(|path| Path::new(path).file_name());
             names.extend(name.map(|name| name.to_string_lossy().into_owned()));
         }

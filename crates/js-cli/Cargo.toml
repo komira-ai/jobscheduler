@@ -12,7 +12,7 @@ name = "js"
 path = "src/main.rs"
 
 [dependencies]
-js-client = { path = "../js-client" }
+js-client = { path = "../js-client", features = ["jobs"] }
 # The job service's descriptor set, which the job commands build requests and print answers by.
 js-proto = { path = "../js-proto" }
 clap.workspace = true

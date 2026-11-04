@@ -9,23 +9,27 @@ publish.workspace = true
 
 [dependencies]
 js-agent-wire = { path = "../js-agent-wire" }
-# The job service's messages and generated gRPC client (the job client, src/jobs).
-js-proto = { path = "../js-proto" }
-# The job client's byte stream under the gRPC channel.
-hyper-util = { workspace = true, features = ["tokio"] }
 rustix = { workspace = true, features = ["fs", "process"] }
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net"] }
-tokio-rustls.workspace = true
-# `channel`: the HTTP/2 client the generated gRPC client runs on, without tonic's own TLS
-# (the job client does TLS itself, with the roots below).
-tonic = { workspace = true, features = ["channel"] }
 ureq.workspace = true
-webpki-roots.workspace = true
+# The job client (src/jobs), behind the `jobs` feature: the job service's messages and
+# generated gRPC client, the HTTP/2 channel they run on (`channel`, without tonic's own TLS:
+# the job client does TLS itself) and the byte stream under it, and the bundled roots.
+hyper-util = { workspace = true, features = ["tokio"], optional = true }
+js-proto = { path = "../js-proto", optional = true }
+tokio = { workspace = true, features = ["net"], optional = true }
+tokio-rustls = { workspace = true, optional = true }
+tonic = { workspace = true, features = ["channel"], optional = true }
+webpki-roots = { workspace = true, optional = true }
+
+[features]
+# The client of the job service, `jobs::JobClient`. Off by default: js-agent and the macOS
+# helper use the lease client only and link none of it; js-cli turns it on.
+jobs = ["dep:hyper-util", "dep:js-proto", "dep:tokio", "dep:tokio-rustls", "dep:tonic", "dep:webpki-roots"]
 
 [dev-dependencies]
 http-body-util.workspace = true
@@ -33,8 +37,9 @@ hyper.workspace = true
 js-testkit = { path = "../js-testkit" }
 prost.workspace = true
 rcgen.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 tonic = { workspace = true, features = ["transport"] }
+webpki-roots.workspace = true
 
 [lints]
 workspace = true

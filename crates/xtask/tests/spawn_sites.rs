@@ -120,7 +120,7 @@ fn the_real_crates_read_include_the_agents_path_dependencies() {
     for krate in ["js-agent", "js-mac-session", "js-mac-provision", "js-types"] {
         assert!(read.contains(krate), "{krate} is not read: {read:?}");
     }
-    for krate in ["js-contain", "js-testkit"] {
+    for krate in ["js-contain", "js-testkit", "js-proto"] {
         assert!(!read.contains(krate), "{krate} is read: {read:?}");
     }
 }
@@ -847,5 +847,122 @@ fn what_cannot_be_read_is_an_error() {
     assert_eq!(
         tree.error(),
         "crates/js-agent/src/lib.rs: stream did not contain valid UTF-8"
+    );
+}
+
+/// A dependency that `include!`s code the check cannot read fails the walk when the agent
+/// depends on it plainly, and when its crate turns the dependency on by default; it is left
+/// out only as an `optional` dependency of a crate with no default feature, which a build
+/// of the agent does not link. It catches a walk that, to leave the job client out, stops
+/// following the dependencies that are built.
+#[test]
+fn only_an_optional_dependency_off_by_default_is_left_out() {
+    let generated = "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n";
+    let error = "crates/gen/src/lib.rs: `include!` is not followed by the spawn-site check";
+    let tree = Tree::new("plain-dependency");
+    tree.manifest("js-agent", "[dependencies]\nlib = { path = \"../lib\" }\n");
+    tree.manifest("lib", "[dependencies]\ngen = { path = \"../gen\" }\n");
+    tree.put("crates/lib/src/lib.rs", "");
+    tree.manifest("gen", "");
+    tree.put("crates/gen/src/lib.rs", generated);
+    assert_eq!(tree.error(), error);
+
+    let tree = Tree::new("optional-dependency");
+    tree.manifest("js-agent", "[dependencies]\nlib = { path = \"../lib\" }\n");
+    tree.manifest(
+        "lib",
+        "[dependencies]\ngen = { path = \"../gen\", optional = true }\n[features]\njobs = [\"dep:gen\"]\n",
+    );
+    tree.put("crates/lib/src/lib.rs", "");
+    tree.manifest("gen", "");
+    tree.put("crates/gen/src/lib.rs", generated);
+    assert!(tree.sites().is_empty());
+    let read = crates(tree.root()).unwrap();
+    assert_eq!(
+        read.into_iter().collect::<Vec<_>>(),
+        ["js-agent", "js-mac-session", "lib"]
+    );
+
+    let tree = Tree::new("default-dependency");
+    tree.manifest("js-agent", "[dependencies]\nlib = { path = \"../lib\" }\n");
+    tree.manifest(
+        "lib",
+        "[dependencies]\ngen = { path = \"../gen\", optional = true }\n[features]\ndefault = [\"jobs\"]\njobs = [\"dep:gen\"]\n",
+    );
+    tree.put("crates/lib/src/lib.rs", "");
+    tree.manifest("gen", "");
+    tree.put("crates/gen/src/lib.rs", generated);
+    assert_eq!(tree.error(), error);
+}
+
+/// The features a build of `package` alone resolves for `dependency`, by `cargo tree`
+/// (resolved against `Cargo.lock`, per package, as a release build of it is), or `None`
+/// when the package does not depend on it.
+fn resolved_features(package: &str, dependency: &str) -> Option<Vec<String>> {
+    let cargo = std::env::var_os("CARGO").unwrap_or("cargo".into());
+    let out = std::process::Command::new(cargo)
+        .current_dir(repo())
+        .args([
+            "tree",
+            "--locked",
+            "--offline",
+            "-p",
+            package,
+            "--target",
+            "all",
+            "-e",
+            "normal",
+            "--prefix",
+            "none",
+            "-f",
+            "{p} [{f}]",
+        ])
+        .output()
+        .expect("cargo tree runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.lines()
+        .find(|line| line.split_whitespace().next() == Some(dependency))
+        .map(|line| {
+            let features = line
+                .rsplit_once('[')
+                .map(|(_, rest)| rest.trim_end_matches(']'))
+                .unwrap_or_default();
+            features
+                .split(',')
+                .filter(|f| !f.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+}
+
+/// Asserts that a build of `js-agent` or of `js-mac-session`, each on its own, resolves
+/// `js-client` without its `jobs` feature and has no `js-proto` at all, while js-cli
+/// resolves the feature. The spawn-site check leaves the job client out because it is
+/// off for them; this catches a dependency of theirs that turns it on.
+#[test]
+fn the_agent_and_the_helper_do_not_link_the_job_client() {
+    for package in ["js-agent", "js-mac-session"] {
+        let features = resolved_features(package, "js-client").unwrap_or_default();
+        assert!(
+            !features.iter().any(|f| f == "jobs"),
+            "{package}: js-client [{}]",
+            features.join(",")
+        );
+        assert_eq!(
+            resolved_features(package, "js-proto"),
+            None,
+            "{package} links js-proto"
+        );
+    }
+    let cli = resolved_features("js-cli", "js-client").unwrap_or_default();
+    assert!(
+        cli.iter().any(|f| f == "jobs"),
+        "js-cli: js-client [{}]",
+        cli.join(",")
     );
 }

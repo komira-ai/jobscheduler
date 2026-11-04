@@ -7,12 +7,14 @@
 //! Failures name the flags `--server`, `--token-file` and `--ca-cert`, so a program that
 //! uses this crate takes its settings from flags of those names.
 //!
-//! [`jobs`] is the client of the job service (`jobscheduler.v1`, gRPC), under the same
-//! rules: [`jobs::JobClient`], whose methods are generated from the service definition, and
-//! [`jobs::JobError`], which says whether a failed call may have taken effect.
+//! With the `jobs` feature (off by default; js-cli turns it on), `jobs` is the client of
+//! the job service (`jobscheduler.v1`, gRPC), under the same rules: `jobs::JobClient`, whose
+//! methods are generated from the service definition, and `jobs::JobError`, which says
+//! whether a failed call may have taken effect.
 
 mod client;
 mod error;
+#[cfg(feature = "jobs")]
 pub mod jobs;
 mod run;
 mod server_url;

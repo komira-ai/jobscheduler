@@ -170,6 +170,10 @@ fn with_flags(target: clap::Command, command: &'static Command) -> clap::Command
         .args(command.flags.iter().map(arg))
 }
 
+/// Where the call's own flags stand in a command's help: after the four global flags (whose
+/// places are their declaration order), each in the order the table gives.
+const FLAG_ORDER: usize = 100;
+
 /// The argument of `flag`.
 fn arg(flag: &'static Flag) -> Arg {
     let action = match flag.repeated {
@@ -181,6 +185,8 @@ fn arg(flag: &'static Flag) -> Arg {
         .help(help(flag))
         .value_name(value_name(&flag.kind))
         .required(flag.required)
+        // After the global flags, in the order of the request's fields.
+        .display_order(FLAG_ORDER)
         // A text value may start with a dash (`--spec.args --fast`), a number may be
         // negative (`--spec.priority -3`).
         .allow_hyphen_values(matches!(flag.kind, Kind::Text))
