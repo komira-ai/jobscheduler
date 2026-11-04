@@ -221,9 +221,9 @@ fn a_bundle_the_store_lacks_is_refused_when_nothing_fetches() {
 
 /// With `--bundle-pull missing` a fetch begins for a bundle the store lacks and the start is
 /// refused `bundle-pending` (retriable); the fetch is asked once with the pin's name and
-/// digest. A digest that names an index is `bundle-index` (the request's fault) and a fetch
+/// digest. A pin whose index nests an index is `bundle-index` (the request's fault) and a fetch
 /// that cannot run or did not verify is `bundle-fetch-failed`. It catches a worker thread
-/// that waits for a download, and an index taken for a manifest.
+/// that waits for a download, and an index nested in an index.
 #[test]
 fn a_missing_bundle_starts_a_fetch_and_the_start_is_retriable() {
     let host = host();

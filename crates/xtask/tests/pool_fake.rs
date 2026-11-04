@@ -150,8 +150,9 @@ fn the_fake_pool_is_reachable_only_from_dev_dependencies() {
 }
 
 /// Asserts that the scan reports `js-pool-fake` under `[dependencies]`, under a
-/// target-specific `[dependencies]` table and under a renamed key, and that a
-/// `[dev-dependencies]` entry is not reported. Catches a scan that passes every
+/// target-specific `[dependencies]` table, under `[build-dependencies]` plain and
+/// target-specific, and under a renamed key, and that a `[dev-dependencies]` entry is not
+/// reported. Catches a scan that passes every
 /// workspace because it reads the wrong table or the key alone.
 #[test]
 fn a_normal_dependency_on_js_pool_fake_is_reported() {
@@ -168,10 +169,16 @@ fn a_normal_dependency_on_js_pool_fake_is_reported() {
         "renamed",
         "[dependencies]\nhosts = { path = \"../js-pool-fake\", package = \"js-pool-fake\" }\n",
     );
+    tree.krate("build", "build", &format!("[build-dependencies]\n{pool}\n"));
+    tree.krate(
+        "target-build",
+        "target-build",
+        &format!("[target.'cfg(unix)'.build-dependencies]\n{pool}\n"),
+    );
     tree.krate("dev", "dev", &format!("[dev-dependencies]\n{pool}\n"));
     assert_eq!(
         normal_dependents_of_pool_fake(tree.root()),
-        ["plain", "renamed", "target"]
+        ["build", "plain", "renamed", "target", "target-build"]
     );
 }
 

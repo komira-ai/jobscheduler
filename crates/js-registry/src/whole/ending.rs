@@ -21,6 +21,8 @@ pub(crate) struct Ending<'a> {
     pub(crate) requests: &'a mut Requests,
     pub(crate) rules: Rules,
     pub(crate) now: Timestamp,
+    /// The placer, told of the lease's end as of any stop ([`crate::Placer::ended`]).
+    pub(crate) placer: Option<&'a dyn crate::Placer>,
 }
 
 impl Ending<'_> {
@@ -55,5 +57,8 @@ impl Ending<'_> {
         self.runs.stop_lease(&lease);
         *exclusive = exclusive.stopped();
         self.book.stop(&lease);
+        if let Some(placer) = self.placer {
+            placer.ended(lease);
+        }
     }
 }

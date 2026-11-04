@@ -292,7 +292,12 @@ impl Allow {
         }
     }
 
-    fn admits(&self, location: &Location) -> bool {
+    /// Whether a pin may name `location` under this entry: the same registry, and a
+    /// repository that is the entry's prefix or below it by whole path components
+    /// (`team` admits `team` and `team/bundle`, not `team2`). Whether the registry may be
+    /// reached at all is the [`Policy`]'s to say, not this.
+    #[must_use]
+    pub fn admits(&self, location: &Location) -> bool {
         let path = location.repository();
         let under = path
             .strip_prefix(self.prefix.as_str())

@@ -148,6 +148,7 @@ fn the_registration_keys_need_an_elastic_pool_and_a_valid_value() {
         ("require_host_credential", "false"),
         ("placement", "\"registry\""),
         ("estimate_feed", "false"),
+        ("cpu_slack", "1.1"),
     ] {
         let scratch = Scratch::new(&format!("one_file_needs_{key}"));
         let stat = PoolText::fake_hosts(&scratch, "hosts");
@@ -205,6 +206,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--agent-hello-burst", "5"),
         key("--agent-hello-interval", "5s"),
         key("--placement", "js-sched"),
+        key("--cpu-slack", "1.1"),
         key("--default-ttl", "5m"),
         key("--max-ttl", "2h"),
         key("--tick", "3s"),
