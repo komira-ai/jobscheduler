@@ -4,11 +4,12 @@
 //! place it. The store decides which one does: the grant is a conditional write, and the
 //! others lose it. A scheduler that learns from the store that an operation it holds queued
 //! is no longer queued there (another scheduler granted it, finished it or refused it) drops
-//! it, so that it places nothing the store gave to another.
+//! it, so that it places nothing the store gave to another. A worker whose host the caller
+//! no longer lists is forgotten here too ([`Scheduler::forget_worker`]).
 
 use std::cmp::Reverse;
 
-use js_types::sched::{OperationId, WaiterId};
+use js_types::sched::{OperationId, WaiterId, WorkerId};
 
 use super::{OpState, Scheduler};
 
@@ -46,6 +47,24 @@ impl Scheduler {
             self.admission.forget(operation);
             op.waiters
         })
+    }
+
+    /// Forgets `worker`, whose host its caller no longer lists: from now on it is no worker
+    /// of this scheduler, and its readings, its cordon and any hold put on it from outside
+    /// ([`Scheduler::reserve_outside`]) go with it. Only a worker that holds no lease and
+    /// for which no recovered lease waits is forgotten; answers whether it was. A worker
+    /// this scheduler does not know is left as it is.
+    pub fn forget_worker(&mut self, worker: &WorkerId) -> bool {
+        let holds = self.held.values().any(|held| {
+            let holder = self.ops[&held.operation].state.holding();
+            holder.is_some_and(|(_, on)| on == worker)
+        });
+        if holds | self.awaited.contains_key(worker) {
+            return false;
+        }
+        self.cordons.uncordon(worker);
+        self.release_outside(worker);
+        self.workers.remove(worker).is_some()
     }
 }
 

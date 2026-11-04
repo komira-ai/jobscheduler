@@ -1,12 +1,11 @@
 //! A job's life on the host: from the `Start` that names it, through its container, to the
 //! result the server acknowledges and the slot that frees (design 5.4 and 5.10).
 //!
-//! [`Lifecycle`] is a state machine over three seams: a [`Runtime`], a
-//! [`CheckHook`] and a [`Clock`]. It consumes the wire types in memory only (it reads a
-//! [`HeartbeatReply`](js_agent_wire::HeartbeatReply) and offers the
+//! [`Lifecycle`] is a state machine over three seams: a [`Runtime`], a [`CheckHook`] and a
+//! [`Clock`]. It reads a [`HeartbeatReply`](js_agent_wire::HeartbeatReply) and offers the
 //! [`HeldRun`](js_agent_wire::HeldRun)s and [`RunResult`](js_agent_wire::RunResult)s, the
-//! [`HeldJob`](js_agent_wire::HeldJob)s and the retired job ids of the next heartbeat), and
-//! it reads no clock but the one it is given and sleeps never.
+//! [`HeldJob`](js_agent_wire::HeldJob)s and the retired job ids of the next heartbeat; it
+//! reads no clock but the one it is given and sleeps never.
 //!
 //! # What the agent guarantees per job
 //!
@@ -21,9 +20,9 @@
 //!   `valid_for_ms`, so no lease bounds it) and goes through the same admission, refusals,
 //!   slots and wall clock: the wall limit counts from the moment the container is made, so a
 //!   start delayed in delivery is neither shortened nor stretched. It is idempotent on the
-//!   job id, and job ids share the bounded set of retired run ids above (in memory: a
-//!   restart forgets them, so a late start of a stopped job can run again: design section
-//!   8, row 31). Such a job is listed in the heartbeat's `jobs` alone, with its
+//!   job id, and job ids share the bounded set of retired run ids above (kept in the state
+//!   root, so a late start of a stopped job does not run after a restart either). Such a
+//!   job is listed in the heartbeat's `jobs` alone, with its
 //!   result inside until a `job_acks` entry of a verdict the agent knows names it; never in
 //!   `held` or `results`, and no `Stop`, `Cancel` or `result_acks` entry touches it (nor a
 //!   `JobStop` or `job_acks` entry a run), so a lease server never sees a job id. A start
@@ -36,8 +35,8 @@
 //!   comes); for a job the agent does not hold it retires the id and lists it in
 //!   `retired_jobs` (the newest [`RETIRED_LISTED`]) in every heartbeat until a reply's
 //!   `retired_acks` names it, the answer that the job is stopped and gone. A container a
-//!   job start made is labelled ([`label::KEYING`]), so a restart that adopts it (the
-//!   Docker and Podman path; `crun` adopts nothing yet) lists it as a job again.
+//!   job start made is labelled ([`label::KEYING`]), so a restart that adopts it
+//!   lists it as a job again.
 //! - **A start that must be refused creates nothing** and is answered with a result of
 //!   outcome `failed_to_start` and the refusal code as its detail, held like any other
 //!   result: a host job on an agent without `--allow-host-jobs`
@@ -151,12 +150,9 @@
 //!   backend reads back where each mount was bound and refuses a container whose mounts
 //!   differ; the time between the agent's resolution and the daemon's bind stays open (see
 //!   [`MountRoots`]).
-//! - **Held and retired state is in memory.** After a restart an unacknowledged result
-//!   whose container was removed is lost, and the agent forgets which run and job ids it
-//!   was told to stop and which retired job ids it still owed the server; a late `Start`
-//!   or `JobStart` for one of them runs. Containers that still exist are
-//!   re-adopted (and a run that exited in the meantime is reported as its container
-//!   says). The scheduler reruns a lease the agent no longer reports.
+//! - **Held results and retired ids survive a restart** as files in the state root (see
+//!   `held`); the `retired_jobs` still owed the server do not. Containers that still exist
+//!   are re-adopted, an exited one as its container says.
 //! - **A `Stop` or `Cancel` of a run the agent does not hold retires the run id on
 //!   purpose**, so that a `Start` that arrives after it never runs.
 //! - **Each run has a slot, and each slot a user of its own.** A run in slot `k` (the lowest
@@ -330,6 +326,10 @@ pub mod code {
     /// The records of owed checks in the state root could not be listed when the agent
     /// started, so the host is tainted ([`reason::CHECK_OWED`](super::taint::reason)).
     pub const OWED_UNREADABLE: &str = "owed-records-unreadable";
+    /// A held result or the retired list could not be written to the state root.
+    pub const HELD_FAILED: &str = "held-record-failed";
+    /// A held result or the retired list in the state root could not be read at start.
+    pub const HELD_UNREADABLE: &str = "held-record-unreadable";
 }
 
 /// A monotonic clock in milliseconds, from an origin of its own. The lifecycle only

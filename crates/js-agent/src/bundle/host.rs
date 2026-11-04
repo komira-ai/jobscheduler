@@ -14,7 +14,7 @@ use js_treestore::Sealer;
 use js_treestore::mac::{Clonefile, Fchflags, MacSealer, Owner};
 
 use super::list::is_digest;
-use super::place::{Placer, load_config};
+use super::place::{Placer, load_config, manifest_of};
 use super::settings::Settings;
 use crate::facts::{CommandRunner, SystemCommands, free_bytes};
 use crate::trusted_file::{self, NOT_WRITABLE_BY_OTHERS};
@@ -52,7 +52,8 @@ pub struct HostXcode {
 pub enum Fetch {
     /// The fetch is running; the bundle is not there yet.
     Started,
-    /// The digest names an index, not a manifest.
+    /// The pin names an index whose darwin/arm64 entry is itself an index; one level of index is
+    /// followed.
     Index,
     /// The fetch cannot run or did not verify; the text says why.
     Failed(String),
@@ -72,10 +73,16 @@ pub trait BundleHost: Send + Sync {
     fn read_file(&self, path: &Path) -> Result<String, String>;
 
     /// The manifest digests the store holds (`sha256:<hex>`), ascending. A store with no
-    /// manifests yet holds none.
+    /// manifests yet holds none. An index digest is not listed: the list is the platform
+    /// manifests, whatever the pins that resolved to them.
     fn held(&self, store: &Path) -> Result<Vec<String>, String>;
 
-    /// What the held bundle `digest` needs of the host.
+    /// The manifest digest the pin digest `digest` stands for in the store: the one the
+    /// store's index alias names when it has one, `digest` itself otherwise ([`manifest_of`]).
+    fn resolve(&self, store: &Path, digest: &str) -> String;
+
+    /// What the held bundle `digest` (a manifest digest, as [`BundleHost::resolve`] gives
+    /// it) needs of the host.
     fn needs(&self, store: &Path, digest: &str) -> Result<Needs, String>;
 
     /// The host's macOS version.
@@ -95,8 +102,8 @@ pub trait BundleHost: Send + Sync {
     /// that cannot run one would see every start end in a refusal.
     fn can_run(&self) -> bool;
 
-    /// Begins to fetch the bundle `name` (a pin's name, with its tag if it has one) with
-    /// manifest digest `digest` into the store.
+    /// Begins to fetch the bundle `name` (a pin's name, with its tag if it has one) with pin
+    /// digest `digest` (a manifest or an image index) into the store.
     fn fetch(&self, store: &Path, name: &str, digest: &str) -> Fetch;
 
     /// Opens the store `settings` names, for an agent that runs native jobs, and gives the
@@ -252,6 +259,10 @@ impl<R: CommandRunner + Clone + Send + Sync + 'static> BundleHost for SystemHost
         held.retain(|digest| trees_present(store, digest, &|path| self.read_file(path)));
         held.sort();
         Ok(held)
+    }
+
+    fn resolve(&self, store: &Path, digest: &str) -> String {
+        manifest_of(store, digest, &|path| self.read_file(path))
     }
 
     fn needs(&self, store: &Path, digest: &str) -> Result<Needs, String> {

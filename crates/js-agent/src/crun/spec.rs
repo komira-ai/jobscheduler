@@ -120,6 +120,36 @@ pub(super) fn job_env(container: &mut ContainerSpec, env: &[(String, String)]) {
     container.env.extend(env.iter().cloned());
 }
 
+/// The container of an adopted run, rebuilt from what its sidecar records: what a stop, an
+/// end, the pid ask and the image collection read of it (its name, directory, image digest
+/// and cgroup). The bundle exists already and the container is never made again, so the rest
+/// is empty.
+pub(super) fn adopted_spec(
+    name: &str,
+    image_digest: &str,
+    lease: &LeaseDirs,
+    cgroup_parent: &str,
+) -> ContainerSpec {
+    ContainerSpec {
+        name: name.to_owned(),
+        image: image_digest.to_owned(),
+        image_digest: image_digest.to_owned(),
+        dir: lease.dir.clone(),
+        cgroup_parent: cgroup_parent.to_owned(),
+        exec_root: EXEC_ROOT.to_owned(),
+        input_root: lease.root.clone(),
+        upper: lease.upper.clone(),
+        overlay_work: lease.work.clone(),
+        working_directory: String::new(),
+        env: Vec::new(),
+        argv: Vec::new(),
+        limits: ContainerLimits::DEFAULT,
+        shared: Vec::new(),
+        mounts: Vec::new(),
+        devices: Vec::new(),
+    }
+}
+
 /// What a container's end is to the lifecycle: the exit status of the job, or [`NOT_RUN`]
 /// for one that did not run; flagged out of memory only when the kernel's killer ran for
 /// the lease's own limit (a node short of memory is not the booking's fault).
@@ -166,6 +196,18 @@ pub(super) fn end_of(
         }
     };
     exit_of(ended, oom.as_ref())
+}
+
+/// The exit and the tail a run's end becomes: `ended` as js-contain read it, `captured` what
+/// the run wrote, and the lease's `cgroup`, `cap` and `backstop` for the OOM account
+/// ([`end_of`]).
+pub(super) fn concluded(
+    ended: Result<Ended, String>,
+    captured: &Captured,
+    (cgroup, cap, backstop): (&LeaseCgroup, Option<u64>, Option<u64>),
+) -> (Exit, LogTail) {
+    let tail = log_tail_of(captured, not_run_words(&ended));
+    (end_of(ended, cgroup, cap, backstop), tail)
 }
 
 /// The words `crun` or the init gave for a container that did not run to an exit.

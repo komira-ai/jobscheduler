@@ -179,7 +179,7 @@ fn claiming_40_gib() -> Vec<u8> {
 }
 
 /// Catches a first argument sent to the wrong mode, or to one when it names none: the
-/// give and unpack words select their modes, the words come from the `HelperModes` given
+/// give, unpack and supervise words select their modes, the words come from the `HelperModes` given
 /// (other words select, the default words then select nothing), and the program's name
 /// alone, an empty list, a flag and a different word select no mode.
 #[test]
@@ -198,6 +198,7 @@ fn the_first_argument_selects_the_mode_the_modes_name() {
         give: "give".to_owned(),
         whole: "all".to_owned(),
         unpack: "unpack".to_owned(),
+        supervise: "supervise".to_owned(),
         binary: "/other".to_owned(),
     };
 
@@ -221,6 +222,13 @@ fn the_first_argument_selects_the_mode_the_modes_name() {
     assert!(stage.join(ROOTFS).join("f").is_file());
     // The root exists now: a second unpack into the same stage is refused, not merged.
     assert_eq!(unpack(&defaults, &defaults.unpack), Some(1));
+
+    // The supervise mode: arguments it cannot read are its exit 2, and nothing is started.
+    let supervise = |modes: &HelperModes, word: &str| dispatch_args(modes, &with(word, Vec::new()));
+    assert_eq!(supervise(&defaults, &defaults.supervise), Some(2));
+    assert_eq!(supervise(&renamed, "supervise"), Some(2));
+    assert_eq!(supervise(&renamed, &defaults.supervise), None);
+    assert_eq!(supervise(&defaults, "supervise"), None);
 
     for none in [
         words(&[]),

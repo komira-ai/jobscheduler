@@ -1,25 +1,32 @@
 //! The ledger of the leases a [`CrunRuntime`](super::CrunRuntime) made: one small file
 //! each, the *sidecar*, in a directory of its own beside the image store.
 //!
-//! `crun run` is a foreground child of the agent, and no `PR_SET_PDEATHSIG` ties it to
-//! the agent: after a crash the unit's `KillMode=mixed` ends it, for an agent run under
-//! `js-agent-crun.service`. What a dead process leaves is files (the lease's directories
-//! and its cgroup). The ledger says which of them are this agent's to remove, and what
-//! labels the run they belonged to carried. A sidecar holds the id the agent registered
-//! under (the value of [`label::AGENT`]), the run id, the lease's name and every label, so
-//! two agents on one host, sharing one store, never take each other's leases: a sweep
-//! removes a lease only when its sidecar names this agent, and leaves every other file in
-//! the directory alone.
+//! A job's `crun run` is run by a supervisor process of its own, not by the agent, so the
+//! container and its supervisor outlive the agent: after a restart what is left of a
+//! lease is the supervisor and the container (while the job runs), the lease's directories
+//! and its cgroup. The ledger says which of them are this agent's, what labels the run
+//! carried, and (from version 2) what a successor needs to take the run over: the state
+//! the lease had reached, what the run booked, its wall-clock limit and start, the paths
+//! of the lease and of the exit record, and the identity of the supervisor. A sidecar holds
+//! the id the agent registered under (the value of [`label::AGENT`]), the run id, the
+//! lease's name and every label, so two agents on one host, sharing one store, never take
+//! each other's leases: a start-up pass takes over or removes a lease only when its sidecar
+//! names this agent, and leaves every other file in the directory alone.
 //!
 //! # Order
 //!
-//! The sidecar is written *before* anything it names is made, and removed *after* the last
-//! of it is gone. A process that dies in between therefore leaves a sidecar with some or
-//! none of its lease: the sweep removes what there is and then the sidecar. A lease with no
-//! sidecar cannot have been made by this code, and is not touched.
+//! The sidecar is written, in the state [`Phase::Starting`], *before* anything it names is
+//! made, and rewritten in the state [`Phase::Running`] (with the start and the supervisor)
+//! once the supervisor answered. It is removed *after* the last of the lease is gone. A
+//! process that dies in between leaves a sidecar with some or none of its lease: the next
+//! start removes what there is and then the sidecar. A lease with no sidecar cannot have
+//! been made by this code; the start-up pass removes one that carries this agent's name
+//! prefix.
 //!
-//! A sidecar is written whole to a file of its own and linked into place, so a reader sees
-//! all of it or none, and an existing sidecar is never overwritten.
+//! A sidecar is first written whole to a file of its own and linked into place, so a reader
+//! sees all of it or none, and a sidecar that exists is never recorded over. A rewrite
+//! writes a whole new file and renames it over, so a reader sees the old sidecar or the new
+//! one.
 //!
 //! # What is left alone
 //!
@@ -36,6 +43,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use js_contain::oci::SupervisorId;
+
 use crate::cli_runtime::{NAME_PREFIX, agent_tag, container_name};
 use crate::lifecycle::label;
 
@@ -48,10 +57,73 @@ const SUFFIX: &str = ".json";
 /// The longest sidecar that is read: a lease's labels are far smaller.
 const MAX_BYTES: u64 = 64 * 1024;
 
-/// The version of the sidecar's form.
-const VERSION: u32 = 1;
+/// The version of the sidecar's form: version 2 adds the fields of a run that a successor
+/// can take over ([`Phase`], [`Booked`], [`Supervisor`] and the paths of the lease).
+pub(super) const VERSION: u32 = 2;
 
-/// One lease's sidecar.
+/// The oldest form that is still read: version 1 has none of the version 2 fields, and its
+/// lease is removed, not taken over.
+const OLDEST: u32 = 1;
+
+/// How far a lease had come when its sidecar was last written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    /// The lease is being made, or is made and its container not started.
+    Starting,
+    /// The supervisor of the container answered: the run runs, or ran.
+    Running,
+}
+
+/// What a run booked, as the labels say it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Booked {
+    /// Thousandths of a CPU core.
+    pub cpu_millis: u64,
+    /// Bytes of memory.
+    pub memory_bytes: u64,
+    /// Bytes of scratch disk; none when the run named none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
+    /// The GPU indices.
+    #[serde(default)]
+    pub gpus: Vec<u32>,
+    /// The slot the run holds.
+    pub slot: u32,
+}
+
+/// The supervisor process of a run: its pid and its start time ([`SupervisorId`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Supervisor {
+    /// The process id.
+    pub pid: u32,
+    /// The start time in clock ticks since boot.
+    pub start: u64,
+}
+
+impl Supervisor {
+    /// The supervisor `id` names.
+    pub(super) fn of(id: SupervisorId) -> Self {
+        Self {
+            pid: id.pid,
+            start: id.start,
+        }
+    }
+
+    /// The identity this record names.
+    pub(super) fn id(&self) -> SupervisorId {
+        SupervisorId {
+            pid: self.pid,
+            start: self.start,
+        }
+    }
+}
+
+/// One lease's sidecar. The fields after `labels` are those of version 2: a sidecar of
+/// version 1 has none of them, and one of version 2 written before the lease's container
+/// started has no `started_wall_ms` and no `supervisor`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
@@ -65,10 +137,44 @@ pub struct Entry {
     pub name: String,
     /// The labels of the container, the agent's own among them.
     pub labels: BTreeMap<String, String>,
+    /// How far the lease had come.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<Phase>,
+    /// The lease id of the run (the allocation id of a job start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation: Option<String>,
+    /// What the run booked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booked: Option<Booked>,
+    /// When the container started, in milliseconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_wall_ms: Option<u64>,
+    /// The wall-time limit of the run in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_ms: Option<u64>,
+    /// The lease's directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_dir: Option<PathBuf>,
+    /// The lease's cgroup directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<PathBuf>,
+    /// The run's scratch directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch: Option<PathBuf>,
+    /// The file the supervisor writes the container's end in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_record: Option<PathBuf>,
+    /// The digest of the run's image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_digest: Option<String>,
+    /// The supervisor process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<Supervisor>,
 }
 
 impl Entry {
-    /// The sidecar of the lease `name` of `run_id`, made by `agent`, which carries `labels`.
+    /// The sidecar of the lease `name` of `run_id`, made by `agent`, which carries `labels`,
+    /// in the state [`Phase::Starting`] with none of the other version 2 fields.
     pub(super) fn new(
         agent: &str,
         run_id: &str,
@@ -83,6 +189,36 @@ impl Entry {
             run_id: run_id.to_owned(),
             name: name.to_owned(),
             labels,
+            state: Some(Phase::Starting),
+            allocation: None,
+            booked: None,
+            started_wall_ms: None,
+            wall_ms: None,
+            lease_dir: None,
+            cgroup: None,
+            scratch: None,
+            exit_record: None,
+            image_digest: None,
+            supervisor: None,
+        }
+    }
+
+    /// This sidecar, still in the state starting, with the supervisor of the container
+    /// being started, so a teardown that finds it ends the supervisor.
+    pub(super) fn supervised(&self, supervisor: Supervisor) -> Self {
+        Self {
+            supervisor: Some(supervisor),
+            ..self.clone()
+        }
+    }
+
+    /// This sidecar once the container started at `started_wall_ms` under `supervisor`.
+    pub(super) fn running(&self, started_wall_ms: u64, supervisor: Supervisor) -> Self {
+        Self {
+            state: Some(Phase::Running),
+            started_wall_ms: Some(started_wall_ms),
+            supervisor: Some(supervisor),
+            ..self.clone()
         }
     }
 }
@@ -143,19 +279,46 @@ pub(super) struct Survey {
     pub(super) left: Vec<Left>,
 }
 
-/// A lease the sweep removed.
+/// Why the start-up pass removed a lease of this agent instead of taking it over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    /// Its sidecar is of version 1, which records nothing a successor could take over.
+    OldForm,
+    /// Its container never started (its sidecar is not in the state running): no job ran.
+    NeverRan,
+    /// Its sidecar is in the state running, but a check of it failed; the text says which.
+    Inconsistent(String),
+    /// A lease of this agent's name prefix that has no sidecar at all: a directory beside
+    /// the runs or a cgroup nothing records.
+    NoRecord,
+}
+
+impl std::fmt::Display for Reason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OldForm => f.write_str("its record is of an old form"),
+            Self::NeverRan => f.write_str("its container never started"),
+            Self::Inconsistent(why) => write!(f, "its record does not hold: {why}"),
+            Self::NoRecord => f.write_str("nothing records it"),
+        }
+    }
+}
+
+/// A lease the start-up pass removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Removed {
     /// The run it was made for.
     pub run_id: String,
     /// The lease's name.
     pub name: String,
-    /// The labels the run's container carried.
+    /// The labels the run's container carried (none for a lease with no sidecar).
     pub labels: BTreeMap<String, String>,
+    /// Why it was removed and not taken over.
+    pub reason: Reason,
 }
 
-/// A lease of this agent that the sweep could not remove: its sidecar stays, and the next
-/// start tries again.
+/// A lease of this agent that the start-up pass could not remove: its sidecar stays, and the
+/// next start tries again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failed {
     /// The run it was made for.
@@ -166,9 +329,12 @@ pub struct Failed {
     pub why: String,
 }
 
-/// What a startup sweep did.
+/// What the start-up pass over the ledger did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SweepReport {
+    /// The runs of earlier processes of this agent that were taken over: they run on (or
+    /// ended and wait to be reported), and the runtime lists them.
+    pub adopted: Vec<String>,
     /// The leases of earlier processes of this agent that were removed: the runs they
     /// belonged to are lost, and the lease server is told so by the agent holding none.
     pub removed: Vec<Removed>,
@@ -176,6 +342,14 @@ pub struct SweepReport {
     pub failed: Vec<Failed>,
     /// The files of the ledger that are not this agent's, or not sidecars.
     pub left: Vec<Left>,
+}
+
+/// What [`Ledger::sweep`] did, and what it kept: the report, and the value `judge` made for
+/// each lease it kept.
+#[derive(Debug)]
+pub(super) struct Swept<T> {
+    pub(super) report: SweepReport,
+    pub(super) adopted: Vec<T>,
 }
 
 /// Whether `name` is one path component of the characters a lease's name has.
@@ -270,6 +444,34 @@ impl Ledger {
         synced
     }
 
+    /// Replaces the sidecar of `entry.name` with `entry`, whole or not at all: a new file is
+    /// written, made durable and renamed over the old one, and the directory is made durable.
+    ///
+    /// # Errors
+    /// The name is not a lease's, or the write failed (the old sidecar is then as it was).
+    pub(super) fn rewrite(&self, entry: &Entry) -> io::Result<()> {
+        let path = self.path_of(&entry.name)?;
+        let tmp = self.dir.join(format!(".{}.tmp", entry.name));
+        let body = serde_json::to_vec(entry).map_err(io::Error::other)?;
+        let _ = fs::remove_file(&tmp);
+        let written = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut file| {
+                file.write_all(&body)?;
+                file.sync_all()
+            })
+            .and_then(|()| fs::rename(&tmp, &path));
+        // A file that was not renamed over is nobody's.
+        if written.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        written?;
+        self.sync()
+    }
+
     /// Removes the sidecar of `name`; one that is not there is removed already.
     ///
     /// # Errors
@@ -334,7 +536,7 @@ impl Ledger {
         }
         let entry: Entry =
             serde_json::from_slice(&body).map_err(|why| format!("it is not a sidecar: {why}"))?;
-        if entry.version != VERSION {
+        if !(OLDEST..=VERSION).contains(&entry.version) {
             return Err(format!("its form is version {}", entry.version));
         }
         let named = container_name(&entry.agent, &entry.run_id).ok();
@@ -412,34 +614,49 @@ impl Ledger {
             .map_err(|why| format!("remove the sidecar: {why}"))
     }
 
-    /// Removes every lease of this agent that the ledger records, with `tear_down`; the
-    /// sidecar of one that cannot be removed stays.
+    /// Goes over every lease of this agent that the ledger records: `judge` says whether the
+    /// lease is taken over (the value it makes is kept in the result) or why it is not, and
+    /// the lease that is not is removed with `tear_down` and then its sidecar. The sidecar of
+    /// a lease that cannot be removed stays.
     ///
     /// # Errors
     /// The ledger could not be listed.
-    pub(super) fn sweep(
+    pub(super) fn sweep<T>(
         &self,
+        mut judge: impl FnMut(&Entry) -> Result<T, Reason>,
         mut tear_down: impl FnMut(&Entry) -> Result<(), String>,
-    ) -> Result<SweepReport, LedgerError> {
+    ) -> Result<Swept<T>, LedgerError> {
         let survey = self.survey()?;
-        let mut report = SweepReport {
-            left: survey.left,
-            ..SweepReport::default()
+        let mut swept = Swept {
+            report: SweepReport {
+                left: survey.left,
+                ..SweepReport::default()
+            },
+            adopted: Vec::new(),
         };
         for entry in survey.mine {
+            let reason = match judge(&entry) {
+                Ok(kept) => {
+                    swept.report.adopted.push(entry.run_id);
+                    swept.adopted.push(kept);
+                    continue;
+                }
+                Err(reason) => reason,
+            };
             match self.discard(&entry, &mut tear_down) {
-                Ok(()) => report.removed.push(Removed {
+                Ok(()) => swept.report.removed.push(Removed {
                     run_id: entry.run_id,
                     name: entry.name,
                     labels: entry.labels,
+                    reason,
                 }),
-                Err(why) => report.failed.push(Failed {
+                Err(why) => swept.report.failed.push(Failed {
                     run_id: entry.run_id,
                     name: entry.name,
                     why,
                 }),
             }
         }
-        Ok(report)
+        Ok(swept)
     }
 }

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, HeldRun, HeldState, Hello, JobSpec};
 use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
-use js_pool_static::Candidate;
+use js_provider::Candidate;
 use js_provider::{StartAck, StartSpec};
 use js_registry::{MarkedTails, Placer, PoolConfig, RunRefusal};
 use js_types::{Admission, ClassId, Dims, ProviderId, Request, ResourceClass, Resources, Shape};

@@ -1,18 +1,31 @@
 //! The registry's placer, with `js-sched` choosing the host.
 //!
-//! The registry shows [`SchedPlacer`] the hosts a start could book, each with the leases
-//! already on it. The placer builds a [`Scheduler`] over exactly those: every host a worker
-//! of its node report, every lease a recovered lease on its worker, and the start a
-//! submitted request. One placement round later the scheduler has named a worker, and that
-//! is the host. The scheduler is built for the one start and dropped, so the registry stays
-//! the only place that books: it checks the room and makes the booking, as it does without
-//! a placer, and the scheduler only picks among the hosts that have room.
+//! [`SchedPlacer`] keeps one scheduler for the life of the server ([`Engine`]), built once
+//! from the server's configuration: the backfill ceiling (`server.max_lease_wall`), the
+//! CPU slack (`--cpu-slack`, js-sched's default 1.1x unless given) and the share of each
+//! host's memory it may book (`memory_schedulable_percent` of the pool). The registry
+//! tells it of every hello, accepted heartbeat, stop and host it forgets as they happen
+//! ([`Placer::host_up`], [`Placer::heard`], [`Placer::ended`], [`Placer::host_gone`]), so
+//! the engine's picture of the hosts follows the registry's books without being rebuilt;
+//! a heartbeat's load reading reaches the engine there, as the registry vetted and
+//! converted it. When the engine is built again it is given the last three readings kept
+//! for each host (its two windows), so a rebuild loses no measured load.
+//!
+//! At a start the registry shows the placer the hosts that could take it (`open`), each
+//! with the leases already on it. The engine first checks that its picture agrees with
+//! the registry's on those hosts; when it does not, it is built again from every host the
+//! registry lists, and the start is counted as `resynced`. That is the only way the engine
+//! is built again: a start in the normal course costs time in the hosts it is offered and
+//! their leases, not in every host and lease. The engine then places the start among
+//! `open` alone, and the registry books the host it names, checking the room as it does
+//! without a placer (with the CPU slack, [`Placer::cpu_slack_permille`]).
 //!
 //! How it picks depends on the lease's class:
 //!
-//! - A class that books part of a host: by the scheduler's score, the host the lease fits
-//!   most tightly (so the most booked first), and equal hosts by a hash of the lease and the
-//!   host, so two leases can break the same tie differently.
+//! - A class that books part of a host: the hosts' load readings choose among the hosts
+//!   that still fit (a host with no fresh reading is charged by what it books), and among
+//!   equal hosts the one the lease fits most tightly (so the most booked first), equal ones
+//!   by a hash of the lease and the host, so two leases can break the same tie differently.
 //! - A class that books the whole host: no score. The registry offers such a lease only
 //!   hosts that carry no lease, and the scheduler gives a worker that a request would own
 //!   whole no score and takes the first by worker name, which is the host id here
@@ -22,62 +35,78 @@
 //! A host a whole-node request has set aside (a mark of the registry) is shown only to a
 //! start that may backfill it (a class that books part of a host, not a probe), with the
 //! time left until its tail ends as the mark took it. The scheduler holds that host for the
-//! request outside it ([`Scheduler::reserve_outside`]) and places the start there only if
-//! the start's max wall time (which the lease table enforces) ends, with a minute to spare,
-//! by then ([`Scheduler::with_backfill`]). A start it places elsewhere or nowhere never
-//! falls back to a marked host.
+//! request outside it ([`js_sched::Scheduler::reserve_outside`], ended when the mark goes)
+//! and places the start there only if the start's max wall time (which the lease table
+//! enforces) ends, with a minute to spare, by then ([`js_sched::Scheduler::with_backfill`]).
+//! A start it places elsewhere or nowhere never falls back to a marked host.
 //!
-//! Cost: the scheduler is rebuilt for every start over all the open hosts and their leases,
-//! under the registry's lock, so a start is linear in hosts plus leases. A cache would have
-//! to follow every booking and stop; none is kept.
+//! Locks: the placer's mutex is taken only inside a call the registry makes under its own
+//! lock (registry, then placer), and the placer never calls the registry, so the order is
+//! fixed.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use js_pool_static::Candidate;
+use js_lease::Clock;
+use js_provider::Candidate;
 use js_provider::{RefusalCode, StartSpec};
 use js_registry::{MarkedTails, Placer, ProbeHost};
-use js_sched::harness::feed;
-use js_sched::{Backfill, DaemonInstance, Event, Recovered, RecoveredLease, Request, Scheduler};
-use js_types::HostId;
-use js_types::sched::{
-    Effect, FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, WaiterId, WorkKey,
-};
+use js_types::sched::FarmTime;
+use js_types::sched::usage::NodeLoad;
+use js_types::{HostId, LeaseId, Shape};
 
 use tracing::warn;
 
-use super::map::{self, MapError};
+use super::engine::{Engine, Settings};
+use crate::adapt::SharedClock;
 
-/// The term the scheduler is built for. It is one start long, so the number only has to
-/// differ from the leases it recovers, which are numbered in term 0.
-const TERM: u64 = 1;
-
-/// Places the starts of a registry with `js-sched`, and counts the starts it could not.
-/// The default backfills no host a whole-node request has set aside.
-#[derive(Debug, Default)]
+/// Places the starts of a registry with `js-sched`, and counts the starts it could not
+/// place and those that found its picture out of date.
 pub(crate) struct SchedPlacer {
-    /// Whether a start may backfill a host set aside, and up to which wall time.
-    backfill: Backfill,
+    settings: Settings,
+    clock: SharedClock,
+    engine: Mutex<Engine>,
     unmappable: AtomicU64,
     declined: AtomicU64,
+    resynced: AtomicU64,
+    /// How many engines this placer built, counted for the tests that hold it to one.
+    #[cfg(test)]
+    built: AtomicU64,
 }
 
-/// How many starts fell back to the registry's first host, by cause.
+/// How many starts fell back to the registry's first host or were placed nowhere, by
+/// cause.
 #[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Fallbacks {
-    /// The scheduler could not be built over the hosts or the request.
+    /// The scheduler could not take the hosts or the request: the first host was booked.
     pub(crate) unmappable: u64,
-    /// The scheduler was built and placed the start nowhere.
+    /// The scheduler placed the start nowhere: none was booked.
     pub(crate) declined: u64,
 }
 
 impl SchedPlacer {
-    /// A placer that backfills a host set aside as `backfill` allows.
-    pub(crate) fn new(backfill: Backfill) -> Self {
+    /// A placer whose engine is built with `settings`, on `clock` (the registry's).
+    pub(crate) fn new(settings: Settings, clock: SharedClock) -> Self {
+        let now = farm_time(&clock);
         Self {
-            backfill,
-            ..Self::default()
+            settings,
+            engine: Mutex::new(Engine::build(settings, &[], now)),
+            clock,
+            unmappable: AtomicU64::new(0),
+            declined: AtomicU64::new(0),
+            resynced: AtomicU64::new(0),
+            #[cfg(test)]
+            built: AtomicU64::new(1),
         }
+    }
+
+    fn engine(&self) -> MutexGuard<'_, Engine> {
+        self.engine.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn now(&self) -> FarmTime {
+        farm_time(&self.clock)
     }
 
     /// The fallbacks so far.
@@ -88,161 +117,185 @@ impl SchedPlacer {
             declined: self.declined.load(Ordering::Relaxed),
         }
     }
+
+    /// The starts at which the engine was built again because it disagreed with the
+    /// registry.
+    #[cfg(test)]
+    pub(crate) fn resynced(&self) -> u64 {
+        self.resynced.load(Ordering::Relaxed)
+    }
+
+    /// How many engines this placer built.
+    #[cfg(test)]
+    pub(crate) fn built(&self) -> u64 {
+        self.built.load(Ordering::Relaxed)
+    }
+
+    /// What the engine charges `host` by its load, for a test that reads it: `None` for a
+    /// host that is no worker of the engine.
+    #[cfg(test)]
+    pub(crate) fn load_of(&self, host: &str) -> Option<js_sched::LoadView> {
+        self.engine().load_of(host)
+    }
+
+    /// How many hosts the engine keeps, for a test that holds it to the registry's.
+    #[cfg(test)]
+    pub(crate) fn hosts_kept(&self) -> usize {
+        self.engine().hosts_kept()
+    }
+
+    /// The host the engine gives `spec` among `open`, rebuilding the engine from `every`
+    /// first when the two pictures disagree on `open`.
+    fn grant(
+        &self,
+        spec: &StartSpec,
+        open: &[Candidate],
+        marked: &MarkedTails,
+        every: &dyn Fn() -> Vec<Candidate>,
+    ) -> Result<Option<usize>, super::map::MapError> {
+        let nodes = Engine::nodes(open)?;
+        let now = self.now();
+        let mut engine = self.engine();
+        if !engine.agrees(open, spec.lease().sequence()) {
+            let rebuilt = engine.rebuild(self.settings, &every(), now);
+            *engine = rebuilt;
+            #[cfg(test)]
+            self.built.fetch_add(1, Ordering::Relaxed);
+            let count = self.resynced.fetch_add(1, Ordering::Relaxed) + 1;
+            warn!(lease = %spec.lease(), count, "the placement engine disagreed with the registry and was rebuilt");
+        }
+        engine.grant(spec, (open, nodes), marked, now)
+    }
+}
+
+impl SchedPlacer {
+    /// Whether `spec` fits on `candidate` within the engine's share of its memory, beside
+    /// the leases already there: what the engine would hold a start it could describe to.
+    /// The registry books the whole memory under this placement, so a start that falls
+    /// back is held to the share here.
+    fn within_share(&self, candidate: &Candidate, spec: &StartSpec) -> bool {
+        let booked = candidate.leases.iter().fold(0u64, |sum, held| {
+            sum.saturating_add(held.resources.memory_bytes())
+        });
+        let asked = spec.request().resources.memory_bytes();
+        let share = self
+            .settings
+            .memory
+            .of_bytes(candidate.shape.resources().memory_bytes());
+        booked.saturating_add(asked) <= share
+    }
+}
+
+#[cfg(test)]
+impl Default for SchedPlacer {
+    /// A placer with the default settings on a clock that stands still at zero.
+    fn default() -> Self {
+        let clock = js_lease::ManualClock::new(js_lease::Timestamp::from_millis(0));
+        Self::new(Settings::default(), SharedClock::new(clock))
+    }
+}
+
+/// The farm time of `clock`: its milliseconds.
+fn farm_time(clock: &SharedClock) -> FarmTime {
+    FarmTime::from_millis(clock.now().millis())
 }
 
 impl Placer for SchedPlacer {
-    /// The host the scheduler gives the start, as an index of `open`.
-    ///
-    /// When the scheduler cannot be built over these hosts or this request (a shape that
-    /// does not describe a node, a capability that is not a platform requirement), or is
-    /// built and places the start nowhere though the registry found room for it, the first
-    /// host not in `marked` is booked, as a registry with no placer does: the registry's
-    /// check of the room stands, and a difference between the two models must not leave a
-    /// lease retrying for ever. Each such start is counted by cause and logged. A host in
-    /// `marked` is booked only when the scheduler places the start there as backfill; with
-    /// no other host, none is.
-    ///
-    /// The scheduler is built afresh for each start over every open host and every lease on
-    /// them, so a start costs time in their number (hosts plus leases), and the registry's
-    /// lock is held for it. Nothing is cached between starts.
-    ///
-    /// A probe never falls back: the scheduler places it on its host, or the start books
-    /// none (`NoCapacity`). Its host is cordoned in the scheduler, as the registry found it
-    /// when the probe was admitted there ([`Placer::admit_probe`]).
+    /// [`Placer::pick_over`] with the hosts it is shown as all the registry lists.
     fn pick(&self, spec: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize> {
-        if spec.request().probe_host.is_some() {
-            return grant(spec, open, marked, self.backfill).ok().flatten();
+        self.pick_over(spec, open, marked, &|| open.to_vec())
+    }
+
+    /// The host the engine gives the start, as an index of `open`.
+    ///
+    /// When the scheduler cannot take these hosts or this request (a shape that does not
+    /// describe a node, a capability that is not a platform requirement), the first host
+    /// not in `marked` with room for it within the engine's share of its memory is booked,
+    /// as a registry with no placer books the first host, and the start is counted as
+    /// unmappable and logged: the registry's check of the room stands (CPU up to the
+    /// slack), the share is held here, and the engine takes the lease up on that host
+    /// ([`Engine::adopt`]). With no such host none is booked. When the
+    /// engine, agreeing with the registry's books, places the start nowhere (its memory
+    /// percent or CPU slack is reached, its readings say the hosts are full), that stands:
+    /// no host is booked (`NoCapacity`; the client retries), and the start is counted as
+    /// declined and logged. A host in `marked` is booked only when the engine places the
+    /// start there as backfill.
+    ///
+    /// A probe never falls back: the engine places it on its host, or the start books
+    /// none (`NoCapacity`). Its host is cordoned in the engine for that start, as the
+    /// registry found it when the probe was admitted there ([`Placer::admit_probe`]).
+    fn pick_over(
+        &self,
+        spec: &StartSpec,
+        open: &[Candidate],
+        marked: &MarkedTails,
+        every: &dyn Fn() -> Vec<Candidate>,
+    ) -> Option<usize> {
+        // The registry never asks with no host; there is nothing to place or count.
+        if open.is_empty() {
+            return None;
         }
-        let (counter, cause) = match grant(spec, open, marked, self.backfill) {
-            Ok(Some(at)) => return Some(at),
-            Ok(None) => (
-                &self.declined,
-                "the scheduler placed the start nowhere".to_owned(),
-            ),
-            Err(err) => (&self.unmappable, err.to_string()),
-        };
-        let first = open.iter().position(|c| !marked.contains_key(&c.host));
-        first.inspect(|_| {
-            let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-            warn!(lease = %spec.lease(), %cause, count, "placement fell back to the first host");
-        })
+        let granted = self.grant(spec, open, marked, every);
+        if spec.request().probe_host.is_some() {
+            return granted.ok().flatten();
+        }
+        match granted {
+            Ok(Some(at)) => Some(at),
+            Ok(None) => {
+                let count = self.declined.fetch_add(1, Ordering::Relaxed) + 1;
+                warn!(lease = %spec.lease(), count, "the placement engine placed the start nowhere");
+                None
+            }
+            Err(err) => {
+                let first = open
+                    .iter()
+                    .position(|c| !marked.contains_key(&c.host) && self.within_share(c, spec));
+                first.inspect(|at| {
+                    // The registry books it there: the engine holds it from now on.
+                    self.engine().adopt(&open[*at], spec);
+                    let count = self.unmappable.fetch_add(1, Ordering::Relaxed) + 1;
+                    let cause = err.to_string();
+                    warn!(lease = %spec.lease(), %cause, count, "placement fell back to the first host");
+                })
+            }
+        }
     }
 
     /// The probe rule of the scheduler ([`js_sched::admit_probe`]) over what the registry
-    /// knows of the probe's host ([`super::probe::admit`]).
+    /// knows of the probe's host ([`super::probe::admit`]), with the host's memory held to
+    /// the engine's share of it.
     fn admit_probe(
         &self,
         spec: &StartSpec,
         pin: &HostId,
         host: Option<&ProbeHost>,
     ) -> Result<(), RefusalCode> {
-        super::probe::admit(spec, pin, host)
+        super::probe::admit(spec, pin, host, self.settings.memory)
     }
-}
 
-/// The recovered operation, numbered `number`, that stands for the lease `held` on
-/// `candidate`.
-fn recovered(number: u64, candidate: &Candidate, held: &js_pool_static::Held) -> Recovered {
-    let request = Request {
-        key: WorkKey::new("held", held.lease.to_string()),
-        qos: Qos::Batch,
-        kind: LeaseKind::Action,
-        resources: map::booking(&held.resources),
-        needs: js_caps::Request::default(),
-        hermetic: false,
-        do_not_cache: true,
-        whole_worker: held.whole,
-        pin: None,
-    };
-    Recovered {
-        operation: OperationId(number),
-        request,
-        waiter: WaiterId(number),
-        lease: Some(RecoveredLease {
-            lease: SchedLeaseId::new(0, number),
-            worker: map::worker(&candidate.host),
-            cost: None,
-        }),
-        losses: 0,
-        fate: None,
+    /// The engine's CPU slack: the registry's book lets the leases that share a host book
+    /// that far above its cores, so the room the engine may take is not refused there.
+    fn cpu_slack_permille(&self) -> u32 {
+        self.settings.load.s_cpu_permille
     }
-}
 
-/// The index of the host the scheduler places `spec` on among `open`, or `None` when it
-/// places it nowhere. A host in `marked` is held for the request that set it aside, until
-/// the end of its tail, and takes the start only as `backfill` allows.
-///
-/// # Errors
-/// [`MapError`] when a host or the request has no scheduler form.
-fn grant(
-    spec: &StartSpec,
-    open: &[Candidate],
-    marked: &MarkedTails,
-    backfill: Backfill,
-) -> Result<Option<usize>, MapError> {
-    let now = FarmTime::default();
-    let mut sched = Scheduler::new(TERM).with_backfill(backfill);
-    let held = open
-        .iter()
-        .flat_map(|candidate| candidate.leases.iter().map(move |held| (candidate, held)));
-    let operations: Vec<Recovered> = (0..)
-        .zip(held)
-        .map(|(number, (candidate, held))| recovered(number, candidate, held))
-        .collect();
-    let next = OperationId(u64::try_from(operations.len()).unwrap_or(u64::MAX));
-    // The lease the scheduler grants is numbered as the registry's lease is, so the
-    // tie-break between equal hosts (a hash of the lease and the host) varies by lease.
-    sched.recover(TERM, next, spec.lease().sequence(), operations);
-    for candidate in open {
-        let (capacity, caps) = map::host(&candidate.shape)?;
-        let up = Event::WorkerUp {
-            worker: map::worker(&candidate.host),
-            instance: DaemonInstance::new(candidate.host.as_str()),
-            predecessor_stopped: false,
-            capacity,
-            caps,
-        };
-        feed(&mut sched, now, up);
-        // The scheduler's clock starts now, at zero: a tail ends the time it has left.
-        if let Some(left) = marked.get(&candidate.host) {
-            let end = left.map(|left| millis(left).saturating_add(now.as_millis()));
-            let start = end.map(FarmTime::from_millis);
-            sched.reserve_outside(map::worker(&candidate.host), start);
-        }
+    fn host_up(&self, host: &HostId, shape: &Shape) {
+        let now = self.now();
+        self.engine().host_up(host, shape, now);
     }
-    let mut request = map::job(spec.request(), &spec.lease().to_string())?;
-    request.whole_worker = spec.class().admission().books_whole_host();
-    // A probe's host is shown only once it was admitted there: it is cordoned.
-    if let Some(pin) = &request.pin {
-        feed(
-            &mut sched,
-            now,
-            Event::Cordon {
-                worker: pin.clone(),
-            },
-        );
-    }
-    // The lease table ends the lease at its wall time: the end backfill reads.
-    sched.set_max_wall(sched.next_operation(), spec.request().max_wall);
-    let submit = Event::Submit {
-        waiter: WaiterId(u64::MAX),
-        request,
-    };
-    let mut effects = feed(&mut sched, now, submit);
-    effects.extend(feed(&mut sched, now, Event::Tick));
-    let placed = effects.iter().find_map(|effect| match effect {
-        Effect::Start(start) => Some(start.worker.clone()),
-        _ => None,
-    });
-    Ok(placed.and_then(|worker| {
-        open.iter()
-            .position(|candidate| map::worker(&candidate.host) == worker)
-    }))
-}
 
-/// `duration` in milliseconds, saturating.
-fn millis(duration: std::time::Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+    fn heard(&self, host: &HostId, load: Option<&NodeLoad>) {
+        let now = self.now();
+        self.engine().heard(host, load, now);
+    }
+
+    fn ended(&self, lease: LeaseId) {
+        self.engine().ended(lease);
+    }
+
+    fn host_gone(&self, host: &HostId) {
+        self.engine().host_gone(host);
+    }
 }
 
 #[cfg(test)]
@@ -250,7 +303,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
-    use js_pool_static::Held;
+    use js_provider::Held;
+    use js_sched::Backfill;
     use js_types::{Admission, ClassId, HostId, LeaseId, Request as HostRequest};
     use js_types::{ResourceClass, Resources, Shape};
 
@@ -426,15 +480,43 @@ mod tests {
         assert_eq!(placer.fallbacks().unmappable, 1);
     }
 
-    /// Catches: a start the registry found room for becoming `no-capacity` because the
-    /// scheduler disagrees (here its one host is booked in full by a lease, which the
-    /// candidate lists though the registry offered it): the registry's first host is booked
-    /// and the fallback is counted as declined, not as unmappable.
+    /// Catches: a lease the fallback booked left out of the engine, so that the next start
+    /// meeting its host finds the two pictures apart and rebuilds the engine. The first
+    /// start (the engine knows neither host yet) builds it once; the odd request falls back
+    /// to `a`, and the next start, shown `a` with that lease on it, agrees with the engine
+    /// and builds nothing more.
     #[test]
-    fn a_start_the_scheduler_declines_falls_back_to_the_first_and_is_counted() {
+    fn a_lease_the_fallback_booked_is_taken_up_without_a_rebuild() {
+        let placer = SchedPlacer::default();
+        let open = [host("a", x86(), &[]), host("b", x86(), &[])];
+        let odd = spec_with(&sharing(), 1, &[("colour", "red")]);
+        assert_eq!(placer.pick(&odd, &open, &unmarked()), Some(0));
+        assert_eq!((placer.resynced(), placer.built()), (1, 2));
+        let booked = Held {
+            lease: odd.lease(),
+            resources: odd.request().resources.clone(),
+            whole: false,
+        };
+        let mut after = open.clone();
+        after[0].leases.push(booked);
+        assert_eq!(
+            placer.pick(&spec_of(&sharing(), 2), &after, &unmarked()),
+            Some(0)
+        );
+        assert_eq!((placer.resynced(), placer.built()), (1, 2));
+        assert_eq!(placer.fallbacks().unmappable, 1);
+    }
+
+    /// Catches: a start the engine places nowhere booked anyway on the registry's first
+    /// host, past the engine's own rules (here its one host is booked in full by a lease,
+    /// which the candidate lists though the registry offered it): once the engine agrees
+    /// with the registry's books, its decline stands, no host is booked and the start is
+    /// counted as declined, not as unmappable.
+    #[test]
+    fn a_start_the_scheduler_declines_books_nothing_and_is_counted() {
         let placer = SchedPlacer::default();
         let open = [host("a", x86(), &[8000])];
-        assert_eq!(placer.pick(&spec(), &open, &unmarked()), Some(0));
+        assert_eq!(placer.pick(&spec(), &open, &unmarked()), None);
         let counted = Fallbacks {
             unmappable: 0,
             declined: 1,
@@ -506,7 +588,12 @@ mod tests {
 
     /// A placer that backfills, trusting any wall time.
     fn backfilling() -> SchedPlacer {
-        SchedPlacer::new(Backfill::enforced(Duration::MAX))
+        let settings = Settings {
+            backfill: Backfill::enforced(Duration::MAX),
+            ..Settings::default()
+        };
+        let clock = js_lease::ManualClock::new(js_lease::Timestamp::from_millis(0));
+        SchedPlacer::new(settings, SharedClock::new(clock))
     }
 
     /// `hosts` marked, each with the time left until its tail ends in seconds (`None`: not
@@ -537,21 +624,21 @@ mod tests {
         assert_eq!(placer.fallbacks(), counted);
     }
 
-    /// Catches: a start the scheduler declines falling back onto a marked host. `a` is
-    /// marked with a tail too short for the 60 s lease and `b` is full in the scheduler's
-    /// eyes: the scheduler places it nowhere, and the registry's `b` is booked and counted;
-    /// with `b` marked too, none is booked and nothing more is counted.
+    /// Catches: a start the scheduler declines booked on a marked host or on the first
+    /// unmarked one. `a` is marked with a tail too short for the 60 s lease and `b` is full
+    /// in the scheduler's eyes: the scheduler places it nowhere and nothing is booked; with
+    /// `b` marked too, the same. Each decline is counted.
     #[test]
-    fn a_declined_start_falls_back_to_the_first_unmarked_host_only() {
+    fn a_declined_start_books_no_host_marked_or_not() {
         let placer = backfilling();
         let open = [host("a", x86(), &[1000]), host("b", x86(), &[8000])];
         let short = marks(&[("a", Some(100))]);
-        assert_eq!(placer.pick(&spec(), &open, &short), Some(1));
+        assert_eq!(placer.pick(&spec(), &open, &short), None);
         let both = marks(&[("a", Some(100)), ("b", Some(600))]);
         assert_eq!(placer.pick(&spec(), &open, &both), None);
         let counted = Fallbacks {
             unmappable: 0,
-            declined: 1,
+            declined: 2,
         };
         assert_eq!(placer.fallbacks(), counted);
     }

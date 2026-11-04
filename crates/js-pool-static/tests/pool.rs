@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use js_pool_static::{ConfigError, EXAMPLE_CONFIG, SeatError, StaticPool};
+use js_pool_static::{ConfigError, EXAMPLE_CONFIG, StaticPool};
+use js_provider::SeatError;
 use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
 use js_types::{
     Admission, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources,

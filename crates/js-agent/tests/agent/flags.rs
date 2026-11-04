@@ -492,7 +492,8 @@ fn egress_allow_list_is_refused_without_the_crun_runtime() {
             "/bin/sh",
         ];
         let mut docker = allow.to_vec();
-        docker.extend(["--runtime", "docker", "--container-bin", "/bin/sh"]);
+        docker.extend(["--runtime", "docker", "--allow-container-engine"]);
+        docker.extend(["--container-bin", "/bin/sh"]);
         for given in [&allow[..], &docker[..]] {
             let said = refused(given, &host);
             assert!(

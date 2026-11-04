@@ -386,14 +386,23 @@ pub trait Runtime {
 
     /// Whether this runtime runs a start named by its image (an `image`, with or without a
     /// `run`), asked before such a start creates anything. The default runs them, which is
-    /// every container runtime. The runtime a Mac agent has runs only the legacy native body
-    /// and refuses them (`image-unsupported-here`).
+    /// every container runtime. The runtime a Mac agent has runs one only with a `run` and a
+    /// bundle store ([`Runtime::runs_image_runs`]); otherwise it refuses it
+    /// (`image-unsupported-here`).
     ///
     /// # Errors
     ///
     /// The code the start is refused with, and why.
     fn check_image(&self) -> Result<(), NativeRefusal> {
         Ok(())
+    }
+
+    /// Whether this runtime runs a start named by its image with a `run`: the Mac runtime
+    /// with a bundle store does, by the bundle the image resolves to, and runs the `run` as
+    /// a native body. The default is a runtime that does not (a container runtime refuses a
+    /// `run`, `run-unsupported`).
+    fn runs_image_runs(&self) -> bool {
+        false
     }
 
     /// Ends and removes whatever an earlier process left, which no list of the runtime's
