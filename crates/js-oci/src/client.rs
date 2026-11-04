@@ -11,6 +11,7 @@ use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 
 use crate::http::{Connect, Http, Reach, RootSummary, Roots, Timeouts};
+use crate::index::{self, Read};
 use crate::location::Authority;
 use crate::location::{HTTP_PORT, HTTPS_PORT};
 use crate::manifest::{self, Descriptor, Kind, Manifest};
@@ -353,21 +354,34 @@ impl Repository<'_> {
     }
 }
 
-#[async_trait]
-impl BundleSource for Repository<'_> {
-    async fn fetch_manifest(&self, digest: &Digest, kind: &Kind) -> Result<Manifest, Error> {
+impl Repository<'_> {
+    /// The bytes the registry serves as the manifest `digest`, at most the kind's manifest
+    /// limit, asked for with the kind's `Accept` header. Nothing in them is checked yet.
+    async fn manifest_bytes(&self, digest: &Digest, kind: &Kind) -> Result<Vec<u8>, Error> {
         let url = self.url("manifests", digest.as_str());
         let accept = kind.accept();
         self.http
             .within(self.http.timeouts.manifest, &url, async {
                 let response = self.get(&url, Some(&accept)).await?;
-                let bytes = self
-                    .http
+                self.http
                     .read_limited(&url, response, kind.limits.manifest)
-                    .await?;
-                manifest::parse(&bytes, digest, kind)
+                    .await
             })
             .await
+    }
+}
+
+#[async_trait]
+impl BundleSource for Repository<'_> {
+    async fn fetch_manifest(&self, digest: &Digest, kind: &Kind) -> Result<Manifest, Error> {
+        let bytes = self.manifest_bytes(digest, kind).await?;
+        match index::read(&bytes, digest, kind)? {
+            Read::Manifest(manifest) => Ok(manifest),
+            Read::Child(child) => {
+                let bytes = self.manifest_bytes(&child, kind).await?;
+                manifest::parse(&bytes, &child, kind)
+            }
+        }
     }
 
     async fn fetch_blob(&self, blob: &Descriptor, sink: &mut dyn BlobSink) -> Result<(), Error> {

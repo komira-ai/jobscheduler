@@ -73,7 +73,9 @@ impl Lifecycle {
                 // tell, so the cause stands.
                 let cause = job.cause.filter(|_| exit.is_none() || job.stop_sent);
                 let (how, status) = outcome(cause, exit);
-                if !job.silent {
+                // A result read back from the state root is the one to send: the exit of a
+                // container taken over after the agent had reported it makes no second.
+                if !job.silent && job.result.is_none() {
                     let mut result = job.report(how, status, None);
                     // The container is still there: it is removed in the next stage. A log
                     // that cannot be read costs the result its tail and nothing else.

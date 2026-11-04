@@ -663,8 +663,73 @@ pub fn run_on(
     )
 }
 
+/// `--runtime none` for the arguments of an agent start that names no runtime: no `--runtime`,
+/// no `--container-bin` and no `--native-*` flag (a verb, which comes first, gets nothing). A
+/// Linux agent given no `--runtime` runs `crun`, its default; the tests written for the agent
+/// that runs no job name that agent with `--runtime none`, and the tests of the default start
+/// through [`run_defaulted`] or [`run_on_defaulted`], which add nothing.
+pub fn no_job_runtime(args: &[&str]) -> &'static [&'static str] {
+    let start = args.first().is_some_and(|first| first.starts_with("--"));
+    let names = args.iter().any(|arg| {
+        ["--runtime", "--container-bin", "--native-"]
+            .iter()
+            .any(|flag| arg.starts_with(flag))
+    });
+    if start && !names {
+        &["--runtime", "none"]
+    } else {
+        &[]
+    }
+}
+
 /// [`run_on`] with the bundle store's host given.
 pub fn run_with_store(
+    args: &[&str],
+    host: &Host,
+    connector: &dyn Connector,
+    sleeper: &mut dyn Sleeper,
+    jitter: &mut dyn Jitter,
+    jobs: Jobs<'_>,
+    store: Arc<FakeHost>,
+) -> Ran {
+    let named: Vec<&str> = no_job_runtime(args).iter().chain(args).copied().collect();
+    run_exactly(&named, host, connector, sleeper, jitter, jobs, store)
+}
+
+/// [`run_on`] with `args` exactly as given: a start with no `--runtime` is the default
+/// runtime's (`crun` on Linux).
+pub fn run_on_defaulted(
+    args: &[&str],
+    host: &Host,
+    connector: &dyn Connector,
+    sleeper: &mut dyn Sleeper,
+    jitter: &mut dyn Jitter,
+    jobs: Jobs<'_>,
+) -> Ran {
+    run_exactly(
+        args,
+        host,
+        connector,
+        sleeper,
+        jitter,
+        jobs,
+        FakeHost::new(),
+    )
+}
+
+/// [`run`] with `args` exactly as given, as [`run_on_defaulted`].
+pub fn run_defaulted(
+    args: &[&str],
+    host: &Host,
+    connector: &dyn Connector,
+    sleeper: &mut dyn Sleeper,
+    jitter: &mut dyn Jitter,
+) -> Ran {
+    let machine = Arc::new(FakeMachine::new());
+    run_on_defaulted(args, host, connector, sleeper, jitter, (machine, None))
+}
+
+fn run_exactly(
     args: &[&str],
     host: &Host,
     connector: &dyn Connector,

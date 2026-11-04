@@ -8,8 +8,9 @@ use crate::ids::HostName;
 /// unit and checks it exists; a provider whose image keeps it elsewhere installs it here.
 pub const CONTAINER_BIN: &str = "/usr/bin/docker";
 
-/// The runtime the agent runs jobs with (`--runtime`): named in the agent's unit, since the
-/// Linux farm's own unit names `crun` and no host gets a runtime by default.
+/// The runtime the agent runs jobs with (`--runtime`): named in the agent's unit, with
+/// [`ENGINE_OPT_IN`] beside it, since `crun` is the agent's default Linux runtime and the
+/// engine runs jobs only for an agent given the opt-in.
 ///
 /// Rollout order: an agent that does not know `--runtime` exits 2 at start on this flag. The
 /// plan's [`Artifact`] is a URL and a digest and carries no version, so the boot payload
@@ -17,6 +18,15 @@ pub const CONTAINER_BIN: &str = "/usr/bin/docker";
 /// artifact must be bumped to an agent that does before a lease server that renders this flag
 /// is deployed (see `docs/runbooks/first-live-launch.md`).
 pub const RUNTIME: &str = "docker";
+
+/// The flag that lets [`RUNTIME`] run jobs: an agent that defaults to `crun` refuses
+/// `--runtime docker` without it (exit status 2), so the boot payload names both.
+///
+/// Rollout order, as for [`RUNTIME`]: an agent that does not know this flag exits 2 at start
+/// on it, and the payload cannot tell which agent its pinned artifact is. A lease server that
+/// renders it is deployed only after the agent release that knows the flag, with the pinned
+/// artifact bumped to that release first (see `docs/runbooks/first-live-launch.md`).
+pub const ENGINE_OPT_IN: &str = "--allow-container-engine";
 
 /// The agent's state root, which the bootstrap creates (owner-only) and names in the
 /// agent's unit. It lies on the machine's root disk.

@@ -115,13 +115,15 @@ const CONFIG: &str =
 /// The stand-in. Its behaviour is chosen by the end of the container's name (a run id such
 /// as `r1-hold`). `delete` makes the lease cgroup's files go, as removing a cgroup does,
 /// and fails when the node has a file `delete-fails`. `state` notes each ask in
-/// `asks-<name>` and names the pid [`PID`], except for a container `*-nopid` or `*-deaf`
-/// (it fails: no container), `*-late` (it fails twice, then names it), `*-badpid` (a state
-/// with no pid) and `*-hugepid` (a pid out of range); those but `*-nopid` run until they are
-/// killed and ignore SIGTERM, as `*-wired` does, and `*-nopid` exits at once with a `crun`
-/// error in its log. `*-stuckcg` runs as `*-wired` does after it left a cgroup `left`, with a
+/// `asks-<name>` and says the container runs with the pid [`PID`], except for a container
+/// `*-nopid` or `*-deaf` (it fails: no container), `*-late` (it fails twice, then names it),
+/// `*-badpid` (a state with no pid) and `*-hugepid` (a pid out of range); those but `*-nopid`
+/// run until they are killed and ignore SIGTERM, as `*-wired` does, and `*-nopid` exits at once
+/// with a `crun` error in its log. `*-stuckcg` runs as `*-wired` does after it left a cgroup `left`, with a
 /// file in it, below its lease's cgroup (so that the lease's cgroup cannot be removed until
-/// the test removes it); its `state` names the pid only once that is there.
+/// the test removes it); its `state` names the pid only once that is there. `*-sayexit` writes
+/// a word to each stream and exits 5; `delete` also clears the `cgroup.procs` that
+/// [`Node::place`] writes in the `ctr` cgroup below the lease's (and nothing else there).
 const CRUN: &str = r#"#!/bin/sh
 MOUNT=@MOUNT@
 DIR=@DIR@
@@ -146,6 +148,7 @@ case "$cmd" in
     case "$name" in
       *-exit) exit 3;;
       *-say) echo to-stdout; echo to-stderr >&2; exit 0;;
+      *-sayexit) echo to-stdout; echo to-stderr >&2; exit 5;;
       *-fail) echo '{"level":"error","msg":"cgroup: no"}' >> "$log"; exit 1;;
       *-oom) printf 'low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n' > "$cg/memory.events"; exit 137;;
       *-busy) printf 'low 0\nhigh 0\nmax 0\noom 0\noom_kill 1\n' > "$cg/memory.events"; exit 137;;
@@ -179,6 +182,7 @@ case "$cmd" in
   delete)
     if [ -e "$DIR/delete-fails" ]; then echo boom >&2; exit 1; fi
     find "$cg" -maxdepth 1 ! -type d -delete 2>/dev/null
+    rm -f "$cg/ctr/cgroup.procs"
     rmdir "$root/$name" 2>/dev/null
     exit 0;;
   state)
@@ -193,7 +197,7 @@ case "$cmd" in
           echo "no container $name yet" >&2; exit 1
         fi;;
     esac
-    echo '{"pid":4321}';;
+    echo '{"status":"running","pid":4321}';;
 esac
 "#;
 
@@ -271,7 +275,8 @@ impl Node {
         CrunSettings {
             oci: OciConfig {
                 runtime: self.dir.join("crun"),
-                daemon: std::env::current_exe().expect("test binary"),
+                // The agent's own binary: it answers the supervisor's helper mode.
+                daemon: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
                 id_files: IdFiles::in_dir(&self.dir.join("ids")),
                 check_search: false,
                 id_tool_path: Some(self.dir.join("tools").into_os_string()),
@@ -347,6 +352,39 @@ impl Node {
             network: Default::default(),
             ports: Vec::new(),
         }
+    }
+
+    /// A run `run_id` of the image as a job start makes it: keyed by job, with the labels of
+    /// a booking (the allocation `lease-<run id>`, the wall-time limit `wall_ms`), so that a
+    /// restarted runtime can adopt it and a lifecycle lists it among its jobs.
+    pub fn job(&self, run_id: &str, wall_ms: u64) -> RunSpec {
+        let mut spec = self.spec(run_id);
+        let own = [
+            (label::KEYING, "job".to_owned()),
+            (label::LEASE, format!("lease-{run_id}")),
+            (label::CPU_MILLIS, spec.cpu_millis.to_string()),
+            (label::MEMORY_BYTES, spec.memory_bytes.to_string()),
+            (label::DISK_BYTES, "2048".to_owned()),
+            (label::GPUS, String::new()),
+            (label::SLOT, spec.slot.to_string()),
+            (label::WALL_MS, wall_ms.to_string()),
+        ];
+        spec.labels
+            .extend(own.map(|(key, value)| (key.to_owned(), value)));
+        spec
+    }
+
+    /// Puts the process `pid` into the container's cgroup of the lease `name` (`ctr`, below
+    /// the lease's cgroup), as `crun` does with the container's init.
+    pub fn place(&self, name: &str, pid: u32) {
+        let ctr = self.cgroup_of(name).join("ctr");
+        std::fs::create_dir_all(&ctr).expect("the container's cgroup");
+        std::fs::write(ctr.join("cgroup.procs"), format!("{pid}\n")).expect("its processes");
+    }
+
+    /// The sidecar of the lease `name`.
+    pub fn sidecar(&self, name: &str) -> PathBuf {
+        self.scratch.join("oci-labels").join(format!("{name}.json"))
     }
 
     /// Makes the pipe the script of the container `name` opens when it is up. Make it

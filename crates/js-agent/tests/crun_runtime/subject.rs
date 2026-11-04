@@ -9,7 +9,7 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
-use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings, GpuSettings, config_dir};
+use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings, GpuSettings, Hooks, config_dir};
 use js_agent::image::RegistryImages;
 use js_agent::lifecycle::{
     Capacity, Config, DirLayout, MountRoots, Prepared, RunHandle, RunSpec, ScratchRoot, StateRoot,
@@ -180,12 +180,22 @@ fn subject_in(name: &str, parent: &Path, beside: bool) -> CrunSubject {
 impl CrunSubject {
     /// Another runtime over the same store and cgroup, registered as `host_id`: what an
     /// agent that starts after another process of its own, or beside another agent, opens.
-    /// It sweeps as it opens.
+    /// It adopts the runs of its own agent that still stand, and removes the rest of its
+    /// leases, as it opens.
     pub fn open_as(&self, host_id: &str) -> CrunRuntime {
         let mut settings = self.settings.clone();
         settings.host_id = host_id.to_owned();
         CrunRuntime::open(settings, registry(&self.settings.scratch))
             .unwrap_or_else(|e| panic!("open as {host_id}: {e}"))
+    }
+
+    /// [`CrunSubject::open_as`] with the hooks given: a clock a test sets, for the start the
+    /// runtime lists a run's age from.
+    pub fn open_with_hooks(&self, host_id: &str, hooks: Hooks) -> CrunRuntime {
+        let mut settings = self.settings.clone();
+        settings.host_id = host_id.to_owned();
+        CrunRuntime::open_with(settings, registry(&self.settings.scratch), hooks)
+            .unwrap_or_else(|e| panic!("open as {host_id} with hooks: {e}"))
     }
 
     /// Another runtime over the same store and cgroup, registered as `host_id`, that gives

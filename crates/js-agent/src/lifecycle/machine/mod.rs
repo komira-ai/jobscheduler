@@ -7,6 +7,7 @@
 mod adopt;
 mod cleanup;
 mod exclusive;
+mod held;
 mod job;
 mod per_job;
 mod prepare;
@@ -17,11 +18,12 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use js_agent_wire::{
-    Ack, Command, HeartbeatReply, HeldRun, Isolation, JobSpec, Outcome, ResultAck, RunResult,
-    Taint, limits, refusal,
+    Ack, Command, HeartbeatReply, HeldRun, Isolation, JobSpec, NativeSpec, Outcome, ResultAck,
+    RunResult, Taint, limits, refusal,
 };
 
 pub use self::exclusive::{Quiet, Restored};
+use self::held::Records;
 use self::job::{Job, Keyed, Retired, Stage, Stuck, Waiting, blind_taint, host_taint, run_spec};
 pub use self::per_job::RETIRED_LISTED;
 pub use self::slots::Slots;
@@ -91,6 +93,8 @@ pub struct Lifecycle {
     /// Containers no job stands for that could not be removed; not held runs.
     stuck: Vec<Stuck>,
     retired: Retired,
+    /// The files in the state root that keep the held results and the retired list.
+    records: Records,
     /// The job ids retired on a `JobStop` for a job the agent did not hold, oldest first,
     /// listed in `retired_jobs` until a reply's `retired_acks` names them (see `per_job`).
     answered: Vec<String>,
@@ -166,6 +170,7 @@ impl Lifecycle {
         }
         self.taint.ack(reply.taint_ack);
         self.sweep();
+        self.persist_held(&mut events);
         events
     }
 
@@ -201,6 +206,7 @@ impl Lifecycle {
         self.watch_quota(&mut events);
         self.fit_log_tails_to_beat(&mut events);
         self.sweep();
+        self.persist_held(&mut events);
         events
     }
 
@@ -339,7 +345,9 @@ impl Lifecycle {
             .jobs
             .extract_if(.., |job| job.stage == Stage::Freed && job.result.is_none())
             .collect();
-        gone.iter().for_each(|job| self.retired.insert(&job.run_id));
+        for job in &gone {
+            self.retired.insert_with(&job.run_id, Some(&job.lease_id));
+        }
     }
 
     fn acknowledge(&mut self, ack: &ResultAck) {
@@ -379,19 +387,20 @@ impl Lifecycle {
         // capability says so (`bundle-unsupported`) and a host with it applies the bundle's
         // rules before the native body is checked.
         if spec.bundle.is_some() {
-            match &self.config.bundle {
-                None => {
-                    return Err(no(
-                        refusal::BUNDLE_UNSUPPORTED,
-                        "this agent holds no bundle store",
-                    ));
-                }
-                Some(bundle) => bundle.admit(spec)?,
-            }
+            self.admit_bundle(spec)?;
         }
-        // A start named by its image: the runtime must run images, and a `run` beside the
-        // image has no consumer on any runtime yet, so it is refused rather than dropped.
-        if spec.native.is_none() {
+        // The native body of the start: the legacy `native` one, or the `run` of a start
+        // named by its image on a runtime that runs those (the Mac one, by the bundle the
+        // image resolves to).
+        let image_run = spec.native.is_none() && self.runtime.runs_image_runs();
+        let body = match (&spec.native, &spec.run) {
+            (Some(native), _) => Some(native.clone()),
+            (None, Some(run)) if image_run => Some(NativeSpec::from(run.clone())),
+            _ => None,
+        };
+        // A start named by its image that the runtime cannot run (no `run`, or no store) is
+        // refused, and a `run` where no runtime runs it is refused rather than dropped.
+        if spec.native.is_none() && body.is_none() {
             self.runtime
                 .check_image()
                 .map_err(|refused| (refused.code, refused.why))?;
@@ -402,7 +411,7 @@ impl Lifecycle {
                 ));
             }
         }
-        if let Some(native) = &spec.native {
+        if let Some(native) = &body {
             self.runtime
                 .check_native(native)
                 .map_err(|refused| (refused.code, refused.why))?;
@@ -412,6 +421,12 @@ impl Lifecycle {
                     "run files are delivered to containers only",
                 ));
             }
+        }
+        // An image start is a bundle start: the image is the bundle's name. It is admitted
+        // after the checks above so that a start the runtime refuses begins no fetch. (A
+        // start with a `bundle` and no `native` body never gets here: the wire refuses it.)
+        if image_run {
+            self.admit_bundle(spec)?;
         }
         if let Some(why) = self.quota_health.why() {
             return Err(no(
@@ -487,13 +502,24 @@ impl Lifecycle {
         // Last, so that a job refused for another reason costs no call. Before every
         // contained create: the firewall can change between two jobs. A native job has its
         // own check (a Mac pool is limited by a packet filter, not a container network).
-        let egress = match &spec.native {
+        let egress = match &body {
             Some(native) => self.runtime.check_native_egress(native),
             None if spec.isolation == Isolation::Contained => self.runtime.check_egress(),
             None => Ok(()),
         };
         egress.map_err(|why| (detail::EGRESS_UNCHECKED, why.to_string()))?;
         Ok(mounts)
+    }
+
+    /// The bundle of a start, by the agent's bundle rules; a host without a store refuses.
+    fn admit_bundle(&self, spec: &JobSpec) -> Result<(), Refusal> {
+        match &self.config.bundle {
+            None => Err((
+                refusal::BUNDLE_UNSUPPORTED,
+                "this agent holds no bundle store".to_owned(),
+            )),
+            Some(bundle) => bundle.admit(spec),
+        }
     }
 
     /// Taints the host for a job that may change it, and writes the marker.
@@ -847,7 +873,7 @@ impl Lifecycle {
         events: &mut Vec<Event>,
     ) {
         let run_id = &spec.run_id;
-        let job = match started {
+        let mut job = match started {
             Ok(id) => {
                 let now = self.clock.now_ms();
                 let deadline = now.saturating_add(spec.limits.wall_ms).min(cap);
@@ -875,7 +901,6 @@ impl Lifecycle {
                 job
             }
         };
-        let mut job = job;
         job.keyed = keyed;
         match replace {
             Some(index) => self.jobs[index] = job,

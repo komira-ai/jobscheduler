@@ -15,8 +15,11 @@
 #        `systemctl status js-agent` shows the unmet ConditionPathIsMountPoint.
 # Upgrade: there is no maintainer script, so after installing a newer deb run
 # `systemctl daemon-reload && systemctl restart js-agent`.
-# The container engine (the program at --container-bin, docker by default) is assumed to be
-# installed and running: the unit is ordered after docker.service and containerd.service and
+# The unit runs jobs through the container engine, named with --runtime docker and allowed with
+# --allow-container-engine: crun is the agent's default Linux runtime, and the engine is a
+# fallback for a host that cannot run crun and for GPU jobs, whose every job gets network none
+# (the agent says so in one warning at start). The container engine (the program at
+# --container-bin, docker by default) is assumed to be installed and running: the unit is ordered after docker.service and containerd.service and
 # does not pull them in, because podman is a valid engine and the agent exits 2 when the
 # engine does not answer.
 #
@@ -90,7 +93,7 @@ ExecStartPre=+systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf
 # containers detached under the engine's own cgroup, so KillMode=process would save none of
 # them and would orphan the agent's readiness and GPU hook processes.
 TimeoutStopSec=120
-ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --runtime docker --container-bin /usr/bin/docker --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
+ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --runtime docker --container-bin /usr/bin/docker --allow-container-engine --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
 Restart=always
 RestartSec=30
 

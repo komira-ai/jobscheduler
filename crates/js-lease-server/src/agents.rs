@@ -24,6 +24,7 @@ use crate::job_store::ServerJobs;
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
+use crate::sched::place::SchedPlacer;
 use crate::usage_hub::Usage;
 use crate::usage_map::limits_of;
 use crate::usage_setup::UsageSetup;
@@ -100,8 +101,18 @@ pub(crate) fn assemble(
     clock: &SharedClock,
     state_file: &Path,
 ) -> Result<Assembled, StartupError> {
+    assemble_placed(hosts, usage, clock, state_file).map(|(assembled, _)| assembled)
+}
+
+/// [`assemble`], with the placer the registry was given under `--placement js-sched`.
+pub(crate) fn assemble_placed(
+    hosts: Hosts,
+    usage: UsageSetup,
+    clock: &SharedClock,
+    state_file: &Path,
+) -> Result<(Assembled, Option<Arc<SchedPlacer>>), StartupError> {
     match hosts {
-        Hosts::Static(source) => Ok((source, None)),
+        Hosts::Static(source) => Ok(((source, None), None)),
         Hosts::Layered {
             static_pool,
             agents,
@@ -114,6 +125,7 @@ pub(crate) fn assemble(
                 require_host_credential,
                 placement,
                 estimate_feed,
+                cpu_slack,
                 max_lease_wall,
             } = *agents;
             let path = state_path(state_file, ".agents");
@@ -126,12 +138,15 @@ pub(crate) fn assemble(
             let bindings = agent_state::load(&path)?;
             let booked = pool.shape().resources();
             let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
+            // `--placement js-sched`: the scheduler picks the host of a start, and books
+            // the share of each host's memory the pool's percent says; the registry books
+            // the whole shape. Under `registry` the registry cuts it, as it always did.
+            let (pool, memory) = placement.split(pool);
             let registry = Registry::new(pool, clock.clone());
-            // `--placement js-sched`: the scheduler picks the host of a start.
-            let placers = placement.placer(max_lease_wall);
-            placers
-                .into_iter()
-                .for_each(|placer| registry.set_placer(placer));
+            let placer = placement.placer(max_lease_wall, cpu_slack, memory, clock);
+            placer
+                .iter()
+                .for_each(|placer| registry.set_placer(placer.clone()));
             let usage = usage.build(clock, limits, &registry)?;
             // `--estimate-feed`: the learned lives of the profiles cost a lease's end in the
             // drain order. Set before the bookings are put back, so a lease restored from
@@ -159,7 +174,7 @@ pub(crate) fn assemble(
                 jobs: None,
                 unclean: Mutex::default(),
             };
-            Ok((Box::new(source), Some(Arc::new(agents))))
+            Ok(((Box::new(source), Some(Arc::new(agents))), placer))
         }
     }
 }
