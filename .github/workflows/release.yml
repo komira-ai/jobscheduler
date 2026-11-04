@@ -226,6 +226,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
+      # ring's C code for arm64 musl. On the arm64 runner the host (aarch64 glibc) and the target
+      # differ, so the cc crate looks for the compiler `aarch64-linux-musl-gcc`; musl-tools installs
+      # it as `musl-gcc` only (for x86_64 the cc crate falls back to `musl-gcc` by itself). The
+      # link gives musl-tools' compiler the name the crate looks for.
+      - name: Name musl-gcc as the arm64 musl compiler
+        if: ${{ matrix.target == 'aarch64-unknown-linux-musl' }}
+        run: sudo ln -s /usr/bin/musl-gcc /usr/local/bin/aarch64-linux-musl-gcc
       # The archives are made with GNU tar's options; the runner has Homebrew's gnu-tar
       # (`gtar`), and this installs it if an image does not.
       - name: Install GNU tar
@@ -249,12 +256,8 @@ jobs:
           mtime="$(git log -1 --format=%ct "$COMMIT")"
           # The oldest macOS the Apple silicon binaries must run on; a newer runner image
           # must not raise it (the check step below reads each binary's minos).
-          # ring's C code for arm64 musl: the cc crate looks for `aarch64-linux-musl-gcc` when the
-          # host (aarch64 glibc) and the target differ, and musl-tools installs only `musl-gcc`
-          # (for x86_64 the cc crate falls back to `musl-gcc` by itself).
           case "$TARGET" in
             *-apple-darwin) export MACOSX_DEPLOYMENT_TARGET=11.0 ;;
-            aarch64-unknown-linux-musl) export CC_aarch64_unknown_linux_musl=musl-gcc ;;
           esac
           # The options below are GNU tar's: on a Mac, Homebrew's gnu-tar is `gtar`.
           tar=tar

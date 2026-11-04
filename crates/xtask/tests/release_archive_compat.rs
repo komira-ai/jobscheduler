@@ -18,6 +18,7 @@
 //! relies on (the other half, the comparison against a published asset, is `publish`'s `cmp`).
 
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, UNIX_EPOCH};
@@ -109,6 +110,14 @@ fn checkout_for<'a>(tmp: &'a TestDir, target: &str) -> &'a Path {
     let declaration = dir.join(DECLARATION_SOURCE);
     std::fs::create_dir_all(declaration.parent().expect("parent")).expect("packaging");
     std::fs::write(&declaration, "name = \"js-agent\"\n").expect("declaration");
+    // The modes a build leaves, whatever the umask: an executable binary, plain data files.
+    for (file, mode) in [
+        (release.join("js-agent"), 0o755),
+        (dir.join("LICENSE"), 0o644),
+        (declaration, 0o644),
+    ] {
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).expect("mode");
+    }
     dir
 }
 
@@ -240,10 +249,12 @@ fn touch_all(path: &Path, secs: u64) {
 /// The arm64 Linux agent archive made twice from one staged tree, the second time from another
 /// working directory and with every staged file and directory given another modification time, is
 /// the same bytes; its gzip header has no name and no time, and its tar headers say owner 0/0, no
-/// owner names and the commit time; and GNU `tar -xzf` unpacks it to the staged files, each
-/// with the commit time. Catches a name, owner, file time or gzip header field that leaks into
+/// owner names, the commit time and the files' modes (the binary 0755, the others 0644); and
+/// GNU `tar -xzf` unpacks it to the staged files, each with the commit time, the binary still
+/// executable. Catches a name, owner, file time or gzip header field that leaks into
 /// the archive, which would make a re-run's file differ from the published one and fail
-/// `publish`.
+/// `publish`, and an execute bit lost in packing or unpacking, which would ship an agent a host
+/// cannot start.
 #[test]
 fn an_arm64_archive_is_byte_identical_when_made_again_and_reads_back_with_gnu_tar() {
     // The options here are the workflow's: a change there must come here too.
@@ -270,11 +281,11 @@ fn an_arm64_archive_is_byte_identical_when_made_again_and_reads_back_with_gnu_ta
     })
     .expect("staged");
     let name = format!("js-agent-1.4.0-{ARM_TARGET}");
-    touch_all(&stage.join(&name), 1_700_000_000);
+    touch_all(&stage.join(&name), COMMIT_TIME - 1);
     let first = archive_with_gzip(&stage, &name, repo);
     let elsewhere = repo.join("elsewhere");
     std::fs::create_dir(&elsewhere).expect("another directory");
-    touch_all(&stage.join(&name), 1_800_000_000);
+    touch_all(&stage.join(&name), COMMIT_TIME + 1);
     let second = archive_with_gzip(&stage, &name, &elsewhere);
     assert!(first == second, "the two archives differ");
 
@@ -285,10 +296,17 @@ fn an_arm64_archive_is_byte_identical_when_made_again_and_reads_back_with_gnu_ta
 
     // The tar headers.
     let mut headers = Vec::new();
+    let mut modes = Vec::new();
     let mut read = tar::Archive::new(flate2::read::GzDecoder::new(first.as_slice()));
     for entry in read.entries().expect("entries") {
         let entry = entry.expect("entry");
         let header = entry.header();
+        if header.entry_type().is_file() {
+            modes.push((
+                entry.path().expect("path").display().to_string(),
+                header.mode().expect("mode") & 0o777,
+            ));
+        }
         headers.push((
             entry.path().expect("path").display().to_string(),
             header.uid().expect("uid"),
@@ -309,6 +327,15 @@ fn an_arm64_archive_is_byte_identical_when_made_again_and_reads_back_with_gnu_ta
     .map(|path| (path, 0, 0, COMMIT_TIME, true))
     .collect();
     assert_eq!(headers, expected);
+    // The binary keeps its execute bits in the archive, and the data files get none.
+    assert_eq!(
+        modes,
+        [
+            (format!("{name}/LICENSE"), 0o644),
+            (format!("{name}/js-agent"), 0o755),
+            (format!("{name}/updater.d/js-agent.toml"), 0o644),
+        ]
+    );
 
     // What a host unpacks.
     let file = repo.join(format!("{name}.tar.gz"));
@@ -336,5 +363,16 @@ fn an_arm64_archive_is_byte_identical_when_made_again_and_reads_back_with_gnu_ta
             UNIX_EPOCH + Duration::from_secs(COMMIT_TIME),
             "{member}"
         );
+    }
+    // What a host runs is executable once unpacked; the data files are not.
+    let mode = |member: &str| {
+        std::fs::metadata(host.join(member))
+            .expect(member)
+            .permissions()
+            .mode()
+    };
+    assert_eq!(mode("js-agent") & 0o111, 0o111, "{:o}", mode("js-agent"));
+    for member in ["LICENSE", DECLARATION_MEMBER] {
+        assert_eq!(mode(member) & 0o111, 0, "{member}: {:o}", mode(member));
     }
 }

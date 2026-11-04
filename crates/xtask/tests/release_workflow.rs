@@ -597,19 +597,42 @@ fn target_condition(condition: &str, target: &str) -> bool {
         .strip_prefix("${{ ")
         .and_then(|c| c.strip_suffix(" }}"))
         .unwrap_or_else(|| panic!("not an expression: {condition}"));
-    inner.split(" || ").any(|term| {
-        if let Some(value) = term
-            .strip_prefix("matrix.target == '")
-            .and_then(|t| t.strip_suffix('\''))
-        {
+    // Each term is checked whole before anything is evaluated: a literal is a plain target word
+    // (no quote, space or operator), so `&&`, `!`, a nested call or a second comparison hidden
+    // inside what looks like one term is refused, not read as part of a literal.
+    let literal = |text: &str| -> String {
+        assert!(
+            !text.is_empty()
+                && text
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')),
+            "a literal this test does not read: {text:?} in {condition}"
+        );
+        text.to_owned()
+    };
+    let terms: Vec<(bool, String)> = inner
+        .split(" || ")
+        .map(|term| {
+            if let Some(value) = term
+                .strip_prefix("matrix.target == '")
+                .and_then(|t| t.strip_suffix('\''))
+            {
+                (true, literal(value))
+            } else if let Some(suffix) = term
+                .strip_prefix("endsWith(matrix.target, '")
+                .and_then(|t| t.strip_suffix("')"))
+            {
+                (false, literal(suffix))
+            } else {
+                panic!("a term this test does not read: {term}")
+            }
+        })
+        .collect();
+    terms.iter().any(|(equal, value)| {
+        if *equal {
             target == value
-        } else if let Some(suffix) = term
-            .strip_prefix("endsWith(matrix.target, '")
-            .and_then(|t| t.strip_suffix("')"))
-        {
-            target.ends_with(suffix)
         } else {
-            panic!("a term this test does not read: {term}")
+            target.ends_with(value.as_str())
         }
     })
 }
@@ -622,17 +645,31 @@ fn the_condition_reader_reads_equality_suffix_and_or() {
     assert!(target_condition(cond, "x-c"));
     assert!(!target_condition(cond, "a-bc"));
     assert!(!target_condition(cond, "x-d"));
-    let refused =
-        std::panic::catch_unwind(|| target_condition("${{ contains(matrix.target, 'x') }}", "x"));
-    assert!(refused.is_err());
+    // Forms it does not read are refused, whatever the target, so a condition GitHub reads
+    // differently cannot pass: another function, an `&&` hidden between the quotes of one
+    // equality (GitHub reads this one as true on the Mac too), a negation, a stray quote, an
+    // empty literal.
+    for refused in [
+        "${{ contains(matrix.target, 'x') }}",
+        "${{ matrix.target == 'aarch64-apple-darwin' && matrix.target == 'aarch64-apple-darwin' || endsWith(matrix.target, '-linux-musl') }}",
+        "${{ !endsWith(matrix.target, '-linux-musl') }}",
+        "${{ matrix.target == 'a'b' }}",
+        "${{ endsWith(matrix.target, '') }}",
+        "matrix.target == 'x'",
+    ] {
+        for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-musl"] {
+            let read = std::panic::catch_unwind(|| target_condition(refused, target));
+            assert!(read.is_err(), "{refused} was read for {target}");
+        }
+    }
 }
 
 /// Asserts that the "Install musl tools" step installs `musl-tools` and that its condition is
-/// true for both musl targets and false for the Mac target, evaluated for each, and that the
-/// build points the cc crate at that package's `musl-gcc` for the arm64 target (the name it
-/// looks for there, `aarch64-linux-musl-gcc`, is not installed). Catches an arm64 leg that builds
-/// without `musl-tools` or without a C compiler the cc crate finds (ring needs one for musl), and
-/// a Mac leg that would run `apt-get`.
+/// true for both musl targets and false for the Mac target, evaluated for each, and that on the
+/// arm64 leg only a link gives that package's `musl-gcc` the name the cc crate looks for there,
+/// `aarch64-linux-musl-gcc`, with no compiler set through the environment. Catches an arm64 leg
+/// that builds without `musl-tools` or without a C compiler the cc crate finds (ring needs one
+/// for musl), and a Mac leg that would run `apt-get`.
 #[test]
 fn the_musl_tools_are_installed_for_both_musl_legs() {
     let text = workflow();
@@ -660,12 +697,38 @@ fn the_musl_tools_are_installed_for_both_musl_legs() {
             "{target}: {condition}"
         );
     }
-    let package = step(build, "Build and package").join("\n");
+    let link = step(build, "Name musl-gcc as the arm64 musl compiler");
+    let link_condition = link
+        .iter()
+        .find_map(|l| l.trim_start().strip_prefix("if: "))
+        .expect("the link step's condition");
+    for (target, links) in [
+        ("x86_64-unknown-linux-musl", false),
+        ("aarch64-unknown-linux-musl", true),
+        ("aarch64-apple-darwin", false),
+    ] {
+        assert_eq!(
+            target_condition(link_condition, target),
+            links,
+            "{target}: {link_condition}"
+        );
+    }
     assert!(
-        package.contains(
-            "aarch64-unknown-linux-musl) export CC_aarch64_unknown_linux_musl=musl-gcc ;;"
-        ),
-        "{package}"
+        link.iter().any(|l| l.trim()
+            == "run: sudo ln -s /usr/bin/musl-gcc /usr/local/bin/aarch64-linux-musl-gcc"),
+        "{link:?}"
+    );
+    // The link comes after the package that installs musl-gcc, and nothing sets a compiler
+    // through the environment.
+    let names: Vec<&str> = build
+        .iter()
+        .filter_map(|l| l.trim_start().strip_prefix("- name: "))
+        .collect();
+    let at = |name: &str| names.iter().position(|n| *n == name).expect(name);
+    assert!(at("Install musl tools") < at("Name musl-gcc as the arm64 musl compiler"));
+    assert!(
+        !text.contains("CC_"),
+        "a compiler set through the environment"
     );
     // Every leg is one of those three.
     for leg in legs(build) {
