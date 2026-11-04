@@ -74,7 +74,9 @@ impl Transport for UreqTransport {
         let body = response
             .body_mut()
             .with_config()
-            .limit(MAX_RESPONSE_BYTES)
+            // ureq's limit refuses a body that reaches it (it reads once more to see the
+            // end), so one byte more lets a body of exactly the cap through.
+            .limit(MAX_RESPONSE_BYTES + 1)
             .read_to_vec()
             .map_err(failure)?;
         Ok(HttpResponse {

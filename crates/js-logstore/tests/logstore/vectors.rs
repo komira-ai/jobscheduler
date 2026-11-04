@@ -12,7 +12,6 @@
 //! - The worked examples of the S3 documentation for header authentication (service `s3`, host
 //!   `examplebucket.s3.amazonaws.com`): GET Object with a `Range` header, PUT Object, and GET
 //!   Bucket (list objects). Their paths are as sent, which the S3 form does not encode again.
-//! - The open tag of S3's listing answer, [`S3_LIST_ROOT`], whose namespace URI holds a date.
 
 /// One vector: the request, the credential and the published result.
 pub struct Vector {
@@ -243,11 +242,6 @@ pub const VECTORS: [Vector; 10] = [
         "34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7",
     ),
 ];
-
-/// The open tag S3 answers a listing with: it names S3's XML namespace, whose URI holds a date
-/// (a third-party protocol identifier).
-pub const S3_LIST_ROOT: &str =
-    "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
 
 /// The canonical request of `get-vanilla`, as the suite publishes it.
 pub const GET_VANILLA_CANONICAL_REQUEST: &str = "GET\n/\n\nhost:example.amazonaws.com\nx-amz-date:20150830T123600Z\n\nhost;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";

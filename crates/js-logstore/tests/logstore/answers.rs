@@ -4,7 +4,6 @@
 use js_logstore::{Metadata, Method, StoreError, TransportError, Unavailable};
 
 use crate::support::{Scripted, reply, s3_error, scripted_client};
-use crate::vectors::S3_LIST_ROOT;
 
 /// A listing answer: `truncated` and one `Contents` per `(key, size, last_modified)`.
 fn page(truncated: &str, contents: &[(&str, &str, &str)]) -> Vec<u8> {
@@ -21,6 +20,9 @@ fn page(truncated: &str, contents: &[(&str, &str, &str)]) -> Vec<u8> {
     )
     .into_bytes()
 }
+
+/// A listing's open tag with a namespace attribute, as stores write it.
+const NAMESPACED_ROOT: &str = "<ListBucketResult xmlns=\"urn:example:listing\">";
 
 /// A valid `LastModified`.
 const AT: &str = "2027-01-15T08:00:00.000Z";
@@ -145,6 +147,7 @@ fn each_call_reads_its_statuses() {
     let transport = Scripted::new(vec![
         reply(204, &[], b""),
         reply(200, &[], b""),
+        reply(404, &[], b""),
         s3_error(404, "NoSuchKey"),
         s3_error(404, "NoSuchBucket"),
         s3_error(500, "InternalError"),
@@ -276,7 +279,7 @@ fn the_list_scanner_reads_only_a_well_formed_page() {
     assert_eq!(listed.entries[1].size, u64::MAX);
 
     let with_namespace = format!(
-        "{S3_LIST_ROOT}<IsTruncated>false</IsTruncated><Contents><Key>p/a</Key><Size>1</Size><LastModified>{AT}</LastModified></Contents></ListBucketResult>"
+        "{NAMESPACED_ROOT}<IsTruncated>false</IsTruncated><Contents><Key>p/a</Key><Size>1</Size><LastModified>{AT}</LastModified></Contents></ListBucketResult>"
     );
     let store = scripted_client(Scripted::new(vec![reply(
         200,
