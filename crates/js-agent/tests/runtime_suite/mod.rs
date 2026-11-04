@@ -220,6 +220,7 @@ pub fn spec_of(s: &mut dyn Subject, run_id: &str, program: Program) -> RunSpec {
             image: s.image(),
             args: program.args(&ready),
         },
+        env: Vec::new(),
         cpu_millis: 1000,
         memory_bytes: program.memory_bytes(),
         pids: Some(256),

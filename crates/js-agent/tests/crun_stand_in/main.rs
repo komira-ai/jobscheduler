@@ -17,6 +17,7 @@
 mod adopt;
 mod blind;
 mod egress;
+mod env;
 mod gpus;
 mod images;
 mod node;

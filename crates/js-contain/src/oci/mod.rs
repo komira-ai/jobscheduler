@@ -146,7 +146,8 @@ pub struct OciConfig {
     /// must not be root.
     pub job_user: Option<(u32, u32)>,
     /// How much of a job's output is kept (`logs`): by default 1 MiB of each stream in a
-    /// file of the lease directory and the last 64 KiB of it in memory.
+    /// file of the lease directory and the last 64 KiB of it in memory. The file cap is the
+    /// default of a run; [`Oci::start`] and [`Oci::start_supervised`] take another for one run.
     pub logs: LogLimits,
     /// The `/etc/resolv.conf` of a container written with [`Oci::create`] (one whose network the
     /// host wires). By default [`RESOLV_CONF`]: one nameserver, loopback, which nothing listens

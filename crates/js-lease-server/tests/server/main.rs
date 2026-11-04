@@ -4,6 +4,7 @@
 //! the agent routes, the layering of the sources of hosts, the restart, and the container
 //! runs a lease holder queues on a registered host.
 
+mod admission;
 mod agents;
 mod agents_contract;
 mod agents_cordon;
@@ -24,6 +25,7 @@ mod config_joined;
 mod config_launch;
 mod config_lifetime;
 mod config_one_file;
+mod config_platform;
 mod config_pool_refusals;
 mod config_refusals;
 mod config_serve;
@@ -46,6 +48,7 @@ mod layering;
 mod limits;
 mod memory_percent;
 mod placement;
+mod platform_default;
 mod pools_checks;
 mod pools_policy;
 mod pools_provider_checks;

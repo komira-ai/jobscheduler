@@ -418,8 +418,9 @@ fn a_floor_that_no_host_can_meet_is_refused() {
     assert!(said.starts_with("pool \"gpu\": provider: "), "{said}");
 }
 
-/// Asserts that pools may not share a name, that a second static pool and a second
-/// registering pool are refused with the design's message, and that a static pool refuses
+/// Asserts that pools may not share a name, that a second static pool is refused with the
+/// design's message, that a file with a second elastic pool is valid and the server refuses
+/// to start on it, naming that pool, and that a static pool refuses
 /// every key that belongs to an elastic one, naming the key; and that `launch = "live"`
 /// on a pool whose provider launches nothing is refused naming `launch`.
 #[test]
@@ -441,7 +442,7 @@ fn pools_are_counted_and_a_static_pool_launches_nothing() {
     let second = PoolText::elastic(&scratch).set("name", &quote("b"));
     assert_eq!(
         refusal(&scratch, &file(&server, &[&first, &second])),
-        "pool \"b\": only one pool may register agents in this version"
+        "pool \"b\": several elastic pools are parsed; running them needs the ordered walk of design 5.6"
     );
     let live = PoolText::static_pool(&scratch, "hosts").set("launch", "\"live\"");
     assert_eq!(

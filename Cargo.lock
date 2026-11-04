@@ -1313,6 +1313,7 @@ dependencies = [
  "js-jobs",
  "js-lease",
  "js-lease-server",
+ "js-platform",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
@@ -1466,6 +1467,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-platform"
+version = "0.1.0"
+dependencies = [
+ "js-types",
+ "thiserror",
+]
+
+[[package]]
 name = "js-pool-static"
 version = "0.1.0"
 dependencies = [
@@ -1570,6 +1579,7 @@ name = "js-sched"
 version = "0.1.0"
 dependencies = [
  "js-caps",
+ "js-elastic",
  "js-sim",
  "js-sizing",
  "js-types",

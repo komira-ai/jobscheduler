@@ -265,6 +265,7 @@ impl Agent {
             disk_gib: None,
             jobs: Vec::new(),
             retired_jobs: Vec::new(),
+            log_grant_state: None,
         };
         let reply = registry.heartbeat(&message, &credential()).unwrap();
         self.prepared = reply.exclusive.clone();

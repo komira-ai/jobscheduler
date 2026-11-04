@@ -364,7 +364,7 @@ impl Cell {
             .await
             .unwrap_or_else(|e| panic!("write the bundle: {e}"));
         self.oci
-            .start(&lease.spec)
+            .start(&lease.spec, None)
             .unwrap_or_else(|e| panic!("start the container: {e}"))
     }
 

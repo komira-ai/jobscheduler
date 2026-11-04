@@ -30,16 +30,22 @@ pub enum Scenario {
     /// A result the scheduler has not acknowledged is sent again in every heartbeat,
     /// including the first on a new connection, and one that was acknowledged is not.
     UnackedResultIsResent,
+    /// A fenced start repeated while its job runs launches nothing more; a start whose
+    /// fence (the job with its allocation) the agent retired, because the job ended and its
+    /// result was acknowledged, launches nothing; the same job under a new allocation is a
+    /// new fence and runs.
+    RetiredFenceIsRefused,
 }
 
 impl Scenario {
     /// Every scenario, in the order [`super::run`] runs them.
-    pub const ALL: [Scenario; 5] = [
+    pub const ALL: [Scenario; 6] = [
         Scenario::StartIsIdempotent,
         Scenario::CancelUntilAbsent,
         Scenario::LateStartIsDropped,
         Scenario::SelfFencesAfterSilence,
         Scenario::UnackedResultIsResent,
+        Scenario::RetiredFenceIsRefused,
     ];
 
     /// Runs this scenario on a fresh harness.
@@ -51,6 +57,7 @@ impl Scenario {
             Self::LateStartIsDropped => late_start_is_dropped(harness, &mut notes),
             Self::SelfFencesAfterSilence => self_fences_after_silence(harness, &mut notes),
             Self::UnackedResultIsResent => unacked_result_is_resent(harness, &mut notes),
+            Self::RetiredFenceIsRefused => retired_fence_is_refused(harness, &mut notes),
         }
         notes.verdict()
     }
@@ -217,5 +224,45 @@ fn unacked_result_is_resent<H: AgentHarness>(harness: &mut H, notes: &mut Notes)
     notes.expect(
         harness.observed().results_sent == ["lease", "lease", "lease"],
         "an acknowledged result is not sent again",
+    );
+}
+
+fn retired_fence_is_refused<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
+    harness.start_fenced("job", "first");
+    harness.start_fenced("job", "first");
+    let seen = harness.observed();
+    notes.expect(
+        seen.running.contains("job"),
+        "the job runs under its first allocation",
+    );
+    notes.expect(
+        seen.launches.get("job") == Some(&1),
+        "a fenced start repeated while the job runs launches it once",
+    );
+    harness.complete("job");
+    notes.expect(
+        harness.ack("job") == Delivery::Delivered,
+        "the acknowledgement of the result is delivered",
+    );
+    harness.heartbeat();
+    harness.start_fenced("job", "first");
+    let seen = harness.observed();
+    notes.expect(
+        !seen.running.contains("job"),
+        "a start whose fence is retired does not run",
+    );
+    notes.expect(
+        seen.launches.get("job") == Some(&1),
+        "a start whose fence is retired launches nothing",
+    );
+    harness.start_fenced("job", "second");
+    let seen = harness.observed();
+    notes.expect(
+        seen.running.contains("job"),
+        "the same job under a new allocation is a new fence and runs",
+    );
+    notes.expect(
+        seen.launches.get("job") == Some(&2),
+        "the new fence launches the job once more",
     );
 }

@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 js-caps = { path = "../js-caps" }
+js-elastic = { path = "../js-elastic" }
 js-sizing = { path = "../js-sizing" }
 js-types = { path = "../js-types" }
 js-whole = { path = "../js-whole" }

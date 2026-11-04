@@ -50,7 +50,7 @@ async fn run(cell: &Cell, name: &str, argv: &[&str]) -> (Ended, String) {
         devices: Vec::new(),
     };
     cell.oci.create(&spec).await.expect("bundle");
-    let mut running = cell.oci.start(&spec).expect("started");
+    let mut running = cell.oci.start(&spec, None).expect("started");
     running.wait().await;
     let ended = cell.oci.ended(&spec, &running).await.expect("ended");
     let said = std::fs::read_to_string(stderr_path(&lease)).unwrap_or_default();

@@ -1,15 +1,16 @@
 //! The registering side of the server: the registry, the join tokens, the hello limit
 //! and the file of bindings, and how they are put together at start.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_agent_wire::InstanceIdentity;
 use js_elastic::HostName;
 use js_registry::{Credential, OsSessions, ProfileLives, Registry};
-use js_types::ProviderId;
+use js_types::{HostId, ProviderId};
 use js_usage::{ProfileCurves, ProfileKey, TailSink};
 use tracing::{error, warn};
 
@@ -19,6 +20,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
+use crate::job_store::ServerJobs;
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
@@ -74,6 +76,14 @@ pub(crate) struct Agents {
     /// The usage side, unless `--usage-off`. Its lock is a leaf, taken after the registry's
     /// call has returned.
     pub(crate) usage: Option<Arc<Usage>>,
+    /// The job and allocation tables, when the job service is on. With them, each heartbeat of
+    /// a host that reports the `per-job` capability is also served the starts and stops of its
+    /// jobs, and its job listing is committed ([`crate::per_job`]); without them, and for any
+    /// other host, the reply is the lease and run reply alone.
+    pub(crate) jobs: Option<Arc<ServerJobs>>,
+    /// The hosts whose last job listing named a job they hold no live allocation for. Its lock
+    /// is a leaf.
+    unclean: Mutex<BTreeSet<HostId>>,
 }
 
 /// Where a file of the agent side is kept: beside the lease file at `state_file`, with
@@ -173,6 +183,8 @@ pub(crate) fn assemble_placed(
                 store: BindingStore::new(path, bindings),
                 errors: AtomicU64::new(0),
                 usage,
+                jobs: None,
+                unclean: Mutex::default(),
             };
             Ok(((Box::new(source), Some(Arc::new(agents))), placer))
         }
@@ -212,7 +224,44 @@ impl Agents {
             store: BindingStore::new(dir.join("bindings"), Default::default()),
             errors: AtomicU64::new(0),
             usage: None,
+            jobs: None,
+            unclean: Mutex::default(),
         }
+    }
+
+    /// This agent side holding the job tables `jobs`, for a test of the per-job heartbeat.
+    #[cfg(test)]
+    pub(crate) fn with_jobs(self, jobs: Arc<ServerJobs>) -> Self {
+        Self {
+            jobs: Some(jobs),
+            ..self
+        }
+    }
+
+    /// Records whether the last job listing of `host` was clean: it named only jobs the host
+    /// holds a live allocation for.
+    pub(crate) fn note_listing(&self, host: &HostId, clean: bool) {
+        let mut unclean = self.unclean.lock().unwrap_or_else(PoisonError::into_inner);
+        if clean {
+            unclean.remove(host);
+        } else {
+            unclean.insert(host.clone());
+        }
+    }
+
+    /// Whether the capacity of `host` may be counted by placement: its last job listing was
+    /// clean (design section 6.2, section 8 row 37). A host that lists a job it holds no live
+    /// allocation for is told to stop it and is not placed on until a listing is clean.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the placement engine reads it; until it lands only tests do"
+        )
+    )]
+    pub(crate) fn listing_clean(&self, host: &HostId) -> bool {
+        let unclean = self.unclean.lock().unwrap_or_else(PoisonError::into_inner);
+        !unclean.contains(host)
     }
 
     /// Lets the hello of `host` register with the one-time token or host credential `who`
