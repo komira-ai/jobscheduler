@@ -5,9 +5,9 @@
 //! docker and podman themselves are never run.
 
 mod args;
-mod egress;
 mod lifecycle;
 mod logs;
+mod network;
 mod runtime;
 mod scripted;
 mod settings;
@@ -56,7 +56,7 @@ pub const NAME_R1: &str = "js-368fcd37c22ac926-r1";
 pub const BIN: &str = "/bin/sh";
 
 pub fn settings() -> Settings {
-    Settings::new(Path::new(BIN), None, None).unwrap()
+    Settings::new(Path::new(BIN), None).unwrap()
 }
 
 pub fn platform(os: &str) -> Platform {
@@ -167,6 +167,7 @@ pub fn spec(run_id: &str) -> RunSpec {
         labels,
         bundle: None,
         network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

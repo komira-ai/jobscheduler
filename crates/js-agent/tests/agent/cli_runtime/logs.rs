@@ -22,7 +22,7 @@ fn over(name: &str, logs_body: &str) -> (CliRuntime, Scratch) {
     );
     let bin = dir.write("docker", &script, 0o755);
     settle(&bin);
-    let settings = Settings::new(&bin, None, None).unwrap();
+    let settings = Settings::new(&bin, None).unwrap();
     let runner = Box::new(system_runner(Duration::from_secs(10)));
     let rt = CliRuntime::open(settings, HOST, &platform("linux"), made_at, runner);
     (rt.ok().unwrap(), dir)

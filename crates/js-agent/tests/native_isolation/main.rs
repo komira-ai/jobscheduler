@@ -313,6 +313,7 @@ fn spec(fixture: &Fixture, run_id: &str, exe: &Path, env: &[(&str, &str)]) -> Ru
         labels: Default::default(),
         bundle: None,
         network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

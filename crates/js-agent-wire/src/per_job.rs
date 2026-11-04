@@ -148,8 +148,7 @@ pub struct JobStartSpec {
     #[serde(default, skip_serializing_if = "JobNetwork::is_none")]
     pub network: JobNetwork,
     /// The ports the job declares, as [`crate::JobSpec::ports`], with the same bounds; left
-    /// out when there are none. Until the agent forwards declared ports it refuses a start
-    /// that declares any (`ports-not-supported`, after `port-above-ceiling`).
+    /// out when there are none, and refused or forwarded as there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<PortMap>,
 }
