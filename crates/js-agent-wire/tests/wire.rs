@@ -76,6 +76,44 @@ fn refusal_codes_snapshot() {
     );
 }
 
+/// The constants the first column of a table in the `refusal` module's documentation names,
+/// in order: the rows that start `//! | [`.
+fn table_codes(source: &str) -> Vec<&str> {
+    source
+        .lines()
+        .filter_map(|line| line.strip_prefix("//! | [`"))
+        .filter_map(|rest| rest.split_once("`]").map(|(name, _)| name))
+        .collect()
+}
+
+/// Asserts that the table of the one-job codes in the `refusal` module's documentation
+/// names exactly the constants a one-job start can meet, in order, and that each is a
+/// constant of the module with the spelling the snapshot holds; and that the reader of the
+/// table sees a table missing a row or naming another constant as different. Catches a
+/// new code left out of the table, a row that names a constant that does not exist, and a
+/// table whose code text drifts from the constant's.
+#[test]
+fn the_refusal_table_names_the_one_job_codes() {
+    let source = include_str!("../src/refusal.rs");
+    let want = [
+        ("INVALID_IMAGE", refusal::INVALID_IMAGE),
+        ("INVALID_JOB", refusal::INVALID_JOB),
+        ("PLATFORM_MISMATCH", refusal::PLATFORM_MISMATCH),
+        ("IMAGE_UNSUPPORTED_HERE", refusal::IMAGE_UNSUPPORTED_HERE),
+        ("RUN_UNSUPPORTED", refusal::RUN_UNSUPPORTED),
+    ];
+    let names = want.map(|(name, _)| name);
+    assert_eq!(table_codes(source), names);
+    for (name, code) in want {
+        let constant = format!("pub const {name}: &str = \"{code}\";");
+        assert!(source.contains(&constant), "{constant}");
+    }
+    let missing = "//! | [`INVALID_IMAGE`] | a |\n//! | [`PLATFORM_MISMATCH`] | b |\n";
+    assert_ne!(table_codes(missing), names);
+    let renamed = "//! | [`PLATFORM_MISMATCHED`] | b |\n";
+    assert_eq!(table_codes(renamed), ["PLATFORM_MISMATCHED"]);
+}
+
 /// Asserts that the grace relation holds for the defaults and is judged correctly for
 /// other values: strictly more than two intervals, and no overflow at the extreme.
 #[test]

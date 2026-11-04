@@ -628,8 +628,10 @@ mod tests {
     /// Asserts that the image's platform fills a request that named none, keeps one that
     /// named the same (an `aarch64` request is held as `arm64` and so is the same as
     /// [`Arch::Arm64`]), and that a request naming another `os` or `arch` is refused naming
-    /// that one, `os` first, compared with case. Catches a platform that overwrites what
-    /// the request asked for, and one that is dropped.
+    /// that one, `os` first, compared with case (`Macos` and `ARM64` conflict); and that a
+    /// request with disk, ISA level and mode keeps all three, the whole result compared.
+    /// Catches a platform that overwrites what the request asked for, one that is dropped,
+    /// and a merge that drops another placement constraint.
     #[test]
     fn the_image_platform_joins_the_requirements_and_a_conflict_is_refused() {
         let with = |caps: &[(&str, &str)], os, arch| {
@@ -668,6 +670,28 @@ mod tests {
             ),
             conflict("os")
         );
+        assert_eq!(
+            with(&[("arch", "ARM64")], Os::Macos, Arch::Arm64),
+            conflict("arch")
+        );
+        let constrained = Requirements::try_from_request(&request(&[
+            (DISK_GIB_KEY, "40"),
+            (ISA_LEVEL_KEY, "armv8.2-a"),
+            (EXEC_KEY, "sandbox-exec"),
+        ]))
+        .unwrap();
+        assert_eq!(constrained.disk_bytes, Some(40 << 30));
+        assert!(constrained.isa_level.is_some() && constrained.exec.is_some());
+        let merged = constrained
+            .clone()
+            .with_image_platform(Os::Macos, Arch::Arm64)
+            .unwrap();
+        let want = Requirements {
+            os: Some("macos".to_owned()),
+            arch: Some("arm64".to_owned()),
+            ..constrained
+        };
+        assert_eq!(merged, want, "disk, ISA level and mode are kept");
         assert_eq!(
             PlatformConflict { os_or_arch: "os" }.to_string(),
             "the request asks for another os than the job's image is built for"

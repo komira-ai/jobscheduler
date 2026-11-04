@@ -1,8 +1,12 @@
 //! What runs from a job's image, on either platform: [`RunSpec`].
 //!
 //! A start that carries a `run` names its job by the image alone (`JobSpec::image`, never
-//! empty beside a run): a Linux host runs the program in the image's container, a macOS
-//! host in the bundle the image resolves to. The body holds the fields of the legacy
+//! empty beside a run). This is the wire form only: the design has a Linux host run the
+//! program in the image's container and a macOS host in the bundle the image resolves to,
+//! but no agent of this release runs it yet. A container agent refuses a start with a `run`
+//! (`run-unsupported`), and a Mac agent refuses every start named by its image
+//! (`image-unsupported-here`); a server sends a `run` only to a host that reported `one-job`
+//! and writes the legacy form for any other ([`crate::JobSpec::downgrade_for`]). The body holds the fields of the legacy
 //! [`NativeSpec`] with the same bounds, and both are checked by the one implementation
 //! here; only the field names a refusal reports differ (`run.*` and `native.*`).
 //!

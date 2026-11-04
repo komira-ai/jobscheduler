@@ -15,7 +15,7 @@ use js_agent_wire::{
     check_platform, refusal,
 };
 use js_types::{Arch, Os};
-use serde_json::json;
+use serde_json::{Value, json};
 
 const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -285,7 +285,11 @@ fn a_run_body_is_held_to_the_native_bounds_under_its_own_names() {
     };
     let mut spec = good.clone();
     at_caps(spec.run.as_mut().unwrap());
-    assert_eq!(spec.validate(), Ok(()), "a run at every cap is accepted");
+    assert_eq!(
+        spec.validate(),
+        Ok(()),
+        "a program, argument list and environment at their caps are accepted"
+    );
 }
 
 /// A change to a run body.
@@ -359,6 +363,19 @@ fn os_and_arch_must_match_the_image_platform() {
     let mut arch_only = start(Os::Linux, Arch::Arm64);
     arch_only.os = None;
     assert_eq!(check_platform(&arch_only, &mac), Ok(()));
+    // The field a partial start names is still held: a wrong os alone, a wrong arch alone.
+    expect(
+        check_platform(&os_only, &mac).unwrap_err(),
+        "os",
+        Rule::Inconsistent,
+        refusal::PLATFORM_MISMATCH,
+    );
+    expect(
+        check_platform(&arch_only, &linux).unwrap_err(),
+        "arch",
+        Rule::Inconsistent,
+        refusal::PLATFORM_MISMATCH,
+    );
     let outside = [
         ("windows", "amd64", "image.os"),
         ("Linux", "amd64", "image.os"),
@@ -467,6 +484,7 @@ fn downgrade_for_a_host_without_one_job_uses_the_legacy_form() {
     linux.os = Some(Os::Linux);
     let mut unnamed = new.clone();
     unnamed.os = None;
+    assert_eq!(linux.downgrade_for(&one_job("true")), Ok(linux.clone()));
     for spec in [linux, unnamed] {
         assert_eq!(spec.validate(), Ok(()));
         expect(
@@ -497,4 +515,186 @@ fn downgrade_for_a_host_without_one_job_uses_the_legacy_form() {
         Rule::Inconsistent,
         refusal::INVALID_JOB,
     );
+    let mut gpus = new.clone();
+    gpus.gpu_indices = vec![0];
+    assert_eq!(gpus.validate(), Ok(()));
+    expect(
+        gpus.downgrade_for(&no_caps()).unwrap_err(),
+        "gpu_indices",
+        Rule::Inconsistent,
+        refusal::INVALID_JOB,
+    );
+}
+
+/// A run with every field set: environment, a working directory, both kinds of input,
+/// both kinds of output and a network level that is not the default.
+fn full_run() -> RunSpec {
+    RunSpec {
+        program: "@bundle/cc".into(),
+        args: vec!["-c".into(), "a.c".into()],
+        env: BTreeMap::from([
+            ("LANG".to_owned(), "C".to_owned()),
+            ("CC_FLAGS".to_owned(), "-O2".to_owned()),
+        ]),
+        cwd: "src".into(),
+        inputs: vec![
+            InputRef::Stage {
+                stage_id: format!("sha256:{HEX}"),
+                dest: "src".into(),
+                placement: Placement::Writable,
+            },
+            InputRef::Mount {
+                root_name: "cache".into(),
+                rel: "sdk/14".into(),
+                dest: "sdk".into(),
+            },
+        ],
+        outputs: vec![
+            OutputSpec {
+                path: "out/a.o".into(),
+                kind: OutputKind::File,
+            },
+            OutputSpec {
+                path: "out/logs".into(),
+                kind: OutputKind::Dir,
+            },
+        ],
+        network: NetworkLevel::Loopback,
+    }
+}
+
+/// Asserts that a run with every field set keeps every field through both conversions
+/// (to the native body and back, and the same JSON either way) and through the downgrade,
+/// whose native body is exactly the run's, written out in full. Catches a conversion or a
+/// downgrade that resets the environment, working directory, inputs, outputs or network,
+/// which a fixture with only defaults cannot see.
+#[test]
+fn a_populated_run_keeps_every_field_through_conversion_and_downgrade() {
+    let run = full_run();
+    let native = NativeSpec::from(run.clone());
+    assert_eq!(native.program, run.program);
+    assert_eq!(native.args, run.args);
+    assert_eq!(native.env, run.env);
+    assert_eq!(native.cwd, run.cwd);
+    assert_eq!(native.inputs, run.inputs);
+    assert_eq!(native.outputs, run.outputs);
+    assert_eq!(native.network, run.network);
+    assert_eq!(RunSpec::from(native.clone()), run);
+    assert_eq!(
+        serde_json::to_value(&native).unwrap(),
+        serde_json::to_value(&run).unwrap()
+    );
+    let mut spec = start(Os::Macos, Arch::Arm64);
+    (spec.gpu_indices, spec.mounts, spec.isolation) =
+        (Vec::new(), Vec::new(), Isolation::Contained);
+    spec.run = Some(run);
+    assert_eq!(spec.validate(), Ok(()));
+    let down = spec.downgrade_for(&no_caps()).unwrap();
+    assert_eq!(down.native, Some(native));
+    assert_eq!(down.bundle.as_deref(), Some(spec.image.as_str()));
+    assert_eq!((down.image.as_str(), down.run.is_none()), ("", true));
+    assert_eq!(down.validate(), Ok(()));
+    assert_eq!(
+        serde_json::to_value(&down).unwrap()["native"],
+        json!({
+            "program": "@bundle/cc",
+            "args": ["-c", "a.c"],
+            "env": {"CC_FLAGS": "-O2", "LANG": "C"},
+            "cwd": "src",
+            "inputs": [
+                {"type": "stage", "stage_id": format!("sha256:{HEX}"), "dest": "src", "placement": "writable"},
+                {"type": "mount", "root_name": "cache", "rel": "sdk/14", "dest": "sdk"}
+            ],
+            "outputs": [
+                {"path": "out/a.o", "kind": "file"},
+                {"path": "out/logs", "kind": "dir"}
+            ],
+            "network": "loopback"
+        })
+    );
+}
+
+/// Asserts what a run body decodes to and what it cannot: a body with only `program` takes
+/// every default (no arguments, environment, working directory, inputs or outputs, and the
+/// network `off`); a field this version does not know is ignored, in the body alone and
+/// inside a start; and a body with no program, a malformed value, or an unknown network,
+/// input type, placement or output kind fails to decode, which inside a reply reads as an
+/// unknown command while the commands beside it still arrive. Catches a dropped default (a
+/// sender that leaves `network` out getting the network), and a run whose confinement the
+/// agent cannot read that is run anyway or costs its neighbours.
+#[test]
+fn a_run_body_decodes_its_defaults_and_refuses_what_it_cannot_read() {
+    let minimal: RunSpec = serde_json::from_value(json!({"program": "/bin/true"})).unwrap();
+    assert_eq!(
+        minimal,
+        RunSpec {
+            program: "/bin/true".into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: String::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            network: NetworkLevel::Off,
+        }
+    );
+    let future = json!({"program": "/bin/true", "field_from_the_future": {"nested": [1]}});
+    assert_eq!(serde_json::from_value::<RunSpec>(future).unwrap(), minimal);
+    let mut wire = serde_json::to_value(start(Os::Linux, Arch::X86_64)).unwrap();
+    wire["run"]["field_from_the_future"] = json!(1);
+    let decoded: JobSpec = serde_json::from_value(wire).unwrap();
+    assert_eq!(decoded, start(Os::Linux, Arch::X86_64));
+    let stage = format!("sha256:{HEX}");
+    let unreadable: [(&str, Value); 7] = [
+        ("no program", json!({"args": []})),
+        (
+            "args not a list",
+            json!({"program": "/bin/true", "args": "make"}),
+        ),
+        (
+            "unknown network",
+            json!({"program": "/bin/true", "network": "open"}),
+        ),
+        (
+            "unknown input type",
+            json!({"program": "/bin/true", "inputs": [{"type": "url", "dest": "a"}]}),
+        ),
+        (
+            "unknown placement",
+            json!({"program": "/bin/true", "inputs": [
+                {"type": "stage", "stage_id": stage, "dest": "a", "placement": "shared"}
+            ]}),
+        ),
+        (
+            "unknown output kind",
+            json!({"program": "/bin/true", "outputs": [{"path": "a", "kind": "link"}]}),
+        ),
+        ("not an object", json!("make")),
+    ];
+    let base =
+        serde_json::to_value(Command::Start(Box::new(start(Os::Linux, Arch::X86_64)))).unwrap();
+    for (why, body) in unreadable {
+        let mut wire = base.clone();
+        wire["run"] = body;
+        assert!(
+            serde_json::from_value::<JobSpec>(wire.clone()).is_err(),
+            "{why}"
+        );
+        let reply: HeartbeatReply = serde_json::from_value(json!({
+            "commands": [{"type": "stop", "run_id": "r0"}, wire, {"type": "cancel", "run_id": "r2"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            reply.commands,
+            [
+                Command::Stop {
+                    run_id: "r0".into()
+                },
+                Command::Unknown,
+                Command::Cancel {
+                    run_id: "r2".into()
+                }
+            ],
+            "{why}"
+        );
+    }
 }
