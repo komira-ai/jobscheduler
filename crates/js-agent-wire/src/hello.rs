@@ -12,7 +12,7 @@ use crate::credential::HostCredential;
 use crate::error::{Rule, ValidationError};
 use crate::heartbeat::HeldRun;
 use crate::limits;
-use crate::network::NetworkCeiling;
+use crate::network::{EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling};
 use crate::protocol::{self, ProtocolRange};
 use crate::refusal;
 
@@ -281,7 +281,13 @@ impl Hello {
         check::count(at, self.capabilities.len(), limits::MAX_CAPABILITIES)?;
         for (key, value) in &self.capabilities {
             check::token(at, key, limits::MAX_CAPABILITY_KEY_LEN, check::ident_byte)?;
-            check::text(at, value, limits::capability_value_max(key))?;
+            // The network ceiling's values are named by their key, as the parser names them.
+            let named = match key.as_str() {
+                EGRESS_CAPABILITY => at.field("capabilities.egress"),
+                EGRESS_PORTS_CAPABILITY => at.field("capabilities.egress-ports"),
+                _ => at,
+            };
+            check::text(named, value, limits::capability_value_max(key))?;
         }
         Ok(())
     }

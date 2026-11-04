@@ -297,15 +297,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn open_allows_any_address_except_the_always_denied_ranges() {
+        let stand_in = crate::egress::stand_in::StandIn::new("ruleset-open");
+        let program = stand_in.path();
         let allow = ["192.0.2.10:9300".to_owned()];
         let dns = ["192.0.2.53".to_owned()];
         let open = Config::from_flags(&Flags {
             mode: Some("open"),
             allow: &allow,
             dns: &dns,
-            ip: Some("/usr/bin/true"),
-            nft: Some("/usr/bin/true"),
-            nsenter: Some("/usr/bin/true"),
+            ip: Some(&program),
+            nft: Some(&program),
+            nsenter: Some(&program),
             ..Flags::default()
         })
         .expect("a sound configuration");
@@ -345,9 +347,9 @@ mod tests {
             mode: Some("allow-list"),
             allow: &allow,
             dns: &dns,
-            ip: Some("/usr/bin/true"),
-            nft: Some("/usr/bin/true"),
-            nsenter: Some("/usr/bin/true"),
+            ip: Some(&program),
+            nft: Some(&program),
+            nsenter: Some(&program),
             ..Flags::default()
         })
         .expect("a sound configuration");

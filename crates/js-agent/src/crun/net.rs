@@ -167,6 +167,26 @@ impl Net {
     }
 }
 
+/// The port a run admitted at `level` is wired through: none for a `none` run, `egress` for a
+/// wired one. The runtime asks before it makes anything of the run.
+///
+/// # Errors
+///
+/// A wired level and no egress (the runtime's ceiling is `none`): the run is refused, never
+/// run with less than it asked for.
+pub(super) fn port_for(
+    egress: Option<&dyn EgressPort>,
+    level: JobNetwork,
+) -> Result<Option<&dyn EgressPort>, String> {
+    match (level, egress) {
+        (JobNetwork::None, _) => Ok(None),
+        (_, Some(egress)) => Ok(Some(egress)),
+        (_, None) => Err(format!(
+            "the job asked for {level} and this agent's ceiling is none"
+        )),
+    }
+}
+
 /// [`EgressPort::check`] of `egress`, for `Runtime::check_egress`; nothing to check without
 /// one.
 pub(super) fn check(egress: Option<&dyn EgressPort>) -> Result<(), RuntimeError> {
@@ -180,8 +200,8 @@ pub(super) fn check(egress: Option<&dyn EgressPort>) -> Result<(), RuntimeError>
 
 /// The wiring of the started container of `spec`, which `running` runs, by `egress`, for a
 /// job admitted at `level`; none for a `none` job, which is not wired (and whose pid is not
-/// asked for). A wired level with no egress is refused: the job is never run with less than
-/// it asked for. The container's pid is asked for until `crun` names one (right after
+/// asked for). A wired level with no egress never gets here: the runtime refused it before it
+/// made the container ([`port_for`]). The container's pid is asked for until `crun` names one (right after
 /// `Oci::start` the container may not be made yet), and the asks end without one when
 /// `crun state` answers with no usable pid (or names one too late), when `crun run` has ended,
 /// or when [`ROUTE_WAIT`] (a wired ceiling's `Config::route_wait`) has passed on `now_ms`: the
@@ -189,7 +209,7 @@ pub(super) fn check(egress: Option<&dyn EgressPort>) -> Result<(), RuntimeError>
 ///
 /// # Errors
 ///
-/// No egress for a wired level, no pid, or the wiring failed; nothing of the wiring is left.
+/// No pid, or the wiring failed; nothing of the wiring is left.
 /// The container's init holds the job until the route, which never came: the caller removes
 /// the container.
 pub(super) fn attach(
@@ -200,13 +220,9 @@ pub(super) fn attach(
     now_ms: fn() -> u64,
 ) -> Result<Option<Box<dyn Wired>>, RuntimeError> {
     let failed = |why: String| RuntimeError::new(format!("wire the container's network: {why}"));
-    if level.is_none() {
+    // `stage` refused a wired run with no egress before anything was made (`port_for`).
+    let Some(egress) = egress.filter(|_| !level.is_none()) else {
         return Ok(None);
-    }
-    let Some(egress) = egress else {
-        return Err(failed(format!(
-            "the job asked for {level} and this agent's ceiling is none"
-        )));
     };
     let pid = pid_of(oci, spec, running, now_ms).map_err(failed)?;
     let wired = egress.attach(&spec.name, pid, level);

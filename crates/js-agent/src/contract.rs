@@ -249,12 +249,14 @@ mod tests {
             use crate::egress::Flags;
             use js_types::JobNetwork;
             let ports = ["80".to_owned(), "8000-8010".to_owned()];
+            let program = crate::egress::stand_in::StandIn::new("contract-ceiling");
+            let program = program.path();
             let config = Config::from_flags(&Flags {
                 mode: Some("open"),
                 forward_ports: &ports,
-                ip: Some("/bin/sh"),
-                nft: Some("/bin/sh"),
-                nsenter: Some("/bin/sh"),
+                ip: Some(&program),
+                nft: Some(&program),
+                nsenter: Some(&program),
                 ..Flags::default()
             })
             .expect("open");

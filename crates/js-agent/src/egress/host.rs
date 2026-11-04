@@ -423,7 +423,9 @@ impl Attachment {
     }
 
     /// Takes the run's wiring down: the set member and the host end. Nothing is left to do
-    /// when the container already ended (the kernel removed the pair with its namespace).
+    /// when the container already ended (the kernel removed the pair with its namespace). When
+    /// either could not be removed, the run's block (and its interface name) is not given back,
+    /// so no later run is wired under a name a set may still hold.
     ///
     /// # Errors
     ///
@@ -452,11 +454,6 @@ impl Attachment {
             &["link", "del", &name],
             None,
         );
-        self.inner
-            .used
-            .lock()
-            .expect("the pool lock is never poisoned")
-            .remove(&index);
         let mut result = Ok(());
         for step in [removed, deleted] {
             if let Err(error) = step
@@ -464,6 +461,18 @@ impl Attachment {
             {
                 result = Err(error);
             }
+        }
+        // The block, and with it the name `jsvN`, is given back only once both are gone. The
+        // sets hold names, so a member left behind would let the next run that takes the name
+        // in through that set's rule (an `allow-list` run taking the name an `open` run left in
+        // `openifs` would reach any address); a veth left behind would make the next run's
+        // pair fail. Such a block stays out of use until the next start sweeps the host.
+        if result.is_ok() {
+            self.inner
+                .used
+                .lock()
+                .expect("the pool lock is never poisoned")
+                .remove(&index);
         }
         result
     }

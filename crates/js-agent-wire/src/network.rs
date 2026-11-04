@@ -168,13 +168,21 @@ pub struct NetworkCeiling {
 }
 
 impl NetworkCeiling {
-    /// Writes the ceiling into a hello's `capabilities`: [`EGRESS_CAPABILITY`] always, and
-    /// [`EGRESS_PORTS_CAPABILITY`] when it names a port.
+    /// Writes the ceiling into a hello's `capabilities`, replacing what an earlier ceiling
+    /// wrote there: [`EGRESS_CAPABILITY`] always, and [`EGRESS_PORTS_CAPABILITY`] when it
+    /// names a port and its list fits [`limits::MAX_CAPABILITY_VALUE_LEN`], the most any
+    /// capability value may hold for a receiver from before the key. A longer list (up to
+    /// [`limits::MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN`], which this version reads) is left out,
+    /// so an older server never refuses the hello for it; the host then reports no port, which
+    /// a server reads as forwarding none and so never places a job that declares one there.
+    /// The other capabilities are left as they are.
     pub fn insert_into(&self, capabilities: &mut BTreeMap<String, String>) {
         capabilities.insert(EGRESS_CAPABILITY.to_owned(), self.level.name().to_owned());
-        if !self.ports.is_empty() {
-            capabilities.insert(EGRESS_PORTS_CAPABILITY.to_owned(), self.ports_text());
-        }
+        let ports = self.ports_text();
+        match !ports.is_empty() && ports.len() <= limits::MAX_CAPABILITY_VALUE_LEN {
+            true => capabilities.insert(EGRESS_PORTS_CAPABILITY.to_owned(), ports),
+            false => capabilities.remove(EGRESS_PORTS_CAPABILITY),
+        };
     }
 
     /// The ceiling a hello's `capabilities` report; an absent key reads as level `none` and

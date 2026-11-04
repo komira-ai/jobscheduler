@@ -913,26 +913,28 @@ fn a_none_run_under_a_ceiling_is_not_wired() {
     assert!(nothing_left(&node, "r1-quiet"));
 }
 
-/// Proves a run that asked for a network on a runtime with no egress is refused rather than
-/// run with loopback only: the start fails naming the ceiling `none`, the port-less runtime
-/// asks for no pid, and nothing of the lease is left. The admission refuses such a start
-/// first (`network-above-ceiling`); this is the runtime's own floor under it. Catches a job
-/// silently run with less than it asked for.
+/// Proves a run that asked for a network on a runtime with no egress is refused before its
+/// container exists, so its command can never run with loopback only: staging it fails naming
+/// the ceiling `none` and makes nothing (no sidecar, no lease directory, no cgroup, so there is
+/// no bundle for `crun` to run), no pid is asked for, and `create_and_start` refuses it the
+/// same way. The admission refuses such a start first (`network-above-ceiling`); this is the
+/// runtime's own floor under it. Catches a job started and then refused, which a real
+/// command could outrun.
 #[test]
 fn a_wired_level_without_an_egress_is_refused() {
     let node = Node::new("egress-no-port");
     let mut runtime = open(&node, None, impatient());
-    let refused = runtime
-        .create_and_start(&wired(&node, "r1-lone"))
-        .expect_err("no egress");
-    assert!(
-        refused
-            .to_string()
-            .contains("the job asked for allow-list and this agent's ceiling is none"),
-        "{refused}"
-    );
-    assert_eq!(asks(&node, "r1-lone"), 0);
+    let said = "the job asked for allow-list and this agent's ceiling is none";
+    let staged = runtime.stage(&wired(&node, "r1-lone")).map(|id| id.0);
+    assert_eq!(staged.map_err(|why| why.to_string()), Err(said.to_owned()));
     assert!(nothing_left(&node, "r1-lone"));
+    assert!(runtime.list_labelled().expect("listed").is_empty());
+    let refused = runtime
+        .create_and_start(&wired(&node, "r2-lone"))
+        .expect_err("no egress");
+    assert_eq!(refused.to_string(), said);
+    assert_eq!(asks(&node, "r2-lone"), 0);
+    assert!(nothing_left(&node, "r2-lone"));
 }
 
 /// Proves each run is wired at the level its job was admitted at: an `allow-list` run and an

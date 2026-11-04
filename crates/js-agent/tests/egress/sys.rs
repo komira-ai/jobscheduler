@@ -107,6 +107,20 @@ pub fn allow_list(allow: &[&str], dns: &[&str]) -> Config {
     .expect("a sound configuration")
 }
 
+/// The ceiling `open` of a test, with the endpoints and resolvers given, the default pool and
+/// programs.
+pub fn open(allow: &[&str], dns: &[&str]) -> Config {
+    let allow: Vec<String> = allow.iter().map(|s| (*s).to_owned()).collect();
+    let dns: Vec<String> = dns.iter().map(|s| (*s).to_owned()).collect();
+    Config::from_flags(&Flags {
+        mode: Some("open"),
+        allow: &allow,
+        dns: &dns,
+        ..Flags::default()
+    })
+    .expect("a sound configuration")
+}
+
 /// Runs `body` on a thread that has joined `netns`: its sockets, and the programs it starts,
 /// are in that namespace.
 pub fn in_netns<T: Send>(netns: &File, body: impl FnOnce() -> T + Send) -> T {

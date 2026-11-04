@@ -390,3 +390,93 @@ fn a_port_range_reads_and_prints_n_and_lo_hi() {
     assert_eq!(PortRange::parse("00080"), PortRange::new(80, 80));
     assert_eq!(PortRange::parse("000080"), None);
 }
+
+/// Proves a ceiling's value that the generic text rules refuse is still named by its key:
+/// an empty value, one with a control character and one a byte over the key's cap are each
+/// `invalid-hello` naming `capabilities.egress` or `capabilities.egress-ports`, with the rule
+/// that failed, while another capability keeps the field `capabilities`. Catches a refusal a
+/// server cannot tell from any other malformed capability.
+#[test]
+fn a_ceiling_value_the_text_rules_refuse_names_its_key() {
+    for (key, field) in [
+        ("egress", "capabilities.egress"),
+        ("egress-ports", "capabilities.egress-ports"),
+    ] {
+        let over = "1".repeat(capability_value_max(key) + 1);
+        for (value, rule) in [
+            ("", Rule::Empty),
+            ("open\u{7}", Rule::BadChars),
+            (over.as_str(), Rule::TooLong),
+        ] {
+            let err = check_hello(&[("egress", "open"), (key, value)]);
+            expect(err, field, rule, refusal::INVALID_HELLO);
+        }
+    }
+    let err = check_hello(&[("toolchain", "")]);
+    expect(err, "capabilities", Rule::Empty, refusal::INVALID_HELLO);
+}
+
+/// Proves writing a ceiling replaces the one written before it and leaves the rest alone: a
+/// ported ceiling followed by one with no port, and by the default, leaves no
+/// `egress-ports`, and the map reads back as the second ceiling; the other capabilities stay.
+/// Catches a stale port list that keeps an allowance the agent no longer has, or that makes
+/// the agent's own hello unreadable (ports beside `none`).
+#[test]
+fn writing_a_ceiling_replaces_the_one_before_it() {
+    let ported = ceiling(JobNetwork::Open, &["80"]);
+    for next in [ceiling(JobNetwork::Open, &[]), NetworkCeiling::default()] {
+        let mut capabilities = caps(&[("os", "linux")]);
+        ported.insert_into(&mut capabilities);
+        assert!(capabilities.contains_key("egress-ports"));
+        next.insert_into(&mut capabilities);
+        let mut want = caps(&[("os", "linux")]);
+        want.insert("egress".into(), next.level.name().into());
+        assert_eq!(capabilities, want);
+        assert_eq!(NetworkCeiling::from_capabilities(&capabilities), Ok(next));
+    }
+}
+
+/// The capability rules of the release before the network ceiling, copied: every value but
+/// the bundle list at most 128 bytes, the bundle list at most `16 * 72 - 1`.
+fn previous_receiver_accepts(capabilities: &BTreeMap<String, String>) -> bool {
+    capabilities.iter().all(|(key, value)| {
+        let max = match key.as_str() {
+            "bundle" => 16 * 72 - 1,
+            _ => 128,
+        };
+        !value.is_empty() && value.len() <= max
+    })
+}
+
+/// Proves a hello carrying the ceiling stays readable by a server from before it: a port
+/// list that fits the previous value cap is written and that server's rules accept it; the
+/// longest list this version reads (16 ranges, 191 bytes) is left out, the hello reads as no
+/// port here and passes the previous rules too. Catches a hello that an older server refuses,
+/// which would cost the host its registration.
+#[test]
+fn a_hello_with_the_ceiling_passes_the_previous_receivers_bounds() {
+    let short = ceiling(JobNetwork::Open, &["80", "8000-8010"]);
+    let mut written = caps(&[("os", "linux")]);
+    short.insert_into(&mut written);
+    assert_eq!(written["egress-ports"], "80,8000-8010");
+    assert!(previous_receiver_accepts(&written));
+
+    let widest: Vec<String> = (0..MAX_PORTS)
+        .map(|n| format!("{}-65535", 65000 + n))
+        .collect();
+    let names: Vec<&str> = widest.iter().map(String::as_str).collect();
+    let long = ceiling(JobNetwork::Open, &names);
+    assert_eq!(
+        long.ports_text().len(),
+        MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN
+    );
+    let mut written = caps(&[("os", "linux")]);
+    long.insert_into(&mut written);
+    assert!(!written.contains_key("egress-ports"), "{written:?}");
+    assert!(previous_receiver_accepts(&written));
+    let read = NetworkCeiling::from_capabilities(&written).expect("readable");
+    assert_eq!((read.level, read.ports.len()), (JobNetwork::Open, 0));
+    let mut hello = hello();
+    hello.capabilities = written;
+    assert_eq!(hello.validate(), Ok(()));
+}

@@ -651,6 +651,7 @@ impl CrunRuntime {
         if spec.isolation != js_agent_wire::Isolation::Contained {
             return Err(Fault::NotContained);
         }
+        net::port_for(self.egress.as_deref(), spec.network).map_err(Fault::Network)?;
         // Before anything is made: a run's nodes are read now, and one that is gone refuses it.
         let gpu = gpu::wiring(self.gpus.as_ref(), &spec.gpu_indices).map_err(Fault::Gpu)?;
         let Body::Container { image: given, args } = &spec.body else {

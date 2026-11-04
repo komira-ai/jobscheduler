@@ -573,14 +573,18 @@ fn a_release_forgives_what_is_gone_and_reports_what_is_not() {
 
     let third = egress
         .attach("three", PID, JobNetwork::AllowList)
-        .expect("freed even by a failed release");
-    assert_eq!(third.interface(), Some("jsv0"));
+        .expect("another block is free");
+    assert_eq!(
+        third.interface(),
+        Some("jsv1"),
+        "a block whose veth could not be deleted is not given out again"
+    );
     fake.answer("link del", Ok(String::new()));
     let logged = fake.log().len();
     drop(third);
     assert_eq!(
         fake.log()[logged..],
-        release_calls(0)[..],
+        release_calls(1)[..],
         "a drop is a release"
     );
 }
@@ -963,4 +967,69 @@ fn none_is_the_default_and_has_loopback_only() {
         drop(attachment);
         assert_eq!(fake.calls(), before, "a none job is wired with nothing");
     }
+}
+
+/// Catches an `open` run's set member outliving its release and handing the next run of
+/// another level its access: under `open`, an `open` run whose `openifs` member cannot be
+/// removed (the veth is deleted) is a failed release, and its name `jsv0` is not given to the
+/// `allow-list` run that comes next, which is wired as `jsv1` in `jobifs`; the same holds for
+/// an attach that fails after its member was added and whose undoing cannot remove it. Once
+/// removals work again a release gives its block back.
+#[test]
+fn a_member_left_in_a_set_is_never_reused_by_another_run() {
+    let fake = Fake::new();
+    let egress = started(&fake, open());
+    let wide = egress
+        .attach("wide", PID, JobNetwork::Open)
+        .expect("attach");
+    assert_eq!(wide.interface(), Some("jsv0"));
+    fake.answer(
+        "delete element",
+        Err("Error: Operation not permitted".to_owned()),
+    );
+    let error = wide.release().expect_err("the member is still there");
+    assert!(
+        error.to_string().contains("Operation not permitted"),
+        "{error}"
+    );
+    let before = fake.log().len();
+    let listed = egress
+        .attach("listed", PID, JobNetwork::AllowList)
+        .expect("attach");
+    assert_eq!(listed.interface(), Some("jsv1"));
+    assert!(
+        fake.log()[before..]
+            .contains(&"nft add element inet js_crun_egress jobifs { \"jsv1\" }".to_owned()),
+        "{:?}",
+        fake.log()
+    );
+
+    // An attach that fails after its member was added, whose undoing cannot remove it.
+    fake.answer(
+        "netns",
+        Err("RTNETLINK answers: Invalid argument".to_owned()),
+    );
+    let failed = egress.attach("failed", PID, JobNetwork::Open);
+    assert!(failed.is_err());
+    fake.answer("netns", Ok(String::new()));
+    let next = egress
+        .attach("next", PID, JobNetwork::AllowList)
+        .expect("attach");
+    assert_eq!(
+        next.interface(),
+        Some("jsv3"),
+        "jsv2 keeps its stale member"
+    );
+
+    fake.answer("delete element", Ok(String::new()));
+    next.release().expect("release");
+    let again = egress
+        .attach("again", PID, JobNetwork::AllowList)
+        .expect("attach");
+    assert_eq!(
+        again.interface(),
+        Some("jsv3"),
+        "a clean release gives its block back"
+    );
+    drop((listed, again));
 }
