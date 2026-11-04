@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use js_provider::{HostCapacity, Observed, RefusalCode, StartAck, StartSpec};
+use crate::{HostCapacity, Observed, RefusalCode, StartAck, StartSpec};
 use js_types::{HostId, LeaseId, MemoryHeadroom, ResourceClass, Resources, Shape};
 
 /// Why [`HostBook::seat`] booked nothing.

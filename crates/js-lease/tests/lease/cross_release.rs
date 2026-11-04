@@ -29,7 +29,7 @@ use std::fs;
 use js_lease::{
     AcquireError, Booking, Boot, LeaseState, LeaseTable, ManualClock, Timestamp, read_bookings,
 };
-use js_pool_static::{HostBook, SeatError};
+use js_provider::{HostBook, SeatError};
 use js_provider::{HostCapacity, Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
 use js_types::{Admission, ClassId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape};
 

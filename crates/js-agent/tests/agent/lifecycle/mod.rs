@@ -12,6 +12,7 @@ mod exclusive;
 pub mod fake;
 mod files;
 mod flags;
+mod held;
 mod layout;
 mod lease_dir;
 mod logs;

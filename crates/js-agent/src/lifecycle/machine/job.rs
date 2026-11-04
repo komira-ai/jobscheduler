@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use js_agent_wire::{
     HeldRun, HeldState, Isolation, JobSpec, NativeSpec, Outcome, RunResult, Taint,
 };
+use serde::{Deserialize, Serialize};
 
 use super::{RETIRED_CAP, SLOTS};
 use crate::lifecycle::runtime::{Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Ticket};
@@ -110,7 +111,8 @@ pub(super) enum Cause {
 /// What a job is keyed by on the wire, which decides where it is listed: a run (the lease
 /// and run messages: `held`, `results`, `result_acks`) or a job (the per-job messages:
 /// `jobs`, `jobs[].result`, `job_acks`). A job is listed under its own keying alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum Keyed {
     /// Started by a `Start`: its id is a run id and its lease a lease id.
     Run,
@@ -342,23 +344,47 @@ pub(super) fn outcome(cause: Option<Cause>, exit: Option<Exit>) -> (Outcome, Opt
     }
 }
 
-/// The run ids that must never start again, oldest first.
+/// The run ids that must never start again, oldest first, each with the allocation (lease)
+/// id of the job when it is known, and a count of the ids added, which says whether the list
+/// has changed since it was last written down.
 #[derive(Default)]
 pub(super) struct Retired {
-    order: VecDeque<String>,
+    order: VecDeque<(String, Option<String>)>,
     seen: BTreeSet<String>,
+    added: u64,
 }
 
 impl Retired {
     pub(super) fn insert(&mut self, run_id: &str) {
+        self.insert_with(run_id, None);
+    }
+
+    /// Retires `run_id`, noting the allocation it belonged to when that is known. An id
+    /// already retired changes nothing.
+    pub(super) fn insert_with(&mut self, run_id: &str, allocation: Option<&str>) {
         if self.seen.insert(run_id.to_owned()) {
-            self.order.push_back(run_id.to_owned());
+            let allocation = allocation.map(str::to_owned);
+            self.order.push_back((run_id.to_owned(), allocation));
+            self.added += 1;
         }
         if self.order.len() > RETIRED_CAP {
-            self.order.pop_front().iter().for_each(|old| {
+            self.order.pop_front().iter().for_each(|(old, _)| {
                 self.seen.remove(old);
             });
         }
+    }
+
+    /// How many ids were added in all: it differs between two readings when the list
+    /// changed.
+    pub(super) fn added(&self) -> u64 {
+        self.added
+    }
+
+    /// The retired ids with their allocations, oldest first.
+    pub(super) fn entries(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.order
+            .iter()
+            .map(|(id, allocation)| (id.as_str(), allocation.as_deref()))
     }
 
     pub(super) fn contains(&self, run_id: &str) -> bool {
@@ -395,6 +421,40 @@ impl Job {
             host: spec.isolation == Isolation::Host,
             owed: false,
             result: None,
+            findings: Vec::new(),
+            started_usec: None,
+            cgroup: None,
+            cgroup_missing_told: false,
+            blind_told: false,
+            adopted: false,
+            usage_held: None,
+            slot_parked: false,
+        }
+    }
+
+    /// A job that holds nothing and only owes its `result`, as one read back from the state
+    /// root after a restart: its slot is free, so it is only listed until the result is
+    /// acknowledged.
+    pub(super) fn held(keyed: Keyed, result: RunResult) -> Self {
+        Self {
+            run_id: result.run_id.clone(),
+            lease_id: result.lease_id.clone(),
+            keyed,
+            booking: Booking {
+                cpu_millis: 0,
+                memory_bytes: 0,
+                disk_bytes: 0,
+                gpus: Vec::new(),
+            },
+            slot: None,
+            deadline_ms: 0,
+            stage: Stage::Freed,
+            cause: None,
+            silent: false,
+            stop_sent: false,
+            host: false,
+            owed: false,
+            result: Some(result),
             findings: Vec::new(),
             started_usec: None,
             cgroup: None,

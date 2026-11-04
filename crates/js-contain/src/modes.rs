@@ -7,12 +7,18 @@
 //! [`HelperModes`] the [`OciConfig`](crate::OciConfig) holds (the default for both, in a
 //! node that sets none).
 //!
+//! The supervise mode ([`crate::oci::supervise`]) is run the same way, as
+//! `<binary> <supervise> <arguments>...`, but on the host and not in a helper container: by
+//! [`Oci::start_supervised`](crate::Oci::start_supervised), to run one job's container to its
+//! end in a process that outlives the agent.
+//!
 //! The binary's `main` calls [`dispatch`] first, before it parses its flags or installs
 //! its signal handlers: a helper has no flags, and the arguments are not the program's.
 
 use std::ffi::OsString;
 
 use crate::oci::helper::HelperModes;
+use crate::oci::supervise;
 use crate::{give, unpack_layers};
 
 /// The exit status of the helper mode that `std::env::args_os` selects, `None` if its
@@ -31,6 +37,8 @@ pub fn dispatch_args(modes: &HelperModes, args: &[OsString]) -> Option<u8> {
         Some(give::run(modes, rest))
     } else if mode == modes.unpack.as_str() {
         Some(unpack_layers::run(modes, rest))
+    } else if mode == modes.supervise.as_str() {
+        Some(supervise::run(rest))
     } else {
         None
     }

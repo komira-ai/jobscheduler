@@ -34,7 +34,7 @@
 //! until the scaler's next tick retires it again: a lease may be booked on it in that gap, bounded
 //! by one tick plus the margin of the cloud lifetime.
 
-use js_pool_static::HostBook;
+use js_provider::HostBook;
 use js_types::HostId;
 
 use super::{HostMark, Record, Registry, State};

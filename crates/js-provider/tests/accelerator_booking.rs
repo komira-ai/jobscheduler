@@ -4,8 +4,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_pool_static::HostBook;
-use js_provider::{RefusalCode, StartAck, StartSpec};
+use js_provider::{HostBook, RefusalCode, StartAck, StartSpec};
 use js_types::{Admission, ClassId, HostId, LeaseId, Request, ResourceClass, Resources, Shape};
 
 const HOST_CLASS: &str = "nvidia-a100-sxm4-80gb";
@@ -113,5 +112,5 @@ fn a_gpu_share_on_a_host_without_a_class_is_booked_as_given() {
     let cpu_only = Resources::new(100_000, 100, 0, None).unwrap();
     book.insert_host(host(), Shape::new(cpu_only, BTreeMap::new()));
     let seated = book.seat_as(&host(), LeaseId::new(1, 1), Some(gpus(1, "nvidia-a100")));
-    assert_eq!(seated, Err(js_pool_static::SeatError::NoRoom(host())));
+    assert_eq!(seated, Err(js_provider::SeatError::NoRoom(host())));
 }

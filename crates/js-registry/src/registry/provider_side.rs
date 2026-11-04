@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use js_pool_static::SeatError;
+use js_provider::SeatError;
 use js_provider::{HostCapacity, Observed};
 use js_types::sched::usage::NodeLoad;
 use js_types::{Admission, HostId, LeaseId, RequestId, Resources};

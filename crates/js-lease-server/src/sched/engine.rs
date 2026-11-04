@@ -36,7 +36,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_caps::NodeCaps;
-use js_pool_static::Candidate;
+use js_provider::Candidate;
 use js_provider::StartSpec;
 use js_registry::MarkedTails;
 use js_sched::harness::feed;
@@ -217,7 +217,7 @@ impl Engine {
     /// there as a lease recovered after a restart is, booking what the registry books.
     pub(crate) fn adopt(&mut self, candidate: &Candidate, spec: &StartSpec) {
         // A lease that books the whole host is taken up as a request that owns its worker.
-        let held = js_pool_static::Held {
+        let held = js_provider::Held {
             lease: spec.lease(),
             resources: spec.request().resources.clone(),
             whole: spec.class().admission().books_whole_host(),
@@ -486,7 +486,7 @@ impl Engine {
 
 /// The recovered operation that stands for the lease `held` on `host`, numbered as
 /// `placed` says: charged its CPU and memory as it books them.
-fn recovered(placed: Placed, host: &HostId, held: &js_pool_static::Held) -> Recovered {
+fn recovered(placed: Placed, host: &HostId, held: &js_provider::Held) -> Recovered {
     let number = placed.operation.0;
     let booked = map::booking(&held.resources);
     let request = Request {
@@ -539,7 +539,7 @@ fn millis(duration: std::time::Duration) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use js_pool_static::Held;
+    use js_provider::Held;
     use js_types::sched::WorkerId;
     use js_types::sched::usage::{LeaseClock, LeaseMinute};
     use js_types::{Resources, Shape};
