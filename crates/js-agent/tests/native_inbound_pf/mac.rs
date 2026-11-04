@@ -196,6 +196,7 @@ fn spec(fixture: &Fixture, exe: &Path) -> RunSpec {
         bundle: None,
         network: Default::default(),
         ports: Vec::new(),
+        env: Vec::new(),
     }
 }
 
