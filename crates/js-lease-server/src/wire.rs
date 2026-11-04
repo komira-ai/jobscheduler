@@ -51,7 +51,7 @@ const PROBE_HOST_INVALID: &str = "probe_host is not a valid host id";
 const REQUEST_ID_INVALID: &str = "request_id is not a valid request id";
 
 /// The resources of an [`AcquireBody`]; a dimension left out is zero.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResourcesBody {
     #[serde(default)]
@@ -69,28 +69,27 @@ struct ResourcesBody {
     disk_bytes: Option<u64>,
     /// The accelerator the lease needs, beside `gpus` and `gpu_class` (which keep their
     /// meaning): read at the resources level because it states what those two state, the
-    /// devices the lease books. Left out (or null), the lease is as before, and the key is
-    /// left out of the body when unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// devices the lease books. Left out (or null), the lease is as before.
+    #[serde(default)]
     accelerator: Option<AcceleratorBody>,
 }
 
 /// The `resources.accelerator` object of an [`AcquireBody`]; every field is optional and a
 /// field left out matches anything.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AcceleratorBody {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     vendor: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     memory_per_device_gib: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     interconnect: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     form_factor: Option<String>,
 }
 
@@ -846,11 +845,10 @@ mod tests {
 
     /// Asserts that a body with no accelerator object and no GPUs parses to the request it
     /// parsed to before the accelerator existed (the resources and capabilities as written,
-    /// no `accelerator.*` capability added), that its `resources` serialize to the keys the
-    /// previous release wrote (the object's key left out) and are read by it, and that a
-    /// body that books GPUs as `gpus` and `gpu_class` keeps its booking. Catches a key
-    /// written when unset, which an older server would refuse, and a capability added to a
-    /// request that asked for no accelerator.
+    /// no `accelerator.*` capability added), that the previous release's reader takes the
+    /// same body, that a body with the object reads every field of it, and that a body that
+    /// books GPUs as `gpus` and `gpu_class` keeps its booking. Catches a capability added to
+    /// a request that asked for no accelerator, and an object field read and dropped.
     #[test]
     fn a_body_without_accelerator_or_gpu_class_is_byte_identical_to_today() {
         let request = accepted(
@@ -871,21 +869,12 @@ mod tests {
         };
         assert_eq!(request, expected);
         let text = r#"{"class":"c","resources":{"cpu_millis":1000,"memory_bytes":2},"max_wall_seconds":60}"#;
+        assert!(parse::<PreviousAcquireBody>(text.as_bytes()).is_ok());
         let body = parse::<AcquireBody>(text.as_bytes()).unwrap();
-        let written = serde_json::to_string(&body.resources).unwrap();
-        assert_eq!(
-            written,
-            r#"{"cpu_millis":1000,"memory_bytes":2,"gpus":0,"gpu_class":null,"disk_bytes":null}"#
-        );
-        assert!(serde_json::from_str::<PreviousResourcesBody>(&written).is_ok());
-        assert_eq!(
-            serde_json::to_string(&AcceleratorBody::default()).unwrap(),
-            "{}"
-        );
-        let full = r#"{"cpu_millis":1,"memory_bytes":2,"gpus":4,"gpu_class":"nvidia-a100","disk_bytes":null,"accelerator":{"vendor":"nvidia","model":"nvidia-a100","count":4,"memory_per_device_gib":80,"interconnect":"nvlink-domain>=8","form_factor":"sxm"}}"#;
-        let read: ResourcesBody = serde_json::from_str(full).unwrap();
-        assert_eq!(serde_json::to_string(&read).unwrap(), full);
-        let shown = format!("{read:?}");
+        assert!(body.resources.accelerator.is_none());
+        let full = r#"{"class":"c","resources":{"gpus":4,"gpu_class":"nvidia-a100","accelerator":{"vendor":"nvidia","model":"nvidia-a100","count":4,"memory_per_device_gib":80,"interconnect":"nvlink-domain>=8","form_factor":"sxm"}},"max_wall_seconds":60}"#;
+        let read = parse::<AcquireBody>(full.as_bytes()).unwrap();
+        let shown = format!("{:?}", read.resources);
         assert!(shown.contains("count: Some(4)"), "{shown}");
         assert!(shown.contains("memory_per_device_gib: Some(80)"), "{shown}");
         let booked = accepted(r#"{"gpus":2,"gpu_class":"nvidia-a100-sxm4-80gb"}"#, "{}");
