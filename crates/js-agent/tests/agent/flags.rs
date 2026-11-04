@@ -556,12 +556,14 @@ fn run_counting(extra: &[&str]) -> (Ran, bool, usize) {
 /// replaces it, before the agent connects or sends anything; that the refusal comes before
 /// clap's own (an unknown flag ahead of it does not turn it into clap's usage error); that a
 /// removed name after a flag whose value cannot start with `-` is read as the flag, as clap
-/// reads it; and that of two removed flags only the first given is reported. Catches a
-/// removed flag silently accepted, clap's generic error printed in place of the replacement,
-/// and a refusal that comes after the agent registered.
+/// reads it; that a removed flag with no value, or an empty attached one, is refused the
+/// same way; that the scan goes on after a value it skipped, a `--` taken as the value of
+/// `--readiness-hook-arg` included; and that of two removed flags only the first given is
+/// reported. Catches a removed flag silently accepted, clap's generic error printed in place
+/// of the replacement, and a refusal that comes after the agent registered.
 #[test]
 fn the_removed_flags_are_refused_with_a_message() {
-    let cases: [(&[&str], &str); 8] = [
+    let cases: [(&[&str], &str); 14] = [
         (&["--container-network", "jobs"], NO_NETWORK),
         (&["--container-network=jobs"], NO_NETWORK),
         (
@@ -570,6 +572,31 @@ fn the_removed_flags_are_refused_with_a_message() {
         ),
         (&["--container-egress-allow=192.0.2.1:443"], NO_EGRESS_ALLOW),
         (&["--container-nft", "/usr/sbin/nft"], NO_NFT),
+        (&["--container-nft=/usr/sbin/nft"], NO_NFT),
+        (&["--container-network"], NO_NETWORK),
+        (&["--container-egress-allow="], NO_EGRESS_ALLOW),
+        (&["--container-nft="], NO_NFT),
+        (
+            &[
+                "--readiness-hook",
+                "/bin/sh",
+                "--readiness-hook-arg",
+                "--container-network",
+                "--container-nft=/usr/sbin/nft",
+            ],
+            NO_NFT,
+        ),
+        (
+            &[
+                "--readiness-hook",
+                "/bin/sh",
+                "--readiness-hook-arg",
+                "--",
+                "--container-network",
+                "jobs",
+            ],
+            NO_NETWORK,
+        ),
         (
             &["--no-such-flag", "--container-network", "jobs"],
             NO_NETWORK,
@@ -624,4 +651,25 @@ fn a_removed_flag_name_as_a_value_is_not_a_refusal() {
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     assert!(!ran.err.contains("removed"), "{}", ran.err);
     assert!(!connected);
+}
+
+/// Asserts that a flag whose name only starts like a removed one is an ordinary unknown
+/// argument: clap's own usage error, status 2, no removal message, and no connect. Catches a
+/// scan that matches a prefix and tells an operator that a flag they never gave was removed.
+#[test]
+fn a_name_like_a_removed_flag_is_an_unknown_argument() {
+    for given in ["--container-network-extra", "--container-nftx=/x"] {
+        let (ran, connected, sent) = run_counting(&[given]);
+        assert_eq!(ran.status(), code(2), "{given}: {}", ran.err);
+        let name = given.split('=').next().unwrap_or(given);
+        assert!(
+            ran.err.contains("unexpected argument"),
+            "{given}: {}",
+            ran.err
+        );
+        assert!(ran.err.contains(name), "{given}: {}", ran.err);
+        assert!(!ran.err.contains("removed"), "{given}: {}", ran.err);
+        assert!(!connected, "{given}");
+        assert_eq!(sent, 0, "{given}");
+    }
 }

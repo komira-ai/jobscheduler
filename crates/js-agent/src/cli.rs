@@ -650,7 +650,7 @@ impl Cli {
 /// what to give instead. A command line that gives one is refused by [`removed_flag`] before
 /// clap reads it, so the operator is told the replacement and not only that the flag is
 /// unknown.
-const REMOVED: [(&str, &str); 3] = [
+static REMOVED: [(&str, &str); 3] = [
     (
         "container-network",
         "--container-network: removed. A job run through the container engine now always has \
@@ -674,32 +674,39 @@ const REMOVED: [(&str, &str); 3] = [
 /// read the way clap reads them, so a removed name that is the value of another flag is not
 /// taken for the flag: a flag of [`Cli`] that takes a value takes the next word, unless that
 /// word starts with `-` and the flag does not take values that start with one, in which case
-/// clap reads the word as a flag too. Nothing after a bare `--` is a flag.
+/// clap reads the word as a flag too. Nothing after a bare `--` is a flag. The words are read
+/// as bytes, so a value that is not UTF-8 (attached with `=` or not) never hides the flag
+/// name before it.
 pub fn removed_flag(args: &[OsString]) -> Option<&'static str> {
     let mut command = Cli::command();
     command.build();
-    let mut words = args.iter().skip(1).map(|word| word.to_str()).peekable();
+    let mut words = args
+        .iter()
+        .skip(1)
+        .map(|word| word.as_encoded_bytes())
+        .peekable();
     while let Some(word) = words.next() {
-        let Some(long) = word.and_then(|word| word.strip_prefix("--")) else {
+        let Some(long) = word.strip_prefix(b"--") else {
             continue;
         };
         if long.is_empty() {
             return None;
         }
-        let (name, attached) = long
-            .split_once('=')
-            .map_or((long, false), |(n, _)| (n, true));
-        if let Some(&(_, refusal)) = REMOVED.iter().find(|(removed, _)| *removed == name) {
+        let (name, attached) = match long.iter().position(|&byte| byte == b'=') {
+            Some(at) => (&long[..at], true),
+            None => (long, false),
+        };
+        let removed = REMOVED.iter().find(|(flag, _)| flag.as_bytes() == name);
+        if let Some(&(_, refusal)) = removed {
             return Some(refusal);
         }
         let takes = command
             .get_arguments()
-            .find(|arg| arg.get_long() == Some(name))
+            .find(|arg| arg.get_long().map(str::as_bytes) == Some(name))
             .filter(|arg| !attached && arg.get_action().takes_values());
         if let Some(arg) = takes {
             let hyphen = arg.is_allow_hyphen_values_set();
-            let flag_like = |next: &Option<&str>| next.is_some_and(|next| next.starts_with('-'));
-            let _value = words.next_if(|next| hyphen || !flag_like(next));
+            let _value = words.next_if(|next| hyphen || !next.starts_with(b"-"));
         }
     }
     None
@@ -752,12 +759,15 @@ mod tests {
             .map(|&(_, refusal)| refusal)
     }
 
-    /// Catches a scan that misreads a word: a removed flag is found in both spellings, after
-    /// a word that is not a flag, a word that is not UTF-8, a flag that takes no value, a flag
-    /// clap does not know and the value of a flag; a removed name is a value after a flag
-    /// that takes values starting with `-`, attached with `=` to another flag, and after a
-    /// bare `--`, but is the flag after one whose value cannot start with `-`; a value that
-    /// is not UTF-8 is skipped as a value; and the first removed flag given is the one named.
+    /// Catches a scan that misreads a word: a removed flag is found in both spellings, with no
+    /// value and with an empty attached one, after a word that is not a flag, a word that is
+    /// not UTF-8, a flag that takes no value, a flag clap does not know and the value of a
+    /// flag; a name that only starts like a removed one is not it; a removed name is a value
+    /// after a flag that takes values starting with `-` (and the scan goes on after that
+    /// value, a `--` included), attached with `=` to another flag, and after a bare `--`, but
+    /// is the flag after one whose value cannot start with `-`; a value that is not UTF-8,
+    /// separate or attached, neither hides the flag before it nor ends the scan; and the
+    /// first removed flag given is the one named.
     #[test]
     fn the_scan_reads_the_words_as_clap_does() {
         let network = refusal("container-network");
@@ -766,10 +776,15 @@ mod tests {
         assert!(network.is_some(), "container-network");
         assert!(allow.is_some(), "container-egress-allow");
         assert!(nft.is_some(), "container-nft");
-        let found: [(&[&str], Option<&str>); 14] = [
+        let found: [(&[&str], Option<&str>); 22] = [
             (&[], None),
             (&["--container-network", "jobs"], network),
             (&["--container-network=jobs"], network),
+            (&["--container-network"], network),
+            (&["--container-network="], network),
+            (&["--container-nft=/usr/sbin/nft"], nft),
+            (&["--container-network-extra", "x"], None),
+            (&["--container-nftx=/x"], None),
             (&["--container-egress-allow=192.0.2.1:443"], allow),
             (&["stray", "--container-nft", "/usr/sbin/nft"], nft),
             (&["--scratch-quota", "--container-nft", "/x"], nft),
@@ -778,6 +793,22 @@ mod tests {
             (&["--label", "--container-network", "x"], network),
             (&["--label"], None),
             (&["--readiness-hook-arg", "--container-network"], None),
+            (
+                &[
+                    "--readiness-hook-arg",
+                    "--container-network",
+                    "--container-nft=/usr/sbin/nft",
+                ],
+                nft,
+            ),
+            (
+                &["--readiness-hook-arg", "--", "--container-network", "x"],
+                network,
+            ),
+            (
+                &["--readiness-hook-arg", "x", "--", "--container-network"],
+                None,
+            ),
             (&["--label=k=--container-network"], None),
             (&["--", "--container-network", "x"], None),
             (&["--container-nft", "/x", "--container-network", "x"], nft),
@@ -791,5 +822,17 @@ mod tests {
         assert_eq!(removed_flag(&unreadable), network);
         let value = args(vec![flag("--label"), bad(), flag("--container-nft")]);
         assert_eq!(removed_flag(&value), nft);
+        let attached = |name: &str| {
+            let mut word = format!("--{name}=").into_bytes();
+            word.push(0xff);
+            OsString::from_vec(word)
+        };
+        let nft_first = args(vec![
+            attached("container-nft"),
+            flag("--container-network=jobs"),
+        ]);
+        assert_eq!(removed_flag(&nft_first), nft);
+        let label_first = args(vec![attached("label"), flag("--container-egress-allow=x")]);
+        assert_eq!(removed_flag(&label_first), allow);
     }
 }

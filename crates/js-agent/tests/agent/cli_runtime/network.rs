@@ -62,3 +62,49 @@ fn a_fallback_runtime_job_gets_network_none() {
         }
     }
 }
+
+/// Asserts what an upgrade does to a job a container engine is still running: the new agent
+/// adopts it as it is, with no call that would make, start, stop or remove a container and
+/// none that reads a network or a firewall back. A job started before the upgrade on a named
+/// network therefore keeps that network until it ends, unchecked; draining the host before
+/// the upgrade is what ends such jobs. It catches an adoption that recreates or stops a
+/// running job, and the old check coming back at adoption.
+#[test]
+fn a_job_left_running_at_an_upgrade_is_adopted_as_it_is() {
+    let dir = Scratch::new("cli-network-adopt");
+    let world = Scripted::new(PODMAN);
+    let config = config_in(&dir, false);
+    let (mut before, _) = Lifecycle::adopt(
+        config.clone(),
+        Box::new(open_at(&world, "linux", made_at)),
+        Box::new(NoChecks),
+        Box::new(ManualClock::default()),
+    )
+    .unwrap();
+    let events = before.apply(&reply(vec![Command::Start(Box::new(job("r1")))]));
+    assert_eq!(names(&events), ["started r1"]);
+    let id = world.id_of("r1").expect("the container of r1");
+    let made = world.calls().len();
+
+    let restarted = open_at(&world, "linux", made_at);
+    restarted.check_egress().expect("nothing to check");
+    let (_after, events) = Lifecycle::adopt(
+        config,
+        Box::new(restarted),
+        Box::new(NoChecks),
+        Box::new(ManualClock::default()),
+    )
+    .unwrap();
+    assert_eq!(names(&events), ["adopted r1"]);
+    assert_eq!(world.ids(), [id]);
+    let since: Vec<String> = world.calls()[made..]
+        .iter()
+        .map(|args| args[0].clone())
+        .collect();
+    for sub in &since {
+        let changes = matches!(sub.as_str(), "create" | "start" | "stop" | "rm" | "kill");
+        let reads_back = matches!(sub.as_str(), "network" | "-j" | "list");
+        assert!(!changes, "{since:?}");
+        assert!(!reads_back, "{since:?}");
+    }
+}
