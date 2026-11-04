@@ -413,9 +413,17 @@ fn errors_name_their_flag() {
     );
 }
 
-/// Runs the agent with `extra` and returns (status, stderr, messages sent).
+/// Runs the agent with `extra` and returns (status, stderr, messages sent). A start with
+/// `--container-bin` names the engine runtime and its opt-in, which a Linux agent needs to run
+/// the engine (with no `--runtime` it is a crun start).
 fn start(extra: &[&str]) -> (String, String, usize) {
-    let (ran, sent, _) = run_scripted(extra, &linux_host(), vec![welcome(1)], 1);
+    let engine: &[&str] = if extra.contains(&"--container-bin") {
+        &["--runtime", "docker", "--allow-container-engine"]
+    } else {
+        &[]
+    };
+    let extra = [engine, extra].concat();
+    let (ran, sent, _) = run_scripted(&extra, &linux_host(), vec![welcome(1)], 1);
     let sent = sent.borrow().len();
     (ran.status(), ran.err, sent)
 }

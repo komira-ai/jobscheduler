@@ -7,7 +7,8 @@ use std::sync::Arc;
 use js_agent::Machine;
 use js_agent::crun_host::flags;
 
-use super::crun_e2e::{CrunMachine, NODE_IN_USE, crun_flags, host};
+use super::crun_e2e::{NODE_IN_USE, crun_flags, host};
+use super::crun_machine::CrunMachine;
 use crate::crun_host::{Fixture, cli};
 use crate::support::{
     CountingSleeper, Lowest, Script, ScriptConnector, code, flags as agent_flags, run_on, welcome,

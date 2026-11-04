@@ -34,6 +34,8 @@ impl Agent {
             .args(["--server", &server.url(), "--pool", "macs"])
             .args(["--token-file", server.join_file().to_str().unwrap()])
             .args(["--host-id", host, "--label", "rack=r9"])
+            // The agent that runs no job: a Linux agent given no `--runtime` runs crun.
+            .args(["--runtime", "none"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

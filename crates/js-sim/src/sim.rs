@@ -56,16 +56,10 @@ impl<N: Node> Sim<N> {
     /// If `faults.min_delay` exceeds `faults.max_delay`.
     #[must_use]
     pub fn new(seed: u64, faults: Faults) -> Self {
-        assert!(
-            faults.min_delay <= faults.max_delay,
-            "min_delay {:?} exceeds max_delay {:?}",
-            faults.min_delay,
-            faults.max_delay
-        );
         Self {
             now: FarmTime::default(),
             rng: SimRng::from_seed(seed),
-            faults,
+            faults: checked(faults),
             nodes: BTreeMap::new(),
             queue: BTreeMap::new(),
             next_seq: 0,
@@ -74,6 +68,26 @@ impl<N: Node> Sim<N> {
             link_last: BTreeMap::new(),
             trace: Trace::new("sim"),
         }
+    }
+
+    /// Replaces the faults of the bus. A message sent after the call takes `faults`; a
+    /// message already in flight keeps the delivery time it was given when it was sent.
+    /// The call itself records nothing in the trace: what changes is the lines of the
+    /// sends that follow it.
+    ///
+    /// # Panics
+    ///
+    /// If `faults.min_delay` exceeds `faults.max_delay`, as [`Sim::new`].
+    pub fn set_faults(&mut self, faults: Faults) {
+        self.faults = checked(faults);
+    }
+
+    /// The virtual time of the event [`Sim::step`] would apply next; `None` when nothing
+    /// is queued. A caller that has something to do at an exact time between two events
+    /// (a call from outside the nodes) reads this to know whether that time comes first.
+    #[must_use]
+    pub fn next_event_time(&self) -> Option<FarmTime> {
+        self.queue.first_key_value().map(|(&(at, _), _)| at)
     }
 
     /// Keeps the trace as text as well as hashing it, for [`Sim::trace_lines`].
@@ -200,11 +214,7 @@ impl<N: Node> Sim<N> {
     /// Applies every event due at or before `until`, then sets the clock to `until` (if
     /// it is later than now).
     pub fn run_until(&mut self, until: FarmTime) {
-        while self
-            .queue
-            .first_key_value()
-            .is_some_and(|(&(at, _), _)| at <= until)
-        {
+        while self.next_event_time().is_some_and(|at| at <= until) {
             self.step();
         }
         self.now = self.now.max(until);
@@ -315,4 +325,15 @@ impl<N: Node> Sim<N> {
                 .between(millis(self.faults.min_delay), millis(self.faults.max_delay)),
         )
     }
+}
+
+/// `faults`, refused when its delay range is empty.
+fn checked(faults: Faults) -> Faults {
+    assert!(
+        faults.min_delay <= faults.max_delay,
+        "min_delay {:?} exceeds max_delay {:?}",
+        faults.min_delay,
+        faults.max_delay
+    );
+    faults
 }

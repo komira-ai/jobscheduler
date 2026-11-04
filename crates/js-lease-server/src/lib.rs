@@ -647,6 +647,8 @@ mod file;
 mod file_checks;
 mod flags;
 mod hosts;
+#[cfg(feature = "in-process")]
+pub mod in_process;
 mod io_timeout;
 mod join_api;
 mod join_tokens;
