@@ -4,10 +4,10 @@
 
 use std::sync::Arc;
 
-use js_agent::crun::{CrunRuntime, Left, SweepReport};
+use js_agent::crun::{CrunRuntime, Left, Reason, SweepReport};
 use js_agent::lifecycle::{RunHandle, Runtime, label};
 
-use crate::node::{LONG, NoImages, Node};
+use crate::node::{LONG, NoImages, Node, PID};
 
 const OTHER: &str = "node-2";
 
@@ -94,46 +94,60 @@ fn a_start_that_fails_leaves_no_sidecar() {
     assert!(names.is_empty(), "{names:?}");
 }
 
-/// Proves the sweep of a restart: the leases of a runtime that is gone, one running and one
-/// made and never started, are removed when a runtime of the same agent opens (directory,
-/// cgroup and sidecar), each is reported with the run and the labels it had, nothing is
-/// adopted (the new runtime lists no container), and the run id can be used again. Catches
-/// leases left behind by a dead process, a sweep that reports nothing, and one that adopts.
+/// Proves the start-up pass of a restart: the run that runs (booked as a job start books it,
+/// its init in its cgroup) is adopted and its lease stays (directory, cgroup and sidecar), the
+/// lease made and never started is removed (directory, cgroup and sidecar) and reported with
+/// the run, the labels it had and the reason that it never ran, the new runtime lists the run
+/// that runs and nothing else, and the run id of the removed lease can be used again. Catches
+/// leases left behind by a dead process, a pass that reports nothing, one that removes a run
+/// that still runs, and one that adopts a lease that never ran.
 #[test]
 fn a_restart_sweeps_the_leases_of_a_dead_process() {
     let node = Node::new("sweep-dead");
     let mut dead = node.open();
-    let up = staged(&node, &mut dead, "r1-hold");
+    let up = dead.stage(&node.job("r1-hold", 60_000)).expect("staged");
     node.pipe(&up.0);
     dead.start_staged(&up).expect("started");
     node.up(&up);
+    node.place(&up.0, PID);
     let made = staged(&node, &mut dead, "r2-exit");
     assert!(left_of(&node, &up.0).len() == 3 && left_of(&node, &made.0).len() == 3);
 
     let mut second = node.open();
     let swept = second.swept();
-    let mut runs: Vec<_> = swept.removed.iter().map(|r| r.run_id.as_str()).collect();
-    runs.sort_unstable();
-    assert_eq!(runs, ["r1-hold", "r2-exit"]);
-    let removed = swept.removed.iter().find(|r| r.name == up.0).expect("up");
-    assert_eq!(removed.labels[label::RUN], "r1-hold");
+    assert_eq!(swept.adopted, ["r1-hold"], "{swept:?}");
+    assert_eq!(swept.removed.len(), 1, "{swept:?}");
+    let removed = &swept.removed[0];
+    assert_eq!(
+        (removed.run_id.as_str(), &removed.name),
+        ("r2-exit", &made.0)
+    );
+    assert_eq!(removed.labels[label::RUN], "r2-exit");
     assert_eq!(removed.labels[label::AGENT], "node-1");
+    assert_eq!(removed.reason, Reason::NeverRan);
     assert!(
         swept.failed.is_empty() && swept.left.is_empty(),
         "{swept:?}"
     );
-    for id in [&up, &made] {
-        assert!(
-            left_of(&node, &id.0).is_empty(),
-            "{:?}",
-            left_of(&node, &id.0)
-        );
-    }
-    assert!(second.list_labelled().expect("lists").is_empty());
+    assert!(
+        left_of(&node, &made.0).is_empty(),
+        "{:?}",
+        left_of(&node, &made.0)
+    );
+    assert_eq!(left_of(&node, &up.0).len(), 3, "the run that runs went");
+    let listed: Vec<_> = second
+        .list_labelled()
+        .expect("lists")
+        .into_iter()
+        .map(|found| found.id)
+        .collect();
+    assert_eq!(listed, std::slice::from_ref(&up));
     let again = second
         .stage(&node.spec("r2-exit"))
         .expect("the run id is free");
     assert_eq!(again, made);
+    second.stop(&up, LONG).expect("stopped");
+    second.remove(&up).expect("removed");
     drop(dead);
 }
 

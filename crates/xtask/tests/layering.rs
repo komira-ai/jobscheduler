@@ -821,3 +821,138 @@ fn only_the_update_hook_contract_crate_may_come_from_kbf_and_only_for_tests() {
         [from_kbf("crates/js-client/Cargo.toml", "wire-fixtures")]
     );
 }
+
+/// The crates that may build against `js-pool-static` outside tests: `js-lease-server`,
+/// whose `kinds.rs`, `adapt.rs` and `capacity.rs` build the pool from the hosts file.
+/// The booking table (`HostBook`, `Candidate`, `Held`, `SeatError`) is `js-provider`'s,
+/// so no other crate needs the pool crate to book a host.
+const MAY_DEPEND_ON_POOL_STATIC: &[&str] = &["js-lease-server"];
+
+/// Every workspace crate under `root/crates` that names `js-pool-static` as a normal
+/// dependency: under `[dependencies]` or `[build-dependencies]`, plain or
+/// target-specific, by its key or by `package = "js-pool-static"`. A
+/// `[dev-dependencies]` entry is not one. In name order.
+fn normal_dependents_of_pool_static(root: &Path) -> Vec<String> {
+    let names = |table: Option<&toml::Value>| -> Vec<String> {
+        let Some(table) = table.and_then(toml::Value::as_table) else {
+            return Vec::new();
+        };
+        table
+            .iter()
+            .map(|(key, value)| {
+                let package = value.get("package").and_then(toml::Value::as_str);
+                package.unwrap_or(key).to_owned()
+            })
+            .collect()
+    };
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(root.join("crates")).expect("crates") {
+        let path = entry.expect("entry").path().join("Cargo.toml");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let manifest: toml::Table = text.parse().expect("manifest parses");
+        let mut deps = Vec::new();
+        for kind in ["dependencies", "build-dependencies"] {
+            deps.extend(names(manifest.get(kind)));
+            if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+                for target in targets.values() {
+                    deps.extend(names(target.get(kind)));
+                }
+            }
+        }
+        if deps.iter().any(|dep| dep == "js-pool-static") {
+            let name = manifest["package"]["name"].as_str().expect("package.name");
+            found.push(name.to_owned());
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Asserts that in this workspace only the crates of [`MAY_DEPEND_ON_POOL_STATIC`] have
+/// `js-pool-static` as a normal dependency. Catches production code (such as
+/// `js-registry`'s) reaching the booking table through the pool crate again, which would
+/// keep that crate from becoming a test fake.
+#[test]
+fn only_the_hosts_file_wiring_depends_on_js_pool_static() {
+    assert_eq!(
+        normal_dependents_of_pool_static(&repo()),
+        MAY_DEPEND_ON_POOL_STATIC
+    );
+}
+
+/// Asserts that the scan reports `js-pool-static` under `[dependencies]` of
+/// `js-registry`, under a target-specific `[dependencies]` table, under
+/// `[build-dependencies]` plain and target-specific, and under a renamed key, and that a
+/// `[dev-dependencies]` entry is not reported. Catches a scan that passes every
+/// workspace because it reads the wrong table or the key alone.
+#[test]
+fn a_normal_dependency_on_js_pool_static_is_reported() {
+    let pool = "js-pool-static = { path = \"../js-pool-static\" }";
+    let copy = Copy::new("pool-static-normal");
+    copy.edit(
+        "crates/js-registry/Cargo.toml",
+        "[dependencies]\n",
+        &format!("[dependencies]\n{pool}\n"),
+    );
+    assert_eq!(
+        normal_dependents_of_pool_static(&copy.dir),
+        ["js-lease-server", "js-registry"]
+    );
+
+    let copy = Copy::new("pool-static-target");
+    copy.edit(
+        "crates/js-provider-fake/Cargo.toml",
+        "[lints]",
+        &format!("[target.'cfg(unix)'.dependencies]\n{pool}\n\n[lints]"),
+    );
+    assert_eq!(
+        normal_dependents_of_pool_static(&copy.dir),
+        ["js-lease-server", "js-provider-fake"]
+    );
+
+    let copy = Copy::new("pool-static-build");
+    copy.edit(
+        "crates/js-provider-fake/Cargo.toml",
+        "[lints]",
+        &format!("[build-dependencies]\n{pool}\n\n[lints]"),
+    );
+    assert_eq!(
+        normal_dependents_of_pool_static(&copy.dir),
+        ["js-lease-server", "js-provider-fake"]
+    );
+
+    let copy = Copy::new("pool-static-target-build");
+    copy.edit(
+        "crates/js-provider-fake/Cargo.toml",
+        "[lints]",
+        &format!("[target.'cfg(unix)'.build-dependencies]\n{pool}\n\n[lints]"),
+    );
+    assert_eq!(
+        normal_dependents_of_pool_static(&copy.dir),
+        ["js-lease-server", "js-provider-fake"]
+    );
+
+    let copy = Copy::new("pool-static-renamed");
+    copy.edit(
+        "crates/js-cli/Cargo.toml",
+        "[dependencies]\n",
+        "[dependencies]\nhosts = { path = \"../js-pool-static\", package = \"js-pool-static\" }\n",
+    );
+    assert_eq!(
+        normal_dependents_of_pool_static(&copy.dir),
+        ["js-cli", "js-lease-server"]
+    );
+
+    let copy = Copy::new("pool-static-dev-only");
+    copy.edit(
+        "crates/js-provider-fake/Cargo.toml",
+        "[lints]",
+        &format!("[dev-dependencies]\n{pool}\n\n[lints]"),
+    );
+    assert_eq!(
+        normal_dependents_of_pool_static(&copy.dir),
+        MAY_DEPEND_ON_POOL_STATIC
+    );
+}
