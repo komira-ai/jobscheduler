@@ -155,7 +155,9 @@ impl Engine {
     /// this one measured: it is built as of the oldest reading this one keeps of a host in
     /// `every`, and each kept reading is fed to it again at the time it came, so a host's
     /// readings are as fresh, or as stale, in the new engine as in this one. The
-    /// readings' leases are named as the new engine numbers them.
+    /// readings' leases are named as the new engine numbers them. Every host in `every`
+    /// is then heard from at `now`, without load: the registry lists it, so it is live,
+    /// whatever the age of its last reading.
     pub(crate) fn rebuild(&self, settings: Settings, every: &[Candidate], now: FarmTime) -> Self {
         let listed: BTreeSet<&HostId> = every.iter().map(|candidate| &candidate.host).collect();
         let mut replay: Vec<(FarmTime, &HostId, &NodeLoad)> = self
@@ -169,6 +171,12 @@ impl Engine {
         let mut engine = Self::build(settings, every, start);
         for (at, host, load) in replay {
             engine.heard(host, Some(load), at);
+        }
+        // Every host the registry lists is live now, as `build` at `now` would have it,
+        // whether or not its last beats brought a reading: a host heard only without load
+        // since its kept readings is not taken for silent and its leases are not given up.
+        for candidate in every {
+            engine.heard(&candidate.host, None, now);
         }
         engine
     }
@@ -658,6 +666,32 @@ mod tests {
         assert_eq!(engine.sched.leases_on(&map::worker(&b)).len(), 1);
         assert_eq!(engine.on.len(), 1);
         assert!(engine.agrees(&every, 3));
+    }
+
+    /// Catches: a rebuild that dates a host's liveness by its kept readings, so that a host
+    /// whose later beats brought no load is taken for silent and gives its leases up.
+    /// `a` holds a lease and sent readings up to 15 s, then beats without load; rebuilt at
+    /// 200 s, well past the lease grace after its last reading, the engine still holds
+    /// `a`'s lease after a tick and agrees with the registry, so the next start needs no
+    /// second rebuild.
+    #[test]
+    fn a_rebuild_keeps_a_host_heard_without_load_live() {
+        let every = [
+            candidate("a", shape(true), &[2]),
+            candidate("b", shape(true), &[]),
+        ];
+        let a = HostId::new("a").unwrap();
+        let mut engine = Engine::build(Settings::default(), &every, at(0));
+        for seq in 1..=3 {
+            engine.heard(&a, Some(&reading(seq, &[])), at(seq * 5_000));
+        }
+        for second in (20..=200).step_by(5) {
+            engine.heard(&a, None, at(second * 1_000));
+        }
+        let mut rebuilt = engine.rebuild(Settings::default(), &every, at(200_000));
+        rebuilt.feed(at(200_000), Event::Tick);
+        assert_eq!(rebuilt.sched.leases_on(&map::worker(&a)).len(), 1);
+        assert!(rebuilt.agrees(&every, 9));
     }
 
     /// Catches: an agreement check that counts the leases on a host and does not read
