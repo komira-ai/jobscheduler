@@ -133,6 +133,49 @@ fn a_rebuild_keeps_the_load_it_measured() {
     assert_eq!(r.counted(), (NONE, 1, 2));
 }
 
+/// Asserts that a rebuild keeps both windows the engine reads a host's load from: the
+/// host carrying lease 1 is busy over one window (all 8 cores) and idle over the next, so
+/// the engine still charges it the busy window (the larger of the last two) and refuses a
+/// start there; a lease booked behind the engine's back on that host rebuilds the engine,
+/// and the next start is refused there just the same and goes to the idle host, with the
+/// same measured load before and after. A rebuild that kept only the last window would
+/// read the host as idle and place the start beside its two leases.
+#[test]
+fn a_rebuild_keeps_both_windows_of_a_host_that_just_fell_idle() {
+    let hosts = ["h1", "h2"];
+    let mut r = rig(
+        "rebuild_windows",
+        &pool(2, 8000, ""),
+        &hosts,
+        &["--placement", "js-sched"],
+    );
+    let busy = r.start(sharing_spec(1)).unwrap();
+    let idle = hosts.iter().find(|h| **h != busy).unwrap().to_string();
+    // Cumulative CPU 0, then 40 s of it over 5 s (8 cores), then none more over 5 s.
+    for (seq, used) in [(1, 0), (2, 40_000_000), (3, 40_000_000)] {
+        r.advance(5_000);
+        let mut beat = reading(seq, 0, GIB, &["1-1"]);
+        beat.cpu_usage_usec = used;
+        r.beat(&busy, Some(beat));
+        r.beat(&idle, Some(reading(seq, 0, GIB, &[])));
+    }
+    let measured = |r: &Rig| r.placer().load_of(&busy).unwrap().measured_cpu_millis;
+    assert_eq!(measured(&r), Some(8_000));
+    assert_eq!(r.start(sharing_spec(2)).as_deref(), Some(idle.as_str()));
+    let booking = js_lease::Booking {
+        lease: LeaseId::new(9, 1),
+        host: js_types::HostId::new(&busy).unwrap(),
+        state: js_lease::LeaseState::Held,
+        shares: Some(Resources::new(1000, 1 << 20, 0, None).unwrap()),
+        started_at: Timestamp::from_millis(T0),
+        ends_at: Timestamp::from_millis(T0 + 600_000),
+    };
+    r.provider.seat_booked(&booking, None).unwrap();
+    assert_eq!(r.start(sharing_spec(3)).as_deref(), Some(idle.as_str()));
+    assert_eq!(r.counted(), (NONE, 1, 2));
+    assert_eq!(measured(&r), Some(8_000));
+}
+
 /// Asserts what beats with no new reading do to a host whose reading was fresh: a beat
 /// with no load, one whose load the vet drops and one that repeats the last reading keep
 /// the host live in the registry and a worker of the engine, and none refreshes the old

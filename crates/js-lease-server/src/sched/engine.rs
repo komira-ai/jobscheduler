@@ -14,7 +14,7 @@
 //! leases the registry books there. When they disagree (a lease the registry booked that
 //! the engine never placed, as one put back after a restart; one the engine gave up for a
 //! silent host; a host it was never told of) the engine is built again from the
-//! registry's view of every host it lists, keeping each host's last two readings
+//! registry's view of every host it lists, keeping each host's last three readings
 //! ([`Engine::rebuild`]); that is the only way it is ever built again.
 //!
 //! The engine places a start only on the hosts the registry offered it
@@ -99,12 +99,14 @@ pub(crate) struct Engine {
     taken: u64,
     /// The last readings each host's heartbeats brought in its present session, with
     /// when: what a rebuild feeds the new scheduler again, so that it loses no measured
-    /// load ([`Engine::rebuild`]). The two newest, as one window needs.
+    /// load ([`Engine::rebuild`]). The three newest: the scheduler charges a host by the
+    /// larger of its last two windows, and two windows take three readings.
     readings: BTreeMap<HostId, Vec<(FarmTime, NodeLoad)>>,
 }
 
-/// How many readings of a host are kept for a rebuild: a window is two.
-const KEPT_READINGS: usize = 2;
+/// How many readings of a host are kept for a rebuild: two windows, the most the
+/// scheduler reads a host's measured load from, take three.
+const KEPT_READINGS: usize = 3;
 
 impl Engine {
     /// An engine built with `settings` over `every`, the hosts the registry lists with

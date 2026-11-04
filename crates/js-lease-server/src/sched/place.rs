@@ -8,8 +8,8 @@
 //! ([`Placer::host_up`], [`Placer::heard`], [`Placer::ended`], [`Placer::host_gone`]), so
 //! the engine's picture of the hosts follows the registry's books without being rebuilt;
 //! a heartbeat's load reading reaches the engine there, as the registry vetted and
-//! converted it. When the engine is built again it is given the last two readings kept
-//! for each host, so a rebuild loses no measured load.
+//! converted it. When the engine is built again it is given the last three readings kept
+//! for each host (its two windows), so a rebuild loses no measured load.
 //!
 //! At a start the registry shows the placer the hosts that could take it (`open`), each
 //! with the leases already on it. The engine first checks that its picture agrees with
