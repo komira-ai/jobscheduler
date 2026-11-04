@@ -422,7 +422,7 @@ fn a_job_with_no_record_is_removed_and_the_server_is_told_it_is_gone() {
         .into_iter()
         .map(|found| found.id)
         .collect();
-    assert_eq!(listed, [standing.clone()]);
+    assert_eq!(listed, std::slice::from_ref(&standing));
 
     let clock = Moving::default();
     let (mut life, _) = lifecycle(&node, second, &clock, LONG);

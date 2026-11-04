@@ -141,7 +141,7 @@ fn a_restart_sweeps_the_leases_of_a_dead_process() {
         .into_iter()
         .map(|found| found.id)
         .collect();
-    assert_eq!(listed, [up.clone()]);
+    assert_eq!(listed, std::slice::from_ref(&up));
     let again = second
         .stage(&node.spec("r2-exit"))
         .expect("the run id is free");

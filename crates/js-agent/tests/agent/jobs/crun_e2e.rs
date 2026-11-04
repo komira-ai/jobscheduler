@@ -29,6 +29,7 @@ use js_agent::{
     Backend, Cli, FileReader, Handle, Machine, Platform, RuntimeBuild, SharedClock, System,
 };
 use js_agent_wire::LogTail;
+use js_contain::oci::{end_supervisor, recorded_supervisor};
 use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
 use serde_json::json;
@@ -535,6 +536,22 @@ pub(super) fn crun_flags(host_id: &str, extra: &[&str]) -> Vec<String> {
     flags
 }
 
+/// Ends the containers an earlier test's agent left on the shared node. A container outlives
+/// its agent (its supervisor holds it), and the next agent, of the same host id, would adopt it
+/// and hold its run, so a start for the same run id would run nothing. Each lease directory in
+/// the scratch root names its supervisor: it is ended, and waited for until it is gone, so the
+/// next agent finds a lease whose supervisor ended and removes it.
+fn end_leftovers(scratch: &Path) {
+    for entry in fs::read_dir(scratch).into_iter().flatten().flatten() {
+        if let Some(id) = recorded_supervisor(&entry.path()) {
+            end_supervisor(id);
+            while id.alive() {
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
 impl Rig {
     /// Starts the server and the agent, waits until the agent has said hello, and takes a
     /// lease on its host.
@@ -545,6 +562,7 @@ impl Rig {
     /// [`Rig::new`] over the pool `pool` describes.
     fn on_pool(name: &str, extra: &[&str], pool: &'static str) -> Self {
         let node = node();
+        end_leftovers(&node.scratch);
         for signal in ["ready", "go", "calls"] {
             let _ = fs::remove_file(node.dir.path().join(signal));
         }
