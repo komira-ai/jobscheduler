@@ -59,16 +59,14 @@ impl Shape {
     ///   still does. A host that states no level satisfies no level.
     /// - The `accelerator.*` keys are one need ([`AcceleratorNeed`]), resolved through the
     ///   alias table and compared with [`AcceleratorNeed::met_by`] against the host's
-    ///   accelerator ([`Self::accelerator`]). A request without them that books GPUs of a
-    ///   class that is a model name is held to the need that booking states
-    ///   ([`AcceleratorNeed::booked`]): the class is the model, so a full spelling fits only
-    ///   its variant and a family every variant. Either way the request is held to the
+    ///   accelerator ([`Self::accelerator`]), over the need the booked GPUs state when they
+    ///   are of a class that is a model name ([`AcceleratorNeed::requested`]): the class is
+    ///   the model, so a full spelling fits only its variant and a family every variant,
+    ///   and a key the request names narrows that need without dropping it. Either way the request is held to the
     ///   host's GPU count, not to its GPU class. A request that books GPUs of a class that
     ///   is not a model name is held to the class exactly, as before.
     pub fn satisfies(&self, wanted: &Resources, required: &Capabilities) -> bool {
-        let stated = AcceleratorNeed::from_capabilities(required)
-            .map(|stated| stated.or_else(|| AcceleratorNeed::booked(wanted)));
-        let resources_ok = match stated {
+        let resources_ok = match AcceleratorNeed::requested(required, wanted) {
             Ok(None) => wanted.fits_in(&self.resources),
             Ok(Some(need)) => {
                 need.met_by(self.accelerator().as_ref()).is_ok()

@@ -196,9 +196,9 @@ pub struct Requirements {
     pub isa_level: Option<IsaLevel>,
     /// The mode the host runs jobs in. `None`: either.
     pub exec: Option<ExecMode>,
-    /// The accelerators the job needs, as the request's `accelerator.*` keys state them, or
-    /// else as its booked GPU count and class (`model` the class as spelt, `count` the
-    /// count). `None`: none asked for.
+    /// The accelerators the job needs: its booked GPU count and class (`model` the class as
+    /// spelt, `count` the count), narrowed by the request's `accelerator.*` keys
+    /// ([`AcceleratorNeed::requested`]). `None`: none asked for.
     pub accelerator: Option<AcceleratorNeed>,
 }
 
@@ -216,12 +216,22 @@ pub enum RequirementsError {
     #[error("isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a, not {0:?}")]
     BadIsaLevel(String),
     /// An `accelerator.*` key holds a value that is not valid.
-    #[error(transparent)]
+    #[error("accelerator: {0}")]
     BadAccelerator(#[from] AccelError),
-    /// `accelerator.count` asks for devices without `accelerator.model`. A booked GPU
-    /// count needs a class (a lease is stored with both), so a count names its model.
-    #[error("accelerator.count above zero needs accelerator.model")]
+    /// `accelerator.count` asks for devices without a model, from `accelerator.model` or
+    /// the booked GPU class. A booked GPU count needs a class (a lease is stored with
+    /// both), so a count names its model.
+    #[error("accelerator.model is required when accelerator.count is above zero")]
     CountWithoutModel,
+    /// `accelerator.count` asks for more devices than the request books in its
+    /// resources, so the devices it needs would not be booked.
+    #[error("accelerator.count {count} is more than the {gpus} gpus the request books")]
+    CountNotBooked {
+        /// The devices the need asks for.
+        count: u32,
+        /// The GPUs the resources book.
+        gpus: u64,
+    },
 }
 
 /// The request asks for another operating system or architecture than the job's image is
@@ -264,7 +274,8 @@ impl Requirements {
     /// mode name; [`RequirementsError::BadIsaLevel`] when `isa_level` is not a level
     /// name; [`RequirementsError::BadAccelerator`] when an `accelerator.*` key is not
     /// valid; [`RequirementsError::CountWithoutModel`] when `accelerator.count` is above
-    /// zero and `accelerator.model` is absent. `disk-gib=0` is valid and asks for nothing.
+    /// zero and neither `accelerator.model` nor a booked GPU class names a model;
+    /// [`RequirementsError::CountNotBooked`] when it is above the GPUs the request books. `disk-gib=0` is valid and asks for nothing.
     pub fn try_from_request(request: &Request) -> Result<Self, RequirementsError> {
         let caps = &request.capabilities;
         let disk_bytes = caps
@@ -334,15 +345,23 @@ fn platform_part(
     }
 }
 
-/// The accelerator need of `request`: its `accelerator.*` keys when it names any, else
-/// its booked GPU count and class.
+/// The accelerator need of `request`: its `accelerator.*` keys over its booked GPU count
+/// and class ([`AcceleratorNeed::requested`]), refused when it asks for devices without a
+/// model or for more devices than it books.
 fn need_of(request: &Request) -> Result<Option<AcceleratorNeed>, RequirementsError> {
-    match AcceleratorNeed::from_capabilities(&request.capabilities)? {
-        Some(need) if need.count > 0 && need.model.is_none() => {
-            Err(RequirementsError::CountWithoutModel)
-        }
-        Some(need) => Ok(Some(need)),
-        None => Ok(AcceleratorNeed::booked(&request.resources)),
+    let need = AcceleratorNeed::requested(&request.capabilities, &request.resources)?;
+    let Some(need) = need else {
+        return Ok(None);
+    };
+    if need.count > 0 && need.model.is_none() {
+        return Err(RequirementsError::CountWithoutModel);
+    }
+    match u64::from(need.count) <= request.resources.gpus() {
+        true => Ok(Some(need)),
+        false => Err(RequirementsError::CountNotBooked {
+            count: need.count,
+            gpus: request.resources.gpus(),
+        }),
     }
 }
 
@@ -767,6 +786,14 @@ mod tests {
         assert!(ImageRefError::NoDigest.to_string().contains("digest"));
     }
 
+    /// A request booking `gpus` GPUs of `class` (none when `class` is `None`) and naming
+    /// these capabilities.
+    fn booking(gpus: u64, class: Option<&str>, caps: &[(&str, &str)]) -> Request {
+        let mut asked = request(caps);
+        asked.resources = Resources::new(4000, 8, gpus, class.map(str::to_owned)).unwrap();
+        asked
+    }
+
     /// Asserts that the `accelerator.*` keys are read as the need (memory in GiB, the model
     /// as spelt, every field), that a vendor-only need books nothing and is valid, and that
     /// a request with no keys reads its booked GPU count and class as the need. Catches a
@@ -775,15 +802,18 @@ mod tests {
     #[test]
     fn the_accelerator_comes_from_its_keys_or_the_booked_gpus() {
         use crate::{FormFactor, Interconnect, Vendor};
-        let read = |caps: &[(&str, &str)]| Requirements::try_from_request(&request(caps));
-        let full = read(&[
-            ("accelerator.vendor", "nvidia"),
-            ("accelerator.model", "nvidia-a100-sxm4-80gb"),
-            ("accelerator.count", "4"),
-            ("accelerator.memory-gib", "80"),
-            ("accelerator.interconnect", "nvlink-domain>=72"),
-            ("accelerator.form-factor", "sxm"),
-        ])
+        let full = Requirements::try_from_request(&booking(
+            4,
+            Some("nvidia-a100-sxm4-80gb"),
+            &[
+                ("accelerator.vendor", "nvidia"),
+                ("accelerator.model", "nvidia-a100-sxm4-80gb"),
+                ("accelerator.count", "4"),
+                ("accelerator.memory-gib", "80"),
+                ("accelerator.interconnect", "nvlink-domain>=72"),
+                ("accelerator.form-factor", "sxm"),
+            ],
+        ))
         .unwrap();
         let want = AcceleratorNeed {
             vendor: Some(Vendor::parse("nvidia").unwrap()),
@@ -794,12 +824,14 @@ mod tests {
             form_factor: Some(FormFactor::Sxm),
         };
         assert_eq!(full.accelerator, Some(want));
-        let vendor_only = read(&[("accelerator.vendor", "nvidia")]).unwrap();
+        let cpu = |caps: &[(&str, &str)]| Requirements::try_from_request(&booking(0, None, caps));
+        let vendor_only = cpu(&[("accelerator.vendor", "nvidia")]).unwrap();
         let want = AcceleratorNeed {
             vendor: Some(Vendor::parse("nvidia").unwrap()),
             ..AcceleratorNeed::default()
         };
         assert_eq!(vendor_only.accelerator, Some(want));
+        let read = |caps: &[(&str, &str)]| Requirements::try_from_request(&request(caps));
         assert_eq!(read(&[]).unwrap().accelerator, a10());
         let mut cpu_only = request(&[]);
         cpu_only.resources = Resources::new(1000, 1, 0, None).unwrap();
@@ -813,18 +845,82 @@ mod tests {
         );
     }
 
-    /// Asserts that a count without a model, and each key holding a value that is not
+    /// Asserts that keys a request names beside a booked pair narrow the booked need and
+    /// never drop it: with a booked full spelling, a vendor alone, a memory alone, a count
+    /// alone (equal to the booking) and a count of zero each keep the booked model (so its
+    /// variant pin) and count, and add what they name. Catches a vendor key that turns a
+    /// pinned request into one for any model, or a count key refused for lacking a model the
+    /// booking names.
+    #[test]
+    fn keys_beside_a_booking_narrow_its_need_and_keep_its_model() {
+        use crate::Vendor;
+        let spelling = "nvidia-a100-sxm4-80gb";
+        let need = |caps: &[(&str, &str)]| {
+            Requirements::try_from_request(&booking(2, Some(spelling), caps))
+                .unwrap()
+                .accelerator
+                .unwrap()
+        };
+        let booked = AcceleratorNeed {
+            model: Some(Model::parse(spelling).unwrap()),
+            count: 2,
+            ..AcceleratorNeed::default()
+        };
+        assert_eq!(
+            need(&[("accelerator.vendor", "nvidia")]),
+            AcceleratorNeed {
+                vendor: Some(Vendor::parse("nvidia").unwrap()),
+                ..booked.clone()
+            }
+        );
+        assert_eq!(
+            need(&[("accelerator.memory-gib", "80")]),
+            AcceleratorNeed {
+                memory_per_device: Some(80 << 30),
+                ..booked.clone()
+            }
+        );
+        assert_eq!(need(&[("accelerator.count", "2")]), booked);
+        assert_eq!(need(&[("accelerator.count", "0")]), booked);
+        assert_eq!(need(&[]), booked);
+    }
+
+    /// Asserts that a count without a model (neither a key nor a booked class names one),
+    /// a count above the GPUs the request books, and each key holding a value that is not
     /// valid, is refused naming what is wrong, and that the lenient read then falls back to
     /// the booked GPU count and class. Catches a count-only need reaching a lease, which
-    /// would be stored as GPUs of no class.
+    /// would be stored as GPUs of no class, and a need for devices the request does not
+    /// book, which would let two leases share one device.
     #[test]
     fn a_count_without_a_model_or_a_bad_key_is_refused() {
         let read = |caps: &[(&str, &str)]| Requirements::try_from_request(&request(caps));
         let count_only = [("accelerator.count", "4")];
-        assert_eq!(read(&count_only), Err(RequirementsError::CountWithoutModel));
+        assert_eq!(
+            Requirements::try_from_request(&booking(0, None, &count_only)),
+            Err(RequirementsError::CountWithoutModel)
+        );
         assert_eq!(
             RequirementsError::CountWithoutModel.to_string(),
-            "accelerator.count above zero needs accelerator.model"
+            "accelerator.model is required when accelerator.count is above zero"
+        );
+        let unbooked = [
+            ("accelerator.model", "nvidia-a100"),
+            ("accelerator.count", "4"),
+        ];
+        assert_eq!(
+            Requirements::try_from_request(&booking(0, None, &unbooked)),
+            Err(RequirementsError::CountNotBooked { count: 4, gpus: 0 })
+        );
+        assert_eq!(
+            read(&count_only),
+            Err(RequirementsError::CountNotBooked { count: 4, gpus: 1 })
+        );
+        assert_eq!(
+            RequirementsError::CountNotBooked { count: 4, gpus: 1 }.to_string(),
+            "accelerator.count 4 is more than the 1 gpus the request books"
+        );
+        assert!(
+            Requirements::try_from_request(&booking(4, Some("nvidia-a100"), &unbooked)).is_ok()
         );
         assert!(read(&[("accelerator.count", "0")]).is_ok());
         let bad = [
@@ -868,8 +964,12 @@ mod tests {
         for (key, value, why) in bad {
             assert_eq!(
                 read(&[(key, value)]),
-                Err(RequirementsError::BadAccelerator(why)),
+                Err(RequirementsError::BadAccelerator(why.clone())),
                 "{key}"
+            );
+            assert_eq!(
+                RequirementsError::BadAccelerator(why.clone()).to_string(),
+                format!("accelerator: {why}")
             );
             let lenient = Requirements::from_request(&request(&[(key, value)]));
             assert_eq!(lenient.accelerator, a10(), "{key}");

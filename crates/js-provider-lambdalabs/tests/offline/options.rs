@@ -134,9 +134,9 @@ fn a_row_whose_gpu_class_is_not_in_the_agents_spelling_is_refused_and_named() {
 }
 
 /// Asserts that an empty class and a misspelt class are refused with their own texts,
-/// each naming the `gpu_class` key, and that a class of 64 characters is taken and one of
-/// 65 refused. Catches a refusal that lost the old operator text, or a length bound off by
-/// one.
+/// each naming the `gpu_class` key, and that a long class an existing configuration may
+/// hold (65 characters, and over 300) is still taken. Catches a refusal that lost the old
+/// operator text, or a length bound that refuses a configuration the previous release read.
 #[test]
 fn a_gpu_class_refusal_names_the_key_and_says_what_is_wrong() {
     let why = |class: &str| {
@@ -153,21 +153,15 @@ fn a_gpu_class_refusal_names_the_key_and_says_what_is_wrong() {
         why("NVIDIA A10"),
         "gpu_class must be lower case letters and digits joined by single '-', as the agent reports a GPU model"
     );
-    let longest = format!("nvidia-{}", "a".repeat(57));
-    let text = row(&format!(
-        "instance_type = \"gpu_1x_a\"\ngpu_class = \"{longest}\"\ngpus = 1"
-    ));
-    let table = OptionTable::parse(&text).unwrap();
-    assert_eq!(
-        table.rows()[0].gpu_class.as_str(),
-        longest,
-        "64 characters is a class"
-    );
-    assert_eq!(
-        why(&format!("{longest}a")),
-        "gpu_class must be lower case letters and digits joined by single '-', as the agent reports a GPU model",
-        "65 characters is not"
-    );
+    // An option row the previous release took, whose class has no length bound: 65
+    // lower case letters, and a longer dashed name. Both are still read as they were.
+    for class in ["a".repeat(65), format!("nvidia-{}", "a".repeat(300))] {
+        let text = row(&format!(
+            "instance_type = \"gpu_1x_a\"\ngpu_class = \"{class}\"\ngpus = 1"
+        ));
+        let table = OptionTable::parse(&text).unwrap();
+        assert_eq!(table.rows()[0].gpu_class.as_str(), class);
+    }
 }
 
 #[test]

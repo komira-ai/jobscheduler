@@ -174,6 +174,17 @@ fn an_unknown_name_matches_only_an_identical_one() {
         );
     }
     assert!(!family.matches(&gpu_node("nvidia-a100x")));
+    let shown = [
+        (AcceleratorMiss::Vendor, "accelerator.vendor"),
+        (AcceleratorMiss::Model, "accelerator.model"),
+        (AcceleratorMiss::Count, "accelerator.count"),
+        (AcceleratorMiss::Memory, "accelerator.memory-gib"),
+        (AcceleratorMiss::Interconnect, "accelerator.interconnect"),
+        (AcceleratorMiss::FormFactor, "accelerator.form-factor"),
+    ];
+    for (miss, key) in shown {
+        assert_eq!(Unmet::Accelerator(miss).to_string(), key);
+    }
     assert!(!family.matches(&gpu_node("nvidia-gb300")));
     assert!(!need("nvidia-a1").matches(&gpu_node("nvidia-a100-sxm4-80gb")));
 }

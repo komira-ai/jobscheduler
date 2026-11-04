@@ -196,3 +196,42 @@ async fn a_count_only_accelerator_is_a_400_naming_accelerator_model() {
     let held = h.call("GET", "/v1/leases", None).await;
     assert_eq!(held.json()["leases"], json!([]));
 }
+
+/// Asserts that a host of an old agent whose class the alias table does not know
+/// (`nvidia-zz9000`, eight devices of 40 GiB) is placed for a `resources.accelerator` of
+/// that model with 40 GiB per device and refused for 41 GiB with a 409, and that a
+/// `nvidia-zz9000` request through `gpus` and `gpu_class` is placed too. Catches the
+/// measured memory of the devices being lost between the hello and placement.
+#[tokio::test]
+async fn the_measured_memory_of_an_unknown_model_decides_placement() {
+    let hello = old_hello("nvidia-zz9000", 40);
+    let ask = |gib: u64| {
+        lease(json!({
+            "accelerator": { "model": "nvidia-zz9000", "memory_per_device_gib": gib, "count": 4 },
+        }))
+    };
+    let h = serve("accel_zz_fits", "nvidia-zz9000", &hello).await;
+    assert_placed(&acquire(&h, &ask(40)).await, "40 GiB");
+    let h = serve("accel_zz_over", "nvidia-zz9000", &hello).await;
+    let refused = acquire(&h, &ask(41)).await;
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    let h = serve("accel_zz_class", "nvidia-zz9000", &hello).await;
+    let body = lease(json!({ "gpus": 4, "gpu_class": "nvidia-zz9000" }));
+    assert_placed(&acquire(&h, &body).await, "class only");
+}
+
+/// Asserts that a pool whose floor names the family `nvidia-a100` registers a host of
+/// `nvidia-a100-sxm4-80gb`, and that a `gpus` and `gpu_class` request for exactly that
+/// spelling is placed on it while one for `nvidia-a100-sxm4-40gb` is a 409. Catches a
+/// host placed as the pool floor's family, which would take either variant.
+#[tokio::test]
+async fn a_host_is_placed_as_its_variant_and_not_as_the_pool_floors_family() {
+    let hello = old_hello(A100_80, 80);
+    let h = serve("accel_floor_family_80", "nvidia-a100", &hello).await;
+    let body = lease(json!({ "gpus": 4, "gpu_class": A100_80 }));
+    assert_placed(&acquire(&h, &body).await, A100_80);
+    let h = serve("accel_floor_family_40", "nvidia-a100", &hello).await;
+    let body = lease(json!({ "gpus": 4, "gpu_class": A100_40 }));
+    let refused = acquire(&h, &body).await;
+    assert_eq!(refused.status, 409, "{}", refused.body);
+}

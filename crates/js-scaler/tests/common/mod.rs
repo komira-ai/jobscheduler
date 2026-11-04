@@ -12,7 +12,8 @@ use js_scaler::{
     Millis, Phase, PoolInput, Record, Settings, State, StoredOffer, Waiting, step,
 };
 use js_types::{
-    Accelerator, AcceleratorNeed, ExecMode, HostId, Model, RequestId, Resources, accelerator_of,
+    Accelerator, AcceleratorNeed, ExecMode, FormFactor, HostId, Interconnect, Model, RequestId,
+    Resources, Vendor, accelerator_of,
 };
 
 /// The time the tests start at: well past one day, so a day window has room behind it.
@@ -54,6 +55,38 @@ pub fn offer(id: &str, price: u64) -> Offer {
         price_unit: PriceUnit::UsCents,
         available: true,
     }
+}
+
+/// An offer of the same machine as `offer` with one `nvidia-gb300`, a model the alias table
+/// does not know, whose 80 GiB of memory per device, vendor, interconnect and form factor
+/// the offer states and its class spelling cannot.
+pub fn gb300_offer(id: &str, price: u64) -> Offer {
+    Offer {
+        accelerator: Some(Accelerator {
+            vendor: Vendor::parse("nvidia").unwrap(),
+            model: Model::parse("nvidia-gb300").unwrap(),
+            variant: None,
+            count: 1,
+            memory_per_device: Some(80 << 30),
+            form_factor: Some(FormFactor::Sxm),
+            interconnect: Some(Interconnect::new("nvlink", 8).unwrap()),
+        }),
+        ..offer(id, price)
+    }
+}
+
+/// A request that needs one nvidia accelerator with 80 GiB of memory, whatever the model.
+pub fn gb300_request(id: &str) -> Waiting {
+    let mut waiting = request(id);
+    waiting.demand.resources =
+        Resources::new(4000, 16 << 30, 1, Some("nvidia-gb300".to_owned())).unwrap();
+    waiting.demand.accelerator = Some(AcceleratorNeed {
+        vendor: Some(Vendor::parse("nvidia").unwrap()),
+        memory_per_device: Some(80 << 30),
+        count: 1,
+        ..AcceleratorNeed::default()
+    });
+    waiting
 }
 
 /// What a job needs: a linux x86_64 machine with the a10 and a little of the rest.

@@ -3,7 +3,8 @@ use js_agent_wire::{
 };
 use js_pool_static::HostBook;
 use js_types::{
-    Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, ProviderId, ResourceClass, Shape,
+    ACCEL_KEYS, Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, ProviderId,
+    ResourceClass, Shape,
 };
 
 use crate::WholeNodeConfig;
@@ -306,6 +307,27 @@ impl PoolConfig {
     /// Lists `host` in `book`, free, as the pool books it.
     pub(crate) fn list_in(&self, book: &mut HostBook, host: HostId) {
         book.insert_host_with(host, self.booked.clone(), self.memory_headroom());
+    }
+
+    /// Lists `host` in `book` for a hello whose accepted `claim` is known. The host books
+    /// as [`Self::booked`] does (the pool's numbers are the booking limits), but its
+    /// `accelerator.*` capabilities are those of the claim, which a hello validated, and
+    /// not the pool floor's, so placement sees the host's real family, variant facts and
+    /// measured memory. A host already listed and free is listed again with that shape; one
+    /// holding a lease keeps the shape it was booked with.
+    pub(crate) fn list_claimed(&self, book: &mut HostBook, host: HostId, claim: Option<&Shape>) {
+        let is_accel = |key: &String| ACCEL_KEYS.contains(&key.as_str());
+        let mut capabilities = self.booked.capabilities().clone();
+        capabilities.retain(|key, _| !is_accel(key));
+        let stated = claim.into_iter().flat_map(|claim| claim.capabilities());
+        capabilities.extend(
+            stated
+                .filter(|(key, _)| is_accel(*key))
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        let shape = Shape::new(self.booked.resources().clone(), capabilities);
+        book.remove_free(&host);
+        book.insert_host_with(host, shape, self.memory_headroom());
     }
 
     pub(crate) fn max_machines(&self) -> usize {

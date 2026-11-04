@@ -189,10 +189,9 @@ impl AcquireBody {
                 RequirementsError::BadIsaLevel(_) => {
                     "isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a".to_owned()
                 }
-                RequirementsError::BadAccelerator(why) => format!("accelerator: {why}"),
-                RequirementsError::CountWithoutModel => {
-                    "accelerator.model is required when accelerator.count is above zero".to_owned()
-                }
+                why @ (RequirementsError::BadAccelerator(_)
+                | RequirementsError::CountWithoutModel
+                | RequirementsError::CountNotBooked { .. }) => why.to_string(),
             })
         })?;
         Ok((request, self.ttl_seconds.map(Duration::from_secs)))
@@ -889,9 +888,11 @@ mod tests {
     }
 
     /// Asserts that a count with no model, in the object or as an `accelerator.count`
-    /// capability, is the 400 that names `accelerator.model`, and that a vendor alone (which
-    /// books no GPU) is taken. Catches GPUs booked with no class, which a previous release
-    /// would read back as a whole host.
+    /// capability, is the 400 that names `accelerator.model`; that capabilities asking for
+    /// devices the resources do not book are a 400 naming the count; and that a vendor alone
+    /// (which books no GPU) and a count key beside the pair that books it are taken. Catches
+    /// GPUs booked with no class, which a previous release would read back as a whole host,
+    /// and devices required but not booked, which a sharing class would book twice.
     #[test]
     fn a_count_only_accelerator_is_a_400_naming_accelerator_model() {
         let said = "accelerator.model is required when accelerator.count is above zero";
@@ -901,6 +902,14 @@ mod tests {
         assert_eq!(vendor.resources.gpus(), 0);
         assert_eq!(vendor.capabilities.len(), 1);
         assert_eq!(vendor.capabilities["accelerator.vendor"], "nvidia");
+        let unbooked = r#"{"accelerator.model":"nvidia-a100","accelerator.count":"4"}"#;
+        assert_eq!(
+            refused("{}", unbooked),
+            "accelerator.count 4 is more than the 0 gpus the request books"
+        );
+        let pair = r#"{"gpus":1,"gpu_class":"nvidia-a100"}"#;
+        let counted = accepted(pair, r#"{"accelerator.count":"1"}"#);
+        assert_eq!(counted.resources.gpus(), 1);
     }
 
     /// Asserts that an accelerator object alone books its count of its model and states

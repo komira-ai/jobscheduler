@@ -126,10 +126,10 @@ fn family_of(text: &str) -> String {
     }
 }
 
-/// What `request` requires of a node: its capabilities as platform requirements (its
-/// `accelerator.*` keys among them; a request with none that books GPUs of a class that is
-/// a model name gets the keys of the need that booking states, so a full spelling pins its
-/// variant here too, without the keys being stored with the request), and its GPU class as
+/// What `request` requires of a node: its capabilities as platform requirements, its
+/// accelerator need as the `accelerator.*` keys of [`AcceleratorNeed::requested`] (its own
+/// keys over the need its booked GPUs state, so a booked full spelling pins its variant
+/// here too, without any key being stored with the request), and its GPU class as
 /// `gpu.kind`: the family of its `accelerator.model` when it states one, else of the class.
 ///
 /// # Errors
@@ -143,21 +143,16 @@ pub(crate) fn needs(request: &Request) -> Result<js_caps::Request, MapError> {
         .map(String::as_str)
         .or_else(|| request.resources.gpu_class());
     let kind = model.map(family_of);
-    let states_need = ACCEL_KEYS
-        .iter()
-        .any(|key| request.capabilities.contains_key(*key));
-    let booked = match states_need {
-        true => Vec::new(),
-        false => AcceleratorNeed::booked(&request.resources)
-            .map(|need| need.to_capabilities())
-            .unwrap_or_default(),
-    };
+    let need = AcceleratorNeed::requested(&request.capabilities, &request.resources)
+        .map_err(RequestError::from)?;
+    let stated: Vec<(&str, String)> = need.map(|need| need.to_capabilities()).unwrap_or_default();
     let mut pairs: BTreeMap<&str, &str> = request
         .capabilities
         .iter()
+        .filter(|(key, _)| !ACCEL_KEYS.contains(&key.as_str()))
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    pairs.extend(booked.iter().map(|(key, value)| (*key, value.as_str())));
+    pairs.extend(stated.iter().map(|(key, value)| (*key, value.as_str())));
     if let Some(kind) = &kind {
         match pairs.insert(GPU_KIND, kind) {
             Some(other) if family_of(other) != *kind => {
@@ -607,6 +602,23 @@ mod tests {
         assert!(
             !job(&bare, "j").unwrap().runnable_on(&caps, &capacity),
             "a booked full spelling pins its variant without stored keys"
+        );
+        let vendor = request(
+            resources(1000, 1, 4, Some(a80)),
+            &[("accelerator.vendor", "nvidia")],
+        );
+        assert!(
+            !job(&vendor, "j").unwrap().runnable_on(&caps, &capacity),
+            "a vendor key beside a booked full spelling keeps its pin"
+        );
+        let odd = shape(resources(8000, 1 << 30, 8, Some("Not A Model")), &[]);
+        let (capacity, caps) = host(&odd).unwrap();
+        let same = request(resources(1000, 1, 1, Some("Not A Model")), &[]);
+        assert!(job(&same, "j").unwrap().runnable_on(&caps, &capacity));
+        let other = request(resources(1000, 1, 1, Some("Not B Model")), &[]);
+        assert!(
+            !job(&other, "j").unwrap().runnable_on(&caps, &capacity),
+            "a class that is not a model name is matched as written"
         );
     }
 

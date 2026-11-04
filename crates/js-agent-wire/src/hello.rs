@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use js_types::{
-    Accelerator, HostId, Model, ProviderId, Resources, Shape, TypeError, accelerator_of,
+    ACCEL_KEYS, Accelerator, HostId, Model, ProviderId, Resources, Shape, TypeError, accelerator_of,
 };
 use serde::{Deserialize, Serialize};
 
@@ -103,8 +103,8 @@ pub struct WireShape {
 
 /// The accelerator of a host on the wire: the canonical family, the spelling the host read
 /// it as and the least memory any device reported. The server derives the same vendor,
-/// family, spelling and count from the shape and refuses a hello that says otherwise;
-/// only the memory is taken as measured.
+/// family, spelling and count from the shape, and the least memory from the listed
+/// devices, and refuses a hello that says otherwise.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireAccelerator {
     /// Who makes it, such as `nvidia`.
@@ -143,10 +143,12 @@ impl WireAccelerator {
     /// be the class, and without one the model must be the class itself (the agent read the
     /// class as a family, or as a name its table does not know). With a variant spelling the
     /// model must be this server's family for the class when this server's alias table
-    /// knows it, and the vendor must be the table's whenever it does. A class this server's
-    /// table does not know is not held to it: an agent of a newer release may know it, so a
-    /// hello is never refused for the table either side was built with.
-    fn agrees_with(&self, derived: &Accelerator, class: &Model) -> bool {
+    /// knows it, and the vendor must be the table's whenever it does. The stated memory
+    /// must be the `least` memory of the listed devices, and absent when none is listed.
+    /// A class this server's table does not know is not held to it: an agent of a newer
+    /// release may know it, so a hello is never refused for the table either side was
+    /// built with.
+    fn agrees_with(&self, derived: &Accelerator, class: &Model, least: Option<u64>) -> bool {
         let known = class.canonical().known;
         let model_agrees = match &self.variant_spelling {
             None => self.model == class.as_str(),
@@ -158,6 +160,7 @@ impl WireAccelerator {
             model_agrees,
             !known || self.vendor == derived.vendor.as_str(),
             self.count == derived.count,
+            self.memory_per_device_bytes == least,
         ]
         .into_iter()
         .all(|same| same)
@@ -329,10 +332,23 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl Hello {
-    /// The shape the host offers: its resource vector and its capabilities.
+    /// The shape the host offers: its resource vector and its capabilities. The
+    /// `accelerator.*` capabilities the host sent are dropped and replaced by the facts of
+    /// [`Hello::accelerator`], so a host cannot report an accelerator its class, count and
+    /// devices do not state.
     pub fn to_shape(&self) -> Result<Shape, TypeError> {
         let resources = self.shape.to_resources()?;
-        Ok(Shape::new(resources, self.capabilities.clone()))
+        let mut capabilities = self.capabilities.clone();
+        capabilities.retain(|key, _| !ACCEL_KEYS.contains(&key.as_str()));
+        let facts = self
+            .accelerator()
+            .map_or_else(Vec::new, |found| found.to_capabilities());
+        capabilities.extend(
+            facts
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value)),
+        );
+        Ok(Shape::new(resources, capabilities))
     }
 
     /// The accelerator of the host: what `shape.gpu_class`, `shape.gpus` and the least
@@ -348,8 +364,15 @@ impl Hello {
             return Ok(());
         };
         let class = self.shape.gpu_class.as_deref().map(Model::parse);
+        let least = self
+            .gpu_devices
+            .iter()
+            .map(|device| device.memory_bytes)
+            .min();
         match (self.accelerator(), class) {
-            (Some(derived), Some(Ok(class))) if stated.agrees_with(&derived, &class) => Ok(()),
+            (Some(derived), Some(Ok(class))) if stated.agrees_with(&derived, &class, least) => {
+                Ok(())
+            }
             _ => Err(at.field("shape.accelerator").fail(Rule::Inconsistent)),
         }
     }

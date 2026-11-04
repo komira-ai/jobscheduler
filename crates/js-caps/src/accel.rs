@@ -19,7 +19,7 @@ pub use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,
     ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ALIASES, APPLE_M, AccelError,
     Accelerator, AcceleratorMiss, AcceleratorNeed, Alias, FAMILIES, Family, FormFactor,
-    Interconnect, Model, Resolved, Variant, Vendor, accelerator_of, vendor_of,
+    Interconnect, MAX_MEMORY_GIB, Model, Resolved, Variant, Vendor, accelerator_of, vendor_of,
 };
 
 /// Bytes in a GiB.

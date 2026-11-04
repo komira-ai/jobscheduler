@@ -20,7 +20,7 @@
 //! - a type's `name` is 1 to 64 lower case letters, digits or `_`, and no two types have
 //!   one name;
 //! - a type's `gpu` is a class in the agent's spelling (a `js_types::Model`: lower-case
-//!   letters and digits joined by single `-`, at most 64 long), and a pool has one class:
+//!   letters and digits joined by single `-`), and a pool has one class:
 //!   every type names the class of the first;
 //! - a type's `gpus` is a whole number from 1;
 //! - `api_key_file` is read through the service's reader of secret files, never directly,

@@ -3,7 +3,8 @@
 
 use js_elastic::{Demand, Dimension, Offer, PriceUnit};
 use js_types::{
-    Accelerator, AcceleratorNeed, ExecMode, FormFactor, Model, Resources, Vendor, accelerator_of,
+    Accelerator, AcceleratorNeed, ExecMode, FormFactor, Interconnect, Model, Resources, Vendor,
+    accelerator_of,
 };
 
 const GIB: u64 = 1 << 30;
@@ -324,5 +325,48 @@ fn the_booked_gpus_are_held_to_the_offers_count() {
     assert_eq!(
         offer_of("nvidia-gb300", 8, None).fit(&odd),
         Err(Dimension::AcceleratorModel)
+    );
+}
+
+/// Asserts the interconnect on an offer: the same kind with a domain of exactly the size
+/// asked or larger fits, a smaller domain, none stated and another kind each fail by the
+/// interconnect dimension, and an offer wrong in both interconnect and form factor is
+/// named by the interconnect, which is checked first. Catches an interconnect miss mapped
+/// to another dimension, or form factor checked before it.
+#[test]
+fn an_interconnect_is_at_least_and_named_before_the_form_factor() {
+    let want = demand(Some(AcceleratorNeed {
+        interconnect: Some(Interconnect::new("nvlink-domain", 72).unwrap()),
+        form_factor: Some(FormFactor::Sxm),
+        ..AcceleratorNeed::default()
+    }));
+    let with = |link: Option<(&str, u32)>, form_factor| {
+        offer(Some(Accelerator {
+            vendor: Vendor::parse("nvidia").unwrap(),
+            model: model("nvidia-gb300"),
+            variant: None,
+            count: 72,
+            memory_per_device: None,
+            form_factor: Some(form_factor),
+            interconnect: link.map(|(kind, size)| Interconnect::new(kind, size).unwrap()),
+        }))
+    };
+    let sxm = FormFactor::Sxm;
+    assert_eq!(with(Some(("nvlink-domain", 72)), sxm).fit(&want), Ok(()));
+    assert_eq!(with(Some(("nvlink-domain", 144)), sxm).fit(&want), Ok(()));
+    for link in [Some(("nvlink-domain", 71)), None, Some(("infiniband", 72))] {
+        assert_eq!(
+            with(link, sxm).fit(&want),
+            Err(Dimension::AcceleratorInterconnect),
+            "{link:?}"
+        );
+    }
+    assert_eq!(
+        with(Some(("nvlink-domain", 8)), FormFactor::Pcie).fit(&want),
+        Err(Dimension::AcceleratorInterconnect)
+    );
+    assert_eq!(
+        with(Some(("nvlink-domain", 72)), FormFactor::Pcie).fit(&want),
+        Err(Dimension::AcceleratorFormFactor)
     );
 }

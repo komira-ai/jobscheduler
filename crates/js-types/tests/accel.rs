@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use js_types::{
     ACCEL_KEYS, AccelError, Accelerator, AcceleratorMiss, AcceleratorNeed, FormFactor,
-    Interconnect, Model, Vendor, accelerator_of, vendor_of,
+    Interconnect, MAX_MEMORY_GIB, Model, Vendor, accelerator_of, vendor_of,
 };
 
 const GIB: u64 = 1 << 30;
@@ -60,13 +60,21 @@ fn a_vendor_is_a_bounded_lower_case_token() {
     );
 }
 
-/// Asserts the model name: lower-case words joined by single `-`, at most 64 long, and
-/// everything else refused naming the text. Catches a model that the agent's spelling
-/// rule could never print reaching the table or the matcher.
+/// Asserts the model name: lower-case words joined by single `-` of any length (a GPU
+/// class of 65 or 300 characters, which the previous release took, is still a model), and
+/// everything else refused naming the text. Catches a model that the agent's spelling rule
+/// could never print reaching the table or the matcher, and a length bound that would
+/// refuse a configuration the previous release accepted.
 #[test]
 fn a_model_is_lower_case_words_joined_by_single_dashes() {
-    let (longest, too_long) = ("m".repeat(64), "m".repeat(65));
-    for good in ["nvidia-a100-sxm4-80gb", "a100", "x-1", longest.as_str()] {
+    let (long, longer) = ("m".repeat(65), format!("nvidia-{}", "a".repeat(300)));
+    for good in [
+        "nvidia-a100-sxm4-80gb",
+        "a100",
+        "x-1",
+        long.as_str(),
+        longer.as_str(),
+    ] {
         assert_eq!(model(good).as_str(), good);
         assert_eq!(model(good).to_string(), good);
     }
@@ -82,7 +90,6 @@ fn a_model_is_lower_case_words_joined_by_single_dashes() {
         "a_b",
         "a.b",
         "nvidia-\u{e9}",
-        too_long.as_str(),
     ] {
         assert_eq!(Model::parse(bad), Err(AccelError::BadModel(bad.to_owned())));
     }
@@ -354,8 +361,11 @@ fn a_full_spelling_need_pins_its_variant() {
 
 /// Asserts that a need round trips through its capability keys (memory in whole GiB,
 /// rounded up so it never asks for less), that no key reads as no need and a zero count
-/// is not written, and that a bad value is refused naming its key. Catches a need whose
-/// keys lose a field, or whose memory is rounded down into asking for less.
+/// is not written, that a bad value is refused naming its key, and that the memory key
+/// reads every GiB up to `MAX_MEMORY_GIB` and refuses the next, while any byte count a need
+/// holds (to `u64::MAX`) is written as a key that reads back. Catches a need whose keys
+/// lose a field, whose memory is rounded down into asking for less, or whose memory is
+/// written as a value its own reader refuses.
 #[test]
 fn a_need_round_trips_through_its_capability_keys() {
     let need = AcceleratorNeed {
@@ -387,6 +397,41 @@ fn a_need_round_trips_through_its_capability_keys() {
         odd.to_capabilities(),
         vec![("accelerator.memory-gib", "81".to_owned())]
     );
+    let largest = MAX_MEMORY_GIB.to_string();
+    let read =
+        AcceleratorNeed::from_capabilities(&caps(&[("accelerator.memory-gib", largest.as_str())]));
+    assert_eq!(
+        read.unwrap().unwrap().memory_per_device,
+        Some(MAX_MEMORY_GIB * GIB),
+        "the largest GiB whose bytes fit is read"
+    );
+    let first_refused = (MAX_MEMORY_GIB + 1).to_string();
+    assert_eq!(
+        AcceleratorNeed::from_capabilities(&caps(&[(
+            "accelerator.memory-gib",
+            first_refused.as_str()
+        )])),
+        Err(AccelError::BadNumber {
+            key: "accelerator.memory-gib",
+            value: first_refused.clone()
+        })
+    );
+    for bytes in [1_u64 << 62, MAX_MEMORY_GIB * GIB, u64::MAX] {
+        let huge = AcceleratorNeed {
+            memory_per_device: Some(bytes),
+            ..AcceleratorNeed::default()
+        };
+        let written: BTreeMap<String, String> = huge
+            .to_capabilities()
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect();
+        let back = AcceleratorNeed::from_capabilities(&written)
+            .unwrap()
+            .unwrap();
+        let memory = back.memory_per_device.unwrap();
+        assert!(memory >= bytes.min(MAX_MEMORY_GIB * GIB), "{bytes}");
+    }
     assert_eq!(
         AcceleratorNeed::from_capabilities(&caps(&[("accelerator.memory-gib", "lots")])),
         Err(AccelError::BadNumber {

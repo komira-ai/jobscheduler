@@ -220,7 +220,7 @@ fn catalog_notes(offers: &[Offer], floor: &Floor, pins: Option<&AgentPins>) -> V
     let other_class = |o: &&Offer| {
         o.accelerator
             .as_ref()
-            .is_some_and(|have| have.count > 0 && Some(&have.model) != floor_model.as_ref())
+            .is_some_and(|have| Some(&have.model) != floor_model.as_ref())
     };
     if let Some(offer) = offers.iter().filter(|_| floor.gpus > 0).find(other_class) {
         notes.push(format!(

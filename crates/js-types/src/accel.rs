@@ -43,10 +43,11 @@ pub const ACCEL_KEYS: [&str; 6] = [
 
 /// Bytes in a GiB.
 const GIB: u64 = 1 << 30;
+/// The largest `accelerator.memory-gib`: the most whole GiB whose bytes fit 64 bits
+/// (2^34 - 1).
+pub const MAX_MEMORY_GIB: u64 = u64::MAX / GIB;
 /// The longest vendor name.
 const VENDOR_MAX: usize = 32;
-/// The longest model name.
-const MODEL_MAX: usize = 64;
 /// The longest interconnect kind.
 const KIND_MAX: usize = 32;
 
@@ -56,10 +57,8 @@ pub enum AccelError {
     /// A vendor is not 1 to 32 of `a-z`, `0-9` and `-`.
     #[error("vendor must be 1 to 32 of a-z, 0-9 and '-', not {0:?}")]
     BadVendor(String),
-    /// A model is not lower-case letters and digits joined by single `-`, at most 64 long.
-    #[error(
-        "model must be lower case letters and digits joined by single '-', at most 64 long, not {0:?}"
-    )]
+    /// A model is not lower-case letters and digits joined by single `-`.
+    #[error("model must be lower case letters and digits joined by single '-', not {0:?}")]
     BadModel(String),
     /// An interconnect is not `kind>=size`.
     #[error("interconnect must be kind>=size, such as nvlink-domain>=72, not {0:?}")]
@@ -127,8 +126,9 @@ impl fmt::Display for Vendor {
     }
 }
 
-/// An accelerator model name: lower-case letters and digits joined by single `-`, at most
-/// 64 long. It is a family (`nvidia-a100`) or a full spelling (`nvidia-a100-sxm4-80gb`)
+/// An accelerator model name: lower-case letters and digits joined by single `-`, of any
+/// length (a GPU class the previous release took has no length bound, so neither does a
+/// model; a wire that carries one bounds its own text). It is a family (`nvidia-a100`) or a full spelling (`nvidia-a100-sxm4-80gb`)
 /// until the alias table resolves it; a name the table does not know stays as it is.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Model(String);
@@ -138,10 +138,9 @@ impl Model {
     ///
     /// # Errors
     ///
-    /// [`AccelError::BadModel`] when `text` is not lower-case words joined by single `-`
-    /// or is longer than 64.
+    /// [`AccelError::BadModel`] when `text` is not lower-case words joined by single `-`.
     pub fn parse(text: &str) -> Result<Self, AccelError> {
-        match text.len() <= MODEL_MAX && dashed_words(text) {
+        match dashed_words(text) {
             true => Ok(Self(text.to_owned())),
             false => Err(AccelError::BadModel(text.to_owned())),
         }
@@ -406,8 +405,33 @@ impl AcceleratorNeed {
         })
     }
 
+    /// The need a request states: its `accelerator.*` keys over the need its booked GPUs
+    /// state ([`Self::booked`]). A key narrows the booked need and never drops it: a model
+    /// and a count the keys leave out are the booking's (so a booked full spelling keeps its
+    /// variant pin beside `accelerator.vendor` alone), and the count is the larger of the
+    /// two (an `accelerator.count` of zero asks for no fewer than the booking).
+    ///
+    /// # Errors
+    ///
+    /// The [`AccelError`] of the first key whose value is not valid.
+    pub fn requested(
+        capabilities: &Capabilities,
+        resources: &Resources,
+    ) -> Result<Option<Self>, AccelError> {
+        let stated = Self::from_capabilities(capabilities)?;
+        Ok(match (stated, Self::booked(resources)) {
+            (None, booked) => booked,
+            (Some(stated), None) => Some(stated),
+            (Some(stated), Some(booked)) => Some(Self {
+                model: stated.model.or(booked.model),
+                count: stated.count.max(booked.count),
+                ..stated
+            }),
+        })
+    }
+
     /// The need the `accelerator.*` keys of `capabilities` state, or `None` when they name
-    /// none. `accelerator.memory-gib` is whole GiB.
+    /// none. `accelerator.memory-gib` is whole GiB, at most [`MAX_MEMORY_GIB`].
     ///
     /// # Errors
     ///
@@ -424,7 +448,16 @@ impl AcceleratorNeed {
             })
         };
         let memory = get(ACCEL_MEMORY_GIB_KEY)
-            .map(|text| number(ACCEL_MEMORY_GIB_KEY, text).map(|gib| u64::from(gib) * GIB))
+            .map(|text| {
+                let bytes = text
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|gib| gib.checked_mul(GIB));
+                bytes.ok_or_else(|| AccelError::BadNumber {
+                    key: ACCEL_MEMORY_GIB_KEY,
+                    value: text.to_owned(),
+                })
+            })
             .transpose()?;
         Ok(Some(Self {
             vendor: get(ACCEL_VENDOR_KEY).map(Vendor::parse).transpose()?,
@@ -445,7 +478,9 @@ impl AcceleratorNeed {
 
     /// The `accelerator.*` capability entries that state this need, in [`ACCEL_KEYS`]
     /// order, leaving out every field that is `None` and a count of zero. Memory is written
-    /// in whole GiB, rounded up, so it never asks for less than the need.
+    /// in whole GiB, rounded up, so it never asks for less than the need; a memory above
+    /// [`MAX_MEMORY_GIB`] GiB (no device has it) is written as that bound, the largest the
+    /// key reads back.
     #[must_use]
     pub fn to_capabilities(&self) -> Vec<(&'static str, String)> {
         let entries = [
@@ -461,7 +496,7 @@ impl AcceleratorNeed {
             (
                 ACCEL_MEMORY_GIB_KEY,
                 self.memory_per_device
-                    .map(|bytes| bytes.div_ceil(GIB).to_string()),
+                    .map(|bytes| bytes.div_ceil(GIB).min(MAX_MEMORY_GIB).to_string()),
             ),
             (
                 ACCEL_INTERCONNECT_KEY,

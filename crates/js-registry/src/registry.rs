@@ -611,7 +611,7 @@ impl Registry {
             .fresh()
             .map(|bytes| secret_text(&bytes))
             .ok_or(Refusal::SessionUnavailable)?;
-        config.list_in(&mut state.book, host.clone());
+        config.list_claimed(&mut state.book, host.clone(), claim.as_ref());
         let held = hello.held.iter().map(|run| run.run_id.clone()).collect();
         state.records.insert(
             host.clone(),

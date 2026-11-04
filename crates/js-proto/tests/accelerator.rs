@@ -3,7 +3,7 @@
 
 use js_caps::{AcceleratorRequest, RequestNeedError};
 use js_proto::request_need;
-use js_proto::v1::{Accelerator, Constraints, Job, JobSpec, Needs};
+use js_proto::v1::{Accelerator, Constraints, ExecMode, Job, JobSpec, Needs};
 use prost::Message;
 
 /// The bytes of a golden `.hex` file: hex pairs separated by white space, each line's text
@@ -159,4 +159,82 @@ fn the_new_constraint_fields_round_trip() {
     };
     let decoded = JobSpec::decode(spec.encode_to_vec().as_slice()).expect("the spec decodes");
     assert_eq!(decoded, spec);
+}
+
+/// The previous release's `Constraints`: operating system, architecture and execution mode.
+/// A fixture standing for readers already deployed; it must not follow later changes.
+#[derive(Clone, PartialEq, Message)]
+struct PreviousConstraints {
+    #[prost(string, tag = "1")]
+    os: String,
+    #[prost(string, tag = "2")]
+    arch: String,
+    #[prost(enumeration = "ExecMode", tag = "3")]
+    exec: i32,
+}
+
+/// The previous release's `JobSpec` envelope, with the fields the constraints travel with.
+#[derive(Clone, PartialEq, Message)]
+struct PreviousJobSpec {
+    #[prost(string, tag = "1")]
+    job_id: String,
+    #[prost(message, optional, tag = "10")]
+    needs: Option<Needs>,
+    #[prost(message, optional, tag = "11")]
+    constraints: Option<PreviousConstraints>,
+}
+
+fn new_spec() -> JobSpec {
+    JobSpec {
+        job_id: "job-1".to_owned(),
+        needs: Some(needs(1, "nvidia-a100-sxm4-80gb")),
+        constraints: Some(Constraints {
+            os: "linux".to_owned(),
+            arch: "x86_64".to_owned(),
+            exec: ExecMode::Container as i32,
+            isa_level: "x86-64-v3".to_owned(),
+            accelerator: Some(Accelerator {
+                vendor: Some("nvidia".to_owned()),
+                model: Some("nvidia-a100".to_owned()),
+                count: Some(2),
+                memory_per_device_gib: Some(40),
+                interconnect: Some("nvlink>=300".to_owned()),
+                form_factor: Some("sxm".to_owned()),
+            }),
+        }),
+        ..JobSpec::default()
+    }
+}
+
+/// Asserts that the constraints of a new spec, with `isa_level` and a populated
+/// accelerator, decode in the previous release's `Constraints` with `os`, `arch` and `exec`
+/// exactly as sent, that the previous `JobSpec` keeps the `Needs` pair `gpus` and
+/// `gpu_class`, and that decoding succeeds with the new fields skipped. Catches a new field
+/// that a reader already deployed cannot decode, or one that disturbs a legacy field.
+#[test]
+fn a_previous_reader_decodes_new_constraints() {
+    let bytes = new_spec().encode_to_vec();
+    let previous = PreviousJobSpec::decode(bytes.as_slice()).expect("the previous reader decodes");
+    assert_eq!(previous.job_id, "job-1");
+    let constraints = previous.constraints.expect("the constraints are kept");
+    assert_eq!(constraints.os, "linux");
+    assert_eq!(constraints.arch, "x86_64");
+    assert_eq!(constraints.exec, ExecMode::Container as i32);
+    let needs = previous.needs.expect("the needs are kept");
+    assert_eq!(needs.gpus, 1);
+    assert_eq!(needs.gpu_class, "nvidia-a100-sxm4-80gb");
+
+    let alone = new_spec()
+        .constraints
+        .expect("the constraints are set")
+        .encode_to_vec();
+    let alone = PreviousConstraints::decode(alone.as_slice()).expect("the constraints decode");
+    assert_eq!(
+        alone,
+        PreviousConstraints {
+            os: "linux".to_owned(),
+            arch: "x86_64".to_owned(),
+            exec: ExecMode::Container as i32,
+        }
+    );
 }
