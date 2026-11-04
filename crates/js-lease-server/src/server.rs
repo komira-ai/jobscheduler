@@ -4,8 +4,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use js_lease::{Boot, LeaseTable, read_bookings};
+use js_lease::{Booking, Boot, LeaseTable, Monotonic, Settings, read_bookings};
 use js_provider::Pool as _;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -13,10 +14,11 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::adapt::{BoxedPool, SharedClock};
-use crate::agents::assemble;
-use crate::api::{Shared, agent_router, router};
+use crate::agents::{Agents, assemble};
+use crate::api::{Shared, Table, agent_router, router};
 use crate::capacity::Seated;
-use crate::config::Config;
+use crate::checks::Checker;
+use crate::config::{Config, Limits, TlsFiles, Token};
 use crate::error::StartupError;
 use crate::listener::{Slots, serve};
 use crate::pool::{Pool, Setup};
@@ -91,122 +93,55 @@ pub async fn start<T: Ticker>(
 /// test steps the checks as it steps the table. Without an elastic pool `checks` is
 /// dropped.
 pub async fn start_with_checks<T: Ticker, C: Ticker>(
-    mut config: Config,
+    config: Config,
     clock: SharedClock,
     ticker: T,
     checks: C,
 ) -> Result<Running, StartupError> {
-    let tick = config.tick_period();
-    let bookings =
-        read_bookings(&config.state_file).map_err(|err| StartupError::new("--state-file", err))?;
-    let (source, agents) = assemble(config.hosts, config.usage, &clock, &config.state_file)?;
-    let registry = agents.as_ref().map(|agents| agents.registry.clone());
-    let elastic = config.elastic.take().map(|mut plan| {
-        let setup = Setup {
-            advertise: config.advertise_url.clone(),
-            tls: config.tls.clone(),
-            inputs: std::mem::take(&mut config.launch_inputs),
-            clock: clock.clone(),
-        };
-        (Pool::new(&mut plan, setup), plan)
-    });
-    // Before anything is served: the scaler marks the machines its records show as being
-    // released, so a host of theirs that says hello again is admitted already marked.
-    let scaler = match (&elastic, agents.clone()) {
-        (Some((pool, plan)), Some(agents)) => {
-            let parts = Parts {
-                agents,
-                clock: clock.clone(),
-                state_file: &config.state_file,
-                advertise_url: config.advertise_url.as_deref(),
-                first_start: config.boot == Boot::Initialise,
-                health: pool.health.clone(),
-                mode: pool.mode(),
-            };
-            Some(build(plan, parts)?)
-        }
-        _ => None,
-    };
-    if let (Some(scaler), Some(sink)) = (&scaler, config.alerts.take()) {
-        scaler.set_sink(sink, config.alert_repeat);
-    }
-    let Seated { provider, unseated } = source.provider(&bookings)?;
-    let tls = config
+    let (prepared, listeners) = prepare(config, &clock)?;
+    let tls = listeners
         .tls
         .as_ref()
         .map(|files| tls::Tls::open(files, clock.clone()))
         .transpose()?;
     let acceptor = tls.as_ref().map(tls::Tls::acceptor);
-    let (listener, addr) = bind(config.listen, config.listen_flag, config.bound.take()).await?;
-    let agent_listener = match config.agent_listen {
+    let (listener, addr) = bind(listeners.listen, listeners.listen_flag, listeners.bound).await?;
+    let agent_listener = match listeners.agent_listen {
         Some(agent) => Some(bind(agent, "server.agent_listen", None).await?),
         None => None,
     };
-    if let Some(scaler) = &scaler {
-        scaler.listening(Some(2 * tick), &bookings);
-    }
-    let mut table = LeaseTable::open(
-        BoxedPool(provider),
-        clock.clone(),
-        config.settings,
-        &config.state_file,
-        config.boot,
-    )
-    .map_err(|err| match err {
-        js_lease::OpenError::Missing { .. } => StartupError::new("--boot", err),
-        _ => StartupError::new("--state-file", err),
-    })?;
-    table.watch_saves(config.monotonic);
-    for lost in &unseated {
-        warn!(
-            lease = %lost.booking.lease,
-            host = %lost.booking.host,
-            state = %lost.booking.state,
-            reason = %lost.reason,
-            "the lease file's booking cannot be restored; the provider does not know the lease, so the table drops it"
+    let served_tls = acceptor.is_some();
+    let Opened {
+        shared,
+        scaler,
+        checker,
+        state_file,
+    } = open(prepared, &clock, |table| {
+        info!(
+            %addr,
+            provider = %table.provider().id(),
+            hosts = table.provider().capacity().len(),
+            tls = served_tls,
+            "listening"
         );
-    }
-    info!(
-        %addr,
-        provider = %table.provider().id(),
-        hosts = table.provider().capacity().len(),
-        tls = acceptor.is_some(),
-        "listening"
-    );
-    for warning in &config.warnings {
-        warn!("{warning}");
-    }
-    let pool = elastic.map(|(pool, _)| pool);
-    let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
-    let status = Status::new(
-        pool,
-        registry,
-        scaler.clone(),
-        config.warnings.clone(),
-        clock.clone(),
-    );
-    let status = config.status.then(|| Arc::new(status));
-    let shared = Arc::new(
-        Shared::new(table, config.token, agents)
-            .with_status(status)
-            .with_scaler(scaler.clone()),
-    );
+    })?;
+    let limits = listeners.limits;
     let split = agent_listener.is_some();
     let (stop, stopped) = oneshot::channel::<()>();
-    let slots = Arc::new(Slots::new(config.limits.max_connections));
+    let slots = Arc::new(Slots::new(limits.max_connections));
     let serving = serve(
         listener,
         acceptor.clone(),
         router(shared.clone(), !split),
-        config.limits,
+        limits,
         slots.clone(),
         stopped,
     );
     let agent = agent_listener.map(|(listener, addr)| {
         let (stop, stopped) = oneshot::channel::<()>();
-        let slots = Arc::new(Slots::new(config.limits.max_connections));
+        let slots = Arc::new(Slots::new(limits.max_connections));
         let app = agent_router(&shared);
-        let serving = serve(listener, acceptor, app, config.limits, slots, stopped);
+        let serving = serve(listener, acceptor, app, limits, slots, stopped);
         info!(%addr, "listening for agents");
         AgentPort {
             addr,
@@ -223,7 +158,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     Ok(Running {
         addr,
         agent,
-        state_file: config.state_file,
+        state_file,
         shared,
         stop,
         slots,
@@ -232,6 +167,205 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         _checking: checking,
         scaler,
         tls,
+    })
+}
+
+/// What only the listeners of a start read of its configuration.
+pub(crate) struct Listeners {
+    listen: SocketAddr,
+    listen_flag: &'static str,
+    bound: Option<std::net::TcpListener>,
+    agent_listen: Option<SocketAddr>,
+    tls: Option<TlsFiles>,
+    limits: Limits,
+}
+
+/// What a start has built when its listeners are about to be bound: the agent side, the
+/// elastic pool and its scaler, and the provider seated over the lease file's bookings,
+/// with the parts of the configuration that [`open`] reads.
+pub(crate) struct Prepared {
+    bookings: Vec<Booking>,
+    agents: Option<Arc<Agents>>,
+    pool: Option<Pool>,
+    scaler: Option<Scaler>,
+    seated: Seated,
+    state_file: PathBuf,
+    boot: Boot,
+    settings: Settings,
+    tick: Duration,
+    token: Token,
+    monotonic: Arc<dyn Monotonic>,
+    warnings: Vec<String>,
+    status: bool,
+}
+
+/// What a start has built once the lease table is open: the state the routes and the tick
+/// share, the elastic pool's scaler and its check loop, and the lease file.
+pub(crate) struct Opened {
+    pub(crate) shared: Arc<Shared>,
+    pub(crate) scaler: Option<Scaler>,
+    pub(crate) checker: Option<Checker>,
+    pub(crate) state_file: PathBuf,
+}
+
+/// The first half of a start, everything before a listener is bound: reads the lease
+/// file's bookings, puts the agent side together, builds the elastic pool and its scaler
+/// (which marks the machines its records show as being released) and seats the provider
+/// over the bookings. Binds nothing and spawns nothing.
+pub(crate) fn prepare(
+    config: Config,
+    clock: &SharedClock,
+) -> Result<(Prepared, Listeners), StartupError> {
+    let Config {
+        listen,
+        listen_flag,
+        bound,
+        agent_listen,
+        advertise_url,
+        warnings,
+        status,
+        mut launch_inputs,
+        elastic,
+        state_file,
+        boot,
+        settings,
+        tick,
+        token,
+        tls,
+        limits,
+        hosts,
+        usage,
+        monotonic,
+        alerts,
+        alert_repeat,
+        ..
+    } = config;
+    let bookings =
+        read_bookings(&state_file).map_err(|err| StartupError::new("--state-file", err))?;
+    let (source, agents) = assemble(hosts, usage, clock, &state_file)?;
+    let elastic = elastic.map(|mut plan| {
+        let setup = Setup {
+            advertise: advertise_url.clone(),
+            tls: tls.clone(),
+            inputs: std::mem::take(&mut launch_inputs),
+            clock: clock.clone(),
+        };
+        (Pool::new(&mut plan, setup), plan)
+    });
+    // Before anything is served: the scaler marks the machines its records show as being
+    // released, so a host of theirs that says hello again is admitted already marked.
+    let scaler = match (&elastic, agents.clone()) {
+        (Some((pool, plan)), Some(agents)) => {
+            let parts = Parts {
+                agents,
+                clock: clock.clone(),
+                state_file: &state_file,
+                advertise_url: advertise_url.as_deref(),
+                first_start: boot == Boot::Initialise,
+                health: pool.health.clone(),
+                mode: pool.mode(),
+            };
+            Some(build(plan, parts)?)
+        }
+        _ => None,
+    };
+    if let (Some(scaler), Some(sink)) = (&scaler, alerts) {
+        scaler.set_sink(sink, alert_repeat);
+    }
+    let seated = source.provider(&bookings)?;
+    let prepared = Prepared {
+        bookings,
+        agents,
+        pool: elastic.map(|(pool, _)| pool),
+        scaler,
+        seated,
+        state_file,
+        boot,
+        settings,
+        tick,
+        token,
+        monotonic,
+        warnings,
+        status,
+    };
+    let listeners = Listeners {
+        listen,
+        listen_flag,
+        bound,
+        agent_listen,
+        tls,
+        limits,
+    };
+    Ok((prepared, listeners))
+}
+
+/// The second half of a start, once the listeners are bound (or, in process, once there is
+/// nothing to bind): the scaler starts counting the registry's view, the lease table is
+/// opened over the lease file (and locks it), the bookings it could not seat are logged,
+/// `announce` is given the table to say where it is served, and the state the routes and the
+/// tick share is built over it. Spawns nothing.
+pub(crate) fn open(
+    prepared: Prepared,
+    clock: &SharedClock,
+    announce: impl FnOnce(&Table),
+) -> Result<Opened, StartupError> {
+    let Prepared {
+        bookings,
+        agents,
+        pool,
+        scaler,
+        seated: Seated { provider, unseated },
+        state_file,
+        boot,
+        settings,
+        tick,
+        token,
+        monotonic,
+        warnings,
+        status: serves_status,
+    } = prepared;
+    let registry = agents.as_ref().map(|agents| agents.registry.clone());
+    if let Some(scaler) = &scaler {
+        scaler.listening(Some(2 * tick), &bookings);
+    }
+    let mut table = LeaseTable::open(
+        BoxedPool(provider),
+        clock.clone(),
+        settings,
+        &state_file,
+        boot,
+    )
+    .map_err(|err| match err {
+        js_lease::OpenError::Missing { .. } => StartupError::new("--boot", err),
+        _ => StartupError::new("--state-file", err),
+    })?;
+    table.watch_saves(monotonic);
+    for lost in &unseated {
+        warn!(
+            lease = %lost.booking.lease,
+            host = %lost.booking.host,
+            state = %lost.booking.state,
+            reason = %lost.reason,
+            "the lease file's booking cannot be restored; the provider does not know the lease, so the table drops it"
+        );
+    }
+    announce(&table);
+    for warning in &warnings {
+        warn!("{warning}");
+    }
+    let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
+    let status = Status::new(pool, registry, scaler.clone(), warnings, clock.clone());
+    let status = serves_status.then(|| Arc::new(status));
+    let shared = Arc::new(
+        Shared::new(table, token, agents)
+            .with_status(status)
+            .with_scaler(scaler.clone()),
+    );
+    Ok(Opened {
+        shared,
+        scaler,
+        checker,
+        state_file,
     })
 }
 
