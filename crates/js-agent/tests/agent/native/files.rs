@@ -413,16 +413,16 @@ fn a_native_agent_with_a_files_root_reports_run_files_and_without_one_does_not()
 /// Asserts how a native agent's flags open its files root: given, it is opened searchable
 /// (`0711`, made when missing), so the run's user can walk down to its own directory;
 /// without the flag there is no root and no warning (there is no default on a Mac); and a
-/// root that is, holds or lies in the homes of the native users or a path no native run may
-/// read (`--native-deny-read`) is refused naming it. It catches a root the run's user cannot
-/// reach, a default the Mac does not have, a root the helper's sweep of the homes would
-/// delete, and files the run's profile would deny it.
+/// root that lies in or holds the homes of the native users is refused naming them. (A read
+/// deny cannot be spelled under `/tmp`, where a searchable root has to be made here, so the
+/// read denies, compared the same way, are not exercised by a refusal.) It catches a root
+/// the run's user cannot reach, a default the Mac does not have, and a root the helper's
+/// sweep of the homes would delete.
 #[test]
 fn a_native_files_root_is_searchable_and_apart_from_what_runs_may_not_read() {
     let world = world("native-files-flags");
-    let (homes, denied) = (world.path().join("homes"), world.path().join("denied"));
+    let homes = world.path().join("homes");
     fs::create_dir(&homes).unwrap();
-    fs::create_dir(&denied).unwrap();
     let dir = Scratch::new("native-files-flags");
     let (state, scratch) = (private(&dir, "state"), private(&dir, "scratch"));
     let cli = |files: Option<&Path>| {
@@ -438,10 +438,6 @@ fn a_native_files_root_is_searchable_and_apart_from_what_runs_may_not_read() {
         .map(str::to_owned)
         .into();
         argv.extend(["--native-homes".to_owned(), homes.display().to_string()]);
-        argv.extend([
-            "--native-deny-read".to_owned(),
-            denied.display().to_string(),
-        ]);
         argv.extend(["--state-root".to_owned(), state.clone()]);
         argv.extend(["--scratch-root".to_owned(), scratch.clone()]);
         if let Some(files) = files {
@@ -459,23 +455,10 @@ fn a_native_files_root_is_searchable_and_apart_from_what_runs_may_not_read() {
     let local = Local::from_cli(&cli(None), 0).unwrap();
     assert_eq!((local.files, local.files_warning), (None, None));
 
-    // The read denies are compared before the homes, so a root holding both names the deny.
-    let (homes, denied) = (
-        fs::canonicalize(&homes).unwrap(),
-        fs::canonicalize(&denied).unwrap(),
-    );
+    let homes = fs::canonicalize(&homes).unwrap();
     let cases = [
         (homes.join("files"), "the --native-homes", &homes),
-        (
-            denied.join("files"),
-            "the path no native run may read",
-            &denied,
-        ),
-        (
-            world.path().to_path_buf(),
-            "the path no native run may read",
-            &denied,
-        ),
+        (world.path().to_path_buf(), "the --native-homes", &homes),
     ];
     for (files, named, other) in cases {
         fs::create_dir_all(&files).unwrap();
