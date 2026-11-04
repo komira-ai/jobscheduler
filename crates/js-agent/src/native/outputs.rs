@@ -82,6 +82,23 @@ struct Budget {
     entries: usize,
 }
 
+impl Budget {
+    /// Takes one tree entry from the run's budget.
+    ///
+    /// # Errors
+    ///
+    /// None is left: the walk stops.
+    fn take_entry(&mut self) -> Result<(), String> {
+        if self.entries == 0 {
+            return Err(
+                "over the entries the outputs of a run may hold: the rest is not copied".to_owned(),
+            );
+        }
+        self.entries -= 1;
+        Ok(())
+    }
+}
+
 /// Copies the outputs `outputs` of a run whose home is `home` (its working directory is
 /// `home/exec`) into `into`, within `caps`.
 pub(super) fn collect(home: &Path, outputs: &[OutputSpec], into: &Path, caps: Caps) -> Collected {
@@ -208,12 +225,7 @@ fn copy_tree(
         .collect();
     names.sort();
     for name in names {
-        if budget.entries == 0 {
-            return Err(
-                "over the entries the outputs of a run may hold: the rest is not copied".to_owned(),
-            );
-        }
-        budget.entries -= 1;
+        budget.take_entry()?;
         let path = format!("{rel}/{}", name.to_string_lossy());
         let target = to.join(OsStr::from_bytes(name.to_bytes()));
         // Listed a moment ago and no process of the user is left: a name that is gone now
