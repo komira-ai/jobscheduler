@@ -957,5 +957,8 @@ fn a_supervisor_file_that_names_another_process_ends_nothing() {
     for (id, _) in &forged {
         assert_gone(&node, &id.0);
     }
+    // The stand-in holds until SIGTERM, which the stop sends; a removal alone would wait for
+    // a cgroup kill the stand-in's cgroup does not do.
+    second.stop(&kept, Duration::ZERO).expect("stopped");
     second.remove(&kept).expect("removed");
 }
