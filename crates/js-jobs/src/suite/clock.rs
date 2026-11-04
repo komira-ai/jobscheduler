@@ -7,7 +7,8 @@ use js_state::{Store, StoreTime};
 
 use super::{Rig, host, rig, share, whole_host_spec};
 use crate::{
-    AllocationRecord, AllocationStep, Booked, EndReason, JobId, JobRecord, JobState, StartFailure,
+    AllocationRecord, AllocationStep, Booked, EndReason, JobEnd, JobId, JobRecord, JobResult,
+    JobState, JobTiming, ResultReason, Retention, StartFailure,
 };
 
 /// The store's clock, moved on first so this step's time differs from the last one's.
@@ -30,8 +31,9 @@ fn stored_allocation<S: Store>(rig: &Rig<S>, id: &JobId) -> AllocationRecord {
 /// Through a job's whole life, each record (returned and stored) is the one before with only
 /// what the step sets changed, and each time it sets is the store's clock at that step: the
 /// submit, the placement and the allocation's creation, the start of running, the first cancel
-/// (a second leaves it), the end, the free, and a requeue and placement after it. The
-/// retention end stays unset.
+/// (a second leaves it), the end (with its result's timing and its retention end, the end
+/// plus the window), the free, and a requeue and placement after it. The retention end is
+/// unset until the end.
 pub fn every_time_is_the_store_clock_at_its_step<B: Backend>(backend: &B) {
     let name = "every_time_is_the_store_clock_at_its_step";
     let rig = rig(backend);
@@ -109,13 +111,25 @@ pub fn every_time_is_the_store_clock_at_its_step<B: Backend>(backend: &B) {
     );
 
     let at = next_reading(&rig);
-    let ended = rig
-        .jobs
-        .transition(&id, JobState::Running, JobState::Cancelled)
-        .expect("ends");
+    let ended = rig.jobs.end_job(&id, super::cancelled()).expect("ends");
     want = JobRecord {
         state: JobState::Cancelled,
         ended_at: Some(at),
+        result: Some(JobResult {
+            exit_code: None,
+            reason: ResultReason::Cancelled,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            truncated: false,
+            timing: JobTiming {
+                queued_at: want.submitted_at,
+                placed_at: want.placed_at,
+                started_at: want.started_at,
+                ended_at: at,
+            },
+            usage: None,
+        }),
+        retention_ends: Some(at.saturating_add(Retention::DEFAULT.window())),
         ..want
     };
     assert_eq!(ended, want, "{name}: the end");
@@ -184,32 +198,51 @@ pub fn every_time_is_the_store_clock_at_its_step<B: Backend>(backend: &B) {
 }
 
 /// Every end the design names, from every state it may follow, through the store: the
-/// answer is what is stored, its end time is the store's clock, a booked allocation is
-/// releasing (and otherwise unchanged), and the ended job then refuses every further move.
+/// answer is what is stored, its end time is the store's clock, it has a result exactly when
+/// the job ran to an exit, a limit or a cancel, its retention end is its end plus the
+/// window, a booked allocation is releasing (and otherwise unchanged), and the ended job then
+/// refuses every further move.
 pub fn every_supported_end_is_stored_with_its_time_and_release<B: Backend>(backend: &B) {
-    use JobState::{Cancelled, Failed, FailedToStart, Lost, Placed, Queued, Running, Starting};
+    use JobState::{Cancelled, Lost, Placed, Queued, Running, Starting};
     use StartFailure::{AgentRefused, ExclusiveNotReady, NoCapacity, StartTimeout};
     let name = "every_supported_end_is_stored_with_its_time_and_release";
     let rig = rig(backend);
     let ends = [
-        (Queued, FailedToStart(NoCapacity)),
-        (Queued, Cancelled),
-        (Queued, Lost),
-        (Placed, FailedToStart(StartTimeout)),
-        (Placed, FailedToStart(AgentRefused)),
-        (Placed, FailedToStart(ExclusiveNotReady)),
-        (Placed, Cancelled),
-        (Placed, Lost),
-        (Starting, FailedToStart(StartTimeout)),
-        (Starting, FailedToStart(AgentRefused)),
-        (Starting, Cancelled),
-        (Starting, Lost),
-        (Running, JobState::Succeeded),
-        (Running, Failed),
-        (Running, Cancelled),
-        (Running, Lost),
+        (Queued, JobEnd::FailedToStart(NoCapacity), false),
+        (Queued, super::cancelled(), true),
+        (Queued, JobEnd::Lost, false),
+        (Placed, JobEnd::FailedToStart(StartTimeout), false),
+        (Placed, JobEnd::FailedToStart(AgentRefused), false),
+        (Placed, JobEnd::FailedToStart(ExclusiveNotReady), false),
+        (Placed, super::cancelled(), true),
+        (Placed, JobEnd::Lost, false),
+        (Starting, JobEnd::FailedToStart(StartTimeout), false),
+        (Starting, JobEnd::FailedToStart(AgentRefused), false),
+        (Starting, super::cancelled(), true),
+        (Starting, JobEnd::Lost, false),
+        (Running, super::exited(0), true),
+        (Running, super::exited(1), true),
+        (
+            Running,
+            JobEnd::WallLimit {
+                exit_code: Some(137),
+                output: super::output(),
+            },
+            true,
+        ),
+        (
+            Running,
+            JobEnd::Memory {
+                exit_code: None,
+                output: super::output(),
+            },
+            true,
+        ),
+        (Running, super::cancelled(), true),
+        (Running, JobEnd::Lost, false),
     ];
-    for (n, (from, to)) in ends.into_iter().enumerate() {
+    for (n, (from, end, has_result)) in ends.into_iter().enumerate() {
+        let to = end.state();
         let text = format!("end-{n:02}");
         let id = match from {
             Queued => rig.queue(&text),
@@ -228,16 +261,23 @@ pub fn every_supported_end_is_stored_with_its_time_and_release<B: Backend>(backe
         let at = next_reading(&rig);
         let ended = rig
             .jobs
-            .transition(&id, from, to)
+            .end_job(&id, end)
             .expect("every_supported_end_is_stored_with_its_time_and_release: the end");
+        assert_eq!(
+            ended.result.as_ref().map(|result| result.timing.ended_at),
+            has_result.then_some(at),
+            "{name}: {from:?} to {to:?} has a result it should not, or lacks one"
+        );
         assert_eq!(
             ended,
             JobRecord {
                 state: to,
                 ended_at: Some(at),
+                result: ended.result.clone(),
+                retention_ends: Some(at.saturating_add(Retention::DEFAULT.window())),
                 ..before
             },
-            "{name}: {from:?} to {to:?} is not stored with its time alone"
+            "{name}: {from:?} to {to:?} is not stored with its time, result and retention alone"
         );
         assert_eq!(stored_job(&rig, &id), ended, "{name}: {from:?} to {to:?}");
         assert_eq!(

@@ -101,9 +101,7 @@ pub fn same_id_same_job_returns_the_existing_row<B: Backend>(backend: &B) {
     );
 
     // An ended job is answered too, ended: the id is not free again until its retention ends.
-    rig.jobs
-        .transition(&id, JobState::Running, JobState::Succeeded)
-        .expect("ends");
+    rig.jobs.end_job(&id, super::exited(0)).expect("ends");
     let ended = rig.raw("job/a");
     let after_end = rig
         .jobs
