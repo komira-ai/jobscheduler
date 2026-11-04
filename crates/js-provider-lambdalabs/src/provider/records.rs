@@ -30,13 +30,16 @@ pub(super) struct Records {
     /// The instances with some of our marks, not all, by id, with their status. They count
     /// toward `max_machines` until they are terminated or gone.
     suspects: BTreeMap<HostRef, HostStatus>,
-    /// The acquire ids of launches sent with no answer yet.
-    unresolved: BTreeSet<String>,
-    /// For a launch with no answer, the instance found to be the one it made: one of its
-    /// acquire id that the records held, not ending, while the launch was unanswered. The
-    /// link stays when that instance ends, so the launch is not counted again; an instance
-    /// already ending when the launch was sent is an earlier one and is never linked.
-    resolved: BTreeMap<String, HostRef>,
+    /// The acquire ids of launches sent with no answer yet, each with the number of its
+    /// attempt.
+    unresolved: BTreeMap<String, u64>,
+    /// For a launch with no answer, by acquire id, the attempt and the instance found to be
+    /// the one it made: one of its acquire id that the records held, not ending, while that
+    /// attempt was unanswered. The link stays when that instance ends, so the launch is not
+    /// counted again, and goes when another attempt of the acquire id is unanswered, so a
+    /// later attempt never inherits it; an instance already ending when an attempt was sent
+    /// is an earlier one and is never linked.
+    resolved: BTreeMap<String, (u64, HostRef)>,
     /// The architectures the catalog has carried.
     arches: BTreeSet<String>,
 }
@@ -69,11 +72,12 @@ impl Records {
 
     /// After an acquire the launch guard holds `answered` (every instance a launch answered
     /// with that no list has shown as ours) and `unresolved` (the acquire ids of launches
-    /// with no answer); `extras` are the instances the acquire's own answer released.
+    /// with no answer, each with its attempt); `extras` are the instances the acquire's own
+    /// answer released.
     pub(super) fn guarded(
         &mut self,
         answered: impl IntoIterator<Item = Held>,
-        unresolved: impl IntoIterator<Item = String>,
+        unresolved: impl IntoIterator<Item = (String, u64)>,
         extras: &[Extra],
     ) {
         self.answered.clear();
@@ -87,7 +91,8 @@ impl Records {
         }
         self.unresolved = unresolved.into_iter().collect();
         let pending = &self.unresolved;
-        self.resolved.retain(|acquire, _| pending.contains(acquire));
+        self.resolved
+            .retain(|acquire, link| pending.get(acquire) == Some(&link.0));
         self.resolve();
         for extra in extras {
             self.released(&extra.id, &extra.released);
@@ -128,8 +133,8 @@ impl Records {
     fn resolve(&mut self) {
         let current = self.held.values().filter(|row| !ending(&row.status));
         for row in current {
-            let open = self.unresolved.contains(&row.acquire);
-            let link = open.then(|| (row.acquire.clone(), row.id.clone()));
+            let open = self.unresolved.get(&row.acquire).copied();
+            let link = open.map(|attempt| (row.acquire.clone(), (attempt, row.id.clone())));
             link.into_iter().for_each(|(acquire, id)| {
                 self.resolved.entry(acquire).or_insert(id);
             });
@@ -161,7 +166,7 @@ impl Records {
             .count();
         let suspects = self.suspects.values();
         let suspects = suspects.filter(|status| **status != HostStatus::Terminated);
-        let pending = self.unresolved.iter();
+        let pending = self.unresolved.keys();
         let unanswered = pending.filter(|acquire| !self.resolved.contains_key(*acquire));
         let counted = live + suspects.count() + unanswered.count();
         Capacity {

@@ -50,6 +50,12 @@ struct Launching {
     /// An entry ends when a list shows the instance, when the launch is answered, or
     /// when the hold runs out.
     unknown: BTreeMap<String, Duration>,
+    /// How many launches have been sent.
+    sent: u64,
+    /// The number of the last launch sent for each acquire id: a launch sent again under
+    /// the same acquire id is another attempt, which the records must not take for the one
+    /// before.
+    attempts: BTreeMap<String, u64>,
     /// Instances a launch answered with, until a list shows them as ours. A list can lag
     /// a write, so for a while an instance exists only in the API's list-to-be: it counts
     /// toward `max_machines` and a retry of the same acquire gets the earlier answer.
@@ -220,7 +226,12 @@ impl LambdaProvider {
             _ => &[],
         };
         let held = gate.answered.iter().map(|launched| launched.held.clone());
-        let unresolved = gate.unknown.keys().cloned();
+        let attempts = &gate.attempts;
+        let attempt = |acquire: &str| attempts.get(acquire).copied().unwrap_or_default();
+        let unresolved = gate
+            .unknown
+            .keys()
+            .map(|acquire| (acquire.clone(), attempt(acquire)));
         let mut records = self.records();
         records.guarded(held, unresolved, extras);
         for (id, observed) in gate.probed.drain(..) {
@@ -605,6 +616,9 @@ impl LambdaProvider {
         gate.last_launch = Some(now);
         gate.unknown
             .insert(request.acquire.as_str().to_owned(), now);
+        gate.sent += 1;
+        gate.attempts
+            .insert(request.acquire.as_str().to_owned(), gate.sent);
         tracing::info!(
             instance_type = %launch.instance_type,
             region = %launch.region,

@@ -502,3 +502,60 @@ fn a_lost_launch_that_landed_is_not_counted_again_once_its_instance_ends() {
     assert_eq!(rig.provider.observe(&landed), Observed::Absent);
     assert_eq!(rig.provider.capacity(), capacity(0, 3));
 }
+
+/// Asserts that a replacement launch whose answer is also lost is not linked to the
+/// instance its predecessor made: the predecessor landed with its answer lost, a list
+/// linked it, it was released, and the replacement under the same acquire id then timed
+/// out with no effect. The replacement holds its own place (`can_add` 1 of 3, nothing
+/// supplied). It catches a link kept by acquire id alone, which a later attempt inherits.
+#[test]
+fn a_replacement_launch_that_also_lost_its_answer_is_not_linked_to_the_released_predecessor() {
+    let rig = roomy(3);
+    rig.fake
+        .lose_response(Call::Launch, ApiError::Transport("reset".to_owned()));
+    assert_eq!(rig.provider.acquire(&ask("a1")), Acquired::Unknown);
+    let first = rig.provider.list().unwrap()[0].id.clone();
+    assert!(matches!(
+        rig.provider.release(&first),
+        Released::Terminating(_)
+    ));
+    rig.fake
+        .fail_next(Call::Launch, ApiError::Transport("timed out".to_owned()));
+    assert_eq!(rig.provider.acquire(&ask("a1")), Acquired::Unknown);
+    assert_eq!(rig.provider.capacity(), capacity(0, 1));
+}
+
+/// Asserts the same replacement when its lost answer did land: until a list shows its
+/// instance it holds its own place; once a list shows it, it is linked to that instance
+/// (supplied, and not counted again), the released predecessor is counted once, and the
+/// link outlasts the release of the new instance. It catches a replacement counted
+/// beside its own instance, or matched to its predecessor's.
+#[test]
+fn a_replacement_launch_that_landed_is_linked_to_its_own_instance() {
+    let rig = roomy(3);
+    rig.fake
+        .lose_response(Call::Launch, ApiError::Transport("reset".to_owned()));
+    assert_eq!(rig.provider.acquire(&ask("a1")), Acquired::Unknown);
+    let first = rig.provider.list().unwrap()[0].id.clone();
+    assert!(matches!(
+        rig.provider.release(&first),
+        Released::Terminating(_)
+    ));
+    rig.fake
+        .lose_response(Call::Launch, ApiError::Transport("reset".to_owned()));
+    assert_eq!(rig.provider.acquire(&ask("a1")), Acquired::Unknown);
+    assert_eq!(rig.provider.capacity(), capacity(0, 1));
+    let listed = rig.provider.list().unwrap();
+    let second = listed
+        .iter()
+        .find(|held| held.id != first)
+        .unwrap()
+        .id
+        .clone();
+    assert_eq!(rig.provider.capacity(), capacity(1, 1));
+    assert!(matches!(
+        rig.provider.release(&second),
+        Released::Terminating(_)
+    ));
+    assert_eq!(rig.provider.capacity(), capacity(0, 1));
+}
