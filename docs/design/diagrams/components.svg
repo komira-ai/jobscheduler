@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 850" width="1400" height="850" role="img" aria-label="Components of jobscheduler: generated clients on the left call a protobuf service API; the scheduler core with one placement engine, queue, lease and run lifecycle and usage history keeps its state in Postgres; on the right a pool names container platforms in priority order: Default, whose ordered machine providers are static hosts running js-agent on Linux and macOS, Lambda Labs, AWS EC2 and GCP Compute Engine, then Kubernetes, Cloud Run and ECS as dashed later platforms with no js-agent; every Default machine runs js-agent and runs jobs as OCI images.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 640" width="1400" height="640" role="img" aria-label="Components of jobscheduler, target design: generated CLI and client library call one protobuf service API; one scheduler (js-sched, queue and placement) with leases and runs, over Postgres; on the right a pool names container platforms in priority order: Default, whose ordered machine providers are Static, Lambda Labs, AWS EC2 and GCP Compute Engine, then Kubernetes, Cloud Run and ECS as dashed later platforms.">
 <title>jobscheduler components</title>
 <defs><marker id="components-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="components-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="components-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
 <style>
@@ -28,137 +28,75 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 .t-w{fill:#FFFFFF;font-weight:600}
 .lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
 </style>
-<rect x="0" y="0" width="1400" height="850" fill="#FFFFFF"/>
-<text x="20" y="28" class="b" text-anchor="start" font-size="16">jobscheduler: clients, one scheduler core, container platforms in priority order</text>
+<rect x="0" y="0" width="1400" height="640" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">jobscheduler: clients, one scheduler, container platforms in priority order</text>
 <text x="20" y="58" class="b" text-anchor="start">Clients</text>
-<text x="235" y="58" class="b" text-anchor="start">Service API</text>
-<text x="470" y="58" class="b" text-anchor="start">Scheduler core (one service)</text>
+<text x="470" y="58" class="b" text-anchor="start">The scheduler (one service)</text>
 <text x="960" y="58" class="b" text-anchor="start">Container platforms of a pool, in priority order</text>
 <rect x="20" y="96" width="170" height="64" rx="5" class="box-bd"/>
-<text x="105.0" y="124" class="b" text-anchor="middle">Generated CLI</text>
-<text x="105.0" y="140" class="t-m" text-anchor="middle">planned</text>
-<rect x="20" y="184" width="170" height="76" rx="5" class="box-bd"/>
-<text x="105.0" y="209" class="b" text-anchor="middle">Generated client library</text>
-<text x="105.0" y="226" class="t-m" text-anchor="middle">any program calls it</text>
-<text x="105.0" y="243" class="t-m" text-anchor="middle">planned</text>
-<rect x="20" y="284" width="170" height="118" rx="5" class="box-gd"/>
-<text x="105.0" y="313" class="b" text-anchor="middle">Today</text>
-<text x="105.0" y="330" class="t-m" text-anchor="middle">hand-written js-cli and</text>
-<text x="105.0" y="347" class="t-m" text-anchor="middle">js-client over HTTP/JSON</text>
-<text x="105.0" y="364" class="t-m" text-anchor="middle">(built); the generated</text>
-<text x="105.0" y="381" class="t-m" text-anchor="middle">pair replaces them</text>
-<text x="105" y="430" class="t-m" text-anchor="middle">both generated from the</text>
-<text x="105" y="446" class="t-m" text-anchor="middle">service definition</text>
-<rect x="235" y="96" width="190" height="164" rx="5" class="box-bld"/>
-<text x="330.0" y="148" class="b" text-anchor="middle">Service API</text>
-<text x="330.0" y="165" class="t-m" text-anchor="middle">protobuf service definition</text>
-<text x="330.0" y="182" class="t-m" text-anchor="middle">(planned)</text>
-<text x="330.0" y="199" class="t-m" text-anchor="middle">HTTP/JSON routes (built)</text>
-<text x="330.0" y="216" class="t-m" text-anchor="middle">generated gateway if kept</text>
+<text x="105.0" y="132.5" class="b" text-anchor="middle">Generated CLI</text>
+<rect x="20" y="184" width="170" height="64" rx="5" class="box-bd"/>
+<text x="105.0" y="212.0" class="b" text-anchor="middle">Generated client library</text>
+<text x="105.0" y="229.0" class="t-m" text-anchor="middle">any program calls it</text>
+<text x="105" y="278" class="t-m" text-anchor="middle">both generated from the</text>
+<text x="105" y="294" class="t-m" text-anchor="middle">service definition</text>
+<rect x="235" y="96" width="190" height="152" rx="5" class="box-bld"/>
+<text x="330.0" y="151.0" class="b" text-anchor="middle">API</text>
+<text x="330.0" y="168.0" class="t-m" text-anchor="middle">one protobuf service:</text>
+<text x="330.0" y="185.0" class="t-m" text-anchor="middle">leases, runs, hosts,</text>
+<text x="330.0" y="202.0" class="t-m" text-anchor="middle">pools, usage</text>
 <path d="M190,128 L235,128" class="ln" marker-end="url(#components-ak)"/>
-<path d="M190,222 L235,222" class="ln" marker-end="url(#components-ak)"/>
-<text x="212" y="118" class="t-m lbl" text-anchor="middle">calls</text>
-<rect x="470" y="70" width="430" height="650" rx="5" class="box-t"/>
-<path d="M425,168 L490,168" class="ln" marker-end="url(#components-ak)"/>
-<text x="458" y="160" class="t-m lbl" text-anchor="middle">requests</text>
-<rect x="490" y="96" width="390" height="140" rx="5" class="box-o"/>
-<text x="685.0" y="136" class="b" text-anchor="middle">Placement engine: js-sched (partly built)</text>
-<text x="685.0" y="153" class="t-m" text-anchor="middle">load placement, CPU slack setting, memory percent</text>
-<text x="685.0" y="170" class="t-m" text-anchor="middle">tail placement for whole-node requests</text>
-<text x="685.0" y="187" class="t-m" text-anchor="middle">walks platforms, then machine providers (planned)</text>
-<text x="685.0" y="204" class="t-m" text-anchor="middle">estimates from usage history</text>
-<text x="685.0" y="221" class="t-m" text-anchor="middle">capability vocabulary: os, arch, cpu, memory, accelerator</text>
-<rect x="490" y="248" width="390" height="52" rx="5" class="box-o"/>
-<text x="685.0" y="270" class="b" text-anchor="middle">Queue and reservations (partly built)</text>
-<text x="685.0" y="286" class="t-m" text-anchor="middle">in js-registry today; moves into js-sched</text>
-<rect x="490" y="312" width="390" height="52" rx="5" class="box-o"/>
-<text x="685.0" y="334" class="b" text-anchor="middle">Lease and run lifecycle (built)</text>
-<text x="685.0" y="350" class="t-m" text-anchor="middle">js-lease, commit before start, tick loop</text>
-<rect x="490" y="376" width="390" height="52" rx="5" class="box-o"/>
-<text x="685.0" y="398" class="b" text-anchor="middle">Usage history (partly built)</text>
-<text x="685.0" y="414" class="t-m" text-anchor="middle">js-usage: per-minute usage, cost curves, P90 wall times</text>
-<text x="685.0" y="426" class="t-m" text-anchor="middle" font-size="10">ended-lease record planned, step 3</text>
-<rect x="490" y="440" width="390" height="52" rx="5" class="box-o"/>
-<text x="685.0" y="462" class="b" text-anchor="middle">Scaler: caps, brake, records (built)</text>
-<text x="685.0" y="478" class="t-m" text-anchor="middle">js-scaler: acquire driver for elastic providers, not a fleet manager</text>
-<rect x="490" y="520" width="390" height="110" rx="5" class="box-od"/>
-<path d="M510,542 v54 a20,6 0 0 0 40,0 v-54" fill="#E8EEF4" stroke="#0B0B0A" stroke-width="1.2"/><ellipse cx="530" cy="542" rx="20" ry="6" fill="#E8EEF4" stroke="#0B0B0A" stroke-width="1.2"/>
-<text x="720" y="546" class="b" text-anchor="middle">Postgres (partly built)</text>
-<text x="720" y="568" class="t-m" text-anchor="middle">leases, runs, hosts, usage history</text>
-<text x="720" y="585" class="t-m" text-anchor="middle">js-state has the backend; the server still</text>
-<text x="720" y="602" class="t-m" text-anchor="middle">keeps a lease file and a SQLite usage file</text>
-<path d="M720,492 L720,520" class="ln" marker-end="url(#components-ak)"/>
-<text x="780" y="510" class="t-m lbl" text-anchor="middle">commit</text>
-<rect x="950" y="72" width="440" height="560" rx="5" class="box-p"/>
-<rect x="960" y="84" width="420" height="382" rx="5" class="box-o"/>
-<text x="1170" y="104" class="b" text-anchor="middle">1  Default: ours (partly built; the only platform in v1)</text>
-<text x="1170" y="121" class="t-m" text-anchor="middle">our placement; js-agent + crun on Linux, native on macOS</text>
-<text x="1170" y="138" class="t-m" text-anchor="middle">machine providers, in priority order:</text>
-<rect x="972" y="148" width="396" height="150" rx="5" class="box-b"/>
-<text x="1170" y="167" class="b" text-anchor="middle">a  Static (partly built)</text>
-<text x="1170" y="183" class="t-m" text-anchor="middle">hosts we install js-agent on; they register; no acquire</text>
-<rect x="982" y="192" width="182" height="96" rx="5" class="box"/>
-<text x="1073" y="211" class="b" text-anchor="middle">Linux host</text>
-<text x="1073" y="227" class="t-m" text-anchor="middle">js-agent + crun, no daemon</text>
-<rect x="1033" y="238" width="80" height="34" rx="5" class="box-b"/>
-<text x="1073" y="260" class="b" text-anchor="middle">job</text>
-<text x="1073" y="283" class="t-m" text-anchor="middle" font-size="10">job = OCI image</text>
-<rect x="1176" y="192" width="182" height="96" rx="5" class="box"/>
-<text x="1267" y="211" class="b" text-anchor="middle">macOS host</text>
-<text x="1267" y="227" class="t-m" text-anchor="middle">js-agent, native run</text>
-<rect x="1227" y="238" width="80" height="34" rx="5" class="box-bd"/>
-<text x="1267" y="260" class="b" text-anchor="middle">job</text>
-<text x="1267" y="283" class="t-m" text-anchor="middle" font-size="10">planned: OCI image</text>
-<rect x="972" y="310" width="126" height="56" rx="5" class="box"/>
-<text x="1035" y="332" class="b" text-anchor="middle">b  Lambda Labs</text>
-<text x="1035" y="350" class="t-m" text-anchor="middle">partly built</text>
-<rect x="1107" y="310" width="126" height="56" rx="5" class="box-bd"/>
-<text x="1170" y="332" class="b" text-anchor="middle">c  AWS EC2</text>
-<text x="1170" y="350" class="t-m" text-anchor="middle">planned</text>
-<rect x="1242" y="310" width="126" height="56" rx="5" class="box-bd"/>
-<text x="1305" y="332" class="b" text-anchor="middle">d  GCP Compute Engine</text>
-<text x="1305" y="350" class="t-m" text-anchor="middle">planned</text>
-<text x="1170" y="386" class="t-m" text-anchor="middle">b to d: catalog() returns offers in our vocabulary;</text>
-<text x="1170" y="402" class="t-m" text-anchor="middle">acquire boots a VM that runs js-agent and says hello;</text>
-<text x="1170" y="418" class="t-m" text-anchor="middle">its detected capabilities are checked against the offer</text>
-<text x="1170" y="440" class="t-m" text-anchor="middle">today: static pool, then registered hosts, one elastic pool</text>
-<rect x="960" y="482" width="132" height="76" rx="5" class="box-gd"/>
-<text x="1026" y="504" class="b" text-anchor="middle">2  Kubernetes</text>
-<text x="1026" y="522" class="t-m" text-anchor="middle">later, not v1</text>
-<text x="1026" y="538" class="t-m" text-anchor="middle">no js-agent</text>
-<rect x="1104" y="482" width="132" height="76" rx="5" class="box-gd"/>
-<text x="1170" y="504" class="b" text-anchor="middle">3  Cloud Run</text>
-<text x="1170" y="522" class="t-m" text-anchor="middle">later, not v1</text>
-<text x="1170" y="538" class="t-m" text-anchor="middle">no js-agent</text>
-<rect x="1248" y="482" width="132" height="76" rx="5" class="box-gd"/>
-<text x="1314" y="504" class="b" text-anchor="middle">4  ECS</text>
-<text x="1314" y="522" class="t-m" text-anchor="middle">later, not v1</text>
-<text x="1314" y="538" class="t-m" text-anchor="middle">no js-agent</text>
-<text x="1170" y="580" class="t-m" text-anchor="middle">each kind has its own typed parameters and capability flags;</text>
-<text x="1170" y="596" class="t-m" text-anchor="middle">they run the image with their own placement and network policy</text>
-<text x="1170" y="616" class="t-m" text-anchor="middle">other candidates: Azure Container Apps, Nomad, Fly Machines</text>
-<path d="M880,170 L960,170" class="ln" marker-end="url(#components-ak)" marker-start="url(#components-ak)"/>
-<text x="920" y="120" class="t-m lbl" text-anchor="middle">hello,</text>
-<text x="920" y="134" class="t-m lbl" text-anchor="middle">heartbeat,</text>
-<text x="920" y="148" class="t-m lbl" text-anchor="middle">commands</text>
-<path d="M880,338 L960,338" class="ln" marker-end="url(#components-ak)"/>
-<text x="920" y="316" class="t-m lbl" text-anchor="middle">acquire,</text>
-<text x="920" y="330" class="t-m lbl" text-anchor="middle">release</text>
-<path d="M900,520 L960,520" class="ln-d" marker-end="url(#components-ak)"/>
-<text x="920" y="508" class="t-m lbl" text-anchor="middle">OCI image</text>
-<rect x="1000" y="672" width="170" height="44" rx="5" class="box-g"/>
-<text x="1085" y="699" class="b" text-anchor="middle">Image registry</text>
-<rect x="1210" y="672" width="170" height="44" rx="5" class="box-g"/>
-<text x="1295" y="699" class="b" text-anchor="middle">Object store</text>
-<path d="M1085,632 L1085,672" class="ln" marker-end="url(#components-ak)"/>
-<text x="1075" y="658" class="t-m lbl" text-anchor="end">digest-verified pull</text>
-<path d="M1295,632 L1295,672" class="ln-d" marker-end="url(#components-ak)"/>
-<text x="1285" y="658" class="t-m lbl" text-anchor="end">one presigned PUT</text>
-
-<path d="M30,745 L80,745" class="ln" marker-end="url(#components-ak)"/>
-<text x="90" y="749" class="t-m" text-anchor="start">message path</text>
-<rect x="30" y="764" width="50" height="16" rx="3" class="box-bd"/>
-<text x="90" y="777" class="t-m" text-anchor="start">dashed outline: planned</text>
-<text x="30" y="808" class="t-m" text-anchor="start">The scheduler never reaches the object store:</text>
-<text x="30" y="825" class="t-m" text-anchor="start">a job reaches it only through the URL its client minted.</text>
+<path d="M190,216 L235,216" class="ln" marker-end="url(#components-ak)"/>
+<rect x="470" y="70" width="430" height="520" rx="5" class="box-t"/>
+<path d="M425,172 L490,172" class="ln" marker-end="url(#components-ak)"/>
+<rect x="490" y="96" width="390" height="150" rx="5" class="box-o"/>
+<text x="685.0" y="141.5" class="b" text-anchor="middle">Scheduler: js-sched</text>
+<text x="685.0" y="158.5" class="t-m" text-anchor="middle">queue of waiting requests</text>
+<text x="685.0" y="175.5" class="t-m" text-anchor="middle">placement: by load; whole host by tail</text>
+<text x="685.0" y="192.5" class="t-m" text-anchor="middle">asks platforms, then providers, in order (section 5.6)</text>
+<text x="685.0" y="209.5" class="t-m" text-anchor="middle">estimates from usage history</text>
+<rect x="490" y="290" width="390" height="110" rx="5" class="box-o"/>
+<text x="685.0" y="332.5" class="b" text-anchor="middle">Leases and runs</text>
+<text x="685.0" y="349.5" class="t-m" text-anchor="middle">the state machine (section 3.2)</text>
+<text x="685.0" y="366.5" class="t-m" text-anchor="middle">a lease holds capacity; a run is a job inside it</text>
+<rect x="490" y="444" width="390" height="120" rx="5" class="box-b"/>
+<text x="685.0" y="491.5" class="b" text-anchor="middle">Postgres</text>
+<text x="685.0" y="508.5" class="t-m" text-anchor="middle">leases, runs, usage history</text>
+<text x="685.0" y="525.5" class="t-m" text-anchor="middle">and the hosts: what exists, live, what each has</text>
+<path d="M685,246 L685,290" class="ln" marker-end="url(#components-ak)"/>
+<path d="M685,400 L685,444" class="ln" marker-end="url(#components-ak)"/>
+<text x="685" y="272" class="t-m lbl" text-anchor="middle">decides</text>
+<text x="685" y="426" class="t-m lbl" text-anchor="middle">stores</text>
+<rect x="960" y="96" width="420" height="300" rx="5" class="box-o"/>
+<text x="1170" y="118" class="b" text-anchor="middle">Default platform (the one v1 builds)</text>
+<text x="1170" y="136" class="t-m" text-anchor="middle">js-agent on every machine runs OCI images:</text>
+<text x="1170" y="153" class="t-m" text-anchor="middle">crun on Linux, native on macOS</text>
+<text x="1170" y="184" class="b" text-anchor="middle">Machine providers, in priority order; they</text>
+<text x="1170" y="201" class="b" text-anchor="middle">acquire and release machines</text>
+<rect x="980" y="214" width="185" height="70" rx="5" class="box"/>
+<text x="1072.5" y="236.5" class="b" text-anchor="middle">Static</text>
+<text x="1072.5" y="253.5" class="t-m" text-anchor="middle">hosts we install js-agent</text>
+<text x="1072.5" y="270.5" class="t-m" text-anchor="middle">on; they register</text>
+<rect x="1175" y="214" width="185" height="70" rx="5" class="box"/>
+<text x="1267.5" y="236.5" class="b" text-anchor="middle">Lambda Labs</text>
+<text x="1267.5" y="253.5" class="t-m" text-anchor="middle">starts a VM that boots</text>
+<text x="1267.5" y="270.5" class="t-m" text-anchor="middle">js-agent</text>
+<rect x="980" y="298" width="185" height="70" rx="5" class="box-bd"/>
+<text x="1072.5" y="329.0" class="b" text-anchor="middle">AWS EC2</text>
+<text x="1072.5" y="346.0" class="t-m" text-anchor="middle">starts a VM that boots js-agent</text>
+<rect x="1175" y="298" width="185" height="70" rx="5" class="box-bd"/>
+<text x="1267.5" y="329.0" class="b" text-anchor="middle">GCP Compute Engine</text>
+<text x="1267.5" y="346.0" class="t-m" text-anchor="middle">starts a VM that boots js-agent</text>
+<rect x="960" y="420" width="420" height="44" rx="5" class="box-gd"/>
+<text x="1170.0" y="446.5" class="b" text-anchor="middle">Kubernetes (later): no js-agent</text>
+<rect x="960" y="478" width="420" height="44" rx="5" class="box-gd"/>
+<text x="1170.0" y="504.5" class="b" text-anchor="middle">Cloud Run (later): no js-agent</text>
+<rect x="960" y="536" width="420" height="44" rx="5" class="box-gd"/>
+<text x="1170.0" y="562.5" class="b" text-anchor="middle">ECS (later): no js-agent</text>
+<path d="M900,172 L960,172" class="ln" marker-end="url(#components-ak)"/>
+<text x="930" y="164" class="t-m lbl" text-anchor="middle">places</text>
+<path d="M960,226 L900,226" class="ln-d" marker-end="url(#components-ak)"/>
+<text x="930" y="218" class="t-m lbl" text-anchor="middle">agents report</text>
+<path d="M900,500 L960,500" class="ln-d" marker-end="url(#components-ak)"/>
+<text x="700" y="622" class="t-m" text-anchor="start">The object store is outside: only a job reaches it, through an upload URL the client minted.</text>
 </svg>

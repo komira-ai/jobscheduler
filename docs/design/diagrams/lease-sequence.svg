@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1140 1192" width="1140" height="1192" role="img" aria-label="Sequence diagram between client, lease server, registry, agent and store for four flows: ordinary acquire, whole-node acquire with request_id, renew and release.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1140 1192" width="1140" height="1192" role="img" aria-label="Sequence diagram between client, service, agent and Postgres for four flows: ordinary acquire, whole-node acquire with request_id, renew and release.">
 <title>Lease sequence: acquire, whole-node, renew, release</title>
 <defs><marker id="lease-sequence-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="lease-sequence-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="lease-sequence-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
 <style>
@@ -28,29 +28,24 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <rect x="0" y="0" width="1140" height="1192" fill="#FFFFFF"/>
 <path d="M90,76 L90,1168" class="ln-d"/>
 <path d="M340,76 L340,1168" class="ln-d"/>
-<path d="M590,76 L590,1168" class="ln-d"/>
 <path d="M820,76 L820,1168" class="ln-d"/>
 <path d="M1040,76 L1040,1168" class="ln-d"/>
-<text x="20" y="28" class="b" text-anchor="start" font-size="16">Four lease calls between client, lease server, registry, agent and store</text>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">Four lease calls between client, service, agent and Postgres</text>
 <rect x="40.0" y="44" width="100" height="32" rx="5" class="box-b"/>
 <text x="90.0" y="64.0" class="b" text-anchor="middle">Client</text>
 <rect x="255.0" y="44" width="170" height="32" rx="5" class="box-b"/>
-<text x="340.0" y="64.0" class="b" text-anchor="middle">Lease server (table)</text>
-<rect x="535.0" y="44" width="110" height="32" rx="5" class="box-b"/>
-<text x="590.0" y="64.0" class="b" text-anchor="middle">Registry</text>
+<text x="340.0" y="64.0" class="b" text-anchor="middle">Service (js-sched)</text>
 <rect x="770.0" y="44" width="100" height="32" rx="5" class="box-b"/>
 <text x="820.0" y="64.0" class="b" text-anchor="middle">Agent</text>
 <rect x="980.0" y="44" width="120" height="32" rx="5" class="box-b"/>
-<text x="1040.0" y="64.0" class="b" text-anchor="middle">Store</text>
+<text x="1040.0" y="64.0" class="b" text-anchor="middle">Postgres</text>
 <text x="20" y="104" class="b lbl" text-anchor="start">A  acquire (ordinary)</text>
 <path d="M90,144 L340,144" class="ln" marker-end="url(#lease-sequence-ak)"/>
 <text x="215.0" y="137" class="t-m lbl" text-anchor="middle">1  POST /v1/leases</text>
 <path d="M340,178 L1040,178" class="ln" marker-end="url(#lease-sequence-ak)"/>
 <text x="690.0" y="171" class="t-m lbl" text-anchor="middle">2  save pending (commit before start)</text>
-<path d="M340,212 L590,212" class="ln" marker-end="url(#lease-sequence-ak)"/>
-<text x="465.0" y="205" class="t-m lbl" text-anchor="middle">3  start</text>
-<path d="M590,246 L340,246" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
-<text x="465.0" y="239" class="t-m lbl" text-anchor="middle">4  started(host)</text>
+<rect x="352" y="198" width="320" height="24" rx="5" class="box-o"/><text x="362" y="215" class="t-m" text-anchor="start">3  place and book a host</text>
+<rect x="352" y="232" width="320" height="24" rx="5" class="box-o"/><text x="362" y="249" class="t-m" text-anchor="start">4  host booked, lease started</text>
 <path d="M340,280 L1040,280" class="ln" marker-end="url(#lease-sequence-ak)"/>
 <text x="690.0" y="273" class="t-m lbl" text-anchor="middle">5  save held</text>
 <path d="M340,314 L90,314" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
@@ -62,19 +57,14 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="215.0" y="413" class="t-m lbl" text-anchor="middle">1  POST /v1/leases {request_id}</text>
 <path d="M340,454 L1040,454" class="ln" marker-end="url(#lease-sequence-ak)"/>
 <text x="690.0" y="447" class="t-m lbl" text-anchor="middle">2  save pending</text>
-<path d="M340,488 L590,488" class="ln" marker-end="url(#lease-sequence-ak)"/>
-<text x="465.0" y="481" class="t-m lbl" text-anchor="middle">3  start(request_id)</text>
-<text x="605" y="492" class="t-m lbl" text-anchor="start">wait list; reserve and drain</text>
+<rect x="352" y="474" width="320" height="24" rx="5" class="box-o"/><text x="362" y="491" class="t-m" text-anchor="start">3  queue; reserve and drain</text>
 <path d="M340,522 L90,522" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
 <text x="215.0" y="515" class="t-m lbl" text-anchor="middle">4  202 {id, state: pending}</text>
-<path d="M340,574 L590,574" class="ln" marker-end="url(#lease-sequence-ak)"/>
-<text x="465.0" y="567" class="t-m lbl" text-anchor="middle">a  present request again</text>
-<text x="605" y="572" class="t-m lbl" text-anchor="start">mark host, drain until</text>
-<text x="605" y="586" class="t-m lbl" text-anchor="start">quiet, commit</text>
-<path d="M590,618 L820,618" class="ln" marker-end="url(#lease-sequence-ak)"/>
-<text x="705.0" y="611" class="t-m lbl" text-anchor="middle">b  exclusive lease (via heartbeat reply)</text>
-<path d="M820,652 L590,652" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
-<text x="705.0" y="645" class="t-m lbl" text-anchor="middle">c  exclusive_ready</text>
+<rect x="352" y="560" width="320" height="24" rx="5" class="box-o"/><text x="362" y="577" class="t-m" text-anchor="start">a  present again; mark host, drain, commit</text>
+<path d="M340,618 L820,618" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="580.0" y="611" class="t-m lbl" text-anchor="middle">b  exclusive lease, sent to the agent</text>
+<path d="M820,652 L340,652" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
+<text x="580.0" y="645" class="t-m lbl" text-anchor="middle">c  exclusive_ready</text>
 <path d="M340,686 L1040,686" class="ln" marker-end="url(#lease-sequence-ak)"/>
 <text x="690.0" y="679" class="t-m lbl" text-anchor="middle">d  present seen: save held, start ttl and wall clocks</text>
 <rect x="60" y="536" width="1040" height="164" rx="5" class="box-p"/>
@@ -88,8 +78,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="215.0" y="825" class="t-m lbl" text-anchor="middle">1  POST .../renew</text>
 <path d="M340,866 L1040,866" class="ln" marker-end="url(#lease-sequence-ak)"/>
 <text x="690.0" y="859" class="t-m lbl" text-anchor="middle">2  save</text>
-<path d="M340,900 L590,900" class="ln" marker-end="url(#lease-sequence-ak)"/>
-<text x="465.0" y="893" class="t-m lbl" text-anchor="middle">3  host reserved?</text>
+<rect x="352" y="886" width="320" height="24" rx="5" class="box-o"/><text x="362" y="903" class="t-m" text-anchor="start">3  is the host reserved?</text>
 <path d="M340,934 L90,934" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
 <text x="215.0" y="927" class="t-m lbl" text-anchor="middle">4  {expires_at_ms, host_reserved}</text>
 <text x="20" y="966" class="b lbl" text-anchor="start">D  release</text>
@@ -97,8 +86,8 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="215.0" y="999" class="t-m lbl" text-anchor="middle">1  DELETE</text>
 <path d="M340,1040 L1040,1040" class="ln" marker-end="url(#lease-sequence-ak)"/>
 <text x="690.0" y="1033" class="t-m lbl" text-anchor="middle">2  save releasing</text>
-<path d="M340,1074 L590,1074" class="ln" marker-end="url(#lease-sequence-ak)"/>
-<text x="465.0" y="1067" class="t-m lbl" text-anchor="middle">3  stop (runs, booking)</text>
+<path d="M340,1074 L820,1074" class="ln" marker-end="url(#lease-sequence-ak)"/>
+<text x="580.0" y="1067" class="t-m lbl" text-anchor="middle">3  stop the runs, free the booking</text>
 <path d="M340,1108 L1040,1108" class="ln" marker-end="url(#lease-sequence-ak)"/>
 <text x="690.0" y="1101" class="t-m lbl" text-anchor="middle">4  save</text>
 <path d="M340,1142 L90,1142" class="ln-d" marker-end="url(#lease-sequence-ak)"/>
