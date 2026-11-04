@@ -224,6 +224,9 @@ fn start(life: &mut Lifecycle, node: &Node, run_id: &str) -> Vec<String> {
         valid_for_ms: 0,
         bundle: None,
         native: None,
+        run: None,
+        os: None,
+        arch: None,
     };
     let reply = HeartbeatReply {
         commands: vec![Command::Start(Box::new(spec))],

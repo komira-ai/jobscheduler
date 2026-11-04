@@ -56,18 +56,25 @@
 //! enum value this version does not know reads as an `Unknown` variant ([`Outcome`],
 //! [`Ack`], [`HeldState`], [`Command`]) and never fails the message around it; a reply
 //! decodes its commands one by one, so one command this version cannot read does not cost
-//! the commands beside it. Two values are the deliberate exceptions, because skipping
+//! the commands beside it. Three values are the deliberate exceptions, because skipping
 //! them would be unsafe:
 //!
 //! - an unknown [`Phase`] reads as [`Phase::Quarantined`], which takes no work;
 //! - an unknown [`Isolation`] value is a decode error (inside a reply, that one start reads
 //!   as [`Command::Unknown`]), so an agent never runs a job it cannot classify, while an
 //!   absent one means [`Isolation::Contained`].
+//! - an unknown `os` or `arch` of a start ([`JobSpec::os`], [`JobSpec::arch`]) is a decode
+//!   error in the same way, so an agent never runs an image built for a platform it cannot
+//!   name, while an absent one is a legacy start.
 //!
 //! A field an old receiver would silently ignore cannot carry something the job needs.
 //! `JobSpec::files` is such a field (a presigned URL is a secret the task cannot run
 //! without), so an agent that can write them reports the capability `run-files` in its
 //! hello, and the server queues and sends a start with files only to a host that did.
+//! `JobSpec::run` is another (an older agent would run the image's own command instead):
+//! a server sends it, with `os` and `arch`, only to a host that reported `one-job`
+//! ([`ONE_JOB_CAPABILITY`]), and writes the start in the legacy forms for any other
+//! ([`JobSpec::downgrade_for`]).
 //!
 //! # Not here yet
 //!
@@ -111,10 +118,12 @@ mod image;
 pub mod limits;
 mod load;
 mod native;
+mod platform;
 pub mod protocol;
 pub mod refusal;
+mod run;
 
-pub use caps::{Caps, ReadModel, bundle_capability};
+pub use caps::{Caps, ONE_JOB_CAPABILITY, ReadModel, bundle_capability};
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use credential::HostCredential;
 pub use error::{Rule, ValidationError};
@@ -131,7 +140,9 @@ pub use native::{
     BUNDLE_ENTRYPOINT_MAX, BUNDLE_PROGRAM_PREFIX, InputRef, NativeSpec, NetworkLevel, OutputKind,
     OutputSpec, Placement,
 };
+pub use platform::{ImagePlatform, check_platform};
 pub use protocol::{PROTOCOL_MAJOR, PROTOCOL_NAME, ProtocolRange};
+pub use run::RunSpec;
 
 /// The heartbeat interval the server proposes in [`Welcome`] unless its configuration
 /// says otherwise, in milliseconds.

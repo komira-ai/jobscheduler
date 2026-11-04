@@ -187,6 +187,9 @@ fn job(s: &mut dyn Subject, run_id: &str, program: Program, wall_ms: u64) -> Job
         valid_for_ms: 0,
         bundle: None,
         native: None,
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 

@@ -80,6 +80,9 @@ pub fn job() -> JobSpec {
         valid_for_ms: 10_000,
         bundle: None,
         native: None,
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 
