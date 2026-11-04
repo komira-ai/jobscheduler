@@ -9,6 +9,7 @@
 //! is run by hand on a GPU host: the target's binary, as that workflow runs it, with
 //! `--ignored a_crun_job_sees_only_its_booked_gpu`.
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use clap::Parser as _;
@@ -39,7 +40,9 @@ const SCRIPT: &str = "ls -1 /dev; echo GPU_TEST=$GPU_TEST; \
 /// driver directory is there to read, but cannot be written or remounted read-write. Catches
 /// a bundle `crun` gives every GPU, a booked node that does not appear or that the job user
 /// cannot open, a node of another type, device or mode, a device rule that keeps the job from
-/// starting, a writable driver mount, and a driver submount that leaks into the job.
+/// starting, a writable driver mount (the directory itself is writable by the job's id, so a
+/// failed write is the bind's), a driver submount that leaks into the job, and a later job
+/// without GPUs of the same image that sees the driver or a GPU node.
 #[test]
 #[ignore = "real crun on a host with two NVIDIA GPUs: run by hand (see the module)"]
 fn a_crun_job_sees_only_its_booked_gpu() {
@@ -51,6 +54,19 @@ fn a_crun_job_sees_only_its_booked_gpu() {
     let mut s = subject::crun_subject("a_crun_job_sees_only_its_booked_gpu");
     let driver = s.searchable_dir("gpu-test-driver");
     std::fs::write(driver.join("marker"), "from-the-host").expect("a file in the driver");
+    // Writable by everyone, the job's host id among them: a write that fails in the job is
+    // the read-only bind's doing, not the directory's mode.
+    std::fs::set_permissions(&driver, std::fs::Permissions::from_mode(0o777))
+        .expect("make the driver writable");
+    let mode = std::fs::metadata(&driver)
+        .expect("the driver")
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o777,
+        0o777,
+        "the job's id could write the driver directory"
+    );
     // A writable mount below the driver directory: the bind is not recursive, so the job must
     // see the empty directory under it and nothing of the mount.
     let sub = driver.join("sub");
@@ -83,6 +99,12 @@ fn a_crun_job_sees_only_its_booked_gpu() {
         .expect("the host has the nodes")
         .expect("a device list");
     s.prepared();
+    let in_image = s.image_root().join("usr/local/gpu-test");
+    assert!(
+        !in_image.exists(),
+        "the image has no {}",
+        in_image.display()
+    );
     let gpus = GpuSettings {
         passthrough,
         read: read_node,
@@ -133,4 +155,37 @@ fn a_crun_job_sees_only_its_booked_gpu() {
     }
     assert!(!listed.contains(&"nvidia0"), "the other GPU: {listed:?}");
     runtime.remove(&id).expect("remove");
+
+    // A job without GPUs of the same image, after `crun` made the driver's destination in the
+    // image's root: it sees at most an empty directory there, and runs.
+    let mut plain = spec_of(&mut s, "r2", Program::Exit(0));
+    plain.body = Body::Container {
+        image: s.image(),
+        args: vec!["/bin/sh".to_owned(), "-c".to_owned(), AFTER.to_owned()],
+    };
+    let id = runtime.create_and_start(&plain).expect("create and start");
+    runtime.wait_ended(&id);
+    let ended = runtime.poll(&id).expect("poll");
+    let tail = runtime.log_tail(&id).expect("a tail").expect("the tail");
+    assert_eq!(
+        ended,
+        Status::Exited(Exit {
+            code: 0,
+            oom_killed: false
+        }),
+        "{tail:?}"
+    );
+    let listed: Vec<&str> = tail.stdout.lines().collect();
+    assert!(listed.contains(&"ran"), "{listed:?}");
+    assert!(
+        listed.contains(&"absent") || listed.contains(&"left 0"),
+        "a job without GPUs sees the driver's files: {listed:?}"
+    );
+    assert!(!listed.contains(&"nvidiactl"), "a GPU node: {listed:?}");
+    runtime.remove(&id).expect("remove");
 }
+
+/// What the job without GPUs prints: what is at the driver's destination, its `/dev`, and that
+/// it ran.
+const AFTER: &str = "if [ -e /usr/local/gpu-test ]; then \
+    echo \"left $(ls -A /usr/local/gpu-test | wc -l)\"; else echo absent; fi; ls -1 /dev; echo ran";

@@ -5,6 +5,7 @@
 //! and their end is waited for.
 
 use std::io;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -547,10 +548,9 @@ fn a_driver_directory_gone_since_the_start_refuses_the_run_and_makes_nothing() {
     let hidden_mount = format!("{}:/usr/local/hidden", hidden.display());
     flags.extend(["--gpu-mount", &hidden_mount]);
     let mut locked = open_with_gpus(&node, passthrough(&flags), four_gpus);
-    let mode = |bits| std::os::unix::fs::PermissionsExt::from_mode(bits);
-    std::fs::set_permissions(&above, mode(0)).expect("lock it");
+    std::fs::set_permissions(&above, std::fs::Permissions::from_mode(0o000)).expect("lock it");
     let denied = locked.stage(&run(&node, "r4-hold", &[0]));
-    std::fs::set_permissions(&above, mode(0o755)).expect("unlock it");
+    std::fs::set_permissions(&above, std::fs::Permissions::from_mode(0o755)).expect("unlock it");
     assert_eq!(
         denied.expect_err("refused").to_string(),
         format!(

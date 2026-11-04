@@ -3,7 +3,7 @@
 //! root. The host's own reader is tested on `/dev/null`, which every Linux host has.
 
 use std::io;
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use clap::Parser as _;
@@ -752,11 +752,9 @@ fn a_destination_is_walked_in_the_image_without_following_a_link() {
         );
     }
     let locked = root.join("locked");
-    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0))
-        .expect("lock it");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("lock it");
     let denied = target_refusal(&root, "/locked/driver");
-    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .expect("unlock it");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("unlock it");
     assert_eq!(
         denied,
         "--gpu-mount: the destination /locked/driver: /locked/driver cannot be looked up in \

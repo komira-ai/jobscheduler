@@ -202,6 +202,12 @@ impl CrunSubject {
         self.made(&[name], 0o755)
     }
 
+    /// The unpacked root of the subject's image in its store.
+    pub fn image_root(&self) -> PathBuf {
+        let digest = self.image.rsplit_once('@').map_or("", |(_, digest)| digest);
+        js_contain::oci::image::published_root(&self.settings.scratch, digest)
+    }
+
     /// The directory of the lease `name`.
     pub fn lease_dir(&self, name: &str) -> PathBuf {
         self.settings.scratch.join(name)
