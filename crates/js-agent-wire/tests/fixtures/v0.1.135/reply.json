@@ -1,0 +1,27 @@
+{
+  "commands": [
+    {
+      "type": "start",
+      "run_id": "run-1",
+      "lease_id": "1-1",
+      "image": "ubuntu:24.04@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "args": ["make", "all"],
+      "limits": {
+        "cpu_millis": 2000,
+        "memory_bytes": 1073741824,
+        "pids": 512,
+        "wall_ms": 60000
+      },
+      "gpu_indices": [0],
+      "mounts": [{"root_name": "cache", "rel": "inputs/a", "ro": true}],
+      "isolation": "host",
+      "labels": {"team": "infra"},
+      "heartbeat_seq": 7,
+      "valid_for_ms": 10000
+    },
+    {"type": "stop", "run_id": "r1"},
+    {"type": "cancel", "run_id": "r2"}
+  ],
+  "result_acks": [{"run_id": "r1", "ack": "UNKNOWN_LEASE"}],
+  "taint_ack": true
+}

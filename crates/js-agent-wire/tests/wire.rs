@@ -63,6 +63,7 @@ fn refusal_codes_snapshot() {
         refusal::PLATFORM_MISMATCH,
         refusal::IMAGE_UNSUPPORTED_HERE,
         refusal::RUN_UNSUPPORTED,
+        refusal::ENV_UNSUPPORTED,
     ];
     assert_eq!(
         codes.join(" "),
@@ -72,7 +73,7 @@ fn refusal_codes_snapshot() {
          unsupported-protocol invalid-heartbeat invalid-welcome invalid-reply unknown-pool \
          shape-not-accepted host-contract execution-mismatch pool-full host-bound session-mismatch session-unavailable host-listed rate-limited \
          body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready invalid-program invalid-env native-unsupported invalid-bundle bundle-digest-required quota-unavailable \
-         platform-mismatch image-unsupported-here run-unsupported"
+         platform-mismatch image-unsupported-here run-unsupported env-unsupported"
     );
 }
 
@@ -255,5 +256,7 @@ fn round_trip_of_every_message() {
         }],
         taint_ack: true,
         exclusive: None,
+        job_acks: Vec::new(),
+        retired_acks: Vec::new(),
     });
 }
