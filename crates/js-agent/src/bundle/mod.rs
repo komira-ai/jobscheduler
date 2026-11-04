@@ -1,7 +1,8 @@
 //! Bundles on a Mac: the flags that configure the store, what the agent reports about it,
 //! and the checks a start that names a bundle must pass.
 //!
-//! A bundle is a darwin toolchain a job pins by digest (`JobSpec::bundle`); the agent keeps
+//! A bundle is a darwin toolchain a job pins by digest (`JobSpec::bundle`), or names by its
+//! image with a `run` (a bundle start on a Mac); the agent keeps
 //! unpacked bundles in a store (`--bundle-store`). This module is the agent's side of the
 //! policy around that store, over one seam, [`BundleHost`], so every rule is tested with a
 //! fake host:
@@ -12,8 +13,10 @@
 //!   empty one, trust `digest` with `--bundle-pull missing` (any submitter could make the
 //!   host download and unpack), a registry entry that is a bare host.
 //! - [`Admission`]: the checks of a start, in order: the deny list, the allow list, the
-//!   registry the name points to, whether the store holds the bundle (or a fetch may begin),
-//!   the macOS it needs, the Xcode it needs. A refusal carries one of the codes of
+//!   platform (darwin/arm64), the registry the name points to (`--bundle-registry-allow*` for a
+//!   `bundle` pin, `--image-allow` for an image, `image-not-allowed` on none), the index alias
+//!   when the pin names an index, whether the store holds the bundle (or a fetch may begin),
+//!   the macOS it needs, the Xcode it needs, the entrypoint the program names. A refusal carries one of the codes of
 //!   [`js_agent_wire::refusal`], and [`js_agent_wire::refusal::bundle_class`] says whose
 //!   fault it is.
 //! - [`report`]: what the hello says (`bundle`, `bundle-root`) and the [`js_agent_wire::Caps`]
@@ -23,6 +26,9 @@
 //! - [`Placer`]: the store itself on the agent that runs native jobs. It ensures a bundle
 //!   through js-oci into the tree store (every byte checked against a digest), fetches in the
 //!   background for `--bundle-pull missing`, and pins the trees of a held bundle for one run.
+//!   A pin may name the bundle's manifest or an image index that lists it for darwin/arm64:
+//!   the store records which manifest an index resolved to (`indexes/<index digest>`), and
+//!   [`manifest_of`] reads it back.
 //!   The native runtime (`crate::native`) runs the bundle's programs from those trees.
 //!
 //! A start that passes every check is run by the runtime, which pins the trees again.
@@ -37,6 +43,6 @@ mod settings;
 pub use admit::Admission;
 pub use host::{BundleHost, Fetch, HostXcode, MAX_LIST_BYTES, Needs, SystemHost};
 pub use list::{ListError, parse_digests};
-pub use place::{Pinned, PlaceError, Placer, load_config};
+pub use place::{Pinned, PlaceError, Placer, load_config, manifest_of};
 pub use report::{Reported, hello_capabilities, report, reserve_bytes};
 pub use settings::{Pull, Registry, Settings, Trust};
