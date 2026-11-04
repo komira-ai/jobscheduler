@@ -5,7 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
-use js_agent_wire::{HeldRun, HeldState, Isolation, JobSpec, Outcome, RunResult, Taint};
+use js_agent_wire::{
+    HeldRun, HeldState, Isolation, JobSpec, NativeSpec, Outcome, RunResult, Taint,
+};
 
 use super::{RETIRED_CAP, SLOTS};
 use crate::lifecycle::runtime::{Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Ticket};
@@ -535,9 +537,12 @@ pub(super) fn run_spec(
     }
     RunSpec {
         run_id: spec.run_id.clone(),
-        body: match &spec.native {
-            Some(native) => Body::Native(native.clone()),
-            None => Body::Container {
+        // A `run` only reaches here on a runtime that runs image runs: admission refused it
+        // elsewhere. Its image is the bundle the run is from.
+        body: match (&spec.native, &spec.run) {
+            (Some(native), _) => Body::Native(native.clone()),
+            (None, Some(run)) => Body::Native(NativeSpec::from(run.clone())),
+            (None, None) => Body::Container {
                 image: spec.image.clone(),
                 args: spec.args.clone(),
             },
@@ -552,7 +557,11 @@ pub(super) fn run_spec(
         slot,
         isolation: spec.isolation,
         network: spec.network,
+        ports: spec.ports.clone(),
         labels,
-        bundle: spec.bundle.clone(),
+        bundle: spec
+            .bundle
+            .clone()
+            .or_else(|| spec.run.as_ref().map(|_| spec.image.clone())),
     }
 }

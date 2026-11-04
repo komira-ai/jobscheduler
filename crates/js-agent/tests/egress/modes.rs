@@ -37,7 +37,7 @@ fn the_default_mode_gives_a_job_loopback_only_and_no_route() {
         let host = ContainerHost::new("none", Network::default()).await;
         let live = host.start(&script).await;
         let attachment = egress
-            .attach("none", live.pid, JobNetwork::None)
+            .attach("none", live.pid, JobNetwork::None, &[])
             .expect("attach does nothing");
         assert_eq!(attachment.interface(), None);
         live.finish().await

@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent_wire::{Isolation, LogTail, NativeSpec, NetworkCeiling, NetworkLevel, refusal};
-use js_types::JobNetwork;
+use js_types::{JobNetwork, PortMap};
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -127,6 +127,10 @@ pub struct RunSpec {
     /// [`Runtime::network_ceiling`]. A backend that wires networks gives the container that
     /// level; `none` is loopback only.
     pub network: JobNetwork,
+    /// The ports the job declared, each forwarded from the host's port to the job's (design
+    /// 5.8) by a backend that wires networks; the admission let them through only when the
+    /// runtime's ceiling lists their host ports and the level is wired (not `none`).
+    pub ports: Vec<PortMap>,
     /// The job's labels and the agent's own ([`label`]); the agent's win.
     pub labels: BTreeMap<String, String>,
     /// The darwin bundle a native run pins, `name[:tag]@sha256:<manifest digest>`: the
@@ -345,14 +349,23 @@ pub trait Runtime {
 
     /// Whether this runtime runs a start named by its image (an `image`, with or without a
     /// `run`), asked before such a start creates anything. The default runs them, which is
-    /// every container runtime. The runtime a Mac agent has runs only the legacy native body
-    /// and refuses them (`image-unsupported-here`).
+    /// every container runtime. The runtime a Mac agent has runs one only with a `run` and a
+    /// bundle store ([`Runtime::runs_image_runs`]); otherwise it refuses it
+    /// (`image-unsupported-here`).
     ///
     /// # Errors
     ///
     /// The code the start is refused with, and why.
     fn check_image(&self) -> Result<(), NativeRefusal> {
         Ok(())
+    }
+
+    /// Whether this runtime runs a start named by its image with a `run`: the Mac runtime
+    /// with a bundle store does, by the bundle the image resolves to, and runs the `run` as
+    /// a native body. The default is a runtime that does not (a container runtime refuses a
+    /// `run`, `run-unsupported`).
+    fn runs_image_runs(&self) -> bool {
+        false
     }
 
     /// Ends and removes whatever an earlier process left, which no list of the runtime's
@@ -382,11 +395,12 @@ pub trait Runtime {
     }
 
     /// The most network a contained job of this runtime may ask for (design 5.8): a start
-    /// above it is refused (`network-above-ceiling`, `port-above-ceiling`) before anything is
-    /// made, and never run with less. The default is `none` with no port: the
-    /// container-engine runtimes (Docker, Podman) and the native one give a job no network of
-    /// its own choosing, so a job that asks for more through them is refused naming the
-    /// ceiling `none`. The `crun` runtime answers its egress's ceiling.
+    /// above it is refused (`network-above-ceiling`, `port-above-ceiling`,
+    /// `ports-not-supported`) before anything is made, and never run with less. The default is
+    /// `none` with no port: the container-engine runtimes (Docker, Podman) and the native one
+    /// give a job no network of its own choosing and forward no port, so a job that asks for
+    /// more through them is refused naming the ceiling `none`, and one that declares a port
+    /// `ports-not-supported`. The `crun` runtime answers its egress's ceiling.
     fn network_ceiling(&self) -> NetworkCeiling {
         NetworkCeiling::default()
     }

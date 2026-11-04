@@ -86,7 +86,9 @@ fn ipv6_is_off_for_a_wired_namespace_and_on_for_one_wired_by_hand() {
     ] {
         let egress = Egress::start(config).expect("start");
         let holder = Holder::new();
-        let attachment = egress.attach("v6", holder.pid(), level).expect("attach");
+        let attachment = egress
+            .attach("v6", holder.pid(), level, &[])
+            .expect("attach");
         let addresses = text(&ip_in(&holder.ns, &["-6", "addr", "show", "dev", "eth0"]));
         assert!(
             !addresses.contains("inet6"),

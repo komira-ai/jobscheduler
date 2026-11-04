@@ -41,6 +41,6 @@ mod config;
 pub mod kind;
 mod pool;
 
-pub use book::{Candidate, Held, HostBook, SeatError};
+pub use book::{Candidate, ChooseOver, Held, HostBook, SeatError};
 pub use config::{ConfigError, EXAMPLE_CONFIG};
 pub use pool::StaticPool;

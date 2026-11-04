@@ -112,8 +112,9 @@ impl Host {
     /// Whether a lease asking `wanted` can be booked here now. A lease that books a
     /// whole host needs a host with no lease. A lease that shares needs a host with no
     /// whole-host lease, and room in every dimension (count of GPUs and their class
-    /// included) beside the leases already here.
-    fn has_room(&self, wanted: &Resources, whole: bool) -> bool {
+    /// included) beside the leases already here; its CPU may go `slack` thousandths above
+    /// the host's ([`HostBook::set_cpu_slack`]), and no other dimension may.
+    fn has_room(&self, wanted: &Resources, whole: bool, slack: u32) -> bool {
         if whole {
             return self.leases.is_empty();
         }
@@ -126,8 +127,28 @@ impl Host {
             .try_fold(self.on_host(wanted), |sum, booked| {
                 sum.checked_add(&booked.resources)
             });
-        sum.is_some_and(|sum| sum.fits_in(self.shape.resources()))
+        let offered = self.shape.resources();
+        let cpu = u128::from(offered.cpu_millis()) * (1000 + u128::from(slack)) / 1000;
+        let limit = offered
+            .clone()
+            .with_cpu_millis(u64::try_from(cpu).unwrap_or(u64::MAX));
+        sum.is_some_and(|sum| sum.fits_in(&limit))
     }
+}
+
+/// The choice [`HostBook::start_over`] asks for: shown the candidates of a start and a way
+/// to read every listed host ([`HostBook::candidates`]), it answers the index of the
+/// candidate to book, or `None` for none.
+pub type ChooseOver<'a> = &'a dyn Fn(&[Candidate], &dyn Fn() -> Vec<Candidate>) -> Option<usize>;
+
+/// Every host of `hosts` as a candidate, in id order.
+fn listing(hosts: &BTreeMap<HostId, Host>) -> Vec<Candidate> {
+    let listed = hosts.iter().map(|(id, host)| Candidate {
+        host: id.clone(),
+        shape: host.shape.clone(),
+        leases: host.leases.clone(),
+    });
+    listed.collect()
 }
 
 /// The booking table of a provider that leases whole hosts: which host each lease
@@ -152,12 +173,24 @@ impl Host {
 pub struct HostBook {
     hosts: BTreeMap<HostId, Host>,
     ended: BTreeSet<LeaseId>,
+    /// The thousandths above a host's CPU that leases sharing it may book together
+    /// ([`HostBook::set_cpu_slack`]); 0, none, unless set.
+    cpu_slack: u32,
 }
 
 impl HostBook {
     /// An empty table.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Lets the leases that share a host book together up to `permille` thousandths more
+    /// CPU than the host's shape has (100 is 1.1x of its cores), and nothing more of any
+    /// other dimension: the room a placer that charges CPU by measured load needs, so the
+    /// book does not refuse what the placer may take. A lease that books the whole host is
+    /// not affected. The default, 0, books no more than the shape.
+    pub fn set_cpu_slack(&mut self, permille: u32) {
+        self.cpu_slack = permille;
     }
 
     /// Lists `id` with `shape`, free, all of whose memory is booked. A host already listed
@@ -250,7 +283,7 @@ impl HostBook {
                 continue;
             }
             fits_somewhere = true;
-            let room = host.has_room(&wanted.resources, whole);
+            let room = host.has_room(&wanted.resources, whole, self.cpu_slack);
             let open = [room, eligible(id, &host.shape)].into_iter().all(|ok| ok);
             if open {
                 host.book(spec, whole);
@@ -297,6 +330,23 @@ impl HostBook {
         eligible: &dyn Fn(&HostId, &Shape) -> bool,
         choose: &dyn Fn(&[Candidate]) -> Option<usize>,
     ) -> StartAck {
+        self.start_over(spec, gate, eligible, &|open, _| choose(open))
+    }
+
+    /// Books `spec`'s lease as [`start_by`] does, and shows `choose` beside the
+    /// candidates a way to read every host the book lists, eligible or not, with the leases
+    /// on it ([`HostBook::candidates`]): for a chooser that keeps a picture of the book and
+    /// rebuilds it when the two disagree. Reading it costs time in hosts plus leases;
+    /// `choose` reads it only when it needs to.
+    ///
+    /// [`start_by`]: HostBook::start_by
+    pub fn start_over(
+        &mut self,
+        spec: &StartSpec,
+        gate: Option<RefusalCode>,
+        eligible: &dyn Fn(&HostId, &Shape) -> bool,
+        choose: ChooseOver<'_>,
+    ) -> StartAck {
         if let Some(settled) = self.settled(spec, gate) {
             return settled;
         }
@@ -317,7 +367,7 @@ impl HostBook {
         let open: Vec<Candidate> = fitting
             .into_iter()
             .filter(|(id, host)| {
-                let room = host.has_room(&wanted.resources, whole);
+                let room = host.has_room(&wanted.resources, whole, self.cpu_slack);
                 [room, eligible(id, &host.shape)].into_iter().all(|ok| ok)
             })
             .map(|(id, host)| Candidate {
@@ -326,9 +376,10 @@ impl HostBook {
                 leases: host.leases.clone(),
             })
             .collect();
+        let every = || self.candidates();
         let chosen = match open.is_empty() {
             true => None,
-            false => choose(&open),
+            false => choose(&open, &every),
         };
         let picked = chosen.and_then(|at| open.get(at));
         let Some(picked) = picked else {
@@ -393,6 +444,12 @@ impl HostBook {
         held.collect()
     }
 
+    /// Every listed host, in id order, as a candidate: its shape and the leases booked on
+    /// it, whether or not it has room or is eligible for anything.
+    pub fn candidates(&self) -> Vec<Candidate> {
+        listing(&self.hosts)
+    }
+
     /// Every listed host, in id order, with its shape and the leases booked on it.
     pub fn hosts(&self) -> Vec<HostCapacity> {
         let listed = self.hosts.iter();
@@ -446,6 +503,7 @@ impl HostBook {
                 false => Err(SeatError::Elsewhere { lease, host: held }),
             };
         }
+        let slack = self.cpu_slack;
         let listed = self.hosts.get_mut(host);
         let listed = listed.ok_or_else(|| SeatError::Unlisted(host.clone()))?;
         let whole = shares.is_none();
@@ -453,7 +511,7 @@ impl HostBook {
             || listed.shape.resources().clone(),
             |shares| listed.on_host(&shares),
         );
-        if !listed.has_room(&resources, whole) {
+        if !listed.has_room(&resources, whole, slack) {
             return Err(match listed.leases.first() {
                 Some(holder) => SeatError::Taken {
                     host: host.clone(),

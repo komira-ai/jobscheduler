@@ -11,7 +11,7 @@
 use js_agent_wire::Phase;
 use js_provider::{RefusalCode, StartSpec};
 use js_registry::ProbeHost;
-use js_sched::{Cordon, ProbeHost as SchedHost, ProbeRefusal, admit_probe};
+use js_sched::{Cordon, MemoryPercent, ProbeHost as SchedHost, ProbeRefusal, admit_probe};
 use js_types::HostId;
 use js_types::sched::{LeaseId as SchedLeaseId, NodePhase};
 
@@ -20,7 +20,9 @@ use tracing::info;
 use super::map;
 
 /// Whether the probe `spec` may be booked on `pin`, the host it names, by the probe rule
-/// over `host`, what the registry knows of it (`None`: no live host of that name).
+/// over `host`, what the registry knows of it (`None`: no live host of that name), with
+/// the host's memory cut to `memory`, the engine's share of it: the registry books the
+/// whole shape under this placement, and the share is the engine's rule.
 ///
 /// A probe whose request or host has no scheduler form (a capability that is not a
 /// platform requirement, a shape that does not describe a node) cannot be judged, and is
@@ -33,6 +35,7 @@ pub(crate) fn admit(
     spec: &StartSpec,
     pin: &HostId,
     host: Option<&ProbeHost>,
+    memory: MemoryPercent,
 ) -> Result<(), RefusalCode> {
     let lease = spec.lease();
     let unsupported = |error: map::MapError| {
@@ -43,7 +46,10 @@ pub(crate) fn admit(
     request.whole_worker = spec.class().admission().books_whole_host();
     let pin = map::worker(pin);
     let facts = host
-        .map(|host| map::host(&host.shape).map(|node| (host, node)))
+        .map(|host| {
+            map::host(&host.shape)
+                .map(|(capacity, caps)| (host, (memory.of_capacity(capacity), caps)))
+        })
         .transpose()
         .map_err(unsupported)?;
     let cordoned = Cordon::Cordoned;
