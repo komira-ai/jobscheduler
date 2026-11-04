@@ -92,7 +92,7 @@ pub use sink::{
 };
 pub use tail::{
     NoTail, StoreTailSink, TAIL_BUCKETS, TAIL_PREFIX, TAIL_ROW_VERSION, TAIL_WRITE_TRIES,
-    TailDelta, TailRowError, TailSink, TailSinkCounters, TailSinkError, TailTotals,
+    TailDelta, TailFlush, TailRowError, TailSink, TailSinkCounters, TailSinkError, TailTotals,
 };
 
 /// Wall minutes in an hour: the unit a node series is stored in (one row per hour).

@@ -37,17 +37,24 @@ sink joins it to the counts waiting to be written, and the usage flush (every fe
 and at shutdown) adds them to the rows in one transaction conditional on the version of
 every row it read. A row that changed in between is read again and the write tried again,
 so two writers, or two boots, each add their own counts and neither loses nor doubles the
-other's. A write that fails keeps its counts for the next flush, is counted
-(`UsageCounters::tail.writes_failed`) and is logged once per run of failures. The counts
-not yet written when a server stops without its final flush are lost from the store.
+other's. Flushes run one after another, so the final flush at shutdown also writes what an
+earlier flush still under way put back. A write that fails keeps its counts for the next
+flush, is counted (`UsageCounters::tail.writes_failed`) and is logged once per run of
+failures, with one more line when a write lands again; a flush with nothing waiting asks
+the store nothing and neither ends nor starts a run. The counts not yet written when a
+server stops without its final flush are lost from the store; what earlier flushes wrote
+stays.
 
 **Restart.** At start the registry reads the rows and counts on from them, so its
-counters are the stored totals plus every count since, written or not. The rows are
+counters are the stored totals plus every count since, written or not. The totals are
+exact while they stay within their ranges; a total that reaches the end of its range stops
+there, and only then may the order in which counts were grouped change it. The rows are
 additive: the server never resets them; only a person deleting them does.
 
-**Refusals.** Rows bucketed by other edges than the build's, or whose edges row does not
-read, are refused: the counters start at zero, nothing is added to those rows, and they
-are left as they are. A counter row of a newer version is skipped, read as zero, counted
+**Refusals.** Rows bucketed by other edges than the build's, rows whose edges row does not
+read, and counter rows with no edges row at all are refused: the counters start at zero,
+nothing is added to those rows (the counts that would have been are dropped and counted),
+and they are left as they are. A counter row of a newer version is skipped, read as zero, counted
 (`UsageCounters::tail.rows_skipped`) and never overwritten. A store that cannot be read at
 start leaves the counters at zero and is logged once.
 

@@ -23,7 +23,7 @@ use js_state::{
 };
 use js_testkit::dir::TestDir;
 use js_types::{Admission, ClassId, Dims, ProviderId, Request, ResourceClass, Resources};
-use js_usage::{ProfileKey, StoreTailSink, TailSink, TailSinkError};
+use js_usage::{ProfileKey, StoreTailSink, TAIL_PREFIX, TailFlush, TailSink, TailSinkError};
 use support::world::*;
 use support::*;
 
@@ -160,10 +160,22 @@ fn tail_counters_survive_a_restart() {
     });
 }
 
-/// A store over the fake that can be told to fail every transaction.
+/// A store that delegates and can be told to fail every transaction (`down`), or every
+/// scan of the tail counters' rows (`unread`).
 struct Failing {
-    inner: Fake,
+    inner: Arc<dyn Store>,
     down: AtomicBool,
+    unread: AtomicBool,
+}
+
+impl Failing {
+    fn over(inner: Arc<dyn Store>) -> Arc<Failing> {
+        Arc::new(Failing {
+            inner,
+            down: AtomicBool::new(false),
+            unread: AtomicBool::new(false),
+        })
+    }
 }
 
 impl Store for Failing {
@@ -179,7 +191,10 @@ impl Store for Failing {
     }
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
-        self.inner.scan_prefix(prefix)
+        match self.unread.load(Ordering::SeqCst) && prefix == TAIL_PREFIX {
+            true => Err(StoreError::Failed("unread".to_owned())),
+            false => self.inner.scan_prefix(prefix),
+        }
     }
 
     fn scan_range(&self, scan: ScanRange<'_>) -> Result<ScanPage, StoreError> {
@@ -211,24 +226,73 @@ impl Store for Failing {
 /// written twice after the store comes back.
 #[test]
 fn a_store_that_cannot_be_written_costs_counters_only() {
-    let store = Arc::new(Failing {
-        inner: Fake::with_flaw(Arc::new(ManualClock::default()), Flaw::None),
-        down: AtomicBool::new(true),
-    });
-    let sink = Arc::new(StoreTailSink::new(store.clone(), ERROR_EDGES_MS));
-    let mut w = world(sink.clone());
-    drive(&mut w);
-    assert_eq!(w.fx.registry.tail_counters(), driven());
-    let down = TailSinkError::Store(StoreError::Failed("down".to_owned()));
-    assert_eq!(sink.flush(), Err(down));
-    assert_eq!(sink.counters().writes_failed, 1);
-    assert_eq!(w.fx.registry.tail_counters(), driven());
+    on_both("tail-down", |inner| {
+        let store = Failing::over(inner);
+        store.down.store(true, Ordering::SeqCst);
+        let sink = Arc::new(StoreTailSink::new(store.clone(), ERROR_EDGES_MS));
+        let mut w = world(sink.clone());
+        drive(&mut w);
+        assert_eq!(w.fx.registry.tail_counters(), driven());
+        let down = TailSinkError::Store(StoreError::Failed("down".to_owned()));
+        assert_eq!(sink.flush(), Err(down));
+        assert_eq!(sink.counters().writes_failed, 1);
+        assert_eq!(w.fx.registry.tail_counters(), driven());
 
-    store.down.store(false, Ordering::SeqCst);
-    sink.flush().unwrap();
-    sink.flush().unwrap();
-    let back = world(Arc::new(StoreTailSink::new(store, ERROR_EDGES_MS)));
-    assert_eq!(back.fx.registry.tail_counters(), driven());
+        store.down.store(false, Ordering::SeqCst);
+        assert_eq!(sink.flush(), Ok(TailFlush::Written));
+        assert_eq!(sink.flush(), Ok(TailFlush::Idle));
+        let back = world(Arc::new(StoreTailSink::new(store, ERROR_EDGES_MS)));
+        assert_eq!(back.fx.registry.tail_counters(), driven());
+    });
+}
+
+/// [`driven`] twice over.
+fn driven_twice() -> TailCounters {
+    let once = driven();
+    let mut buckets = once.error_buckets;
+    buckets.iter_mut().for_each(|b| *b *= 2);
+    TailCounters {
+        started_on_marked: 2,
+        backfilled: 2,
+        ended_estimated: 2,
+        ended_unestimated: 2,
+        error_sum_ms: 60_000,
+        error_buckets: buckets,
+    }
+}
+
+/// Asserts what a store whose tail rows cannot be read at a start does, when it holds
+/// counters already: the registry is told (the server logs it once), counts on from zero
+/// and keeps the sink; once the store reads again, the new counts are added to what was
+/// stored, so the next registry reads both. Catches: a read failure that drops the sink
+/// (the counts after it never stored), one that resets the stored counters, and one read
+/// as zero stored counters that a later write then overwrites.
+#[test]
+fn a_tail_read_that_fails_at_start_counts_on_from_zero_beside_the_stored() {
+    on_both("tail-unread", |inner| {
+        let store = Failing::over(inner);
+        let first = Arc::new(StoreTailSink::new(store.clone(), ERROR_EDGES_MS));
+        let mut w = world(first.clone());
+        drive(&mut w);
+        assert_eq!(first.flush(), Ok(TailFlush::Written));
+
+        store.unread.store(true, Ordering::SeqCst);
+        let mut w = World::of(pool(), &["a"]);
+        w.fx.registry.set_placer(Arc::new(First));
+        w.fx.registry.set_lives(Arc::new(TwoMinutes));
+        w.provider = w.fx.registry.provider();
+        let sink = Arc::new(StoreTailSink::new(store.clone(), ERROR_EDGES_MS));
+        let unread = TailSinkError::Store(StoreError::Failed("unread".to_owned()));
+        assert_eq!(w.fx.registry.set_tail_sink(sink.clone()), Err(unread));
+        assert_eq!(w.fx.registry.tail_counters(), TailCounters::default());
+
+        store.unread.store(false, Ordering::SeqCst);
+        drive(&mut w);
+        assert_eq!(w.fx.registry.tail_counters(), driven());
+        assert_eq!(sink.flush(), Ok(TailFlush::Written));
+        let next = world(Arc::new(StoreTailSink::new(store, ERROR_EDGES_MS)));
+        assert_eq!(next.fx.registry.tail_counters(), driven_twice());
+    });
 }
 
 /// Asserts that a registry whose sink holds counters bucketed by other edges starts from

@@ -29,7 +29,9 @@
 //!
 //! A stored set made with other edges is refused ([`TailSinkError::OtherEdges`]): its
 //! buckets mean other ranges, so they are neither read nor added to, and the rows are
-//! left as they are. A counter row of a newer version (a later build that stores a field
+//! left as they are. So is one whose edges row does not read
+//! ([`TailSinkError::Unreadable`]) and counter rows with no edges row
+//! ([`TailSinkError::NoEdges`]). A counter row of a newer version (a later build that stores a field
 //! another way) is skipped, read as zero and counted ([`TailSinkCounters::rows_skipped`]),
 //! and never overwritten.
 
@@ -162,6 +164,8 @@ macro_rules! tail_values {
 tail_values! {
     /// The tail counters as a whole: what is stored, or what the registry has counted.
     /// Every count saturates at its largest value and the sum at either end of its range.
+    /// Within those ranges the totals are exact whatever the order and grouping of the
+    /// changes; only a total that reaches a limit may depend on them.
     TailTotals
 }
 
@@ -229,6 +233,10 @@ pub enum TailSinkError {
         /// What is wrong with it.
         reason: TailRowError,
     },
+    /// Counter rows are stored with no row of the edges beside them, so the ranges their
+    /// buckets count are unknown. They are left as they are.
+    #[error("tail counter rows are stored with no edges row; their buckets cannot be read")]
+    NoEdges,
     /// The rows changed under every try of a write: other writers kept writing.
     #[error("tail counter rows changed under each of {tries} tries of a write")]
     Conflict {
@@ -369,6 +377,19 @@ pub struct StoreTailSink {
     store: Arc<dyn Store>,
     edges: [i64; TAIL_BUCKETS - 1],
     state: Mutex<State>,
+    /// Held for the whole of a flush, so flushes run one after another: a flush that
+    /// starts while another writes waits for it, and so sees the counts a failed write
+    /// put back. [`StoreTailSink::add`] never takes it.
+    flushing: Mutex<()>,
+}
+
+/// What a flush did that did not fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TailFlush {
+    /// Nothing waited, and the store was not asked.
+    Idle,
+    /// The counts that waited are in the store.
+    Written,
 }
 
 #[derive(Default)]
@@ -386,6 +407,7 @@ impl StoreTailSink {
             store,
             edges,
             state: Mutex::new(State::default()),
+            flushing: Mutex::new(()),
         }
     }
 
@@ -399,15 +421,22 @@ impl StoreTailSink {
         self.state().pending
     }
 
-    /// Writes the counts waiting to be written. On failure they keep waiting for the next
-    /// flush, and the failure is counted ([`TailSinkCounters::writes_failed`]); on a
-    /// refusal for other edges they are dropped, since they can never be written beside
-    /// those rows.
+    /// Writes the counts waiting to be written, after any flush already under way has
+    /// ended. On a store failure or a conflict they keep waiting for the next flush, with
+    /// whatever was added meanwhile, and the failure is counted
+    /// ([`TailSinkCounters::writes_failed`]); on a refusal (other edges, an edges row that
+    /// does not read, counter rows with no edges row) they are dropped and counted, since
+    /// they can never be written beside those rows. With nothing waiting the store is not
+    /// asked ([`TailFlush::Idle`]).
     ///
     /// # Errors
     /// [`TailSinkError`] when the write did not land.
-    pub fn flush(&self) -> Result<(), TailSinkError> {
+    pub fn flush(&self) -> Result<TailFlush, TailSinkError> {
+        let _flushing = self.flushing.lock().unwrap_or_else(PoisonError::into_inner);
         let delta = std::mem::take(&mut self.state().pending);
+        if delta.is_empty() {
+            return Ok(TailFlush::Idle);
+        }
         let written = self.write(&delta);
         let mut state = self.state();
         if written.is_err() {
@@ -416,7 +445,7 @@ impl StoreTailSink {
         if let Err(TailSinkError::Store(_) | TailSinkError::Conflict { .. }) = &written {
             state.pending.merge(&delta);
         }
-        written
+        written.map(|()| TailFlush::Written)
     }
 
     /// The tail rows in the store, one scan.
@@ -435,6 +464,18 @@ impl StoreTailSink {
             }
         }
         Ok(stored)
+    }
+
+    /// Refuses a stored set this build cannot add to: one whose edges are not this
+    /// build's, or do not read, or counter rows with no edges row beside them.
+    fn check_set(&self, stored: &Stored) -> Result<(), TailSinkError> {
+        match &stored.edges {
+            Some(edges) => self.check_edges(edges),
+            None => match stored.rows.iter().any(Option::is_some) {
+                true => Err(TailSinkError::NoEdges),
+                false => Ok(()),
+            },
+        }
     }
 
     /// Refuses a stored set whose edges are not this build's.
@@ -459,18 +500,13 @@ impl StoreTailSink {
     /// Adds `delta` to the stored rows: one transaction conditional on every row read,
     /// read and tried again while another writer got in first.
     fn write(&self, delta: &TailDelta) -> Result<(), TailSinkError> {
-        if delta.is_empty() {
-            return Ok(());
-        }
         let more = delta.values();
         for _ in 0..TAIL_WRITE_TRIES {
             let stored = self.scan()?;
+            self.check_set(&stored)?;
             let edges_key = key_of(EDGES);
             let mut txn = match &stored.edges {
-                Some(edges) => {
-                    self.check_edges(edges)?;
-                    Txn::new().check(edges_key, Cond::Version(edges.version))
-                }
+                Some(edges) => Txn::new().check(edges_key, Cond::Version(edges.version)),
                 None => Txn::new().put(edges_key, encode_edges(&self.edges), Cond::Absent),
             };
             for (i, row) in stored.rows.iter().enumerate() {
@@ -503,9 +539,7 @@ impl StoreTailSink {
 impl TailSink for StoreTailSink {
     fn load(&self) -> Result<TailTotals, TailSinkError> {
         let stored = self.scan()?;
-        if let Some(edges) = &stored.edges {
-            self.check_edges(edges)?;
-        }
+        self.check_set(&stored)?;
         let mut values = [0; COUNTERS];
         for (i, row) in stored.rows.iter().enumerate() {
             let Some(row) = row else {

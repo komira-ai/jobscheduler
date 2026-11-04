@@ -35,7 +35,7 @@ use js_types::HostId;
 use js_types::sched::WorkKey;
 use js_usage::{
     KeyProfile, NodeBuffer, NodeSeries, ProfileCurves, ProfileError, ProfileKey, ProfileStore,
-    Recorder, RunSeries, StoreTailSink, TailSink,
+    Recorder, RunSeries, StoreTailSink, TailFlush, TailSink,
 };
 use tracing::{info, warn};
 
@@ -155,19 +155,36 @@ impl NodeUsage {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Writes the tail counts that wait. A failure costs the stored counters only: the
-    /// counts wait for the next flush, the sink counts it, and the first failure of a run
-    /// of them is logged, as is the write that ends the run.
-    fn flush_tail(&self) {
-        let written = self.tail.flush();
-        let was_failing = self.tail_failing.swap(written.is_err(), Ordering::SeqCst);
-        match (written, was_failing) {
-            (Err(error), false) => {
-                warn!(%error, "cannot write the tail counters; they wait for the next flush");
-            }
-            (Ok(()), true) => info!("the tail counters are written again"),
-            (Err(_), true) | (Ok(()), false) => {}
+    /// Writes the tail counts that wait, and says what is to be logged: the first failure
+    /// of a run of them, and the write that ends the run. A failure costs the stored
+    /// counters only: the sink counts it and keeps or drops the counts as it says. A flush
+    /// with nothing waiting asks the store nothing, so it neither ends a run nor starts one.
+    fn flush_tail(&self) -> Option<TailNote> {
+        let set = |failing| self.tail_failing.swap(failing, Ordering::SeqCst);
+        match self.tail.flush() {
+            Ok(TailFlush::Idle) => None,
+            Ok(TailFlush::Written) => set(false).then_some(TailNote::Recovered),
+            Err(error) => (!set(true)).then(|| TailNote::Failing(error.to_string())),
         }
+    }
+}
+
+/// What a flush of the tail counters logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TailNote {
+    /// The first failed write of a run of them, and why it failed.
+    Failing(String),
+    /// A write that landed after a run of failed ones.
+    Recovered,
+}
+
+/// Logs `note`.
+fn log_tail(note: TailNote) {
+    match note {
+        TailNote::Failing(error) => {
+            warn!(%error, "cannot write the tail counters; they wait for the next flush");
+        }
+        TailNote::Recovered => info!("the tail counters are written again"),
     }
 }
 
@@ -199,7 +216,7 @@ impl UsageSink for NodeUsage {
     }
 
     fn flush(&self, now_minute: u64) -> Result<Vec<(HostId, NodeRow)>, UsageFault> {
-        self.flush_tail();
+        self.flush_tail().into_iter().for_each(log_tail);
         let mut inner = self.inner();
         let due = inner.recorder.node_minutes_due(now_minute);
         for (host, row) in &due {

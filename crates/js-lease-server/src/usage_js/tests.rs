@@ -351,3 +351,51 @@ fn the_tail_counts_are_written_at_a_flush_and_wait_while_the_store_is_down() {
     assert_eq!(stored.load().unwrap().backfilled, 1);
     assert_eq!(tail.counters().writes_failed, 2);
 }
+
+/// Asserts what the tail counters' log says over a run of failures: nothing for a flush
+/// with nothing waiting; the first failure of a run, by its exact text, once; nothing for
+/// the failures after it, nor for a flush with nothing waiting while the store still
+/// refuses (the refused counts are dropped); the end of the run once, when a write lands;
+/// and the first failure of a later run again. Catches: an idle flush taken for a
+/// recovery (a false recovery, then a second warning for the same refusal), a warning on
+/// every failed flush, and a recovery that is never said.
+#[test]
+fn the_tail_log_says_a_run_of_failures_once_and_its_end_once() {
+    let (sink, fail) = sink();
+    let tail = sink.tail().unwrap();
+    let one = js_usage::TailDelta {
+        backfilled: 1,
+        ..js_usage::TailDelta::default()
+    };
+    let edges = "usage/tail/error_edges_ms";
+    let put = Txn::new().put(edges, vec![9], js_state::Cond::Any);
+    sink.store.txn(put).unwrap().unwrap();
+    assert_eq!(sink.flush_tail(), None);
+
+    tail.add(&one);
+    let unreadable = "tail counter row usage/tail/error_edges_ms does not read: \
+                      the row has version 9, which this build does not read";
+    let first = sink.flush_tail();
+    assert_eq!(first, Some(TailNote::Failing(unreadable.to_owned())));
+    first.into_iter().for_each(log_tail);
+    assert_eq!(sink.flush_tail(), None);
+    tail.add(&one);
+    assert_eq!(sink.flush_tail(), None);
+
+    let delete = Txn::new().delete(edges, js_state::Cond::Any);
+    sink.store.txn(delete).unwrap().unwrap();
+    tail.add(&one);
+    let recovered = sink.flush_tail();
+    assert_eq!(recovered, Some(TailNote::Recovered));
+    recovered.into_iter().for_each(log_tail);
+    assert_eq!(sink.flush_tail(), None);
+
+    fail.store(true, Ordering::SeqCst);
+    tail.add(&one);
+    let down = "tail counters: state store failure: down".to_owned();
+    assert_eq!(sink.flush_tail(), Some(TailNote::Failing(down)));
+    fail.store(false, Ordering::SeqCst);
+    let stored = StoreTailSink::new(sink.store.clone(), ERROR_EDGES_MS);
+    assert_eq!(stored.load().unwrap().backfilled, 1);
+    assert_eq!(tail.counters().writes_failed, 3);
+}
