@@ -21,8 +21,11 @@ use js_agent::lifecycle::{
     Capacity, Clock, Config, DirLayout, Event, Exit, Lifecycle, MountRoots, NoChecks, RunHandle,
     RunSpec, Runtime, ScratchRoot, StateRoot, Status, label,
 };
-use js_agent_wire::{Command, HeartbeatReply, HeldJob, HeldState, LogTail, Outcome};
+use js_agent_wire::{
+    Command, HeartbeatReply, HeldJob, HeldState, LogTail, NetworkCeiling, Outcome,
+};
 use js_contain::oci::SupervisorId;
+use js_types::JobNetwork;
 use serde_json::{Value, json};
 
 use crate::node::{LONG, NoImages, Node, PID};
@@ -610,7 +613,19 @@ impl EgressPort for Unused {
         Ok(())
     }
 
-    fn attach(&self, _run: &str, _pid: u32) -> Result<Box<dyn Wired>, EgressError> {
+    fn ceiling(&self) -> NetworkCeiling {
+        NetworkCeiling {
+            level: JobNetwork::AllowList,
+            ports: Vec::new(),
+        }
+    }
+
+    fn attach(
+        &self,
+        _run: &str,
+        _pid: u32,
+        _level: JobNetwork,
+    ) -> Result<Box<dyn Wired>, EgressError> {
         Err(EgressError::Exhausted)
     }
 }
