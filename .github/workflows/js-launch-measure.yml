@@ -12,6 +12,10 @@
 name: js-launch-measure
 
 on:
+  # TEMPORARY, removed before merge: a workflow only on a branch cannot be dispatched.
+  push:
+    branches: [task/js-measure-launch]
+    paths: ['.github/workflows/js-launch-measure.yml']
   workflow_dispatch:
     inputs:
       ref:
@@ -77,6 +81,6 @@ jobs:
       # cannot search, and /tmp is the directory the egress tests use for the same reason.
       - name: Measure as root
         env:
-          RUNS: ${{ inputs.runs }}
-          WARMUP: ${{ inputs.warmup }}
+          RUNS: ${{ inputs.runs || 2 }}
+          WARMUP: ${{ inputs.warmup || 0 }}
         run: sudo -E env "PATH=$PATH" target/release/js-launch-measure --runs "$RUNS" --warmup "$WARMUP" --image-name ubuntu-24.04 --crun "$JS_B_CRUN" --busybox "$JS_B_BUSYBOX" --job-user "$JS_B_UID:$JS_B_GID" --work-dir /tmp/js-launch-measure --summary-file "$GITHUB_STEP_SUMMARY"
