@@ -90,13 +90,13 @@ impl JobClient {
     ) -> Result<Self, JobError> {
         let server = ServerUrl::parse(server)?;
         let bearer = token::bearer(token_file)?;
-        let mut bearer = MetadataValue::try_from(bearer.as_str())
-            .map_err(|why| JobError::flag("--token-file", why))?;
-        bearer.set_sensitive(true);
         let token = bearer
             .strip_prefix("Bearer ")
             .unwrap_or_default()
             .to_owned();
+        let mut bearer = MetadataValue::try_from(bearer.as_str())
+            .map_err(|why| JobError::flag("--token-file", why))?;
+        bearer.set_sensitive(true);
         let begun = Arc::new(AtomicU64::new(0));
         let connector = wire::Connector::new(&server, ca_cert, dialer, Arc::clone(&begun))?;
         // The connector does TLS itself, so the channel's own address is plain `http://` (a
