@@ -55,7 +55,7 @@ fn gpu_request(gpu_class: &str, extra: &[(&str, &str)]) -> Request {
 /// Whether `request` is placed on the one registered host of `fx`.
 fn placed(fx: &Fixture, request: Request) -> bool {
     let spec = StartSpec::new(lease(1), request, &[class()]).unwrap();
-    started_on(&fx.provider.start(spec)) == Some("gpu-1")
+    started_on(&fx.provider.clone().start(spec)) == Some("gpu-1")
 }
 
 /// Asserts that a host of an old agent (no `shape.accelerator`) with a class the alias
