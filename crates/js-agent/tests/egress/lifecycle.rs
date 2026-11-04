@@ -34,7 +34,7 @@ fn releasing_a_run_removes_its_veth_and_its_set_member() {
     assert!(links("jsv").is_empty() && wired().is_empty());
     let holder = Holder::new();
     let attachment = egress
-        .attach("one", holder.pid(), JobNetwork::AllowList)
+        .attach("one", holder.pid(), JobNetwork::AllowList, &[])
         .expect("attach");
     assert_eq!(links("jsv"), ["jsv0"]);
     assert_eq!(wired(), ["jsv0"]);
@@ -44,7 +44,7 @@ fn releasing_a_run_removes_its_veth_and_its_set_member() {
     assert!(wired().is_empty());
     assert_eq!(named_namespaces(), named);
     let again = egress
-        .attach("two", holder.pid(), JobNetwork::AllowList)
+        .attach("two", holder.pid(), JobNetwork::AllowList, &[])
         .expect("the first block is free again");
     assert_eq!(again.interface(), Some("jsv0"));
     assert!(tcp(&holder.ns, far::ALLOWED).connected());
@@ -63,7 +63,7 @@ fn a_run_that_ends_leaves_only_a_set_member_and_release_removes_it() {
     let egress = Egress::start(config()).expect("start");
     let holder = Holder::new();
     let attachment = egress
-        .attach("ended", holder.pid(), JobNetwork::AllowList)
+        .attach("ended", holder.pid(), JobNetwork::AllowList, &[])
         .expect("attach");
     assert_eq!(links("jsv"), ["jsv0"]);
     drop(holder);
@@ -130,7 +130,7 @@ fn a_restart_removes_what_a_crash_left() {
     assert!(wired().is_empty(), "{:?}", wired());
     assert!(std::path::Path::new(&format!("/proc/{}", holder.pid())).exists());
     let attachment = new
-        .attach("again", holder.pid(), JobNetwork::AllowList)
+        .attach("again", holder.pid(), JobNetwork::AllowList, &[])
         .expect("wired again");
     assert_eq!(attachment.interface(), Some("jsv0"));
     assert!(tcp(&holder.ns, far::ALLOWED).connected());
@@ -148,9 +148,9 @@ fn wiring_refuses_the_hosts_own_namespace_and_a_missing_process() {
     let _serial = serial();
     let _far = Far::new();
     let egress = Egress::start(config()).expect("start");
-    let own = egress.attach("own", std::process::id(), JobNetwork::AllowList);
+    let own = egress.attach("own", std::process::id(), JobNetwork::AllowList, &[]);
     assert!(matches!(own, Err(EgressError::Container { .. })), "{own:?}");
-    let missing = egress.attach("missing", u32::MAX, JobNetwork::AllowList);
+    let missing = egress.attach("missing", u32::MAX, JobNetwork::AllowList, &[]);
     assert!(
         matches!(missing, Err(EgressError::Container { .. })),
         "{missing:?}"
@@ -159,7 +159,7 @@ fn wiring_refuses_the_hosts_own_namespace_and_a_missing_process() {
     assert!(wired().is_empty());
     let holder = Holder::new();
     let attachment = egress
-        .attach("fine", holder.pid(), JobNetwork::AllowList)
+        .attach("fine", holder.pid(), JobNetwork::AllowList, &[])
         .expect("attach");
     assert_eq!(
         attachment.interface(),
@@ -181,10 +181,10 @@ fn two_runs_at_once_cannot_reach_each_other() {
     let egress = Egress::start(config()).expect("start");
     let (a, b) = (Holder::new(), Holder::new());
     let first = egress
-        .attach("a", a.pid(), JobNetwork::AllowList)
+        .attach("a", a.pid(), JobNetwork::AllowList, &[])
         .expect("attach a");
     let second = egress
-        .attach("b", b.pid(), JobNetwork::AllowList)
+        .attach("b", b.pid(), JobNetwork::AllowList, &[])
         .expect("attach b");
     assert_eq!(links("jsv"), ["jsv0", "jsv1"]);
     assert_eq!(wired(), ["jsv0", "jsv1"]);
@@ -248,7 +248,7 @@ fn a_second_agent_cannot_start_while_one_holds_the_hosts_egress() {
     let first = Egress::start(config()).expect("start");
     let holder = Holder::new();
     let attachment = first
-        .attach("first", holder.pid(), JobNetwork::AllowList)
+        .attach("first", holder.pid(), JobNetwork::AllowList, &[])
         .expect("attach");
     let second = Egress::start(config()).map(drop);
     assert_eq!(second, Err(EgressError::Held));

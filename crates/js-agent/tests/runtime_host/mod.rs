@@ -305,6 +305,7 @@ impl RuntimeHost {
             bundle: None,
             labels: BTreeMap::new(),
             network: self.network,
+            ports: Vec::new(),
         })
     }
 }

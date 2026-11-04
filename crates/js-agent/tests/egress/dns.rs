@@ -27,7 +27,7 @@ fn only_the_configured_resolver_is_reachable() {
     let egress = Egress::start(config).expect("start");
     let holder = Holder::new();
     let attachment = egress
-        .attach("dns", holder.pid(), JobNetwork::AllowList)
+        .attach("dns", holder.pid(), JobNetwork::AllowList, &[])
         .expect("attach");
     assert!(
         udp(&holder.ns, far::DNS),
@@ -68,7 +68,7 @@ fn only_the_configured_resolver_is_reachable() {
     assert_eq!(none.config().resolv_conf(), None);
     let holder = Holder::new();
     let attachment = none
-        .attach("no-dns", holder.pid(), JobNetwork::AllowList)
+        .attach("no-dns", holder.pid(), JobNetwork::AllowList, &[])
         .expect("attach");
     assert!(
         !udp(&holder.ns, far::DNS),

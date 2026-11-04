@@ -272,7 +272,7 @@ fn the_scratch_is_given_to_the_mapped_ids() {
         .unwrap()
         .with_chown(record);
     rt.create_and_start(&spec("r1")).unwrap();
-    let other = Settings::new(Path::new(super::super::BIN), None, Some("2000:3000"))
+    let other = Settings::new(Path::new(super::super::BIN), Some("2000:3000"))
         .unwrap()
         .with_subuid("jobmap")
         .unwrap()

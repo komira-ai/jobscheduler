@@ -6,9 +6,12 @@ use std::time::Duration;
 
 use clap::ValueEnum;
 use js_registry::PoolConfig;
-use js_sched::Backfill;
+use js_sched::{Backfill, MemoryPercent};
 
+use super::CpuSlack;
+use crate::adapt::SharedClock;
 use crate::error::StartupError;
+use crate::sched::engine::Settings;
 use crate::sched::map;
 use crate::sched::place::SchedPlacer;
 
@@ -45,19 +48,63 @@ impl Placement {
         }
     }
 
+    /// The CPU slack the placement engine is built with: `given`, or the engine's
+    /// default. A slack given for any placement but `js-sched` is refused at `place`,
+    /// naming `needs`: no other placement reads it, so it would do nothing.
+    pub(crate) fn slack(
+        self,
+        given: Option<CpuSlack>,
+        place: &str,
+        needs: &str,
+    ) -> Result<CpuSlack, StartupError> {
+        match (self, given) {
+            (Self::JsSched, given) => Ok(given.unwrap_or_default()),
+            (Self::Registry, None) => Ok(CpuSlack::default()),
+            (Self::Registry, Some(_)) => Err(StartupError::at(place, format!("requires {needs}"))),
+        }
+    }
+
+    /// `pool` as the registry books it under this choice, and the share of each host's
+    /// memory the placement engine books. Under `registry` the registry cuts the shape it
+    /// books to the pool's `memory_schedulable_percent`, as it always did, and the engine
+    /// is not built. Under `js-sched` the share is the engine's rule: the registry books
+    /// each host's whole memory ([`PoolConfig::booking_whole_memory`]; the percent still
+    /// decides what fits the pool, and the hosts still report it), and the engine is given
+    /// the pool's percent. The pool holds a percent from 1 to 100 only (its parse refuses
+    /// any other), so every percent the engine is given is one js-sched takes.
+    pub(crate) fn split(self, pool: PoolConfig) -> (PoolConfig, MemoryPercent) {
+        match self {
+            Self::Registry => (pool, MemoryPercent::FULL),
+            Self::JsSched => {
+                let percent = MemoryPercent::clamped(u32::from(pool.memory_percent().get()));
+                (pool.booking_whole_memory(), percent)
+            }
+        }
+    }
+
     /// The placer the registry takes for this choice; none for `registry`. Under
-    /// `js-sched` a lease may backfill a host a whole-node request has set aside: the lease
-    /// table ends every lease at its wall time, so every bound is enforced, up to
-    /// `max_lease_wall` (`server.max_lease_wall`; none: any wall time the table took).
+    /// `js-sched` the placer's one engine is built with `cpu_slack`, the share `memory` of
+    /// each host's memory, and backfill: a lease may backfill a host a whole-node request
+    /// has set aside, since the lease table ends every lease at its wall time, so every
+    /// bound is enforced, up to `max_lease_wall` (`server.max_lease_wall`; none: any wall
+    /// time the table took). `clock` is the registry's.
     pub(crate) fn placer(
         self,
         max_lease_wall: Option<Duration>,
-    ) -> Option<Arc<dyn js_registry::Placer>> {
+        cpu_slack: CpuSlack,
+        memory: MemoryPercent,
+        clock: &SharedClock,
+    ) -> Option<Arc<SchedPlacer>> {
         match self {
             Self::Registry => None,
             Self::JsSched => {
                 let ceiling = max_lease_wall.unwrap_or(Duration::MAX);
-                Some(Arc::new(SchedPlacer::new(Backfill::enforced(ceiling))))
+                let settings = Settings {
+                    backfill: Backfill::enforced(ceiling),
+                    load: cpu_slack.load_config(),
+                    memory,
+                };
+                Some(Arc::new(SchedPlacer::new(settings, clock.clone())))
             }
         }
     }

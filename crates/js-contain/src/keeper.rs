@@ -1,5 +1,10 @@
 //! The keeper: a process for each lease that kills the lease cgroup when the daemon dies.
 //!
+//! It is for a daemon whose containers must not outlive it. A daemon that keeps its jobs
+//! across its own restart does the opposite: it starts each container under a supervisor
+//! ([`crate::oci::supervise`]) that outlives it, and its next start takes the container over;
+//! the agent's crun runtime does that and starts no keeper.
+//!
 //! A daemon killed by SIGKILL, the kernel's OOM killer or a panic that aborts cannot
 //! end its containers: nothing kills a `crun run` or the container it started when the
 //! daemon dies, so they keep running. A start-up sweep removes them only when a daemon

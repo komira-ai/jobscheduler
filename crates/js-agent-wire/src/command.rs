@@ -164,10 +164,12 @@ impl Mount {
 ///
 /// A job is named one way on both platforms: a non-empty `image`, pinned by digest, with an
 /// optional `run` that says what runs from it, and the `os` and `arch` of the manifest the
-/// digest pins. That is the wire form: the design has Linux run the image's container and
-/// macOS resolve the image to a bundle and run its entrypoint under the sandbox, but no agent
-/// of this release runs a `run` yet. A container agent refuses one (`run-unsupported`) and a
-/// Mac agent refuses every start named by its image (`image-unsupported-here`). The legacy forms, a container job without `run`
+/// digest pins. That is the wire form: Linux runs the image's container and macOS resolves
+/// the image to a bundle and runs its entrypoint under the sandbox. A container agent refuses
+/// a `run` (`run-unsupported`); a Mac agent with a bundle store runs a start named by its
+/// image that carries a `run`, and refuses one without a `run`, or without a store
+/// (`image-unsupported-here`), and one whose image is on no `--image-allow` entry
+/// (`image-not-allowed`). The legacy forms, a container job without `run`
 /// and a `native` body with an optional `bundle` and an empty `image`, are read and checked
 /// as before for this release; [`JobSpec::downgrade_for`] writes a start in them for a host
 /// that did not report the `one-job` capability.
@@ -278,9 +280,11 @@ pub struct JobSpec {
     #[serde(default, skip_serializing_if = "JobNetwork::is_none")]
     pub network: JobNetwork,
     /// The ports the job declares ([`PortMap`]): at most [`limits::MAX_PORTS`], each port
-    /// above zero, no host port twice. Left out when there are none. An agent refuses a host
-    /// port it does not list (`port-above-ceiling`), and until it forwards declared ports it
-    /// refuses a start that declares any (`ports-not-supported`). A native job declares none.
+    /// above zero, no host port twice. Left out when there are none. An agent that forwards
+    /// declared ports refuses a host port it does not list (`port-above-ceiling`) and forwards
+    /// each other one from the host's port to the job; an agent that forwards none, and any
+    /// agent for a job whose `network` is `none`, refuses a start that declares any
+    /// (`ports-not-supported`). A native job declares none.
     ///
     /// An agent that predates the field ignores it, so a server sends a start with ports only
     /// to a host whose hello lists them ([`crate::NetworkCeiling`]).

@@ -7,6 +7,8 @@ mod admit;
 pub mod fake;
 pub mod fixture;
 mod hello;
+pub mod image;
+mod index;
 mod lifecycle;
 mod place;
 mod private;

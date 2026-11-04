@@ -14,6 +14,7 @@ use js_contain::oci::RESOLV_CONF;
 use js_contain::subids::IdFiles;
 use js_oci::{Client, Policy};
 
+use super::adopt::report_lines;
 use super::{
     CgroupSettings, CrunError, CrunRuntime, CrunSettings, GpuSettings, Hooks, config_dir, port_of,
     read_node,
@@ -150,6 +151,9 @@ pub struct Seams {
     pub host: fn() -> CrunHost,
     /// The files the backend reads its ids from.
     pub ids: IdSources,
+    /// The binary each container's supervisor runs (`__supervise-run`): this program, unless a
+    /// test runs the agent inside a binary that does not answer the helper modes.
+    pub daemon: PathBuf,
 }
 
 impl Default for Seams {
@@ -159,6 +163,7 @@ impl Default for Seams {
             hooks: Hooks::default(),
             host: CrunHost::system,
             ids: IdSources::system(),
+            daemon: OciConfig::default().daemon,
         }
     }
 }
@@ -177,8 +182,9 @@ pub enum WireError {
     Open(#[from] CrunError),
 }
 
-/// A [`CrunRuntime`] for `plan`, the job users' mapping, and the warnings the operator
-/// should read.
+/// A [`CrunRuntime`] for `plan`, the job users' mapping, and the lines the operator should
+/// read: the warnings, then one line for each run the runtime adopted and each lease it
+/// removed as it opened.
 ///
 /// # Errors
 /// See [`WireError`].
@@ -200,6 +206,7 @@ pub fn open(
     oci.id_files = seams.ids.files.clone();
     oci.id_tool_path = Some(seams.ids.tool_path.clone());
     oci.check_search = seams.ids.check_search;
+    oci.daemon = seams.daemon.clone();
     // A lease's `/work` and home are made beside the run's directory in the scratch root, so
     // the run's disk quota bounds them with `/scratch`.
     oci.leases_in = Some(plan.scratch_root.clone());
@@ -220,13 +227,14 @@ pub fn open(
     let runtime = CrunRuntime::open_with(settings, Arc::new(images), seams.hooks)?;
     let (uid, gid) = runtime.subordinate_ids();
     // One warning, when no registry is allowed; none otherwise.
-    let warnings = vec![
+    let mut lines = vec![
         "--image-allow: none given, so no image is pulled and a job whose image is not on \
          the host is refused"
             .to_owned();
         usize::from(plan.image_allow.is_empty())
     ];
-    Ok((runtime, Mapping::new(uid, gid), warnings))
+    lines.extend(report_lines(runtime.swept()));
+    Ok((runtime, Mapping::new(uid, gid), lines))
 }
 
 impl CrunRuntime {

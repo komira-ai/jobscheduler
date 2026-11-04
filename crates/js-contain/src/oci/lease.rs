@@ -305,7 +305,17 @@ impl Oci {
     /// # Errors
     /// `crun` itself could not be run or did not finish.
     pub async fn ended(&self, spec: &ContainerSpec, running: &Running) -> Result<Ended, String> {
-        match running.run_end() {
+        self.ended_as(spec, running.run_end()).await
+    }
+
+    /// [`Oci::ended`] for a run whose end is `end`, however it was learnt (an exit record
+    /// of a supervisor, say): the same reading of `crun`'s log and the init's report in
+    /// `spec.dir`.
+    ///
+    /// # Errors
+    /// `end` is a failure of `crun` itself.
+    pub async fn ended_as(&self, spec: &ContainerSpec, end: RunEnd) -> Result<Ended, String> {
+        match end {
             RunEnd::Exited(0) => Ok(Ended::Exited(0)),
             RunEnd::Exited(code) => {
                 let log = tokio::fs::read_to_string(log_path(&spec.dir)).await;

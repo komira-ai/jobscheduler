@@ -29,6 +29,7 @@ use js_agent::{
     Backend, Cli, FileReader, Handle, Machine, Platform, RuntimeBuild, SharedClock, System,
 };
 use js_agent_wire::LogTail;
+use js_contain::oci::{end_supervisor, recorded_supervisor};
 use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
 use serde_json::json;
@@ -207,6 +208,9 @@ fn seams() -> Seams {
             tool_path: node.tools.clone().into_os_string(),
             check_search: false,
         },
+        // The agent runs inside this test binary, which does not answer the helper modes: each
+        // container's supervisor is the agent's own binary.
+        daemon: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
     }
 }
 
@@ -408,7 +412,7 @@ fn crun_settings_place_the_store_beside_the_scratch_root() {
         Some("/oci".into())
     );
     // Settings of an engine are left as they are.
-    let engine = Settings::new(Path::new("/bin/sh"), None, None).expect("an executable");
+    let engine = Settings::new(Path::new("/bin/sh"), None).expect("an executable");
     let placed = engine.clone().placed_beside(Path::new("/x/scratch"), None);
     assert!(placed.crun().is_none());
     assert_eq!(placed, engine);
@@ -532,6 +536,22 @@ pub(super) fn crun_flags(host_id: &str, extra: &[&str]) -> Vec<String> {
     flags
 }
 
+/// Ends the containers an earlier test's agent left on the shared node. A container outlives
+/// its agent (its supervisor holds it), and the next agent, of the same host id, would adopt it
+/// and hold its run, so a start for the same run id would run nothing. Each lease directory in
+/// the scratch root names its supervisor: it is ended, and waited for until it is gone, so the
+/// next agent finds a lease whose supervisor ended and removes it.
+fn end_leftovers(scratch: &Path) {
+    for entry in fs::read_dir(scratch).into_iter().flatten().flatten() {
+        if let Some(id) = recorded_supervisor(&entry.path()) {
+            end_supervisor(id);
+            while id.alive() {
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
 impl Rig {
     /// Starts the server and the agent, waits until the agent has said hello, and takes a
     /// lease on its host.
@@ -542,9 +562,16 @@ impl Rig {
     /// [`Rig::new`] over the pool `pool` describes.
     fn on_pool(name: &str, extra: &[&str], pool: &'static str) -> Self {
         let node = node();
+        end_leftovers(&node.scratch);
         for signal in ["ready", "go", "calls"] {
             let _ = fs::remove_file(node.dir.path().join(signal));
         }
+        // Each test has a server of its own, which numbers its runs from the start again: the
+        // results and retired ids an earlier test's agent kept in the shared state root are
+        // another server's, and a retired id would keep this test's run of the same id from
+        // starting.
+        let _ = fs::remove_file(node.state.join("retired.json"));
+        let _ = fs::remove_dir_all(node.state.join("held"));
         let server = Server::start_pool(name, &[], pool);
         let address = Arc::new(Mutex::new(server.url()));
         let flags = crun_flags("h1", extra);

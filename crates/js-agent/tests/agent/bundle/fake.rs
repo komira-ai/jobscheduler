@@ -22,6 +22,9 @@ pub struct State {
     pub files: BTreeMap<PathBuf, String>,
     pub held: Result<Vec<String>, String>,
     pub needs: BTreeMap<String, Needs>,
+    /// The index aliases of the store: pin digest to the manifest digest it resolves to.
+    /// A digest with no entry resolves to itself.
+    pub aliases: BTreeMap<String, String>,
     pub os: Result<DottedVersion, String>,
     pub xcodes: Vec<HostXcode>,
     pub used: Result<u64, String>,
@@ -48,6 +51,7 @@ impl Default for State {
             files: BTreeMap::new(),
             held: Ok(Vec::new()),
             needs: BTreeMap::new(),
+            aliases: BTreeMap::new(),
             os: Ok(DottedVersion::parse("14.8").unwrap()),
             xcodes: Vec::new(),
             used: Ok(0),
@@ -120,6 +124,11 @@ impl BundleHost for FakeHost {
 
     fn held(&self, _store: &Path) -> Result<Vec<String>, String> {
         self.get(|s| s.held.clone())
+    }
+
+    fn resolve(&self, _store: &Path, digest: &str) -> String {
+        self.get(|s| s.aliases.get(digest).cloned())
+            .unwrap_or_else(|| digest.to_owned())
     }
 
     fn needs(&self, _store: &Path, digest: &str) -> Result<Needs, String> {

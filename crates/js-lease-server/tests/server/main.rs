@@ -30,6 +30,7 @@ mod config_refusals;
 mod config_serve;
 mod config_support;
 mod config_usage;
+mod cpu_slack;
 mod disk;
 mod elastic_fake_e2e;
 mod estimate_feed;

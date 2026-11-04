@@ -194,7 +194,7 @@ impl Registry {
         // `NoFit` when no listed host fits, and every host is booked as the pool's shape,
         // so that happens for a request the pool's shape fits only when no host is listed
         // yet. A host could still join, which is capacity, not fit.
-        let floor = self.shared.config.booked();
+        let floor = self.shared.config.fit();
         let wanted = spec.request();
         let fits_pool = floor.satisfies(&wanted.resources, &wanted.capabilities);
         // A whole-node request that fits the pool is refused for lack of a host only when
@@ -290,12 +290,18 @@ impl Registry {
                 .all(|ok| ok)
         };
         // Without a placer the book books the first host that qualifies, stopping at it;
-        // with one it is shown every host that qualifies. The placer runs under this
-        // registry's lock and costs time in the hosts and leases it is shown.
+        // with one it is shown every host that qualifies, and may read every host listed.
+        // The placer runs under this registry's lock.
         let ack = match placer {
             Some(placer) => {
-                let choose = |open: &[Candidate]| placer.pick(spec, open, &marked);
-                book.start_by(spec, gate, &eligible, &choose)
+                // A start that fits no host by the pool's percent is not shown to the
+                // placer: it is `NoFit` (see the answer below).
+                let choose = |open: &[Candidate], every: &dyn Fn() -> Vec<Candidate>| {
+                    fits_pool
+                        .then(|| placer.pick_over(spec, open, &marked, every))
+                        .flatten()
+                };
+                book.start_over(spec, gate, &eligible, &choose)
             }
             None => book.start_where(spec, gate, &eligible),
         };
@@ -347,6 +353,11 @@ impl Registry {
             (_, true, true) => placement::answer(verdict, capable),
             (StartAck::Refused(RefusalCode::NoFit), true, false) => {
                 StartAck::Refused(RefusalCode::NoCapacity)
+            }
+            // A host's room is its whole memory when the placer keeps the percent: a
+            // request above the share fits a host but never the pool.
+            (StartAck::Refused(RefusalCode::NoCapacity), false, _) => {
+                StartAck::Refused(RefusalCode::NoFit)
             }
             (other, _, _) => other,
         }

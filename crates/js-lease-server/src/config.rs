@@ -25,7 +25,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
 use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
-use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering, Resolved};
+use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
 use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
@@ -33,8 +33,11 @@ use crate::rate::HelloLimit;
 use crate::usage::{KeySource, ProfileKey, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
 
+mod cpu_slack;
 mod placement;
+mod resolve;
 mod retention;
+pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub use placement::Placement;
 pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
 
@@ -123,6 +126,12 @@ pub struct Cli {
     /// `arch`.
     #[arg(long, value_enum, default_value = "registry")]
     pub placement: Placement,
+    /// How far above a host's cores the placement engine may charge it, as a multiplier
+    /// of the cores from 1.0 to 2.0 with at most three decimals, such as `1.1`. Without
+    /// the flag the engine's own default is used, which is 1.1. Needs `--placement
+    /// js-sched`.
+    #[arg(long, value_parser = CpuSlack::parse)]
+    pub cpu_slack: Option<CpuSlack>,
     /// Feeds each lease's estimated end to the drain cost of a whole-node request: the
     /// lease's start plus the largest P90 wall time, among the profiles the usage file has
     /// learned, of the runs queued on it with a profile name. A lease with no such run is
@@ -431,6 +440,8 @@ pub(crate) struct AgentSetup {
     pub(crate) placement: Placement,
     /// `--estimate-feed`.
     pub(crate) estimate_feed: bool,
+    /// `--cpu-slack`, or the engine's default: read by `--placement js-sched` only.
+    pub(crate) cpu_slack: CpuSlack,
     /// `server.max_lease_wall`: the ceiling the lease table holds a lease's wall time to,
     /// and the one up to which `--placement js-sched` trusts it for backfill.
     pub(crate) max_lease_wall: Option<Duration>,
@@ -536,6 +547,13 @@ impl Config {
                     mint_provider,
                 } = *registering;
                 server.agents.placement().check(&pool, "server.placement")?;
+                let given = server.agents.cpu_slack();
+                let needs = "server.placement = \"js-sched\"";
+                let cpu_slack =
+                    server
+                        .agents
+                        .placement()
+                        .slack(given, "server.cpu_slack", needs)?;
                 let agents = Box::new(AgentSetup {
                     tokens,
                     pool,
@@ -544,6 +562,7 @@ impl Config {
                     require_host_credential: server.agents.require_host_credential(),
                     placement: server.agents.placement(),
                     estimate_feed: server.agents.estimate_feed(),
+                    cpu_slack,
                     max_lease_wall: server.max_lease_wall,
                 });
                 (
@@ -595,28 +614,6 @@ impl Config {
             alert_repeat,
             job_retention: server.job_retention,
         })
-    }
-
-    /// Checks the configuration file at `path` as [`Config::from_config_file`] does and
-    /// answers its machine providers, platforms and pools, however each pool was written.
-    /// A file that is valid but that this version cannot start on (more than one pool that
-    /// registers agents) is resolved too.
-    ///
-    /// # Errors
-    ///
-    /// [`StartupError`] naming the table and the field at fault.
-    pub fn resolve_file(
-        path: &Path,
-        kinds: &Kinds,
-        files: &dyn SecretFiles,
-        clock: SharedClock,
-    ) -> Result<Resolved, StartupError> {
-        let load = Load {
-            kinds,
-            files,
-            clock,
-        };
-        Ok(file::load(path, &load)?.resolved)
     }
 
     /// The same configuration with every alert of the scaler also sent to `sink`, in
@@ -742,6 +739,16 @@ impl Config {
         }
     }
 
+    /// The CPU slack of the placement engine (`--cpu-slack`, or `server.cpu_slack`): the
+    /// value given, or the engine's default, 1.1x, which is also the answer for a server
+    /// with no agent registration. Only `--placement js-sched` reads it.
+    pub fn cpu_slack(&self) -> CpuSlack {
+        match &self.hosts {
+            Hosts::Layered { agents, .. } => agents.cpu_slack,
+            Hosts::Static(_) => CpuSlack::default(),
+        }
+    }
+
     /// How long an ended job's record and result are kept after the job ends
     /// (`--job-retention`, or `server.job_retention`): seven days unless set. It is read
     /// once here and applied when a job ends.
@@ -837,6 +844,8 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
             };
             let pool = agent_pool::read(pool)?;
             cli.placement.check(&pool, "--placement")?;
+            let needs = "--placement js-sched";
+            let cpu_slack = cli.placement.slack(cli.cpu_slack, "--cpu-slack", needs)?;
             Ok(Hosts::Layered {
                 static_pool,
                 agents: Box::new(AgentSetup {
@@ -850,6 +859,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                     require_host_credential: cli.require_host_credential,
                     placement: cli.placement,
                     estimate_feed: cli.estimate_feed,
+                    cpu_slack,
                     max_lease_wall: None,
                 }),
             })
