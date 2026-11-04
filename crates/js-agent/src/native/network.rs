@@ -357,6 +357,26 @@ mod tests {
         assert_eq!(Ceiling::default(), Ceiling::Off);
     }
 
+    /// Asserts that every level is named in a refusal's text by the word a job or a native
+    /// body uses for it: `none`, `loopback`, `allow-list` and `open`, and that the job levels'
+    /// names are those of `JobNetwork`. Catches a refusal that names the agent's flag value
+    /// (`on`) where the job asked `allow-list`, which would send an operator to the wrong side.
+    #[test]
+    fn each_level_is_named_as_the_job_names_it() {
+        let names = [
+            (NativeNet::Off, "none"),
+            (NativeNet::Loopback, "loopback"),
+            (NativeNet::OnWithFilter, "allow-list"),
+            (NativeNet::Open, "open"),
+        ];
+        for (level, name) in names {
+            assert_eq!(level.name(), name, "{level:?}");
+        }
+        for level in JOB_LEVELS {
+            assert_eq!(wanted(level).name(), level.name(), "{level}");
+        }
+    }
+
     /// Asserts that declared ports are refused `ports-not-supported` with the exact text, and
     /// that no port passes. Catches a port that is ignored on a Mac, and a refusal on the
     /// field's presence alone.
