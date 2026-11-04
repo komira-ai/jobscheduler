@@ -429,7 +429,7 @@ fn shown(value: Option<u64>) -> String {
 fn span(duration: Duration) -> String {
     let millis = duration.as_millis();
     let units = [(3_600_000, "h"), (60_000, "m"), (1000, "s")];
-    let whole = units.into_iter().find(|(size, _)| millis % size == 0);
+    let whole = units.into_iter().find(|(size, _)| millis.is_multiple_of(*size));
     match whole {
         Some((size, unit)) => format!("{}{unit}", millis / size),
         None => format!("{millis}ms"),
