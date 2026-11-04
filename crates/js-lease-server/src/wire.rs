@@ -189,9 +189,9 @@ impl AcquireBody {
                 RequirementsError::BadIsaLevel(_) => {
                     "isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a".to_owned()
                 }
-                why @ (RequirementsError::BadAccelerator(_)
-                | RequirementsError::CountWithoutModel
-                | RequirementsError::CountNotBooked { .. }) => why.to_string(),
+                // The accelerator refusals name their key and value themselves; a bad
+                // `accelerator.*` key is refused by `check_stated` before this is reached.
+                other => other.to_string(),
             })
         })?;
         Ok((request, self.ttl_seconds.map(Duration::from_secs)))
