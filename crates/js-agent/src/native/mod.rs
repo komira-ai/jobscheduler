@@ -72,9 +72,9 @@
 //! digest), carry a job start's environment (`RunSpec::env`: a start with one is refused
 //! `env-unsupported` at admission and before the image is looked at, and a run handed here
 //! with one fails before a user is made; the native body's own `env` is applied; the job
-//! start's comes with the one job definition), stage inputs or collect outputs (a start that names either is refused
-//! `native-unsupported`), adopt a run after the agent restarts (the
-//! journal ends it), stop a run softly (the helper only kills), or grant the user's
+//! start's comes with the one job definition), stage inputs or collect outputs (a start
+//! that names either is refused `native-unsupported`), adopt a run after the agent
+//! restarts (the journal ends it), stop a run softly (the helper only kills), or grant the user's
 //! `/var/folders` entry (toolchains that need it get their temporary files from `TMPDIR`,
 //! which is inside the home).
 //!
