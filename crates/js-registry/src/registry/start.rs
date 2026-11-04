@@ -275,8 +275,12 @@ impl Registry {
         // The placer runs under this registry's lock.
         let ack = match placer {
             Some(placer) => {
+                // A start that fits no host by the pool's percent is not shown to the
+                // placer: it is `NoFit` (see the answer below).
                 let choose = |open: &[Candidate], every: &dyn Fn() -> Vec<Candidate>| {
-                    placer.pick_over(spec, open, &marked, every)
+                    fits_pool
+                        .then(|| placer.pick_over(spec, open, &marked, every))
+                        .flatten()
                 };
                 book.start_over(spec, gate, &eligible, &choose)
             }

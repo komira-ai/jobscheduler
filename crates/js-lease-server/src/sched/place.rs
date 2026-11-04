@@ -195,6 +195,10 @@ impl Placer for SchedPlacer {
         marked: &MarkedTails,
         every: &dyn Fn() -> Vec<Candidate>,
     ) -> Option<usize> {
+        // The registry never asks with no host; there is nothing to place or count.
+        if open.is_empty() {
+            return None;
+        }
         let granted = self.grant(spec, open, marked, every);
         if spec.request().probe_host.is_some() {
             return granted.ok().flatten();

@@ -24,6 +24,9 @@
 //! start ([`Event::Capacity`]), so the registry, not the engine's own grace, says which
 //! hosts are live.
 //!
+//! The engine is given no learned curves: each lease is charged what it books, and each
+//! host by its load readings when it has fresh ones.
+//!
 //! A host the registry forgets (lost past its retention, or given back) is not told to
 //! the engine: it stays a worker there, silent and so out of every placement, until the
 //! engine is next built.
