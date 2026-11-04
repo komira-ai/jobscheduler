@@ -80,6 +80,8 @@ struct State {
     identities: HashMap<String, (Seen, usize)>,
     /// Whether another agent holds the host's egress.
     held: bool,
+    /// Whether the host's egress cannot be asked for at all.
+    lock_fails: bool,
 }
 
 /// A machine that records every call and answers as scripted.
@@ -185,7 +187,11 @@ impl Sys for Fake {
     }
 
     fn lock_host(&self, _name: &str) -> std::io::Result<Option<Held>> {
-        Ok((!self.state().held).then(|| Arc::new(()) as Held))
+        let state = self.state();
+        if state.lock_fails {
+            return Err(std::io::Error::other("injected"));
+        }
+        Ok((!state.held).then(|| Arc::new(()) as Held))
     }
 
     fn open_netns(&self, pid: u32) -> std::io::Result<Netns> {
@@ -699,9 +705,10 @@ fn the_crun_runtimes_port_is_the_host_side() {
     assert_ne!(egress, started(&Fake::new(), allow_list()));
 }
 
-/// Catches a start that sweeps the host while another agent holds its egress: with the host
-/// held the start is refused as `Held` and nothing else is run (no interface listed or
-/// removed, no table touched), and mode none starts whoever holds it.
+/// Catches a start that sweeps the host while another agent holds its egress, or when the
+/// hold cannot be asked for: with the host held the start is refused as `Held`, and with the
+/// socket unusable it is an error naming the hold; either way nothing else is run (no
+/// interface listed or removed, no table touched). Mode none starts whoever holds it.
 #[test]
 fn a_held_host_refuses_an_allow_list_and_sweeps_nothing() {
     let fake = Fake::new();
@@ -714,6 +721,17 @@ fn a_held_host_refuses_an_allow_list_and_sweeps_nothing() {
         "{}",
         EgressError::Held
     );
+    let broken = Fake::new();
+    broken.state().lock_fails = true;
+    let failed = Egress::start_on(allow_list(), broken.clone()).map(drop);
+    assert_eq!(
+        failed,
+        Err(EgressError::Command {
+            what: "holding the host's egress".to_owned(),
+            why: "injected".to_owned(),
+        })
+    );
+    assert_eq!(broken.log(), Vec::<String>::new(), "nothing swept");
     let none = Fake::new();
     none.state().held = true;
     started(&none, config_with("none", None));
