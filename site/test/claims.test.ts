@@ -73,7 +73,7 @@ const ROWS: readonly Row[] = [
   ['index', 'Placement by load, in the <code>js-sched</code> crate', 'crates/js-sched/src/lib.rs', 'admission by measured and predicted load'],
   ['index', 'crate</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">used by the lease server only under <code>--placement js-sched</code>', 'crates/js-lease-server/src/lib.rs', '`js-sched` keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading)'],
   ['index', 'A pool that books part of a host', 'crates/js-lease-server/src/agent_pool.rs', 'a mixed pool (a class that books part of a host) is not served by this server yet'],
-  ['index', 'not built: refused when the pool file loads', 'crates/js-lease-server/src/file.rs', 'Refuses a class that books part of a host: this server serves whole hosts only.'],
+  ['index', 'not built: refused when the pool file loads', 'crates/js-lease-server/src/file/section.rs', 'Refuses a class that books part of a host: this server serves whole hosts only.'],
   ['index', 'One token for each tenant', 'crates/js-lease-server/src/lib.rs', 'Per-tenant leases (each tenant with a token of its own'],
   ['index', 'not built: one shared token', 'crates/js-lease-server/src/lib.rs', 'The server is single-tenant: there is one token'],
   ['index', 'not built: one shared token', 'crates/js-lease-server/src/lib.rs', 'the design document lists the shared token as a risk) are a follow-up and not built here'],
