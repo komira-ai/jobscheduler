@@ -818,6 +818,7 @@ impl Scheduler {
                 (blocked == Some(Blocked::Load)).then(|| servable.pool(&self.workers, request));
             if let Some(pool) = pool
                 && !held_pools.contains(&pool)
+                && self.backfill.only(id).is_none()
             {
                 let attempt = Attempt {
                     request,

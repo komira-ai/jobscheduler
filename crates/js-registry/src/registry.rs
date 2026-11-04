@@ -72,10 +72,11 @@ pub struct HostView {
     /// of them. Empty when the host holds none.
     pub leases: Vec<LeaseId>,
     /// The shape the pool books for the host (not the host's own claim), with its memory
-    /// cut to the pool's memory percent; whole for a pool whose placer keeps the percent.
+    /// cut to the pool's memory percent: what may be booked on it, also for a pool whose
+    /// placer keeps the percent ([`crate::PoolConfig::booking_whole_memory`]).
     pub shape: Shape,
     /// The memory the pool lists for the host, the percent of it that may be booked and
-    /// what that comes to (the memory of `shape`, unless the placer keeps the percent).
+    /// what that comes to (the memory of `shape`).
     pub memory: MemoryHeadroom,
     /// The shape the host announced at its last hello, which the registry checked against
     /// the pool's floor; `None` for a host that has not said hello since a restart. A
@@ -181,20 +182,22 @@ struct State {
 
 impl State {
     /// Forgets every host that has been lost for longer than the retention and holds no
-    /// booking, binding included. A booked host stays however long it is silent.
-    fn forget_lost(&mut self, now: Timestamp, grace_ms: u64, retention_ms: u64) {
+    /// booking, binding included, and answers which. A booked host stays however long it
+    /// is silent.
+    fn forget_lost(&mut self, now: Timestamp, grace_ms: u64, retention_ms: u64) -> Vec<HostId> {
         let lost = self
             .records
             .iter()
             .filter(|(_, record)| record.out_of_retention(now, grace_ms, retention_ms))
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
-        for id in lost {
-            if self.book.remove_free(&id) {
-                self.records.remove(&id);
-                self.runs.forget(&id);
-            }
+        let forgotten = lost.into_iter().filter(|id| self.book.remove_free(id));
+        let forgotten: Vec<HostId> = forgotten.collect();
+        for id in &forgotten {
+            self.records.remove(id);
+            self.runs.forget(id);
         }
+        forgotten
     }
 }
 
@@ -324,7 +327,8 @@ impl Registry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let config = &self.shared.config;
-        state.forget_lost(now, config.grace_ms(), config.lost_retention_ms());
+        let forgotten = state.forget_lost(now, config.grace_ms(), config.lost_retention_ms());
+        forgotten.iter().for_each(|host| self.tell_gone(host));
         let horizon = Rules::of(config).idle_horizon_ms();
         state.requests.sweep(now, horizon);
         let unclaimed = state.waiting.expire(now, Rules::of(config).regain_grace_ms);

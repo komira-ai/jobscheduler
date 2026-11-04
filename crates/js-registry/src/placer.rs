@@ -124,6 +124,13 @@ pub trait Placer: Send + Sync {
         let _ = (host, load);
     }
 
+    /// `host` is no longer listed: it was lost past the pool's retention holding no booking,
+    /// or given back ([`crate::Registry::remove`]). Told under the registry's lock. The
+    /// default does nothing.
+    fn host_gone(&self, host: &HostId) {
+        let _ = host;
+    }
+
     /// `lease` was stopped: its booking is gone. Told under the registry's lock. The
     /// default does nothing.
     fn ended(&self, lease: LeaseId) {

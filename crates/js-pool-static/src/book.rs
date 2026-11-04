@@ -348,7 +348,7 @@ impl HostBook {
                 leases: host.leases.clone(),
             })
             .collect();
-        let every = || listing(&self.hosts);
+        let every = || self.candidates();
         let chosen = match open.is_empty() {
             true => None,
             false => choose(&open, &every),

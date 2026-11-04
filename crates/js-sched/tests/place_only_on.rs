@@ -140,3 +140,72 @@ fn an_operation_held_to_no_worker_holds_none_for_itself() {
     assert!(leased(&r, after));
     assert!(!leased(&r, owner));
 }
+
+/// Catches: an operation held to a set of workers that, blocked by the load of the one it
+/// may use, holds another worker as a blocked head does, which keeps later work off it.
+/// `a` (one core) is full; an operation held to `a` cannot be placed and holds nothing,
+/// so an ordinary action after it goes to `b`.
+#[test]
+fn an_operation_held_to_a_busy_worker_holds_no_other_as_a_blocked_head() {
+    let mut r = Rig::on();
+    r.up("a", Resources::new(1_000, 16 * GIB));
+    r.up("b", Resources::new(8_000, 16 * GIB));
+    let first = action(&mut r);
+    r.s.place_only_on(first, set(&["a"]));
+    assert_eq!(placed(&mut r), ["a"]);
+    let held = action(&mut r);
+    r.s.place_only_on(held, set(&["a"]));
+    assert!(placed(&mut r).is_empty());
+    let after = action(&mut r);
+    assert_eq!(placed(&mut r), ["b"]);
+    assert!(leased(&r, after));
+    assert!(!leased(&r, held));
+}
+
+/// Catches: a forgotten worker still taken for work, and a worker forgotten while it holds
+/// a lease (its lease's end would release a booking on nothing). `b`, idle, is forgotten
+/// and takes nothing after; `a`, holding a lease, is kept, and a worker never registered
+/// is not forgotten.
+#[test]
+fn only_an_idle_worker_is_forgotten_and_takes_no_work_after() {
+    let mut r = rig(&["a", "b"]);
+    let first = action(&mut r);
+    r.s.place_only_on(first, set(&["a"]));
+    assert_eq!(placed(&mut r), ["a"]);
+    assert!(!r.s.forget_worker(&w("a")));
+    assert!(r.s.capacity(&w("a")).is_some());
+    r.s.reserve_outside(w("b"), None);
+    assert!(r.s.forget_worker(&w("b")));
+    assert!(r.s.capacity(&w("b")).is_none());
+    assert!(!r.s.forget_worker(&w("b")));
+    assert!(!r.s.forget_worker(&w("z")));
+    let next = action(&mut r);
+    r.s.place_only_on(next, set(&["b"]));
+    assert!(placed(&mut r).is_empty());
+}
+
+/// Catches: a worker forgotten while a recovered lease waits for it to register (the
+/// lease would never be booked on it): a worker not yet registered, for which a lease
+/// was recovered, is not forgotten, and once it registers the lease is booked on it.
+#[test]
+fn a_worker_a_recovered_lease_waits_for_is_not_forgotten() {
+    let mut r = Rig::on();
+    let request = r.request(js_types::sched::LeaseKind::Action, 1_000, GIB);
+    let lease = js_types::sched::LeaseId::new(1, 7);
+    let waiting = js_sched::Recovered {
+        operation: OperationId(0),
+        request,
+        waiter: js_types::sched::WaiterId(0),
+        lease: Some(js_sched::RecoveredLease {
+            lease,
+            worker: w("late"),
+            cost: None,
+        }),
+        losses: 0,
+        fate: None,
+    };
+    r.s.recover(1, OperationId(1), 10, vec![waiting]);
+    assert!(!r.s.forget_worker(&w("late")));
+    r.up("late", Resources::new(8_000, 16 * GIB));
+    assert_eq!(r.s.leases_on(&w("late")), [lease]);
+}

@@ -29,7 +29,7 @@ impl Registry {
     ) -> impl Fn(&HostId, &Record) -> HostView + 'a {
         let booked = book.booked();
         let every = book.leases();
-        let shape = self.shared.config.booked();
+        let shape = self.shared.config.fit();
         let memory = self.shared.config.memory_headroom();
         let marks = marks.reservations();
         move |id, record| {

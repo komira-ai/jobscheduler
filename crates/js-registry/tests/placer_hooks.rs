@@ -9,13 +9,16 @@ mod support;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use js_agent_wire::DEFAULT_GRACE_MS;
 use js_agent_wire::limits::MAX_MEMORY_BYTES;
 use js_agent_wire::{ExclusiveRefusal, RefusalReason};
 use js_agent_wire::{LoadDrops, NodeLoad as Wire};
 use js_pool_static::Candidate;
 use js_provider::Observed;
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
-use js_registry::{DEFAULT_PREPARE_TIMEOUT_MS, MarkedTails, Placer, PoolConfig};
+use js_registry::{
+    DEFAULT_LOST_RETENTION_MS, DEFAULT_PREPARE_TIMEOUT_MS, MarkedTails, Placer, PoolConfig,
+};
 use js_types::sched::usage::NodeLoad;
 use js_types::{Admission, ClassId, Dims, HostId, LeaseId, Request, ResourceClass, Resources};
 use js_types::{ProviderId, Shape};
@@ -80,6 +83,10 @@ impl Placer for Told {
 
     fn ended(&self, lease: LeaseId) {
         self.note(format!("ended {lease}"));
+    }
+
+    fn host_gone(&self, host: &HostId) {
+        self.note(format!("gone {}", host.as_str()));
     }
 }
 
@@ -282,11 +289,13 @@ impl Placer for Declines {
     }
 }
 
-/// Catches: a pool that books the whole memory for its placer still listing its hosts at
-/// the cut, no longer reporting the percent, or answering a request above the share
+/// Catches: a pool that books the whole memory for its placer still booking at the cut,
+/// showing its hosts with the whole memory (a reader of the host listing would take it as
+/// bookable), no longer reporting the percent, or answering a request above the share
 /// `NoCapacity` (a client would retry for ever) where it fits no host by the percent. At
-/// 90 the host is listed with its whole 8 GiB and reports 90 percent of it bookable; a
-/// start the placer declines is `NoCapacity` within the share and `NoFit` above it.
+/// 90 the book lists the host's whole 8 GiB to the lease table, the host listing shows the
+/// cut and 90 percent; a start the placer declines is `NoCapacity` within the share and
+/// `NoFit` above it.
 #[test]
 fn a_pool_that_books_whole_memory_keeps_the_percent_for_fit_and_report() {
     let name = ProviderId::new("builders").unwrap();
@@ -310,9 +319,60 @@ fn a_pool_that_books_whole_memory_keeps_the_percent_for_fit_and_report() {
         };
         StartSpec::new(lease(sequence), request, &[book()]).unwrap()
     };
+    let shown = fx.registry.hosts();
+    assert_eq!(shown[0].shape.resources().memory_bytes(), 7_730_941_132);
+    assert_eq!(shown[0].memory.percent(), percent);
     let share = listed[0].memory.bookable_bytes();
     let within = provider.start(asking(1, share));
     assert_eq!(within, StartAck::Refused(RefusalCode::NoCapacity));
     let above = provider.start(asking(2, share + 1));
     assert_eq!(above, StartAck::Refused(RefusalCode::NoFit));
+}
+
+/// Catches: a host the registry forgets not told to the placer, so that a placer keeping
+/// a picture of the hosts keeps every host it ever heard of. A host lost past the pool's
+/// retention with no booking is told gone at the next call, once; a host given back is told
+/// gone when it is removed, and not before.
+#[test]
+fn a_host_the_registry_forgets_is_told_gone() {
+    let told = Arc::new(Told::default());
+    let fx = pool(told.clone());
+    fx.join("a", "t");
+    let epoch = fx.join("b", "t");
+    told.said();
+    let silent = DEFAULT_GRACE_MS + DEFAULT_LOST_RETENTION_MS + 1;
+    for _ in 0..4 {
+        fx.clock.advance(Duration::from_millis(silent / 4 + 1));
+        fx.beat("b", epoch);
+    }
+    let _ = fx.registry.hosts();
+    let said = told.said();
+    assert_eq!(
+        said.iter().filter(|line| *line == "gone a").count(),
+        1,
+        "{said:?}"
+    );
+    assert!(!said.iter().any(|line| line == "gone b"), "{said:?}");
+    let b = HostId::new("b").unwrap();
+    fx.registry.drain(&b).unwrap();
+    fx.registry.release_host(&b).unwrap();
+    assert!(!told.said().iter().any(|line| line == "gone b"));
+    fx.registry.remove(&b).unwrap();
+    assert!(told.said().contains(&"gone b".to_owned()));
+}
+
+/// Catches: a registry that stops forgetting a host when its placer ignores the news (the
+/// default of the call): with a placer that keeps no picture of the hosts, a host given
+/// back is still removed.
+#[test]
+fn a_placer_that_ignores_gone_hosts_leaves_their_removal_as_it_was() {
+    let name = ProviderId::new("builders").unwrap();
+    let fx = fixture_of(PoolConfig::new(name, book(), pool_shape(), 4));
+    fx.registry.set_placer(Arc::new(Declines));
+    fx.join("a", "t");
+    let a = HostId::new("a").unwrap();
+    fx.registry.drain(&a).unwrap();
+    fx.registry.release_host(&a).unwrap();
+    assert_eq!(fx.registry.remove(&a), Ok(()));
+    assert!(fx.registry.hosts().is_empty());
 }

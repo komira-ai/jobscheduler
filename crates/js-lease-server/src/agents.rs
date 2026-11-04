@@ -22,6 +22,7 @@ use crate::error::StartupError;
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
+use crate::sched::place::SchedPlacer;
 use crate::usage_hub::Usage;
 use crate::usage_map::limits_of;
 use crate::usage_setup::UsageSetup;
@@ -65,10 +66,6 @@ pub(crate) struct Agents {
     /// The usage side, unless `--usage-off`. Its lock is a leaf, taken after the registry's
     /// call has returned.
     pub(crate) usage: Option<Arc<Usage>>,
-    /// The placer the registry was given, under `--placement js-sched`, for a test that
-    /// reads its counters.
-    #[cfg(test)]
-    pub(crate) placer: Option<Arc<crate::sched::place::SchedPlacer>>,
 }
 
 /// Where a file of the agent side is kept: beside the lease file at `state_file`, with
@@ -94,8 +91,18 @@ pub(crate) fn assemble(
     clock: &SharedClock,
     state_file: &Path,
 ) -> Result<Assembled, StartupError> {
+    assemble_placed(hosts, usage, clock, state_file).map(|(assembled, _)| assembled)
+}
+
+/// [`assemble`], with the placer the registry was given under `--placement js-sched`.
+pub(crate) fn assemble_placed(
+    hosts: Hosts,
+    usage: UsageSetup,
+    clock: &SharedClock,
+    state_file: &Path,
+) -> Result<(Assembled, Option<Arc<SchedPlacer>>), StartupError> {
     match hosts {
-        Hosts::Static(source) => Ok((source, None)),
+        Hosts::Static(source) => Ok(((source, None), None)),
         Hosts::Layered {
             static_pool,
             agents,
@@ -154,10 +161,8 @@ pub(crate) fn assemble(
                 store: BindingStore::new(path, bindings),
                 errors: AtomicU64::new(0),
                 usage,
-                #[cfg(test)]
-                placer,
             };
-            Ok((Box::new(source), Some(Arc::new(agents))))
+            Ok(((Box::new(source), Some(Arc::new(agents))), placer))
         }
     }
 }
@@ -195,7 +200,6 @@ impl Agents {
             store: BindingStore::new(dir.join("bindings"), Default::default()),
             errors: AtomicU64::new(0),
             usage: None,
-            placer: None,
         }
     }
 

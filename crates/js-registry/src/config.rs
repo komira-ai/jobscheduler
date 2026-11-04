@@ -199,9 +199,10 @@ impl PoolConfig {
     /// The same pool, whose book takes the whole memory of `[shape]` though the pool keeps
     /// its memory percent: for a placer that holds every host to the percent itself
     /// (`--placement js-sched` of the lease server). The percent still decides what fits
-    /// the pool, so a request above the share is refused `NoFit`, and the memory headroom
-    /// still reports it ([`PoolConfig::memory_headroom`]); only the room the book checks,
-    /// and the shape each host is listed with, are the whole memory.
+    /// the pool, so a request above the share is refused `NoFit`, and the host listing
+    /// ([`crate::Registry::hosts`]) still shows each host's shape cut to it beside the
+    /// memory headroom ([`PoolConfig::memory_headroom`]); only the room the book checks,
+    /// and the capacity it lists to the lease table, are the whole memory.
     #[must_use]
     pub fn booking_whole_memory(mut self) -> Self {
         self.whole_memory = true;

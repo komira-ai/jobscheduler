@@ -4,10 +4,12 @@
 //! from the server's configuration: the backfill ceiling (`server.max_lease_wall`), the
 //! CPU slack (`--cpu-slack`, js-sched's default 1.1x unless given) and the share of each
 //! host's memory it may book (`memory_schedulable_percent` of the pool). The registry
-//! tells it of every hello, accepted heartbeat and stop as they happen
-//! ([`Placer::host_up`], [`Placer::heard`], [`Placer::ended`]), so the engine's picture of
-//! the hosts follows the registry's books without being rebuilt; a heartbeat's load
-//! reading reaches the engine there, as the registry vetted and converted it.
+//! tells it of every hello, accepted heartbeat, stop and host it forgets as they happen
+//! ([`Placer::host_up`], [`Placer::heard`], [`Placer::ended`], [`Placer::host_gone`]), so
+//! the engine's picture of the hosts follows the registry's books without being rebuilt;
+//! a heartbeat's load reading reaches the engine there, as the registry vetted and
+//! converted it. When the engine is built again it is given the last two readings kept
+//! for each host, so a rebuild loses no measured load.
 //!
 //! At a start the registry shows the placer the hosts that could take it (`open`), each
 //! with the leases already on it. The engine first checks that its picture agrees with
@@ -129,6 +131,19 @@ impl SchedPlacer {
         self.built.load(Ordering::Relaxed)
     }
 
+    /// What the engine charges `host` by its load, for a test that reads it: `None` for a
+    /// host that is no worker of the engine.
+    #[cfg(test)]
+    pub(crate) fn load_of(&self, host: &str) -> Option<js_sched::LoadView> {
+        self.engine().load_of(host)
+    }
+
+    /// How many hosts the engine keeps, for a test that holds it to the registry's.
+    #[cfg(test)]
+    pub(crate) fn hosts_kept(&self) -> usize {
+        self.engine().hosts_kept()
+    }
+
     /// The host the engine gives `spec` among `open`, rebuilding the engine from `every`
     /// first when the two pictures disagree on `open`.
     fn grant(
@@ -142,13 +157,32 @@ impl SchedPlacer {
         let now = self.now();
         let mut engine = self.engine();
         if !engine.agrees(open, spec.lease().sequence()) {
-            *engine = Engine::build(self.settings, &every(), now);
+            let rebuilt = engine.rebuild(self.settings, &every(), now);
+            *engine = rebuilt;
             #[cfg(test)]
             self.built.fetch_add(1, Ordering::Relaxed);
             let count = self.resynced.fetch_add(1, Ordering::Relaxed) + 1;
             warn!(lease = %spec.lease(), count, "the placement engine disagreed with the registry and was rebuilt");
         }
         engine.grant(spec, (open, nodes), marked, now)
+    }
+}
+
+impl SchedPlacer {
+    /// Whether `spec` fits on `candidate` within the engine's share of its memory, beside
+    /// the leases already there: what the engine would hold a start it could describe to.
+    /// The registry books the whole memory under this placement, so a start that falls
+    /// back is held to the share here.
+    fn within_share(&self, candidate: &Candidate, spec: &StartSpec) -> bool {
+        let booked = candidate.leases.iter().fold(0u64, |sum, held| {
+            sum.saturating_add(held.resources.memory_bytes())
+        });
+        let asked = spec.request().resources.memory_bytes();
+        let share = self
+            .settings
+            .memory
+            .of_bytes(candidate.shape.resources().memory_bytes());
+        booked.saturating_add(asked) <= share
     }
 }
 
@@ -176,9 +210,11 @@ impl Placer for SchedPlacer {
     ///
     /// When the scheduler cannot take these hosts or this request (a shape that does not
     /// describe a node, a capability that is not a platform requirement), the first host
-    /// not in `marked` is booked, as a registry with no placer does, and the start is
-    /// counted as unmappable and logged: the registry's check of the room stands, and the
-    /// engine takes the lease up on that host ([`Engine::adopt`]). When the
+    /// not in `marked` with room for it within the engine's share of its memory is booked,
+    /// as a registry with no placer books the first host, and the start is counted as
+    /// unmappable and logged: the registry's check of the room stands (CPU up to the
+    /// slack), the share is held here, and the engine takes the lease up on that host
+    /// ([`Engine::adopt`]). With no such host none is booked. When the
     /// engine, agreeing with the registry's books, places the start nowhere (its memory
     /// percent or CPU slack is reached, its readings say the hosts are full), that stands:
     /// no host is booked (`NoCapacity`; the client retries), and the start is counted as
@@ -211,7 +247,9 @@ impl Placer for SchedPlacer {
                 None
             }
             Err(err) => {
-                let first = open.iter().position(|c| !marked.contains_key(&c.host));
+                let first = open
+                    .iter()
+                    .position(|c| !marked.contains_key(&c.host) && self.within_share(c, spec));
                 first.inspect(|at| {
                     // The registry books it there: the engine holds it from now on.
                     self.engine().adopt(&open[*at], spec);
@@ -253,6 +291,10 @@ impl Placer for SchedPlacer {
 
     fn ended(&self, lease: LeaseId) {
         self.engine().ended(lease);
+    }
+
+    fn host_gone(&self, host: &HostId) {
+        self.engine().host_gone(host);
     }
 }
 

@@ -1,7 +1,7 @@
 //! The provider side of the registry: the booking, stop and observation calls the lease
 //! table makes through [`crate::RegisteredProvider`], and what the placer is told of the
 //! books between starts ([`crate::Placer::host_up`], [`crate::Placer::heard`],
-//! [`crate::Placer::ended`]).
+//! [`crate::Placer::ended`], [`crate::Placer::host_gone`]).
 
 use std::collections::BTreeMap;
 
@@ -187,6 +187,13 @@ impl Registry {
     pub(super) fn tell_up(&self, host: &HostId) {
         if let Some(placer) = self.shared.placer.get() {
             placer.host_up(host, self.shared.config.booked());
+        }
+    }
+
+    /// Tells the placer, if there is one, that `host` is no longer listed.
+    pub(super) fn tell_gone(&self, host: &HostId) {
+        if let Some(placer) = self.shared.placer.get() {
+            placer.host_gone(host);
         }
     }
 

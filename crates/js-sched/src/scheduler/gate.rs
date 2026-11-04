@@ -146,3 +146,105 @@ impl Scheduler {
         self.backfill.settings.duration(wall, p90)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use js_caps::NodeCaps;
+    use js_types::sched::{
+        Failure, FarmTime, LeaseKind, OperationId, Outcome, Qos, Resources, WaiterId, WorkKey,
+        WorkerId,
+    };
+
+    use crate::harness::feed;
+    use crate::{DaemonInstance, Event, OpState, Request, Scheduler};
+
+    fn at(ms: u64) -> FarmTime {
+        FarmTime::from_millis(ms)
+    }
+
+    /// A scheduler with the worker `a` of 8 cores and 16 GiB, and one action queued.
+    fn queued() -> (Scheduler, OperationId) {
+        let mut s = Scheduler::new(1);
+        let caps = NodeCaps::from_report([
+            ("arch", "x86_64"),
+            ("drivers", "container"),
+            ("cpus", "8"),
+            ("mem_gib", "16"),
+        ])
+        .unwrap();
+        let up = Event::WorkerUp {
+            worker: WorkerId::new("a"),
+            instance: DaemonInstance::new("a"),
+            predecessor_stopped: false,
+            capacity: Resources::new(8_000, 16 << 30),
+            caps,
+        };
+        feed(&mut s, at(0), up);
+        let operation = s.next_operation();
+        let request = Request {
+            key: WorkKey::new("gate", "one"),
+            qos: Qos::Ci,
+            kind: LeaseKind::Action,
+            resources: Resources::new(1_000, 1 << 30),
+            needs: js_caps::Request::default(),
+            hermetic: true,
+            do_not_cache: true,
+            whole_worker: false,
+            pin: None,
+        };
+        let submit = Event::Submit {
+            waiter: WaiterId(1),
+            request,
+        };
+        feed(&mut s, at(0), submit);
+        (s, operation)
+    }
+
+    fn only_a() -> BTreeSet<WorkerId> {
+        BTreeSet::from([WorkerId::new("a")])
+    }
+
+    /// Catches: a set kept for an operation forgotten as queued (a later operation given
+    /// the same id would be held to it, and the table grows for ever).
+    #[test]
+    fn a_forgotten_operation_leaves_no_set() {
+        let (mut s, op) = queued();
+        s.place_only_on(op, only_a());
+        assert_eq!(s.backfill.only(op), Some(&only_a()));
+        assert!(s.forget_queued(op).is_some());
+        assert_eq!(s.backfill.only(op), None);
+    }
+
+    /// Catches: a set dropped when the operation's lease is undone (it would then be placed
+    /// anywhere), and a set kept after the operation finished and retired. Held to `a` and
+    /// placed, then unplaced, it is queued and still held to `a`; placed again, ended and
+    /// retired, it leaves no set.
+    #[test]
+    fn the_set_holds_across_a_requeue_and_goes_at_retirement() {
+        let (mut s, op) = queued();
+        s.place_only_on(op, only_a());
+        feed(&mut s, at(1), Event::Tick);
+        let Some(OpState::Leased { lease, .. }) = s.state(op).cloned() else {
+            panic!("placed: {:?}", s.state(op));
+        };
+        assert_eq!(s.unplace(lease), Some(op));
+        assert_eq!(s.state(op), Some(&OpState::Queued));
+        assert_eq!(s.backfill.only(op), Some(&only_a()));
+        feed(&mut s, at(2), Event::Tick);
+        let Some(OpState::Leased { lease, .. }) = s.state(op).cloned() else {
+            panic!("placed again: {:?}", s.state(op));
+        };
+        let report = Event::Report {
+            operation: op,
+            lease,
+            outcome: Outcome::Failed(Failure::Timeout),
+        };
+        feed(&mut s, at(3), report);
+        let retired = at(3).saturating_add(crate::FINISHED_RETENTION);
+        feed(&mut s, retired, Event::Tick);
+        assert_eq!(s.state(op), None);
+        assert_eq!(s.backfill.only(op), None);
+    }
+}

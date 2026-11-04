@@ -5,16 +5,17 @@
 //! snapshot per start: a host that says hello is a worker up ([`Engine::host_up`]), with
 //! the capacity and caps its pool's shape gives ([`map::host`]); an accepted heartbeat is
 //! a heartbeat, with the reading the registry vetted and converted ([`Engine::heard`]); a
-//! lease the placer places is booked by the placement itself ([`Engine::grant`]), and one
-//! the registry stops is released ([`Engine::ended`]).
+//! lease the placer places is booked by the placement itself ([`Engine::grant`]), one
+//! the registry stops is released ([`Engine::ended`]), and a host the registry forgets is
+//! forgotten ([`Engine::host_gone`]).
 //!
 //! At each start the two pictures are compared on the hosts the start could book
 //! ([`Engine::agrees`]): every one must be a worker of the same shape, holding exactly the
 //! leases the registry books there. When they disagree (a lease the registry booked that
 //! the engine never placed, as one put back after a restart; one the engine gave up for a
 //! silent host; a host it was never told of) the engine is built again from the
-//! registry's view of every host it lists ([`Engine::build`]); that is the only way it is
-//! ever built again.
+//! registry's view of every host it lists, keeping each host's last two readings
+//! ([`Engine::rebuild`]); that is the only way it is ever built again.
 //!
 //! The engine places a start only on the hosts the registry offered it
 //! ([`Scheduler::place_only_on`]); once the start is booked, the operation is held to no
@@ -24,12 +25,13 @@
 //! start ([`Event::Capacity`]), so the registry, not the engine's own grace, says which
 //! hosts are live.
 //!
+//! A rebuild keeps the load the engine measured: the last readings of each host are fed
+//! to the new scheduler again at the times they came ([`Engine::rebuild`]). A host the
+//! registry forgets (lost past its retention, or given back) is forgotten by the engine
+//! too, worker and all ([`Engine::host_gone`]).
+//!
 //! The engine is given no learned curves: each lease is charged what it books, and each
 //! host by its load readings when it has fresh ones.
-//!
-//! A host the registry forgets (lost past its retention, or given back) is not told to
-//! the engine: it stays a worker there, silent and so out of every placement, until the
-//! engine is next built.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -95,7 +97,14 @@ pub(crate) struct Engine {
     now: FarmTime,
     /// The number the next lease the engine takes up gets, in term 0.
     taken: u64,
+    /// The last readings each host's heartbeats brought in its present session, with
+    /// when: what a rebuild feeds the new scheduler again, so that it loses no measured
+    /// load ([`Engine::rebuild`]). The two newest, as one window needs.
+    readings: BTreeMap<HostId, Vec<(FarmTime, NodeLoad)>>,
 }
+
+/// How many readings of a host are kept for a rebuild: a window is two.
+const KEPT_READINGS: usize = 2;
 
 impl Engine {
     /// An engine built with `settings` over `every`, the hosts the registry lists with
@@ -129,6 +138,7 @@ impl Engine {
             outside: BTreeSet::new(),
             now,
             taken: u64::try_from(holds.len()).unwrap_or(u64::MAX),
+            readings: BTreeMap::new(),
         };
         for candidate in every {
             engine.host_up(&candidate.host, &candidate.shape, now);
@@ -137,6 +147,41 @@ impl Engine {
             engine.hold(&host, lease, placed);
         }
         engine
+    }
+
+    /// An engine built over `every` as [`Engine::build`] builds one, that keeps the load
+    /// this one measured: it is built as of the oldest reading this one keeps of a host in
+    /// `every`, and each kept reading is fed to it again at the time it came, so a host's
+    /// readings are as fresh, or as stale, in the new engine as in this one. The
+    /// readings' leases are named as the new engine numbers them.
+    pub(crate) fn rebuild(&self, settings: Settings, every: &[Candidate], now: FarmTime) -> Self {
+        let listed: BTreeSet<&HostId> = every.iter().map(|candidate| &candidate.host).collect();
+        let mut replay: Vec<(FarmTime, &HostId, &NodeLoad)> = self
+            .readings
+            .iter()
+            .filter(|(host, _)| listed.contains(host))
+            .flat_map(|(host, kept)| kept.iter().map(move |(at, load)| (*at, host, load)))
+            .collect();
+        replay.sort_by_key(|(at, _, _)| *at);
+        let start = replay.first().map_or(now, |(at, _, _)| (*at).min(now));
+        let mut engine = Self::build(settings, every, start);
+        for (at, host, load) in replay {
+            engine.heard(host, Some(load), at);
+        }
+        engine
+    }
+
+    /// `host` is no longer listed by the registry: it is forgotten, worker and all, unless
+    /// the engine still holds a lease there (it then waits for the next rebuild).
+    pub(crate) fn host_gone(&mut self, host: &HostId) {
+        if self.on.get(host).is_some_and(|leases| !leases.is_empty()) {
+            return;
+        }
+        let _ = self.sched.forget_worker(&map::worker(host));
+        self.hosts.remove(host);
+        self.on.remove(host);
+        self.outside.remove(host);
+        self.readings.remove(host);
     }
 
     /// Feeds `event` at `now`, or at the last time fed if that is later.
@@ -193,6 +238,8 @@ impl Engine {
             self.feed(now, up);
         }
         self.hosts.insert(host.clone(), shape.clone());
+        // A hello opens a new session: the readings of the last one are no window now.
+        self.readings.remove(host);
     }
 
     /// A heartbeat of `host` the registry accepted, with the reading it brought. The
@@ -211,7 +258,7 @@ impl Engine {
             .into_iter()
             .flat_map(|leases| leases.values().map(|placed| placed.lease))
             .collect();
-        let load = load.map(|load| NodeLoad {
+        let translated = load.map(|load| NodeLoad {
             covered: load.covered.iter().filter_map(ours).collect(),
             lease_clocks: load
                 .lease_clocks
@@ -228,9 +275,15 @@ impl Engine {
         let beat = Event::Heartbeat {
             worker: map::worker(host),
             running,
-            load,
+            load: translated,
         };
         self.feed(now, beat);
+        if let Some(load) = load {
+            let kept = self.readings.entry(host.clone()).or_default();
+            kept.push((self.now, load.clone()));
+            let over = kept.len().saturating_sub(KEPT_READINGS);
+            *kept = kept.split_off(over);
+        }
     }
 
     /// The registry stopped `lease`: the engine releases it, whether it still holds it or
@@ -400,6 +453,24 @@ impl Engine {
             self.sched.reserve_outside(map::worker(host), start);
             self.outside.insert(host.clone());
         }
+    }
+}
+
+#[cfg(test)]
+impl Engine {
+    /// The scheduler's load view of `host`.
+    pub(crate) fn load_of(&self, host: &str) -> Option<js_sched::LoadView> {
+        self.sched.load_view(&js_types::sched::WorkerId::new(host))
+    }
+
+    /// How many hosts the engine keeps, as hosts, workers and kept readings: the largest.
+    pub(crate) fn hosts_kept(&self) -> usize {
+        let workers = self
+            .hosts
+            .keys()
+            .filter(|host| self.sched.capacity(&map::worker(host)).is_some());
+        let workers = workers.count();
+        self.hosts.len().max(self.readings.len()).max(workers)
     }
 }
 

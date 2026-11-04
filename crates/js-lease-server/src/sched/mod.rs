@@ -19,6 +19,10 @@ mod probe;
 #[cfg(test)]
 mod backfill_tests;
 #[cfg(test)]
+mod engine_cases_tests;
+#[cfg(test)]
+mod engine_rig;
+#[cfg(test)]
 mod engine_tests;
 #[cfg(test)]
 mod wiring_tests;
