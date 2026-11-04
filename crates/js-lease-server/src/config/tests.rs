@@ -1,7 +1,14 @@
 //! Unit tests of the configuration: the token and its file, the default limits and a pool's
 //! prepare timeout.
 
+use std::ffi::OsString;
+use std::os::unix::fs::PermissionsExt;
+
+use js_lease::Booking;
+use js_testkit::dir::TestDir;
+
 use super::*;
+use crate::capacity::Seated;
 
 /// Asserts that a token compares equal only to itself and prints without its bytes.
 #[test]
@@ -100,4 +107,66 @@ fn a_pools_prepare_timeout_replaces_only_the_prepare_timeout() {
     whole.prepare_timeout_ms = 0;
     let err = with_whole_node(flags, Some(&whole)).err().unwrap();
     assert!(err.to_string().contains("--agent-pool-config"), "{err}");
+}
+
+/// A simulated source that builds nothing: asking it for a provider is refused naming
+/// `--stub-hosts`, which tells it apart from any other source.
+struct Stub;
+
+impl CapacitySource for Stub {
+    fn provider(&self, _bookings: &[Booking]) -> Result<Seated, StartupError> {
+        Err(StartupError::new("--stub-hosts", "stub"))
+    }
+}
+
+/// `text` as a TOML string.
+fn quoted(text: impl std::fmt::Display) -> String {
+    format!("{:?}", text.to_string())
+}
+
+/// Asserts that a configuration file read through the flags has no simulated source of
+/// its own, and that [`Config::simulated`] over the same file serves the source it is
+/// given beside the hosts the file's registering pool takes. It catches a source dropped
+/// when the file is loaded, and one that appears with no caller to hand it in.
+#[test]
+fn a_config_file_is_served_beside_the_simulated_source_it_is_given() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/config_unit");
+    let dir = TestDir::under(root, "simulated_beside_file");
+    let token = dir.path().join("client-token");
+    std::fs::write(&token, "x".repeat(40)).unwrap();
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let text = format!(
+        "[server]\nstate_file = {}\nboot = \"initialise\"\nclient_token_file = {}\nmax_lease_wall = \"2h\"\nlisten = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\n\n[[pool]]\nkind = \"static\"\nname = \"burst\"\nclass = \"whole-node\"\nexec = \"none\"\nmax_machines = 6\nshape = {{ cpu_millis = 8000, memory_bytes = 17179869184 }}\n",
+        quoted(dir.path().join("leases.toml").display()),
+        quoted(token.display()),
+    );
+    let file = dir.path().join("js.toml");
+    std::fs::write(&file, text).unwrap();
+    let cli = || {
+        let args: Vec<OsString> = vec![
+            "js-lease-server".into(),
+            "--config".into(),
+            file.clone().into_os_string(),
+        ];
+        Cli::try_parse_from(args).unwrap()
+    };
+
+    let plain = Config::from_cli(cli()).unwrap();
+    assert!(matches!(
+        plain.hosts,
+        Hosts::Layered {
+            simulated: None,
+            ..
+        }
+    ));
+
+    let config = Config::simulated(cli(), Box::new(Stub)).unwrap();
+    let served = match &config.hosts {
+        Hosts::Layered {
+            simulated: Some(source),
+            ..
+        } => source.provider(&[]).err().unwrap().to_string(),
+        _ => String::from("not layered with a simulated source"),
+    };
+    assert_eq!(served, "--stub-hosts: stub");
 }

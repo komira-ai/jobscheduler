@@ -9,7 +9,7 @@ ucdk repository (komira-ai/ucdk) at commit f28c240. Every statement about existi
 marked (not found) means a search of the named place did not find the thing; it is a keyword result, not a proof of absence. Crates of
 jobscheduler itself are named `js-*`; the map is in 10.2.
 
-Code now exists on `main` of this repository: `js-types`, `js-provider`, `js-pool-static`, `js-provider-fake`, `js-conformance`, `js-lease`,
+Code now exists on `main` of this repository: `js-types`, `js-provider`, `js-pool-fake` (a test double), `js-provider-fake`, `js-conformance`, `js-lease`,
 `js-lease-server`, `js-cli`, `js-coverage`, `js-agent-wire` (the agent wire, protocol major 1), `js-registry` and `js-agent` (session,
 facts and a lifecycle over a `Runtime` trait; a docker and podman backend is in review). Section 5.9 says what each becomes; 10.2 marks which crates are merged. Everything else
 describes future work. What exists in kbf today (the former section 4) is in [design/kbf-today.md](design/kbf-today.md); references of the
@@ -392,7 +392,7 @@ only after `release` reads back Absent; a provider outage freezes its pool; a co
 the operation; a VM that vanishes under a run is a failed run (5.14).
 
 ### 5.7 Configuration
-The scheduler is configured by one file named by a flag (`--config`; R4), in the TOML style of `js-pool-static` (`deny_unknown_fields`,
+The scheduler is configured by one file named by a flag (`--config`; R4), in the TOML style of `js-pool-fake` (`deny_unknown_fields`,
 unique names). Every value is configuration; none is compiled in. A secret is a path to a file, never a value. The one environment
 exception is the cloud's own credential chain (`AWS_*`, ambient role credentials), which R4 permits as a provider-standard variable.
 
@@ -417,10 +417,10 @@ Rules, enforced when the file loads and refused with the key and the line:
   below the binary names `aws` or any other kind (10.1).
 - Adding a key is additive (R3). A scheduler reads an older file unchanged.
 
-The merged `--pool-config` file keeps working as a **stepping stone**: it is a configuration with one implicit `static` provider, one pool
-of class `gpu-host` (read as `whole-node`, 5.17) and the listed hosts, until a `--config` file is given (5.9). It is the operator-listed pool of the test provider, and
-it goes away when the GPU machines run `js-agent` and register (step 54). The `--allow-test-providers` gate applies to a `--config`
-file; the merged `--pool-config` path needs no new flag until then.
+The merged `--pool-config` file, the operator-listed pool, was removed: the server refuses `--pool-config`, and a `[[pool]]` with
+`provider = { kind = "static", hosts_file = ... }`, with the migration in [design/configuration.md](design/configuration.md). The machines run
+`js-agent` and register, in a `--agent-pool-config` file or a `[[pool]]` of `kind = "static"`. The `--allow-test-providers` gate applies to a
+`--config` file of this 5.7 design.
 
 ### 5.8 Pools: scaling and registration
 **Membership.** A host belongs to exactly one pool. It joins when its agent's hello is admitted (registration.md) and leaves only by `release`
@@ -467,12 +467,12 @@ tainted-set check, join credentials and the deny file, instance identity, lifecy
 [design/registration.md](design/registration.md). Proof of admission travels with the hello in message metadata, never in a log line.
 
 ### 5.9 The merged code and what it becomes
-The merged slice is a GPU-host lease service (the whole-node class before its reservation, quiet gate and caps, 5.17): the lease table (`js-lease`) books a whole host from a pool (`js-pool-static`) for a client
+The merged slice is a GPU-host lease service (the whole-node class before its reservation, quiet gate and caps, 5.17): the lease table (`js-lease`) books a whole host from a pool for a client
 on a TTL, through the `js-provider` trait. That is level 1 of two-level leasing (9.1) already. What it lacks is the machine side: nothing
 on `main` launches or terminates a machine, and there is no agent wire. The GPU-host service keeps working through every follow-up; each
-change below is additive and leaves the `--pool-config` file, the routes and the lease file readable. The operator-listed pool behind that
-file is a stepping stone: `js-pool-static` stays as the `static` test provider, and the GPU machines move to running `js-agent` and
-registering with a `default` provider (step 54). `RegisteredProvider` (`js-registry`) is the core of the `DefaultProvider`, and
+change below is additive and leaves the routes and the lease file readable. The operator-listed pool (`--pool-config`) that this service
+once read is removed: `js-pool-static` is now the test double `js-pool-fake`, and the GPU machines run `js-agent` and register (a
+`[[pool]]` of `kind = "static"`, or the `default` provider of step 54). `RegisteredProvider` (`js-registry`) is the core of the `DefaultProvider`, and
 `LayeredProvider`'s fixed order (static, then registered) becomes the configured hierarchy ([design/merged-code.md](design/merged-code.md)).
 
 The map of each merged item to what it becomes, with the follow-up step, is in [design/merged-code.md](design/merged-code.md).
@@ -727,7 +727,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 |---|---|---|
 | `js-types` (merged) | generic half of `crates/kbf-types` | `Resources` as a named vector plus the separate lease-count cap, ids, `ResourceClass`, `Shape`, labels; later farm time, `Qos`, `NodePhase`, `StateMachine`, `Effect`, control record |
 | `js-provider` (merged) | new | merged as `Provider`, now renamed `Pool` (the allocation port); `CapacityProvider` lives in `js-elastic`; `StartSpec` and its rules; `HostBook`, the booking table the static pool and the registry share |
-| `js-pool-static` (merged) | new | the pool of operator-listed hosts; kept as the `static` capacity provider, **for tests only**, and as the stepping stone of the GPU lease service (5.7, 5.9) |
+| `js-pool-fake` (merged as `js-pool-static`) | new | a fake list of operator-listed hosts, a test double **for tests only**; the agentless pool it once served was removed (5.7, 5.9) |
 | `js-provider-fake` (merged) | new | the merged fake provider; becomes the fake aws at step 28 (13.1) |
 | `js-conformance` (merged) | new | the machinery; gains the two suites and their broken providers (13.2) |
 | `js-lease` (merged) | new | the lease table: states, TTL, reaper, lease file; gains `acquiring` and the pool name (5.9) |
@@ -937,7 +937,7 @@ D65 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
   request whose last capable path goes waits `regain_grace` before it is refused (D41). Refusing whenever no host is free now was
   considered and rejected: it turns a busy fleet into errors and puts a queue in every caller. Text in [design/providers.md](design/providers.md).
 - D36 the static pool is for testing only (settled): the operator-listed pool is a test provider; production hosts register through
-  `js-agent`; the GPU lease service's listed pool is the stepping stone (step 54). D37 the default provider never creates or destroys
+  `js-agent`; the GPU lease service's listed pool was removed. D37 the default provider never creates or destroys
   compute, and an elastic provider boots a machine whose agent registers itself (direction settled). D38 no minimum machines anywhere
   (settled; supersedes D21 and D23(c)). D39 a provider hierarchy: an ordered list per pool, falling through only when an earlier entry
   cannot satisfy now (direction settled). D40 a host that frees while a later entry's machine boots takes the waiting request, and the

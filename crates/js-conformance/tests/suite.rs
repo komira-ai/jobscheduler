@@ -1,9 +1,9 @@
-//! Runs the conformance suite against the fake, the static pool, and each broken fake.
+//! Runs the conformance suite against the fake, the fake host pool, and each broken fake.
 
 use std::collections::BTreeMap;
 
 use js_conformance::{Check, Report, Subject, Verdict, run};
-use js_pool_static::StaticPool;
+use js_pool_fake::FakeHostPool;
 use js_provider::{Call, HostCapacity, Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
 use js_provider_fake::{Defect, FakePool, Rank};
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
@@ -12,7 +12,7 @@ use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 /// instantiation that reaches every arm: the fake can be scripted, the pool cannot.
 enum Under {
     Fake(FakePool),
-    Pool(StaticPool),
+    Pool(FakeHostPool),
     /// A fake that cannot be made to list an unleasable class.
     Bare(FakePool),
     /// A fake whose capacity listing shows a second lease on every booked host.
@@ -86,7 +86,8 @@ impl Subject for Under {
             }
             Self::Pool(pool) => {
                 let id = ProviderId::new("pool").unwrap();
-                let kept = std::mem::replace(pool, StaticPool::from_toml(id, POOL_CONFIG).unwrap());
+                let kept =
+                    std::mem::replace(pool, FakeHostPool::from_toml(id, POOL_CONFIG).unwrap());
                 *pool = kept.with_classes(vec![ResourceClass::gpu_host(), class]);
                 true
             }
@@ -144,13 +145,13 @@ fn the_fake_conforms() {
     assert_eq!(report.results.len(), Check::ALL.len());
 }
 
-/// Asserts that the static pool passes every check except the two it cannot take
+/// Asserts that the fake host pool passes every check except the two it cannot take
 /// part in, which are reported as not applicable and not skipped silently.
 #[test]
 fn the_static_pool_conforms() {
     let make = || {
         let id = ProviderId::new("pool").unwrap();
-        Under::Pool(StaticPool::from_toml(id, POOL_CONFIG).unwrap())
+        Under::Pool(FakeHostPool::from_toml(id, POOL_CONFIG).unwrap())
     };
     let report = run(make);
     assert!(report.failed().is_empty(), "{report:?}");

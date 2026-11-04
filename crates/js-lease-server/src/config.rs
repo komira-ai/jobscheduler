@@ -23,7 +23,7 @@ use crate::adapt::SharedClock;
 use crate::agent_pool;
 use crate::agent_tokens::AgentTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
-use crate::capacity::{CapacitySource, StaticPoolSource};
+use crate::capacity::CapacitySource;
 use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
 use crate::flags;
@@ -70,8 +70,10 @@ pub struct Cli {
     /// silently started empty.
     #[arg(long, value_enum, required_unless_present = "config")]
     pub boot: Option<BootMode>,
-    /// The TOML file listing the hosts to lease. Optional when agents register hosts
-    /// (`--agent-pool-config`); one of the two sources is required.
+    /// Removed: the agentless hosts-file pool is no longer served. The flag is kept only
+    /// so that a start that gives it is refused naming it, with the migration: run
+    /// `js-agent` on each host and use `--agent-pool-config` (or a `[[pool]]` of
+    /// `kind = "static"` in `--config`).
     #[arg(long)]
     pub pool_config: Option<PathBuf>,
     /// A file holding the bearer token. It must be owner-only (mode 0600 or 0400).
@@ -403,15 +405,17 @@ pub struct Config {
     pub(crate) job_retention: Retention,
 }
 
-/// Where the hosts come from: the operator's pool file alone, or that file (when given)
-/// beside the hosts agents register.
+/// Where the hosts come from: the hosts agents register, or hosts a library caller handed
+/// in through the simulation seam ([`Config::simulated`], [`Config::with_capacity_source`],
+/// or a kind of its own that builds [`Built::Simulated`](crate::Built::Simulated)). No flag
+/// and no kind the server ships makes a simulated source.
 pub(crate) enum Hosts {
-    /// `--pool-config` alone: the server builds exactly what it always has.
-    Static(Box<dyn CapacitySource>),
+    /// A simulated source alone, with no agent registration: tests and simulations only.
+    Simulated(Box<dyn CapacitySource>),
     /// Agent registration is on.
     Layered {
-        /// The static pool, when `--pool-config` was given; it is tried first.
-        static_pool: Option<Box<dyn CapacitySource>>,
+        /// The simulated source, when a library caller handed one in; it is tried first.
+        simulated: Option<Box<dyn CapacitySource>>,
         /// The registering side.
         agents: Box<AgentSetup>,
     },
@@ -439,15 +443,43 @@ pub(crate) struct AgentSetup {
 impl Config {
     /// Checks `cli`: the ttls are consistent, a listen address that is not loopback has
     /// TLS flags, the token files are owner-only and hold tokens, the pool files are
-    /// valid, and at least one source of hosts is configured.
+    /// valid, and agents register hosts (`--agent-pool-config`, or a registering
+    /// `[[pool]]` of `--config`). `--pool-config` is refused with the migration.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError`] naming the flag, or the field of the file, at fault.
     pub fn from_cli(cli: Cli) -> Result<Self, StartupError> {
+        Self::checked(cli, None)
+    }
+
+    /// The simulation seam: checks `cli` as [`Config::from_cli`] does, with the hosts of
+    /// `hosts` served beside the hosts agents register, or alone when the flags turn no
+    /// registration on. It is for tests and simulations of the scheduler without real
+    /// hosts; the program never calls it, and no flag or file reaches it.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError`] as [`Config::from_cli`] refuses `cli`.
+    pub fn simulated(cli: Cli, hosts: Box<dyn CapacitySource>) -> Result<Self, StartupError> {
+        Self::checked(cli, Some(hosts))
+    }
+
+    fn checked(cli: Cli, simulated: Option<Box<dyn CapacitySource>>) -> Result<Self, StartupError> {
         let given = flags::recorded(&cli)?;
         if let Some(path) = &cli.config {
             if let Some(flag) = given.first() {
                 return Err(flags::beside_config(flag));
             }
             let clock = SharedClock::new(SystemClock);
-            return Self::from_config_file(path, &Kinds::standard(), &OwnerOnlyFiles, clock);
+            let config = Self::from_config_file(path, &Kinds::standard(), &OwnerOnlyFiles, clock)?;
+            return Ok(match simulated {
+                Some(hosts) => config.with_capacity_source(hosts),
+                None => config,
+            });
+        }
+        if cli.pool_config.is_some() {
+            return Err(StartupError::new("--pool-config", flags::AGENTLESS_REMOVED));
         }
         flags::need_agent_pool(&cli)?;
         let settings = Settings::new(cli.default_ttl, cli.max_ttl)
@@ -456,7 +488,7 @@ impl Config {
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
         let token = read_token(token_file)?;
         let limits = Limits::from(&cli);
-        let hosts = hosts(&cli, &token)?;
+        let hosts = hosts(&cli, &token, simulated)?;
         let settings = with_pool_settings(settings, &hosts)?;
         let state_file = required(cli.state_file.clone(), "--state-file")?;
         let usage = usage_setup(
@@ -519,9 +551,9 @@ impl Config {
             mut warnings,
         } = file::load(path, &load)?;
         let (hosts, elastic) = match hosts {
-            LoadedHosts::Static(source) => (Hosts::Static(source), None),
+            LoadedHosts::Simulated(source) => (Hosts::Simulated(source), None),
             LoadedHosts::Registering {
-                static_pool,
+                simulated,
                 registering,
             } => {
                 let Registering {
@@ -541,13 +573,7 @@ impl Config {
                     estimate_feed: server.agents.estimate_feed(),
                     max_lease_wall: server.max_lease_wall,
                 });
-                (
-                    Hosts::Layered {
-                        static_pool,
-                        agents,
-                    },
-                    plan,
-                )
+                (Hosts::Layered { simulated, agents }, plan)
             }
         };
         let alerts = alert_sink(server.alerts.as_ref(), files)?;
@@ -661,13 +687,14 @@ impl Config {
         self.elastic.as_ref()
     }
 
-    /// The same configuration taking its static hosts from `capacity` instead of the
-    /// file `--pool-config` names.
+    /// The same configuration taking its simulated hosts from `capacity`: in place of the
+    /// simulated source it has, or beside the hosts agents register. Part of the
+    /// simulation seam ([`Config::simulated`]).
     pub fn with_capacity_source(mut self, capacity: Box<dyn CapacitySource>) -> Self {
         self.hosts = match self.hosts {
-            Hosts::Static(_) => Hosts::Static(capacity),
+            Hosts::Simulated(_) => Hosts::Simulated(capacity),
             Hosts::Layered { agents, .. } => Hosts::Layered {
-                static_pool: Some(capacity),
+                simulated: Some(capacity),
                 agents,
             },
         };
@@ -702,7 +729,7 @@ impl Config {
     pub fn placement(&self) -> Placement {
         match &self.hosts {
             Hosts::Layered { agents, .. } => agents.placement,
-            Hosts::Static(_) => Placement::Registry,
+            Hosts::Simulated(_) => Placement::Registry,
         }
     }
 
@@ -711,7 +738,7 @@ impl Config {
     pub fn estimate_feed(&self) -> bool {
         match &self.hosts {
             Hosts::Layered { agents, .. } => agents.estimate_feed,
-            Hosts::Static(_) => false,
+            Hosts::Simulated(_) => false,
         }
     }
 
@@ -767,7 +794,7 @@ fn with_pool_settings(settings: Settings, hosts: &Hosts) -> Result<Settings, Sta
             let settings = with_whole_node(settings, whole)?;
             Ok(crate::reservations::with_restart_grace(settings, whole))
         }
-        Hosts::Static(_) => Ok(settings),
+        Hosts::Simulated(_) => Ok(settings),
     }
 }
 
@@ -789,18 +816,20 @@ fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> 
     value.ok_or_else(|| StartupError::new(flag, "required unless --config is given"))
 }
 
-/// The sources of hosts the flags name. At least one is required; the shared join token
-/// file needs the agent pool file, which alone turns registration on.
-fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
-    let static_pool = cli
-        .pool_config
-        .as_ref()
-        .map(|path| Box::new(StaticPoolSource::new(path)) as Box<dyn CapacitySource>);
+/// The sources of hosts: the agent pool the flags name, beside the simulated source a
+/// library caller handed in. One of the two is required, and the program hands in none;
+/// the shared join token file needs the agent pool file, which alone turns registration
+/// on.
+fn hosts(
+    cli: &Cli,
+    client: &Token,
+    simulated: Option<Box<dyn CapacitySource>>,
+) -> Result<Hosts, StartupError> {
     match (&cli.agent_token_file, &cli.agent_pool_config) {
-        (None, None) => static_pool.map(Hosts::Static).ok_or_else(|| {
+        (None, None) => simulated.map(Hosts::Simulated).ok_or_else(|| {
             StartupError::new(
-                "--pool-config",
-                "required unless agents register hosts (--agent-pool-config)",
+                "--agent-pool-config",
+                "required: a server serves the hosts that run js-agent and register",
             )
         }),
         (tokens, Some(pool)) => {
@@ -811,7 +840,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
             let pool = agent_pool::read(pool)?;
             cli.placement.check(&pool, "--placement")?;
             Ok(Hosts::Layered {
-                static_pool,
+                simulated,
                 agents: Box::new(AgentSetup {
                     tokens,
                     pool,

@@ -31,8 +31,8 @@ const GIB: u64 = 1 << 30;
 /// places on it. A pool that books no level, or a text that is not a list of levels of one
 /// family, states none.
 ///
-/// Today only agent pools and static host files can book disk; elastic and joined pools
-/// have no `disk_bytes` key, so a request for disk there is refused before the scaler
+/// Today only agent pools (and simulated sources) can book disk; elastic pools and static
+/// pools of the configuration file have no `disk_bytes` key, so a request for disk there is refused before the scaler
 /// sees it.
 fn offer_of(shape: &Shape, booked: &Shape, exec: ExecMode) -> Offer {
     let resources = shape.resources();

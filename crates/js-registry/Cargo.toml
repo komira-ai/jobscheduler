@@ -25,7 +25,7 @@ thiserror.workspace = true
 # tests/capacity.rs runs the registered set of the machine-provider conformance suite
 # against `StaticCapacity`.
 js-elastic = { path = "../js-elastic", features = ["conformance"] }
-js-pool-static = { path = "../js-pool-static" }
+js-pool-fake = { path = "../js-pool-fake" }
 js-sim = { path = "../js-sim" }
 serde_json.workspace = true
 

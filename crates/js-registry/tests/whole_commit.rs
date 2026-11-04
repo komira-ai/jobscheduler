@@ -7,7 +7,7 @@ mod support;
 use js_agent_wire::{
     Command, HeartbeatReply, HeldRun, HeldState, Isolation, JobSpec, Limits, Phase, Taint,
 };
-use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
+use js_pool_fake::{EXAMPLE_CONFIG, FakeHostPool};
 use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, RegisteredProvider, RunRefusal, RunState};
 use js_types::{Admission, ClassId, ProviderId, Request, ResourceClass, Resources};
@@ -492,13 +492,13 @@ fn a_bookall_lease_is_unchanged() {
     assert_eq!(started_on(&provider.start(spec(2))), Some("a"));
 }
 
-/// Documents the static pool: it has no agent to wait for, so a `Whole` lease (the
+/// Documents the fake host pool: it has no agent to wait for, so a `Whole` lease (the
 /// `whole-node` class) is held at once and reads `Present` on its first look.
 #[test]
 fn a_static_pool_holds_a_whole_lease_at_once() {
     let id = ProviderId::new("pool").unwrap();
     let class = ResourceClass::whole_node();
-    let pool = StaticPool::from_toml(id, EXAMPLE_CONFIG).unwrap();
+    let pool = FakeHostPool::from_toml(id, EXAMPLE_CONFIG).unwrap();
     let mut pool = pool.with_classes(vec![class.clone()]);
     assert_eq!(class.admission(), &Admission::Whole);
     let request = Request {
@@ -509,7 +509,7 @@ fn a_static_pool_holds_a_whole_lease_at_once() {
     };
     let spec = StartSpec::new(lease(1), request, &[class]).unwrap();
     let StartAck::Started { host } = pool.start(spec) else {
-        panic!("a static pool grants a whole lease at once");
+        panic!("a fake host pool grants a whole lease at once");
     };
     assert_eq!(pool.observe(&lease(1)), Observed::Present { host });
 }

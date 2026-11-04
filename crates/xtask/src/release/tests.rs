@@ -595,7 +595,6 @@ fn this_repositorys_shipped_crates() {
         "js-mdm-core",
         "js-host-step",
         "js-oci",
-        "js-pool-static",
         "js-provider",
         "js-registry",
         "js-types",
@@ -605,8 +604,14 @@ fn this_repositorys_shipped_crates() {
             "{member} ships"
         );
     }
-    // The fake provider is a dev-dependency of the binaries: only their tests link it.
-    for member in ["xtask", "js-coverage", "js-conformance", "js-provider-fake"] {
+    // The fakes are dev-dependencies of the binaries: only their tests link them.
+    for member in [
+        "xtask",
+        "js-coverage",
+        "js-conformance",
+        "js-provider-fake",
+        "js-pool-fake",
+    ] {
         assert!(
             !shipped.contains(&format!("crates/{member}")),
             "{member} does not"

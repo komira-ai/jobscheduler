@@ -16,7 +16,7 @@ use crate::support::{Scratch, args_with, base_args, config};
 #[test]
 fn job_retention_flag_and_config_key_agree() {
     let scratch = Scratch::new("job_retention_agree");
-    let pool = PoolText::static_pool(&scratch, "hosts");
+    let pool = PoolText::fake_hosts(&scratch, "hosts");
     let from_file = |line: &str| {
         load(&scratch, &file(&server(&scratch, line), &[&pool]))
             .map(|config| config.job_retention())

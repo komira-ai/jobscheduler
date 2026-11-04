@@ -1,11 +1,18 @@
-//! The `joined` kind of `[[pool]]`: a fixed set of machines that run `js-agent` and join
-//! by hand. The pool launches nothing, so it has no provider, no scaler, no spend caps and
-//! no network mode; it books one shape for every host, and the hosts register with their
-//! join tokens.
+//! The `static` kind of `[[pool]]`: the machines we install `js-agent` on, which reach
+//! out and register. The pool launches nothing, so it has no provider, no scaler, no spend
+//! caps and no network mode; it books one shape for every host, and the hosts register
+//! with their join tokens. There is no list of hosts: a host is in the pool when its agent
+//! registers.
+//!
+//! `kind = "joined"` is the old spelling of the same pool. It is read exactly as
+//! `kind = "static"`, and the server logs one warning at start for each pool that uses it,
+//! naming the pool; a later release refuses it. The provider kind `static` of the removed
+//! agentless hosts-file pool (a `provider` table of kind `static` naming a hosts file, no
+//! top-level `kind`) is another thing, refused with the migration (`agentless.rs`).
 //!
 //! ```toml
 //! [[pool]]
-//! kind  = "joined"
+//! kind  = "static"
 //! name  = "nodes"
 //! class = "whole-node"
 //! exec  = "container"                    # optional; absent or "none": no host contract
@@ -22,7 +29,7 @@
 //! A lease request is matched against the pool's shape, `capabilities` included (the
 //! registry books every host as that shape), and a host is admitted only if its hello
 //! reports every capability of the pool with the same value. A request that requires
-//! `os=linux` therefore finds a place on a joined pool only if the pool names `os`.
+//! `os=linux` therefore finds a place on a static pool only if the pool names `os`.
 //!
 //! # Building one without the server's configuration file
 //!
@@ -71,7 +78,7 @@ const KEYS: &[&str] = &[
 
 const SHAPE_KEYS: &[&str] = &["cpu_millis", "memory_bytes", "gpus", "gpu_class"];
 
-/// The keys of a pool that launches, which a joined pool refuses.
+/// The keys of a pool that launches, which a static pool refuses.
 const LAUNCHING: &[&str] = &[
     "launch",
     "provider",
@@ -89,11 +96,15 @@ const LAUNCHING: &[&str] = &[
 ];
 
 const LAUNCHES_NOTHING: &str =
-    "a joined pool launches nothing: its machines are started by hand and join with js-agent";
+    "a static pool launches nothing: its machines run js-agent and register";
+
+/// The old spelling of `kind = "static"`, read as it and warned about at start.
+const OLD_SPELLING: &str = "joined";
 
 const ID_RULE: &str = "must be 1 to 63 characters of [a-z0-9._-]";
 
-/// A pool of hand-joined agents, as the configuration describes it.
+/// A static pool (machines that run `js-agent` and register), as the configuration
+/// describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinedPool {
     /// The pool's name: what a host names as `pool` in its hello, and the `provider` of
@@ -133,8 +144,9 @@ pub struct JoinedPool {
 }
 
 impl JoinedPool {
-    /// Reads the pool from the table of one `[[pool]]`. It reads and checks the types of
-    /// the keys and refuses the keys of a pool that launches, naming the key; the values
+    /// Reads the pool from the table of one `[[pool]]`, whose `kind` is `static`, its old
+    /// spelling `joined` (read the same), or absent. It reads and checks the types of the
+    /// keys and refuses the keys of a pool that launches, naming the key; the values
     /// themselves are checked by [`JoinedPool::validate`], which this calls.
     ///
     /// # Errors
@@ -147,10 +159,9 @@ impl JoinedPool {
         };
         let mut s = Section::open(table, head);
         match s.string("kind")?.as_deref() {
-            None | Some("joined") => {}
+            None | Some("static" | OLD_SPELLING) => {}
             Some(_) => {
-                let reason =
-                    "must be \"joined\"; a pool that launches names its kind under provider";
+                let reason = "must be \"static\" (or its old spelling \"joined\"); a pool that launches names its kind under provider";
                 return Err(s.fail("kind", reason));
             }
         }
@@ -315,10 +326,13 @@ fn needed(sh: &mut Section, key: &str) -> Result<u64, StartupError> {
     }
 }
 
-/// Reads the `[[pool]]` table of a joined pool for the file: the pool, and the shared token
-/// file when it names one. The pool registers agents and launches nothing.
+/// Reads the `[[pool]]` table of a static pool for the file: the pool, the shared token
+/// file when it names one, and the warning of the old spelling `kind = "joined"`. The pool
+/// registers agents and launches nothing.
 pub(super) fn read(table: toml::Table, client: &Token) -> Result<Read, StartupError> {
+    let old = table.get("kind").and_then(toml::Value::as_str) == Some(OLD_SPELLING);
     let joined = JoinedPool::from_table(table)?;
+    let warning = old.then(|| old_spelling(&joined.name));
     let pool = joined.validate()?;
     let tokens = match &joined.join_token_file {
         Some(path) => match AgentTokens::open(path, client) {
@@ -339,7 +353,15 @@ pub(super) fn read(table: toml::Table, client: &Token) -> Result<Read, StartupEr
     Ok(Read {
         name: joined.name,
         pool: Pool::Elastic(Box::new(registering)),
+        warning,
     })
+}
+
+/// The warning of a pool `name` that spells its kind `joined`.
+fn old_spelling(name: &str) -> String {
+    format!(
+        "pool {name:?}: warning: kind = \"joined\" is the old spelling of kind = \"static\", which replaces it; the pool is read the same, and a later release refuses the old spelling"
+    )
 }
 
 #[cfg(test)]
@@ -366,7 +388,7 @@ mod tests {
         JoinedPool::from_table(table).unwrap_err().to_string()
     }
 
-    /// The smallest joined pool parses with the wire's timing and no contract; a full one carries every field through to the registry's pool. It
+    /// The smallest static pool parses with the wire's timing and no contract; a full one carries every field through to the registry's pool. It
     /// catches a key that is read and dropped and a default that drifts from the wire's.
     #[test]
     fn a_joined_pool_parses_with_defaults_and_with_every_field() {
@@ -402,10 +424,10 @@ mod tests {
         assert_eq!(none.exec, None);
     }
 
-    /// `memory_schedulable_percent` on a joined pool is read into `memory_percent` (all of
+    /// `memory_schedulable_percent` on a static pool is read into `memory_percent` (all of
     /// it when absent) and reaches the registry's pool, and a value outside 1 to 100 is
     /// refused naming the key. It catches a key that is refused as unknown, one that is
-    /// read and dropped, and a joined pool that books `MemoryPercent::FULL` regardless.
+    /// read and dropped, and a static pool that books `MemoryPercent::FULL` regardless.
     #[test]
     fn the_memory_percent_is_read_and_reaches_the_registry_pool() {
         let whole = JoinedPool::from_table(with("")).unwrap();
@@ -446,8 +468,8 @@ mod tests {
     }
 
     /// Each key of a pool that launches is refused by name with the reason that the pool
-    /// launches nothing, and a kind other than joined is refused on `kind`. It catches a
-    /// joined pool that accepts a spend cap or a network it would never use.
+    /// launches nothing, and a kind other than static (or joined) is refused on `kind`. It
+    /// catches a static pool that accepts a spend cap or a network it would never use.
     #[test]
     fn the_keys_of_a_launching_pool_are_refused_by_name() {
         let launching = [
@@ -471,7 +493,9 @@ mod tests {
         }
         let said = refused(with("kind = \"lambdalabs\""));
         assert!(
-            said.starts_with("pool \"nodes\": kind: must be \"joined\""),
+            said.starts_with(
+                "pool \"nodes\": kind: must be \"static\" (or its old spelling \"joined\")"
+            ),
             "{said}"
         );
     }
@@ -577,7 +601,7 @@ mod tests {
         }
     }
 
-    /// A joined pool's `share_class` is carried to the registry's pool as a class that
+    /// A static pool's `share_class` is carried to the registry's pool as a class that
     /// books part of a host; one with the pool's own name is refused naming the pool and
     /// the key. It catches the key read and dropped on the way to the registry.
     #[test]
@@ -601,5 +625,26 @@ mod tests {
             gpu,
             "pool \"nodes\": share_class: \"gpu-host\" is a shipped class that books a whole host"
         );
+    }
+
+    /// Asserts that `kind = "joined"` and `kind = "static"` read the same pool, that only
+    /// the old spelling gives a warning, and that the warning names the pool and `static`.
+    /// It catches a reader that refuses either spelling, one that reads them apart, and a
+    /// warning given for the new spelling or naming no pool.
+    #[test]
+    fn the_old_spelling_reads_the_same_pool_with_one_warning() {
+        let client = crate::config::parse_token(&[b'c'; 40]).unwrap();
+        let old = read(with("kind = \"joined\""), &client).unwrap();
+        let new = read(with("kind = \"static\""), &client).unwrap();
+        assert_eq!(
+            JoinedPool::from_table(with("kind = \"joined\"")).unwrap(),
+            JoinedPool::from_table(with("kind = \"static\"")).unwrap()
+        );
+        assert_eq!((old.name.as_str(), new.name.as_str()), ("nodes", "nodes"));
+        assert_eq!(new.warning, None);
+        assert_eq!(old.warning, Some(old_spelling("nodes")));
+        let said = old_spelling("nodes");
+        assert!(said.starts_with("pool \"nodes\": warning: "), "{said}");
+        assert!(said.contains("kind = \"static\""), "{said}");
     }
 }

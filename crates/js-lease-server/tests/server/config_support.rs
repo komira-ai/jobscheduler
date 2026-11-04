@@ -1,8 +1,9 @@
 //! What the configuration file tests share: a provider kind shaped like the cloud one,
 //! builders for the file's tables, and the design's examples read out of the docs file.
 
+use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use js_elastic::{
     AcquireRequest, Acquired, BootStep, CapacityProvider, GpuClass, Held, HostRef, Offer,
@@ -13,10 +14,11 @@ use js_lease_server::{
     BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, SharedClock,
     StartupError,
 };
-use js_pool_static::EXAMPLE_CONFIG;
-use js_types::ExecMode;
+use js_pool_fake::{EXAMPLE_CONFIG, FakeHostPool};
+use js_types::{ExecMode, ProviderId};
 
-use crate::support::{Scratch, T0, TOKEN};
+use crate::agents_support::{JOIN, POOL};
+use crate::support::{FakeHosts, Scratch, T0, TOKEN, base_args, take_fake_hosts};
 
 /// A secret that must never be printed: the content of the key and OAuth files.
 pub const API_KEY: &str = "PLANTED-API-KEY-VALUE";
@@ -155,13 +157,57 @@ fn any_mode(_table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, KindErro
     }))
 }
 
-/// The kinds of the tests: `static` as the server ships it, `lambdalabs` as
-/// [`cloud_kind`], and two more.
+/// The kind of a pool that lists its hosts, for the tests: `hosts_file` names a host list
+/// of the fake pool's format, checked offline, and the pool is served through the
+/// simulation seam ([`Built::Simulated`]) as a [`FakeHosts`] source of the pool's class
+/// and memory share. The program has no such kind.
+fn fake_hosts_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
+    if let Some(key) = table.keys().find(|key| key.as_str() != "hosts_file") {
+        return Err(kind_error(key, "unknown field; known: hosts_file"));
+    }
+    let path = match table.get("hosts_file") {
+        None => return Err(kind_error("hosts_file", "required")),
+        Some(toml::Value::String(path)) => PathBuf::from(path),
+        Some(_) => return Err(kind_error("hosts_file", "must be a string")),
+    };
+    let id = ProviderId::new("fake-hosts").unwrap();
+    let listed = FakeHostPool::from_config_file(id, &path);
+    listed.map_err(|err| kind_error("hosts_file", format!("{}: {err}", path.display())))?;
+    let source = FakeHosts::new(path).with_classes(vec![ctx.class.clone()]);
+    let source = match ctx.memory_percent {
+        Some(percent) => source.with_memory_percent(percent),
+        None => source,
+    };
+    Ok(Built::Simulated(Box::new(source)))
+}
+
+/// The kinds of the tests: the server's own, `lambdalabs` as [`cloud_kind`],
+/// `fake-hosts` ([`fake_hosts_kind`]), and two more.
 pub fn kinds() -> Kinds {
     Kinds::standard()
         .with("lambdalabs", cloud_kind)
+        .with("fake-hosts", fake_hosts_kind)
         .with("broken-floor", broken_floor)
         .with("any-mode", any_mode)
+}
+
+/// The command line of the program as shipped: the base flags without the test-only host
+/// list, and the agent flags that make the server serve hosts that register (the join
+/// token file holds [`JOIN`], the agent pool is [`POOL`]). The program parses it as it is;
+/// no flag on it is a test seam.
+pub fn registering_args(scratch: &Scratch) -> Vec<OsString> {
+    let (mut args, _) = take_fake_hosts(base_args(scratch));
+    let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
+    let pool = scratch.write("agent-pool.toml", POOL, 0o644);
+    let flags = [
+        ("--agent-token-file", tokens.into_os_string()),
+        ("--agent-pool-config", pool.into_os_string()),
+    ];
+    for (flag, value) in flags {
+        args.push(flag.into());
+        args.push(value);
+    }
+    args
 }
 
 /// A clock that stands still.
@@ -216,23 +262,26 @@ pub fn server_with_agents(scratch: &Scratch) -> String {
 pub struct PoolText(Vec<(String, String)>);
 
 impl PoolText {
-    /// A static pool `name` over the shipped two-host file.
-    pub fn static_pool(scratch: &Scratch, name: &str) -> Self {
+    /// A pool `name` of the test kind `fake-hosts` over the shared two-host list.
+    pub fn fake_hosts(scratch: &Scratch, name: &str) -> Self {
         let hosts = scratch.write(&format!("hosts-{name}.toml"), EXAMPLE_CONFIG, 0o644);
         Self(Vec::new())
             .set("name", &quote(name))
             .set("class", &quote("gpu-host"))
             .set(
                 "provider",
-                &format!("{{ kind = \"static\", hosts_file = {} }}", quoted(&hosts)),
+                &format!(
+                    "{{ kind = \"fake-hosts\", hosts_file = {} }}",
+                    quoted(&hosts)
+                ),
             )
     }
 
-    /// A pool `name` of hand-joined agents: six machines of 8 cores and 16 GiB, with no
-    /// host contract.
-    pub fn joined(name: &str) -> Self {
+    /// A static pool `name`, `kind = "static"` (machines that run `js-agent` and
+    /// register): six machines of 8 cores and 16 GiB, with no host contract.
+    pub fn registering(name: &str) -> Self {
         Self(Vec::new())
-            .set("kind", &quote("joined"))
+            .set("kind", &quote("static"))
             .set("name", &quote(name))
             .set("class", &quote("whole-node"))
             .set("exec", &quote("none"))

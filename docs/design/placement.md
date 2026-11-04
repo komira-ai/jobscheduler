@@ -86,7 +86,7 @@ took before.
   hook takes), so a cordoned host is one whose cordon has not lapsed. The registry has no drain of that cordon, so the lease server never
   answers `probe-host-draining`. The registry only reports what it knows of the host (its booked shape, cordon, phase, taint and whether it
   is being scaled away), and the placer judges it.
-- With the default `--placement registry`, a probe is refused `probe-unsupported`, as it is by the static pool, whose hosts are never
+- With the default `--placement registry`, a probe is refused `probe-unsupported`, as it is by a pool of fixed hosts (the test double), whose hosts are never
   cordoned. The layered provider passes over a child that answers `probe-unsupported`, so a probe reaches the registry. Every other
   probe refusal is final there: the probe is never placed by a child that did not judge its host. A probe of a whole-node class is
   refused `probe-unsupported` too, because its host would be prepared and held as the whole-node queue decides, and no probe rule judges

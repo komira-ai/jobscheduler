@@ -1,9 +1,9 @@
-//! The share of a static host's memory the pool books: `memory_schedulable_percent`.
+//! The share of a fake host's memory the pool books: `memory_schedulable_percent`.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_pool_static::{ConfigError, StaticPool};
+use js_pool_fake::{ConfigError, FakeHostPool};
 use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_types::{ClassId, LeaseId, MemoryPercent, ProviderId, Request, ResourceClass, Resources};
 
@@ -21,8 +21,8 @@ fn hosts(percent: &str) -> String {
     )
 }
 
-fn pool(text: &str) -> StaticPool {
-    StaticPool::from_toml(ProviderId::new("pool").unwrap(), text).unwrap()
+fn pool(text: &str) -> FakeHostPool {
+    FakeHostPool::from_toml(ProviderId::new("pool").unwrap(), text).unwrap()
 }
 
 fn asking(seq: u64, memory_bytes: u64) -> StartSpec {
@@ -40,7 +40,7 @@ fn asking(seq: u64, memory_bytes: u64) -> StartSpec {
 
 fn refused(text: &str) -> String {
     let id = ProviderId::new("pool").unwrap();
-    StaticPool::from_toml(id, text).unwrap_err().to_string()
+    FakeHostPool::from_toml(id, text).unwrap_err().to_string()
 }
 
 /// Asserts that at 90 a host listing 251 GiB books exactly floor(251 GiB x 90 / 100)
@@ -86,7 +86,7 @@ fn zero_and_above_a_hundred_are_refused() {
         assert!(said.contains("line 1"), "{bad}: {said}");
         assert!(said.contains("memory_schedulable_percent"), "{bad}: {said}");
     }
-    let err = StaticPool::from_toml(
+    let err = FakeHostPool::from_toml(
         ProviderId::new("pool").unwrap(),
         &hosts("memory_schedulable_percent = 0\n"),
     );
@@ -101,10 +101,10 @@ fn a_percent_passed_by_the_caller_replaces_the_files() {
     let text = hosts("memory_schedulable_percent = 50\n");
     let id = || ProviderId::new("pool").unwrap();
     let eighty = Some(MemoryPercent::new(80).unwrap());
-    let mut replaced = StaticPool::from_toml_with_percent(id(), &text, eighty).unwrap();
+    let mut replaced = FakeHostPool::from_toml_with_percent(id(), &text, eighty).unwrap();
     let ack = replaced.start(asking(1, LISTED * 80 / 100));
     assert!(matches!(ack, StartAck::Started { .. }), "{ack:?}");
-    let mut kept = StaticPool::from_toml_with_percent(id(), &text, None).unwrap();
+    let mut kept = FakeHostPool::from_toml_with_percent(id(), &text, None).unwrap();
     assert_eq!(
         kept.start(asking(1, LISTED / 2 + 1)),
         StartAck::Refused(RefusalCode::NoFit)

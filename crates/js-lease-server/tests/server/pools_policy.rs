@@ -101,7 +101,7 @@ fn listening(name: &str, listen: &str) -> js_lease_server::Config {
         quoted(&cert),
         quoted(&key)
     );
-    let hosts = PoolText::static_pool(&scratch, "hosts");
+    let hosts = PoolText::fake_hosts(&scratch, "hosts");
     load(&scratch, &file(&server(&scratch, &extra), &[&hosts])).unwrap()
 }
 

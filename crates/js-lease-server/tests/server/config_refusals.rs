@@ -8,13 +8,13 @@ use js_lease_server::{Config, Kinds, OwnerOnlyFiles};
 use crate::config_support::{PoolText, clock, file, load, oauth_file, quoted, refusal, server};
 use crate::support::Scratch;
 
-/// A static pool, to stand beside the table under test.
+/// A fake-hosts pool, to stand beside the table under test.
 fn hosts(scratch: &Scratch) -> PoolText {
-    PoolText::static_pool(scratch, "hosts")
+    PoolText::fake_hosts(scratch, "hosts")
 }
 
 /// The refusal of a file whose `[server]` table has `extra` after its required keys,
-/// beside a static pool.
+/// beside a fake-hosts pool.
 fn refused_server(name: &str, extra: &str) -> String {
     let scratch = Scratch::new(name);
     let text = file(&server(&scratch, extra), &[&hosts(&scratch)]);
@@ -261,7 +261,7 @@ fn tls_files_come_together_and_a_public_listener_needs_them() {
 
 /// Asserts that an elastic pool needs the agent routes on a port of their own, with the
 /// design's message: no `agent_listen`, and one equal to `listen`, are refused naming
-/// `server.agent_listen`; a static pool alone needs none.
+/// `server.agent_listen`; a fake-hosts pool alone needs none.
 #[test]
 fn an_elastic_pool_needs_an_agent_port_of_its_own() {
     let scratch = Scratch::new("config_agent_port");
@@ -280,7 +280,7 @@ fn an_elastic_pool_needs_an_agent_port_of_its_own() {
 /// Asserts that `http://` off the loopback is refused for an elastic pool in each network
 /// mode, naming `server.advertise_url`, and that `https`, the loopback names (`localhost`,
 /// `127.0.0.1`, `[::1]`) and an address that does not parse as a URL are not refused by
-/// this check; a static pool alone may advertise `http://`. The agent refuses a plain
+/// this check; a fake-hosts pool alone may advertise `http://`. The agent refuses a plain
 /// `http://` address that is not loopback, so a pool that passed start would bill for
 /// every launch it could not boot.
 #[test]

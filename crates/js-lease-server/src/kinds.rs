@@ -19,7 +19,7 @@ use js_provider_lambdalabs as lambda;
 use js_types::{ExecMode, MemoryPercent, ResourceClass};
 
 use crate::adapt::SharedClock;
-use crate::capacity::{CapacitySource, StaticPoolSource};
+use crate::capacity::CapacitySource;
 use crate::config::read_private_reason;
 use crate::file::Launch;
 
@@ -59,7 +59,7 @@ pub struct BuildCtx<'a> {
     /// The class the pool serves.
     pub class: &'a ResourceClass,
     /// The pool's `memory_schedulable_percent`, when its table sets one: a kind that
-    /// lists hosts the operator describes books that share of their memory.
+    /// builds a simulated source books that share of its hosts' memory.
     pub memory_percent: Option<MemoryPercent>,
     /// The server's clock.
     pub clock: SharedClock,
@@ -98,8 +98,11 @@ pub struct ElasticBuilt {
 
 /// What a constructor builds.
 pub enum Built {
-    /// Hosts that exist already, listed by the operator.
-    Static(Box<dyn CapacitySource>),
+    /// Hosts handed in by a kind a library caller registers with [`Kinds::with`]: the
+    /// simulation seam of tests and simulations of the scheduler without real hosts. No
+    /// kind of [`Kinds::standard`] builds it, so no configuration file the program reads
+    /// reaches it.
+    Simulated(Box<dyn CapacitySource>),
     /// Hosts the scheduler launches.
     Elastic(ElasticBuilt),
 }
@@ -114,11 +117,12 @@ pub struct Kinds {
 }
 
 impl Kinds {
-    /// The kinds compiled into the server: `static` and `lambdalabs`.
+    /// The kinds compiled into the server: `lambdalabs`. The hosts that run `js-agent`
+    /// and register are a `[[pool]]` of `kind = "static"`, which has no provider and so
+    /// no kind here; the provider kind `static` of the removed agentless hosts-file pool
+    /// is refused by the file reader with the migration.
     pub fn standard() -> Self {
-        Self::default()
-            .with("static", static_kind)
-            .with("lambdalabs", lambdalabs_kind)
+        Self::default().with("lambdalabs", lambdalabs_kind)
     }
 
     /// These kinds and `name`, built by `ctor`.
@@ -153,20 +157,6 @@ impl Kinds {
             }),
         }
     }
-}
-
-/// The `static` kind: `js_pool_static::kind::build` over the operator's hosts file.
-fn static_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
-    let path = js_pool_static::kind::build(table).map_err(|refused| KindError {
-        field: refused.field,
-        reason: refused.reason,
-    })?;
-    let source = StaticPoolSource::new(path).with_classes(vec![ctx.class.clone()]);
-    let source = match ctx.memory_percent {
-        Some(percent) => source.with_memory_percent(percent),
-        None => source,
-    };
-    Ok(Built::Static(Box::new(source)))
 }
 
 /// The provider's clock over the server's: the milliseconds the server's clock reads.

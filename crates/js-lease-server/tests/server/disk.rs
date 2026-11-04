@@ -5,7 +5,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Harness, Scratch, base_args, replace};
+use crate::support::{FAKE_HOSTS, Harness, Scratch, base_args, replace};
 
 const GIB: u64 = 1 << 30;
 
@@ -22,11 +22,11 @@ fn hosts_text(disk: u64) -> String {
     )
 }
 
-/// A server over a static hosts file whose one host has `disk` bytes of scratch disk.
+/// A server over a simulated hosts file whose one host has `disk` bytes of scratch disk.
 async fn serve(name: &str, disk: u64) -> Harness {
     let scratch = Scratch::new(name);
     let path = scratch.write("big-hosts.toml", &hosts_text(disk), 0o644);
-    let args = replace(base_args(&scratch), "--pool-config", path.into_os_string());
+    let args = replace(base_args(&scratch), FAKE_HOSTS, path.into_os_string());
     Harness::with(scratch, args, None).await
 }
 

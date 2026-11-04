@@ -1,6 +1,6 @@
 //! A restart over the same lease file.
 
-use js_pool_static::EXAMPLE_CONFIG;
+use js_pool_fake::EXAMPLE_CONFIG;
 use serde_json::json;
 
 use crate::support::{

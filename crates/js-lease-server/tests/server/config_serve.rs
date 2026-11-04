@@ -110,7 +110,7 @@ async fn agent_routes_answer_on_the_agent_port_only() {
 #[tokio::test]
 async fn an_agent_port_without_agents_serves_nothing() {
     let scratch = Scratch::new("serve_no_agents");
-    let hosts = PoolText::static_pool(&scratch, "hosts");
+    let hosts = PoolText::fake_hosts(&scratch, "hosts");
     let extra = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
     let text = file(&server(&scratch, extra), &[&hosts]);
     let config = load(&scratch, &text).unwrap();
@@ -216,7 +216,7 @@ async fn a_wildcard_listener_starts_with_a_warning() {
         quoted(&cert),
         quoted(&key)
     );
-    let hosts = PoolText::static_pool(&scratch, "hosts");
+    let hosts = PoolText::fake_hosts(&scratch, "hosts");
     let config = load(&scratch, &file(&server(&scratch, &extra), &[&hosts])).unwrap();
     assert_eq!(
         config.warnings(),

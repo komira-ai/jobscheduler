@@ -10,7 +10,9 @@ use js_lease_server::{Cli, run};
 use serde_json::json;
 
 use crate::agents_support::{JOIN, JOIN_B, agent_args, beat, hello_with, join, post, session};
-use crate::support::{Harness, LogCapture, Scratch, TOKEN, base_args, config, replace};
+use crate::support::{
+    Harness, LogCapture, Scratch, TOKEN, base_args, config, replace, take_fake_hosts,
+};
 
 fn secs(n: u64) -> std::time::Duration {
     std::time::Duration::from_secs(n)
@@ -23,12 +25,9 @@ fn flag_of(args: Vec<OsString>) -> (&'static str, String) {
     (err.flag(), err.reason().to_string())
 }
 
-/// `base_args` without its `--pool-config`.
-fn without_pool_config(scratch: &Scratch) -> Vec<OsString> {
-    let mut args = base_args(scratch);
-    let at = args.iter().position(|arg| arg == "--pool-config").unwrap();
-    args.drain(at..at + 2);
-    args
+/// `base_args` without its fake hosts.
+fn without_hosts(scratch: &Scratch) -> Vec<OsString> {
+    take_fake_hosts(base_args(scratch)).0
 }
 
 /// `args` with `flag` and its `value` added.
@@ -38,22 +37,29 @@ fn with_flag(mut args: Vec<OsString>, flag: &str, value: impl Into<OsString>) ->
     args
 }
 
-/// Asserts that a server with neither a static pool nor agent registration is refused,
-/// naming `--pool-config`, and that the program ends with status 2 and says so; and that
-/// the static pool alone and agent registration alone both start. It catches a server
+/// Asserts that a server with neither simulated hosts nor agent registration is refused,
+/// naming `--agent-pool-config` with the reason that a server serves the hosts that run
+/// js-agent and register, and that the program ends with status 2 and says so; and that
+/// the simulated hosts alone and agent registration alone both start. It catches a server
 /// that starts with nothing to lease, and a refusal that names no flag.
 #[test]
 fn neither_source_configured_refused() {
     let scratch = Scratch::new("agents_neither");
-    let (flag, reason) = flag_of(without_pool_config(&scratch));
-    assert_eq!(flag, "--pool-config");
-    assert!(reason.contains("--agent-pool-config"), "{reason}");
+    let (flag, reason) = flag_of(without_hosts(&scratch));
+    assert_eq!(flag, "--agent-pool-config");
+    assert_eq!(
+        reason,
+        "required: a server serves the hosts that run js-agent and register"
+    );
 
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let code = run(without_pool_config(&scratch), &mut out, &mut err);
+    let code = run(without_hosts(&scratch), &mut out, &mut err);
     assert!(code == ExitCode::from(2));
     let err = String::from_utf8(err).unwrap();
-    assert!(err.starts_with("js-lease-server: --pool-config:"), "{err}");
+    assert!(
+        err.starts_with("js-lease-server: --agent-pool-config:"),
+        "{err}"
+    );
 
     assert!(config(base_args(&scratch)).is_ok());
     assert!(config(agent_args(&scratch, false)).is_ok());
@@ -97,9 +103,9 @@ fn agent_flags_come_together() {
         "--agent-hello-interval: requires --agent-pool-config"
     );
     let zero = with_flag(full.clone(), "--agent-hello-burst", "0");
-    assert!(Cli::try_parse_from(zero).is_err());
+    assert!(Cli::try_parse_from(take_fake_hosts(zero).0).is_err());
     let limited = with_flag(full, "--agent-hello-burst", "5");
-    assert!(Cli::try_parse_from(limited).is_ok());
+    assert!(Cli::try_parse_from(take_fake_hosts(limited).0).is_ok());
 }
 
 /// Asserts that the join token file is read only when it is a regular file only its owner

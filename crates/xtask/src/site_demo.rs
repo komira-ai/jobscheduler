@@ -6,6 +6,10 @@
 //! port it picked). Lease ids and times differ on every run, so a new recording differs from the committed
 //! one in those.
 //!
+//! The recorder is stale: the lease server now refuses `--pool-config`, because the agentless hosts-file
+//! pool was removed, so a run of this verb stops at the server start. The committed transcript is the last
+//! recording; it is to be recorded again over a host that runs `js-agent`.
+//!
 //! The recording, in order: the host file (a `#` line saying what it is, then the file), the command that
 //! writes the token file, the server start (a command and no output), then `js lease acquire`, `list`,
 //! `release <id>` and `list` again, each with what it printed. The commands are the ones [`commands`]

@@ -81,9 +81,9 @@ pub(crate) type Assembled = (Box<dyn CapacitySource>, Option<Arc<Agents>>);
 
 /// The capacity source the lease table runs on, and the agent side when it is on.
 ///
-/// Without agent flags this is the source `--pool-config` names, untouched. With them it
-/// is a [`LayeredSource`] over that source (if given) and a registry on `clock`, seeded
-/// with the bindings the previous run persisted.
+/// Without agent registration this is the simulated source a library caller handed in,
+/// untouched. With it, it is a [`LayeredSource`] over that source (if given) and a registry
+/// on `clock`, seeded with the bindings the previous run persisted.
 pub(crate) fn assemble(
     hosts: Hosts,
     usage: UsageSetup,
@@ -91,11 +91,8 @@ pub(crate) fn assemble(
     state_file: &Path,
 ) -> Result<Assembled, StartupError> {
     match hosts {
-        Hosts::Static(source) => Ok((source, None)),
-        Hosts::Layered {
-            static_pool,
-            agents,
-        } => {
+        Hosts::Simulated(source) => Ok((source, None)),
+        Hosts::Layered { simulated, agents } => {
             let AgentSetup {
                 tokens,
                 pool,
@@ -134,7 +131,7 @@ pub(crate) fn assemble(
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());
             }
-            let source = LayeredSource::new(static_pool, registry.clone(), bindings.clone());
+            let source = LayeredSource::new(simulated, registry.clone(), bindings.clone());
             let agents = Agents {
                 registry,
                 tokens,

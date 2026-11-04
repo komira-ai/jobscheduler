@@ -11,12 +11,12 @@ use std::sync::Arc;
 use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{
     CapacitySource, Cli, Config, Limits, Running, Seated, SharedClock, StartupError, TickHandle,
-    Ticker, channel_ticker, start_with_checks,
+    Ticker, Unseated, channel_ticker, start_with_checks,
 };
-use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
+use js_pool_fake::{EXAMPLE_CONFIG, FakeHostPool};
 use js_provider::Pool;
 use js_testkit::dir::TestDir;
-use js_types::ProviderId;
+use js_types::{MemoryPercent, ProviderId, ResourceClass};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -129,8 +129,13 @@ pub fn logged_with(needle: &str) -> Vec<String> {
         .collect()
 }
 
-/// The flags every test server gets: ephemeral loopback port, a first boot, the shipped
-/// two-host pool and an owner-only token file.
+/// The test servers' stand-in for a host list: not a flag of the program. [`config`]
+/// takes it and its value off the command line and serves the hosts of the file through
+/// the simulation seam ([`Config::simulated`]) as a [`FakeHosts`] source.
+pub const FAKE_HOSTS: &str = "--fake-hosts";
+
+/// The flags every test server gets: ephemeral loopback port, a first boot, the shared
+/// two-host fake pool ([`FAKE_HOSTS`]) and an owner-only token file.
 pub fn base_args(scratch: &Scratch) -> Vec<OsString> {
     let pool = scratch.write("pool.toml", EXAMPLE_CONFIG, 0o644);
     let token = scratch.write("token", TOKEN, 0o600);
@@ -139,7 +144,7 @@ pub fn base_args(scratch: &Scratch) -> Vec<OsString> {
         ("--listen", "127.0.0.1:0".into()),
         ("--state-file", scratch.state().into_os_string()),
         ("--boot", "initialise".into()),
-        ("--pool-config", pool.into_os_string()),
+        (FAKE_HOSTS, pool.into_os_string()),
         ("--token-file", token.into_os_string()),
     ];
     for (flag, value) in flags {
@@ -164,9 +169,88 @@ pub fn replace(mut args: Vec<OsString>, flag: &str, value: impl Into<OsString>) 
     args
 }
 
-/// Checks `args` as the program does.
+/// `args` without [`FAKE_HOSTS`] and its value, and that value when it was given.
+pub fn take_fake_hosts(mut args: Vec<OsString>) -> (Vec<OsString>, Option<PathBuf>) {
+    match args.iter().position(|arg| arg == FAKE_HOSTS) {
+        Some(at) => {
+            let path = args.remove(at + 1);
+            args.remove(at);
+            (args, Some(PathBuf::from(path)))
+        }
+        None => (args, None),
+    }
+}
+
+/// Checks `args` as the program does, with the hosts of [`FAKE_HOSTS`] (when given)
+/// served through the simulation seam.
 pub fn config(args: Vec<OsString>) -> Result<Config, StartupError> {
-    Config::from_cli(Cli::try_parse_from(args).unwrap())
+    let (args, hosts) = take_fake_hosts(args);
+    let cli = Cli::try_parse_from(args).unwrap();
+    match hosts {
+        Some(path) => Config::simulated(cli, Box::new(FakeHosts::new(path))),
+        None => Config::from_cli(cli),
+    }
+}
+
+/// The hosts a test lists in a file of the fake pool's format ([`EXAMPLE_CONFIG`]), as a
+/// source of the simulation seam: the bookings of the lease file are seated in a fresh
+/// [`FakeHostPool`] at every start, in lease id order, and a booking of a host the file
+/// does not list, or that an earlier lease holds, comes back unseated.
+#[derive(Debug, Clone)]
+pub struct FakeHosts {
+    path: PathBuf,
+    classes: Option<Vec<ResourceClass>>,
+    memory_percent: Option<MemoryPercent>,
+}
+
+impl FakeHosts {
+    /// A source over the host list at `path`.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            classes: None,
+            memory_percent: None,
+        }
+    }
+
+    /// The same source booking `percent` of each host's memory, in place of the percent
+    /// the file says.
+    pub fn with_memory_percent(mut self, percent: MemoryPercent) -> Self {
+        self.memory_percent = Some(percent);
+        self
+    }
+
+    /// The same source serving `classes` instead of the fake pool's default class.
+    pub fn with_classes(mut self, classes: Vec<ResourceClass>) -> Self {
+        self.classes = Some(classes);
+        self
+    }
+}
+
+impl CapacitySource for FakeHosts {
+    fn provider(&self, bookings: &[Booking]) -> Result<Seated, StartupError> {
+        let id = ProviderId::new("fake-hosts").unwrap();
+        let pool = FakeHostPool::from_config_file_with_percent(id, &self.path, self.memory_percent)
+            .map_err(StartupError::because(FAKE_HOSTS))?;
+        let mut pool = match &self.classes {
+            Some(classes) => pool.with_classes(classes.clone()),
+            None => pool,
+        };
+        let unseated = bookings
+            .iter()
+            .filter_map(|booking| {
+                let refused = pool.seat(&booking.host, booking.lease).err()?;
+                Some(Unseated {
+                    booking: booking.clone(),
+                    reason: refused.to_string(),
+                })
+            })
+            .collect();
+        Ok(Seated {
+            provider: Box::new(pool),
+            unseated,
+        })
+    }
 }
 
 /// A running test server with its clock and ticker.
@@ -241,7 +325,7 @@ impl Harness {
 /// from it, as a provider that is a service of its own would.
 #[derive(Clone)]
 pub struct SharedPool {
-    pool: Arc<std::sync::Mutex<StaticPool>>,
+    pool: Arc<std::sync::Mutex<FakeHostPool>>,
     gate: Arc<std::sync::Mutex<Option<Gate>>>,
 }
 
@@ -254,7 +338,7 @@ pub struct Gate {
 impl SharedPool {
     pub fn new() -> Self {
         let id = ProviderId::new("shared").unwrap();
-        let pool = StaticPool::from_toml(id, EXAMPLE_CONFIG).unwrap();
+        let pool = FakeHostPool::from_toml(id, EXAMPLE_CONFIG).unwrap();
         Self {
             pool: Arc::new(std::sync::Mutex::new(pool)),
             gate: Arc::new(std::sync::Mutex::new(None)),
@@ -268,7 +352,7 @@ impl SharedPool {
     }
 }
 
-struct SharedProvider(Arc<std::sync::Mutex<StaticPool>>, Option<Gate>);
+struct SharedProvider(Arc<std::sync::Mutex<FakeHostPool>>, Option<Gate>);
 
 impl CapacitySource for SharedPool {
     fn provider(&self, _bookings: &[Booking]) -> Result<Seated, StartupError> {
@@ -281,7 +365,7 @@ impl CapacitySource for SharedPool {
 }
 
 impl SharedProvider {
-    fn pool(&self) -> std::sync::MutexGuard<'_, StaticPool> {
+    fn pool(&self) -> std::sync::MutexGuard<'_, FakeHostPool> {
         self.0.lock().unwrap()
     }
 }

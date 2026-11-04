@@ -8,7 +8,8 @@ use std::process::ExitCode;
 use js_lease_server::{SharedClock, channel_ticker, parse_duration, run};
 
 use crate::support::{
-    Harness, Scratch, TOKEN, args_with, base_args, config, replace, request, start,
+    FAKE_HOSTS, Harness, Scratch, TOKEN, args_with, base_args, config, replace, request, start,
+    take_fake_hosts,
 };
 
 /// The flag a refusal names, and that its reason is not empty.
@@ -193,7 +194,10 @@ fn run_reports_refusals_with_status_2() {
     assert!(err.contains("--listen"), "{err}");
 }
 
+/// Runs the program's entry point on `args`, without the test seam's [`FAKE_HOSTS`]
+/// (the program has no such flag), and returns its exit code and output.
 fn run_captured(args: Vec<OsString>) -> (ExitCode, String, String) {
+    let (args, _) = take_fake_hosts(args);
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = run(args, &mut out, &mut err);
     (
@@ -253,10 +257,10 @@ async fn other_start_refusals_name_their_flag() {
         if name == "missing.toml" {
             fs::remove_file(&pool).unwrap();
         }
-        let args = replace(base_args(&scratch), "--pool-config", pool);
+        let args = replace(base_args(&scratch), FAKE_HOSTS, pool);
         let (_, ticker) = channel_ticker();
         let started = start(config(args).unwrap(), SharedClock::new(clock()), ticker).await;
-        assert_eq!(flag_of(started), "--pool-config");
+        assert_eq!(flag_of(started), FAKE_HOSTS);
     }
 
     let busy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -333,7 +337,7 @@ fn connection_limits_are_flags() {
         "--header-timeout=0s",
         "--drain-timeout=soon",
     ] {
-        let args = args_with(&scratch, &[bad]);
+        let args = take_fake_hosts(args_with(&scratch, &[bad])).0;
         assert!(js_lease_server::Cli::try_parse_from(args).is_err(), "{bad}");
     }
     let args = args_with(
@@ -345,7 +349,7 @@ fn connection_limits_are_flags() {
             "--drain-timeout=1h",
         ],
     );
-    let cli = js_lease_server::Cli::try_parse_from(args).unwrap();
+    let cli = js_lease_server::Cli::try_parse_from(take_fake_hosts(args).0).unwrap();
     assert_eq!(cli.max_connections, 7);
     assert_eq!(cli.handshake_timeout.as_secs(), 3);
     assert_eq!(cli.header_timeout.as_secs(), 120);
@@ -414,14 +418,14 @@ fn write_timeout_and_request_limit_are_flags() {
         "--max-requests=0",
         "--max-requests=-1",
     ] {
-        let args = args_with(&scratch, &[bad]);
+        let args = take_fake_hosts(args_with(&scratch, &[bad])).0;
         assert!(js_lease_server::Cli::try_parse_from(args).is_err(), "{bad}");
     }
     let args = args_with(
         &scratch,
         &["--read-timeout=4", "--write-timeout=3", "--max-requests=7"],
     );
-    let cli = js_lease_server::Cli::try_parse_from(args).unwrap();
+    let cli = js_lease_server::Cli::try_parse_from(take_fake_hosts(args).0).unwrap();
     let limits = js_lease_server::Limits::from(&cli);
     assert_eq!(limits.read_timeout.as_secs(), 4);
     assert_eq!(limits.write_timeout.as_secs(), 3);

@@ -15,9 +15,9 @@ use js_cli::{Clock, ForwardedSignal, Services, SignalSource, Signaller, Waiter};
 use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{
     CapacitySource, Cli as ServerCli, Config, Running, Seated, SharedClock, StartupError,
-    TickHandle, channel_ticker, start,
+    TickHandle, Unseated, channel_ticker, start,
 };
-use js_pool_static::EXAMPLE_CONFIG;
+use js_pool_fake::{EXAMPLE_CONFIG, FakeHostPool};
 use js_provider::Call;
 use js_provider_fake::FakePool;
 use js_testkit::dir::TestDir;
@@ -362,6 +362,33 @@ impl CapacitySource for Scripted {
     }
 }
 
+/// The shipped two-host fake pool ([`EXAMPLE_CONFIG`]) as a source of the simulation
+/// seam: the bookings of the lease file are seated in a fresh pool at every start, and a
+/// booking of a host the list does not have, or that an earlier lease holds, comes back
+/// unseated.
+pub struct FakeHosts;
+
+impl CapacitySource for FakeHosts {
+    fn provider(&self, bookings: &[Booking]) -> Result<Seated, StartupError> {
+        let id = ProviderId::new("fake-hosts").unwrap();
+        let mut pool = FakeHostPool::from_toml(id, EXAMPLE_CONFIG).unwrap();
+        let unseated = bookings
+            .iter()
+            .filter_map(|booking| {
+                let refused = pool.seat(&booking.host, booking.lease).err()?;
+                Some(Unseated {
+                    booking: booking.clone(),
+                    reason: refused.to_string(),
+                })
+            })
+            .collect();
+        Ok(Seated {
+            provider: Box::new(pool),
+            unseated,
+        })
+    }
+}
+
 /// A lease server in this process, on a runtime of its own so the CLI can block the
 /// test's thread, with a clock and a ticker the test moves.
 pub struct Harness {
@@ -409,7 +436,6 @@ impl Harness {
         extra: &[&str],
         source: Option<Box<dyn CapacitySource>>,
     ) -> Self {
-        let pool = scratch.write("pool.toml", EXAMPLE_CONFIG, 0o644);
         let token_file = scratch.write("token", TOKEN, 0o600);
         let state = scratch.path("leases.toml");
         let mut args: Vec<OsString> = vec![
@@ -420,16 +446,12 @@ impl Harness {
             state.into(),
             "--boot".into(),
             "initialise".into(),
-            "--pool-config".into(),
-            pool.into(),
             "--token-file".into(),
             token_file.clone().into(),
         ];
         args.extend(extra.iter().map(OsString::from));
-        let mut config = Config::from_cli(ServerCli::try_parse_from(args).unwrap()).unwrap();
-        if let Some(source) = source {
-            config = config.with_capacity_source(source);
-        }
+        let hosts = source.unwrap_or_else(|| Box::new(FakeHosts));
+        let config = Config::simulated(ServerCli::try_parse_from(args).unwrap(), hosts).unwrap();
         let rt = Runtime::new().unwrap();
         let clock = ManualClock::new(Timestamp::from_millis(T0));
         let (ticks, ticker) = channel_ticker();

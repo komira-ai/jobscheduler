@@ -1,5 +1,5 @@
 //! Runs the conformance suite against the layer the lease server runs on when agents
-//! register hosts: a static pool holding `h1` and a registry holding the registered
+//! register hosts: a fake host pool holding `h1` and a registry holding the registered
 //! host `h2`.
 
 use std::collections::BTreeMap;
@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use js_conformance::{Check, Subject, Verdict, run};
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::LayeredProvider;
-use js_pool_static::StaticPool;
+use js_pool_fake::FakeHostPool;
 use js_provider::{Call, Pool};
 use js_registry::{Credential, PoolConfig, Registry};
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
@@ -29,7 +29,7 @@ struct Layered {
     provider: LayeredProvider,
 }
 
-/// The layer over the static pool of `h1` and the registry of `h2`, both serving the
+/// The layer over the fake host pool of `h1` and the registry of `h2`, both serving the
 /// shipped class and `extra` when given.
 fn layer(extra: Option<ResourceClass>) -> LayeredProvider {
     let classes = [Some(ResourceClass::gpu_host()), extra];
@@ -49,7 +49,7 @@ fn layer(extra: Option<ResourceClass>) -> LayeredProvider {
         &Credential::of_token("t"),
     );
     admitted.expect("the registered host meets the pool's shape");
-    let pool = StaticPool::from_toml(ProviderId::new("static").unwrap(), STATIC_HOST).unwrap();
+    let pool = FakeHostPool::from_toml(ProviderId::new("static").unwrap(), STATIC_HOST).unwrap();
     LayeredProvider::new(
         ProviderId::new("layered").unwrap(),
         vec![

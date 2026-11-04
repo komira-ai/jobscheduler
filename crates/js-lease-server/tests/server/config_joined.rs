@@ -1,8 +1,9 @@
-//! A pool of kind `joined` in the configuration file: machines that run `js-agent` and join
-//! by hand, against a real server on loopback.
+//! A pool of kind `static` in the configuration file (`joined` is its old spelling): machines
+//! that run `js-agent` and join by hand, against a real server on loopback.
 
 use std::net::SocketAddr;
 
+use js_lease_server::JoinedPool;
 use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, Session, hello_body, session};
@@ -12,7 +13,7 @@ use crate::support::{Harness, Reply, Scratch, TOKEN, request};
 /// A joined pool `burst`, six nodes at most, that books 8 cores and 16 GiB and asks the hosts
 /// for no contract. The text is the `[[pool]]` table.
 fn joined() -> PoolText {
-    PoolText::joined("burst")
+    PoolText::registering("burst")
 }
 
 /// A server over the file whose only pool is `pool`.
@@ -89,6 +90,93 @@ async fn a_node_joins_with_a_one_time_token_and_heartbeats_with_its_credential()
     assert_eq!(hosts.json()["hosts"][0]["id"], "node-1");
 }
 
+/// The `[[pool]]` table `pool` writes, as the table the file reader hands to a pool.
+fn table_of(pool: &PoolText) -> toml::Table {
+    let mut whole: toml::Table = pool.text().parse().unwrap();
+    let Some(toml::Value::Array(mut pools)) = whole.remove("pool") else {
+        panic!("no [[pool]] in {}", pool.text());
+    };
+    let toml::Value::Table(table) = pools.remove(0) else {
+        panic!("the pool is not a table in {}", pool.text());
+    };
+    table
+}
+
+/// Asserts that the old spelling `kind = "joined"` is read as `kind = "static"`: both files
+/// load; the two tables read into equal pools; the file that spells the old kind carries
+/// exactly one warning for its pool, with the exact words; and the file that spells the new
+/// kind carries none about `joined`. It catches the old spelling refused, a warning on the
+/// new spelling, more than one warning for a pool, or the two spellings loading differently.
+#[test]
+fn a_joined_pool_is_accepted_as_static_with_a_warning() {
+    let scratch = Scratch::new("joined_old_spelling");
+    let server = server_with_agents(&scratch);
+    let old = joined().set("kind", &quote("joined"));
+    let new = joined().set("kind", &quote("static"));
+    let old_config = load(&scratch, &file(&server, &[&old])).unwrap();
+    let new_config = load(&scratch, &file(&server, &[&new])).unwrap();
+    assert_eq!(
+        JoinedPool::from_table(table_of(&old)).unwrap(),
+        JoinedPool::from_table(table_of(&new)).unwrap()
+    );
+    let expected = "pool \"burst\": warning: kind = \"joined\" is the old spelling of kind = \"static\", which replaces it; the pool is read the same, and a later release refuses the old spelling";
+    let about_burst: Vec<&str> = old_config
+        .warnings()
+        .iter()
+        .map(String::as_str)
+        .filter(|line| line.contains("\"burst\""))
+        .collect();
+    assert_eq!(about_burst, [expected]);
+    assert!(
+        new_config
+            .warnings()
+            .iter()
+            .all(|line| !line.contains("joined")),
+        "{:?}",
+        new_config.warnings()
+    );
+}
+
+/// Asserts that a server over a file with one `kind = "static"` pool and no host list
+/// starts with no host, admits the host that joins with a one-time token, and then lists
+/// it with `source` `registered` (the value `static` is for the hosts of a pool the
+/// program no longer has) and the keys of a registered host's row: its id, state, shape,
+/// memory, capabilities and labels. It catches a static pool that is served as a host list
+/// of its own, a registered host that is not listed, and a row that lost a key.
+#[tokio::test]
+async fn a_static_pool_with_no_host_list_registers_hosts() {
+    let h = serving("static_registers", |_| joined()).await;
+    let before = h.call("GET", "/v1/hosts", None).await;
+    assert_eq!(before.status, 200, "{}", before.body);
+    assert_eq!(before.json()["hosts"], json!([]));
+    let token = mint(&h, "node-1").await;
+    let body = hello("node-1", Some("node-1"));
+    let welcome = agent_call(&h, "/v1/agent/hello", &token, &body).await;
+    session(&welcome, "node-1");
+    let listing = h.call("GET", "/v1/hosts", None).await;
+    assert_eq!(listing.status, 200, "{}", listing.body);
+    let listing = listing.json();
+    let hosts = listing["hosts"].as_array().unwrap();
+    assert_eq!(hosts.len(), 1, "{listing}");
+    let host = &hosts[0];
+    assert_eq!(host["id"], "node-1");
+    assert_eq!(host["source"], "registered");
+    for key in [
+        "state",
+        "shape",
+        "memory",
+        "capabilities",
+        "labels",
+        "agent_version",
+    ] {
+        assert!(host.get(key).is_some(), "{key} is missing from {host}");
+    }
+    assert_eq!(host["shape"]["cpu_millis"], 8000);
+    assert_eq!(host["shape"]["memory_bytes"], 17179869184u64);
+    assert_eq!(host["memory"]["configured_bytes"], 17179869184u64);
+    assert_eq!(host["labels"], json!({ "rack": "r1" }));
+}
+
 /// Asserts that a hello naming another host than the token's is refused 403
 /// `join-token-instance`, and that the token still admits its own host afterwards. It
 /// catches a token that admits any host of the pool.
@@ -146,13 +234,13 @@ async fn the_shared_pool_token_still_admits_hosts() {
 
 /// Asserts that a joined pool counts as the one pool that registers agents: beside another
 /// joined pool or an elastic pool, the later one is refused naming it; and a joined pool
-/// beside a static pool is served. It catches two registries built from one file.
+/// beside a pool of the test kind `fake-hosts` is served. It catches two registries built from one file.
 #[test]
 fn two_registering_pools_are_refused() {
     let scratch = Scratch::new("joined_two");
     let server = server_with_agents(&scratch);
     let message = "pool \"second\": only one pool may register agents in this version";
-    let second = PoolText::joined("second");
+    let second = PoolText::registering("second");
     assert_eq!(
         refusal(&scratch, &file(&server, &[&joined(), &second])),
         message
@@ -162,7 +250,7 @@ fn two_registering_pools_are_refused() {
         refusal(&scratch, &file(&server, &[&joined(), &elastic])),
         message
     );
-    let hosts = PoolText::static_pool(&scratch, "hosts");
+    let hosts = PoolText::fake_hosts(&scratch, "hosts");
     assert!(load(&scratch, &file(&server, &[&hosts, &joined()])).is_ok());
 }
 
@@ -189,7 +277,7 @@ fn a_joined_pool_refuses_the_keys_of_a_launching_pool() {
         let said = refusal(&scratch, &file(&server, &[&joined().set(key, value)]));
         assert!(
             said.starts_with(&format!(
-                "pool \"burst\": {key}: a joined pool launches nothing"
+                "pool \"burst\": {key}: a static pool launches nothing: its machines run js-agent and register"
             )),
             "{said}"
         );

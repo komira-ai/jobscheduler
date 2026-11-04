@@ -153,7 +153,7 @@ fn a_bad_lifetime_value_is_refused_by_name() {
 #[tokio::test]
 async fn a_lease_above_the_servers_ceiling_is_refused() {
     let scratch = Scratch::new("life_http");
-    let pool = PoolText::static_pool(&scratch, "hosts");
+    let pool = PoolText::fake_hosts(&scratch, "hosts");
     let head = server(&scratch, "listen = \"127.0.0.1:0\"");
     let config = load(&scratch, &file(&head, &[&pool])).unwrap();
     let h = Harness::over(scratch, config).await;

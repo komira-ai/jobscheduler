@@ -14,7 +14,6 @@ js-caps = { path = "../js-caps" }
 js-elastic = { path = "../js-elastic" }
 js-jobs = { path = "../js-jobs" }
 js-lease = { path = "../js-lease" }
-js-pool-static = { path = "../js-pool-static" }
 js-provider = { path = "../js-provider" }
 js-provider-lambdalabs = { path = "../js-provider-lambdalabs" }
 js-registry = { path = "../js-registry" }
@@ -47,6 +46,8 @@ x509-parser.workspace = true
 js-agent = { path = "../js-agent" }
 # The elastic fake cloud with its own bill (tests/server/elastic_fake_e2e.rs).
 js-elastic-fake = { path = "../js-elastic-fake" }
+# The fake host pool, behind the simulation seam (`Config::simulated`).
+js-pool-fake = { path = "../js-pool-fake" }
 js-provider-fake = { path = "../js-provider-fake" }
 js-state = { path = "../js-state", features = ["test-support"] }
 js-testkit = { path = "../js-testkit" }

@@ -103,7 +103,7 @@ fn a_bad_brake_value_is_refused_by_name() {
     }
 }
 
-/// Asserts that a static pool, which launches nothing, is refused each brake key by name.
+/// Asserts that a fake-hosts pool, which launches nothing, is refused each brake key by name.
 /// It catches a key accepted by a pool it can never apply to.
 #[test]
 fn a_static_pool_is_refused_the_brake_keys() {
@@ -114,7 +114,7 @@ fn a_static_pool_is_refused_the_brake_keys() {
         ("boot_fail_cooldown_max", "\"1h\""),
         ("boot_fail_reset_after", "\"5m\""),
     ] {
-        let pool = PoolText::static_pool(&scratch, "fixed").set(key, value);
+        let pool = PoolText::fake_hosts(&scratch, "fixed").set(key, value);
         let said = refusal(&scratch, &file(&server, &[&pool]));
         assert!(
             said.ends_with(&format!("{key}: only for an elastic pool")),
