@@ -70,7 +70,7 @@ mod tests {
         ResourceClass::new(ClassId::new("c").unwrap(), Admission::BookAll, 0)
     }
 
-    fn registry() -> Registry {
+    fn new_registry() -> Registry {
         let resources = Resources::new(4000, 8 << 30, 0, None).unwrap();
         let shape = Shape::new(resources, BTreeMap::new());
         let config = PoolConfig::new(ProviderId::new("p").unwrap(), class(), shape, 4);
@@ -118,7 +118,7 @@ mod tests {
     /// start or stop that never hands its counts on.
     #[test]
     fn the_registry_never_calls_the_sink_under_its_lock() {
-        let registry = registry();
+        let registry = new_registry();
         let probe = Arc::new(Probe::default());
         let _ = probe.registry.set(registry.clone());
         registry.set_tail_sink(probe.clone()).unwrap();
@@ -171,7 +171,7 @@ mod tests {
     /// that takes over, and a load failure that drops the sink.
     #[test]
     fn a_sink_counts_on_from_what_it_holds_and_only_the_first_is_taken() {
-        let registry = registry();
+        let registry = new_registry();
         count_one(&registry);
         registry.send_tail();
         let first = Arc::new(Fixed(Ok(stored(5)), Mutex::default()));
@@ -184,7 +184,7 @@ mod tests {
         assert_eq!(*first.1.lock().unwrap(), one_backfill());
         assert_eq!(*second.1.lock().unwrap(), TailDelta::default());
 
-        let unread = registry();
+        let unread = new_registry();
         let down = TailSinkError::Conflict { tries: 1 };
         let sink = Arc::new(Fixed(Err(down.clone()), Mutex::default()));
         assert_eq!(unread.set_tail_sink(sink.clone()), Err(down));
