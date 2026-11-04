@@ -7,7 +7,7 @@ use js_agent_wire::{
 };
 use js_caps::{BUNDLE_ROOT, EXEC, FLAG_SET, HostContract, RUN_FILES, RUNTIME, SCRATCH_QUOTA};
 use js_lease::{Clock, Timestamp};
-use js_pool_static::HostBook;
+use js_provider::HostBook;
 use js_provider::Observed;
 use js_types::sched::usage::NodeLoad;
 use js_types::{ExecMode, HostId, LeaseId, MemoryHeadroom, ProviderId, RequestId, Shape};

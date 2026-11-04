@@ -401,7 +401,7 @@ fn with_the_flag_a_probe_on_a_marked_host_is_not_backfilled() {
 /// passed to the placer, or applied with `<` for `<=`.
 #[test]
 fn the_placer_trusts_a_wall_time_up_to_max_lease_wall() {
-    use js_pool_static::Candidate;
+    use js_provider::Candidate;
     let open = [Candidate {
         host: HostId::new("h1").unwrap(),
         shape: js_types::Shape::new(

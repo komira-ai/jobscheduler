@@ -33,7 +33,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use js_pool_static::Candidate;
+use js_provider::Candidate;
 use js_provider::{RefusalCode, StartSpec};
 use js_registry::{MarkedTails, Placer, ProbeHost};
 use js_sched::harness::feed;
@@ -142,7 +142,7 @@ impl Placer for SchedPlacer {
 
 /// The recovered operation, numbered `number`, that stands for the lease `held` on
 /// `candidate`.
-fn recovered(number: u64, candidate: &Candidate, held: &js_pool_static::Held) -> Recovered {
+fn recovered(number: u64, candidate: &Candidate, held: &js_provider::Held) -> Recovered {
     let request = Request {
         key: WorkKey::new("held", held.lease.to_string()),
         qos: Qos::Batch,
@@ -250,7 +250,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
-    use js_pool_static::Held;
+    use js_provider::Held;
     use js_types::{Admission, ClassId, HostId, LeaseId, Request as HostRequest};
     use js_types::{ResourceClass, Resources, Shape};
 

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::Phase;
-use js_pool_static::Candidate;
+use js_provider::Candidate;
 use js_provider::{RefusalCode, StartSpec};
 use js_types::{HostId, Shape};
 

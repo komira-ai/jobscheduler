@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_pool_static::{HostBook, SeatError};
+use js_provider::{HostBook, SeatError};
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
 use js_types::{Admission, ClassId, HostId, LeaseId, Request, ResourceClass, Resources, Shape};
 
@@ -184,7 +184,7 @@ fn a_probe_is_booked_only_by_choice_and_only_on_its_host() {
     assert_eq!(book.read(&LeaseId::new(1, 1)), Observed::Absent);
 
     let shown = std::cell::RefCell::new(Vec::new());
-    let first = |open: &[js_pool_static::Candidate]| {
+    let first = |open: &[js_provider::Candidate]| {
         shown.replace(open.iter().map(|c| c.host.clone()).collect());
         Some(0)
     };

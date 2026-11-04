@@ -726,7 +726,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | jobscheduler crate | From | Notes |
 |---|---|---|
 | `js-types` (merged) | generic half of `crates/kbf-types` | `Resources` as a named vector plus the separate lease-count cap, ids, `ResourceClass`, `Shape`, labels; later farm time, `Qos`, `NodePhase`, `StateMachine`, `Effect`, control record |
-| `js-provider` (merged) | new | merged as `Provider`, now renamed `Pool` (the allocation port); `CapacityProvider` lives in `js-elastic`; `StartSpec` and its rules |
+| `js-provider` (merged) | new | merged as `Provider`, now renamed `Pool` (the allocation port); `CapacityProvider` lives in `js-elastic`; `StartSpec` and its rules; `HostBook`, the booking table the static pool and the registry share |
 | `js-pool-static` (merged) | new | the pool of operator-listed hosts; kept as the `static` capacity provider, **for tests only**, and as the stepping stone of the GPU lease service (5.7, 5.9) |
 | `js-provider-fake` (merged) | new | the merged fake provider; becomes the fake aws at step 28 (13.1) |
 | `js-conformance` (merged) | new | the machinery; gains the two suites and their broken providers (13.2) |

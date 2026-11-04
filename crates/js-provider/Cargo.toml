@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 js-types = { path = "../js-types" }
+thiserror.workspace = true
 
 [lints]
 workspace = true
