@@ -67,8 +67,10 @@
 //! is in `packaging/js-agent-macos/README.md`; `docs/design/spawn-disclaim.md` has the
 //! design.
 //!
-//! What this runtime does not do yet: stage inputs or collect outputs (a start that names
-//! either is refused `native-unsupported`), adopt a run after the agent restarts (the
+//! What this runtime does not do yet: run a start named by its image (`image`, with or
+//! without `run`; it is refused `image-unsupported-here` until the bundle is pulled by its
+//! digest), stage inputs or collect outputs (a start that names either is refused
+//! `native-unsupported`), adopt a run after the agent restarts (the
 //! journal ends it), stop a run softly (the helper only kills), or grant the user's
 //! `/var/folders` entry (toolchains that need it get their temporary files from `TMPDIR`,
 //! which is inside the home).
@@ -617,6 +619,16 @@ impl Runtime for NativeRuntime {
             return Ok(());
         }
         self.pf_in_force()
+    }
+
+    /// A start named by its image would need the bundle the image resolves to, pulled by
+    /// its digest, which this runtime does not do yet: it is refused before anything is
+    /// made, with the code that says so, never as a native start it is not.
+    fn check_image(&self) -> Result<(), NativeRefusal> {
+        Err(NativeRefusal {
+            code: refusal::IMAGE_UNSUPPORTED_HERE,
+            why: "this agent runs native bodies only and pulls no image".to_owned(),
+        })
     }
 
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {
