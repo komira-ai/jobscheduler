@@ -113,6 +113,14 @@ impl Resources {
         self
     }
 
+    /// This vector with `cpu_millis` of CPU in place of its own, every other dimension
+    /// and the GPU class as they were.
+    #[must_use]
+    pub fn with_cpu_millis(mut self, cpu_millis: u64) -> Self {
+        self.cpu_millis = cpu_millis;
+        self
+    }
+
     /// A vector from `(dimension name, count)` pairs; a dimension left out is zero.
     /// An unknown name is refused by name.
     pub fn from_named<'a>(
@@ -262,6 +270,18 @@ mod tests {
             Err(TypeError::GpuClassMismatch),
             "GPUs without a class"
         );
+    }
+
+    /// Asserts that the CPU builder sets the CPU and nothing else: memory, GPUs, their
+    /// class and disk are kept. It catches a builder that drops the disk or the class.
+    #[test]
+    fn cpu_millis_is_set_by_its_builder_alone() {
+        let built = res(1, 2, 1, Some("a100"))
+            .with_disk_bytes(9)
+            .with_cpu_millis(11_000);
+        assert_eq!(built.cpu_millis(), 11_000);
+        assert_eq!((built.memory_bytes(), built.gpus()), (2, 1));
+        assert_eq!((built.gpu_class(), built.disk_bytes()), (Some("a100"), 9));
     }
 
     /// Asserts that `from_named` reads `disk_bytes`, that `new` leaves disk at zero and

@@ -35,6 +35,7 @@ mod marks;
 mod provider_side;
 mod record;
 mod start;
+mod view;
 
 use record::Record;
 
@@ -71,10 +72,11 @@ pub struct HostView {
     /// of them. Empty when the host holds none.
     pub leases: Vec<LeaseId>,
     /// The shape the pool books for the host (not the host's own claim), with its memory
-    /// cut to the pool's memory percent.
+    /// cut to the pool's memory percent: what may be booked on it, also for a pool whose
+    /// placer keeps the percent ([`crate::PoolConfig::booking_whole_memory`]).
     pub shape: Shape,
-    /// The memory the pool lists for the host, the percent of it that is booked and what
-    /// that comes to (the memory of `shape`).
+    /// The memory the pool lists for the host, the percent of it that may be booked and
+    /// what that comes to (the memory of `shape`).
     pub memory: MemoryHeadroom,
     /// The shape the host announced at its last hello, which the registry checked against
     /// the pool's floor; `None` for a host that has not said hello since a restart. A
@@ -180,20 +182,22 @@ struct State {
 
 impl State {
     /// Forgets every host that has been lost for longer than the retention and holds no
-    /// booking, binding included. A booked host stays however long it is silent.
-    fn forget_lost(&mut self, now: Timestamp, grace_ms: u64, retention_ms: u64) {
+    /// booking, binding included, and answers which. A booked host stays however long it
+    /// is silent.
+    fn forget_lost(&mut self, now: Timestamp, grace_ms: u64, retention_ms: u64) -> Vec<HostId> {
         let lost = self
             .records
             .iter()
             .filter(|(_, record)| record.out_of_retention(now, grace_ms, retention_ms))
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
-        for id in lost {
-            if self.book.remove_free(&id) {
-                self.records.remove(&id);
-                self.runs.forget(&id);
-            }
+        let forgotten = lost.into_iter().filter(|id| self.book.remove_free(id));
+        let forgotten: Vec<HostId> = forgotten.collect();
+        for id in &forgotten {
+            self.records.remove(id);
+            self.runs.forget(id);
         }
+        forgotten
     }
 }
 
@@ -294,8 +298,12 @@ impl Registry {
     /// lease takes the second. Without a placer the registry books the first host by id,
     /// leases whole hosts only, and refuses a class that does not book one with
     /// `UnsupportedClass`. Only the first call takes effect.
+    /// The book lets the leases that share a host book together as much CPU above its
+    /// cores as the placer says ([`crate::Placer::cpu_slack_permille`]).
     pub fn set_placer(&self, placer: Arc<dyn crate::Placer>) {
-        let _ = self.shared.placer.set(placer);
+        let slack = placer.cpu_slack_permille();
+        let first = self.shared.placer.set(placer).is_ok();
+        first.then(|| self.lock().book.set_cpu_slack(slack));
     }
 
     /// The provider the lease table runs on, serving the pool's class and its share class
@@ -319,7 +327,8 @@ impl Registry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let config = &self.shared.config;
-        state.forget_lost(now, config.grace_ms(), config.lost_retention_ms());
+        let forgotten = state.forget_lost(now, config.grace_ms(), config.lost_retention_ms());
+        forgotten.iter().for_each(|host| self.tell_gone(host));
         let horizon = Rules::of(config).idle_horizon_ms();
         state.requests.sweep(now, horizon);
         let unclaimed = state.waiting.expire(now, Rules::of(config).regain_grace_ms);
@@ -356,6 +365,7 @@ impl Registry {
             requests,
             rules,
             now,
+            placer: self.shared.placer.get().map(|placer| &**placer),
         };
         for (host, record) in records.iter_mut() {
             let overdue = record.exclusive.overdue(now, rules.prepare_timeout_ms);
@@ -646,6 +656,7 @@ impl Registry {
             },
         );
         state.runs.sync(&host, &hello.held, true);
+        self.tell_up(&host);
         Ok(Welcome {
             protocol,
             epoch,
@@ -742,7 +753,8 @@ impl Registry {
         record.heard = Some(now);
         record.phase = heartbeat.phase;
         record.beats = record.beats.saturating_add(1);
-        record.load.take(heartbeat.load.as_ref());
+        let reading = record.load.take(heartbeat.load.as_ref());
+        self.tell_heard(&host, reading);
         record.held = heartbeat
             .held
             .iter()
@@ -786,6 +798,7 @@ impl Registry {
                 requests: &mut *requests,
                 rules,
                 now,
+                placer: self.shared.placer.get().map(|placer| &**placer),
             };
             ending.fail(
                 (&mut record.taint, &mut record.exclusive),
@@ -1016,64 +1029,5 @@ impl Registry {
         let now = self.shared.clock.now();
         let state = self.lock_at(now);
         (self.host_views(&state, now), waiting_rows(&state))
-    }
-
-    fn host_views(&self, state: &State, now: Timestamp) -> Vec<HostView> {
-        let view = self.viewer((&state.book, &state.runs, &state.marks), now);
-        state
-            .records
-            .iter()
-            .map(|(id, record)| view(id, record))
-            .collect()
-    }
-
-    /// The listing's view of one host, given the parts of the state that it reads. The
-    /// reads that are the same for every host are made once, here.
-    fn viewer<'a>(
-        &'a self,
-        (book, runs, marks): (&'a HostBook, &'a Runs, &'a Marks),
-        now: Timestamp,
-    ) -> impl Fn(&HostId, &Record) -> HostView + 'a {
-        let booked = book.booked();
-        let every = book.leases();
-        let shape = self.shared.config.booked();
-        let memory = self.shared.config.memory_headroom();
-        let marks = marks.reservations();
-        move |id, record| {
-            let set_aside = |id: &HostId| marks.iter().find(|mark| mark.host == *id);
-            HostView {
-                id: id.clone(),
-                state: record.state(now, self.grace_ms()),
-                load: record
-                    .load
-                    .latest
-                    .clone()
-                    .filter(|_| record.state(now, self.grace_ms()) != HostState::Lost),
-                phase: record.phase,
-                lease: booked.get(id).copied(),
-                leases: every.get(id).cloned().unwrap_or_default(),
-                shape: shape.clone(),
-                memory,
-                claim: record.claim.clone(),
-                labels: record.labels.clone(),
-                agent_version: record.agent_version.clone(),
-                epoch: record.epoch,
-                heard_since_hello: record.session.is_none() | (record.beats > 0),
-                releasing: !booked.contains_key(id)
-                    & !(record.quiet(runs, id) & record.exclusive.is_free()),
-                taint: record.taint.clone(),
-                mark: match (record.leaving, set_aside(id), record.exclusive.held_since()) {
-                    (Some(leaving), _, _) => Some(leaving.mark()),
-                    (None, Some(_), _) => Some(HostMark::Reserved),
-                    (None, None, Some(_)) => Some(HostMark::Held),
-                    (None, None, None) => None,
-                },
-                reserved_for: set_aside(id).map(|mark| mark.request.clone()),
-                drain_deadline: set_aside(id)
-                    .filter(|mark| !mark.assigned)
-                    .map(|mark| mark.deadline),
-                cordon_until: record.cordon.filter(|until| *until > now),
-            }
-        }
     }
 }

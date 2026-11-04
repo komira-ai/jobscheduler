@@ -56,7 +56,7 @@ fn an_allowed_endpoint_answers_and_everything_else_is_refused_by_its_rule() {
         egress.check().expect("checked before the create");
         let live = host.start(&script).await;
         let attachment = egress
-            .attach("allow", live.pid, JobNetwork::AllowList)
+            .attach("allow", live.pid, JobNetwork::AllowList, &[])
             .expect("attach");
         assert_eq!(attachment.interface(), Some("jsv0"));
         let outcome = live.finish().await;
@@ -138,7 +138,7 @@ fn the_far_host_answers_only_through_the_masquerade() {
     let egress = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("start");
     let holder = Holder::new();
     let attachment = egress
-        .attach("masq", holder.pid(), JobNetwork::AllowList)
+        .attach("masq", holder.pid(), JobNetwork::AllowList, &[])
         .expect("attach");
 
     nft(&["flush", "chain", "ip", "js_crun_egress_nat", "postrouting"]);

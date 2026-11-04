@@ -96,8 +96,8 @@ fn a_job_cannot_send_from_an_address_that_is_not_its_own() {
         let seen = allowed.accepted();
         let egress = Egress::start(config).expect("start");
         let (a, b) = (Holder::new(), Holder::new());
-        let _first = egress.attach("a", a.pid(), level).expect("attach a");
-        let _second = egress.attach("b", b.pid(), level).expect("attach b");
+        let _first = egress.attach("a", a.pid(), level, &[]).expect("attach a");
+        let _second = egress.attach("b", b.pid(), level, &[]).expect("attach b");
         sysctl("net/ipv4/conf/jsv0/rp_filter", "0");
         let mac = std::fs::read_to_string("/sys/class/net/jsv0/address").expect("mac");
         let mac = mac.trim();

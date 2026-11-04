@@ -450,8 +450,9 @@ pub struct Cli {
     pub egress_dns: Vec<String>,
     /// A host port a job may declare (`ports`), `PORT` or `LO-HI`, each from 1 to 65535;
     /// repeatable, at most 16. A job that declares a port not listed is refused
-    /// `port-above-ceiling`. Declared ports are not forwarded yet, so a job that declares one
-    /// is refused `ports-not-supported`, and the hello does not report them. Needs
+    /// `port-above-ceiling`. Each declared port of an admitted `allow-list` or `open` job is
+    /// forwarded from the host's port to the job's (a `none` job that declares one is refused
+    /// `ports-not-supported`), and the hello reports them as `egress-ports`. Needs
     /// `--egress allow-list` or `open`.
     #[arg(long, value_name = "PORT|LO-HI")]
     pub egress_forward_port: Vec<String>,
@@ -516,7 +517,9 @@ pub struct Cli {
     /// `ghcr.io/komira-ai/`; repeatable. The prefix is whole path components, and a bare
     /// host (every account on it) is refused at start. An image on no entry is never
     /// pulled. The runtime that pulls with js-oci reads the list; the Docker and Podman
-    /// runtimes do not.
+    /// runtimes do not. A Mac agent with `--bundle-store` reads it too: a start named by its
+    /// image (with a `run`) is a bundle, and its image must be on an entry or it is refused
+    /// `image-not-allowed`.
     #[arg(long, value_name = "HOST/PREFIX")]
     pub image_allow: Vec<String>,
     /// The credentials an allow-list entry sends to its registry's token realm, for a
@@ -568,15 +571,17 @@ pub struct Cli {
     /// Whether a bundle that is not in the store is fetched: `never` (the default: the
     /// operator, or the updater, puts it there first, and a job that names another is
     /// refused `bundle-not-held`) or `missing` (only with `--bundle-trust list`, and at
-    /// least one registry flag): the first start that names one begins a fetch in the
-    /// background (`bundle-pending` until the bundle is held; every byte is checked against
+    /// least one `--image-allow`, `--bundle-registry-allow` or
+    /// `--bundle-registry-allow-private` entry): the first start that names one, by a
+    /// `bundle` pin or by its image, begins a fetch in the background (`bundle-pending` until the bundle is held; every byte is checked against
     /// its digest, and a fetch that fails is reported once as `bundle-fetch-failed`). Needs
     /// `--bundle-store`.
     #[arg(long, value_name = "never|missing")]
     pub bundle_pull: Option<String>,
     /// A registry and namespace a bundle may be fetched from, `HOST[:PORT]/PREFIX`
-    /// (`ghcr.io/example/`); not a bare host. A job's bundle must name one when any is
-    /// given. May be given more than once. Needs `--bundle-store`.
+    /// (`ghcr.io/example/`); not a bare host. A job's `bundle` pin (the legacy form; an
+    /// image reference is held to `--image-allow` instead) must name one when any is given.
+    /// May be given more than once. Needs `--bundle-store`.
     #[arg(long = "bundle-registry-allow", value_name = "HOST[:PORT]/PREFIX")]
     pub bundle_registry_allow: Vec<String>,
     /// Like `--bundle-registry-allow`, for a registry on a private address, and for that
