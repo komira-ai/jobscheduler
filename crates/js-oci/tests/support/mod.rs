@@ -741,9 +741,12 @@ pub fn write_index(root: &Path, manifests: &[&Digest]) {
     .expect("index.json");
 }
 
-/// An OCI image index that lists `entries`: each a media type, a digest, and the platform
-/// (`os`, `architecture`) it states, or none.
-pub fn index_of(entries: &[(&str, &Digest, Option<(&str, &str)>)]) -> Vec<u8> {
+/// One entry of [`index_of`]: a media type, a digest, and the platform (`os`,
+/// `architecture`) it states, or none.
+pub type IndexEntry<'a> = (&'a str, &'a Digest, Option<(&'a str, &'a str)>);
+
+/// An OCI image index that lists `entries` ([`IndexEntry`]).
+pub fn index_of(entries: &[IndexEntry<'_>]) -> Vec<u8> {
     let entries: Vec<String> = entries
         .iter()
         .map(|(media, digest, platform)| {
