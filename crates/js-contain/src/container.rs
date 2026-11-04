@@ -161,6 +161,10 @@ pub struct HostMount {
     pub source: PathBuf,
     /// Whether the job sees it read-only.
     pub read_only: bool,
+    /// Whether the mounts below the directory on the host are bound too (`rbind`); a bind
+    /// that is not recursive (`bind`) shows only the directory's own file system, so no
+    /// mount below it, whatever its flags, reaches the job.
+    pub recursive: bool,
 }
 
 /// A host directory mounted read-only inside the exec root.
@@ -236,16 +240,19 @@ pub(crate) mod tests {
                     target: "/scratch".to_owned(),
                     source: PathBuf::from("/scratch/lease-1-2/job"),
                     read_only: false,
+                    recursive: true,
                 },
                 HostMount {
                     target: "/workspace".to_owned(),
                     source: PathBuf::from("/srv/mount-root"),
                     read_only: false,
+                    recursive: true,
                 },
                 HostMount {
                     target: "/run/js-files".to_owned(),
                     source: PathBuf::from("/run/js-agent/files/1-2"),
                     read_only: true,
+                    recursive: true,
                 },
             ],
             devices: Vec::new(),

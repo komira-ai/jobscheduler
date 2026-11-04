@@ -343,12 +343,16 @@ pub struct Cli {
     #[arg(long = "gpu-device", value_name = "PATH")]
     pub gpu_devices: Vec<String>,
     /// A host directory a job of `--runtime crun` that booked a GPU is given read-only
-    /// (`nosuid`, `nodev`), as `SRC:DST`: the driver's libraries and programs; repeatable.
-    /// Both are absolute. The source must be a directory, not below `/proc`, `/sys` or
-    /// `/dev`; the destination not below those or `/scratch`, and no two share one. A file
-    /// source is refused: binding a file where the image has none would leave a file in the
-    /// image's root that every job of that image shares. A GPU job whose image has a file at
-    /// the destination is refused when it starts. Needs `--gpu-device`.
+    /// (`nosuid`, `nodev`, and not recursive: no mount below it reaches the job), as
+    /// `SRC:DST`: the driver's libraries and programs; repeatable. Both are absolute. The
+    /// source must be a directory, not below `/proc`, `/sys` or `/dev`. The destination may
+    /// not be at or below those, `/scratch` or a place the runtime mounts itself (`/work`,
+    /// `/root`, `/tmp`, `/var/tmp`, `/run`, `/etc/hosts`, `/etc/hostname`,
+    /// `/etc/resolv.conf`), nor hold one of them (`/etc`, `/var`), nor be at or below
+    /// another's. A file source is refused: binding a
+    /// file where the image has none would leave a file in the image's root that every job of
+    /// that image shares. A GPU job is refused when it starts if its image has a link or a file
+    /// on the way to the destination, or the directory is gone. Needs `--gpu-device`.
     #[arg(long = "gpu-mount", value_name = "SRC:DST")]
     pub gpu_mounts: Vec<String>,
     /// A variable set in the environment of a job of `--runtime crun` that booked a GPU,

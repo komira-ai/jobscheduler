@@ -72,11 +72,18 @@ no vendor hook. It gives a job that booked GPU indices exactly what the flags li
 - `--gpu-device PATH`, repeatable: a character device below `/dev`. A path with `{index}` is one
   GPU's node and is given only for the indices the job booked; a path without it is given to every
   GPU job. The job's device cgroup allows these nodes and denies every other device.
-- `--gpu-mount SRC:DST`, repeatable: a directory bound read-only (`nosuid`, `nodev`) at `DST`.
-  A file source is refused: binding a file where the image has none would leave a file in the
-  image's root that every job of that image shares. A job whose image has a file at `DST` is
-  refused when it starts, naming `--gpu-mount`.
-- `--gpu-env NAME=VALUE`, repeatable: a variable set over the image's of that name.
+- `--gpu-mount SRC:DST`, repeatable: a directory bound read-only (`nosuid`, `nodev`) at `DST`,
+  not recursively: a mount below the directory on the host does not reach the job. A file source
+  is refused: binding a file where the image has none would leave a file in the image's root that
+  every job of that image shares. `DST` may not be at or below `/proc`, `/sys`, `/dev`,
+  `/scratch`, another mount's destination, or a place the runtime mounts itself (`/work`, `/root`,
+  `/tmp`, `/var/tmp`, `/run`, `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`), nor hold one of
+  them (`/etc`, `/var`). A job whose
+  image has a link or a file on the way to `DST`, or whose driver directory is gone, is refused
+  when it starts, naming `--gpu-mount`; so pick a destination the image does not have, such as
+  `/usr/local/nvidia/lib64`.
+- `--gpu-env NAME=VALUE`, repeatable: a variable set over the image's of that name (one entry,
+  however many the image has).
 
 A job that books no GPU gets none of it. At start every node must be a character device, for every
 GPU the host offers (`--gpus` lowers that), or the agent exits 2 naming the flag; with the flags in

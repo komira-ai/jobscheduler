@@ -70,6 +70,7 @@ pub(super) fn container_spec(
         target: target.to_owned(),
         source: source.to_owned(),
         read_only,
+        recursive: true,
     };
     let mut mounts = vec![bind(SCRATCH_TARGET, &run.scratch, false)];
     mounts.extend(

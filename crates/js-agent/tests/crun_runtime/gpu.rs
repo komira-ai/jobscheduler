@@ -1,5 +1,6 @@
 //! A GPU job over a real `crun` on a host with at least two NVIDIA GPUs: the job sees the node
-//! of the GPU it booked and not the other's.
+//! of the GPU it booked and not the other's, can open it, and reads its driver directory but
+//! cannot write it.
 //!
 //! The test needs what every test of this target needs (root in a `Delegate=yes` unit, the job
 //! user `JS_JOB_USER`, the image `JS_TEST_IMAGE`) and, beside it, the NVIDIA driver's nodes
@@ -21,11 +22,24 @@ use crate::subject;
 /// The NVIDIA nodes the test needs: the control node and two GPUs'.
 const NODES: [&str; 3] = ["/dev/nvidiactl", "/dev/nvidia0", "/dev/nvidia1"];
 
-/// Proves, over a real `crun`, that a job that booked GPU 1 of a host with two sees
-/// `/dev/nvidiactl` and `/dev/nvidia1` in its `/dev` and not `/dev/nvidia0`, with the variable
-/// `--gpu-env` names set, and exits 0. Catches a bundle `crun` gives every GPU, one whose
-/// booked node does not appear (a device list `crun` does not honour), and a device rule that
-/// keeps the job from starting.
+/// What the job prints: its `/dev`, then one line for each check.
+const SCRIPT: &str = "ls -1 /dev; echo GPU_TEST=$GPU_TEST; \
+    echo \"node $(stat -c '%F %t %T' /dev/nvidia1)\"; echo \"mode $(stat -c '%a' /dev/nvidia1)\"; \
+    if [ -e /usr/local/gpu-test/sub/inner ]; then echo sub-seen; else echo sub-hidden; fi; \
+    if : < /dev/nvidia1; then echo opened; else echo not-opened; fi; \
+    echo \"driver $(cat /usr/local/gpu-test/marker)\"; \
+    if touch /usr/local/gpu-test/written 2>/dev/null; then echo wrote; else echo read-only; fi; \
+    if mount -o remount,rw /usr/local/gpu-test 2>/dev/null; then echo remounted; else echo kept; fi";
+
+/// Proves, over a real `crun` and as the job user, that a job that booked GPU 1 of a host with
+/// two sees `/dev/nvidiactl` and `/dev/nvidia1` in its `/dev` and not `/dev/nvidia0`; that
+/// `/dev/nvidia1` there is a character device with the host node's major and minor numbers
+/// and mode, and that the job can open it; that a writable mount below the driver directory
+/// on the host does not reach the job (the bind is not recursive); that the variable `--gpu-env` names is set; and that the
+/// driver directory is there to read, but cannot be written or remounted read-write. Catches
+/// a bundle `crun` gives every GPU, a booked node that does not appear or that the job user
+/// cannot open, a node of another type, device or mode, a device rule that keeps the job from
+/// starting, a writable driver mount, and a driver submount that leaks into the job.
 #[test]
 #[ignore = "real crun on a host with two NVIDIA GPUs: run by hand (see the module)"]
 fn a_crun_job_sees_only_its_booked_gpu() {
@@ -33,6 +47,22 @@ fn a_crun_job_sees_only_its_booked_gpu() {
         read_node(Path::new(node))
             .unwrap_or_else(|e| panic!("this test needs a host with two NVIDIA GPUs: {e}"));
     }
+    let host_node = read_node(Path::new("/dev/nvidia1")).expect("GPU 1's node");
+    let mut s = subject::crun_subject("a_crun_job_sees_only_its_booked_gpu");
+    let driver = s.searchable_dir("gpu-test-driver");
+    std::fs::write(driver.join("marker"), "from-the-host").expect("a file in the driver");
+    // A writable mount below the driver directory: the bind is not recursive, so the job must
+    // see the empty directory under it and nothing of the mount.
+    let sub = driver.join("sub");
+    std::fs::create_dir(&sub).expect("a mount point");
+    let mounted = std::process::Command::new("mount")
+        .args(["-t", "tmpfs", "tmpfs"])
+        .arg(&sub)
+        .status()
+        .expect("run mount");
+    assert!(mounted.success(), "mount a tmpfs below the driver");
+    std::fs::write(sub.join("inner"), "below").expect("a file in the submount");
+    let mount = format!("{}:/usr/local/gpu-test", driver.display());
     let cli = Cli::try_parse_from([
         "js-agent",
         "--server",
@@ -43,6 +73,8 @@ fn a_crun_job_sees_only_its_booked_gpu() {
         "/dev/nvidiactl",
         "--gpu-device",
         "/dev/nvidia{index}",
+        "--gpu-mount",
+        &mount,
         "--gpu-env",
         "GPU_TEST=booked",
     ])
@@ -50,7 +82,6 @@ fn a_crun_job_sees_only_its_booked_gpu() {
     let passthrough = GpuPassthrough::from_cli(&cli, &[0, 1], read_node)
         .expect("the host has the nodes")
         .expect("a device list");
-    let mut s = subject::crun_subject("a_crun_job_sees_only_its_booked_gpu");
     s.prepared();
     let gpus = GpuSettings {
         passthrough,
@@ -59,10 +90,9 @@ fn a_crun_job_sees_only_its_booked_gpu() {
     let mut runtime = s.open_with_gpus("crun-suite-gpu", gpus);
     let mut spec = spec_of(&mut s, "r1", Program::Exit(0));
     spec.gpu_indices = vec![1];
-    let script = "ls -1 /dev; echo GPU_TEST=$GPU_TEST";
     spec.body = Body::Container {
         image: s.image(),
-        args: vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
+        args: vec!["/bin/sh".to_owned(), "-c".to_owned(), SCRIPT.to_owned()],
     };
     let id = runtime.create_and_start(&spec).expect("create and start");
     runtime.wait_ended(&id);
@@ -76,8 +106,29 @@ fn a_crun_job_sees_only_its_booked_gpu() {
         }),
         "{tail:?}"
     );
+    let unmounted = std::process::Command::new("umount")
+        .arg(&sub)
+        .status()
+        .expect("run umount");
+    assert!(unmounted.success(), "unmount the tmpfs below the driver");
     let listed: Vec<&str> = tail.stdout.lines().collect();
-    for want in ["nvidiactl", "nvidia1", "GPU_TEST=booked"] {
+    let mode_line = format!("mode {:o}", host_node.mode & 0o777);
+    let node_line = format!(
+        "node character special file {:x} {:x}",
+        host_node.major, host_node.minor
+    );
+    for want in [
+        "nvidiactl",
+        "nvidia1",
+        "GPU_TEST=booked",
+        node_line.as_str(),
+        mode_line.as_str(),
+        "sub-hidden",
+        "opened",
+        "driver from-the-host",
+        "read-only",
+        "kept",
+    ] {
         assert!(listed.contains(&want), "{want} not in {listed:?}");
     }
     assert!(!listed.contains(&"nvidia0"), "the other GPU: {listed:?}");

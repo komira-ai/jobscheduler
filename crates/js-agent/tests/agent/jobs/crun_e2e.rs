@@ -40,7 +40,7 @@ use crate::support::{Host, code, linux_host};
 
 /// Held by a test while it opens runtimes or runs an agent on the node: the backend makes
 /// its helper directories in the node's store, which two openings at once would fight over.
-pub(super) static NODE_IN_USE: Mutex<()> = Mutex::new(());
+static NODE_IN_USE: Mutex<()> = Mutex::new(());
 
 /// The pool of an agent that bounds its runs' disk: it names the quota capability, so a host
 /// joins it only by reporting one, and books 4 GiB for each host.
@@ -252,7 +252,7 @@ fn host_on(scratch_apart: bool, store_apart: bool) -> Host {
 }
 
 /// The node's host: everything but the state root on one file system.
-pub(super) fn host() -> Host {
+fn host() -> Host {
     host_on(false, false)
 }
 
@@ -271,7 +271,7 @@ fn host_with_store_mounted() -> Host {
 /// The real [`System`] for the clock, the runtime and the start check, over the node; the
 /// view of the host, the cgroup files and the quota are the fake machine's, as a test that is
 /// not root cannot read the namespaces of process 1.
-pub(super) struct CrunMachine {
+struct CrunMachine {
     system: System,
     fake: FakeMachine,
     /// The grace of every stop the runtime was asked for.
@@ -279,7 +279,7 @@ pub(super) struct CrunMachine {
 }
 
 impl CrunMachine {
-    pub(super) fn new() -> Arc<Self> {
+    fn new() -> Arc<Self> {
         Arc::new(Self {
             system: System::new().with_crun(seams()),
             fake: FakeMachine::new(),
@@ -510,7 +510,7 @@ struct Rig {
 }
 
 /// The flags of a crun agent of the node with host id `host_id`, and `extra`.
-pub(super) fn crun_flags(host_id: &str, extra: &[&str]) -> Vec<String> {
+fn crun_flags(host_id: &str, extra: &[&str]) -> Vec<String> {
     let node = node();
     let mut flags: Vec<String> = [
         "--host-id",

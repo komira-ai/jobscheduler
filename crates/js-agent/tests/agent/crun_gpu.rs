@@ -31,7 +31,8 @@ fn run_agent(extra: &[&str], host: &crate::support::Host) -> (String, String, bo
 /// sends nothing: a relative device path, one outside `/dev`, one with `..`, a second
 /// `{index}`, a path that is not a character device, a missing node, a mount source below
 /// `/proc`, a mount source that is a file, two mounts at one destination, a reserved
-/// variable, `--gpu-mount` and `--gpu-env` without `--gpu-device`, and the flags with
+/// variable, `--gpu-mount` and `--gpu-env` without `--gpu-device`, a device list on a host
+/// whose GPUs `--gpus 0` takes out of the offer, and the flags with
 /// `--runtime docker`, with the engine by default and on a Mac. Catches a flag that is accepted and then ignored, a check that runs after the
 /// host registered, and a runtime that ignores GPU flags it cannot honour.
 #[test]
@@ -84,7 +85,10 @@ fn gpu_flags_are_validated_naming_the_flag() {
                 "--gpu-mount",
                 &twice,
             ],
-            format!("--gpu-mount: {twice}: another mount has the destination /usr/local/driver"),
+            format!(
+                "--gpu-mount: {twice}: the destination /usr/local/driver overlaps \
+                 /usr/local/driver, another mount's"
+            ),
         ),
         (
             vec!["--gpu-device", "/dev/null", "--gpu-mount", &file_source],
@@ -97,6 +101,10 @@ fn gpu_flags_are_validated_naming_the_flag() {
         (
             vec!["--gpu-mount", "/proc:/driver"],
             "--gpu-mount: needs --gpu-device".to_owned(),
+        ),
+        (
+            vec!["--gpu-device", "/dev/null", "--gpus", "0"],
+            "--gpu-device: the host offers no GPU to give a job".to_owned(),
         ),
         (
             vec!["--gpu-env", "A=1"],

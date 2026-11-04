@@ -153,8 +153,8 @@ fn tmp(destination: &str, size_mib: u64) -> Mount {
 
 /// The mounts of a job: the standard ones of `crun spec --rootless`, the `hosts`, `hostname` and `resolv.conf` files,
 /// the exec-root overlay, the shared trees read-only inside it, `/tmp`, [`WRITABLE`], and
-/// the host mounts last (each a recursive bind, `nosuid` and `nodev`, read-only or
-/// read-write as asked).
+/// the host mounts last (each a bind, recursive unless the mount says not, `nosuid` and
+/// `nodev`, read-only or read-write as asked).
 fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
     let shm = format!("size={}m", spec.limits.shm_mib);
     let open = ["rbind", "ro", "nosuid", "noexec", "nodev"];
@@ -233,10 +233,11 @@ fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
     }
     for host in &spec.mounts {
         let access = if host.read_only { "ro" } else { "rw" };
+        let kind = if host.recursive { "rbind" } else { "bind" };
         mounts.push(bind(
             &host.source,
             &host.target,
-            &["rbind", access, "nosuid", "nodev"],
+            &[kind, access, "nosuid", "nodev"],
         ));
     }
     mounts

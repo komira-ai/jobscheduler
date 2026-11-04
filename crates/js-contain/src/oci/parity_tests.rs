@@ -219,6 +219,7 @@ fn host_mount_targets_must_be_normalized_absolute_paths() {
             target: bad.to_owned(),
             source: PathBuf::from("/srv/x"),
             read_only: false,
+            recursive: true,
         }];
         let why = config_with(&spec).expect_err(bad).to_string();
         assert!(why.starts_with("mount target "), "{bad}: {why}");
@@ -425,4 +426,28 @@ fn a_container_given_devices_still_holds_no_capability() {
         assert_eq!(set, &json!([]), "{name}");
     }
     assert_eq!(config["process"]["noNewPrivileges"], true);
+}
+
+/// Proves a host mount that is not recursive is a plain `bind` with the same flags, and a
+/// recursive one an `rbind`: no mount below a non-recursive mount's directory on the host
+/// reaches the job, whatever that mount's own flags. Catches a driver directory bound with
+/// its submounts, where a writable one below it would be writable in the job.
+#[test]
+fn a_mount_that_is_not_recursive_is_a_plain_bind() {
+    let mut spec = spec();
+    spec.mounts.push(HostMount {
+        target: "/usr/local/driver".to_owned(),
+        source: PathBuf::from("/opt/driver"),
+        read_only: true,
+        recursive: false,
+    });
+    let config = config_with(&spec).expect("config");
+    assert_eq!(
+        options(mount_at(&config, "/usr/local/driver")),
+        ["bind", "ro", "nosuid", "nodev"]
+    );
+    assert_eq!(
+        options(mount_at(&config, "/run/js-files")),
+        ["rbind", "ro", "nosuid", "nodev"]
+    );
 }

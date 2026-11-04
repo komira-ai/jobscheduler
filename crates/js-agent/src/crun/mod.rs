@@ -123,7 +123,10 @@ mod wire;
 use dirs::{cgroup_dir, legacy_lease, make_dir, make_helper_cgroup, owned, project_of, take_dir};
 
 pub use claim::{ClaimError, HostClaim, prepare_store, require_trusted_ancestors};
-pub use gpu::{GpuPassthrough, GpuSettings, INDEX, NO_GPUS, ReadNode, read_node};
+pub use gpu::{
+    DESTINATION_OFF_LIMITS, DeviceProblem, EnvProblem, GpuFlagError, GpuPassthrough, GpuSettings,
+    INDEX, MountProblem, NO_GPUS, NodeError, ReadNode, read_node,
+};
 
 pub use wire::{
     CgroupError, CgroupSource, ID_TOOL_PATH, IdSources, PULL_THREADS, Seams, WireError, oci_config,
@@ -310,8 +313,8 @@ pub enum CrunError {
 enum Fault {
     #[error("this runtime runs contained jobs only")]
     NotContained,
-    #[error("{0}")]
-    Gpu(String),
+    #[error(transparent)]
+    Gpu(gpu::StartError),
     #[error("this runtime runs container jobs only")]
     Native,
     #[error("{0}")]

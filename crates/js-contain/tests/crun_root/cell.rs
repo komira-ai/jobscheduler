@@ -308,6 +308,7 @@ impl Cell {
             target: "/sync".to_owned(),
             source: dir,
             read_only: false,
+            recursive: true,
         }
     }
 

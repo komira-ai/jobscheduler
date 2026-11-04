@@ -135,6 +135,7 @@ impl Node {
                 target: target.to_owned(),
                 source: PathBuf::from("/srv/host-mount"),
                 read_only,
+                recursive: true,
             })
             .to_vec(),
             devices: Vec::new(),

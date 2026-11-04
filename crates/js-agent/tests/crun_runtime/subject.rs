@@ -197,6 +197,11 @@ impl CrunSubject {
             .unwrap_or_else(|e| panic!("open with GPUs as {host_id}: {e}"))
     }
 
+    /// A directory `name` below the subject's that the job's ids can read: `0755`.
+    pub fn searchable_dir(&self, name: &str) -> PathBuf {
+        self.made(&[name], 0o755)
+    }
+
     /// The directory of the lease `name`.
     pub fn lease_dir(&self, name: &str) -> PathBuf {
         self.settings.scratch.join(name)
