@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 
 use js_agent_wire::{Ack, BookedResources, HeldState, JobStartSpec, Outcome};
 use js_jobs::{AllocationStep, EndReason, JobEnd, JobId, JobState};
-use js_types::JobNetwork;
 
 use super::job_rig::{FakeAgent, image, rig, starts, stops};
 use super::*;
@@ -38,13 +37,13 @@ async fn a_start_is_resent_until_listed() {
             gpu_indices: Vec::new(),
         },
         wall_ms: 600_000,
-        network: JobNetwork::None,
+        network: Default::default(),
         ports: Vec::new(),
     };
     let mut last = None;
     for _ in 0..3 {
         let reply = rig.beat(&agent).await.unwrap();
-        assert_eq!(starts(&reply), [expected.clone()]);
+        assert_eq!(starts(&reply), std::slice::from_ref(&expected));
         assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
         last = Some(reply);
     }

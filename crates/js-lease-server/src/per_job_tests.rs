@@ -39,7 +39,7 @@ fn a_retired_id_that_is_no_job_id_is_acknowledged() {
             ceiling: &ceiling,
         },
         &[],
-        &[long.clone()],
+        std::slice::from_ref(&long),
         8,
     )
     .unwrap();

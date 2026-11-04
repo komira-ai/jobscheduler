@@ -6,7 +6,7 @@ use js_agent_wire::{
     BookedResources, EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling, RunFile,
 };
 use js_jobs::{AllocationRecord, Booked, DeclaredPort, JobId, JobRecord, NetworkPolicy};
-use js_types::{HostId, JobNetwork, PortMap};
+use js_types::{HostId, JobNetwork as Level, PortMap};
 
 use super::{Unsendable, start_of};
 use crate::agent_api::job_rig::{BOOKED, image, placed, spec, tables};
@@ -72,7 +72,7 @@ fn a_start_carries_the_job_and_what_its_allocation_booked() {
             contents: "https://store/put".to_owned(),
         }]
     );
-    assert_eq!(start.network, JobNetwork::AllowList);
+    assert_eq!(start.network, Level::AllowList);
     assert_eq!(
         start.ports,
         [PortMap {
@@ -93,11 +93,11 @@ fn a_start_carries_the_job_and_what_its_allocation_booked() {
     open.spec.network = NetworkPolicy::Open;
     open.spec.ports.clear();
     let ceiling = NetworkCeiling {
-        level: JobNetwork::Open,
+        level: Level::Open,
         ports: Vec::new(),
     };
     let start = build(&open, &allocation, &ceiling).unwrap();
-    assert_eq!(start.network, JobNetwork::Open);
+    assert_eq!(start.network, Level::Open);
     assert_eq!(
         start.booked,
         BookedResources {

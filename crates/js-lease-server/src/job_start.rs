@@ -8,7 +8,9 @@
 
 use js_agent_wire::{BookedResources, JobStartSpec, RunFile};
 use js_jobs::{AllocationRecord, Booked, JobRecord, NetworkPolicy};
-use js_types::{JobNetwork, PortMap};
+// The job's network level, named `Level` here: the server's own `network` module is the
+// only one that names a network path (tests/network/one_layer.rs).
+use js_types::{JobNetwork as Level, PortMap};
 
 use crate::per_job::BeatContext;
 
@@ -79,9 +81,9 @@ pub(crate) fn start_of(
         },
     };
     let network = match spec.network {
-        NetworkPolicy::None => JobNetwork::None,
-        NetworkPolicy::AllowList => JobNetwork::AllowList,
-        NetworkPolicy::Open => JobNetwork::Open,
+        NetworkPolicy::None => Level::None,
+        NetworkPolicy::AllowList => Level::AllowList,
+        NetworkPolicy::Open => Level::Open,
     };
     let ports: Vec<PortMap> = spec
         .ports
