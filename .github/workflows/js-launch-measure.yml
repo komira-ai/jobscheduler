@@ -12,7 +12,7 @@
 name: js-launch-measure
 
 on:
-  # TEMPORARY, removed before merge: a workflow only on a branch cannot be dispatched.
+  # TEMPORARY, removed before merge: a workflow only on a branch cannot be dispatched (probe 2).
   push:
     branches: [task/js-measure-launch]
     paths: ['.github/workflows/js-launch-measure.yml']
