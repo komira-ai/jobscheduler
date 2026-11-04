@@ -453,6 +453,7 @@ impl Scheduler {
             self.max_walls.remove(&id);
             self.drain.forget(id);
             self.admission.forget(id);
+            self.backfill.forget(id);
         }
     }
 
@@ -678,6 +679,7 @@ impl Scheduler {
                 barred: &barred,
                 avoid: &avoid,
                 not_whole: key_raised,
+                only: self.backfill.only(id),
                 cost,
                 profile: profile.clone(),
                 lease,
@@ -739,6 +741,7 @@ impl Scheduler {
             if !fitted
                 && (request.kind == LeaseKind::WholeMachine || request.owns_worker())
                 && verdict == Verdict::Servable
+                && self.backfill.only(id).is_none()
             {
                 let held = match &self.whole_node {
                     Some(cfg) if request.kind == LeaseKind::WholeMachine => {
@@ -815,6 +818,7 @@ impl Scheduler {
                 (blocked == Some(Blocked::Load)).then(|| servable.pool(&self.workers, request));
             if let Some(pool) = pool
                 && !held_pools.contains(&pool)
+                && self.backfill.only(id).is_none()
             {
                 let attempt = Attempt {
                     request,
@@ -824,6 +828,7 @@ impl Scheduler {
                     barred: &barred,
                     avoid: &op.avoid,
                     not_whole: key_raised,
+                    only: self.backfill.only(id),
                     cost,
                     profile,
                     lease,

@@ -7,6 +7,7 @@
 mod adopt;
 mod cleanup;
 mod exclusive;
+mod held;
 mod job;
 mod per_job;
 mod prepare;
@@ -22,6 +23,7 @@ use js_agent_wire::{
 };
 
 pub use self::exclusive::{Quiet, Restored};
+use self::held::Records;
 use self::job::{Job, Keyed, Retired, Stage, Stuck, Waiting, blind_taint, host_taint, run_spec};
 pub use self::per_job::RETIRED_LISTED;
 pub use self::slots::Slots;
@@ -91,6 +93,8 @@ pub struct Lifecycle {
     /// Containers no job stands for that could not be removed; not held runs.
     stuck: Vec<Stuck>,
     retired: Retired,
+    /// The files in the state root that keep the held results and the retired list.
+    records: Records,
     /// The job ids retired on a `JobStop` for a job the agent did not hold, oldest first,
     /// listed in `retired_jobs` until a reply's `retired_acks` names them (see `per_job`).
     answered: Vec<String>,
@@ -166,6 +170,7 @@ impl Lifecycle {
         }
         self.taint.ack(reply.taint_ack);
         self.sweep();
+        self.persist_held(&mut events);
         events
     }
 
@@ -201,6 +206,7 @@ impl Lifecycle {
         self.watch_quota(&mut events);
         self.fit_log_tails_to_beat(&mut events);
         self.sweep();
+        self.persist_held(&mut events);
         events
     }
 
@@ -339,7 +345,9 @@ impl Lifecycle {
             .jobs
             .extract_if(.., |job| job.stage == Stage::Freed && job.result.is_none())
             .collect();
-        gone.iter().for_each(|job| self.retired.insert(&job.run_id));
+        for job in &gone {
+            self.retired.insert_with(&job.run_id, Some(&job.lease_id));
+        }
     }
 
     fn acknowledge(&mut self, ack: &ResultAck) {
@@ -861,7 +869,7 @@ impl Lifecycle {
         events: &mut Vec<Event>,
     ) {
         let run_id = &spec.run_id;
-        let job = match started {
+        let mut job = match started {
             Ok(id) => {
                 let now = self.clock.now_ms();
                 let deadline = now.saturating_add(spec.limits.wall_ms).min(cap);
@@ -889,7 +897,6 @@ impl Lifecycle {
                 job
             }
         };
-        let mut job = job;
         job.keyed = keyed;
         match replace {
             Some(index) => self.jobs[index] = job,
