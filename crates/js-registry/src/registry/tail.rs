@@ -15,7 +15,10 @@ impl Registry {
     /// then on every start and stop hands its counts to the sink once the registry's lock
     /// is released, and the counts made before the sink was given go with the first.
     /// Only the first call takes effect, as with [`Registry::set_lives`]; a later one is
-    /// ignored. With no sink the counters are in memory only.
+    /// ignored. With no sink the counters are in memory only. The registry holds the sink
+    /// weakly: the caller keeps it alive (the server's usage side owns it), so a handle on
+    /// the registry never holds its store open, and once the caller drops it the counts
+    /// stay in memory.
     ///
     /// # Errors
     /// The sink's [`TailSinkError`] when what it holds cannot be read or was bucketed by
@@ -166,9 +169,11 @@ mod tests {
 
     /// Asserts that counts made before a sink is set are kept and go to the sink with the
     /// first hand-over, on top of what it held; that a second sink is ignored; and that a
-    /// sink that cannot be read is still taken, with the counters from zero. Catches: a
-    /// sink whose stored counts replace the ones already made (or are lost), a second sink
-    /// that takes over, and a load failure that drops the sink.
+    /// sink that cannot be read is still taken, with the counters from zero; and that once
+    /// the sink's owner drops it, the registry keeps counting and holds the counts. Catches:
+    /// a sink whose stored counts replace the ones already made (or are lost), a second
+    /// sink that takes over, a load failure that drops the sink, and a registry that keeps
+    /// a sink (and its store) alive after its owner is gone.
     #[test]
     fn a_sink_counts_on_from_what_it_holds_and_only_the_first_is_taken() {
         let registry = new_registry();
@@ -192,5 +197,13 @@ mod tests {
         unread.send_tail();
         assert_eq!(unread.tail_counters().backfilled, 1);
         assert_eq!(*sink.1.lock().unwrap(), one_backfill());
+
+        let dropped = new_registry();
+        let gone = Arc::new(Fixed(Ok(stored(2)), Mutex::default()));
+        dropped.set_tail_sink(gone).unwrap();
+        count_one(&dropped);
+        dropped.send_tail();
+        assert_eq!(dropped.tail_counters().backfilled, 3);
+        assert_eq!(dropped.state().tail.unsent, one_backfill());
     }
 }

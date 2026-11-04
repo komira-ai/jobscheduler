@@ -22,7 +22,7 @@
 //! bound and no start (a host keeps one of each for every lease the registry started, in
 //! `Record::bounds`), so its stop counts nothing.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use js_types::RequestId;
 use js_usage::{TAIL_BUCKETS, TailDelta, TailSink, TailTotals};
@@ -127,8 +127,10 @@ pub(crate) struct TailBook {
     /// The changes counted and not yet handed to the sink.
     pub(crate) unsent: TailDelta,
     /// Where the counters are kept beyond memory; `None` keeps them in memory only, and
-    /// the changes wait in `unsent` for a sink.
-    pub(crate) sink: Option<Arc<dyn TailSink>>,
+    /// the changes wait in `unsent` for a sink. Held weakly: the sink's owner (the server's
+    /// usage side) keeps it, and its store, alive, so a handle on the registry never holds
+    /// the store open; once the owner has dropped it the changes wait in `unsent`.
+    pub(crate) sink: Option<Weak<dyn TailSink>>,
 }
 
 impl TailBook {
@@ -155,9 +157,10 @@ impl TailBook {
         self.unsent.merge(&delta);
     }
 
-    /// Takes the sink and the changes that wait for it; with no sink, the changes wait on.
+    /// Takes the sink and the changes that wait for it; with no sink, or one its owner has
+    /// dropped, the changes wait on.
     pub(crate) fn take_unsent(&mut self) -> Option<(Arc<dyn TailSink>, TailDelta)> {
-        let sink = self.sink.clone()?;
+        let sink = self.sink.as_ref()?.upgrade()?;
         Some((sink, std::mem::take(&mut self.unsent)))
     }
 
@@ -168,7 +171,7 @@ impl TailBook {
         let counted = delta_of(self.counters);
         let mut totals = stored;
         totals.add(&counted);
-        let taken = first.then(|| (sink, TailCounters::from(totals)));
+        let taken = first.then(|| (Arc::downgrade(&sink), TailCounters::from(totals)));
         taken.into_iter().for_each(|(sink, counters)| {
             self.sink = Some(sink);
             self.counters = counters;
