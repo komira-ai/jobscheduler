@@ -14,19 +14,23 @@
 //! directory are made (`Runtime::lease_dir`); the per-start firewall check
 //! (`Runtime::check_egress`) runs; `CrunRuntime::stage` makes the lease (its directories, the
 //! cgroup, the bundle; the image is in the store before the first sample, so no pull or
-//! unpack happens). Then a FIFO `up` is made in the lease's overlay upper layer, which the job
-//! sees as `/work/up`, and opened for reading and writing (so the open never waits, and a read
-//! waits for a byte), and a thread blocks reading it. The start stamp is taken and
-//! `CrunRuntime::start_staged` is called (`crun run`, and for the allow-list the pid and the
-//! wiring); the job, `sh -c 'echo up > /work/up'`, writes to the FIFO, and the end stamp is
-//! taken by the reading thread when its read returns the first byte: no poll interval is
-//! inside the interval. Both stamps are `std::time::Instant` (monotonic). Then, outside the
-//! interval, the run is removed (its wiring released) with its directories, before the next
-//! sample starts. `create_and_start` is `stage` then `start_staged`, so the interval is the
-//! second half of the runtime's start entry.
+//! unpack happens). Then a FIFO `up` is made, mode `0666`, in the run's scratch directory,
+//! which the runtime binds at `/scratch` (a bind shares the host's inode, so the job and this
+//! program open one pipe; `/work` is an overlayfs, where a FIFO does not). This program opens
+//! it for reading and writing: the open never waits, and since this program holds a writing
+//! end, a read waits for a byte instead of returning the end of file before the job opens it.
+//! A thread blocks in that read. The start stamp is taken and `CrunRuntime::start_staged` is
+//! called (`crun run`, and for the allow-list the pid and the wiring); the job,
+//! `sh -c 'echo up > /scratch/up'`, writes, and the end stamp is taken by the reading thread
+//! when its blocking read returns the first byte: one wake-up, no poll interval inside the
+//! interval. Both stamps are `std::time::Instant` (monotonic). Then, outside the interval, the
+//! run is removed (its wiring released) with its directories, before the next sample starts.
+//! `create_and_start` is `stage` then `start_staged`, so the interval is the second half of
+//! the runtime's start entry.
 //!
 //! A sample whose check, stage or start returns an error, or whose job does not write within
-//! [`REPORT_LIMIT`] (or ends without writing), is failed: counted, listed with its error, and
+//! [`REPORT_LIMIT`] (or ends without writing), is failed (the limit is a guard, never a
+//! duration in the table): counted, listed with its error, and
 //! in no statistic (`table`). A fault of the harness itself (a directory, the FIFO, a removal)
 //! ends the program with an error, since every later sample would stand on it.
 
@@ -52,16 +56,12 @@ use crate::out;
 use crate::runtime_host::{RuntimeHost, Setup};
 use crate::table::{self, Facts, Method, Sample, Samples, Variant};
 
-/// The job: one write to the FIFO, its first instruction. It starts in `/work`.
-const SCRIPT: &str = "echo up > /work/up";
+/// The job: one write to the FIFO, its first instruction.
+// In /scratch, a bind of the run's scratch directory: /work is an overlayfs, where a FIFO does not share a pipe with the host.
+const SCRIPT: &str = "echo up > /scratch/up";
 
-/// The FIFO's name, in the overlay's upper layer of the lease: `/work/up` in the container.
+/// The FIFO's name in the run's scratch directory, which the job sees at `/scratch`.
 const FIFO: &str = "up";
-
-/// The overlay's upper layer in a lease directory (js-contain's `LeaseDirs::upper`), which
-/// the job sees at `/work`. The lease's `work` directory is the overlay's own work directory,
-/// which the job does not see.
-const UPPER: &str = "upper";
 
 /// The one endpoint of the allow-list: the allowed endpoint of the far host the egress tests
 /// build. The job opens no connection, so nothing needs to listen there.
@@ -299,7 +299,7 @@ fn take_sample(host: &mut RuntimeHost, run_id: &str) -> Result<Sample, String> {
     fs::create_dir(&lease).map_err(|why| format!("make {}: {why}", lease.display()))?;
     let sample = match host.runtime.check_egress() {
         Err(why) => failed(0, format!("check the egress: {why}")),
-        Ok(()) => staged_then_timed(host, &spec, &lease)?,
+        Ok(()) => staged_then_timed(host, &spec)?,
     };
     for dir in [&spec.scratch, &lease] {
         match js_contain::remove::remove_tree(dir) {
@@ -314,33 +314,23 @@ fn take_sample(host: &mut RuntimeHost, run_id: &str) -> Result<Sample, String> {
 
 /// `CrunRuntime::stage`, the timed start of the staged run, and its removal, outside the
 /// interval.
-fn staged_then_timed(
-    host: &mut RuntimeHost,
-    spec: &RunSpec,
-    lease: &Path,
-) -> Result<Sample, String> {
+fn staged_then_timed(host: &mut RuntimeHost, spec: &RunSpec) -> Result<Sample, String> {
     let id = match host.runtime.stage(spec) {
         Ok(id) => id,
         Err(why) => return Ok(failed(0, format!("stage: {why}"))),
     };
-    let sample = timed(host, &id, lease);
+    let sample = timed(host, &id, &spec.scratch);
     host.runtime
         .remove(&id)
         .map_err(|why| format!("remove the run {}: {why}", spec.run_id))?;
     sample
 }
 
-/// The interval itself: the FIFO made in the staged lease and held open, the start stamp,
-/// `CrunRuntime::start_staged`, and the reading thread's stamp of the job's first byte.
-fn timed(host: &mut RuntimeHost, id: &RunHandle, lease: &Path) -> Result<Sample, String> {
-    let upper = lease.join(UPPER);
-    if !upper.is_dir() {
-        return Err(format!(
-            "the staged lease has no overlay upper layer {}",
-            upper.display()
-        ));
-    }
-    let fifo = upper.join(FIFO);
+/// The interval itself: the FIFO made in the run's scratch directory `scratch` and held open
+/// (outside it), the start stamp, `CrunRuntime::start_staged`, and the reading thread's stamp
+/// of the job's first byte.
+fn timed(host: &mut RuntimeHost, id: &RunHandle, scratch: &Path) -> Result<Sample, String> {
+    let fifo = scratch.join(FIFO);
     let harness =
         |what: &str, why: &dyn std::fmt::Display| format!("{what} {}: {why}", fifo.display());
     mkfifoat(CWD, &fifo, Mode::from_raw_mode(0o666)).map_err(|why| harness("make", &why))?;

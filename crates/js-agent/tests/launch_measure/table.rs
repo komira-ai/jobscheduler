@@ -303,8 +303,9 @@ pub fn report(variants: &[Samples], method: Method, facts: &Facts) -> Result<Str
     text.push_str(&format!(
         "One sample is the interval from the call of the agent's `CrunRuntime::start_staged` \
          (the job staged by `CrunRuntime::stage`: its lease directories, cgroup and bundle made, \
-         its image in the store) to the first byte the job writes to `/work/up`, a FIFO in the \
-         lease's overlay upper layer that the program holds open, read by a blocking read. \
+         its image in the store) to the first byte the job writes to `/scratch/up`, a FIFO in \
+         the run's scratch directory (a bind mount; `/work` is an overlayfs, where a FIFO does \
+         not share a pipe with the host) that the program holds open, read by a blocking read. \
          Outside it: the lifecycle's per-start firewall check (`check_egress`), the stage, \
          image pull and unpack, and the teardown between samples. The allow-list names one \
          endpoint and nothing listens there: the job opens no connection, so the wired \
