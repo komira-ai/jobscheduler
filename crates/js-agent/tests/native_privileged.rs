@@ -192,7 +192,6 @@ fn spec(fixture: &Fixture, run_id: &str, program: &str, args: &[&str]) -> RunSpe
             inputs: Vec::new(),
             outputs: Vec::new(),
             network: NetworkLevel::Off,
-            ports: Vec::new(),
         }),
         cpu_millis: 1000,
         memory_bytes: 1 << 30,
@@ -206,6 +205,7 @@ fn spec(fixture: &Fixture, run_id: &str, program: &str, args: &[&str]) -> RunSpe
         labels: Default::default(),
         bundle: None,
         network: Default::default(),
+        ports: Vec::new(),
     }
 }
 
