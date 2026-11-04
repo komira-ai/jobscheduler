@@ -37,12 +37,7 @@ impl Ending<'_> {
     ) {
         let row = cause.row();
         if row.host == HostEffect::Taint {
-            let reason = String::from(RefusalReason::HostUnsafe);
-            taint.get_or_insert(Taint {
-                reason,
-                run_id: None,
-                check: None,
-            });
+            taint.get_or_insert_with(prepare_taint);
         }
         let backoff = Duration::from_millis(self.rules.reserve_backoff_ms);
         let failure = Failure {
@@ -55,5 +50,15 @@ impl Ending<'_> {
         self.runs.stop_lease(&lease);
         *exclusive = exclusive.stopped();
         self.book.stop(&lease);
+    }
+}
+
+/// The taint a failed prepare records on its host when its reason taints the host
+/// (`host-unsafe`), and the host has no taint yet.
+pub(crate) fn prepare_taint() -> Taint {
+    Taint {
+        reason: String::from(RefusalReason::HostUnsafe),
+        run_id: None,
+        check: None,
     }
 }

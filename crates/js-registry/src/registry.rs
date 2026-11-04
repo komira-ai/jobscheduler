@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{
-    Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome, WireShape,
+    Heartbeat, HeartbeatReply, Hello, JobSpec, Phase, Taint, Welcome, WireShape,
 };
 use js_caps::{BUNDLE_ROOT, EXEC, FLAG_SET, HostContract, RUN_FILES, RUNTIME, SCRATCH_QUOTA};
 use js_lease::{Clock, Timestamp};
@@ -28,6 +27,7 @@ use crate::whole::requests::{
 };
 use crate::whole::reserve::{Marks, Reservation};
 
+mod beat;
 mod cordon;
 mod demand;
 mod ledger;
@@ -38,6 +38,7 @@ mod start;
 
 use record::Record;
 
+pub use beat::HeartbeatCheck;
 pub use cordon::{Cordoned, NotHeld, OwnHost, Uncordoned};
 use demand::waiting_rows;
 pub use demand::{Launchable, Waiting};
@@ -701,13 +702,16 @@ impl Registry {
     /// untouched until it ends), and is never forgotten for being silent; the
     /// runs it already holds finish, their results are acknowledged, and their stops are
     /// sent as for any host. Nothing here clears a taint.
+    ///
+    /// This records the beat: it changes the registry. [`Registry::check_heartbeat`] runs
+    /// the same checks and finds the taint the beat would record, changing nothing, so a
+    /// caller can make that taint durable first.
     pub fn heartbeat(
         &self,
         heartbeat: &Heartbeat,
         credential: &Credential,
     ) -> Result<HeartbeatReply, Refusal> {
-        let host = HostId::new(&heartbeat.host_id).map_err(Refusal::BadHeartbeatHostId)?;
-        heartbeat.validate().map_err(Refusal::Invalid)?;
+        let host = beat::parse(heartbeat)?;
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
         let State {
@@ -717,27 +721,8 @@ impl Registry {
             requests,
             ..
         } = &mut *guard;
-        let record = records
-            .get_mut(&host)
-            .filter(|record| record.heard.is_some())
-            .ok_or(Refusal::UnknownHost)?;
-        if record
-            .binding
-            .as_ref()
-            .is_some_and(|bound| bound.credential() != credential)
-        {
-            return Err(Refusal::HostBound);
-        }
-        if record.epoch != heartbeat.epoch {
-            return Err(Refusal::StaleEpoch);
-        }
-        let issued = record
-            .session
-            .as_ref()
-            .is_some_and(|digest| digest.matches(&heartbeat.session));
-        if !issued {
-            return Err(Refusal::SessionMismatch);
-        }
+        let record = beat::admitted(records, &host, heartbeat, credential)?;
+        let plan = beat::Plan::of(record, heartbeat);
         let gap = record.state(now, self.grace_ms()) == HostState::Lost;
         record.heard = Some(now);
         record.phase = heartbeat.phase;
@@ -748,37 +733,14 @@ impl Registry {
             .iter()
             .map(|run| run.run_id.clone())
             .collect();
-        // An agent that refuses a start because its host is tainted may be unable to write
-        // its own marker (a full disk), so that refusal taints the host here as a report
-        // would. It is the host's fault: the result is answered like any other. A start
-        // refused as `quota-unavailable` is the host's fault too, and taints nothing.
-        let refused = heartbeat.results.iter().find(|result| {
-            let by_host = result.detail.as_deref() == Some(refusal_code::HOST_TAINTED);
-            by_host && result.outcome == Outcome::FailedToStart
-        });
-        let reported = heartbeat.taint.clone().or_else(|| {
-            refused.map(|result| Taint {
-                reason: refusal_code::HOST_TAINTED.to_string(),
-                run_id: Some(result.run_id.clone()),
-                check: None,
-            })
-        });
-        record.taint = record.taint.take().or(reported);
-        record.exclusive = record.exclusive.after_beat();
-        let clean = record.taint.is_none();
-        if let Some(ready) = &heartbeat.exclusive_ready {
-            record.exclusive = record.exclusive.report_ready(ready, clean);
+        let clean = plan.taint.is_none();
+        record.taint = plan.taint;
+        record.exclusive = plan.exclusive;
+        if heartbeat.exclusive_ready.is_some() {
             let granted = record.exclusive.ready_lease();
             granted.iter().for_each(|lease| requests.granted(lease));
         }
-        // A typed refusal of the lease committed to the host ends it at once; one for any
-        // other lease says nothing about this host's preparation.
-        let refused = heartbeat.exclusive_refused.as_ref().and_then(|refused| {
-            let lease = record.exclusive.committed()?;
-            let named = lease.to_string() == refused.lease_id;
-            named.then_some((lease, Cause::Refused(refused.code), refused.detail.as_str()))
-        });
-        if let Some((lease, cause, detail)) = refused {
+        if let Some((lease, cause, detail)) = plan.refused {
             let rules = Rules::of(&self.shared.config);
             let mut ending = Ending {
                 book: &mut *book,
