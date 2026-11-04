@@ -83,6 +83,24 @@
 //! sends a start that asks for more than `none`, or declares a port, only to a host whose
 //! ceiling covers it.
 //!
+//! # Live logs
+//!
+//! The live-log fields are a message set added within major 1 (`docs/design/live-logs.md`,
+//! section 7; see [`LogSink`]): `log_sink` in a job start ([`JobStartSpec::log_sink`], where
+//! to upload one job's output, no secret), `log_grant` in a reply
+//! ([`HeartbeatReply::log_grant`], the host's upload credential, one for all its jobs),
+//! `log_grant_state` in a heartbeat ([`Heartbeat::log_grant_state`]) and `logs` in a job's
+//! result ([`JobResult::logs`], each stream's length and dropped bytes). An agent that
+//! uploads reports the hello capability [`LOG_UPLOAD_CAPABILITY`], and a server sends
+//! `log_sink` and `log_grant` only to an agent that reported it.
+//!
+//! **A log field never refuses a job or a heartbeat.** Each is decoded as a [`NodeLoad`] is
+//! (a malformed value reads as absent) and is checked apart from its message: a start with
+//! a bad sink still passes [`JobStartSpec::validate`] and runs without live logs
+//! ([`JobStartSpec::log_sink_checked`]), a bad grant is set aside in
+//! [`ReplyCheck::log_grant`] while the rest of the reply applies, and an inconsistent `logs`
+//! report is dropped by [`JobResult::logs_report`] while the result is recorded.
+//!
 //! # Two keyings in one major
 //!
 //! A start, stop and report are keyed by run and lease ([`Command::Start`], [`HeldRun`],
@@ -138,6 +156,7 @@ mod hello;
 mod image;
 pub mod limits;
 mod load;
+mod log_sink;
 mod native;
 mod network;
 pub mod per_job;
@@ -146,7 +165,7 @@ pub mod protocol;
 pub mod refusal;
 mod run;
 
-pub use caps::{Caps, ONE_JOB_CAPABILITY, ReadModel, bundle_capability};
+pub use caps::{Caps, LOG_UPLOAD_CAPABILITY, ONE_JOB_CAPABILITY, ReadModel, bundle_capability};
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use credential::HostCredential;
 pub use env::check_env;
@@ -160,6 +179,7 @@ pub use hello::{
     GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireShape,
 };
 pub use load::{LeaseClock, LeaseMinute, LoadDrops, NodeLoad, lease_parts};
+pub use log_sink::{LogGrant, LogGrantState, LogReport, LogSink};
 pub use native::{
     BUNDLE_ENTRYPOINT_MAX, BUNDLE_PROGRAM_PREFIX, InputRef, NativeSpec, NetworkLevel, OutputKind,
     OutputSpec, Placement,

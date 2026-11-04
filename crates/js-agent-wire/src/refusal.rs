@@ -150,6 +150,15 @@ pub const HOST_LISTED: &str = "host-listed";
 pub const RATE_LIMITED: &str = "rate-limited";
 /// A request body over the transport's cap, refused before it is read in full.
 pub const BODY_TOO_LARGE: &str = "body-too-large";
+/// A job start's `log_sink` that fails [`crate::JobStartSpec::log_sink_checked`]: an
+/// endpoint, region, bucket or prefix out of its form, or a prefix that is not the job's
+/// own. The refusal's `field` names the part. It never refuses the start: the server sends
+/// no sink instead, and an agent starts the job without live logs.
+pub const INVALID_LOG_SINK: &str = "invalid-log-sink";
+/// A reply's `log_grant` with an empty, over-long or malformed field, or an expiry of zero
+/// ([`crate::ReplyCheck::log_grant`]). The refusal's `field` names it. The agent ignores
+/// the credential and acts on the rest of the reply.
+pub const INVALID_LOG_CREDENTIAL: &str = "invalid-log-credential";
 
 /// A whole-node lease request that failed after the host could not be prepared within the
 /// allowed number of replacements; its detail names the last reason code and detail the

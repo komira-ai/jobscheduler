@@ -19,8 +19,9 @@ use crate::token;
 /// The longest a request may take from first byte to last, connect and TLS included.
 pub const REQUEST_LIMIT: Duration = Duration::from_secs(30);
 
-/// The largest reply read; the server's answers are small.
-const REPLY_LIMIT: u64 = 1024 * 1024;
+/// The largest reply read: the wire's bound on a reply body,
+/// [`js_agent_wire::limits::REPLY_BODY_BUDGET`] (1 MiB). The server's answers are small.
+const REPLY_LIMIT: u64 = js_agent_wire::limits::REPLY_BODY_BUDGET as u64;
 
 /// What the server answered: a status and the JSON body (`null` when the body was empty
 /// or not JSON). Its `Debug` text leaves the body out: a welcome holds a session secret.

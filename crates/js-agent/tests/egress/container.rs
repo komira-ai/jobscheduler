@@ -183,7 +183,7 @@ impl ContainerHost {
     pub async fn start(&self, script: &str) -> Live {
         let spec = self.lease(script);
         self.oci.create(&spec).await.unwrap();
-        let running = self.oci.start(&spec).unwrap();
+        let running = self.oci.start(&spec, None).unwrap();
         let mut pid = None;
         for _ in 0..400 {
             if let Ok(found) = self.oci.container_pid(&spec) {
