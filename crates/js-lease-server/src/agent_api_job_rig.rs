@@ -180,7 +180,7 @@ impl Rig {
 
     /// Records the job `id` and places it on `host` with [`BOOKED`].
     pub(crate) fn place(&self, id: &str, host: &str) -> JobId {
-        placed(&*self.jobs, id, host, spec(), BOOKED).0.id
+        placed(&self.jobs, id, host, spec(), BOOKED).0.id
     }
 
     /// The job `id` as the store holds it.
