@@ -428,7 +428,7 @@ fn an_allocation_is_recorded_once_whatever_end_a_later_write_gives_it() {
         let first = row(20_000);
         assert_eq!(history.put(&first), Ok(true));
         assert_eq!(history.put(&row(30_000)), Ok(false));
-        assert_eq!(all(store).rows, [first.clone()]);
+        assert_eq!(all(store).rows, std::slice::from_ref(&first));
         let index = store.get(&ended_id_key(&first.id)).unwrap().unwrap();
         assert_eq!(index.value, ended_key(20_000, &first.id).into_bytes());
         assert_eq!(history.prune(20_001, 0), Ok(1));
