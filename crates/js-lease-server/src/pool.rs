@@ -422,8 +422,9 @@ mod tests {
     }
 
     /// Asserts that the pools page names the missing count (`gpus`) for an offer with no
-    /// accelerators against a demand for some, the model (`gpu_class`) for an offer of
-    /// another model, and the vendor for an offer of another vendor. Catches a status that
+    /// accelerators against a demand for some (one that names a model, and one that names
+    /// only a vendor), the model (`gpu_class`) for an offer of another model, and the vendor
+    /// for an offer of another vendor. Catches a status that
     /// names the model of a CPU-only catalog, which has none to differ.
     #[test]
     fn an_offer_without_accelerators_is_named_by_its_count() {
@@ -462,6 +463,11 @@ mod tests {
         assert_eq!(
             named(&[with("nvidia-h100")], &demand),
             Some("accelerator_vendor".to_owned())
+        );
+        assert_eq!(
+            named(&[offer_at("cpu", None)], &demand),
+            Some("gpus".to_owned()),
+            "a vendor need against an offer with no accelerators names the count too"
         );
     }
 

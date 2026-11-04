@@ -882,6 +882,9 @@ mod tests {
             serde_json::to_string(&AcceleratorBody::default()).unwrap(),
             "{}"
         );
+        let full = r#"{"cpu_millis":1,"memory_bytes":2,"gpus":4,"gpu_class":"nvidia-a100","disk_bytes":null,"accelerator":{"vendor":"nvidia","model":"nvidia-a100","count":4,"memory_per_device_gib":80,"interconnect":"nvlink-domain>=8","form_factor":"sxm"}}"#;
+        let read = parse::<ResourcesBody>(full.as_bytes()).unwrap();
+        assert_eq!(serde_json::to_string(&read).unwrap(), full);
         let booked = accepted(r#"{"gpus":2,"gpu_class":"nvidia-a100-sxm4-80gb"}"#, "{}");
         assert_eq!(booked.resources.gpus(), 2);
         assert_eq!(booked.resources.gpu_class(), Some("nvidia-a100-sxm4-80gb"));
