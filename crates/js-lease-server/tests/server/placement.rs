@@ -1,16 +1,19 @@
 //! `--placement`: who picks the host of a lease on a host that registered itself. The
 //! default is the registry, which is the server as it was; `js-sched` has the scheduler
 //! choose among the hosts with room and lets leases of a class that books part of a host
-//! share one. These tests read the flag and the key; where the leases land is tested in
-//! process, without a listener, in `src/sched/wiring_tests.rs`.
+//! share one. These tests read the flag and the key, and one serves a lease under it;
+//! where the leases land is tested in process, without a listener, in
+//! `src/sched/wiring_tests.rs`.
 
 use std::ffi::OsString;
 
 use js_lease_server::{Cli, Config, Placement};
 
-use crate::agents_support::JOIN;
+use serde_json::json;
+
+use crate::agents_support::{JOIN, beat, entry, hosts, post, session};
 use crate::config_support::{PoolText, file, load, quote, quoted, refusal, server};
-use crate::support::{Scratch, base_args, config};
+use crate::support::{Harness, Scratch, base_args, config};
 
 /// A pool of up to two machines with a node report: the scheduler describes a host by
 /// its `arch`.
@@ -144,4 +147,45 @@ fn js_sched_is_refused_for_a_pool_with_no_arch() {
     let said = refusal(&scratch, &text);
     assert!(said.starts_with("server.placement: "), "{said}");
     assert!(said.contains("arch"), "{said}");
+}
+
+/// Asserts, through a running server and its routes, that `--placement js-sched` is wired
+/// in: a host that registers takes a lease of the pool's class through `POST /v1/leases`,
+/// the listing shows the lease on it, and the next request waits for capacity (the class
+/// books a whole host). It catches a placer built at start and never given to the
+/// registry, which would leave every lease refused or placed by the registry alone.
+#[tokio::test]
+async fn a_server_under_js_sched_places_a_lease_on_a_registered_host() {
+    let scratch = Scratch::new("placement_served");
+    let mut flags = args(&scratch, &["--placement", "js-sched"]);
+    let at = flags.iter().position(|arg| arg == "--pool-config").unwrap();
+    flags.drain(at..at + 2);
+    let h = Harness::with(scratch, flags, None).await;
+    let hello = json!({
+        "host_id": "burst-1",
+        "pool": "burst",
+        "agent_version": "0.1.0",
+        "shape": { "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 0 },
+        "capabilities": { "arch": "x86_64" },
+        "labels": {},
+        "phase": "serving",
+    });
+    let me = session(
+        &post(&h, "/v1/agent/hello", Some(JOIN), &hello).await,
+        "burst-1",
+    );
+    assert_eq!(beat(&h, &me).await.status, 200);
+    let body = json!({
+        "class": "burst-host",
+        "resources": { "cpu_millis": 1000, "memory_bytes": 1024 },
+        "max_wall_seconds": 600,
+        "labels": {},
+    });
+    let granted = h.call("POST", "/v1/leases", Some(&body)).await;
+    assert_eq!(granted.status, 201, "{}", granted.body);
+    assert_eq!(granted.json()["host"], "burst-1");
+    let id = granted.json()["id"].as_str().unwrap().to_owned();
+    assert_eq!(entry(&hosts(&h).await, "burst-1")["lease"], id);
+    let full = h.call("POST", "/v1/leases", Some(&body)).await;
+    assert_eq!(full.json(), json!({ "error": "no-capacity" }));
 }
