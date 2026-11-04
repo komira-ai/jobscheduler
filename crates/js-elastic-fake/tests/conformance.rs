@@ -6,15 +6,17 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::{PRICE, cloud, launch, offer};
+use common::{PRICE, START, cloud, launch, offer};
 use js_elastic::conformance::{FOREIGN_ACQUIRE, OTHER_SCHEDULER, Rig, run_all};
 use js_elastic::{
     AcquireId, AcquireRequest, BootPayload, Capacity, CapacityProvider, GpuClass, HostName,
     HostRef, Observed, ProviderCaps, ProviderEvent, RefusalCode, SchedulerId,
 };
-use js_elastic_fake::{Billing, Call, ElasticFake, PROVIDER_ID, Step};
+use js_elastic_fake::{Billing, Call, ElasticFake, FakeClock, PROVIDER_ID, Step};
+use js_types::ProviderId;
 
-/// The fake under the suite: a fresh cloud for each case, whose quota is the room.
+/// The fake under the suite: a fresh cloud for each case, whose quota is the room and
+/// whose catalog holds an x86_64 offer and an aarch64 one.
 struct FakeRig {
     fake: ElasticFake,
 }
@@ -41,7 +43,10 @@ impl Rig for FakeRig {
     }
 
     fn make_room(&mut self, machines: u32) {
-        self.fake = cloud(Billing::Lambda);
+        let mut arm = offer(Some(PRICE));
+        (arm.id, arm.arch) = ("a10-arm".to_owned(), "aarch64".to_owned());
+        let offers = vec![offer(Some(PRICE)), arm];
+        self.fake = ElasticFake::new(FakeClock::new(START), Billing::Lambda, offers);
         let mut knobs = self.fake.knobs();
         knobs.quota = Some(usize::try_from(machines).unwrap());
         self.fake.set_knobs(knobs);
@@ -81,6 +86,10 @@ impl Rig for FakeRig {
 
     fn throttle_reads(&mut self) {
         self.fake.script(Call::IsGone, &[Step::Throttled]);
+    }
+
+    fn outwait_unresolved(&mut self) {
+        self.fake.clock().advance(self.fake.knobs().unknown_hold);
     }
 
     fn launches(&self) -> usize {
@@ -133,6 +142,7 @@ fn the_fake_names_itself_and_offers_what_its_catalog_lists() {
     let cloud = cloud(Billing::Lambda);
     assert_eq!(cloud.id(), PROVIDER_ID);
     assert_eq!(cloud.id().as_str(), "fake");
+    assert_eq!(ProviderId::new(cloud.id().as_str()), Ok(PROVIDER_ID));
     assert!(cloud.can_launch());
     let expected = ProviderCaps {
         os: BTreeSet::from(["linux".to_owned()]),

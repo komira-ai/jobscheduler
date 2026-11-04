@@ -80,7 +80,9 @@ mod tests {
     use super::*;
     use crate::answer::{Acquired, Observed, Released};
     use crate::caps::{Capacity, ProviderCaps};
-    use crate::ids::{Hello, ProviderId};
+    use js_types::ProviderId;
+
+    use crate::ids::Hello;
     use crate::provider::AcquireRequest;
 
     /// A provider that writes down the name of every call made on it.

@@ -192,8 +192,8 @@ mod tests {
     struct Stub;
 
     impl CapacityProvider for Stub {
-        fn id(&self) -> js_elastic::ProviderId {
-            js_elastic::ProviderId::known("stub")
+        fn id(&self) -> js_types::ProviderId {
+            js_types::ProviderId::known("stub")
         }
 
         fn can_launch(&self) -> bool {

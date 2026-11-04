@@ -4,7 +4,7 @@
 //! - [`CapacityProvider`] is the trait a provider of machines implements. It takes an
 //!   [`AcquireRequest`] whose [`BootPayload`] is rendered by the service and delivered by
 //!   the provider as it is: a provider never sees a network mode or a boot plan. Beside
-//!   acquire, list and release it says who it is ([`ProviderId`]), what it could ever
+//!   acquire, list and release it says who it is (a `js_types::ProviderId`), what it could ever
 //!   offer ([`ProviderCaps`]), how many machines it holds and could add ([`Capacity`]),
 //!   what a read of one machine by id found ([`Observed`]), which of its launches an
 //!   agent's first [`Hello`] comes from, and, if it sends any, its notices
@@ -51,7 +51,7 @@ pub use boot::{
     Artifact, BootPlan, BootStep, CONTAINER_BIN, RUNTIME, SCRATCH_ROOT, STATE_ROOT, SlotName,
 };
 pub use caps::{Capacity, ProviderCaps};
-pub use ids::{AcquireId, Hello, HostName, HostRef, InvalidId, ProviderId, SchedulerId};
+pub use ids::{AcquireId, Hello, HostName, HostRef, InvalidId, SchedulerId};
 pub use offer::{Demand, Dimension, GpuClass, Offer, PriceUnit};
 pub use provider::{
     AcquireRequest, CapacityProvider, CheckResult, EventStream, ProviderError, ProviderEvent,

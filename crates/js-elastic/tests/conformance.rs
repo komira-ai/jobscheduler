@@ -5,13 +5,15 @@
 
 use std::sync::Mutex;
 
-use js_elastic::conformance::{Rig, acquire_is_idempotent_on_the_acquire_id};
+use js_elastic::conformance::{
+    Rig, acquire_is_idempotent_on_the_acquire_id, refused_codes_are_the_plain_constants,
+};
 use js_elastic::{
     AcquireId, AcquireRequest, Acquired, BootPayload, BootStep, Capacity, CapacityProvider, Held,
     Hello, HostName, HostRef, HostStatus, Observed, Offer, PriceUnit, ProviderCaps, ProviderError,
-    ProviderId, RefusalCode, Released, SchedulerId,
+    RefusalCode, Released, SchedulerId,
 };
-use js_types::ExecMode;
+use js_types::{ExecMode, ProviderId};
 
 /// How the stand-in breaks the contract.
 #[derive(Clone, Copy)]
@@ -168,6 +170,8 @@ impl Rig for BrokenRig {
 
     fn throttle_reads(&mut self) {}
 
+    fn outwait_unresolved(&mut self) {}
+
     fn launches(&self) -> usize {
         *self.0.launched.lock().unwrap()
     }
@@ -196,4 +200,15 @@ fn a_conformance_case_fails_on_a_provider_that_breaks_its_rule() {
 )]
 fn a_case_fails_on_a_provider_whose_acquire_never_answers() {
     acquire_is_idempotent_on_the_acquire_id(&mut BrokenRig::new(Flaw::NeverAnswers));
+}
+
+/// Asserts that the refusal case fails, naming the constant it wanted, on a provider that
+/// launches where its cloud refused: a refusal never reads as a pass when the provider
+/// answers something else.
+#[test]
+#[should_panic(
+    expected = "refused_codes_are_the_plain_constants: a refusal for Capacity answers Accepted"
+)]
+fn the_refusal_case_fails_on_a_provider_that_launches_instead() {
+    refused_codes_are_the_plain_constants(&mut BrokenRig::new(Flaw::LaunchesOnEveryAcquire));
 }

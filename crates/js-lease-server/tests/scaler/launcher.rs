@@ -60,8 +60,8 @@ impl CapacityProvider for Provider {
         Released::Unknown
     }
 
-    fn id(&self) -> js_elastic::ProviderId {
-        js_elastic::ProviderId::known("launcher")
+    fn id(&self) -> js_types::ProviderId {
+        js_types::ProviderId::known("launcher")
     }
 
     fn can_launch(&self) -> bool {

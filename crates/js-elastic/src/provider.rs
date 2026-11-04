@@ -3,7 +3,9 @@
 use crate::answer::{Acquired, Held, Observed, Released};
 use crate::boot::BootStep;
 use crate::caps::{Capacity, ProviderCaps};
-use crate::ids::{AcquireId, Hello, HostName, HostRef, ProviderId};
+use js_types::ProviderId;
+
+use crate::ids::{AcquireId, Hello, HostName, HostRef};
 use crate::offer::Offer;
 use crate::secret::BootPayload;
 

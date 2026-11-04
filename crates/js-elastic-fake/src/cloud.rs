@@ -8,8 +8,10 @@ use std::time::Duration;
 use js_elastic::{
     AcquireId, AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CheckResult, Claim,
     EventStream, Held, Hello, HostRef, HostStatus, Observed, Offer, ProviderCaps, ProviderError,
-    ProviderEvent, ProviderId, ReadHandle, Reason, Refusal, RefusalCode, Released,
+    ProviderEvent, ReadHandle, Reason, Refusal, RefusalCode, Released,
 };
+
+use js_types::ProviderId;
 
 use crate::bill::{Bill, Billing};
 use crate::clock::{FakeClock, millis};

@@ -11,18 +11,31 @@ use js_elastic::{
     HostName, HostRef, HostStatus, Observed, ProviderCaps, RefusalCode, SchedulerId,
 };
 use js_provider_lambdalabs::{
-    ACQUIRE_TAG, ApiError, Call, ErrorCode, POOL_TAG, PROVIDER_ID, SCHEDULER_TAG,
+    ACQUIRE_TAG, ApiError, Architecture, Call, ErrorCode, POOL_TAG, PROVIDER_ID, SCHEDULER_TAG,
 };
+use js_types::ProviderId;
 
-use crate::rig::{Rig, SCHEDULER, ask, candidate, host, id, live, rig, rig_with, row, tag};
+use crate::rig::{Rig, SCHEDULER, ask, candidate, host, id, live, offer, rig, rig_with, row, tag};
 
 /// The provider under the suite: a fresh account and provider for each case, with room
-/// for as many machines as `max_machines` allows and no space between launches.
+/// for as many machines as `max_machines` allows and no space between launches, whose
+/// catalog holds an x86_64 type and an arm64 one.
 struct LambdaRig(Rig);
 
 impl LambdaRig {
     fn fresh(machines: usize) -> Rig {
-        rig(live(machines).launch_interval(Duration::ZERO))
+        let fresh = rig(live(machines).launch_interval(Duration::ZERO));
+        fresh.fake.set_offers(vec![
+            offer("gpu_1x_sample", 75, 1, Architecture::X86_64, &["region-a"]),
+            offer(
+                "gpu_8x_example",
+                1200,
+                8,
+                Architecture::Arm64,
+                &["region-a"],
+            ),
+        ]);
+        fresh
     }
 }
 
@@ -112,6 +125,10 @@ impl Conformance for LambdaRig {
         self.0.fake.fail_next(Call::GetInstance, throttled);
     }
 
+    fn outwait_unresolved(&mut self) {
+        self.0.clock.advance(Duration::from_secs(24 * 60 * 60));
+    }
+
     fn launches(&self) -> usize {
         self.0.fake.launched()
     }
@@ -144,6 +161,7 @@ fn lambda_has_no_event_stream() {
     assert!(rig.provider.events().is_none());
     assert_eq!(rig.provider.id(), PROVIDER_ID);
     assert_eq!(rig.provider.id().as_str(), "lambdalabs");
+    assert_eq!(ProviderId::new("lambdalabs"), Ok(PROVIDER_ID));
     assert!(rig.provider.can_launch());
 }
 

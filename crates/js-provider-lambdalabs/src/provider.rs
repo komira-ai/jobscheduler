@@ -8,8 +8,9 @@ use std::time::Duration;
 use js_elastic::{
     AcquireId, AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CheckResult, Claim,
     Demand, Extra, Held, Hello, HostName, HostRef, HostStatus, Observed, Offer, ProviderCaps,
-    ProviderError, ProviderId, Reason, Refusal, RefusalCode, Released, Secret,
+    ProviderError, Reason, Refusal, RefusalCode, Released, Secret,
 };
+use js_types::ProviderId;
 
 use crate::api::LambdaApi;
 use crate::clock::Clock;

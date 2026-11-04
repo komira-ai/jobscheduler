@@ -14,7 +14,7 @@
 //! reads a clock or waits: a rig whose provider spaces its launches in time sets the space
 //! to nothing.
 
-use crate::answer::{Acquired, Claim, Held, HostStatus, Observed, Refusal, RefusalCode, Released};
+use crate::answer::{Acquired, Claim, Held, HostStatus, Observed, RefusalCode, Released};
 use crate::ids::{AcquireId, Hello, HostName, HostRef, SchedulerId};
 use crate::provider::{AcquireRequest, CapacityProvider};
 
@@ -73,6 +73,10 @@ pub trait Rig {
     /// The cloud throttles the next read of one machine by id (a 429).
     fn throttle_reads(&mut self);
 
+    /// Time passes beyond the provider's hold on calls that got no answer, so that an
+    /// acquire held back for one is asked of the cloud again.
+    fn outwait_unresolved(&mut self);
+
     /// How many machines the cloud has launched since [`Rig::make_room`].
     fn launches(&self) -> usize;
 
@@ -88,6 +92,7 @@ pub fn run_all<R: Rig>(rig: &mut R) {
     refused_codes_are_the_plain_constants(rig);
     unknown_never_launches_twice_and_never_frees(rig);
     unknown_when_the_answer_did_not_land_does_not_free_a_booking(rig);
+    an_acquire_that_did_not_land_launches_once_when_retried(rig);
     release_terminates_then_reads_back(rig);
     release_of_a_foreign_reference_sends_nothing(rig);
     list_returns_only_machines_tagged_by_this_scheduler(rig);
@@ -108,6 +113,22 @@ fn accepted(case: &str, answer: &Acquired) -> Held {
         panic!("{case}: an acquire the cloud has room for answers {answer:?}, not Accepted");
     };
     held.clone()
+}
+
+/// The machine an answer names, when it is [`Acquired::Accepted`].
+fn machine_of(answer: &Acquired) -> Option<HostRef> {
+    let Acquired::Accepted { held, .. } = answer else {
+        return None;
+    };
+    Some(held.id.clone())
+}
+
+/// The constant of an answer, when it is [`Acquired::Refused`].
+fn refusal_of(answer: &Acquired) -> Option<RefusalCode> {
+    let Acquired::Refused(refusal) = answer else {
+        return None;
+    };
+    Some(refusal.code)
 }
 
 /// Launches the machine of `acquire`, which must be accepted.
@@ -200,8 +221,9 @@ pub fn refused_codes_are_the_plain_constants(rig: &mut dyn Rig) {
         rig.make_room(1);
         rig.refuse_next(code);
         let answer = rig.provider().acquire(&rig.request(&acquire_id("refused")));
-        assert!(
-            matches!(&answer, Acquired::Refused(Refusal { code: got, .. }) if *got == code),
+        assert_eq!(
+            refusal_of(&answer),
+            Some(code),
             "{CASE}: a refusal for {code:?} answers {answer:?}"
         );
         assert_eq!(
@@ -244,7 +266,7 @@ pub fn unknown_never_launches_twice_and_never_frees(rig: &mut dyn Rig) {
     assert_eq!(landed.len(), 1, "{CASE}: the landed machine is listed once");
     let existing = landed[0].id.clone();
     assert!(
-        !matches!(&retry, Acquired::Accepted { held, .. } if held.id != existing),
+        [None, Some(existing.clone())].contains(&machine_of(&retry)),
         "{CASE}: an accepted retry answers the machine that exists, not {retry:?}"
     );
 
@@ -265,9 +287,9 @@ pub fn unknown_never_launches_twice_and_never_frees(rig: &mut dyn Rig) {
     );
 }
 
-/// A read by id that times out is `Unknown`, never `Absent`, and the next read finds the
-/// machine again; an acquire whose call timed out without effect launches nothing and
-/// frees nothing. Fails on a provider that reads a timeout as not-found.
+/// A read by id of a booked machine that times out is `Unknown`, never `Absent`, the next
+/// read finds the machine again, and it is still supplied. Fails on a provider that reads
+/// a timeout as not-found.
 pub fn unknown_when_the_answer_did_not_land_does_not_free_a_booking(rig: &mut dyn Rig) {
     const CASE: &str = "unknown_when_the_answer_did_not_land_does_not_free_a_booking";
     rig.make_room(2);
@@ -282,24 +304,42 @@ pub fn unknown_when_the_answer_did_not_land_does_not_free_a_booking(rig: &mut dy
         matches!(rig.provider().observe(&booked.id), Observed::Present(_)),
         "{CASE}: the next read finds the machine"
     );
+    assert_eq!(
+        rig.provider().capacity().supplied,
+        1,
+        "{CASE}: the booked machine is still supplied"
+    );
+}
+
+/// An acquire whose call timed out without effect answers `Unknown` (or `Deferred`, for a
+/// provider whose timed-out call came before the launch) and launches nothing; once the
+/// provider's hold on it has passed, an acquire with the same id launches exactly once,
+/// and a further one answers that machine. Fails on a provider that reads a timed-out
+/// acquire as launched, or launches twice once it is retried.
+pub fn an_acquire_that_did_not_land_launches_once_when_retried(rig: &mut dyn Rig) {
+    const CASE: &str = "an_acquire_that_did_not_land_launches_once_when_retried";
+    rig.make_room(1);
+    let request = rig.request(&acquire_id("did-not-land"));
     rig.lose_next_answer_that_did_not_land();
-    let answer = rig
-        .provider()
-        .acquire(&rig.request(&acquire_id("did-not-land")));
+    let answer = rig.provider().acquire(&request);
     assert!(
         matches!(&answer, Acquired::Unknown | Acquired::Deferred { .. }),
         "{CASE}: an acquire whose call timed out answers {answer:?}"
     );
     assert_eq!(
         rig.launches(),
-        1,
+        0,
         "{CASE}: the timed-out acquire launched nothing"
     );
+    rig.outwait_unresolved();
+    let launched = accepted(CASE, &rig.provider().acquire(&request));
+    assert_eq!(rig.launches(), 1, "{CASE}: the retry launched once");
+    let again = accepted(CASE, &rig.provider().acquire(&request));
     assert_eq!(
-        rig.provider().capacity().supplied,
-        1,
-        "{CASE}: the booked machine is still supplied"
+        again.id, launched.id,
+        "{CASE}: a further acquire answers that machine"
     );
+    assert_eq!(rig.launches(), 1, "{CASE}: and launches nothing");
 }
 
 /// A release terminates the machine and reports what a read after the terminate found,
@@ -311,21 +351,22 @@ pub fn release_terminates_then_reads_back(rig: &mut dyn Rig) {
     let held = launch(CASE, rig, "released");
     let released = rig.provider().release(&held.id);
     let observed = rig.provider().observe(&held.id);
-    let ending = matches!(
-        &released,
-        Released::Terminating(HostStatus::Terminating | HostStatus::Terminated) | Released::Gone
-    );
-    assert!(ending, "{CASE}: a release answers {released:?}");
-    let pair = (&released, &observed);
-    let read_back = matches!(
-        pair,
-        (Released::Terminating(said), Observed::Present(read)) if said == read
-    );
-    let gone = matches!(pair, (Released::Gone, Observed::Absent));
-    let agrees = read_back | gone;
+    let read_back = [
+        (
+            Released::Terminating(HostStatus::Terminating),
+            Observed::Present(HostStatus::Terminating),
+        ),
+        (
+            Released::Terminating(HostStatus::Terminated),
+            Observed::Present(HostStatus::Terminated),
+        ),
+        (Released::Gone, Observed::Absent),
+    ];
+    let pair = (released.clone(), observed.clone());
     assert!(
-        agrees,
-        "{CASE}: a release that answers {released:?} is followed by a read of {observed:?}"
+        read_back.contains(&pair),
+        "{CASE}: a release that answers {released:?} is followed by a read of {observed:?}; \
+         it must be terminating, terminated or gone, and the read must agree"
     );
     assert_eq!(
         rig.terminates(),
@@ -517,7 +558,8 @@ pub fn capacity_counts_what_it_supplied(rig: &mut dyn Rig) {
 }
 
 /// Every offer of the catalog is inside the capabilities: its operating system,
-/// architecture and GPU class. Fails on a provider whose capability table and catalog are
+/// architecture and GPU class. It holds for a catalog whose architectures are ones the
+/// provider's cloud documents; a rig's catalog holds more than one architecture. Fails on a provider whose capability table and catalog are
 /// two lists that drift.
 pub fn capabilities_cover_every_offer_the_catalog_returns(rig: &mut dyn Rig) {
     const CASE: &str = "capabilities_cover_every_offer_the_catalog_returns";

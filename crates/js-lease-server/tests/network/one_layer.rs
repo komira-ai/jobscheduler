@@ -72,8 +72,8 @@ impl CapacityProvider for Recorder {
         Released::Unknown
     }
 
-    fn id(&self) -> js_elastic::ProviderId {
-        js_elastic::ProviderId::known("recorder")
+    fn id(&self) -> js_types::ProviderId {
+        js_types::ProviderId::known("recorder")
     }
 
     fn can_launch(&self) -> bool {

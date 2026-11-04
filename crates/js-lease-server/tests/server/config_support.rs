@@ -50,8 +50,8 @@ impl CapacityProvider for NullElastic {
         Released::Unknown
     }
 
-    fn id(&self) -> js_elastic::ProviderId {
-        js_elastic::ProviderId::known("null")
+    fn id(&self) -> js_types::ProviderId {
+        js_types::ProviderId::known("null")
     }
 
     fn can_launch(&self) -> bool {

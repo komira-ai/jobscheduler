@@ -90,7 +90,7 @@ impl CapacityProvider for PanicOnList {
         self.0.is_gone(id)
     }
 
-    fn id(&self) -> js_elastic::ProviderId {
+    fn id(&self) -> js_types::ProviderId {
         self.0.id()
     }
 

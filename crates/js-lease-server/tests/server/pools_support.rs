@@ -184,8 +184,8 @@ impl CapacityProvider for Handle {
         Released::Unknown
     }
 
-    fn id(&self) -> js_elastic::ProviderId {
-        js_elastic::ProviderId::known("handle")
+    fn id(&self) -> js_types::ProviderId {
+        js_types::ProviderId::known("handle")
     }
 
     fn can_launch(&self) -> bool {
