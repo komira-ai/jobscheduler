@@ -271,6 +271,10 @@ fn a_forward_that_reads_back_wrong_fails_the_attach_and_is_undone() {
     assert_eq!(again.interface(), Some("jsv0"));
 }
 
+/// A way a release's listing fails: what makes it fail, what the error says, and the interface
+/// and address of the run it fails for.
+type Failure<'a> = (&'a dyn Fn(&Fake), &'a str, &'a str, &'a str);
+
 /// Catches a release that leaves a forward, frees its port while the rules stay without
 /// saying so, or lets a failing deletion keep the interface: a release deletes the run's
 /// forward rules by handle (one transaction, found by a listing of each table), then the set
@@ -361,7 +365,7 @@ fn release_removes_the_forwards_then_the_interface() {
     assert_eq!(six.interface(), Some("jsv1"));
 
     // Each failed release below keeps its block out of use: the next run takes the next.
-    let failures: [(&dyn Fn(&Fake), &str, &str, &str); 3] = [
+    let failures: [Failure<'_>; 3] = [
         (
             &|fake: &Fake| fake.answer("list table inet", Ok("nope".to_owned())),
             "line 1 column",

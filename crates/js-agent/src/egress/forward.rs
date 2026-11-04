@@ -309,9 +309,8 @@ enum Piece {
 fn piece(expr: &Value) -> Option<Piece> {
     let (key, body) = expr
         .as_object()
-        .filter(|one| one.len() == 1)?
-        .iter()
-        .next()?;
+        .filter(|one| one.len() == 1)
+        .and_then(|one| one.iter().next())?;
     match key.as_str() {
         "counter" => Some(Piece::Counter),
         "accept" => body.is_null().then_some(Piece::Accept),
