@@ -202,6 +202,19 @@ mod tests {
         (s, operation)
     }
 
+    /// The one lease `a` holds, which must be `op`'s, committed.
+    fn leased_on_a(s: &Scheduler, op: OperationId) -> js_types::sched::LeaseId {
+        let held = s.leases_on(&WorkerId::new("a"));
+        assert_eq!(held.len(), 1, "{:?}", s.state(op));
+        let leased = OpState::Leased {
+            lease: held[0],
+            worker: WorkerId::new("a"),
+            committed: true,
+        };
+        assert_eq!(s.state(op), Some(&leased));
+        held[0]
+    }
+
     fn only_a() -> BTreeSet<WorkerId> {
         BTreeSet::from([WorkerId::new("a")])
     }
@@ -226,16 +239,12 @@ mod tests {
         let (mut s, op) = queued();
         s.place_only_on(op, only_a());
         feed(&mut s, at(1), Event::Tick);
-        let Some(OpState::Leased { lease, .. }) = s.state(op).cloned() else {
-            panic!("placed: {:?}", s.state(op));
-        };
+        let lease = leased_on_a(&s, op);
         assert_eq!(s.unplace(lease), Some(op));
         assert_eq!(s.state(op), Some(&OpState::Queued));
         assert_eq!(s.backfill.only(op), Some(&only_a()));
         feed(&mut s, at(2), Event::Tick);
-        let Some(OpState::Leased { lease, .. }) = s.state(op).cloned() else {
-            panic!("placed again: {:?}", s.state(op));
-        };
+        let lease = leased_on_a(&s, op);
         let report = Event::Report {
             operation: op,
             lease,

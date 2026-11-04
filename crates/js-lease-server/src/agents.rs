@@ -134,9 +134,9 @@ pub(crate) fn assemble_placed(
             let (pool, memory) = placement.split(pool);
             let registry = Registry::new(pool, clock.clone());
             let placer = placement.placer(max_lease_wall, cpu_slack, memory, clock);
-            if let Some(placer) = &placer {
-                registry.set_placer(placer.clone());
-            }
+            placer
+                .iter()
+                .for_each(|placer| registry.set_placer(placer.clone()));
             let usage = usage.build(clock, limits, &registry)?;
             // `--estimate-feed`: the learned lives of the profiles cost a lease's end in the
             // drain order. Set before the bookings are put back, so a lease restored from
