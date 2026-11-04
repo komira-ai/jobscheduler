@@ -255,6 +255,51 @@ async fn a_response_that_does_not_serialize_is_internal() {
     assert_eq!(&body[..], br#"{"error":"internal"}"#);
 }
 
+/// Asserts every path of the strict JSON reader in this test binary's copy of the crate
+/// (its generic visitor is instantiated here apart from the integration tests): a body with
+/// a list, a map, a negative and an unsigned number, a bool, a string and `null` is read
+/// whole; a fraction reaches the integer check; a member given twice, JSON that is not an
+/// object and text that is not JSON are each refused with their own reason. Catches a body
+/// path of the reader that only another test binary runs.
+#[test]
+fn the_strict_reader_reads_every_json_value() {
+    let request = good_pool()
+        .get_message_by_name("gatewaytest.Req")
+        .expect("defined");
+    let read = |body: &[u8]| crate::input::build(&request, true, &[], None, body);
+    let body = br#"{"tags":["a"],"count":-5,"big":7,"flag":true,"labels":{"k":"v"},"inner":null}"#;
+    let message = read(body).expect("the body is read");
+    assert_eq!(
+        message.get_field_by_name("count").as_deref(),
+        Some(&Value::I32(-5))
+    );
+    assert_eq!(
+        message.get_field_by_name("big").as_deref(),
+        Some(&Value::U64(7))
+    );
+    assert!(!message.has_field_by_name("inner"));
+    let refusals = [
+        (
+            &br#"{"count":1.5}"#[..],
+            Some("count"),
+            "the field is unknown, or does not hold a value of its type",
+        ),
+        (
+            &br#"{"count":1,"count":2}"#[..],
+            None,
+            "an object of the body gives a member twice",
+        ),
+        (&b"[1]"[..], None, "the body is not a JSON object"),
+        (&b"{"[..], None, "the body is not valid JSON"),
+    ];
+    for (body, field, reason) in refusals {
+        assert_eq!(
+            read(body).map(|_| ()),
+            Err(Answer::invalid(field.map(str::to_owned), reason))
+        );
+    }
+}
+
 /// Asserts what the strict JSON reader expects, as serde words it in an error.
 #[test]
 fn the_strict_reader_expects_a_json_value() {
