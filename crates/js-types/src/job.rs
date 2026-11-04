@@ -681,7 +681,8 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(constrained.disk_bytes, Some(40 << 30));
-        assert!(constrained.isa_level.is_some() && constrained.exec.is_some());
+        assert_eq!(constrained.isa_level, "armv8.2-a".parse().ok());
+        assert_eq!(constrained.exec, Some(ExecMode::SandboxExec));
         let merged = constrained
             .clone()
             .with_image_platform(Os::Macos, Arch::Arm64)

@@ -275,6 +275,9 @@ fn the_old_native_body_still_parses() {
     }
 }
 
+/// A change to a start's JSON.
+type Edit = fn(&mut Value);
+
 /// A macOS start whose run sets every field, as a host without `one-job` is sent it.
 fn downgraded() -> Value {
     let mut spec: JobSpec =
@@ -365,7 +368,7 @@ fn a_downgraded_start_reads_as_the_previous_release_read_its_own() {
     );
     assert_eq!(native.network, PreviousNetwork::Loopback);
 
-    let undecodable: [(&str, fn(&mut Value)); 4] = [
+    let undecodable: [(&str, Edit); 4] = [
         ("no lease_id", |wire| {
             wire.as_object_mut().unwrap().remove("lease_id");
         }),
@@ -387,7 +390,7 @@ fn a_downgraded_start_reads_as_the_previous_release_read_its_own() {
             "{why}"
         );
     }
-    let refused: [(&str, fn(&mut Value), &str); 3] = [
+    let refused: [(&str, Edit, &str); 3] = [
         (
             "relative program",
             |wire| wire["native"]["program"] = json!("bin/cc"),
